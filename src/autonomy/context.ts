@@ -1,0 +1,31 @@
+import { AsyncLocalStorage } from 'node:async_hooks'
+import type { RoleName } from './types.ts'
+
+/**
+ * Who is currently running.
+ *
+ * Tools are plain functions with no context parameter, but once a fleet of
+ * sub-agents is running in parallel *in the same process*, "who called this" is
+ * suddenly load-bearing: blackboard posts need attribution and the journal needs
+ * to say which worker did what. AsyncLocalStorage carries that identity across
+ * awaits without threading a context argument through every tool signature.
+ */
+export interface AgentIdentity {
+  /** Short display name, e.g. "scout#2". */
+  name: string
+  role: RoleName | 'lead'
+  runId?: string
+}
+
+const LEAD: AgentIdentity = { name: 'lead', role: 'lead' }
+
+const storage = new AsyncLocalStorage<AgentIdentity>()
+
+/** Runs `fn` with `identity` as the ambient agent, for it and everything it awaits. */
+export function withAgentIdentity<T>(identity: AgentIdentity, fn: () => Promise<T>): Promise<T> {
+  return storage.run(identity, fn)
+}
+
+export function currentAgent(): AgentIdentity {
+  return storage.getStore() ?? LEAD
+}

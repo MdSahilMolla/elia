@@ -1,0 +1,160 @@
+import { runSubAgent, type SubAgentResult } from '../subagent.ts'
+import { runWithConcurrencyLimit } from '../agentLoop.ts'
+import { createFleetBoard } from '../ui/fleetBoard.ts'
+import { ZERO_USAGE, addUsage } from '../usage.ts'
+import type { Usage } from '../providers/types.ts'
+import type { Journal } from './journal.ts'
+import type { ProposalStep, RoleName } from './types.ts'
+
+/** How many sub-agents run at once. Beyond this, provider rate limits dominate and add latency instead of removing it. */
+const DEFAULT_FLEET_CONCURRENCY = 4
+
+export interface FleetAssignment {
+  id: string
+  title: string
+  role: RoleName
+  instructions: string
+}
+
+export interface FleetRunOptions {
+  assignments: FleetAssignment[]
+  /** Shared context every worker is given — the goal, and what has happened so far. */
+  briefing?: string
+  concurrency?: number
+  journal?: Journal
+  /** Show the live status board. Off when a fleet runs inside another progress display. */
+  showBoard?: boolean
+  signal?: AbortSignal
+}
+
+export interface FleetResult {
+  results: (SubAgentResult & { id: string; title: string })[]
+  usage: Usage
+  elapsedMs: number
+  /** Wall-clock saved versus running the same workers one after another. */
+  savedMs: number
+}
+
+/**
+ * Dispatches a set of assignments to sub-agents in parallel and waits for all of them.
+ *
+ * The interesting number this returns is `savedMs`: the sum of the workers' own
+ * elapsed times minus the wall clock the fleet actually took. That is the whole
+ * point of a fleet, and reporting it keeps the parallelism honest — if a
+ * "parallel" run saved nothing, the decomposition was wrong.
+ */
+export async function runFleet(options: FleetRunOptions): Promise<FleetResult> {
+  const { assignments, briefing, journal, signal } = options
+  const concurrency = options.concurrency ?? DEFAULT_FLEET_CONCURRENCY
+  const showBoard = options.showBoard ?? true
+  const startedAt = Date.now()
+
+  const named = assignments.map((assignment, index) => ({
+    ...assignment,
+    // Worker names are what show up in blackboard attribution, so they need to be
+    // distinct and readable: "scout#1", "builder#2".
+    workerName: `${assignment.role}#${index + 1}`,
+  }))
+
+  const board = showBoard
+    ? createFleetBoard(named.map((item) => ({ name: item.workerName, role: item.role, title: item.title })))
+    : undefined
+
+  const results = await runWithConcurrencyLimit(named, concurrency, async (item) => {
+    board?.update(item.workerName, 'running')
+    journal?.append('step-start', { id: item.id, title: item.title, role: item.role, worker: item.workerName })
+
+    let toolCount = 0
+    const result = await runSubAgent({
+      prompt: item.instructions,
+      role: item.role,
+      name: item.workerName,
+      briefing,
+      signal,
+      onTool: (event) => {
+        toolCount += 1
+        board?.update(item.workerName, 'running', `${event.name} (${toolCount})`)
+      },
+    }).catch(
+      (err: unknown): SubAgentResult => ({
+        name: item.workerName,
+        role: item.role,
+        report: `Failed: ${err instanceof Error ? err.message : String(err)}`,
+        usage: ZERO_USAGE,
+        steps: 0,
+        elapsedMs: 0,
+        ok: false,
+      }),
+    )
+
+    board?.update(item.workerName, result.ok ? 'done' : 'failed', `${result.steps} steps`)
+    journal?.append('step-end', {
+      id: item.id,
+      worker: item.workerName,
+      ok: result.ok,
+      steps: result.steps,
+      elapsedMs: result.elapsedMs,
+      report: result.report,
+    })
+
+    return { ...result, id: item.id, title: item.title }
+  })
+
+  board?.stop()
+
+  const elapsedMs = Date.now() - startedAt
+  const serialMs = results.reduce((total, result) => total + result.elapsedMs, 0)
+
+  return {
+    results,
+    usage: results.reduce((total, result) => addUsage(total, result.usage), ZERO_USAGE),
+    elapsedMs,
+    savedMs: Math.max(0, serialMs - elapsedMs),
+  }
+}
+
+/**
+ * Splits steps into dependency waves: every step in a wave can run at the same
+ * time, and each wave waits for the one before it.
+ *
+ * This is how a tech lead actually parallelises work — not "run everything at
+ * once" (which corrupts files two workers both edit) and not "run everything in
+ * order" (which wastes the fleet), but the widest safe wave at each point.
+ * Steps whose dependencies can never be satisfied — a typo'd id, or a cycle —
+ * are returned separately rather than silently dropped or deadlocked on.
+ */
+export function planWaves(steps: ProposalStep[]): { waves: ProposalStep[][]; unreachable: ProposalStep[] } {
+  const byId = new Map(steps.map((step) => [step.id, step]))
+  const done = new Set<string>()
+  const waves: ProposalStep[][] = []
+  let remaining = [...steps]
+
+  while (remaining.length > 0) {
+    const ready = remaining.filter((step) =>
+      step.dependsOn.every((id) => done.has(id) || !byId.has(id)),
+    )
+    // Nothing became ready, so what is left is a cycle or depends on a step that
+    // is itself stuck. Stop rather than spin.
+    if (ready.length === 0) return { waves, unreachable: remaining }
+
+    waves.push(ready)
+    for (const step of ready) done.add(step.id)
+    remaining = remaining.filter((step) => !done.has(step.id))
+  }
+
+  return { waves, unreachable: [] }
+}
+
+/** Files two steps in the same wave both intend to touch — a real risk of clobbering each other. */
+export function fileCollisions(wave: ProposalStep[]): { file: string; steps: string[] }[] {
+  const owners = new Map<string, string[]>()
+  for (const step of wave) {
+    for (const file of step.files) {
+      const normalized = file.replace(/\\/g, '/')
+      owners.set(normalized, [...(owners.get(normalized) ?? []), step.id])
+    }
+  }
+  return [...owners.entries()]
+    .filter(([, steps]) => steps.length > 1)
+    .map(([file, steps]) => ({ file, steps }))
+}
