@@ -72,6 +72,18 @@ export function parseProposal(raw: unknown): { proposal: Proposal } | { error: s
     }
   }
 
+  // A plan with nothing to check against is the one failure mode that costs the
+  // most: the work runs, the gate silently has nothing to run, and "done" means
+  // only that the workers stopped. Weaker models omit this field even though the
+  // schema requires it, so it is enforced here rather than assumed.
+  const verification = asStringArray(input.verification)
+  if (verification.length === 0) {
+    return {
+      error:
+        'proposal.verification needs at least one shell command that will actually fail if the work is wrong. Look one up in this project (package.json scripts, its README, its CI config). If it genuinely has no test or build command, give the most specific check you can run instead',
+    }
+  }
+
   return {
     proposal: {
       goal,
@@ -79,7 +91,7 @@ export function parseProposal(raw: unknown): { proposal: Proposal } | { error: s
       assumptions: asStringArray(input.assumptions),
       steps,
       risks: asStringArray(input.risks),
-      verification: asStringArray(input.verification),
+      verification,
       outOfScope: asStringArray(input.outOfScope),
     },
   }

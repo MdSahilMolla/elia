@@ -73,6 +73,30 @@ export function average(items: number[]): number {
 }
 `
 
+const COUPLED_SOURCE = `/** Decimal places used when formatting values for display. */
+export const PRECISION = 2
+
+export function formatPrice(amount: number): string {
+  return amount.toFixed(PRECISION)
+}
+
+export function formatWeight(kilograms: number): string {
+  return kilograms.toFixed(PRECISION)
+}
+`
+
+const COUPLED_TEST = `import { expect, test } from 'bun:test'
+import { formatPrice, formatWeight } from '../src/format.ts'
+
+test('prices are formatted to 2 decimal places', () => {
+  expect(formatPrice(12.3456)).toBe('12.35')
+})
+
+test('weights are formatted to 3 decimal places', () => {
+  expect(formatWeight(1.23456)).toBe('1.235')
+})
+`
+
 export const BENCH_TASKS: BenchTask[] = [
   {
     id: 'precise-edit',
@@ -210,6 +234,45 @@ test('inclusiveRange handles a single value', () => {
       }
 
       return { passed: true, detail: 'definition, internal call, and both importers updated' }
+    },
+  },
+
+  {
+    // The hard one, and the one worth having.
+    //
+    // A shared constant serves two callers with genuinely different requirements,
+    // and one caller's test fails. The obvious fix — widen the shared constant —
+    // makes the *other* test fail, so an agent that pattern-matches on the error
+    // without reading the second call site will confidently break something.
+    // Passing requires noticing the coupling and localising the change.
+    id: 'coupled-fix',
+    weight: 3,
+    prompt:
+      'Run `bun test`. A test is failing. Fix the source so the whole suite passes. You must NOT modify anything in the tests directory — both tests are correct as written.',
+    async setup(dir) {
+      write(dir, 'src/format.ts', COUPLED_SOURCE)
+      write(dir, 'tests/format.test.ts', COUPLED_TEST)
+    },
+    async check(dir) {
+      if (read(dir, 'tests/format.test.ts') !== COUPLED_TEST) {
+        return { passed: false, detail: 'the test file was modified — that was explicitly forbidden' }
+      }
+
+      const result = await runShell('bun test', 90_000, dir)
+      if (result.exitCode !== 0) {
+        // Name the specific wrong answer rather than just reporting a failure —
+        // widening the shared constant is the trap this task exists to catch, and
+        // a hypothesis about why elia fell into it needs to know it did.
+        const brokePrice = /PRECISION\s*=\s*3/.test(read(dir, 'src/format.ts'))
+        return {
+          passed: false,
+          detail: brokePrice
+            ? 'widened the shared PRECISION constant to 3, breaking the price test — the two callers have different requirements'
+            : `bun test still fails (exit ${result.exitCode})`,
+        }
+      }
+
+      return { passed: true, detail: 'both callers formatted correctly without touching the tests' }
     },
   },
 ]

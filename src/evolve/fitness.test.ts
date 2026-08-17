@@ -3,7 +3,7 @@ import { expect, test } from 'bun:test'
 // fitness.ts pulls in the agent loop, which resolves a provider at import time.
 process.env.ANTHROPIC_API_KEY ??= 'test-key-for-fitness-test'
 
-const { compareScorecards } = await import('./fitness.ts')
+const { compareScorecards, isInfrastructureFailure } = await import('./fitness.ts')
 const { IMMUTABLE_FILES, violatedImmutables } = await import('./sandbox.ts')
 
 import type { Metrics } from './ledger.ts'
@@ -95,6 +95,27 @@ test('a first run against an empty baseline is promoted on any pass', () => {
   const result = compareScorecards(baseline, metrics({ passRate: 0.25, passed: ['a'], failed: ['b', 'c', 'd'] }))
 
   expect(result.better).toBe(true)
+})
+
+test('a provider outage is treated as infrastructure, not as the agent failing the task', () => {
+  // Scoring a transient 500 as a failure would make the benchmark reject a better
+  // candidate on the strength of a network blip, and the ledger would carry that
+  // false result forward into every later generation.
+  expect(isInfrastructureFailure({ error: 'The server had an error while processing your request.', steps: 0 })).toBe(
+    true,
+  )
+  expect(isInfrastructureFailure({ error: 'rate limit exceeded', steps: 4 })).toBe(true)
+  expect(isInfrastructureFailure({ error: 'upstream returned 503', steps: 2 })).toBe(true)
+  expect(isInfrastructureFailure({ error: 'fetch failed', steps: 1 })).toBe(true)
+})
+
+test('a hang scores as a real failure even though it also reports zero steps', () => {
+  expect(isInfrastructureFailure({ error: 'timed out after 300000ms', steps: 0 })).toBe(false)
+})
+
+test('a wrong answer is never retried', () => {
+  expect(isInfrastructureFailure({ steps: 6 })).toBe(false)
+  expect(isInfrastructureFailure({ error: 'Unknown tool: search', steps: 6 })).toBe(false)
 })
 
 test('the files defining the benchmark are off limits to a candidate', () => {

@@ -52,6 +52,13 @@ test('a missing goal is rejected', () => {
   expect(expectError({ ...minimal, goal: '   ' })).toContain('goal is required')
 })
 
+test('a plan with nothing to verify against is rejected', () => {
+  // Otherwise the work runs, the gate has no command to run, and "done" only means
+  // the workers stopped.
+  expect(expectError({ ...minimal, verification: [] })).toContain('at least one shell command')
+  expect(expectError({ ...minimal, verification: undefined })).toContain('at least one shell command')
+})
+
 test('a step without instructions is rejected, naming its index', () => {
   const error = expectError({ ...minimal, steps: [{ title: 'no body' }] })
 

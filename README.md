@@ -2,6 +2,12 @@
 
 A fast, autonomous coding agent for the terminal, built on Bun. It streams model output live, calls tools (file read/write/edit, glob, grep, shell) automatically in a loop, and works with multiple LLM providers.
 
+Beyond the usual loop, elia does three things most terminal agents don't:
+
+- **It works a task the way a person does** — orients, tells you what it intends to do, executes it with a fleet of specialised sub-agents running in parallel, checks its own work, repairs what broke, and writes down what it learned for next time.
+- **It improves itself, measurably.** `elia evolve` has elia read its own source, form one hypothesis about its weakest link, implement it in a sandboxed copy, and benchmark that copy *using the copy's own code*. It only replaces itself if the score actually goes up.
+- **It writes its own tools.** Elia counts what it keeps doing by hand and can turn a repeated routine into a real, tested tool that loads on every future run.
+
 ## Requirements
 
 - [Bun](https://bun.sh) >= 1.3
@@ -25,6 +31,17 @@ Edit `.env` to pick a provider and set its key. `ELIA_PROVIDER` defaults to `ant
 
 Any provider's model can be overridden with `ELIA_MODEL`. `custom` (and any provider, if you need to point at a proxy or self-hosted gateway) also honors `ELIA_BASE_URL`.
 
+### The fast tier (optional, recommended)
+
+Elia routes work across two model tiers. The **deep** tier plans, builds, and reviews. The **fast** tier does the high-volume legwork — read-only scouts, summarising, end-of-run note taking — where a cheap model is indistinguishable but several times quicker.
+
+```bash
+ELIA_FAST_PROVIDER=groq
+ELIA_FAST_MODEL=openai/gpt-oss-20b
+```
+
+Investigation is where an agent spends most of its wall clock, and almost none of it needs the strong model. With a fast tier configured, a five-scout recon sweep costs a fraction of what it would otherwise, while every actual decision still goes through the deep model. Leave it unset and both tiers are the same model — behaviour is identical, you just don't get the speed-up.
+
 ## Usage
 
 ```bash
@@ -32,6 +49,19 @@ bun run dev                    # interactive session
 bun run dev "list the files in this directory"   # one-shot prompt
 bun run dev --continue         # resume the most recent session in this directory
 bun run dev --resume <id>      # resume a specific session
+
+bun run dev auto "<goal>"                # plan, delegate to a fleet, verify, repair, and learn — end to end
+bun run dev auto "<goal>" --yolo         # same, without pausing for plan approval
+bun run dev bench                        # score the current elia against its own benchmark suite
+bun run dev evolve                       # elia proposes and tries one improvement to its own source
+bun run dev evolve -n 3 --dry-run        # three generations, evaluated but never promoted to live source
+bun run dev skills                       # list tools elia has written for itself
+bun run dev skills candidates            # show repeated work that could become a new tool
+bun run dev skills synth                 # write a tool for the strongest candidate
+bun run dev runs                         # list past autonomous runs
+bun run dev runs <id>                    # show one run's timeline and forkable decision points
+bun run dev fork <id> --at <n> --with "<change>"   # re-plan an earlier run from a checkpoint
+
 elia --help
 elia --version
 ```
@@ -42,38 +72,143 @@ After every response you'll see a dim usage line — `2.5s · 1,840 tokens · $0
 
 Elia has a `workspace/` folder (created on first use, next to `.elia/` but visible — not a dotfile) for standalone output: prototypes, generated pages, anything that isn't an edit to your existing project. Ask it to show you something and it calls `preview`, which opens a real Chrome window (falls back to your OS default browser if Chrome isn't found, and says so) — files under `workspace/` are served locally with push-based live-reload over a WebSocket, so the window updates itself as elia keeps editing, no manual refresh. An already-running URL (e.g. a dev server elia started itself) opens directly instead, without live-reload.
 
+## Autonomous work: `elia auto`
+
+```bash
+elia auto "add rate limiting to the API client"
+elia auto "migrate the config loader to zod" --yolo   # skip the approval gate
+```
+
+This runs a full work cycle instead of a single conversation turn. Each phase has its own tool set and its own prompt, so elia is never simultaneously exploring and committing:
+
+1. **Orient** — reads the project, then sends several read-only *scouts* out in parallel on the fast tier to answer specific questions. Recon is the part of a task that parallelises best and matters least which model does it.
+2. **Propose** — submits a structured plan: what it found (with real file paths), what it's assuming, the steps decomposed into dependency waves, the risks, and the exact commands that will prove the work is correct. **Nothing has been changed at this point.** You approve it, reject it, or type what to change and it re-plans. A plan with no verification command is rejected before you ever see it.
+3. **Execute** — runs the steps in dependency waves: everything in a wave goes at once, each wave waits for the last. A live status board shows every worker, its role, and what it's doing. Workers publish findings to a shared blackboard as they go, so the second wave inherits what the first learned.
+4. **Verify** — runs your verification commands, fail-fast. If they pass, an adversarial *critic* reviews the real diff and returns a structured verdict; it's told to find what's broken, not to be encouraging.
+5. **Reflect** — on failure, feeds the actual error back into a repair pass and re-verifies. Bounded retries, then it stops and says a human is needed rather than thrashing.
+6. **Learn** — appends durable, project-specific lessons to `.elia/lessons.md`, which is injected into the *next* run's planning. Elia gets better at your project over time instead of rediscovering it every session.
+
+### Roles
+
+The `task` tool takes a `role`, and the role decides three things before a token is generated: which model tier runs it, which tools exist at all, and what the worker optimises for.
+
+| Role | Tier | Can write? | For |
+|---|---|---|---|
+| `scout` | fast | no | read-only investigation; run several in parallel |
+| `builder` | deep | yes | making the actual changes |
+| `critic` | deep | no | adversarial review of work already done |
+| `tester` | deep | yes | writing and running tests, diagnosing failures |
+| `scribe` | fast | yes | docs and comments only |
+
+A scout physically cannot damage your tree — `write_file` and `edit_file` aren't in its tool set — so aggressive parallel recon carries no risk.
+
+## Time travel: `elia runs` / `elia fork`
+
+Every autonomous run journals its phases and checkpoints the exact message history each one started from.
+
+```bash
+elia runs                 # list runs
+elia runs <id>            # timeline + forkable decision points
+elia fork <id> --at 1 --with "use a token bucket instead of a fixed window"
+```
+
+A fork replays the investigation that was already correct — for free — and only re-takes the decision. Normally exploring "what if the plan had been different" means paying for the whole run again. The original run is untouched; the fork gets its own id, so you can compare them.
+
+## Self-improvement: `elia bench` / `elia evolve`
+
+```bash
+elia bench                # score the current elia
+elia evolve               # one generation
+elia evolve -n 3          # three, each building on the last
+elia evolve --dry-run     # evaluate but never touch the live source
+```
+
+`src/evolve/suite.ts` is elia's fitness function: real tasks in real temporary repositories. Edit one occurrence of three identical lines. Find where a symbol is *defined*, not called. Fix a failing test without touching the test. Propagate a rename to every call site including the internal one. And the hard one — fix a failing test where a shared constant serves two callers with different requirements, so the obvious fix breaks the other test.
+
+Every check is exact: file contents, exit codes, and hashes of the files the agent was told not to touch. **No model is in the scoring path.**
+
+A generation goes: measure the current elia → read the whole ledger of what's already been tried → form one specific hypothesis about the weakest link → implement it in a sandboxed copy → gate it → promote only if the benchmark agrees.
+
+What makes this recursive rather than just repeated:
+
+- **The candidate is measured by running the candidate.** Benchmark tasks are launched as child processes from the sandbox's own source, so a change to the agent loop, the system prompt, or a tool description is measured through its own effects.
+- **Mutations are allowed to target the parts that do the improving** — the planner prompt, the role definitions, the loop's policy on batching and delegation. A generation that makes elia a better engineer makes the next generation's attempt better too.
+- **Each generation stands on the last.** A promoted change becomes the new baseline, and the ledger (`.evolution/ledger.jsonl`) carries both the wins and the rejections forward, so generation 12 doesn't re-propose what generation 3 already disproved.
+
+And what keeps it honest:
+
+- **The benchmark is off limits.** `src/evolve/suite.ts`, `fitness.ts`, `engine.ts`, `ledger.ts`, `sandbox.ts`, and `benchTask.ts` cannot be modified by a candidate — touching any of them voids the generation outright. A model asked to improve its score can improve it far more cheaply by editing the benchmark, and it will: not from malice, but because that genuinely is the shortest path to the stated objective.
+- **A tie is a rejection.** Equal pass rate needs a ≥5% token or time win to promote, so benchmark noise can't manufacture a false victory that later generations then "build on".
+- **A regression is disqualifying** even when the total ties, so capabilities can't be quietly traded for each other.
+- **Provider outages don't count as failures.** A transient 500 or rate limit is retried; a wrong answer never is. Otherwise a network blip could reject a genuinely better candidate, and the ledger would carry that false result into every later generation.
+- **The live tree is only touched after the gate passes**, and everything it overwrites is backed up to `.evolution/gen-N-backup/`. Rollback is one copy.
+
+`elia evolve` makes real API calls and, on success, modifies elia's own source. Use `--dry-run` to see what it would do first.
+
+## Learned tools: `elia skills`
+
+```bash
+elia skills               # list the tools elia has written for itself
+elia skills candidates    # show repeated work that could become a tool
+elia skills synth         # write a tool for the strongest candidate
+```
+
+Elia counts two kinds of repetition as it works, for free, with no model involved: shell-command *shapes* (`git diff --stat HEAD~1` and `git diff --cached` are the same habit) and sliding trigrams of tool names (a `grep → read_file → edit_file` routine that costs three round-trips every time). Once a habit crosses a threshold, `elia skills synth` has a builder write a real tool for it — plus a test — into `~/.elia/skills/`.
+
+A synthesized skill is only kept if it survives the same gate a human contribution would: it has to import cleanly, expose a valid tool schema, and pass a test that actually ran. Anything else is quarantined rather than loaded. Skills are ordinary modules exporting a `Tool`, so they're indistinguishable from built-ins at the call site, and they're self-contained (no imports from elia's source) so they keep working across upgrades. `ELIA_SKILLS=off` disables loading entirely.
+
 ## How it works
 
-- **`src/agentLoop.ts`** — the shared core loop: send messages to the active provider, stream text to the terminal, execute any tool calls the model requests (in parallel, up to 4 at a time), feed results back, and repeat until the model stops calling tools. Used by both the top-level agent and sub-agents.
-- **`src/agent.ts`** — the top-level agent: runs `agentLoop` with the full tool set (including `task`), live streaming to the terminal, and the thinking animation.
-- **`src/subagent.ts`** and **`src/tools/task.ts`** — the `task` tool lets the model delegate an independent, self-contained piece of work to an autonomous sub-agent with its own isolated context. Sub-agents run silently (no live terminal output) and can't spawn further sub-agents. Calling `task` multiple times in one turn runs those sub-agents in parallel.
-- **`src/providers/`** — a small provider abstraction (`types.ts`) with two adapters: `anthropic.ts` (native Anthropic Messages API, with prompt-caching breakpoints on the system prompt, tools, and tail of the conversation for speed) and `openaiCompatible.ts` (one adapter covering Groq, OpenAI, Mercury, and any other OpenAI-compatible endpoint via `baseURL`). `registry.ts` resolves `ELIA_PROVIDER`/env vars into a concrete provider instance.
-- **`src/tools/`** — `read_file`, `write_file`, `edit_file` (exact string replace), `list_files` (glob), `grep`, `run_command` (shell, 60s timeout), and `task` (sub-agent). Each tool is a plain object with a JSON schema and an `execute()` function.
-- **`src/memory.ts`** — loads `ELIA.md` (project, in the cwd) and `~/.elia/ELIA.md` (user, global) into the system prompt at startup, so persistent instructions don't need to be repeated every session.
-- **`src/session.ts`** — every session is auto-saved to `.elia/sessions/<id>.json`; `elia --continue`/`-c` resumes the most recent one in the current directory, `elia --resume <id>` resumes a specific one.
-- **`src/ui/stream.ts`** — writes streamed text and tool-call/result notices directly to the terminal as they happen, no buffering.
-- **`src/ui/character.ts` + `src/ui/animator.ts`** — Elia's ASCII art frames and a small in-place terminal animator (raw ANSI cursor control, no dependencies).
-- **`src/ui/streamCursor.ts`** — the blinking cursor shown during mid-stream pauses.
-- **`src/usage.ts`** — token/time/cost accounting: per-turn and cumulative-session accumulation, the pricing table, and formatting.
-- **`src/preview/server.ts`** — localhost-only static server (`127.0.0.1`, ephemeral port) over `workspace/`, singleton per process. Injects a small live-reload script into served HTML and pushes a reload message over WebSocket whenever a watched file changes. Guards against path traversal.
-- **`src/preview/launchChrome.ts`** — finds a real Chrome install across Windows/macOS/Linux and launches it detached; falls back to the OS default-browser opener (and says so) if Chrome isn't found.
-- **`src/tools/preview.ts`** — the `preview` tool: `path` (served + live-reloaded from `workspace/`) or `url` (opened directly, e.g. a dev server elia started itself). Top-level only, same as `task`.
+- **`src/agentLoop.ts`** — the shared core loop: send messages to the active provider, stream text, execute tool calls (in parallel, up to 4 at a time), feed results back, repeat. Takes an optional provider (for tier routing), a step budget, a tool-event hook, and a speculative cache. Used by the top-level agent, sub-agents, the planner, and the evolution engine.
+- **`src/agent.ts`** — the top-level agent: full tool set (including `task` and `preview`), live streaming, thinking animation, prefetch, and usage accounting.
+- **`src/subagent.ts`** + **`src/autonomy/roles.ts`** + **`src/tools/task.ts`** — role-typed sub-agents. The role resolves to a model tier, a tool allowlist, a step budget, and a specialised prompt. Sub-agents can't spawn sub-agents (no role's allowlist contains `task`), which caps recursion at one level.
+- **`src/autonomy/loop.ts`** — the orient → propose → execute → verify → reflect → learn cycle.
+- **`src/autonomy/proposal.ts`** — the `submit_proposal` tool, plan validation (unknown step ids, duplicate ids, dependency cycles, and missing verification are all rejected with a message the model can act on), and terminal rendering that shows the wave structure and warns about two steps in one wave claiming the same file.
+- **`src/autonomy/fleet.ts`** — dependency-wave planning and parallel dispatch. Reports `savedMs`: the workers' summed time minus the wall clock actually taken, which keeps the parallelism honest — a "parallel" run that saved nothing means the decomposition was wrong.
+- **`src/autonomy/blackboard.ts`** + **`src/tools/blackboard.ts`** — the shared whiteboard. Sub-agents are normally hermetic, so two of them investigating the same repo rediscover the same facts twice; `board_post`/`board_read` turns a parallel fleet into one that cooperates.
+- **`src/autonomy/context.ts`** — `AsyncLocalStorage` carrying the current worker's identity, so blackboard posts are attributed without threading a context argument through every tool signature.
+- **`src/autonomy/verify.ts`** — fail-fast verification runner and the critic's `submit_verdict` tool. The verdict is structured because it drives control flow; "did the model mean yes" is not something to infer from prose.
+- **`src/autonomy/journal.ts`** + **`src/autonomy/rewind.ts`** — the append-only run log and phase checkpoints that make forking possible.
+- **`src/autonomy/lessons.ts`** — durable, deduplicated, cross-run lessons in `.elia/lessons.md`.
+- **`src/speculation/`** — predictive prefetch. `prefetch.ts` follows the edges agents actually read along (grep hits → open them; a module → open its imports) and `cache.ts` holds the results. Any mutating tool call invalidates the cache, and a batch mixing reads and writes bypasses it entirely, so the model can never be handed a pre-write snapshot. Prefetched results show a `⚡` in the tool log.
+- **`src/evolve/`** — `suite.ts` (the fitness function), `benchTask.ts` (one task, one child process, cwd already set), `fitness.ts` (scoring and the promotion rules), `sandbox.ts` (isolated copies, the immutable-file guard, promote/rollback), `ledger.ts` (the generation record), `engine.ts` (the loop).
+- **`src/skills/`** — `detector.ts` (free repetition counting), `synthesize.ts` (write + gate a new tool), `loader.ts` (hot-load and quarantine).
+- **`src/providers/`** — a small provider abstraction with two adapters: `anthropic.ts` (native Messages API with prompt-caching breakpoints on the system prompt, tools, and tail of history) and `openaiCompatible.ts` (Groq, OpenAI, Mercury, and anything else via `baseURL`). `registry.ts` resolves env vars into a concrete provider; `tryResolveProvider` returns an error instead of exiting so the optional fast tier can degrade silently.
+- **`src/tools/`** — `read_file`, `write_file`, `edit_file`, `list_files`, `grep`, `run_command`, `board_post`, `board_read`, `task`, `preview`, plus any synthesized skills.
+- **`src/shell.ts`** — one shell implementation shared by the `run_command` tool, verification, and the evolution gate, so all three behave identically.
+- **`src/memory.ts`** — loads `ELIA.md` (project, in the cwd) and `~/.elia/ELIA.md` (user, global) into the system prompt at startup.
+- **`src/session.ts`** — sessions auto-saved to `.elia/sessions/<id>.json` for `--continue`/`--resume`.
+- **`src/ui/`** — `stream.ts` (unbuffered streaming and tool notices), `character.ts` + `animator.ts` (the ASCII character and in-place animator), `streamCursor.ts` (mid-stream blink), `fleetBoard.ts` (the live parallel-worker board), `report.ts` (phase headings and summaries).
+- **`src/usage.ts`** — token/time/cost accounting and formatting.
+- **`src/preview/`** — localhost-only static server over `workspace/` with WebSocket live-reload, and cross-platform Chrome launching.
 
-Both animation pieces automatically disable themselves when stdout isn't a real terminal (piped/redirected output), so scripted usage is never polluted with escape codes.
+Every animated or in-place UI element disables itself when stdout isn't a real terminal, so piped and scripted usage is never polluted with escape codes — the fleet board degrades to one plain line per state change.
 
 ## Testing
 
 ```bash
-bun test        # unit tests for the tools
+bun test
 bun run typecheck
 ```
 
-The test suite covers the tools, session persistence, and memory-file loading directly and doesn't require any API key. Exercising the actual model loop (streaming, parallel tool calls, sub-agents end-to-end) requires a real provider key and is a manual step — run `bun run dev` and try a prompt.
+The suite covers the tools, session persistence, memory loading, usage accounting, wave planning, proposal validation, the speculative cache, path/import prediction, the promotion rules, habit detection, the blackboard, lessons, and provider response parsing — all without an API key.
+
+What can't be covered that way is the model loop itself. `elia bench` is the real test for that: it runs actual agent loops against checkable tasks, and it's also what `elia evolve` uses to decide whether a change to elia was an improvement.
 
 ## Status
 
-This is an early, minimal build. Sub-agents (parallel `task` calls), prompt caching, session persistence/resume, and token/time/cost tracking are in. Deliberately out of scope so far: a permission/confirmation system for risky actions, MCP support, and git-aware diff review. The code is structured so these can be layered on without a rewrite.
+In: parallel role-typed sub-agents, the autonomous work cycle with an approval gate, dependency-wave execution, the shared blackboard, adversarial review, bounded self-repair, cross-run lessons, run forking, predictive prefetch, the two-tier model cascade, benchmark-gated self-evolution, and skill synthesis.
+
+Deliberately out of scope so far: a permission/confirmation system for individual risky tool calls (`elia auto`'s plan approval is the current gate), MCP support, and git-aware diff review beyond what the critic does. `elia evolve` does not commit to git — it copies files in and backs up what it replaced, leaving the commit to you.
 
 ### On speed
 
-Two things already do the heavy lifting: Anthropic prompt caching (system prompt, tool definitions, and the tail of conversation history are marked as cache breakpoints, so an unchanged prefix of the growing tool-calling loop is reused instead of reprocessed — the single biggest lever for both latency and cost) and parallel tool execution (up to 4 tool calls in flight at once via `agentLoop.ts`'s concurrency limiter). `max_tokens` for Anthropic was also raised from 8192 to 32,000 (Sonnet 5 supports up to 128k) — billing is by tokens actually generated, not the ceiling, so this only removes a risk of truncated output on larger tasks with no cost downside.
+Five things, roughly in order of impact:
+
+1. **Prompt caching** (Anthropic): system prompt, tool definitions, and the tail of history are cache breakpoints, so the unchanged prefix of a growing tool-calling loop is reused rather than reprocessed.
+2. **Parallel sub-agents in dependency waves** — the widest safe wave at each point, rather than everything at once (which corrupts files two workers both edit) or everything in order (which wastes the fleet).
+3. **The fast tier** — recon and summarising go to a cheap quick model; only decisions pay for the strong one.
+4. **Parallel tool execution** — up to 4 tool calls in flight per turn.
+5. **Predictive prefetch** — the reads the model is about to make happen *while it's still generating*, so the tool phase often costs ~0ms instead of a disk round-trip per file.
+
+`max_tokens` for Anthropic is 32,000 (Sonnet 5 supports up to 128k). Billing is by tokens actually generated, not the ceiling, so this only removes the risk of truncated output on large refactors, with no cost downside.

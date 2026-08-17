@@ -64,7 +64,7 @@ export async function measureFitness(options: MeasureOptions): Promise<Scorecard
     tasks,
     options.concurrency ?? DEFAULT_CONCURRENCY,
     async (task) => {
-      const outcome = await runOneTask(task, options.sourceRoot)
+      const outcome = await runTaskWithRetry(task, options.sourceRoot)
       options.onTaskDone?.(outcome)
       return outcome
     },
@@ -87,6 +87,40 @@ export async function measureFitness(options: MeasureOptions): Promise<Scorecard
     totalElapsedMs: outcomes.reduce((sum, outcome) => sum + outcome.elapsedMs, 0),
     wallClockMs: Date.now() - startedAt,
   }
+}
+
+/**
+ * Errors that mean the provider fell over, not that the agent got the task wrong.
+ *
+ * This distinction is load-bearing. A transient 500 scored as a task failure would
+ * make the benchmark reject a genuinely better candidate — or promote a worse one —
+ * on the strength of a network blip, and the ledger would then carry that false
+ * result into every future generation. So an infrastructure failure is retried; a
+ * wrong answer never is.
+ */
+const INFRASTRUCTURE_ERROR = /server had an error|rate.?limit|overloaded|ECONNRESET|ETIMEDOUT|fetch failed|502|503|529/i
+
+export function isInfrastructureFailure(outcome: Pick<TaskOutcome, 'error' | 'steps'>): boolean {
+  if (!outcome.error) return false
+  // A hang is the candidate's own fault and must be allowed to score as a failure,
+  // even though it also reports zero steps.
+  if (/timed out/i.test(outcome.error)) return false
+  // Zero steps means the very first model call never completed, which is not
+  // something the agent's behaviour can cause.
+  return outcome.steps === 0 || INFRASTRUCTURE_ERROR.test(outcome.error)
+}
+
+async function runTaskWithRetry(task: BenchTask, sourceRoot: string, attempts = 2): Promise<TaskOutcome> {
+  let last = await runOneTask(task, sourceRoot)
+
+  for (let attempt = 1; attempt < attempts && isInfrastructureFailure(last); attempt++) {
+    if (last.keptDir) rmSync(last.keptDir, { recursive: true, force: true })
+    // A short pause, since the usual causes (rate limit, overload) clear with time.
+    await new Promise((resolve) => setTimeout(resolve, 2000 * attempt))
+    last = await runOneTask(task, sourceRoot)
+  }
+
+  return last
 }
 
 async function runOneTask(task: BenchTask, sourceRoot: string): Promise<TaskOutcome> {

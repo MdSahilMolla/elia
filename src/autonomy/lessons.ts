@@ -84,7 +84,13 @@ export function createLessonsTool(): LessonsCapture {
   const tool: Tool = {
     name: 'submit_lessons',
     description:
-      'Record what a future run in this same project would want to have known before starting. Only durable facts about *this project*: where things live, a command that has to be run a particular way, a constraint that is not obvious from the code, a trap you fell into. Never record what happened in this run, praise, or generic engineering advice. Zero lessons is a perfectly good answer — submit an empty list rather than padding it.',
+      `Record what a future run in this same project would want to have known before starting.
+
+Only durable facts about *this project*: where something lives, a command that has to be run a particular way, a constraint that is not obvious from the code, a trap you fell into.
+
+The test is whether the sentence will still be true and useful in six months. "The test suite must be run with bun, not node — node cannot resolve the .ts imports" passes. "greet.ts now has a farewell function, do not re-add it" fails: it describes what this run did, and it goes stale the moment anyone edits that file.
+
+Never record what happened in this run, what the code currently contains, praise, or generic engineering advice. Zero lessons is a perfectly good answer — submit an empty list rather than padding it.`,
     input_schema: {
       type: 'object',
       properties: {
