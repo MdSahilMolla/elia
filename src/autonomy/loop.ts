@@ -3,7 +3,7 @@ import { runAgentLoop, type ConversationMessage } from '../agentLoop.ts'
 import { taskTool } from '../tools/task.ts'
 import { allWorkerTools } from '../tools/registry.ts'
 import { runSubAgent } from '../subagent.ts'
-import { runShell } from '../shell.ts'
+import { runShell, clampOutput } from '../shell.ts'
 import { ZERO_USAGE, addUsage, formatElapsed, recordUsage } from '../usage.ts'
 import type { Usage } from '../providers/types.ts'
 import { writeText } from '../ui/stream.ts'
@@ -284,7 +284,24 @@ export async function runAutonomousTask(options: AutonomousRunOptions): Promise<
     // Only spend a critic on a change that already builds. Reviewing code that
     // doesn't compile just rediscovers the compiler's own error, slowly.
     if (verification.passed) {
-      writeSubStep('running adversarial review — correctness, security, and bugs in parallel')
+      // Fetched once and handed to every reviewer directly, instead of each of
+      // them independently spending a tool round-trip (reasoning + tool_use +
+      // tool_result, all billed) to ask git the same question. Three reviewers
+      // asking separately used to cost 3x this round-trip for identical output.
+      const [diff, status] = await Promise.all([runShell('git diff HEAD', 30_000), runShell('git status --porcelain=v1', 30_000)])
+      const diffText = diff.stdout.trim() ? clampOutput(diff.stdout.trim(), 8000) : '(no diff against HEAD — check git status below)'
+      const changedFiles = [...diff.stdout.matchAll(/^diff --git a\/(.+) b\/.+$/gm)].map((match) => match[1] ?? '')
+      // A diff that only touches prose has no exploit surface and no logic to
+      // break, so paying for a security and a bug-hunt pass on it is waste —
+      // skip straight to the one reviewer whose job (was this actually done?)
+      // still applies to docs.
+      const docsOnly = changedFiles.length > 0 && changedFiles.every((file) => /\.(md|mdx|txt)$/i.test(file))
+
+      writeSubStep(
+        docsOnly
+          ? 'running review — docs-only diff, skipping security/bug-hunt passes'
+          : 'running adversarial review — correctness, security, and bugs in parallel',
+      )
 
       const reviewContext = `## What was promised
 ${proposal.goal}
@@ -295,18 +312,26 @@ ${proposal.steps.map((step) => `- ${step.id} (${step.role}): ${step.title} — f
 ## Risks flagged during planning
 ${proposal.risks.length > 0 ? proposal.risks.map((risk) => `- ${risk}`).join('\n') : '(none flagged)'}
 
-Start with \`git diff\` and \`git status\` to see what actually changed, then read the changed files in full.`
+## What actually changed (git diff HEAD)
+${diffText}
 
-      // Three specialists look at the same diff from different angles at once,
-      // rather than one generalist critic trying to hold correctness, security,
-      // and functional-bug-hunting in mind simultaneously. Each gets its own
-      // verdict tool instance since they run concurrently and must not share
-      // captured state.
-      const reviewers: { role: 'critic' | 'security' | 'bughunter'; name: string; focus: string }[] = [
-        { role: 'critic', name: 'critic#1', focus: 'Check specifically whether each promised step was really done, not just claimed.' },
-        { role: 'security', name: 'security#1', focus: 'Focus only on exploitable security weaknesses in what changed.' },
-        { role: 'bughunter', name: 'bughunter#1', focus: 'Focus only on functional/logic bugs in what changed.' },
-      ]
+## git status
+${status.stdout.trim() || '(clean)'}
+
+Read the changed files in full for context beyond the diff above — a diff hides the sibling code that makes a snippet correct or broken.`
+
+      // Multiple specialists look at the same diff from different angles at
+      // once, rather than one generalist critic trying to hold correctness,
+      // security, and functional-bug-hunting in mind simultaneously. Each gets
+      // its own verdict tool instance since they run concurrently and must not
+      // share captured state.
+      const reviewers: { role: 'critic' | 'security' | 'bughunter'; name: string; focus: string }[] = docsOnly
+        ? [{ role: 'critic', name: 'critic#1', focus: 'Check specifically whether each promised step was really done, not just claimed.' }]
+        : [
+            { role: 'critic', name: 'critic#1', focus: 'Check specifically whether each promised step was really done, not just claimed.' },
+            { role: 'security', name: 'security#1', focus: 'Focus only on exploitable security weaknesses in what changed.' },
+            { role: 'bughunter', name: 'bughunter#1', focus: 'Focus only on functional/logic bugs in what changed.' },
+          ]
 
       const reviewResults = await Promise.all(
         reviewers.map(async (reviewer) => {
