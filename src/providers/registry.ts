@@ -1,6 +1,6 @@
 import { createAnthropicProvider } from './anthropic.ts'
 import { createOpenAICompatibleProvider } from './openaiCompatible.ts'
-import type { Provider } from './types.ts'
+import type { Provider, ThinkingOption } from './types.ts'
 
 interface ProviderPreset {
   kind: 'anthropic' | 'openai-compatible'
@@ -45,6 +45,20 @@ export interface ResolvedProvider {
   model: string
 }
 
+/** Preset provider names elia knows about out of the box — `custom` covers anything else via `ELIA_BASE_URL`. */
+export const PROVIDER_PRESET_NAMES = Object.keys(PROVIDER_PRESETS)
+
+/** Whether a preset's API key is actually set, so a "switch model" listing can show what's usable right now versus just known by name. */
+export function isProviderPresetConfigured(providerName: string): boolean {
+  const preset = PROVIDER_PRESETS[providerName]
+  if (!preset) return false
+  return Boolean(process.env[preset.apiKeyEnv] ?? process.env.ELIA_API_KEY)
+}
+
+export function providerPresetDefaultModel(providerName: string): string | undefined {
+  return PROVIDER_PRESETS[providerName]?.defaultModel
+}
+
 export interface ProviderRequest {
   /** Provider preset name (defaults to `ELIA_PROVIDER`, then `anthropic`). */
   providerName?: string
@@ -60,6 +74,8 @@ export interface ProviderRequest {
    * be overridden by env vars the user set for the primary one.
    */
   ignoreAmbient?: boolean
+  /** Extended thinking / reasoning. Omitted (not just `enabled: false`) means the caller doesn't want it wired at all. */
+  thinking?: ThinkingOption
 }
 
 /** Resolves the primary provider from the environment, exiting the process with a clear message if it can't. */
@@ -111,8 +127,8 @@ export function tryResolveProvider(request: ProviderRequest = {}): ResolvedProvi
 
   const provider =
     preset.kind === 'anthropic'
-      ? createAnthropicProvider(apiKey, model)
-      : createOpenAICompatibleProvider(apiKey, model, baseURL)
+      ? createAnthropicProvider(apiKey, model, { thinking: request.thinking })
+      : createOpenAICompatibleProvider(apiKey, model, baseURL, { thinking: request.thinking })
 
   return { provider, providerName, model }
 }

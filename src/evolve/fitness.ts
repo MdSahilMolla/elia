@@ -5,6 +5,8 @@ import { runWithConcurrencyLimit } from '../agentLoop.ts'
 import { estimateCostUsd, formatCostUsd, formatElapsed, formatTokenCount } from '../usage.ts'
 import { BENCH_TASKS, TOTAL_WEIGHT, type BenchTask } from './suite.ts'
 import type { Metrics } from './ledger.ts'
+import { bold, dim, green, red } from '../ui/theme.ts'
+import { table } from '../ui/layout.ts'
 
 /**
  * Runs the benchmark suite against a given copy of elia's source and scores it.
@@ -243,6 +245,7 @@ export function toMetrics(card: Scorecard): Metrics {
     passRate: card.passRate,
     passed: card.outcomes.filter((outcome) => outcome.passed).map((outcome) => outcome.taskId),
     failed: card.outcomes.filter((outcome) => !outcome.passed).map((outcome) => outcome.taskId),
+    steps: Object.fromEntries(card.outcomes.map((outcome) => [outcome.taskId, outcome.steps])),
     totalTokens: card.totalTokens,
     totalElapsedMs: card.totalElapsedMs,
     ...(costUsd !== undefined ? { costUsd } : {}),
@@ -316,15 +319,32 @@ function signed(value: number): string {
 }
 
 export function renderScorecard(card: Scorecard, title = 'Scorecard'): string {
-  const lines: string[] = ['', `${title} — ${pct(card.passRate)} weighted pass rate`, '']
+  const lines: string[] = ['', `${bold(title)} ${dim(`— ${pct(card.passRate)} weighted pass rate`)}`, '']
 
-  for (const outcome of card.outcomes) {
-    const mark = outcome.passed ? '✓' : '✗'
-    const stats = `${outcome.steps} steps · ${formatElapsed(outcome.elapsedMs)} · ${formatTokenCount(outcome.totalTokens)} tok`
-    lines.push(`  ${mark} ${outcome.taskId.padEnd(18)} ${stats}`)
-    lines.push(`      ${outcome.error ? `error: ${outcome.error}` : outcome.detail}`)
-    if (outcome.keptDir) lines.push(`      kept for inspection: ${outcome.keptDir}`)
-  }
+  const rows = table(
+    [
+      { header: '' },
+      { header: 'task' },
+      { header: 'steps', align: 'right' },
+      { header: 'time', align: 'right' },
+      { header: 'tokens', align: 'right' },
+    ],
+    card.outcomes.map((outcome) => [
+      outcome.passed ? green('✓') : red('✗'),
+      outcome.taskId,
+      String(outcome.steps),
+      formatElapsed(outcome.elapsedMs),
+      formatTokenCount(outcome.totalTokens),
+    ]),
+  )
+  const [header, separator, ...dataRows] = rows
+  lines.push(`  ${header}`, `  ${separator}`)
+  card.outcomes.forEach((outcome, i) => {
+    lines.push(`  ${dataRows[i]}`)
+    if (outcome.error) lines.push(`      ${red(`error: ${outcome.error}`)}`)
+    else if (outcome.detail) lines.push(`      ${dim(outcome.detail)}`)
+    if (outcome.keptDir) lines.push(`      ${dim(`kept for inspection: ${outcome.keptDir}`)}`)
+  })
 
   const cost = card.model
     ? formatCostUsd(
@@ -339,7 +359,7 @@ export function renderScorecard(card: Scorecard, title = 'Scorecard'): string {
 
   lines.push('')
   lines.push(
-    `  total: ${formatTokenCount(card.totalTokens)} tokens · ${formatElapsed(card.totalElapsedMs)} of agent time · ${formatElapsed(card.wallClockMs)} wall clock · ~${cost}`,
+    `  ${dim(`total: ${formatTokenCount(card.totalTokens)} tokens · ${formatElapsed(card.totalElapsedMs)} of agent time · ${formatElapsed(card.wallClockMs)} wall clock · ~${cost}`)}`,
   )
   lines.push('')
   return lines.join('\n')

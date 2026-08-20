@@ -1,13 +1,8 @@
 import type { Tool } from '../tools/types.ts'
 import { isRoleName, type Proposal, type ProposalStep } from './types.ts'
 import { fileCollisions, planWaves } from './fleet.ts'
-
-const BOLD = '\x1b[1m'
-const DIM = '\x1b[2m'
-const GOLD = '\x1b[33m'
-const CYAN = '\x1b[36m'
-const RED = '\x1b[31m'
-const RESET = '\x1b[0m'
+import { bold, dim, cyan, red, gold } from '../ui/theme.ts'
+import { box, wrapText } from '../ui/layout.ts'
 
 /**
  * Turns whatever the model produced into a validated proposal, or an explanation
@@ -196,63 +191,59 @@ export function renderProposal(proposal: Proposal): string {
   const lines: string[] = []
   const { waves } = planWaves(proposal.steps)
 
+  lines.push(dim('nothing has been changed yet'))
   lines.push('')
-  lines.push(`${BOLD}${GOLD}Proposal${RESET} ${DIM}— nothing has been changed yet${RESET}`)
-  lines.push('')
-  lines.push(`${BOLD}Goal${RESET}  ${proposal.goal}`)
+  lines.push(`${bold('Goal')}  ${proposal.goal}`)
 
   if (proposal.understanding) {
     lines.push('')
-    lines.push(`${BOLD}What I found${RESET}`)
-    for (const line of wrap(proposal.understanding, 88)) lines.push(`  ${line}`)
+    lines.push(bold('What I found'))
+    for (const line of wrapText(proposal.understanding, 84)) lines.push(`  ${line}`)
   }
 
   if (proposal.assumptions.length > 0) {
     lines.push('')
-    lines.push(`${BOLD}Assuming${RESET} ${DIM}(correct me and I'll replan)${RESET}`)
-    for (const assumption of proposal.assumptions) lines.push(`  ${DIM}·${RESET} ${assumption}`)
+    lines.push(`${bold('Assuming')} ${dim("(correct me and I'll replan)")}`)
+    for (const assumption of proposal.assumptions) lines.push(`  ${dim('·')} ${assumption}`)
   }
 
   lines.push('')
   const workerCount = proposal.steps.length
   const waveWord = waves.length === 1 ? 'wave' : 'waves'
   lines.push(
-    `${BOLD}Plan${RESET} ${DIM}— ${workerCount} ${workerCount === 1 ? 'worker' : 'workers'} in ${waves.length} ${waveWord}${RESET}`,
+    `${bold('Plan')} ${dim(`— ${workerCount} ${workerCount === 1 ? 'worker' : 'workers'} in ${waves.length} ${waveWord}`)}`,
   )
   for (const [index, wave] of waves.entries()) {
-    const parallelNote = wave.length > 1 ? ` ${DIM}(${wave.length} in parallel)${RESET}` : ''
-    lines.push(`  ${DIM}wave ${index + 1}${RESET}${parallelNote}`)
+    const parallelNote = wave.length > 1 ? ` ${dim(`(${wave.length} in parallel)`)}` : ''
+    lines.push(`  ${dim(`wave ${index + 1}`)}${parallelNote}`)
     for (const step of wave) {
-      lines.push(`    ${CYAN}${step.role.padEnd(8)}${RESET} ${step.id}  ${step.title}`)
-      if (step.files.length > 0) lines.push(`             ${DIM}${step.files.join(', ')}${RESET}`)
+      lines.push(`    ${cyan(step.role.padEnd(8))} ${step.id}  ${step.title}`)
+      if (step.files.length > 0) lines.push(`             ${dim(step.files.join(', '))}`)
     }
 
     for (const collision of fileCollisions(wave)) {
-      lines.push(
-        `    ${RED}!${RESET} ${collision.file} is claimed by ${collision.steps.join(' and ')} in the same wave`,
-      )
+      lines.push(`    ${red('!')} ${collision.file} is claimed by ${collision.steps.join(' and ')} in the same wave`)
     }
   }
 
   if (proposal.risks.length > 0) {
     lines.push('')
-    lines.push(`${BOLD}Risks${RESET}`)
-    for (const risk of proposal.risks) lines.push(`  ${DIM}·${RESET} ${risk}`)
+    lines.push(bold('Risks'))
+    for (const risk of proposal.risks) lines.push(`  ${dim('·')} ${risk}`)
   }
 
   lines.push('')
-  lines.push(`${BOLD}Done when${RESET}`)
-  for (const command of proposal.verification) lines.push(`  ${DIM}$${RESET} ${command}`)
-  if (proposal.verification.length === 0) lines.push(`  ${DIM}(no verification commands given)${RESET}`)
+  lines.push(bold('Done when'))
+  for (const command of proposal.verification) lines.push(`  ${dim('$')} ${command}`)
+  if (proposal.verification.length === 0) lines.push(`  ${dim('(no verification commands given)')}`)
 
   if (proposal.outOfScope.length > 0) {
     lines.push('')
-    lines.push(`${BOLD}Not doing${RESET}`)
-    for (const item of proposal.outOfScope) lines.push(`  ${DIM}·${RESET} ${item}`)
+    lines.push(bold('Not doing'))
+    for (const item of proposal.outOfScope) lines.push(`  ${dim('·')} ${item}`)
   }
 
-  lines.push('')
-  return lines.join('\n')
+  return `\n${box(lines, { title: 'Proposal', borderColor: gold })}\n`
 }
 
 function asString(value: unknown): string | undefined {
@@ -262,20 +253,4 @@ function asString(value: unknown): string | undefined {
 function asStringArray(value: unknown): string[] {
   if (!Array.isArray(value)) return []
   return value.filter((item): item is string => typeof item === 'string' && item.trim().length > 0).map((item) => item.trim())
-}
-
-function wrap(text: string, width: number): string[] {
-  const words = text.split(/\s+/)
-  const lines: string[] = []
-  let current = ''
-  for (const word of words) {
-    if (current.length + word.length + 1 > width && current.length > 0) {
-      lines.push(current)
-      current = word
-    } else {
-      current = current.length === 0 ? word : `${current} ${word}`
-    }
-  }
-  if (current.length > 0) lines.push(current)
-  return lines
 }

@@ -1,0 +1,9 @@
+{
+  "saas_monthly": 3000,
+  "dev_cost": 350000,
+  "infra_year1": 15000,
+  "maint_pct": 0.20,
+  "opp_pct": 0.10,
+  "discount_rate": 0.05,
+  "years": 3
+}

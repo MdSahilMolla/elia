@@ -1,8 +1,16 @@
-import { CHARACTER_FRAMES, GOLD, DIM, RESET } from './character.ts'
+import { FACE_NEUTRAL, FACE_BLINK, FACE_LEFT, FACE_RIGHT } from './character.ts'
+import { dim, gold } from './theme.ts'
 
-const FRAME_INTERVAL_MS = 450
-const STATUS_LINE_COUNT = 1
-const LINE_COUNT = CHARACTER_FRAMES[0]!.length + STATUS_LINE_COUNT
+// Eyes dart around while "thinking", blink once, and repeat — a small loop, not
+// a set piece. Each entry gets one FRAME_MS tick.
+const FACES = [FACE_NEUTRAL, FACE_LEFT, FACE_NEUTRAL, FACE_RIGHT, FACE_NEUTRAL, FACE_BLINK]
+const FRAME_MS = 220
+
+// The verb rotates far slower than the face — swapping it every tick would be
+// noise, not personality. Themed to the same lightning motif as the mascot and
+// the rest of the app's gold accent, not a random word generator.
+const VERBS = ['Sparking', 'Charging', 'Pondering', 'Zapping', 'Percolating', 'Scheming', 'Noodling']
+const VERB_INTERVAL_S = 3
 
 export interface Animation {
   stop(): void
@@ -10,45 +18,46 @@ export interface Animation {
 
 const NOOP_ANIMATION: Animation = { stop() {} }
 
+/**
+ * A single-line "thinking" indicator: a small blinking kaomoji plus a rotating
+ * verb and elapsed time. Deliberately one line — the old version was a two-line
+ * ASCII snake plus a separate status line, which is more real estate than a
+ * "still working" cue needs. This is the shape Claude Code's own status line
+ * takes: one glyph, one phrase, one clock.
+ */
 export function startThinkingAnimation(): Animation {
-  // Escape codes corrupt output when stdout isn't a real terminal (piped/redirected).
   if (!process.stdout.isTTY) return NOOP_ANIMATION
 
   const startedAt = Date.now()
   let frameIndex = 0
   let stopped = false
 
-  function statusLine(): string {
+  function line(): string {
     const elapsedSeconds = Math.floor((Date.now() - startedAt) / 1000)
-    return `${DIM}    · thinking (${elapsedSeconds}s)${RESET}`
+    const verb = VERBS[Math.floor(elapsedSeconds / VERB_INTERVAL_S) % VERBS.length]
+    const face = FACES[frameIndex % FACES.length]
+    return `${gold(`(${face})`)} ${dim(`${verb}… (${elapsedSeconds}s)`)}`
   }
 
-  function render(frame: readonly string[]): void {
-    for (const line of frame) {
-      process.stdout.write(`\x1b[2K${GOLD}${line}${RESET}\n`)
-    }
-    process.stdout.write(`\x1b[2K${statusLine()}\n`)
+  process.stdout.write(`${line()}\n`)
+
+  let timer: ReturnType<typeof setTimeout> | undefined
+  function scheduleNext(): void {
+    timer = setTimeout(() => {
+      if (stopped) return
+      frameIndex += 1
+      process.stdout.write(`\x1b[1A\x1b[2K${line()}\n`)
+      scheduleNext()
+    }, FRAME_MS)
   }
-
-  function moveUp(): void {
-    process.stdout.write(`\x1b[${LINE_COUNT}A`)
-  }
-
-  render(CHARACTER_FRAMES[0]!)
-
-  const interval = setInterval(() => {
-    frameIndex = (frameIndex + 1) % CHARACTER_FRAMES.length
-    moveUp()
-    render(CHARACTER_FRAMES[frameIndex]!)
-  }, FRAME_INTERVAL_MS)
+  scheduleNext()
 
   return {
     stop() {
       if (stopped) return
       stopped = true
-      clearInterval(interval)
-      moveUp()
-      process.stdout.write('\x1b[0J') // clear the frame, cursor lands where it was
+      if (timer) clearTimeout(timer)
+      process.stdout.write('\x1b[1A\x1b[0J')
     },
   }
 }

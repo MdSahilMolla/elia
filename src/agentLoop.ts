@@ -1,16 +1,18 @@
 import { config } from './config.ts'
 import type { ChatMessage, ContentBlock, Provider, Usage } from './providers/types.ts'
 import type { Tool } from './tools/types.ts'
-import { endTextTurn, writeToolCall, writeToolResult } from './ui/stream.ts'
+import { endTextTurn, writeNotice, writeToolCall, writeToolResult } from './ui/stream.ts'
 import { startThinkingAnimation } from './ui/animator.ts'
 import { createStreamCursor } from './ui/streamCursor.ts'
 import { ZERO_USAGE, addUsage } from './usage.ts'
 import { SPECULABLE_TOOLS, type CacheStats, type ToolResultCache } from './speculation/cache.ts'
 import type { Prefetcher } from './speculation/prefetch.ts'
+import { maybeCompact } from './compaction.ts'
 
 export type ConversationMessage = ChatMessage
 
 const MAX_PARALLEL_TOOLS = 4
+const MAX_PROVIDER_ATTEMPTS = 3
 
 /**
  * A hard ceiling on model round-trips in one loop. Without it a model that keeps
@@ -34,6 +36,8 @@ export interface RunAgentLoopOptions {
   systemPrompt: string
   tools: Tool[]
   onText?: (delta: string) => void
+  /** Streamed reasoning, when the provider produces any (not every provider/turn does). */
+  onThinking?: (delta: string) => void
   /** Show the thinking animation and emit a trailing newline after streamed text (top-level only). */
   useAnimation: boolean
   /** Log tool calls/results to stdout as they happen (off for silent sub-agents so parallel runs don't interleave). */
@@ -77,6 +81,7 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
     systemPrompt,
     tools,
     onText,
+    onThinking,
     useAnimation,
     verbose,
     provider,
@@ -106,6 +111,15 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
 
   while (true) {
     if (signal?.aborted) return finish('aborted')
+
+    // A growing history costs more to attend to every turn even with prompt
+    // caching (which makes it cheap to *re-send*, not smaller), and is
+    // eventually finite regardless of provider. Cheap no-op check below the
+    // threshold; only pays for a summary call once it's actually crossed.
+    if (await maybeCompact(messages)) {
+      if (verbose) writeNotice('elia: conversation history compacted to keep things fast')
+    }
+
     if (steps >= maxSteps) {
       messages.push({
         role: 'user',
@@ -207,25 +221,69 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
     const active = provider ?? config.provider
 
     try {
-      const result = await active.streamTurn({
-        system: systemPrompt,
-        messages,
-        tools: toolDefinitions,
-        onText: (delta) => {
-          stopAnimation()
-          cursor?.beforeText()
-          onText?.(delta)
-          cursor?.afterText()
-        },
-      })
-      totalUsage = addUsage(totalUsage, result.usage)
-      return result.content
+      let emittedOutput = false
+      for (let attempt = 1; ; attempt++) {
+        try {
+          const result = await active.streamTurn({
+            system: systemPrompt,
+            messages,
+            tools: toolDefinitions,
+            onText: (delta) => {
+              emittedOutput = true
+              stopAnimation()
+              cursor?.beforeText()
+              onText?.(delta)
+              cursor?.afterText()
+            },
+            onThinking: (delta) => {
+              // Reasoning is real output too — a retry after some has been shown
+              // would duplicate it in the terminal exactly like retrying after text.
+              emittedOutput = true
+              stopAnimation()
+              onThinking?.(delta)
+            },
+          })
+          totalUsage = addUsage(totalUsage, result.usage)
+          return result.content
+        } catch (error) {
+          // Retrying after output was emitted would duplicate a partial answer in
+          // the terminal. Only retry failures that happened before any output.
+          if (emittedOutput || attempt >= MAX_PROVIDER_ATTEMPTS || !isRetryableProviderError(error)) throw error
+          if (signal?.aborted) throw error
+          await Bun.sleep(250 * 2 ** (attempt - 1))
+        }
+      }
     } finally {
       stopAnimation()
       cursor?.stop()
       if (useAnimation) endTextTurn()
     }
   }
+}
+
+/**
+ * The last thing the assistant actually said in a conversation — what a
+ * sub-agent or persona turn reports back to whoever dispatched it. Shared so
+ * every caller (sub-agents, agent personas) reads a finished turn's result the
+ * same way instead of re-deriving it, with a caller-supplied fallback for the
+ * "stopped without saying anything" case.
+ */
+export function lastAssistantText(messages: ConversationMessage[], fallback: string): string {
+  const lastAssistantMessage = [...messages].reverse().find((message) => message.role === 'assistant')
+  const text = lastAssistantMessage?.content
+    .filter((block): block is Extract<ContentBlock, { type: 'text' }> => block.type === 'text')
+    .map((block) => block.text)
+    .join('\n')
+    .trim()
+
+  return text && text.length > 0 ? text : fallback
+}
+
+function isRetryableProviderError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error)
+  return /connection|fetch failed|network|timeout|timed out|rate limit|429|500|502|503|504|server had an error/i.test(
+    message,
+  )
 }
 
 /** Runs `fn` over `items` with at most `limit` in flight at once, preserving result order. */

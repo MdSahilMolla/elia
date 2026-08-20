@@ -1,4 +1,5 @@
 import type { Tool } from './types.ts'
+import { captureBeforeWrite } from '../checkpoint.ts'
 
 export const editFileTool: Tool = {
   name: 'edit_file',
@@ -14,9 +15,18 @@ export const editFileTool: Tool = {
     required: ['path', 'old_string', 'new_string'],
   },
   async execute(input) {
-    const path = input.path as string
-    const oldString = input.old_string as string
-    const newString = input.new_string as string
+    if (typeof input.path !== 'string' || input.path.length === 0) {
+      throw new Error('edit_file requires a non-empty "path" string argument.')
+    }
+    if (typeof input.old_string !== 'string' || input.old_string.length === 0) {
+      throw new Error('edit_file requires a non-empty "old_string" string argument.')
+    }
+    if (typeof input.new_string !== 'string') {
+      throw new Error('edit_file requires a "new_string" string argument (use an empty string to delete old_string).')
+    }
+    const path = input.path
+    const oldString = input.old_string
+    const newString = input.new_string
 
     const file = Bun.file(path)
     if (!(await file.exists())) {
@@ -36,6 +46,7 @@ export const editFileTool: Tool = {
     }
 
     const updated = text.slice(0, firstIndex) + newString + text.slice(firstIndex + oldString.length)
+    await captureBeforeWrite(path)
     await Bun.write(path, updated)
     return `Edited ${path}`
   },

@@ -6,7 +6,7 @@ import type { ProposalStep } from './types.ts'
 // makes a network call; only the pure planning functions are exercised.
 process.env.ANTHROPIC_API_KEY ??= 'test-key-for-fleet-test'
 
-const { planWaves, fileCollisions } = await import('./fleet.ts')
+const { planWaves, fileCollisions, fleetConcurrency } = await import('./fleet.ts')
 
 function step(id: string, dependsOn: string[] = [], files: string[] = []): ProposalStep {
   return { id, title: `step ${id}`, role: 'builder', instructions: 'do it', files, dependsOn }
@@ -72,4 +72,33 @@ test('fileCollisions normalizes separators so the same file is not missed', () =
 
 test('disjoint files in one wave are not a collision', () => {
   expect(fileCollisions([step('a', [], ['x.ts']), step('b', [], ['y.ts'])])).toEqual([])
+})
+
+test('dependency-ready steps that claim the same file are serialized', () => {
+  const { waves } = planWaves([
+    step('a', [], ['src/same.ts']),
+    step('b', [], ['src/same.ts']),
+    step('c', [], ['src/other.ts']),
+  ])
+
+  expect(waves.map((wave) => wave.map((item) => item.id))).toEqual([['a', 'c'], ['b']])
+  expect(waves.every((wave) => fileCollisions(wave).length === 0)).toBe(true)
+})
+
+test('fleetConcurrency matches the old fixed default when everyone shares one provider', () => {
+  expect(fleetConcurrency(['anthropic (claude-sonnet-5)', 'anthropic (claude-sonnet-5)', 'anthropic (claude-sonnet-5)'])).toBe(4)
+})
+
+test('fleetConcurrency widens per distinct provider so one rate limit does not throttle the whole fleet', () => {
+  expect(fleetConcurrency(['groq (a)', 'anthropic (b)'])).toBe(8)
+  expect(fleetConcurrency(['groq (a)', 'anthropic (b)', 'openai (c)'])).toBe(12)
+})
+
+test('fleetConcurrency is capped even with many distinct providers', () => {
+  const labels = Array.from({ length: 10 }, (_, i) => `provider-${i}`)
+  expect(fleetConcurrency(labels)).toBe(16)
+})
+
+test('fleetConcurrency defaults to 4 for an empty batch rather than dividing by zero', () => {
+  expect(fleetConcurrency([])).toBe(4)
 })

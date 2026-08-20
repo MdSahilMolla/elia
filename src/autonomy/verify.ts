@@ -147,3 +147,17 @@ export function describeIssues(issues: CriticIssue[]): string {
 export function hasBlockingIssues(verdict: CriticVerdict): boolean {
   return verdict.verdict === 'revise' && verdict.issues.some((issue) => issue.severity !== 'minor')
 }
+
+/** Missing structured review is a failed gate, never implicit approval. */
+export function requireCriticVerdict(verdict: CriticVerdict | undefined): CriticVerdict {
+  return verdict ?? {
+    verdict: 'revise',
+    summary: 'The critic did not submit a structured verdict.',
+    issues: [
+      {
+        severity: 'blocker',
+        detail: 'Review could not be verified because submit_verdict was never called.',
+      },
+    ],
+  }
+}

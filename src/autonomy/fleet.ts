@@ -2,12 +2,16 @@ import { runSubAgent, type SubAgentResult } from '../subagent.ts'
 import { runWithConcurrencyLimit } from '../agentLoop.ts'
 import { createFleetBoard } from '../ui/fleetBoard.ts'
 import { ZERO_USAGE, addUsage } from '../usage.ts'
+import { roleConfig } from '../config.ts'
+import { role as roleDefinition } from './roles.ts'
 import type { Usage } from '../providers/types.ts'
 import type { Journal } from './journal.ts'
 import type { ProposalStep, RoleName } from './types.ts'
 
-/** How many sub-agents run at once. Beyond this, provider rate limits dominate and add latency instead of removing it. */
+/** How many sub-agents run at once against a single provider. Beyond this, that provider's rate limits dominate and add latency instead of removing it. */
 const DEFAULT_FLEET_CONCURRENCY = 4
+/** Hard ceiling regardless of how many distinct providers are in play — past this, local resources (not any one provider) become the bottleneck. */
+const MAX_FLEET_CONCURRENCY = 16
 
 export interface FleetAssignment {
   id: string
@@ -45,7 +49,6 @@ export interface FleetResult {
  */
 export async function runFleet(options: FleetRunOptions): Promise<FleetResult> {
   const { assignments, briefing, journal, signal } = options
-  const concurrency = options.concurrency ?? DEFAULT_FLEET_CONCURRENCY
   const showBoard = options.showBoard ?? true
   const startedAt = Date.now()
 
@@ -54,7 +57,10 @@ export async function runFleet(options: FleetRunOptions): Promise<FleetResult> {
     // Worker names are what show up in blackboard attribution, so they need to be
     // distinct and readable: "scout#1", "builder#2".
     workerName: `${assignment.role}#${index + 1}`,
+    providerLabel: roleConfig(assignment.role, roleDefinition(assignment.role).tier).label,
   }))
+
+  const concurrency = options.concurrency ?? fleetConcurrency(named.map((item) => item.providerLabel))
 
   const board = showBoard
     ? createFleetBoard(named.map((item) => ({ name: item.workerName, role: item.role, title: item.title })))
@@ -114,6 +120,21 @@ export async function runFleet(options: FleetRunOptions): Promise<FleetResult> {
 }
 
 /**
+ * How many workers to run at once, given the providers this batch actually uses.
+ *
+ * `DEFAULT_FLEET_CONCURRENCY` exists because piling every worker onto one
+ * provider trades rate-limit throttling for the parallelism it was supposed to
+ * buy. That reasoning is per-provider, not global: a wave split across N
+ * genuinely distinct providers (a scout on Groq, a critic on Claude, ...) has N
+ * separate rate-limit budgets, so it can safely run wider without any one of
+ * them being hammered harder than a single-provider fleet already is.
+ */
+export function fleetConcurrency(providerLabels: string[]): number {
+  const distinctProviders = new Set(providerLabels).size || 1
+  return Math.min(MAX_FLEET_CONCURRENCY, DEFAULT_FLEET_CONCURRENCY * distinctProviders)
+}
+
+/**
  * Splits steps into dependency waves: every step in a wave can run at the same
  * time, and each wave waits for the one before it.
  *
@@ -137,12 +158,28 @@ export function planWaves(steps: ProposalStep[]): { waves: ProposalStep[][]; unr
     // is itself stuck. Stop rather than spin.
     if (ready.length === 0) return { waves, unreachable: remaining }
 
-    waves.push(ready)
+    // Dependency-ready does not necessarily mean safe to run together. Split
+    // steps that claim the same file into later sub-waves so two builders can
+    // never clobber one another merely because the planner omitted dependsOn.
+    for (const safeWave of collisionFreeWaves(ready)) waves.push(safeWave)
     for (const step of ready) done.add(step.id)
     remaining = remaining.filter((step) => !done.has(step.id))
   }
 
   return { waves, unreachable: [] }
+}
+
+/** Greedily packs steps into the fewest deterministic waves with no shared files. */
+function collisionFreeWaves(steps: ProposalStep[]): ProposalStep[][] {
+  const waves: ProposalStep[][] = []
+
+  for (const step of steps) {
+    const target = waves.find((wave) => fileCollisions([...wave, step]).length === 0)
+    if (target) target.push(step)
+    else waves.push([step])
+  }
+
+  return waves
 }
 
 /** Files two steps in the same wave both intend to touch — a real risk of clobbering each other. */

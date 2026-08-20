@@ -85,3 +85,28 @@ test('text and tool calls come back together, text first', () => {
 
   expect(blocks.map((block) => block.type)).toEqual(['text', 'tool_use'])
 })
+
+test('a reasoning field becomes a thinking block, ordered before text', () => {
+  const blocks = toContentBlocks({ reasoning: '17*24 = 408', content: '408' })
+
+  expect(blocks).toEqual([
+    { type: 'thinking', text: '17*24 = 408', signature: '' },
+    { type: 'text', text: '408' },
+  ])
+})
+
+test('reasoning_content is read the same way as reasoning', () => {
+  const blocks = toContentBlocks({ reasoning_content: 'because X', content: 'answer' })
+
+  expect(blocks[0]).toEqual({ type: 'thinking', text: 'because X', signature: '' })
+})
+
+test('reasoning is omitted from content blocks when includeReasoning is false', () => {
+  const blocks = toContentBlocks({ reasoning: 'hidden', content: 'answer' }, false)
+
+  expect(blocks).toEqual([{ type: 'text', text: 'answer' }])
+})
+
+test('an empty reasoning string produces no thinking block', () => {
+  expect(toContentBlocks({ reasoning: '', content: 'answer' })).toEqual([{ type: 'text', text: 'answer' }])
+})

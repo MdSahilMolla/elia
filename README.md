@@ -42,6 +42,19 @@ ELIA_FAST_MODEL=openai/gpt-oss-20b
 
 Investigation is where an agent spends most of its wall clock, and almost none of it needs the strong model. With a fast tier configured, a five-scout recon sweep costs a fraction of what it would otherwise, while every actual decision still goes through the deep model. Leave it unset and both tiers are the same model — behaviour is identical, you just don't get the speed-up.
 
+### Per-role providers (optional, for true multi-model fleets)
+
+Any role can be pinned to its own dedicated provider, on top of (or instead of) the tier system — e.g. run scouts on Groq for raw inference speed while critics stay on Claude for judgment:
+
+```bash
+ELIA_SCOUT_PROVIDER=groq
+ELIA_SCOUT_MODEL=openai/gpt-oss-20b
+```
+
+The pattern is `ELIA_<ROLE>_PROVIDER` / `ELIA_<ROLE>_MODEL` / `ELIA_<ROLE>_BASE_URL` / `ELIA_<ROLE>_API_KEY` for any of `SCOUT`, `BUILDER`, `CRITIC`, `TESTER`, `SCRIBE`. Unset roles fall back to their tier exactly as before.
+
+This is what makes a fleet a genuine multi-model system rather than one model wearing different hats: a wave of five scouts and a critic isn't five-plus-one calls to the same provider's rate limit, it can be two calls to two providers running fully in parallel. Fleet concurrency scales with how many distinct providers a batch actually uses (`fleetConcurrency` in `src/autonomy/fleet.ts`), so spreading roles across providers also widens how much runs at once — a single-provider fleet still caps at 4 concurrent workers, but a two-provider fleet can run 8, up to a hard ceiling of 16.
+
 ## Usage
 
 ```bash
@@ -66,7 +79,7 @@ elia --help
 elia --version
 ```
 
-In an interactive session, type `exit` or press Ctrl+C to quit. Elia — a small ASCII Greek woman in a laurel wreath — appears at startup and animates in place (3 cycling poses, live elapsed-time counter) while the model is thinking. The moment real output starts streaming she's cleared and replaced by a blinking type-cursor that only appears during pauses *within* the stream (e.g. waiting on the next network chunk) — fast streaming never flickers.
+In an interactive session, type `exit` or press Ctrl+C to quit. Elia's startup logo is rendered from `logo/zeus_ascii.txt` as a compact, high-contrast white-on-black portrait of Zeus, capped at 48×20 cells. While the model works, the logo gives way to a single-line snake that slithers by shifting its body wave, blinking, and flicking its forked tongue beside a live elapsed-time counter. It clears before real output begins, and neither mascot appears in redirected or piped output.
 
 After every response you'll see a dim usage line — `2.5s · 1,840 tokens · $0.0041` — and a `Session: N turns · ... · $... · ...` total when you exit. Sub-agent usage (`task` calls) counts toward the total even though sub-agents run silently. Cost is a best-effort estimate from a small hardcoded pricing table (`src/usage.ts`) verified against provider pricing pages as of 2026-08-18 — providers change pricing without notice, so treat it as orientation, not a bill. An unrecognized model shows "cost unknown" rather than a fabricated number.
 
@@ -83,7 +96,7 @@ This runs a full work cycle instead of a single conversation turn. Each phase ha
 
 1. **Orient** — reads the project, then sends several read-only *scouts* out in parallel on the fast tier to answer specific questions. Recon is the part of a task that parallelises best and matters least which model does it.
 2. **Propose** — submits a structured plan: what it found (with real file paths), what it's assuming, the steps decomposed into dependency waves, the risks, and the exact commands that will prove the work is correct. **Nothing has been changed at this point.** You approve it, reject it, or type what to change and it re-plans. A plan with no verification command is rejected before you ever see it.
-3. **Execute** — runs the steps in dependency waves: everything in a wave goes at once, each wave waits for the last. A live status board shows every worker, its role, and what it's doing. Workers publish findings to a shared blackboard as they go, so the second wave inherits what the first learned.
+3. **Execute** — runs the steps in dependency waves: everything in a wave goes at once, each wave waits for the last. Steps that claim the same file are automatically split into separate waves, even if the planner forgot to declare a dependency. A live status board shows every worker, its role, and what it's doing. Workers publish findings to a shared blackboard as they go, so the second wave inherits what the first learned.
 4. **Verify** — runs your verification commands, fail-fast. If they pass, an adversarial *critic* reviews the real diff and returns a structured verdict; it's told to find what's broken, not to be encouraging.
 5. **Reflect** — on failure, feeds the actual error back into a repair pass and re-verifies. Bounded retries, then it stops and says a human is needed rather than thrashing.
 6. **Learn** — appends durable, project-specific lessons to `.elia/lessons.md`, which is injected into the *next* run's planning. Elia gets better at your project over time instead of rediscovering it every session.
@@ -138,10 +151,14 @@ What makes this recursive rather than just repeated:
 And what keeps it honest:
 
 - **The benchmark is off limits.** `src/evolve/suite.ts`, `fitness.ts`, `engine.ts`, `ledger.ts`, `sandbox.ts`, and `benchTask.ts` cannot be modified by a candidate — touching any of them voids the generation outright. A model asked to improve its score can improve it far more cheaply by editing the benchmark, and it will: not from malice, but because that genuinely is the shortest path to the stated objective.
+- **The whole gate is off limits.** Existing tests, `package.json`, and `tsconfig.json` are immutable too, and their changes are included in candidate diffing. A candidate cannot win by deleting an assertion or weakening type checking.
+- **Candidate builders are confined to the sandbox.** Their file tools reject paths outside the copied tree, and their shell can only run `bun test` or `bun run typecheck`, always with the sandbox as its working directory. The live installation is not exposed as an editable target during mutation.
 - **A tie is a rejection.** Equal pass rate needs a ≥5% token or time win to promote, so benchmark noise can't manufacture a false victory that later generations then "build on".
+- **A win has to repeat.** Every provisional winner is measured in a second, independent candidate/baseline pair (run in reverse order) and is rejected unless the improvement reproduces. One lucky model sample cannot promote itself.
 - **A regression is disqualifying** even when the total ties, so capabilities can't be quietly traded for each other.
 - **Provider outages don't count as failures.** A transient 500 or rate limit is retried; a wrong answer never is. Otherwise a network blip could reject a genuinely better candidate, and the ledger would carry that false result into every later generation.
-- **The live tree is only touched after the gate passes**, and everything it overwrites is backed up to `.evolution/gen-N-backup/`. Rollback is one copy.
+- **Transient provider calls recover in place.** The shared agent loop retries connection, rate-limit, timeout, and 5xx failures when they occur before any text is streamed. It never retries a partially emitted response, which would duplicate output or tool calls.
+- **The live tree is only touched after the gate passes**, and everything it overwrites is backed up to `.evolution/gen-N-backup/`. Promotion is transactional: a partial copy is rolled back, including removal of newly introduced files.
 
 `elia evolve` makes real API calls and, on success, modifies elia's own source. Use `--dry-run` to see what it would do first.
 
@@ -171,7 +188,7 @@ A synthesized skill is only kept if it survives the same gate a human contributi
 - **`src/autonomy/journal.ts`** + **`src/autonomy/rewind.ts`** — the append-only run log and phase checkpoints that make forking possible.
 - **`src/autonomy/lessons.ts`** — durable, deduplicated, cross-run lessons in `.elia/lessons.md`.
 - **`src/speculation/`** — predictive prefetch. `prefetch.ts` follows the edges agents actually read along (grep hits → open them; a module → open its imports) and `cache.ts` holds the results. Any mutating tool call invalidates the cache, and a batch mixing reads and writes bypasses it entirely, so the model can never be handed a pre-write snapshot. Prefetched results show a `⚡` in the tool log.
-- **`src/evolve/`** — `suite.ts` (the fitness function), `benchTask.ts` (one task, one child process, cwd already set), `fitness.ts` (scoring and the promotion rules), `sandbox.ts` (isolated copies, the immutable-file guard, promote/rollback), `ledger.ts` (the generation record), `engine.ts` (the loop).
+- **`src/evolve/`** — `suite.ts` (the fitness function), `benchTask.ts` (one task, one child process, cwd already set), `fitness.ts` (scoring and the promotion rules), `sandbox.ts` (isolated copies, the immutable-file guard, transactional promote/rollback), `candidateTools.ts` (sandbox-confined mutation tools), `ledger.ts` (the generation record), `engine.ts` (the loop).
 - **`src/skills/`** — `detector.ts` (free repetition counting), `synthesize.ts` (write + gate a new tool), `loader.ts` (hot-load and quarantine).
 - **`src/providers/`** — a small provider abstraction with two adapters: `anthropic.ts` (native Messages API with prompt-caching breakpoints on the system prompt, tools, and tail of history) and `openaiCompatible.ts` (Groq, OpenAI, Mercury, and anything else via `baseURL`). `registry.ts` resolves env vars into a concrete provider; `tryResolveProvider` returns an error instead of exiting so the optional fast tier can degrade silently.
 - **`src/tools/`** — `read_file`, `write_file`, `edit_file`, `list_files`, `grep`, `run_command`, `board_post`, `board_read`, `task`, `preview`, plus any synthesized skills.

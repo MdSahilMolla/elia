@@ -1,12 +1,31 @@
 import * as readline from 'node:readline/promises'
-import type { ConversationMessage } from './agent.ts'
-import { writeNotice, writeUsageLine } from './ui/stream.ts'
-import { printBanner } from './ui/character.ts'
-import { getSessionSummaryLine } from './usage.ts'
+import type { ConversationMessage, AgentMode } from './agent.ts'
+import { writeNotice, writeError, writeUsageLine } from './ui/stream.ts'
+import { playIntro } from './ui/character.ts'
+import { getSessionSummaryLine, recordTopLevelTurn, formatUsageLine } from './usage.ts'
+import { createSlashPrompt, type SlashCommand } from './ui/slashPrompt.ts'
+import { confirmOnce } from './ui/confirm.ts'
+import { classifyRisk } from './autonomy/risk.ts'
+import { gold, dim } from './ui/theme.ts'
+import { box, table } from './ui/layout.ts'
+import { pick } from './ui/picker.ts'
+import { isAgentPersona, type AgentPersona } from './agents/types.ts'
+
+const REPL_COMMANDS: SlashCommand[] = [
+  { name: '/cyber', description: 'switch to cyber mode — authorized security testing, vuln research, CTFs' },
+  { name: '/marketing', description: 'switch to the Marketing agent persona for this session' },
+  { name: '/finance', description: 'switch to the Finance agent persona for this session' },
+  { name: '/tech', description: 'switch to the Tech agent persona for this session' },
+  { name: '/normal', description: "switch back to elia's normal coding mode" },
+  { name: '/mode', description: '/mode manual (default) asks only for risky commands, /mode auto never asks' },
+  { name: '/rewind', description: 'list rewind points (add a number to restore one, e.g. /rewind 2)' },
+  { name: '/model', description: 'pick a model with arrow keys, or /model groq, /model claude-opus-5' },
+  { name: '/thinking', description: 'pick reasoning effort with arrow keys, or /thinking off/low/medium/high/<n>' },
+]
 
 const rawArgs = process.argv.slice(2)
 
-const SUBCOMMANDS = ['auto', 'evolve', 'bench', 'skills', 'runs', 'fork'] as const
+const SUBCOMMANDS = ['auto', 'agent', 'evolve', 'bench', 'skills', 'runs', 'fork'] as const
 type Subcommand = (typeof SUBCOMMANDS)[number]
 
 function printHelp(): void {
@@ -18,11 +37,24 @@ Usage:
   elia --continue, -c         Resume the most recent session in this directory
   elia --resume <id>          Resume a specific session by id
 
+Manual mode (default): before running a command, elia checks whether it looks
+risky (deletes, sends, spending, publishing, system changes, ...) — only
+risky commands get an "About to: ... run it?" prompt, safe ones just run.
+Once a command starts, it finishes end to end, including irreversible steps,
+with no further prompts. Pass --yolo/-y (or "/mode auto" in a session) for
+auto mode: no risk check, no prompts, ever.
+
 Autonomous work:
   elia auto "<goal>"          Plan the work, show you the plan, then execute it with a
                               fleet of sub-agents, verify it, repair what failed, and
                               record what it learned
   elia auto "<goal>" --yolo   Same, without waiting for you to approve the plan
+
+Multi-agent:
+  elia agent "<request>"      Route the request to Marketing, Finance, and/or Tech — one or
+                              more specialist personas, chosen automatically — and answer
+                              in that persona's voice. Multi-domain requests get labeled
+                              "## X take" sections plus a combined recommendation.
 
 Self-improvement:
   elia bench                  Score the current elia against its own benchmark suite
@@ -42,7 +74,28 @@ Time travel:
   elia fork <id> --at <n> --with "<change>"
                               Replay that run up to checkpoint <n> and re-plan from there
 
+Inside an interactive session:
+  /                            Type "/" to see available commands — up/down to highlight,
+                              tab to accept, enter to run, left/right to edit as usual
+  rewind                      List rewind points for this session
+  rewind <n>                  Restore conversation + files to just before turn <n>
+  /cyber                      Switch to cyber mode: authorized security testing, vuln
+                              research, CTFs, and defensive work — same tools, a
+                              security-focused system prompt with authorization guardrails
+  /marketing /finance /tech   Switch to that agent persona for the rest of the session
+  /normal                     Switch back to elia's normal coding mode
+  /mode auto                  Stop risk-checking/asking — full autonomy, no prompts
+  /mode manual                Go back to risk-checking and asking only when it matters (default)
+  /model                      Pick a provider with up/down or left/right, enter to switch
+  /model <provider>           Switch provider (e.g. /model groq), keeping its default model
+  /model <model-id>           Switch just the model id, keeping the current provider
+  /thinking                   Pick a reasoning effort with up/down or left/right, enter to switch
+  /thinking off|on            Turn reasoning off, or back on at its last budget
+  /thinking low|medium|high   Switch reasoning effort to a preset token budget
+  /thinking <n>               Switch reasoning to an exact token budget (Anthropic only)
+
 Other:
+  elia --cyber                Start (or run a one-shot prompt) in cyber mode
   elia --help                 Show this help
   elia --version              Print the version
 
@@ -96,46 +149,42 @@ function userMessage(text: string): ConversationMessage {
   return { role: 'user', content: [{ type: 'text', text }] }
 }
 
-/**
- * The approval gate. A plan the user cannot change is not a proposal, so the
- * prompt accepts an amendment as well as yes or no — `e <feedback>` sends the plan
- * back to be reworked rather than forcing a reject-and-retype.
- */
+/** The plan-approval gate for `elia auto`/`elia fork` — thin wrapper over the shared confirmOnce helper. */
 function createInteractiveApprover(rl: readline.Interface) {
-  return async () => {
-    while (true) {
-      const answer = (await rl.question('Approve this plan? [y]es / [n]o / [e]dit <what to change>: ')).trim()
-      const lower = answer.toLowerCase()
+  return () => confirmOnce(rl, 'Approve this plan? [y]es / [n]o / [e]dit <what to change>: ')
+}
 
-      if (lower === 'y' || lower === 'yes') return { action: 'approve' as const }
-      if (lower === 'n' || lower === 'no') return { action: 'reject' as const }
-
-      if (lower === 'e' || lower === 'edit') {
-        const feedback = (await rl.question('What should change? ')).trim()
-        if (feedback) return { action: 'amend' as const, feedback }
-        continue
-      }
-      if (lower.startsWith('e ')) return { action: 'amend' as const, feedback: answer.slice(2).trim() }
-
-      // Anything else is treated as feedback rather than an error — typing a
-      // sentence at this prompt obviously means "change this".
-      if (answer.length > 3) return { action: 'amend' as const, feedback: answer }
-    }
+async function runAgentCommand(): Promise<void> {
+  const { runAgentRequest } = await import('./agents/orchestrator.ts')
+  const { config } = await import('./config.ts')
+  const request = positionals().join(' ').trim()
+  if (!request) {
+    writeError('Give elia a request: elia agent "write 3 instagram captions for our new product"')
+    process.exitCode = 1
+    return
   }
+
+  const startedAt = Date.now()
+  const result = await runAgentRequest(request)
+  const elapsedMs = Date.now() - startedAt
+  recordTopLevelTurn(elapsedMs)
+
+  writeUsageLine(`agent(s): ${result.personas.join(' -> ')}${result.rationale ? ` — ${result.rationale}` : ''}`)
+  writeUsageLine(formatUsageLine(result.usage, elapsedMs, config.model))
 }
 
 async function runAuto(): Promise<void> {
   const { runAutonomousTask, autoApprove } = await import('./autonomy/loop.ts')
   const goal = positionals().join(' ').trim()
   if (!goal) {
-    writeNotice('Give elia a goal: elia auto "add rate limiting to the API client"')
+    writeError('Give elia a goal: elia auto "add rate limiting to the API client"')
     process.exitCode = 1
     return
   }
 
   const yolo = hasFlag('--yolo', '-y')
   if (!yolo && !process.stdin.isTTY) {
-    writeNotice('elia auto needs a terminal to approve the plan. Re-run with --yolo to skip approval.')
+    writeError('elia auto needs a terminal to approve the plan. Re-run with --yolo to skip approval.')
     process.exitCode = 1
     return
   }
@@ -173,7 +222,7 @@ async function runEvolve(): Promise<void> {
   const { evolve } = await import('./evolve/engine.ts')
   const generations = Number.parseInt(flagValue('--generations', '-n') ?? '1', 10)
   if (!Number.isFinite(generations) || generations < 1) {
-    writeNotice('--generations must be a positive integer.')
+    writeError('--generations must be a positive integer.')
     process.exitCode = 1
     return
   }
@@ -200,7 +249,9 @@ async function runSkills(): Promise<void> {
       writeNotice('No synthesized skills yet. Run "elia skills candidates" to see what elia keeps doing by hand.')
       return
     }
-    for (const { file, source } of files) writeUsageLine(`  [${source}] ${file}`)
+    for (const line of table([{ header: 'source' }, { header: 'file' }], files.map(({ source, file }) => [source, file]))) {
+      writeUsageLine(`  ${line}`)
+    }
     return
   }
 
@@ -210,10 +261,17 @@ async function runSkills(): Promise<void> {
       writeNotice('Nothing has repeated often enough yet. Keep using elia — it is counting.')
       return
     }
-    for (const candidate of candidates) {
-      writeUsageLine(`  ${String(candidate.count).padStart(4)}×  [${candidate.kind}] ${candidate.pattern}`)
-      for (const example of candidate.examples) writeUsageLine(`         e.g. ${example}`)
-    }
+    const rows = table(
+      [{ header: 'seen', align: 'right' }, { header: 'kind' }, { header: 'pattern' }],
+      candidates.map((c) => [`${c.count}×`, c.kind, c.pattern]),
+    )
+    const [header, separator, ...dataRows] = rows
+    writeUsageLine(`  ${header}`)
+    writeUsageLine(`  ${separator}`)
+    candidates.forEach((candidate, i) => {
+      writeUsageLine(`  ${dataRows[i]}`)
+      for (const example of candidate.examples) writeUsageLine(`         ${dim('e.g.')} ${example}`)
+    })
     writeNotice('Turn the strongest one into a real tool with: elia skills synth')
     return
   }
@@ -230,13 +288,13 @@ async function runSkills(): Promise<void> {
     const result = await synthesizeSkill(candidate)
     if (result.ok) writeNotice(`✓ ${result.detail}`)
     else {
-      writeNotice(`✗ ${result.detail}`)
+      writeError(`✗ ${result.detail}`)
       process.exitCode = 1
     }
     return
   }
 
-  writeNotice(`Unknown skills action "${action}". Use: list, candidates, or synth.`)
+  writeError(`Unknown skills action "${action}". Use: list, candidates, or synth.`)
   process.exitCode = 1
 }
 
@@ -255,10 +313,11 @@ async function runRuns(): Promise<void> {
     writeNotice('No autonomous runs in this directory yet. Start one with: elia auto "<goal>"')
     return
   }
-  for (const run of runs) {
-    writeUsageLine(
-      `  ${run.runId}  ${run.outcome.padEnd(16)} ${run.checkpoints} checkpoints  ${run.goal.slice(0, 60)}`,
-    )
+  for (const line of table(
+    [{ header: 'id' }, { header: 'outcome' }, { header: 'checkpoints', align: 'right' }, { header: 'goal' }],
+    runs.map((run) => [run.runId, run.outcome, String(run.checkpoints), run.goal.slice(0, 60)]),
+  )) {
+    writeUsageLine(`  ${line}`)
   }
   writeNotice('Inspect one with: elia runs <id>')
 }
@@ -272,7 +331,7 @@ async function runFork(): Promise<void> {
   const instruction = flagValue('--with')
 
   if (!runId || !Number.isFinite(at) || !instruction) {
-    writeNotice('Usage: elia fork <runId> --at <checkpoint> --with "<what to do differently>"')
+    writeError('Usage: elia fork <runId> --at <checkpoint> --with "<what to do differently>"')
     process.exitCode = 1
     return
   }
@@ -289,7 +348,7 @@ async function runFork(): Promise<void> {
       approve: rl ? createInteractiveApprover(rl) : autoApprove,
     })
     if (!result.ok) {
-      writeNotice(result.error)
+      writeError(result.error)
       process.exitCode = 1
     }
   } finally {
@@ -299,15 +358,30 @@ async function runFork(): Promise<void> {
 
 async function runInteractive(): Promise<void> {
   const { runTurn } = await import('./agent.ts')
-  const { config } = await import('./config.ts')
+  const { config, describeThinking, getThinking, switchModel, switchThinking, THINKING_EFFORT_BUDGETS, DEFAULT_THINKING_BUDGET } =
+    await import('./config.ts')
+  const { PROVIDER_PRESET_NAMES, isProviderPresetConfigured, providerPresetDefaultModel } = await import('./providers/registry.ts')
   const { newSessionId, loadSession, loadLatestSession, saveSession } = await import('./session.ts')
+  const { createFileTracker, setActiveTracker, loadCheckpoints, saveCheckpoints, restoreCheckpoint, renderCheckpointList } =
+    await import('./checkpoint.ts')
+  const { setActiveLedgerSession, countEpisodes } = await import('./ledger.ts')
+  const { renderContextStatus } = await import('./compaction.ts')
 
   const continueFlag = hasFlag('--continue', '-c')
   const resumeId = flagValue('--resume')
   const oneShotPrompt = positionals(['--resume']).join(' ').trim()
 
+  let mode: AgentMode = hasFlag('--cyber') ? 'cyber' : 'default'
+  let persona: AgentPersona | undefined
   let messages: ConversationMessage[] = []
   let sessionId = newSessionId()
+  // manual (default): a cheap risk check runs before each command — only
+  // commands flagged risky (deletes, sends, spend, publishing, system
+  // changes, ...) get an "About to: ... run it?" prompt; everything else just
+  // runs. auto (--yolo or "/mode auto"): no risk check, no prompts, ever.
+  // Either way, once a command starts it runs to completion — including
+  // irreversible steps — with no further gating.
+  let replMode: 'manual' | 'auto' = hasFlag('--yolo', '-y') ? 'auto' : 'manual'
 
   if (continueFlag || resumeId) {
     const loaded = resumeId ? await loadSession(resumeId) : await loadLatestSession()
@@ -322,47 +396,300 @@ async function runInteractive(): Promise<void> {
     }
   }
 
-  if (oneShotPrompt) {
-    messages.push(userMessage(oneShotPrompt))
+  const checkpoints = await loadCheckpoints(sessionId)
+
+  /** Snapshots messages + touched files around one turn, then records a rewind point. */
+  async function runCheckpointedTurn(userText: string): Promise<void> {
+    const tracker = createFileTracker()
+    setActiveTracker(tracker)
+    // Lets compaction (mid-loop, several call frames down) and the recall tool
+    // find this session's ledger — see ledger.ts's setActiveLedgerSession doc.
+    setActiveLedgerSession({ id: sessionId, turn: checkpoints.length })
+    const messagesBefore = structuredClone(messages)
+    messages.push(userMessage(userText))
     try {
-      await runTurn(messages)
+      if (persona) {
+        const { runPersonaTurn } = await import('./agents/orchestrator.ts')
+        await runPersonaTurn(messages, persona)
+      } else {
+        await runTurn(messages, { mode })
+      }
+    } finally {
+      setActiveTracker(undefined)
+    }
+    checkpoints.push({
+      turn: checkpoints.length,
+      at: Date.now(),
+      label: userText.length > 60 ? `${userText.slice(0, 59)}…` : userText,
+      messagesBefore,
+      files: tracker.snapshot(),
+    })
+    await saveCheckpoints(sessionId, checkpoints)
+  }
+
+  if (oneShotPrompt) {
+    let commandToRun = oneShotPrompt
+
+    // Non-TTY (piped/scripted) runs can't answer a prompt, so they skip straight
+    // to execution — same as today. A real terminal gets the same risk-gated
+    // ask as the interactive loop below, unless --yolo skips it.
+    if (!hasFlag('--yolo', '-y') && process.stdin.isTTY) {
+      const { risky, reason } = await classifyRisk(commandToRun)
+      if (risky) {
+        const confirmPrompt = createSlashPrompt([])
+        const label = `${reason ? `${reason}\n` : ''}About to: "${commandToRun}" — run it? [y]es / [n]o / [e]dit: `
+        const result = await confirmOnce(confirmPrompt, label)
+        confirmPrompt.close()
+        if (result.action === 'reject') {
+          writeNotice('Skipped.')
+          return
+        }
+        if (result.action === 'amend') commandToRun = result.feedback
+      }
+    }
+
+    try {
+      await runCheckpointedTurn(commandToRun)
     } catch (err) {
-      writeNotice(`Error: ${err instanceof Error ? err.message : String(err)}`)
+      writeError(`Error: ${err instanceof Error ? err.message : String(err)}`)
       process.exitCode = 1
     }
     await saveSession(sessionId, messages)
+    writeUsageLine(renderContextStatus(messages, await countEpisodes(sessionId)))
     return
   }
 
-  if (process.stdout.isTTY) printBanner()
-  writeNotice(`elia — using ${config.providerLabel}${config.cascadeEnabled ? ` · fast tier ${config.tiers.fast.label}` : ''}`)
-  writeNotice('type a prompt, or "exit" to quit (Ctrl+C also works)')
+  if (process.stdout.isTTY) await playIntro()
+  process.stdout.write(
+    `${box(
+      [
+        `${dim('provider')}  ${config.providerLabel}${config.cascadeEnabled ? dim(` · fast tier ${config.tiers.fast.label}`) : ''}`,
+        dim(describeThinking()),
+      ],
+      { title: mode === 'cyber' ? 'elia — cyber mode' : 'elia', borderColor: gold },
+    )}\n`,
+  )
+  writeNotice(
+    mode === 'cyber'
+      ? 'cyber mode on — authorized security testing, vuln research, and CTFs only. type a prompt, "/" to see commands, or "exit" to quit'
+      : 'type a prompt, "/" to see commands, or "exit" to quit (Ctrl+C also works)',
+  )
+  writeNotice(
+    replMode === 'auto'
+      ? 'auto mode (--yolo) — commands run immediately, no risk check, no prompts. "/mode manual" to turn it back on.'
+      : 'manual mode — elia flags risky commands and asks before running them; safe commands just run. "/mode auto" for zero prompts.',
+  )
 
-  const rl = readline.createInterface({ input: process.stdin, output: process.stdout })
+  function applyModelChoice(providerName: string, model?: string): void {
+    const result = switchModel({ providerName, model })
+    if (!result.ok) writeError(result.error)
+    else writeNotice(`Model switched: ${result.label}`)
+  }
+
+  async function handleModelCommand(argLine: string): Promise<void> {
+    const args = argLine.split(/\s+/).filter(Boolean)
+
+    if (args.length === 0) {
+      const currentIndex = PROVIDER_PRESET_NAMES.indexOf(config.providerName)
+      const options = PROVIDER_PRESET_NAMES.map((name) => ({
+        label: name === config.providerName ? `${name} (current)` : name,
+        detail: `${isProviderPresetConfigured(name) ? 'ready' : 'no key set'} · ${providerPresetDefaultModel(name) ?? 'custom'}`,
+        value: name,
+      }))
+      const result = await pick('Switch model', options, Math.max(0, currentIndex))
+      if (result.type === 'select') {
+        applyModelChoice(result.value)
+        return
+      }
+      if (result.type === 'unavailable') {
+        const rows = PROVIDER_PRESET_NAMES.map((name) => [
+          name === config.providerName ? `${gold('●')} ${name}` : `  ${name}`,
+          isProviderPresetConfigured(name) ? 'ready' : dim('no key set'),
+          dim(providerPresetDefaultModel(name) ?? ''),
+        ])
+        for (const line of table([{ header: 'provider' }, { header: 'status' }, { header: 'default model' }], rows)) {
+          writeUsageLine(`  ${line}`)
+        }
+        writeNotice(`Current: ${config.providerLabel}. Switch with "/model <provider>" or "/model <model-id>" (keeps the current provider).`)
+      }
+      return
+    }
+
+    const [first, second] = args
+    if (PROVIDER_PRESET_NAMES.includes(first!)) applyModelChoice(first!, second)
+    else applyModelChoice(config.providerName, first)
+  }
+
+  function applyThinkingChoice(arg: string): void {
+    if (arg === 'off') {
+      const result = switchThinking({ enabled: false, budgetTokens: 0 })
+      if (!result.ok) writeError(result.error)
+      else writeNotice(describeThinking())
+      return
+    }
+
+    let budgetTokens: number
+    if (arg === 'on') {
+      const current = getThinking()
+      budgetTokens = current.budgetTokens > 0 ? current.budgetTokens : DEFAULT_THINKING_BUDGET
+    } else if (arg in THINKING_EFFORT_BUDGETS) {
+      budgetTokens = THINKING_EFFORT_BUDGETS[arg as keyof typeof THINKING_EFFORT_BUDGETS]
+    } else {
+      const parsed = Number.parseInt(arg, 10)
+      if (!Number.isFinite(parsed) || parsed < 1024) {
+        writeError('Usage: /thinking off|on|low|medium|high|<token budget ≥1024>')
+        return
+      }
+      budgetTokens = parsed
+    }
+
+    const result = switchThinking({ enabled: true, budgetTokens })
+    if (!result.ok) {
+      writeError(result.error)
+      return
+    }
+    writeNotice(describeThinking())
+    if (config.providerName !== 'anthropic') {
+      writeNotice(
+        `Note: ${config.providerLabel} doesn't take a reasoning budget — this only controls whether elia displays reasoning it sends automatically.`,
+      )
+    }
+  }
+
+  async function handleThinkingCommand(argLine: string): Promise<void> {
+    const arg = argLine.trim().toLowerCase()
+
+    if (!arg) {
+      const current = getThinking()
+      const levels: { label: string; value: string; budget: number }[] = [
+        { label: 'Off', value: 'off', budget: 0 },
+        { label: 'Low', value: 'low', budget: THINKING_EFFORT_BUDGETS.low },
+        { label: 'Medium', value: 'medium', budget: THINKING_EFFORT_BUDGETS.medium },
+        { label: 'High', value: 'high', budget: THINKING_EFFORT_BUDGETS.high },
+      ]
+      const currentIndex = current.enabled ? levels.findIndex((level) => level.budget === current.budgetTokens) : 0
+      const options = levels.map((level) => ({
+        label: level.label,
+        detail: level.budget > 0 ? `${level.budget.toLocaleString()} tokens` : undefined,
+        value: level.value,
+      }))
+      const result = await pick('Reasoning effort', options, Math.max(0, currentIndex))
+      if (result.type === 'select') applyThinkingChoice(result.value)
+      else if (result.type === 'unavailable') writeNotice(describeThinking())
+      return
+    }
+
+    applyThinkingChoice(arg)
+  }
+
+  const prompt = createSlashPrompt(REPL_COMMANDS)
 
   while (true) {
-    let line: string
-    try {
-      line = await rl.question('> ')
-    } catch {
-      break // stdin closed (EOF)
-    }
+    const label = persona ? `${dim(`[${persona}]`)} ` : mode === 'cyber' ? `${dim('[cyber]')} ` : ''
+    const line = await prompt.question(`${label}${gold('❯')} `)
+    if (line === null) break // stdin closed (EOF)
 
     const trimmed = line.trim()
     if (trimmed === 'exit' || trimmed === 'quit') break
     if (trimmed === '') continue
 
-    messages.push(userMessage(trimmed))
+    if (trimmed === '/cyber' || trimmed === '/cyber on') {
+      mode = 'cyber'
+      writeNotice(
+        'cyber mode on — elia will help with authorized security testing, vuln research, and CTFs. Only point it at systems you own or are explicitly authorized to test.',
+      )
+      continue
+    }
+    const personaMatch = /^\/(marketing|finance|tech)$/.exec(trimmed)
+    if (personaMatch && isAgentPersona(personaMatch[1])) {
+      persona = personaMatch[1] as AgentPersona
+      writeNotice(
+        `${persona.charAt(0).toUpperCase()}${persona.slice(1)} agent on — elia will answer in this persona until /normal.`,
+      )
+      continue
+    }
+
+    if (trimmed === '/normal' || trimmed === '/cyber off') {
+      mode = 'default'
+      const hadPersona = persona !== undefined
+      persona = undefined
+      writeNotice(hadPersona ? 'Agent persona off — back to normal coding mode.' : 'cyber mode off — back to normal coding mode.')
+      continue
+    }
+
+    const modelMatch = /^\/model(?:\s+(.*))?$/.exec(trimmed)
+    if (modelMatch) {
+      await handleModelCommand(modelMatch[1]?.trim() ?? '')
+      continue
+    }
+
+    const thinkingMatch = /^\/thinking(?:\s+(.*))?$/.exec(trimmed)
+    if (thinkingMatch) {
+      await handleThinkingCommand(thinkingMatch[1]?.trim() ?? '')
+      continue
+    }
+
+    if (trimmed === '/mode auto') {
+      replMode = 'auto'
+      writeNotice('Auto mode — commands run immediately, no risk check, no prompts, including irreversible ones. "/mode manual" to re-enable.')
+      continue
+    }
+    if (trimmed === '/mode manual') {
+      replMode = 'manual'
+      writeNotice('Manual mode — elia flags risky commands and asks first; safe commands just run.')
+      continue
+    }
+
+    if (trimmed === 'rewind' || trimmed === '/rewind') {
+      writeNotice(renderCheckpointList(checkpoints))
+      continue
+    }
+
+    const rewindMatch = /^\/?rewind\s+(\d+)$/.exec(trimmed)
+    if (rewindMatch) {
+      const n = Number.parseInt(rewindMatch[1]!, 10)
+      const checkpoint = checkpoints[n]
+      if (!checkpoint) {
+        writeNotice(`No rewind point ${n}. Type "rewind" to list them.`)
+        continue
+      }
+      const result = await restoreCheckpoint(checkpoint)
+      messages.length = 0
+      messages.push(...checkpoint.messagesBefore)
+      checkpoints.length = n // later rewind points described a future that no longer exists
+      await saveCheckpoints(sessionId, checkpoints)
+      await saveSession(sessionId, messages)
+      writeNotice(
+        `Rewound to before turn ${n} ("${checkpoint.label}") — restored ${result.restored} file(s), removed ${result.deleted} file(s) created since.`,
+      )
+      continue
+    }
+
+    let commandToRun = trimmed
+    if (replMode === 'manual') {
+      const { risky, reason } = await classifyRisk(commandToRun)
+      if (risky) {
+        const label = `${reason ? `${reason}\n` : ''}About to: "${commandToRun}" — run it? [y]es / [n]o / [e]dit: `
+        const result = await confirmOnce(prompt, label)
+        if (result.action === 'reject') {
+          writeNotice('Skipped.')
+          continue
+        }
+        if (result.action === 'amend') commandToRun = result.feedback
+      }
+    }
+
     try {
-      await runTurn(messages)
+      await runCheckpointedTurn(commandToRun)
     } catch (err) {
-      writeNotice(`Error: ${err instanceof Error ? err.message : String(err)}`)
+      writeError(`Error: ${err instanceof Error ? err.message : String(err)}`)
     }
     await saveSession(sessionId, messages)
+    writeUsageLine(renderContextStatus(messages, await countEpisodes(sessionId)))
   }
 
-  rl.close()
-  if (messages.length > 0) writeUsageLine(getSessionSummaryLine(config.model))
+  prompt.close()
+  if (messages.length > 0) process.stdout.write(`${box([getSessionSummaryLine(config.model)])}\n`)
   writeNotice('Goodbye!')
 }
 
@@ -383,6 +710,8 @@ async function main() {
   switch (subcommand) {
     case 'auto':
       return runAuto()
+    case 'agent':
+      return runAgentCommand()
     case 'evolve':
       return runEvolve()
     case 'bench':
@@ -404,6 +733,6 @@ process.on('SIGINT', () => {
 })
 
 main().catch((err: unknown) => {
-  writeNotice(`Error: ${err instanceof Error ? err.message : String(err)}`)
+  writeError(`Error: ${err instanceof Error ? err.message : String(err)}`)
   process.exitCode = 1
 })

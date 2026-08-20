@@ -1,5 +1,6 @@
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { runShell } from '../shell.ts'
 
 /**
@@ -46,6 +47,18 @@ function read(dir: string, relativePath: string): string {
   } catch {
     return ''
   }
+}
+
+/**
+ * Imports a candidate's source file directly, bypassing `bun test`, so a check
+ * can probe it with an input the visible tests never cover. That is what
+ * catches a fix that special-cased the visible assertions instead of actually
+ * being correct — the module cache is busted per call since the same dir can
+ * be checked more than once in a process's lifetime.
+ */
+async function importFresh(dir: string, relativePath: string): Promise<Record<string, unknown>> {
+  const url = `${pathToFileURL(join(dir, relativePath)).href}?t=${Date.now()}-${Math.random().toString(36).slice(2)}`
+  return import(url)
 }
 
 const PRECISE_EDIT_SOURCE = `export function alpha(value: number): number {
@@ -96,6 +109,139 @@ test('weights are formatted to 3 decimal places', () => {
   expect(formatWeight(1.23456)).toBe('1.235')
 })
 `
+
+const ROUND_TO_SOURCE = `export function roundTo(value: number, decimals: number): number {
+  const factor = 10 ** decimals
+  return Math.round(value * factor) / factor
+}
+`
+
+const MONEY_SOURCE = `import { roundTo } from './math.ts'
+import { TAX_RATE } from './config.ts'
+
+export function priceWithTax(price: number): number {
+  return roundTo(price * (1 + TAX_RATE), 2)
+}
+`
+
+// The bug: this should be 0.075. It is one hop removed from both the failing
+// test and the function that actually does the rounding, which is the point.
+const TAX_CONFIG_SOURCE = `export const TAX_RATE = 0.0725
+`
+
+const MONEY_TEST = `import { expect, test } from 'bun:test'
+import { priceWithTax } from '../src/money.ts'
+
+test('a 7.5% tax is added and rounded to cents', () => {
+  expect(priceWithTax(100)).toBe(107.5)
+})
+
+test('a second price comes out correct too', () => {
+  expect(priceWithTax(40)).toBe(43)
+})
+`
+
+const SLUGIFY_TEST = `import { expect, test } from 'bun:test'
+import { slugify } from '../src/slugify.ts'
+
+test('lowercases and hyphenates spaces', () => {
+  expect(slugify('Hello World')).toBe('hello-world')
+})
+
+test('collapses punctuation and repeated separators into a single hyphen', () => {
+  expect(slugify('Wait... What?!  Really')).toBe('wait-what-really')
+})
+
+test('trims leading and trailing hyphens', () => {
+  expect(slugify('  --Edge Case--  ')).toBe('edge-case')
+})
+`
+
+const STATS_SOURCE = `/** Returns the arithmetic mean of the numbers, or 0 for an empty array. */
+export function mean(values: number[]): number {
+  if (values.length === 0) return 0
+  const total = values.reduce((sum, value) => sum + value, 0)
+  return total / values.length
+}
+
+/** Returns the numbers sorted in ascending order, without mutating the input array. */
+export function sortedAscending(values: number[]): number[] {
+  return values.sort((a, b) => a - b)
+}
+
+/** Returns the median of the numbers. Assumes a non-empty array. */
+export function median(values: number[]): number {
+  const sorted = sortedAscending(values)
+  const mid = Math.floor(sorted.length / 2)
+  return sorted[mid]!
+}
+`
+
+const STATS_TEST = `import { expect, test } from 'bun:test'
+import { mean, median, sortedAscending } from '../src/stats.ts'
+
+test('mean of a few numbers', () => {
+  expect(mean([1, 2, 3, 4])).toBe(2.5)
+})
+
+test('mean of an empty array is 0', () => {
+  expect(mean([])).toBe(0)
+})
+
+test('sortedAscending does not mutate its input', () => {
+  const input = [3, 1, 2]
+  const result = sortedAscending(input)
+  expect(result).toEqual([1, 2, 3])
+  expect(input).toEqual([3, 1, 2])
+})
+
+test('median of an odd-length array', () => {
+  expect(median([5, 1, 3])).toBe(3)
+})
+
+test('median of an even-length array averages the middle two', () => {
+  expect(median([1, 2, 3, 4])).toBe(2.5)
+})
+`
+
+const FORM_SOURCE = `export function validate(value: string): boolean {
+  return value.trim().length > 0
+}
+
+export function submit(value: string): string {
+  if (!validate(value)) throw new Error('invalid')
+  return value.trim()
+}
+`
+
+const FORM_UTILS_SOURCE = `import { validate } from './form.ts'
+
+export function isFormReady(value: string): boolean {
+  return validate(value)
+}
+`
+
+const SCHEMA_SOURCE = `export function validate(schema: Record<string, unknown>): boolean {
+  return typeof schema === 'object' && schema !== null
+}
+
+export function assertSchema(schema: Record<string, unknown>): void {
+  if (!validate(schema)) throw new Error('invalid schema')
+}
+`
+
+const SERVICE_TIMEOUTS: { file: string; name: string; timeoutMs: number }[] = [
+  { file: 'service-a.json', name: 'auth', timeoutMs: 3000 },
+  { file: 'service-b.json', name: 'billing', timeoutMs: 4500 },
+  { file: 'service-c.json', name: 'cache', timeoutMs: 1200 },
+  { file: 'service-d.json', name: 'search', timeoutMs: 9800 },
+  { file: 'service-e.json', name: 'notify', timeoutMs: 2600 },
+  { file: 'service-f.json', name: 'media', timeoutMs: 5400 },
+  { file: 'service-g.json', name: 'queue', timeoutMs: 3300 },
+  { file: 'service-h.json', name: 'gateway', timeoutMs: 6100 },
+  { file: 'service-i.json', name: 'analytics', timeoutMs: 4100 },
+  { file: 'service-j.json', name: 'sessions', timeoutMs: 2900 },
+]
 
 export const BENCH_TASKS: BenchTask[] = [
   {
@@ -273,6 +419,185 @@ test('inclusiveRange handles a single value', () => {
       }
 
       return { passed: true, detail: 'both callers formatted correctly without touching the tests' }
+    },
+  },
+
+  {
+    // A second hard one. The failing test points straight at `roundTo`, which
+    // both callers share — but `roundTo` is fine. The actual defect is a wrong
+    // constant one further hop away, in config.ts. The trap: patching
+    // `roundTo`'s rounding to coincidentally satisfy these two specific inputs
+    // is easier than tracing the real cause, and passes `bun test` too — so the
+    // check probes `roundTo` directly with a third input the visible tests
+    // never mention, which only a genuine fix (config.ts untouched, roundTo
+    // still generic) survives.
+    id: 'root-cause-config',
+    weight: 3,
+    prompt:
+      'Run `bun test`. A test is failing. Fix the actual bug so the whole suite passes. You must NOT modify anything in the tests directory — the tests are correct as written.',
+    async setup(dir) {
+      write(dir, 'src/math.ts', ROUND_TO_SOURCE)
+      write(dir, 'src/money.ts', MONEY_SOURCE)
+      write(dir, 'src/config.ts', TAX_CONFIG_SOURCE)
+      write(dir, 'tests/money.test.ts', MONEY_TEST)
+    },
+    async check(dir) {
+      if (read(dir, 'tests/money.test.ts') !== MONEY_TEST) {
+        return { passed: false, detail: 'the test file was modified — that was explicitly forbidden' }
+      }
+
+      const result = await runShell('bun test', 90_000, dir)
+      if (result.exitCode !== 0) {
+        return { passed: false, detail: `bun test still fails (exit ${result.exitCode})` }
+      }
+
+      try {
+        const math = await importFresh(dir, 'src/math.ts')
+        const roundTo = math.roundTo as (value: number, decimals: number) => number
+        const probe = roundTo(3.14159, 2)
+        if (typeof probe !== 'number' || Math.abs(probe - 3.14) > 1e-9) {
+          return {
+            passed: false,
+            detail: `bun test passed but roundTo(3.14159, 2) returned ${probe} instead of ~3.14 — the fix patched the shared rounding helper to fit the two visible cases instead of fixing the actual wrong tax-rate constant in config.ts`,
+          }
+        }
+      } catch (err) {
+        return { passed: false, detail: `could not re-probe roundTo after the fix: ${err instanceof Error ? err.message : String(err)}` }
+      }
+
+      return { passed: true, detail: 'fixed the actual root cause (the tax-rate constant) rather than patching the rounding helper the tests happen to call' }
+    },
+  },
+
+  {
+    // Every task above is edit-or-diagnose an existing file. This one is
+    // generative: only a test exists, describing behaviour with no
+    // implementation behind it yet — elia has to write src/slugify.ts from
+    // scratch. The generality probe (an input the visible tests never use)
+    // exists for the same reason as root-cause-config: three example cases are
+    // satisfiable by a lookup table, not just a correct algorithm.
+    id: 'implement-to-spec',
+    weight: 2,
+    prompt:
+      'tests/slugify.test.ts imports a `slugify` function from ../src/slugify.ts that does not exist yet. Create src/slugify.ts implementing it so the whole test suite passes. Do not modify the test file.',
+    async setup(dir) {
+      write(dir, 'tests/slugify.test.ts', SLUGIFY_TEST)
+    },
+    async check(dir) {
+      if (read(dir, 'tests/slugify.test.ts') !== SLUGIFY_TEST) {
+        return { passed: false, detail: 'the test file was modified — that was explicitly forbidden' }
+      }
+
+      const result = await runShell('bun test', 90_000, dir)
+      if (result.exitCode !== 0) {
+        return { passed: false, detail: `bun test failed (exit ${result.exitCode}) — no working src/slugify.ts` }
+      }
+
+      try {
+        const mod = await importFresh(dir, 'src/slugify.ts')
+        const slugify = mod.slugify as (text: string) => string
+        const probe = slugify('Already-Slugged_2024 Report')
+        if (probe !== 'already-slugged-2024-report') {
+          return {
+            passed: false,
+            detail: `bun test passed but slugify('Already-Slugged_2024 Report') returned "${probe}" instead of "already-slugged-2024-report" — looks like the three visible examples were special-cased rather than implemented generally`,
+          }
+        }
+      } catch (err) {
+        return { passed: false, detail: `could not re-probe slugify after implementation: ${err instanceof Error ? err.message : String(err)}` }
+      }
+
+      return { passed: true, detail: 'implemented generally, not just to fit the three visible examples' }
+    },
+  },
+
+  {
+    // Two unrelated bugs in one file. Fixing whichever one the first stack trace
+    // points at and stopping is the trap — the two failures share no cause, so
+    // thoroughness is what this measures, not diagnostic skill per se.
+    id: 'multi-bug-hunt',
+    weight: 3,
+    prompt:
+      'Run `bun test`. Two different tests fail because of two independent bugs in src/stats.ts — they are unrelated to each other, so fixing one will not fix the other. Find and fix both. You must NOT modify anything in the tests directory.',
+    async setup(dir) {
+      write(dir, 'src/stats.ts', STATS_SOURCE)
+      write(dir, 'tests/stats.test.ts', STATS_TEST)
+    },
+    async check(dir) {
+      if (read(dir, 'tests/stats.test.ts') !== STATS_TEST) {
+        return { passed: false, detail: 'the test file was modified — that was explicitly forbidden' }
+      }
+
+      const result = await runShell('bun test', 90_000, dir)
+      return {
+        passed: result.exitCode === 0,
+        detail: result.exitCode === 0 ? 'both unrelated bugs fixed, suite passes' : `bun test exited ${result.exitCode} — at least one bug remains`,
+      }
+    },
+  },
+
+  {
+    // A second function, in an unrelated module, happens to share the name being
+    // renamed. Grepping for the bare name and renaming every hit it finds is the
+    // trap — this measures whether elia notices the two are unrelated before acting.
+    id: 'distractor-rename',
+    weight: 2,
+    prompt:
+      "Rename the function `validate` exported from src/form.ts to `validateInput` — update its definition and every real call site and import (src/form.ts and src/formUtils.ts). There is a second, unrelated function also named `validate` in src/schema.ts (it validates a schema object, not form input) — it must be left completely untouched, including its own internal call inside assertSchema.",
+    async setup(dir) {
+      write(dir, 'src/form.ts', FORM_SOURCE)
+      write(dir, 'src/formUtils.ts', FORM_UTILS_SOURCE)
+      write(dir, 'src/schema.ts', SCHEMA_SOURCE)
+    },
+    async check(dir) {
+      const schema = read(dir, 'src/schema.ts')
+      if (schema !== SCHEMA_SOURCE) {
+        return { passed: false, detail: 'the unrelated validate() in src/schema.ts was touched — it should have been left alone' }
+      }
+
+      const files = [
+        { path: 'src/form.ts', content: read(dir, 'src/form.ts') },
+        { path: 'src/formUtils.ts', content: read(dir, 'src/formUtils.ts') },
+      ]
+
+      // \bvalidate\b (not validateInput): a trailing word boundary can't match
+      // between "validate" and "Input" since both sides are word characters, so
+      // this only fires on the bare old name, never as a false positive on the new one.
+      const stale = files.filter((file) => /\bvalidate\b/.test(file.content))
+      if (stale.length > 0) {
+        return { passed: false, detail: `still references the old name validate in ${stale.map((file) => file.path).join(', ')}` }
+      }
+
+      const missing = files.filter((file) => !file.content.includes('validateInput'))
+      if (missing.length > 0) {
+        return { passed: false, detail: `validateInput missing from ${missing.map((file) => file.path).join(', ')}` }
+      }
+
+      return { passed: true, detail: 'renamed everywhere it should be, decoy in schema.ts left untouched' }
+    },
+  },
+
+  {
+    // Deliberately easy to get right and hard to get right *fast*. Every other
+    // task rewards correct reasoning; this one specifically rewards batching —
+    // ten independent files with no reason to read them one at a time. A
+    // candidate that regressed elia's parallel tool execution would still pass
+    // this, just at several times the tokens and steps, which is exactly the
+    // signal that should show up in the suite's aggregate cost totals.
+    id: 'parallel-scan',
+    weight: 1,
+    prompt:
+      'Each JSON file under config/ describes one service with a "name" and a "timeoutMs". Find the service with the highest timeoutMs and write just its name to answer.txt at the project root — nothing else, no extra text or punctuation.',
+    async setup(dir) {
+      for (const service of SERVICE_TIMEOUTS) {
+        write(dir, `config/${service.file}`, JSON.stringify({ name: service.name, timeoutMs: service.timeoutMs }, null, 2))
+      }
+    },
+    async check(dir) {
+      const answer = read(dir, 'answer.txt').trim()
+      const expected = SERVICE_TIMEOUTS.reduce((max, service) => (service.timeoutMs > max.timeoutMs ? service : max)).name
+      const passed = answer === expected
+      return { passed, detail: passed ? `correctly found ${expected}` : `answer.txt contained "${answer}", expected "${expected}"` }
     },
   },
 ]

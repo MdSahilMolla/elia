@@ -26,6 +26,7 @@ import {
   violatedImmutables,
   type Sandbox,
 } from './sandbox.ts'
+import { candidateTools } from './candidateTools.ts'
 
 /**
  * Elia improving elia.
@@ -167,20 +168,13 @@ async function runGeneration(
   // --- Implement it inside the sandbox --------------------------------------
 
   writePhase('execute', `applying it in ${sandbox.root}`)
-  const previousCwd = process.cwd()
-  try {
-    // The builder works on the copy. chdir so its relative paths land in the
-    // sandbox even if it ignores the absolute paths it was given.
-    process.chdir(sandbox.root)
-    await runSubAgent({
-      role: 'builder',
-      name: `builder#gen${generation}`,
-      prompt: implementationBrief(sandbox, hypothesis),
-      signal: options.signal,
-    })
-  } finally {
-    process.chdir(previousCwd)
-  }
+  await runSubAgent({
+    role: 'builder',
+    name: `builder#gen${generation}`,
+    prompt: implementationBrief(sandbox, hypothesis),
+    signal: options.signal,
+    tools: candidateTools(sandbox.root, allWorkerTools()),
+  })
 
   // --- Gate -----------------------------------------------------------------
 
@@ -259,14 +253,36 @@ async function runGeneration(
     return { ...base, verdict: 'rejected', reason: comparison.reason }
   }
 
+  // Model-driven benchmarks are stochastic. A single baseline/candidate pair
+  // can manufacture an efficiency "win" from sampling variance, so a provisional
+  // winner must reproduce its result independently before it can touch live code.
+  // Reverse the order on confirmation to avoid consistently favoring the second run.
+  writeSubStep('provisional win — running an independent confirmation pair')
+  const confirmationCandidateCard = await measureFitness({ sourceRoot: sandbox.root })
+  const confirmationBaselineCard = await measureFitness({ sourceRoot: ELIA_ROOT })
+  const confirmationBaseline = toMetrics(confirmationBaselineCard)
+  const confirmationCandidate = toMetrics(confirmationCandidateCard)
+  const confirmation = compareScorecards(confirmationBaseline, confirmationCandidate)
+
+  if (!confirmation.better) {
+    const reason = `provisional improvement did not reproduce: ${confirmation.reason}`
+    writeFail(`rejected: ${reason}`)
+    writeSubStep(`sandbox kept at ${sandbox.root} if you want to inspect it`)
+    return { ...base, baseline: confirmationBaseline, candidate: confirmationCandidate, verdict: 'rejected', reason }
+  }
+
+  base.baseline = confirmationBaseline
+  base.candidate = confirmationCandidate
+  const confirmedReason = `${comparison.reason}; confirmed independently (${confirmation.reason})`
+
   if (options.dryRun) {
-    writePass(`would promote: ${comparison.reason}`)
+    writePass(`would promote: ${confirmedReason}`)
     writeSubStep('dry run — the live source was not modified')
-    return { ...base, verdict: 'rejected', reason: `dry run; would have been promoted (${comparison.reason})` }
+    return { ...base, verdict: 'rejected', reason: `dry run; would have been promoted (${confirmedReason})` }
   }
 
   const backupDir = promote(sandbox, changed)
-  writePass(`promoted: ${comparison.reason}`)
+  writePass(`promoted: ${confirmedReason}`)
   writeSummary(`Generation ${generation} promoted`, [
     ['change', hypothesis.title],
     ['files', changed.join(', ')],
@@ -276,7 +292,7 @@ async function runGeneration(
     ['rollback', `copy ${backupDir} back over ${ELIA_ROOT}`],
   ])
 
-  return { ...base, verdict: 'promoted', reason: comparison.reason }
+  return { ...base, verdict: 'promoted', reason: confirmedReason }
 }
 
 const HYPOTHESIS_PROMPT = `You are elia, examining your own source code in order to improve yourself.
@@ -305,6 +321,7 @@ The benchmark is in src/evolve/suite.ts — read it, it defines exactly what "be
 Current weighted pass rate: ${Math.round(baseline.passRate * 100)}%
 Passing: ${baseline.passed.join(', ') || '(none)'}
 FAILING: ${failing}
+Observed model steps: ${baseline.steps ? Object.entries(baseline.steps).map(([id, steps]) => `${id}=${steps}`).join(', ') : '(not recorded)'}
 Cost of one full run: ${baseline.totalTokens} tokens, ${Math.round(baseline.totalElapsedMs / 1000)}s of agent time.
 
 ## What you may not change

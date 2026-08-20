@@ -24,6 +24,8 @@ export interface Metrics {
   /** Which task ids passed — needed to detect a regression that a tied pass rate would hide. */
   passed: string[]
   failed: string[]
+  /** Model round-trips per task, so efficiency hypotheses can cite actual activation evidence. */
+  steps?: Record<string, number>
   totalTokens: number
   totalElapsedMs: number
   costUsd?: number

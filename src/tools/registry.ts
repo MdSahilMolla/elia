@@ -5,6 +5,12 @@ import { listFilesTool } from './listFiles.ts'
 import { grepTool } from './grep.ts'
 import { runCommandTool } from './runCommand.ts'
 import { boardPostTool, boardReadTool } from './blackboard.ts'
+import { newEngagementTool } from './engagement.ts'
+import { runSecurityToolTool } from './securityScan.ts'
+import { webSearchTool } from './webSearch.ts'
+import { webFetchTool } from './webFetch.ts'
+import { readSpreadsheetTool } from './readSpreadsheet.ts'
+import { recallTool } from './recall.ts'
 import type { Tool } from './types.ts'
 
 /** The built-in file and shell tools. */
@@ -15,10 +21,17 @@ export const tools: Tool[] = [
   listFilesTool,
   grepTool,
   runCommandTool,
+  recallTool,
 ]
 
 /** Tools that let a fleet of sub-agents coordinate instead of working blind. */
 export const collaborationTools: Tool[] = [boardPostTool, boardReadTool]
+
+/** Only granted to the lead agent's own turn, and only in cyber mode — see agent.ts. */
+export const cyberTools: Tool[] = [newEngagementTool, runSecurityToolTool]
+
+/** Real external data for the Marketing/Finance personas — see src/agents/personas.ts. Tech's toolset is unchanged. */
+export const businessTools: Tool[] = [webSearchTool, webFetchTool, readSpreadsheetTool]
 
 export const toolsByName: Record<string, Tool> = Object.fromEntries(
   tools.map((tool) => [tool.name, tool]),

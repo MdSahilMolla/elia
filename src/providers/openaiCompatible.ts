@@ -1,15 +1,25 @@
 import OpenAI from 'openai'
-import type { ChatMessage, ContentBlock, Provider, StreamTurnParams, ToolDefinition, Usage } from './types.ts'
+import type { ChatMessage, ContentBlock, Provider, StreamTurnParams, ThinkingOption, ToolDefinition, Usage } from './types.ts'
+
+export interface OpenAICompatibleProviderOptions {
+  thinking?: ThinkingOption
+}
 
 export function createOpenAICompatibleProvider(
   apiKey: string,
   model: string,
   baseURL?: string,
+  options: OpenAICompatibleProviderOptions = {},
 ): Provider {
   const client = new OpenAI({ apiKey, baseURL })
+  // Reasoning-capable OpenAI-compatible models (Groq's gpt-oss, DeepSeek's API,
+  // others) emit reasoning as a non-standard `reasoning`/`reasoning_content`
+  // field with no enable/disable request param — there is nothing to toggle in
+  // the request itself, only whether elia surfaces what the model already sends.
+  const passthroughReasoning = options.thinking?.enabled ?? true
 
   return {
-    async streamTurn({ system, messages, tools, onText }: StreamTurnParams) {
+    async streamTurn({ system, messages, tools, onText, onThinking }: StreamTurnParams) {
       const runner = client.chat.completions
         .stream({
           model,
@@ -20,13 +30,25 @@ export function createOpenAICompatibleProvider(
         })
         .on('content', (delta) => onText(delta))
 
+      if (passthroughReasoning) {
+        runner.on('chunk', (chunk) => {
+          // The reasoning field is non-standard, so the SDK's delta type has no
+          // overlap with it at all — an explicit cast, not just a loose param type.
+          const delta = chunk.choices?.[0]?.delta as
+            | { reasoning?: string | null; reasoning_content?: string | null }
+            | undefined
+          const reasoning = readReasoning(delta)
+          if (reasoning) onThinking?.(reasoning)
+        })
+      }
+
       const completion = await runner.finalChatCompletion()
       const message = completion.choices[0]?.message
       if (!message) {
         throw new Error('Provider returned no message in response')
       }
 
-      const content = toContentBlocks(message)
+      const content = toContentBlocks(message, passthroughReasoning)
 
       // OpenAI-style usage reports prompt_tokens as a total that already
       // *includes* any cached portion, unlike Anthropic's separate counters —
@@ -48,6 +70,9 @@ export function createOpenAICompatibleProvider(
 /** The shape this adapter actually depends on, kept loose because "OpenAI-compatible" providers vary. */
 export interface CompletionMessageLike {
   content?: string | null
+  /** Non-standard reasoning fields — Groq's gpt-oss models use `reasoning`, DeepSeek-style APIs use `reasoning_content`. */
+  reasoning?: string | null
+  reasoning_content?: string | null
   tool_calls?: (
     | {
         id?: string
@@ -71,8 +96,11 @@ export interface CompletionMessageLike {
  * model sees the tool it asked for produce nothing and can retry, which is
  * recoverable in a way that a crashed agent loop is not.
  */
-export function toContentBlocks(message: CompletionMessageLike): ContentBlock[] {
+export function toContentBlocks(message: CompletionMessageLike, includeReasoning = true): ContentBlock[] {
   const content: ContentBlock[] = []
+
+  const reasoning = includeReasoning ? (message.reasoning ?? message.reasoning_content) : undefined
+  if (reasoning) content.push({ type: 'thinking', text: reasoning, signature: '' })
 
   if (message.content) content.push({ type: 'text', text: message.content })
 
@@ -151,6 +179,14 @@ function toOpenAITools(tools: ToolDefinition[]): OpenAI.Chat.ChatCompletionTool[
       parameters: tool.input_schema,
     },
   }))
+}
+
+/** Pulls a reasoning fragment off a raw streamed delta, tolerating either non-standard field name. */
+function readReasoning(
+  delta: { reasoning?: string | null; reasoning_content?: string | null } | null | undefined,
+): string | undefined {
+  const value = delta?.reasoning ?? delta?.reasoning_content
+  return typeof value === 'string' && value.length > 0 ? value : undefined
 }
 
 function safeJsonParse(text: string): Record<string, unknown> {

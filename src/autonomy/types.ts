@@ -15,7 +15,7 @@ export interface ProposalStep {
   title: string
   role: RoleName
   instructions: string
-  /** Files the step expects to touch. Used to warn about steps that would collide if run in parallel. */
+  /** Files the step expects to touch. Colliding steps are automatically placed in separate waves. */
   files: string[]
   /** Ids of steps that must finish first. Steps with no unmet dependencies run together. */
   dependsOn: string[]

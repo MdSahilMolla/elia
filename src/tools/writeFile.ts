@@ -1,4 +1,5 @@
 import type { Tool } from './types.ts'
+import { captureBeforeWrite } from '../checkpoint.ts'
 
 export const writeFileTool: Tool = {
   name: 'write_file',
@@ -13,8 +14,15 @@ export const writeFileTool: Tool = {
     required: ['path', 'content'],
   },
   async execute(input) {
-    const path = input.path as string
-    const content = input.content as string
+    if (typeof input.path !== 'string' || input.path.length === 0) {
+      throw new Error('write_file requires a non-empty "path" string argument.')
+    }
+    if (typeof input.content !== 'string') {
+      throw new Error('write_file requires a "content" string argument (use an empty string for an empty file).')
+    }
+    const path = input.path
+    const content = input.content
+    await captureBeforeWrite(path)
     await Bun.write(path, content)
     return `Wrote ${content.length} bytes to ${path}`
   },

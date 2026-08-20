@@ -20,6 +20,7 @@ import { EVOLUTION_DIR } from './ledger.ts'
 
 /** Copied into every sandbox. Everything else (node_modules, .git, .evolution) is either inherited or irrelevant. */
 const COPIED_ENTRIES = ['src', 'package.json', 'tsconfig.json']
+const TRACKED_ROOT_FILES = ['package.json', 'tsconfig.json']
 
 /**
  * Files a candidate is not allowed to change.
@@ -38,6 +39,10 @@ export const IMMUTABLE_FILES = [
   'src/evolve/ledger.ts',
   'src/evolve/sandbox.ts',
   'src/evolve/benchTask.ts',
+  'src/evolve/candidateTools.ts',
+  'package.json',
+  'tsconfig.json',
+  'src/**/*.test.ts',
 ]
 
 export interface Sandbox {
@@ -78,14 +83,14 @@ export function removeSandbox(sandbox: Sandbox): void {
 export function changedFiles(sandbox: Sandbox, liveRoot = ELIA_ROOT): string[] {
   const changed: string[] = []
 
-  for (const relativePath of sourceFilesIn(sandbox.root)) {
+  for (const relativePath of trackedFilesIn(sandbox.root)) {
     const candidate = readIfPresent(join(sandbox.root, relativePath))
     const live = readIfPresent(join(liveRoot, relativePath))
     if (candidate !== live) changed.push(relativePath)
   }
 
   // A file the candidate deleted still counts as a change.
-  for (const relativePath of sourceFilesIn(liveRoot)) {
+  for (const relativePath of trackedFilesIn(liveRoot)) {
     if (!existsSync(join(sandbox.root, relativePath))) changed.push(relativePath)
   }
 
@@ -94,7 +99,9 @@ export function changedFiles(sandbox: Sandbox, liveRoot = ELIA_ROOT): string[] {
 
 /** Which of the changed files the candidate was forbidden from touching. */
 export function violatedImmutables(changed: string[]): string[] {
-  return changed.filter((file) => IMMUTABLE_FILES.includes(file))
+  return changed.filter(
+    (file) => IMMUTABLE_FILES.includes(file) || (file.startsWith('src/') && file.endsWith('.test.ts')),
+  )
 }
 
 /**
@@ -102,8 +109,11 @@ export function violatedImmutables(changed: string[]): string[] {
  * Returns the backup directory so a promotion can be undone by copying it back.
  */
 export function promote(sandbox: Sandbox, changed: string[], liveRoot = ELIA_ROOT): string {
+  rmSync(sandbox.backupDir, { recursive: true, force: true })
   mkdirSync(sandbox.backupDir, { recursive: true })
 
+  // Finish every backup before touching the live tree. If backup fails, there is
+  // nothing to roll back because promotion has not started.
   for (const relativePath of changed) {
     const livePath = join(liveRoot, relativePath)
     if (existsSync(livePath)) {
@@ -112,14 +122,25 @@ export function promote(sandbox: Sandbox, changed: string[], liveRoot = ELIA_ROO
       copyFileSync(livePath, backupPath)
     }
 
-    const candidatePath = join(sandbox.root, relativePath)
-    if (existsSync(candidatePath)) {
-      mkdirSync(join(livePath, '..'), { recursive: true })
-      copyFileSync(candidatePath, livePath)
-    } else {
-      // The candidate deleted it; mirror that, having backed it up first.
-      rmSync(livePath, { force: true })
+  }
+
+  const applied: string[] = []
+  try {
+    for (const relativePath of changed) {
+      const livePath = join(liveRoot, relativePath)
+      const candidatePath = join(sandbox.root, relativePath)
+      applied.push(relativePath)
+      if (existsSync(candidatePath)) {
+        mkdirSync(join(livePath, '..'), { recursive: true })
+        copyFileSync(candidatePath, livePath)
+      } else {
+        // The candidate deleted it; mirror that, having backed it up first.
+        rmSync(livePath, { force: true })
+      }
     }
+  } catch (error) {
+    rollback(sandbox, applied, liveRoot)
+    throw error
   }
 
   return sandbox.backupDir
@@ -129,19 +150,28 @@ export function promote(sandbox: Sandbox, changed: string[], liveRoot = ELIA_ROO
 export function rollback(sandbox: Sandbox, changed: string[], liveRoot = ELIA_ROOT): void {
   for (const relativePath of changed) {
     const backupPath = join(sandbox.backupDir, relativePath)
-    if (existsSync(backupPath)) copyFileSync(backupPath, join(liveRoot, relativePath))
+    const livePath = join(liveRoot, relativePath)
+    if (existsSync(backupPath)) {
+      mkdirSync(join(livePath, '..'), { recursive: true })
+      copyFileSync(backupPath, livePath)
+    } else {
+      // No backup means promotion introduced this file. A real rollback must
+      // remove it instead of leaving a partially promoted candidate behind.
+      rmSync(livePath, { force: true })
+    }
   }
 }
 
-function sourceFilesIn(root: string): string[] {
+function trackedFilesIn(root: string): string[] {
   const srcDir = join(root, 'src')
-  if (!existsSync(srcDir)) return []
-
-  const glob = new Bun.Glob('**/*.ts')
   const files: string[] = []
-  for (const path of glob.scanSync({ cwd: srcDir, dot: false })) {
-    files.push(`src/${path.replace(/\\/g, '/')}`)
+  if (existsSync(srcDir)) {
+    const glob = new Bun.Glob('**/*.ts')
+    for (const path of glob.scanSync({ cwd: srcDir, dot: false })) {
+      files.push(`src/${path.replace(/\\/g, '/')}`)
+    }
   }
+  for (const file of TRACKED_ROOT_FILES) if (existsSync(join(root, file))) files.push(file)
   return files
 }
 

@@ -1,10 +1,5 @@
-const BOLD = '\x1b[1m'
-const DIM = '\x1b[2m'
-const GOLD = '\x1b[33m'
-const GREEN = '\x1b[32m'
-const RED = '\x1b[31m'
-const CYAN = '\x1b[36m'
-const RESET = '\x1b[0m'
+import { bold, dim, gold, green, red, boldCyan } from './theme.ts'
+import { box } from './layout.ts'
 
 const PHASE_LABELS: Record<string, string> = {
   orient: 'Orienting',
@@ -18,30 +13,29 @@ const PHASE_LABELS: Record<string, string> = {
 /** A phase heading, so a long autonomous run reads as a sequence of moves rather than a wall of tool calls. */
 export function writePhase(phase: string, detail?: string): void {
   const label = PHASE_LABELS[phase] ?? phase
-  process.stdout.write(`\n${BOLD}${GOLD}◆ ${label}${RESET}${detail ? ` ${DIM}${detail}${RESET}` : ''}\n`)
+  process.stdout.write(`\n${bold(gold(`◆ ${label}`))}${detail ? ` ${dim(detail)}` : ''}\n`)
 }
 
 export function writeSubStep(text: string): void {
-  process.stdout.write(`  ${DIM}${text}${RESET}\n`)
+  process.stdout.write(`  ${dim(text)}\n`)
 }
 
 export function writePass(text: string): void {
-  process.stdout.write(`  ${GREEN}✓${RESET} ${text}\n`)
+  process.stdout.write(`  ${green('✓')} ${text}\n`)
 }
 
 export function writeFail(text: string): void {
-  process.stdout.write(`  ${RED}✗${RESET} ${text}\n`)
+  process.stdout.write(`  ${red('✗')} ${text}\n`)
 }
 
+/** A titled panel for a chunk of prose or diagnostic output the user should notice as a unit — a review, an issue list — rather than read as more streamed activity. */
 export function writeBlock(title: string, body: string): void {
-  process.stdout.write(`\n${BOLD}${title}${RESET}\n${body}\n`)
+  process.stdout.write(`\n${box(body.split('\n'), { title })}\n`)
 }
 
+/** The closing panel for a finished run — its own bordered block so it reads as a summary, not the tail end of the activity log above it. */
 export function writeSummary(title: string, rows: [string, string][]): void {
   const width = Math.max(...rows.map(([label]) => label.length), 0)
-  process.stdout.write(`\n${BOLD}${CYAN}${title}${RESET}\n`)
-  for (const [label, value] of rows) {
-    process.stdout.write(`  ${DIM}${label.padEnd(width)}${RESET}  ${value}\n`)
-  }
-  process.stdout.write('\n')
+  const lines = rows.map(([label, value]) => `${dim(label.padEnd(width))}  ${value}`)
+  process.stdout.write(`\n${box(lines, { title, borderColor: boldCyan })}\n`)
 }

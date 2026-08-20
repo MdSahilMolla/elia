@@ -23,6 +23,14 @@ test('write_file creates a file', async () => {
   expect(await Bun.file(join(testDir, 'hello.txt')).text()).toBe('hello from elia')
 })
 
+test('write_file rejects a missing path with a clear error instead of a raw Node exception', async () => {
+  await expect(toolsByName.write_file!.execute({ content: 'x' })).rejects.toThrow('non-empty "path"')
+})
+
+test('write_file rejects a missing content argument', async () => {
+  await expect(toolsByName.write_file!.execute({ path: join(testDir, 'no-content.txt') })).rejects.toThrow('"content"')
+})
+
 test('read_file returns content with line numbers', async () => {
   const result = await toolsByName.read_file!.execute({ path: join(testDir, 'hello.txt') })
   expect(result).toBe('1\thello from elia')
@@ -51,6 +59,18 @@ test('edit_file throws when old_string is not found', async () => {
       new_string: 'x',
     }),
   ).rejects.toThrow('not found')
+})
+
+test('edit_file rejects a missing old_string with a clear error', async () => {
+  await expect(
+    toolsByName.edit_file!.execute({ path: join(testDir, 'hello.txt'), new_string: 'x' }),
+  ).rejects.toThrow('non-empty "old_string"')
+})
+
+test('edit_file rejects a missing new_string with a clear error', async () => {
+  await expect(
+    toolsByName.edit_file!.execute({ path: join(testDir, 'hello.txt'), old_string: 'hi' }),
+  ).rejects.toThrow('"new_string"')
 })
 
 test('edit_file throws when old_string is not unique', async () => {

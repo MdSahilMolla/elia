@@ -15,7 +15,14 @@ import { createJournal, newRunId, type Journal } from './journal.ts'
 import { planWaves, runFleet } from './fleet.ts'
 import { createProposalTool, renderProposal } from './proposal.ts'
 import { appendLessons, createLessonsTool, renderLessons } from './lessons.ts'
-import { createVerdictTool, describeIssues, describeVerification, hasBlockingIssues, runVerification } from './verify.ts'
+import {
+  createVerdictTool,
+  describeIssues,
+  describeVerification,
+  hasBlockingIssues,
+  requireCriticVerdict,
+  runVerification,
+} from './verify.ts'
 import type { CriticVerdict, Proposal } from './types.ts'
 
 export type ApprovalDecision =
@@ -297,12 +304,13 @@ ${proposal.risks.length > 0 ? proposal.risks.map((risk) => `- ${risk}`).join('\n
 Start with \`git diff\` and \`git status\` to see what actually changed, then read the changed files in full. Check specifically whether each promised step was really done, not just claimed. Finish by calling submit_verdict.`,
       })
       track(critic.usage)
-      verdict = verdictCapture.taken()
+      const submittedVerdict = verdictCapture.taken()
+      verdict = requireCriticVerdict(submittedVerdict)
 
-      if (!verdict) {
-        // No structured verdict means no basis to loop; report the prose and stop.
+      if (!submittedVerdict) {
+        // Prose cannot drive a safety gate. Preserve it for diagnosis, then send
+        // the structured fail-closed verdict through the normal repair path.
         writeBlock('Review (unstructured)', critic.report)
-        break
       }
 
       journal.append('verdict', { ...verdict })

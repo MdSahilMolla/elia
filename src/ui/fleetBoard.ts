@@ -1,12 +1,17 @@
-const DIM = '\x1b[2m'
-const GOLD = '\x1b[33m'
-const GREEN = '\x1b[32m'
-const RED = '\x1b[31m'
-const CYAN = '\x1b[36m'
-const RESET = '\x1b[0m'
+import { dim, gold, green, red, cyan } from './theme.ts'
+import { frame } from './layout.ts'
 
 const SPINNER = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
 const TICK_MS = 120
+
+const ROLE_WIDTH = 8
+const TITLE_WIDTH = 46
+const TIME_WIDTH = 7
+const DETAIL_WIDTH = 41 // includes its own leading space when present
+// Kept in sync with the columns `line()` below actually writes, so the frame
+// never has to guess — a live board can't re-measure its width every tick
+// without the border jittering as detail text grows and shrinks.
+const INNER_WIDTH = 1 + 1 + ROLE_WIDTH + 1 + TITLE_WIDTH + 1 + TIME_WIDTH + DETAIL_WIDTH
 
 export type WorkerStatus = 'queued' | 'running' | 'done' | 'failed'
 
@@ -46,37 +51,44 @@ export function createFleetBoard(workers: FleetWorkerSpec[]): FleetBoard {
 
   if (!process.stdout.isTTY) return createPlainBoard(rows)
 
-  let frame = 0
+  const panel = frame(INNER_WIDTH, {
+    title: `Fleet — ${rows.length} worker${rows.length === 1 ? '' : 's'}`,
+    borderColor: gold,
+  })
+
+  let frameIndex = 0
   let rendered = 0
   let stopped = false
 
   function line(row: WorkerRow): string {
     const elapsed = row.startedAt ? ((row.finishedAt ?? Date.now()) - row.startedAt) / 1000 : 0
-    const time = row.startedAt ? `${DIM}${elapsed.toFixed(1)}s${RESET}` : ''
+    const time = row.startedAt ? dim(`${elapsed.toFixed(1)}s`) : ''
 
     const marker =
       row.status === 'running'
-        ? `${GOLD}${SPINNER[frame % SPINNER.length]}${RESET}`
+        ? gold(SPINNER[frameIndex % SPINNER.length]!)
         : row.status === 'done'
-          ? `${GREEN}✓${RESET}`
+          ? green('✓')
           : row.status === 'failed'
-            ? `${RED}✗${RESET}`
-            : `${DIM}·${RESET}`
+            ? red('✗')
+            : dim('·')
 
-    const detail = row.detail ? ` ${DIM}${truncate(row.detail, 40)}${RESET}` : ''
-    return `  ${marker} ${CYAN}${row.role.padEnd(8)}${RESET} ${truncate(row.title, 46).padEnd(46)} ${time}${detail}`
+    const detail = row.detail ? ` ${dim(truncate(row.detail, 40))}` : ''
+    return panel.line(`${marker} ${cyan(row.role.padEnd(ROLE_WIDTH))} ${truncate(row.title, TITLE_WIDTH).padEnd(TITLE_WIDTH)} ${time}${detail}`)
   }
 
   function render(): void {
     if (stopped) return
     if (rendered > 0) process.stdout.write(`\x1b[${rendered}A`)
+    process.stdout.write(`\x1b[2K${panel.top}\n`)
     for (const row of rows) process.stdout.write(`\x1b[2K${line(row)}\n`)
-    rendered = rows.length
+    process.stdout.write(`\x1b[2K${panel.bottom}\n`)
+    rendered = rows.length + 2
   }
 
   render()
   const timer = setInterval(() => {
-    frame += 1
+    frameIndex += 1
     render()
   }, TICK_MS)
 

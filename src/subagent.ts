@@ -1,10 +1,11 @@
-import { SUBAGENT_SYSTEM_PROMPT, tierConfig } from './config.ts'
-import { runAgentLoop, type ConversationMessage, type ToolEvent } from './agentLoop.ts'
-import type { ContentBlock, Usage } from './providers/types.ts'
+import { SUBAGENT_SYSTEM_PROMPT, CYBER_SUBAGENT_SYSTEM_PROMPT, roleConfig } from './config.ts'
+import { runAgentLoop, lastAssistantText, type ConversationMessage, type ToolEvent } from './agentLoop.ts'
+import type { Usage } from './providers/types.ts'
 import type { Tool } from './tools/types.ts'
 import { toolsForRole, role as roleDefinition } from './autonomy/roles.ts'
 import { withAgentIdentity } from './autonomy/context.ts'
 import { activeBlackboard } from './autonomy/blackboard.ts'
+import { activeMode } from './autonomy/mode.ts'
 import type { RoleName } from './autonomy/types.ts'
 import { createToolResultCache } from './speculation/cache.ts'
 import { createPrefetcher } from './speculation/prefetch.ts'
@@ -19,6 +20,8 @@ export interface SubAgentRequest {
   briefing?: string
   /** Tools granted to this run on top of its role's allowlist — used for the structured-report tools. */
   extraTools?: Tool[]
+  /** Replace the role tool set entirely, for constrained environments such as evolution sandboxes. */
+  tools?: Tool[]
   onTool?: (event: ToolEvent) => void
   signal?: AbortSignal
 }
@@ -37,8 +40,9 @@ export interface SubAgentResult {
  * Runs one isolated, autonomous sub-agent to completion.
  *
  * The role decides three things before a single token is generated: which model
- * tier answers (a scout runs on the fast tier), which tools exist at all (a
- * scout has no way to write), and what the worker is told to optimise for. Each
+ * answers (a scout runs on the fast tier, or its own dedicated provider if one is
+ * configured), which tools exist at all (a scout has no way to write), and what
+ * the worker is told to optimise for. Each
  * sub-agent gets its own speculative read cache — they're reading different
  * parts of the tree, so sharing one would mostly mean invalidating each other's.
  *
@@ -47,8 +51,8 @@ export interface SubAgentResult {
  */
 export async function runSubAgent(request: SubAgentRequest): Promise<SubAgentResult> {
   const definition = roleDefinition(request.role)
-  const tier = tierConfig(definition.tier)
-  const tools = [...toolsForRole(request.role), ...(request.extraTools ?? [])]
+  const tier = roleConfig(request.role, definition.tier)
+  const tools = request.tools ?? [...toolsForRole(request.role), ...(request.extraTools ?? [])]
   const startedAt = Date.now()
 
   const board = activeBlackboard()
@@ -67,10 +71,14 @@ export async function runSubAgent(request: SubAgentRequest): Promise<SubAgentRes
   const cache = createToolResultCache()
   const prefetcher = createPrefetcher({ tools, cache })
 
+  // A scout or critic dispatched while the lead is in cyber mode needs the same
+  // authorization guardrails the lead has — see autonomy/mode.ts.
+  const basePrompt = activeMode() === 'cyber' ? CYBER_SUBAGENT_SYSTEM_PROMPT : SUBAGENT_SYSTEM_PROMPT
+
   const result = await withAgentIdentity({ name: request.name, role: request.role }, () =>
     runAgentLoop({
       messages,
-      systemPrompt: `${SUBAGENT_SYSTEM_PROMPT}\n\n## Your role\n${definition.prompt}`,
+      systemPrompt: `${basePrompt}\n\n## Your role\n${definition.prompt}`,
       tools,
       provider: tier.provider,
       model: tier.model,
@@ -89,21 +97,10 @@ export async function runSubAgent(request: SubAgentRequest): Promise<SubAgentRes
   return {
     name: request.name,
     role: request.role,
-    report: finalReport(messages),
+    report: lastAssistantText(messages, '(sub-agent finished without a final text report)'),
     usage: result.usage,
     steps: result.steps,
     elapsedMs: Date.now() - startedAt,
     ok: result.stopReason === 'complete',
   }
-}
-
-function finalReport(messages: ConversationMessage[]): string {
-  const lastAssistantMessage = [...messages].reverse().find((message) => message.role === 'assistant')
-  const text = lastAssistantMessage?.content
-    .filter((block): block is Extract<ContentBlock, { type: 'text' }> => block.type === 'text')
-    .map((block) => block.text)
-    .join('\n')
-    .trim()
-
-  return text && text.length > 0 ? text : '(sub-agent finished without a final text report)'
 }

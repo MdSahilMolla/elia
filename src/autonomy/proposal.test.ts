@@ -128,7 +128,7 @@ test('the rendered proposal shows the wave structure it implies', () => {
   expect(rendered).toContain('bun test')
 })
 
-test('the rendered proposal flags two steps in one wave claiming the same file', () => {
+test('the rendered proposal serializes two steps claiming the same file', () => {
   const proposal = expectOk({
     ...minimal,
     steps: [
@@ -137,5 +137,7 @@ test('the rendered proposal flags two steps in one wave claiming the same file',
     ],
   })
 
-  expect(renderProposal(proposal)).toContain('is claimed by a and b in the same wave')
+  const rendered = renderProposal(proposal)
+  expect(rendered).toContain('2 workers in 2 waves')
+  expect(rendered).not.toContain('is claimed by')
 })

@@ -1,7 +1,7 @@
 import { existsSync, readdirSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import type { ConversationMessage } from './agentLoop.ts'
-import { writeNotice } from './ui/stream.ts'
+import { writeError } from './ui/stream.ts'
 
 export const SESSIONS_DIR = join(process.cwd(), '.elia', 'sessions')
 
@@ -25,7 +25,7 @@ export async function saveSession(
   try {
     await Bun.write(join(dir, `${id}.json`), JSON.stringify(session))
   } catch (err) {
-    writeNotice(`Warning: failed to save session: ${err instanceof Error ? err.message : String(err)}`)
+    writeError(`Warning: failed to save session: ${err instanceof Error ? err.message : String(err)}`)
   }
 }
 
