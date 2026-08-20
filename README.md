@@ -90,6 +90,7 @@ Elia has a `workspace/` folder (created on first use, next to `.elia/` but visib
 ```bash
 elia auto "add rate limiting to the API client"
 elia auto "migrate the config loader to zod" --yolo   # skip the approval gate
+elia auto "fix the race condition in the queue" --variants 3   # best-of-3, see below
 ```
 
 This runs a full work cycle instead of a single conversation turn. Each phase has its own tool set and its own prompt, so elia is never simultaneously exploring and committing:
@@ -118,6 +119,14 @@ The `task` tool takes a `role`, and the role decides three things before a token
 | `scribe` | fast | yes | docs and comments only |
 
 A scout physically cannot damage your tree — `write_file` and `edit_file` aren't in its tool set — so aggressive parallel recon carries no risk.
+
+### Best-of-N: `--variants N`
+
+`--variants N` runs the *execute* phase N times in parallel, each in its own isolated git worktree — genuinely independent implementation attempts of the same approved plan, not N copies hoping for different random output. Verification (typecheck/tests/build — an objective, cheap, non-LLM oracle) picks the winner: an attempt that fails verification can never win over one that passes, no matter how confident its own report sounds. Only the winning worktree's files are copied into your real working tree; every worktree, winner included, is discarded afterward, so you're never left with stray branches or directories. If every attempt fails verification, it falls back to the first one and hands off to the normal reflect/repair loop exactly as a single-attempt run would.
+
+It deliberately skips the critic/security/bughunter panel per variant — paying for three reviewers on N-1 attempts that get thrown away regardless would be pure waste. That panel still runs once, on the merged winner, exactly as it does without `--variants`.
+
+Cost is roughly Nx the execute phase (N parallel builder fleets instead of one) for the same wall-clock time, so it's opt-in — default is 1, today's behavior, unchanged. Worth it when an implementation approach is genuinely uncertain and you'd rather spend tokens than guess wrong; not worth it for a change whose shape is already obvious.
 
 ## Time travel: `elia runs` / `elia fork`
 
@@ -218,7 +227,7 @@ What can't be covered that way is the model loop itself. `elia bench` is the rea
 
 ## Status
 
-In: parallel role-typed sub-agents, the autonomous work cycle with an approval gate, dependency-wave execution, the shared blackboard, adversarial review, bounded self-repair, cross-run lessons, run forking, predictive prefetch, the two-tier model cascade, benchmark-gated self-evolution, and skill synthesis.
+In: parallel role-typed sub-agents, the autonomous work cycle with an approval gate, dependency-wave execution, verification-gated best-of-N execution in isolated worktrees, the shared blackboard, adversarial review, bounded self-repair, cross-run lessons, run forking, predictive prefetch, the two-tier model cascade, benchmark-gated self-evolution, and skill synthesis.
 
 Deliberately out of scope so far: a permission/confirmation system for individual risky tool calls (`elia auto`'s plan approval is the current gate), MCP support, and git-aware diff review beyond what the critic does. `elia evolve` does not commit to git — it copies files in and backs up what it replaced, leaving the commit to you.
 
