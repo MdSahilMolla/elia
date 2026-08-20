@@ -3,7 +3,7 @@ import { runAgentLoop, lastAssistantText, type ConversationMessage, type ToolEve
 import type { Usage } from './providers/types.ts'
 import type { Tool } from './tools/types.ts'
 import { toolsForRole, role as roleDefinition } from './autonomy/roles.ts'
-import { withAgentIdentity } from './autonomy/context.ts'
+import { currentAgent, withAgentIdentity } from './autonomy/context.ts'
 import { activeBlackboard } from './autonomy/blackboard.ts'
 import { activeMode } from './autonomy/mode.ts'
 import type { RoleName } from './autonomy/types.ts'
@@ -22,6 +22,14 @@ export interface SubAgentRequest {
   extraTools?: Tool[]
   /** Replace the role tool set entirely, for constrained environments such as evolution sandboxes. */
   tools?: Tool[]
+  /**
+   * Working-directory root this sub-agent's file/shell tools resolve relative
+   * paths against — set only when running inside an isolated git worktree
+   * (see autonomy/variants.ts). Unset inherits the dispatching agent's own
+   * root, so a sub-agent spawned from inside a variant automatically stays
+   * inside that variant's worktree without every call site having to say so.
+   */
+  cwd?: string
   onTool?: (event: ToolEvent) => void
   signal?: AbortSignal
 }
@@ -74,8 +82,9 @@ export async function runSubAgent(request: SubAgentRequest): Promise<SubAgentRes
   // A scout or critic dispatched while the lead is in cyber mode needs the same
   // authorization guardrails the lead has — see autonomy/mode.ts.
   const basePrompt = activeMode() === 'cyber' ? CYBER_SUBAGENT_SYSTEM_PROMPT : SUBAGENT_SYSTEM_PROMPT
+  const cwd = request.cwd ?? currentAgent().cwd
 
-  const result = await withAgentIdentity({ name: request.name, role: request.role }, () =>
+  const result = await withAgentIdentity({ name: request.name, role: request.role, cwd }, () =>
     runAgentLoop({
       messages,
       systemPrompt: `${basePrompt}\n\n## Your role\n${definition.prompt}`,

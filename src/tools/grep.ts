@@ -1,5 +1,6 @@
 import type { Tool } from './types.ts'
 import { isIgnored } from './ignoreDirs.ts'
+import { resolvePath } from '../autonomy/context.ts'
 
 export const grepTool: Tool = {
   name: 'grep',
@@ -14,7 +15,11 @@ export const grepTool: Tool = {
   },
   async execute(input) {
     const pattern = input.pattern as string
-    const dir = (input.path as string | undefined) ?? '.'
+    // Displayed paths stay relative to what the model asked for; only the
+    // actual filesystem scan resolves against the ambient worktree root, so a
+    // variant's grep results don't leak its internal worktree path.
+    const inputDir = (input.path as string | undefined) ?? '.'
+    const dir = resolvePath(inputDir)
     const regex = new RegExp(pattern)
 
     const glob = new Bun.Glob('**/*')
@@ -23,8 +28,8 @@ export const grepTool: Tool = {
     for await (const relPath of glob.scan({ cwd: dir, dot: false })) {
       if (isIgnored(relPath)) continue
 
-      const fullPath = `${dir}/${relPath}`
-      const file = Bun.file(fullPath)
+      const fullPath = `${inputDir}/${relPath}`
+      const file = Bun.file(`${dir}/${relPath}`)
       const stat = await file.exists()
       if (!stat) continue
 

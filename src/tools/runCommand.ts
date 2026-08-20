@@ -1,5 +1,6 @@
 import type { Tool } from './types.ts'
 import { DEFAULT_SHELL_TIMEOUT_MS, formatShellResult, runShell } from '../shell.ts'
+import { currentAgent } from '../autonomy/context.ts'
 
 export const runCommandTool: Tool = {
   name: 'run_command',
@@ -13,6 +14,6 @@ export const runCommandTool: Tool = {
   },
   async execute(input) {
     const command = input.command as string
-    return formatShellResult(await runShell(command, DEFAULT_SHELL_TIMEOUT_MS))
+    return formatShellResult(await runShell(command, DEFAULT_SHELL_TIMEOUT_MS, currentAgent().cwd))
   },
 }

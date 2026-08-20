@@ -1,5 +1,6 @@
 import type { Tool } from './types.ts'
 import { isIgnored } from './ignoreDirs.ts'
+import { resolvePath } from '../autonomy/context.ts'
 
 export const listFilesTool: Tool = {
   name: 'list_files',
@@ -14,7 +15,7 @@ export const listFilesTool: Tool = {
   },
   async execute(input) {
     const pattern = input.pattern as string
-    const cwd = (input.cwd as string | undefined) ?? '.'
+    const cwd = resolvePath((input.cwd as string | undefined) ?? '.')
     const glob = new Bun.Glob(pattern)
     const results: string[] = []
     for await (const path of glob.scan({ cwd, dot: false })) {

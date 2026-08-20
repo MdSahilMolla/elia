@@ -3,10 +3,13 @@ import { runWithConcurrencyLimit } from '../agentLoop.ts'
 import { createFleetBoard } from '../ui/fleetBoard.ts'
 import { ZERO_USAGE, addUsage } from '../usage.ts'
 import { roleConfig } from '../config.ts'
-import { role as roleDefinition } from './roles.ts'
+import { role as roleDefinition, toolsForRole } from './roles.ts'
 import type { Usage } from '../providers/types.ts'
 import type { Journal } from './journal.ts'
 import type { ProposalStep, RoleName } from './types.ts'
+
+/** board_post/board_read are stripped for a variant's workers — see FleetRunOptions.stripBoardTools. */
+const BOARD_TOOL_NAMES = ['board_post', 'board_read']
 
 /** How many sub-agents run at once against a single provider. Beyond this, that provider's rate limits dominate and add latency instead of removing it. */
 const DEFAULT_FLEET_CONCURRENCY = 4
@@ -28,6 +31,20 @@ export interface FleetRunOptions {
   journal?: Journal
   /** Show the live status board. Off when a fleet runs inside another progress display. */
   showBoard?: boolean
+  /**
+   * Working-directory root every worker in this fleet writes into — set when
+   * this fleet is one of several isolated variants (see variants.ts) so its
+   * workers touch that variant's own git worktree instead of the real cwd.
+   */
+  cwd?: string
+  /**
+   * Drop board_post/board_read from every worker's tools. The blackboard is a
+   * single process-wide resource; when several fleets for isolated variants
+   * run concurrently, letting them post to and read from the same board would
+   * leak one variant's (possibly divergent) findings into another's. Set
+   * whenever more than one fleet may be running at once.
+   */
+  stripBoardTools?: boolean
   signal?: AbortSignal
 }
 
@@ -48,7 +65,7 @@ export interface FleetResult {
  * "parallel" run saved nothing, the decomposition was wrong.
  */
 export async function runFleet(options: FleetRunOptions): Promise<FleetResult> {
-  const { assignments, briefing, journal, signal } = options
+  const { assignments, briefing, journal, signal, cwd, stripBoardTools } = options
   const showBoard = options.showBoard ?? true
   const startedAt = Date.now()
 
@@ -76,6 +93,8 @@ export async function runFleet(options: FleetRunOptions): Promise<FleetResult> {
       role: item.role,
       name: item.workerName,
       briefing,
+      cwd,
+      tools: stripBoardTools ? toolsForRole(item.role).filter((tool) => !BOARD_TOOL_NAMES.includes(tool.name)) : undefined,
       signal,
       onTool: (event) => {
         toolCount += 1

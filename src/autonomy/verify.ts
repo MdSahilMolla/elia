@@ -19,11 +19,11 @@ export interface VerificationOutcome {
  * the next being meaningful, and a typecheck failure makes the test output noise
  * rather than information.
  */
-export async function runVerification(commands: string[]): Promise<VerificationOutcome> {
+export async function runVerification(commands: string[], cwd?: string): Promise<VerificationOutcome> {
   const results: ShellResult[] = []
 
   for (const command of commands) {
-    const result = await runShell(command, VERIFY_TIMEOUT_MS)
+    const result = await runShell(command, VERIFY_TIMEOUT_MS, cwd)
     results.push(result)
     if (result.exitCode !== 0 || result.timedOut) return { results, passed: false }
   }

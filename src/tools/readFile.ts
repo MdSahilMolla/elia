@@ -1,4 +1,5 @@
 import type { Tool } from './types.ts'
+import { resolvePath } from '../autonomy/context.ts'
 
 export const readFileTool: Tool = {
   name: 'read_file',
@@ -12,7 +13,7 @@ export const readFileTool: Tool = {
     required: ['path'],
   },
   async execute(input) {
-    const path = input.path as string
+    const path = resolvePath(input.path as string)
     const file = Bun.file(path)
     if (!(await file.exists())) {
       throw new Error(`File not found: ${path}`)

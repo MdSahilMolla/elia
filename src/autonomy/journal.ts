@@ -20,6 +20,7 @@ export type JournalEventKind =
   | 'approval'
   | 'step-start'
   | 'step-end'
+  | 'variants'
   | 'tool'
   | 'verify'
   | 'verdict'

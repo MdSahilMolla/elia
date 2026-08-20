@@ -1,5 +1,6 @@
 import type { Tool } from './types.ts'
 import { captureBeforeWrite } from '../checkpoint.ts'
+import { resolvePath } from '../autonomy/context.ts'
 
 export const writeFileTool: Tool = {
   name: 'write_file',
@@ -20,10 +21,10 @@ export const writeFileTool: Tool = {
     if (typeof input.content !== 'string') {
       throw new Error('write_file requires a "content" string argument (use an empty string for an empty file).')
     }
-    const path = input.path
+    const path = resolvePath(input.path)
     const content = input.content
     await captureBeforeWrite(path)
     await Bun.write(path, content)
-    return `Wrote ${content.length} bytes to ${path}`
+    return `Wrote ${content.length} bytes to ${input.path}`
   },
 }

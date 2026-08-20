@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
+import { isAbsolute, join } from 'node:path'
 import type { RoleName } from './types.ts'
 
 /**
@@ -15,6 +16,13 @@ export interface AgentIdentity {
   name: string
   role: RoleName | 'lead'
   runId?: string
+  /**
+   * Working-directory root this identity's file/shell tools resolve relative
+   * paths against. Unset means `process.cwd()`, the normal case for every
+   * agent that isn't running inside an isolated git worktree — see
+   * `autonomy/variants.ts`, the only thing that sets this today.
+   */
+  cwd?: string
 }
 
 const LEAD: AgentIdentity = { name: 'lead', role: 'lead' }
@@ -28,4 +36,17 @@ export function withAgentIdentity<T>(identity: AgentIdentity, fn: () => Promise<
 
 export function currentAgent(): AgentIdentity {
   return storage.getStore() ?? LEAD
+}
+
+/**
+ * Resolves a tool-supplied path against the current agent's working root
+ * instead of always `process.cwd()` — the one hook that lets an isolated
+ * variant's builders write into their own worktree using the exact same
+ * relative paths a normal run would use. Absolute paths pass through
+ * unchanged (the model still gets to be explicit).
+ */
+export function resolvePath(path: string): string {
+  const root = currentAgent().cwd
+  if (!root || isAbsolute(path)) return path
+  return join(root, path)
 }

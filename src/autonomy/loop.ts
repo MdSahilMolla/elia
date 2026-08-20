@@ -13,6 +13,7 @@ import { createPrefetcher } from '../speculation/prefetch.ts'
 import { createBlackboard, setActiveBlackboard } from './blackboard.ts'
 import { createJournal, newRunId, type Journal } from './journal.ts'
 import { planWaves, runFleet } from './fleet.ts'
+import { runVariants } from './variants.ts'
 import { createProposalTool, renderProposal } from './proposal.ts'
 import { appendLessons, createLessonsTool, renderLessons } from './lessons.ts'
 import {
@@ -42,6 +43,13 @@ export interface AutonomousRunOptions {
   maxRepairAttempts?: number
   /** How many times the user may send the plan back for changes (default 3). */
   maxAmendments?: number
+  /**
+   * Run this many independent implementation attempts of the approved plan in
+   * parallel, each in its own isolated git worktree, and let verification —
+   * not another LLM's opinion — pick the winner (default 1: today's single-
+   * attempt behavior, unchanged). See variants.ts.
+   */
+  variants?: number
   /** Resume from a checkpoint's message history instead of orienting from scratch. */
   resumeMessages?: ConversationMessage[]
   runId?: string
@@ -227,35 +235,46 @@ export async function runAutonomousTask(options: AutonomousRunOptions): Promise<
 
   // --- Execute --------------------------------------------------------------
 
-  const { waves } = planWaves(proposal.steps)
-  writePhase('execute', `${proposal.steps.length} steps in ${waves.length} wave${waves.length === 1 ? '' : 's'}`)
-  journal.append('phase', { phase: 'execute', waves: waves.length })
-
   const briefing = `## The goal of this run\n${proposal.goal}\n\n## What we established while planning\n${proposal.understanding}`
   let totalSavedMs = 0
+  const variantCount = options.variants ?? 1
 
-  for (const [index, wave] of waves.entries()) {
+  if (variantCount > 1) {
+    writePhase('execute', `${variantCount} parallel implementation attempts`)
+    journal.append('phase', { phase: 'execute', variants: variantCount })
+
     if (signal?.aborted) return done('aborted', { proposal })
-    if (waves.length > 1) writeSubStep(`wave ${index + 1} of ${waves.length}`)
+    const result = await runVariants({ proposal, briefing, count: variantCount, runId, journal, signal })
+    track(result.usage)
+    board.post('variants', 'execute', `chose attempt ${result.chosen.index + 1}/${variantCount} (${result.chosen.verificationSummary}); merged ${result.mergedFiles.length} file(s)`)
+  } else {
+    const { waves } = planWaves(proposal.steps)
+    writePhase('execute', `${proposal.steps.length} steps in ${waves.length} wave${waves.length === 1 ? '' : 's'}`)
+    journal.append('phase', { phase: 'execute', waves: waves.length })
 
-    const fleet = await runFleet({
-      assignments: wave.map((step) => ({
-        id: step.id,
-        title: step.title,
-        role: step.role,
-        instructions: step.instructions,
-      })),
-      briefing,
-      journal,
-      signal,
-    })
-    track(fleet.usage)
-    totalSavedMs += fleet.savedMs
+    for (const [index, wave] of waves.entries()) {
+      if (signal?.aborted) return done('aborted', { proposal })
+      if (waves.length > 1) writeSubStep(`wave ${index + 1} of ${waves.length}`)
 
-    // Each worker's report goes onto the board, so the next wave inherits what
-    // this one learned instead of re-deriving it.
-    for (const result of fleet.results) {
-      board.post(result.name, `step:${result.id}`, `${result.title} — ${result.report}`)
+      const fleet = await runFleet({
+        assignments: wave.map((step) => ({
+          id: step.id,
+          title: step.title,
+          role: step.role,
+          instructions: step.instructions,
+        })),
+        briefing,
+        journal,
+        signal,
+      })
+      track(fleet.usage)
+      totalSavedMs += fleet.savedMs
+
+      // Each worker's report goes onto the board, so the next wave inherits what
+      // this one learned instead of re-deriving it.
+      for (const result of fleet.results) {
+        board.post(result.name, `step:${result.id}`, `${result.title} — ${result.report}`)
+      }
     }
   }
 
@@ -422,6 +441,7 @@ Read the changed files in full for context beyond the diff above — a diff hide
     ['run', runId],
     ['goal', proposal.goal],
     ['workers', String(proposal.steps.length)],
+    ...(variantCount > 1 ? ([['variants', `${variantCount} attempts run, best verified one kept`]] as [string, string][]) : []),
     ['parallel saving', formatElapsed(totalSavedMs)],
     ['repairs', String(attempt)],
     ['review', verdict ? verdict.summary : 'not available'],

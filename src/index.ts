@@ -45,10 +45,15 @@ with no further prompts. Pass --yolo/-y (or "/mode auto" in a session) for
 auto mode: no risk check, no prompts, ever.
 
 Autonomous work:
-  elia auto "<goal>"          Plan the work, show you the plan, then execute it with a
-                              fleet of sub-agents, verify it, repair what failed, and
-                              record what it learned
-  elia auto "<goal>" --yolo   Same, without waiting for you to approve the plan
+  elia auto "<goal>"                Plan the work, show you the plan, then execute it with a
+                                     fleet of sub-agents, verify it, repair what failed, and
+                                     record what it learned
+  elia auto "<goal>" --yolo         Same, without waiting for you to approve the plan
+  elia auto "<goal>" --variants N   Run N independent implementation attempts in parallel,
+                                     each in its own isolated git worktree, and keep only
+                                     the one that verification — not an LLM's opinion — likes
+                                     best. Costs roughly Nx the execute phase; default is 1
+                                     (today's single-attempt behavior, unchanged)
 
 Multi-agent:
   elia agent "<request>"      Route the request to Marketing, Finance, and/or Tech — one or
@@ -175,11 +180,24 @@ async function runAgentCommand(): Promise<void> {
 
 async function runAuto(): Promise<void> {
   const { runAutonomousTask, autoApprove } = await import('./autonomy/loop.ts')
-  const goal = positionals().join(' ').trim()
+  const goal = positionals(['--variants']).join(' ').trim()
   if (!goal) {
     writeError('Give elia a goal: elia auto "add rate limiting to the API client"')
     process.exitCode = 1
     return
+  }
+
+  const variantsRaw = flagValue('--variants')
+  const variants = variantsRaw ? Number.parseInt(variantsRaw, 10) : undefined
+  if (variantsRaw && (!Number.isInteger(variants) || variants! < 1)) {
+    writeError(`--variants must be a positive integer, got "${variantsRaw}"`)
+    process.exitCode = 1
+    return
+  }
+  if (variants && variants > 1) {
+    writeNotice(
+      `--variants ${variants}: running ${variants} independent implementation attempts in isolated git worktrees, keeping the one that verifies best.`,
+    )
   }
 
   const yolo = hasFlag('--yolo', '-y')
@@ -190,14 +208,14 @@ async function runAuto(): Promise<void> {
   }
 
   if (yolo) {
-    const result = await runAutonomousTask({ goal, approve: autoApprove })
+    const result = await runAutonomousTask({ goal, approve: autoApprove, variants })
     if (result.outcome !== 'completed') process.exitCode = 1
     return
   }
 
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout })
   try {
-    const result = await runAutonomousTask({ goal, approve: createInteractiveApprover(rl) })
+    const result = await runAutonomousTask({ goal, approve: createInteractiveApprover(rl), variants })
     if (result.outcome !== 'completed' && result.outcome !== 'rejected') process.exitCode = 1
   } finally {
     rl.close()
