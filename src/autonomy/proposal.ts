@@ -1,5 +1,5 @@
 import type { Tool } from '../tools/types.ts'
-import { isRoleName, type Proposal, type ProposalStep } from './types.ts'
+import { isRoleName, ROLE_NAMES, type Proposal, type ProposalStep } from './types.ts'
 import { fileCollisions, planWaves } from './fleet.ts'
 import { bold, dim, cyan, red, gold } from '../ui/theme.ts'
 import { box, wrapText } from '../ui/layout.ts'
@@ -134,7 +134,7 @@ Break the work into the smallest number of steps that are genuinely separable, a
               title: { type: 'string', description: 'Short label for the step' },
               role: {
                 type: 'string',
-                enum: ['scout', 'builder', 'critic', 'tester', 'scribe'],
+                enum: ROLE_NAMES,
                 description: 'Which kind of worker should do it',
               },
               instructions: {

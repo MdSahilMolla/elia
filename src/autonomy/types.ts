@@ -1,6 +1,25 @@
-export type RoleName = 'scout' | 'builder' | 'critic' | 'tester' | 'scribe'
+export type RoleName =
+  | 'scout'
+  | 'builder'
+  | 'frontend'
+  | 'backend'
+  | 'critic'
+  | 'security'
+  | 'bughunter'
+  | 'tester'
+  | 'scribe'
 
-export const ROLE_NAMES: RoleName[] = ['scout', 'builder', 'critic', 'tester', 'scribe']
+export const ROLE_NAMES: RoleName[] = [
+  'scout',
+  'builder',
+  'frontend',
+  'backend',
+  'critic',
+  'security',
+  'bughunter',
+  'tester',
+  'scribe',
+]
 
 export function isRoleName(value: unknown): value is RoleName {
   return typeof value === 'string' && (ROLE_NAMES as string[]).includes(value)

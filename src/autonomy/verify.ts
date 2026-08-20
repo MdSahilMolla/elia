@@ -149,15 +149,32 @@ export function hasBlockingIssues(verdict: CriticVerdict): boolean {
 }
 
 /** Missing structured review is a failed gate, never implicit approval. */
-export function requireCriticVerdict(verdict: CriticVerdict | undefined): CriticVerdict {
+export function requireCriticVerdict(verdict: CriticVerdict | undefined, reviewer = 'critic'): CriticVerdict {
   return verdict ?? {
     verdict: 'revise',
-    summary: 'The critic did not submit a structured verdict.',
+    summary: `The ${reviewer} did not submit a structured verdict.`,
     issues: [
       {
         severity: 'blocker',
-        detail: 'Review could not be verified because submit_verdict was never called.',
+        detail: `Review could not be verified because submit_verdict was never called by ${reviewer}.`,
       },
     ],
   }
+}
+
+/**
+ * Combines the verdicts from several reviewers who each looked at the same
+ * change from a different angle (general correctness, security, functional
+ * bugs) into one gate. Fails closed: any reviewer voting "revise" makes the
+ * combined verdict "revise", and every issue survives the merge tagged with
+ * who raised it, so the repair step sees the whole picture instead of just
+ * whichever reviewer happened to run.
+ */
+export function mergeVerdicts(named: { reviewer: string; verdict: CriticVerdict }[]): CriticVerdict {
+  const verdict = named.some((entry) => entry.verdict.verdict === 'revise') ? 'revise' : 'approve'
+  const issues = named.flatMap((entry) =>
+    entry.verdict.issues.map((issue) => ({ ...issue, detail: `[${entry.reviewer}] ${issue.detail}` })),
+  )
+  const summary = named.map((entry) => `${entry.reviewer}: ${entry.verdict.summary}`).join(' | ')
+  return { verdict, summary, issues }
 }

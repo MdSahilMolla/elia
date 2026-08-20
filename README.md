@@ -51,7 +51,7 @@ ELIA_SCOUT_PROVIDER=groq
 ELIA_SCOUT_MODEL=openai/gpt-oss-20b
 ```
 
-The pattern is `ELIA_<ROLE>_PROVIDER` / `ELIA_<ROLE>_MODEL` / `ELIA_<ROLE>_BASE_URL` / `ELIA_<ROLE>_API_KEY` for any of `SCOUT`, `BUILDER`, `CRITIC`, `TESTER`, `SCRIBE`. Unset roles fall back to their tier exactly as before.
+The pattern is `ELIA_<ROLE>_PROVIDER` / `ELIA_<ROLE>_MODEL` / `ELIA_<ROLE>_BASE_URL` / `ELIA_<ROLE>_API_KEY` for any of `SCOUT`, `BUILDER`, `FRONTEND`, `BACKEND`, `CRITIC`, `SECURITY`, `BUGHUNTER`, `TESTER`, `SCRIBE`. Unset roles fall back to their tier exactly as before.
 
 This is what makes a fleet a genuine multi-model system rather than one model wearing different hats: a wave of five scouts and a critic isn't five-plus-one calls to the same provider's rate limit, it can be two calls to two providers running fully in parallel. Fleet concurrency scales with how many distinct providers a batch actually uses (`fleetConcurrency` in `src/autonomy/fleet.ts`), so spreading roles across providers also widens how much runs at once — a single-provider fleet still caps at 4 concurrent workers, but a two-provider fleet can run 8, up to a hard ceiling of 16.
 
@@ -96,8 +96,8 @@ This runs a full work cycle instead of a single conversation turn. Each phase ha
 
 1. **Orient** — reads the project, then sends several read-only *scouts* out in parallel on the fast tier to answer specific questions. Recon is the part of a task that parallelises best and matters least which model does it.
 2. **Propose** — submits a structured plan: what it found (with real file paths), what it's assuming, the steps decomposed into dependency waves, the risks, and the exact commands that will prove the work is correct. **Nothing has been changed at this point.** You approve it, reject it, or type what to change and it re-plans. A plan with no verification command is rejected before you ever see it.
-3. **Execute** — runs the steps in dependency waves: everything in a wave goes at once, each wave waits for the last. Steps that claim the same file are automatically split into separate waves, even if the planner forgot to declare a dependency. A live status board shows every worker, its role, and what it's doing. Workers publish findings to a shared blackboard as they go, so the second wave inherits what the first learned.
-4. **Verify** — runs your verification commands, fail-fast. If they pass, an adversarial *critic* reviews the real diff and returns a structured verdict; it's told to find what's broken, not to be encouraging.
+3. **Execute** — runs the steps in dependency waves: everything in a wave goes at once, each wave waits for the last. Steps that claim the same file are automatically split into separate waves, even if the planner forgot to declare a dependency. The planner assigns *frontend* and *backend* specialists to their respective steps so UI work and server work genuinely run side by side instead of one generalist doing both serially. A live status board shows every worker, its role, and what it's doing. Workers publish findings to a shared blackboard as they go, so the second wave inherits what the first learned.
+4. **Verify** — runs your verification commands, fail-fast. If they pass, three specialist reviewers run concurrently against the same diff: a *critic* (was what was promised actually done), a *security* reviewer (exploitable weaknesses), and a *bughunter* (functional/logic defects). Their verdicts are merged — any one voting "revise" blocks — so review runs at the speed of the slowest single reviewer instead of three run one after another.
 5. **Reflect** — on failure, feeds the actual error back into a repair pass and re-verifies. Bounded retries, then it stops and says a human is needed rather than thrashing.
 6. **Learn** — appends durable, project-specific lessons to `.elia/lessons.md`, which is injected into the *next* run's planning. Elia gets better at your project over time instead of rediscovering it every session.
 
@@ -109,7 +109,11 @@ The `task` tool takes a `role`, and the role decides three things before a token
 |---|---|---|---|
 | `scout` | fast | no | read-only investigation; run several in parallel |
 | `builder` | deep | yes | making the actual changes |
-| `critic` | deep | no | adversarial review of work already done |
+| `frontend` | deep | yes | UI/component/styling/client-side changes, run alongside `backend` |
+| `backend` | deep | yes | API/business-logic/data changes, run alongside `frontend` |
+| `critic` | deep | no | adversarial review of work already done — was it actually done as promised |
+| `security` | deep | no | adversarial review for exploitable security weaknesses, run alongside `critic` and `bughunter` |
+| `bughunter` | deep | no | adversarial review for functional/logic bugs, run alongside `critic` and `security` |
 | `tester` | deep | yes | writing and running tests, diagnosing failures |
 | `scribe` | fast | yes | docs and comments only |
 

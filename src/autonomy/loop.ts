@@ -20,6 +20,7 @@ import {
   describeIssues,
   describeVerification,
   hasBlockingIssues,
+  mergeVerdicts,
   requireCriticVerdict,
   runVerification,
 } from './verify.ts'
@@ -76,6 +77,7 @@ Do not write the plan out in prose first. The proposal is rendered for the user 
 What makes a good proposal:
 - \`understanding\` names real files, real symbols, real patterns you verified. Not "the codebase appears to use X" — say which file proves it.
 - Steps are decomposed for parallelism. Two steps touching disjoint files with no ordering requirement must NOT depend on each other; each unnecessary dependency costs the user wall-clock time.
+- Pick the specific role for each step, not just "builder": use \`frontend\` for UI/component/styling/client-side work and \`backend\` for API/business-logic/data work — a change that touches both should be two independent steps (one per role) so they execute in parallel instead of one generalist doing both serially.
 - Every step's instructions stand alone. The worker executing it sees your instructions and nothing else — not this conversation, not the other steps.
 - \`verification\` is real commands from this project that will actually fail if the work is wrong. Look them up in package.json or the docs; do not invent them.
 - Assumptions are where you guessed. The user correcting a wrong assumption now costs seconds; discovering it after the work costs the whole run.`
@@ -282,17 +284,9 @@ export async function runAutonomousTask(options: AutonomousRunOptions): Promise<
     // Only spend a critic on a change that already builds. Reviewing code that
     // doesn't compile just rediscovers the compiler's own error, slowly.
     if (verification.passed) {
-      writeSubStep('running adversarial review')
-      const verdictCapture = createVerdictTool()
-      const critic = await runSubAgent({
-        role: 'critic',
-        name: 'critic#1',
-        briefing,
-        extraTools: [verdictCapture.tool],
-        signal,
-        prompt: `Review the work that was just done against what was promised.
+      writeSubStep('running adversarial review — correctness, security, and bugs in parallel')
 
-## What was promised
+      const reviewContext = `## What was promised
 ${proposal.goal}
 
 Steps that were executed:
@@ -301,17 +295,42 @@ ${proposal.steps.map((step) => `- ${step.id} (${step.role}): ${step.title} — f
 ## Risks flagged during planning
 ${proposal.risks.length > 0 ? proposal.risks.map((risk) => `- ${risk}`).join('\n') : '(none flagged)'}
 
-Start with \`git diff\` and \`git status\` to see what actually changed, then read the changed files in full. Check specifically whether each promised step was really done, not just claimed. Finish by calling submit_verdict.`,
-      })
-      track(critic.usage)
-      const submittedVerdict = verdictCapture.taken()
-      verdict = requireCriticVerdict(submittedVerdict)
+Start with \`git diff\` and \`git status\` to see what actually changed, then read the changed files in full.`
 
-      if (!submittedVerdict) {
-        // Prose cannot drive a safety gate. Preserve it for diagnosis, then send
-        // the structured fail-closed verdict through the normal repair path.
-        writeBlock('Review (unstructured)', critic.report)
-      }
+      // Three specialists look at the same diff from different angles at once,
+      // rather than one generalist critic trying to hold correctness, security,
+      // and functional-bug-hunting in mind simultaneously. Each gets its own
+      // verdict tool instance since they run concurrently and must not share
+      // captured state.
+      const reviewers: { role: 'critic' | 'security' | 'bughunter'; name: string; focus: string }[] = [
+        { role: 'critic', name: 'critic#1', focus: 'Check specifically whether each promised step was really done, not just claimed.' },
+        { role: 'security', name: 'security#1', focus: 'Focus only on exploitable security weaknesses in what changed.' },
+        { role: 'bughunter', name: 'bughunter#1', focus: 'Focus only on functional/logic bugs in what changed.' },
+      ]
+
+      const reviewResults = await Promise.all(
+        reviewers.map(async (reviewer) => {
+          const verdictCapture = createVerdictTool()
+          const result = await runSubAgent({
+            role: reviewer.role,
+            name: reviewer.name,
+            briefing,
+            extraTools: [verdictCapture.tool],
+            signal,
+            prompt: `${reviewContext} ${reviewer.focus} Finish by calling submit_verdict.`,
+          })
+          const submittedVerdict = verdictCapture.taken()
+          if (!submittedVerdict) {
+            // Prose cannot drive a safety gate. Preserve it for diagnosis, then send
+            // the structured fail-closed verdict through the normal repair path.
+            writeBlock(`Review (unstructured) — ${reviewer.name}`, result.report)
+          }
+          return { reviewer: reviewer.name, usage: result.usage, verdict: requireCriticVerdict(submittedVerdict, reviewer.name) }
+        }),
+      )
+
+      for (const result of reviewResults) track(result.usage)
+      verdict = mergeVerdicts(reviewResults.map(({ reviewer, verdict }) => ({ reviewer, verdict })))
 
       journal.append('verdict', { ...verdict })
       if (!hasBlockingIssues(verdict)) {
