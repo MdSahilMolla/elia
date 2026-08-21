@@ -93,6 +93,8 @@ bun run dev --continue         # resume the most recent session in this director
 bun run dev --resume <id>      # resume a specific session
 
 bun run dev auto "<goal>"                # plan, delegate to a fleet, verify, repair, and learn — end to end
+bun run dev auto "<goal>" --fast         # bounded fast path for simple work: one reviewer, one repair, no polish/lessons
+bun run dev auto "<goal>" --thorough     # deeper bounded review and repair for high-risk changes
 bun run dev auto "<goal>" --yolo         # same, without pausing for plan approval
 bun run dev bench                        # score the current elia against its own benchmark suite
 bun run dev evolve                       # elia proposes and tries one improvement to its own source
