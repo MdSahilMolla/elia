@@ -37,7 +37,8 @@ rl.on("line", (line) => {
     return;
   }
 
-  const [from, to] = parts;
+  const from = parts[0]!;
+  const to = parts[1]!;
   const success = game.makeMove(from, to);
   if (!success) {
     console.log(`Invalid move: ${input}`);

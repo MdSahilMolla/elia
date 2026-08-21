@@ -49,6 +49,8 @@ Autonomous work:
                                      fleet of sub-agents, verify it, repair what failed, and
                                      record what it learned
   elia auto "<goal>" --yolo         Same, without waiting for you to approve the plan
+  elia auto "<goal>" --autonomous   Self-supervised alias for --yolo; executes, verifies, repairs, and polishes
+  elia auto "<goal>" --no-polish     Skip the bounded final quality pass
   elia auto "<goal>" --variants N   Run N independent implementation attempts in parallel,
                                      each in its own isolated git worktree, and keep only
                                      the one that verification — not an LLM's opinion — likes
@@ -200,7 +202,7 @@ async function runAuto(): Promise<void> {
     )
   }
 
-  const yolo = hasFlag('--yolo', '-y')
+  const yolo = hasFlag('--yolo', '-y', '--autonomous', '--self-supervise') || process.env.ELIA_AUTO_APPROVE === '1'
   if (!yolo && !process.stdin.isTTY) {
     writeError('elia auto needs a terminal to approve the plan. Re-run with --yolo to skip approval.')
     process.exitCode = 1
@@ -208,14 +210,14 @@ async function runAuto(): Promise<void> {
   }
 
   if (yolo) {
-    const result = await runAutonomousTask({ goal, approve: autoApprove, variants })
+    const result = await runAutonomousTask({ goal, approve: autoApprove, variants, polish: !hasFlag('--no-polish') })
     if (result.outcome !== 'completed') process.exitCode = 1
     return
   }
 
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout })
   try {
-    const result = await runAutonomousTask({ goal, approve: createInteractiveApprover(rl), variants })
+    const result = await runAutonomousTask({ goal, approve: createInteractiveApprover(rl), variants, polish: !hasFlag('--no-polish') })
     if (result.outcome !== 'completed' && result.outcome !== 'rejected') process.exitCode = 1
   } finally {
     rl.close()

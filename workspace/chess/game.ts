@@ -24,7 +24,11 @@ export class Game {
       return null;
     }
     const file = square[0];
-    const rank = parseInt(square[1], 10);
+    const rankChar = square[1];
+    if (file === undefined || rankChar === undefined) {
+      return null;
+    }
+    const rank = parseInt(rankChar, 10);
     const col = file.charCodeAt(0) - 'a'.charCodeAt(0);
     // Row 0 is the top of the board (rank 8), row 7 is the bottom (rank 1)
     const row = 8 - rank;
@@ -44,9 +48,14 @@ export class Game {
     const [fromRow, fromCol] = fromIdx;
     const [toRow, toCol] = toIdx;
     // Perform the move (no validation of piece colour or legality)
-    const piece = this.board.board[fromRow][fromCol];
-    this.board.board[toRow][toCol] = piece;
-    this.board.board[fromRow][fromCol] = "";
+    const fromBoardRow = this.board.board[fromRow];
+    const toBoardRow = this.board.board[toRow];
+    const piece = fromBoardRow?.[fromCol];
+    if (!fromBoardRow || !toBoardRow || piece === undefined) {
+      return false;
+    }
+    toBoardRow[toCol] = piece;
+    fromBoardRow[fromCol] = "";
     // Switch turn
     this.turn = this.turn === "w" ? "b" : "w";
     return true;

@@ -3,6 +3,7 @@ import { runAgentLoop, type ConversationMessage, type RunAgentLoopResult } from 
 import { allWorkerTools, cyberTools } from './tools/registry.ts'
 import { taskTool } from './tools/task.ts'
 import { previewTool } from './tools/preview.ts'
+import { browserTool } from './tools/browser.ts'
 import { writeText, writeThinking, writeUsageLine } from './ui/stream.ts'
 import { recordUsage, recordTopLevelTurn, formatUsageLine } from './usage.ts'
 import { createToolResultCache } from './speculation/cache.ts'
@@ -19,7 +20,7 @@ export type { AgentMode }
 // The engagement/scan tools are top-level-only too, and further gated to cyber
 // mode — a normal coding turn has no business scaffolding a security engagement.
 function topLevelTools(mode: AgentMode) {
-  return [...allWorkerTools(), taskTool, previewTool, ...(mode === 'cyber' ? cyberTools : [])]
+  return [...allWorkerTools(), taskTool, previewTool, browserTool, ...(mode === 'cyber' ? cyberTools : [])]
 }
 
 export async function runTurn(

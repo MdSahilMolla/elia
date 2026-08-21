@@ -31,6 +31,35 @@ Edit `.env` to pick a provider and set its key. `ELIA_PROVIDER` defaults to `ant
 
 Any provider's model can be overridden with `ELIA_MODEL`. `custom` (and any provider, if you need to point at a proxy or self-hosted gateway) also honors `ELIA_BASE_URL`.
 
+### Self-supervised execution and polish
+
+For a fully autonomous run, use `--autonomous` (an alias for `--yolo`):
+
+```bash
+bun run dev auto "improve the authentication flow and make the tests pass" --autonomous
+```
+
+Elia will orient itself, propose a plan internally, delegate independent work, execute the plan, run verification commands, repair failures, and perform a bounded final quality pass before reporting completion. The polish pass is conservative: it can improve concrete rough edges, tests, documentation, and error handling, but it may leave the tree unchanged when no safe improvement is justified. Use `--no-polish` only when a task explicitly requires the older execution path. External side effects such as purchases, publishing, deletion, sending messages, or subscription changes still require explicit confirmation.
+
+### Browser tasks
+
+Elia exposes a lead-agent `browser` tool for status checks, navigation, page snapshots, text extraction, clicking, typing, key presses, and waits. It never pretends browser work succeeded: every configured browser action returns its result to the agent, and the agent is instructed to re-read the page after meaningful actions.
+
+The browser tool connects through an enabled user-browser connector, a trusted local bridge, or a Chrome DevTools endpoint:
+
+```bash
+# Direct connector route, when the enabled connector exposes browser_navigate, browser_snapshot, etc.
+ELIA_BROWSER_MCP_SERVER="My Browser" bun run dev "open the dashboard and summarize its current status"
+# or
+ELIA_BROWSER_BRIDGE_COMMAND="/path/to/your/browser-bridge" bun run dev "open the dashboard and summarize its current status"
+# or
+ELIA_BROWSER_CDP_URL=http://127.0.0.1:9222 bun run dev "inspect the active page"
+```
+
+If a connector uses different tool names, override them with variables such as `ELIA_BROWSER_NAVIGATE_TOOL` and `ELIA_BROWSER_SNAPSHOT_TOOL`.
+
+A bridge receives one JSON request on stdin and should return one JSON or text response. Keep login credentials in the bridge or browser session, never in Elia prompts, source files, or command-line arguments. Elia must not bypass login challenges, CAPTCHAs, paywalls, or site safety controls. Actions that may send, buy, publish, delete, or change subscriptions require an explicit user approval represented by `confirmed=true`.
+
 ### The fast tier (optional, recommended)
 
 Elia routes work across two model tiers. The **deep** tier plans, builds, and reviews. The **fast** tier does the high-volume legwork — read-only scouts, summarising, end-of-run note taking — where a cheap model is indistinguishable but several times quicker.
