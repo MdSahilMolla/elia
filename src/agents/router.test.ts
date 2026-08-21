@@ -10,6 +10,9 @@ test('parseOverride recognises "as the X agent"', () => {
 test('parseOverride recognises "give me the X take"', () => {
   expect(parseOverride('give me the marketing take on this')).toBe('marketing')
   expect(parseOverride('what is the finance take here')).toBe('finance')
+  expect(parseOverride('give me the data analyst take here')).toBe('data')
+  expect(parseOverride('as the cybersecurity agent, review this scope')).toBe('cyber')
+  expect(parseOverride('as the communications agent, prepare an email')).toBe('communications')
 })
 
 test('parseOverride returns undefined for an unmarked request', () => {
@@ -32,6 +35,14 @@ test('keywordHint can return multiple personas for a request spanning domains', 
   const hint = keywordHint('should we build an in-house CRM or buy one, our budget is tight')
   expect(hint).toContain('tech')
   expect(hint).toContain('finance')
+})
+
+test('keywordHint matches the expanded specialist signals', () => {
+  const hint = keywordHint('automate an email workflow, profile the dataset, and evaluate an LLM')
+  expect(hint).toContain('automation')
+  expect(hint).toContain('communications')
+  expect(hint).toContain('data')
+  expect(hint).toContain('ai')
 })
 
 test('keywordHint returns an empty array when nothing matches', () => {

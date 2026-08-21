@@ -13,6 +13,7 @@ interface BrowserRequest {
   selector?: string
   ms?: number
   confirmed?: boolean
+  confirmationToken?: string
 }
 
 interface BrowserResult {
@@ -26,10 +27,12 @@ interface BrowserResult {
 const SENSITIVE_WORDS = /\b(buy|purchase|pay|checkout|send|publish|delete|remove|confirm|submit|transfer|wire|post|tweet|message|cancel|subscribe)\b/i
 const MAX_TEXT_LENGTH = 20_000
 const MAX_WAIT_MS = 30_000
+const APPROVAL_TTL_MS = 5 * 60_000
+const pendingApprovals = new Map<string, { fingerprint: string; expiresAt: number }>()
 
 export const browserTool: Tool = {
   name: 'browser',
-  description: `Control the user's browser through a configured bridge. Use status first, then navigate, snapshot/extract, click, type, press, or wait as needed. The bridge can be a user-Chrome connector or a Chrome DevTools endpoint configured outside Elia. Read the page after important actions and verify the final state instead of assuming a click worked. Never bypass authentication, CAPTCHAs, paywalls, or site safety controls. Actions that look like sending, purchasing, publishing, deleting, or changing subscriptions require confirmed=true after the user has explicitly approved that exact side effect.`,
+  description: `Control the user's browser through a configured bridge. Use status first, then navigate, snapshot/extract, click, type, press, or wait as needed. The bridge can be a user-Chrome connector or a Chrome DevTools endpoint configured outside Elia. Read the page after important actions and verify the final state instead of assuming a click worked. Never bypass authentication, CAPTCHAs, paywalls, or site safety controls. Actions that look like sending, purchasing, publishing, deleting, or changing subscriptions pause with an exact approval token; the token must be supplied after the user approves that exact side effect.`,
   input_schema: {
     type: 'object',
     properties: {
@@ -49,7 +52,11 @@ export const browserTool: Tool = {
       ms: { type: 'number', description: 'Milliseconds to wait, capped at 30 seconds' },
       confirmed: {
         type: 'boolean',
-        description: 'Must be true only after the user explicitly approved a detected external side effect',
+        description: 'Legacy confirmation flag; sensitive actions also require the exact confirmationToken returned by a paused action',
+      },
+      confirmationToken: {
+        type: 'string',
+        description: 'Exact approval token returned after a sensitive action is paused; expires after five minutes and is bound to the action details',
       },
     },
     required: ['action'],
@@ -59,9 +66,10 @@ export const browserTool: Tool = {
     const session = taskSessions.create('browser', `Browser: ${request.action}`, 'Queued browser action')
     const sideEffectText = [request.target, request.text, request.url].filter(Boolean).join(' ')
     const needsConfirmation = SENSITIVE_WORDS.test(sideEffectText) && request.action !== 'status' && request.action !== 'snapshot' && request.action !== 'extract'
-    if (needsConfirmation && !request.confirmed) {
+    if (needsConfirmation && !consumeApproval(request)) {
+      const token = createApprovalToken(request)
       taskSessions.update(session.id, { status: 'paused', action: 'Awaiting confirmation', detail: 'This action may create an external side effect' })
-      return `Confirmation required before browser action "${request.action}" because it may cause an external side effect. Ask the user to approve the exact action, then retry with confirmed=true. Task session: ${session.id}`
+      return `Confirmation required before browser action "${request.action}". Ask the user to approve this exact action, then retry with confirmationToken=${token}. The token expires in five minutes and cannot be reused for a changed target, recipient, or message. Task session: ${session.id}`
     }
 
     taskSessions.update(session.id, { status: 'running', action: request.action, detail: request.url ?? request.target ?? request.text?.slice(0, 120) ?? 'Working' })
@@ -106,6 +114,10 @@ export function validateRequest(input: Record<string, unknown>): BrowserRequest 
   if (action === 'wait') {
     const ms = typeof input.ms === 'number' && Number.isFinite(input.ms) ? Math.round(input.ms) : 500
     request.ms = Math.max(0, Math.min(MAX_WAIT_MS, ms))
+  }
+  if (input.confirmationToken !== undefined) {
+    if (typeof input.confirmationToken !== 'string' || input.confirmationToken.trim().length === 0) throw new Error('confirmationToken must be a non-empty string')
+    request.confirmationToken = input.confirmationToken.trim()
   }
   if (action === 'extract' && input.selector !== undefined) {
     if (typeof input.selector !== 'string' || input.selector.trim().length === 0) throw new Error('extract selector must be a non-empty string')
@@ -286,6 +298,29 @@ function formatBrowserResult(value: BrowserResult | string): string {
 
 function browserSetupHint(): string {
   return 'Configure ELIA_BROWSER_MCP_SERVER for an enabled user-Chrome connector, ELIA_BROWSER_BRIDGE_COMMAND for a trusted wrapper, or ELIA_BROWSER_CDP_URL for a Chrome DevTools endpoint. Keep credentials in the bridge environment, not in Elia prompts or source files.'
+}
+
+function requestFingerprint(request: BrowserRequest): string {
+  return JSON.stringify({ action: request.action, url: request.url ?? '', target: request.target ?? '', text: request.text ?? '', key: request.key ?? '', selector: request.selector ?? '', ms: request.ms ?? 0 })
+}
+
+function createApprovalToken(request: BrowserRequest): string {
+  const token = `approval_${crypto.randomUUID()}`
+  pendingApprovals.set(token, { fingerprint: requestFingerprint(request), expiresAt: Date.now() + APPROVAL_TTL_MS })
+  return token
+}
+
+function consumeApproval(request: BrowserRequest): boolean {
+  if (!request.confirmed || !request.confirmationToken) return false
+  const approval = pendingApprovals.get(request.confirmationToken)
+  if (!approval) return false
+  if (approval.expiresAt <= Date.now()) {
+    pendingApprovals.delete(request.confirmationToken)
+    return false
+  }
+  if (approval.fingerprint !== requestFingerprint(request)) return false
+  pendingApprovals.delete(request.confirmationToken)
+  return true
 }
 
 export function isSensitiveBrowserInput(input: Record<string, unknown>): boolean {

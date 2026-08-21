@@ -20,7 +20,7 @@ const CODES = {
 export type ColorName = keyof typeof CODES
 
 /** True when ANSI escapes should be emitted at all: a real TTY, and the user hasn't opted out. */
-export const colorEnabled = Boolean(process.stdout.isTTY) && !process.env.NO_COLOR
+export const colorEnabled = process.env.NODE_ENV !== 'test' && Boolean(process.stdout.isTTY) && !process.env.NO_COLOR
 
 const ANSI_PATTERN = /\x1b\[[0-9;]*m/g
 

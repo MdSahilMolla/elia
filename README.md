@@ -1,6 +1,6 @@
 # elia
 
-A fast, autonomous coding agent for the terminal, built on Bun. It streams model output live, calls tools (file read/write/edit, glob, grep, shell, browser) automatically in a loop, and works with multiple LLM providers. Every meaningful tool call passes through a deterministic autonomy governor, and autonomous runs produce a redacted action ledger plus a human-readable receipt.
+A fast, general-purpose autonomous agent for the terminal, built on Bun. It streams model output live, calls tools (file read/write/edit, glob, grep, shell, browser) automatically in a loop, and works with multiple LLM providers. Every meaningful tool call passes through a deterministic autonomy governor, and autonomous runs produce a redacted action ledger plus a human-readable receipt.
 
 Beyond the usual loop, elia does three things most terminal agents don't:
 
@@ -39,6 +39,12 @@ Any provider's model can be overridden with `ELIA_MODEL`. `openrouter` uses Open
 
 The selected provider and model remain primary. Use `/model auto` or set `ELIA_ROUTING_MODE=auto` to try another configured provider when the selected route fails before output because of a missing model, outage, network error, rate limit, or retryable server response. Fallback is immediate when another ready provider exists and never retries after partial output.
 
+### Specialist modes and capability contracts
+
+Elia routes requests across explicit specialist modes: **Marketing**, **Finance**, **Business Analyst**, **Data Analyst**, **Research**, **Cybersecurity**, **Automation**, **Communications**, **AI/ML**, and **Tech**. Automatic routing is available through `elia agent "<request>"`; interactive sessions can pin a mode with `/marketing`, `/finance`, `/business`, `/data`, `/research`, `/cybersecurity`, `/automation`, `/communications`, `/ai`, or `/tech`. Use `/capabilities` to inspect each mode’s risk class, preferred tools, and required output contract.
+
+Each specialist must separate facts, assumptions, recommendations, and unknowns. Finance and cybersecurity work require explicit assumptions or authorized scope; data work requires quality checks and reproducibility; research requires sources and citations; communications and automation require exact approval immediately before consequential external actions.
+
 ### Self-supervised execution and polish
 
 For a fully autonomous run, use `--autonomous` (an alias for `--yolo`):
@@ -48,6 +54,10 @@ bun run dev auto "improve the authentication flow and make the tests pass" --aut
 ```
 
 Elia will orient itself, propose a plan internally, delegate independent work, execute the plan, run verification commands, repair failures, and perform a bounded final quality pass before reporting completion. The polish pass is conservative: it can improve concrete rough edges, tests, documentation, and error handling, but it may leave the tree unchanged when no safe improvement is justified. Use `--no-polish` only when a task explicitly requires the older execution path. External side effects such as purchases, publishing, deletion, sending messages, or subscription changes still require explicit confirmation.
+
+### External communication and browser tasks
+
+Elia can prepare and, when the user has enabled a trusted browser or service connector, execute external-party workflows such as drafting email to a co-founder, preparing a calendar invitation, or updating a web application. The system deliberately separates **draft** from **send**: it must verify the recipient, channel, content, and final page state, and obtain explicit approval immediately before sending, publishing, deleting, purchasing, transferring, or changing account state. Login, CAPTCHA, payment, and sensitive-input steps require user takeover. If Gmail, Calendar, Outlook, or another connector is disabled, Elia must report that limitation instead of pretending it can access the account.
 
 ### Browser tasks
 

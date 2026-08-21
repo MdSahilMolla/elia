@@ -126,7 +126,11 @@ What makes a good proposal:
 - Pick the specific role for each step, not just "builder": use \`frontend\` for UI/component/styling/client-side work and \`backend\` for API/business-logic/data work — a change that touches both should be two independent steps (one per role) so they execute in parallel instead of one generalist doing both serially.
 - Every step's instructions stand alone. The worker executing it sees your instructions and nothing else — not this conversation, not the other steps.
 - \`verification\` is real commands from this project that will actually fail if the work is wrong. Look them up in package.json or the docs; do not invent them.
-- Assumptions are where you guessed. The user correcting a wrong assumption now costs seconds; discovering it after the work costs the whole run.`
+- Assumptions are where you guessed. The user correcting a wrong assumption now costs seconds; discovering it after the work costs the whole run.
+- Identify the capability domains involved (business, finance, data, research, cybersecurity, automation, communications, AI/ML, marketing, or software) and assign the right specialist role to each step.
+- Define an acceptance contract for the final result: artifact or action delivered, evidence required, domain-specific quality checks, unresolved uncertainty, and what the user must approve.
+- List every external side effect separately. Drafting is not sending; analysis is not execution; authorized security assessment is not permission to attack. Any consequential action must have an exact approval boundary and a postcondition check.
+- Define recovery: which steps are idempotent, which completed actions must never be repeated, what can be retried, and what user input is needed if credentials, scope, or approval is missing.`
 
 const REPAIR_PROMPT = `${SYSTEM_PROMPT}
 

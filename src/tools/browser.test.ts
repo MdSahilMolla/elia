@@ -18,11 +18,34 @@ test('sensitive browser inputs are detected conservatively', () => {
   expect(isSensitiveBrowserInput({ target: 'Read product details' })).toBe(false)
 })
 
-test('side-effecting actions require explicit confirmation and become paused sessions', async () => {
+test('side-effecting actions require an exact approval token and become paused sessions', async () => {
   const result = await browserTool.execute({ action: 'click', target: 'Publish' })
   expect(result).toContain('Confirmation required')
-  expect(result).toContain('confirmed=true')
+  expect(result).toContain('confirmationToken=approval_')
   expect(result).toContain('Task session:')
+})
+
+test('approval tokens are bound to the exact target and consumed once', async () => {
+  const pending = await browserTool.execute({ action: 'click', target: 'Send' })
+  const token = pending.match(/confirmationToken=(approval_[^\. ]+)/)?.[1]
+  expect(token).toBeDefined()
+
+  const previousBridge = process.env.ELIA_BROWSER_BRIDGE_COMMAND
+  process.env.ELIA_BROWSER_BRIDGE_COMMAND = 'cat'
+  try {
+    const changedTarget = await browserTool.execute({ action: 'click', target: 'Delete', confirmed: true, confirmationToken: token })
+    expect(changedTarget).toContain('Confirmation required')
+
+    const approved = await browserTool.execute({ action: 'click', target: 'Send', confirmed: true, confirmationToken: token })
+    expect(approved).not.toContain('Confirmation required')
+    expect(approved).toContain('Task session:')
+
+    const reused = await browserTool.execute({ action: 'click', target: 'Send', confirmed: true, confirmationToken: token })
+    expect(reused).toContain('Confirmation required')
+  } finally {
+    if (previousBridge === undefined) delete process.env.ELIA_BROWSER_BRIDGE_COMMAND
+    else process.env.ELIA_BROWSER_BRIDGE_COMMAND = previousBridge
+  }
 })
 
 test('wait works without a configured browser bridge and records a session', async () => {

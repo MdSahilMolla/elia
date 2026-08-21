@@ -12,12 +12,21 @@ import { pick } from './ui/picker.ts'
 import { createLiveActionWindow, openTaskDashboard } from './ui/taskDashboard.ts'
 import { inferTaskKind, taskSessions } from './taskSessions.ts'
 import { isAgentPersona, type AgentPersona } from './agents/types.ts'
+import { CAPABILITIES } from './capabilities.ts'
 import type { ActionApproval, ActionAssessment, ActionRequest } from './autonomy/governor.ts'
 
 const REPL_COMMANDS: SlashCommand[] = [
+  { name: '/capabilities', description: 'list specialist capabilities, risk classes, and output contracts' },
   { name: '/cyber', description: 'switch to cyber mode — authorized security testing, vuln research, CTFs' },
   { name: '/marketing', description: 'switch to the Marketing agent persona for this session' },
   { name: '/finance', description: 'switch to the Finance agent persona for this session' },
+  { name: '/business', description: 'switch to the Business Analyst persona for this session' },
+  { name: '/data', description: 'switch to the Data Analyst persona for this session' },
+  { name: '/research', description: 'switch to the Research persona for this session' },
+  { name: '/cybersecurity', description: 'switch to the Cybersecurity persona for this session' },
+  { name: '/automation', description: 'switch to the Automation persona for this session' },
+  { name: '/communications', description: 'switch to the Communications persona for this session' },
+  { name: '/ai', description: 'switch to the AI/ML persona for this session' },
   { name: '/tech', description: 'switch to the Tech agent persona for this session' },
   { name: '/normal', description: "switch back to elia's normal coding mode" },
   { name: '/mode', description: '/mode manual (default) asks only for risky commands, /mode auto never asks' },
@@ -33,7 +42,7 @@ const SUBCOMMANDS = ['auto', 'agent', 'evolve', 'bench', 'skills', 'runs', 'fork
 type Subcommand = (typeof SUBCOMMANDS)[number]
 
 function printHelp(): void {
-  console.log(`elia — an autonomous coding agent for your terminal
+  console.log(`elia — a general-purpose autonomous agent for your terminal
 
 Usage:
   elia                        Start an interactive session
@@ -65,10 +74,10 @@ Autonomous work:
                                      (today's single-attempt behavior, unchanged)
 
 Multi-agent:
-  elia agent "<request>"      Route the request to Marketing, Finance, and/or Tech — one or
-                              more specialist personas, chosen automatically — and answer
-                              in that persona's voice. Multi-domain requests get labeled
-                              "## X take" sections plus a combined recommendation.
+  elia agent "<request>"      Route the request to one or more specialist personas — Business,
+                              Data, Research, Cybersecurity, Automation, Communications, AI/ML,
+                              Marketing, Finance, or Tech — and answer in their voice. Multi-domain
+                              requests get labeled "## X take" sections plus a combined recommendation.
 
 Self-improvement:
   elia bench                  Score the current elia against its own benchmark suite
@@ -94,10 +103,13 @@ Inside an interactive session:
                               tab to accept, enter to run, left/right to edit as usual
   rewind                      List rewind points for this session
   rewind <n>                  Restore conversation + files to just before turn <n>
+  /capabilities               List specialist capabilities, risk classes, and output contracts
   /cyber                      Switch to cyber mode: authorized security testing, vuln
                               research, CTFs, and defensive work — same tools, a
                               security-focused system prompt with authorization guardrails
-  /marketing /finance /tech   Switch to that agent persona for the rest of the session
+  /marketing /finance /business /data /research /cybersecurity
+  /automation /communications /ai /tech
+                              Switch to that specialist persona for the rest of the session
   /normal                     Switch back to elia's normal coding mode
   /mode auto                  Skip the pre-flight risk prompt; critical actions remain governed
   /mode manual                Go back to risk-checking and asking only when it matters (default)
@@ -735,6 +747,13 @@ async function runInteractive(): Promise<void> {
     if (trimmed === 'exit' || trimmed === 'quit') break
     if (trimmed === '') continue
 
+    if (trimmed === '/capabilities') {
+      for (const capability of CAPABILITIES) {
+        writeUsageLine(`${capability.label} [${capability.persona}] · risk: ${capability.risk} · ${capability.summary}`)
+        writeUsageLine(`  output: ${capability.outputContract.join('; ')}`)
+      }
+      continue
+    }
     if (trimmed === '/cyber' || trimmed === '/cyber on') {
       mode = 'cyber'
       writeNotice(
@@ -742,9 +761,10 @@ async function runInteractive(): Promise<void> {
       )
       continue
     }
-    const personaMatch = /^\/(marketing|finance|tech)$/.exec(trimmed)
-    if (personaMatch && isAgentPersona(personaMatch[1])) {
-      persona = personaMatch[1] as AgentPersona
+    const personaMatch = /^\/(marketing|finance|business|data|research|cybersecurity|automation|communications|ai|tech)$/.exec(trimmed)
+    const requestedPersona = personaMatch?.[1] === 'cybersecurity' ? 'cyber' : personaMatch?.[1]
+    if (requestedPersona && isAgentPersona(requestedPersona)) {
+      persona = requestedPersona
       writeNotice(
         `${persona.charAt(0).toUpperCase()}${persona.slice(1)} agent on — elia will answer in this persona until /normal.`,
       )

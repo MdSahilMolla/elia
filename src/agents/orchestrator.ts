@@ -8,6 +8,7 @@ import { writeText, writeNotice } from '../ui/stream.ts'
 import type { AgentPersona } from './types.ts'
 import { parseOverride, classifyRequest } from './router.ts'
 import { personaPrompt, personaTools } from './personas.ts'
+import { capabilityForPersona } from '../capabilities.ts'
 
 export interface AgentSectionResult {
   persona: AgentPersona
@@ -29,11 +30,9 @@ function toolsForPersona(persona: AgentPersona) {
 }
 
 /**
- * Marketing and Finance do focused, mostly single-pass creative/analytical
- * work with a small toolset (no run_command, no task) — the coding fleet's
- * 80-step default is sized for open-ended engineering work they never do, so
- * a much smaller budget keeps a stuck run from burning tokens for minutes.
- * Tech keeps elia's normal budget since it uses elia's normal toolset.
+ * Domain specialists do focused work with scoped toolsets; Tech keeps the full
+ * worker set plus task delegation. A bounded budget keeps a stuck specialist
+ * from burning tokens for minutes while still allowing multi-step analysis.
  */
 function maxStepsForPersona(persona: AgentPersona): number | undefined {
   return persona === 'tech' ? undefined : 30
@@ -56,10 +55,14 @@ async function runSection(
       : ''
 
   const messages: ConversationMessage[] = [{ role: 'user', content: [{ type: 'text', text: `${request}${handoff}` }] }]
+  const capability = capabilityForPersona(persona)
+  const contract = capability
+    ? `\n\n## Capability contract\nRisk class: ${capability.risk}.\nRequired output elements: ${capability.outputContract.join('; ')}.\nPreferred tools: ${capability.preferredTools.join(', ')}.\nDo not claim completion until the required elements are addressed or explicitly marked unavailable.`
+    : ''
 
   const result = await runAgentLoop({
     messages,
-    systemPrompt: personaPrompt(persona),
+    systemPrompt: `${personaPrompt(persona)}${contract}`,
     tools: toolsForPersona(persona),
     onText: writeText,
     useAnimation: true,
@@ -105,7 +108,7 @@ async function synthesize(request: string, sections: AgentSectionResult[]): Prom
   return { text: lastAssistantText(messages, '(no response)'), usage: result.usage }
 }
 
-const SEARCH_TOOL_PERSONAS: AgentPersona[] = ['marketing', 'finance']
+const SEARCH_TOOL_PERSONAS: AgentPersona[] = ['marketing', 'finance', 'business', 'data', 'research', 'automation', 'communications', 'ai', 'cyber']
 const warnedPersonas = new Set<AgentPersona>()
 
 /**
@@ -125,12 +128,10 @@ function warnIfSearchUnconfigured(personas: AgentPersona[]): void {
 }
 
 /**
- * Routes a request to Marketing, Finance, and/or Tech and runs each in
- * sequence, carrying context forward so later agents don't repeat earlier
- * ones' work. A single persona just answers in that persona's voice — the
- * routing stays invisible, per the orchestrator's own rule not to expose it
- * unless asked. More than one persona gets "## X take" headers plus a
- * combined recommendation.
+ * Routes a request to one or more specialist personas and runs each in
+ * dependency order, carrying context forward so later agents don't repeat
+ * earlier work. A single persona answers in that persona's voice; multi-domain
+ * requests get labeled sections plus a combined recommendation.
  */
 export async function runAgentRequest(request: string, opts: { signal?: AbortSignal } = {}): Promise<AgentRunResult> {
   const override = parseOverride(request)
@@ -186,7 +187,7 @@ export async function runAgentRequest(request: string, opts: { signal?: AbortSig
 
 /**
  * Forces a single persona for one turn of an ongoing conversation (REPL
- * /marketing, /finance, /tech), mutating `messages` in place like agent.ts's
+ * persona commands, mutating `messages` in place like agent.ts's
  * runTurn — used when the user has explicitly picked a persona for the rest
  * of the session, so the router never runs.
  */

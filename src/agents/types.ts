@@ -1,6 +1,27 @@
-export type AgentPersona = 'marketing' | 'finance' | 'tech'
+export type AgentPersona =
+  | 'marketing'
+  | 'finance'
+  | 'business'
+  | 'data'
+  | 'research'
+  | 'cyber'
+  | 'automation'
+  | 'communications'
+  | 'ai'
+  | 'tech'
 
-export const AGENT_PERSONAS: AgentPersona[] = ['marketing', 'finance', 'tech']
+export const AGENT_PERSONAS: AgentPersona[] = [
+  'business',
+  'data',
+  'research',
+  'cyber',
+  'automation',
+  'communications',
+  'ai',
+  'marketing',
+  'finance',
+  'tech',
+]
 
 export function isAgentPersona(value: unknown): value is AgentPersona {
   return typeof value === 'string' && (AGENT_PERSONAS as string[]).includes(value)

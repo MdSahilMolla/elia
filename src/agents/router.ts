@@ -3,21 +3,22 @@ import { runAgentLoop, type ConversationMessage } from '../agentLoop.ts'
 import { autoFallbacksFor, tierConfig } from '../config.ts'
 import type { Usage } from '../providers/types.ts'
 import { AGENT_PERSONAS, isAgentPersona, type AgentPersona, type AgentRoute } from './types.ts'
+import { detectCapabilities } from '../capabilities.ts'
 
 const OVERRIDE_PATTERNS: { pattern: RegExp; persona: AgentPersona }[] = [
-  { pattern: /\bas the marketing agent\b/i, persona: 'marketing' },
-  { pattern: /\bmarketing take\b/i, persona: 'marketing' },
-  { pattern: /\bas the finance agent\b/i, persona: 'finance' },
-  { pattern: /\bfinance take\b/i, persona: 'finance' },
-  { pattern: /\bas the tech agent\b/i, persona: 'tech' },
-  { pattern: /\btech take\b/i, persona: 'tech' },
+  { pattern: /\bas the marketing agent\b|\bmarketing take\b/i, persona: 'marketing' },
+  { pattern: /\bas the finance agent\b|\bfinance take\b/i, persona: 'finance' },
+  { pattern: /\bas the business analyst\b|\bbusiness analysis take\b|\bbusiness analyst take\b/i, persona: 'business' },
+  { pattern: /\bas the data analyst\b|\bdata analysis take\b|\bdata analyst take\b/i, persona: 'data' },
+  { pattern: /\bas the research agent\b|\bresearch take\b/i, persona: 'research' },
+  { pattern: /\bas the cybersecurity agent\b|\bas the cyber agent\b|\bcybersecurity take\b/i, persona: 'cyber' },
+  { pattern: /\bas the automation agent\b|\bautomation take\b/i, persona: 'automation' },
+  { pattern: /\bas the communications agent\b|\bcommunications take\b/i, persona: 'communications' },
+  { pattern: /\bas the AI agent\b|\bas the AI\/ML agent\b|\bAI take\b/i, persona: 'ai' },
+  { pattern: /\bas the tech agent\b|\btech take\b/i, persona: 'tech' },
 ]
 
-/**
- * An explicit ask like "as the Tech agent..." or "give me the Marketing take"
- * always wins over classification, per the orchestrator's routing rules — and
- * checked first so it never costs a model round-trip.
- */
+/** Explicit requests always win over classification and cost no model round-trip. */
 export function parseOverride(request: string): AgentPersona | undefined {
   for (const { pattern, persona } of OVERRIDE_PATTERNS) {
     if (pattern.test(request)) return persona
@@ -25,33 +26,27 @@ export function parseOverride(request: string): AgentPersona | undefined {
   return undefined
 }
 
-const KEYWORD_TABLE: { pattern: RegExp; persona: AgentPersona }[] = [
-  { pattern: /\b(campaign|ad copy|audience|brand|launch|content calendar)\b/i, persona: 'marketing' },
-  { pattern: /\b(budget|forecast|\bcost\b|pricing|\broi\b|cash flow|p&l|runway)\b/i, persona: 'finance' },
-  { pattern: /\b(bug|\bbuild\b|automate|integrate|deploy|script|\bapi\b|error|how do i set up)\b/i, persona: 'tech' },
-]
-
-/** The spec's keyword first-pass, as a pure function so it's testable and can be handed to the router as a hint. */
 export function keywordHint(request: string): AgentPersona[] {
-  const hits: AgentPersona[] = []
-  for (const { pattern, persona } of KEYWORD_TABLE) {
-    if (pattern.test(request) && !hits.includes(persona)) hits.push(persona)
-  }
-  return hits
+  return detectCapabilities(request).map((capability) => capability.persona)
 }
 
-const ROUTER_PROMPT = `You are the routing layer in front of three specialist agents: Marketing, Finance, and Tech.
+const ROUTER_PROMPT = `You are the routing layer in front of these specialist agents: Marketing, Finance, Business Analyst, Data Analyst, Research, Cybersecurity, Automation, Communications, AI/ML, and Tech.
 
-Read the request and decide which agent(s) should handle it, and in what order they should run if more than one applies.
+Read the request and decide which agent(s) should handle it, and in what order they should run if more than one applies. Route to the smallest set that can complete the work, but include every domain whose output is needed. Treat keyword hints as weak evidence only.
 
-First-pass signal table (use judgment beyond it — this is not exhaustive):
-- campaign, ad copy, audience, brand, launch, content calendar -> marketing
-- budget, forecast, cost, pricing, ROI, cash flow, P&L, runway -> finance
-- bug, build, automate, integrate, deploy, script, API, error, "how do I set up..." -> tech
+Specialist boundaries:
+- marketing: campaigns, brand, copy, audience, launches
+- finance: budgets, forecasts, pricing, unit economics, financial scenarios
+- business: requirements, process/KPI analysis, business cases, stakeholder decisions
+- data: datasets, metrics, statistics, experiments, dashboards, reproducible analysis
+- research: evidence gathering, source synthesis, fact checking, due diligence
+- cyber: authorized defensive security, threat modeling, vulnerability triage, remediation
+- automation: workflows, triggers, schedules, APIs, integrations, resumable execution
+- communications: drafting and preparing email, messages, calendar, and stakeholder updates
+- ai: AI/ML systems, model selection, prompts, evaluation, retrieval, inference
+- tech: coding, debugging, infrastructure, implementation, and technical integration
 
-Route to more than one agent when the request genuinely spans domains — e.g. "should we build or buy this" needs finance then tech; "plan the launch for our new pricing tier" needs marketing then finance. List personas in the order they should run: whichever agent's output the others need as input goes first.
-
-Call submit_route exactly once with your decision.`
+For external communication or security work, route to the specialist even when Tech is also needed. Call submit_route exactly once with the personas in dependency order.`
 
 interface RouteCapture {
   tool: Tool
@@ -60,62 +55,33 @@ interface RouteCapture {
 
 function createRouteTool(): RouteCapture {
   let captured: AgentRoute | undefined
-
   const tool: Tool = {
     name: 'submit_route',
-    description: 'Submit which agent(s) should handle this request, in run order. Call exactly once.',
+    description: 'Submit which specialist agent(s) should handle this request, in dependency order. Call exactly once.',
     input_schema: {
       type: 'object',
       properties: {
-        personas: {
-          type: 'array',
-          items: { type: 'string', enum: AGENT_PERSONAS },
-          description: 'One or more of: marketing, finance, tech — in the order they should run',
-        },
-        rationale: { type: 'string', description: 'One sentence: why this routing' },
+        personas: { type: 'array', items: { type: 'string', enum: AGENT_PERSONAS }, description: 'One or more specialist names in dependency order' },
+        rationale: { type: 'string', description: 'One sentence explaining the route' },
       },
       required: ['personas', 'rationale'],
     },
     async execute(input) {
       const raw = Array.isArray(input.personas) ? input.personas.filter(isAgentPersona) : []
-      // A model can plausibly list the same persona twice (or repeat one while also
-      // meaning a different order) — dedupe while keeping first-seen order rather
-      // than running that persona's turn more than once.
       const personas = [...new Set(raw)]
-      if (personas.length === 0) {
-        throw new Error('personas must include at least one of: marketing, finance, tech. Call submit_route again.')
-      }
+      if (personas.length === 0) throw new Error(`personas must include at least one of: ${AGENT_PERSONAS.join(', ')}`)
       captured = { personas, rationale: typeof input.rationale === 'string' ? input.rationale : '' }
       return 'Route recorded.'
     },
   }
-
-  return {
-    tool,
-    taken() {
-      const route = captured
-      captured = undefined
-      return route
-    },
-  }
+  return { tool, taken: () => { const route = captured; captured = undefined; return route } }
 }
 
-/**
- * Classifies a request into one or more personas via a cheap fast-tier call.
- * Falls back to ['tech'] — elia's original default persona — if the model
- * never calls submit_route, so a router hiccup degrades gracefully instead of
- * failing the whole request. Returns its own usage so the caller can fold the
- * routing cost into the run's total instead of losing it silently.
- */
 export async function classifyRequest(request: string): Promise<AgentRoute & { usage: Usage }> {
   const routeCapture = createRouteTool()
   const hint = keywordHint(request)
-  const hintLine = hint.length > 0 ? `\n\n(First-pass keyword signal: ${hint.join(', ')} — use your judgment, this is only a hint.)` : ''
-
-  const messages: ConversationMessage[] = [
-    { role: 'user', content: [{ type: 'text', text: `Request:\n${request}${hintLine}` }] },
-  ]
-
+  const hintLine = hint.length > 0 ? `\n\n(Weak keyword signal: ${hint.join(', ')} — use judgment; this is not a decision.)` : ''
+  const messages: ConversationMessage[] = [{ role: 'user', content: [{ type: 'text', text: `Request:\n${request}${hintLine}` }] }]
   const fast = tierConfig('fast')
   const result = await runAgentLoop({
     messages,
@@ -129,10 +95,6 @@ export async function classifyRequest(request: string): Promise<AgentRoute & { u
     useAnimation: false,
     verbose: false,
   })
-
-  const route = routeCapture.taken() ?? {
-    personas: ['tech'] as AgentPersona[],
-    rationale: 'router did not classify the request; defaulting to tech',
-  }
+  const route = routeCapture.taken() ?? { personas: ['tech'] as AgentPersona[], rationale: 'router did not classify the request; defaulting to tech' }
   return { ...route, usage: result.usage }
 }
