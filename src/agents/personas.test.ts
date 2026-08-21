@@ -22,5 +22,12 @@ test('cyber specialist receives scoped security tools and browser access', () =>
 test('communications specialist can use the browser but has no shell tool', () => {
   const names = personaTools('communications').map((tool) => tool.name)
   expect(names).toContain('browser')
+  expect(names).toContain('communication')
   expect(names).not.toContain('run_command')
+})
+
+test('automation specialist can coordinate browser and communication workflows', () => {
+  const names = personaTools('automation').map((tool) => tool.name)
+  expect(names).toContain('browser')
+  expect(names).toContain('communication')
 })

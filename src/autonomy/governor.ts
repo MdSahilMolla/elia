@@ -49,9 +49,16 @@ export function assessAction(request: ActionRequest, cwd = currentAgent().cwd ??
 
   if (name === 'run_command') return assessCommand(joined, cwd)
 
+  if (name === 'communication') {
+    const action = typeof input.action === 'string' ? input.action : 'unknown'
+    if (action === 'send') return assessment('critical', 'approve', 'communication send creates an external message or event', 'communication.send', resources, false)
+    if (action === 'verify') return assessment('review', 'approve', 'communication verification reads external delivery state', 'communication.verify', resources, true)
+    return assessment('safe', 'allow', `communication ${action} only manages a durable draft locally`, `communication.${action}`, resources, true)
+  }
+
   if (name === 'browser') {
     const action = typeof input.action === 'string' ? input.action : 'unknown'
-    if (['status', 'navigate', 'snapshot', 'extract', 'wait'].includes(action)) {
+    if (['status', 'navigate', 'refresh', 'back', 'forward', 'snapshot', 'extract', 'scroll', 'wait', 'wait_for'].includes(action)) {
       return assessment('safe', 'allow', `browser ${action} is observational or navigation-only`, `browser.${action}`, resources, true)
     }
     return assessment('critical', 'approve', `browser ${action} changes page state and needs an authorization record`, `browser.${action}`, resources, false)
@@ -179,7 +186,7 @@ function isOutside(path: string, cwd: string): boolean {
 export function redactActionInput(tool: string, input: Record<string, unknown>): Record<string, unknown> {
   const output: Record<string, unknown> = {}
   for (const [key, value] of Object.entries(input)) {
-    if (SECRET_KEY.test(key) || (tool === 'browser' && input.action === 'type' && key === 'text')) {
+    if (SECRET_KEY.test(key) || (tool === 'browser' && input.action === 'type' && key === 'text') || (tool === 'communication' && ['body', 'recipient', 'cc', 'bcc', 'attachments'].includes(key))) {
       output[key] = '[REDACTED]'
       continue
     }

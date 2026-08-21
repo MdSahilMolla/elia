@@ -1,5 +1,5 @@
 import { SHARED_CONTEXT, memorySections } from '../config.ts'
-import { tools as baseTools, businessTools, browserTools, cyberTools, getSynthesizedTools } from '../tools/registry.ts'
+import { tools as baseTools, businessTools, browserTools, communicationTools, cyberTools, getSynthesizedTools } from '../tools/registry.ts'
 import type { Tool } from '../tools/types.ts'
 import type { AgentPersona } from './types.ts'
 
@@ -103,10 +103,10 @@ const PERSONA_TOOL_NAMES: Record<AgentPersona, string[]> = {
   finance: ['read_file', 'list_files', 'grep', 'write_file', 'edit_file', 'web_search', 'web_fetch', 'read_spreadsheet'],
   business: ['read_file', 'list_files', 'grep', 'write_file', 'edit_file', 'web_search', 'web_fetch', 'read_spreadsheet'],
   data: ['read_file', 'list_files', 'grep', 'write_file', 'edit_file', 'run_command', 'web_search', 'web_fetch', 'read_spreadsheet'],
-  research: ['read_file', 'list_files', 'grep', 'write_file', 'edit_file', 'web_search', 'web_fetch', 'browser'],
+  research: ['read_file', 'list_files', 'grep', 'write_file', 'edit_file', 'web_search', 'web_fetch', 'browser', 'communication'],
   cyber: ['read_file', 'list_files', 'grep', 'run_command', 'write_file', 'edit_file', 'web_search', 'web_fetch', 'browser', 'new_engagement', 'run_security_tool'],
-  automation: ['read_file', 'list_files', 'grep', 'run_command', 'write_file', 'edit_file', 'web_search', 'web_fetch', 'browser'],
-  communications: ['read_file', 'list_files', 'grep', 'write_file', 'edit_file', 'web_search', 'web_fetch', 'browser'],
+  automation: ['read_file', 'list_files', 'grep', 'run_command', 'write_file', 'edit_file', 'web_search', 'web_fetch', 'browser', 'communication'],
+  communications: ['read_file', 'list_files', 'grep', 'write_file', 'edit_file', 'web_search', 'web_fetch', 'browser', 'communication'],
   ai: ['read_file', 'list_files', 'grep', 'run_command', 'write_file', 'edit_file', 'web_search', 'web_fetch', 'read_spreadsheet', 'browser'],
   tech: [],
 }
@@ -117,7 +117,7 @@ const PERSONA_TOOL_NAMES: Record<AgentPersona, string[]> = {
  * scoped security tools in addition to its read/write/browser surface.
  */
 export function personaTools(persona: Exclude<AgentPersona, 'tech'>, selectedSkillNames?: string[]): Tool[] {
-  const pool = [...baseTools, ...businessTools, ...browserTools, ...getSynthesizedTools(), ...(persona === 'cyber' ? cyberTools : [])]
+  const pool = [...baseTools, ...businessTools, ...browserTools, ...communicationTools, ...getSynthesizedTools(), ...(persona === 'cyber' ? cyberTools : [])]
   const allowed = PERSONA_TOOL_NAMES[persona]
   const selected = new Set(selectedSkillNames ?? [])
   const synthesized = new Set(getSynthesizedTools().map((tool) => tool.name))

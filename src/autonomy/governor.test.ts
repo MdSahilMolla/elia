@@ -74,4 +74,14 @@ describe('autonomy governor', () => {
       text: '[REDACTED]',
     })
   })
+
+  test('communication sends require approval while drafts remain safe', () => {
+    const send = assessAction({ name: 'communication', input: { action: 'send', draftId: 'comm_12345678' } })
+    const draft = assessAction({ name: 'communication', input: { action: 'draft', channel: 'email' } })
+    const verify = assessAction({ name: 'communication', input: { action: 'verify', draftId: 'comm_12345678' } })
+    expect(send.risk).toBe('critical')
+    expect(send.decision).toBe('approve')
+    expect(draft.decision).toBe('allow')
+    expect(verify.risk).toBe('review')
+  })
 })

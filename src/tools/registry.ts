@@ -12,6 +12,7 @@ import { webFetchTool } from './webFetch.ts'
 import { readSpreadsheetTool } from './readSpreadsheet.ts'
 import { recallTool } from './recall.ts'
 import { browserTool } from './browser.ts'
+import { communicationTool } from './communication.ts'
 import { projectProfileTool } from './projectProfile.ts'
 import type { Tool } from './types.ts'
 
@@ -32,6 +33,9 @@ export const collaborationTools: Tool[] = [boardPostTool, boardReadTool]
 
 /** Browser observation is available to workers; mutations are governed at runtime. */
 export const browserTools: Tool[] = [browserTool]
+
+/** Durable draft/send/verify workflows for external communication; consequential actions remain governed. */
+export const communicationTools: Tool[] = [communicationTool]
 
 /** Only granted to the lead agent's own turn, and only in cyber mode — see agent.ts. */
 export const cyberTools: Tool[] = [newEngagementTool, runSecurityToolTool]
@@ -60,7 +64,7 @@ export function getSynthesizedTools(): Tool[] {
 
 /** Every tool available to a worker: built-ins, collaboration, and anything elia has synthesized. */
 export function allWorkerTools(): Tool[] {
-  return [...tools, ...collaborationTools, ...browserTools, ...synthesizedTools]
+  return [...tools, ...collaborationTools, ...browserTools, ...communicationTools, ...synthesizedTools]
 }
 
 export function findTool(name: string): Tool | undefined {

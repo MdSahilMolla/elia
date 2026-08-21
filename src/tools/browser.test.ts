@@ -74,3 +74,26 @@ test('reports missing bridge configuration as an actionable browser failure', as
     else process.env.ELIA_BROWSER_CDP_URL = previousCdp
   }
 })
+
+test('validateRequest supports bounded scroll and wait-for actions', () => {
+  expect(validateRequest({ action: 'scroll', direction: 'down', amount: 900 })).toMatchObject({ action: 'scroll', direction: 'down', amount: 900 })
+  expect(validateRequest({ action: 'wait_for', expectText: 'Ready', ms: 1000 })).toMatchObject({ action: 'wait_for', expectText: 'Ready', ms: 1000 })
+  expect(validateRequest({ action: 'verify', expectUrl: 'https://example.com' })).toMatchObject({ action: 'verify', expectUrl: 'https://example.com' })
+})
+
+test('verify requires an explicit expectation', () => {
+  expect(() => validateRequest({ action: 'verify' })).toThrow('verify requires')
+})
+
+test('post-action URL expectations are checked against a follow-up snapshot', async () => {
+  const previousBridge = process.env.ELIA_BROWSER_BRIDGE_COMMAND
+  process.env.ELIA_BROWSER_BRIDGE_COMMAND = "printf '%s' '{\"ok\":true,\"result\":{\"url\":\"https://example.com/done\",\"text\":\"Done\"}}'"
+  try {
+    const result = await browserTool.execute({ action: 'navigate', url: 'https://example.com/start', expectUrl: 'https://example.com/done' })
+    expect(result).toContain('https://example.com/done')
+    expect(result).toContain('Task session:')
+  } finally {
+    if (previousBridge === undefined) delete process.env.ELIA_BROWSER_BRIDGE_COMMAND
+    else process.env.ELIA_BROWSER_BRIDGE_COMMAND = previousBridge
+  }
+})
