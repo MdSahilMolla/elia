@@ -7,6 +7,7 @@ const originalBaseURL = process.env.ELIA_BASE_URL
 const originalGoogleKey = process.env.GEMINI_API_KEY
 const originalNvidiaKey = process.env.NVIDIA_API_KEY
 const originalOpenRouterKey = process.env.OPENROUTER_API_KEY
+const originalMistralKey = process.env.MISTRAL_API_KEY
 
 function restore(name: string, value: string | undefined): void {
   if (value === undefined) delete process.env[name]
@@ -20,6 +21,7 @@ beforeEach(() => {
   delete process.env.GEMINI_API_KEY
   delete process.env.NVIDIA_API_KEY
   delete process.env.OPENROUTER_API_KEY
+  delete process.env.MISTRAL_API_KEY
 })
 
 afterEach(() => {
@@ -29,6 +31,7 @@ afterEach(() => {
   restore('GEMINI_API_KEY', originalGoogleKey)
   restore('NVIDIA_API_KEY', originalNvidiaKey)
   restore('OPENROUTER_API_KEY', originalOpenRouterKey)
+  restore('MISTRAL_API_KEY', originalMistralKey)
 })
 
 test('Google Gemini has a documented default model and reports configuration from its key variable', () => {
@@ -83,4 +86,22 @@ test('OpenRouter resolves through the OpenAI-compatible adapter', () => {
   if ('error' in resolved) return
   expect(resolved.providerName).toBe('openrouter')
   expect(resolved.model).toBe('openrouter/auto')
+})
+
+test('Mistral has a documented default model and reports configuration from its key variable', () => {
+  expect(providerPresetDefaultModel('mistral')).toBe('mistral-large-latest')
+
+  process.env.MISTRAL_API_KEY = 'test-mistral-key'
+  expect(isProviderPresetConfigured('mistral')).toBe(true)
+})
+
+test('Mistral resolves through the OpenAI-compatible adapter', () => {
+  process.env.MISTRAL_API_KEY = 'test-mistral-key'
+
+  const resolved = tryResolveProvider({ providerName: 'mistral' })
+
+  expect('error' in resolved).toBe(false)
+  if ('error' in resolved) return
+  expect(resolved.providerName).toBe('mistral')
+  expect(resolved.model).toBe('mistral-large-latest')
 })
