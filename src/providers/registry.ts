@@ -33,6 +33,12 @@ const PROVIDER_PRESETS: Record<string, ProviderPreset> = {
     baseURL: 'https://openrouter.ai/api/v1',
     defaultModel: 'openrouter/auto',
   },
+  mistral: {
+    kind: 'openai-compatible',
+    apiKeyEnv: 'MISTRAL_API_KEY',
+    baseURL: 'https://api.mistral.ai/v1',
+    defaultModel: 'mistral-large-latest',
+  },
   mercury: {
     kind: 'openai-compatible',
     apiKeyEnv: 'INCEPTION_API_KEY',
