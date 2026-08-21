@@ -61,7 +61,7 @@ export const browserTool: Tool = {
     const needsConfirmation = SENSITIVE_WORDS.test(sideEffectText) && request.action !== 'status' && request.action !== 'snapshot' && request.action !== 'extract'
     if (needsConfirmation && !request.confirmed) {
       taskSessions.update(session.id, { status: 'paused', action: 'Awaiting confirmation', detail: 'This action may create an external side effect' })
-      return `Confirmation required before browser action \"${request.action}\" because it may cause an external side effect. Ask the user to approve the exact action, then retry with confirmed=true. Task session: ${session.id}`
+      return `Confirmation required before browser action "${request.action}" because it may cause an external side effect. Ask the user to approve the exact action, then retry with confirmed=true. Task session: ${session.id}`
     }
 
     taskSessions.update(session.id, { status: 'running', action: request.action, detail: request.url ?? request.target ?? request.text?.slice(0, 120) ?? 'Working' })
@@ -123,10 +123,29 @@ async function dispatchBrowserRequest(request: BrowserRequest): Promise<BrowserR
   const bridgeCommand = process.env.ELIA_BROWSER_BRIDGE_COMMAND?.trim()
   if (bridgeCommand) return callBridge(bridgeCommand, request)
 
+  const mcpServer = process.env.ELIA_BROWSER_MCP_SERVER?.trim()
+  if (mcpServer) return callMcpTool(mcpServer, request)
+
   const cdpUrl = process.env.ELIA_BROWSER_CDP_URL?.trim()
   if (cdpUrl) return callCdp(cdpUrl, request)
 
   throw new Error('no browser bridge is configured')
+}
+
+async function callMcpTool(server: string, request: BrowserRequest): Promise<BrowserResult | string> {
+  const actionKey = request.action.toUpperCase()
+  const toolName = process.env[`ELIA_BROWSER_${actionKey}_TOOL`] ?? defaultMcpToolName(request.action)
+  const proc = Bun.spawn(['manus-mcp-cli', '-s', server, 'tool', 'call', toolName, '-i', JSON.stringify(request)], {
+    stdout: 'pipe',
+    stderr: 'pipe',
+  })
+  const [stdout, stderr, exitCode] = await Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+    proc.exited,
+  ])
+  if (exitCode !== 0) throw new Error(`MCP browser tool ${toolName} exited with code ${exitCode}${stderr.trim() ? `: ${stderr.trim()}` : ''}`)
+  return parseBridgeOutput(stdout)
 }
 
 async function callBridge(command: string, request: BrowserRequest): Promise<BrowserResult | string> {
@@ -141,6 +160,10 @@ async function callBridge(command: string, request: BrowserRequest): Promise<Bro
   ])
   if (exitCode !== 0) throw new Error(`bridge exited with code ${exitCode}${stderr.trim() ? `: ${stderr.trim()}` : ''}`)
 
+  return parseBridgeOutput(stdout)
+}
+
+function parseBridgeOutput(stdout: string): BrowserResult | string {
   const raw = stdout.trim()
   if (!raw) return '(browser bridge returned no output)'
   const lastLine = raw.split('\n').at(-1) ?? raw
@@ -152,6 +175,10 @@ async function callBridge(command: string, request: BrowserRequest): Promise<Bro
     if (error instanceof Error && error.message !== 'Unexpected end of JSON input' && !error.message.startsWith('Unexpected token')) throw error
     return raw
   }
+}
+
+function defaultMcpToolName(action: BrowserAction): string {
+  return `browser_${action}`
 }
 
 async function callCdp(endpoint: string, request: BrowserRequest): Promise<BrowserResult> {
@@ -168,6 +195,13 @@ async function callCdp(endpoint: string, request: BrowserRequest): Promise<Brows
         const command = await cdpCommandFor(request)
         const final = await cdpRequest(socket, pending, () => nextId++, command.method, command.params)
         if (final.error) throw new Error(final.error ?? 'browser command failed')
+        if (request.action === 'press') {
+          const keyUp = await cdpRequest(socket, pending, () => nextId++, 'Input.dispatchKeyEvent', {
+            type: 'keyUp',
+            key: request.key,
+          })
+          if (keyUp.error) throw new Error(keyUp.error ?? 'browser key-up failed')
+        }
         resolve({ ok: true, result: final.result ?? {} })
       } catch (error) {
         reject(error instanceof Error ? error : new Error(String(error)))
@@ -177,12 +211,12 @@ async function callCdp(endpoint: string, request: BrowserRequest): Promise<Brows
     })
     socket.addEventListener('message', (event) => {
       try {
-        const message = JSON.parse(String(event.data)) as { id?: number; result?: BrowserResult; error?: BrowserResult }
+        const message = JSON.parse(String(event.data)) as { id?: number; result?: BrowserResult; error?: { message?: string } }
         if (typeof message.id !== 'number') return
         const item = pending.get(message.id)
         if (!item) return
         pending.delete(message.id)
-        if (message.error) item.resolve({ error: String(message.error['message'] ?? 'CDP error') })
+        if (message.error) item.resolve({ error: message.error.message ?? 'CDP error' })
         else item.resolve(message.result ?? {})
       } catch (error) {
         reject(error instanceof Error ? error : new Error(String(error)))
@@ -222,7 +256,7 @@ async function cdpCommandFor(request: BrowserRequest): Promise<{ method: string;
   }
   if (request.action === 'type') {
     const text = JSON.stringify(request.text ?? '')
-    return evaluate(`(() => { const element = document.activeElement; if (!element) return { ok: false, error: 'no active element' }; element.dispatchEvent(new InputEvent('beforeinput', { inputType: 'insertText', data: ${text}, bubbles: true })); return { activeElement: element.tagName, textLength: ${text}.length }; })()`)
+    return evaluate(`(() => { const element = document.activeElement; if (!element) return { ok: false, error: 'no active element' }; const value = ${text}; if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) { const prototype = element instanceof HTMLInputElement ? HTMLInputElement.prototype : HTMLTextAreaElement.prototype; const setter = Object.getOwnPropertyDescriptor(prototype, 'value')?.set; setter?.call(element, element.value + value); element.dispatchEvent(new InputEvent('input', { inputType: 'insertText', data: value, bubbles: true })); } else if (element instanceof HTMLElement && element.isContentEditable) { document.execCommand('insertText', false, value); } else { return { ok: false, error: 'active element is not text-editable' }; } return { activeElement: element.tagName, textLength: value.length }; })()`)
   }
   if (request.action === 'press') {
     return { method: 'Input.dispatchKeyEvent', params: { type: 'keyDown', key: request.key, text: request.key === 'Enter' ? '\\r' : undefined } }
@@ -251,7 +285,7 @@ function formatBrowserResult(value: BrowserResult | string): string {
 }
 
 function browserSetupHint(): string {
-  return 'Configure ELIA_BROWSER_BRIDGE_COMMAND for a user-Chrome/MCP wrapper, or ELIA_BROWSER_CDP_URL for a Chrome DevTools endpoint. Keep credentials in the bridge environment, not in Elia prompts or source files.'
+  return 'Configure ELIA_BROWSER_MCP_SERVER for an enabled user-Chrome connector, ELIA_BROWSER_BRIDGE_COMMAND for a trusted wrapper, or ELIA_BROWSER_CDP_URL for a Chrome DevTools endpoint. Keep credentials in the bridge environment, not in Elia prompts or source files.'
 }
 
 export function isSensitiveBrowserInput(input: Record<string, unknown>): boolean {
