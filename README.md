@@ -86,6 +86,20 @@ Every delegated plan and proposal may declare `acceptanceCriteria`, `verificatio
 
 For specialist work, `elia agent "<request>" --dry-run` performs routing only and prints the selected persona chain and rationale without running specialist tools or side effects. Use this to inspect an execution plan before allowing a full specialist turn.
 
+### Native Excel and presentation workflows
+
+Elia’s Office workflow is now first-class for local workbooks. The `spreadsheet` tool supports `inspect`, `analyze`, `audit`, and bounded `write` operations. Analysis selects numeric measures, computes totals and averages, groups results by categorical columns, counts formula cells, reports blank values, detects duplicate keys when requested, and returns structured JSON that can be reconciled before it is used in a decision. Workbook writes are atomic, limited to 200 cell operations per request, and must create an output file inside the current repository or `workspace/` directory rather than silently overwriting an arbitrary source file.
+
+The `presentation` tool turns a verified workbook into an editable management `.pptx` deck. It creates KPI cards, grouped-performance charts, audit findings, and recommended actions, and writes a JSON sidecar containing the source, analysis, and audit data. Its `verify` action checks the PPTX package and slide count and can optionally render through LibreOffice when available. The generated deck is an artifact that should still be visually reviewed before publication; native creation does not claim that the deck is automatically perfect for every template or brand system.
+
+Example request:
+
+```text
+Analyze workspace/q3-sales.xlsx by Region using Sales, audit duplicate Order IDs, and create a management presentation with the top risks and recommended actions.
+```
+
+The finance, business, data, research, and automation specialists can use these Office tools. Presentation and workbook generation remain governed as reviewable artifact actions, while inspection and analysis are read-only. This keeps the Office layer broad without weakening the existing model behavior or action safety boundaries.
+
 ### External communication and browser tasks
 
 Elia can prepare and, when the user has enabled a trusted browser or service connector, execute external-party workflows such as drafting email to a co-founder, preparing a calendar invitation, or updating a web application. The system deliberately separates **draft** from **send**: it must verify the recipient, channel, content, attachments, timing, and final page or connector state, and obtain explicit approval immediately before sending, publishing, deleting, purchasing, transferring, or changing account state. Login, CAPTCHA, payment, and sensitive-input steps require user takeover. If Gmail, Calendar, Outlook, Slack, an SMS provider, or another connector is disabled, Elia must report that limitation instead of pretending it can access the account.

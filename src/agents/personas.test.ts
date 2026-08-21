@@ -31,3 +31,11 @@ test('automation specialist can coordinate browser and communication workflows',
   expect(names).toContain('browser')
   expect(names).toContain('communication')
 })
+
+test('office specialists receive spreadsheet and presentation tools', () => {
+  for (const persona of ['finance', 'business', 'data', 'research', 'automation'] as const) {
+    const names = personaTools(persona).map((tool) => tool.name)
+    expect(names).toContain('spreadsheet')
+    expect(names).toContain('presentation')
+  }
+})

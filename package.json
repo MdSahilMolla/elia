@@ -19,6 +19,7 @@
   "dependencies": {
     "@anthropic-ai/sdk": "^0.68.0",
     "openai": "^7.5.0",
+    "pptxgenjs": "^4.0.1",
     "xlsx": "^0.18.5"
   },
   "devDependencies": {

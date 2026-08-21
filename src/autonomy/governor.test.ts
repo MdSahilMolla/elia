@@ -84,4 +84,10 @@ describe('autonomy governor', () => {
     expect(draft.decision).toBe('allow')
     expect(verify.risk).toBe('review')
   })
+
+  test('office artifact actions are bounded and reviewable', () => {
+    expect(assessAction({ name: 'spreadsheet', input: { action: 'inspect', path: 'workspace/report.xlsx' } }).decision).toBe('allow')
+    expect(assessAction({ name: 'spreadsheet', input: { action: 'write', path: 'workspace/report.xlsx' } }).risk).toBe('review')
+    expect(assessAction({ name: 'presentation', input: { action: 'from_workbook', path: 'workspace/report.xlsx' } }).risk).toBe('review')
+  })
 })

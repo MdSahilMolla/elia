@@ -10,6 +10,8 @@ import { runSecurityToolTool } from './securityScan.ts'
 import { webSearchTool } from './webSearch.ts'
 import { webFetchTool } from './webFetch.ts'
 import { readSpreadsheetTool } from './readSpreadsheet.ts'
+import { spreadsheetTool } from './spreadsheet.ts'
+import { presentationTool } from './presentation.ts'
 import { recallTool } from './recall.ts'
 import { browserTool } from './browser.ts'
 import { communicationTool } from './communication.ts'
@@ -41,7 +43,7 @@ export const communicationTools: Tool[] = [communicationTool]
 export const cyberTools: Tool[] = [newEngagementTool, runSecurityToolTool]
 
 /** Real external data for the Marketing/Finance personas — see src/agents/personas.ts. Tech's toolset is unchanged. */
-export const businessTools: Tool[] = [webSearchTool, webFetchTool, readSpreadsheetTool]
+export const businessTools: Tool[] = [webSearchTool, webFetchTool, readSpreadsheetTool, spreadsheetTool, presentationTool]
 
 export const toolsByName: Record<string, Tool> = Object.fromEntries(
   tools.map((tool) => [tool.name, tool]),

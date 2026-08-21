@@ -85,6 +85,10 @@ Multi-agent:
                               requests get labeled "## X take" sections plus a combined recommendation.
   elia agent "<request>" --dry-run  Show routing/persona plan without executing tools or side effects
 
+Office workflows:
+  Agent/autonomous requests can use spreadsheet to inspect, analyze, audit, or safely write
+  Excel workbooks; presentation creates an editable management .pptx plus analysis sidecar.
+
 Self-improvement:
   elia bench                  Score the current elia against its own benchmark suite
   elia evolve                 Improve elia's own source: hypothesise one change, build it

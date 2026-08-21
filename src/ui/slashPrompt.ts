@@ -226,7 +226,8 @@ function createFallbackPrompt(): SlashPromptHandle {
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout })
   let resolveLine: ((line: string | null) => void) | undefined
   // One persistent listener rather than one per question() call, so it never accumulates.
-  rl.on('close', () => {
+  const closeAwareRl = rl as unknown as { on(event: 'close', listener: () => void): void }
+  closeAwareRl.on('close', () => {
     resolveLine?.(null)
     resolveLine = undefined
   })

@@ -100,12 +100,12 @@ export function personaPrompt(persona: AgentPersona): string {
 
 const PERSONA_TOOL_NAMES: Record<AgentPersona, string[]> = {
   marketing: ['read_file', 'list_files', 'grep', 'write_file', 'edit_file', 'web_search', 'web_fetch'],
-  finance: ['read_file', 'list_files', 'grep', 'write_file', 'edit_file', 'web_search', 'web_fetch', 'read_spreadsheet'],
-  business: ['read_file', 'list_files', 'grep', 'write_file', 'edit_file', 'web_search', 'web_fetch', 'read_spreadsheet'],
-  data: ['read_file', 'list_files', 'grep', 'write_file', 'edit_file', 'run_command', 'web_search', 'web_fetch', 'read_spreadsheet'],
-  research: ['read_file', 'list_files', 'grep', 'write_file', 'edit_file', 'web_search', 'web_fetch', 'browser', 'communication'],
+  finance: ['read_file', 'list_files', 'grep', 'write_file', 'edit_file', 'web_search', 'web_fetch', 'read_spreadsheet', 'spreadsheet', 'presentation'],
+  business: ['read_file', 'list_files', 'grep', 'write_file', 'edit_file', 'web_search', 'web_fetch', 'read_spreadsheet', 'spreadsheet', 'presentation'],
+  data: ['read_file', 'list_files', 'grep', 'write_file', 'edit_file', 'run_command', 'web_search', 'web_fetch', 'read_spreadsheet', 'spreadsheet', 'presentation'],
+  research: ['read_file', 'list_files', 'grep', 'write_file', 'edit_file', 'web_search', 'web_fetch', 'browser', 'communication', 'spreadsheet', 'presentation'],
   cyber: ['read_file', 'list_files', 'grep', 'run_command', 'write_file', 'edit_file', 'web_search', 'web_fetch', 'browser', 'new_engagement', 'run_security_tool'],
-  automation: ['read_file', 'list_files', 'grep', 'run_command', 'write_file', 'edit_file', 'web_search', 'web_fetch', 'browser', 'communication'],
+  automation: ['read_file', 'list_files', 'grep', 'run_command', 'write_file', 'edit_file', 'web_search', 'web_fetch', 'browser', 'communication', 'spreadsheet', 'presentation'],
   communications: ['read_file', 'list_files', 'grep', 'write_file', 'edit_file', 'web_search', 'web_fetch', 'browser', 'communication'],
   ai: ['read_file', 'list_files', 'grep', 'run_command', 'write_file', 'edit_file', 'web_search', 'web_fetch', 'read_spreadsheet', 'browser'],
   tech: [],

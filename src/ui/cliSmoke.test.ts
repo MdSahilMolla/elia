@@ -40,6 +40,9 @@ test('help documents autonomous budget and agent dry-run controls', async () => 
   expect(result.code).toBe(0)
   expect(result.stdout).toContain('--max-run-ms')
   expect(result.stdout).toContain('--dry-run')
+  expect(result.stdout).toContain('Office workflows:')
+  expect(result.stdout).toContain('spreadsheet')
+  expect(result.stdout).toContain('presentation')
 })
 
 test('invalid autonomous wall-clock budget fails before execution', async () => {

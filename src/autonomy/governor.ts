@@ -49,6 +49,16 @@ export function assessAction(request: ActionRequest, cwd = currentAgent().cwd ??
 
   if (name === 'run_command') return assessCommand(joined, cwd)
 
+  if (name === 'presentation') {
+    return assessment('review', 'approve', 'presentation generation creates a derived document artifact', 'presentation.from_workbook', resources, true)
+  }
+
+  if (name === 'spreadsheet') {
+    const action = typeof input.action === 'string' ? input.action : 'unknown'
+    if (action === 'write') return assessment('review', 'approve', 'spreadsheet write changes a workbook and creates an output artifact', 'spreadsheet.write', resources, true)
+    return assessment('safe', 'allow', `spreadsheet ${action} is read-only analysis or audit`, `spreadsheet.${action}`, resources, true)
+  }
+
   if (name === 'communication') {
     const action = typeof input.action === 'string' ? input.action : 'unknown'
     if (action === 'send') return assessment('critical', 'approve', 'communication send creates an external message or event', 'communication.send', resources, false)
