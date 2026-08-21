@@ -5,6 +5,7 @@ import type { CriticVerdict, Proposal } from './types.ts'
 import { currentAgent } from './context.ts'
 import { redactActionInput } from './governor.ts'
 import type { JournalEvent } from './journal.ts'
+import type { GoalGraphSnapshot } from './goalGraph.ts'
 
 export interface ActionLedgerRecord {
   at: number
@@ -23,6 +24,10 @@ export interface ActionLedgerRecord {
   intent?: string
   resources?: string[]
   reversible?: boolean
+  actionId?: string
+  idempotencyKey?: string
+  replayed?: boolean
+  failureClass?: string
 }
 
 export interface RunReceiptInput {
@@ -33,6 +38,7 @@ export interface RunReceiptInput {
   verdict?: CriticVerdict
   lessons?: string[]
   events: JournalEvent[]
+  graph?: GoalGraphSnapshot
 }
 
 export function appendActionAudit(event: ToolEvent, runIdOverride?: string): void {
@@ -55,6 +61,10 @@ export function appendActionAudit(event: ToolEvent, runIdOverride?: string): voi
     intent: assessment?.intent,
     resources: assessment?.resources,
     reversible: assessment?.reversible,
+    actionId: event.actionId,
+    idempotencyKey: event.idempotencyKey,
+    replayed: event.replayed,
+    failureClass: event.failureClass,
   }
 
   const runId = runIdOverride ?? identity.runId
@@ -106,6 +116,13 @@ export function writeRunReceipt(input: RunReceiptInput): void {
     verification: input.events.filter((event) => event.kind === 'verify').map((event) => event.data),
     verdict: input.verdict,
     lessons: input.lessons ?? [],
+    graph: input.graph
+      ? {
+          nodes: input.graph.nodes.map((node) => ({ id: node.id, status: node.status, attempts: node.attemptCount, evidenceIds: node.evidenceIds })),
+          pendingApprovals: input.graph.approvals.filter((approval) => approval.status === 'pending').length,
+          evidence: input.graph.evidence.map((evidence) => ({ id: evidence.id, kind: evidence.kind, passed: evidence.passed, summary: evidence.summary })),
+        }
+      : undefined,
     actions: {
       total: actions.length,
       byTool: countBy(actions, (action) => action.tool),
@@ -114,6 +131,8 @@ export function writeRunReceipt(input: RunReceiptInput): void {
       failed: actions.filter((action) => action.isError).length,
       reversible: actions.filter((action) => action.reversible === true).length,
       irreversible: actions.filter((action) => action.reversible === false).length,
+      replayed: actions.filter((action) => action.replayed === true).length,
+      humanReview: actions.filter((action) => action.failureClass === 'human-review').length,
     },
     uncertainty: input.verdict?.issues.filter((issue) => issue.severity === 'minor').map((issue) => issue.detail) ?? [],
     replay: {
@@ -148,7 +167,8 @@ function renderReceipt(receipt: {
   outcome: string
   verification: Record<string, unknown>[]
   uncertainty: string[]
-  actions: { total: number; failed: number; blocked: number; irreversible: number }
+  actions: { total: number; failed: number; blocked: number; irreversible: number; replayed?: number; humanReview?: number }
+  graph?: { nodes: { id: string; status: string; attempts: number }[]; pendingApprovals: number }
 }): string {
   const verificationLines =
     receipt.verification.length > 0
@@ -167,6 +187,9 @@ function renderReceipt(receipt: {
     `- **Goal:** ${receipt.goal}`,
     `- **Actions:** ${receipt.actions.total} (${receipt.actions.failed} failed, ${receipt.actions.blocked} blocked)`,
     `- **Irreversible actions:** ${receipt.actions.irreversible}`,
+    `- **Replayed idempotent actions:** ${receipt.actions.replayed ?? 0}`,
+    `- **Human-review actions:** ${receipt.actions.humanReview ?? 0}`,
+    ...(receipt.graph ? [`- **Pending approvals:** ${receipt.graph.pendingApprovals}`, `- **Graph nodes:** ${receipt.graph.nodes.filter((node) => node.status === 'completed').length}/${receipt.graph.nodes.length} completed`] : []),
     '',
     '## What proves completion',
     '',

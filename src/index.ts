@@ -29,7 +29,7 @@ const REPL_COMMANDS: SlashCommand[] = [
 
 const rawArgs = process.argv.slice(2)
 
-const SUBCOMMANDS = ['auto', 'agent', 'evolve', 'bench', 'skills', 'runs', 'fork'] as const
+const SUBCOMMANDS = ['auto', 'agent', 'evolve', 'bench', 'skills', 'runs', 'fork', 'resume'] as const
 type Subcommand = (typeof SUBCOMMANDS)[number]
 
 function printHelp(): void {
@@ -85,6 +85,7 @@ Time travel:
   elia runs <id>              Show one run's timeline and its forkable decision points
   elia fork <id> --at <n> --with "<change>"
                               Replay that run up to checkpoint <n> and re-plan from there
+  elia resume <id>            Continue a durable goal from its persisted graph and approvals
 
 Inside an interactive session:
   /                            Type "/" to see available commands — up/down to highlight,
@@ -96,7 +97,7 @@ Inside an interactive session:
                               security-focused system prompt with authorization guardrails
   /marketing /finance /tech   Switch to that agent persona for the rest of the session
   /normal                     Switch back to elia's normal coding mode
-  /mode auto                  Stop risk-checking/asking — full autonomy, no prompts
+  /mode auto                  Skip the pre-flight risk prompt; critical actions remain governed
   /mode manual                Go back to risk-checking and asking only when it matters (default)
   /model                      Pick a provider with up/down or left/right, enter to switch
   /model <provider>           Switch provider (e.g. /model groq), keeping its default model
@@ -359,6 +360,63 @@ async function runRuns(): Promise<void> {
   writeNotice('Inspect one with: elia runs <id>')
 }
 
+async function runResume(): Promise<void> {
+  const { runAutonomousTask, autoApprove } = await import('./autonomy/loop.ts')
+  const { GoalGraphStore } = await import('./autonomy/goalGraph.ts')
+  const { runDir, readEvents } = await import('./autonomy/journal.ts')
+  const runId = positionals()[0]
+  if (!runId) {
+    writeError('Usage: elia resume <runId> [--yolo]')
+    process.exitCode = 1
+    return
+  }
+  const start = readEvents(runId).find((event) => event.kind === 'run-start')
+  const goal = typeof start?.data.goal === 'string' ? start.data.goal : undefined
+  if (!goal) {
+    writeError(`No durable run found for ${runId}`)
+    process.exitCode = 1
+    return
+  }
+
+  const graph = GoalGraphStore.open({ runId, goal, dir: runDir(runId) })
+  const pending = graph.pendingApprovals()
+  if (pending.length > 0 && !process.stdin.isTTY && !hasFlag('--yolo', '-y')) {
+    writeError(`Run ${runId} has ${pending.length} pending approval(s); resume from a terminal or pass --yolo to keep them blocked.`)
+    process.exitCode = 1
+    return
+  }
+
+  const rl = process.stdin.isTTY && !hasFlag('--yolo', '-y')
+    ? readline.createInterface({ input: process.stdin, output: process.stdout })
+    : undefined
+  try {
+    for (const approval of pending) {
+      if (!rl) break
+      const result = await confirmOnce(rl, `Resume ${approval.kind} approval ${approval.subject}? [y]es / [n]o: `)
+      graph.resolveApproval(approval.id, result.action === 'approve', result.action)
+    }
+
+    const approveAction: ActionApproval | undefined = rl
+      ? async (assessment, request) => {
+          const result = await confirmOnce(rl, actionApprovalPrompt(assessment, request))
+          return result.action === 'approve'
+        }
+      : undefined
+    const result = await runAutonomousTask({
+      goal,
+      runId,
+      resumeGraph: true,
+      approve: rl ? createInteractiveApprover(rl) : autoApprove,
+      approveAction,
+      governanceMode: rl ? 'supervised' : 'unattended',
+      polish: !hasFlag('--no-polish'),
+    })
+    if (result.outcome !== 'completed') process.exitCode = 1
+  } finally {
+    rl?.close()
+  }
+}
+
 async function runFork(): Promise<void> {
   const { forkRun } = await import('./autonomy/rewind.ts')
   const { autoApprove } = await import('./autonomy/loop.ts')
@@ -416,9 +474,9 @@ async function runInteractive(): Promise<void> {
   // manual (default): a cheap risk check runs before each command — only
   // commands flagged risky (deletes, sends, spend, publishing, system
   // changes, ...) get an "About to: ... run it?" prompt; everything else just
-  // runs. auto (--yolo or "/mode auto"): no risk check, no prompts, ever.
-  // Either way, once a command starts it runs to completion — including
-  // irreversible steps — with no further gating.
+  // runs. auto (--yolo or "/mode auto"): skips the pre-flight prompt while the
+  // shared governor still blocks or requests approval for critical actions.
+  // Safe and reversible work runs end to end without interruption.
   let replMode: 'manual' | 'auto' = hasFlag('--yolo', '-y') ? 'auto' : 'manual'
 
   if (continueFlag || resumeId) {
@@ -543,7 +601,7 @@ async function runInteractive(): Promise<void> {
   )
   writeNotice(
     replMode === 'auto'
-      ? 'auto mode (--yolo) — safe and reversible work runs immediately; irreversible actions still require approval or are blocked. "/mode manual" to turn it back on.'
+      ? 'auto mode (--yolo) — safe and reversible work runs immediately; irreversible actions remain governed. "/mode manual" to turn it back on.'
       : 'manual mode — elia flags risky commands and asks before running them; safe commands just run. "/mode auto" for zero prompts.',
   )
 
@@ -798,6 +856,8 @@ async function main() {
       return runRuns()
     case 'fork':
       return runFork()
+    case 'resume':
+      return runResume()
     default:
       return runInteractive()
   }

@@ -29,6 +29,7 @@ import {
 import type { CriticVerdict, Proposal } from './types.ts'
 import { appendActionAudit, writeRunReceipt } from './audit.ts'
 import { createActionGovernor, withActionGovernor, type ActionApproval, type ActionGovernor, type GovernanceMode } from './governor.ts'
+import { GoalGraphStore, withGoalGraph, type GoalGraphStore as GoalGraphStoreType } from './goalGraph.ts'
 
 export type ApprovalDecision =
   | { action: 'approve' }
@@ -55,6 +56,8 @@ export interface AutonomousRunOptions {
   variants?: number
   /** Resume from a checkpoint's message history instead of orienting from scratch. */
   resumeMessages?: ConversationMessage[]
+  /** Continue an existing durable goal graph from its persisted node states. */
+  resumeGraph?: boolean
   /** Run a bounded final quality pass before verification; enabled by default. */
   polish?: boolean
   /** Maximum final polish passes; bounded to prevent autonomous thrashing. */
@@ -131,6 +134,7 @@ export async function runAutonomousTask(options: AutonomousRunOptions): Promise<
   const governor = createActionGovernor({ mode: options.governanceMode ?? 'unattended', approve: options.approveAction })
 
   const journal = createJournal(runId, goal)
+  const graph = GoalGraphStore.open({ runId, goal, dir: journal.dir })
   const board = createBlackboard(`${journal.dir}/board.json`)
   setActiveBlackboard(board)
 
@@ -143,8 +147,17 @@ export async function runAutonomousTask(options: AutonomousRunOptions): Promise<
     outcome: RunOutcome,
     extra: Partial<AutonomousRunResult> = {},
   ): AutonomousRunResult => {
-    journal.append('run-end', { outcome })
-    writeRunReceipt({ runId, goal, outcome, proposal: extra.proposal, verdict: extra.verdict, lessons: extra.lessons, events: journal.events() })
+    if (outcome === 'completed') {
+      try {
+        graph.completeGoal()
+      } catch {
+        // Preserve the run result while leaving the graph visibly incomplete for resume.
+      }
+    } else if (outcome === 'needs-attention' || outcome === 'aborted') {
+      graph.failRun(outcome)
+    }
+    journal.append('run-end', { outcome, graph: graph.state().nodes.map((node) => ({ id: node.id, status: node.status })) })
+    writeRunReceipt({ runId, goal, outcome, proposal: extra.proposal, verdict: extra.verdict, lessons: extra.lessons, events: journal.events(), graph: graph.state() })
     return {
       runId,
       outcome,
@@ -181,14 +194,16 @@ export async function runAutonomousTask(options: AutonomousRunOptions): Promise<
 
   journal.checkpoint('before-orient', messages)
 
-  let proposal: Proposal | undefined
+  let proposal: Proposal | undefined = options.resumeGraph ? graph.state().proposal : undefined
   let amendments = 0
 
-  while (true) {
+  if (proposal) {
+    writeSubStep(`resuming durable goal graph ${runId} from persisted node state`)
+  } else while (true) {
     if (signal?.aborted) return done('aborted')
 
     journal.append('phase', { phase: 'propose', attempt: amendments })
-    const planning = await withAgentIdentity({ name: 'lead', role: 'lead', runId, cwd: process.cwd() }, () => withActionGovernor(governor, () => runAgentLoop({
+    const planning = await withAgentIdentity({ name: 'lead', role: 'lead', runId, cwd: process.cwd() }, () => withActionGovernor(governor, () => withGoalGraph(graph, () => runAgentLoop({
       messages,
       systemPrompt: PLANNER_PROMPT,
       tools: planningTools,
@@ -198,7 +213,7 @@ export async function runAutonomousTask(options: AutonomousRunOptions): Promise<
       maxSteps: 40,
       signal,
       onTool: (event) => appendActionAudit(event, runId),
-    })))
+    }))))
     track(planning.usage)
     recordUsage(planning.usage)
 
@@ -224,8 +239,11 @@ export async function runAutonomousTask(options: AutonomousRunOptions): Promise<
     process.stdout.write(renderProposal(proposal))
     journal.checkpoint('after-propose', messages)
 
-    const decision = await approve(proposal)
-    journal.append('approval', { action: decision.action })
+    graph.seedProposal(proposal)
+    const durableApproval = graph.requestApproval('plan', 'proposal', { goal: proposal.goal }, 'The approved proposal authorizes the run to execute its planned steps.')
+    const decision = durableApproval.status === 'approved' ? ({ action: 'approve' } as const) : await approve(proposal)
+    if (durableApproval.status === 'pending') graph.resolveApproval(durableApproval.id, decision.action === 'approve', decision.action === 'amend' ? decision.feedback : decision.action)
+    journal.append('approval', { action: decision.action, approvalId: durableApproval.id })
 
     if (decision.action === 'approve') break
     if (decision.action === 'reject') {
@@ -249,6 +267,15 @@ export async function runAutonomousTask(options: AutonomousRunOptions): Promise<
     })
   }
 
+  if (proposal && options.resumeGraph) {
+    const durableApproval = graph.state().approvals.find((approval) => approval.kind === 'plan')
+    if (durableApproval?.status !== 'approved') {
+      const decision = await approve(proposal)
+      if (durableApproval) graph.resolveApproval(durableApproval.id, decision.action === 'approve', decision.action === 'amend' ? decision.feedback : decision.action)
+      if (decision.action !== 'approve') return done(decision.action === 'reject' ? 'rejected' : 'needs-attention', { proposal })
+    }
+  }
+
   // --- Execute --------------------------------------------------------------
 
   const briefing = `## The goal of this run\n${proposal.goal}\n\n## What we established while planning\n${proposal.understanding}`
@@ -262,6 +289,13 @@ export async function runAutonomousTask(options: AutonomousRunOptions): Promise<
     if (signal?.aborted) return done('aborted', { proposal })
     const result = await runVariants({ proposal, briefing, count: variantCount, runId, journal, governor, signal })
     track(result.usage)
+    for (const step of proposal.steps) {
+      const node = graph.node(`step:${step.id}`)
+      if (node?.status !== 'completed') {
+        if (node?.status === 'pending' || node?.status === 'ready' || node?.status === 'waiting-retry') graph.startNode(`step:${step.id}`)
+        graph.finishNode(`step:${step.id}`, { ok: true, report: `verified variant ${result.chosen.index + 1} selected` })
+      }
+    }
     board.post('variants', 'execute', `chose attempt ${result.chosen.index + 1}/${variantCount} (${result.chosen.verificationSummary}); merged ${result.mergedFiles.length} file(s)`)
   } else {
     const { waves } = planWaves(proposal.steps)
@@ -272,8 +306,15 @@ export async function runAutonomousTask(options: AutonomousRunOptions): Promise<
       if (signal?.aborted) return done('aborted', { proposal })
       if (waves.length > 1) writeSubStep(`wave ${index + 1} of ${waves.length}`)
 
+      const pendingWave = wave.filter((step) => {
+        const nodeId = `step:${step.id}`
+        return graph.node(nodeId)?.status !== 'completed' || graph.needsResumption(nodeId)
+      })
+      if (pendingWave.length === 0) continue
+      for (const step of pendingWave) graph.startNode(`step:${step.id}`)
+
       const fleet = await runFleet({
-        assignments: wave.map((step) => ({
+        assignments: pendingWave.map((step) => ({
           id: step.id,
           title: step.title,
           role: step.role,
@@ -283,6 +324,7 @@ export async function runAutonomousTask(options: AutonomousRunOptions): Promise<
         journal,
         runId,
         governor,
+        graph,
         signal,
       })
       track(fleet.usage)
@@ -292,6 +334,20 @@ export async function runAutonomousTask(options: AutonomousRunOptions): Promise<
       // this one learned instead of re-deriving it.
       for (const result of fleet.results) {
         board.post(result.name, `step:${result.id}`, `${result.title} — ${result.report}`)
+        graph.finishNode(`step:${result.id}`, {
+          ok: result.ok,
+          report: result.report,
+          error: result.ok ? undefined : result.report,
+          evidence: [{
+            id: `evidence:step:${result.id}:${graph.node(`step:${result.id}`)?.attemptCount ?? 0}`,
+            nodeId: `step:${result.id}`,
+            kind: 'action',
+            passed: result.ok,
+            summary: result.ok ? `${result.title} completed by ${result.name}` : `${result.title} failed in ${result.name}`,
+            data: { worker: result.name, steps: result.steps, report: result.report },
+            at: Date.now(),
+          }],
+        })
       }
     }
   }
@@ -355,10 +411,12 @@ Read the changed files in full context. Improve only concrete issues directly re
       if (result.exitCode === 0 && !result.timedOut) writePass(label)
       else writeFail(`${label} — ${result.timedOut ? 'timed out' : `exit ${result.exitCode}`}`)
     }
-    journal.append('verify', {
+    const verificationData = {
       passed: verification.passed,
       results: verification.results.map((result) => ({ command: result.command, exitCode: result.exitCode })),
-    })
+    }
+    journal.append('verify', verificationData)
+    graph.recordVerification(verification.passed, verificationData)
 
     // Only spend a critic on a change that already builds. Reviewing code that
     // doesn't compile just rediscovers the compiler's own error, slowly.
@@ -420,6 +478,8 @@ Read the changed files in full for context beyond the diff above — a diff hide
             name: reviewer.name,
             runId,
             governor,
+            graph,
+            nodeId: `review:${reviewer.name}`,
             briefing,
             extraTools: [verdictCapture.tool],
             signal,
@@ -440,6 +500,7 @@ Read the changed files in full for context beyond the diff above — a diff hide
       verdict = mergeVerdicts(reviewResults.map(({ reviewer, verdict }) => ({ reviewer, verdict })))
 
       journal.append('verdict', { ...verdict })
+      graph.recordReview(!hasBlockingIssues(verdict), { verdict })
       if (!hasBlockingIssues(verdict)) {
         writePass(verdict.summary)
         if (verdict.issues.length > 0) writeBlock('Minor notes', describeIssues(verdict.issues))
@@ -451,7 +512,7 @@ Read the changed files in full for context beyond the diff above — a diff hide
 
     if (attempt >= maxRepairAttempts) {
       writeSubStep(`Stopping after ${attempt} repair attempt${attempt === 1 ? '' : 's'} — this needs a human.`)
-      const lessons = await captureLessons(goal, proposal, 'unresolved', journal, track, governor)
+      const lessons = await captureLessons(goal, proposal, 'unresolved', journal, track, governor, graph)
       return done('needs-attention', { proposal, verdict, lessons })
     }
 
@@ -480,7 +541,7 @@ Read the changed files in full for context beyond the diff above — a diff hide
 
     const cache = createToolResultCache()
     const repairTools = [...allWorkerTools(), taskTool]
-    const repair = await withAgentIdentity({ name: 'lead', role: 'lead', runId, cwd: process.cwd() }, () => withActionGovernor(governor, () => runAgentLoop({
+    const repair = await withAgentIdentity({ name: 'lead', role: 'lead', runId, cwd: process.cwd() }, () => withActionGovernor(governor, () => withGoalGraph(graph, () => runAgentLoop({
       messages: repairMessages,
       systemPrompt: REPAIR_PROMPT,
       tools: repairTools,
@@ -492,14 +553,14 @@ Read the changed files in full for context beyond the diff above — a diff hide
       prefetcher: createPrefetcher({ tools: repairTools, cache }),
       signal,
       onTool: (event) => appendActionAudit(event, runId),
-    })))
+    }))))
     track(repair.usage)
     recordUsage(repair.usage)
   }
 
   // --- Learn ---------------------------------------------------------------
 
-  const lessons = await captureLessons(goal, proposal, 'succeeded', journal, track, governor)
+  const lessons = await captureLessons(goal, proposal, 'succeeded', journal, track, governor, graph)
 
   writeSummary('Run complete', [
     ['run', runId],
@@ -529,6 +590,7 @@ async function captureLessons(
   journal: Journal,
   track: (usage: Usage) => void,
   governor: ActionGovernor,
+  graph: GoalGraphStoreType,
 ): Promise<string[]> {
   writePhase('learn')
   journal.append('phase', { phase: 'learn' })
@@ -541,6 +603,8 @@ async function captureLessons(
       name: 'scribe#lessons',
       runId: journal.runId,
       governor,
+      graph,
+      nodeId: 'learn:lessons',
       extraTools: [capture.tool],
       prompt: `An autonomous run just ${status === 'succeeded' ? 'completed' : 'stopped without fully succeeding'}.
 

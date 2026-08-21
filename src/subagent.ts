@@ -12,6 +12,7 @@ import { createPrefetcher } from './speculation/prefetch.ts'
 import { recordUsage } from './usage.ts'
 import { appendActionAudit } from './autonomy/audit.ts'
 import { activeActionGovernor, withActionGovernor, type ActionGovernor } from './autonomy/governor.ts'
+import { activeGoalGraph, withGoalGraph, withGoalNode, type GoalGraphStore } from './autonomy/goalGraph.ts'
 
 export interface SubAgentRequest {
   prompt: string
@@ -22,6 +23,10 @@ export interface SubAgentRequest {
   runId?: string
   /** Parent governor; omitted for standalone worker calls. */
   governor?: ActionGovernor
+  /** Parent durable goal graph. */
+  graph?: GoalGraphStore
+  /** Durable node for this worker; action identity is scoped to it. */
+  nodeId?: string
   /** Extra context injected above the task, typically the blackboard and the run's goal. */
   briefing?: string
   /** Tools granted to this run on top of its role's allowlist — used for the structured-report tools. */
@@ -63,6 +68,10 @@ export interface SubAgentResult {
  * Sub-agents cannot spawn further sub-agents: no role's allowlist contains
  * `task`, which caps recursion depth at one and keeps the fan-out predictable.
  */
+function withGoalGraphIfAvailable<T>(graph: GoalGraphStore | undefined, fn: () => Promise<T>): Promise<T> {
+  return graph ? withGoalGraph(graph, fn) : fn()
+}
+
 export async function runSubAgent(request: SubAgentRequest): Promise<SubAgentResult> {
   const definition = roleDefinition(request.role)
   const tier = roleConfig(request.role, definition.tier)
@@ -70,6 +79,8 @@ export async function runSubAgent(request: SubAgentRequest): Promise<SubAgentRes
   const parent = currentAgent()
   const runId = request.runId ?? parent.runId
   const governor = request.governor ?? activeActionGovernor()
+  const graph = request.graph ?? activeGoalGraph()
+  const nodeId = request.nodeId
   const startedAt = Date.now()
 
   const board = activeBlackboard()
@@ -94,7 +105,7 @@ export async function runSubAgent(request: SubAgentRequest): Promise<SubAgentRes
   const cwd = request.cwd ?? currentAgent().cwd
 
   const result = await withAgentIdentity({ name: request.name, role: request.role, runId, cwd }, () =>
-    withActionGovernor(governor, () => runAgentLoop({
+    withActionGovernor(governor, () => withGoalGraphIfAvailable(graph, () => withGoalNode(nodeId, () => runAgentLoop({
       messages,
       systemPrompt: `${basePrompt}\n\n## Your role\n${definition.prompt}`,
       tools,
@@ -110,7 +121,7 @@ export async function runSubAgent(request: SubAgentRequest): Promise<SubAgentRes
       cache,
       prefetcher,
       signal: request.signal,
-    })),
+    })))),
   )
 
   recordUsage(result.usage)

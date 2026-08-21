@@ -8,7 +8,8 @@ import { ZERO_USAGE, addUsage } from './usage.ts'
 import { SPECULABLE_TOOLS, type CacheStats, type ToolResultCache } from './speculation/cache.ts'
 import type { Prefetcher } from './speculation/prefetch.ts'
 import { maybeCompact } from './compaction.ts'
-import { activeActionGovernor, type ActionAssessment } from './autonomy/governor.ts'
+import { activeActionGovernor, assessAction, redactActionInput, type ActionAssessment } from './autonomy/governor.ts'
+import { activeGoalGraph, activeGoalNode, type ActionReservation, classifyFailure } from './autonomy/goalGraph.ts'
 
 export type ConversationMessage = ChatMessage
 
@@ -32,6 +33,11 @@ export interface ToolEvent {
   cached: boolean
   /** Deterministic pre-execution governance assessment, when available. */
   assessment?: ActionAssessment
+  /** Durable action identity, when the loop is running inside a goal graph. */
+  actionId?: string
+  idempotencyKey?: string
+  replayed?: boolean
+  failureClass?: string
 }
 
 export interface RunAgentLoopOptions {
@@ -172,31 +178,60 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
       let isError = false
       let cached = false
       let assessment: ActionAssessment | undefined
+      let reservation: ActionReservation | undefined
+      let replayed = false
+      let failureClass: string | undefined
       try {
-        const gate = await activeActionGovernor().check({ name: block.name, input: block.input })
-        assessment = gate.assessment
-        if (!gate.allowed) {
+        const graph = activeGoalGraph()
+        reservation = graph?.reserveAction({ name: block.name, input: block.input }, activeGoalNode())
+        if (reservation?.decision === 'replay') {
+          replayed = true
+          cached = true
+          resultText = reservation.action.result ?? '[replayed completed action]'
+        } else if (reservation && reservation.decision !== 'execute') {
           isError = true
-          resultText = gate.message ?? `Action blocked by Elia’s autonomy governor: ${gate.assessment.reason}`
+          failureClass = reservation.decision === 'human-review' ? 'human-review' : 'authorization'
+          resultText = `Action ${reservation.action.idempotencyKey} is ${reservation.action.state}; Elia will not repeat it automatically. Human review is required.`
         } else {
-          const pending = batchMutates ? undefined : cache?.take(block.name, block.input)
-          if (pending) {
-            cached = true
-            resultText = await pending
+          const request = { name: block.name, input: block.input }
+          const alreadyApproved = activeGoalGraph()?.isActionApproved(request, activeGoalNode()) ?? false
+          const gate = alreadyApproved
+            ? { allowed: true, assessment: { ...assessAction(request), decision: 'allow' as const } }
+            : await activeActionGovernor().check(request)
+          assessment = gate.assessment
+          if (!gate.allowed) {
+            isError = true
+            failureClass = classifyFailure(gate.message ?? gate.assessment.reason).class
+            resultText = gate.message ?? `Action blocked by Elia’s autonomy governor: ${gate.assessment.reason}`
+            if (reservation && gate.assessment.risk === 'critical') {
+              activeGoalGraph()?.requestApproval('action', reservation.action.idempotencyKey, { name: block.name, input: redactActionInput(block.name, block.input) }, gate.assessment.reason)
+            }
+            if (reservation) activeGoalGraph()?.blockAction(reservation.action.id, resultText, gate.assessment.risk === 'critical')
           } else {
-            if (!tool) throw new Error(`Unknown tool: ${block.name}`)
-            resultText = await tool.execute(block.input)
+            if (reservation) activeGoalGraph()?.startAction(reservation.action.id)
+            const pending = batchMutates ? undefined : cache?.take(block.name, block.input)
+            if (pending) {
+              cached = true
+              resultText = await pending
+            } else {
+              if (!tool) throw new Error(`Unknown tool: ${block.name}`)
+              resultText = await tool.execute(block.input)
+            }
+            if (reservation) activeGoalGraph()?.finishAction(reservation.action.id, { ok: true, result: resultText })
           }
         }
       } catch (err) {
         isError = true
         cached = false
         resultText = err instanceof Error ? err.message : String(err)
+        const failure = classifyFailure(err)
+        failureClass = failure.class
+        if (reservation && reservation.decision === 'execute') activeGoalGraph()?.finishAction(reservation.action.id, { ok: false, error: err })
       }
 
       const durationMs = Date.now() - startedAt
       if (verbose) writeToolResult(block.name, resultText, isError, cached)
-      onTool?.({ name: block.name, input: block.input, result: resultText, isError, durationMs, cached, assessment })
+      onTool?.({ name: block.name, input: block.input, result: resultText, isError, durationMs, cached, assessment, actionId: reservation?.action.id, idempotencyKey: reservation?.action.idempotencyKey, replayed, failureClass })
       if (!isError) observed.push({ name: block.name, input: block.input, result: resultText })
 
       return {

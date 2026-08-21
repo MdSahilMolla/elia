@@ -57,9 +57,15 @@ export function createJournal(runId: string, goal: string): Journal {
   mkdirSync(join(dir, 'checkpoints'), { recursive: true })
   const logPath = join(dir, 'events.ndjson')
 
-  let seq = 0
-  let checkpointCount = 0
-  const recorded: JournalEvent[] = []
+  const previousEvents = readEvents(runId)
+  let seq = previousEvents.reduce((highest, event) => Math.max(highest, event.seq + 1), 0)
+  const checkpointFiles = readdirSync(join(dir, 'checkpoints'), { withFileTypes: true })
+  let checkpointCount = checkpointFiles
+    .filter((entry) => entry.isFile() && entry.name.endsWith('.json'))
+    .map((entry) => Number.parseInt(entry.name, 10))
+    .filter(Number.isFinite)
+    .reduce((highest, id) => Math.max(highest, id + 1), 0)
+  const recorded: JournalEvent[] = [...previousEvents]
 
   const journal: Journal = {
     runId,

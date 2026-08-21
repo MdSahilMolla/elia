@@ -49,6 +49,22 @@ After that, build **provenance-aware memory** with source, timestamp, confidence
 
 These stages preserve Elia’s strongest existing advantages—benchmark-gated self-evolution, run forking, multi-model fleets, and learned tools—while extending them into a coherent autonomy control plane.
 
+## Durable execution upgrade
+
+The follow-up implementation adds the next autonomy foundation: a **persistent goal graph** stored at `.elia/runs/<run-id>/goal-graph.json`. The validated proposal becomes a graph with a root goal and dependency-linked step nodes. Each node records status, attempts, files, role, evidence IDs, and a stable node idempotency namespace.
+
+| Durable capability | Behavior |
+| --- | --- |
+| Persistent graph | Atomic JSON snapshots survive process restarts and preserve proposal nodes, dependencies, actions, evidence, approvals, and failure state. |
+| Checkpointed continuation | `elia resume <run-id>` reopens the existing graph, skips completed nodes, and reruns only nodes with unresolved actions or failed verification. Existing journal sequence and checkpoint numbering remain append-only when resumed. |
+| Idempotent actions | Tool calls receive stable action identity derived from run, node, tool, and canonical input. Completed actions replay their stored result rather than executing twice. An interrupted in-flight side effect becomes human-review work instead of an automatic duplicate. |
+| Resumable approvals | Critical actions create durable redacted approval records. Operators can reconcile pending approvals before continuing, while unattended mode keeps them blocked. |
+| Evidence-gated completion | A goal cannot become `completed` until every proposal step is complete, plan approval exists, verification evidence passes, and structured review evidence passes. |
+| Failure classification | Failures are categorized as retryable, authorization, environment, human-review, or fatal, allowing the next run to distinguish safe retry from unsafe repetition. |
+| Run inspection | `elia runs <run-id>` now shows durable node statuses, attempt counts, and pending approval count in addition to the existing journal timeline. |
+
+The final verification for this pass is **345 tests passing across 45 files**, `bun run typecheck` passing, and `git diff --check` passing. The implementation adds focused tests for dependency readiness, evidence requirements, stable action replay, approval continuation, and failure classification.
+
 ## References
 
 [1]: https://manus.im/ "Manus official homepage"

@@ -101,8 +101,9 @@ bun run dev skills                       # list tools elia has written for itsel
 bun run dev skills candidates            # show repeated work that could become a new tool
 bun run dev skills synth                 # write a tool for the strongest candidate
 bun run dev runs                         # list past autonomous runs
-bun run dev runs <id>                    # show one run's timeline and forkable decision points
+bun run dev runs <id>                    # show one run's timeline, graph state, and forkable points
 bun run dev fork <id> --at <n> --with "<change>"   # re-plan an earlier run from a checkpoint
+bun run dev resume <id>                    # continue a durable goal and reconcile pending approvals
 
 elia --help
 elia --version
@@ -161,7 +162,7 @@ Cost is roughly Nx the execute phase (N parallel builder fleets instead of one) 
 
 ## Time travel: `elia runs` / `elia fork`
 
-Every autonomous run journals its phases and checkpoints the exact message history each one started from.
+Every autonomous run journals its phases, checkpoints the exact message history each one started from, and persists `.elia/runs/<id>/goal-graph.json` with the proposal nodes, dependencies, action reservations, approvals, and evidence required for completion.
 
 ```bash
 elia runs                 # list runs
@@ -169,7 +170,7 @@ elia runs <id>            # timeline + forkable decision points
 elia fork <id> --at 1 --with "use a token bucket instead of a fixed window"
 ```
 
-A fork replays the investigation that was already correct — for free — and only re-takes the decision. Normally exploring "what if the plan had been different" means paying for the whole run again. The original run is untouched; the fork gets its own id, so you can compare them.
+A fork replays the investigation that was already correct — for free — and only re-takes the decision. Normally exploring "what if the plan had been different" means paying for the whole run again. The original run is untouched; the fork gets its own id, so you can compare them. `elia resume <id>` is different: it continues the same durable graph, skips completed nodes, reopens only nodes with unresolved actions, and reconciles pending plan or side-effect approvals before continuing.
 
 ## Self-improvement: `elia bench` / `elia evolve`
 
@@ -223,7 +224,8 @@ A synthesized skill is only kept if it survives the same gate a human contributi
 - **`src/agentLoop.ts`** — the shared core loop: send messages to the active provider, stream text, execute tool calls (in parallel, up to 4 at a time), feed results back, repeat. Takes an optional provider (for tier routing), a step budget, a tool-event hook, and a speculative cache. Used by the top-level agent, sub-agents, the planner, and the evolution engine.
 - **`src/agent.ts`** — the top-level agent: full tool set (including `task` and `preview`), live streaming, thinking animation, prefetch, and usage accounting.
 - **`src/subagent.ts`** + **`src/autonomy/roles.ts`** + **`src/tools/task.ts`** — role-typed sub-agents. The role resolves to a model tier, a tool allowlist, a step budget, and a specialised prompt. Sub-agents can't spawn sub-agents (no role's allowlist contains `task`), which caps recursion at one level.
-- **`src/autonomy/loop.ts`** — the orient → propose → execute → verify → reflect → learn cycle.
+- **`src/autonomy/loop.ts`** — the orient → propose → execute → verify → reflect → learn cycle, with durable graph resumption across process boundaries.
+- **`src/autonomy/goalGraph.ts`** — atomic goal-graph persistence, dependency-aware node states, stable action idempotency keys, failure classes, resumable approvals, and evidence-gated completion.
 - **`src/autonomy/proposal.ts`** — the `submit_proposal` tool, plan validation (unknown step ids, duplicate ids, dependency cycles, and missing verification are all rejected with a message the model can act on), and terminal rendering that shows the wave structure and warns about two steps in one wave claiming the same file.
 - **`src/autonomy/fleet.ts`** — dependency-wave planning and parallel dispatch. Reports `savedMs`: the workers' summed time minus the wall clock actually taken, which keeps the parallelism honest — a "parallel" run that saved nothing means the decomposition was wrong.
 - **`src/autonomy/blackboard.ts`** + **`src/tools/blackboard.ts`** — the shared whiteboard. Sub-agents are normally hermetic, so two of them investigating the same repo rediscover the same facts twice; `board_post`/`board_read` turns a parallel fleet into one that cooperates.
@@ -259,9 +261,9 @@ What can't be covered that way is the model loop itself. `elia bench` is the rea
 
 ## Status
 
-In: parallel role-typed sub-agents, the autonomous work cycle with an approval gate, dependency-wave execution, verification-gated best-of-N execution in isolated worktrees, the shared blackboard, adversarial review, bounded self-repair, cross-run lessons, run forking, predictive prefetch, the two-tier model cascade, benchmark-gated self-evolution, skill synthesis, a central per-tool autonomy governor, delegated read-only browser observation, redacted action ledgers, and run receipts.
+In: parallel role-typed sub-agents, the autonomous work cycle with an approval gate, dependency-wave execution, verification-gated best-of-N execution in isolated worktrees, the shared blackboard, adversarial review, bounded self-repair, cross-run lessons, run forking, predictive prefetch, the two-tier model cascade, benchmark-gated self-evolution, skill synthesis, a central per-tool autonomy governor, delegated read-only browser observation, redacted action ledgers, run receipts, a durable goal graph, resumable approvals, stable action idempotency, failure classification, and evidence-gated completion.
 
-Still on the roadmap: a full durable goal graph with idempotent external retries, provenance-aware memory with expiry/conflict handling, a governed MCP connector registry, user-defined evolution fitness profiles, and event-triggered workflows. `elia evolve` does not commit to git — it copies files in and backs up what it replaced, leaving the commit to you.
+Still on the roadmap: provenance-aware memory with expiry/conflict handling, a governed MCP connector registry, user-defined evolution fitness profiles, event-triggered workflows, and provider-backed idempotency adapters for APIs that accept native idempotency keys. `elia evolve` does not commit to git — it copies files in and backs up what it replaced, leaving the commit to you.
 
 ### On speed
 

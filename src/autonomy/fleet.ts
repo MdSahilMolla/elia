@@ -7,6 +7,7 @@ import { role as roleDefinition, toolsForRole } from './roles.ts'
 import type { Usage } from '../providers/types.ts'
 import type { Journal } from './journal.ts'
 import type { ActionGovernor } from './governor.ts'
+import type { GoalGraphStore } from './goalGraph.ts'
 import type { ProposalStep, RoleName } from './types.ts'
 
 /** board_post/board_read are stripped for a variant's workers — see FleetRunOptions.stripBoardTools. */
@@ -32,6 +33,7 @@ export interface FleetRunOptions {
   journal?: Journal
   runId?: string
   governor?: ActionGovernor
+  graph?: GoalGraphStore
   /** Show the live status board. Off when a fleet runs inside another progress display. */
   showBoard?: boolean
   /**
@@ -99,6 +101,8 @@ export async function runFleet(options: FleetRunOptions): Promise<FleetResult> {
       cwd,
       runId: options.runId,
       governor: options.governor,
+      graph: options.graph,
+      nodeId: `step:${item.id}`,
       tools: stripBoardTools ? toolsForRole(item.role).filter((tool) => !BOARD_TOOL_NAMES.includes(tool.name)) : undefined,
       signal,
       onTool: (event) => {

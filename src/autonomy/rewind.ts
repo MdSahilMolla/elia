@@ -1,4 +1,5 @@
-import { listCheckpoints, readCheckpoint, readEvents, type StoredCheckpoint } from './journal.ts'
+import { listCheckpoints, readCheckpoint, readEvents, runDir, type StoredCheckpoint } from './journal.ts'
+import { readGoalGraphSnapshot } from './goalGraph.ts'
 import { runAutonomousTask, type Approver, type AutonomousRunResult } from './loop.ts'
 
 /**
@@ -54,12 +55,16 @@ export function renderRunTimeline(runId: string): string {
     })
 
   const forkable = runSteps(runId).filter((step) => step.forkable)
+  const graph = readGoalGraphSnapshot(runDir(runId))
+  const graphSummary = graph
+    ? `\nDurable goal graph:\n${graph.nodes.map((node) => `  ${node.id.padEnd(22)} ${node.status.padEnd(16)} attempts=${node.attemptCount}`).join('\n')}\nPending approvals: ${graph.approvals.filter((approval) => approval.status === 'pending').length}`
+    : '\nNo durable goal graph recorded for this run.'
   const footer =
     forkable.length > 0
       ? `\nForkable points:\n${forkable.map((step) => `  ${step.checkpointId}  ${step.label} (${step.messageCount} messages)`).join('\n')}\n\nFork one with:  elia fork ${runId} --at <n> --with "<what to do differently>"`
       : '\nNo forkable checkpoints in this run.'
 
-  return `Run ${runId}\n\n${lines.join('\n')}\n${footer}`
+  return `Run ${runId}\n\n${lines.join('\n')}\n${graphSummary}\n${footer}`
 }
 
 export interface ForkOptions {
