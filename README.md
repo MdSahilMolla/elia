@@ -45,6 +45,8 @@ Elia routes requests across explicit specialist modes: **Marketing**, **Finance*
 
 Each specialist must separate facts, assumptions, recommendations, and unknowns. Finance and cybersecurity work require explicit assumptions or authorized scope; data work requires quality checks and reproducibility; research requires sources and citations; communications and automation require exact approval immediately before consequential external actions.
 
+The capability inventory, architecture boundaries, and current limitations are documented in [`docs/agent-capability-audit.md`](docs/agent-capability-audit.md). The repeatable evaluation matrix and quality thresholds are in [`docs/general-agent-evaluation.md`](docs/general-agent-evaluation.md). Use `/capabilities` inside a session to inspect the live registry of specialist domains, risk classes, preferred tools, and output contracts.
+
 ### Self-supervised execution and polish
 
 For a fully autonomous run, use `--autonomous` (an alias for `--yolo`):
@@ -76,13 +78,7 @@ ELIA_BROWSER_CDP_URL=http://127.0.0.1:9222 bun run dev "inspect the active page"
 
 If a connector uses different tool names, override them with variables such as `ELIA_BROWSER_NAVIGATE_TOOL` and `ELIA_BROWSER_SNAPSHOT_TOOL`.
 
-A bridge receives one JSON request on stdin and should return one JSON or text response. Keep login credentials in the bridge or browser session, never in Elia prompts, source files, or command-line arguments. Elia must not bypass login challenges, CAPTCHAs, paywalls, or site safety controls. Actions that may send, buy, publish, delete, or change subscriptions require an explicit user approval represented by `confirmed=true`.
-
-### Automatic provider fallback
-
-The selected provider and model always remain the primary route. In the interactive session, use `/model auto` to enable transparent failover, or set `ELIA_ROUTING_MODE=auto` in `.env`. If the selected route fails before producing output because of a missing model, provider outage, network error, rate limit, or retryable server response, elia immediately tries the next configured provider without changing the selected model in the session. The model picker shows `auto` plus every provider whose key is available. Auto fallback is intentionally fast: it does not wait through the normal same-provider retry cycle when another ready provider is available, and it never retries after partial output because doing so could duplicate a response.
-
-The existing `ELIA_FAST_PROVIDER`/`ELIA_FAST_MODEL` setting is separate: it routes low-stakes reconnaissance and summarisation to a cheaper fast tier. Auto fallback is a resilience feature, not a replacement for the fast tier.
+A bridge receives one JSON request on stdin and should return one JSON or text response. Keep login credentials in the bridge or browser session, never in Elia prompts, source files, or command-line arguments. Elia must not bypass login challenges, CAPTCHAs, paywalls, or site safety controls. Actions that may send, buy, publish, delete, or change subscriptions pause and return an exact five-minute `confirmationToken`. The user must approve that exact action before the token is supplied; tokens are bound to the action details and cannot be reused for a changed target or message.
 
 ### The fast tier (optional, recommended)
 
