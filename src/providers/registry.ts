@@ -27,6 +27,18 @@ const PROVIDER_PRESETS: Record<string, ProviderPreset> = {
     baseURL: 'https://api.openai.com/v1',
     defaultModel: 'gpt-4.1',
   },
+  google: {
+    kind: 'openai-compatible',
+    apiKeyEnv: 'GEMINI_API_KEY',
+    baseURL: 'https://generativelanguage.googleapis.com/v1beta/openai/',
+    defaultModel: 'gemini-3.7-flash',
+  },
+  nvidia: {
+    kind: 'openai-compatible',
+    apiKeyEnv: 'NVIDIA_API_KEY',
+    baseURL: 'https://integrate.api.nvidia.com/v1',
+    defaultModel: 'nvidia/llama-3.3-nemotron-super-49b-v1.5',
+  },
   mercury: {
     kind: 'openai-compatible',
     apiKeyEnv: 'INCEPTION_API_KEY',
