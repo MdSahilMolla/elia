@@ -11,7 +11,7 @@ export function createOpenAICompatibleProvider(
   baseURL?: string,
   options: OpenAICompatibleProviderOptions = {},
 ): Provider {
-  const client = new OpenAI({ apiKey, baseURL })
+  const client = new OpenAI({ apiKey, baseURL, timeout: 180_000, maxRetries: 0 })
   // Reasoning-capable OpenAI-compatible models (Groq's gpt-oss, DeepSeek's API,
   // others) emit reasoning as a non-standard `reasoning`/`reasoning_content`
   // field with no enable/disable request param — there is nothing to toggle in
@@ -19,7 +19,7 @@ export function createOpenAICompatibleProvider(
   const passthroughReasoning = options.thinking?.enabled ?? true
 
   return {
-    async streamTurn({ system, messages, tools, onText, onThinking }: StreamTurnParams) {
+    async streamTurn({ system, messages, tools, onText, onThinking, signal }: StreamTurnParams) {
       const runner = client.chat.completions
         .stream({
           model,
@@ -27,7 +27,7 @@ export function createOpenAICompatibleProvider(
           tools: toOpenAITools(tools),
           // Without this the final streamed response has no usage data at all.
           stream_options: { include_usage: true },
-        })
+        }, signal ? { signal } : undefined)
         .on('content', (delta) => onText(delta))
 
       if (passthroughReasoning) {
@@ -56,7 +56,7 @@ export function createOpenAICompatibleProvider(
           messages: toOpenAIMessages(system, messages),
           tools: toOpenAITools(tools),
           stream: false,
-        })
+        }, signal ? { signal } : undefined)
         const message = completion.choices[0]?.message
         if (!message) throw new Error('Provider returned no message in non-streaming response')
         const content = toContentBlocks(message, passthroughReasoning)

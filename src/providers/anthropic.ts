@@ -15,12 +15,12 @@ export function createAnthropicProvider(
   model: string,
   options: AnthropicProviderOptions = {},
 ): Provider {
-  const client = new Anthropic({ apiKey })
+  const client = new Anthropic({ apiKey, timeout: 180_000, maxRetries: 0 })
   // undefined = thinking disabled entirely (no request param, no extra max_tokens headroom).
   const thinkingBudget = options.thinking?.enabled ? options.thinking.budgetTokens : undefined
 
   return {
-    async streamTurn({ system, messages, tools, onText, onThinking }: StreamTurnParams) {
+    async streamTurn({ system, messages, tools, onText, onThinking, signal }: StreamTurnParams) {
       const stream = client.messages.stream({
         model,
         // Extended thinking's budget counts toward max_tokens, so the ceiling has
@@ -40,7 +40,7 @@ export function createAnthropicProvider(
             input_schema: tool.input_schema,
           })),
         ),
-      })
+      }, signal ? { signal } : undefined)
 
       stream.on('text', (delta) => onText(delta))
       if (thinkingBudget) stream.on('thinking', (delta) => onThinking?.(delta))

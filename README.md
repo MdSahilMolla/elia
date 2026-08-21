@@ -76,6 +76,16 @@ bun run dev auto "improve the authentication flow and make the tests pass" --aut
 
 Elia will orient itself, propose a plan internally, delegate independent work, execute the plan, run verification commands, repair failures, and perform a bounded final quality pass before reporting completion. The polish pass is conservative: it can improve concrete rough edges, tests, documentation, and error handling, but it may leave the tree unchanged when no safe improvement is justified. Use `--no-polish` only when a task explicitly requires the older execution path. External side effects such as purchases, publishing, deletion, sending messages, or subscription changes still require explicit confirmation.
 
+### Production hardening and supervised operation
+
+Autonomous runs are durable rather than process-local. Elia persists a versioned goal graph, append-only journal, action ledger, checkpoints, proposal contracts, verification evidence, and a redacted receipt under `.elia/runs/<run-id>/`. Node and action execution uses expiring leases with heartbeat renewal; when a process is interrupted, opening the run reconciles stale leases into retryable or human-review states instead of silently duplicating work. `elia resume <run-id>` reports any recovered stale nodes or actions before continuing.
+
+Tool execution is bounded and cancellable end to end. Shell commands run in process groups, terminate descendants on timeout or operator cancellation, and cap captured output. Browser bridge, CDP, and provider requests have deadlines; provider retries are disabled at the transport boundary so the agent-level fallback policy remains visible and bounded. Set a default wall-clock budget with `ELIA_MAX_RUN_MS`, or override it per invocation with `elia auto "<goal>" --max-run-ms 900000`. Budget use, token usage, recovery counts, verification results, and action failure classes are included in the run receipt.
+
+Every delegated plan and proposal may declare `acceptanceCriteria`, `verificationCommands`, `sideEffects`, and `recovery`. These fields are persisted and shown for approval. Verification commands are checked by the same autonomy governor as ordinary shell actions; credential reads and outbound data writes are critical and fail closed when unattended. Structured JSONL events, `--plain`, `--quiet`, `--verbose`, and `--json` modes make long-running and CI execution observable without changing the underlying model prompt or its raw generation behavior.
+
+For specialist work, `elia agent "<request>" --dry-run` performs routing only and prints the selected persona chain and rationale without running specialist tools or side effects. Use this to inspect an execution plan before allowing a full specialist turn.
+
 ### External communication and browser tasks
 
 Elia can prepare and, when the user has enabled a trusted browser or service connector, execute external-party workflows such as drafting email to a co-founder, preparing a calendar invitation, or updating a web application. The system deliberately separates **draft** from **send**: it must verify the recipient, channel, content, and final page state, and obtain explicit approval immediately before sending, publishing, deleting, purchasing, transferring, or changing account state. Login, CAPTCHA, payment, and sensitive-input steps require user takeover. If Gmail, Calendar, Outlook, or another connector is disabled, Elia must report that limitation instead of pretending it can access the account.
@@ -140,6 +150,7 @@ bun run dev --resume <id>      # resume a specific session
 bun run dev auto "<goal>"                # plan, delegate to a fleet, verify, repair, and learn — end to end
 bun run dev auto "<goal>" --fast         # bounded fast path for simple work: one reviewer, one repair, no polish/lessons
 bun run dev auto "<goal>" --thorough     # deeper bounded review and repair for high-risk changes
+bun run dev auto "<goal>" --max-run-ms 900000  # hard wall-clock budget for this run
 bun run dev auto "<goal>" --yolo         # same, without pausing for plan approval
 bun run dev bench                        # score the current elia against its own benchmark suite
 bun run dev evolve                       # elia proposes and tries one improvement to its own source
@@ -152,7 +163,8 @@ bun run dev skills synth                 # write a tool for the strongest candid
 bun run dev runs                         # list past autonomous runs
 bun run dev runs <id>                    # show one run's timeline, graph state, and forkable points
 bun run dev fork <id> --at <n> --with "<change>"   # re-plan an earlier run from a checkpoint
-bun run dev resume <id>                    # continue a durable goal and reconcile pending approvals
+bun run dev resume <id>                    # continue a durable goal and reconcile pending approvals and stale leases
+bun run dev agent "<request>" --dry-run       # show specialist routing without executing tools
 
 elia --help
 elia --version
@@ -239,7 +251,7 @@ elia runs <id>            # timeline + forkable decision points
 elia fork <id> --at 1 --with "use a token bucket instead of a fixed window"
 ```
 
-A fork replays the investigation that was already correct — for free — and only re-takes the decision. Normally exploring "what if the plan had been different" means paying for the whole run again. The original run is untouched; the fork gets its own id, so you can compare them. `elia resume <id>` is different: it continues the same durable graph, skips completed nodes, reopens only nodes with unresolved actions, and reconciles pending plan or side-effect approvals before continuing.
+A fork replays the investigation that was already correct — for free — and only re-takes the decision. Normally exploring "what if the plan had been different" means paying for the whole run again. The original run is untouched; the fork gets its own id, so you can compare them. `elia resume <id>` is different: it continues the same durable graph, skips completed nodes, reopens only nodes with unresolved actions, and reconciles stale execution leases plus pending plan or side-effect approvals before continuing. `elia runs` includes a recovered-node count, while `elia runs <id>` shows the graph, timeline, verification evidence, and receipt-oriented diagnostics.
 
 ## Self-improvement: `elia bench` / `elia evolve`
 

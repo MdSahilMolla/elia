@@ -6,6 +6,7 @@ import { currentAgent } from './context.ts'
 import { redactActionInput } from './governor.ts'
 import type { JournalEvent } from './journal.ts'
 import type { GoalGraphSnapshot } from './goalGraph.ts'
+import type { Usage } from '../providers/types.ts'
 
 export interface ActionLedgerRecord {
   at: number
@@ -39,6 +40,9 @@ export interface RunReceiptInput {
   lessons?: string[]
   events: JournalEvent[]
   graph?: GoalGraphSnapshot
+  usage?: Usage
+  elapsedMs?: number
+  maxWallClockMs?: number
 }
 
 export function appendActionAudit(event: ToolEvent, runIdOverride?: string): void {
@@ -103,6 +107,9 @@ export function writeRunReceipt(input: RunReceiptInput): void {
     outcome: input.outcome,
     createdAt: actions[0]?.at ?? Date.now(),
     completedAt: Date.now(),
+    elapsedMs: input.elapsedMs,
+    maxWallClockMs: input.maxWallClockMs,
+    usage: input.usage,
     proposal: input.proposal
       ? {
           goal: input.proposal.goal,
@@ -111,6 +118,9 @@ export function writeRunReceipt(input: RunReceiptInput): void {
           risks: input.proposal.risks,
           assumptions: input.proposal.assumptions,
           outOfScope: input.proposal.outOfScope,
+          acceptanceCriteria: input.proposal.acceptanceCriteria ?? [],
+          sideEffects: input.proposal.sideEffects ?? [],
+          recovery: input.proposal.recovery ?? [],
         }
       : undefined,
     verification: input.events.filter((event) => event.kind === 'verify').map((event) => event.data),
@@ -118,8 +128,12 @@ export function writeRunReceipt(input: RunReceiptInput): void {
     lessons: input.lessons ?? [],
     graph: input.graph
       ? {
-          nodes: input.graph.nodes.map((node) => ({ id: node.id, status: node.status, attempts: node.attemptCount, evidenceIds: node.evidenceIds })),
+          nodes: input.graph.nodes.map((node) => ({ id: node.id, parentId: node.parentId, role: node.role, depth: node.depth, status: node.status, attempts: node.attemptCount, evidenceIds: node.evidenceIds, lastError: node.lastError?.class })),
           pendingApprovals: input.graph.approvals.filter((approval) => approval.status === 'pending').length,
+          recoveredNodes: input.graph.nodes.filter((node) => node.lastError?.message.includes('stale') || node.lastError?.message.includes('interruption')).length,
+          activeLeases: input.graph.nodes.filter((node) => node.leaseExpiresAt && node.leaseExpiresAt > Date.now()).length + input.graph.actions.filter((action) => action.leaseExpiresAt && action.leaseExpiresAt > Date.now()).length,
+          retryableActions: input.graph.actions.filter((action) => action.state === 'retryable').length,
+          humanReviewActions: input.graph.actions.filter((action) => action.state === 'human-review').length,
           evidence: input.graph.evidence.map((evidence) => ({ id: evidence.id, kind: evidence.kind, passed: evidence.passed, summary: evidence.summary })),
         }
       : undefined,
@@ -133,8 +147,14 @@ export function writeRunReceipt(input: RunReceiptInput): void {
       irreversible: actions.filter((action) => action.reversible === false).length,
       replayed: actions.filter((action) => action.replayed === true).length,
       humanReview: actions.filter((action) => action.failureClass === 'human-review').length,
+      retryable: actions.filter((action) => action.failureClass === 'retryable').length,
     },
     uncertainty: input.verdict?.issues.filter((issue) => issue.severity === 'minor').map((issue) => issue.detail) ?? [],
+    operational: {
+      elapsedMs: input.elapsedMs,
+      maxWallClockMs: input.maxWallClockMs,
+      usage: input.usage,
+    },
     replay: {
       eventsFile: 'events.ndjson',
       actionsFile: 'actions.ndjson',
@@ -167,8 +187,10 @@ function renderReceipt(receipt: {
   outcome: string
   verification: Record<string, unknown>[]
   uncertainty: string[]
-  actions: { total: number; failed: number; blocked: number; irreversible: number; replayed?: number; humanReview?: number }
-  graph?: { nodes: { id: string; status: string; attempts: number }[]; pendingApprovals: number }
+  elapsedMs?: number
+  maxWallClockMs?: number
+  actions: { total: number; failed: number; blocked: number; irreversible: number; replayed?: number; humanReview?: number; retryable?: number }
+  graph?: { nodes: { id: string; status: string; attempts: number }[]; pendingApprovals: number; recoveredNodes?: number; activeLeases?: number; retryableActions?: number; humanReviewActions?: number }
 }): string {
   const verificationLines =
     receipt.verification.length > 0
@@ -185,11 +207,13 @@ function renderReceipt(receipt: {
     `- **Run:** ${receipt.runId}`,
     `- **Outcome:** ${receipt.outcome}`,
     `- **Goal:** ${receipt.goal}`,
+    `- **Elapsed:** ${receipt.elapsedMs === undefined ? 'unknown' : `${(receipt.elapsedMs / 1000).toFixed(1)}s`}${receipt.maxWallClockMs ? ` / budget ${(receipt.maxWallClockMs / 1000).toFixed(1)}s` : ''}`,
     `- **Actions:** ${receipt.actions.total} (${receipt.actions.failed} failed, ${receipt.actions.blocked} blocked)`,
     `- **Irreversible actions:** ${receipt.actions.irreversible}`,
     `- **Replayed idempotent actions:** ${receipt.actions.replayed ?? 0}`,
     `- **Human-review actions:** ${receipt.actions.humanReview ?? 0}`,
-    ...(receipt.graph ? [`- **Pending approvals:** ${receipt.graph.pendingApprovals}`, `- **Graph nodes:** ${receipt.graph.nodes.filter((node) => node.status === 'completed').length}/${receipt.graph.nodes.length} completed`] : []),
+    `- **Retryable actions:** ${receipt.actions.retryable ?? 0}`,
+    ...(receipt.graph ? [`- **Pending approvals:** ${receipt.graph.pendingApprovals}`, `- **Graph nodes:** ${receipt.graph.nodes.filter((node) => node.status === 'completed').length}/${receipt.graph.nodes.length} completed`, `- **Recovered stale nodes:** ${receipt.graph.recoveredNodes ?? 0}`, `- **Active leases at receipt:** ${receipt.graph.activeLeases ?? 0}`] : []),
     '',
     '## What proves completion',
     '',

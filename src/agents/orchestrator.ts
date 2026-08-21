@@ -24,6 +24,7 @@ export interface AgentRunResult {
   sections: AgentSectionResult[]
   combined?: string
   usage: Usage
+  dryRun?: boolean
 }
 
 function toolsForPersona(persona: AgentPersona, selectedSkillNames?: string[]) {
@@ -138,7 +139,7 @@ function warnIfSearchUnconfigured(personas: AgentPersona[]): void {
  * earlier work. A single persona answers in that persona's voice; multi-domain
  * requests get labeled sections plus a combined recommendation.
  */
-export async function runAgentRequest(request: string, opts: { signal?: AbortSignal; skillNames?: string[] } = {}): Promise<AgentRunResult> {
+export async function runAgentRequest(request: string, opts: { signal?: AbortSignal; skillNames?: string[]; dryRun?: boolean } = {}): Promise<AgentRunResult> {
   const override = parseOverride(request)
   let usage = ZERO_USAGE
 
@@ -156,6 +157,8 @@ export async function runAgentRequest(request: string, opts: { signal?: AbortSig
   }
 
   warnIfSearchUnconfigured(personas)
+
+  if (opts.dryRun) return { personas, rationale, sections: [], usage, dryRun: true }
 
   const sections: AgentSectionResult[] = []
 

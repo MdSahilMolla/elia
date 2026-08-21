@@ -117,7 +117,7 @@ export async function listProviderModels(providerName: string): Promise<ModelDis
     : { Authorization: `Bearer ${apiKey}` }
 
   try {
-    const response = await fetch(endpoint, { headers })
+    const response = await fetch(endpoint, { headers, signal: AbortSignal.timeout(15_000) })
     if (!response.ok) return { providerName, models: [], error: `Model discovery returned HTTP ${response.status}` }
     const payload = (await response.json()) as { data?: unknown[]; models?: unknown[] }
     const rows = Array.isArray(payload.data) ? payload.data : Array.isArray(payload.models) ? payload.models : []

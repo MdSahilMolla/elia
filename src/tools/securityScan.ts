@@ -4,6 +4,7 @@ import type { Tool } from './types.ts'
 import { clampOutput, formatShellResult, runShell } from '../shell.ts'
 import { captureBeforeWrite } from '../checkpoint.ts'
 import { engagementDir } from './engagement.ts'
+import { currentAgent } from '../autonomy/context.ts'
 
 const SCAN_TIMEOUT_MS = 5 * 60_000
 
@@ -30,7 +31,7 @@ export const runSecurityToolTool: Tool = {
       return `No engagement "${engagement}" found (missing ${join(dir, 'SCOPE.md')}). Run new_engagement first — it records what you're authorized to test before any scan runs.`
     }
 
-    const result = await runShell(command, SCAN_TIMEOUT_MS)
+    const result = await runShell(command, SCAN_TIMEOUT_MS, currentAgent().cwd, currentAgent().signal)
     const logPath = join(dir, 'recon', `${Date.now()}-${label}.log`)
     await captureBeforeWrite(logPath)
     await Bun.write(logPath, `$ ${command}\n\n${formatShellResult(result)}`)

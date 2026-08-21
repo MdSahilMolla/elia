@@ -1,6 +1,8 @@
 import type { Tool } from '../tools/types.ts'
 import { clampOutput, runShell, type ShellResult } from '../shell.ts'
 import type { CriticIssue, CriticVerdict } from './types.ts'
+import { currentAgent } from './context.ts'
+import { activeActionGovernor, type ActionGovernor } from './governor.ts'
 
 /** Verification commands are usually a test suite, which needs far longer than an ordinary tool call. */
 const VERIFY_TIMEOUT_MS = 300_000
@@ -19,11 +21,17 @@ export interface VerificationOutcome {
  * the next being meaningful, and a typecheck failure makes the test output noise
  * rather than information.
  */
-export async function runVerification(commands: string[], cwd?: string): Promise<VerificationOutcome> {
+export async function runVerification(commands: string[], cwd?: string, signal?: AbortSignal, governor?: ActionGovernor): Promise<VerificationOutcome> {
   const results: ShellResult[] = []
 
   for (const command of commands) {
-    const result = await runShell(command, VERIFY_TIMEOUT_MS, cwd)
+    const gate = await (governor ?? activeActionGovernor()).check({ name: 'run_command', input: { command } })
+    if (!gate.allowed) {
+      const result: ShellResult = { command, exitCode: 126, stdout: '', stderr: gate.message ?? 'verification command blocked by autonomy governor', elapsedMs: 0, timedOut: false }
+      results.push(result)
+      return { results, passed: false }
+    }
+    const result = await runShell(command, VERIFY_TIMEOUT_MS, cwd, signal ?? currentAgent().signal)
     results.push(result)
     if (result.exitCode !== 0 || result.timedOut) return { results, passed: false }
   }

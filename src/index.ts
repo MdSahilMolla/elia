@@ -71,6 +71,7 @@ Autonomous work:
   elia auto "<goal>" --no-polish     Skip the bounded final quality pass
   elia auto "<goal>" --fast          Bounded fast path: no polish, one reviewer, one repair, no lesson pass
   elia auto "<goal>" --thorough      Extra bounded review and repair depth for high-risk changes
+  elia auto "<goal>" --max-run-ms N  Abort the run after N milliseconds (also ELIA_MAX_RUN_MS)
   elia auto "<goal>" --variants N   Run N independent implementation attempts in parallel,
                                      each in its own isolated git worktree, and keep only
                                      the one that verification — not an LLM's opinion — likes
@@ -82,6 +83,7 @@ Multi-agent:
                               Data, Research, Cybersecurity, Automation, Communications, AI/ML,
                               Marketing, Finance, or Tech — and answer in their voice. Multi-domain
                               requests get labeled "## X take" sections plus a combined recommendation.
+  elia agent "<request>" --dry-run  Show routing/persona plan without executing tools or side effects
 
 Self-improvement:
   elia bench                  Score the current elia against its own benchmark suite
@@ -132,6 +134,7 @@ Other:
   elia --plain                Disable color, animation, and in-place terminal redraws
   elia --quiet                Print the final answer and essential failures only
   elia --verbose              Include detailed progress output
+  ELIA_MAX_RUN_MS             Default wall-clock budget for autonomous runs; --max-run-ms overrides it
   elia --help                 Show this help
   elia --version              Print the version
 
@@ -210,11 +213,13 @@ async function runAgentCommand(): Promise<void> {
   }
 
   const startedAt = Date.now()
-  const result = await runAgentRequest(request)
+  const dryRun = hasFlag('--dry-run')
+  const result = await runAgentRequest(request, { dryRun })
   const elapsedMs = Date.now() - startedAt
   recordTopLevelTurn(elapsedMs)
 
-  writeUsageLine(`agent(s): ${result.personas.join(' -> ')}${result.rationale ? ` — ${result.rationale}` : ''}`)
+  writeUsageLine(`${dryRun ? 'routing plan' : 'agent(s)'}: ${result.personas.join(' -> ')}${result.rationale ? ` — ${result.rationale}` : ''}`)
+  if (dryRun) writeNotice('Dry run complete: no specialist tools or side effects were executed.')
   writeUsageLine(formatUsageLine(result.usage, elapsedMs, config.model))
 }
 
@@ -228,6 +233,14 @@ async function runAuto(): Promise<void> {
   }
 
   const profile = hasFlag('--fast') ? 'fast' : hasFlag('--thorough') ? 'thorough' : 'balanced'
+  const maxRunMsRaw = flagValue('--max-run-ms')
+  const maxRunMs = maxRunMsRaw === undefined ? undefined : Number.parseInt(maxRunMsRaw, 10)
+  if (maxRunMsRaw !== undefined && (!Number.isInteger(maxRunMs) || maxRunMs! < 1)) {
+    writeError(`--max-run-ms must be a positive integer in milliseconds, got "${maxRunMsRaw}"`)
+    process.exitCode = 1
+    return
+  }
+  if (maxRunMs !== undefined) writeNotice(`wall-clock budget: ${(maxRunMs / 1000).toFixed(1)}s`)
   if (profile !== 'balanced') writeNotice(`autonomy profile: ${profile}`)
 
   const variantsRaw = flagValue('--variants')
@@ -256,7 +269,7 @@ async function runAuto(): Promise<void> {
   let rl: readline.Interface | undefined
   try {
     if (yolo) {
-      const result = await runAutonomousTask({ goal, approve: autoApprove, variants, profile, polish: !hasFlag('--no-polish'), governanceMode: 'unattended', signal: controller.signal })
+      const result = await runAutonomousTask({ goal, approve: autoApprove, variants, profile, polish: !hasFlag('--no-polish'), governanceMode: 'unattended', signal: controller.signal, maxWallClockMs: maxRunMs })
       if (result.outcome !== 'completed') process.exitCode = 1
       return
     }
@@ -269,7 +282,7 @@ async function runAuto(): Promise<void> {
       const result = await confirmOnce(interactiveRl, label)
       return result.action === 'approve'
     }
-    const result = await runAutonomousTask({ goal, approve: createInteractiveApprover(interactiveRl), variants, profile, polish: !hasFlag('--no-polish'), governanceMode: 'supervised', approveAction, signal: controller.signal })
+    const result = await runAutonomousTask({ goal, approve: createInteractiveApprover(interactiveRl), variants, profile, polish: !hasFlag('--no-polish'), governanceMode: 'supervised', approveAction, signal: controller.signal, maxWallClockMs: maxRunMs })
     if (result.outcome !== 'completed' && result.outcome !== 'rejected') process.exitCode = 1
   } finally {
     rl?.close()
@@ -399,8 +412,8 @@ async function runRuns(): Promise<void> {
     return
   }
   for (const line of table(
-    [{ header: 'id' }, { header: 'outcome' }, { header: 'checkpoints', align: 'right' }, { header: 'goal' }],
-    runs.map((run) => [run.runId, run.outcome, String(run.checkpoints), run.goal.slice(0, 60)]),
+    [{ header: 'id' }, { header: 'outcome' }, { header: 'checkpoints', align: 'right' }, { header: 'recovered', align: 'right' }, { header: 'goal' }],
+    runs.map((run) => [run.runId, run.outcome, String(run.checkpoints), String(run.recoveredNodes ?? 0), run.goal.slice(0, 60)]),
   )) {
     writeUsageLine(`  ${line}`)
   }
@@ -426,6 +439,8 @@ async function runResume(): Promise<void> {
   }
 
   const graph = GoalGraphStore.open({ runId, goal, dir: runDir(runId) })
+  const recovery = graph.leaseRecoverySummary()
+  if (recovery.nodes || recovery.actions) writeNotice(`Recovered stale execution leases: ${recovery.nodes} node(s), ${recovery.actions} action(s).`)
   const pending = graph.pendingApprovals()
   if (pending.length > 0 && !process.stdin.isTTY && !hasFlag('--yolo', '-y')) {
     writeError(`Run ${runId} has ${pending.length} pending approval(s); resume from a terminal or pass --yolo to keep them blocked.`)

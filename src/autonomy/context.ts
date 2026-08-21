@@ -23,6 +23,8 @@ export interface AgentIdentity {
    * `autonomy/variants.ts`, the only thing that sets this today.
    */
   cwd?: string
+  /** Cooperative cancellation inherited by tools in this execution context. */
+  signal?: AbortSignal
 }
 
 const LEAD: AgentIdentity = { name: 'lead', role: 'lead' }

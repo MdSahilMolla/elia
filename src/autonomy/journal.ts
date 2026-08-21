@@ -153,6 +153,7 @@ export interface RunSummary {
   updatedAt: number
   checkpoints: number
   outcome: string
+  recoveredNodes?: number
 }
 
 export function listRuns(limit = 20): RunSummary[] {
@@ -164,6 +165,16 @@ export function listRuns(limit = 20): RunSummary[] {
       const events = readEvents(runId)
       const start = events.find((event) => event.kind === 'run-start')
       const end = [...events].reverse().find((event) => event.kind === 'run-end')
+      let recoveredNodes = 0
+      const graphPath = join(paths.runs, runId, 'goal-graph.json')
+      if (existsSync(graphPath)) {
+        try {
+          const graph = JSON.parse(readFileSync(graphPath, 'utf8')) as { nodes?: Array<{ lastError?: { reason?: string } }> }
+          recoveredNodes = graph.nodes?.filter((node) => node.lastError?.reason?.includes('stale execution lease recovered')).length ?? 0
+        } catch {
+          recoveredNodes = 0
+        }
+      }
       return {
         runId,
         goal: typeof start?.data.goal === 'string' ? start.data.goal : '(unknown goal)',
@@ -171,6 +182,7 @@ export function listRuns(limit = 20): RunSummary[] {
         updatedAt: events.at(-1)?.at ?? 0,
         checkpoints: events.filter((event) => event.kind === 'checkpoint').length,
         outcome: typeof end?.data.outcome === 'string' ? end.data.outcome : 'incomplete',
+        recoveredNodes,
       }
     })
     .sort((a, b) => b.startedAt - a.startedAt)

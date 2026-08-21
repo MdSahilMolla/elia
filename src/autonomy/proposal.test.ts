@@ -111,6 +111,17 @@ test('a non-object proposal is rejected rather than throwing', () => {
   expect(expectError(null)).toContain('must be an object')
 })
 
+test('proposal contracts are preserved and rendered for approval', () => {
+  const proposal = expectOk({ ...minimal, acceptanceCriteria: ['page loads at mobile width'], sideEffects: ['do not publish'], recovery: ['ask for credentials if deployment is required'] })
+  expect(proposal.acceptanceCriteria).toEqual(['page loads at mobile width'])
+  expect(proposal.sideEffects).toEqual(['do not publish'])
+  expect(proposal.recovery).toEqual(['ask for credentials if deployment is required'])
+  const rendered = renderProposal(proposal)
+  expect(rendered).toContain('Acceptance')
+  expect(rendered).toContain('page loads at mobile width')
+  expect(rendered).toContain('Side effects')
+})
+
 test('the rendered proposal shows the wave structure it implies', () => {
   const proposal = expectOk({
     ...minimal,

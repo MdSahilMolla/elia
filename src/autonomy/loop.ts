@@ -74,6 +74,8 @@ export interface AutonomousRunOptions {
   profile?: AutonomyProfile
   /** Capture cross-run lessons after completion; defaults from the selected profile. */
   learn?: boolean
+  /** Optional hard wall-clock budget for the entire run; 0 means no additional deadline. */
+  maxWallClockMs?: number
 }
 
 export type AutonomyProfile = 'fast' | 'balanced' | 'thorough'
@@ -156,6 +158,16 @@ Fix everything listed. When you are done, re-run the verification commands yours
 export async function runAutonomousTask(options: AutonomousRunOptions): Promise<AutonomousRunResult> {
   const { goal, approve, signal } = options
   const profile = options.profile ?? 'balanced'
+  const configuredWallClockMs = options.maxWallClockMs ?? (Number.parseInt(process.env.ELIA_MAX_RUN_MS ?? '0', 10) || 0)
+  const maxWallClockMs = Math.max(0, Math.min(configuredWallClockMs, 24 * 60 * 60_000))
+  const budgetController = maxWallClockMs > 0 ? new AbortController() : undefined
+  const runSignal = budgetController?.signal ?? signal
+  const forwardAbort = signal && budgetController ? () => budgetController.abort() : undefined
+  if (forwardAbort && signal) {
+    if (signal.aborted) forwardAbort()
+    else signal.addEventListener('abort', forwardAbort, { once: true })
+  }
+  const budgetTimer = budgetController ? setTimeout(() => budgetController.abort(), maxWallClockMs) : undefined
   const defaults = autonomyProfileDefaults(profile)
   const maxRepairAttempts = options.maxRepairAttempts ?? defaults.maxRepairAttempts
   const maxAmendments = options.maxAmendments ?? defaults.maxAmendments
@@ -180,6 +192,11 @@ export async function runAutonomousTask(options: AutonomousRunOptions): Promise<
     outcome: RunOutcome,
     extra: Partial<AutonomousRunResult> = {},
   ): AutonomousRunResult => {
+    if (budgetTimer) clearTimeout(budgetTimer)
+    if (forwardAbort) signal?.removeEventListener('abort', forwardAbort)
+    if (outcome === 'aborted' && budgetController?.signal.aborted && !signal?.aborted) {
+      journal.append('phase', { phase: 'budget', maxWallClockMs })
+    }
     if (outcome === 'completed') {
       try {
         graph.completeGoal()
@@ -190,7 +207,7 @@ export async function runAutonomousTask(options: AutonomousRunOptions): Promise<
       graph.failRun(outcome)
     }
     journal.append('run-end', { outcome, graph: graph.state().nodes.map((node) => ({ id: node.id, status: node.status })) })
-    writeRunReceipt({ runId, goal, outcome, proposal: extra.proposal, verdict: extra.verdict, lessons: extra.lessons, events: journal.events(), graph: graph.state() })
+    writeRunReceipt({ runId, goal, outcome, proposal: extra.proposal, verdict: extra.verdict, lessons: extra.lessons, events: journal.events(), graph: graph.state(), usage, elapsedMs: Date.now() - startedAt, maxWallClockMs: maxWallClockMs || undefined })
     emitEvent('run_finished', { runId, goal: redactText(goal, 2000), outcome, elapsedMs: Date.now() - startedAt, usage, graph: graph.state() })
     return {
       runId,
@@ -237,10 +254,10 @@ export async function runAutonomousTask(options: AutonomousRunOptions): Promise<
   if (proposal) {
     writeSubStep(`resuming durable goal graph ${runId} from persisted node state`)
   } else while (true) {
-    if (signal?.aborted) return done('aborted')
+    if (runSignal?.aborted) return done('aborted')
 
     journal.append('phase', { phase: 'propose', attempt: amendments })
-    const planning = await withAgentIdentity({ name: 'lead', role: 'lead', runId, cwd: process.cwd() }, () => withActionGovernor(governor, () => withGoalGraph(graph, () => runAgentLoop({
+    const planning = await withAgentIdentity({ name: 'lead', role: 'lead', runId, cwd: process.cwd(), signal: runSignal }, () => withActionGovernor(governor, () => withGoalGraph(graph, () => runAgentLoop({
       messages,
       systemPrompt: plannerPrompt,
       tools: planningTools,
@@ -248,7 +265,7 @@ export async function runAutonomousTask(options: AutonomousRunOptions): Promise<
       useAnimation: true,
       verbose: true,
       maxSteps: defaults.plannerSteps,
-      signal,
+      signal: runSignal,
       onTool: (event) => appendActionAudit(event, runId),
     }))))
     track(planning.usage)
@@ -325,7 +342,7 @@ export async function runAutonomousTask(options: AutonomousRunOptions): Promise<
     writePhase('execute', `${variantCount} parallel implementation attempts`)
     journal.append('phase', { phase: 'execute', variants: variantCount })
 
-    if (signal?.aborted) return done('aborted', { proposal })
+    if (runSignal?.aborted) return done('aborted', { proposal })
     const result = await runVariants({ proposal, briefing, count: variantCount, runId, journal, governor, signal })
     track(result.usage)
     for (const step of proposal.steps) {
@@ -342,7 +359,7 @@ export async function runAutonomousTask(options: AutonomousRunOptions): Promise<
     journal.append('phase', { phase: 'execute', waves: waves.length })
 
     for (const [index, wave] of waves.entries()) {
-      if (signal?.aborted) return done('aborted', { proposal })
+      if (runSignal?.aborted) return done('aborted', { proposal })
       if (waves.length > 1) writeSubStep(`wave ${index + 1} of ${waves.length}`)
 
       const pendingWave = wave.filter((step) => {
@@ -364,7 +381,7 @@ export async function runAutonomousTask(options: AutonomousRunOptions): Promise<
         runId,
         governor,
         graph,
-        signal,
+        signal: runSignal,
       })
       track(fleet.usage)
       totalSavedMs += fleet.savedMs
@@ -400,10 +417,10 @@ export async function runAutonomousTask(options: AutonomousRunOptions): Promise<
   if (runPolish && maxPolishPasses > 0) {
     writePhase('polish', `${maxPolishPasses} bounded final quality pass${maxPolishPasses === 1 ? '' : 'es'}`)
     for (let polishAttempt = 1; polishAttempt <= maxPolishPasses; polishAttempt++) {
-      if (signal?.aborted) return done('aborted', { proposal })
+      if (runSignal?.aborted) return done('aborted', { proposal })
       journal.append('phase', { phase: 'polish', attempt: polishAttempt })
 
-      const diff = await runShell('git diff HEAD', 30_000)
+      const diff = await runShell('git diff HEAD', 30_000, undefined, runSignal)
       const diffText = diff.stdout.trim() ? clampOutput(diff.stdout.trim(), 8000) : '(no diff yet — inspect the completed work and the goal)'
       const polish = await runSubAgent({
         role: 'polisher',
@@ -411,7 +428,7 @@ export async function runAutonomousTask(options: AutonomousRunOptions): Promise<
         runId,
         governor,
         briefing,
-        signal,
+        signal: runSignal,
         prompt: `The implementation phase is complete. Perform one final, conservative quality pass before the verification gate.
 
 Goal:
@@ -428,7 +445,7 @@ Read the changed files in full context. Improve only concrete issues directly re
 
       // A second pass is useful only when the first pass actually changed the
       // tree; otherwise stop early rather than rewarding autonomous churn.
-      const after = await runShell('git diff HEAD', 30_000)
+      const after = await runShell('git diff HEAD', 30_000, undefined, runSignal)
       if (after.stdout === diff.stdout) break
     }
   }
@@ -439,12 +456,12 @@ Read the changed files in full context. Improve only concrete issues directly re
   let attempt = 0
 
   while (true) {
-    if (signal?.aborted) return done('aborted', { proposal, verdict })
+    if (runSignal?.aborted) return done('aborted', { proposal, verdict })
 
     writePhase('verify', proposal.verification.length > 0 ? proposal.verification.join(' · ') : 'review only')
     journal.append('phase', { phase: 'verify', attempt })
 
-    const verification = await runVerification(proposal.verification)
+    const verification = await runVerification(proposal.verification, undefined, runSignal, governor)
     for (const result of verification.results) {
       const label = `$ ${result.command}`
       if (result.exitCode === 0 && !result.timedOut) writePass(label)
@@ -452,7 +469,14 @@ Read the changed files in full context. Improve only concrete issues directly re
     }
     const verificationData = {
       passed: verification.passed,
-      results: verification.results.map((result) => ({ command: result.command, exitCode: result.exitCode })),
+      results: verification.results.map((result) => ({
+        command: result.command,
+        exitCode: result.exitCode,
+        timedOut: result.timedOut,
+        elapsedMs: result.elapsedMs,
+        stdout: redactText(clampOutput(result.stdout, 1200), 1200),
+        stderr: redactText(clampOutput(result.stderr, 1200), 1200),
+      })),
     }
     journal.append('verify', verificationData)
     graph.recordVerification(verification.passed, verificationData)
@@ -464,7 +488,7 @@ Read the changed files in full context. Improve only concrete issues directly re
       // them independently spending a tool round-trip (reasoning + tool_use +
       // tool_result, all billed) to ask git the same question. Three reviewers
       // asking separately used to cost 3x this round-trip for identical output.
-      const [diff, status] = await Promise.all([runShell('git diff HEAD', 30_000), runShell('git status --porcelain=v1', 30_000)])
+      const [diff, status] = await Promise.all([runShell('git diff HEAD', 30_000, undefined, runSignal), runShell('git status --porcelain=v1', 30_000, undefined, runSignal)])
       const diffText = diff.stdout.trim() ? clampOutput(diff.stdout.trim(), 8000) : '(no diff against HEAD — check git status below)'
       const changedFiles = [...diff.stdout.matchAll(/^diff --git a\/(.+) b\/.+$/gm)].map((match) => match[1] ?? '')
       // A diff that only touches prose has no exploit surface and no logic to
@@ -521,7 +545,7 @@ Read the changed files in full for context beyond the diff above — a diff hide
             nodeId: `review:${reviewer.name}`,
             briefing,
             extraTools: [verdictCapture.tool],
-            signal,
+            signal: runSignal,
 
             prompt: `${reviewContext} ${reviewer.focus} Finish by calling submit_verdict.`,
           })
@@ -580,7 +604,7 @@ Read the changed files in full for context beyond the diff above — a diff hide
 
     const cache = createToolResultCache()
     const repairTools = [...allWorkerTools(), taskTool]
-    const repair = await withAgentIdentity({ name: 'lead', role: 'lead', runId, cwd: process.cwd() }, () => withActionGovernor(governor, () => withGoalGraph(graph, () => runAgentLoop({
+    const repair = await withAgentIdentity({ name: 'lead', role: 'lead', runId, cwd: process.cwd(), signal: runSignal }, () => withActionGovernor(governor, () => withGoalGraph(graph, () => runAgentLoop({
       messages: repairMessages,
       systemPrompt: REPAIR_PROMPT,
       tools: repairTools,
@@ -590,7 +614,7 @@ Read the changed files in full for context beyond the diff above — a diff hide
       maxSteps: 50,
       cache,
       prefetcher: createPrefetcher({ tools: repairTools, cache }),
-      signal,
+      signal: runSignal,
       onTool: (event) => appendActionAudit(event, runId),
     }))))
     track(repair.usage)

@@ -4,7 +4,7 @@ import { currentAgent } from '../autonomy/context.ts'
 
 export const runCommandTool: Tool = {
   name: 'run_command',
-  description: 'Run a shell command and return its stdout, stderr, and exit code. Times out after 60 seconds.',
+  description: 'Run a shell command and return its stdout, stderr, and exit code. Times out after 60 seconds and inherits the active autonomous cancellation signal.',
   input_schema: {
     type: 'object',
     properties: {
@@ -14,6 +14,6 @@ export const runCommandTool: Tool = {
   },
   async execute(input) {
     const command = input.command as string
-    return formatShellResult(await runShell(command, DEFAULT_SHELL_TIMEOUT_MS, currentAgent().cwd))
+    return formatShellResult(await runShell(command, DEFAULT_SHELL_TIMEOUT_MS, currentAgent().cwd, currentAgent().signal))
   },
 }

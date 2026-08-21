@@ -15,6 +15,8 @@ export type ConversationMessage = ChatMessage
 
 const MAX_PARALLEL_TOOLS = 4
 const MAX_PROVIDER_ATTEMPTS = 3
+const PROVIDER_HEALTH_COOLDOWN_MS = 30_000
+const providerHealth = new Map<string, { failures: number; cooldownUntil: number; lastError?: string }>()
 
 /**
  * A hard ceiling on model round-trips in one loop. Without it a model that keeps
@@ -156,13 +158,24 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
       // One final call, with the budget lifted, so the run ends with a real report
       // rather than being cut off mid-thought.
       steps += 1
-      const wrapUp = await streamOnce()
-      messages.push({ role: 'assistant', content: wrapUp })
+      try {
+        const wrapUp = await streamOnce()
+        messages.push({ role: 'assistant', content: wrapUp })
+      } catch (error) {
+        if (signal?.aborted) return finish('aborted')
+        throw error
+      }
       return finish('step-budget')
     }
 
     steps += 1
-    const content = await streamOnce()
+    let content: ContentBlock[]
+    try {
+      content = await streamOnce()
+    } catch (error) {
+      if (signal?.aborted) return finish('aborted')
+      throw error
+    }
     messages.push({ role: 'assistant', content })
 
     const toolUseBlocks = content.filter(
@@ -195,8 +208,9 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
       let reservation: ActionReservation | undefined
       let replayed = false
       let failureClass: string | undefined
+      let actionHeartbeat: ReturnType<typeof setInterval> | undefined
+      const graph = activeGoalGraph()
       try {
-        const graph = activeGoalGraph()
         reservation = graph?.reserveAction({ name: block.name, input: block.input }, activeGoalNode())
         if (reservation?.decision === 'replay') {
           replayed = true
@@ -222,7 +236,16 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
             }
             if (reservation) activeGoalGraph()?.blockAction(reservation.action.id, resultText, gate.assessment.risk === 'critical')
           } else {
-            if (reservation) activeGoalGraph()?.startAction(reservation.action.id)
+            if (reservation) {
+              graph?.startAction(reservation.action.id)
+              actionHeartbeat = setInterval(() => {
+                try {
+                  graph?.heartbeatAction(reservation!.action.id)
+                } catch {
+                  // The action may have finished between timer ticks.
+                }
+              }, 30_000)
+            }
             const pending = batchMutates ? undefined : cache?.take(block.name, block.input)
             if (pending) {
               cached = true
@@ -240,7 +263,9 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
         resultText = err instanceof Error ? err.message : String(err)
         const failure = classifyFailure(err)
         failureClass = failure.class
-        if (reservation && reservation.decision === 'execute') activeGoalGraph()?.finishAction(reservation.action.id, { ok: false, error: err })
+        if (reservation && reservation.decision === 'execute') graph?.finishAction(reservation.action.id, { ok: false, error: err })
+      } finally {
+        if (actionHeartbeat) clearInterval(actionHeartbeat)
       }
 
       const durationMs = Date.now() - startedAt
@@ -276,8 +301,8 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
     }
     const cursor = useAnimation ? createStreamCursor() : undefined
 
-    // Resolved per call rather than captured once, so the ambient provider stays
-    // swappable (tests stub `config.provider`) while roles can still pin a tier.
+    // Resolve routes per call so the ambient provider remains swappable while
+    // role-pinned tiers can still supply their own provider and fallback list.
     const active = provider ?? config.provider
     const routes: ProviderRoute[] = [
       {
@@ -288,12 +313,15 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
       },
       ...(fallbacks ?? (provider ? [] : autoFallbacksFor(config.providerName))),
     ]
-
+    const now = Date.now()
+    const healthyRoutes = routes.filter((route) => (providerHealth.get(providerHealthKey(route))?.cooldownUntil ?? 0) <= now)
+    const activeRoutes = healthyRoutes.length > 0 ? healthyRoutes : routes
     try {
+
       let emittedOutput = false
       let lastError: unknown
-      for (let routeIndex = 0; routeIndex < routes.length; routeIndex += 1) {
-        const route = routes[routeIndex]!
+      for (let routeIndex = 0; routeIndex < activeRoutes.length; routeIndex += 1) {
+        const route = activeRoutes[routeIndex]!
         for (let attempt = 1; ; attempt++) {
           try {
             const result = await route.provider.streamTurn({
@@ -314,17 +342,24 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
               stopAnimation()
               onThinking?.(delta)
             },
+            signal,
             })
             totalUsage = addUsage(totalUsage, result.usage)
+            providerHealth.delete(providerHealthKey(route))
             return result.content
           } catch (error) {
             lastError = error
+            if (isFallbackableProviderError(error)) {
+              const key = providerHealthKey(route)
+              const previous = providerHealth.get(key)
+              providerHealth.set(key, { failures: (previous?.failures ?? 0) + 1, cooldownUntil: Date.now() + PROVIDER_HEALTH_COOLDOWN_MS, lastError: error instanceof Error ? error.message : String(error) })
+            }
             // Retrying after output was emitted would duplicate a partial answer in
             // the terminal. Only route before any output has been emitted.
             if (emittedOutput || !isFallbackableProviderError(error)) throw error
             if (signal?.aborted) throw error
 
-            const nextRoute = routes[routeIndex + 1]
+            const nextRoute = activeRoutes[routeIndex + 1]
             if (nextRoute) {
               if (verbose) {
                 writeNotice(
@@ -364,6 +399,14 @@ export function lastAssistantText(messages: ConversationMessage[], fallback: str
     .trim()
 
   return text && text.length > 0 ? text : fallback
+}
+
+function providerHealthKey(route: ProviderRoute): string {
+  return `${route.providerName}:${route.model}`
+}
+
+export function resetProviderHealthForTests(): void {
+  providerHealth.clear()
 }
 
 function isFallbackableProviderError(error: unknown): boolean {

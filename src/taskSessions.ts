@@ -1,4 +1,4 @@
-import { mkdirSync } from 'node:fs'
+import { mkdirSync, renameSync } from 'node:fs'
 import { join } from 'node:path'
 import { emitEvent, machineReadable } from './ui/runtime.ts'
 import { redactText } from './ui/redact.ts'
@@ -44,20 +44,24 @@ export interface TaskControls {
 export type TaskSessionListener = (sessions: TaskSession[]) => void
 
 const TASKS_FILE = join(process.cwd(), '.elia', 'tasks.json')
+const TASKS_SCHEMA_VERSION = 2
 
 export class TaskSessionStore {
   private readonly records = new Map<string, TaskSession>()
   private readonly listeners = new Set<TaskSessionListener>()
   private readonly controls = new Map<string, TaskControls>()
   private writeQueued = false
+  private persistencePath = TASKS_FILE
 
   async load(filePath = TASKS_FILE): Promise<void> {
+    this.persistencePath = filePath
     const file = Bun.file(filePath)
     if (!(await file.exists())) return
     try {
-      const parsed = (await file.json()) as TaskSession[]
-      if (!Array.isArray(parsed)) return
-      for (const item of parsed) {
+      const parsed = (await file.json()) as TaskSession[] | { version?: number; tasks?: TaskSession[] }
+      const records = Array.isArray(parsed) ? parsed : parsed && Array.isArray(parsed.tasks) ? parsed.tasks : []
+      if (records.length === 0 && !Array.isArray(parsed) && !parsed?.tasks) return
+      for (const item of records) {
         if (!item || typeof item.id !== 'string' || typeof item.title !== 'string') continue
         this.records.set(item.id, {
           id: item.id,
@@ -162,8 +166,10 @@ export class TaskSessionStore {
     queueMicrotask(async () => {
       this.writeQueued = false
       try {
-        mkdirSync(join(process.cwd(), '.elia'), { recursive: true })
-        await Bun.write(TASKS_FILE, JSON.stringify(this.list(), null, 2))
+        mkdirSync(join(this.persistencePath, '..'), { recursive: true })
+        const temporary = `${this.persistencePath}.tmp-${process.pid}`
+        await Bun.write(temporary, JSON.stringify({ version: TASKS_SCHEMA_VERSION, tasks: this.list() }, null, 2))
+        renameSync(temporary, this.persistencePath)
       } catch {
         // Persistence is best-effort. The live dashboard remains authoritative.
       }

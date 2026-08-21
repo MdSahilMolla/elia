@@ -88,6 +88,9 @@ export function parseProposal(raw: unknown): { proposal: Proposal } | { error: s
       risks: asStringArray(input.risks),
       verification,
       outOfScope: asStringArray(input.outOfScope),
+      acceptanceCriteria: asStringArray(input.acceptanceCriteria),
+      sideEffects: asStringArray(input.sideEffects),
+      recovery: asStringArray(input.recovery),
     },
   }
 }
@@ -162,6 +165,9 @@ Break the work into the smallest number of steps that are genuinely separable, a
           items: { type: 'string' },
           description: 'Related things you are deliberately not doing',
         },
+        acceptanceCriteria: { type: 'array', items: { type: 'string' }, description: 'Observable conditions and evidence required for completion' },
+        sideEffects: { type: 'array', items: { type: 'string' }, description: 'External or irreversible effects identified in this plan' },
+        recovery: { type: 'array', items: { type: 'string' }, description: 'What to do when a dependency, credential, environment, or approval blocks progress' },
       },
       required: ['goal', 'understanding', 'steps', 'verification'],
     },
@@ -224,6 +230,18 @@ export function renderProposal(proposal: Proposal): string {
     for (const collision of fileCollisions(wave)) {
       lines.push(`    ${red('!')} ${collision.file} is claimed by ${collision.steps.join(' and ')} in the same wave`)
     }
+  }
+
+  if (proposal.acceptanceCriteria?.length) {
+    lines.push('')
+    lines.push(bold('Acceptance'))
+    for (const criterion of proposal.acceptanceCriteria) lines.push(`  ${dim('·')} ${criterion}`)
+  }
+
+  if (proposal.sideEffects?.length) {
+    lines.push('')
+    lines.push(bold('Side effects'))
+    for (const effect of proposal.sideEffects) lines.push(`  ${dim('·')} ${effect}`)
   }
 
   if (proposal.risks.length > 0) {

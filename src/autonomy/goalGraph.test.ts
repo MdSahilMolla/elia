@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { GoalGraphStore, classifyFailure, type GoalGraphOptions } from './goalGraph.ts'
+import { EXECUTION_LEASE_TTL_MS, GoalGraphStore, classifyFailure, type GoalGraphOptions } from './goalGraph.ts'
 import type { Proposal } from './types.ts'
 
 const temporaryDirectories: string[] = []
@@ -73,6 +73,22 @@ describe('durable goal graph', () => {
     expect(graph.reserveAction(secondRequest, 'step:build').decision).toBe('human-review')
     graph.resolveApproval(approval.id, true)
     expect(graph.reserveAction(secondRequest, 'step:build').decision).toBe('execute')
+  })
+
+  test('reconciles stale node and action leases after interruption', () => {
+    const { graph } = createGraph()
+    graph.seedProposal(proposal)
+    const planApproval = graph.requestApproval('plan', 'proposal')
+    graph.resolveApproval(planApproval.id, true)
+    graph.startNode('step:inspect')
+    const action = graph.reserveAction({ name: 'run_command', input: { command: 'bun test' } }, 'step:inspect')
+    graph.startAction(action.action.id)
+
+    const recovered = graph.reconcileStaleLeases(Date.now() + EXECUTION_LEASE_TTL_MS + 1)
+    expect(recovered.nodes).toEqual(['step:inspect'])
+    expect(recovered.actions).toEqual([action.action.id])
+    expect(graph.node('step:inspect')?.status).toBe('waiting-retry')
+    expect(graph.state().actions[0]?.state).toBe('retryable')
   })
 
   test('classifies transient, authorization, environment, and human-review failures', () => {

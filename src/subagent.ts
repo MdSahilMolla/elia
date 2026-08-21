@@ -131,7 +131,7 @@ export async function runSubAgent(request: SubAgentRequest): Promise<SubAgentRes
   const basePrompt = activeMode() === 'cyber' ? CYBER_SUBAGENT_SYSTEM_PROMPT : SUBAGENT_SYSTEM_PROMPT
   const cwd = request.cwd ?? currentAgent().cwd
 
-  const result = await withAgentIdentity({ name: request.name, role: request.role, runId, cwd }, () =>
+  const result = await withAgentIdentity({ name: request.name, role: request.role, runId, cwd, signal: request.signal }, () =>
     withActionGovernor(governor, () => withGoalGraphIfAvailable(graph, () => withGoalNode(nodeId, () => runAgentLoop({
       messages,
       systemPrompt: `${basePrompt}\n\n## Your role\n${definition.prompt}`,

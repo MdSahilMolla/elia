@@ -35,6 +35,8 @@ export interface StreamTurnParams {
   onText: (delta: string) => void
   /** Streamed reasoning, when the provider/model produces any. Never guaranteed to fire. */
   onThinking?: (delta: string) => void
+  /** Abort the in-flight provider request when the owning run is cancelled. */
+  signal?: AbortSignal
 }
 
 /** Whether extended thinking / reasoning is requested for a provider instance, and how much budget to give it. */

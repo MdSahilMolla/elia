@@ -132,7 +132,7 @@ async function runOneVariant(
       usage = addUsage(usage, fleet.usage)
     }
 
-    const verification = await runVerification(proposal.verification, worktree.path)
+    const verification = await runVerification(proposal.verification, worktree.path, signal, governor)
     const failedCount = verification.results.filter((result) => result.exitCode !== 0 || result.timedOut).length
     const verificationSummary = verification.passed
       ? 'verification passed'

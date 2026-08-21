@@ -25,6 +25,13 @@ describe('autonomy governor', () => {
     expect(result.decision).toBe('approve')
   })
 
+  test('blocks unattended credential reads and outbound data transfer', () => {
+    const credentialRead = assessAction({ name: 'run_command', input: { command: 'cat .env' } }, '/repo')
+    const externalWrite = assessAction({ name: 'run_command', input: { command: 'curl -X POST https://example.test -d @report.json' } }, '/repo')
+    expect(credentialRead.risk).toBe('critical')
+    expect(externalWrite.risk).toBe('critical')
+  })
+
   test('allows review work in unattended mode but blocks critical work without approval', async () => {
     const governor = createActionGovernor({ mode: 'unattended' })
     expect((await governor.check({ name: 'run_command', input: { command: 'bun install' } })).allowed).toBe(true)

@@ -10,32 +10,83 @@ export interface ShellResult {
 }
 
 export const DEFAULT_SHELL_TIMEOUT_MS = 60_000
+export const MAX_SHELL_OUTPUT_LENGTH = 200_000
 
 export async function runShell(
   command: string,
   timeoutMs = DEFAULT_SHELL_TIMEOUT_MS,
   /** Directory to run in. Passed to the spawn rather than prefixed as `cd`, which differs per shell (and per drive on Windows). */
   cwd?: string,
+  /** Cooperative cancellation for autonomous runs. */
+  signal?: AbortSignal,
 ): Promise<ShellResult> {
   const startedAt = Date.now()
   const shellArgs = process.platform === 'win32' ? ['cmd', '/c', command] : ['sh', '-c', command]
 
-  const proc = Bun.spawn(shellArgs, { stdout: 'pipe', stderr: 'pipe', ...(cwd ? { cwd } : {}) })
+  const proc = Bun.spawn(shellArgs, {
+    stdout: 'pipe',
+    stderr: 'pipe',
+    ...(cwd ? { cwd } : {}),
+    ...(process.platform === 'win32' ? {} : { detached: true }),
+  })
 
   let timedOut = false
+  let cancelled = false
+  let terminated = false
+  const terminate = () => {
+    if (terminated) return
+    terminated = true
+    if (process.platform !== 'win32' && proc.pid) {
+      try {
+        process.kill(-proc.pid, 'SIGTERM')
+      } catch {
+        proc.kill()
+      }
+      setTimeout(() => {
+        try {
+          process.kill(-proc.pid, 'SIGKILL')
+        } catch {
+          // The process group may already have exited.
+        }
+      }, 750).unref()
+    } else {
+      proc.kill()
+    }
+  }
   const timeout = setTimeout(() => {
     timedOut = true
-    proc.kill()
-  }, timeoutMs)
+    terminate()
+  }, Math.max(1, timeoutMs))
+  const onAbort = () => {
+    cancelled = true
+    terminate()
+  }
+  if (signal) {
+    if (signal.aborted) onAbort()
+    else signal.addEventListener('abort', onAbort, { once: true })
+  }
 
   const [stdout, stderr, exitCode] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
+    readBounded(proc.stdout, MAX_SHELL_OUTPUT_LENGTH),
+    readBounded(proc.stderr, MAX_SHELL_OUTPUT_LENGTH),
     proc.exited,
   ])
   clearTimeout(timeout)
+  signal?.removeEventListener('abort', onAbort)
 
-  return { command, exitCode, stdout, stderr, elapsedMs: Date.now() - startedAt, timedOut }
+  return {
+    command,
+    exitCode,
+    stdout,
+    stderr: cancelled && !stderr ? 'cancelled by operator' : stderr,
+    elapsedMs: Date.now() - startedAt,
+    timedOut,
+  }
+}
+
+async function readBounded(stream: ReadableStream<Uint8Array>, maxLength: number): Promise<string> {
+  const text = await new Response(stream).text()
+  return text.length <= maxLength ? text : `${text.slice(0, maxLength)}\\n… [${text.length - maxLength} characters omitted] …`
 }
 
 /** Formats a result the way a model reads it best: status first, then the output that explains it. */

@@ -61,6 +61,12 @@ export interface Proposal {
   verification: string[]
   /** Things deliberately not being done, so scope creep is visible up front. */
   outOfScope: string[]
+  /** Observable conditions and evidence required for the goal to count as complete. */
+  acceptanceCriteria?: string[]
+  /** External or irreversible actions explicitly identified in the plan. */
+  sideEffects?: string[]
+  /** Recovery instructions for retries, missing credentials, or human handoff. */
+  recovery?: string[]
 }
 
 export interface CriticIssue {

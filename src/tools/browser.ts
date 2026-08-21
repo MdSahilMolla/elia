@@ -27,6 +27,7 @@ interface BrowserResult {
 const SENSITIVE_WORDS = /\b(buy|purchase|pay|checkout|send|publish|delete|remove|confirm|submit|transfer|wire|post|tweet|message|cancel|subscribe)\b/i
 const MAX_TEXT_LENGTH = 20_000
 const MAX_WAIT_MS = 30_000
+const BROWSER_DEADLINE_MS = 45_000
 const APPROVAL_TTL_MS = 5 * 60_000
 const pendingApprovals = new Map<string, { fingerprint: string; expiresAt: number }>()
 
@@ -74,7 +75,7 @@ export const browserTool: Tool = {
 
     taskSessions.update(session.id, { status: 'running', action: request.action, detail: request.url ?? request.target ?? request.text?.slice(0, 120) ?? 'Working' })
     try {
-      const result = await dispatchBrowserRequest(request)
+      const result = await withDeadline(dispatchBrowserRequest(request), BROWSER_DEADLINE_MS, 'browser action timed out')
       const output = formatBrowserResult(result)
       taskSessions.update(session.id, { status: 'done', action: 'Finished', detail: output.slice(0, 240) })
       return `${output}\nTask session: ${session.id}`
@@ -150,26 +151,19 @@ async function callMcpTool(server: string, request: BrowserRequest): Promise<Bro
   const proc = Bun.spawn(['manus-mcp-cli', '-s', server, 'tool', 'call', toolName, '-i', JSON.stringify(request)], {
     stdout: 'pipe',
     stderr: 'pipe',
+    ...(process.platform === 'win32' ? {} : { detached: true }),
   })
-  const [stdout, stderr, exitCode] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-    proc.exited,
-  ])
+  const { stdout, stderr, exitCode } = await collectBrowserProcess(proc, BROWSER_DEADLINE_MS)
   if (exitCode !== 0) throw new Error(`MCP browser tool ${toolName} exited with code ${exitCode}${stderr.trim() ? `: ${stderr.trim()}` : ''}`)
   return parseBridgeOutput(stdout)
 }
 
 async function callBridge(command: string, request: BrowserRequest): Promise<BrowserResult | string> {
-  const proc = Bun.spawn(['sh', '-c', command], { stdin: 'pipe', stdout: 'pipe', stderr: 'pipe' })
+  const proc = Bun.spawn(['sh', '-c', command], { stdin: 'pipe', stdout: 'pipe', stderr: 'pipe', detached: true })
   proc.stdin.write(`${JSON.stringify(request)}\n`)
   proc.stdin.end()
 
-  const [stdout, stderr, exitCode] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-    proc.exited,
-  ])
+  const { stdout, stderr, exitCode } = await collectBrowserProcess(proc, BROWSER_DEADLINE_MS)
   if (exitCode !== 0) throw new Error(`bridge exited with code ${exitCode}${stderr.trim() ? `: ${stderr.trim()}` : ''}`)
 
   return parseBridgeOutput(stdout)
@@ -199,7 +193,7 @@ async function callCdp(endpoint: string, request: BrowserRequest): Promise<Brows
   let nextId = 1
   const pending = new Map<number, { resolve: (value: BrowserResult) => void; reject: (error: Error) => void }>()
 
-  const result = await new Promise<BrowserResult>((resolve, reject) => {
+  const pendingResult = new Promise<BrowserResult>((resolve, reject) => {
     socket.addEventListener('open', async () => {
       try {
         const response = await cdpRequest(socket, pending, () => nextId++, 'Runtime.enable', {})
@@ -237,7 +231,12 @@ async function callCdp(endpoint: string, request: BrowserRequest): Promise<Brows
     socket.addEventListener('error', () => reject(new Error('could not connect to the Chrome DevTools endpoint')))
   })
 
-  return result
+  try {
+    return await withDeadline(pendingResult, BROWSER_DEADLINE_MS, 'Chrome DevTools action timed out')
+  } catch (error) {
+    socket.close()
+    throw error
+  }
 }
 
 function cdpRequest(
@@ -282,12 +281,50 @@ function evaluate(expression: string): { method: string; params: Record<string, 
 
 async function discoverCdpTarget(endpoint: string): Promise<string> {
   const base = endpoint.replace(/\/$/, '')
-  const response = await fetch(`${base}/json/list`)
+  const response = await fetch(`${base}/json/list`, { signal: AbortSignal.timeout(BROWSER_DEADLINE_MS) })
   if (!response.ok) throw new Error(`Chrome DevTools target discovery returned ${response.status}`)
   const targets = (await response.json()) as { type?: string; webSocketDebuggerUrl?: string }[]
   const page = targets.find((target) => target.type === 'page' && target.webSocketDebuggerUrl)
   if (!page?.webSocketDebuggerUrl) throw new Error('no page target found at the Chrome DevTools endpoint')
   return page.webSocketDebuggerUrl
+}
+
+async function collectBrowserProcess(proc: Bun.Subprocess, timeoutMs: number): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+  let timedOut = false
+  const timeout = setTimeout(() => {
+    timedOut = true
+    if (process.platform !== 'win32' && proc.pid) {
+      try {
+        process.kill(-proc.pid, 'SIGTERM')
+      } catch {
+        proc.kill()
+      }
+    } else {
+      proc.kill()
+    }
+  }, timeoutMs)
+  const [stdout, stderr, exitCode] = await Promise.all([
+    new Response(proc.stdout as ReadableStream<Uint8Array>).text(),
+    new Response(proc.stderr as ReadableStream<Uint8Array>).text(),
+    proc.exited,
+  ])
+  clearTimeout(timeout)
+  if (timedOut) throw new Error(`browser bridge timed out after ${timeoutMs}ms`)
+  return { stdout, stderr, exitCode }
+}
+
+async function withDeadline<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(message)), timeoutMs)
+      }),
+    ])
+  } finally {
+    if (timer) clearTimeout(timer)
+  }
 }
 
 function formatBrowserResult(value: BrowserResult | string): string {

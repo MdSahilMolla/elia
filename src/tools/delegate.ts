@@ -34,6 +34,9 @@ interface ChildAssignmentInput {
   prompt: string
   files: string[]
   dependsOn: string[]
+  acceptanceCriteria: string[]
+  verificationCommands: string[]
+  sideEffects: string[]
 }
 
 /**
@@ -69,6 +72,9 @@ export function createDelegationTool(options: DelegationToolOptions): Tool {
               prompt: { type: 'string', description: 'Complete instructions for this child task' },
               files: { type: 'array', items: { type: 'string' }, description: 'Files or directories this child may touch or inspect' },
               dependsOn: { type: 'array', items: { type: 'string' }, description: 'Child ids that must finish first' },
+              acceptanceCriteria: { type: 'array', items: { type: 'string' }, description: 'Observable conditions that define success' },
+              verificationCommands: { type: 'array', items: { type: 'string' }, description: 'Commands or checks the child must run and report' },
+              sideEffects: { type: 'array', items: { type: 'string' }, description: 'External or irreversible effects that require approval or must not occur' },
             },
             required: ['id', 'title', 'role', 'prompt'],
           },
@@ -103,8 +109,12 @@ export function createDelegationTool(options: DelegationToolOptions): Tool {
           title,
           role: item.role,
           instructions: prompt,
-          files: stringArray(item.files),
-          dependsOn: stringArray(item.dependsOn),
+                        files: stringArray(item.files),
+              dependsOn: stringArray(item.dependsOn),
+              acceptanceCriteria: stringArray(item.acceptanceCriteria),
+              verificationCommands: stringArray(item.verificationCommands),
+              sideEffects: stringArray(item.sideEffects),
+
         }
       })
 
@@ -121,6 +131,9 @@ export function createDelegationTool(options: DelegationToolOptions): Tool {
         instructions: assignment.instructions,
         files: assignment.files ?? [],
         dependsOn: assignment.dependsOn ?? [],
+        acceptanceCriteria: assignment.acceptanceCriteria ?? [],
+        verificationCommands: assignment.verificationCommands ?? [],
+        sideEffects: assignment.sideEffects ?? [],
       })))
       if (planned.unreachable.length > 0) {
         throw new Error(`child delegation contains a dependency cycle or unreachable task: ${planned.unreachable.map((item) => item.id).join(', ')}`)
@@ -136,14 +149,14 @@ export function createDelegationTool(options: DelegationToolOptions): Tool {
         parent: options.parentName,
         parentRole: options.parentRole,
         depth: options.depth,
-        assignments: assignments.map((assignment) => ({ id: assignment.id, title: assignment.title, role: assignment.role, files: assignment.files ?? [] })),
+        assignments: assignments.map((assignment) => ({ id: assignment.id, title: assignment.title, role: assignment.role, files: assignment.files ?? [], acceptanceCriteria: assignment.acceptanceCriteria ?? [], verificationCommands: assignment.verificationCommands ?? [], sideEffects: assignment.sideEffects ?? [] })),
       })
       if (machineReadable) {
         emitEvent('delegation_started', {
           parent: options.parentName,
           parentRole: options.parentRole,
           depth: options.depth,
-          assignments: assignments.map((assignment) => ({ id: assignment.id, title: assignment.title, role: assignment.role, files: assignment.files ?? [] })),
+          assignments: assignments.map((assignment) => ({ id: assignment.id, title: assignment.title, role: assignment.role, files: assignment.files ?? [], acceptanceCriteria: assignment.acceptanceCriteria ?? [], verificationCommands: assignment.verificationCommands ?? [], sideEffects: assignment.sideEffects ?? [] })),
         })
       }
 

@@ -36,6 +36,8 @@ export interface ActionGovernor {
 const CRITICAL_COMMAND = /\b(rm\s+-rf|rm\s+--no-preserve-root|mkfs|dd\s+if=|shutdown|reboot|poweroff|drop\s+(database|table)|truncate\s+table|git\s+(push|reset\s+--hard|clean\s+-fd)|force[- ]push|sudo\b|chmod\s+777|chown\s+-R|kill\s+-9|kubectl\s+delete|docker\s+(rm|system\s+prune)|terraform\s+destroy|curl[^\n|]*\|\s*(sh|bash)|wget[^\n|]*\|\s*(sh|bash)|deploy\s+(to\s+)?prod(uction)?|send\s+.*(email|message)|publish\b|tweet\b|buy\b|purchase\b|checkout\b|transfer\b|wire\b)\b/i
 const REVIEW_COMMAND = /\b(git\s+commit|npm\s+install|pnpm\s+install|yarn\s+add|bun\s+(add|install)|pip\s+install|docker\s+build|docker\s+run|curl\b|wget\b|ssh\b|scp\b|gh\s+pr|deploy\b)\b/i
 const SECRET_KEY = /(password|passwd|token|secret|api[-_]?key|authorization|cookie|credential)/i
+const SENSITIVE_READ_COMMAND = /\b(cat|less|head|tail|sed|awk|grep|printenv|env|set)\b[^\n]*(\.env|id_rsa|\.ssh|credentials?|secret|token|password|shadow)\b/i
+const EXTERNAL_WRITE_COMMAND = /\b(curl|wget)\b[^\n]*(--data(?:-raw)?|\s-d\s|\s-X\s*(POST|PUT|PATCH|DELETE)|--upload-file|--form)\b/i
 const INTERNAL_SAFE_TOOLS = new Set(['flag_risk', 'submit_route', 'submit_proposal', 'submit_verdict', 'submit_lessons', 'delegate_tasks'])
 
 export function assessAction(request: ActionRequest, cwd = currentAgent().cwd ?? process.cwd()): ActionAssessment {
@@ -142,6 +144,12 @@ export function auditActionEvent(event: ToolEvent, governor?: ActionAssessment):
 }
 
 function assessCommand(command: string, cwd: string): ActionAssessment {
+  if (SENSITIVE_READ_COMMAND.test(command)) {
+    return assessment('critical', 'approve', 'shell command may read credentials or protected system data', 'shell.sensitive-read', [], false)
+  }
+  if (EXTERNAL_WRITE_COMMAND.test(command)) {
+    return assessment('critical', 'approve', 'shell command may transmit data to an external system', 'shell.external-write', [], false)
+  }
   if (CRITICAL_COMMAND.test(command)) {
     return assessment('critical', 'approve', 'shell command may cause an irreversible or external side effect', 'shell', [], false)
   }

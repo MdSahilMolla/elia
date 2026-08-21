@@ -5,7 +5,9 @@ import { AsyncLocalStorage } from 'node:async_hooks'
 import type { Proposal } from './types.ts'
 import type { ActionRequest } from './governor.ts'
 
-export const GOAL_GRAPH_VERSION = 1
+export const GOAL_GRAPH_VERSION = 2
+export const EXECUTION_LEASE_TTL_MS = 120_000
+const EXECUTION_OWNER = `${process.pid}:${crypto.randomUUID()}`
 
 export type GoalNodeKind = 'goal' | 'step' | 'delegation'
 export type GoalNodeStatus = 'pending' | 'ready' | 'running' | 'waiting-approval' | 'waiting-retry' | 'completed' | 'failed' | 'blocked'
@@ -25,6 +27,9 @@ export interface GoalNode {
   parentId?: string
   /** Zero for top-level steps; positive for delegated children. */
   depth?: number
+  acceptanceCriteria?: string[]
+  verificationCommands?: string[]
+  sideEffects?: string[]
   status: GoalNodeStatus
   attemptCount: number
   maxAttempts: number
@@ -34,6 +39,8 @@ export interface GoalNode {
   updatedAt: number
   startedAt?: number
   finishedAt?: number
+  leaseOwner?: string
+  leaseExpiresAt?: number
   lastError?: FailureRecord
 }
 
@@ -77,6 +84,8 @@ export interface DurableActionRecord {
   error?: FailureRecord
   createdAt: number
   updatedAt: number
+  leaseOwner?: string
+  leaseExpiresAt?: number
 }
 
 export interface GoalGraphSnapshot {
@@ -117,6 +126,7 @@ export function readGoalGraphSnapshot(dir: string): GoalGraphSnapshot | undefine
 export class GoalGraphStore {
   readonly path: string
   private snapshot: GoalGraphSnapshot
+  private lastLeaseRecovery = { nodes: 0, actions: 0 }
 
   private constructor(private readonly options: GoalGraphOptions, snapshot: GoalGraphSnapshot) {
     this.path = join(options.dir, 'goal-graph.json')
@@ -129,8 +139,11 @@ export class GoalGraphStore {
     if (existsSync(path)) {
       try {
         const parsed = JSON.parse(readFileSync(path, 'utf8')) as GoalGraphSnapshot
-        if (parsed.version === GOAL_GRAPH_VERSION && parsed.runId === options.runId) {
-          return new GoalGraphStore(options, normalizeSnapshot(parsed, options))
+        if ((parsed.version === 1 || parsed.version === GOAL_GRAPH_VERSION) && parsed.runId === options.runId) {
+          const store = new GoalGraphStore(options, normalizeSnapshot(parsed, options))
+          const recovery = store.reconcileStaleLeases()
+          store.lastLeaseRecovery = { nodes: recovery.nodes.length, actions: recovery.actions.length }
+          return store
         }
       } catch {
         // A torn graph is replaced by a fresh, valid snapshot. The journal remains authoritative.
@@ -242,6 +255,9 @@ export class GoalGraphStore {
     files?: string[]
     dependsOn?: string[]
     depth: number
+    acceptanceCriteria?: string[]
+    verificationCommands?: string[]
+    sideEffects?: string[]
   }): GoalNode {
     const id = `${input.parentId}/child:${input.id}`
     const existing = this.snapshot.nodes.find((node) => node.id === id)
@@ -257,6 +273,9 @@ export class GoalGraphStore {
       dependsOn: (input.dependsOn ?? []).map((dependency) => `${input.parentId}/child:${dependency}`),
       parentId: input.parentId,
       depth: input.depth,
+      acceptanceCriteria: [...(input.acceptanceCriteria ?? [])],
+      verificationCommands: [...(input.verificationCommands ?? [])],
+      sideEffects: [...(input.sideEffects ?? [])],
       status: 'pending',
       attemptCount: 0,
       maxAttempts: 2,
@@ -273,6 +292,16 @@ export class GoalGraphStore {
 
   startNode(id: string): GoalNode {
     const node = this.requireNode(id)
+    if (node.status === 'running') {
+      if (node.leaseExpiresAt && node.leaseExpiresAt > Date.now()) {
+        if (node.leaseOwner !== EXECUTION_OWNER) throw new Error(`goal node ${id} is already leased by another execution`)
+        return structuredClone(node)
+      }
+      node.status = 'waiting-retry'
+      node.lastError = classifyFailure('stale execution lease recovered')
+      node.leaseOwner = undefined
+      node.leaseExpiresAt = undefined
+    }
     if (node.status === 'completed' && !this.needsResumption(id)) return structuredClone(node)
     if (node.status === 'blocked' || node.status === 'failed') {
       if (node.lastError?.class !== 'retryable' && !this.needsResumption(id)) throw new Error(`goal node ${id} requires human review before it can resume`)
@@ -281,8 +310,20 @@ export class GoalGraphStore {
     node.status = 'running'
     node.attemptCount += 1
     node.startedAt ??= Date.now()
+    node.leaseOwner = EXECUTION_OWNER
+    node.leaseExpiresAt = Date.now() + EXECUTION_LEASE_TTL_MS
     node.updatedAt = Date.now()
     this.persist()
+    return structuredClone(node)
+  }
+
+  heartbeatNode(id: string): GoalNode {
+    const node = this.requireNode(id)
+    if (node.status === 'running' && node.leaseOwner === EXECUTION_OWNER) {
+      node.leaseExpiresAt = Date.now() + EXECUTION_LEASE_TTL_MS
+      node.updatedAt = Date.now()
+      this.persist()
+    }
     return structuredClone(node)
   }
 
@@ -292,6 +333,8 @@ export class GoalGraphStore {
     if (result.evidence) for (const evidence of result.evidence) this.addEvidence(evidence)
     node.updatedAt = now
     node.finishedAt = result.ok ? now : undefined
+    node.leaseOwner = undefined
+    node.leaseExpiresAt = undefined
     if (result.ok) {
       node.status = 'completed'
       node.lastError = undefined
@@ -442,6 +485,14 @@ export class GoalGraphStore {
     const idempotencyKey = actionKey(this.snapshot.runId, nodeId, request)
     const existing = this.snapshot.actions.find((action) => action.idempotencyKey === idempotencyKey)
     if (existing) {
+      if (existing.state === 'running' && existing.leaseExpiresAt && existing.leaseExpiresAt <= Date.now()) {
+        existing.state = 'retryable'
+        existing.error = classifyFailure('stale action execution lease recovered')
+        existing.leaseOwner = undefined
+        existing.leaseExpiresAt = undefined
+        existing.updatedAt = Date.now()
+        this.persist()
+      }
       if (existing.state === 'completed') return { action: structuredClone(existing), decision: 'replay' }
       if (existing.state === 'blocked') return { action: structuredClone(existing), decision: 'blocked' }
       if (existing.state === 'human-review' || existing.state === 'running') return { action: structuredClone(existing), decision: 'human-review' }
@@ -469,14 +520,28 @@ export class GoalGraphStore {
     const action = this.requireAction(id)
     action.state = 'running'
     action.attempts += 1
+    action.leaseOwner = EXECUTION_OWNER
+    action.leaseExpiresAt = Date.now() + EXECUTION_LEASE_TTL_MS
     action.updatedAt = Date.now()
     this.persist()
+    return structuredClone(action)
+  }
+
+  heartbeatAction(id: string): DurableActionRecord {
+    const action = this.requireAction(id)
+    if (action.state === 'running' && action.leaseOwner === EXECUTION_OWNER) {
+      action.leaseExpiresAt = Date.now() + EXECUTION_LEASE_TTL_MS
+      action.updatedAt = Date.now()
+      this.persist()
+    }
     return structuredClone(action)
   }
 
   finishAction(id: string, result: { ok: boolean; result?: string; error?: unknown }): DurableActionRecord {
     const action = this.requireAction(id)
     action.updatedAt = Date.now()
+    action.leaseOwner = undefined
+    action.leaseExpiresAt = undefined
     if (result.ok) {
       action.state = 'completed'
       action.result = result.result ?? ''
@@ -495,9 +560,45 @@ export class GoalGraphStore {
     const record = classifyFailure(failure)
     action.state = humanReview ? 'human-review' : 'blocked'
     action.error = record
+    action.leaseOwner = undefined
+    action.leaseExpiresAt = undefined
     action.updatedAt = Date.now()
     this.persist()
     return structuredClone(action)
+  }
+
+  leaseRecoverySummary(): { nodes: number; actions: number } {
+    return { ...this.lastLeaseRecovery }
+  }
+
+  reconcileStaleLeases(now = Date.now()): { nodes: string[]; actions: string[] } {
+    const nodes: string[] = []
+    const actions: string[] = []
+    for (const node of this.snapshot.nodes) {
+      if (node.status === 'running' && node.leaseExpiresAt && node.leaseExpiresAt <= now) {
+        node.status = node.attemptCount < node.maxAttempts ? 'waiting-retry' : 'blocked'
+        node.lastError = classifyFailure('stale execution lease recovered after process interruption')
+        node.leaseOwner = undefined
+        node.leaseExpiresAt = undefined
+        node.updatedAt = now
+        nodes.push(node.id)
+      }
+    }
+    for (const action of this.snapshot.actions) {
+      if (action.state === 'running' && action.leaseExpiresAt && action.leaseExpiresAt <= now) {
+        action.state = action.attempts < 2 ? 'retryable' : 'human-review'
+        action.error = classifyFailure('stale action execution lease recovered after process interruption')
+        action.leaseOwner = undefined
+        action.leaseExpiresAt = undefined
+        action.updatedAt = now
+        actions.push(action.id)
+      }
+    }
+    if (nodes.length > 0 || actions.length > 0) {
+      this.refreshReadyStates()
+      this.persist()
+    }
+    return { nodes, actions }
   }
 
   private requireNode(id: string): GoalNode {

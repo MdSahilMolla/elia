@@ -42,10 +42,13 @@ describe('hierarchical delegation', () => {
       goal: 'landing page', understanding: '', assumptions: [], risks: [], verification: ['bun test'], outOfScope: [],
       steps: [{ id: 'frontend', title: 'Frontend lead', role: 'frontend', instructions: 'Build', files: ['src/App.tsx'], dependsOn: [] }],
     })
-    const child = graph.registerDelegationNode({ parentId: 'step:frontend', id: 'design', title: 'Design brief', role: 'designer', instructions: 'Design', depth: 1 })
+    const child = graph.registerDelegationNode({ parentId: 'step:frontend', id: 'design', title: 'Design brief', role: 'designer', instructions: 'Design', depth: 1, acceptanceCriteria: ['brief covers responsive states'], verificationCommands: ['bun test'], sideEffects: ['do not publish'] })
     const dependent = graph.registerDelegationNode({ parentId: 'step:frontend', id: 'tests', title: 'Tests', role: 'tester', instructions: 'Test', dependsOn: ['design'], depth: 1 })
     expect(child.id).toBe('step:frontend/child:design')
     expect(dependent.dependsOn).toEqual(['step:frontend/child:design'])
     expect(graph.node(dependent.id)?.parentId).toBe('step:frontend')
+    expect(graph.node(child.id)?.acceptanceCriteria).toEqual(['brief covers responsive states'])
+    expect(graph.node(child.id)?.verificationCommands).toEqual(['bun test'])
+    expect(graph.node(child.id)?.sideEffects).toEqual(['do not publish'])
   })
 })

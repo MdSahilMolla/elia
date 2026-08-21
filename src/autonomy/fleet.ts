@@ -10,6 +10,7 @@ import type { ActionGovernor } from './governor.ts'
 import type { GoalGraphStore } from './goalGraph.ts'
 import type { ProposalStep, RoleName } from './types.ts'
 import { inferTaskKind, taskSessions } from '../taskSessions.ts'
+import { runVerification } from './verify.ts'
 
 /** board_post/board_read are stripped for a variant's workers — see FleetRunOptions.stripBoardTools. */
 const BOARD_TOOL_NAMES = ['board_post', 'board_read']
@@ -28,6 +29,12 @@ export interface FleetAssignment {
   files?: string[]
   /** Assignment ids that must complete before this assignment runs. */
   dependsOn?: string[]
+  /** Concrete acceptance checks the child must satisfy before reporting success. */
+  acceptanceCriteria?: string[]
+  /** Commands or checks the child should run and report truthfully. */
+  verificationCommands?: string[]
+  /** External or irreversible effects the child must not perform without approval. */
+  sideEffects?: string[]
 }
 
 export interface FleetRunOptions {
@@ -111,6 +118,7 @@ export async function runFleet(options: FleetRunOptions): Promise<FleetResult> {
 
     let toolCount = 0
     const childNodeId = options.parentNodeId ? `${options.parentNodeId}/child:${item.id}` : `step:${item.id}`
+    let nodeHeartbeat: ReturnType<typeof setInterval> | undefined
     if (options.graph && options.parentNodeId) {
       options.graph.registerDelegationNode({
         parentId: options.parentNodeId,
@@ -121,11 +129,28 @@ export async function runFleet(options: FleetRunOptions): Promise<FleetResult> {
         files: item.files,
         dependsOn: item.dependsOn,
         depth: options.delegationDepth ?? 0,
+        acceptanceCriteria: item.acceptanceCriteria,
+        verificationCommands: item.verificationCommands,
+        sideEffects: item.sideEffects,
       })
-      options.graph.startNode(childNodeId)
     }
-    const result = await runSubAgent({
-      prompt: item.instructions,
+    if (options.graph) {
+      options.graph.startNode(childNodeId)
+      nodeHeartbeat = setInterval(() => {
+        try {
+          options.graph!.heartbeatNode(childNodeId)
+        } catch {
+          // The worker may have finished between timer ticks.
+        }
+      }, 30_000)
+    }
+    const contract = [
+      item.acceptanceCriteria?.length ? `## Acceptance criteria\n${item.acceptanceCriteria.map((criterion) => `- ${criterion}`).join('\n')}` : undefined,
+      item.verificationCommands?.length ? `## Verification commands\n${item.verificationCommands.map((command) => `- ${command}`).join('\n')}` : undefined,
+      item.sideEffects?.length ? `## Side-effect boundary\n${item.sideEffects.map((effect) => `- ${effect}`).join('\n')}` : undefined,
+    ].filter(Boolean).join('\n\n')
+    let result = await runSubAgent({
+      prompt: contract ? `${item.instructions}\n\n${contract}` : item.instructions,
       role: item.role,
       name: item.workerName,
       briefing,
@@ -162,6 +187,12 @@ export async function runFleet(options: FleetRunOptions): Promise<FleetResult> {
       }),
     )
 
+    if (nodeHeartbeat) clearInterval(nodeHeartbeat)
+    if (result.ok && item.verificationCommands?.length) {
+      const verification = await runVerification(item.verificationCommands, cwd, signal, options.governor)
+      const verificationReport = verification.passed ? `Verification passed: ${item.verificationCommands.join(' && ')}` : `Verification failed:\n${verification.results.map((check) => `${check.command}: ${check.timedOut ? 'timed out' : `exit ${check.exitCode}`}`).join('\n')}`
+      result = { ...result, ok: verification.passed, report: `${result.report}\n\n${verificationReport}` }
+    }
     board?.update(item.workerName, result.ok ? 'done' : 'failed', `${result.steps} steps`)
     taskSessions.update(task.id, {
       status: result.ok ? 'done' : 'failed',

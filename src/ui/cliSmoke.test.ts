@@ -34,3 +34,16 @@ test('plain mode emits no ANSI escape sequences', async () => {
   expect(result.stdout).not.toContain('\x1b[')
   expect(result.stdout).toContain('Project skills:')
 })
+
+test('help documents autonomous budget and agent dry-run controls', async () => {
+  const result = await runCli(['--help', '--plain'])
+  expect(result.code).toBe(0)
+  expect(result.stdout).toContain('--max-run-ms')
+  expect(result.stdout).toContain('--dry-run')
+})
+
+test('invalid autonomous wall-clock budget fails before execution', async () => {
+  const result = await runCli(['auto', 'do work', '--max-run-ms', '0', '--plain'])
+  expect(result.code).toBe(1)
+  expect(result.stderr).toContain('--max-run-ms must be a positive integer')
+})
