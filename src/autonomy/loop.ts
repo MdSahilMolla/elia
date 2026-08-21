@@ -11,6 +11,7 @@ import { writeBlock, writeFail, writePass, writePhase, writeSubStep, writeSummar
 import { createToolResultCache } from '../speculation/cache.ts'
 import { createPrefetcher } from '../speculation/prefetch.ts'
 import { createBlackboard, setActiveBlackboard } from './blackboard.ts'
+import { withAgentIdentity } from './context.ts'
 import { createJournal, newRunId, type Journal } from './journal.ts'
 import { planWaves, runFleet } from './fleet.ts'
 import { runVariants } from './variants.ts'
@@ -26,6 +27,8 @@ import {
   runVerification,
 } from './verify.ts'
 import type { CriticVerdict, Proposal } from './types.ts'
+import { appendActionAudit, writeRunReceipt } from './audit.ts'
+import { createActionGovernor, withActionGovernor, type ActionApproval, type ActionGovernor, type GovernanceMode } from './governor.ts'
 
 export type ApprovalDecision =
   | { action: 'approve' }
@@ -58,6 +61,10 @@ export interface AutonomousRunOptions {
   maxPolishPasses?: number
   runId?: string
   signal?: AbortSignal
+  /** Optional approval callback for critical side effects during this run. */
+  approveAction?: ActionApproval
+  /** Defaults to unattended: safe work flows, irreversible work pauses or blocks. */
+  governanceMode?: GovernanceMode
 }
 
 export type RunOutcome = 'completed' | 'needs-attention' | 'rejected' | 'no-proposal' | 'aborted'
@@ -121,6 +128,7 @@ export async function runAutonomousTask(options: AutonomousRunOptions): Promise<
   const maxPolishPasses = Math.max(0, Math.min(options.maxPolishPasses ?? 1, 3))
   const runId = options.runId ?? newRunId()
   const startedAt = Date.now()
+  const governor = createActionGovernor({ mode: options.governanceMode ?? 'unattended', approve: options.approveAction })
 
   const journal = createJournal(runId, goal)
   const board = createBlackboard(`${journal.dir}/board.json`)
@@ -136,6 +144,7 @@ export async function runAutonomousTask(options: AutonomousRunOptions): Promise<
     extra: Partial<AutonomousRunResult> = {},
   ): AutonomousRunResult => {
     journal.append('run-end', { outcome })
+    writeRunReceipt({ runId, goal, outcome, proposal: extra.proposal, verdict: extra.verdict, lessons: extra.lessons, events: journal.events() })
     return {
       runId,
       outcome,
@@ -179,7 +188,7 @@ export async function runAutonomousTask(options: AutonomousRunOptions): Promise<
     if (signal?.aborted) return done('aborted')
 
     journal.append('phase', { phase: 'propose', attempt: amendments })
-    const planning = await runAgentLoop({
+    const planning = await withAgentIdentity({ name: 'lead', role: 'lead', runId, cwd: process.cwd() }, () => withActionGovernor(governor, () => runAgentLoop({
       messages,
       systemPrompt: PLANNER_PROMPT,
       tools: planningTools,
@@ -188,7 +197,8 @@ export async function runAutonomousTask(options: AutonomousRunOptions): Promise<
       verbose: true,
       maxSteps: 40,
       signal,
-    })
+      onTool: (event) => appendActionAudit(event, runId),
+    })))
     track(planning.usage)
     recordUsage(planning.usage)
 
@@ -250,7 +260,7 @@ export async function runAutonomousTask(options: AutonomousRunOptions): Promise<
     journal.append('phase', { phase: 'execute', variants: variantCount })
 
     if (signal?.aborted) return done('aborted', { proposal })
-    const result = await runVariants({ proposal, briefing, count: variantCount, runId, journal, signal })
+    const result = await runVariants({ proposal, briefing, count: variantCount, runId, journal, governor, signal })
     track(result.usage)
     board.post('variants', 'execute', `chose attempt ${result.chosen.index + 1}/${variantCount} (${result.chosen.verificationSummary}); merged ${result.mergedFiles.length} file(s)`)
   } else {
@@ -271,6 +281,8 @@ export async function runAutonomousTask(options: AutonomousRunOptions): Promise<
         })),
         briefing,
         journal,
+        runId,
+        governor,
         signal,
       })
       track(fleet.usage)
@@ -301,6 +313,8 @@ export async function runAutonomousTask(options: AutonomousRunOptions): Promise<
       const polish = await runSubAgent({
         role: 'polisher',
         name: `polisher#${polishAttempt}`,
+        runId,
+        governor,
         briefing,
         signal,
         prompt: `The implementation phase is complete. Perform one final, conservative quality pass before the verification gate.
@@ -401,12 +415,15 @@ Read the changed files in full for context beyond the diff above — a diff hide
       const reviewResults = await Promise.all(
         reviewers.map(async (reviewer) => {
           const verdictCapture = createVerdictTool()
-          const result = await runSubAgent({
+                      const result = await runSubAgent({
             role: reviewer.role,
             name: reviewer.name,
+            runId,
+            governor,
             briefing,
             extraTools: [verdictCapture.tool],
             signal,
+
             prompt: `${reviewContext} ${reviewer.focus} Finish by calling submit_verdict.`,
           })
           const submittedVerdict = verdictCapture.taken()
@@ -434,7 +451,7 @@ Read the changed files in full for context beyond the diff above — a diff hide
 
     if (attempt >= maxRepairAttempts) {
       writeSubStep(`Stopping after ${attempt} repair attempt${attempt === 1 ? '' : 's'} — this needs a human.`)
-      const lessons = await captureLessons(goal, proposal, 'unresolved', journal, track)
+      const lessons = await captureLessons(goal, proposal, 'unresolved', journal, track, governor)
       return done('needs-attention', { proposal, verdict, lessons })
     }
 
@@ -463,7 +480,7 @@ Read the changed files in full for context beyond the diff above — a diff hide
 
     const cache = createToolResultCache()
     const repairTools = [...allWorkerTools(), taskTool]
-    const repair = await runAgentLoop({
+    const repair = await withAgentIdentity({ name: 'lead', role: 'lead', runId, cwd: process.cwd() }, () => withActionGovernor(governor, () => runAgentLoop({
       messages: repairMessages,
       systemPrompt: REPAIR_PROMPT,
       tools: repairTools,
@@ -474,14 +491,15 @@ Read the changed files in full for context beyond the diff above — a diff hide
       cache,
       prefetcher: createPrefetcher({ tools: repairTools, cache }),
       signal,
-    })
+      onTool: (event) => appendActionAudit(event, runId),
+    })))
     track(repair.usage)
     recordUsage(repair.usage)
   }
 
   // --- Learn ---------------------------------------------------------------
 
-  const lessons = await captureLessons(goal, proposal, 'succeeded', journal, track)
+  const lessons = await captureLessons(goal, proposal, 'succeeded', journal, track, governor)
 
   writeSummary('Run complete', [
     ['run', runId],
@@ -510,6 +528,7 @@ async function captureLessons(
   status: 'succeeded' | 'unresolved',
   journal: Journal,
   track: (usage: Usage) => void,
+  governor: ActionGovernor,
 ): Promise<string[]> {
   writePhase('learn')
   journal.append('phase', { phase: 'learn' })
@@ -520,6 +539,8 @@ async function captureLessons(
     const result = await runSubAgent({
       role: 'scout',
       name: 'scribe#lessons',
+      runId: journal.runId,
+      governor,
       extraTools: [capture.tool],
       prompt: `An autonomous run just ${status === 'succeeded' ? 'completed' : 'stopped without fully succeeding'}.
 

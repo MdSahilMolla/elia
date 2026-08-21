@@ -23,8 +23,8 @@ export class Game {
     if (!/^[a-h][1-8]$/.test(square)) {
       return null;
     }
-    const file = square[0];
-    const rank = parseInt(square[1], 10);
+    const file = square[0]!;
+    const rank = parseInt(square[1]!, 10);
     const col = file.charCodeAt(0) - 'a'.charCodeAt(0);
     // Row 0 is the top of the board (rank 8), row 7 is the bottom (rank 1)
     const row = 8 - rank;
@@ -44,9 +44,9 @@ export class Game {
     const [fromRow, fromCol] = fromIdx;
     const [toRow, toCol] = toIdx;
     // Perform the move (no validation of piece colour or legality)
-    const piece = this.board.board[fromRow][fromCol];
-    this.board.board[toRow][toCol] = piece;
-    this.board.board[fromRow][fromCol] = "";
+    const piece = this.board.board[fromRow]![fromCol]!;
+    this.board.board[toRow]![toCol] = piece;
+    this.board.board[fromRow]![fromCol] = "";
     // Switch turn
     this.turn = this.turn === "w" ? "b" : "w";
     return true;

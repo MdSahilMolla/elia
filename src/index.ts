@@ -12,6 +12,7 @@ import { pick } from './ui/picker.ts'
 import { createLiveActionWindow, openTaskDashboard } from './ui/taskDashboard.ts'
 import { inferTaskKind, taskSessions } from './taskSessions.ts'
 import { isAgentPersona, type AgentPersona } from './agents/types.ts'
+import type { ActionApproval, ActionAssessment, ActionRequest } from './autonomy/governor.ts'
 
 const REPL_COMMANDS: SlashCommand[] = [
   { name: '/cyber', description: 'switch to cyber mode — authorized security testing, vuln research, CTFs' },
@@ -43,9 +44,10 @@ Usage:
 Manual mode (default): before running a command, elia checks whether it looks
 risky (deletes, sends, spending, publishing, system changes, ...) — only
 risky commands get an "About to: ... run it?" prompt, safe ones just run.
-Once a command starts, it finishes end to end, including irreversible steps,
-with no further prompts. Pass --yolo/-y (or "/mode auto" in a session) for
-auto mode: no risk check, no prompts, ever.
+Once a command starts, safe and reversible work finishes end to end without
+interruptions; irreversible tool actions are separately governed. Pass --yolo/-y
+(or "/mode auto" in a session) to skip the pre-flight risk prompt while keeping
+that action governor active.
 
 Autonomous work:
   elia auto "<goal>"                Plan the work, show you the plan, then execute it with a
@@ -164,6 +166,12 @@ function createInteractiveApprover(rl: readline.Interface) {
   return () => confirmOnce(rl, 'Approve this plan? [y]es / [n]o / [e]dit <what to change>: ')
 }
 
+function actionApprovalPrompt(assessment: ActionAssessment, request: ActionRequest): string {
+  const rawIntent = request.input.command ?? request.input.target ?? request.input.action ?? request.name
+  const intent = typeof rawIntent === 'string' ? rawIntent : JSON.stringify(rawIntent)
+  return `\n${assessment.reason}\nRisk: ${assessment.risk} · reversible: ${assessment.reversible ? 'yes' : 'no'}\nAbout to run ${request.name}: ${intent}\nApprove this exact action? [y]es / [n]o: `
+}
+
 async function runAgentCommand(): Promise<void> {
   const { runAgentRequest } = await import('./agents/orchestrator.ts')
   const { config } = await import('./config.ts')
@@ -206,6 +214,7 @@ async function runAuto(): Promise<void> {
   }
 
   const yolo = hasFlag('--yolo', '-y', '--autonomous', '--self-supervise') || process.env.ELIA_AUTO_APPROVE === '1'
+  let approveAction: ActionApproval | undefined
   if (!yolo && !process.stdin.isTTY) {
     writeError('elia auto needs a terminal to approve the plan. Re-run with --yolo to skip approval.')
     process.exitCode = 1
@@ -213,14 +222,19 @@ async function runAuto(): Promise<void> {
   }
 
   if (yolo) {
-    const result = await runAutonomousTask({ goal, approve: autoApprove, variants, polish: !hasFlag('--no-polish') })
+    const result = await runAutonomousTask({ goal, approve: autoApprove, variants, polish: !hasFlag('--no-polish'), governanceMode: 'unattended' })
     if (result.outcome !== 'completed') process.exitCode = 1
     return
   }
 
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout })
+  approveAction = async (assessment, request) => {
+    const label = actionApprovalPrompt(assessment, request)
+    const result = await confirmOnce(rl, label)
+    return result.action === 'approve'
+  }
   try {
-    const result = await runAutonomousTask({ goal, approve: createInteractiveApprover(rl), variants, polish: !hasFlag('--no-polish') })
+    const result = await runAutonomousTask({ goal, approve: createInteractiveApprover(rl), variants, polish: !hasFlag('--no-polish'), governanceMode: 'supervised', approveAction })
     if (result.outcome !== 'completed' && result.outcome !== 'rejected') process.exitCode = 1
   } finally {
     rl.close()
@@ -423,7 +437,7 @@ async function runInteractive(): Promise<void> {
   const checkpoints = await loadCheckpoints(sessionId)
 
   /** Snapshots messages + touched files around one turn, then records a rewind point. */
-  async function runCheckpointedTurn(userText: string): Promise<void> {
+  async function runCheckpointedTurn(userText: string, approveAction?: ActionApproval): Promise<void> {
     const tracker = createFileTracker()
     const task = taskSessions.create(inferTaskKind(userText, userText), userText, 'Starting request')
     taskSessions.update(task.id, { status: 'running', action: 'Thinking', detail: 'Planning the next action' })
@@ -440,8 +454,10 @@ async function runInteractive(): Promise<void> {
         await runPersonaTurn(messages, persona)
       } else {
         await runTurn(messages, {
-          mode,
-          onTool: (event) => {
+                      mode,
+            approveAction,
+            onTool: (event) => {
+
             taskSessions.update(task.id, {
               status: 'running',
               action: event.isError ? `Retrying after ${event.name}` : event.name,
@@ -492,7 +508,15 @@ async function runInteractive(): Promise<void> {
     }
 
     try {
-      await runCheckpointedTurn(commandToRun)
+      await runCheckpointedTurn(commandToRun, process.stdin.isTTY ? async (assessment, request) => {
+        const actionPrompt = createSlashPrompt([])
+        try {
+          const result = await confirmOnce(actionPrompt, actionApprovalPrompt(assessment, request))
+          return result.action === 'approve'
+        } finally {
+          actionPrompt.close()
+        }
+      } : undefined)
     } catch (err) {
       writeError(`Error: ${err instanceof Error ? err.message : String(err)}`)
       process.exitCode = 1
@@ -519,7 +543,7 @@ async function runInteractive(): Promise<void> {
   )
   writeNotice(
     replMode === 'auto'
-      ? 'auto mode (--yolo) — commands run immediately, no risk check, no prompts. "/mode manual" to turn it back on.'
+      ? 'auto mode (--yolo) — safe and reversible work runs immediately; irreversible actions still require approval or are blocked. "/mode manual" to turn it back on.'
       : 'manual mode — elia flags risky commands and asks before running them; safe commands just run. "/mode auto" for zero prompts.',
   )
 
@@ -729,7 +753,10 @@ async function runInteractive(): Promise<void> {
     }
 
     try {
-      await runCheckpointedTurn(commandToRun)
+      await runCheckpointedTurn(commandToRun, async (assessment, request) => {
+        const result = await confirmOnce(prompt, actionApprovalPrompt(assessment, request))
+        return result.action === 'approve'
+      })
     } catch (err) {
       writeError(`Error: ${err instanceof Error ? err.message : String(err)}`)
     }

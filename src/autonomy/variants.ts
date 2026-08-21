@@ -8,6 +8,7 @@ import { writeFail, writePass, writeSubStep } from '../ui/report.ts'
 import { paths } from '../config.ts'
 import type { Usage } from '../providers/types.ts'
 import type { Journal } from './journal.ts'
+import type { ActionGovernor } from './governor.ts'
 import type { Proposal, ProposalStep } from './types.ts'
 
 export interface VariantOutcome {
@@ -33,6 +34,7 @@ export interface RunVariantsOptions {
   count: number
   runId: string
   journal?: Journal
+  governor?: ActionGovernor
   signal?: AbortSignal
 }
 
@@ -51,14 +53,14 @@ export interface RunVariantsOptions {
  * the merged result afterward exactly as it would for a single-plan run.
  */
 export async function runVariants(options: RunVariantsOptions): Promise<VariantsResult> {
-  const { proposal, briefing, count, runId, journal, signal } = options
+  const { proposal, briefing, count, runId, journal, governor, signal } = options
   const { waves } = planWaves(proposal.steps)
 
   writeSubStep(`running ${count} independent implementation attempts in parallel, each in its own isolated worktree`)
   journal?.append('variants', { phase: 'start', count })
 
   const outcomes = await Promise.all(
-    Array.from({ length: count }, (_, index) => runOneVariant(index, waves, proposal, briefing, runId, signal)),
+    Array.from({ length: count }, (_, index) => runOneVariant(index, waves, proposal, briefing, runId, governor, signal)),
   )
 
   const usage = outcomes.reduce((total, outcome) => addUsage(total, outcome.usage), ZERO_USAGE)
@@ -101,6 +103,7 @@ async function runOneVariant(
   proposal: Proposal,
   briefing: string,
   runId: string,
+  governor: ActionGovernor | undefined,
   signal: AbortSignal | undefined,
 ): Promise<VariantOutcome> {
   const startedAt = Date.now()
@@ -118,6 +121,8 @@ async function runOneVariant(
         showBoard: false,
         cwd: worktree.path,
         stripBoardTools: true,
+        runId,
+        governor,
         signal,
       })
       usage = addUsage(usage, fleet.usage)

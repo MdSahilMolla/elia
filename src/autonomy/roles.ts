@@ -28,7 +28,7 @@ export interface Role {
   maxSteps: number
 }
 
-const READ_TOOLS = ['read_file', 'list_files', 'grep', 'board_post', 'board_read']
+const READ_TOOLS = ['read_file', 'list_files', 'grep', 'board_post', 'board_read', 'browser']
 const WRITE_TOOLS = [...READ_TOOLS, 'write_file', 'edit_file']
 const FULL_TOOLS = [...WRITE_TOOLS, 'run_command']
 

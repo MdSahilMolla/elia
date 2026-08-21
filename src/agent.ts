@@ -3,7 +3,6 @@ import { runAgentLoop, type ConversationMessage, type RunAgentLoopResult, type T
 import { allWorkerTools, cyberTools } from './tools/registry.ts'
 import { taskTool } from './tools/task.ts'
 import { previewTool } from './tools/preview.ts'
-import { browserTool } from './tools/browser.ts'
 import { writeText, writeThinking, writeUsageLine } from './ui/stream.ts'
 import { recordUsage, recordTopLevelTurn, formatUsageLine } from './usage.ts'
 import { createToolResultCache } from './speculation/cache.ts'
@@ -11,6 +10,8 @@ import { createPrefetcher } from './speculation/prefetch.ts'
 import { observeToolCall } from './skills/detector.ts'
 import { setActiveMode, type AgentMode } from './autonomy/mode.ts'
 import { noteToolUse } from './ledger.ts'
+import { appendActionAudit } from './autonomy/audit.ts'
+import { createActionGovernor, withActionGovernor, type ActionApproval, type GovernanceMode } from './autonomy/governor.ts'
 
 export type { ConversationMessage }
 export type { AgentMode }
@@ -20,12 +21,19 @@ export type { AgentMode }
 // The engagement/scan tools are top-level-only too, and further gated to cyber
 // mode — a normal coding turn has no business scaffolding a security engagement.
 function topLevelTools(mode: AgentMode) {
-  return [...allWorkerTools(), taskTool, previewTool, browserTool, ...(mode === 'cyber' ? cyberTools : [])]
+  return [...allWorkerTools(), taskTool, previewTool, ...(mode === 'cyber' ? cyberTools : [])]
+}
+
+export interface RunTurnOptions {
+  mode?: AgentMode
+  onTool?: (event: ToolEvent) => void
+  approveAction?: ActionApproval
+  governanceMode?: GovernanceMode
 }
 
 export async function runTurn(
   messages: ConversationMessage[],
-  options: { mode?: AgentMode; onTool?: (event: ToolEvent) => void } = {},
+  options: RunTurnOptions = {},
 ): Promise<RunAgentLoopResult> {
   const startedAt = Date.now()
   const mode = options.mode ?? 'default'
@@ -40,7 +48,12 @@ export async function runTurn(
   const cache = createToolResultCache()
   const prefetcher = createPrefetcher({ tools, cache })
 
-  const result = await runAgentLoop({
+  const governor = createActionGovernor({
+    mode: options.governanceMode ?? (options.approveAction ? 'supervised' : 'unattended'),
+    approve: options.approveAction,
+  })
+
+  const result = await withActionGovernor(governor, () => runAgentLoop({
     messages,
     systemPrompt,
     tools,
@@ -52,12 +65,13 @@ export async function runTurn(
     prefetcher,
     onTool: (event) => {
       // Every call is a data point for deciding which tool elia should write itself next.
+      appendActionAudit(event)
       observeToolCall(event.name, event.input)
       // And a data point for whether a recently recalled episode actually mattered — see ledger.ts.
       noteToolUse(event.input)
       options.onTool?.(event)
     },
-  })
+  }))
   const elapsedMs = Date.now() - startedAt
 
   recordUsage(result.usage)

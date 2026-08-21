@@ -10,12 +10,18 @@ import type { RoleName } from './autonomy/types.ts'
 import { createToolResultCache } from './speculation/cache.ts'
 import { createPrefetcher } from './speculation/prefetch.ts'
 import { recordUsage } from './usage.ts'
+import { appendActionAudit } from './autonomy/audit.ts'
+import { activeActionGovernor, withActionGovernor, type ActionGovernor } from './autonomy/governor.ts'
 
 export interface SubAgentRequest {
   prompt: string
   role: RoleName
   /** Display name for logs and blackboard attribution, e.g. "scout#2". */
   name: string
+  /** Parent autonomous run, when this worker is part of a durable run. */
+  runId?: string
+  /** Parent governor; omitted for standalone worker calls. */
+  governor?: ActionGovernor
   /** Extra context injected above the task, typically the blackboard and the run's goal. */
   briefing?: string
   /** Tools granted to this run on top of its role's allowlist — used for the structured-report tools. */
@@ -61,6 +67,9 @@ export async function runSubAgent(request: SubAgentRequest): Promise<SubAgentRes
   const definition = roleDefinition(request.role)
   const tier = roleConfig(request.role, definition.tier)
   const tools = request.tools ?? [...toolsForRole(request.role), ...(request.extraTools ?? [])]
+  const parent = currentAgent()
+  const runId = request.runId ?? parent.runId
+  const governor = request.governor ?? activeActionGovernor()
   const startedAt = Date.now()
 
   const board = activeBlackboard()
@@ -84,8 +93,8 @@ export async function runSubAgent(request: SubAgentRequest): Promise<SubAgentRes
   const basePrompt = activeMode() === 'cyber' ? CYBER_SUBAGENT_SYSTEM_PROMPT : SUBAGENT_SYSTEM_PROMPT
   const cwd = request.cwd ?? currentAgent().cwd
 
-  const result = await withAgentIdentity({ name: request.name, role: request.role, cwd }, () =>
-    runAgentLoop({
+  const result = await withAgentIdentity({ name: request.name, role: request.role, runId, cwd }, () =>
+    withActionGovernor(governor, () => runAgentLoop({
       messages,
       systemPrompt: `${basePrompt}\n\n## Your role\n${definition.prompt}`,
       tools,
@@ -94,11 +103,14 @@ export async function runSubAgent(request: SubAgentRequest): Promise<SubAgentRes
       maxSteps: definition.maxSteps,
       useAnimation: false,
       verbose: false,
-      onTool: request.onTool,
+      onTool: (event) => {
+        appendActionAudit(event, runId)
+        request.onTool?.(event)
+      },
       cache,
       prefetcher,
       signal: request.signal,
-    }),
+    })),
   )
 
   recordUsage(result.usage)

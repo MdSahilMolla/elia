@@ -8,6 +8,7 @@ import { ZERO_USAGE, addUsage } from './usage.ts'
 import { SPECULABLE_TOOLS, type CacheStats, type ToolResultCache } from './speculation/cache.ts'
 import type { Prefetcher } from './speculation/prefetch.ts'
 import { maybeCompact } from './compaction.ts'
+import { activeActionGovernor, type ActionAssessment } from './autonomy/governor.ts'
 
 export type ConversationMessage = ChatMessage
 
@@ -29,6 +30,8 @@ export interface ToolEvent {
   durationMs: number
   /** True when the result came from a speculative pre-read instead of running now. */
   cached: boolean
+  /** Deterministic pre-execution governance assessment, when available. */
+  assessment?: ActionAssessment
 }
 
 export interface RunAgentLoopOptions {
@@ -168,14 +171,22 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
       let resultText: string
       let isError = false
       let cached = false
+      let assessment: ActionAssessment | undefined
       try {
-        const pending = batchMutates ? undefined : cache?.take(block.name, block.input)
-        if (pending) {
-          cached = true
-          resultText = await pending
+        const gate = await activeActionGovernor().check({ name: block.name, input: block.input })
+        assessment = gate.assessment
+        if (!gate.allowed) {
+          isError = true
+          resultText = gate.message ?? `Action blocked by Elia’s autonomy governor: ${gate.assessment.reason}`
         } else {
-          if (!tool) throw new Error(`Unknown tool: ${block.name}`)
-          resultText = await tool.execute(block.input)
+          const pending = batchMutates ? undefined : cache?.take(block.name, block.input)
+          if (pending) {
+            cached = true
+            resultText = await pending
+          } else {
+            if (!tool) throw new Error(`Unknown tool: ${block.name}`)
+            resultText = await tool.execute(block.input)
+          }
         }
       } catch (err) {
         isError = true
@@ -185,7 +196,7 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
 
       const durationMs = Date.now() - startedAt
       if (verbose) writeToolResult(block.name, resultText, isError, cached)
-      onTool?.({ name: block.name, input: block.input, result: resultText, isError, durationMs, cached })
+      onTool?.({ name: block.name, input: block.input, result: resultText, isError, durationMs, cached, assessment })
       if (!isError) observed.push({ name: block.name, input: block.input, result: resultText })
 
       return {
