@@ -27,6 +27,12 @@ const PROVIDER_PRESETS: Record<string, ProviderPreset> = {
     baseURL: 'https://api.openai.com/v1',
     defaultModel: 'gpt-4.1',
   },
+  openrouter: {
+    kind: 'openai-compatible',
+    apiKeyEnv: 'OPENROUTER_API_KEY',
+    baseURL: 'https://openrouter.ai/api/v1',
+    defaultModel: 'openrouter/auto',
+  },
   mercury: {
     kind: 'openai-compatible',
     apiKeyEnv: 'INCEPTION_API_KEY',

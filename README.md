@@ -26,10 +26,11 @@ Edit `.env` to pick a provider and set its key. `ELIA_PROVIDER` defaults to `ant
 | Anthropic | `anthropic` (default) | `ANTHROPIC_API_KEY` | `claude-sonnet-5` |
 | Groq | `groq` | `GROQ_API_KEY` | `openai/gpt-oss-120b` |
 | OpenAI | `openai` | `OPENAI_API_KEY` | `gpt-4.1` |
+| OpenRouter | `openrouter` | `OPENROUTER_API_KEY` | `openrouter/auto` |
 | Inception (Mercury) | `mercury` | `INCEPTION_API_KEY` | `mercury-2` |
 | Any other OpenAI-compatible endpoint | `custom` | `ELIA_API_KEY` | none — set `ELIA_MODEL` |
 
-Any provider's model can be overridden with `ELIA_MODEL`. `custom` (and any provider, if you need to point at a proxy or self-hosted gateway) also honors `ELIA_BASE_URL`.
+Any provider's model can be overridden with `ELIA_MODEL`. `openrouter` uses OpenRouter's OpenAI-compatible endpoint and its `openrouter/auto` router by default; set `ELIA_MODEL` to pin a specific OpenRouter model. `custom` (and any provider, if you need to point at a proxy or self-hosted gateway) also honors `ELIA_BASE_URL`.
 
 ### The fast tier (optional, recommended)
 
@@ -203,7 +204,7 @@ A synthesized skill is only kept if it survives the same gate a human contributi
 - **`src/speculation/`** — predictive prefetch. `prefetch.ts` follows the edges agents actually read along (grep hits → open them; a module → open its imports) and `cache.ts` holds the results. Any mutating tool call invalidates the cache, and a batch mixing reads and writes bypasses it entirely, so the model can never be handed a pre-write snapshot. Prefetched results show a `⚡` in the tool log.
 - **`src/evolve/`** — `suite.ts` (the fitness function), `benchTask.ts` (one task, one child process, cwd already set), `fitness.ts` (scoring and the promotion rules), `sandbox.ts` (isolated copies, the immutable-file guard, transactional promote/rollback), `candidateTools.ts` (sandbox-confined mutation tools), `ledger.ts` (the generation record), `engine.ts` (the loop).
 - **`src/skills/`** — `detector.ts` (free repetition counting), `synthesize.ts` (write + gate a new tool), `loader.ts` (hot-load and quarantine).
-- **`src/providers/`** — a small provider abstraction with two adapters: `anthropic.ts` (native Messages API with prompt-caching breakpoints on the system prompt, tools, and tail of history) and `openaiCompatible.ts` (Groq, OpenAI, Mercury, and anything else via `baseURL`). `registry.ts` resolves env vars into a concrete provider; `tryResolveProvider` returns an error instead of exiting so the optional fast tier can degrade silently.
+- **`src/providers/`** — a small provider abstraction with two adapters: `anthropic.ts` (native Messages API with prompt-caching breakpoints on the system prompt, tools, and tail of history) and `openaiCompatible.ts` (Groq, OpenAI, OpenRouter, Mercury, and anything else via `baseURL`). `registry.ts` resolves env vars into a concrete provider; `tryResolveProvider` returns an error instead of exiting so the optional fast tier can degrade silently.
 - **`src/tools/`** — `read_file`, `write_file`, `edit_file`, `list_files`, `grep`, `run_command`, `board_post`, `board_read`, `task`, `preview`, plus any synthesized skills.
 - **`src/shell.ts`** — one shell implementation shared by the `run_command` tool, verification, and the evolution gate, so all three behave identically.
 - **`src/memory.ts`** — loads `ELIA.md` (project, in the cwd) and `~/.elia/ELIA.md` (user, global) into the system prompt at startup.
