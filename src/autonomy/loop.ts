@@ -68,6 +68,30 @@ export interface AutonomousRunOptions {
   approveAction?: ActionApproval
   /** Defaults to unattended: safe work flows, irreversible work pauses or blocks. */
   governanceMode?: GovernanceMode
+  /** Fast skips optional quality loops; thorough adds bounded review and repair depth. */
+  profile?: AutonomyProfile
+  /** Capture cross-run lessons after completion; defaults from the selected profile. */
+  learn?: boolean
+}
+
+export type AutonomyProfile = 'fast' | 'balanced' | 'thorough'
+
+export function autonomyProfileDefaults(profile: AutonomyProfile): {
+  maxRepairAttempts: number
+  maxAmendments: number
+  polish: boolean
+  maxPolishPasses: number
+  reviewerCount: number
+  learn: boolean
+  plannerSteps: number
+} {
+  if (profile === 'fast') {
+    return { maxRepairAttempts: 1, maxAmendments: 1, polish: false, maxPolishPasses: 0, reviewerCount: 1, learn: false, plannerSteps: 24 }
+  }
+  if (profile === 'thorough') {
+    return { maxRepairAttempts: 3, maxAmendments: 4, polish: true, maxPolishPasses: 2, reviewerCount: 3, learn: true, plannerSteps: 50 }
+  }
+  return { maxRepairAttempts: 2, maxAmendments: 3, polish: true, maxPolishPasses: 1, reviewerCount: 3, learn: true, plannerSteps: 40 }
 }
 
 export type RunOutcome = 'completed' | 'needs-attention' | 'rejected' | 'no-proposal' | 'aborted'
@@ -125,10 +149,13 @@ Fix everything listed. When you are done, re-run the verification commands yours
  */
 export async function runAutonomousTask(options: AutonomousRunOptions): Promise<AutonomousRunResult> {
   const { goal, approve, signal } = options
-  const maxRepairAttempts = options.maxRepairAttempts ?? 2
-  const maxAmendments = options.maxAmendments ?? 3
-  const runPolish = options.polish ?? true
-  const maxPolishPasses = Math.max(0, Math.min(options.maxPolishPasses ?? 1, 3))
+  const profile = options.profile ?? 'balanced'
+  const defaults = autonomyProfileDefaults(profile)
+  const maxRepairAttempts = options.maxRepairAttempts ?? defaults.maxRepairAttempts
+  const maxAmendments = options.maxAmendments ?? defaults.maxAmendments
+  const runPolish = options.polish ?? defaults.polish
+  const maxPolishPasses = Math.max(0, Math.min(options.maxPolishPasses ?? defaults.maxPolishPasses, 3))
+  const captureLearning = options.learn ?? defaults.learn
   const runId = options.runId ?? newRunId()
   const startedAt = Date.now()
   const governor = createActionGovernor({ mode: options.governanceMode ?? 'unattended', approve: options.approveAction })
@@ -171,9 +198,12 @@ export async function runAutonomousTask(options: AutonomousRunOptions): Promise<
   // --- Orient & propose -----------------------------------------------------
 
   writePhase('orient', `run ${runId}`)
-  const snapshot = await projectSnapshot()
+  const snapshot = options.resumeGraph ? '(resuming from the durable goal graph; inspect only files needed for unfinished nodes)' : await projectSnapshot()
 
   const proposalCapture = createProposalTool()
+  const plannerPrompt = profile === 'fast'
+    ? `${PLANNER_PROMPT}\n\n## Fast bounded mode\nThis is a time-sensitive task. Prefer 3–6 high-value steps, combine edits that share a coherent UI or subsystem, and keep independent steps in the same wave. Do not create separate steps for trivial assets, documentation, or cosmetic micro-edits. The goal is a complete verified result, not an exhaustive project plan.`
+    : PLANNER_PROMPT
   const planningTools = [
     ...allWorkerTools().filter((tool) => ['read_file', 'list_files', 'grep', 'board_read', 'board_post'].includes(tool.name)),
     taskTool,
@@ -205,12 +235,12 @@ export async function runAutonomousTask(options: AutonomousRunOptions): Promise<
     journal.append('phase', { phase: 'propose', attempt: amendments })
     const planning = await withAgentIdentity({ name: 'lead', role: 'lead', runId, cwd: process.cwd() }, () => withActionGovernor(governor, () => withGoalGraph(graph, () => runAgentLoop({
       messages,
-      systemPrompt: PLANNER_PROMPT,
+      systemPrompt: plannerPrompt,
       tools: planningTools,
       onText: writeText,
       useAnimation: true,
       verbose: true,
-      maxSteps: 40,
+      maxSteps: defaults.plannerSteps,
       signal,
       onTool: (event) => appendActionAudit(event, runId),
     }))))
@@ -462,8 +492,8 @@ Read the changed files in full for context beyond the diff above — a diff hide
       // security, and functional-bug-hunting in mind simultaneously. Each gets
       // its own verdict tool instance since they run concurrently and must not
       // share captured state.
-      const reviewers: { role: 'critic' | 'security' | 'bughunter'; name: string; focus: string }[] = docsOnly
-        ? [{ role: 'critic', name: 'critic#1', focus: 'Check specifically whether each promised step was really done, not just claimed.' }]
+      const reviewers: { role: 'critic' | 'security' | 'bughunter'; name: string; focus: string }[] = docsOnly || defaults.reviewerCount === 1
+        ? [{ role: 'critic', name: 'critic#1', focus: 'Check specifically whether each promised step was really done, not just claimed, and catch concrete correctness or UX defects.' }]
         : [
             { role: 'critic', name: 'critic#1', focus: 'Check specifically whether each promised step was really done, not just claimed.' },
             { role: 'security', name: 'security#1', focus: 'Focus only on exploitable security weaknesses in what changed.' },
@@ -560,7 +590,7 @@ Read the changed files in full for context beyond the diff above — a diff hide
 
   // --- Learn ---------------------------------------------------------------
 
-  const lessons = await captureLessons(goal, proposal, 'succeeded', journal, track, governor, graph)
+  const lessons = captureLearning ? await captureLessons(goal, proposal, 'succeeded', journal, track, governor, graph) : []
 
   writeSummary('Run complete', [
     ['run', runId],

@@ -42,27 +42,30 @@ export function createOpenAICompatibleProvider(
         })
       }
 
-      const completion = await runner.finalChatCompletion()
-      const message = completion.choices[0]?.message
-      if (!message) {
-        throw new Error('Provider returned no message in response')
+      try {
+        const completion = await runner.finalChatCompletion()
+        const message = completion.choices[0]?.message
+        if (!message) {
+          throw new Error('Provider returned no message in response')
+        }
+        return { content: toContentBlocks(message, passthroughReasoning), usage: usageFrom(completion.usage) }
+      } catch (err) {
+        if (!isStreamingUnsupported(err)) throw err
+        const completion = await client.chat.completions.create({
+          model,
+          messages: toOpenAIMessages(system, messages),
+          tools: toOpenAITools(tools),
+          stream: false,
+        })
+        const message = completion.choices[0]?.message
+        if (!message) throw new Error('Provider returned no message in non-streaming response')
+        const content = toContentBlocks(message, passthroughReasoning)
+        for (const block of content) {
+          if (block.type === 'thinking') onThinking?.(block.text)
+          if (block.type === 'text') onText(block.text)
+        }
+        return { content, usage: usageFrom(completion.usage) }
       }
-
-      const content = toContentBlocks(message, passthroughReasoning)
-
-      // OpenAI-style usage reports prompt_tokens as a total that already
-      // *includes* any cached portion, unlike Anthropic's separate counters —
-      // so subtract it out to keep inputTokens meaning "non-cached" everywhere.
-      const rawUsage = completion.usage
-      const cacheReadTokens = rawUsage?.prompt_tokens_details?.cached_tokens ?? 0
-      const usage: Usage = {
-        inputTokens: Math.max(0, (rawUsage?.prompt_tokens ?? 0) - cacheReadTokens),
-        outputTokens: rawUsage?.completion_tokens ?? 0,
-        cacheReadTokens,
-        cacheWriteTokens: 0,
-      }
-
-      return { content, usage }
     },
   }
 }
@@ -179,6 +182,23 @@ function toOpenAITools(tools: ToolDefinition[]): OpenAI.Chat.ChatCompletionTool[
       parameters: tool.input_schema,
     },
   }))
+}
+
+function usageFrom(rawUsage: { prompt_tokens?: number; completion_tokens?: number; prompt_tokens_details?: { cached_tokens?: number } } | null | undefined): Usage {
+  // OpenAI-style usage reports prompt_tokens as a total that already includes
+  // any cached portion, unlike Anthropic's separate counters.
+  const cacheReadTokens = rawUsage?.prompt_tokens_details?.cached_tokens ?? 0
+  return {
+    inputTokens: Math.max(0, (rawUsage?.prompt_tokens ?? 0) - cacheReadTokens),
+    outputTokens: rawUsage?.completion_tokens ?? 0,
+    cacheReadTokens,
+    cacheWriteTokens: 0,
+  }
+}
+
+function isStreamingUnsupported(error: unknown): boolean {
+  const text = error instanceof Error ? error.message : String(error)
+  return /streaming is not supported|stream is not supported|request ended without sending any chunks/i.test(text)
 }
 
 /** Pulls a reasoning fragment off a raw streamed delta, tolerating either non-standard field name. */

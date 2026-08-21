@@ -56,6 +56,8 @@ Autonomous work:
   elia auto "<goal>" --yolo         Same, without waiting for you to approve the plan
   elia auto "<goal>" --autonomous   Self-supervised alias for --yolo; executes, verifies, repairs, and polishes
   elia auto "<goal>" --no-polish     Skip the bounded final quality pass
+  elia auto "<goal>" --fast          Bounded fast path: no polish, one reviewer, one repair, no lesson pass
+  elia auto "<goal>" --thorough      Extra bounded review and repair depth for high-risk changes
   elia auto "<goal>" --variants N   Run N independent implementation attempts in parallel,
                                      each in its own isolated git worktree, and keep only
                                      the one that verification — not an LLM's opinion — likes
@@ -201,6 +203,9 @@ async function runAuto(): Promise<void> {
     return
   }
 
+  const profile = hasFlag('--fast') ? 'fast' : hasFlag('--thorough') ? 'thorough' : 'balanced'
+  if (profile !== 'balanced') writeNotice(`autonomy profile: ${profile}`)
+
   const variantsRaw = flagValue('--variants')
   const variants = variantsRaw ? Number.parseInt(variantsRaw, 10) : undefined
   if (variantsRaw && (!Number.isInteger(variants) || variants! < 1)) {
@@ -223,7 +228,7 @@ async function runAuto(): Promise<void> {
   }
 
   if (yolo) {
-    const result = await runAutonomousTask({ goal, approve: autoApprove, variants, polish: !hasFlag('--no-polish'), governanceMode: 'unattended' })
+    const result = await runAutonomousTask({ goal, approve: autoApprove, variants, profile, polish: !hasFlag('--no-polish'), governanceMode: 'unattended' })
     if (result.outcome !== 'completed') process.exitCode = 1
     return
   }
@@ -235,7 +240,7 @@ async function runAuto(): Promise<void> {
     return result.action === 'approve'
   }
   try {
-    const result = await runAutonomousTask({ goal, approve: createInteractiveApprover(rl), variants, polish: !hasFlag('--no-polish'), governanceMode: 'supervised', approveAction })
+    const result = await runAutonomousTask({ goal, approve: createInteractiveApprover(rl), variants, profile, polish: !hasFlag('--no-polish'), governanceMode: 'supervised', approveAction })
     if (result.outcome !== 'completed' && result.outcome !== 'rejected') process.exitCode = 1
   } finally {
     rl.close()
