@@ -12,6 +12,7 @@ import { webFetchTool } from './webFetch.ts'
 import { readSpreadsheetTool } from './readSpreadsheet.ts'
 import { recallTool } from './recall.ts'
 import { browserTool } from './browser.ts'
+import { projectProfileTool } from './projectProfile.ts'
 import type { Tool } from './types.ts'
 
 /** The built-in file and shell tools. */
@@ -23,6 +24,7 @@ export const tools: Tool[] = [
   grepTool,
   runCommandTool,
   recallTool,
+  projectProfileTool,
 ]
 
 /** Tools that let a fleet of sub-agents coordinate instead of working blind. */

@@ -47,6 +47,19 @@ Each specialist must separate facts, assumptions, recommendations, and unknowns.
 
 The capability inventory, architecture boundaries, and current limitations are documented in [`docs/agent-capability-audit.md`](docs/agent-capability-audit.md). The repeatable evaluation matrix and quality thresholds are in [`docs/general-agent-evaluation.md`](docs/general-agent-evaluation.md). Use `/capabilities` inside a session to inspect the live registry of specialist domains, risk classes, preferred tools, and output contracts.
 
+### Coding language and framework support
+
+Elia’s Tech specialist is compatible with projects built in **Python**, **TypeScript/JavaScript**, **Bun**, and **React/TSX**, including common adjacent tooling such as Vite, Next.js, pytest, npm, pnpm, and project-specific scripts. Compatibility means Elia can inspect the project, edit source and configuration, run the declared commands, debug failures, and verify the result; it does not require the target project to use Elia’s own Bun stack.
+
+| Stack | Project signals Elia detects | Typical verification |
+|---|---|---|
+| Python | `pyproject.toml`, `requirements.txt`, `setup.cfg`, virtual-environment metadata, `.py` files | pytest, project scripts, type/lint tools such as mypy or ruff when declared |
+| TypeScript/JavaScript | `package.json`, `tsconfig.json`, `.ts`/`.tsx`/`.js` files | package-manager test, typecheck, lint, and build scripts |
+| Bun | `bunfig.toml`, Bun lockfiles, Bun package scripts, `bun test`/`bun run` commands | Bun tests, scripts, typecheck, and build commands |
+| React/TSX | React dependencies, `.jsx`/`.tsx`, Vite/Next configuration, component and route structure | project test, typecheck, lint, and production build scripts |
+
+Elia uses the target project’s existing package manager and conventions rather than assuming one toolchain. Before coding in an unfamiliar repository, the Tech agent can use the deterministic `project_profile` tool to report detected stacks, package manager, manifest signals, and declared verification commands. It can work across these stacks in one delegated task, for example updating a Python API, a TypeScript service, and a React client in separate dependency-aware steps, then running the relevant verification for each.
+
 ### Self-supervised execution and polish
 
 For a fully autonomous run, use `--autonomous` (an alias for `--yolo`):
