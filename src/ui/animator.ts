@@ -1,5 +1,7 @@
 import { FACE_NEUTRAL, FACE_BLINK, FACE_LEFT, FACE_RIGHT } from './character.ts'
 import { dim, gold } from './theme.ts'
+import { interactiveTerminal } from './runtime.ts'
+import { registerShutdownCleanup } from './shutdown.ts'
 
 // Eyes dart around while "thinking", blink once, and repeat — a small loop, not
 // a set piece. Each entry gets one FRAME_MS tick.
@@ -26,7 +28,7 @@ const NOOP_ANIMATION: Animation = { stop() {} }
  * takes: one glyph, one phrase, one clock.
  */
 export function startThinkingAnimation(): Animation {
-  if (!process.stdout.isTTY) return NOOP_ANIMATION
+  if (!interactiveTerminal) return NOOP_ANIMATION
 
   const startedAt = Date.now()
   let frameIndex = 0
@@ -52,12 +54,18 @@ export function startThinkingAnimation(): Animation {
   }
   scheduleNext()
 
+  const cleanup = () => {
+    if (stopped) return
+    stopped = true
+    if (timer) clearTimeout(timer)
+    process.stdout.write('\x1b[1A\x1b[0J')
+  }
+  const unregisterShutdown = registerShutdownCleanup(cleanup)
+
   return {
     stop() {
-      if (stopped) return
-      stopped = true
-      if (timer) clearTimeout(timer)
-      process.stdout.write('\x1b[1A\x1b[0J')
+      cleanup()
+      unregisterShutdown()
     },
   }
 }

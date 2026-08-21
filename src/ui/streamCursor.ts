@@ -2,6 +2,9 @@
 // waiting on the next network chunk) — distinct from the pre-stream "thinking"
 // character animation. Only blinks after a short idle gap so fast streaming
 // never flickers; any incoming text instantly erases it first.
+import { interactiveTerminal } from './runtime.ts'
+import { registerShutdownCleanup } from './shutdown.ts'
+
 const CURSOR_CHAR = '_'
 const BLINK_INTERVAL_MS = 500
 const IDLE_BEFORE_BLINK_MS = 250
@@ -16,7 +19,7 @@ const NOOP_CURSOR: StreamCursor = { beforeText() {}, afterText() {}, stop() {} }
 
 export function createStreamCursor(): StreamCursor {
   // Escape codes corrupt output when stdout isn't a real terminal (piped/redirected).
-  if (!process.stdout.isTTY) return NOOP_CURSOR
+  if (!interactiveTerminal) return NOOP_CURSOR
 
   let blinkTimer: ReturnType<typeof setInterval> | null = null
   let idleTimer: ReturnType<typeof setTimeout> | null = null
@@ -49,6 +52,12 @@ export function createStreamCursor(): StreamCursor {
     hide()
   }
 
+  const cleanup = () => {
+    cancelIdleTimer()
+    stopBlink()
+  }
+  const unregisterShutdown = registerShutdownCleanup(cleanup)
+
   return {
     beforeText() {
       cancelIdleTimer()
@@ -62,8 +71,8 @@ export function createStreamCursor(): StreamCursor {
       }, IDLE_BEFORE_BLINK_MS)
     },
     stop() {
-      cancelIdleTimer()
-      stopBlink()
+      cleanup()
+      unregisterShutdown()
     },
   }
 }

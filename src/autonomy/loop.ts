@@ -16,6 +16,8 @@ import { createJournal, newRunId, type Journal } from './journal.ts'
 import { planWaves, runFleet } from './fleet.ts'
 import { runVariants } from './variants.ts'
 import { createProposalTool, renderProposal } from './proposal.ts'
+import { emitEvent, machineReadable } from '../ui/runtime.ts'
+import { redactText } from '../ui/redact.ts'
 import { appendLessons, createLessonsTool, renderLessons } from './lessons.ts'
 import {
   createVerdictTool,
@@ -189,6 +191,7 @@ export async function runAutonomousTask(options: AutonomousRunOptions): Promise<
     }
     journal.append('run-end', { outcome, graph: graph.state().nodes.map((node) => ({ id: node.id, status: node.status })) })
     writeRunReceipt({ runId, goal, outcome, proposal: extra.proposal, verdict: extra.verdict, lessons: extra.lessons, events: journal.events(), graph: graph.state() })
+    emitEvent('run_finished', { runId, goal: redactText(goal, 2000), outcome, elapsedMs: Date.now() - startedAt, usage, graph: graph.state() })
     return {
       runId,
       outcome,
@@ -270,7 +273,8 @@ export async function runAutonomousTask(options: AutonomousRunOptions): Promise<
     }
 
     journal.append('proposal', { proposal })
-    process.stdout.write(renderProposal(proposal))
+    if (machineReadable) emitEvent('proposal_ready', { proposal })
+    else process.stdout.write(renderProposal(proposal))
     journal.checkpoint('after-propose', messages)
 
     graph.seedProposal(proposal)
@@ -278,6 +282,7 @@ export async function runAutonomousTask(options: AutonomousRunOptions): Promise<
     const decision = durableApproval.status === 'approved' ? ({ action: 'approve' } as const) : await approve(proposal)
     if (durableApproval.status === 'pending') graph.resolveApproval(durableApproval.id, decision.action === 'approve', decision.action === 'amend' ? decision.feedback : decision.action)
     journal.append('approval', { action: decision.action, approvalId: durableApproval.id })
+    emitEvent('approval_decision', { runId, approvalId: durableApproval.id, kind: 'plan', decision: decision.action })
 
     if (decision.action === 'approve') break
     if (decision.action === 'reject') {

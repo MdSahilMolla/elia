@@ -1,5 +1,7 @@
 import * as readline from 'node:readline'
 import { reverse, dim, gold, bold } from './theme.ts'
+import { interactiveTerminal } from './runtime.ts'
+import { gracefulShutdown, registerShutdownCleanup } from './shutdown.ts'
 
 export interface PickerOption {
   label: string
@@ -10,10 +12,8 @@ export interface PickerOption {
 export type PickerResult =
   | { type: 'select'; value: string }
   | { type: 'cancel' }
-  /** Not a real TTY, so there was nothing to render at all — distinct from the user actually pressing escape, so a caller can fall back to printing a plain listing instead of just going silent. */
   | { type: 'unavailable' }
 
-/** The subset of Node's keypress event this module reacts to — kept minimal and structural so tests don't need a real TTY (mirrors slashPrompt.ts's KeyEvent). */
 export interface KeyEvent {
   name?: string
   ctrl?: boolean
@@ -26,15 +26,12 @@ export type PickerKeyResult =
   | { type: 'quit' }
   | { type: 'none' }
 
-/**
- * Pure reducer over one keypress given the current selection and option count —
- * up/down *and* left/right both move the highlight (deliberately: this is a
- * single vertical list, not a grid, but different people's muscle memory reaches
- * for either pair). Free of any terminal I/O so it can be unit tested without a
- * real TTY; `pick` below is the thin raw-mode renderer that drives it.
- */
+const PAGE_SIZE = 10
+
+/** Pure picker reducer; all terminal I/O stays in pick() below. */
 export function applyPickerKey(selected: number, optionCount: number, key: KeyEvent): PickerKeyResult {
   if (key.ctrl && key.name === 'c') return { type: 'quit' }
+  if (optionCount <= 0) return key.name === 'escape' ? { type: 'cancel' } : { type: 'none' }
   switch (key.name) {
     case 'up':
     case 'left':
@@ -42,8 +39,16 @@ export function applyPickerKey(selected: number, optionCount: number, key: KeyEv
     case 'down':
     case 'right':
       return { type: 'move', selected: (selected + 1) % optionCount }
+    case 'pageup':
+      return { type: 'move', selected: Math.max(0, selected - PAGE_SIZE) }
+    case 'pagedown':
+      return { type: 'move', selected: Math.min(optionCount - 1, selected + PAGE_SIZE) }
+    case 'home':
+      return { type: 'move', selected: 0 }
+    case 'end':
+      return { type: 'move', selected: optionCount - 1 }
     case 'return':
-      return { type: 'select', index: selected }
+      return { type: 'select', index: Math.min(Math.max(selected, 0), optionCount - 1) }
     case 'escape':
       return { type: 'cancel' }
     default:
@@ -51,22 +56,9 @@ export function applyPickerKey(selected: number, optionCount: number, key: KeyEv
   }
 }
 
-/**
- * A small interactive list picker — up/down or left/right move the highlight,
- * enter selects, escape cancels, Ctrl+C quits elia entirely (matching the slash
- * prompt's own convention, since raw mode intercepts Ctrl+C as a keypress rather
- * than letting the terminal deliver SIGINT).
- *
- * Runs as its own short-lived modal between `prompt.question()` calls rather than
- * being woven into the line editor: `/model` and `/thinking` need to browse a
- * fixed list of options, not edit a line of text. It reuses the same raw-mode
- * stdin the main prompt already put the terminal into and restores exactly what
- * it found, so control hands back to `createSlashPrompt` none the wiser.
- */
+/** A bounded interactive list picker for models, skills, and reasoning settings. */
 export function pick(title: string, options: PickerOption[], initialIndex = 0): Promise<PickerResult> {
-  if (!process.stdin.isTTY || !process.stdout.isTTY || options.length === 0) {
-    return Promise.resolve({ type: 'unavailable' })
-  }
+  if (!interactiveTerminal || options.length === 0) return Promise.resolve({ type: 'unavailable' })
 
   const stdin = process.stdin
   const stdout = process.stdout
@@ -76,61 +68,82 @@ export function pick(title: string, options: PickerOption[], initialIndex = 0): 
   stdin.resume()
 
   let selected = Math.min(Math.max(initialIndex, 0), options.length - 1)
+  let viewportStart = 0
   let rendered = 0
+  let finished = false
+
+  function adjustViewport(): void {
+    if (selected < viewportStart) viewportStart = selected
+    if (selected >= viewportStart + PAGE_SIZE) viewportStart = selected - PAGE_SIZE + 1
+    viewportStart = Math.max(0, Math.min(viewportStart, Math.max(0, options.length - PAGE_SIZE)))
+  }
 
   function render(): void {
+    if (finished) return
+    adjustViewport()
     if (rendered > 0) stdout.write(`\x1b[${rendered}A`)
+    const visible = options.slice(viewportStart, viewportStart + PAGE_SIZE)
     const lines = [
-      `${bold(title)} ${dim('(↑/↓ move · enter select · esc cancel)')}`,
-      ...options.map((option, i) => {
+      `${bold(title)} ${dim('(↑/↓ move · pgup/pgdn page · home/end · enter select · esc cancel)')}`,
+      ...visible.map((option, offset) => {
+        const i = viewportStart + offset
         const highlighted = i === selected
         const marker = highlighted ? gold('›') : ' '
         const label = highlighted ? reverse(option.label) : option.label
         const detail = option.detail ? ` ${dim(option.detail)}` : ''
         return `  ${marker} ${label}${detail}`
       }),
+      dim(`showing ${viewportStart + 1}–${Math.min(options.length, viewportStart + visible.length)} of ${options.length}`),
     ]
     for (const line of lines) stdout.write(`\x1b[2K${line}\n`)
     rendered = lines.length
   }
 
+  function cleanup(): void {
+    if (finished) return
+    finished = true
+    stdin.off('keypress', onKeypress)
+    if (stdin.isTTY) stdin.setRawMode(wasRaw ?? false)
+    stdin.pause()
+  }
+
+  const unregisterShutdown = registerShutdownCleanup(cleanup)
+
+  function finish(result: PickerResult): void {
+    cleanup()
+    unregisterShutdown()
+    stdout.write(`\x1b[${rendered}A\x1b[0J`)
+    resolveResult?.(result)
+  }
+
+  let resolveResult: ((result: PickerResult) => void) | undefined
+  function onKeypress(_str: string | undefined, key: KeyEvent): void {
+    const result = applyPickerKey(selected, options.length, key)
+    switch (result.type) {
+      case 'quit':
+        cleanup()
+        unregisterShutdown()
+        stdout.write('\n')
+        gracefulShutdown(130)
+        break
+      case 'move':
+        selected = result.selected
+        render()
+        break
+      case 'select':
+        finish({ type: 'select', value: options[result.index]!.value })
+        break
+      case 'cancel':
+        finish({ type: 'cancel' })
+        break
+      case 'none':
+        break
+    }
+  }
+
   render()
-
+  stdin.on('keypress', onKeypress)
   return new Promise((resolve) => {
-    function cleanup(): void {
-      stdin.off('keypress', onKeypress)
-      if (stdin.isTTY) stdin.setRawMode(wasRaw ?? false)
-    }
-
-    function finish(result: PickerResult): void {
-      cleanup()
-      stdout.write(`\x1b[${rendered}A\x1b[0J`)
-      resolve(result)
-    }
-
-    function onKeypress(_str: string | undefined, key: KeyEvent): void {
-      const result = applyPickerKey(selected, options.length, key)
-      switch (result.type) {
-        case 'quit':
-          cleanup()
-          stdout.write('\n')
-          process.exit(0)
-          break // unreachable, keeps TS happy about exhaustiveness
-        case 'move':
-          selected = result.selected
-          render()
-          break
-        case 'select':
-          finish({ type: 'select', value: options[result.index]!.value })
-          break
-        case 'cancel':
-          finish({ type: 'cancel' })
-          break
-        case 'none':
-          break
-      }
-    }
-
-    stdin.on('keypress', onKeypress)
+    resolveResult = resolve
   })
 }

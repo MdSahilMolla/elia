@@ -45,3 +45,10 @@ test('a single-option list still wraps to itself', () => {
   expect(applyPickerKey(0, 1, { name: 'down' })).toEqual({ type: 'move', selected: 0 })
   expect(applyPickerKey(0, 1, { name: 'up' })).toEqual({ type: 'move', selected: 0 })
 })
+
+test('page navigation and home/end stay within large catalogs', () => {
+  expect(applyPickerKey(9, 50, { name: 'pagedown' })).toEqual({ type: 'move', selected: 19 })
+  expect(applyPickerKey(9, 50, { name: 'pageup' })).toEqual({ type: 'move', selected: 0 })
+  expect(applyPickerKey(9, 50, { name: 'home' })).toEqual({ type: 'move', selected: 0 })
+  expect(applyPickerKey(9, 50, { name: 'end' })).toEqual({ type: 'move', selected: 49 })
+})

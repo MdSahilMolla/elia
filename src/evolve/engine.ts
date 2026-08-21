@@ -9,6 +9,7 @@ import { clampOutput, runShell } from '../shell.ts'
 import { writeText } from '../ui/stream.ts'
 import { writeBlock, writeFail, writePass, writePhase, writeSubStep, writeSummary } from '../ui/report.ts'
 import { formatElapsed } from '../usage.ts'
+import { emitEvent, machineReadable, quietOutput } from '../ui/runtime.ts'
 import {
   appendGeneration,
   nextGenerationNumber,
@@ -84,7 +85,8 @@ export async function evolve(options: EvolveOptions = {}): Promise<EvolveResult>
     onTaskDone: (outcome) =>
       outcome.passed ? writePass(`${outcome.taskId} — ${outcome.detail}`) : writeFail(`${outcome.taskId} — ${outcome.error ?? outcome.detail}`),
   })
-  process.stdout.write(renderScorecard(baselineCard, 'Baseline'))
+  if (machineReadable) emitEvent('benchmark_scorecard', { stage: 'baseline', scorecard: baselineCard })
+  else if (!quietOutput) process.stdout.write(renderScorecard(baselineCard, 'Baseline'))
 
   const firstBaseline = toMetrics(baselineCard)
   let baseline = firstBaseline
@@ -187,7 +189,8 @@ async function runGeneration(
     return { ...base, reason: 'the builder changed nothing' }
   }
   writeSubStep(`changed ${changed.length} file${changed.length === 1 ? '' : 's'}`)
-  process.stdout.write(`${describeChanges(sandbox, changed)}\n`)
+  if (machineReadable) emitEvent('candidate_changes', { generation, files: changed, description: describeChanges(sandbox, changed) })
+  else process.stdout.write(`${describeChanges(sandbox, changed)}\n`)
 
   const violations = violatedImmutables(changed)
   if (violations.length > 0) {
@@ -241,7 +244,8 @@ async function runGeneration(
   } catch (err) {
     return { ...base, reason: `benchmark could not run: ${err instanceof Error ? err.message : String(err)}` }
   }
-  process.stdout.write(renderScorecard(candidateCard, `Generation ${generation}`))
+  if (machineReadable) emitEvent('benchmark_scorecard', { stage: 'candidate', generation, scorecard: candidateCard })
+  else if (!quietOutput) process.stdout.write(renderScorecard(candidateCard, `Generation ${generation}`))
 
   const candidate = toMetrics(candidateCard)
   base.candidate = candidate

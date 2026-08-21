@@ -25,6 +25,17 @@ test('tracks pending, running, and completed task state', () => {
   expect(finished?.stepsCompleted).toBe(1)
 })
 
+test('invokes registered task controls and unregisters them', () => {
+  const store = new TaskSessionStore()
+  const session = store.create('code', 'Cancelable work')
+  let cancelled = 0
+  const unregister = store.registerControls(session.id, { cancel: () => { cancelled += 1 } })
+  expect(store.control(session.id, 'cancel')).toBe(true)
+  expect(cancelled).toBe(1)
+  unregister()
+  expect(store.control(session.id, 'cancel')).toBe(false)
+})
+
 test('persists and reloads task sessions while ignoring malformed history', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'elia-task-sessions-'))
   const file = join(dir, 'tasks.json')

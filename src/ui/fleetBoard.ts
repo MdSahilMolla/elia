@@ -1,5 +1,7 @@
 import { dim, gold, green, red, cyan } from './theme.ts'
-import { frame } from './layout.ts'
+import { frame, terminalWidth } from './layout.ts'
+import { interactiveTerminal } from './runtime.ts'
+import { registerShutdownCleanup } from './shutdown.ts'
 
 const SPINNER = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
 const TICK_MS = 120
@@ -49,9 +51,9 @@ export interface FleetWorkerSpec {
 export function createFleetBoard(workers: FleetWorkerSpec[]): FleetBoard {
   const rows: WorkerRow[] = workers.map((worker) => ({ ...worker, status: 'queued', detail: '' }))
 
-  if (!process.stdout.isTTY) return createPlainBoard(rows)
+  if (!interactiveTerminal) return createPlainBoard(rows)
 
-  const panel = frame(INNER_WIDTH, {
+  const panel = frame(Math.max(40, Math.min(INNER_WIDTH, terminalWidth(96) - 4)), {
     title: `Fleet — ${rows.length} worker${rows.length === 1 ? '' : 's'}`,
     borderColor: gold,
   })
@@ -74,7 +76,8 @@ export function createFleetBoard(workers: FleetWorkerSpec[]): FleetBoard {
             : dim('·')
 
     const detail = row.detail ? ` ${dim(truncate(row.detail, 40))}` : ''
-    return panel.line(`${marker} ${cyan(row.role.padEnd(ROLE_WIDTH))} ${truncate(row.title, TITLE_WIDTH).padEnd(TITLE_WIDTH)} ${time}${detail}`)
+    const content = `${marker} ${cyan(row.role.padEnd(ROLE_WIDTH))} ${truncate(row.title, TITLE_WIDTH).padEnd(TITLE_WIDTH)} ${time}${detail}`
+    return panel.line(truncate(content, panel.innerWidth))
   }
 
   function render(): void {
@@ -91,6 +94,13 @@ export function createFleetBoard(workers: FleetWorkerSpec[]): FleetBoard {
     frameIndex += 1
     render()
   }, TICK_MS)
+  const onResize = () => render()
+  process.stdout.on('resize', onResize)
+  const unregisterShutdown = registerShutdownCleanup(() => {
+    clearInterval(timer)
+    process.stdout.off('resize', onResize)
+    if (rendered > 0) process.stdout.write(`\x1b[${rendered}A\x1b[0J`)
+  })
 
   return {
     update(name, status, detail) {
@@ -105,6 +115,8 @@ export function createFleetBoard(workers: FleetWorkerSpec[]): FleetBoard {
     stop() {
       if (stopped) return
       clearInterval(timer)
+      process.stdout.off('resize', onResize)
+      unregisterShutdown()
       render()
       stopped = true
     },

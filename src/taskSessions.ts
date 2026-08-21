@@ -1,5 +1,7 @@
 import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
+import { emitEvent, machineReadable } from './ui/runtime.ts'
+import { redactText } from './ui/redact.ts'
 
 export type TaskKind = 'browser' | 'code' | 'pending'
 export type TaskStatus = 'pending' | 'running' | 'paused' | 'done' | 'failed'
@@ -21,6 +23,13 @@ export interface TaskSession {
 }
 
 export type TaskSessionPatch = Partial<Pick<TaskSession, 'status' | 'action' | 'detail' | 'stepsCompleted' | 'stepsTotal' | 'error'>>
+export type TaskControlAction = 'pause' | 'resume' | 'cancel' | 'retry'
+export interface TaskControls {
+  pause?: () => void
+  resume?: () => void
+  cancel?: () => void
+  retry?: () => void
+}
 export type TaskSessionListener = (sessions: TaskSession[]) => void
 
 const TASKS_FILE = join(process.cwd(), '.elia', 'tasks.json')
@@ -28,6 +37,7 @@ const TASKS_FILE = join(process.cwd(), '.elia', 'tasks.json')
 export class TaskSessionStore {
   private readonly records = new Map<string, TaskSession>()
   private readonly listeners = new Set<TaskSessionListener>()
+  private readonly controls = new Map<string, TaskControls>()
   private writeQueued = false
 
   async load(filePath = TASKS_FILE): Promise<void> {
@@ -66,10 +76,10 @@ export class TaskSessionStore {
     const record: TaskSession = {
       id: `${now.toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
       kind,
-      title: title.trim() || 'Untitled task',
+      title: redactText(title.trim() || 'Untitled task', 160),
       status: 'pending',
       action: 'Queued',
-      detail,
+      detail: redactText(detail, 1000),
       createdAt: now,
       updatedAt: now,
       stepsCompleted: 0,
@@ -82,7 +92,11 @@ export class TaskSessionStore {
   update(id: string, patch: TaskSessionPatch): TaskSession | undefined {
     const record = this.records.get(id)
     if (!record) return undefined
-    Object.assign(record, patch, { updatedAt: Date.now() })
+    const safePatch: TaskSessionPatch = { ...patch }
+    if (patch.action !== undefined) safePatch.action = redactText(patch.action, 160)
+    if (patch.detail !== undefined) safePatch.detail = redactText(patch.detail, 1000)
+    if (patch.error !== undefined) safePatch.error = redactText(patch.error, 2000)
+    Object.assign(record, safePatch, { updatedAt: Date.now() })
     if (patch.status === 'running' && !record.startedAt) record.startedAt = Date.now()
     if ((patch.status === 'done' || patch.status === 'failed') && !record.finishedAt) record.finishedAt = Date.now()
     this.emit()
@@ -92,6 +106,18 @@ export class TaskSessionStore {
   get(id: string): TaskSession | undefined {
     const record = this.records.get(id)
     return record ? { ...record } : undefined
+  }
+
+  registerControls(id: string, controls: TaskControls): () => void {
+    this.controls.set(id, controls)
+    return () => this.controls.delete(id)
+  }
+
+  control(id: string, action: TaskControlAction): boolean {
+    const handler = this.controls.get(id)?.[action]
+    if (!handler) return false
+    handler()
+    return true
   }
 
   list(): TaskSession[] {
@@ -109,6 +135,7 @@ export class TaskSessionStore {
   private emit(): void {
     const snapshot = this.list()
     for (const listener of this.listeners) listener(snapshot)
+    if (machineReadable) emitEvent('tasks_updated', { tasks: snapshot })
     this.persistSoon()
   }
 

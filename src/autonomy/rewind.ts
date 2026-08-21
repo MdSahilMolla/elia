@@ -72,6 +72,7 @@ export interface ForkOptions {
   checkpointId: number
   instruction: string
   approve: Approver
+  signal?: AbortSignal
 }
 
 export type ForkResult = { ok: true; run: AutonomousRunResult } | { ok: false; error: string }
@@ -110,6 +111,7 @@ export async function forkRun(options: ForkOptions): Promise<ForkResult> {
     goal: `${goal} (forked from ${options.runId}@${options.checkpointId}: ${options.instruction})`,
     approve: options.approve,
     resumeMessages: messages,
+    signal: options.signal,
   })
 
   return { ok: true, run }

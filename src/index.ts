@@ -14,6 +14,9 @@ import { inferTaskKind, taskSessions } from './taskSessions.ts'
 import { isAgentPersona, type AgentPersona } from './agents/types.ts'
 import { CAPABILITIES } from './capabilities.ts'
 import type { ActionApproval, ActionAssessment, ActionRequest } from './autonomy/governor.ts'
+import { emitEvent, machineReadable, plainOutput, quietOutput } from './ui/runtime.ts'
+import { installShutdownHandlers, registerShutdownCleanup } from './ui/shutdown.ts'
+import { redactText } from './ui/redact.ts'
 
 const REPL_COMMANDS: SlashCommand[] = [
   { name: '/capabilities', description: 'list specialist capabilities, risk classes, and output contracts' },
@@ -125,10 +128,17 @@ Inside an interactive session:
 
 Other:
   elia --cyber                Start (or run a one-shot prompt) in cyber mode
+  elia --json                 Emit stable JSONL lifecycle events for automation
+  elia --plain                Disable color, animation, and in-place terminal redraws
+  elia --quiet                Print the final answer and essential failures only
+  elia --verbose              Include detailed progress output
   elia --help                 Show this help
   elia --version              Print the version
 
-Sessions auto-save to .elia/sessions/. Configure a provider via .env — see .env.example.
+  UI output: --json/--jsonl emits machine-readable JSONL events; --plain disables color and redraws;
+  --quiet minimizes progress; --verbose includes additional progress detail. Errors go to stderr
+  in human modes. Sessions auto-save to .elia/sessions/. Configure a provider via .env — see .env.example.
+
 Set ELIA_FAST_PROVIDER/ELIA_FAST_MODEL to give elia a cheap fast tier for recon work; it
 routes investigation there and keeps the strong model for planning, building, and review.`)
 }
@@ -185,8 +195,8 @@ function createInteractiveApprover(rl: readline.Interface) {
 
 function actionApprovalPrompt(assessment: ActionAssessment, request: ActionRequest): string {
   const rawIntent = request.input.command ?? request.input.target ?? request.input.action ?? request.name
-  const intent = typeof rawIntent === 'string' ? rawIntent : JSON.stringify(rawIntent)
-  return `\n${assessment.reason}\nRisk: ${assessment.risk} · reversible: ${assessment.reversible ? 'yes' : 'no'}\nAbout to run ${request.name}: ${intent}\nApprove this exact action? [y]es / [n]o: `
+  const intent = redactText(typeof rawIntent === 'string' ? rawIntent : JSON.stringify(rawIntent), 500)
+  return `\n${redactText(assessment.reason, 500)}\nRisk: ${assessment.risk} · reversible: ${assessment.reversible ? 'yes' : 'no'}\nAbout to run ${request.name}: ${intent}\nApprove this exact action? [y]es / [n]o: `
 }
 
 async function runAgentCommand(): Promise<void> {
@@ -241,23 +251,29 @@ async function runAuto(): Promise<void> {
     return
   }
 
-  if (yolo) {
-    const result = await runAutonomousTask({ goal, approve: autoApprove, variants, profile, polish: !hasFlag('--no-polish'), governanceMode: 'unattended' })
-    if (result.outcome !== 'completed') process.exitCode = 1
-    return
-  }
-
-  const rl = readline.createInterface({ input: process.stdin, output: process.stdout })
-  approveAction = async (assessment, request) => {
-    const label = actionApprovalPrompt(assessment, request)
-    const result = await confirmOnce(rl, label)
-    return result.action === 'approve'
-  }
+  const controller = new AbortController()
+  const unregisterShutdown = registerShutdownCleanup(() => controller.abort())
+  let rl: readline.Interface | undefined
   try {
-    const result = await runAutonomousTask({ goal, approve: createInteractiveApprover(rl), variants, profile, polish: !hasFlag('--no-polish'), governanceMode: 'supervised', approveAction })
+    if (yolo) {
+      const result = await runAutonomousTask({ goal, approve: autoApprove, variants, profile, polish: !hasFlag('--no-polish'), governanceMode: 'unattended', signal: controller.signal })
+      if (result.outcome !== 'completed') process.exitCode = 1
+      return
+    }
+
+  rl = readline.createInterface({ input: process.stdin, output: process.stdout })
+    const interactiveRl = rl
+    if (!interactiveRl) throw new Error('interactive approval input was not initialized')
+    approveAction = async (assessment, request) => {
+      const label = actionApprovalPrompt(assessment, request)
+      const result = await confirmOnce(interactiveRl, label)
+      return result.action === 'approve'
+    }
+    const result = await runAutonomousTask({ goal, approve: createInteractiveApprover(interactiveRl), variants, profile, polish: !hasFlag('--no-polish'), governanceMode: 'supervised', approveAction, signal: controller.signal })
     if (result.outcome !== 'completed' && result.outcome !== 'rejected') process.exitCode = 1
   } finally {
-    rl.close()
+    rl?.close()
+    unregisterShutdown()
   }
 }
 
@@ -271,7 +287,8 @@ async function runBench(): Promise<void> {
     onTaskDone: (outcome) =>
       writeUsageLine(`  ${outcome.passed ? '✓' : '✗'} ${outcome.taskId} — ${outcome.error ?? outcome.detail}`),
   })
-  process.stdout.write(renderScorecard(card, 'elia'))
+  if (machineReadable) emitEvent('benchmark_scorecard', { stage: 'current', scorecard: card })
+  else process.stdout.write(renderScorecard(card, 'elia'))
   if (card.passRate < 1) process.exitCode = 1
 }
 
@@ -370,7 +387,9 @@ async function runRuns(): Promise<void> {
   const runId = positionals()[0]
 
   if (runId) {
-    process.stdout.write(`${renderRunTimeline(runId)}\n`)
+    const timeline = renderRunTimeline(runId)
+    if (machineReadable) emitEvent('run_timeline', { runId, timeline })
+    else process.stdout.write(`${timeline}\n`)
     return
   }
 
@@ -417,6 +436,8 @@ async function runResume(): Promise<void> {
   const rl = process.stdin.isTTY && !hasFlag('--yolo', '-y')
     ? readline.createInterface({ input: process.stdin, output: process.stdout })
     : undefined
+  const controller = new AbortController()
+  const unregisterShutdown = registerShutdownCleanup(() => controller.abort())
   try {
     for (const approval of pending) {
       if (!rl) break
@@ -438,10 +459,12 @@ async function runResume(): Promise<void> {
       approveAction,
       governanceMode: rl ? 'supervised' : 'unattended',
       polish: !hasFlag('--no-polish'),
+      signal: controller.signal,
     })
     if (result.outcome !== 'completed') process.exitCode = 1
   } finally {
     rl?.close()
+    unregisterShutdown()
   }
 }
 
@@ -462,6 +485,8 @@ async function runFork(): Promise<void> {
   const rl = process.stdin.isTTY && !hasFlag('--yolo', '-y')
     ? readline.createInterface({ input: process.stdin, output: process.stdout })
     : undefined
+  const controller = new AbortController()
+  const unregisterShutdown = registerShutdownCleanup(() => controller.abort())
 
   try {
     const result = await forkRun({
@@ -469,6 +494,7 @@ async function runFork(): Promise<void> {
       checkpointId: at,
       instruction,
       approve: rl ? createInteractiveApprover(rl) : autoApprove,
+      signal: controller.signal,
     })
     if (!result.ok) {
       writeError(result.error)
@@ -476,6 +502,7 @@ async function runFork(): Promise<void> {
     }
   } finally {
     rl?.close()
+    unregisterShutdown()
   }
 }
 
@@ -526,9 +553,20 @@ async function runInteractive(): Promise<void> {
   /** Snapshots messages + touched files around one turn, then records a rewind point. */
   async function runCheckpointedTurn(userText: string, approveAction?: ActionApproval, skillNames = selectedSkillNames): Promise<void> {
     const tracker = createFileTracker()
-    const task = taskSessions.create(inferTaskKind(userText, userText), userText, 'Starting request')
+    const task = taskSessions.create(inferTaskKind(userText, userText), redactText(userText, 160), 'Starting request')
     taskSessions.update(task.id, { status: 'running', action: 'Thinking', detail: 'Planning the next action' })
+    const controller = new AbortController()
+    let stopRequested = false
+    const unregisterControls = taskSessions.registerControls(task.id, {
+      cancel: () => {
+        stopRequested = true
+        controller.abort()
+        taskSessions.update(task.id, { status: 'paused', action: 'Stopping', detail: 'Cancellation requested by operator' })
+      },
+    })
+    const unregisterShutdown = registerShutdownCleanup(() => controller.abort())
     const actionWindow = createLiveActionWindow()
+    emitEvent('turn_started', { taskId: task.id, sessionId, prompt: redactText(userText, 2000) })
     setActiveTracker(tracker)
     // Lets compaction (mid-loop, several call frames down) and the recall tool
     // find this session's ledger — see ledger.ts's setActiveLedgerSession doc.
@@ -538,29 +576,45 @@ async function runInteractive(): Promise<void> {
     try {
       if (persona) {
         const { runPersonaTurn } = await import('./agents/orchestrator.ts')
-        await runPersonaTurn(messages, persona, skillNames)
+        await runPersonaTurn(messages, persona, skillNames, controller.signal)
       } else {
-        await runTurn(messages, {
+        const turnResult = await runTurn(messages, {
                       mode,
             approveAction,
             skillNames,
+            signal: controller.signal,
             onTool: (event) => {
 
             taskSessions.update(task.id, {
               status: 'running',
               action: event.isError ? `Retrying after ${event.name}` : event.name,
-              detail: event.isError ? event.result : 'Action completed successfully',
+              detail: event.isError ? redactText(event.result, 500) : 'Action completed successfully',
               stepsCompleted: (taskSessions.get(task.id)?.stepsCompleted ?? 0) + 1,
             })
           },
         })
+        if (turnResult.stopReason === 'aborted') stopRequested = true
+      }
+      if (stopRequested || controller.signal.aborted) {
+        taskSessions.update(task.id, { status: 'paused', action: 'Stopped', detail: 'Stopped by operator; no further tool calls will run' })
+        emitEvent('turn_finished', { taskId: task.id, sessionId, outcome: 'aborted' })
+        return
       }
       taskSessions.update(task.id, { status: 'done', action: 'Finished', detail: 'Request completed and session saved' })
+      emitEvent('turn_finished', { taskId: task.id, sessionId, outcome: 'completed' })
     } catch (error) {
-      const detail = error instanceof Error ? error.message : String(error)
-      taskSessions.update(task.id, { status: 'failed', action: 'Failed', detail, error: detail })
-      throw error
+      const detail = redactText(error instanceof Error ? error.message : String(error), 2000)
+      if (stopRequested || controller.signal.aborted) {
+        taskSessions.update(task.id, { status: 'paused', action: 'Stopped', detail: 'Stopped by operator; no further tool calls will run' })
+        emitEvent('turn_finished', { taskId: task.id, sessionId, outcome: 'aborted' })
+      } else {
+        taskSessions.update(task.id, { status: 'failed', action: 'Failed', detail, error: detail })
+        emitEvent('turn_finished', { taskId: task.id, sessionId, outcome: 'failed', error: redactText(detail, 2000) })
+        throw error
+      }
     } finally {
+      unregisterControls()
+      unregisterShutdown()
       setActiveTracker(undefined)
       actionWindow.stop()
     }
@@ -584,7 +638,7 @@ async function runInteractive(): Promise<void> {
       const { risky, reason } = await classifyRisk(commandToRun)
       if (risky) {
         const confirmPrompt = createSlashPrompt([])
-        const label = `${reason ? `${reason}\n` : ''}About to: "${commandToRun}" — run it? [y]es / [n]o / [e]dit: `
+        const label = `${reason ? `${redactText(reason, 500)}\n` : ''}About to: "${redactText(commandToRun, 500)}" — run it? [y]es / [n]o / [e]dit: `
         const result = await confirmOnce(confirmPrompt, label)
         confirmPrompt.close()
         if (result.action === 'reject') {
@@ -614,16 +668,18 @@ async function runInteractive(): Promise<void> {
     return
   }
 
-  if (process.stdout.isTTY) await playIntro()
-  process.stdout.write(
-    `${box(
-      [
-        `${dim('provider')}  ${config.providerLabel}${config.routingMode === 'auto' ? dim(' · auto fallback on') : ''}${config.cascadeEnabled ? dim(` · fast tier ${config.tiers.fast.label}`) : ''}`,
-        dim(describeThinking()),
-      ],
-      { title: mode === 'cyber' ? 'elia — cyber mode' : 'elia', borderColor: gold },
-    )}\n`,
-  )
+  if (process.stdout.isTTY && !plainOutput && !machineReadable) await playIntro()
+  if (!machineReadable && !quietOutput) {
+    process.stdout.write(
+      `${box(
+        [
+          `${dim('provider')}  ${config.providerLabel}${config.routingMode === 'auto' ? dim(' · auto fallback on') : ''}${config.cascadeEnabled ? dim(` · fast tier ${config.tiers.fast.label}`) : ''}`,
+          dim(describeThinking()),
+        ],
+        { title: mode === 'cyber' ? 'elia — cyber mode' : 'elia', borderColor: gold },
+      )}\n`,
+    )
+  }
   writeNotice(
     mode === 'cyber'
       ? 'cyber mode on — authorized security testing, vuln research, and CTFs only. type a prompt, "/" to see commands, or "exit" to quit'
@@ -631,7 +687,7 @@ async function runInteractive(): Promise<void> {
   )
   writeNotice(
     replMode === 'auto'
-      ? 'auto mode (--yolo) — safe and reversible work runs immediately; irreversible actions remain governed. "/mode manual" to turn it back on.'
+      ? 'auto mode (--yolo) — preliminary risk checks are skipped; safe work runs immediately, while governed irreversible actions still require explicit approval. "/mode manual" to turn checks back on.'
       : 'manual mode — elia flags risky commands and asks before running them; safe commands just run. "/mode auto" for zero prompts.',
   )
 
@@ -863,7 +919,7 @@ async function runInteractive(): Promise<void> {
 
     if (trimmed === '/mode auto') {
       replMode = 'auto'
-      writeNotice('Auto mode — commands run immediately, no risk check, no prompts, including irreversible ones. "/mode manual" to re-enable.')
+      writeNotice('Auto mode — preliminary risk checks are skipped. Safe work runs immediately; governed irreversible actions still require explicit approval. "/mode manual" to re-enable checks.')
       continue
     }
     if (trimmed === '/mode manual') {
@@ -901,7 +957,7 @@ async function runInteractive(): Promise<void> {
     if (replMode === 'manual') {
       const { risky, reason } = await classifyRisk(commandToRun)
       if (risky) {
-        const label = `${reason ? `${reason}\n` : ''}About to: "${commandToRun}" — run it? [y]es / [n]o / [e]dit: `
+        const label = `${reason ? `${redactText(reason, 500)}\n` : ''}About to: "${redactText(commandToRun, 500)}" — run it? [y]es / [n]o / [e]dit: `
         const result = await confirmOnce(prompt, label)
         if (result.action === 'reject') {
           writeNotice('Skipped.')
@@ -924,11 +980,13 @@ async function runInteractive(): Promise<void> {
   }
 
   prompt.close()
-  if (messages.length > 0) process.stdout.write(`${box([getSessionSummaryLine(config.model)])}\n`)
+  if (messages.length > 0 && !machineReadable) process.stdout.write(`${box([getSessionSummaryLine(config.model)])}\n`)
   writeNotice('Goodbye!')
 }
 
 async function main() {
+  installShutdownHandlers()
+  emitEvent('cli_started', { version: JSON.parse(await Bun.file(new URL('../package.json', import.meta.url)).text()).version, uiMode: machineReadable ? 'json' : plainOutput ? 'plain' : 'normal' })
   // Skills elia wrote for itself are loaded before anything can call a tool, and a
   // broken one is quarantined rather than allowed to stop startup.
   const { loadSkills } = await import('./skills/loader.ts')
@@ -964,10 +1022,8 @@ async function main() {
   }
 }
 
-process.on('SIGINT', () => {
-  process.stdout.write('\n')
-  process.exit(0)
-})
+// Signal handlers are installed by installShutdownHandlers() so every terminal
+// component follows one cleanup path and returns a conventional interrupt code.
 
 main().catch((err: unknown) => {
   writeError(`Error: ${err instanceof Error ? err.message : String(err)}`)

@@ -34,6 +34,8 @@ export interface RunTurnOptions {
   governanceMode?: GovernanceMode
   /** Names of synthesized skills explicitly selected for this turn; omitted means all loaded skills remain available. */
   skillNames?: string[]
+  /** Cooperative cancellation for task-console shutdown and operator control. */
+  signal?: AbortSignal
 }
 
 export async function runTurn(
@@ -68,6 +70,7 @@ export async function runTurn(
     verbose: true,
     cache,
     prefetcher,
+    signal: options.signal,
     onTool: (event) => {
       // Every call is a data point for deciding which tool elia should write itself next.
       appendActionAudit(event)

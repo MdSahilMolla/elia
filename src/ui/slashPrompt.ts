@@ -1,5 +1,8 @@
 import * as readline from 'node:readline'
-import { dim, reverse, stripAnsi } from './theme.ts'
+import { dim, reverse } from './theme.ts'
+import { interactiveTerminal } from './runtime.ts'
+import { visibleWidth } from './layout.ts'
+import { gracefulShutdown, registerShutdownCleanup } from './shutdown.ts'
 
 /** One entry in the slash-command or @-mention completion menu. */
 export interface SlashCommand {
@@ -126,7 +129,7 @@ export interface SlashPromptHandle {
  * only makes sense against a real terminal.
  */
 export function createSlashPrompt(commands: SlashCommand[]): SlashPromptHandle {
-  if (!process.stdin.isTTY) return createFallbackPrompt()
+  if (!interactiveTerminal) return createFallbackPrompt()
 
   const stdin = process.stdin
   const stdout = process.stdout
@@ -158,9 +161,18 @@ export function createSlashPrompt(commands: SlashCommand[]): SlashPromptHandle {
     stdout.write('\r')
     // promptLabel may carry ANSI color codes (see index.ts) — strip them before
     // measuring, or the cursor lands past where the visible text actually ends.
-    const col = stripAnsi(promptLabel).length + state.cursor
+    const col = visibleWidth(promptLabel) + visibleWidth(state.buffer.slice(0, state.cursor))
     if (col > 0) stdout.write(`\x1b[${col}C`)
   }
+
+  function cleanup(): void {
+    active = false
+    stdin.off('keypress', onKeypress)
+    if (stdin.isTTY) stdin.setRawMode(false)
+    stdin.pause()
+  }
+
+  const unregisterShutdown = registerShutdownCleanup(cleanup)
 
   function finish(line: string | null): void {
     active = false
@@ -176,7 +188,7 @@ export function createSlashPrompt(commands: SlashCommand[]): SlashPromptHandle {
 
     if (result.type === 'interrupt') {
       stdout.write(`\r\x1b[0J${promptLabel}${state.buffer}\n`)
-      process.exit(0)
+      gracefulShutdown(130)
     }
     if (result.type === 'eof') {
       finish(null)
@@ -204,10 +216,8 @@ export function createSlashPrompt(commands: SlashCommand[]): SlashPromptHandle {
       })
     },
     close() {
-      active = false
-      stdin.off('keypress', onKeypress)
-      if (stdin.isTTY) stdin.setRawMode(false)
-      stdin.pause()
+      cleanup()
+      unregisterShutdown()
     },
   }
 }

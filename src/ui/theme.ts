@@ -2,7 +2,9 @@
 // redefine its own ANSI escape codes independently, which let the palette drift
 // (gold vs. yellow for the same meaning) and meant color codes got written even
 // when stdout wasn't a real terminal — corrupting piped/redirected output.
-// Everything routes through `paint()` so both problems are fixed in one place.
+// Everything routes through `paint()` so both
+// problems are fixed in one place.
+import { plainOutput } from './runtime.ts'
 
 const CODES = {
   bold: '\x1b[1m',
@@ -20,7 +22,7 @@ const CODES = {
 export type ColorName = keyof typeof CODES
 
 /** True when ANSI escapes should be emitted at all: a real TTY, and the user hasn't opted out. */
-export const colorEnabled = process.env.NODE_ENV !== 'test' && Boolean(process.stdout.isTTY) && !process.env.NO_COLOR
+export const colorEnabled = process.env.NODE_ENV !== 'test' && Boolean(process.stdout.isTTY) && !plainOutput
 
 const ANSI_PATTERN = /\x1b\[[0-9;]*m/g
 

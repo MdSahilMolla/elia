@@ -156,11 +156,21 @@ bun run dev resume <id>                    # continue a durable goal and reconci
 
 elia --help
 elia --version
+
+# Production-friendly output modes
+elia auto "run the verification suite" --json    # stable JSONL lifecycle events for CI/orchestration
+elia "summarize the project" --plain             # no color, animation, or in-place redraws
+elia "summarize the project" --quiet             # final answer and essential failures only
+elia "summarize the project" --verbose           # additional progress detail
 ```
 
-In an interactive session, type `exit` or press Ctrl+C to quit. Elia's startup logo is rendered from `logo/zeus_ascii.txt` as a compact, high-contrast white-on-black portrait of Zeus, capped at 48×20 cells. While the model works, the logo gives way to a single-line snake that slithers by shifting its body wave, blinking, and flicking its forked tongue beside a live elapsed-time counter. It clears before real output begins, and neither mascot appears in redirected or piped output.
+In an interactive session, type `exit` or press Ctrl+C to quit. Elia's startup logo and live animation appear only in normal interactive mode. Use `--plain` or `ELIA_UI_MODE=plain` for an accessible, no-color, no-animation presentation; `--quiet` suppresses progress noise; and `--json`/`--jsonl` emits one stable JSON object per lifecycle event. Human-readable errors go to stderr so stdout can be safely redirected or piped.
 
-While a request is running, Elia maintains task sessions in `.elia/tasks.json`. Coding work, browser work, and queued or confirmation-waiting work are shown as separate task types. The live **Action window** reports the current action, status, and step count from real tool events. Type `/task` to open the task dashboard; use Up/Down or Left/Right to move between tasks, Enter to inspect the selected task, and Escape or `q` to close the dashboard. The dashboard also works in piped output by printing a plain task list instead of using terminal cursor control.
+While a request is running, Elia maintains task sessions in `.elia/tasks.json`. Coding work, browser work, and queued or confirmation-waiting work are shown as separate task types. The live **Action window** reports the current action, status, and step count from real tool events. Type `/task` to open the task dashboard; use Up/Down or Left/Right to move between tasks, PageUp/PageDown or Home/End for large task lists, `c` to stop an active task cooperatively, and Escape or `q` to close the dashboard. The dashboard also works in piped output by printing a plain task list instead of using terminal cursor control.
+
+The `/model` and `@skills` pickers are bounded and support PageUp/PageDown plus Home/End, so large provider catalogs and skill libraries do not flood the terminal. Tool previews are redacted before they reach scrollback; use the structured run receipt for full audit data rather than relying on terminal text.
+
+In manual mode, Elia performs its preliminary risk check and asks before risky user-requested work. Auto mode skips that preliminary check, but governed irreversible actions still require explicit approval unless unattended execution was explicitly requested with the appropriate autonomous flag. This distinction is shown in the startup status line and is not merely cosmetic.
 
 After every response you'll see a dim usage line — `2.5s · 1,840 tokens · $0.0041` — and a `Session: N turns · ... · $... · ...` total when you exit. Sub-agent usage (`task` calls) counts toward the total even though sub-agents run silently. Cost is a best-effort estimate from a small hardcoded pricing table (`src/usage.ts`) verified against provider pricing pages as of 2026-08-18 — providers change pricing without notice, so treat it as orientation, not a bill. An unrecognized model shows "cost unknown" rather than a fabricated number. Autonomous runs also write `.elia/runs/<run-id>/receipt.md`, `receipt.json`, and a redacted `actions.ndjson` ledger that records the actor, role, tool, risk decision, outcome, and replay pointers without storing credential-like inputs.
 

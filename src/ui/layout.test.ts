@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { box, hr, table, terminalWidth, wrapText } from './layout.ts'
+import { box, hr, table, terminalWidth, visibleWidth, wrapText } from './layout.ts'
 
 const GOLD = '\x1b[33m'
 const RESET = '\x1b[0m'
@@ -53,6 +53,12 @@ test('hr repeats the rule character to the requested width', () => {
 test('terminalWidth clamps to the given max and never drops below a usable floor', () => {
   expect(terminalWidth(200)).toBeLessThanOrEqual(200)
   expect(terminalWidth(10)).toBeGreaterThanOrEqual(40)
+})
+
+test('visibleWidth handles wide and combining Unicode characters', () => {
+  expect(visibleWidth('界')).toBe(2)
+  expect(visibleWidth('e\u0301')).toBe(1)
+  expect(visibleWidth('a界b')).toBe(4)
 })
 
 test('table right-aligns numeric columns and left-aligns the rest', () => {

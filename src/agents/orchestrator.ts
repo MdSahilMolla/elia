@@ -5,6 +5,7 @@ import { allWorkerTools, getSynthesizedTools } from '../tools/registry.ts'
 import { taskTool } from '../tools/task.ts'
 import { autoFallbacksFor, tierConfig } from '../config.ts'
 import { writeText, writeNotice } from '../ui/stream.ts'
+import { emitEvent, machineReadable } from '../ui/runtime.ts'
 import type { AgentPersona } from './types.ts'
 import { parseOverride, classifyRequest } from './router.ts'
 import { personaPrompt, personaTools } from './personas.ts'
@@ -160,7 +161,10 @@ export async function runAgentRequest(request: string, opts: { signal?: AbortSig
 
   for (const persona of personas) {
     if (opts.signal?.aborted) break
-    if (personas.length > 1) process.stdout.write(`\n## ${capitalize(persona)} take\n\n`)
+    if (personas.length > 1) {
+      if (machineReadable) emitEvent('persona_started', { persona })
+      else process.stdout.write(`\n## ${capitalize(persona)} take\n\n`)
+    }
 
     // One persona's turn failing (a provider error, a tool crash) shouldn't take
     // down a multi-domain request that's otherwise fine — report the failure as
@@ -183,7 +187,8 @@ export async function runAgentRequest(request: string, opts: { signal?: AbortSig
     combined = synthesis.text
     usage = addUsage(usage, synthesis.usage)
     recordUsage(synthesis.usage)
-    process.stdout.write(`\n## Combined recommendation\n\n${combined}\n`)
+    if (machineReadable) emitEvent('combined_recommendation', { text: combined })
+    else process.stdout.write(`\n## Combined recommendation\n\n${combined}\n`)
   }
 
   return { personas, rationale, sections, combined, usage }
@@ -195,7 +200,12 @@ export async function runAgentRequest(request: string, opts: { signal?: AbortSig
  * runTurn — used when the user has explicitly picked a persona for the rest
  * of the session, so the router never runs.
  */
-export async function runPersonaTurn(messages: ConversationMessage[], persona: AgentPersona, selectedSkillNames?: string[]): Promise<Usage> {
+export async function runPersonaTurn(
+  messages: ConversationMessage[],
+  persona: AgentPersona,
+  selectedSkillNames?: string[],
+  signal?: AbortSignal,
+): Promise<Usage> {
   warnIfSearchUnconfigured([persona])
   const result = await runAgentLoop({
     messages,
@@ -205,6 +215,7 @@ export async function runPersonaTurn(messages: ConversationMessage[], persona: A
     useAnimation: true,
     verbose: true,
     maxSteps: maxStepsForPersona(persona),
+    signal,
   })
   recordUsage(result.usage)
   return result.usage
