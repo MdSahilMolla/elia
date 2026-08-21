@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Simple Chess UI</title>
+<style>
+  table { border-collapse: collapse; margin: 10px 0; }
+  td { width: 30px; height: 30px; text-align: center; vertical-align: middle; font-family: monospace; font-size: 20px; border: 1px solid #555; }
+  .white { background: #f0d9b5; }
+  .black { background: #b58863; }
+  #board { font-family: monospace; white-space: pre; }
+</style>
+</head>
+<body>
+<h1>Simple Chess</h1>
+<div id="board"></div>
+<input type="text" id="move" placeholder="e2 e4" size="10" />
+<button id="makeMove">Make Move</button>
+<button id="reset">Reset</button>
+<div id="status"></div>
+<script>
+// Board class (JS version)
+class Board {
+  constructor() { this.board = Array.from({length:8},()=>Array(8).fill(''))); this.reset(); }
+  reset() {
+    const empty = Array(8).fill('');
+    // pieces using simple notation
+    const back = ['R','N','B','Q','K','B','N','R'];
+    this.board[0] = back.map(p=>p.toLowerCase()); // black back rank
+    this.board[1] = Array(8).fill('p'); // black pawns
+    this.board[6] = Array(8).fill('P'); // white pawns
+    this.board[7] = back.slice(); // white back rank
+    // clear middle squares
+    for(let r=2;r<=5;r++) this.board[r]=empty.slice();
+  }
+  toString(){
+    return this.board.map(row=>row.map(c=>c||'.').join(' ')).join('\n');
+  }
+}
+// Game class
+class Game {
+  constructor(){ this.board = new Board(); this.turn='w'; }
+  algebraicToIndices(pos){
+    if(!/^([a-h][1-8])$/.test(pos)) return null;
+    const file = pos.charCodeAt(0)-97; // a=0
+    const rank = 8-parseInt(pos[1]); // 1->7, 8->0
+    return [rank,file];
+  }
+  makeMove(from,to){
+    const f=this.algebraicToIndices(from); const t=this.algebraicToIndices(to);
+    if(!f||!t) return false;
+    const piece=this.board.board[f[0]][f[1]];
+    if(piece==='') return false;
+    this.board.board[t[0]][t[1]]=piece;
+    this.board.board[f[0]][f[1]]='';
+    this.turn=this.turn==='w'?'b':'w';
+    return true;
+  }
+  currentBoardString(){ return this.board.toString(); }
+  getTurn(){ return this.turn; }
+}
+const game = new Game();
+const boardDiv=document.getElementById('board');
+const statusDiv=document.getElementById('status');
+function render(){
+  boardDiv.textContent = game.currentBoardString();
+  statusDiv.textContent = `Turn: ${game.getTurn()==='w'?'White':'Black'}`;
+}
+render();
+document.getElementById('makeMove').addEventListener('click',()=>{
+  const input=document.getElementById('move').value.trim();
+  const parts=input.split(/\s+/);
+  if(parts.length===2){
+    const ok=game.makeMove(parts[0],parts[1]);
+    if(!ok) alert('Invalid move');
+    render();
+  }else{ alert('Enter move as "e2 e4"'); }
+});
+document.getElementById('reset').addEventListener('click',()=>{
+  game.board.reset(); game.turn='w'; render();
+});
+</script>
+</body>
+</html>
