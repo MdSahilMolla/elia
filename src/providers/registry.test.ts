@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test'
-import { isProviderPresetConfigured, providerPresetDefaultModel, tryResolveProvider } from './registry.ts'
+import { isProviderPresetConfigured, listProviderModels, providerPresetDefaultModel, tryResolveProvider } from './registry.ts'
 
 const originalProvider = process.env.ELIA_PROVIDER
 const originalModel = process.env.ELIA_MODEL
@@ -104,4 +104,32 @@ test('Mistral resolves through the OpenAI-compatible adapter', () => {
   if ('error' in resolved) return
   expect(resolved.providerName).toBe('mistral')
   expect(resolved.model).toBe('mistral-large-latest')
+})
+
+test('model discovery lists and sorts provider models without changing chat configuration', async () => {
+  process.env.OPENROUTER_API_KEY = 'test-openrouter-key'
+  const originalFetch = globalThis.fetch
+  let requestedURL = ''
+  let authorization = ''
+  globalThis.fetch = (async (input, init) => {
+    requestedURL = String(input)
+    authorization = new Headers(init?.headers).get('authorization') ?? ''
+    return new Response(JSON.stringify({ data: [{ id: 'zeta-model' }, { id: 'alpha-model', name: 'Alpha' }, { id: 42 }] }), { status: 200 })
+  }) as typeof fetch
+  try {
+    const result = await listProviderModels('openrouter')
+    expect(requestedURL).toBe('https://openrouter.ai/api/v1/models')
+    expect(authorization).toBe('Bearer test-openrouter-key')
+    expect(result.models.map((model) => model.id)).toEqual(['alpha-model', 'zeta-model'])
+    expect(result.models[0]?.name).toBe('Alpha')
+    expect(result.error).toBeUndefined()
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})
+
+test('model discovery reports an actionable result when a provider has no key', async () => {
+  const result = await listProviderModels('mistral')
+  expect(result.models).toEqual([])
+  expect(result.error).toContain('No API key set')
 })

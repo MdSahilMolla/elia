@@ -4,7 +4,7 @@ import { runSubAgent } from '../subagent.ts'
 import { clampOutput, runShell } from '../shell.ts'
 import { registerSynthesizedTool } from '../tools/registry.ts'
 import { markResolved, type SkillCandidate } from './detector.ts'
-import { loadSkillFile } from './loader.ts'
+import { loadSkillFile, registerLoadedSkill } from './loader.ts'
 import { QUARANTINE_DIR, SKILL_SUFFIX, USER_SKILLS_DIR } from './paths.ts'
 
 /**
@@ -73,6 +73,7 @@ export async function synthesizeSkill(candidate: SkillCandidate): Promise<Synthe
   }
 
   registerSynthesizedTool(loaded.tool)
+  registerLoadedSkill({ name: loaded.tool.name, file: skillFile, source: 'user' })
   markResolved(candidate.pattern)
 
   return {

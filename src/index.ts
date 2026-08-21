@@ -34,6 +34,7 @@ const REPL_COMMANDS: SlashCommand[] = [
   { name: '/model', description: 'pick a model with arrow keys, or /model groq, /model claude-opus-5' },
   { name: '/thinking', description: 'pick reasoning effort with arrow keys, or /thinking off/low/medium/high/<n>' },
   { name: '/task', description: 'browse browser, coding, and pending tasks with arrow keys' },
+  { name: '@skills', description: 'browse loaded skills and choose which skill tools are active for the next turn' },
 ]
 
 const rawArgs = process.argv.slice(2)
@@ -297,7 +298,16 @@ async function runEvolve(): Promise<void> {
 async function runSkills(): Promise<void> {
   const { listSkillFiles } = await import('./skills/loader.ts')
   const { skillCandidates } = await import('./skills/detector.ts')
+  const { PROJECT_SKILLS_DIR, USER_SKILLS_DIR, SKILL_SUFFIX } = await import('./skills/paths.ts')
   const action = positionals()[0] ?? 'list'
+
+  if (action === 'path' || action === 'folder' || action === 'folders') {
+    writeNotice(`Project skills: ${PROJECT_SKILLS_DIR}`)
+    writeNotice(`User skills:    ${USER_SKILLS_DIR}`)
+    writeNotice(`File contract:  create a self-contained ${SKILL_SUFFIX} module exporting a default Tool with name, description, input_schema, and execute(input).`)
+    writeNotice('Skills are validated at startup; invalid modules are moved to the quarantine folder instead of stopping Elia.')
+    return
+  }
 
   if (action === 'list') {
     const files = listSkillFiles()
@@ -350,7 +360,7 @@ async function runSkills(): Promise<void> {
     return
   }
 
-  writeError(`Unknown skills action "${action}". Use: list, candidates, or synth.`)
+  writeError(`Unknown skills action "${action}". Use: list, path, candidates, or synth.`)
   process.exitCode = 1
 }
 
@@ -473,7 +483,7 @@ async function runInteractive(): Promise<void> {
   const { runTurn } = await import('./agent.ts')
   const { config, describeThinking, getThinking, switchModel, switchThinking, THINKING_EFFORT_BUDGETS, DEFAULT_THINKING_BUDGET } =
     await import('./config.ts')
-  const { PROVIDER_PRESET_NAMES, isProviderPresetConfigured, providerPresetDefaultModel } = await import('./providers/registry.ts')
+  const { PROVIDER_PRESET_NAMES, isProviderPresetConfigured, providerPresetDefaultModel, listProviderModels } = await import('./providers/registry.ts')
   const { newSessionId, loadSession, loadLatestSession, saveSession } = await import('./session.ts')
   const { createFileTracker, setActiveTracker, loadCheckpoints, saveCheckpoints, restoreCheckpoint, renderCheckpointList } =
     await import('./checkpoint.ts')
@@ -487,6 +497,7 @@ async function runInteractive(): Promise<void> {
 
   let mode: AgentMode = hasFlag('--cyber') ? 'cyber' : 'default'
   let persona: AgentPersona | undefined
+  let selectedSkillNames: string[] | undefined
   let messages: ConversationMessage[] = []
   let sessionId = newSessionId()
   // manual (default): a cheap risk check runs before each command — only
@@ -513,7 +524,7 @@ async function runInteractive(): Promise<void> {
   const checkpoints = await loadCheckpoints(sessionId)
 
   /** Snapshots messages + touched files around one turn, then records a rewind point. */
-  async function runCheckpointedTurn(userText: string, approveAction?: ActionApproval): Promise<void> {
+  async function runCheckpointedTurn(userText: string, approveAction?: ActionApproval, skillNames = selectedSkillNames): Promise<void> {
     const tracker = createFileTracker()
     const task = taskSessions.create(inferTaskKind(userText, userText), userText, 'Starting request')
     taskSessions.update(task.id, { status: 'running', action: 'Thinking', detail: 'Planning the next action' })
@@ -527,11 +538,12 @@ async function runInteractive(): Promise<void> {
     try {
       if (persona) {
         const { runPersonaTurn } = await import('./agents/orchestrator.ts')
-        await runPersonaTurn(messages, persona)
+        await runPersonaTurn(messages, persona, skillNames)
       } else {
         await runTurn(messages, {
                       mode,
             approveAction,
+            skillNames,
             onTool: (event) => {
 
             taskSessions.update(task.id, {
@@ -632,6 +644,26 @@ async function runInteractive(): Promise<void> {
   async function handleModelCommand(argLine: string): Promise<void> {
     const args = argLine.split(/\s+/).filter(Boolean)
 
+    async function chooseModelForProvider(providerName: string): Promise<void> {
+      const discovery = await listProviderModels(providerName)
+      const fallbackModel = providerName === config.providerName ? config.model : providerPresetDefaultModel(providerName)
+      if (discovery.models.length === 0) {
+        if (discovery.error) writeNotice(`Could not list ${providerName} models: ${discovery.error}`)
+        if (fallbackModel) applyModelChoice(providerName, fallbackModel)
+        else writeNotice(`No model list or default model is available for ${providerName}. Use /model ${providerName} <model-id>.`)
+        return
+      }
+      const currentModel = providerName === config.providerName ? config.model : fallbackModel
+      const modelOptions = discovery.models.map((model) => ({
+        label: model.id === currentModel ? `${model.id} (current)` : model.id,
+        detail: model.name ?? model.ownedBy ?? 'available model',
+        value: model.id,
+      }))
+      const result = await pick(`Models for ${providerName} (${modelOptions.length})`, modelOptions, Math.max(0, modelOptions.findIndex((option) => option.value === currentModel)))
+      if (result.type === 'select') applyModelChoice(providerName, result.value)
+      else if (result.type === 'unavailable') writeNotice(`${providerName} exposes ${discovery.models.length} selectable model(s).`)
+    }
+
     if (args.length === 0) {
       const currentIndex = config.routingMode === 'auto' ? 0 : PROVIDER_PRESET_NAMES.indexOf(config.providerName) + 1
       const options = [
@@ -648,7 +680,8 @@ async function runInteractive(): Promise<void> {
       ]
       const result = await pick('Switch model', options, Math.max(0, currentIndex))
       if (result.type === 'select') {
-        applyModelChoice(result.value)
+        if (result.value === 'auto') applyModelChoice('auto')
+        else await chooseModelForProvider(result.value)
         return
       }
       if (result.type === 'unavailable') {
@@ -670,8 +703,10 @@ async function runInteractive(): Promise<void> {
 
     const [first, second] = args
     if (first === 'auto') applyModelChoice('auto')
-    else if (PROVIDER_PRESET_NAMES.includes(first!)) applyModelChoice(first!, second)
-    else applyModelChoice(config.providerName, first)
+    else if (PROVIDER_PRESET_NAMES.includes(first!)) {
+      if (second) applyModelChoice(first!, second)
+      else await chooseModelForProvider(first!)
+    } else applyModelChoice(config.providerName, first)
   }
 
   function applyThinkingChoice(arg: string): void {
@@ -738,6 +773,30 @@ async function runInteractive(): Promise<void> {
 
   const prompt = createSlashPrompt(REPL_COMMANDS)
 
+  async function handleSkillsPicker(): Promise<void> {
+    const { listLoadedSkills } = await import('./skills/loader.ts')
+    const { USER_SKILLS_DIR, PROJECT_SKILLS_DIR } = await import('./skills/paths.ts')
+    const skills = listLoadedSkills()
+    if (skills.length === 0) {
+      writeNotice(`No loaded skills. Add a validated *.skill.ts file to ${PROJECT_SKILLS_DIR} for this project or ${USER_SKILLS_DIR} for all projects, then restart Elia.`)
+      return
+    }
+
+    const active = new Set(selectedSkillNames ?? skills.map((skill) => skill.name))
+    const options = [
+      { label: active.size === skills.length ? 'all loaded skills (current)' : 'all loaded skills', detail: 'make every loaded skill available', value: '__all__' },
+      ...skills.map((skill) => ({
+        label: active.has(skill.name) && active.size === 1 ? `${skill.name} (current)` : skill.name,
+        detail: `${skill.source} · ${skill.file}`,
+        value: skill.name,
+      })),
+    ]
+    const result = await pick('Skills for subsequent turns', options)
+    if (result.type !== 'select') return
+    selectedSkillNames = result.value === '__all__' ? undefined : [result.value]
+    writeNotice(selectedSkillNames ? `Skill selected for subsequent turns: ${selectedSkillNames[0]}` : 'All loaded skills are available for subsequent turns.')
+  }
+
   while (true) {
     const label = persona ? `${dim(`[${persona}]`)} ` : mode === 'cyber' ? `${dim('[cyber]')} ` : ''
     const line = await prompt.question(`${label}${gold('❯')} `)
@@ -746,6 +805,11 @@ async function runInteractive(): Promise<void> {
     const trimmed = line.trim()
     if (trimmed === 'exit' || trimmed === 'quit') break
     if (trimmed === '') continue
+
+    if (trimmed === '@skills') {
+      await handleSkillsPicker()
+      continue
+    }
 
     if (trimmed === '/capabilities') {
       for (const capability of CAPABILITIES) {

@@ -1,7 +1,7 @@
 import { ZERO_USAGE, addUsage, recordUsage } from '../usage.ts'
 import type { Usage } from '../providers/types.ts'
 import { runAgentLoop, lastAssistantText, type ConversationMessage } from '../agentLoop.ts'
-import { allWorkerTools } from '../tools/registry.ts'
+import { allWorkerTools, getSynthesizedTools } from '../tools/registry.ts'
 import { taskTool } from '../tools/task.ts'
 import { autoFallbacksFor, tierConfig } from '../config.ts'
 import { writeText, writeNotice } from '../ui/stream.ts'
@@ -25,8 +25,11 @@ export interface AgentRunResult {
   usage: Usage
 }
 
-function toolsForPersona(persona: AgentPersona) {
-  return persona === 'tech' ? [...allWorkerTools(), taskTool] : personaTools(persona)
+function toolsForPersona(persona: AgentPersona, selectedSkillNames?: string[]) {
+  const selected = new Set(selectedSkillNames ?? [])
+  const synthesized = new Set(getSynthesizedTools().map((tool) => tool.name))
+  const filterSkills = (tools: ReturnType<typeof allWorkerTools>) => tools.filter((tool) => selectedSkillNames === undefined || !synthesized.has(tool.name) || selected.has(tool.name))
+  return persona === 'tech' ? [...filterSkills(allWorkerTools()), taskTool] : personaTools(persona, selectedSkillNames)
 }
 
 /**
@@ -48,6 +51,7 @@ async function runSection(
   request: string,
   priorSections: AgentSectionResult[],
   signal?: AbortSignal,
+  selectedSkillNames?: string[],
 ): Promise<{ section: AgentSectionResult; usage: Usage }> {
   const handoff =
     priorSections.length > 0
@@ -63,7 +67,7 @@ async function runSection(
   const result = await runAgentLoop({
     messages,
     systemPrompt: `${personaPrompt(persona)}${contract}`,
-    tools: toolsForPersona(persona),
+    tools: toolsForPersona(persona, selectedSkillNames),
     onText: writeText,
     useAnimation: true,
     verbose: true,
@@ -133,7 +137,7 @@ function warnIfSearchUnconfigured(personas: AgentPersona[]): void {
  * earlier work. A single persona answers in that persona's voice; multi-domain
  * requests get labeled sections plus a combined recommendation.
  */
-export async function runAgentRequest(request: string, opts: { signal?: AbortSignal } = {}): Promise<AgentRunResult> {
+export async function runAgentRequest(request: string, opts: { signal?: AbortSignal; skillNames?: string[] } = {}): Promise<AgentRunResult> {
   const override = parseOverride(request)
   let usage = ZERO_USAGE
 
@@ -162,7 +166,7 @@ export async function runAgentRequest(request: string, opts: { signal?: AbortSig
     // down a multi-domain request that's otherwise fine — report the failure as
     // that section's content and let the remaining personas still run.
     try {
-      const { section, usage: sectionUsage } = await runSection(persona, request, sections, opts.signal)
+      const { section, usage: sectionUsage } = await runSection(persona, request, sections, opts.signal, opts.skillNames)
       sections.push(section)
       usage = addUsage(usage, sectionUsage)
       recordUsage(sectionUsage)
@@ -191,12 +195,12 @@ export async function runAgentRequest(request: string, opts: { signal?: AbortSig
  * runTurn — used when the user has explicitly picked a persona for the rest
  * of the session, so the router never runs.
  */
-export async function runPersonaTurn(messages: ConversationMessage[], persona: AgentPersona): Promise<Usage> {
+export async function runPersonaTurn(messages: ConversationMessage[], persona: AgentPersona, selectedSkillNames?: string[]): Promise<Usage> {
   warnIfSearchUnconfigured([persona])
   const result = await runAgentLoop({
     messages,
     systemPrompt: personaPrompt(persona),
-    tools: toolsForPersona(persona),
+    tools: toolsForPersona(persona, selectedSkillNames),
     onText: writeText,
     useAnimation: true,
     verbose: true,

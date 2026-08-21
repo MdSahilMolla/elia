@@ -60,6 +60,12 @@ Elia’s Tech specialist is compatible with projects built in **Python**, **Type
 
 Elia uses the target project’s existing package manager and conventions rather than assuming one toolchain. Before coding in an unfamiliar repository, the Tech agent can use the deterministic `project_profile` tool to report detected stacks, package manager, manifest signals, and declared verification commands. It can work across these stacks in one delegated task, for example updating a Python API, a TypeScript service, and a React client in separate dependency-aware steps, then running the relevant verification for each.
 
+### Skills: create, install, and select
+
+Elia can synthesize a repeated routine into a tested skill with `elia skills candidates` followed by `elia skills synth`. Users can also create or add a skill manually by placing a self-contained `*.skill.ts` module in the project’s `.elia/skills/` directory or the user-wide `~/.elia/skills/` directory. Use `elia skills path` to print the exact folders and contract. Invalid skills are quarantined instead of crashing startup.
+
+Inside an interactive session, type **`@skills`** and press Enter to browse loaded skills. The picker lets the user make all loaded skills available or select one synthesized skill for subsequent turns. Selection changes the tool set only; it does not rewrite the user’s text, alter the system prompt, or add hidden instructions to the model. `ELIA_SKILLS=off` disables skill loading.
+
 ### Self-supervised execution and polish
 
 For a fully autonomous run, use `--autonomous` (an alias for `--yolo`):
@@ -92,6 +98,12 @@ ELIA_BROWSER_CDP_URL=http://127.0.0.1:9222 bun run dev "inspect the active page"
 If a connector uses different tool names, override them with variables such as `ELIA_BROWSER_NAVIGATE_TOOL` and `ELIA_BROWSER_SNAPSHOT_TOOL`.
 
 A bridge receives one JSON request on stdin and should return one JSON or text response. Keep login credentials in the bridge or browser session, never in Elia prompts, source files, or command-line arguments. Elia must not bypass login challenges, CAPTCHAs, paywalls, or site safety controls. Actions that may send, buy, publish, delete, or change subscriptions pause and return an exact five-minute `confirmationToken`. The user must approve that exact action before the token is supplied; tokens are bound to the action details and cannot be reused for a changed target or message.
+
+### Manual model discovery and raw model performance
+
+`/model` first shows every known provider and its readiness. Selecting a provider queries that provider’s models endpoint **on demand**, then opens a second picker containing the available model IDs. Direct selection remains available with `/model <provider> <model-id>` or `/model <model-id>` for the current provider. This keeps startup fast and lets users choose newly released provider models without waiting for a code release. If a provider does not expose a models endpoint, its configured default and direct model-ID syntax still work.
+
+Elia does not replace the underlying model with a smaller “agent personality,” hidden chain-of-thought imitation, or prompt-heavy wrapper. The autonomy layer contributes tools, planning, safety gates, routing, verification, and recovery; the selected model receives the normal request through the existing provider adapter. The user can therefore select the model manually while keeping its native reasoning and generation capability intact.
 
 ### The fast tier (optional, recommended)
 
@@ -133,6 +145,8 @@ bun run dev bench                        # score the current elia against its ow
 bun run dev evolve                       # elia proposes and tries one improvement to its own source
 bun run dev evolve -n 3 --dry-run        # three generations, evaluated but never promoted to live source
 bun run dev skills                       # list tools elia has written for itself
+bun run dev skills path                  # print skill folders and the manual skill contract
+
 bun run dev skills candidates            # show repeated work that could become a new tool
 bun run dev skills synth                 # write a tool for the strongest candidate
 bun run dev runs                         # list past autonomous runs

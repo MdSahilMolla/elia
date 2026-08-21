@@ -27,8 +27,11 @@ export interface SkillLoadReport {
   quarantined: { file: string; reason: string }[]
 }
 
+let loadedSkillCatalog: LoadedSkill[] = []
+
 export async function loadSkills(): Promise<SkillLoadReport> {
   const report: SkillLoadReport = { loaded: [], quarantined: [] }
+  loadedSkillCatalog = []
   if (!skillsEnabled()) return report
 
   for (const [dir, source] of [
@@ -47,6 +50,7 @@ export async function loadSkills(): Promise<SkillLoadReport> {
     }
   }
 
+  loadedSkillCatalog = [...report.loaded]
   return report
 }
 
@@ -105,6 +109,17 @@ function quarantine(file: string, reason: string): void {
     process.stderr.write(`elia: quarantined skill ${file} (${reason})\n`)
   } catch {
     // If it can't be moved it simply stays and fails to load again next time.
+  }
+}
+
+/** Returns successfully loaded skills with their actual tool names — used by `@skills`. */
+export function listLoadedSkills(): LoadedSkill[] {
+  return loadedSkillCatalog.map((skill) => ({ ...skill }))
+}
+
+export function registerLoadedSkill(skill: LoadedSkill): void {
+  if (!loadedSkillCatalog.some((existing) => existing.name === skill.name && existing.file === skill.file)) {
+    loadedSkillCatalog.push({ ...skill })
   }
 }
 

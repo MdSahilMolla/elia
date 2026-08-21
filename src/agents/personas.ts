@@ -1,5 +1,5 @@
 import { SHARED_CONTEXT, memorySections } from '../config.ts'
-import { browserTools, businessTools, cyberTools, tools as baseTools } from '../tools/registry.ts'
+import { tools as baseTools, businessTools, browserTools, cyberTools, getSynthesizedTools } from '../tools/registry.ts'
 import type { Tool } from '../tools/types.ts'
 import type { AgentPersona } from './types.ts'
 
@@ -116,8 +116,10 @@ const PERSONA_TOOL_NAMES: Record<AgentPersona, string[]> = {
  * worker set plus task delegation from orchestrator.ts; cyber gets only the
  * scoped security tools in addition to its read/write/browser surface.
  */
-export function personaTools(persona: Exclude<AgentPersona, 'tech'>): Tool[] {
-  const pool = [...baseTools, ...businessTools, ...browserTools, ...(persona === 'cyber' ? cyberTools : [])]
+export function personaTools(persona: Exclude<AgentPersona, 'tech'>, selectedSkillNames?: string[]): Tool[] {
+  const pool = [...baseTools, ...businessTools, ...browserTools, ...getSynthesizedTools(), ...(persona === 'cyber' ? cyberTools : [])]
   const allowed = PERSONA_TOOL_NAMES[persona]
-  return pool.filter((tool) => allowed.includes(tool.name))
+  const selected = new Set(selectedSkillNames ?? [])
+  const synthesized = new Set(getSynthesizedTools().map((tool) => tool.name))
+  return pool.filter((tool) => allowed.includes(tool.name) || (synthesized.has(tool.name) && (selectedSkillNames === undefined || selected.has(tool.name))))
 }

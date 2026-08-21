@@ -1,7 +1,7 @@
 import * as readline from 'node:readline'
 import { dim, reverse, stripAnsi } from './theme.ts'
 
-/** One entry in the "/" command menu. */
+/** One entry in the slash-command or @-mention completion menu. */
 export interface SlashCommand {
   name: string
   description: string
@@ -21,9 +21,9 @@ export function initialState(): PromptState {
   return { buffer: '', cursor: 0, selectedIndex: 0, history: [], historyIndex: 0, draft: '' }
 }
 
-/** Commands whose name starts with the current buffer — the buffer only reads as a slash command when it starts with "/". */
+/** Entries whose name starts with the current buffer — completion activates for slash commands and @-mentions. */
 export function filteredCommands(buffer: string, commands: SlashCommand[]): SlashCommand[] {
-  if (!buffer.startsWith('/')) return []
+  if (!buffer.startsWith('/') && !buffer.startsWith('@')) return []
   const prefix = buffer.toLowerCase()
   return commands.filter((c) => c.name.toLowerCase().startsWith(prefix))
 }
@@ -118,9 +118,9 @@ export interface SlashPromptHandle {
 }
 
 /**
- * A line editor for the interactive REPL with a live slash-command menu: typing "/"
+ * A line editor for the interactive REPL with a live completion menu: typing "/"
  * lists matching commands, up/down move the highlight (or walk line history once the
- * buffer isn't a slash command), left/right/home/end move the cursor, tab accepts the
+ * buffer isn't a slash or @-mention), left/right/home/end move the cursor, tab accepts the
  * highlighted suggestion, enter submits it. Falls back to plain `readline.question`
  * when stdin isn't a TTY (piped input, non-interactive runs) since raw-mode rendering
  * only makes sense against a real terminal.

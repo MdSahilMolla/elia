@@ -1,6 +1,6 @@
 import { config, SYSTEM_PROMPT, CYBER_SYSTEM_PROMPT } from './config.ts'
 import { runAgentLoop, type ConversationMessage, type RunAgentLoopResult, type ToolEvent } from './agentLoop.ts'
-import { allWorkerTools, cyberTools } from './tools/registry.ts'
+import { allWorkerTools, cyberTools, getSynthesizedTools } from './tools/registry.ts'
 import { taskTool } from './tools/task.ts'
 import { previewTool } from './tools/preview.ts'
 import { writeText, writeThinking, writeUsageLine } from './ui/stream.ts'
@@ -20,8 +20,11 @@ export type { AgentMode }
 // capability; a silent sub-agent popping open browser windows would be surprising.
 // The engagement/scan tools are top-level-only too, and further gated to cyber
 // mode — a normal coding turn has no business scaffolding a security engagement.
-function topLevelTools(mode: AgentMode) {
-  return [...allWorkerTools(), taskTool, previewTool, ...(mode === 'cyber' ? cyberTools : [])]
+function topLevelTools(mode: AgentMode, selectedSkillNames?: string[]) {
+  const selected = new Set(selectedSkillNames ?? [])
+  const synthesized = new Set(getSynthesizedTools().map((tool) => tool.name))
+  const workerTools = allWorkerTools().filter((tool) => selectedSkillNames === undefined || !synthesized.has(tool.name) || selected.has(tool.name))
+  return [...workerTools, taskTool, previewTool, ...(mode === 'cyber' ? cyberTools : [])]
 }
 
 export interface RunTurnOptions {
@@ -29,6 +32,8 @@ export interface RunTurnOptions {
   onTool?: (event: ToolEvent) => void
   approveAction?: ActionApproval
   governanceMode?: GovernanceMode
+  /** Names of synthesized skills explicitly selected for this turn; omitted means all loaded skills remain available. */
+  skillNames?: string[]
 }
 
 export async function runTurn(
@@ -40,7 +45,7 @@ export async function runTurn(
   // Ambient for the whole turn, including sub-agents dispatched via the task
   // tool arbitrarily deep in a tool call — see autonomy/mode.ts.
   setActiveMode(mode)
-  const tools = topLevelTools(mode)
+  const tools = topLevelTools(mode, options.skillNames)
   const systemPrompt = mode === 'cyber' ? CYBER_SYSTEM_PROMPT : SYSTEM_PROMPT
 
   // One cache per turn rather than per session: the turn boundary is the point at

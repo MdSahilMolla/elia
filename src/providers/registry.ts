@@ -83,6 +83,64 @@ export function providerPresetDefaultModel(providerName: string): string | undef
   return PROVIDER_PRESETS[providerName]?.defaultModel
 }
 
+export interface AvailableModel {
+  id: string
+  name?: string
+  ownedBy?: string
+}
+
+export interface ModelDiscoveryResult {
+  providerName: string
+  models: AvailableModel[]
+  error?: string
+}
+
+/**
+ * Lists models only when the user asks for them. This avoids startup latency and
+ * does not modify the system prompt, model parameters, or chat request path.
+ * Providers that expose an OpenAI-compatible /models endpoint use the same
+ * adapter; Anthropic uses its native models endpoint and headers.
+ */
+export async function listProviderModels(providerName: string): Promise<ModelDiscoveryResult> {
+  const preset = PROVIDER_PRESETS[providerName]
+  if (!preset) return { providerName, models: [], error: `Unknown provider "${providerName}"` }
+
+  const apiKey = process.env[preset.apiKeyEnv] ?? process.env.ELIA_API_KEY
+  if (!apiKey) return { providerName, models: [], error: `No API key set for ${providerName}` }
+
+  const baseURL = providerName === 'custom' ? process.env.ELIA_BASE_URL : preset.baseURL
+  if (!baseURL) return { providerName, models: [], error: `Set ELIA_BASE_URL to discover models for ${providerName}` }
+
+  const endpoint = preset.kind === 'anthropic' ? 'https://api.anthropic.com/v1/models' : `${baseURL.replace(/\/+$/, '')}/models`
+  const headers: Record<string, string> = preset.kind === 'anthropic'
+    ? { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' }
+    : { Authorization: `Bearer ${apiKey}` }
+
+  try {
+    const response = await fetch(endpoint, { headers })
+    if (!response.ok) return { providerName, models: [], error: `Model discovery returned HTTP ${response.status}` }
+    const payload = (await response.json()) as { data?: unknown[]; models?: unknown[] }
+    const rows = Array.isArray(payload.data) ? payload.data : Array.isArray(payload.models) ? payload.models : []
+    const models = rows
+      .map((row) => {
+        if (typeof row === 'string') return { id: row }
+        if (!row || typeof row !== 'object') return undefined
+        const item = row as Record<string, unknown>
+        if (typeof item.id !== 'string' || item.id.length === 0) return undefined
+        return {
+          id: item.id,
+          name: typeof item.name === 'string' ? item.name : undefined,
+          ownedBy: typeof item.owned_by === 'string' ? item.owned_by : typeof item.ownedBy === 'string' ? item.ownedBy : undefined,
+        }
+      })
+      .filter((model): model is AvailableModel => model !== undefined)
+      .sort((a, b) => a.id.localeCompare(b.id))
+    return { providerName, models }
+  } catch (error) {
+    return { providerName, models: [], error: error instanceof Error ? error.message : String(error) }
+  }
+}
+
 export interface ProviderRequest {
   /** Provider preset name (defaults to `ELIA_PROVIDER`, then `anthropic`). */
   providerName?: string
@@ -131,7 +189,8 @@ export function tryResolveProvider(request: ProviderRequest = {}): ResolvedProvi
     }
   }
 
-  const baseURL = request.baseURL ?? ambient.ELIA_BASE_URL ?? preset.baseURL
+  const explicitDifferentProvider = request.providerName !== undefined && request.providerName !== ambient.ELIA_PROVIDER
+  const baseURL = request.baseURL ?? (explicitDifferentProvider && providerName !== 'custom' ? preset.baseURL : ambient.ELIA_BASE_URL ?? preset.baseURL)
   if (preset.kind === 'openai-compatible' && !baseURL) {
     return {
       error:

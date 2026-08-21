@@ -18,9 +18,14 @@ function type(state: PromptState, text: string): PromptState {
 }
 
 describe('filteredCommands', () => {
-  test('empty when the buffer is not a slash command', () => {
+  test('empty when the buffer is not a slash or @ command', () => {
     expect(filteredCommands('hello', commands)).toEqual([])
     expect(filteredCommands('', commands)).toEqual([])
+  })
+
+  test('supports @skills inline completion', () => {
+    const skillCommands = [{ name: '@skills', description: 'choose a skill' }]
+    expect(filteredCommands('@sk', skillCommands)).toEqual(skillCommands)
   })
 
   test('matches by prefix, case-insensitively', () => {
@@ -108,6 +113,19 @@ describe('menu navigation', () => {
     const result = applyKey(down.state, undefined, { name: 'return' }, commands)
     if (result.type !== 'submit') throw new Error('expected submit')
     expect(result.line).toBe('/cyber')
+  })
+
+  test('enter submits an @skills selector', () => {
+    const skillCommands = [{ name: '@skills', description: 'choose a skill' }]
+    let state = initialState()
+    for (const ch of '@sk') {
+      const result = applyKey(state, ch, {}, skillCommands)
+      if (result.type !== 'update') throw new Error('expected update')
+      state = result.state
+    }
+    const result = applyKey(state, undefined, { name: 'return' }, skillCommands)
+    if (result.type !== 'submit') throw new Error('expected submit')
+    expect(result.line).toBe('@skills')
   })
 
   test('tab accepts the highlighted suggestion into the buffer without submitting', () => {
