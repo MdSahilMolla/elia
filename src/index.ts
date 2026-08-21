@@ -9,6 +9,8 @@ import { classifyRisk } from './autonomy/risk.ts'
 import { gold, dim } from './ui/theme.ts'
 import { box, table } from './ui/layout.ts'
 import { pick } from './ui/picker.ts'
+import { createLiveActionWindow, openTaskDashboard } from './ui/taskDashboard.ts'
+import { inferTaskKind, taskSessions } from './taskSessions.ts'
 import { isAgentPersona, type AgentPersona } from './agents/types.ts'
 
 const REPL_COMMANDS: SlashCommand[] = [
@@ -21,6 +23,7 @@ const REPL_COMMANDS: SlashCommand[] = [
   { name: '/rewind', description: 'list rewind points (add a number to restore one, e.g. /rewind 2)' },
   { name: '/model', description: 'pick a model with arrow keys, or /model groq, /model claude-opus-5' },
   { name: '/thinking', description: 'pick reasoning effort with arrow keys, or /thinking off/low/medium/high/<n>' },
+  { name: '/task', description: 'browse browser, coding, and pending tasks with arrow keys' },
 ]
 
 const rawArgs = process.argv.slice(2)
@@ -49,6 +52,8 @@ Autonomous work:
                                      fleet of sub-agents, verify it, repair what failed, and
                                      record what it learned
   elia auto "<goal>" --yolo         Same, without waiting for you to approve the plan
+  elia auto "<goal>" --autonomous   Self-supervised alias for --yolo; executes, verifies, repairs, and polishes
+  elia auto "<goal>" --no-polish     Skip the bounded final quality pass
   elia auto "<goal>" --variants N   Run N independent implementation attempts in parallel,
                                      each in its own isolated git worktree, and keep only
                                      the one that verification — not an LLM's opinion — likes
@@ -200,7 +205,7 @@ async function runAuto(): Promise<void> {
     )
   }
 
-  const yolo = hasFlag('--yolo', '-y')
+  const yolo = hasFlag('--yolo', '-y', '--autonomous', '--self-supervise') || process.env.ELIA_AUTO_APPROVE === '1'
   if (!yolo && !process.stdin.isTTY) {
     writeError('elia auto needs a terminal to approve the plan. Re-run with --yolo to skip approval.')
     process.exitCode = 1
@@ -208,14 +213,14 @@ async function runAuto(): Promise<void> {
   }
 
   if (yolo) {
-    const result = await runAutonomousTask({ goal, approve: autoApprove, variants })
+    const result = await runAutonomousTask({ goal, approve: autoApprove, variants, polish: !hasFlag('--no-polish') })
     if (result.outcome !== 'completed') process.exitCode = 1
     return
   }
 
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout })
   try {
-    const result = await runAutonomousTask({ goal, approve: createInteractiveApprover(rl), variants })
+    const result = await runAutonomousTask({ goal, approve: createInteractiveApprover(rl), variants, polish: !hasFlag('--no-polish') })
     if (result.outcome !== 'completed' && result.outcome !== 'rejected') process.exitCode = 1
   } finally {
     rl.close()
@@ -384,6 +389,7 @@ async function runInteractive(): Promise<void> {
     await import('./checkpoint.ts')
   const { setActiveLedgerSession, countEpisodes } = await import('./ledger.ts')
   const { renderContextStatus } = await import('./compaction.ts')
+  await taskSessions.load()
 
   const continueFlag = hasFlag('--continue', '-c')
   const resumeId = flagValue('--resume')
@@ -419,6 +425,9 @@ async function runInteractive(): Promise<void> {
   /** Snapshots messages + touched files around one turn, then records a rewind point. */
   async function runCheckpointedTurn(userText: string): Promise<void> {
     const tracker = createFileTracker()
+    const task = taskSessions.create(inferTaskKind(userText, userText), userText, 'Starting request')
+    taskSessions.update(task.id, { status: 'running', action: 'Thinking', detail: 'Planning the next action' })
+    const actionWindow = createLiveActionWindow()
     setActiveTracker(tracker)
     // Lets compaction (mid-loop, several call frames down) and the recall tool
     // find this session's ledger — see ledger.ts's setActiveLedgerSession doc.
@@ -430,10 +439,26 @@ async function runInteractive(): Promise<void> {
         const { runPersonaTurn } = await import('./agents/orchestrator.ts')
         await runPersonaTurn(messages, persona)
       } else {
-        await runTurn(messages, { mode })
+        await runTurn(messages, {
+          mode,
+          onTool: (event) => {
+            taskSessions.update(task.id, {
+              status: 'running',
+              action: event.isError ? `Retrying after ${event.name}` : event.name,
+              detail: event.isError ? event.result : 'Action completed successfully',
+              stepsCompleted: (taskSessions.get(task.id)?.stepsCompleted ?? 0) + 1,
+            })
+          },
+        })
       }
+      taskSessions.update(task.id, { status: 'done', action: 'Finished', detail: 'Request completed and session saved' })
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error)
+      taskSessions.update(task.id, { status: 'failed', action: 'Failed', detail, error: detail })
+      throw error
     } finally {
       setActiveTracker(undefined)
+      actionWindow.stop()
     }
     checkpoints.push({
       turn: checkpoints.length,
@@ -644,6 +669,12 @@ async function runInteractive(): Promise<void> {
     const thinkingMatch = /^\/thinking(?:\s+(.*))?$/.exec(trimmed)
     if (thinkingMatch) {
       await handleThinkingCommand(thinkingMatch[1]?.trim() ?? '')
+      continue
+    }
+
+    if (trimmed === '/task' || trimmed.startsWith('/task ')) {
+      const taskId = trimmed.slice('/task'.length).trim() || undefined
+      await openTaskDashboard(taskSessions, taskId)
       continue
     }
 

@@ -2,6 +2,7 @@ import type { Tool } from './types.ts'
 import { runSubAgent } from '../subagent.ts'
 import { roleMenu } from '../autonomy/roles.ts'
 import { isRoleName, ROLE_NAMES } from '../autonomy/types.ts'
+import { inferTaskKind, taskSessions } from '../taskSessions.ts'
 
 let dispatched = 0
 
@@ -30,12 +31,38 @@ Scouts run on a faster, cheaper model and cannot modify anything, so prefer a ha
     const prompt = input.prompt as string
     const role = isRoleName(input.role) ? input.role : 'builder'
     dispatched += 1
+    const description = typeof input.description === 'string' ? input.description : `${role} task`
+    const session = taskSessions.create(inferTaskKind(description, prompt), description, 'Waiting for a worker')
+    taskSessions.update(session.id, { status: 'running', action: 'Starting worker', detail: `Role: ${role}` })
 
-    const result = await runSubAgent({ prompt, role, name: `${role}#${dispatched}` })
-    const header = result.ok
-      ? `[${result.role} finished in ${(result.elapsedMs / 1000).toFixed(1)}s, ${result.steps} steps]`
-      : `[${result.role} stopped early after ${result.steps} steps — treat this report as incomplete]`
-
-    return `${header}\n${result.report}`
+    try {
+      const result = await runSubAgent({
+        prompt,
+        role,
+        name: `${role}#${dispatched}`,
+        onTool: (event) => {
+          taskSessions.update(session.id, {
+            status: 'running',
+            action: event.isError ? `Retrying after ${event.name}` : event.name,
+            detail: event.isError ? event.result : `step ${event.name} completed`,
+            stepsCompleted: (taskSessions.get(session.id)?.stepsCompleted ?? 0) + 1,
+          })
+        },
+      })
+      const header = result.ok
+        ? `[${result.role} finished in ${(result.elapsedMs / 1000).toFixed(1)}s, ${result.steps} steps]`
+        : `[${result.role} stopped early after ${result.steps} steps — treat this report as incomplete]`
+      taskSessions.update(session.id, {
+        status: result.ok ? 'done' : 'failed',
+        action: result.ok ? 'Finished' : 'Stopped early',
+        detail: result.report.slice(0, 240),
+        error: result.ok ? undefined : 'Worker stopped before completing its assigned task',
+      })
+      return `${header}\nTask session: ${session.id}\n${result.report}`
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error)
+      taskSessions.update(session.id, { status: 'failed', action: 'Failed', detail, error: detail })
+      throw error
+    }
   },
 }

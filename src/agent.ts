@@ -1,8 +1,9 @@
 import { config, SYSTEM_PROMPT, CYBER_SYSTEM_PROMPT } from './config.ts'
-import { runAgentLoop, type ConversationMessage, type RunAgentLoopResult } from './agentLoop.ts'
+import { runAgentLoop, type ConversationMessage, type RunAgentLoopResult, type ToolEvent } from './agentLoop.ts'
 import { allWorkerTools, cyberTools } from './tools/registry.ts'
 import { taskTool } from './tools/task.ts'
 import { previewTool } from './tools/preview.ts'
+import { browserTool } from './tools/browser.ts'
 import { writeText, writeThinking, writeUsageLine } from './ui/stream.ts'
 import { recordUsage, recordTopLevelTurn, formatUsageLine } from './usage.ts'
 import { createToolResultCache } from './speculation/cache.ts'
@@ -19,12 +20,12 @@ export type { AgentMode }
 // The engagement/scan tools are top-level-only too, and further gated to cyber
 // mode — a normal coding turn has no business scaffolding a security engagement.
 function topLevelTools(mode: AgentMode) {
-  return [...allWorkerTools(), taskTool, previewTool, ...(mode === 'cyber' ? cyberTools : [])]
+  return [...allWorkerTools(), taskTool, previewTool, browserTool, ...(mode === 'cyber' ? cyberTools : [])]
 }
 
 export async function runTurn(
   messages: ConversationMessage[],
-  options: { mode?: AgentMode } = {},
+  options: { mode?: AgentMode; onTool?: (event: ToolEvent) => void } = {},
 ): Promise<RunAgentLoopResult> {
   const startedAt = Date.now()
   const mode = options.mode ?? 'default'
@@ -54,6 +55,7 @@ export async function runTurn(
       observeToolCall(event.name, event.input)
       // And a data point for whether a recently recalled episode actually mattered — see ledger.ts.
       noteToolUse(event.input)
+      options.onTool?.(event)
     },
   })
   const elapsedMs = Date.now() - startedAt

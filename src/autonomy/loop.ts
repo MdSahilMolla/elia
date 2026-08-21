@@ -52,6 +52,10 @@ export interface AutonomousRunOptions {
   variants?: number
   /** Resume from a checkpoint's message history instead of orienting from scratch. */
   resumeMessages?: ConversationMessage[]
+  /** Run a bounded final quality pass before verification; enabled by default. */
+  polish?: boolean
+  /** Maximum final polish passes; bounded to prevent autonomous thrashing. */
+  maxPolishPasses?: number
   runId?: string
   signal?: AbortSignal
 }
@@ -113,6 +117,8 @@ export async function runAutonomousTask(options: AutonomousRunOptions): Promise<
   const { goal, approve, signal } = options
   const maxRepairAttempts = options.maxRepairAttempts ?? 2
   const maxAmendments = options.maxAmendments ?? 3
+  const runPolish = options.polish ?? true
+  const maxPolishPasses = Math.max(0, Math.min(options.maxPolishPasses ?? 1, 3))
   const runId = options.runId ?? newRunId()
   const startedAt = Date.now()
 
@@ -275,6 +281,46 @@ export async function runAutonomousTask(options: AutonomousRunOptions): Promise<
       for (const result of fleet.results) {
         board.post(result.name, `step:${result.id}`, `${result.title} — ${result.report}`)
       }
+    }
+  }
+
+  // --- Polish ---------------------------------------------------------------
+
+  // Polishing happens before the normal verification/review gate, so any useful
+  // improvement is judged by the same objective checks and adversarial reviewers
+  // as the implementation itself. The pass is bounded and may legitimately make
+  // no changes; "more" is not automatically "better".
+  if (runPolish && maxPolishPasses > 0) {
+    writePhase('polish', `${maxPolishPasses} bounded final quality pass${maxPolishPasses === 1 ? '' : 'es'}`)
+    for (let polishAttempt = 1; polishAttempt <= maxPolishPasses; polishAttempt++) {
+      if (signal?.aborted) return done('aborted', { proposal })
+      journal.append('phase', { phase: 'polish', attempt: polishAttempt })
+
+      const diff = await runShell('git diff HEAD', 30_000)
+      const diffText = diff.stdout.trim() ? clampOutput(diff.stdout.trim(), 8000) : '(no diff yet — inspect the completed work and the goal)'
+      const polish = await runSubAgent({
+        role: 'polisher',
+        name: `polisher#${polishAttempt}`,
+        briefing,
+        signal,
+        prompt: `The implementation phase is complete. Perform one final, conservative quality pass before the verification gate.
+
+Goal:
+${proposal.goal}
+
+Current diff:
+${diffText}
+
+Read the changed files in full context. Improve only concrete issues directly related to the goal: incomplete edge cases, unclear behavior, missing focused tests, stale documentation, duplicated logic, or rough user-facing output. Do not add speculative features, change unrelated files, weaken checks, or rewrite working code for style alone. If the result is already strong, make no changes and say so. Finish by reporting exactly what changed and what still needs verification.`,
+      })
+      track(polish.usage)
+      recordUsage(polish.usage)
+      writeSubStep(polish.report)
+
+      // A second pass is useful only when the first pass actually changed the
+      // tree; otherwise stop early rather than rewarding autonomous churn.
+      const after = await runShell('git diff HEAD', 30_000)
+      if (after.stdout === diff.stdout) break
     }
   }
 

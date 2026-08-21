@@ -7,6 +7,7 @@ export type RoleName =
   | 'security'
   | 'bughunter'
   | 'tester'
+  | 'polisher'
   | 'scribe'
 
 export const ROLE_NAMES: RoleName[] = [
@@ -18,6 +19,7 @@ export const ROLE_NAMES: RoleName[] = [
   'security',
   'bughunter',
   'tester',
+  'polisher',
   'scribe',
 ]
 
@@ -69,6 +71,6 @@ export interface CriticVerdict {
   issues: CriticIssue[]
 }
 
-export type PhaseName = 'orient' | 'propose' | 'execute' | 'verify' | 'reflect' | 'learn'
+export type PhaseName = 'orient' | 'propose' | 'execute' | 'verify' | 'reflect' | 'polish' | 'learn'
 
-export const PHASE_ORDER: PhaseName[] = ['orient', 'propose', 'execute', 'verify', 'reflect', 'learn']
+export const PHASE_ORDER: PhaseName[] = ['orient', 'propose', 'execute', 'verify', 'reflect', 'polish', 'learn']
