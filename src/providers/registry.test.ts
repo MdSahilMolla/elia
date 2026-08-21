@@ -6,6 +6,7 @@ const originalModel = process.env.ELIA_MODEL
 const originalBaseURL = process.env.ELIA_BASE_URL
 const originalGoogleKey = process.env.GEMINI_API_KEY
 const originalNvidiaKey = process.env.NVIDIA_API_KEY
+const originalOpenRouterKey = process.env.OPENROUTER_API_KEY
 
 function restore(name: string, value: string | undefined): void {
   if (value === undefined) delete process.env[name]
@@ -18,6 +19,7 @@ beforeEach(() => {
   delete process.env.ELIA_BASE_URL
   delete process.env.GEMINI_API_KEY
   delete process.env.NVIDIA_API_KEY
+  delete process.env.OPENROUTER_API_KEY
 })
 
 afterEach(() => {
@@ -26,6 +28,7 @@ afterEach(() => {
   restore('ELIA_BASE_URL', originalBaseURL)
   restore('GEMINI_API_KEY', originalGoogleKey)
   restore('NVIDIA_API_KEY', originalNvidiaKey)
+  restore('OPENROUTER_API_KEY', originalOpenRouterKey)
 })
 
 test('Google Gemini has a documented default model and reports configuration from its key variable', () => {
@@ -62,4 +65,22 @@ test('NVIDIA NIM resolves through the OpenAI-compatible adapter', () => {
   if ('error' in resolved) return
   expect(resolved.providerName).toBe('nvidia')
   expect(resolved.model).toBe('nvidia/llama-3.3-nemotron-super-49b-v1.5')
+})
+
+test('OpenRouter has a documented default model and reports configuration from its key variable', () => {
+  expect(providerPresetDefaultModel('openrouter')).toBe('openrouter/auto')
+
+  process.env.OPENROUTER_API_KEY = 'test-openrouter-key'
+  expect(isProviderPresetConfigured('openrouter')).toBe(true)
+})
+
+test('OpenRouter resolves through the OpenAI-compatible adapter', () => {
+  process.env.OPENROUTER_API_KEY = 'test-openrouter-key'
+
+  const resolved = tryResolveProvider({ providerName: 'openrouter' })
+
+  expect('error' in resolved).toBe(false)
+  if ('error' in resolved) return
+  expect(resolved.providerName).toBe('openrouter')
+  expect(resolved.model).toBe('openrouter/auto')
 })
