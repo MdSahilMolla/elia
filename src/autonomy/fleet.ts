@@ -9,6 +9,7 @@ import type { Journal } from './journal.ts'
 import type { ActionGovernor } from './governor.ts'
 import type { GoalGraphStore } from './goalGraph.ts'
 import type { ProposalStep, RoleName } from './types.ts'
+import { inferTaskKind, taskSessions } from '../taskSessions.ts'
 
 /** board_post/board_read are stripped for a variant's workers — see FleetRunOptions.stripBoardTools. */
 const BOARD_TOOL_NAMES = ['board_post', 'board_read']
@@ -23,6 +24,10 @@ export interface FleetAssignment {
   title: string
   role: RoleName
   instructions: string
+  /** Expected file ownership used by dependency and collision planning. */
+  files?: string[]
+  /** Assignment ids that must complete before this assignment runs. */
+  dependsOn?: string[]
 }
 
 export interface FleetRunOptions {
@@ -51,6 +56,12 @@ export interface FleetRunOptions {
    */
   stripBoardTools?: boolean
   signal?: AbortSignal
+  /** Parent durable node for nested child action attribution. */
+  parentNodeId?: string
+  /** Delegation depth passed to child workers; depth one cannot recurse. */
+  delegationDepth?: number
+  /** Shared tool-event observer for nested task dashboards and telemetry. */
+  onTool?: (event: import('../agentLoop.ts').ToolEvent) => void
 }
 
 export interface FleetResult {
@@ -91,8 +102,28 @@ export async function runFleet(options: FleetRunOptions): Promise<FleetResult> {
   const results = await runWithConcurrencyLimit(named, concurrency, async (item) => {
     board?.update(item.workerName, 'running')
     journal?.append('step-start', { id: item.id, title: item.title, role: item.role, worker: item.workerName })
+    const task = taskSessions.create(inferTaskKind(item.title, item.instructions), item.title, `Worker ${item.workerName} starting`, {
+      parentId: options.parentNodeId,
+      depth: options.delegationDepth ?? 0,
+      role: item.role,
+    })
+    taskSessions.update(task.id, { status: 'running', action: 'Starting worker', detail: `Role: ${item.role}` })
 
     let toolCount = 0
+    const childNodeId = options.parentNodeId ? `${options.parentNodeId}/child:${item.id}` : `step:${item.id}`
+    if (options.graph && options.parentNodeId) {
+      options.graph.registerDelegationNode({
+        parentId: options.parentNodeId,
+        id: item.id,
+        title: item.title,
+        role: item.role,
+        instructions: item.instructions,
+        files: item.files,
+        dependsOn: item.dependsOn,
+        depth: options.delegationDepth ?? 0,
+      })
+      options.graph.startNode(childNodeId)
+    }
     const result = await runSubAgent({
       prompt: item.instructions,
       role: item.role,
@@ -102,12 +133,22 @@ export async function runFleet(options: FleetRunOptions): Promise<FleetResult> {
       runId: options.runId,
       governor: options.governor,
       graph: options.graph,
-      nodeId: `step:${item.id}`,
+      nodeId: childNodeId,
+      parentNodeId: options.parentNodeId,
+      delegationDepth: options.delegationDepth,
+      journal: options.journal,
       tools: stripBoardTools ? toolsForRole(item.role).filter((tool) => !BOARD_TOOL_NAMES.includes(tool.name)) : undefined,
       signal,
       onTool: (event) => {
         toolCount += 1
         board?.update(item.workerName, 'running', `${event.name} (${toolCount})`)
+        taskSessions.update(task.id, {
+          status: 'running',
+          action: event.isError ? `Retrying after ${event.name}` : event.name,
+          detail: event.isError ? event.result : `step ${event.name} completed`,
+          stepsCompleted: (taskSessions.get(task.id)?.stepsCompleted ?? 0) + 1,
+        })
+        options.onTool?.(event)
       },
     }).catch(
       (err: unknown): SubAgentResult => ({
@@ -122,6 +163,15 @@ export async function runFleet(options: FleetRunOptions): Promise<FleetResult> {
     )
 
     board?.update(item.workerName, result.ok ? 'done' : 'failed', `${result.steps} steps`)
+    taskSessions.update(task.id, {
+      status: result.ok ? 'done' : 'failed',
+      action: result.ok ? 'Finished' : 'Stopped early',
+      detail: result.report.slice(0, 1000),
+      error: result.ok ? undefined : 'Worker stopped before completing its assignment',
+    })
+    if (options.graph && options.parentNodeId) {
+      options.graph.finishNode(childNodeId, { ok: result.ok, report: result.report, error: result.ok ? undefined : result.report })
+    }
     journal?.append('step-end', {
       id: item.id,
       worker: item.workerName,

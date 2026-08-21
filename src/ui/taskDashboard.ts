@@ -104,6 +104,8 @@ export function openTaskDashboard(store: TaskSessionStore = taskSessions, reques
           `${bold('Action')}   ${truncate(selectedSession.action || '—', 70)}`,
           `${bold('Detail')}   ${truncate(selectedSession.detail || '—', 70)}`,
           `${bold('Steps')}    ${selectedSession.stepsCompleted}${selectedSession.stepsTotal ? ` / ${selectedSession.stepsTotal}` : ''}`,
+          `${bold('Role')}     ${selectedSession.role ?? 'top-level'}${selectedSession.depth === undefined ? '' : ` · depth ${selectedSession.depth}`}`,
+          `${bold('Parent')}   ${selectedSession.parentId ?? 'top-level'}`,
           `${bold('ID')}       ${selectedSession.id}`,
           `${bold('Controls')} ${availableControls(selectedSession)}`,
         ]
@@ -207,7 +209,8 @@ function writePlainTaskList(sessions: TaskSession[], requestedId?: string): void
 function renderSessionLine(session: TaskSession, tick: number, maxWidth: number): string {
   const marker = session.status === 'running' ? SPINNER[tick % SPINNER.length]! : statusGlyph(session.status)
   const progress = session.stepsTotal ? ` ${session.stepsCompleted}/${session.stepsTotal}` : ''
-  const line = `${marker} ${cyan(kindLabel(session.kind).padEnd(7))} ${truncate(session.title, 30).padEnd(30)} ${truncate(session.action || session.status, 22).padEnd(22)}${dim(progress)}`
+  const owner = session.role ? `${session.role}${session.depth ? `@${session.depth}` : ''}` : 'lead'
+  const line = `${marker} ${cyan(kindLabel(session.kind).padEnd(7))} ${truncate(owner, 14).padEnd(14)} ${truncate(session.title, 26).padEnd(26)} ${truncate(session.action || session.status, 20).padEnd(20)}${dim(progress)}`
   return truncate(line, Math.max(20, maxWidth))
 }
 
@@ -236,7 +239,9 @@ function availableControls(session: TaskSession): string {
 }
 
 function shortStatus(session: TaskSession): string {
-  return truncate(session.action || session.detail || session.status, 42)
+  const owner = session.role ? `${session.role}${session.depth ? ` · d${session.depth}` : ''}` : ''
+  const status = session.action || session.detail || session.status
+  return truncate(owner ? `${owner} · ${status}` : status, 42)
 }
 
 function truncate(text: string, max: number): string {

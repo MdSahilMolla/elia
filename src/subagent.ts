@@ -12,7 +12,9 @@ import { createPrefetcher } from './speculation/prefetch.ts'
 import { recordUsage } from './usage.ts'
 import { appendActionAudit } from './autonomy/audit.ts'
 import { activeActionGovernor, withActionGovernor, type ActionGovernor } from './autonomy/governor.ts'
+import { createDelegationTool } from './tools/delegate.ts'
 import { activeGoalGraph, withGoalGraph, withGoalNode, type GoalGraphStore } from './autonomy/goalGraph.ts'
+import type { Journal } from './autonomy/journal.ts'
 
 export interface SubAgentRequest {
   prompt: string
@@ -43,6 +45,12 @@ export interface SubAgentRequest {
   cwd?: string
   onTool?: (event: ToolEvent) => void
   signal?: AbortSignal
+  /** Zero for a direct worker; one for a child worker. Children cannot delegate. */
+  delegationDepth?: number
+  /** Durable parent node identity for nested action attribution. */
+  parentNodeId?: string
+  /** Parent autonomous journal for nested delegation lifecycle events. */
+  journal?: Journal
 }
 
 export interface SubAgentResult {
@@ -65,8 +73,9 @@ export interface SubAgentResult {
  * sub-agent gets its own speculative read cache — they're reading different
  * parts of the tree, so sharing one would mostly mean invalidating each other's.
  *
- * Sub-agents cannot spawn further sub-agents: no role's allowlist contains
- * `task`, which caps recursion depth at one and keeps the fan-out predictable.
+ * Coding lead roles receive a separate `delegate_tasks` tool at depth zero. It
+ * can run one bounded child fleet; child workers run at depth one and receive no
+ * delegation tool, which keeps recursive fan-out predictable.
  */
 function withGoalGraphIfAvailable<T>(graph: GoalGraphStore | undefined, fn: () => Promise<T>): Promise<T> {
   return graph ? withGoalGraph(graph, fn) : fn()
@@ -75,12 +84,30 @@ function withGoalGraphIfAvailable<T>(graph: GoalGraphStore | undefined, fn: () =
 export async function runSubAgent(request: SubAgentRequest): Promise<SubAgentResult> {
   const definition = roleDefinition(request.role)
   const tier = roleConfig(request.role, definition.tier)
-  const tools = request.tools ?? [...toolsForRole(request.role), ...(request.extraTools ?? [])]
   const parent = currentAgent()
   const runId = request.runId ?? parent.runId
   const governor = request.governor ?? activeActionGovernor()
   const graph = request.graph ?? activeGoalGraph()
   const nodeId = request.nodeId
+  const delegationDepth = request.delegationDepth ?? 0
+  const baseTools = request.tools ?? [...toolsForRole(request.role), ...(request.extraTools ?? [])]
+  const tools = [...baseTools]
+  if (definition.canDelegate && delegationDepth < 1) {
+    tools.push(createDelegationTool({
+      parentRole: request.role,
+      parentName: request.name,
+      depth: delegationDepth,
+      runId,
+      governor,
+      graph,
+      parentNodeId: request.parentNodeId ?? nodeId,
+      briefing: request.briefing,
+      cwd: request.cwd ?? parent.cwd,
+      signal: request.signal,
+      onTool: request.onTool,
+      journal: request.journal,
+    }))
+  }
   const startedAt = Date.now()
 
   const board = activeBlackboard()

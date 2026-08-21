@@ -3,6 +3,8 @@ export type RoleName =
   | 'builder'
   | 'frontend'
   | 'backend'
+  | 'designer'
+  | 'accessibility'
   | 'critic'
   | 'security'
   | 'bughunter'
@@ -15,6 +17,8 @@ export const ROLE_NAMES: RoleName[] = [
   'builder',
   'frontend',
   'backend',
+  'designer',
+  'accessibility',
   'critic',
   'security',
   'bughunter',

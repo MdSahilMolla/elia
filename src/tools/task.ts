@@ -13,7 +13,7 @@ export const taskTool: Tool = {
 Pick the role that matches the work:
 ${roleMenu()}
 
-Scouts run on a faster, cheaper model and cannot modify anything, so prefer a handful of parallel scouts for investigation and reserve builders for the actual changes. Returns the sub-agent's final report.`,
+Scouts run on a faster, cheaper model and cannot modify anything, so prefer a handful of parallel scouts for investigation and reserve builders for the actual changes. Coding leads such as \`frontend\`, \`backend\`, and \`builder\` receive one additional bounded \`delegate_tasks\` capability: they can fan out up to four focused child assignments, but child workers cannot delegate again. Returns the sub-agent's final report.`,
   input_schema: {
     type: 'object',
     properties: {

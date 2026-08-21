@@ -7,7 +7,7 @@ import type { ActionRequest } from './governor.ts'
 
 export const GOAL_GRAPH_VERSION = 1
 
-export type GoalNodeKind = 'goal' | 'step'
+export type GoalNodeKind = 'goal' | 'step' | 'delegation'
 export type GoalNodeStatus = 'pending' | 'ready' | 'running' | 'waiting-approval' | 'waiting-retry' | 'completed' | 'failed' | 'blocked'
 export type EvidenceKind = 'approval' | 'verification' | 'review' | 'action' | 'checkpoint' | 'observation'
 export type ActionState = 'planned' | 'running' | 'completed' | 'retryable' | 'blocked' | 'human-review' | 'failed'
@@ -21,6 +21,10 @@ export interface GoalNode {
   instructions?: string
   files: string[]
   dependsOn: string[]
+  /** Parent step or delegation node for hierarchical execution. */
+  parentId?: string
+  /** Zero for top-level steps; positive for delegated children. */
+  depth?: number
   status: GoalNodeStatus
   attemptCount: number
   maxAttempts: number
@@ -227,6 +231,44 @@ export class GoalGraphStore {
   readyNodes(): GoalNode[] {
     this.refreshReadyStates()
     return this.snapshot.nodes.filter((node) => node.kind === 'step' && node.status === 'ready').map((node) => structuredClone(node))
+  }
+
+  registerDelegationNode(input: {
+    parentId: string
+    id: string
+    title: string
+    role: string
+    instructions: string
+    files?: string[]
+    dependsOn?: string[]
+    depth: number
+  }): GoalNode {
+    const id = `${input.parentId}/child:${input.id}`
+    const existing = this.snapshot.nodes.find((node) => node.id === id)
+    if (existing) return structuredClone(existing)
+    const now = Date.now()
+    const node: GoalNode = {
+      id,
+      kind: 'delegation',
+      title: input.title,
+      role: input.role,
+      instructions: input.instructions,
+      files: [...(input.files ?? [])],
+      dependsOn: (input.dependsOn ?? []).map((dependency) => `${input.parentId}/child:${dependency}`),
+      parentId: input.parentId,
+      depth: input.depth,
+      status: 'pending',
+      attemptCount: 0,
+      maxAttempts: 2,
+      idempotencyKey: stableKey(this.snapshot.runId, id),
+      evidenceIds: [],
+      createdAt: now,
+      updatedAt: now,
+    }
+    this.snapshot.nodes.push(node)
+    this.refreshReadyStates()
+    this.persist()
+    return structuredClone(node)
   }
 
   startNode(id: string): GoalNode {
@@ -476,7 +518,7 @@ export class GoalGraphStore {
 
   private refreshReadyStates(): void {
     for (const node of this.snapshot.nodes) {
-      if (node.kind === 'step' && node.status === 'pending' && this.dependenciesComplete(node)) node.status = 'ready'
+      if (node.kind !== 'goal' && node.status === 'pending' && this.dependenciesComplete(node)) node.status = 'ready'
     }
     this.snapshot.updatedAt = Date.now()
   }

@@ -201,8 +201,10 @@ The `task` tool takes a `role`, and the role decides three things before a token
 |---|---|---|---|
 | `scout` | fast | no | read-only investigation; run several in parallel |
 | `builder` | deep | yes | making the actual changes |
-| `frontend` | deep | yes | UI/component/styling/client-side changes, run alongside `backend` |
-| `backend` | deep | yes | API/business-logic/data changes, run alongside `frontend` |
+| `frontend` | deep | yes | UI/component/styling/client-side changes; may coordinate a bounded child fleet |
+| `backend` | deep | yes | API/business-logic/data changes; may coordinate a bounded child fleet |
+| `designer` | fast | no | page structure, visual direction, responsive behavior, and interaction specifications |
+| `accessibility` | fast | no | semantics, keyboard flow, contrast, focus, responsive behavior, and assistive-technology review |
 | `critic` | deep | no | adversarial review of work already done — was it actually done as promised |
 | `security` | deep | no | adversarial review for exploitable security weaknesses, run alongside `critic` and `bughunter` |
 | `bughunter` | deep | no | adversarial review for functional/logic bugs, run alongside `critic` and `security` |
@@ -210,6 +212,14 @@ The `task` tool takes a `role`, and the role decides three things before a token
 | `scribe` | fast | yes | docs and comments only |
 
 A scout physically cannot damage your tree — `write_file` and `edit_file` aren't in its tool set — so aggressive parallel recon carries no risk.
+
+### Hierarchical coding delegation
+
+Coding leads use a bounded `delegate_tasks` capability when a task is large enough to benefit from specialist decomposition. A frontend lead developing an initial landing page can delegate a design brief, frontend implementation, accessibility review, and test/documentation work as separate child assignments. The scheduler runs independent assignments in parallel, serializes declared dependencies and file collisions, passes completed-wave reports into later waves, and keeps every worker in the same governed working directory.
+
+The hierarchy is deliberately bounded rather than recursively open-ended. A lead can create at most four child assignments in one delegation call, and child workers run at depth one without any further delegation capability. Child workers inherit the parent run’s cancellation signal, autonomy governor, provider fallback behavior, shared blackboard, durable goal graph, and working directory. Their reports and progress appear in the task dashboard with role, depth, and parent lineage, while the durable graph records child nodes and action idempotency keys.
+
+Delegation is not a substitute for verification. The lead remains responsible for integrating reports, resolving conflicts, running the project’s tests and type checks, and satisfying the autonomous run’s final critic, security, bughunter, verification, and approval gates. If a child fails, the failure is returned explicitly to the lead instead of being silently treated as success.
 
 ### Best-of-N: `--variants N`
 

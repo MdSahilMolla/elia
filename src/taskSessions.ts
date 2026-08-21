@@ -20,9 +20,20 @@ export interface TaskSession {
   stepsCompleted: number
   stepsTotal?: number
   error?: string
+  /** Parent task or lead session that owns this worker. */
+  parentId?: string
+  /** Hierarchical delegation depth, zero for a top-level task. */
+  depth?: number
+  /** Worker role responsible for this task. */
+  role?: string
 }
 
 export type TaskSessionPatch = Partial<Pick<TaskSession, 'status' | 'action' | 'detail' | 'stepsCompleted' | 'stepsTotal' | 'error'>>
+export interface TaskSessionMeta {
+  parentId?: string
+  depth?: number
+  role?: string
+}
 export type TaskControlAction = 'pause' | 'resume' | 'cancel' | 'retry'
 export interface TaskControls {
   pause?: () => void
@@ -61,7 +72,10 @@ export class TaskSessionStore {
           finishedAt: item.finishedAt,
           stepsCompleted: Number.isFinite(item.stepsCompleted) ? item.stepsCompleted : 0,
           stepsTotal: Number.isFinite(item.stepsTotal) ? item.stepsTotal : undefined,
-          error: typeof item.error === 'string' ? item.error : undefined,
+          error: typeof item.error === 'string' ? redactText(item.error, 2000) : undefined,
+          parentId: typeof item.parentId === 'string' ? item.parentId : undefined,
+          depth: Number.isFinite(item.depth) ? item.depth : undefined,
+          role: typeof item.role === 'string' ? item.role : undefined,
         })
       }
       this.emit()
@@ -71,7 +85,7 @@ export class TaskSessionStore {
     }
   }
 
-  create(kind: TaskKind, title: string, detail = 'Queued'): TaskSession {
+  create(kind: TaskKind, title: string, detail = 'Queued', meta: TaskSessionMeta = {}): TaskSession {
     const now = Date.now()
     const record: TaskSession = {
       id: `${now.toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
@@ -83,6 +97,9 @@ export class TaskSessionStore {
       createdAt: now,
       updatedAt: now,
       stepsCompleted: 0,
+      parentId: meta.parentId,
+      depth: meta.depth,
+      role: meta.role,
     }
     this.records.set(record.id, record)
     this.emit()

@@ -7,6 +7,12 @@ describe('autonomy governor', () => {
     expect(assessAction({ name: 'run_command', input: { command: 'bun test' } }, '/repo').risk).toBe('safe')
   })
 
+  test('treats bounded delegation as internal safe orchestration', () => {
+    const result = assessAction({ name: 'delegate_tasks', input: { assignments: [] } }, '/repo')
+    expect(result.risk).toBe('safe')
+    expect(result.decision).toBe('allow')
+  })
+
   test('classifies dependency installation as reversible review work', () => {
     const result = assessAction({ name: 'run_command', input: { command: 'bun install' } }, '/repo')
     expect(result.risk).toBe('review')
