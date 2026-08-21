@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="800" height="500" viewBox="0 0 800 500" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title desc">
+  <title id="title">Future of Learning Placeholder</title>
+  <desc id="desc">An 800 by 500 image placeholder for the future of learning section.</desc>
+  <rect width="800" height="500" fill="#f2f4f7"/>
+  <rect x="16" y="16" width="768" height="468" fill="none" stroke="#cdd5df" stroke-width="2" stroke-dasharray="6 6"/>
+  <text x="400" y="255" text-anchor="middle" fill="#7a8794" font-family="Inter, Arial, sans-serif" font-size="22">Placeholder — Future of Learning 800×500</text>
+</svg>

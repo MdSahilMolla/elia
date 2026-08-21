@@ -49,6 +49,30 @@ After that, build **provenance-aware memory** with source, timestamp, confidence
 
 These stages preserve Elia’s strongest existing advantages—benchmark-gated self-evolution, run forking, multi-model fleets, and learned tools—while extending them into a coherent autonomy control plane.
 
+## Workflow optimization and capability gap
+
+The latest implementation optimizes Elia’s autonomous workflow for speed and reliability, addressing the bottlenecks identified during the Bhawanipur recreation test.
+
+| Optimization | Behavior |
+| --- | --- |
+| **Autonomy profiles** | Added `--fast`, `--balanced` (default), and `--thorough` profiles. `--fast` skips optional polish, reduces review fan-out, and avoids the lesson pass for simple tasks. |
+| **Planner tuning** | The planner now receives a profile-specific prompt. In `fast` mode, it deliberately compresses work into 3–6 high-value parallel steps rather than producing over-detailed 12-step plans. |
+| **Provider fallback** | The OpenAI-compatible adapter now includes a non-streaming fallback that recognizes "request ended without sending any chunks" errors, enabling Elia to run on more diverse model endpoints. |
+| **Incremental QA** | Bounded review and repair depth are now tied to the selected profile, preventing unnecessary sequential QA waves for low-risk changes. |
+
+### Capability gap analysis (Manus & Devin)
+
+To make Elia better than Manus and Devin, we are targeting the following remaining gaps:
+
+| Capability | Elia (Current) | Manus / Devin (Target) | Priority |
+| --- | --- | --- | --- |
+| **Hosting** | Local durable execution. | Cloud-hosted, multi-week persistence. | High |
+| **Computer use** | Read-only browser, local shell. | Authenticated browser operator, desktop app. | High |
+| **QA & Review** | Adversarial review, repair. | Visual-diff QA, automated PR integration. | Medium |
+| **Triggers** | CLI/Interactive only. | Event-triggered workflows, incident response. | Medium |
+
+Elia’s unique advantage remains its **benchmark-gated self-evolution** and **skill synthesis**, which allow it to improve its own source code and toolset based on performance data—a capability not publicly emphasized by Manus or Devin.
+
 ## Durable execution upgrade
 
 The follow-up implementation adds the next autonomy foundation: a **persistent goal graph** stored at `.elia/runs/<run-id>/goal-graph.json`. The validated proposal becomes a graph with a root goal and dependency-linked step nodes. Each node records status, attempts, files, role, evidence IDs, and a stable node idempotency namespace.
@@ -71,6 +95,8 @@ The final verification for this pass is **345 tests passing across 45 files**, `
 
 [2]: https://manus.im/features/manus-browser-operator "Manus Browser Operator"
 
-[3]: https://www.openhands.dev/ "OpenHands official platform page"
+[3]: https://devin.ai/ "Devin — The AI Software Engineer"
 
-[4]: https://browser-use.com/ "Browser Use official platform page"
+[4]: https://www.openhands.dev/ "OpenHands official platform page"
+
+[5]: https://browser-use.com/ "Browser Use official platform page"

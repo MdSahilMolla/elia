@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="200" height="200" viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title desc">
+  <title id="title">Portrait Placeholder</title>
+  <desc id="desc">Circular portrait placeholder used for students and faculty.</desc>
+  <defs>
+    <clipPath id="circle">
+      <circle cx="100" cy="100" r="96"/>
+    </clipPath>
+  </defs>
+  <rect width="200" height="200" fill="#fafafa"/>
+  <g clip-path="url(#circle)">
+    <rect width="200" height="200" fill="#f0f2f5"/>
+    <circle cx="100" cy="84" r="36" fill="#d7dce3"/>
+    <rect x="40" y="134" width="120" height="60" rx="30" fill="#d7dce3"/>
+  </g>
+  <circle cx="100" cy="100" r="96" fill="none" stroke="#d9dee4" stroke-width="2" stroke-dasharray="5 5"/>
+</svg>
