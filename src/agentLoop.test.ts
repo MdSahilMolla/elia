@@ -53,6 +53,7 @@ test('runAgentLoop sums usage across multiple tool-call round trips, not just th
 })
 
 test('runAgentLoop retries transient provider failures before output', async () => {
+  config.routingMode = 'selected'
   let calls = 0
   config.provider = {
     async streamTurn() {
@@ -73,6 +74,7 @@ test('runAgentLoop retries transient provider failures before output', async () 
 })
 
 test('runAgentLoop does not retry permanent provider errors', async () => {
+  config.routingMode = 'selected'
   let calls = 0
   config.provider = {
     async streamTurn() {
@@ -86,4 +88,62 @@ test('runAgentLoop does not retry permanent provider errors', async () => {
     runAgentLoop({ messages, systemPrompt: 'test', tools: [], useAnimation: false, verbose: false }),
   ).rejects.toThrow('invalid API key')
   expect(calls).toBe(1)
+})
+
+test('auto mode falls back to another provider on model unavailability without changing the primary selection', async () => {
+  const original = {
+    provider: config.provider,
+    providerName: config.providerName,
+    model: config.model,
+    providerLabel: config.providerLabel,
+    routingMode: config.routingMode,
+    fallbacks: config.fallbacks,
+  }
+  let primaryCalls = 0
+  let fallbackCalls = 0
+  const fallback = {
+    provider: {
+      async streamTurn() {
+        fallbackCalls += 1
+        return {
+          content: [{ type: 'text', text: 'backup response' }] as ContentBlock[],
+          usage: { inputTokens: 2, outputTokens: 3, cacheReadTokens: 0, cacheWriteTokens: 0 },
+        }
+      },
+    },
+    providerName: 'backup-provider',
+    model: 'backup-model',
+    label: 'backup-provider (backup-model)',
+  }
+
+  config.provider = {
+    async streamTurn() {
+      primaryCalls += 1
+      throw new Error('404 model not found')
+    },
+  }
+  config.providerName = 'primary-provider'
+  config.model = 'primary-model'
+  config.providerLabel = 'primary-provider (primary-model)'
+  config.routingMode = 'auto'
+  config.fallbacks = [fallback]
+
+  try {
+    const messages: ConversationMessage[] = [{ role: 'user', content: [{ type: 'text', text: 'go' }] }]
+    const result = await runAgentLoop({ messages, systemPrompt: 'test', tools: [], useAnimation: false, verbose: false })
+
+    expect(result.stopReason).toBe('complete')
+    expect(messages.at(-1)?.content).toEqual([{ type: 'text', text: 'backup response' }])
+    expect(primaryCalls).toBe(1)
+    expect(fallbackCalls).toBe(1)
+    expect(config.providerName).toBe('primary-provider')
+    expect(config.model).toBe('primary-model')
+  } finally {
+    config.provider = original.provider
+    config.providerName = original.providerName
+    config.model = original.model
+    config.providerLabel = original.providerLabel
+    config.routingMode = original.routingMode
+    config.fallbacks = original.fallbacks
+  }
 })

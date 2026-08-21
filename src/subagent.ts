@@ -1,4 +1,4 @@
-import { SUBAGENT_SYSTEM_PROMPT, CYBER_SUBAGENT_SYSTEM_PROMPT, roleConfig } from './config.ts'
+import { SUBAGENT_SYSTEM_PROMPT, CYBER_SUBAGENT_SYSTEM_PROMPT, autoFallbacksFor, roleConfig } from './config.ts'
 import { runAgentLoop, lastAssistantText, type ConversationMessage, type ToolEvent } from './agentLoop.ts'
 import type { Usage } from './providers/types.ts'
 import type { Tool } from './tools/types.ts'
@@ -110,7 +110,9 @@ export async function runSubAgent(request: SubAgentRequest): Promise<SubAgentRes
       systemPrompt: `${basePrompt}\n\n## Your role\n${definition.prompt}`,
       tools,
       provider: tier.provider,
+      providerName: tier.providerName,
       model: tier.model,
+      fallbacks: autoFallbacksFor(tier.providerName),
       maxSteps: definition.maxSteps,
       useAnimation: false,
       verbose: false,

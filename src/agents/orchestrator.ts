@@ -3,7 +3,7 @@ import type { Usage } from '../providers/types.ts'
 import { runAgentLoop, lastAssistantText, type ConversationMessage } from '../agentLoop.ts'
 import { allWorkerTools } from '../tools/registry.ts'
 import { taskTool } from '../tools/task.ts'
-import { tierConfig } from '../config.ts'
+import { autoFallbacksFor, tierConfig } from '../config.ts'
 import { writeText, writeNotice } from '../ui/stream.ts'
 import type { AgentPersona } from './types.ts'
 import { parseOverride, classifyRequest } from './router.ts'
@@ -95,7 +95,9 @@ async function synthesize(request: string, sections: AgentSectionResult[]): Prom
     systemPrompt: 'You reconcile the outputs of specialist agents into one short, direct recommendation for the user.',
     tools: [],
     provider: fast.provider,
+    providerName: fast.providerName,
     model: fast.model,
+    fallbacks: autoFallbacksFor(fast.providerName),
     useAnimation: false,
     verbose: false,
   })

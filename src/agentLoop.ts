@@ -1,4 +1,5 @@
-import { config } from './config.ts'
+import { autoFallbacksFor, config } from './config.ts'
+import { maybeCompact } from './compaction.ts'
 import type { ChatMessage, ContentBlock, Provider, Usage } from './providers/types.ts'
 import type { Tool } from './tools/types.ts'
 import { endTextTurn, writeNotice, writeToolCall, writeToolResult } from './ui/stream.ts'
@@ -7,7 +8,6 @@ import { createStreamCursor } from './ui/streamCursor.ts'
 import { ZERO_USAGE, addUsage } from './usage.ts'
 import { SPECULABLE_TOOLS, type CacheStats, type ToolResultCache } from './speculation/cache.ts'
 import type { Prefetcher } from './speculation/prefetch.ts'
-import { maybeCompact } from './compaction.ts'
 import { activeActionGovernor, assessAction, redactActionInput, type ActionAssessment } from './autonomy/governor.ts'
 import { activeGoalGraph, activeGoalNode, type ActionReservation, classifyFailure } from './autonomy/goalGraph.ts'
 
@@ -22,6 +22,13 @@ const MAX_PROVIDER_ATTEMPTS = 3
  * terminates and reports *why* it stopped.
  */
 const DEFAULT_MAX_STEPS = 80
+
+export interface ProviderRoute {
+  provider: Provider
+  providerName: string
+  model: string
+  label?: string
+}
 
 export interface ToolEvent {
   name: string
@@ -51,10 +58,14 @@ export interface RunAgentLoopOptions {
   useAnimation: boolean
   /** Log tool calls/results to stdout as they happen (off for silent sub-agents so parallel runs don't interleave). */
   verbose: boolean
-  /** Model to run this loop on. Defaults to the deep tier; roles override it to route cheap work to the fast tier. */
+  /** Model to run this loop on. Defaults to the selected deep-tier provider. */
   provider?: Provider
-  /** Model id matching `provider`, used only for cost accounting. */
+  /** Provider name matching `provider`, used for fallback notices and routing. */
+  providerName?: string
+  /** Model id matching `provider`, used for fallback notices and accounting. */
   model?: string
+  /** Additional providers to try when the selected route is unavailable before output. */
+  fallbacks?: ProviderRoute[]
   /** Max model round-trips before the loop gives up (default 80). */
   maxSteps?: number
   /** Called after every tool result — used by the journal and the skill-synthesis detector. */
@@ -94,6 +105,9 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
     useAnimation,
     verbose,
     provider,
+    providerName,
+    model,
+    fallbacks,
     maxSteps = DEFAULT_MAX_STEPS,
     onTool,
     cache,
@@ -265,12 +279,24 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
     // Resolved per call rather than captured once, so the ambient provider stays
     // swappable (tests stub `config.provider`) while roles can still pin a tier.
     const active = provider ?? config.provider
+    const routes: ProviderRoute[] = [
+      {
+        provider: active,
+        providerName: providerName ?? config.providerName,
+        model: model ?? config.model,
+        label: `${providerName ?? config.providerName} (${model ?? config.model})`,
+      },
+      ...(fallbacks ?? (provider ? [] : autoFallbacksFor(config.providerName))),
+    ]
 
     try {
       let emittedOutput = false
-      for (let attempt = 1; ; attempt++) {
-        try {
-          const result = await active.streamTurn({
+      let lastError: unknown
+      for (let routeIndex = 0; routeIndex < routes.length; routeIndex += 1) {
+        const route = routes[routeIndex]!
+        for (let attempt = 1; ; attempt++) {
+          try {
+            const result = await route.provider.streamTurn({
             system: systemPrompt,
             messages,
             tools: toolDefinitions,
@@ -288,17 +314,32 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
               stopAnimation()
               onThinking?.(delta)
             },
-          })
-          totalUsage = addUsage(totalUsage, result.usage)
-          return result.content
-        } catch (error) {
-          // Retrying after output was emitted would duplicate a partial answer in
-          // the terminal. Only retry failures that happened before any output.
-          if (emittedOutput || attempt >= MAX_PROVIDER_ATTEMPTS || !isRetryableProviderError(error)) throw error
-          if (signal?.aborted) throw error
-          await Bun.sleep(250 * 2 ** (attempt - 1))
+            })
+            totalUsage = addUsage(totalUsage, result.usage)
+            return result.content
+          } catch (error) {
+            lastError = error
+            // Retrying after output was emitted would duplicate a partial answer in
+            // the terminal. Only route before any output has been emitted.
+            if (emittedOutput || !isFallbackableProviderError(error)) throw error
+            if (signal?.aborted) throw error
+
+            const nextRoute = routes[routeIndex + 1]
+            if (nextRoute) {
+              if (verbose) {
+                writeNotice(
+                  `provider ${route.label ?? `${route.providerName} (${route.model})`} unavailable; trying ${nextRoute.label ?? `${nextRoute.providerName} (${nextRoute.model})`}`,
+                )
+              }
+              break
+            }
+
+            if (attempt >= MAX_PROVIDER_ATTEMPTS) throw error
+            await Bun.sleep(250 * 2 ** (attempt - 1))
+          }
         }
       }
+      throw lastError instanceof Error ? lastError : new Error(String(lastError))
     } finally {
       stopAnimation()
       cursor?.stop()
@@ -325,9 +366,9 @@ export function lastAssistantText(messages: ConversationMessage[], fallback: str
   return text && text.length > 0 ? text : fallback
 }
 
-function isRetryableProviderError(error: unknown): boolean {
+function isFallbackableProviderError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error)
-  return /connection|fetch failed|network|timeout|timed out|rate limit|429|500|502|503|504|server had an error/i.test(
+  return /connection|fetch failed|network|timeout|timed out|rate limit|model (?:not found|unavailable)|not found|404|429|500|502|503|504|server had an error/i.test(
     message,
   )
 }

@@ -1,6 +1,11 @@
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { tryResolveProvider, type ResolvedProvider } from './providers/registry.ts'
+import {
+  PROVIDER_PRESET_NAMES,
+  providerPresetDefaultModel,
+  tryResolveProvider,
+  type ResolvedProvider,
+} from './providers/registry.ts'
 import type { ThinkingOption } from './providers/types.ts'
 import { loadProjectMemory, loadUserMemory } from './memory.ts'
 import { ROLE_NAMES, type RoleName } from './autonomy/types.ts'
@@ -13,6 +18,7 @@ import { ROLE_NAMES, type RoleName } from './autonomy/types.ts'
  * unchanged and only the wall-clock win is lost.
  */
 export type Tier = 'fast' | 'deep'
+export type RoutingMode = 'selected' | 'auto'
 
 export interface TierConfig {
   provider: ResolvedProvider['provider']
@@ -52,8 +58,14 @@ let currentThinking = resolveThinking()
 const deep = resolveDeepTier(currentThinking)
 const fast = resolveFastTier(deep)
 const roleOverrides = resolveRoleOverrides(deep)
+const autoFallbacks = resolveAutoFallbacks(deep, fast)
 
 export const config = {
+  // The selected provider/model always remains the primary route; auto mode only
+  // adds transparent fallbacks and never mutates this selection on failure.
+  routingMode: (process.env.ELIA_ROUTING_MODE === 'auto' ? 'auto' : 'selected') as RoutingMode,
+  fallbacks: autoFallbacks,
+
   // Kept as the primary/default provider so every existing call site is unchanged.
   provider: deep.provider,
   providerName: deep.providerName,
@@ -92,6 +104,11 @@ export function tierConfig(tier: Tier): TierConfig {
   return config.tiers[tier]
 }
 
+/** Fallback routes for a tier, excluding its selected provider. */
+export function autoFallbacksFor(providerName: string): TierConfig[] {
+  return config.routingMode === 'auto' ? config.fallbacks.filter((route) => route.providerName !== providerName) : []
+}
+
 export function getThinking(): ThinkingOption {
   return currentThinking
 }
@@ -111,6 +128,11 @@ export type SwitchResult = { ok: true; label: string } | { ok: false; error: str
  * default of its own.
  */
 export function switchModel(options: { providerName?: string; model?: string } = {}): SwitchResult {
+  if (options.providerName === 'auto') {
+    config.routingMode = 'auto'
+    return { ok: true, label: `auto fallback (${config.providerLabel})` }
+  }
+
   const resolved = tryResolveProvider({
     providerName: options.providerName ?? config.providerName,
     model: options.model,
@@ -119,6 +141,7 @@ export function switchModel(options: { providerName?: string; model?: string } =
     ignoreAmbient: true,
   })
   if ('error' in resolved) return { ok: false, error: resolved.error }
+  config.routingMode = 'selected'
   applyDeepTier(toTierConfig(resolved))
   return { ok: true, label: config.providerLabel }
 }
@@ -156,6 +179,7 @@ function applyDeepTier(next: TierConfig): void {
   config.providerName = config.tiers.deep.providerName
   config.model = config.tiers.deep.model
   config.providerLabel = config.tiers.deep.label
+  config.fallbacks = resolveAutoFallbacks(config.tiers.deep, config.tiers.fast)
   config.cascadeEnabled = config.tiers.fast.label !== config.tiers.deep.label
 }
 
@@ -322,6 +346,26 @@ function resolveFastTier(deepTier: TierConfig): TierConfig {
  * misconfigured override must never stop elia from running that role, it just
  * loses the speed-up and falls back to the tier.
  */
+function resolveAutoFallbacks(deepTier: TierConfig, fastTier: TierConfig): TierConfig[] {
+  const candidateNames = [fastTier.providerName, ...PROVIDER_PRESET_NAMES]
+  const routes: TierConfig[] = []
+
+  for (const providerName of candidateNames) {
+    if (providerName === deepTier.providerName || routes.some((route) => route.providerName === providerName)) continue
+
+    const resolved = tryResolveProvider({
+      providerName,
+      model: providerPresetDefaultModel(providerName),
+      baseURL: providerName === 'custom' ? process.env.ELIA_BASE_URL : undefined,
+      ignoreAmbient: true,
+      thinking: currentThinking,
+    })
+    if (!('error' in resolved)) routes.push(toTierConfig(resolved))
+  }
+
+  return routes
+}
+
 function resolveRoleOverrides(deepTier: TierConfig): Partial<Record<RoleName, TierConfig>> {
   const overrides: Partial<Record<RoleName, TierConfig>> = {}
 

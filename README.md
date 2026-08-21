@@ -68,6 +68,12 @@ If a connector uses different tool names, override them with variables such as `
 
 A bridge receives one JSON request on stdin and should return one JSON or text response. Keep login credentials in the bridge or browser session, never in Elia prompts, source files, or command-line arguments. Elia must not bypass login challenges, CAPTCHAs, paywalls, or site safety controls. Actions that may send, buy, publish, delete, or change subscriptions require an explicit user approval represented by `confirmed=true`.
 
+### Automatic provider fallback
+
+The selected provider and model always remain the primary route. In the interactive session, use `/model auto` to enable transparent failover, or set `ELIA_ROUTING_MODE=auto` in `.env`. If the selected route fails before producing output because of a missing model, provider outage, network error, rate limit, or retryable server response, elia immediately tries the next configured provider without changing the selected model in the session. The model picker shows `auto` plus every provider whose key is available. Auto fallback is intentionally fast: it does not wait through the normal same-provider retry cycle when another ready provider is available, and it never retries after partial output because doing so could duplicate a response.
+
+The existing `ELIA_FAST_PROVIDER`/`ELIA_FAST_MODEL` setting is separate: it routes low-stakes reconnaissance and summarisation to a cheaper fast tier. Auto fallback is a resilience feature, not a replacement for the fast tier.
+
 ### The fast tier (optional, recommended)
 
 Elia routes work across two model tiers. The **deep** tier plans, builds, and reviews. The **fast** tier does the high-volume legwork — read-only scouts, summarising, end-of-run note taking — where a cheap model is indistinguishable but several times quicker.

@@ -59,6 +59,21 @@ test('switchModel to an unresolvable provider fails without mutating the live co
   expect(config.model).toBe(originalModel)
 })
 
+test('switchModel auto enables fallback without changing the selected provider or model', () => {
+  const providerName = config.providerName
+  const model = config.model
+  const result = switchModel({ providerName: 'auto' })
+
+  expect(result.ok).toBe(true)
+  expect(config.routingMode).toBe('auto')
+  expect(config.providerName).toBe(providerName)
+  expect(config.model).toBe(model)
+
+  const restored = switchModel({ providerName, model })
+  expect(restored.ok).toBe(true)
+  expect(config.routingMode).toBe('selected')
+})
+
 test('switchThinking off is reflected in getThinking and describeThinking', () => {
   const result = switchThinking({ enabled: false, budgetTokens: 0 })
   expect(result.ok).toBe(true)

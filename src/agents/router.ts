@@ -1,6 +1,6 @@
 import type { Tool } from '../tools/types.ts'
 import { runAgentLoop, type ConversationMessage } from '../agentLoop.ts'
-import { tierConfig } from '../config.ts'
+import { autoFallbacksFor, tierConfig } from '../config.ts'
 import type { Usage } from '../providers/types.ts'
 import { AGENT_PERSONAS, isAgentPersona, type AgentPersona, type AgentRoute } from './types.ts'
 
@@ -122,7 +122,9 @@ export async function classifyRequest(request: string): Promise<AgentRoute & { u
     systemPrompt: ROUTER_PROMPT,
     tools: [routeCapture.tool],
     provider: fast.provider,
+    providerName: fast.providerName,
     model: fast.model,
+    fallbacks: autoFallbacksFor(fast.providerName),
     maxSteps: 3,
     useAnimation: false,
     verbose: false,

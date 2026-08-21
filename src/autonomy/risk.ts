@@ -1,6 +1,6 @@
 import type { Tool } from '../tools/types.ts'
 import { runAgentLoop, type ConversationMessage } from '../agentLoop.ts'
-import { tierConfig } from '../config.ts'
+import { autoFallbacksFor, tierConfig } from '../config.ts'
 import type { Usage } from '../providers/types.ts'
 
 export interface RiskVerdict {
@@ -83,7 +83,9 @@ export async function classifyRisk(command: string): Promise<RiskVerdict & { usa
     systemPrompt: RISK_PROMPT,
     tools: [riskCapture.tool],
     provider: fast.provider,
+    providerName: fast.providerName,
     model: fast.model,
+    fallbacks: autoFallbacksFor(fast.providerName),
     maxSteps: 3,
     useAnimation: false,
     verbose: false,

@@ -101,7 +101,8 @@ Inside an interactive session:
   /normal                     Switch back to elia's normal coding mode
   /mode auto                  Skip the pre-flight risk prompt; critical actions remain governed
   /mode manual                Go back to risk-checking and asking only when it matters (default)
-  /model                      Pick a provider with up/down or left/right, enter to switch
+  /model                      Pick a provider/model or enable auto fallback
+  /model auto                 Keep the selected model primary; fail over to another ready provider
   /model <provider>           Switch provider (e.g. /model groq), keeping its default model
   /model <model-id>           Switch just the model id, keeping the current provider
   /thinking                   Pick a reasoning effort with up/down or left/right, enter to switch
@@ -593,7 +594,7 @@ async function runInteractive(): Promise<void> {
   process.stdout.write(
     `${box(
       [
-        `${dim('provider')}  ${config.providerLabel}${config.cascadeEnabled ? dim(` · fast tier ${config.tiers.fast.label}`) : ''}`,
+        `${dim('provider')}  ${config.providerLabel}${config.routingMode === 'auto' ? dim(' · auto fallback on') : ''}${config.cascadeEnabled ? dim(` · fast tier ${config.tiers.fast.label}`) : ''}`,
         dim(describeThinking()),
       ],
       { title: mode === 'cyber' ? 'elia — cyber mode' : 'elia', borderColor: gold },
@@ -620,33 +621,44 @@ async function runInteractive(): Promise<void> {
     const args = argLine.split(/\s+/).filter(Boolean)
 
     if (args.length === 0) {
-      const currentIndex = PROVIDER_PRESET_NAMES.indexOf(config.providerName)
-      const options = PROVIDER_PRESET_NAMES.map((name) => ({
+      const currentIndex = config.routingMode === 'auto' ? 0 : PROVIDER_PRESET_NAMES.indexOf(config.providerName) + 1
+      const options = [
+        {
+          label: config.routingMode === 'auto' ? 'auto (current)' : 'auto',
+          detail: 'transparent fallback across every ready provider',
+          value: 'auto',
+        },
+        ...PROVIDER_PRESET_NAMES.map((name) => ({
         label: name === config.providerName ? `${name} (current)` : name,
         detail: `${isProviderPresetConfigured(name) ? 'ready' : 'no key set'} · ${providerPresetDefaultModel(name) ?? 'custom'}`,
-        value: name,
-      }))
+          value: name,
+        })),
+      ]
       const result = await pick('Switch model', options, Math.max(0, currentIndex))
       if (result.type === 'select') {
         applyModelChoice(result.value)
         return
       }
       if (result.type === 'unavailable') {
-        const rows = PROVIDER_PRESET_NAMES.map((name) => [
-          name === config.providerName ? `${gold('●')} ${name}` : `  ${name}`,
-          isProviderPresetConfigured(name) ? 'ready' : dim('no key set'),
-          dim(providerPresetDefaultModel(name) ?? ''),
-        ])
+        const rows = [
+          [config.routingMode === 'auto' ? `${gold('●')} auto` : '  auto', 'transparent fallback', dim(config.providerLabel)],
+          ...PROVIDER_PRESET_NAMES.map((name) => [
+            name === config.providerName && config.routingMode !== 'auto' ? `${gold('●')} ${name}` : `  ${name}`,
+            isProviderPresetConfigured(name) ? 'ready' : dim('no key set'),
+            dim(providerPresetDefaultModel(name) ?? ''),
+          ]),
+        ]
         for (const line of table([{ header: 'provider' }, { header: 'status' }, { header: 'default model' }], rows)) {
           writeUsageLine(`  ${line}`)
         }
-        writeNotice(`Current: ${config.providerLabel}. Switch with "/model <provider>" or "/model <model-id>" (keeps the current provider).`)
+        writeNotice(`Current: ${config.providerLabel}${config.routingMode === 'auto' ? ' · auto fallback on' : ''}. Use "/model auto" to enable transparent failover.`)
       }
       return
     }
 
     const [first, second] = args
-    if (PROVIDER_PRESET_NAMES.includes(first!)) applyModelChoice(first!, second)
+    if (first === 'auto') applyModelChoice('auto')
+    else if (PROVIDER_PRESET_NAMES.includes(first!)) applyModelChoice(first!, second)
     else applyModelChoice(config.providerName, first)
   }
 
