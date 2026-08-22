@@ -48,7 +48,7 @@ if (!task) {
 }
 
 // Imported after the argv checks so a bad invocation doesn't need an API key.
-const { SYSTEM_PROMPT, config } = await import('../config.ts')
+const { DEV_SYSTEM_PROMPT, config } = await import('../config.ts')
 const { runAgentLoop } = await import('../agentLoop.ts')
 const { allWorkerTools } = await import('../tools/registry.ts')
 const { taskTool } = await import('../tools/task.ts')
@@ -62,7 +62,7 @@ try {
 
   const result = await runAgentLoop({
     messages: [{ role: 'user', content: [{ type: 'text', text: task.prompt }] }],
-    systemPrompt: SYSTEM_PROMPT,
+    systemPrompt: DEV_SYSTEM_PROMPT,
     tools,
     useAnimation: false,
     verbose: false,

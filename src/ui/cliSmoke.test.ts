@@ -43,6 +43,8 @@ test('help documents autonomous budget and agent dry-run controls', async () => 
   expect(result.stdout).toContain('Office workflows:')
   expect(result.stdout).toContain('spreadsheet')
   expect(result.stdout).toContain('presentation')
+  expect(result.stdout).toContain('Dev mode (default)')
+  expect(result.stdout).toContain('/dev')
 })
 
 test('invalid autonomous wall-clock budget fails before execution', async () => {

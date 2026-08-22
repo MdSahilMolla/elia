@@ -1,4 +1,4 @@
-import { SYSTEM_PROMPT, config, tierConfig } from '../config.ts'
+import { DEV_SYSTEM_PROMPT, config, tierConfig } from '../config.ts'
 import { runAgentLoop, type ConversationMessage } from '../agentLoop.ts'
 import { taskTool } from '../tools/task.ts'
 import { allWorkerTools } from '../tools/registry.ts'
@@ -110,7 +110,7 @@ export interface AutonomousRunResult {
   lessons: string[]
 }
 
-const PLANNER_PROMPT = `${SYSTEM_PROMPT}
+const PLANNER_PROMPT = `${DEV_SYSTEM_PROMPT}
 
 ## Right now you are planning, not building
 
@@ -136,7 +136,7 @@ What makes a good proposal:
 - List every external side effect separately. Drafting is not sending; analysis is not execution; authorized security assessment is not permission to attack. Any consequential action must have an exact approval boundary and a postcondition check.
 - Define recovery: which steps are idempotent, which completed actions must never be repeated, what can be retried, and what user input is needed if credentials, scope, or approval is missing.`
 
-const REPAIR_PROMPT = `${SYSTEM_PROMPT}
+const REPAIR_PROMPT = `${DEV_SYSTEM_PROMPT}
 
 ## Right now you are fixing your own work
 

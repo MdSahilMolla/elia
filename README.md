@@ -12,6 +12,12 @@ Beyond the usual loop, elia does three things most terminal agents don't:
 
 - [Bun](https://bun.sh) >= 1.3
 
+### Dev mode
+
+Elia’s default general-purpose coding mode is called **dev mode**. It covers building, debugging, refactoring, testing, software operations, browser work, and task delegation. Start it explicitly with `elia --dev`, or switch back to it interactively with `/dev`. The old `/normal` command remains accepted as a compatibility alias but is not shown in command completion.
+
+Dev mode is separate from execution policy: manual policy asks before risky actions, while auto policy skips preliminary risk checks but keeps governed irreversible actions behind explicit approval unless unattended execution has been explicitly requested.
+
 ## Setup
 
 ```bash
@@ -190,6 +196,7 @@ bun run dev fork <id> --at <n> --with "<change>"   # re-plan an earlier run from
 bun run dev resume <id>                    # continue a durable goal and reconcile pending approvals and stale leases
 bun run dev agent "<request>" --dry-run       # show specialist routing without executing tools
 
+elia --dev                    # explicit dev mode (the default)
 elia --help
 elia --version
 
@@ -200,7 +207,7 @@ elia "summarize the project" --quiet             # final answer and essential fa
 elia "summarize the project" --verbose           # additional progress detail
 ```
 
-In an interactive session, type `exit` or press Ctrl+C to quit. Elia's startup logo and live animation appear only in normal interactive mode. Use `--plain` or `ELIA_UI_MODE=plain` for an accessible, no-color, no-animation presentation; `--quiet` suppresses progress noise; and `--json`/`--jsonl` emits one stable JSON object per lifecycle event. Human-readable errors go to stderr so stdout can be safely redirected or piped.
+In an interactive session, type `exit` or press Ctrl+C to quit. Elia's startup logo and live animation appear only in interactive dev mode. Use `--plain` or `ELIA_UI_MODE=plain` for an accessible, no-color, no-animation presentation; `--quiet` suppresses progress noise; and `--json`/`--jsonl` emits one stable JSON object per lifecycle event. Human-readable errors go to stderr so stdout can be safely redirected or piped.
 
 While a request is running, Elia maintains task sessions in `.elia/tasks.json`. Coding work, browser work, and queued or confirmation-waiting work are shown as separate task types. The live **Action window** reports the current action, status, and step count from real tool events. Type `/task` to open the task dashboard; use Up/Down or Left/Right to move between tasks, PageUp/PageDown or Home/End for large task lists, `c` to stop an active task cooperatively, and Escape or `q` to close the dashboard. The dashboard also works in piped output by printing a plain task list instead of using terminal cursor control.
 

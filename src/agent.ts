@@ -1,4 +1,4 @@
-import { config, SYSTEM_PROMPT, CYBER_SYSTEM_PROMPT } from './config.ts'
+import { config, DEV_SYSTEM_PROMPT, CYBER_SYSTEM_PROMPT } from './config.ts'
 import { runAgentLoop, type ConversationMessage, type RunAgentLoopResult, type ToolEvent } from './agentLoop.ts'
 import { allWorkerTools, cyberTools, getSynthesizedTools } from './tools/registry.ts'
 import { taskTool } from './tools/task.ts'
@@ -19,7 +19,7 @@ export type { AgentMode }
 // preview opens a real Chrome window — like task, that's a top-level-only
 // capability; a silent sub-agent popping open browser windows would be surprising.
 // The engagement/scan tools are top-level-only too, and further gated to cyber
-// mode — a normal coding turn has no business scaffolding a security engagement.
+// mode — a dev turn has no business scaffolding a security engagement.
 function topLevelTools(mode: AgentMode, selectedSkillNames?: string[]) {
   const selected = new Set(selectedSkillNames ?? [])
   const synthesized = new Set(getSynthesizedTools().map((tool) => tool.name))
@@ -43,12 +43,12 @@ export async function runTurn(
   options: RunTurnOptions = {},
 ): Promise<RunAgentLoopResult> {
   const startedAt = Date.now()
-  const mode = options.mode ?? 'default'
+  const mode = options.mode ?? 'dev'
   // Ambient for the whole turn, including sub-agents dispatched via the task
   // tool arbitrarily deep in a tool call — see autonomy/mode.ts.
   setActiveMode(mode)
   const tools = topLevelTools(mode, options.skillNames)
-  const systemPrompt = mode === 'cyber' ? CYBER_SYSTEM_PROMPT : SYSTEM_PROMPT
+  const systemPrompt = mode === 'cyber' ? CYBER_SYSTEM_PROMPT : DEV_SYSTEM_PROMPT
 
   // One cache per turn rather than per session: the turn boundary is the point at
   // which the user may have edited files behind elia's back.

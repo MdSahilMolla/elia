@@ -31,7 +31,7 @@ const REPL_COMMANDS: SlashCommand[] = [
   { name: '/communications', description: 'switch to the Communications persona for this session' },
   { name: '/ai', description: 'switch to the AI/ML persona for this session' },
   { name: '/tech', description: 'switch to the Tech agent persona for this session' },
-  { name: '/normal', description: "switch back to elia's normal coding mode" },
+  { name: '/dev', description: "switch back to elia's development mode" },
   { name: '/mode', description: '/mode manual (default) asks only for risky commands, /mode auto never asks' },
   { name: '/rewind', description: 'list rewind points (add a number to restore one, e.g. /rewind 2)' },
   { name: '/model', description: 'pick a model with arrow keys, or /model groq, /model claude-opus-5' },
@@ -54,7 +54,10 @@ Usage:
   elia --continue, -c         Resume the most recent session in this directory
   elia --resume <id>          Resume a specific session by id
 
-Manual mode (default): before running a command, elia checks whether it looks
+Dev mode (default): elia is the general-purpose development mode for building,
+debugging, testing, refactoring, and operating software.
+
+Execution policy (manual by default): before running a command, elia checks whether it looks
 risky (deletes, sends, spending, publishing, system changes, ...) — only
 risky commands get an "About to: ... run it?" prompt, safe ones just run.
 Once a command starts, safe and reversible work finishes end to end without
@@ -120,7 +123,7 @@ Inside an interactive session:
   /marketing /finance /business /data /research /cybersecurity
   /automation /communications /ai /tech
                               Switch to that specialist persona for the rest of the session
-  /normal                     Switch back to elia's normal coding mode
+  /dev                        Switch back to elia's development mode (legacy /normal also accepted)
   /mode auto                  Skip the pre-flight risk prompt; critical actions remain governed
   /mode manual                Go back to risk-checking and asking only when it matters (default)
   /model                      Pick a provider/model or enable auto fallback
@@ -132,7 +135,8 @@ Inside an interactive session:
   /thinking low|medium|high   Switch reasoning effort to a preset token budget
   /thinking <n>               Switch reasoning to an exact token budget (Anthropic only)
 
-Other:
+  Other:
+  elia --dev                  Start explicitly in dev mode (the default)
   elia --cyber                Start (or run a one-shot prompt) in cyber mode
   elia --json                 Emit stable JSONL lifecycle events for automation
   elia --plain                Disable color, animation, and in-place terminal redraws
@@ -542,7 +546,7 @@ async function runInteractive(): Promise<void> {
   const resumeId = flagValue('--resume')
   const oneShotPrompt = positionals(['--resume']).join(' ').trim()
 
-  let mode: AgentMode = hasFlag('--cyber') ? 'cyber' : 'default'
+  let mode: AgentMode = hasFlag('--cyber') ? 'cyber' : 'dev'
   let persona: AgentPersona | undefined
   let selectedSkillNames: string[] | undefined
   let messages: ConversationMessage[] = []
@@ -696,14 +700,14 @@ async function runInteractive(): Promise<void> {
           `${dim('provider')}  ${config.providerLabel}${config.routingMode === 'auto' ? dim(' · auto fallback on') : ''}${config.cascadeEnabled ? dim(` · fast tier ${config.tiers.fast.label}`) : ''}`,
           dim(describeThinking()),
         ],
-        { title: mode === 'cyber' ? 'elia — cyber mode' : 'elia', borderColor: gold },
+        { title: mode === 'cyber' ? 'elia — cyber mode' : 'elia — dev mode', borderColor: gold },
       )}\n`,
     )
   }
   writeNotice(
     mode === 'cyber'
       ? 'cyber mode on — authorized security testing, vuln research, and CTFs only. type a prompt, "/" to see commands, or "exit" to quit'
-      : 'type a prompt, "/" to see commands, or "exit" to quit (Ctrl+C also works)',
+      : 'dev mode on — building, debugging, testing, browser, and task workflows available. type a prompt, "/" to see commands, or "exit" to quit (Ctrl+C also works)',
   )
   writeNotice(
     replMode === 'auto'
@@ -906,16 +910,16 @@ async function runInteractive(): Promise<void> {
     if (requestedPersona && isAgentPersona(requestedPersona)) {
       persona = requestedPersona
       writeNotice(
-        `${persona.charAt(0).toUpperCase()}${persona.slice(1)} agent on — elia will answer in this persona until /normal.`,
+        `${persona.charAt(0).toUpperCase()}${persona.slice(1)} agent on — elia will answer in this persona until /dev.`,
       )
       continue
     }
 
-    if (trimmed === '/normal' || trimmed === '/cyber off') {
-      mode = 'default'
+    if (trimmed === '/dev' || trimmed === '/normal' || trimmed === '/cyber off') {
+      mode = 'dev'
       const hadPersona = persona !== undefined
       persona = undefined
-      writeNotice(hadPersona ? 'Agent persona off — back to normal coding mode.' : 'cyber mode off — back to normal coding mode.')
+      writeNotice(hadPersona ? 'Agent persona off — back to dev mode.' : 'cyber mode off — back to dev mode.')
       continue
     }
 

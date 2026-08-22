@@ -127,7 +127,7 @@ export async function runSubAgent(request: SubAgentRequest): Promise<SubAgentRes
   const prefetcher = createPrefetcher({ tools, cache })
 
   // A scout or critic dispatched while the lead is in cyber mode needs the same
-  // authorization guardrails the lead has — see autonomy/mode.ts.
+  // authorization guardrails the lead has — see autonomy/mode.ts. Dev mode is the default.
   const basePrompt = activeMode() === 'cyber' ? CYBER_SUBAGENT_SYSTEM_PROMPT : SUBAGENT_SYSTEM_PROMPT
   const cwd = request.cwd ?? currentAgent().cwd
 

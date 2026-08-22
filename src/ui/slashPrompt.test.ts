@@ -3,7 +3,7 @@ import { applyKey, filteredCommands, initialState, type PromptState, type SlashC
 
 const commands: SlashCommand[] = [
   { name: '/cyber', description: 'switch to cyber mode' },
-  { name: '/normal', description: 'switch back to normal mode' },
+  { name: '/dev', description: 'switch back to dev mode' },
   { name: '/rewind', description: 'list rewind points' },
 ]
 
@@ -31,7 +31,7 @@ describe('filteredCommands', () => {
   test('matches by prefix, case-insensitively', () => {
     expect(filteredCommands('/cy', commands).map((c) => c.name)).toEqual(['/cyber'])
     expect(filteredCommands('/CY', commands).map((c) => c.name)).toEqual(['/cyber'])
-    expect(filteredCommands('/', commands).map((c) => c.name)).toEqual(['/cyber', '/normal', '/rewind'])
+    expect(filteredCommands('/', commands).map((c) => c.name)).toEqual(['/cyber', '/dev', '/rewind'])
   })
 })
 
