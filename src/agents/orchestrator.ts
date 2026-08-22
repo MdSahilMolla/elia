@@ -114,7 +114,7 @@ async function synthesize(request: string, sections: AgentSectionResult[]): Prom
   return { text: lastAssistantText(messages, '(no response)'), usage: result.usage }
 }
 
-const SEARCH_TOOL_PERSONAS: AgentPersona[] = ['marketing', 'finance', 'business', 'data', 'research', 'automation', 'communications', 'ai', 'cyber']
+const SEARCH_TOOL_PERSONAS: AgentPersona[] = ['marketing', 'sports', 'fitness', 'finance', 'business', 'data', 'research', 'automation', 'communications', 'ai', 'cyber']
 const warnedPersonas = new Set<AgentPersona>()
 
 /**

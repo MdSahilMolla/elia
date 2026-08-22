@@ -2,6 +2,8 @@ import type { AgentPersona } from './agents/types.ts'
 
 export type CapabilityId =
   | 'marketing'
+  | 'sports'
+  | 'fitness'
   | 'finance'
   | 'business-analysis'
   | 'data-analysis'
@@ -36,6 +38,26 @@ export const CAPABILITIES: CapabilitySpec[] = [
     patterns: [/\b(campaign|ad copy|audience|brand|launch|content calendar)\b/i],
     preferredTools: ['web_search', 'web_fetch'],
     outputContract: ['audience and objective', 'copy or campaign artifact', 'measurement plan', 'source-backed claims'],
+  },
+  {
+    id: 'sports',
+    persona: 'sports',
+    label: 'Sports intelligence and operations',
+    summary: 'Match analysis, scouting, performance metrics, leagues, events, fan engagement, and sports business workflows.',
+    risk: 'medium',
+    patterns: [/\b(sports?|athlete|player|coach|team|league|match|game|fixture|tournament|scout|scouting|performance analysis|opponent|fan engagement|sponsorship|stadium|sports business)\b/i],
+    preferredTools: ['data_science', 'read_spreadsheet', 'web_search', 'web_fetch', 'browser', 'presentation'],
+    outputContract: ['competition or dataset context', 'source-backed observations', 'reproducible metrics or method', 'separation of fact, calculation, and opinion', 'limitations and uncertainty'],
+  },
+  {
+    id: 'fitness',
+    persona: 'fitness',
+    label: 'Fitness planning and wellbeing support',
+    summary: 'Goal setting, training organization, habit tracking, recovery reflection, and conservative fitness-plan adaptation.',
+    risk: 'high',
+    patterns: [/\b(fitness|workout|training plan|exercise|strength|mobility|cardio|running|lifting|gym|recovery|sleep|steps|calories|macros|nutrition|wellness|weight loss|muscle gain)\b/i],
+    preferredTools: ['data_science', 'read_spreadsheet', 'web_search', 'web_fetch', 'write_file'],
+    outputContract: ['goal, experience, equipment, and constraints', 'conservative progressive plan', 'tracking and adaptation criteria', 'safety or professional-referral notes', 'limitations and non-medical disclaimer'],
   },
   {
     id: 'finance',

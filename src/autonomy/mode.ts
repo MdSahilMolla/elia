@@ -1,5 +1,5 @@
 /**
- * Which operating mode the current top-level turn is running as: dev or cyber.
+ * Which operating mode the current top-level turn is running as: dev, cyber, sports, or fitness.
  *
  * Ambient rather than threaded as a parameter because sub-agents (dispatched via
  * the `task` tool, arbitrarily deep in a tool call) need to pick it up too: a
@@ -8,7 +8,7 @@
  * ambient-blackboard pattern in autonomy/blackboard.ts for the same reason —
  * the `Tool` interface is intentionally context-free.
  */
-export type AgentMode = 'dev' | 'cyber'
+export type AgentMode = 'dev' | 'cyber' | 'sports' | 'fitness'
 
 let current: AgentMode = 'dev'
 

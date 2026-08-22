@@ -1,4 +1,4 @@
-import { config, DEV_SYSTEM_PROMPT, CYBER_SYSTEM_PROMPT } from './config.ts'
+import { config, CYBER_SYSTEM_PROMPT, DEV_SYSTEM_PROMPT, FITNESS_SYSTEM_PROMPT, SPORTS_SYSTEM_PROMPT } from './config.ts'
 import { runAgentLoop, type ConversationMessage, type RunAgentLoopResult, type ToolEvent } from './agentLoop.ts'
 import { allWorkerTools, cyberTools, getSynthesizedTools } from './tools/registry.ts'
 import { taskTool } from './tools/task.ts'
@@ -48,7 +48,13 @@ export async function runTurn(
   // tool arbitrarily deep in a tool call — see autonomy/mode.ts.
   setActiveMode(mode)
   const tools = topLevelTools(mode, options.skillNames)
-  const systemPrompt = mode === 'cyber' ? CYBER_SYSTEM_PROMPT : DEV_SYSTEM_PROMPT
+  const systemPrompt = mode === 'cyber'
+    ? CYBER_SYSTEM_PROMPT
+    : mode === 'sports'
+      ? SPORTS_SYSTEM_PROMPT
+      : mode === 'fitness'
+        ? FITNESS_SYSTEM_PROMPT
+        : DEV_SYSTEM_PROMPT
 
   // One cache per turn rather than per session: the turn boundary is the point at
   // which the user may have edited files behind elia's back.

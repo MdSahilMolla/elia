@@ -47,3 +47,19 @@ test('finance, data, and production specialists receive domain workflows', () =>
   expect(productionNames).toContain('production_readiness')
   expect(productionNames).toContain('project_profile')
 })
+
+test('sports specialist receives evidence and analysis tools', () => {
+  const names = personaTools('sports').map((tool) => tool.name)
+  expect(names).toContain('data_science')
+  expect(names).toContain('read_spreadsheet')
+  expect(names).toContain('browser')
+  expect(personaPrompt('sports')).toContain('never fabricate scores')
+})
+
+test('fitness specialist receives tracking tools and conservative safety guidance', () => {
+  const names = personaTools('fitness').map((tool) => tool.name)
+  expect(names).toContain('data_science')
+  expect(names).toContain('read_spreadsheet')
+  expect(names).not.toContain('run_command')
+  expect(personaPrompt('fitness')).toContain('not a doctor')
+})

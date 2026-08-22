@@ -7,6 +7,8 @@ import { detectCapabilities } from '../capabilities.ts'
 
 const OVERRIDE_PATTERNS: { pattern: RegExp; persona: AgentPersona }[] = [
   { pattern: /\bas the marketing agent\b|\bmarketing take\b/i, persona: 'marketing' },
+  { pattern: /\bas the sports agent\b|\bsports take\b|\bas the sports analyst\b/i, persona: 'sports' },
+  { pattern: /\bas the fitness agent\b|\bfitness take\b|\bas the fitness coach\b/i, persona: 'fitness' },
   { pattern: /\bas the finance agent\b|\bfinance take\b/i, persona: 'finance' },
   { pattern: /\bas the business analyst\b|\bbusiness analysis take\b|\bbusiness analyst take\b/i, persona: 'business' },
   { pattern: /\bas the data analyst\b|\bdata analysis take\b|\bdata analyst take\b/i, persona: 'data' },
@@ -31,12 +33,14 @@ export function keywordHint(request: string): AgentPersona[] {
   return detectCapabilities(request).map((capability) => capability.persona)
 }
 
-const ROUTER_PROMPT = `You are the routing layer in front of these specialist agents: Marketing, Finance, Business Analyst, Data Analyst, Research, Cybersecurity, Automation, Communications, AI/ML, and Tech.
+const ROUTER_PROMPT = `You are the routing layer in front of these specialist agents: Marketing, Sports Intelligence, Fitness Planning, Finance, Business Analyst, Data Analyst, Research, Cybersecurity, Automation, Communications, AI/ML, and Tech.
 
 Read the request and decide which agent(s) should handle it, and in what order they should run if more than one applies. Route to the smallest set that can complete the work, but include every domain whose output is needed. Treat keyword hints as weak evidence only.
 
 Specialist boundaries:
 - marketing: campaigns, brand, copy, audience, launches
+- sports: match and opponent analysis, scouting, athletes, teams, leagues, events, sports business, performance metrics
+- fitness: workouts, training plans, strength, mobility, cardio, recovery, habits, and safe wellbeing support
 - finance: budgets, forecasts, pricing, unit economics, financial scenarios
 - business: requirements, process/KPI analysis, business cases, stakeholder decisions
 - data: datasets, metrics, statistics, experiments, dashboards, reproducible analysis

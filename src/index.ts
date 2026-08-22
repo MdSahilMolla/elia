@@ -21,6 +21,8 @@ import { redactText } from './ui/redact.ts'
 const REPL_COMMANDS: SlashCommand[] = [
   { name: '/capabilities', description: 'list specialist capabilities, risk classes, and output contracts' },
   { name: '/cyber', description: 'switch to cyber mode — authorized security testing, vuln research, CTFs' },
+  { name: '/sports', description: 'switch to Sports mode — evidence-aware sports intelligence and operations' },
+  { name: '/fitness', description: 'switch to Fitness mode — conservative fitness planning and wellbeing support' },
   { name: '/marketing', description: 'switch to the Marketing agent persona for this session' },
   { name: '/finance', description: 'switch to the Finance agent persona for this session' },
   { name: '/business', description: 'switch to the Business Analyst persona for this session' },
@@ -86,7 +88,7 @@ Autonomous work:
 Multi-agent:
   elia agent "<request>"      Route the request to one or more specialist personas — Business,
                               Data, Research, Cybersecurity, Automation, Communications, AI/ML,
-                              Marketing, Finance, or Tech — and answer in their voice. Multi-domain
+                              Sports, Fitness, Marketing, Finance, or Tech — and answer in their voice. Multi-domain
                               requests get labeled "## X take" sections plus a combined recommendation.
   elia agent "<request>" --dry-run  Show routing/persona plan without executing tools or side effects
 
@@ -130,7 +132,7 @@ Inside an interactive session:
   /cyber                      Switch to cyber mode: authorized security testing, vuln
                               research, CTFs, and defensive work — same tools, a
                               security-focused system prompt with authorization guardrails
-  /marketing /finance /business /data /research /cybersecurity
+  /sports /fitness /marketing /finance /business /data /research /cybersecurity
   /automation /communications /ai /production /tech
                               Switch to that specialist persona for the rest of the session
   /dev                        Switch back to elia's development mode (legacy /normal also accepted)
@@ -147,6 +149,8 @@ Inside an interactive session:
 
   Other:
   elia --dev                  Start explicitly in dev mode (the default)
+  elia --sports               Start (or run a one-shot prompt) in Sports mode
+  elia --fitness              Start (or run a one-shot prompt) in Fitness mode
   elia --cyber                Start (or run a one-shot prompt) in cyber mode
   elia --json                 Emit stable JSONL lifecycle events for automation
   elia --plain                Disable color, animation, and in-place terminal redraws
@@ -669,7 +673,7 @@ async function runInteractive(): Promise<void> {
   const resumeId = flagValue('--resume')
   const oneShotPrompt = positionals(['--resume']).join(' ').trim()
 
-  let mode: AgentMode = hasFlag('--cyber') ? 'cyber' : 'dev'
+  let mode: AgentMode = hasFlag('--cyber') ? 'cyber' : hasFlag('--sports') ? 'sports' : hasFlag('--fitness') ? 'fitness' : 'dev'
   let persona: AgentPersona | undefined
   let selectedSkillNames: string[] | undefined
   let messages: ConversationMessage[] = []
@@ -823,14 +827,18 @@ async function runInteractive(): Promise<void> {
           `${dim('provider')}  ${config.providerLabel}${config.routingMode === 'auto' ? dim(' · auto fallback on') : ''}${config.cascadeEnabled ? dim(` · fast tier ${config.tiers.fast.label}`) : ''}`,
           dim(describeThinking()),
         ],
-        { title: mode === 'cyber' ? 'elia — cyber mode' : 'elia — dev mode', borderColor: gold },
+        { title: mode === 'cyber' ? 'elia — cyber mode' : mode === 'sports' ? 'elia — sports mode' : mode === 'fitness' ? 'elia — fitness mode' : 'elia — dev mode', borderColor: gold },
       )}\n`,
     )
   }
   writeNotice(
     mode === 'cyber'
       ? 'cyber mode on — authorized security testing, vuln research, and CTFs only. type a prompt, "/" to see commands, or "exit" to quit'
-      : 'dev mode on — building, debugging, testing, browser, and task workflows available. type a prompt, "/" to see commands, or "exit" to quit (Ctrl+C also works)',
+      : mode === 'sports'
+        ? 'sports mode on — evidence-aware match, scouting, performance, league, event, and sports-business analysis. type a prompt, "/" to see commands, or "exit" to quit'
+        : mode === 'fitness'
+          ? 'fitness mode on — conservative training, habit, recovery, and wellbeing support; not medical advice. type a prompt, "/" to see commands, or "exit" to quit'
+          : 'dev mode on — building, debugging, testing, browser, and task workflows available. type a prompt, "/" to see commands, or "exit" to quit (Ctrl+C also works)',
   )
   writeNotice(
     replMode === 'auto'
@@ -1001,7 +1009,7 @@ async function runInteractive(): Promise<void> {
   }
 
   while (true) {
-    const label = persona ? `${dim(`[${persona}]`)} ` : mode === 'cyber' ? `${dim('[cyber]')} ` : ''
+    const label = persona ? `${dim(`[${persona}]`)} ` : mode !== 'dev' ? `${dim(`[${mode}]`)} ` : ''
     const line = await prompt.question(`${label}${gold('❯')} `)
     if (line === null) break // stdin closed (EOF)
 
@@ -1023,9 +1031,22 @@ async function runInteractive(): Promise<void> {
     }
     if (trimmed === '/cyber' || trimmed === '/cyber on') {
       mode = 'cyber'
+      persona = undefined
       writeNotice(
         'cyber mode on — elia will help with authorized security testing, vuln research, and CTFs. Only point it at systems you own or are explicitly authorized to test.',
       )
+      continue
+    }
+    if (trimmed === '/sports') {
+      mode = 'sports'
+      persona = undefined
+      writeNotice('sports mode on — evidence-aware match, scouting, performance, league, event, and sports-business analysis.')
+      continue
+    }
+    if (trimmed === '/fitness') {
+      mode = 'fitness'
+      persona = undefined
+      writeNotice('fitness mode on — conservative training, habit, recovery, and wellbeing support; not medical advice.')
       continue
     }
     const personaMatch = /^\/(marketing|finance|business|data|research|cybersecurity|automation|communications|ai|production|tech)$/.exec(trimmed)
@@ -1039,10 +1060,10 @@ async function runInteractive(): Promise<void> {
     }
 
     if (trimmed === '/dev' || trimmed === '/normal' || trimmed === '/cyber off') {
+      const hadSpecialist = persona !== undefined || mode !== 'dev'
       mode = 'dev'
-      const hadPersona = persona !== undefined
       persona = undefined
-      writeNotice(hadPersona ? 'Agent persona off — back to dev mode.' : 'cyber mode off — back to dev mode.')
+      writeNotice(hadSpecialist ? 'Specialist mode/persona off — back to dev mode.' : 'dev mode remains active.')
       continue
     }
 

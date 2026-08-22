@@ -1,4 +1,4 @@
-import { SUBAGENT_SYSTEM_PROMPT, CYBER_SUBAGENT_SYSTEM_PROMPT, autoFallbacksFor, roleConfig } from './config.ts'
+import { autoFallbacksFor, CYBER_SUBAGENT_SYSTEM_PROMPT, FITNESS_SUBAGENT_SYSTEM_PROMPT, roleConfig, SPORTS_SUBAGENT_SYSTEM_PROMPT, SUBAGENT_SYSTEM_PROMPT } from './config.ts'
 import { runAgentLoop, lastAssistantText, type ConversationMessage, type ToolEvent } from './agentLoop.ts'
 import type { Usage } from './providers/types.ts'
 import type { Tool } from './tools/types.ts'
@@ -128,7 +128,13 @@ export async function runSubAgent(request: SubAgentRequest): Promise<SubAgentRes
 
   // A scout or critic dispatched while the lead is in cyber mode needs the same
   // authorization guardrails the lead has — see autonomy/mode.ts. Dev mode is the default.
-  const basePrompt = activeMode() === 'cyber' ? CYBER_SUBAGENT_SYSTEM_PROMPT : SUBAGENT_SYSTEM_PROMPT
+  const basePrompt = activeMode() === 'cyber'
+    ? CYBER_SUBAGENT_SYSTEM_PROMPT
+    : activeMode() === 'sports'
+      ? SPORTS_SUBAGENT_SYSTEM_PROMPT
+      : activeMode() === 'fitness'
+        ? FITNESS_SUBAGENT_SYSTEM_PROMPT
+        : SUBAGENT_SYSTEM_PROMPT
   const cwd = request.cwd ?? currentAgent().cwd
 
   const result = await withAgentIdentity({ name: request.name, role: request.role, runId, cwd, signal: request.signal }, () =>

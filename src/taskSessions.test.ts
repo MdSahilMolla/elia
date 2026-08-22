@@ -17,6 +17,11 @@ test('classifies unseen domain work before execution', () => {
   expect(inferTaskKind('Sync records', 'build a webhook workflow')).toBe('automation')
 })
 
+test('classifies Sports and Fitness work separately', () => {
+  expect(inferTaskKind('match scouting report', 'compare player performance in the league')).toBe('sports')
+  expect(inferTaskKind('weekly workout', 'build a strength and mobility plan')).toBe('fitness')
+})
+
 test('tracks pending, running, and completed task state', () => {
   const store = new TaskSessionStore()
   const session = store.create('code', 'Fix parser', 'Queued')

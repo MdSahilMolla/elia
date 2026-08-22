@@ -19,6 +19,8 @@ import { projectProfileTool } from './projectProfile.ts'
 import { productionReadinessTool } from './productionReadiness.ts'
 import { financeTool } from './finance.ts'
 import { dataScienceTool } from './dataScience.ts'
+import { sportsTool } from './sports.ts'
+import { fitnessTool } from './fitness.ts'
 import { environmentTool } from './environment.ts'
 import type { Tool } from './types.ts'
 
@@ -35,6 +37,8 @@ export const tools: Tool[] = [
   productionReadinessTool,
   financeTool,
   dataScienceTool,
+  sportsTool,
+  fitnessTool,
   environmentTool,
 ]
 

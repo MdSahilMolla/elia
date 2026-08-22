@@ -3,7 +3,7 @@ import { join } from 'node:path'
 import { emitEvent, machineReadable } from './ui/runtime.ts'
 import { redactText } from './ui/redact.ts'
 
-export type TaskKind = 'browser' | 'code' | 'data' | 'finance' | 'production' | 'research' | 'communication' | 'automation' | 'pending'
+export type TaskKind = 'browser' | 'code' | 'data' | 'finance' | 'sports' | 'fitness' | 'production' | 'research' | 'communication' | 'automation' | 'pending'
 export type TaskStatus = 'pending' | 'running' | 'paused' | 'waiting-input' | 'waiting-approval' | 'needs-review' | 'done' | 'failed'
 
 export interface TaskSession {
@@ -83,7 +83,7 @@ export class TaskSessionStore {
         const recoveredStatus: TaskStatus = stale ? 'needs-review' : item.status === 'running' || item.status === 'paused' || item.status === 'waiting-input' || item.status === 'waiting-approval' || item.status === 'needs-review' || item.status === 'done' || item.status === 'failed' ? item.status : 'pending'
         this.records.set(item.id, {
           id: item.id,
-          kind: item.kind === 'browser' || item.kind === 'code' || item.kind === 'data' || item.kind === 'finance' || item.kind === 'production' || item.kind === 'research' || item.kind === 'communication' || item.kind === 'automation' ? item.kind : 'pending',
+          kind: item.kind === 'browser' || item.kind === 'code' || item.kind === 'data' || item.kind === 'finance' || item.kind === 'sports' || item.kind === 'fitness' || item.kind === 'production' || item.kind === 'research' || item.kind === 'communication' || item.kind === 'automation' ? item.kind : 'pending',
           title: item.title,
           status: recoveredStatus,
           action: stale ? 'Recovered interrupted task' : typeof item.action === 'string' ? item.action : '',
@@ -221,6 +221,8 @@ export const taskSessions = new TaskSessionStore()
 export function inferTaskKind(title: string, prompt: string): TaskKind {
   const text = `${title} ${prompt}`.toLowerCase()
   if (/\b(finance|financial|budget|forecast|runway|valuation|dcf|cash flow|unit economics|roi)\b/.test(text)) return 'finance'
+  if (/\b(sports?|athlete|player|coach|team|league|match|fixture|tournament|scout|scouting|opponent|fan engagement|sponsorship|stadium)\b/.test(text)) return 'sports'
+  if (/\b(fitness|workout|training plan|exercise|strength|mobility|cardio|running|lifting|gym|recovery|sleep|steps|calories|macros|nutrition|wellness|weight loss|muscle gain)\b/.test(text)) return 'fitness'
   if (/\b(production|deploy|deployment|release|rollback|migration|observability|incident|slo|backup|ci\/cd|kubernetes|terraform)\b/.test(text)) return 'production'
   if (/\b(data science|dataset|csv|jsonl|cohort|funnel|regression|correlation|experiment|statistics|anomaly)\b/.test(text)) return 'data'
   if (/\b(research|literature|sources|citations|fact check|due diligence)\b/.test(text)) return 'research'

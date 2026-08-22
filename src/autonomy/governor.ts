@@ -65,6 +65,14 @@ export function assessAction(request: ActionRequest, cwd = currentAgent().cwd ??
     return assessment('safe', 'allow', 'finance calculations are deterministic and do not mutate external state', 'finance.analysis', resources, true)
   }
 
+  if (name === 'sports') {
+    return assessment('safe', 'allow', 'sports calculations analyze user-supplied data without mutating external state', 'sports.analysis', resources, true)
+  }
+
+  if (name === 'fitness') {
+    return assessment('safe', 'allow', 'fitness planning and tracking summaries are bounded deterministic support, not medical action', 'fitness.support', resources, true)
+  }
+
   if (name === 'data_science') {
     const path = typeof input.path === 'string' ? input.path : ''
     return path && isOutside(path, cwd)

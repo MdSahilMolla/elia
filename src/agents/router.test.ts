@@ -5,6 +5,8 @@ test('parseOverride recognises "as the X agent"', () => {
   expect(parseOverride('as the Tech agent, explain this stack trace')).toBe('tech')
   expect(parseOverride('As the Marketing agent, write some captions')).toBe('marketing')
   expect(parseOverride('as the finance agent what is our CAC')).toBe('finance')
+  expect(parseOverride('as the sports analyst, compare these players')).toBe('sports')
+  expect(parseOverride('as the fitness coach, build a workout plan')).toBe('fitness')
 })
 
 test('parseOverride recognises "give me the X take"', () => {
@@ -25,6 +27,11 @@ test('keywordHint matches marketing signals', () => {
 
 test('keywordHint matches finance signals', () => {
   expect(keywordHint('what is our monthly cash flow and runway')).toEqual(['finance'])
+})
+
+test('keywordHint matches sports and fitness signals', () => {
+  expect(keywordHint('compare team performance in the league match')).toContain('sports')
+  expect(keywordHint('create a strength and mobility workout plan')).toContain('fitness')
 })
 
 test('keywordHint matches tech signals', () => {
