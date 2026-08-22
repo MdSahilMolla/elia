@@ -31,7 +31,7 @@ import {
 } from './verify.ts'
 import type { CriticVerdict, Proposal } from './types.ts'
 import { appendActionAudit, writeRunReceipt } from './audit.ts'
-import { createActionGovernor, withActionGovernor, type ActionApproval, type ActionGovernor, type GovernanceMode } from './governor.ts'
+import { createActionGovernor, withActionGovernor, type ActionApproval, type ActionGovernor, type ActionGovernorStats, type GovernanceMode } from './governor.ts'
 import { GoalGraphStore, withGoalGraph, type GoalGraphStore as GoalGraphStoreType } from './goalGraph.ts'
 import { assessCompletion, type CompletionAssessment } from './outcome.ts'
 import { inferTaskKind, taskSessions } from '../taskSessions.ts'
@@ -67,6 +67,8 @@ export interface AutonomousRunOptions {
   polish?: boolean
   /** Maximum final polish passes; bounded to prevent autonomous thrashing. */
   maxPolishPasses?: number
+  /** Maximum governed tool requests for the entire run; 0 means no additional action-count limit. */
+  maxActions?: number
   runId?: string
   signal?: AbortSignal
   /** Optional approval callback for critical side effects during this run. */
@@ -91,14 +93,15 @@ export function autonomyProfileDefaults(profile: AutonomyProfile): {
   reviewerCount: number
   learn: boolean
   plannerSteps: number
+  maxActions: number
 } {
   if (profile === 'fast') {
-    return { maxRepairAttempts: 1, maxAmendments: 1, polish: false, maxPolishPasses: 0, reviewerCount: 1, learn: false, plannerSteps: 24 }
+    return { maxRepairAttempts: 1, maxAmendments: 1, polish: false, maxPolishPasses: 0, reviewerCount: 1, learn: false, plannerSteps: 24, maxActions: 120 }
   }
   if (profile === 'thorough') {
-    return { maxRepairAttempts: 3, maxAmendments: 4, polish: true, maxPolishPasses: 2, reviewerCount: 3, learn: true, plannerSteps: 50 }
+    return { maxRepairAttempts: 3, maxAmendments: 4, polish: true, maxPolishPasses: 2, reviewerCount: 3, learn: true, plannerSteps: 50, maxActions: 600 }
   }
-  return { maxRepairAttempts: 2, maxAmendments: 3, polish: true, maxPolishPasses: 1, reviewerCount: 3, learn: true, plannerSteps: 40 }
+  return { maxRepairAttempts: 2, maxAmendments: 3, polish: true, maxPolishPasses: 1, reviewerCount: 3, learn: true, plannerSteps: 40, maxActions: 300 }
 }
 
 export type RunOutcome = 'completed' | 'needs-attention' | 'rejected' | 'no-proposal' | 'aborted'
@@ -113,6 +116,7 @@ export interface AutonomousRunResult {
   lessons: string[]
   completion: CompletionAssessment
   taskSessionId?: string
+  actionBudget: ActionGovernorStats
 }
 
 const PLANNER_PROMPT = `${DEV_SYSTEM_PROMPT}
@@ -197,7 +201,8 @@ export async function runAutonomousTask(options: AutonomousRunOptions): Promise<
       runController.abort()
     },
   })
-  const governor = createActionGovernor({ mode: options.governanceMode ?? 'unattended', approve: options.approveAction })
+  const maxActions = options.maxActions ?? defaults.maxActions
+  const governor = createActionGovernor({ mode: options.governanceMode ?? 'unattended', approve: options.approveAction, maxActions })
 
   const journal = createJournal(runId, goal)
   const graph = GoalGraphStore.open({ runId, goal, dir: journal.dir })
@@ -221,7 +226,13 @@ export async function runAutonomousTask(options: AutonomousRunOptions): Promise<
       journal.append('phase', { phase: 'budget', maxWallClockMs })
     }
 
+    const actionBudget = governor.stats()
+    if (actionBudget.blockedByBudget > 0) {
+      journal.append('phase', { phase: 'action-budget-exhausted', maxActions: actionBudget.maxActions, consumed: actionBudget.consumed, blockedRequests: actionBudget.blockedByBudget })
+    }
+
     let finalOutcome = outcome
+    if (actionBudget.blockedByBudget > 0 && !['rejected', 'aborted'].includes(finalOutcome)) finalOutcome = 'needs-attention'
     if (outcome === 'completed') {
       try {
         graph.completeGoal()
@@ -232,7 +243,7 @@ export async function runAutonomousTask(options: AutonomousRunOptions): Promise<
     }
     if (finalOutcome === 'needs-attention' || finalOutcome === 'aborted') graph.failRun(finalOutcome)
 
-    const completion = assessCompletion({ outcome: finalOutcome, graph: graph.state(), verificationPassed, reviewPassed, planApproved })
+    const completion = assessCompletion({ outcome: finalOutcome, graph: graph.state(), verificationPassed, reviewPassed, planApproved, actionBudget })
     unregisterParentControls()
     signal?.removeEventListener('abort', forwardAbort)
     const taskStatus = completion.state === 'verified'
@@ -256,7 +267,7 @@ export async function runAutonomousTask(options: AutonomousRunOptions): Promise<
       error: completion.state === 'verified' ? undefined : completion.blockers.join('; ') || undefined,
     })
     journal.append('run-end', { outcome: finalOutcome, completion, taskSessionId: parentTask.id, graph: graph.state().nodes.map((node) => ({ id: node.id, status: node.status })) })
-    writeRunReceipt({ runId, goal, outcome: finalOutcome, taskSessionId: parentTask.id, proposal: extra.proposal, verdict: extra.verdict, lessons: extra.lessons, completion, events: journal.events(), graph: graph.state(), usage, elapsedMs: Date.now() - startedAt, maxWallClockMs: maxWallClockMs || undefined })
+    writeRunReceipt({ runId, goal, outcome: finalOutcome, taskSessionId: parentTask.id, proposal: extra.proposal, verdict: extra.verdict, lessons: extra.lessons, completion, events: journal.events(), graph: graph.state(), usage, elapsedMs: Date.now() - startedAt, maxWallClockMs: maxWallClockMs || undefined, actionBudget })
     emitEvent('run_finished', { runId, goal: redactText(goal, 2000), outcome: finalOutcome, taskSessionId: parentTask.id, completion, elapsedMs: Date.now() - startedAt, usage, graph: graph.state() })
     return {
       runId,
@@ -266,6 +277,7 @@ export async function runAutonomousTask(options: AutonomousRunOptions): Promise<
       lessons: [],
       completion,
       taskSessionId: parentTask.id,
+      actionBudget,
       ...extra,
     }
   }

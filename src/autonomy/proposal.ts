@@ -4,6 +4,9 @@ import { fileCollisions, planWaves } from './fleet.ts'
 import { bold, dim, cyan, red, gold } from '../ui/theme.ts'
 import { box, wrapText } from '../ui/layout.ts'
 
+const MAX_PROPOSAL_STEPS = 32
+const MAX_VERIFICATION_COMMANDS = 16
+
 /**
  * Turns whatever the model produced into a validated proposal, or an explanation
  * of what was wrong with it.
@@ -23,6 +26,7 @@ export function parseProposal(raw: unknown): { proposal: Proposal } | { error: s
 
   const rawSteps = Array.isArray(input.steps) ? input.steps : []
   if (rawSteps.length === 0) return { error: 'proposal.steps must contain at least one step' }
+  if (rawSteps.length > MAX_PROPOSAL_STEPS) return { error: `proposal.steps cannot contain more than ${MAX_PROPOSAL_STEPS} steps; split the goal into smaller resumable runs` }
 
   const steps: ProposalStep[] = []
   for (const [index, rawStep] of rawSteps.entries()) {
@@ -73,6 +77,7 @@ export function parseProposal(raw: unknown): { proposal: Proposal } | { error: s
   // only that the workers stopped. Weaker models omit this field even though the
   // schema requires it, so it is enforced here rather than assumed.
   const verification = asStringArray(input.verification)
+  if (verification.length > MAX_VERIFICATION_COMMANDS) return { error: `proposal.verification cannot contain more than ${MAX_VERIFICATION_COMMANDS} commands; choose the highest-value checks` }
   if (verification.length === 0) {
     return {
       error:

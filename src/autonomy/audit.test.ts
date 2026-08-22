@@ -37,6 +37,7 @@ describe('autonomy audit ledger and receipt', () => {
       goal: 'test governed execution',
       outcome: 'needs-attention',
       lessons: ['critical browser actions stay blocked without approval'],
+      actionBudget: { maxActions: 2, consumed: 2, exhausted: true, blockedByBudget: 1 },
       events: [
         { seq: 1, at: Date.now(), kind: 'verify', data: { passed: false, command: 'bun test' } },
       ],
@@ -44,10 +45,12 @@ describe('autonomy audit ledger and receipt', () => {
 
     const receipt = Bun.file(join(runDir, 'receipt.json'))
     expect(await receipt.exists()).toBe(true)
-    const parsed = (await receipt.json()) as { actions: { total: number; blocked: number }; outcome: string }
+    const parsed = (await receipt.json()) as { actions: { total: number; blocked: number }; actionBudget: { maxActions: number; consumed: number; exhausted: boolean; blockedByBudget: number }; outcome: string }
     expect(parsed.outcome).toBe('needs-attention')
     expect(parsed.actions.total).toBe(1)
     expect(parsed.actions.blocked).toBe(1)
+    expect(parsed.actionBudget).toEqual({ maxActions: 2, consumed: 2, exhausted: true, blockedByBudget: 1 })
+    expect(await Bun.file(join(runDir, 'receipt.md')).text()).toContain('**Action budget:** 2/2 consumed (exhausted)')
   })
 
   afterAll(() => {

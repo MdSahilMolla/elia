@@ -49,6 +49,7 @@ export async function runScheduledDaemon(options: ScheduledDaemonOptions = {}): 
         approve: autoApprove,
         profile: claimed.profile,
         maxWallClockMs: claimed.maxRunMs,
+        maxActions: claimed.maxActions,
         governanceMode: 'unattended',
         polish: true,
         signal: options.signal,

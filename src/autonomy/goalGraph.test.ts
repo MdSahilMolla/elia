@@ -104,3 +104,26 @@ describe('durable goal graph', () => {
     expect(classifyFailure('action partially completed').class).toBe('human-review')
   })
 })
+
+
+test('root completion waits for nested delegation and durable action resolution', () => {
+  const { graph } = createGraph()
+  graph.seedProposal(proposal)
+  const planApproval = graph.requestApproval('plan', 'proposal')
+  graph.resolveApproval(planApproval.id, true)
+  for (const step of ['inspect', 'build']) {
+    graph.startNode(`step:${step}`)
+    graph.finishNode(`step:${step}`, { ok: true, report: `${step} complete` })
+  }
+  graph.recordVerification(true, { command: 'bun test', exitCode: 0 })
+  graph.recordReview(true, { verdict: 'approve' })
+  graph.registerDelegationNode({ parentId: 'step:build', id: 'child', title: 'Nested worker', role: 'tester', instructions: 'Check the result.', depth: 1 })
+  expect(() => graph.completeGoal()).toThrow('missing completed nodes')
+  graph.startNode('step:build/child:child')
+  graph.finishNode('step:build/child:child', { ok: true, report: 'child complete' })
+  const action = graph.reserveAction({ name: 'run_command', input: { command: 'bun test' } }, 'step:build')
+  expect(() => graph.completeGoal()).toThrow('missing completed nodes')
+  graph.startAction(action.action.id)
+  graph.finishAction(action.action.id, { ok: true, result: 'verified' })
+  expect(() => graph.completeGoal()).not.toThrow()
+})

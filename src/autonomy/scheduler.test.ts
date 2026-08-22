@@ -48,3 +48,14 @@ describe('durable scheduler', () => {
     expect(store.due(created.nextRunAt)).toHaveLength(1)
   })
 })
+
+
+test('persists a bounded action budget for scheduled runs', () => {
+  const path = join(mkdtempSync(join(tmpdir(), 'elia-schedule-')), 'schedules.json')
+  const store = ScheduleStore.open(path)
+  const created = store.create({ title: 'Bounded', goal: 'Inspect local evidence', intervalMs: MIN_SCHEDULE_INTERVAL_MS, maxActions: 42, now: 1_000 })
+  expect(created.maxActions).toBe(42)
+  expect(ScheduleStore.open(path).list()[0]?.maxActions).toBe(42)
+  expect(() => store.create({ title: 'Invalid', goal: 'x', intervalMs: MIN_SCHEDULE_INTERVAL_MS, maxActions: 0 })).toThrow('between 1 and 10000')
+  expect(() => store.create({ title: 'Invalid', goal: 'x', intervalMs: MIN_SCHEDULE_INTERVAL_MS, maxActions: 10_001 })).toThrow('between 1 and 10000')
+})

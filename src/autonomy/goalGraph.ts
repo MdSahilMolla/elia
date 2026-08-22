@@ -469,11 +469,12 @@ export class GoalGraphStore {
   }
 
   canCompleteGoal(): boolean {
-    const steps = this.snapshot.nodes.filter((node) => node.kind === 'step')
+    const workNodes = this.snapshot.nodes.filter((node) => node.kind === 'step' || node.kind === 'delegation')
     const verification = this.snapshot.evidence.some((evidence) => evidence.kind === 'verification' && evidence.passed)
     const review = this.snapshot.evidence.some((evidence) => evidence.kind === 'review' && evidence.passed)
     const approval = this.snapshot.approvals.some((item) => item.kind === 'plan' && item.status === 'approved')
-    return steps.length > 0 && steps.every((node) => node.status === 'completed') && verification && review && approval
+    const actionsResolved = this.snapshot.actions.every((action) => action.state === 'completed')
+    return workNodes.length > 0 && workNodes.every((node) => node.status === 'completed') && actionsResolved && verification && review && approval
   }
 
   completeGoal(): void {

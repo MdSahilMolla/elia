@@ -119,3 +119,14 @@ test('unattended mode never delegates critical actions to an approval callback',
   expect(result.assessment.decision).toBe('block')
   expect(callbackCalled).toBe(false)
 })
+
+test('bounded action budget stops runaway unattended tool use', async () => {
+  const governor = createActionGovernor({ mode: 'unattended', maxActions: 2 })
+  expect((await governor.check({ name: 'read_file', input: { path: 'README.md' } })).allowed).toBe(true)
+  expect((await governor.check({ name: 'list_files', input: { path: '.' } })).allowed).toBe(true)
+  const exhausted = await governor.check({ name: 'grep', input: { pattern: 'goal', path: '.' } })
+  expect(exhausted.allowed).toBe(false)
+  expect(exhausted.assessment.decision).toBe('block')
+  expect(exhausted.message).toContain('Action budget exhausted')
+  expect(governor.stats()).toEqual({ maxActions: 2, consumed: 2, exhausted: true, blockedByBudget: 1 })
+})

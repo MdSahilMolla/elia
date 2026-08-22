@@ -29,8 +29,16 @@ export interface ActionGateResult {
 
 export type ActionApproval = (assessment: ActionAssessment, request: ActionRequest) => Promise<boolean>
 
+export interface ActionGovernorStats {
+  maxActions: number
+  consumed: number
+  exhausted: boolean
+  blockedByBudget: number
+}
+
 export interface ActionGovernor {
   check(request: ActionRequest): Promise<ActionGateResult>
+  stats(): ActionGovernorStats
 }
 
 const CRITICAL_COMMAND = /\b(rm\s+-rf|rm\s+--no-preserve-root|mkfs|dd\s+if=|shutdown|reboot|poweroff|drop\s+(database|table)|truncate\s+table|git\s+(push|reset\s+--hard|clean\s+-fd)|force[- ]push|sudo\b|chmod\s+777|chown\s+-R|kill\s+-9|kubectl\s+(apply|delete|rollout|scale)|helm\s+(install|upgrade|uninstall)|docker\s+(push|rm|system\s+prune)|terraform\s+(apply|destroy)|prisma\s+migrate\s+(deploy|reset)|alembic\s+upgrade|drizzle-kit\s+push|npm\s+publish|pnpm\s+publish|bun\s+publish|vercel\s+.*--prod|fly\s+deploy|railway\s+up|gcloud\s+.*\bdeploy\b|aws\s+(cloudformation|ecs|rds|lambda)|curl[^\n|]*\|\s*(sh|bash)|wget[^\n|]*\|\s*(sh|bash)|deploy\s+(to\s+)?prod(uction)?|send\s+.*(email|message)|publish\b|tweet\b|buy\b|purchase\b|checkout\b|transfer\b|wire\b)\b/i
@@ -123,13 +131,29 @@ export function assessAction(request: ActionRequest, cwd = currentAgent().cwd ??
   return assessment('critical', 'approve', `unknown tool ${name} has no declared safety contract`, name, resources, false)
 }
 
-export function createActionGovernor(options: { mode?: GovernanceMode; approve?: ActionApproval; cwd?: string } = {}): ActionGovernor {
+export function createActionGovernor(options: { mode?: GovernanceMode; approve?: ActionApproval; cwd?: string; maxActions?: number } = {}): ActionGovernor {
   const mode = options.mode ?? 'unattended'
+  const requestedMaxActions = options.maxActions ?? 0
+  const maxActions = Number.isFinite(requestedMaxActions) && requestedMaxActions > 0
+    ? Math.max(1, Math.min(Math.floor(requestedMaxActions), 10_000))
+    : 0
+  let actionCount = 0
+  let blockedByBudget = 0
   let approvalQueue = Promise.resolve()
 
   return {
+    stats: () => ({ maxActions, consumed: actionCount, exhausted: maxActions > 0 && actionCount >= maxActions, blockedByBudget }),
     async check(request) {
       const assessment = assessAction(request, options.cwd)
+      if (maxActions > 0 && actionCount >= maxActions) {
+        blockedByBudget += 1
+        return {
+          allowed: false,
+          assessment: { ...assessment, decision: 'block' },
+          message: `Action budget exhausted after ${maxActions} tool requests. Resume with a larger bounded budget or split the goal into smaller tasks.`,
+        }
+      }
+      actionCount += 1
       if (assessment.decision === 'allow') return { allowed: true, assessment }
 
       // Unattended mode may continue reversible review work, but it must never

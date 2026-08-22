@@ -15,8 +15,12 @@ test('a submitted critic verdict is preserved', () => {
 })
 
 test('verification fails closed and stops when the governor blocks a command', async () => {
-  const outcome = await runVerification(['echo safe', 'curl -X POST https://example.test --data secret'], undefined, undefined, {
-    async check(request) {
+  const outcome = await runVerification(['echo safe', 'curl -X POST https://example.test --data secret'],     undefined,
+    undefined,
+    {
+      stats: () => ({ maxActions: 0, consumed: 0, exhausted: false, blockedByBudget: 0 }),
+      async check(request) {
+
       const blocked = request.input.command === 'curl -X POST https://example.test --data secret'
       return {
         allowed: !blocked,

@@ -6,6 +6,7 @@ import type { AutonomyProfile, AutonomousRunResult } from './loop.ts'
 export const SCHEDULE_SCHEMA_VERSION = 1
 export const MIN_SCHEDULE_INTERVAL_MS = 60_000
 export const MAX_SCHEDULE_INTERVAL_MS = 30 * 24 * 60 * 60_000
+export const MAX_SCHEDULE_ACTIONS = 10_000
 const DEFAULT_FILE = join(process.cwd(), '.elia', 'schedules.json')
 const LEASE_BUFFER_MS = 60_000
 const STORE_LOCK_TTL_MS = 5 * 60_000
@@ -21,6 +22,7 @@ export interface ScheduleRecord {
   status: ScheduleStatus
   profile: AutonomyProfile
   maxRunMs?: number
+  maxActions?: number
   createdAt: number
   updatedAt: number
   runCount: number
@@ -80,6 +82,7 @@ export class ScheduleStore {
           status: raw.status === 'paused' || raw.status === 'running' ? raw.status : 'active',
           profile: raw.profile === 'fast' || raw.profile === 'thorough' ? raw.profile : 'balanced',
           maxRunMs: typeof raw.maxRunMs === 'number' && Number.isFinite(raw.maxRunMs) ? Math.max(1, Math.min(24 * 60 * 60_000, raw.maxRunMs)) : undefined,
+          maxActions: typeof raw.maxActions === 'number' && Number.isFinite(raw.maxActions) && raw.maxActions > 0 ? Math.max(1, Math.min(MAX_SCHEDULE_ACTIONS, Math.floor(raw.maxActions))) : undefined,
           createdAt: Number.isFinite(raw.createdAt) ? raw.createdAt : Date.now(),
           updatedAt: Number.isFinite(raw.updatedAt) ? raw.updatedAt : Date.now(),
           runCount: Number.isFinite(raw.runCount) ? Math.max(0, raw.runCount) : 0,
@@ -101,12 +104,15 @@ export class ScheduleStore {
     return [...this.records.values()].sort((a, b) => a.nextRunAt - b.nextRunAt).map((record) => structuredClone(record))
   }
 
-  create(input: { title: string; goal: string; intervalMs: number; profile?: AutonomyProfile; maxRunMs?: number; now?: number }): ScheduleRecord {
+  create(input: { title: string; goal: string; intervalMs: number; profile?: AutonomyProfile; maxRunMs?: number; maxActions?: number; now?: number }): ScheduleRecord {
     return this.withExclusiveLock(() => {
       this.reloadFromDisk()
       const now = input.now ?? Date.now()
       if (!Number.isInteger(input.intervalMs) || input.intervalMs < MIN_SCHEDULE_INTERVAL_MS || input.intervalMs > MAX_SCHEDULE_INTERVAL_MS) {
         throw new Error('schedule interval must be between 60s and 30d')
+      }
+      if (input.maxActions !== undefined && (!Number.isInteger(input.maxActions) || input.maxActions < 1 || input.maxActions > MAX_SCHEDULE_ACTIONS)) {
+        throw new Error(`schedule max-actions must be an integer between 1 and ${MAX_SCHEDULE_ACTIONS}`)
       }
       const record: ScheduleRecord = {
         id: `${now.toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
@@ -117,6 +123,7 @@ export class ScheduleStore {
         status: 'active',
         profile: input.profile ?? 'balanced',
         maxRunMs: input.maxRunMs === undefined ? undefined : Math.max(1, Math.min(24 * 60 * 60_000, input.maxRunMs)),
+        maxActions: input.maxActions,
         createdAt: now,
         updatedAt: now,
         runCount: 0,

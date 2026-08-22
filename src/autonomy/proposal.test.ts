@@ -169,3 +169,13 @@ test('the rendered proposal serializes two steps claiming the same file', () => 
   expect(rendered).toContain('2 workers in 2 waves')
   expect(rendered).not.toContain('is claimed by')
 })
+
+test('oversized plans are rejected with resumable split guidance', () => {
+  const steps = Array.from({ length: 33 }, (_, index) => ({ title: `step ${index}`, instructions: 'do bounded work' }))
+  expect(expectError({ ...minimal, steps })).toContain('split the goal into smaller resumable runs')
+})
+
+test('verification command lists are bounded', () => {
+  const verification = Array.from({ length: 17 }, (_, index) => `bun test --filter check-${index}`)
+  expect(expectError({ ...minimal, verification })).toContain('highest-value checks')
+})

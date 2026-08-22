@@ -21,11 +21,13 @@ export interface CompletionInput {
   verificationPassed: boolean
   reviewPassed: boolean
   planApproved: boolean
+  actionBudget?: { maxActions: number; consumed: number; exhausted: boolean; blockedByBudget: number }
 }
 
 export function assessCompletion(input: CompletionInput): CompletionAssessment {
-  const steps = input.graph?.nodes.filter((node) => node.kind === 'step') ?? []
+  const steps = input.graph?.nodes.filter((node) => node.kind === 'step' || node.kind === 'delegation') ?? []
   const completedSteps = steps.filter((node) => node.status === 'completed').length
+  const unresolvedActions = input.graph?.actions.filter((action) => action.state !== 'completed') ?? []
   const pendingApprovals = input.graph?.approvals.filter((approval) => approval.status === 'pending').length ?? 0
   const blockers: string[] = []
   const evidence: string[] = []
@@ -34,12 +36,14 @@ export function assessCompletion(input: CompletionInput): CompletionAssessment {
   if (input.planApproved) evidence.push('The execution plan was approved.')
   else blockers.push('The execution plan does not have an approved durable approval record.')
   if (steps.length > 0 && completedSteps === steps.length) evidence.push(`All ${steps.length} planned step(s) completed.`)
-  else blockers.push(`${completedSteps} of ${steps.length} planned step(s) completed.`)
+  else blockers.push(`${completedSteps} of ${steps.length} planned work node(s) completed.`)
+  if (unresolvedActions.length > 0) blockers.push(`${unresolvedActions.length} durable action(s) remain unresolved.`)
   if (input.verificationPassed) evidence.push('Verification commands passed.')
   else blockers.push('Verification commands did not pass or were not completed.')
   if (input.reviewPassed) evidence.push('Structured review passed.')
   else blockers.push('Structured review did not pass or was not completed.')
   if (pendingApprovals > 0) blockers.push(`${pendingApprovals} approval(s) remain pending.`)
+  if ((input.actionBudget?.blockedByBudget ?? 0) > 0) blockers.push(`The autonomous action budget was exhausted after ${input.actionBudget?.consumed ?? 0} governed request(s).`)
 
   let state: CompletionState
   let confidence: CompletionConfidence
@@ -51,11 +55,11 @@ export function assessCompletion(input: CompletionInput): CompletionAssessment {
     state = 'blocked'
     confidence = 'low'
     nextActions.push('Resolve the outstanding approval or revise and approve the plan before execution.')
-  } else if (input.outcome === 'completed' && completedSteps === steps.length && steps.length > 0 && input.verificationPassed && input.reviewPassed) {
+  } else if (input.outcome === 'completed' && completedSteps === steps.length && steps.length > 0 && unresolvedActions.length === 0 && input.verificationPassed && input.reviewPassed && (input.actionBudget?.blockedByBudget ?? 0) === 0) {
     state = 'verified'
     confidence = 'high'
     nextActions.push('Review the receipt and accept the verified result, or provide a new goal for follow-up work.')
-  } else if (completedSteps > 0 || input.verificationPassed || input.reviewPassed) {
+  } else if (completedSteps > 0 || input.verificationPassed || input.reviewPassed || (input.actionBudget?.blockedByBudget ?? 0) > 0) {
     state = input.outcome === 'needs-attention' ? 'failed' : 'partial'
     confidence = 'medium'
     nextActions.push('Inspect the receipt, address the listed blockers, and resume or retry only the incomplete work.')

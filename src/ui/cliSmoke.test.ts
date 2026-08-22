@@ -39,6 +39,7 @@ test('help documents autonomous budget and agent dry-run controls', async () => 
   const result = await runCli(['--help', '--plain'])
   expect(result.code).toBe(0)
   expect(result.stdout).toContain('--max-run-ms')
+  expect(result.stdout).toContain('--max-actions')
   expect(result.stdout).toContain('--dry-run')
   expect(result.stdout).toContain('Office workflows:')
   expect(result.stdout).toContain('spreadsheet')
@@ -55,4 +56,10 @@ test('invalid autonomous wall-clock budget fails before execution', async () => 
   const result = await runCli(['auto', 'do work', '--max-run-ms', '0', '--plain'])
   expect(result.code).toBe(1)
   expect(result.stderr).toContain('--max-run-ms must be a positive integer')
+})
+
+test('invalid autonomous action budget fails before execution', async () => {
+  const result = await runCli(['auto', 'do work', '--max-actions', '0', '--plain'])
+  expect(result.code).toBe(1)
+  expect(result.stderr).toContain('--max-actions must be a positive integer')
 })

@@ -79,6 +79,7 @@ Autonomous work:
   elia auto "<goal>" --fast          Bounded fast path: no polish, one reviewer, one repair, no lesson pass
   elia auto "<goal>" --thorough      Extra bounded review and repair depth for high-risk changes
   elia auto "<goal>" --max-run-ms N  Abort the run after N milliseconds (also ELIA_MAX_RUN_MS)
+  elia auto "<goal>" --max-actions N  Bound governed tool requests for this run
   elia auto "<goal>" --variants N   Run N independent implementation attempts in parallel,
                                      each in its own isolated git worktree, and keep only
                                      the one that verification — not an LLM's opinion — likes
@@ -116,7 +117,7 @@ Time travel:
   elia resume <id>            Continue a durable goal from its persisted graph and approvals
 
 Background autonomy:
-  elia schedule add --every 1h "<goal>"  Persist a recurring goal for the local daemon
+  elia schedule add --every 1h [--max-actions N] "<goal>"  Persist a recurring goal for the local daemon
   elia schedule list                       Show scheduled goals and last outcomes
   elia schedule pause|resume|remove <id>  Control a scheduled goal
   elia schedule run <id>                   Run one scheduled goal immediately
@@ -157,6 +158,7 @@ Inside an interactive session:
   elia --quiet                Print the final answer and essential failures only
   elia --verbose              Include detailed progress output
   ELIA_MAX_RUN_MS             Default wall-clock budget for autonomous runs; --max-run-ms overrides it
+  --max-actions <n>            Bound governed tool requests for one autonomous run
   ELIA_TOOL_CONCURRENCY       Read-only tool batches can use up to 8; mutating batches stay capped at 4
   elia --help                 Show this help
   elia --version              Print the version
@@ -248,7 +250,7 @@ async function runAgentCommand(): Promise<void> {
 
 async function runAuto(): Promise<void> {
   const { runAutonomousTask, autoApprove } = await import('./autonomy/loop.ts')
-  const goal = positionals(['--variants', '--run-id']).join(' ').trim()
+  const goal = positionals(['--variants', '--run-id', '--max-run-ms', '--max-actions']).join(' ').trim()
   if (!goal) {
     writeError('Give elia a goal: elia auto "add rate limiting to the API client"')
     process.exitCode = 1
@@ -264,6 +266,14 @@ async function runAuto(): Promise<void> {
     return
   }
   if (resumeGraph) writeNotice(`resuming durable run: ${resumeRunId}`)
+  const maxActionsRaw = flagValue('--max-actions')
+  const maxActions = maxActionsRaw === undefined ? undefined : Number.parseInt(maxActionsRaw, 10)
+  if (maxActionsRaw !== undefined && (!Number.isInteger(maxActions) || maxActions! < 1)) {
+    writeError(`--max-actions must be a positive integer, got "${maxActionsRaw}"`)
+    process.exitCode = 1
+    return
+  }
+  if (maxActions !== undefined) writeNotice(`action budget: ${maxActions} governed tool requests`)
   const maxRunMsRaw = flagValue('--max-run-ms')
   const maxRunMs = maxRunMsRaw === undefined ? undefined : Number.parseInt(maxRunMsRaw, 10)
   if (maxRunMsRaw !== undefined && (!Number.isInteger(maxRunMs) || maxRunMs! < 1)) {
@@ -300,7 +310,7 @@ async function runAuto(): Promise<void> {
   let rl: readline.Interface | undefined
   try {
     if (yolo) {
-      const result = await runAutonomousTask({ goal, approve: autoApprove, variants, profile, resumeGraph, runId: resumeRunId, polish: !hasFlag('--no-polish'), governanceMode: 'unattended', signal: controller.signal, maxWallClockMs: maxRunMs })
+      const result = await runAutonomousTask({ goal, approve: autoApprove, variants, profile, resumeGraph, runId: resumeRunId, polish: !hasFlag('--no-polish'), governanceMode: 'unattended', signal: controller.signal, maxWallClockMs: maxRunMs, maxActions })
       if (result.outcome !== 'completed') process.exitCode = 1
       return
     }
@@ -313,7 +323,7 @@ async function runAuto(): Promise<void> {
       const result = await confirmOnce(interactiveRl, label)
       return result.action === 'approve'
     }
-    const result = await runAutonomousTask({ goal, approve: createInteractiveApprover(interactiveRl), variants, profile, resumeGraph, runId: resumeRunId, polish: !hasFlag('--no-polish'), governanceMode: 'supervised', approveAction, signal: controller.signal, maxWallClockMs: maxRunMs })
+    const result = await runAutonomousTask({ goal, approve: createInteractiveApprover(interactiveRl), variants, profile, resumeGraph, runId: resumeRunId, polish: !hasFlag('--no-polish'), governanceMode: 'supervised', approveAction, signal: controller.signal, maxWallClockMs: maxRunMs, maxActions })
     if (result.outcome !== 'completed' && result.outcome !== 'rejected') process.exitCode = 1
   } finally {
     rl?.close()
@@ -426,8 +436,8 @@ async function runSkills(): Promise<void> {
 }
 
 async function runSchedule(): Promise<void> {
-  const { ScheduleStore, formatScheduleInterval, parseScheduleInterval } = await import('./autonomy/scheduler.ts')
-  const action = positionals(['--every', '--title', '--profile', '--max-run-ms'])[0] ?? 'list'
+  const { MAX_SCHEDULE_ACTIONS, ScheduleStore, formatScheduleInterval, parseScheduleInterval } = await import('./autonomy/scheduler.ts')
+  const action = positionals(['--every', '--title', '--profile', '--max-run-ms', '--max-actions'])[0] ?? 'list'
   const store = ScheduleStore.open()
 
   if (action === 'list') {
@@ -437,8 +447,8 @@ async function runSchedule(): Promise<void> {
       return
     }
     for (const line of table(
-      [{ header: 'id' }, { header: 'title' }, { header: 'status' }, { header: 'every' }, { header: 'next run' }, { header: 'runs', align: 'right' }, { header: 'last outcome' }, { header: 'goal' }],
-      records.map((record) => [record.id, record.title, record.status, formatScheduleInterval(record.intervalMs), new Date(record.nextRunAt).toISOString(), String(record.runCount), record.lastOutcome ?? '—', record.goal.slice(0, 60)]),
+      [{ header: 'id' }, { header: 'title' }, { header: 'status' }, { header: 'every' }, { header: 'actions' }, { header: 'next run' }, { header: 'runs', align: 'right' }, { header: 'last outcome' }, { header: 'goal' }],
+      records.map((record) => [record.id, record.title, record.status, formatScheduleInterval(record.intervalMs), record.maxActions ? String(record.maxActions) : 'profile default', new Date(record.nextRunAt).toISOString(), String(record.runCount), record.lastOutcome ?? '—', record.goal.slice(0, 60)]),
     )) writeUsageLine(`  ${line}`)
     return
   }
@@ -478,10 +488,10 @@ async function runSchedule(): Promise<void> {
     return
   }
 
-  const goal = positionals(['--every', '--title', '--profile', '--max-run-ms']).slice(1).join(' ').trim()
+  const goal = positionals(['--every', '--title', '--profile', '--max-run-ms', '--max-actions']).slice(1).join(' ').trim()
   const every = flagValue('--every')
   if (!goal || !every) {
-    writeError('Usage: elia schedule add --every 1h [--title "Short title"] "<goal>"')
+    writeError('Usage: elia schedule add --every 1h [--title "Short title"] [--max-actions N] "<goal>"')
     process.exitCode = 1
     return
   }
@@ -507,7 +517,14 @@ async function runSchedule(): Promise<void> {
     process.exitCode = 1
     return
   }
-  const record = store.create({ title: flagValue('--title') ?? goal.slice(0, 80), goal, intervalMs, profile, maxRunMs })
+  const maxActionsRaw = flagValue('--max-actions')
+  const maxActions = maxActionsRaw === undefined ? undefined : Number.parseInt(maxActionsRaw, 10)
+  if (maxActionsRaw !== undefined && (!Number.isInteger(maxActions) || maxActions! < 1 || maxActions! > MAX_SCHEDULE_ACTIONS)) {
+    writeError(`--max-actions must be an integer between 1 and ${MAX_SCHEDULE_ACTIONS}`)
+    process.exitCode = 1
+    return
+  }
+  const record = store.create({ title: flagValue('--title') ?? goal.slice(0, 80), goal, intervalMs, profile, maxRunMs, maxActions })
   writeNotice(`Scheduled ${record.title} every ${formatScheduleInterval(record.intervalMs)}. id=${record.id}`)
   writeNotice('Run it with: elia daemon --once')
 }

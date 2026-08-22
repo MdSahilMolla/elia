@@ -45,6 +45,7 @@ export interface RunReceiptInput {
   usage?: Usage
   elapsedMs?: number
   maxWallClockMs?: number
+  actionBudget?: { maxActions: number; consumed: number; exhausted: boolean; blockedByBudget: number }
   completion?: CompletionAssessment
 }
 
@@ -114,6 +115,7 @@ export function writeRunReceipt(input: RunReceiptInput): void {
     completedAt: Date.now(),
     elapsedMs: input.elapsedMs,
     maxWallClockMs: input.maxWallClockMs,
+    actionBudget: input.actionBudget,
     usage: input.usage,
     proposal: input.proposal
       ? {
@@ -199,6 +201,7 @@ function renderReceipt(receipt: {
   uncertainty: string[]
   elapsedMs?: number
   maxWallClockMs?: number
+  actionBudget?: { maxActions: number; consumed: number; exhausted: boolean; blockedByBudget: number }
   actions: { total: number; failed: number; blocked: number; irreversible: number; replayed?: number; humanReview?: number; retryable?: number }
   graph?: { nodes: { id: string; status: string; attempts: number }[]; pendingApprovals: number; recoveredNodes?: number; activeLeases?: number; retryableActions?: number; humanReviewActions?: number; contractedActions?: number; preconditionFailures?: { id: string; tool: string; failures: string[]; nextAction?: string }[]; postconditionFailures?: { id: string; tool: string; failures: string[]; nextAction?: string }[]; takeoverActions?: { id: string; tool: string; state: string; error?: string }[] }
   completion?: CompletionAssessment
@@ -222,6 +225,7 @@ function renderReceipt(receipt: {
     `- **Goal:** ${receipt.goal}`,
     `- **Elapsed:** ${receipt.elapsedMs === undefined ? 'unknown' : `${(receipt.elapsedMs / 1000).toFixed(1)}s`}${receipt.maxWallClockMs ? ` / budget ${(receipt.maxWallClockMs / 1000).toFixed(1)}s` : ''}`,
     `- **Actions:** ${receipt.actions.total} (${receipt.actions.failed} failed, ${receipt.actions.blocked} blocked)`,
+    ...(receipt.actionBudget ? [`- **Action budget:** ${receipt.actionBudget.consumed}/${receipt.actionBudget.maxActions || 'unlimited'} consumed${receipt.actionBudget.exhausted ? ' (exhausted)' : ''}`] : []),
     `- **Irreversible actions:** ${receipt.actions.irreversible}`,
     `- **Replayed idempotent actions:** ${receipt.actions.replayed ?? 0}`,
     `- **Human-review actions:** ${receipt.actions.humanReview ?? 0}`,
