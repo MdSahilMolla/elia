@@ -115,6 +115,8 @@ export async function runFleet(options: FleetRunOptions): Promise<FleetResult> {
       parentId: options.parentNodeId,
       depth: options.delegationDepth ?? 0,
       role: item.role,
+      acceptanceCriteria: item.acceptanceCriteria,
+      verificationCommands: item.verificationCommands,
     })
     taskSessions.update(task.id, { status: 'running', action: 'Starting worker', detail: `Role: ${item.role}` })
 
@@ -190,20 +192,41 @@ export async function runFleet(options: FleetRunOptions): Promise<FleetResult> {
     )
 
     if (nodeHeartbeat) clearInterval(nodeHeartbeat)
+    let verificationPassed: boolean | undefined
+    let verificationReport: string | undefined
     if (result.ok && item.verificationCommands?.length) {
       const verification = await runVerification(item.verificationCommands, cwd, signal, options.governor)
-      const verificationReport = verification.passed ? `Verification passed: ${item.verificationCommands.join(' && ')}` : `Verification failed:\n${verification.results.map((check) => `${check.command}: ${check.timedOut ? 'timed out' : `exit ${check.exitCode}`}`).join('\n')}`
+      verificationPassed = verification.passed
+      verificationReport = verification.passed ? `Verification passed: ${item.verificationCommands.join(' && ')}` : `Verification failed:\n${verification.results.map((check) => `${check.command}: ${check.timedOut ? 'timed out' : `exit ${check.exitCode}`}`).join('\n')}`
       result = { ...result, ok: verification.passed, report: `${result.report}\n\n${verificationReport}` }
     }
-    board?.update(item.workerName, result.ok ? 'done' : 'failed', `${result.steps} steps`)
+    const needsReview = !result.ok && verificationPassed === false
+    board?.update(item.workerName, result.ok ? 'done' : needsReview ? 'failed' : 'failed', `${result.steps} steps`)
     taskSessions.update(task.id, {
-      status: result.ok ? 'done' : 'failed',
-      action: result.ok ? 'Finished' : 'Stopped early',
+      status: result.ok ? 'done' : needsReview ? 'needs-review' : 'failed',
+      action: result.ok ? 'Finished and verified' : needsReview ? 'Verification needs review' : 'Stopped early',
       detail: result.report.slice(0, 1000),
-      error: result.ok ? undefined : 'Worker stopped before completing its assignment',
+      stepsCompleted: result.steps,
+      progress: result.ok ? 1 : 0,
+      nextAction: result.ok ? undefined : needsReview ? 'Inspect the failed verification output, repair the assignment, and retry the incomplete work.' : 'Inspect the worker report and retry only after addressing the reported failure.',
+      blockedReason: result.ok ? undefined : needsReview ? verificationReport : undefined,
+      error: result.ok ? undefined : result.report.slice(0, 2000),
     })
     if (options.graph && options.parentNodeId) {
-      options.graph.finishNode(childNodeId, { ok: result.ok, report: result.report, error: result.ok ? undefined : result.report })
+      options.graph.finishNode(childNodeId, {
+        ok: result.ok,
+        report: result.report,
+        error: result.ok ? undefined : needsReview ? `retryable verification failure: ${verificationReport ?? result.report}` : result.report,
+        evidence: [{
+          id: `evidence:worker:${childNodeId}:${options.graph.node(childNodeId)?.attemptCount ?? 0}`,
+          nodeId: childNodeId,
+          kind: 'action',
+          passed: result.ok,
+          summary: result.ok ? `${item.title} completed and verified by ${item.workerName}` : `${item.title} did not satisfy its worker contract`,
+          data: { worker: item.workerName, steps: result.steps, report: result.report, verificationPassed },
+          at: Date.now(),
+        }],
+      })
     }
     journal?.append('step-end', {
       id: item.id,

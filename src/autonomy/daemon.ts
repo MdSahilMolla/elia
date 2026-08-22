@@ -53,7 +53,11 @@ export async function runScheduledDaemon(options: ScheduledDaemonOptions = {}): 
         polish: true,
         signal: options.signal,
       })
-      store.complete(claimed.id, { runId: result.runId, outcome: result.outcome, error: result.completion.blockers.join('; ') || undefined })
+      store.complete(claimed.id, {
+        runId: result.runId,
+        outcome: result.outcome,
+        error: result.outcome === 'completed' ? undefined : result.completion.blockers.join('; ') || result.completion.nextActions[0],
+      })
       emitEvent('scheduler_finished', { scheduleId: claimed.id, runId: result.runId, outcome: result.outcome, completion: result.completion })
       writeNotice(`Scheduled goal finished: ${result.outcome} (${result.completion.state})`)
     } catch (error) {

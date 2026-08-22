@@ -544,8 +544,8 @@ async function runRuns(): Promise<void> {
     return
   }
   for (const line of table(
-    [{ header: 'id' }, { header: 'outcome' }, { header: 'checkpoints', align: 'right' }, { header: 'recovered', align: 'right' }, { header: 'goal' }],
-    runs.map((run) => [run.runId, run.outcome, String(run.checkpoints), String(run.recoveredNodes ?? 0), run.goal.slice(0, 60)]),
+    [{ header: 'id' }, { header: 'outcome' }, { header: 'checkpoints', align: 'right' }, { header: 'recovered', align: 'right' }, { header: 'task' }, { header: 'goal' }],
+    runs.map((run) => [run.runId, run.outcome, String(run.checkpoints), String(run.recoveredNodes ?? 0), run.taskSessionId ?? '—', run.goal.slice(0, 60)]),
   )) {
     writeUsageLine(`  ${line}`)
   }
@@ -663,7 +663,6 @@ async function runInteractive(): Promise<void> {
     await import('./checkpoint.ts')
   const { setActiveLedgerSession, countEpisodes } = await import('./ledger.ts')
   const { renderContextStatus } = await import('./compaction.ts')
-  await taskSessions.load()
 
   const continueFlag = hasFlag('--continue', '-c')
   const resumeId = flagValue('--resume')
@@ -1146,6 +1145,7 @@ async function main() {
   if (skills.loaded.length > 0 && subcommand !== 'skills') {
     writeUsageLine(`${skills.loaded.length} learned tool(s): ${skills.loaded.map((skill) => skill.name).join(', ')}`)
   }
+  await taskSessions.load()
 
   switch (subcommand) {
     case 'auto':

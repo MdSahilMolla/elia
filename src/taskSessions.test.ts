@@ -86,3 +86,73 @@ test('persists and reloads task sessions while ignoring malformed history', asyn
     await rm(dir, { recursive: true, force: true })
   }
 })
+
+test('persists acceptance metadata and explicit needs-review recovery guidance', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'elia-task-review-'))
+  const file = join(dir, 'tasks.json')
+  try {
+    const store = new TaskSessionStore()
+    const task = store.create('code', 'Autonomous implementation', 'Queued', {
+      role: 'lead',
+      acceptanceCriteria: ['the artifact exists'],
+      verificationCommands: ['bun test'],
+    })
+    store.update(task.id, {
+      status: 'needs-review',
+      action: 'Verification needs review',
+      nextAction: 'Inspect the failed verification output and retry the incomplete work.',
+      blockedReason: 'bun test exited 1',
+      error: 'The worker did not satisfy its contract.',
+    })
+    await Bun.write(file, JSON.stringify([...store.list()]))
+
+    const restored = new TaskSessionStore()
+    await restored.load(file)
+    expect(restored.get(task.id)).toMatchObject({
+      status: 'needs-review',
+      acceptanceCriteria: ['the artifact exists'],
+      verificationCommands: ['bun test'],
+      nextAction: 'Inspect the failed verification output and retry the incomplete work.',
+      blockedReason: 'bun test exited 1',
+    })
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('recovers stale running tasks into needs-review with a resume action', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'elia-task-stale-'))
+  const file = join(dir, 'tasks.json')
+  try {
+    const staleAt = Date.now() - 10 * 60_000
+    await Bun.write(file, JSON.stringify({
+      version: 3,
+      tasks: [{
+        id: 'stale-task',
+        kind: 'code',
+        title: 'Interrupted build',
+        status: 'running',
+        action: 'Running tests',
+        detail: 'The previous process stopped.',
+        createdAt: staleAt,
+        updatedAt: staleAt,
+        startedAt: staleAt,
+        stepsCompleted: 1,
+        progress: 0.5,
+        attempts: 1,
+        lastHeartbeatAt: staleAt,
+      }],
+    }))
+
+    const store = new TaskSessionStore()
+    await store.load(file)
+    expect(store.get('stale-task')).toMatchObject({
+      status: 'needs-review',
+      action: 'Recovered interrupted task',
+      nextAction: 'Inspect the run receipt and resume only the incomplete work.',
+      blockedReason: 'The previous process stopped without a fresh heartbeat.',
+    })
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})

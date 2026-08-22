@@ -153,6 +153,7 @@ export interface RunSummary {
   updatedAt: number
   checkpoints: number
   outcome: string
+  taskSessionId?: string
   recoveredNodes?: number
 }
 
@@ -169,8 +170,8 @@ export function listRuns(limit = 20): RunSummary[] {
       const graphPath = join(paths.runs, runId, 'goal-graph.json')
       if (existsSync(graphPath)) {
         try {
-          const graph = JSON.parse(readFileSync(graphPath, 'utf8')) as { nodes?: Array<{ lastError?: { reason?: string } }> }
-          recoveredNodes = graph.nodes?.filter((node) => node.lastError?.reason?.includes('stale execution lease recovered')).length ?? 0
+          const graph = JSON.parse(readFileSync(graphPath, 'utf8')) as { nodes?: Array<{ lastError?: { message?: string } }> }
+          recoveredNodes = graph.nodes?.filter((node) => node.lastError?.message?.includes('stale execution lease recovered')).length ?? 0
         } catch {
           recoveredNodes = 0
         }
@@ -182,6 +183,7 @@ export function listRuns(limit = 20): RunSummary[] {
         updatedAt: events.at(-1)?.at ?? 0,
         checkpoints: events.filter((event) => event.kind === 'checkpoint').length,
         outcome: typeof end?.data.outcome === 'string' ? end.data.outcome : 'incomplete',
+        taskSessionId: typeof end?.data.taskSessionId === 'string' ? end.data.taskSessionId : undefined,
         recoveredNodes,
       }
     })

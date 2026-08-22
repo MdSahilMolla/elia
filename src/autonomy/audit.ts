@@ -36,6 +36,7 @@ export interface RunReceiptInput {
   runId: string
   goal: string
   outcome: string
+  taskSessionId?: string
   proposal?: Proposal
   verdict?: CriticVerdict
   lessons?: string[]
@@ -107,6 +108,7 @@ export function writeRunReceipt(input: RunReceiptInput): void {
     runId: input.runId,
     goal: input.goal,
     outcome: input.outcome,
+    taskSessionId: input.taskSessionId,
     completion: input.completion,
     createdAt: actions[0]?.at ?? Date.now(),
     completedAt: Date.now(),
@@ -192,6 +194,7 @@ function renderReceipt(receipt: {
   runId: string
   goal: string
   outcome: string
+  taskSessionId?: string
   verification: Record<string, unknown>[]
   uncertainty: string[]
   elapsedMs?: number
@@ -214,6 +217,7 @@ function renderReceipt(receipt: {
     '',
     `- **Run:** ${receipt.runId}`,
     `- **Outcome:** ${receipt.outcome}`,
+    ...(receipt.taskSessionId ? [`- **Task session:** ${receipt.taskSessionId}`] : []),
     ...(receipt.completion ? [`- **Completion state:** ${receipt.completion.state} (${receipt.completion.confidence} confidence)`, `- **Completion:** ${receipt.completion.summary}`, `- **Evidence:** ${receipt.completion.evidence.length > 0 ? receipt.completion.evidence.join('; ') : 'none'}`, `- **Blockers:** ${receipt.completion.blockers.length > 0 ? receipt.completion.blockers.join('; ') : 'none'}`, `- **Next actions:** ${receipt.completion.nextActions.join('; ')}`] : []),
     `- **Goal:** ${receipt.goal}`,
     `- **Elapsed:** ${receipt.elapsedMs === undefined ? 'unknown' : `${(receipt.elapsedMs / 1000).toFixed(1)}s`}${receipt.maxWallClockMs ? ` / budget ${(receipt.maxWallClockMs / 1000).toFixed(1)}s` : ''}`,

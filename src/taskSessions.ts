@@ -55,6 +55,7 @@ export type TaskSessionListener = (sessions: TaskSession[]) => void
 
 const TASKS_FILE = join(process.cwd(), '.elia', 'tasks.json')
 const TASKS_SCHEMA_VERSION = 3
+const STALE_TASK_HEARTBEAT_MS = 5 * 60_000
 
 export class TaskSessionStore {
   private readonly records = new Map<string, TaskSession>()
@@ -73,13 +74,20 @@ export class TaskSessionStore {
       if (records.length === 0 && !Array.isArray(parsed) && !parsed?.tasks) return
       for (const item of records) {
         if (!item || typeof item.id !== 'string' || typeof item.title !== 'string') continue
+        const lastHeartbeatAt = typeof item.lastHeartbeatAt === 'number' && Number.isFinite(item.lastHeartbeatAt)
+          ? item.lastHeartbeatAt
+          : typeof item.updatedAt === 'number' && Number.isFinite(item.updatedAt)
+            ? item.updatedAt
+            : undefined
+        const stale = item.status === 'running' && lastHeartbeatAt !== undefined && Date.now() - lastHeartbeatAt > STALE_TASK_HEARTBEAT_MS
+        const recoveredStatus: TaskStatus = stale ? 'needs-review' : item.status === 'running' || item.status === 'paused' || item.status === 'waiting-input' || item.status === 'waiting-approval' || item.status === 'needs-review' || item.status === 'done' || item.status === 'failed' ? item.status : 'pending'
         this.records.set(item.id, {
           id: item.id,
           kind: item.kind === 'browser' || item.kind === 'code' || item.kind === 'data' || item.kind === 'finance' || item.kind === 'production' || item.kind === 'research' || item.kind === 'communication' || item.kind === 'automation' ? item.kind : 'pending',
           title: item.title,
-          status: item.status === 'running' || item.status === 'paused' || item.status === 'waiting-input' || item.status === 'waiting-approval' || item.status === 'needs-review' || item.status === 'done' || item.status === 'failed' ? item.status : 'pending',
-          action: typeof item.action === 'string' ? item.action : '',
-          detail: typeof item.detail === 'string' ? item.detail : '',
+          status: recoveredStatus,
+          action: stale ? 'Recovered interrupted task' : typeof item.action === 'string' ? item.action : '',
+          detail: stale ? 'No heartbeat was recorded before the previous process stopped.' : typeof item.detail === 'string' ? item.detail : '',
           createdAt: Number.isFinite(item.createdAt) ? item.createdAt : Date.now(),
           updatedAt: Number.isFinite(item.updatedAt) ? item.updatedAt : Date.now(),
           startedAt: item.startedAt,
@@ -89,17 +97,18 @@ export class TaskSessionStore {
           progress: typeof item.progress === 'number' && Number.isFinite(item.progress) ? Math.max(0, Math.min(1, item.progress)) : 0,
           attempts: Number.isFinite(item.attempts) ? Math.max(0, item.attempts) : 0,
           lastHeartbeatAt: Number.isFinite(item.lastHeartbeatAt) ? item.lastHeartbeatAt : undefined,
-          nextAction: typeof item.nextAction === 'string' ? redactText(item.nextAction, 500) : undefined,
-          blockedReason: typeof item.blockedReason === 'string' ? redactText(item.blockedReason, 1000) : undefined,
+          nextAction: stale ? 'Inspect the run receipt and resume only the incomplete work.' : typeof item.nextAction === 'string' ? redactText(item.nextAction, 500) : undefined,
+          blockedReason: stale ? 'The previous process stopped without a fresh heartbeat.' : typeof item.blockedReason === 'string' ? redactText(item.blockedReason, 1000) : undefined,
           acceptanceCriteria: Array.isArray(item.acceptanceCriteria) ? item.acceptanceCriteria.filter((value): value is string => typeof value === 'string').slice(0, 20) : undefined,
           verificationCommands: Array.isArray(item.verificationCommands) ? item.verificationCommands.filter((value): value is string => typeof value === 'string').slice(0, 20) : undefined,
-          error: typeof item.error === 'string' ? redactText(item.error, 2000) : undefined,
+          error: stale ? 'Task was interrupted before completion.' : typeof item.error === 'string' ? redactText(item.error, 2000) : undefined,
           parentId: typeof item.parentId === 'string' ? item.parentId : undefined,
           depth: Number.isFinite(item.depth) ? item.depth : undefined,
           role: typeof item.role === 'string' ? item.role : undefined,
         })
       }
-      this.emit()
+      // Loading is intentionally silent. Subscribers receive the complete loaded
+      // snapshot when they subscribe, and CLI JSONL startup must remain stable.
     } catch {
       // Corrupt task history must not prevent Elia from starting. A new task will
       // overwrite the file with a valid snapshot on the next mutation.

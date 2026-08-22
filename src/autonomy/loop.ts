@@ -34,6 +34,7 @@ import { appendActionAudit, writeRunReceipt } from './audit.ts'
 import { createActionGovernor, withActionGovernor, type ActionApproval, type ActionGovernor, type GovernanceMode } from './governor.ts'
 import { GoalGraphStore, withGoalGraph, type GoalGraphStore as GoalGraphStoreType } from './goalGraph.ts'
 import { assessCompletion, type CompletionAssessment } from './outcome.ts'
+import { inferTaskKind, taskSessions } from '../taskSessions.ts'
 
 export type ApprovalDecision =
   | { action: 'approve' }
@@ -111,6 +112,7 @@ export interface AutonomousRunResult {
   elapsedMs: number
   lessons: string[]
   completion: CompletionAssessment
+  taskSessionId?: string
 }
 
 const PLANNER_PROMPT = `${DEV_SYSTEM_PROMPT}
@@ -163,14 +165,18 @@ export async function runAutonomousTask(options: AutonomousRunOptions): Promise<
   const profile = options.profile ?? 'balanced'
   const configuredWallClockMs = options.maxWallClockMs ?? (Number.parseInt(process.env.ELIA_MAX_RUN_MS ?? '0', 10) || 0)
   const maxWallClockMs = Math.max(0, Math.min(configuredWallClockMs, 24 * 60 * 60_000))
-  const budgetController = maxWallClockMs > 0 ? new AbortController() : undefined
-  const runSignal = budgetController?.signal ?? signal
-  const forwardAbort = signal && budgetController ? () => budgetController.abort() : undefined
-  if (forwardAbort && signal) {
+  const runController = new AbortController()
+  const runSignal = runController.signal
+  let deadlineTriggered = false
+  const forwardAbort = () => runController.abort()
+  if (signal) {
     if (signal.aborted) forwardAbort()
     else signal.addEventListener('abort', forwardAbort, { once: true })
   }
-  const budgetTimer = budgetController ? setTimeout(() => budgetController.abort(), maxWallClockMs) : undefined
+  const budgetTimer = maxWallClockMs > 0 ? setTimeout(() => {
+    deadlineTriggered = true
+    runController.abort()
+  }, maxWallClockMs) : undefined
   const defaults = autonomyProfileDefaults(profile)
   const maxRepairAttempts = options.maxRepairAttempts ?? defaults.maxRepairAttempts
   const maxAmendments = options.maxAmendments ?? defaults.maxAmendments
@@ -179,6 +185,18 @@ export async function runAutonomousTask(options: AutonomousRunOptions): Promise<
   const captureLearning = options.learn ?? defaults.learn
   const runId = options.runId ?? newRunId()
   const startedAt = Date.now()
+  const parentTask = taskSessions.create(inferTaskKind(goal, goal), `Autonomous: ${goal}`, 'Queued autonomous execution', { role: 'lead' })
+  taskSessions.update(parentTask.id, { status: 'running', action: 'Orienting', detail: 'Inspecting the environment and preparing a durable plan' })
+  const unregisterParentControls = taskSessions.registerControls(parentTask.id, {
+    cancel: () => {
+      taskSessions.update(parentTask.id, { status: 'paused', action: 'Stopping', detail: 'Cancellation requested by operator', nextAction: 'Resume the durable run after reviewing its receipt.' })
+      runController.abort()
+    },
+    pause: () => {
+      taskSessions.update(parentTask.id, { status: 'paused', action: 'Pausing', detail: 'Pause requested by operator', nextAction: 'Resume the durable run after reviewing its receipt.' })
+      runController.abort()
+    },
+  })
   const governor = createActionGovernor({ mode: options.governanceMode ?? 'unattended', approve: options.approveAction })
 
   const journal = createJournal(runId, goal)
@@ -199,30 +217,55 @@ export async function runAutonomousTask(options: AutonomousRunOptions): Promise<
     extra: Partial<AutonomousRunResult> = {},
   ): AutonomousRunResult => {
     if (budgetTimer) clearTimeout(budgetTimer)
-    if (forwardAbort) signal?.removeEventListener('abort', forwardAbort)
-    if (outcome === 'aborted' && budgetController?.signal.aborted && !signal?.aborted) {
+    if (outcome === 'aborted' && deadlineTriggered && !signal?.aborted) {
       journal.append('phase', { phase: 'budget', maxWallClockMs })
     }
+
+    let finalOutcome = outcome
     if (outcome === 'completed') {
       try {
         graph.completeGoal()
-      } catch {
-        // Preserve the run result while leaving the graph visibly incomplete for resume.
+      } catch (error) {
+        finalOutcome = 'needs-attention'
+        journal.append('phase', { phase: 'completion-blocked', reason: error instanceof Error ? error.message : String(error) })
       }
-    } else if (outcome === 'needs-attention' || outcome === 'aborted') {
-      graph.failRun(outcome)
     }
-    const completion = assessCompletion({ outcome, graph: graph.state(), verificationPassed, reviewPassed, planApproved })
-    journal.append('run-end', { outcome, completion, graph: graph.state().nodes.map((node) => ({ id: node.id, status: node.status })) })
-    writeRunReceipt({ runId, goal, outcome, proposal: extra.proposal, verdict: extra.verdict, lessons: extra.lessons, completion, events: journal.events(), graph: graph.state(), usage, elapsedMs: Date.now() - startedAt, maxWallClockMs: maxWallClockMs || undefined })
-    emitEvent('run_finished', { runId, goal: redactText(goal, 2000), outcome, completion, elapsedMs: Date.now() - startedAt, usage, graph: graph.state() })
+    if (finalOutcome === 'needs-attention' || finalOutcome === 'aborted') graph.failRun(finalOutcome)
+
+    const completion = assessCompletion({ outcome: finalOutcome, graph: graph.state(), verificationPassed, reviewPassed, planApproved })
+    unregisterParentControls()
+    signal?.removeEventListener('abort', forwardAbort)
+    const taskStatus = completion.state === 'verified'
+      ? 'done'
+      : finalOutcome === 'aborted'
+        ? 'paused'
+        : completion.pendingApprovals > 0
+          ? 'waiting-approval'
+          : completion.state === 'blocked' || finalOutcome === 'needs-attention'
+            ? 'needs-review'
+            : 'failed'
+    taskSessions.update(parentTask.id, {
+      status: taskStatus,
+      action: completion.state === 'verified' ? 'Verified' : finalOutcome === 'aborted' ? 'Paused' : 'Needs attention',
+      detail: completion.summary,
+      progress: completion.totalSteps > 0 ? completion.completedSteps / completion.totalSteps : completion.state === 'verified' ? 1 : 0,
+      stepsCompleted: completion.completedSteps,
+      stepsTotal: completion.totalSteps || undefined,
+      nextAction: completion.nextActions[0],
+      blockedReason: completion.blockers[0],
+      error: completion.state === 'verified' ? undefined : completion.blockers.join('; ') || undefined,
+    })
+    journal.append('run-end', { outcome: finalOutcome, completion, taskSessionId: parentTask.id, graph: graph.state().nodes.map((node) => ({ id: node.id, status: node.status })) })
+    writeRunReceipt({ runId, goal, outcome: finalOutcome, taskSessionId: parentTask.id, proposal: extra.proposal, verdict: extra.verdict, lessons: extra.lessons, completion, events: journal.events(), graph: graph.state(), usage, elapsedMs: Date.now() - startedAt, maxWallClockMs: maxWallClockMs || undefined })
+    emitEvent('run_finished', { runId, goal: redactText(goal, 2000), outcome: finalOutcome, taskSessionId: parentTask.id, completion, elapsedMs: Date.now() - startedAt, usage, graph: graph.state() })
     return {
       runId,
-      outcome,
+      outcome: finalOutcome,
       usage,
       elapsedMs: Date.now() - startedAt,
       lessons: [],
       completion,
+      taskSessionId: parentTask.id,
       ...extra,
     }
   }
@@ -345,6 +388,14 @@ export async function runAutonomousTask(options: AutonomousRunOptions): Promise<
 
   // --- Execute --------------------------------------------------------------
 
+  taskSessions.update(parentTask.id, {
+    status: 'running',
+    action: 'Executing approved plan',
+    detail: `Running ${proposal.steps.length} planned step(s) with verification and recovery enabled`,
+    stepsTotal: proposal.steps.length,
+    acceptanceCriteria: proposal.acceptanceCriteria,
+    verificationCommands: proposal.verification,
+  })
   const briefing = `## The goal of this run\n${proposal.goal}\n\n## What we established while planning\n${proposal.understanding}`
   let totalSavedMs = 0
   const variantCount = options.variants ?? 1
@@ -354,7 +405,7 @@ export async function runAutonomousTask(options: AutonomousRunOptions): Promise<
     journal.append('phase', { phase: 'execute', variants: variantCount })
 
     if (runSignal?.aborted) return done('aborted', { proposal })
-    const result = await runVariants({ proposal, briefing, count: variantCount, runId, journal, governor, signal })
+    const result = await runVariants({ proposal, briefing, count: variantCount, runId, journal, governor, signal: runSignal })
     track(result.usage)
     for (const step of proposal.steps) {
       const node = graph.node(`step:${step.id}`)
@@ -364,6 +415,14 @@ export async function runAutonomousTask(options: AutonomousRunOptions): Promise<
       }
     }
     board.post('variants', 'execute', `chose attempt ${result.chosen.index + 1}/${variantCount} (${result.chosen.verificationSummary}); merged ${result.mergedFiles.length} file(s)`)
+    taskSessions.update(parentTask.id, {
+      status: 'running',
+      action: 'Variant selected',
+      detail: `Selected verified attempt ${result.chosen.index + 1}/${variantCount} and merged ${result.mergedFiles.length} file(s)`,
+      stepsCompleted: proposal.steps.length,
+      stepsTotal: proposal.steps.length,
+      progress: proposal.steps.length > 0 ? 1 : 0,
+    })
   } else {
     const { waves } = planWaves(proposal.steps)
     writePhase('execute', `${proposal.steps.length} steps in ${waves.length} wave${waves.length === 1 ? '' : 's'}`)
@@ -372,6 +431,11 @@ export async function runAutonomousTask(options: AutonomousRunOptions): Promise<
     for (const [index, wave] of waves.entries()) {
       if (runSignal?.aborted) return done('aborted', { proposal })
       if (waves.length > 1) writeSubStep(`wave ${index + 1} of ${waves.length}`)
+      taskSessions.update(parentTask.id, {
+        status: 'running',
+        action: `Executing wave ${index + 1} of ${waves.length}`,
+        detail: `${wave.length} worker assignment(s) are running in this dependency wave`,
+      })
 
       const pendingWave = wave.filter((step) => {
         const nodeId = `step:${step.id}`
@@ -419,6 +483,14 @@ export async function runAutonomousTask(options: AutonomousRunOptions): Promise<
           }],
         })
       }
+      const completedSteps = graph.state().nodes.filter((node) => node.kind === 'step' && node.status === 'completed').length
+      taskSessions.update(parentTask.id, {
+        status: 'running',
+        action: 'Wave finished',
+        detail: `${completedSteps}/${proposal.steps.length} planned step(s) have completed; continuing with remaining work or verification`,
+        stepsCompleted: completedSteps,
+        progress: proposal.steps.length > 0 ? completedSteps / proposal.steps.length : 0,
+      })
     }
   }
 
@@ -429,6 +501,7 @@ export async function runAutonomousTask(options: AutonomousRunOptions): Promise<
   // as the implementation itself. The pass is bounded and may legitimately make
   // no changes; "more" is not automatically "better".
   if (runPolish && maxPolishPasses > 0) {
+    taskSessions.update(parentTask.id, { status: 'running', action: 'Polishing', detail: 'Running the bounded final quality pass before verification' })
     writePhase('polish', `${maxPolishPasses} bounded final quality pass${maxPolishPasses === 1 ? '' : 'es'}`)
     for (let polishAttempt = 1; polishAttempt <= maxPolishPasses; polishAttempt++) {
       if (runSignal?.aborted) return done('aborted', { proposal })
@@ -472,6 +545,7 @@ Read the changed files in full context. Improve only concrete issues directly re
   while (true) {
     if (runSignal?.aborted) return done('aborted', { proposal, verdict })
 
+    taskSessions.update(parentTask.id, { status: 'running', action: 'Verifying', detail: proposal.verification.length > 0 ? `Running ${proposal.verification.length} verification command(s)` : 'Running structured review without declared commands' })
     writePhase('verify', proposal.verification.length > 0 ? proposal.verification.join(' · ') : 'review only')
     journal.append('phase', { phase: 'verify', attempt })
 
@@ -591,13 +665,14 @@ Read the changed files in full for context beyond the diff above — a diff hide
 
     if (attempt >= maxRepairAttempts) {
       writeSubStep(`Stopping after ${attempt} repair attempt${attempt === 1 ? '' : 's'} — this needs a human.`)
-      const lessons = await captureLessons(goal, proposal, 'unresolved', journal, track, governor, graph)
+      const lessons = await captureLessons(goal, proposal, 'unresolved', journal, track, governor, graph, runSignal)
       return done('needs-attention', { proposal, verdict, lessons })
     }
 
     // --- Reflect & repair ---------------------------------------------------
 
     attempt += 1
+    taskSessions.update(parentTask.id, { status: 'running', action: 'Repairing', detail: `Addressing verification or review failures (attempt ${attempt} of ${maxRepairAttempts})` })
     writePhase('reflect', `attempt ${attempt} of ${maxRepairAttempts}`)
     journal.append('phase', { phase: 'reflect', attempt })
 
@@ -639,7 +714,8 @@ Read the changed files in full for context beyond the diff above — a diff hide
 
   // --- Learn ---------------------------------------------------------------
 
-  const lessons = captureLearning ? await captureLessons(goal, proposal, 'succeeded', journal, track, governor, graph) : []
+  taskSessions.update(parentTask.id, { status: 'running', action: 'Learning', detail: 'Capturing durable lessons for future runs' })
+  const lessons = captureLearning ? await captureLessons(goal, proposal, 'succeeded', journal, track, governor, graph, runSignal) : []
 
   writeSummary('Run complete', [
     ['run', runId],
@@ -670,6 +746,7 @@ async function captureLessons(
   track: (usage: Usage) => void,
   governor: ActionGovernor,
   graph: GoalGraphStoreType,
+  signal?: AbortSignal,
 ): Promise<string[]> {
   writePhase('learn')
   journal.append('phase', { phase: 'learn' })
@@ -685,6 +762,7 @@ async function captureLessons(
       graph,
       nodeId: 'learn:lessons',
       extraTools: [capture.tool],
+      signal,
       prompt: `An autonomous run just ${status === 'succeeded' ? 'completed' : 'stopped without fully succeeding'}.
 
 Goal: ${goal}
