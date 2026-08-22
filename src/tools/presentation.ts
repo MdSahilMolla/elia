@@ -4,6 +4,7 @@ import { basename, dirname, extname, join, resolve } from 'node:path'
 import { paths } from '../config.ts'
 import { analyzeWorkbook, auditWorkbook, readWorkbook, safeOutputPath } from './spreadsheet.ts'
 import type { Tool } from './types.ts'
+import { MAX_SHELL_OUTPUT_LENGTH, readBoundedOutput } from '../shell.ts'
 
 type PresentationAction = 'from_workbook' | 'verify'
 
@@ -185,8 +186,8 @@ async function verifyPresentation(path: string, render: boolean): Promise<string
   if (!existsSync(path)) throw new Error(`Presentation not found: ${path}`)
   const process = Bun.spawn(['unzip', '-Z1', path], { stdout: 'pipe', stderr: 'pipe' })
   const [stdout, stderr, exitCode] = await Promise.all([
-    new Response(process.stdout as ReadableStream<Uint8Array>).text(),
-    new Response(process.stderr as ReadableStream<Uint8Array>).text(),
+    readBoundedOutput(process.stdout as ReadableStream<Uint8Array>, MAX_SHELL_OUTPUT_LENGTH),
+    readBoundedOutput(process.stderr as ReadableStream<Uint8Array>, MAX_SHELL_OUTPUT_LENGTH),
     process.exited,
   ])
   if (exitCode !== 0) throw new Error(`could not inspect PPTX package: ${stderr.trim() || `unzip exited with ${exitCode}`}`)
@@ -200,8 +201,8 @@ async function verifyPresentation(path: string, render: boolean): Promise<string
     try {
       const conversion = Bun.spawn(['libreoffice', '--headless', '--convert-to', 'pdf', '--outdir', tempDir, path], { stdout: 'pipe', stderr: 'pipe' })
       const [, conversionStderr, conversionExit] = await Promise.all([
-        new Response(conversion.stdout as ReadableStream<Uint8Array>).text(),
-        new Response(conversion.stderr as ReadableStream<Uint8Array>).text(),
+        readBoundedOutput(conversion.stdout as ReadableStream<Uint8Array>, MAX_SHELL_OUTPUT_LENGTH),
+        readBoundedOutput(conversion.stderr as ReadableStream<Uint8Array>, MAX_SHELL_OUTPUT_LENGTH),
         conversion.exited,
       ])
       if (conversionExit === 0) {

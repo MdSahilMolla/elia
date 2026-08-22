@@ -1,5 +1,6 @@
 import type { Tool } from './types.ts'
 import { taskSessions } from '../taskSessions.ts'
+import { readBoundedOutput, terminateProcessGroup } from '../shell.ts'
 
 /** Actions supported by the browser bridge. The bridge can be a user-Chrome MCP wrapper or CDP endpoint. */
 export type BrowserAction = 'status' | 'navigate' | 'refresh' | 'back' | 'forward' | 'snapshot' | 'click' | 'type' | 'press' | 'scroll' | 'wait' | 'wait_for' | 'extract' | 'verify'
@@ -34,6 +35,7 @@ const MAX_WAIT_MS = 30_000
 const MAX_SCROLL_PX = 4_000
 const MAX_EXPECTATION_LENGTH = 4_000
 const BROWSER_DEADLINE_MS = 45_000
+const MAX_BROWSER_OUTPUT_LENGTH = 200_000
 const SAFE_RETRY_ACTIONS = new Set<BrowserAction>(['status', 'snapshot', 'extract', 'verify', 'wait_for'])
 const APPROVAL_TTL_MS = 5 * 60_000
 const pendingApprovals = new Map<string, { fingerprint: string; expiresAt: number }>()
@@ -245,7 +247,8 @@ async function callMcpTool(server: string, request: BrowserRequest): Promise<Bro
 }
 
 async function callBridge(command: string, request: BrowserRequest): Promise<BrowserResult | string> {
-  const proc = Bun.spawn(['sh', '-c', command], { stdin: 'pipe', stdout: 'pipe', stderr: 'pipe', detached: true })
+  const shellArgs = process.platform === 'win32' ? ['cmd', '/c', command] : ['sh', '-c', command]
+  const proc = Bun.spawn(shellArgs, { stdin: 'pipe', stdout: 'pipe', stderr: 'pipe', ...(process.platform === 'win32' ? {} : { detached: true }) })
   proc.stdin.write(`${JSON.stringify(request)}\n`)
   proc.stdin.end()
 
@@ -314,7 +317,20 @@ async function callCdp(endpoint: string, request: BrowserRequest): Promise<Brows
         reject(error instanceof Error ? error : new Error(String(error)))
       }
     })
-    socket.addEventListener('error', () => reject(new Error('could not connect to the Chrome DevTools endpoint')))
+    const rejectPending = (error: Error) => {
+      for (const item of pending.values()) item.reject(error)
+      pending.clear()
+    }
+    socket.addEventListener('error', () => {
+      const error = new Error('could not connect to the Chrome DevTools endpoint')
+      rejectPending(error)
+      reject(error)
+    })
+    socket.addEventListener('close', () => {
+      const error = new Error('Chrome DevTools endpoint closed before the action completed')
+      rejectPending(error)
+      reject(error)
+    })
   })
 
   try {
@@ -335,7 +351,12 @@ function cdpRequest(
   const id = nextId()
   return new Promise((resolve, reject) => {
     pending.set(id, { resolve, reject })
-    socket.send(JSON.stringify({ id, method, params }))
+    try {
+      socket.send(JSON.stringify({ id, method, params }))
+    } catch (error) {
+      pending.delete(id)
+      reject(error instanceof Error ? error : new Error(String(error)))
+    }
   })
 }
 
@@ -392,24 +413,22 @@ async function collectBrowserProcess(proc: Bun.Subprocess, timeoutMs: number): P
   let timedOut = false
   const timeout = setTimeout(() => {
     timedOut = true
-    if (process.platform !== 'win32' && proc.pid) {
-      try {
-        process.kill(-proc.pid, 'SIGTERM')
-      } catch {
-        proc.kill()
-      }
-    } else {
-      proc.kill()
-    }
+    terminateProcessGroup(proc)
   }, timeoutMs)
-  const [stdout, stderr, exitCode] = await Promise.all([
-    new Response(proc.stdout as ReadableStream<Uint8Array>).text(),
-    new Response(proc.stderr as ReadableStream<Uint8Array>).text(),
-    proc.exited,
-  ])
-  clearTimeout(timeout)
-  if (timedOut) throw new Error(`browser bridge timed out after ${timeoutMs}ms`)
-  return { stdout, stderr, exitCode }
+  let completed = false
+  try {
+    const [stdout, stderr, exitCode] = await Promise.all([
+      readBoundedOutput(proc.stdout as ReadableStream<Uint8Array>, MAX_BROWSER_OUTPUT_LENGTH),
+      readBoundedOutput(proc.stderr as ReadableStream<Uint8Array>, MAX_BROWSER_OUTPUT_LENGTH),
+      proc.exited,
+    ])
+    if (timedOut) throw new Error(`browser bridge timed out after ${timeoutMs}ms`)
+    completed = true
+    return { stdout, stderr, exitCode }
+  } finally {
+    clearTimeout(timeout)
+    if (!completed) terminateProcessGroup(proc)
+  }
 }
 
 async function withDeadline<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {

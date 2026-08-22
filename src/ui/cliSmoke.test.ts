@@ -63,3 +63,9 @@ test('invalid autonomous action budget fails before execution', async () => {
   expect(result.code).toBe(1)
   expect(result.stderr).toContain('--max-actions must be a positive integer')
 })
+
+test('CLI accepts inline value flags and does not treat them as goal text', async () => {
+  const result = await runCli(['auto', 'do work', '--max-actions=0', '--plain=false'])
+  expect(result.code).toBe(1)
+  expect(result.stderr).toContain('--max-actions must be a positive integer')
+})

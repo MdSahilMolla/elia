@@ -96,3 +96,7 @@ test('editing a served file triggers a live-reload push over the WebSocket', asy
 
   await reloadReceived
 })
+
+test('resolveWithinRoot rejects malformed percent-encoding', () => {
+  expect(resolveWithinRoot(testDir, '/%E0%A4%A')).toBeUndefined()
+})

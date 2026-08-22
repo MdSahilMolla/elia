@@ -1,10 +1,11 @@
+import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Tool } from './types.ts'
 import { captureBeforeWrite } from '../checkpoint.ts'
 import { paths } from '../config.ts'
 
 function slugify(name: string): string {
-  return name.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'engagement'
+  return name.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 120) || 'engagement'
 }
 
 /** Where an engagement's scope, findings, and recon output live — shared with run_security_tool. */
@@ -33,17 +34,30 @@ export const newEngagementTool: Tool = {
     required: ['slug', 'target', 'authorizedBy', 'scope'],
   },
   async execute(input) {
-    const slug = slugify(input.slug as string)
+    const values: Record<'slug' | 'target' | 'authorizedBy' | 'scope', string> = {
+      slug: '',
+      target: '',
+      authorizedBy: '',
+      scope: '',
+    }
+    for (const key of Object.keys(values) as Array<keyof typeof values>) {
+      const value = input[key]
+      if (typeof value !== 'string' || value.trim().length === 0) throw new Error(`${key} must be a non-empty string`)
+      if (value.length > 20_000) throw new Error(`${key} exceeds 20000 characters`)
+      values[key] = value.trim()
+    }
+    const slug = slugify(values.slug)
     const dir = engagementDir(slug)
-    const target = input.target as string
-    const authorizedBy = input.authorizedBy as string
-    const scope = input.scope as string
+    const target = values.target
+    const authorizedBy = values.authorizedBy
+    const scope = values.scope
     const recordedAt = new Date().toISOString()
 
     const scopePath = join(dir, 'SCOPE.md')
     const findingsPath = join(dir, 'findings.md')
     const reportPath = join(dir, 'report.md')
     const reconKeep = join(dir, 'recon', '.gitkeep')
+    if (existsSync(scopePath)) throw new Error(`engagement "${slug}" already exists; refusing to overwrite its authorization record`)
 
     const scopeContent = `# Engagement scope: ${slug}
 

@@ -1,6 +1,8 @@
 import type { Tool } from './types.ts'
 import { resolvePath } from '../autonomy/context.ts'
 
+const MAX_READ_BYTES = 5_000_000
+
 export const readFileTool: Tool = {
   name: 'read_file',
   description:
@@ -13,11 +15,13 @@ export const readFileTool: Tool = {
     required: ['path'],
   },
   async execute(input) {
-    const path = resolvePath(input.path as string)
+    if (typeof input.path !== 'string' || input.path.trim().length === 0) throw new Error('path must be a non-empty string')
+    const path = resolvePath(input.path)
     const file = Bun.file(path)
     if (!(await file.exists())) {
       throw new Error(`File not found: ${path}`)
     }
+    if (file.size > MAX_READ_BYTES) throw new Error(`file exceeds ${MAX_READ_BYTES} bytes; use a narrower search or inspect it with a specialized tool`)
     const text = await file.text()
     const lines = text.split('\n')
     return lines.map((line, i) => `${i + 1}\t${line}`).join('\n')

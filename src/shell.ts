@@ -36,22 +36,7 @@ export async function runShell(
   const terminate = () => {
     if (terminated) return
     terminated = true
-    if (process.platform !== 'win32' && proc.pid) {
-      try {
-        process.kill(-proc.pid, 'SIGTERM')
-      } catch {
-        proc.kill()
-      }
-      setTimeout(() => {
-        try {
-          process.kill(-proc.pid, 'SIGKILL')
-        } catch {
-          // The process group may already have exited.
-        }
-      }, 750).unref()
-    } else {
-      proc.kill()
-    }
+    terminateProcessGroup(proc)
   }
   const timeout = setTimeout(() => {
     timedOut = true
@@ -66,13 +51,22 @@ export async function runShell(
     else signal.addEventListener('abort', onAbort, { once: true })
   }
 
-  const [stdout, stderr, exitCode] = await Promise.all([
-    readBounded(proc.stdout, MAX_SHELL_OUTPUT_LENGTH),
-    readBounded(proc.stderr, MAX_SHELL_OUTPUT_LENGTH),
-    proc.exited,
-  ])
-  clearTimeout(timeout)
-  signal?.removeEventListener('abort', onAbort)
+  let stdout = ''
+  let stderr = ''
+  let exitCode = 1
+  let completed = false
+  try {
+    ;[stdout, stderr, exitCode] = await Promise.all([
+      readBoundedOutput(proc.stdout, MAX_SHELL_OUTPUT_LENGTH),
+      readBoundedOutput(proc.stderr, MAX_SHELL_OUTPUT_LENGTH),
+      proc.exited,
+    ])
+    completed = true
+  } finally {
+    clearTimeout(timeout)
+    signal?.removeEventListener('abort', onAbort)
+    if (!completed) terminate()
+  }
 
   return {
     command,
@@ -84,9 +78,55 @@ export async function runShell(
   }
 }
 
-async function readBounded(stream: ReadableStream<Uint8Array>, maxLength: number): Promise<string> {
-  const text = await new Response(stream).text()
-  return text.length <= maxLength ? text : `${text.slice(0, maxLength)}\\n… [${text.length - maxLength} characters omitted] …`
+export async function readBoundedOutput(stream: ReadableStream<Uint8Array>, maxLength: number): Promise<string> {
+  const limit = Math.max(0, Math.floor(maxLength))
+  const reader = stream.getReader()
+  const decoder = new TextDecoder()
+  let totalLength = 0
+  let output = ''
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      const chunk = decoder.decode(value, { stream: true })
+      totalLength += chunk.length
+      if (output.length < limit) output += chunk.slice(0, limit - output.length)
+    }
+    const finalChunk = decoder.decode()
+    totalLength += finalChunk.length
+    if (output.length < limit) output += finalChunk.slice(0, limit - output.length)
+  } finally {
+    reader.releaseLock()
+  }
+  return totalLength <= limit ? output : `${output}\n… [${totalLength - limit} characters omitted] …`
+}
+
+export function terminateProcessGroup(proc: Bun.Subprocess): void {
+  if (process.platform !== 'win32' && proc.pid) {
+    try {
+      process.kill(-proc.pid, 'SIGTERM')
+    } catch {
+      try {
+        proc.kill()
+      } catch {
+        return
+      }
+      return
+    }
+    setTimeout(() => {
+      try {
+        process.kill(-proc.pid!, 'SIGKILL')
+      } catch {
+        // The process group has already exited.
+      }
+    }, 750).unref()
+  } else {
+    try {
+      proc.kill()
+    } catch {
+      // The process has already exited.
+    }
+  }
 }
 
 /** Formats a result the way a model reads it best: status first, then the output that explains it. */

@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFile
 import { join } from 'node:path'
 import { paths } from '../config.ts'
 import type { Tool } from './types.ts'
+import { readBoundedOutput, terminateProcessGroup } from '../shell.ts'
 
 export type CommunicationChannel = 'email' | 'message' | 'calendar' | 'slack' | 'sms' | 'custom'
 type CommunicationStatus = 'draft' | 'awaiting_approval' | 'sending' | 'sent' | 'verified' | 'send_failed' | 'cancelled'
@@ -60,6 +61,7 @@ interface CommunicationResult {
 
 const COMMUNICATION_DIR = join(paths.state, 'communications')
 const COMMUNICATION_DEADLINE_MS = 45_000
+const MAX_COMMUNICATION_OUTPUT_LENGTH = 200_000
 const APPROVAL_TTL_MS = 5 * 60_000
 const MAX_BODY_LENGTH = 100_000
 const MAX_RECIPIENT_LENGTH = 2_000
@@ -317,7 +319,8 @@ async function callMcpAdapter(server: string, toolName: string, payload: unknown
 }
 
 async function callProcessAdapter(command: string, payload: unknown): Promise<CommunicationResult> {
-  const proc = Bun.spawn(['sh', '-c', command], { stdin: 'pipe', stdout: 'pipe', stderr: 'pipe', detached: true })
+  const shellArgs = process.platform === 'win32' ? ['cmd', '/c', command] : ['sh', '-c', command]
+  const proc = Bun.spawn(shellArgs, { stdin: 'pipe', stdout: 'pipe', stderr: 'pipe', ...(process.platform === 'win32' ? {} : { detached: true }) })
   proc.stdin.write(`${JSON.stringify(payload)}\n`)
   proc.stdin.end()
   return collectAdapterProcess(proc)
@@ -325,42 +328,30 @@ async function callProcessAdapter(command: string, payload: unknown): Promise<Co
 
 async function collectAdapterProcess(proc: Bun.Subprocess): Promise<CommunicationResult> {
   const timer = setTimeout(() => terminateProcessGroup(proc), COMMUNICATION_DEADLINE_MS)
-  const [stdout, stderr, exitCode] = await Promise.all([
-    new Response(proc.stdout as ReadableStream<Uint8Array>).text(),
-    new Response(proc.stderr as ReadableStream<Uint8Array>).text(),
-    proc.exited,
-  ])
-  clearTimeout(timer)
-  if (exitCode !== 0) throw new Error(`communication adapter exited with code ${exitCode}${stderr.trim() ? `: ${stderr.trim()}` : ''}`)
-  const raw = stdout.trim()
-  if (!raw) return { ok: true, result: 'adapter returned no response' }
-  const lastLine = raw.split('\n').at(-1) ?? raw
+  let completed = false
   try {
-    const result = JSON.parse(lastLine) as CommunicationResult
-    if (result.ok === false || result.error) throw new Error(result.error ?? 'communication adapter reported failure')
-    return result
-  } catch (error) {
-    if (error instanceof Error && error.message !== 'Unexpected end of JSON input' && !error.message.startsWith('Unexpected token')) throw error
-    return { ok: true, result: raw }
-  }
-}
-
-function terminateProcessGroup(proc: Bun.Subprocess): void {
-  if (process.platform !== 'win32' && proc.pid) {
+    const [stdout, stderr, exitCode] = await Promise.all([
+      readBoundedOutput(proc.stdout as ReadableStream<Uint8Array>, MAX_COMMUNICATION_OUTPUT_LENGTH),
+      readBoundedOutput(proc.stderr as ReadableStream<Uint8Array>, MAX_COMMUNICATION_OUTPUT_LENGTH),
+      proc.exited,
+    ])
+    if (exitCode !== 0) throw new Error(`communication adapter exited with code ${exitCode}${stderr.trim() ? `: ${stderr.trim()}` : ''}`)
+    const raw = stdout.trim()
+    if (!raw) return { ok: true, result: 'adapter returned no response' }
+    const lastLine = raw.split('\n').at(-1) ?? raw
     try {
-      process.kill(-proc.pid, 'SIGTERM')
-      setTimeout(() => {
-        try {
-          process.kill(-proc.pid!, 'SIGKILL')
-        } catch {
-          // The process group has already exited.
-        }
-      }, 750).unref()
-    } catch {
-      proc.kill()
+      const result = JSON.parse(lastLine) as CommunicationResult
+      if (result.ok === false || result.error) throw new Error(result.error ?? 'communication adapter reported failure')
+      completed = true
+      return result
+    } catch (error) {
+      if (error instanceof Error && error.message !== 'Unexpected end of JSON input' && !error.message.startsWith('Unexpected token')) throw error
+      completed = true
+      return { ok: true, result: raw }
     }
-  } else {
-    proc.kill()
+  } finally {
+    clearTimeout(timer)
+    if (!completed) terminateProcessGroup(proc)
   }
 }
 

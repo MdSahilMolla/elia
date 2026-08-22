@@ -2,6 +2,8 @@ import type { Tool } from './types.ts'
 import { DEFAULT_SHELL_TIMEOUT_MS, formatShellResult, runShell } from '../shell.ts'
 import { currentAgent } from '../autonomy/context.ts'
 
+const MAX_COMMAND_LENGTH = 100_000
+
 export const runCommandTool: Tool = {
   name: 'run_command',
   description: 'Run a shell command and return its stdout, stderr, and exit code. Times out after 60 seconds and inherits the active autonomous cancellation signal.',
@@ -13,7 +15,8 @@ export const runCommandTool: Tool = {
     required: ['command'],
   },
   async execute(input) {
-    const command = input.command as string
-    return formatShellResult(await runShell(command, DEFAULT_SHELL_TIMEOUT_MS, currentAgent().cwd, currentAgent().signal))
+    if (typeof input.command !== 'string' || input.command.trim().length === 0) throw new Error('command must be a non-empty string')
+    if (input.command.length > MAX_COMMAND_LENGTH) throw new Error(`command exceeds ${MAX_COMMAND_LENGTH} characters`)
+    return formatShellResult(await runShell(input.command, DEFAULT_SHELL_TIMEOUT_MS, currentAgent().cwd, currentAgent().signal))
   },
 }

@@ -33,12 +33,15 @@ Scouts run on a faster, cheaper model and cannot modify anything, so prefer a ha
     required: ['description', 'prompt'],
   },
   async execute(input) {
-    const prompt = input.prompt as string
+    if (typeof input.prompt !== 'string' || input.prompt.trim().length === 0) throw new Error('prompt must be a non-empty string')
+    if (input.prompt.length > 200_000) throw new Error('prompt exceeds 200000 characters')
+    if (input.description !== undefined && (typeof input.description !== 'string' || input.description.trim().length === 0)) throw new Error('description must be a non-empty string when provided')
+    const prompt = input.prompt
     const role = isRoleName(input.role) ? input.role : 'builder'
     dispatched += 1
-    const description = typeof input.description === 'string' ? input.description : `${role} task`
-    const acceptanceCriteria = Array.isArray(input.acceptanceCriteria) ? input.acceptanceCriteria.filter((value): value is string => typeof value === 'string' && value.trim().length > 0).slice(0, 20) : undefined
-    const verificationCommands = Array.isArray(input.verificationCommands) ? input.verificationCommands.filter((value): value is string => typeof value === 'string' && value.trim().length > 0).slice(0, 20) : undefined
+    const description = typeof input.description === 'string' ? input.description.trim().slice(0, 160) : `${role} task`
+    const acceptanceCriteria = Array.isArray(input.acceptanceCriteria) ? input.acceptanceCriteria.filter((value): value is string => typeof value === 'string' && value.trim().length > 0).map((value) => value.trim().slice(0, 4_000)).slice(0, 20) : undefined
+    const verificationCommands = Array.isArray(input.verificationCommands) ? input.verificationCommands.filter((value): value is string => typeof value === 'string' && value.trim().length > 0).map((value) => value.trim().slice(0, 4_000)).slice(0, 20) : undefined
     const session = taskSessions.create(inferTaskKind(description, prompt), description, 'Waiting for a worker', { acceptanceCriteria, verificationCommands })
     taskSessions.update(session.id, { status: 'running', action: 'Starting worker', detail: `Role: ${role}`, nextAction: 'Worker is orienting and will report evidence' })
 

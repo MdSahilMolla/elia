@@ -7,6 +7,7 @@ import { BENCH_TASKS, TOTAL_WEIGHT, type BenchTask } from './suite.ts'
 import type { Metrics } from './ledger.ts'
 import { bold, dim, green, red } from '../ui/theme.ts'
 import { table } from '../ui/layout.ts'
+import { MAX_SHELL_OUTPUT_LENGTH, readBoundedOutput, terminateProcessGroup } from '../shell.ts'
 
 /**
  * Runs the benchmark suite against a given copy of elia's source and scores it.
@@ -166,15 +167,23 @@ async function runOneTask(task: BenchTask, sourceRoot: string): Promise<TaskOutc
     let timedOut = false
     const timeout = setTimeout(() => {
       timedOut = true
-      proc.kill()
+      terminateProcessGroup(proc)
     }, TASK_TIMEOUT_MS)
 
-    const [stdout, stderr] = await Promise.all([
-      new Response(proc.stdout).text(),
-      new Response(proc.stderr).text(),
-    ])
-    await proc.exited
-    clearTimeout(timeout)
+    let stdout = ''
+    let stderr = ''
+    let completed = false
+    try {
+      ;[stdout, stderr] = await Promise.all([
+        readBoundedOutput(proc.stdout, MAX_SHELL_OUTPUT_LENGTH),
+        readBoundedOutput(proc.stderr, MAX_SHELL_OUTPUT_LENGTH),
+      ])
+      await proc.exited
+      completed = true
+    } finally {
+      clearTimeout(timeout)
+      if (!completed) terminateProcessGroup(proc)
+    }
 
     const run = parseRunOutput(stdout)
     if (timedOut) {

@@ -2,6 +2,7 @@ import type { Tool } from './types.ts'
 
 const SEARCH_TIMEOUT_MS = 15_000
 const RESULT_COUNT = 8
+const MAX_QUERY_LENGTH = 2_000
 
 interface BraveResult {
   title?: string
@@ -26,7 +27,9 @@ export const webSearchTool: Tool = {
     required: ['query'],
   },
   async execute(input) {
-    const query = input.query as string
+    if (typeof input.query !== 'string' || input.query.trim().length === 0) throw new Error('query must be a non-empty string')
+    if (input.query.length > MAX_QUERY_LENGTH) throw new Error(`query exceeds ${MAX_QUERY_LENGTH} characters`)
+    const query = input.query.trim()
     const provider = searchProvider()
     if (provider !== 'brave') {
       throw new Error(`Unsupported ELIA_SEARCH_PROVIDER "${provider}" — only "brave" is implemented right now.`)

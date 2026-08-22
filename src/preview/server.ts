@@ -12,6 +12,7 @@ export interface PreviewServer {
 }
 
 let singleton: PreviewServer | undefined
+let singletonCleanup: (() => void) | undefined
 
 /**
  * Starts (once — subsequent calls reuse it) a localhost-only static server over
@@ -21,9 +22,11 @@ let singleton: PreviewServer | undefined
  * polling for changes.
  */
 export function ensurePreviewServer(root: string = paths.workspace): PreviewServer {
-  if (singleton) return singleton
+  const resolvedRoot = resolve(root)
+  if (singleton && resolve(singleton.root) === resolvedRoot) return singleton
+  if (singleton) resetPreviewServerForTests()
 
-  mkdirSync(root, { recursive: true })
+  mkdirSync(resolvedRoot, { recursive: true })
 
   const sockets = new Set<ServerWebSocket<unknown>>()
 
@@ -35,7 +38,7 @@ export function ensurePreviewServer(root: string = paths.workspace): PreviewServ
       if (url.pathname === RELOAD_PATH) {
         return srv.upgrade(req) ? undefined : new Response('Upgrade failed', { status: 400 })
       }
-      return serveStatic(root, url.pathname)
+      return serveStatic(resolvedRoot, url.pathname)
     },
     websocket: {
       open(ws) {
@@ -51,19 +54,34 @@ export function ensurePreviewServer(root: string = paths.workspace): PreviewServ
   })
 
   let debounceTimer: ReturnType<typeof setTimeout> | undefined
-  watch(root, { recursive: true }, () => {
+  const watcher = watch(resolvedRoot, { recursive: true }, () => {
     clearTimeout(debounceTimer)
     debounceTimer = setTimeout(() => {
       for (const ws of sockets) ws.send('reload')
     }, RELOAD_DEBOUNCE_MS)
   })
 
-  singleton = { baseUrl: `http://127.0.0.1:${server.port}`, root }
+  singleton = { baseUrl: `http://127.0.0.1:${server.port}`, root: resolvedRoot }
+  singletonCleanup = () => {
+    clearTimeout(debounceTimer)
+    watcher.close()
+    for (const ws of sockets) {
+      try {
+        ws.close()
+      } catch {
+        // A socket may already be closed while the server is stopping.
+      }
+    }
+    sockets.clear()
+    server.stop(true)
+  }
   return singleton
 }
 
-/** Exposed for tests — resets the module-level singleton so each test gets its own server/port. */
+/** Stops the active preview resources so repeated runs do not leak servers or watchers. */
 export function resetPreviewServerForTests(): void {
+  singletonCleanup?.()
+  singletonCleanup = undefined
   singleton = undefined
 }
 
@@ -84,7 +102,12 @@ async function serveStatic(root: string, pathname: string): Promise<Response> {
 
 /** Resolves a request path against `root`, rejecting anything that would escape it. Exported for direct testing. */
 export function resolveWithinRoot(root: string, pathname: string): string | undefined {
-  const decoded = decodeURIComponent(pathname)
+  let decoded: string
+  try {
+    decoded = decodeURIComponent(pathname)
+  } catch {
+    return undefined
+  }
   const relative = decoded === '/' || decoded === '' ? 'index.html' : decoded.replace(/^\/+/, '')
   const resolvedRoot = resolve(root)
   const resolvedPath = resolve(resolvedRoot, relative)

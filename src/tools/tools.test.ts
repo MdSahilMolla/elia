@@ -108,3 +108,10 @@ test('run_command captures stdout and exit code', async () => {
   expect(result).toContain('exit code: 0')
   expect(result).toContain('test123')
 })
+
+
+test('run_command rejects malformed and oversized command inputs', async () => {
+  await expect(toolsByName.run_command!.execute({})).rejects.toThrow('non-empty string')
+  await expect(toolsByName.run_command!.execute({ command: 42 })).rejects.toThrow('non-empty string')
+  await expect(toolsByName.run_command!.execute({ command: 'x'.repeat(100_001) })).rejects.toThrow('exceeds 100000 characters')
+})

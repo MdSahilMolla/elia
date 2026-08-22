@@ -1,6 +1,7 @@
 import { rm } from 'node:fs/promises'
 import { join } from 'node:path'
 import { paths } from '../config.ts'
+import { MAX_SHELL_OUTPUT_LENGTH, readBoundedOutput } from '../shell.ts'
 
 /**
  * Isolated git worktrees for running several independent implementation
@@ -45,8 +46,8 @@ interface GitResult {
 async function runGit(args: string[], cwd?: string): Promise<GitResult> {
   const proc = Bun.spawn(['git', ...args], { stdout: 'pipe', stderr: 'pipe', ...(cwd ? { cwd } : {}) })
   const [stdout, stderr, exitCode] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
+    readBoundedOutput(proc.stdout, MAX_SHELL_OUTPUT_LENGTH),
+    readBoundedOutput(proc.stderr, MAX_SHELL_OUTPUT_LENGTH),
     proc.exited,
   ])
   return { exitCode, stdout, stderr }

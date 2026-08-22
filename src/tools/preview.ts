@@ -14,11 +14,22 @@ export const previewTool: Tool = {
     },
   },
   async execute(input) {
-    const path = input.path as string | undefined
-    const url = input.url as string | undefined
+    const path = input.path === undefined ? undefined : typeof input.path === 'string' ? input.path.trim() : undefined
+    const url = input.url === undefined ? undefined : typeof input.url === 'string' ? input.url.trim() : undefined
+    if (input.path !== undefined && typeof input.path !== 'string') throw new Error('preview "path" must be a string')
+    if (input.url !== undefined && typeof input.url !== 'string') throw new Error('preview "url" must be a string')
 
     if (!path && !url) throw new Error('preview requires either "path" or "url"')
     if (path && url) throw new Error('preview accepts only one of "path" or "url", not both')
+    if (url) {
+      let parsed: URL
+      try {
+        parsed = new URL(url)
+      } catch {
+        throw new Error(`preview URL is invalid: ${url}`)
+      }
+      if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') throw new Error('preview URL must use http or https')
+    }
 
     const target = url ?? buildWorkspaceUrl(path!)
     const result = await launchInBrowser(target)
@@ -28,5 +39,6 @@ export const previewTool: Tool = {
 
 function buildWorkspaceUrl(relativePath: string): string {
   const server = ensurePreviewServer()
-  return `${server.baseUrl}/${relativePath.replace(/^\/+/, '')}`
+  const encodedPath = relativePath.replace(/^\/+/, '').split('/').map((segment) => encodeURIComponent(segment)).join('/')
+  return `${server.baseUrl}/${encodedPath}`
 }

@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, renameSync, writeFileSync } from 'node:fs'
 import { dirname, isAbsolute, relative, resolve } from 'node:path'
 import { paths } from '../config.ts'
 import type { Tool } from './types.ts'
+import { resolvePath } from '../autonomy/context.ts'
 
 type SpreadsheetAction = 'inspect' | 'analyze' | 'audit' | 'write'
 type CellOperation = { sheet: string; cell: string; value: unknown }
@@ -28,14 +29,17 @@ interface SheetData {
 
 const MAX_SAMPLE_ROWS = 5
 const MAX_GROUP_ROWS = 100
+const MAX_SPREADSHEET_BYTES = 25_000_000
 
 function safeOutputPath(path: string | undefined, fallbackName: string): string {
-  const candidate = resolve(path ?? resolve(paths.workspace, fallbackName))
-  const root = resolve(process.cwd())
+  const root = resolve(resolvePath('.'))
+  const candidate = path ? resolve(resolvePath(path)) : resolve(root, fallbackName)
   const workspace = resolve(paths.workspace)
-  const insideRoot = relative(root, candidate) === '' || !relative(root, candidate).startsWith(`..${requireSeparator()}`)
-  const insideWorkspace = relative(workspace, candidate) === '' || !relative(workspace, candidate).startsWith(`..${requireSeparator()}`)
-  if (!insideRoot && !insideWorkspace) throw new Error(`spreadsheet output must stay inside the current workspace: ${candidate}`)
+  const inside = (base: string) => {
+    const rel = relative(base, candidate)
+    return rel === '' || (!rel.startsWith(`..${requireSeparator()}`) && rel !== '..' && !isAbsolute(rel))
+  }
+  if (!inside(root) && !inside(workspace)) throw new Error(`spreadsheet output must stay inside the current workspace: ${candidate}`)
   return candidate
 }
 
@@ -56,6 +60,8 @@ function atomicWriteWorkbook(workbook: XLSX.WorkBook, outputPath: string): void 
 
 function readWorkbook(path: string): XLSX.WorkBook {
   if (!existsSync(path)) throw new Error(`File not found: ${path}`)
+  const size = Bun.file(path).size
+  if (size > MAX_SPREADSHEET_BYTES) throw new Error(`spreadsheet exceeds ${MAX_SPREADSHEET_BYTES} bytes`)
   return XLSX.readFile(path, { cellFormula: true, cellNF: true, cellStyles: true })
 }
 
@@ -120,17 +126,17 @@ function analyzeWorkbook(workbook: XLSX.WorkBook, requestedSheet?: string, reque
     const numbers = numericColumns(sheet)
     const measure = requestedMeasure && sheet.headers.includes(requestedMeasure) ? requestedMeasure : numbers.find((name) => /sales|revenue|profit|amount|cost|value|total/i.test(name)) ?? numbers[0]
     const groupBy = requestedGroupBy && sheet.headers.includes(requestedGroupBy) ? requestedGroupBy : sheet.headers.find((name) => !numbers.includes(name))
-    const summary = measure ? {
-      column: measure,
-      count: sheet.rows.filter((row) => numeric(row[measure])).length,
-      sum: sheet.rows.reduce((total, row) => total + (numeric(row[measure]) ? row[measure] : 0), 0),
-      average: (() => {
-        const values = sheet.rows.map((row) => row[measure]).filter(numeric)
-        return values.length ? values.reduce((a, b) => a + b, 0) / values.length : 0
-      })(),
-      min: Math.min(...sheet.rows.map((row) => row[measure]).filter(numeric)),
-      max: Math.max(...sheet.rows.map((row) => row[measure]).filter(numeric)),
-    } : undefined
+    const summary = measure ? (() => {
+      const values = sheet.rows.map((row) => row[measure]).filter(numeric)
+      return {
+        column: measure,
+        count: values.length,
+        sum: values.reduce((total, value) => total + value, 0),
+        average: values.length ? values.reduce((a, b) => a + b, 0) / values.length : 0,
+        min: values.length ? Math.min(...values) : undefined,
+        max: values.length ? Math.max(...values) : undefined,
+      }
+    })() : undefined
     const groups = measure && groupBy ? Object.entries(sheet.rows.reduce<Record<string, { count: number; sum: number }>>((acc, row) => {
       const key = String(row[groupBy] ?? '(blank)')
       const current = acc[key] ?? { count: 0, sum: 0 }
@@ -199,7 +205,7 @@ function writeWorkbook(request: SpreadsheetRequest): string {
     range.e.c = Math.max(range.e.c, cell.c)
     sheet['!ref'] = XLSX.utils.encode_range(range)
   }
-  const outputPath = safeOutputPath(request.outputPath, `${paths.workspace}/edited-workbook.xlsx`)
+  const outputPath = safeOutputPath(request.outputPath, 'edited-workbook.xlsx')
   atomicWriteWorkbook(workbook, outputPath)
   return JSON.stringify({ action: 'write', outputPath, operations: operations.length, status: 'written' }, null, 2)
 }
@@ -207,15 +213,16 @@ function writeWorkbook(request: SpreadsheetRequest): string {
 export function validateSpreadsheetRequest(input: Record<string, unknown>): SpreadsheetRequest {
   const action = input.action
   if (typeof action !== 'string' || !['inspect', 'analyze', 'audit', 'write'].includes(action)) throw new Error('action must be one of inspect, analyze, audit, or write')
-  if (typeof input.path !== 'string' || input.path.length === 0) throw new Error('path is required')
+  if (typeof input.path !== 'string' || input.path.trim().length === 0) throw new Error('path must be a non-empty string')
+  if (input.sheet !== undefined && (typeof input.sheet !== 'string' || input.sheet.trim().length === 0)) throw new Error('sheet must be a non-empty string when provided')
   if (input.groupBy !== undefined && typeof input.groupBy !== 'string') throw new Error('groupBy must be a string')
   if (input.measure !== undefined && typeof input.measure !== 'string') throw new Error('measure must be a string')
   if (input.keyColumn !== undefined && typeof input.keyColumn !== 'string') throw new Error('keyColumn must be a string')
-  if (input.outputPath !== undefined && typeof input.outputPath !== 'string') throw new Error('outputPath must be a string')
+  if (input.outputPath !== undefined && (typeof input.outputPath !== 'string' || input.outputPath.trim().length === 0)) throw new Error('outputPath must be a non-empty string when provided')
   const operations = input.operations
   if (action === 'write' && (!Array.isArray(operations) || operations.length === 0)) throw new Error('write requires a non-empty operations array')
   if (operations !== undefined && !Array.isArray(operations)) throw new Error('operations must be an array')
-  return { action: action as SpreadsheetAction, path: input.path, sheet: input.sheet as string | undefined, groupBy: input.groupBy as string | undefined, measure: input.measure as string | undefined, keyColumn: input.keyColumn as string | undefined, outputPath: input.outputPath as string | undefined, operations: operations as CellOperation[] | undefined }
+  return { action: action as SpreadsheetAction, path: resolvePath(input.path.trim()), sheet: typeof input.sheet === 'string' ? input.sheet.trim() || undefined : undefined, groupBy: typeof input.groupBy === 'string' ? input.groupBy.trim() || undefined : undefined, measure: typeof input.measure === 'string' ? input.measure.trim() || undefined : undefined, keyColumn: typeof input.keyColumn === 'string' ? input.keyColumn.trim() || undefined : undefined, outputPath: typeof input.outputPath === 'string' ? input.outputPath.trim() || undefined : undefined, operations: operations as CellOperation[] | undefined }
 }
 
 export const spreadsheetTool: Tool = {

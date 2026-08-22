@@ -10,16 +10,7 @@ export function registerShutdownCleanup(cleanup: Cleanup): () => void {
 }
 
 export function gracefulShutdown(code = 130): never {
-  if (!shuttingDown) {
-    shuttingDown = true
-    for (const cleanup of [...cleanups].reverse()) {
-      try {
-        cleanup()
-      } catch {
-        // Terminal cleanup must be best effort; one broken cleanup must not block the rest.
-      }
-    }
-  }
+  runCleanupsOnce()
   process.exitCode = code
   process.exit(code)
 }
@@ -31,15 +22,21 @@ export function installShutdownHandlers(): void {
   process.once('SIGINT', () => gracefulShutdown(130))
   process.once('SIGTERM', () => gracefulShutdown(143))
   process.once('SIGHUP', () => gracefulShutdown(129))
-  process.once('exit', () => {
-    for (const cleanup of [...cleanups].reverse()) {
-      try {
-        cleanup()
-      } catch {
-        // Best effort during process exit.
-      }
+  process.once('exit', () => runCleanupsOnce())
+}
+
+function runCleanupsOnce(): void {
+  if (shuttingDown) return
+  shuttingDown = true
+  const pending = [...cleanups].reverse()
+  cleanups.clear()
+  for (const cleanup of pending) {
+    try {
+      cleanup()
+    } catch {
+      // Terminal cleanup must be best effort; one broken cleanup must not block the rest.
     }
-  })
+  }
 }
 
 export function isShuttingDown(): boolean {

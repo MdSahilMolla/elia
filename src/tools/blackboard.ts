@@ -18,8 +18,10 @@ export const boardPostTool: Tool = {
     required: ['topic', 'note'],
   },
   async execute(input) {
-    const topic = input.topic as string
-    const note = input.note as string
+    if (typeof input.topic !== 'string' || input.topic.trim().length === 0) throw new Error('topic must be a non-empty string')
+    if (typeof input.note !== 'string' || input.note.trim().length === 0) throw new Error('note must be a non-empty string')
+    const topic = input.topic.trim().slice(0, 200)
+    const note = input.note.trim().slice(0, 2_000)
     const entry = activeBlackboard().post(currentAgent().name, topic, note)
     return `Posted to blackboard under "${entry.topic}".`
   },
@@ -39,7 +41,8 @@ export const boardReadTool: Tool = {
     },
   },
   async execute(input) {
-    const topic = input.topic as string | undefined
+    if (input.topic !== undefined && (typeof input.topic !== 'string' || input.topic.trim().length === 0)) throw new Error('topic must be a non-empty string when provided')
+    const topic = typeof input.topic === 'string' ? input.topic.trim().slice(0, 200) : undefined
     return activeBlackboard().render(topic)
   },
 }

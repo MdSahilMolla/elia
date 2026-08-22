@@ -1,7 +1,9 @@
 import type { Tool } from './types.ts'
+import { readBoundedOutput } from '../shell.ts'
 
 const FETCH_TIMEOUT_MS = 15_000
 const MAX_CHARS = 20_000
+const MAX_RESPONSE_CHARS = 2_000_000
 
 /** Reads one specific page a web_search turned up — a competitor site, a pricing page, a public data source. */
 export const webFetchTool: Tool = {
@@ -16,7 +18,8 @@ export const webFetchTool: Tool = {
     required: ['url'],
   },
   async execute(input) {
-    const raw = input.url as string
+    if (typeof input.url !== 'string' || input.url.trim().length === 0) throw new Error('url must be a non-empty string')
+    const raw = input.url.trim()
     let url: URL
     try {
       url = new URL(raw)
@@ -29,22 +32,21 @@ export const webFetchTool: Tool = {
 
     const controller = new AbortController()
     const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS)
-    let response: Response
     try {
-      response = await fetch(url, { signal: controller.signal, headers: { 'User-Agent': 'elia-agent/0.1' } })
+      const response = await fetch(url, { signal: controller.signal, headers: { 'User-Agent': 'elia-agent/0.1' } })
+      if (!response.ok) throw new Error(`web_fetch failed: ${response.status} ${response.statusText}`)
+
+      const contentType = response.headers.get('content-type') ?? ''
+      const body = response.body ? await readBoundedOutput(response.body, MAX_RESPONSE_CHARS) : ''
+      const text = contentType.includes('html') ? htmlToText(body) : body
+
+      return text.length > MAX_CHARS ? `${text.slice(0, MAX_CHARS)}\n\n[truncated at ${MAX_CHARS} characters]` : text
     } catch (err) {
+      if (err instanceof Error && err.message.startsWith('web_fetch failed:')) throw err
       throw new Error(`web_fetch request failed: ${err instanceof Error ? err.message : String(err)}`)
     } finally {
       clearTimeout(timeout)
     }
-
-    if (!response.ok) throw new Error(`web_fetch failed: ${response.status} ${response.statusText}`)
-
-    const contentType = response.headers.get('content-type') ?? ''
-    const body = await response.text()
-    const text = contentType.includes('html') ? htmlToText(body) : body
-
-    return text.length > MAX_CHARS ? `${text.slice(0, MAX_CHARS)}\n\n[truncated at ${MAX_CHARS} characters]` : text
   },
 }
 

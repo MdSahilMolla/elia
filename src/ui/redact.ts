@@ -1,8 +1,13 @@
 const SECRET_KEY = /(api[_-]?key|token|secret|password|passwd|authorization|cookie|session|private[_-]?key|access[_-]?key|client[_-]?secret|webhook)/i
 const SECRET_VALUE = /((?:sk|pk|rk|xox[baprs]-|gh[pousr]_|AIza|AKIA)[A-Za-z0-9_\-/]{8,}|Bearer\s+[A-Za-z0-9._\-/+=]{8,}|\b[A-Za-z0-9+/]{32,}={0,2}\b)/g
 
+/** Redacts credential-like values without flattening or truncating the surrounding evidence. */
+export function redactSecrets(text: string): string {
+  return text.replace(SECRET_VALUE, '[REDACTED]')
+}
+
 export function redactText(text: string, maxLength = 300): string {
-  const redacted = text.replace(SECRET_VALUE, '[REDACTED]')
+  const redacted = redactSecrets(text)
   const flattened = redacted.replace(/\s+/g, ' ').trim()
   return flattened.length > maxLength ? `${flattened.slice(0, maxLength - 1)}…` : flattened
 }

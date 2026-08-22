@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import * as XLSX from 'xlsx'
 import { readSpreadsheetTool } from './readSpreadsheet.ts'
+import { withAgentIdentity } from '../autonomy/context.ts'
 
 let testDir: string
 let fixturePath: string
@@ -52,4 +53,12 @@ test('read_spreadsheet returns only the requested sheet', async () => {
 
 test('read_spreadsheet throws on an unknown sheet name', async () => {
   await expect(readSpreadsheetTool.execute({ path: fixturePath, sheet: 'Nope' })).rejects.toThrow('Sheet(s) not found')
+})
+
+
+test('read_spreadsheet validates inputs and resolves relative paths against the active agent cwd', async () => {
+  await expect(readSpreadsheetTool.execute({})).rejects.toThrow('path must be a non-empty string')
+  await expect(readSpreadsheetTool.execute({ path: fixturePath, sheet: 42 })).rejects.toThrow('sheet must be a non-empty string')
+  const result = await withAgentIdentity({ name: 'test', role: 'scout', cwd: testDir }, () => readSpreadsheetTool.execute({ path: 'budget.xlsx', sheet: 'Revenue' }))
+  expect(result).toContain('Jan,1000')
 })

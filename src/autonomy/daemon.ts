@@ -74,13 +74,23 @@ export async function runScheduledDaemon(options: ScheduledDaemonOptions = {}): 
   if (options.once) return
 
   while (!options.signal?.aborted) {
-    await new Promise<void>((resolve) => {
-      const timer = setTimeout(resolve, pollMs)
-      options.signal?.addEventListener('abort', () => {
-        clearTimeout(timer)
-        resolve()
-      }, { once: true })
-    })
+    await waitForNextPoll(pollMs, options.signal)
     if (!options.signal?.aborted) await tick()
   }
+}
+
+function waitForNextPoll(pollMs: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    let settled = false
+    const finish = () => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      signal?.removeEventListener('abort', finish)
+      resolve()
+    }
+    const timer = setTimeout(finish, pollMs)
+    if (signal?.aborted) finish()
+    else signal?.addEventListener('abort', finish, { once: true })
+  })
 }

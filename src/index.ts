@@ -186,13 +186,15 @@ const subcommand = SUBCOMMANDS.includes(rawArgs[0] as Subcommand) ? (rawArgs[0] 
 const args = subcommand ? rawArgs.slice(1) : rawArgs
 
 function hasFlag(...names: string[]): boolean {
-  return names.some((name) => args.includes(name))
+  return args.some((arg) => names.some((name) => arg === name || arg === `${name}=true`))
 }
 
 function flagValue(...names: string[]): string | undefined {
   for (const name of names) {
     const index = args.indexOf(name)
     if (index !== -1) return args[index + 1]
+    const inline = args.find((arg) => arg.startsWith(`${name}=`))
+    if (inline) return inline.slice(name.length + 1)
   }
   return undefined
 }
@@ -206,6 +208,7 @@ function positionals(valueFlags: string[] = []): string[] {
       i += 1
       continue
     }
+    if (valueFlags.some((flag) => arg.startsWith(`${flag}=`))) continue
     if (arg.startsWith('-')) continue
     result.push(arg)
   }
