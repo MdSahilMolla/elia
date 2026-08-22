@@ -24,6 +24,8 @@ Scouts run on a faster, cheaper model and cannot modify anything, so prefer a ha
         description: 'Which kind of worker to use (default: builder)',
       },
       prompt: { type: 'string', description: 'Full, self-contained instructions for the sub-agent' },
+      acceptanceCriteria: { type: 'array', description: 'Observable conditions that must be true before the worker can report completion' },
+      verificationCommands: { type: 'array', description: 'Commands or checks the worker must run and report' },
     },
     required: ['description', 'prompt'],
   },
@@ -32,8 +34,10 @@ Scouts run on a faster, cheaper model and cannot modify anything, so prefer a ha
     const role = isRoleName(input.role) ? input.role : 'builder'
     dispatched += 1
     const description = typeof input.description === 'string' ? input.description : `${role} task`
-    const session = taskSessions.create(inferTaskKind(description, prompt), description, 'Waiting for a worker')
-    taskSessions.update(session.id, { status: 'running', action: 'Starting worker', detail: `Role: ${role}` })
+    const acceptanceCriteria = Array.isArray(input.acceptanceCriteria) ? input.acceptanceCriteria.filter((value): value is string => typeof value === 'string' && value.trim().length > 0).slice(0, 20) : undefined
+    const verificationCommands = Array.isArray(input.verificationCommands) ? input.verificationCommands.filter((value): value is string => typeof value === 'string' && value.trim().length > 0).slice(0, 20) : undefined
+    const session = taskSessions.create(inferTaskKind(description, prompt), description, 'Waiting for a worker', { acceptanceCriteria, verificationCommands })
+    taskSessions.update(session.id, { status: 'running', action: 'Starting worker', detail: `Role: ${role}`, nextAction: 'Worker is orienting and will report evidence' })
 
     try {
       const result = await runSubAgent({
@@ -41,12 +45,15 @@ Scouts run on a faster, cheaper model and cannot modify anything, so prefer a ha
         role,
         name: `${role}#${dispatched}`,
         onTool: (event) => {
-          taskSessions.update(session.id, {
-            status: 'running',
-            action: event.isError ? `Retrying after ${event.name}` : event.name,
-            detail: event.isError ? event.result : `step ${event.name} completed`,
-            stepsCompleted: (taskSessions.get(session.id)?.stepsCompleted ?? 0) + 1,
-          })
+            const current = taskSessions.get(session.id)
+            const stepsCompleted = (current?.stepsCompleted ?? 0) + 1
+            taskSessions.update(session.id, {
+              status: 'running',
+              action: event.isError ? `Retrying after ${event.name}` : event.name,
+              detail: event.isError ? event.result : `step ${event.name} completed`,
+              stepsCompleted,
+              nextAction: event.isError ? 'Diagnose the failed tool call and retry safely' : 'Continue until acceptance evidence is complete',
+            })
         },
       })
       const header = result.ok
@@ -56,12 +63,16 @@ Scouts run on a faster, cheaper model and cannot modify anything, so prefer a ha
         status: result.ok ? 'done' : 'failed',
         action: result.ok ? 'Finished' : 'Stopped early',
         detail: result.report.slice(0, 240),
+        stepsCompleted: result.steps,
+        stepsTotal: result.steps,
+        progress: result.ok ? 1 : Math.min(0.95, result.steps > 0 ? 0.5 : 0),
+        nextAction: result.ok ? undefined : 'Review the worker report and retry with corrected context',
         error: result.ok ? undefined : 'Worker stopped before completing its assigned task',
       })
       return `${header}\nTask session: ${session.id}\n${result.report}`
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error)
-      taskSessions.update(session.id, { status: 'failed', action: 'Failed', detail, error: detail })
+      taskSessions.update(session.id, { status: 'failed', action: 'Failed', detail, blockedReason: 'Worker execution raised an error', nextAction: 'Inspect the error, check environment prerequisites, and retry if safe', error: detail })
       throw error
     }
   },

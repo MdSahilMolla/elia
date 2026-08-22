@@ -132,5 +132,5 @@ export function personaTools(persona: Exclude<AgentPersona, 'tech'>, selectedSki
   const allowed = PERSONA_TOOL_NAMES[persona]
   const selected = new Set(selectedSkillNames ?? [])
   const synthesized = new Set(getSynthesizedTools().map((tool) => tool.name))
-  return pool.filter((tool) => allowed.includes(tool.name) || (synthesized.has(tool.name) && (selectedSkillNames === undefined || selected.has(tool.name))))
+  return pool.filter((tool) => tool.name === 'environment' || allowed.includes(tool.name) || (synthesized.has(tool.name) && (selectedSkillNames === undefined || selected.has(tool.name))))
 }

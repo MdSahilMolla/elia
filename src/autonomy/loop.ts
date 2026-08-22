@@ -2,6 +2,7 @@ import { DEV_SYSTEM_PROMPT, config, tierConfig } from '../config.ts'
 import { runAgentLoop, type ConversationMessage } from '../agentLoop.ts'
 import { taskTool } from '../tools/task.ts'
 import { allWorkerTools } from '../tools/registry.ts'
+import { environmentTool } from '../tools/environment.ts'
 import { runSubAgent } from '../subagent.ts'
 import { runShell, clampOutput } from '../shell.ts'
 import { ZERO_USAGE, addUsage, formatElapsed, recordUsage } from '../usage.ts'
@@ -32,6 +33,7 @@ import type { CriticVerdict, Proposal } from './types.ts'
 import { appendActionAudit, writeRunReceipt } from './audit.ts'
 import { createActionGovernor, withActionGovernor, type ActionApproval, type ActionGovernor, type GovernanceMode } from './governor.ts'
 import { GoalGraphStore, withGoalGraph, type GoalGraphStore as GoalGraphStoreType } from './goalGraph.ts'
+import { assessCompletion, type CompletionAssessment } from './outcome.ts'
 
 export type ApprovalDecision =
   | { action: 'approve' }
@@ -108,6 +110,7 @@ export interface AutonomousRunResult {
   usage: Usage
   elapsedMs: number
   lessons: string[]
+  completion: CompletionAssessment
 }
 
 const PLANNER_PROMPT = `${DEV_SYSTEM_PROMPT}
@@ -117,7 +120,7 @@ const PLANNER_PROMPT = `${DEV_SYSTEM_PROMPT}
 You are in the orient-and-propose phase of an autonomous run. You must NOT change anything yet — you have no write tools in this phase, by design.
 
 Work like an engineer picking up an unfamiliar ticket:
-1. Look at the shape of the project before forming any opinion.
+1. Look at the shape of the project and call environment before forming any opinion; verify runtimes, credentials presence, browser transport presence, git state, and the detected project shape.
 2. Send several scouts out in parallel (call \`task\` with role "scout" multiple times in one turn) to answer the specific questions you need answered. Scouts are fast and cheap; serial investigation is the single biggest waste of wall-clock time available to you, so batch it.
 3. Read the handful of files that actually decide the design yourself.
 4. Then call \`submit_proposal\` exactly once and stop.
@@ -184,6 +187,9 @@ export async function runAutonomousTask(options: AutonomousRunOptions): Promise<
   setActiveBlackboard(board)
 
   let usage = ZERO_USAGE
+  let planApproved = false
+  let verificationPassed = false
+  let reviewPassed = false
   const track = (delta: Usage) => {
     usage = addUsage(usage, delta)
   }
@@ -206,15 +212,17 @@ export async function runAutonomousTask(options: AutonomousRunOptions): Promise<
     } else if (outcome === 'needs-attention' || outcome === 'aborted') {
       graph.failRun(outcome)
     }
-    journal.append('run-end', { outcome, graph: graph.state().nodes.map((node) => ({ id: node.id, status: node.status })) })
-    writeRunReceipt({ runId, goal, outcome, proposal: extra.proposal, verdict: extra.verdict, lessons: extra.lessons, events: journal.events(), graph: graph.state(), usage, elapsedMs: Date.now() - startedAt, maxWallClockMs: maxWallClockMs || undefined })
-    emitEvent('run_finished', { runId, goal: redactText(goal, 2000), outcome, elapsedMs: Date.now() - startedAt, usage, graph: graph.state() })
+    const completion = assessCompletion({ outcome, graph: graph.state(), verificationPassed, reviewPassed, planApproved })
+    journal.append('run-end', { outcome, completion, graph: graph.state().nodes.map((node) => ({ id: node.id, status: node.status })) })
+    writeRunReceipt({ runId, goal, outcome, proposal: extra.proposal, verdict: extra.verdict, lessons: extra.lessons, completion, events: journal.events(), graph: graph.state(), usage, elapsedMs: Date.now() - startedAt, maxWallClockMs: maxWallClockMs || undefined })
+    emitEvent('run_finished', { runId, goal: redactText(goal, 2000), outcome, completion, elapsedMs: Date.now() - startedAt, usage, graph: graph.state() })
     return {
       runId,
       outcome,
       usage,
       elapsedMs: Date.now() - startedAt,
       lessons: [],
+      completion,
       ...extra,
     }
   }
@@ -222,14 +230,14 @@ export async function runAutonomousTask(options: AutonomousRunOptions): Promise<
   // --- Orient & propose -----------------------------------------------------
 
   writePhase('orient', `run ${runId}`)
-  const snapshot = options.resumeGraph ? '(resuming from the durable goal graph; inspect only files needed for unfinished nodes)' : await projectSnapshot()
+  const snapshot = options.resumeGraph ? '(resuming from the durable goal graph; inspect only files needed for unfinished nodes)' : await projectSnapshot(runId, runSignal)
 
   const proposalCapture = createProposalTool()
   const plannerPrompt = profile === 'fast'
     ? `${PLANNER_PROMPT}\n\n## Fast bounded mode\nThis is a time-sensitive task. Prefer 3–6 high-value steps, combine edits that share a coherent UI or subsystem, and keep independent steps in the same wave. Do not create separate steps for trivial assets, documentation, or cosmetic micro-edits. The goal is a complete verified result, not an exhaustive project plan.`
     : PLANNER_PROMPT
   const planningTools = [
-    ...allWorkerTools().filter((tool) => ['read_file', 'list_files', 'grep', 'board_read', 'board_post'].includes(tool.name)),
+    ...allWorkerTools().filter((tool) => ['read_file', 'list_files', 'grep', 'board_read', 'board_post', 'environment'].includes(tool.name)),
     taskTool,
     proposalCapture.tool,
   ]
@@ -298,6 +306,7 @@ export async function runAutonomousTask(options: AutonomousRunOptions): Promise<
     const durableApproval = graph.requestApproval('plan', 'proposal', { goal: proposal.goal }, 'The approved proposal authorizes the run to execute its planned steps.')
     const decision = durableApproval.status === 'approved' ? ({ action: 'approve' } as const) : await approve(proposal)
     if (durableApproval.status === 'pending') graph.resolveApproval(durableApproval.id, decision.action === 'approve', decision.action === 'amend' ? decision.feedback : decision.action)
+    planApproved = decision.action === 'approve'
     journal.append('approval', { action: decision.action, approvalId: durableApproval.id })
     emitEvent('approval_decision', { runId, approvalId: durableApproval.id, kind: 'plan', decision: decision.action })
 
@@ -325,10 +334,12 @@ export async function runAutonomousTask(options: AutonomousRunOptions): Promise<
 
   if (proposal && options.resumeGraph) {
     const durableApproval = graph.state().approvals.find((approval) => approval.kind === 'plan')
+    planApproved = durableApproval?.status === 'approved'
     if (durableApproval?.status !== 'approved') {
       const decision = await approve(proposal)
       if (durableApproval) graph.resolveApproval(durableApproval.id, decision.action === 'approve', decision.action === 'amend' ? decision.feedback : decision.action)
       if (decision.action !== 'approve') return done(decision.action === 'reject' ? 'rejected' : 'needs-attention', { proposal })
+      planApproved = true
     }
   }
 
@@ -375,6 +386,9 @@ export async function runAutonomousTask(options: AutonomousRunOptions): Promise<
           title: step.title,
           role: step.role,
           instructions: step.instructions,
+          acceptanceCriteria: proposal.acceptanceCriteria,
+          verificationCommands: proposal.verification,
+          sideEffects: proposal.sideEffects,
         })),
         briefing,
         journal,
@@ -467,6 +481,7 @@ Read the changed files in full context. Improve only concrete issues directly re
       if (result.exitCode === 0 && !result.timedOut) writePass(label)
       else writeFail(`${label} — ${result.timedOut ? 'timed out' : `exit ${result.exitCode}`}`)
     }
+    verificationPassed = verification.passed
     const verificationData = {
       passed: verification.passed,
       results: verification.results.map((result) => ({
@@ -563,8 +578,9 @@ Read the changed files in full for context beyond the diff above — a diff hide
       verdict = mergeVerdicts(reviewResults.map(({ reviewer, verdict }) => ({ reviewer, verdict })))
 
       journal.append('verdict', { ...verdict })
-      graph.recordReview(!hasBlockingIssues(verdict), { verdict })
-      if (!hasBlockingIssues(verdict)) {
+      reviewPassed = !hasBlockingIssues(verdict)
+      graph.recordReview(reviewPassed, { verdict })
+      if (reviewPassed) {
         writePass(verdict.summary)
         if (verdict.issues.length > 0) writeBlock('Minor notes', describeIssues(verdict.issues))
         break
@@ -698,14 +714,16 @@ Read the shared blackboard with \`board_read\` to see what the workers actually 
  * with real commands so the planner starts from facts instead of spending its
  * first three tool calls asking what kind of project this is.
  */
-async function projectSnapshot(): Promise<string> {
+async function projectSnapshot(runId: string, signal?: AbortSignal): Promise<string> {
+  const environment = await withAgentIdentity({ name: 'lead', role: 'lead', runId, cwd: process.cwd(), signal }, () => environmentTool.execute({}))
   const [tree, status, branch] = await Promise.all([
-    runShell(process.platform === 'win32' ? 'dir /b' : 'ls -1', 10_000),
-    runShell('git status --porcelain=v1 --branch', 10_000),
-    runShell('git log --oneline -5', 10_000),
+    runShell(process.platform === 'win32' ? 'dir /b' : 'ls -1', 10_000, process.cwd(), signal),
+    runShell('git status --porcelain=v1 --branch', 10_000, process.cwd(), signal),
+    runShell('git log --oneline -5', 10_000, process.cwd(), signal),
   ])
 
   const sections = [
+    `Environment preflight:\n${environment}`,
     `Top level:\n${tree.stdout.trim() || '(empty)'}`,
     status.exitCode === 0 ? `Git status:\n${status.stdout.trim() || '(clean)'}` : 'Not a git repository.',
     branch.exitCode === 0 && branch.stdout.trim() ? `Recent commits:\n${branch.stdout.trim()}` : '',

@@ -7,6 +7,7 @@ import { redactActionInput } from './governor.ts'
 import type { JournalEvent } from './journal.ts'
 import type { GoalGraphSnapshot } from './goalGraph.ts'
 import type { Usage } from '../providers/types.ts'
+import type { CompletionAssessment } from './outcome.ts'
 
 export interface ActionLedgerRecord {
   at: number
@@ -43,6 +44,7 @@ export interface RunReceiptInput {
   usage?: Usage
   elapsedMs?: number
   maxWallClockMs?: number
+  completion?: CompletionAssessment
 }
 
 export function appendActionAudit(event: ToolEvent, runIdOverride?: string): void {
@@ -105,6 +107,7 @@ export function writeRunReceipt(input: RunReceiptInput): void {
     runId: input.runId,
     goal: input.goal,
     outcome: input.outcome,
+    completion: input.completion,
     createdAt: actions[0]?.at ?? Date.now(),
     completedAt: Date.now(),
     elapsedMs: input.elapsedMs,
@@ -191,6 +194,7 @@ function renderReceipt(receipt: {
   maxWallClockMs?: number
   actions: { total: number; failed: number; blocked: number; irreversible: number; replayed?: number; humanReview?: number; retryable?: number }
   graph?: { nodes: { id: string; status: string; attempts: number }[]; pendingApprovals: number; recoveredNodes?: number; activeLeases?: number; retryableActions?: number; humanReviewActions?: number }
+  completion?: CompletionAssessment
 }): string {
   const verificationLines =
     receipt.verification.length > 0
@@ -206,6 +210,7 @@ function renderReceipt(receipt: {
     '',
     `- **Run:** ${receipt.runId}`,
     `- **Outcome:** ${receipt.outcome}`,
+    ...(receipt.completion ? [`- **Completion state:** ${receipt.completion.state} (${receipt.completion.confidence} confidence)`, `- **Completion:** ${receipt.completion.summary}`, `- **Evidence:** ${receipt.completion.evidence.length > 0 ? receipt.completion.evidence.join('; ') : 'none'}`, `- **Blockers:** ${receipt.completion.blockers.length > 0 ? receipt.completion.blockers.join('; ') : 'none'}`, `- **Next actions:** ${receipt.completion.nextActions.join('; ')}`] : []),
     `- **Goal:** ${receipt.goal}`,
     `- **Elapsed:** ${receipt.elapsedMs === undefined ? 'unknown' : `${(receipt.elapsedMs / 1000).toFixed(1)}s`}${receipt.maxWallClockMs ? ` / budget ${(receipt.maxWallClockMs / 1000).toFixed(1)}s` : ''}`,
     `- **Actions:** ${receipt.actions.total} (${receipt.actions.failed} failed, ${receipt.actions.blocked} blocked)`,

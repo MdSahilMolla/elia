@@ -2,7 +2,7 @@
 
 ## Executive assessment
 
-Elia already has a strong coding-agent core: model/provider selection with automatic failover, a two-tier model cascade, role-typed sub-agents, parallel dependency waves, durable goal graphs, checkpoints and rewind, action governance, browser bridging, cyber engagement scaffolding, web search/fetch, spreadsheet reading and writing, deterministic data-science workflows, deterministic finance calculations, production-readiness audits, autonomous execution profiles, verification, repair, lessons, and run receipts. It is not yet a complete general-purpose autonomous agent because external environment delivery, advanced statistical/financial modeling, and quality guarantees across non-coding work still require project-specific evidence and human review.
+Elia already has a strong coding-agent core: model/provider selection with automatic failover, a two-tier model cascade, role-typed sub-agents, parallel dependency waves, durable goal graphs, checkpoints and rewind, action governance, browser bridging, cyber engagement scaffolding, web search/fetch, spreadsheet reading and writing, deterministic data-science workflows, deterministic finance calculations, production-readiness audits, environment preflight, richer domain task sessions, structured completion confidence, autonomous execution profiles, verification, repair, lessons, and run receipts. It is not yet a complete general-purpose autonomous agent because external environment delivery, advanced statistical/financial modeling, and quality guarantees across non-coding work still require project-specific evidence and human review.
 
 No honest system can guarantee that every possible task is flawless. The correct target is a **general execution substrate** with explicit capability discovery, domain playbooks, reversible planning, confirmation gates for consequential actions, durable recovery, and benchmark-backed quality thresholds.
 
@@ -20,8 +20,10 @@ No honest system can guarantee that every possible task is flawless. The correct
 | Automation | Shell, browser bridge, task orchestration, autonomy profiles, and goal graphs exist | No unified workflow/action catalog or external event/communication adapter layer |
 | Research | Web search/fetch and parallel scouts exist | Needs source registry, citation/provenance contract, and research deliverables |
 | Browser/computer use | Browser bridge supports status, navigation, snapshot, extraction, click, type, press, and wait | A bridge must be configured; authenticated external actions need explicit user takeover/approval |
+| Environment awareness | Read-only preflight reports project shape, git state, runtimes/CLIs, credential presence, and browser transport presence without exposing secret values | Snapshot can become stale; presence does not prove authorization, login, reachability, or health |
 | Email/calendar/external parties | Connectors such as Gmail and Google Calendar are present but disabled in the current session; Elia has no native email tool | Requires user-enabled connectors or a trusted browser/bridge, with confirmation and audit trails |
-| Long-running autonomy | Durable goal graph, checkpoints, run receipts, repair attempts, profiles, and resume support exist | Needs stronger pause/resume semantics and external event delivery |
+| Completion truth | Completion assessor distinguishes verified, partial, blocked, failed, and aborted runs with evidence, blockers, confidence, and next actions | Subjective acceptance and external-world outcomes still need domain-specific postconditions or human review |
+| Long-running autonomy | Durable goal graph, checkpoints, run receipts, repair attempts, profiles, structured completion states, and resume support exist | Needs stronger pause/resume semantics, external event delivery, and a persistent always-on worker |
 
 
 ## Proposed end-to-end architecture

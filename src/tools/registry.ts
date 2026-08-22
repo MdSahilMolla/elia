@@ -19,6 +19,7 @@ import { projectProfileTool } from './projectProfile.ts'
 import { productionReadinessTool } from './productionReadiness.ts'
 import { financeTool } from './finance.ts'
 import { dataScienceTool } from './dataScience.ts'
+import { environmentTool } from './environment.ts'
 import type { Tool } from './types.ts'
 
 /** The built-in file and shell tools. */
@@ -34,6 +35,7 @@ export const tools: Tool[] = [
   productionReadinessTool,
   financeTool,
   dataScienceTool,
+  environmentTool,
 ]
 
 /** Tools that let a fleet of sub-agents coordinate instead of working blind. */

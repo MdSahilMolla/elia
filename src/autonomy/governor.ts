@@ -57,6 +57,10 @@ export function assessAction(request: ActionRequest, cwd = currentAgent().cwd ??
     return assessment('safe', 'allow', 'production readiness is a repository-only, read-only evidence audit', 'production_readiness', resources, true)
   }
 
+  if (name === 'environment') {
+    return assessment('safe', 'allow', 'environment discovery is a local, read-only capability snapshot', 'environment.inspect', resources, true)
+  }
+
   if (name === 'finance') {
     return assessment('safe', 'allow', 'finance calculations are deterministic and do not mutate external state', 'finance.analysis', resources, true)
   }

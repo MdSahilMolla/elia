@@ -235,7 +235,7 @@ async function runAgentCommand(): Promise<void> {
 
 async function runAuto(): Promise<void> {
   const { runAutonomousTask, autoApprove } = await import('./autonomy/loop.ts')
-  const goal = positionals(['--variants']).join(' ').trim()
+  const goal = positionals(['--variants', '--run-id']).join(' ').trim()
   if (!goal) {
     writeError('Give elia a goal: elia auto "add rate limiting to the API client"')
     process.exitCode = 1
@@ -243,6 +243,14 @@ async function runAuto(): Promise<void> {
   }
 
   const profile = hasFlag('--fast') ? 'fast' : hasFlag('--thorough') ? 'thorough' : 'balanced'
+  const resumeGraph = hasFlag('--resume')
+  const resumeRunId = flagValue('--run-id')
+  if (resumeGraph && !resumeRunId) {
+    writeError('--resume requires --run-id <run-id> so Elia can locate the durable goal graph')
+    process.exitCode = 1
+    return
+  }
+  if (resumeGraph) writeNotice(`resuming durable run: ${resumeRunId}`)
   const maxRunMsRaw = flagValue('--max-run-ms')
   const maxRunMs = maxRunMsRaw === undefined ? undefined : Number.parseInt(maxRunMsRaw, 10)
   if (maxRunMsRaw !== undefined && (!Number.isInteger(maxRunMs) || maxRunMs! < 1)) {
@@ -279,7 +287,7 @@ async function runAuto(): Promise<void> {
   let rl: readline.Interface | undefined
   try {
     if (yolo) {
-      const result = await runAutonomousTask({ goal, approve: autoApprove, variants, profile, polish: !hasFlag('--no-polish'), governanceMode: 'unattended', signal: controller.signal, maxWallClockMs: maxRunMs })
+      const result = await runAutonomousTask({ goal, approve: autoApprove, variants, profile, resumeGraph, runId: resumeRunId, polish: !hasFlag('--no-polish'), governanceMode: 'unattended', signal: controller.signal, maxWallClockMs: maxRunMs })
       if (result.outcome !== 'completed') process.exitCode = 1
       return
     }
@@ -292,7 +300,7 @@ async function runAuto(): Promise<void> {
       const result = await confirmOnce(interactiveRl, label)
       return result.action === 'approve'
     }
-    const result = await runAutonomousTask({ goal, approve: createInteractiveApprover(interactiveRl), variants, profile, polish: !hasFlag('--no-polish'), governanceMode: 'supervised', approveAction, signal: controller.signal, maxWallClockMs: maxRunMs })
+    const result = await runAutonomousTask({ goal, approve: createInteractiveApprover(interactiveRl), variants, profile, resumeGraph, runId: resumeRunId, polish: !hasFlag('--no-polish'), governanceMode: 'supervised', approveAction, signal: controller.signal, maxWallClockMs: maxRunMs })
     if (result.outcome !== 'completed' && result.outcome !== 'rejected') process.exitCode = 1
   } finally {
     rl?.close()
