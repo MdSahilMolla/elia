@@ -84,12 +84,12 @@ export function contractForAction(request: ActionRequest, cwd: string, idempoten
   }
 }
 
-export async function evaluatePreconditions(contract: ActionContract, cwd: string, signal?: AbortSignal): Promise<ContractEvaluation> {
+export async function evaluatePreconditions(contract: ActionContract, cwd: string, signal?: AbortSignal, environment: NodeJS.ProcessEnv = process.env): Promise<ContractEvaluation> {
   const failures: string[] = []
   const evidence: string[] = []
   for (const check of contract.preconditions) {
     if (check.kind === 'browser-transport') {
-      const configured = Boolean(process.env.ELIA_BROWSER_MCP_SERVER || process.env.ELIA_BROWSER_BRIDGE_COMMAND || process.env.ELIA_BROWSER_CDP_URL)
+      const configured = Boolean(environment.ELIA_BROWSER_MCP_SERVER || environment.ELIA_BROWSER_BRIDGE_COMMAND || environment.ELIA_BROWSER_CDP_URL)
       if (configured) evidence.push('browser transport configured; login, reachability, and authorization remain unverified')
       else failures.push('no browser transport configured; configure an enabled user-Chrome connector, trusted bridge, or CDP endpoint')
       continue

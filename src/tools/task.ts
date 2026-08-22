@@ -3,6 +3,9 @@ import { runSubAgent } from '../subagent.ts'
 import { roleMenu } from '../autonomy/roles.ts'
 import { isRoleName, ROLE_NAMES } from '../autonomy/types.ts'
 import { inferTaskKind, taskSessions } from '../taskSessions.ts'
+import { currentAgent } from '../autonomy/context.ts'
+import { activeActionGovernor } from '../autonomy/governor.ts'
+import { runVerification } from '../autonomy/verify.ts'
 
 let dispatched = 0
 
@@ -40,10 +43,15 @@ Scouts run on a faster, cheaper model and cannot modify anything, so prefer a ha
     taskSessions.update(session.id, { status: 'running', action: 'Starting worker', detail: `Role: ${role}`, nextAction: 'Worker is orienting and will report evidence' })
 
     try {
-      const result = await runSubAgent({
-        prompt,
+      const contract = [
+        acceptanceCriteria?.length ? `## Acceptance criteria\n${acceptanceCriteria.map((criterion) => `- ${criterion}`).join('\n')}` : undefined,
+        verificationCommands?.length ? `## Verification commands\n${verificationCommands.map((command) => `- ${command}`).join('\n')}` : undefined,
+      ].filter(Boolean).join('\n\n')
+      let result = await runSubAgent({
+        prompt: contract ? `${prompt}\n\n${contract}` : prompt,
         role,
         name: `${role}#${dispatched}`,
+        signal: currentAgent().signal,
         onTool: (event) => {
             const current = taskSessions.get(session.id)
             const stepsCompleted = (current?.stepsCompleted ?? 0) + 1
@@ -56,18 +64,30 @@ Scouts run on a faster, cheaper model and cannot modify anything, so prefer a ha
             })
         },
       })
+      let verificationPassed: boolean | undefined
+      let verificationReport = ''
+      if (result.ok && verificationCommands?.length) {
+        const verification = await runVerification(verificationCommands, currentAgent().cwd ?? process.cwd(), currentAgent().signal, activeActionGovernor())
+        verificationPassed = verification.passed
+        verificationReport = verification.passed
+          ? `Verification passed: ${verificationCommands.join(' && ')}`
+          : `Verification failed:\n${verification.results.map((check) => `${check.command}: ${check.timedOut ? 'timed out' : `exit ${check.exitCode}`}`).join('\n')}`
+        result = { ...result, ok: verification.passed, report: `${result.report}\n\n${verificationReport}` }
+      }
+      const needsReview = !result.ok && verificationPassed === false
       const header = result.ok
-        ? `[${result.role} finished in ${(result.elapsedMs / 1000).toFixed(1)}s, ${result.steps} steps]`
-        : `[${result.role} stopped early after ${result.steps} steps — treat this report as incomplete]`
+        ? `[${result.role} finished and verified in ${(result.elapsedMs / 1000).toFixed(1)}s, ${result.steps} steps]`
+        : `[${result.role} ${needsReview ? 'needs review after failed verification' : `stopped early after ${result.steps} steps`} — treat this report as incomplete]`
       taskSessions.update(session.id, {
-        status: result.ok ? 'done' : 'failed',
-        action: result.ok ? 'Finished' : 'Stopped early',
-        detail: result.report.slice(0, 240),
+        status: result.ok ? 'done' : needsReview ? 'needs-review' : 'failed',
+        action: result.ok ? 'Finished and verified' : needsReview ? 'Verification needs review' : 'Stopped early',
+        detail: result.report.slice(0, 1000),
         stepsCompleted: result.steps,
         stepsTotal: result.steps,
         progress: result.ok ? 1 : Math.min(0.95, result.steps > 0 ? 0.5 : 0),
-        nextAction: result.ok ? undefined : 'Review the worker report and retry with corrected context',
-        error: result.ok ? undefined : 'Worker stopped before completing its assigned task',
+        nextAction: result.ok ? undefined : needsReview ? 'Inspect the failed verification output and retry the incomplete task.' : 'Review the worker report and retry with corrected context',
+        blockedReason: needsReview ? verificationReport : undefined,
+        error: result.ok ? undefined : result.report.slice(0, 2000),
       })
       return `${header}\nTask session: ${session.id}\n${result.report}`
     } catch (error) {

@@ -61,7 +61,7 @@ export class ScheduleStore {
 
   private constructor(private readonly path: string) {}
 
-  static open(path = DEFAULT_FILE): ScheduleStore {
+  static open(path = DEFAULT_FILE, recoverExpired = true): ScheduleStore {
     const store = new ScheduleStore(path)
     if (!existsSync(path)) return store
     try {
@@ -93,7 +93,7 @@ export class ScheduleStore {
     } catch {
       // Corrupt schedules are ignored so they cannot prevent Elia from starting.
     }
-    store.recoverExpired()
+    if (recoverExpired) store.recoverExpired()
     return store
   }
 
@@ -102,52 +102,64 @@ export class ScheduleStore {
   }
 
   create(input: { title: string; goal: string; intervalMs: number; profile?: AutonomyProfile; maxRunMs?: number; now?: number }): ScheduleRecord {
-    const now = input.now ?? Date.now()
-    if (!Number.isInteger(input.intervalMs) || input.intervalMs < MIN_SCHEDULE_INTERVAL_MS || input.intervalMs > MAX_SCHEDULE_INTERVAL_MS) {
-      throw new Error('schedule interval must be between 60s and 30d')
-    }
-    const record: ScheduleRecord = {
-      id: `${now.toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
-      title: redactText(input.title.trim() || 'Autonomous task', 160),
-      goal: redactText(input.goal.trim(), 4000),
-      intervalMs: input.intervalMs,
-      nextRunAt: now + input.intervalMs,
-      status: 'active',
-      profile: input.profile ?? 'balanced',
-      maxRunMs: input.maxRunMs === undefined ? undefined : Math.max(1, Math.min(24 * 60 * 60_000, input.maxRunMs)),
-      createdAt: now,
-      updatedAt: now,
-      runCount: 0,
-      failureCount: 0,
-    }
-    if (!record.goal) throw new Error('scheduled goal cannot be empty')
-    this.records.set(record.id, record)
-    this.persist()
-    return structuredClone(record)
+    return this.withExclusiveLock(() => {
+      this.reloadFromDisk()
+      const now = input.now ?? Date.now()
+      if (!Number.isInteger(input.intervalMs) || input.intervalMs < MIN_SCHEDULE_INTERVAL_MS || input.intervalMs > MAX_SCHEDULE_INTERVAL_MS) {
+        throw new Error('schedule interval must be between 60s and 30d')
+      }
+      const record: ScheduleRecord = {
+        id: `${now.toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+        title: redactText(input.title.trim() || 'Autonomous task', 160),
+        goal: redactText(input.goal.trim(), 4000),
+        intervalMs: input.intervalMs,
+        nextRunAt: now + input.intervalMs,
+        status: 'active',
+        profile: input.profile ?? 'balanced',
+        maxRunMs: input.maxRunMs === undefined ? undefined : Math.max(1, Math.min(24 * 60 * 60_000, input.maxRunMs)),
+        createdAt: now,
+        updatedAt: now,
+        runCount: 0,
+        failureCount: 0,
+      }
+      if (!record.goal) throw new Error('scheduled goal cannot be empty')
+      this.records.set(record.id, record)
+      this.persist()
+      return structuredClone(record)
+    })
   }
 
   pause(id: string): ScheduleRecord {
-    const record = this.require(id)
-    record.status = 'paused'
-    record.leaseExpiresAt = undefined
-    record.updatedAt = Date.now()
-    this.persist()
-    return structuredClone(record)
+    return this.withExclusiveLock(() => {
+      this.reloadFromDisk()
+      const record = this.require(id)
+      record.status = 'paused'
+      record.leaseExpiresAt = undefined
+      record.updatedAt = Date.now()
+      this.persist()
+      return structuredClone(record)
+    })
   }
 
   resume(id: string, now = Date.now()): ScheduleRecord {
-    const record = this.require(id)
-    record.status = 'active'
-    record.nextRunAt = Math.min(record.nextRunAt, now)
-    record.leaseExpiresAt = undefined
-    record.updatedAt = now
-    this.persist()
-    return structuredClone(record)
+    return this.withExclusiveLock(() => {
+      this.reloadFromDisk()
+      const record = this.require(id)
+      record.status = 'active'
+      record.nextRunAt = Math.min(record.nextRunAt, now)
+      record.leaseExpiresAt = undefined
+      record.updatedAt = now
+      this.persist()
+      return structuredClone(record)
+    })
   }
 
   remove(id: string): void {
-    if (!this.records.delete(id)) throw new Error(`unknown schedule ${id}`)
-    this.persist()
+    this.withExclusiveLock(() => {
+      this.reloadFromDisk()
+      if (!this.records.delete(id)) throw new Error(`unknown schedule ${id}`)
+      this.persist()
+    })
   }
 
   due(now = Date.now()): ScheduleRecord[] {
@@ -159,9 +171,7 @@ export class ScheduleStore {
       // A second daemon may have loaded an older in-memory snapshot. Reload after
       // acquiring the lock so a completed or already-running schedule cannot be
       // claimed twice by separate processes.
-      const fresh = ScheduleStore.open(this.path)
-      this.records.clear()
-      for (const record of fresh.list()) this.records.set(record.id, record)
+      this.reloadFromDisk()
       const record = this.require(id)
       if (record.status !== 'active' || record.nextRunAt > now) throw new Error(`schedule ${id} is not due`)
       record.status = 'running'
@@ -173,35 +183,47 @@ export class ScheduleStore {
   }
 
   complete(id: string, result: Pick<AutonomousRunResult, 'runId' | 'outcome'> & { error?: string }, now = Date.now()): ScheduleRecord {
-    const record = this.require(id)
-    record.status = 'active'
-    record.nextRunAt = now + record.intervalMs
-    record.updatedAt = now
-    record.runCount += 1
-    record.lastRunId = result.runId
-    record.lastOutcome = result.outcome
-    record.lastError = result.error ? redactText(result.error, 2000) : undefined
-    record.failureCount += result.outcome === 'completed' ? 0 : 1
-    record.leaseExpiresAt = undefined
-    this.persist()
-    return structuredClone(record)
+    return this.withExclusiveLock(() => {
+      this.reloadFromDisk()
+      const record = this.require(id)
+      record.status = 'active'
+      record.nextRunAt = now + record.intervalMs
+      record.updatedAt = now
+      record.runCount += 1
+      record.lastRunId = result.runId
+      record.lastOutcome = result.outcome
+      record.lastError = result.error ? redactText(result.error, 2000) : undefined
+      record.failureCount += result.outcome === 'completed' ? 0 : 1
+      record.leaseExpiresAt = undefined
+      this.persist()
+      return structuredClone(record)
+    })
   }
 
   recoverExpired(now = Date.now()): ScheduleRecord[] {
-    const recovered: ScheduleRecord[] = []
-    for (const record of this.records.values()) {
-      if (record.status === 'running' && record.leaseExpiresAt !== undefined && record.leaseExpiresAt <= now) {
-        record.status = 'active'
-        record.nextRunAt = now
-        record.updatedAt = now
-        record.failureCount += 1
-        record.lastError = 'scheduler lease expired; the previous run may have been interrupted'
-        record.leaseExpiresAt = undefined
-        recovered.push(structuredClone(record))
+    return this.withExclusiveLock(() => {
+      this.reloadFromDisk()
+      const recovered: ScheduleRecord[] = []
+      for (const record of this.records.values()) {
+        if (record.status === 'running' && record.leaseExpiresAt !== undefined && record.leaseExpiresAt <= now) {
+          record.status = 'active'
+          record.nextRunAt = now
+          record.updatedAt = now
+          record.failureCount += 1
+          record.lastError = 'scheduler lease expired; the previous run may have been interrupted'
+          record.leaseExpiresAt = undefined
+          recovered.push(structuredClone(record))
+        }
       }
-    }
-    if (recovered.length > 0) this.persist()
-    return recovered
+      if (recovered.length > 0) this.persist()
+      return recovered
+    })
+  }
+
+  private reloadFromDisk(): void {
+    const fresh = ScheduleStore.open(this.path, false)
+    this.records.clear()
+    for (const record of fresh.list()) this.records.set(record.id, record)
   }
 
   private require(id: string): ScheduleRecord {

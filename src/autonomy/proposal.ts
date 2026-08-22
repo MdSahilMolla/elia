@@ -261,6 +261,12 @@ export function renderProposal(proposal: Proposal): string {
   for (const command of proposal.verification) lines.push(`  ${dim('$')} ${command}`)
   if (proposal.verification.length === 0) lines.push(`  ${dim('(no verification commands given)')}`)
 
+  if (proposal.recovery?.length) {
+    lines.push('')
+    lines.push(bold('Recovery'))
+    for (const item of proposal.recovery) lines.push(`  ${dim('·')} ${item}`)
+  }
+
   if (proposal.outOfScope.length > 0) {
     lines.push('')
     lines.push(bold('Not doing'))

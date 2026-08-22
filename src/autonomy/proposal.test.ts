@@ -130,6 +130,8 @@ test('proposal contracts are preserved and rendered for approval', () => {
   expect(rendered).toContain('Acceptance')
   expect(rendered).toContain('page loads at mobile width')
   expect(rendered).toContain('Side effects')
+  expect(rendered).toContain('Recovery')
+  expect(rendered).toContain('ask for credentials if deployment is required')
 })
 
 test('the rendered proposal shows the wave structure it implies', () => {

@@ -104,3 +104,18 @@ describe('autonomy governor', () => {
     }
   })
 })
+
+test('unattended mode never delegates critical actions to an approval callback', async () => {
+  let callbackCalled = false
+  const governor = createActionGovernor({
+    mode: 'unattended',
+    approve: async () => {
+      callbackCalled = true
+      return true
+    },
+  })
+  const result = await governor.check({ name: 'communication', input: { action: 'send', draftId: 'comm_12345678' } })
+  expect(result.allowed).toBe(false)
+  expect(result.assessment.decision).toBe('block')
+  expect(callbackCalled).toBe(false)
+})

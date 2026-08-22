@@ -124,8 +124,15 @@ export function createActionGovernor(options: { mode?: GovernanceMode; approve?:
       const assessment = assessAction(request, options.cwd)
       if (assessment.decision === 'allow') return { allowed: true, assessment }
 
-      // In unattended mode, reversible review actions proceed. This preserves the
-      // speed of autonomous coding while keeping irreversible actions gated.
+      // Unattended mode may continue reversible review work, but it must never
+      // use a supplied callback to authorize a critical external side effect.
+      if (mode === 'unattended' && assessment.risk === 'critical') {
+        return {
+          allowed: false,
+          assessment: { ...assessment, decision: 'block' },
+          message: `Action blocked by Elia’s unattended policy: ${assessment.reason}. Resume in supervised mode for an exact approval boundary.`,
+        }
+      }
       if (assessment.risk === 'review' && mode === 'unattended') {
         return { allowed: true, assessment: { ...assessment, decision: 'allow' } }
       }

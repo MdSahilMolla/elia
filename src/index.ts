@@ -72,6 +72,7 @@ Autonomous work:
                                      record what it learned
   elia auto "<goal>" --yolo         Same, without waiting for you to approve the plan
   elia auto "<goal>" --autonomous   Self-supervised alias for --yolo; executes, verifies, repairs, and polishes
+  elia auto "<goal>" --unattended   Run safe, bounded work without routine prompts; critical actions still block
   elia auto "<goal>" --no-polish     Skip the bounded final quality pass
   elia auto "<goal>" --fast          Bounded fast path: no polish, one reviewer, one repair, no lesson pass
   elia auto "<goal>" --thorough      Extra bounded review and repair depth for high-risk changes
@@ -282,10 +283,10 @@ async function runAuto(): Promise<void> {
     )
   }
 
-  const yolo = hasFlag('--yolo', '-y', '--autonomous', '--self-supervise') || process.env.ELIA_AUTO_APPROVE === '1'
+  const yolo = hasFlag('--yolo', '-y', '--autonomous', '--self-supervise', '--unattended') || process.env.ELIA_AUTO_APPROVE === '1'
   let approveAction: ActionApproval | undefined
   if (!yolo && !process.stdin.isTTY) {
-    writeError('elia auto needs a terminal to approve the plan. Re-run with --yolo to skip approval.')
+    writeError('elia auto needs a terminal to approve the plan. Re-run with --unattended to skip routine approval.')
     process.exitCode = 1
     return
   }
@@ -432,8 +433,8 @@ async function runSchedule(): Promise<void> {
       return
     }
     for (const line of table(
-      [{ header: 'id' }, { header: 'status' }, { header: 'every' }, { header: 'next run' }, { header: 'runs', align: 'right' }, { header: 'last outcome' }, { header: 'goal' }],
-      records.map((record) => [record.id, record.status, formatScheduleInterval(record.intervalMs), new Date(record.nextRunAt).toISOString(), String(record.runCount), record.lastOutcome ?? '—', record.goal.slice(0, 60)]),
+      [{ header: 'id' }, { header: 'title' }, { header: 'status' }, { header: 'every' }, { header: 'next run' }, { header: 'runs', align: 'right' }, { header: 'last outcome' }, { header: 'goal' }],
+      records.map((record) => [record.id, record.title, record.status, formatScheduleInterval(record.intervalMs), new Date(record.nextRunAt).toISOString(), String(record.runCount), record.lastOutcome ?? '—', record.goal.slice(0, 60)]),
     )) writeUsageLine(`  ${line}`)
     return
   }

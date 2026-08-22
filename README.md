@@ -96,7 +96,7 @@ For specialist work, `elia agent "<request>" --dry-run` performs routing only an
 
 ### Background autonomy and safe unattended actions
 
-Elia now has a local, durable background control plane for recurring AI goals. Create a schedule, inspect it, pause or resume it, and run due work through a single-flight daemon:
+Elia now has a local, durable background control plane for recurring AI goals. For one-off safe work, `elia auto "<goal>" --unattended` runs the plan without routine interactive prompts; it still uses the autonomy governor and stops at consequential actions. Create a schedule, inspect it, pause or resume it, and run due work through a single-flight daemon:
 
 ```bash
 elia schedule add --every 1h --title "Repository health" "Inspect the repository, run the declared checks, and report only evidence-backed findings"

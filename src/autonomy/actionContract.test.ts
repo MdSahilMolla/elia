@@ -21,31 +21,13 @@ describe('action contracts', () => {
   })
 
   test('requires configured browser transport and preserves takeover for browser mutations', async () => {
-    const previous = {
-      cdp: process.env.ELIA_BROWSER_CDP_URL,
-      mcp: process.env.ELIA_BROWSER_MCP_SERVER,
-      bridge: process.env.ELIA_BROWSER_BRIDGE_COMMAND,
-    }
-    delete process.env.ELIA_BROWSER_CDP_URL
-    delete process.env.ELIA_BROWSER_MCP_SERVER
-    delete process.env.ELIA_BROWSER_BRIDGE_COMMAND
-    try {
-      const contract = contractForAction({ name: 'browser', input: { action: 'click', target: 'Publish', expectUrl: 'https://example.test/done' } }, process.cwd(), 'run:browser:1')
-      expect(contract.requiresUserTakeover).toBe(true)
-      expect(contract.failureDisposition).toBe('human-review')
-      expect((await evaluatePreconditions(contract, process.cwd())).ok).toBe(false)
-      process.env.ELIA_BROWSER_CDP_URL = 'ws://configured-for-test'
-      expect((await evaluatePreconditions(contract, process.cwd())).ok).toBe(true)
-      expect(evaluatePostconditions(contract, '{\n  "url": "https://example.test/start"\n}', process.cwd())).toMatchObject({ ok: false })
-      expect(evaluatePostconditions(contract, '{\n  "url": "https://example.test/done"\n}', process.cwd())).toMatchObject({ ok: true })
-    } finally {
-      if (previous.cdp === undefined) delete process.env.ELIA_BROWSER_CDP_URL
-      else process.env.ELIA_BROWSER_CDP_URL = previous.cdp
-      if (previous.mcp === undefined) delete process.env.ELIA_BROWSER_MCP_SERVER
-      else process.env.ELIA_BROWSER_MCP_SERVER = previous.mcp
-      if (previous.bridge === undefined) delete process.env.ELIA_BROWSER_BRIDGE_COMMAND
-      else process.env.ELIA_BROWSER_BRIDGE_COMMAND = previous.bridge
-    }
+    const contract = contractForAction({ name: 'browser', input: { action: 'click', target: 'Publish', expectUrl: 'https://example.test/done' } }, process.cwd(), 'run:browser:1')
+    expect(contract.requiresUserTakeover).toBe(true)
+    expect(contract.failureDisposition).toBe('human-review')
+    expect((await evaluatePreconditions(contract, process.cwd(), undefined, {})).ok).toBe(false)
+    expect((await evaluatePreconditions(contract, process.cwd(), undefined, { ELIA_BROWSER_CDP_URL: 'ws://configured-for-test' })).ok).toBe(true)
+    expect(evaluatePostconditions(contract, '{\n  "url": "https://example.test/start"\n}', process.cwd())).toMatchObject({ ok: false })
+    expect(evaluatePostconditions(contract, '{\n  "url": "https://example.test/done"\n}', process.cwd())).toMatchObject({ ok: true })
   })
 
   test('verifies a workspace artifact after a write', () => {
