@@ -43,7 +43,7 @@ const REPL_COMMANDS: SlashCommand[] = [
 
 const rawArgs = process.argv.slice(2)
 
-const SUBCOMMANDS = ['auto', 'agent', 'evolve', 'bench', 'skills', 'runs', 'fork', 'resume'] as const
+const SUBCOMMANDS = ['auto', 'agent', 'evolve', 'bench', 'skills', 'runs', 'fork', 'resume', 'schedule', 'daemon'] as const
 type Subcommand = (typeof SUBCOMMANDS)[number]
 
 function printHelp(): void {
@@ -111,6 +111,14 @@ Time travel:
   elia fork <id> --at <n> --with "<change>"
                               Replay that run up to checkpoint <n> and re-plan from there
   elia resume <id>            Continue a durable goal from its persisted graph and approvals
+
+Background autonomy:
+  elia schedule add --every 1h "<goal>"  Persist a recurring goal for the local daemon
+  elia schedule list                       Show scheduled goals and last outcomes
+  elia schedule pause|resume|remove <id>  Control a scheduled goal
+  elia schedule run <id>                   Run one scheduled goal immediately
+  elia daemon --once                       Run due schedules once and exit
+  elia daemon --poll-ms 30000             Keep checking due schedules in the foreground
 
 Inside an interactive session:
   /                            Type "/" to see available commands — up/down to highlight,
@@ -410,6 +418,112 @@ async function runSkills(): Promise<void> {
 
   writeError(`Unknown skills action "${action}". Use: list, path, candidates, or synth.`)
   process.exitCode = 1
+}
+
+async function runSchedule(): Promise<void> {
+  const { ScheduleStore, formatScheduleInterval, parseScheduleInterval } = await import('./autonomy/scheduler.ts')
+  const action = positionals(['--every', '--title', '--profile', '--max-run-ms'])[0] ?? 'list'
+  const store = ScheduleStore.open()
+
+  if (action === 'list') {
+    const records = store.list()
+    if (records.length === 0) {
+      writeNotice('No scheduled goals. Add one with: elia schedule add --every 1h "<goal>"')
+      return
+    }
+    for (const line of table(
+      [{ header: 'id' }, { header: 'status' }, { header: 'every' }, { header: 'next run' }, { header: 'runs', align: 'right' }, { header: 'last outcome' }, { header: 'goal' }],
+      records.map((record) => [record.id, record.status, formatScheduleInterval(record.intervalMs), new Date(record.nextRunAt).toISOString(), String(record.runCount), record.lastOutcome ?? '—', record.goal.slice(0, 60)]),
+    )) writeUsageLine(`  ${line}`)
+    return
+  }
+
+  const id = positionals()[1]
+  if (action === 'pause' || action === 'resume' || action === 'remove') {
+    if (!id) {
+      writeError(`Usage: elia schedule ${action} <id>`)
+      process.exitCode = 1
+      return
+    }
+    if (action === 'remove') {
+      store.remove(id)
+      writeNotice(`Removed scheduled goal ${id}.`)
+    } else {
+      const record = action === 'pause' ? store.pause(id) : store.resume(id)
+      writeNotice(`${action === 'pause' ? 'Paused' : 'Resumed'} ${record.title} (${record.id}).`)
+    }
+    return
+  }
+
+  if (action === 'run') {
+    if (!id) {
+      writeError('Usage: elia schedule run <id>')
+      process.exitCode = 1
+      return
+    }
+    store.resume(id, Date.now())
+    const { runScheduledDaemon } = await import('./autonomy/daemon.ts')
+    await runScheduledDaemon({ once: true })
+    return
+  }
+
+  if (action !== 'add') {
+    writeError(`Unknown schedule action "${action}". Use: add, list, pause, resume, remove, or run.`)
+    process.exitCode = 1
+    return
+  }
+
+  const goal = positionals(['--every', '--title', '--profile', '--max-run-ms']).slice(1).join(' ').trim()
+  const every = flagValue('--every')
+  if (!goal || !every) {
+    writeError('Usage: elia schedule add --every 1h [--title "Short title"] "<goal>"')
+    process.exitCode = 1
+    return
+  }
+  let intervalMs: number
+  try {
+    intervalMs = parseScheduleInterval(every)
+  } catch (error) {
+    writeError(error instanceof Error ? error.message : String(error))
+    process.exitCode = 1
+    return
+  }
+  const profileValue = flagValue('--profile')
+  const profile = profileValue === 'fast' || profileValue === 'thorough' ? profileValue : 'balanced'
+  if (profileValue && !['fast', 'balanced', 'thorough'].includes(profileValue)) {
+    writeError('--profile must be fast, balanced, or thorough')
+    process.exitCode = 1
+    return
+  }
+  const maxRunMsRaw = flagValue('--max-run-ms')
+  const maxRunMs = maxRunMsRaw === undefined ? undefined : Number.parseInt(maxRunMsRaw, 10)
+  if (maxRunMsRaw !== undefined && (!Number.isInteger(maxRunMs) || maxRunMs! < 1)) {
+    writeError('--max-run-ms must be a positive integer in milliseconds')
+    process.exitCode = 1
+    return
+  }
+  const record = store.create({ title: flagValue('--title') ?? goal.slice(0, 80), goal, intervalMs, profile, maxRunMs })
+  writeNotice(`Scheduled ${record.title} every ${formatScheduleInterval(record.intervalMs)}. id=${record.id}`)
+  writeNotice('Run it with: elia daemon --once')
+}
+
+async function runDaemon(): Promise<void> {
+  const pollMsRaw = flagValue('--poll-ms')
+  const pollMs = pollMsRaw === undefined ? undefined : Number.parseInt(pollMsRaw, 10)
+  if (pollMsRaw !== undefined && (!Number.isInteger(pollMs) || pollMs! < 1_000)) {
+    writeError('--poll-ms must be an integer of at least 1000 milliseconds')
+    process.exitCode = 1
+    return
+  }
+  const { runScheduledDaemon } = await import('./autonomy/daemon.ts')
+  const controller = new AbortController()
+  const unregisterShutdown = registerShutdownCleanup(() => controller.abort())
+  try {
+    if (!hasFlag('--once')) writeNotice(`Background daemon active; polling every ${(pollMs ?? 30_000) / 1000}s. Ctrl+C stops it.`)
+    await runScheduledDaemon({ pollMs, once: hasFlag('--once'), signal: controller.signal })
+  } finally {
+    unregisterShutdown()
+  }
 }
 
 async function runRuns(): Promise<void> {
@@ -1050,6 +1164,10 @@ async function main() {
       return runFork()
     case 'resume':
       return runResume()
+    case 'schedule':
+      return runSchedule()
+    case 'daemon':
+      return runDaemon()
     default:
       return runInteractive()
   }

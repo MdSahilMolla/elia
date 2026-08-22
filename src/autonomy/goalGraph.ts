@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import { AsyncLocalStorage } from 'node:async_hooks'
 import type { Proposal } from './types.ts'
 import type { ActionRequest } from './governor.ts'
+import type { ActionContract, ContractEvaluation } from './actionContract.ts'
 
 export const GOAL_GRAPH_VERSION = 2
 export const EXECUTION_LEASE_TTL_MS = 120_000
@@ -86,6 +87,9 @@ export interface DurableActionRecord {
   updatedAt: number
   leaseOwner?: string
   leaseExpiresAt?: number
+  contract?: ActionContract
+  precondition?: ContractEvaluation
+  postcondition?: ContractEvaluation
 }
 
 export interface GoalGraphSnapshot {
@@ -516,12 +520,14 @@ export class GoalGraphStore {
     return { action: structuredClone(action), decision: 'execute' }
   }
 
-  startAction(id: string): DurableActionRecord {
+  startAction(id: string, contract?: ActionContract, precondition?: ContractEvaluation): DurableActionRecord {
     const action = this.requireAction(id)
     action.state = 'running'
     action.attempts += 1
     action.leaseOwner = EXECUTION_OWNER
     action.leaseExpiresAt = Date.now() + EXECUTION_LEASE_TTL_MS
+    if (contract) action.contract = structuredClone(contract)
+    if (precondition) action.precondition = structuredClone(precondition)
     action.updatedAt = Date.now()
     this.persist()
     return structuredClone(action)
@@ -537,11 +543,12 @@ export class GoalGraphStore {
     return structuredClone(action)
   }
 
-  finishAction(id: string, result: { ok: boolean; result?: string; error?: unknown }): DurableActionRecord {
+  finishAction(id: string, result: { ok: boolean; result?: string; error?: unknown; postcondition?: ContractEvaluation }): DurableActionRecord {
     const action = this.requireAction(id)
     action.updatedAt = Date.now()
     action.leaseOwner = undefined
     action.leaseExpiresAt = undefined
+    if (result.postcondition) action.postcondition = structuredClone(result.postcondition)
     if (result.ok) {
       action.state = 'completed'
       action.result = result.result ?? ''
@@ -555,11 +562,14 @@ export class GoalGraphStore {
     return structuredClone(action)
   }
 
-  blockAction(id: string, failure: unknown, humanReview = false): DurableActionRecord {
+  blockAction(id: string, failure: unknown, humanReview = false, precondition?: ContractEvaluation, postcondition?: ContractEvaluation, contract?: ActionContract): DurableActionRecord {
     const action = this.requireAction(id)
     const record = classifyFailure(failure)
     action.state = humanReview ? 'human-review' : 'blocked'
     action.error = record
+    if (contract) action.contract = structuredClone(contract)
+    if (precondition) action.precondition = structuredClone(precondition)
+    if (postcondition) action.postcondition = structuredClone(postcondition)
     action.leaseOwner = undefined
     action.leaseExpiresAt = undefined
     action.updatedAt = Date.now()
@@ -669,7 +679,7 @@ export function classifyFailure(error: unknown): FailureRecord {
   let failureClass: FailureClass = 'fatal'
   let retryAfter: number | undefined
   if (/blocked by elia|denied by the user|approval|unauthori[sz]ed|forbidden|captcha|login required/.test(lower)) failureClass = 'authorization'
-  else if (/timeout|timed out|econnreset|econnrefused|network|rate limit|\b429\b|\b5\d\d\b|temporar/.test(lower)) {
+  else if (/timeout|timed out|econnreset|econnrefused|network|rate limit|\b429\b|\b5\d\d\b|temporar|retryable|exit code/.test(lower)) {
     failureClass = 'retryable'
     retryAfter = 1000
   } else if (/enoent|no such file|not found|missing|executable|provider unavailable|configuration|invalid environment/.test(lower)) failureClass = 'environment'

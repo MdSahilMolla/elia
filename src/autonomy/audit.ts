@@ -137,6 +137,10 @@ export function writeRunReceipt(input: RunReceiptInput): void {
           activeLeases: input.graph.nodes.filter((node) => node.leaseExpiresAt && node.leaseExpiresAt > Date.now()).length + input.graph.actions.filter((action) => action.leaseExpiresAt && action.leaseExpiresAt > Date.now()).length,
           retryableActions: input.graph.actions.filter((action) => action.state === 'retryable').length,
           humanReviewActions: input.graph.actions.filter((action) => action.state === 'human-review').length,
+          contractedActions: input.graph.actions.filter((action) => action.contract).length,
+          preconditionFailures: input.graph.actions.filter((action) => action.precondition && !action.precondition.ok).map((action) => ({ id: action.id, tool: action.tool, failures: action.precondition?.failures ?? [], nextAction: action.precondition?.nextAction })),
+          postconditionFailures: input.graph.actions.filter((action) => action.postcondition && !action.postcondition.ok).map((action) => ({ id: action.id, tool: action.tool, failures: action.postcondition?.failures ?? [], nextAction: action.postcondition?.nextAction })),
+          takeoverActions: input.graph.actions.filter((action) => action.contract?.requiresUserTakeover).map((action) => ({ id: action.id, tool: action.tool, state: action.state, error: action.error?.message })),
           evidence: input.graph.evidence.map((evidence) => ({ id: evidence.id, kind: evidence.kind, passed: evidence.passed, summary: evidence.summary })),
         }
       : undefined,
@@ -193,7 +197,7 @@ function renderReceipt(receipt: {
   elapsedMs?: number
   maxWallClockMs?: number
   actions: { total: number; failed: number; blocked: number; irreversible: number; replayed?: number; humanReview?: number; retryable?: number }
-  graph?: { nodes: { id: string; status: string; attempts: number }[]; pendingApprovals: number; recoveredNodes?: number; activeLeases?: number; retryableActions?: number; humanReviewActions?: number }
+  graph?: { nodes: { id: string; status: string; attempts: number }[]; pendingApprovals: number; recoveredNodes?: number; activeLeases?: number; retryableActions?: number; humanReviewActions?: number; contractedActions?: number; preconditionFailures?: { id: string; tool: string; failures: string[]; nextAction?: string }[]; postconditionFailures?: { id: string; tool: string; failures: string[]; nextAction?: string }[]; takeoverActions?: { id: string; tool: string; state: string; error?: string }[] }
   completion?: CompletionAssessment
 }): string {
   const verificationLines =
@@ -218,7 +222,7 @@ function renderReceipt(receipt: {
     `- **Replayed idempotent actions:** ${receipt.actions.replayed ?? 0}`,
     `- **Human-review actions:** ${receipt.actions.humanReview ?? 0}`,
     `- **Retryable actions:** ${receipt.actions.retryable ?? 0}`,
-    ...(receipt.graph ? [`- **Pending approvals:** ${receipt.graph.pendingApprovals}`, `- **Graph nodes:** ${receipt.graph.nodes.filter((node) => node.status === 'completed').length}/${receipt.graph.nodes.length} completed`, `- **Recovered stale nodes:** ${receipt.graph.recoveredNodes ?? 0}`, `- **Active leases at receipt:** ${receipt.graph.activeLeases ?? 0}`] : []),
+    ...(receipt.graph ? [`- **Pending approvals:** ${receipt.graph.pendingApprovals}`, `- **Graph nodes:** ${receipt.graph.nodes.filter((node) => node.status === 'completed').length}/${receipt.graph.nodes.length} completed`, `- **Recovered stale nodes:** ${receipt.graph.recoveredNodes ?? 0}`, `- **Active leases at receipt:** ${receipt.graph.activeLeases ?? 0}`, `- **Contracted actions:** ${receipt.graph.contractedActions ?? 0}`, `- **Contract precondition failures:** ${receipt.graph.preconditionFailures?.length ?? 0}`, `- **Contract postcondition failures:** ${receipt.graph.postconditionFailures?.length ?? 0}`, `- **User-takeover actions:** ${receipt.graph.takeoverActions?.length ?? 0}`] : []),
     '',
     '## What proves completion',
     '',

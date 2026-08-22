@@ -58,12 +58,18 @@ describe('durable goal graph', () => {
     const request = { name: 'run_command', input: { command: 'deploy --once' } }
     const first = graph.reserveAction(request, 'step:build')
     expect(first.decision).toBe('execute')
-    graph.startAction(first.action.id)
-    graph.finishAction(first.action.id, { ok: true, result: 'deployed' })
+    const contract = { idempotencyKey: first.action.idempotencyKey, preconditions: [], postconditions: [], maxAttempts: 2, failureDisposition: 'retryable' as const, requiresUserTakeover: false }
+    const precondition = { ok: true, phase: 'precondition' as const, failures: [], evidence: ['bun available'] }
+    const postcondition = { ok: true, phase: 'postcondition' as const, failures: [], evidence: ['exit code 0'] }
+    graph.startAction(first.action.id, contract, precondition)
+    graph.finishAction(first.action.id, { ok: true, result: 'deployed', postcondition })
 
     const replay = graph.reserveAction(request, 'step:build')
     expect(replay.decision).toBe('replay')
     expect(replay.action.result).toBe('deployed')
+    expect(replay.action.contract).toMatchObject({ idempotencyKey: first.action.idempotencyKey, maxAttempts: 2 })
+    expect(replay.action.precondition?.evidence).toEqual(['bun available'])
+    expect(replay.action.postcondition?.evidence).toEqual(['exit code 0'])
 
     const secondRequest = { name: 'browser', input: { action: 'click', target: 'Publish' } }
     const second = graph.reserveAction(secondRequest, 'step:build')

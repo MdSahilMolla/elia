@@ -10,6 +10,8 @@ import { SPECULABLE_TOOLS, type CacheStats, type ToolResultCache } from './specu
 import type { Prefetcher } from './speculation/prefetch.ts'
 import { activeActionGovernor, assessAction, redactActionInput, type ActionAssessment } from './autonomy/governor.ts'
 import { activeGoalGraph, activeGoalNode, type ActionReservation, classifyFailure } from './autonomy/goalGraph.ts'
+import { contractForAction, evaluatePostconditions, evaluatePreconditions, type ActionContract, type ContractEvaluation } from './autonomy/actionContract.ts'
+import { currentAgent } from './autonomy/context.ts'
 
 export type ConversationMessage = ChatMessage
 
@@ -202,7 +204,7 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
       const tool = toolsByName[block.name]
       const startedAt = Date.now()
 
-      let resultText: string
+      let resultText = ''
       let isError = false
       let cached = false
       let assessment: ActionAssessment | undefined
@@ -210,7 +212,11 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
       let replayed = false
       let failureClass: string | undefined
       let actionHeartbeat: ReturnType<typeof setInterval> | undefined
+      let contract: ActionContract | undefined
+      let precondition: ContractEvaluation | undefined
+      let postcondition: ContractEvaluation | undefined
       const graph = activeGoalGraph()
+      const cwd = currentAgent().cwd ?? process.cwd()
       try {
         reservation = graph?.reserveAction({ name: block.name, input: block.input }, activeGoalNode())
         if (reservation?.decision === 'replay') {
@@ -223,39 +229,60 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
           resultText = `Action ${reservation.action.idempotencyKey} is ${reservation.action.state}; Elia will not repeat it automatically. Human review is required.`
         } else {
           const request = { name: block.name, input: block.input }
-          const alreadyApproved = activeGoalGraph()?.isActionApproved(request, activeGoalNode()) ?? false
-          const gate = alreadyApproved
-            ? { allowed: true, assessment: { ...assessAction(request), decision: 'allow' as const } }
-            : await activeActionGovernor().check(request)
-          assessment = gate.assessment
-          if (!gate.allowed) {
+          contract = contractForAction(request, cwd, reservation?.action.idempotencyKey ?? `ephemeral:${block.name}`)
+          precondition = await evaluatePreconditions(contract, cwd, currentAgent().signal)
+          if (!precondition.ok) {
             isError = true
-            failureClass = classifyFailure(gate.message ?? gate.assessment.reason).class
-            resultText = gate.message ?? `Action blocked by Elia’s autonomy governor: ${gate.assessment.reason}`
-            if (reservation && gate.assessment.risk === 'critical') {
-              activeGoalGraph()?.requestApproval('action', reservation.action.idempotencyKey, { name: block.name, input: redactActionInput(block.name, block.input) }, gate.assessment.reason)
-            }
-            if (reservation) activeGoalGraph()?.blockAction(reservation.action.id, resultText, gate.assessment.risk === 'critical')
-          } else {
-            if (reservation) {
-              graph?.startAction(reservation.action.id)
-              actionHeartbeat = setInterval(() => {
-                try {
-                  graph?.heartbeatAction(reservation!.action.id)
-                } catch {
-                  // The action may have finished between timer ticks.
-                }
-              }, 30_000)
-            }
-            const pending = batchMutates ? undefined : cache?.take(block.name, block.input)
-            if (pending) {
-              cached = true
-              resultText = await pending
+            failureClass = contract.failureDisposition
+            resultText = `Action precondition failed: ${precondition.failures.join('; ')}${precondition.nextAction ? ` ${precondition.nextAction}` : ''}`
+            if (reservation) graph?.blockAction(reservation.action.id, resultText, contract.failureDisposition === 'human-review', precondition, undefined, contract)
+          }
+          if (!isError) {
+            const alreadyApproved = activeGoalGraph()?.isActionApproved(request, activeGoalNode()) ?? false
+            const gate = alreadyApproved
+              ? { allowed: true, assessment: { ...assessAction(request), decision: 'allow' as const } }
+              : await activeActionGovernor().check(request)
+            assessment = gate.assessment
+            if (!gate.allowed) {
+              isError = true
+              failureClass = classifyFailure(gate.message ?? gate.assessment.reason).class
+              resultText = gate.message ?? `Action blocked by Elia’s autonomy governor: ${gate.assessment.reason}`
+              if (reservation && gate.assessment.risk === 'critical') {
+                activeGoalGraph()?.requestApproval('action', reservation.action.idempotencyKey, { name: block.name, input: redactActionInput(block.name, block.input) }, gate.assessment.reason)
+              }
+              if (reservation) activeGoalGraph()?.blockAction(reservation.action.id, resultText, gate.assessment.risk === 'critical', precondition, undefined, contract)
             } else {
-              if (!tool) throw new Error(`Unknown tool: ${block.name}`)
-              resultText = await tool.execute(block.input)
+              if (reservation) {
+                graph?.startAction(reservation.action.id, contract, precondition)
+                actionHeartbeat = setInterval(() => {
+                  try {
+                    graph?.heartbeatAction(reservation!.action.id)
+                  } catch {
+                    // The action may have finished between timer ticks.
+                  }
+                }, 30_000)
+              }
+              const pending = batchMutates ? undefined : cache?.take(block.name, block.input)
+              if (pending) {
+                cached = true
+                resultText = await pending
+              } else {
+                if (!tool) throw new Error(`Unknown tool: ${block.name}`)
+                resultText = await tool.execute(block.input)
+              }
+              postcondition = contract ? evaluatePostconditions(contract, resultText, cwd) : undefined
+              if (postcondition && !postcondition.ok) {
+                isError = true
+                failureClass = contract?.failureDisposition ?? 'retryable'
+                resultText = `Action postcondition failed: ${postcondition.failures.join('; ')}${postcondition.nextAction ? ` ${postcondition.nextAction}` : ''}`
+                if (reservation) {
+                  if (contract?.failureDisposition === 'human-review') graph?.blockAction(reservation.action.id, resultText, true, precondition, postcondition, contract)
+                  else graph?.finishAction(reservation.action.id, { ok: false, error: `retryable postcondition failure: ${postcondition.failures.join('; ')}`, postcondition })
+                }
+              } else if (reservation) {
+                graph?.finishAction(reservation.action.id, { ok: true, result: resultText, postcondition })
+              }
             }
-            if (reservation) activeGoalGraph()?.finishAction(reservation.action.id, { ok: true, result: resultText })
           }
         }
       } catch (err) {

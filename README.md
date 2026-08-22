@@ -94,6 +94,23 @@ Every delegated plan and proposal may declare `acceptanceCriteria`, `verificatio
 
 For specialist work, `elia agent "<request>" --dry-run` performs routing only and prints the selected persona chain and rationale without running specialist tools or side effects. Use this to inspect an execution plan before allowing a full specialist turn.
 
+### Background autonomy and safe unattended actions
+
+Elia now has a local, durable background control plane for recurring AI goals. Create a schedule, inspect it, pause or resume it, and run due work through a single-flight daemon:
+
+```bash
+elia schedule add --every 1h --title "Repository health" "Inspect the repository, run the declared checks, and report only evidence-backed findings"
+elia schedule list
+elia daemon --once
+elia daemon --poll-ms 30000
+```
+
+Schedules are stored atomically in `.elia/schedules.json`. Each claimed run has a lease, a bounded wall-clock budget, a persisted outcome, and a recovery path if the worker stops. The daemon invokes `elia auto` with unattended governance, but unattended does **not** mean unrestricted: read-only, reversible, and idempotent work may proceed; non-zero command results, missing browser transports, unmet postconditions, stale leases, and ambiguous outcomes become retryable or human-review states. Sending messages, publishing, purchasing, deleting, changing account state, production mutations, authentication, CAPTCHA, and payment steps remain blocked or require exact user approval/takeover.
+
+Tool actions now carry an internal contract containing an idempotency key, readiness preconditions, postconditions/evidence, bounded retry behavior, and an escalation disposition. The environment preflight reports `ready`, `missing-config`, or `unavailable` for model, browser, source-control, data-science, and deployment capabilities without returning secrets or claiming that a credential is authorized. A successful model response is never treated as proof that an external-world action succeeded.
+
+This is **Gemini Spark-inspired**, not a claim that Elia is Gemini Spark. Google’s Spark product is a separate consumer agent with its own Google-hosted tasks, connected apps, schedules, and supervision model [gemini-spark]. Google’s support material also describes Spark as experimental and supervised [gemini-spark-support]. Elia’s `google` provider calls Gemini models through the documented OpenAI-compatible Gemini endpoint [gemini-api], while Elia’s scheduler and local browser/communication adapters provide its own control plane. The repository does not claim a direct Spark API or Spark account integration. A local daemon also cannot guarantee 24/7 operation in the ephemeral sandbox: for unattended execution across restarts, run it on an always-on user machine or a properly hosted worker with explicitly configured connectors, credentials, monitoring, and stop controls.
+
 ### Production SaaS delivery
 
 The Production Engineering specialist is routed for release, deployment, migration, rollback, observability, SLO, incident, backup, and CI/CD requests. Its read-only `production_readiness` tool scans the actual repository for CI configuration, deployment manifests, verification scripts, environment/secret hygiene, database and migration evidence, observability, health checks, rollback, incident, and backup artifacts. It returns a scored evidence checklist and recommendations; a detected file is never treated as proof that a production system is safe or deployed.
@@ -352,6 +369,9 @@ A synthesized skill is only kept if it survives the same gate a human contributi
 - **`src/subagent.ts`** + **`src/autonomy/roles.ts`** + **`src/tools/task.ts`** — role-typed sub-agents. The role resolves to a model tier, a tool allowlist, a step budget, and a specialised prompt. Sub-agents can't spawn sub-agents (no role's allowlist contains `task`), which caps recursion at one level.
 - **`src/autonomy/loop.ts`** — the orient → propose → execute → verify → reflect → learn cycle, with durable graph resumption across process boundaries.
 - **`src/autonomy/goalGraph.ts`** — atomic goal-graph persistence, dependency-aware node states, stable action idempotency keys, failure classes, resumable approvals, and evidence-gated completion.
+- **`src/autonomy/actionContract.ts`** — inferred action contracts with readiness preconditions, exit/artifact/UI postconditions, bounded retry dispositions, idempotency metadata, and takeover escalation.
+- **`src/autonomy/scheduler.ts`** + **`src/autonomy/daemon.ts`** — atomic recurring-goal storage, reclaimable leases, single-flight background execution, pause/resume controls, and explicit local-daemon lifecycle.
+
 - **`src/autonomy/proposal.ts`** — the `submit_proposal` tool, plan validation (unknown step ids, duplicate ids, dependency cycles, and missing verification are all rejected with a message the model can act on), and terminal rendering that shows the wave structure and warns about two steps in one wave claiming the same file.
 - **`src/autonomy/fleet.ts`** — dependency-wave planning and parallel dispatch. Reports `savedMs`: the workers' summed time minus the wall clock actually taken, which keeps the parallelism honest — a "parallel" run that saved nothing means the decomposition was wrong.
 - **`src/autonomy/blackboard.ts`** + **`src/tools/blackboard.ts`** — the shared whiteboard. Sub-agents are normally hermetic, so two of them investigating the same repo rediscover the same facts twice; `board_post`/`board_read` turns a parallel fleet into one that cooperates.
@@ -381,13 +401,14 @@ bun test
 bun run typecheck
 ```
 
-The suite covers the tools, session persistence, memory loading, usage accounting, wave planning, proposal validation, the speculative cache, path/import prediction, the promotion rules, habit detection, the blackboard, lessons, and provider response parsing — all without an API key.
+The suite covers the tools, session persistence, memory loading, usage accounting, wave planning, proposal validation, the speculative cache, path/import prediction, the promotion rules, habit detection, the blackboard, lessons, provider response parsing, action contracts, scheduler persistence/lease recovery, and environment readiness — all without an API key.
 
 What can't be covered that way is the model loop itself. `elia bench` is the real test for that: it runs actual agent loops against checkable tasks, and it's also what `elia evolve` uses to decide whether a change to elia was an improvement.
 
 ## Status
 
-In: parallel role-typed sub-agents, the autonomous work cycle with an approval gate, dependency-wave execution, verification-gated best-of-N execution in isolated worktrees, the shared blackboard, adversarial review, bounded self-repair, cross-run lessons, run forking, predictive prefetch, the two-tier model cascade, benchmark-gated self-evolution, skill synthesis, a central per-tool autonomy governor, delegated read-only browser observation, redacted action ledgers, run receipts, a durable goal graph, resumable approvals, stable action idempotency, failure classification, and evidence-gated completion.
+In: parallel role-typed sub-agents, the autonomous work cycle with an approval gate, dependency-wave execution, verification-gated best-of-N execution in isolated worktrees, the shared blackboard, adversarial review, bounded self-repair, cross-run lessons, run forking, predictive prefetch, the two-tier model cascade, benchmark-gated self-evolution, skill synthesis, a central per-tool autonomy governor, delegated read-only browser observation, redacted action ledgers, run receipts, a durable goal graph, resumable approvals, stable action idempotency, failure classification, readiness tiers, action pre/postcondition contracts, recurring schedules, single-flight daemon execution, and evidence-gated completion.
+
 
 Still on the roadmap: provenance-aware memory with expiry/conflict handling, a governed MCP connector registry, user-defined evolution fitness profiles, event-triggered workflows, and provider-backed idempotency adapters for APIs that accept native idempotency keys. `elia evolve` does not commit to git — it copies files in and backs up what it replaced, leaving the commit to you.
 
@@ -402,3 +423,12 @@ Five things, roughly in order of impact:
 5. **Predictive prefetch** — the reads the model is about to make happen *while it's still generating*, so the tool phase often costs ~0ms instead of a disk round-trip per file.
 
 `max_tokens` for Anthropic is 32,000 (Sonnet 5 supports up to 128k). Billing is by tokens actually generated, not the ceiling, so this only removes the risk of truncated output on large refactors, with no cost downside.
+
+## References
+
+[gemini-spark]: https://gemini.google/overview/agent/spark/ "Gemini Spark overview"
+[gemini-spark-support]: https://support.google.com/gemini/answer/17094507?hl=en&co=GENIE.Platform%3DAndroid "Gemini Spark availability and help"
+[gemini-api]: https://ai.google.dev/gemini-api/docs "Gemini API documentation"
+[gemini-interactions]: https://ai.google.dev/api/interactions-api "Gemini Interactions API reference"
+
+The Gemini Spark discussion above is based on Google’s [Spark overview][gemini-spark], [support documentation][gemini-spark-support], [Gemini API documentation][gemini-api], and [Interactions API reference][gemini-interactions].

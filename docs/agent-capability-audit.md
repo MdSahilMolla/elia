@@ -17,13 +17,15 @@ No honest system can guarantee that every possible task is flawless. The correct
 | Business analysis | Partially covered by Finance and Tech | No explicit business-analyst persona for requirements, process, KPI, and decision analysis |
 | Data analysis | Data specialist plus deterministic CSV/TSV/JSON/JSONL profiling, validation, grouped summaries, correlation, and linear regression with reproducibility limitations | No advanced statistical inference, causal analysis, experiment significance testing, visualization pipeline, or automated leakage detection |
 | Cybersecurity | Cyber mode, engagement scope, security tools, security role, and governance exist | Needs broader defensive playbooks, evidence normalization, and safer reusable report outputs |
-| Automation | Shell, browser bridge, task orchestration, autonomy profiles, and goal graphs exist | No unified workflow/action catalog or external event/communication adapter layer |
+| Automation | Shell, browser bridge, task orchestration, autonomy profiles, durable schedules, a single-flight daemon, and goal graphs exist | No hosted event ingress or provider-native background-interaction adapter; deployment still requires an online host |
 | Research | Web search/fetch and parallel scouts exist | Needs source registry, citation/provenance contract, and research deliverables |
 | Browser/computer use | Browser bridge supports status, navigation, snapshot, extraction, click, type, press, and wait | A bridge must be configured; authenticated external actions need explicit user takeover/approval |
-| Environment awareness | Read-only preflight reports project shape, git state, runtimes/CLIs, credential presence, and browser transport presence without exposing secret values | Snapshot can become stale; presence does not prove authorization, login, reachability, or health |
+| Environment awareness | Read-only preflight reports project shape, git state, runtimes/CLIs, credential presence, browser transport presence, and redacted `ready`/`missing-config`/`unavailable` capability tiers | Snapshot can become stale; presence/readiness does not prove authorization, login, reachability, or health |
 | Email/calendar/external parties | Connectors such as Gmail and Google Calendar are present but disabled in the current session; Elia has no native email tool | Requires user-enabled connectors or a trusted browser/bridge, with confirmation and audit trails |
-| Completion truth | Completion assessor distinguishes verified, partial, blocked, failed, and aborted runs with evidence, blockers, confidence, and next actions | Subjective acceptance and external-world outcomes still need domain-specific postconditions or human review |
-| Long-running autonomy | Durable goal graph, checkpoints, run receipts, repair attempts, profiles, structured completion states, and resume support exist | Needs stronger pause/resume semantics, external event delivery, and a persistent always-on worker |
+| Completion truth | Completion assessor distinguishes verified, partial, blocked, failed, and aborted runs with evidence, blockers, confidence, and next actions; action contracts record preconditions and postconditions | Subjective acceptance and external-world outcomes still need domain-specific postconditions or human review |
+| Long-running autonomy | Durable goal graph, schedules, single-flight daemon, leases, checkpoints, run receipts, repair attempts, profiles, structured completion states, and resume support exist | The local daemon is not a hosted 24/7 service; external event delivery and provider-native background execution are not included |
+| Safe unattended action | Unattended mode can continue bounded read-only, reversible, and idempotent work with command/browser readiness checks, exit/artifact/UI postconditions, retries, and human-review escalation | Critical external effects remain approval/takeover gated; safe classification cannot prove a third-party system’s final state |
+| Gemini Spark relationship | Spark-inspired task/schedule/skill/supervision design is documented; Elia can call Gemini through its existing Google provider | Spark is a separate consumer product; no direct Spark account/API integration is claimed, and Gemini Interactions API is not yet an Elia adapter |
 
 
 ## Proposed end-to-end architecture
@@ -42,6 +44,8 @@ No honest system can guarantee that every possible task is flawless. The correct
 
 7. **Interaction layer.** Support both user-only collaboration and external-party workflows. The agent may draft and prepare communication autonomously, but sending, publishing, purchasing, deleting, or changing account state requires explicit approval immediately before the exact action. Login, CAPTCHA, payment, and sensitive-input steps require user takeover.
 
+8. **Unattended control plane.** Recurring work may be persisted as a schedule and executed by a single-flight daemon. Each action receives an idempotency key, bounded retry policy, precondition checks, postcondition/evidence checks, and a failure disposition. Missing configuration, stale leases, non-zero commands, unmet expectations, ambiguous outcomes, and critical actions must surface as retryable or human-review states rather than being silently retried or reported as success. The daemon is a local process; continuous operation requires an online machine or hosted worker.
+
 ## Priority order
 
 | Priority | Deliverable | Why first |
@@ -52,6 +56,7 @@ No honest system can guarantee that every possible task is flawless. The correct
 | P1 | Advanced business, data, research, communications, and automation playbooks | Expands domain-specific verification beyond the current bounded workflows |
 | P1 | Output contracts and domain verification | Converts plausible prose into verifiable work products |
 | P1 | Task state, pause/resume, user-interaction requests, and delivery receipts | Makes long-running delegated work reliable |
+| P1 | Hosted background worker and verified external-event adapters | The repository daemon provides local control-plane semantics but cannot stay online in an ephemeral sandbox |
 | P2 | Connectors and browser/email/calendar workflows | Depends on enabled user integrations and should not silently guess accounts or recipients |
 | P2 | Benchmark suite across all capability families | Measures accuracy, speed, recovery, and safety instead of relying on claims |
 
