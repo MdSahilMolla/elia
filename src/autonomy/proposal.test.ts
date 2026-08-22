@@ -87,6 +87,16 @@ test('a dependency on a step that does not exist is rejected, not silently dropp
   expect(error).toContain('unknown step "s9"')
 })
 
+test('a step cannot depend on itself', () => {
+  const error = expectError({ ...minimal, steps: [{ id: 's1', title: 'a', instructions: 'a', dependsOn: ['s1'] }] })
+  expect(error).toContain('cannot depend on itself')
+})
+
+test('duplicate dependencies and files are normalized', () => {
+  const proposal = expectOk({ ...minimal, steps: [{ ...minimal.steps[0], files: ['src/a.ts', 'src/a.ts'], dependsOn: [] }] })
+  expect(proposal.steps[0]!.files).toEqual(['src/a.ts'])
+})
+
 test('a dependency cycle is rejected', () => {
   const error = expectError({
     ...minimal,
@@ -137,6 +147,11 @@ test('the rendered proposal shows the wave structure it implies', () => {
   expect(rendered).toContain('3 workers in 2 waves')
   expect(rendered).toContain('2 in parallel')
   expect(rendered).toContain('bun test')
+})
+
+test('rendering warns when file ownership is not declared', () => {
+  const rendered = renderProposal(expectOk(minimal))
+  expect(rendered).toContain('declare no file ownership')
 })
 
 test('the rendered proposal serializes two steps claiming the same file', () => {

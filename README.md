@@ -133,9 +133,15 @@ A bridge receives one JSON request on stdin and should return one JSON or text r
 
 Elia does not replace the underlying model with a smaller “agent personality,” hidden chain-of-thought imitation, or prompt-heavy wrapper. The autonomy layer contributes tools, planning, safety gates, routing, verification, and recovery; the selected model receives the normal request through the existing provider adapter. The user can therefore select the model manually while keeping its native reasoning and generation capability intact.
 
+### Coding speed, accuracy, and benchmark discipline
+
+Elia keeps speed and correctness separate. Read-only file, data, and web observations can run in a bounded higher-concurrency pool; mutating tools, shared browser navigation, and external side effects remain conservative. The optional fast model tier is used for scouts and low-risk summaries, while builders, testers, critics, security reviewers, and final verification retain the deep tier. `ELIA_TOOL_CONCURRENCY` is capped at 8 for read-only batches and at 4 for batches that include mutations.
+
+The coding benchmark records per-task steps, elapsed time, stop reason, token usage, cache hits/misses, total agent time, and suite wall-clock time. Promotion is correctness-first: a candidate that regresses any previously passing task is rejected, and a tied-correctness candidate must show a material token or wall-clock improvement. This prevents Elia from becoming “faster” by skipping verification or silently lowering task quality.
+
 ### The fast tier (optional, recommended)
 
-Elia routes work across two model tiers. The **deep** tier plans, builds, and reviews. The **fast** tier does the high-volume legwork — read-only scouts, summarising, end-of-run note taking — where a cheap model is indistinguishable but several times quicker.
+Elia routes work across two model tiers. The **deep** tier plans, builds, and reviews. The **fast** tier does the high-volume legwork — read-only scouts, summarising, end-of-run note taking — where a cheap model is indistinguishable but several times quicker. Set `ELIA_TOOL_CONCURRENCY` to tune tool batches; read-only reconnaissance is bounded at 8 concurrent calls, while any batch containing mutations or external side effects remains capped at 4. Speed controls never remove deep-tier implementation or verification work.
 
 ```bash
 ELIA_FAST_PROVIDER=groq

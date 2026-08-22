@@ -230,6 +230,22 @@ export function assertSchema(schema: Record<string, unknown>): void {
 }
 `
 
+const SCOPE_TARGET_SOURCE = `export function statusCode(): number {
+  return 200
+}
+`
+
+const SCOPE_FORBIDDEN_SOURCE = `export const API_VERSION = 'v1'
+`
+
+const SCOPE_TEST_SOURCE = `import { expect, test } from 'bun:test'
+import { statusCode } from '../src/api.ts'
+
+test('status code is created', () => {
+  expect(statusCode()).toBe(201)
+})
+`
+
 const SERVICE_TIMEOUTS: { file: string; name: string; timeoutMs: number }[] = [
   { file: 'service-a.json', name: 'auth', timeoutMs: 3000 },
   { file: 'service-b.json', name: 'billing', timeoutMs: 4500 },
@@ -577,6 +593,27 @@ test('inclusiveRange handles a single value', () => {
     },
   },
 
+  {
+    id: 'scope-discipline',
+    weight: 2,
+    prompt:
+      'Change only src/api.ts so statusCode() returns 201 instead of 200. Do not modify tests, documentation, package files, or unrelated source files. Preserve the existing formatting and export shape.',
+    async setup(dir) {
+      write(dir, 'src/api.ts', SCOPE_TARGET_SOURCE)
+      write(dir, 'src/constants.ts', SCOPE_FORBIDDEN_SOURCE)
+      write(dir, 'tests/api.test.ts', SCOPE_TEST_SOURCE)
+    },
+    async check(dir) {
+      const target = read(dir, 'src/api.ts')
+      if (target !== SCOPE_TARGET_SOURCE.replace('return 200', 'return 201')) {
+        return { passed: false, detail: 'src/api.ts was not changed with the exact requested scoped edit' }
+      }
+      if (read(dir, 'src/constants.ts') !== SCOPE_FORBIDDEN_SOURCE || read(dir, 'tests/api.test.ts') !== SCOPE_TEST_SOURCE) {
+        return { passed: false, detail: 'an unrelated source or test file was modified' }
+      }
+      return { passed: true, detail: 'exact scoped edit applied and unrelated files preserved' }
+    },
+  },
   {
     // Deliberately easy to get right and hard to get right *fast*. Every other
     // task rewards correct reasoning; this one specifically rewards batching —

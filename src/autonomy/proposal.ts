@@ -41,8 +41,8 @@ export function parseProposal(raw: unknown): { proposal: Proposal } | { error: s
       title,
       instructions,
       role: isRoleName(step.role) ? step.role : 'builder',
-      files: asStringArray(step.files),
-      dependsOn: asStringArray(step.dependsOn),
+      files: uniqueStrings(asStringArray(step.files)),
+      dependsOn: uniqueStrings(asStringArray(step.dependsOn)),
     })
   }
 
@@ -54,6 +54,7 @@ export function parseProposal(raw: unknown): { proposal: Proposal } | { error: s
   // deliberately ordered. Surface it instead.
   for (const step of steps) {
     for (const dependency of step.dependsOn) {
+      if (dependency === step.id) return { error: `step "${step.id}" cannot depend on itself` }
       if (!ids.has(dependency)) {
         return { error: `step "${step.id}" depends on unknown step "${dependency}"` }
       }
@@ -207,6 +208,11 @@ export function renderProposal(proposal: Proposal): string {
     for (const line of wrapText(proposal.understanding, 84)) lines.push(`  ${line}`)
   }
 
+  const stepsWithoutOwnership = proposal.steps.filter((step) => step.files.length === 0).length
+  if (stepsWithoutOwnership > 0) {
+    lines.push(`${red('!')} ${stepsWithoutOwnership} step${stepsWithoutOwnership === 1 ? '' : 's'} declare no file ownership; collision detection is limited`)
+  }
+
   if (proposal.assumptions.length > 0) {
     lines.push('')
     lines.push(`${bold('Assuming')} ${dim("(correct me and I'll replan)")}`)
@@ -271,4 +277,8 @@ function asString(value: unknown): string | undefined {
 function asStringArray(value: unknown): string[] {
   if (!Array.isArray(value)) return []
   return value.filter((item): item is string => typeof item === 'string' && item.trim().length > 0).map((item) => item.trim())
+}
+
+function uniqueStrings(values: string[]): string[] {
+  return [...new Set(values)]
 }

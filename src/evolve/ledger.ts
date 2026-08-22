@@ -28,6 +28,12 @@ export interface Metrics {
   steps?: Record<string, number>
   totalTokens: number
   totalElapsedMs: number
+  /** User-visible suite duration when benchmark tasks run in parallel. */
+  wallClockMs?: number
+  /** Speculative read effectiveness, when reported by the benchmark harness. */
+  cacheHitRate?: number
+  cacheHits?: number
+  cacheMisses?: number
   costUsd?: number
 }
 

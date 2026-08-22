@@ -8,8 +8,8 @@ process.env.ANTHROPIC_API_KEY ??= 'test-key-for-fleet-test'
 
 const { planWaves, fileCollisions, fleetConcurrency } = await import('./fleet.ts')
 
-function step(id: string, dependsOn: string[] = [], files: string[] = []): ProposalStep {
-  return { id, title: `step ${id}`, role: 'builder', instructions: 'do it', files, dependsOn }
+function step(id: string, dependsOn: string[] = [], files: string[] = [], role: ProposalStep['role'] = 'builder'): ProposalStep {
+  return { id, title: `step ${id}`, role, instructions: 'do it', files, dependsOn }
 }
 
 test('independent steps all land in one wave so they run in parallel', () => {
@@ -70,8 +70,24 @@ test('fileCollisions normalizes separators so the same file is not missed', () =
   expect(collisions).toEqual([{ file: 'src/one.ts', steps: ['a', 'b'] }])
 })
 
+test('fileCollisions normalizes relative path variants', () => {
+  const collisions = fileCollisions([step('a', [], ['./src/one.ts']), step('b', [], ['src/dir/../one.ts'])])
+
+  expect(collisions).toEqual([{ file: 'src/one.ts', steps: ['a', 'b'] }])
+})
+
 test('disjoint files in one wave are not a collision', () => {
   expect(fileCollisions([step('a', [], ['x.ts']), step('b', [], ['y.ts'])])).toEqual([])
+})
+
+test('an unscoped writer is serialized against a scoped writer to avoid unknown file races', () => {
+  const { waves } = planWaves([step('a', [], ['src/a.ts']), step('b')])
+  expect(waves.map((wave) => wave.map((item) => item.id))).toEqual([['a'], ['b']])
+})
+
+test('read-only unscoped steps remain parallel', () => {
+  const { waves } = planWaves([step('a', [], [], 'scout'), step('b', [], [], 'scout')])
+  expect(waves.map((wave) => wave.map((item) => item.id))).toEqual([['a', 'b']])
 })
 
 test('dependency-ready steps that claim the same file are serialized', () => {

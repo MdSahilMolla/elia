@@ -36,6 +36,11 @@ export interface TaskOutcome {
   model?: string
   /** Kept on failure so the run can be inspected afterwards. */
   keptDir?: string
+  /** Execution stop classification returned by the child loop. */
+  stopReason?: string
+  /** Speculative read effectiveness for this task. */
+  cacheHits?: number
+  cacheMisses?: number
 }
 
 export interface Scorecard {
@@ -49,6 +54,9 @@ export interface Scorecard {
   totalElapsedMs: number
   /** Real time the whole suite took, which is lower when tasks ran in parallel. */
   wallClockMs: number
+  cacheHits: number
+  cacheMisses: number
+  cacheHitRate: number
 }
 
 export interface MeasureOptions {
@@ -80,6 +88,10 @@ export async function measureFitness(options: MeasureOptions): Promise<Scorecard
   const earned = outcomes.filter((outcome) => outcome.passed).reduce((sum, outcome) => sum + weightOf(outcome.taskId), 0)
   const available = tasks.reduce((sum, task) => sum + task.weight, 0) || TOTAL_WEIGHT
 
+  const cacheHits = outcomes.reduce((sum, outcome) => sum + (outcome.cacheHits ?? 0), 0)
+  const cacheMisses = outcomes.reduce((sum, outcome) => sum + (outcome.cacheMisses ?? 0), 0)
+  const cacheAttempts = cacheHits + cacheMisses
+
   return {
     sourceRoot: options.sourceRoot,
     model,
@@ -88,6 +100,9 @@ export async function measureFitness(options: MeasureOptions): Promise<Scorecard
     totalTokens: outcomes.reduce((sum, outcome) => sum + outcome.totalTokens, 0),
     totalElapsedMs: outcomes.reduce((sum, outcome) => sum + outcome.elapsedMs, 0),
     wallClockMs: Date.now() - startedAt,
+    cacheHits,
+    cacheMisses,
+    cacheHitRate: cacheAttempts === 0 ? 0 : cacheHits / cacheAttempts,
   }
 }
 
@@ -186,6 +201,8 @@ async function runOneTask(task: BenchTask, sourceRoot: string): Promise<TaskOutc
       totalTokens: run.totalTokens,
       model: run.model,
       ...(run.error ? { error: run.error } : {}),
+      ...(run.stopReason ? { stopReason: run.stopReason } : {}),
+      ...(run.cacheStats ? { cacheHits: run.cacheStats.hits, cacheMisses: run.cacheStats.misses } : {}),
     }
 
     // A passing task's temp dir is disposable; a failing one is evidence.
@@ -208,6 +225,8 @@ interface RunOutput {
   elapsedMs: number
   totalTokens: number
   model: string
+  stopReason?: string
+  cacheStats?: { speculated: number; hits: number; misses: number }
   error?: string
 }
 
@@ -223,6 +242,8 @@ function parseRunOutput(stdout: string): RunOutput | undefined {
           elapsedMs: parsed.elapsedMs,
           totalTokens: parsed.totalTokens ?? 0,
           model: parsed.model ?? '',
+          ...(parsed.stopReason ? { stopReason: parsed.stopReason } : {}),
+          ...(parsed.cacheStats ? { cacheStats: parsed.cacheStats } : {}),
           ...(parsed.error ? { error: parsed.error } : {}),
         }
       }
@@ -248,6 +269,10 @@ export function toMetrics(card: Scorecard): Metrics {
     steps: Object.fromEntries(card.outcomes.map((outcome) => [outcome.taskId, outcome.steps])),
     totalTokens: card.totalTokens,
     totalElapsedMs: card.totalElapsedMs,
+    wallClockMs: card.wallClockMs,
+    cacheHits: card.cacheHits,
+    cacheMisses: card.cacheMisses,
+    cacheHitRate: card.cacheHitRate,
     ...(costUsd !== undefined ? { costUsd } : {}),
   }
 }
@@ -290,7 +315,11 @@ export function compareScorecards(baseline: Metrics, candidate: Metrics): Compar
 
   // Tied on correctness — allow a clear efficiency win, and nothing less.
   const tokenDelta = relativeChange(baseline.totalTokens, candidate.totalTokens)
-  const timeDelta = relativeChange(baseline.totalElapsedMs, candidate.totalElapsedMs)
+  // Wall clock is the user-visible metric for parallel autonomous work. Older
+  // ledger records do not have it, so they safely fall back to summed task time.
+  const baselineTime = baseline.wallClockMs ?? baseline.totalElapsedMs
+  const candidateTime = candidate.wallClockMs ?? candidate.totalElapsedMs
+  const timeDelta = relativeChange(baselineTime, candidateTime)
 
   if (tokenDelta <= -EFFICIENCY_MARGIN && timeDelta < EFFICIENCY_MARGIN) {
     return { better: true, reason: `same pass rate, ${pct(-tokenDelta)} fewer tokens` }
@@ -358,8 +387,9 @@ export function renderScorecard(card: Scorecard, title = 'Scorecard'): string {
     : 'cost unknown'
 
   lines.push('')
+  const cacheNote = card.cacheHits + card.cacheMisses > 0 ? ` · reads prefetched ${Math.round(card.cacheHitRate * 100)}% (${card.cacheHits}/${card.cacheHits + card.cacheMisses})` : ''
   lines.push(
-    `  ${dim(`total: ${formatTokenCount(card.totalTokens)} tokens · ${formatElapsed(card.totalElapsedMs)} of agent time · ${formatElapsed(card.wallClockMs)} wall clock · ~${cost}`)}`,
+    `  ${dim(`total: ${formatTokenCount(card.totalTokens)} tokens · ${formatElapsed(card.totalElapsedMs)} of agent time · ${formatElapsed(card.wallClockMs)} wall clock${cacheNote} · ~${cost}`)}`,
   )
   lines.push('')
   return lines.join('\n')

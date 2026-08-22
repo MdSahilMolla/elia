@@ -9,7 +9,25 @@ import type { Tool } from './tools/types.ts'
 process.env.ANTHROPIC_API_KEY ??= 'test-key-for-agentloop-test'
 
 const { config } = await import('./config.ts')
-const { resetProviderHealthForTests, runAgentLoop } = await import('./agentLoop.ts')
+const { resetProviderHealthForTests, runAgentLoop, toolBatchConcurrency } = await import('./agentLoop.ts')
+
+test('safe read-only tool batches use bounded fast concurrency while mutating batches stay conservative', () => {
+  const original = process.env.ELIA_TOOL_CONCURRENCY
+  try {
+    delete process.env.ELIA_TOOL_CONCURRENCY
+    expect(toolBatchConcurrency([{ name: 'read_file', input: { path: 'src/a.ts' } }, { name: 'grep', input: { pattern: 'x' } }])).toBe(4)
+    expect(toolBatchConcurrency([{ name: 'read_file', input: { path: 'src/a.ts' } }, { name: 'read_file', input: { path: 'src/b.ts' } }, { name: 'read_file', input: { path: 'src/c.ts' } }, { name: 'read_file', input: { path: 'src/d.ts' } }, { name: 'read_file', input: { path: 'src/e.ts' } }])).toBe(4)
+    expect(toolBatchConcurrency([{ name: 'write_file', input: { path: 'src/a.ts' } }, { name: 'read_file', input: { path: 'src/b.ts' } }])).toBe(4)
+    process.env.ELIA_TOOL_CONCURRENCY = '99'
+    expect(toolBatchConcurrency([{ name: 'read_file', input: { path: 'src/a.ts' } }])).toBe(8)
+    expect(toolBatchConcurrency([{ name: 'write_file', input: { path: 'src/a.ts' } }])).toBe(4)
+    expect(toolBatchConcurrency([{ name: 'browser', input: { action: 'snapshot' } }])).toBe(8)
+    expect(toolBatchConcurrency([{ name: 'browser', input: { action: 'navigate', url: 'https://example.com' } }])).toBe(4)
+  } finally {
+    if (original === undefined) delete process.env.ELIA_TOOL_CONCURRENCY
+    else process.env.ELIA_TOOL_CONCURRENCY = original
+  }
+})
 
 test('runAgentLoop sums usage across multiple tool-call round trips, not just the last one', async () => {
   let call = 0

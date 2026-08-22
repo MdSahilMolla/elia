@@ -139,6 +139,7 @@ Other:
   elia --quiet                Print the final answer and essential failures only
   elia --verbose              Include detailed progress output
   ELIA_MAX_RUN_MS             Default wall-clock budget for autonomous runs; --max-run-ms overrides it
+  ELIA_TOOL_CONCURRENCY       Read-only tool batches can use up to 8; mutating batches stay capped at 4
   elia --help                 Show this help
   elia --version              Print the version
 

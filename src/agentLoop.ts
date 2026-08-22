@@ -14,6 +14,7 @@ import { activeGoalGraph, activeGoalNode, type ActionReservation, classifyFailur
 export type ConversationMessage = ChatMessage
 
 const MAX_PARALLEL_TOOLS = 4
+const MAX_SAFE_PARALLEL_TOOLS = 8
 const MAX_PROVIDER_ATTEMPTS = 3
 const PROVIDER_HEALTH_COOLDOWN_MS = 30_000
 const providerHealth = new Map<string, { failures: number; cooldownUntil: number; lastError?: string }>()
@@ -197,7 +198,7 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
 
     const observed: { name: string; input: Record<string, unknown>; result: string }[] = []
 
-    const toolResults = await runWithConcurrencyLimit(toolUseBlocks, MAX_PARALLEL_TOOLS, async (block) => {
+    const toolResults = await runWithConcurrencyLimit(toolUseBlocks, toolBatchConcurrency(toolUseBlocks), async (block) => {
       const tool = toolsByName[block.name]
       const startedAt = Date.now()
 
@@ -399,6 +400,35 @@ export function lastAssistantText(messages: ConversationMessage[], fallback: str
     .trim()
 
   return text && text.length > 0 ? text : fallback
+}
+
+type ToolBatch = Array<{ name: string; input: Record<string, unknown> }>
+
+/**
+ * Read-only batches are the dominant reconnaissance path in coding work. They can
+ * safely use a larger pool because they do not compete on file mutations, while
+ * any batch containing a write or external side effect stays on the conservative
+ * default. The environment override is bounded so a fast setting cannot create
+ * an unbounded fan-out against a provider or local machine.
+ */
+export function toolBatchConcurrency(batch: ToolBatch): number {
+  const configured = Number.parseInt(process.env.ELIA_TOOL_CONCURRENCY ?? '', 10)
+  const requested = Number.isInteger(configured) && configured > 0 ? Math.min(configured, MAX_SAFE_PARALLEL_TOOLS) : MAX_PARALLEL_TOOLS
+  if (batch.length === 0) return requested
+  return batch.every(isReadOnlyToolCall) ? requested : Math.min(requested, MAX_PARALLEL_TOOLS)
+}
+
+function isReadOnlyToolCall(block: { name: string; input: Record<string, unknown> }): boolean {
+  if (SPECULABLE_TOOLS.has(block.name)) return true
+  if (block.name === 'read_spreadsheet' || block.name === 'web_search' || block.name === 'web_fetch') return true
+  if (block.name === 'spreadsheet') return ['inspect', 'analyze', 'audit'].includes(String(block.input.action ?? ''))
+  // Browser sessions are shared state: only pure observations may run together.
+  // Navigation, scrolling, waits, and verification can race with another page
+  // action even when they do not create an external side effect.
+  if (block.name === 'browser') return ['status', 'snapshot', 'extract'].includes(String(block.input.action ?? ''))
+  if (block.name === 'communication') return ['status', 'inspect', 'list', 'verify'].includes(String(block.input.action ?? ''))
+  if (block.name === 'project_profile' || block.name === 'recall' || block.name === 'board_read') return true
+  return false
 }
 
 function providerHealthKey(route: ProviderRoute): string {

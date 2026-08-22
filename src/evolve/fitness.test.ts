@@ -84,6 +84,16 @@ test('a clear speed-up at the same pass rate and token count is promoted', () =>
   expect(result.reason).toContain('faster')
 })
 
+test('parallel benchmark promotion uses wall-clock time when available', () => {
+  const result = compareScorecards(
+    metrics({ totalElapsedMs: 120_000, wallClockMs: 60_000 }),
+    metrics({ totalElapsedMs: 120_000, wallClockMs: 40_000 }),
+  )
+
+  expect(result.better).toBe(true)
+  expect(result.reason).toContain('faster')
+})
+
 test('saving tokens by getting much slower is rejected', () => {
   const result = compareScorecards(metrics(), metrics({ totalTokens: 70_000, totalElapsedMs: 120_000 }))
 

@@ -26,6 +26,8 @@ interface TaskRunOutput {
   elapsedMs: number
   totalTokens: number
   model: string
+  stopReason?: string
+  cacheStats?: { speculated: number; hits: number; misses: number }
   error?: string
 }
 
@@ -76,6 +78,8 @@ try {
     elapsedMs: Date.now() - started,
     totalTokens: totalTokens(result.usage),
     model: config.model,
+    stopReason: result.stopReason,
+    cacheStats: result.cacheStats,
   })
 } catch (err) {
   emit({

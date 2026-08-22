@@ -211,6 +211,25 @@ export function isFormReady(value: string): boolean {
   expect(result.passed).toBe(true)
 })
 
+test('scope-discipline: passes only when the exact target file changes', async () => {
+  const task = taskById('scope-discipline')!
+  const dir = tempDir('scope-discipline-solved')
+  await task.setup(dir)
+  writeFileSync(join(dir, 'src/api.ts'), `export function statusCode(): number {\n  return 201\n}\n`)
+  expect((await task.check(dir)).passed).toBe(true)
+})
+
+test('scope-discipline: fails when an unrelated file changes', async () => {
+  const task = taskById('scope-discipline')!
+  const dir = tempDir('scope-discipline-forbidden')
+  await task.setup(dir)
+  writeFileSync(join(dir, 'src/api.ts'), `export function statusCode(): number {\n  return 201\n}\n`)
+  writeFileSync(join(dir, 'src/constants.ts'), 'export const API_VERSION = \'v2\'\n')
+  const result = await task.check(dir)
+  expect(result.passed).toBe(false)
+  expect(result.detail).toContain('unrelated')
+})
+
 test('parallel-scan: fails on the unsolved state (no answer.txt)', async () => {
   const task = taskById('parallel-scan')!
   const dir = tempDir('parallel-scan-unsolved')

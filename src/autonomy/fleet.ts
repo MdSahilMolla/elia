@@ -1,5 +1,6 @@
 import { runSubAgent, type SubAgentResult } from '../subagent.ts'
 import { runWithConcurrencyLimit } from '../agentLoop.ts'
+import { posix } from 'node:path'
 import { createFleetBoard } from '../ui/fleetBoard.ts'
 import { ZERO_USAGE, addUsage } from '../usage.ts'
 import { roleConfig } from '../config.ts'
@@ -14,6 +15,7 @@ import { runVerification } from './verify.ts'
 
 /** board_post/board_read are stripped for a variant's workers — see FleetRunOptions.stripBoardTools. */
 const BOARD_TOOL_NAMES = ['board_post', 'board_read']
+const WRITE_CAPABLE_ROLES = new Set(['builder', 'frontend', 'backend', 'tester', 'polisher', 'scribe'])
 
 /** How many sub-agents run at once against a single provider. Beyond this, that provider's rate limits dominate and add latency instead of removing it. */
 const DEFAULT_FLEET_CONCURRENCY = 4
@@ -283,7 +285,7 @@ function collisionFreeWaves(steps: ProposalStep[]): ProposalStep[][] {
   const waves: ProposalStep[][] = []
 
   for (const step of steps) {
-    const target = waves.find((wave) => fileCollisions([...wave, step]).length === 0)
+    const target = waves.find((wave) => fileCollisions([...wave, step]).length === 0 && !unscopedWriterCollision(wave, step))
     if (target) target.push(step)
     else waves.push([step])
   }
@@ -291,12 +293,24 @@ function collisionFreeWaves(steps: ProposalStep[]): ProposalStep[][] {
   return waves
 }
 
-/** Files two steps in the same wave both intend to touch — a real risk of clobbering each other. */
+/** Missing file ownership is safe for read-only roles but ambiguous for writers. */
+function unscopedWriterCollision(wave: ProposalStep[], candidate: ProposalStep): boolean {
+  if (!WRITE_CAPABLE_ROLES.has(candidate.role)) return false
+  const candidateFiles = candidate.files.map(normalizeOwnedFile)
+  return wave.some((step) => WRITE_CAPABLE_ROLES.has(step.role) && ((step.files.length === 0) !== (candidate.files.length === 0) || candidateFiles.some((file) => step.files.map(normalizeOwnedFile).includes(file))))
+}
+
+/** Normalizes equivalent relative ownership spellings before comparing them. */
+function normalizeOwnedFile(file: string): string {
+  return posix.normalize(file.replace(/\\/g, '/')).replace(/^\.\//, '')
+}
+
+/** Files two steps in one wave both intend to touch — a real risk of clobbering each other. */
 export function fileCollisions(wave: ProposalStep[]): { file: string; steps: string[] }[] {
   const owners = new Map<string, string[]>()
   for (const step of wave) {
     for (const file of step.files) {
-      const normalized = file.replace(/\\/g, '/')
+      const normalized = normalizeOwnedFile(file)
       owners.set(normalized, [...(owners.get(normalized) ?? []), step.id])
     }
   }
