@@ -33,7 +33,7 @@ export interface ActionGovernor {
   check(request: ActionRequest): Promise<ActionGateResult>
 }
 
-const CRITICAL_COMMAND = /\b(rm\s+-rf|rm\s+--no-preserve-root|mkfs|dd\s+if=|shutdown|reboot|poweroff|drop\s+(database|table)|truncate\s+table|git\s+(push|reset\s+--hard|clean\s+-fd)|force[- ]push|sudo\b|chmod\s+777|chown\s+-R|kill\s+-9|kubectl\s+delete|docker\s+(rm|system\s+prune)|terraform\s+destroy|curl[^\n|]*\|\s*(sh|bash)|wget[^\n|]*\|\s*(sh|bash)|deploy\s+(to\s+)?prod(uction)?|send\s+.*(email|message)|publish\b|tweet\b|buy\b|purchase\b|checkout\b|transfer\b|wire\b)\b/i
+const CRITICAL_COMMAND = /\b(rm\s+-rf|rm\s+--no-preserve-root|mkfs|dd\s+if=|shutdown|reboot|poweroff|drop\s+(database|table)|truncate\s+table|git\s+(push|reset\s+--hard|clean\s+-fd)|force[- ]push|sudo\b|chmod\s+777|chown\s+-R|kill\s+-9|kubectl\s+(apply|delete|rollout|scale)|helm\s+(install|upgrade|uninstall)|docker\s+(push|rm|system\s+prune)|terraform\s+(apply|destroy)|prisma\s+migrate\s+(deploy|reset)|alembic\s+upgrade|drizzle-kit\s+push|npm\s+publish|pnpm\s+publish|bun\s+publish|vercel\s+.*--prod|fly\s+deploy|railway\s+up|gcloud\s+.*\bdeploy\b|aws\s+(cloudformation|ecs|rds|lambda)|curl[^\n|]*\|\s*(sh|bash)|wget[^\n|]*\|\s*(sh|bash)|deploy\s+(to\s+)?prod(uction)?|send\s+.*(email|message)|publish\b|tweet\b|buy\b|purchase\b|checkout\b|transfer\b|wire\b)\b/i
 const REVIEW_COMMAND = /\b(git\s+commit|npm\s+install|pnpm\s+install|yarn\s+add|bun\s+(add|install)|pip\s+install|docker\s+build|docker\s+run|curl\b|wget\b|ssh\b|scp\b|gh\s+pr|deploy\b)\b/i
 const SECRET_KEY = /(password|passwd|token|secret|api[-_]?key|authorization|cookie|credential)/i
 const SENSITIVE_READ_COMMAND = /\b(cat|less|head|tail|sed|awk|grep|printenv|env|set)\b[^\n]*(\.env|id_rsa|\.ssh|credentials?|secret|token|password|shadow)\b/i
@@ -51,6 +51,21 @@ export function assessAction(request: ActionRequest, cwd = currentAgent().cwd ??
 
   if (name === 'presentation') {
     return assessment('review', 'approve', 'presentation generation creates a derived document artifact', 'presentation.from_workbook', resources, true)
+  }
+
+  if (name === 'production_readiness') {
+    return assessment('safe', 'allow', 'production readiness is a repository-only, read-only evidence audit', 'production_readiness', resources, true)
+  }
+
+  if (name === 'finance') {
+    return assessment('safe', 'allow', 'finance calculations are deterministic and do not mutate external state', 'finance.analysis', resources, true)
+  }
+
+  if (name === 'data_science') {
+    const path = typeof input.path === 'string' ? input.path : ''
+    return path && isOutside(path, cwd)
+      ? assessment('review', 'approve', 'data-science analysis may access data outside the active workspace', 'data_science', [path], true)
+      : assessment('safe', 'allow', 'data-science analysis is read-only and does not mutate the dataset', 'data_science', resources, true)
   }
 
   if (name === 'spreadsheet') {

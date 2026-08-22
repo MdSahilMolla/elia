@@ -2,7 +2,7 @@
 
 ## Executive assessment
 
-Elia already has a strong coding-agent core: model/provider selection with automatic failover, a two-tier model cascade, role-typed sub-agents, parallel dependency waves, durable goal graphs, checkpoints and rewind, action governance, browser bridging, cyber engagement scaffolding, web search/fetch, spreadsheet reading, autonomous execution profiles, verification, repair, lessons, and run receipts. It is not yet a complete general-purpose autonomous agent because its specialist surface is narrow, its external communication surface is only partially wired, and its quality guarantees are not yet measured across non-coding work.
+Elia already has a strong coding-agent core: model/provider selection with automatic failover, a two-tier model cascade, role-typed sub-agents, parallel dependency waves, durable goal graphs, checkpoints and rewind, action governance, browser bridging, cyber engagement scaffolding, web search/fetch, spreadsheet reading and writing, deterministic data-science workflows, deterministic finance calculations, production-readiness audits, autonomous execution profiles, verification, repair, lessons, and run receipts. It is not yet a complete general-purpose autonomous agent because external environment delivery, advanced statistical/financial modeling, and quality guarantees across non-coding work still require project-specific evidence and human review.
 
 No honest system can guarantee that every possible task is flawless. The correct target is a **general execution substrate** with explicit capability discovery, domain playbooks, reversible planning, confirmation gates for consequential actions, durable recovery, and benchmark-backed quality thresholds.
 
@@ -11,16 +11,18 @@ No honest system can guarantee that every possible task is flawless. The correct
 | Capability area | Current state | Main gap |
 |---|---|---|
 | Coding and debugging | Strong: read/write/edit, shell, tests, browser, task delegation, specialist engineering roles | Needs broader artifact workflows and stronger end-to-end acceptance checks |
+| Production SaaS delivery | Production specialist plus read-only repository readiness audit for CI/CD, deploy manifests, migrations, observability, rollback, incident, and backup evidence | No proof of external-environment health or deployment success; production mutation remains governed and project-specific |
 | Marketing | Existing persona with web research and writing tools | No reusable campaign/report artifact schemas |
-| Finance | Existing persona with spreadsheets and web research | No dedicated financial model validation or data-source provenance layer |
+| Finance | Finance specialist plus deterministic unit economics, runway, scenario, and DCF calculations with basis/date/source disclosures and sensitivity cases | No full 3-statement, LBO, accounting-policy, or licensed-adviser workflow; external financial data still needs source-specific integration |
 | Business analysis | Partially covered by Finance and Tech | No explicit business-analyst persona for requirements, process, KPI, and decision analysis |
-| Data analysis | Spreadsheet reading exists; Python/shell can be used by Tech | No explicit data-analyst workflow, dataset profiling, validation, visualization, or reproducible report contract |
+| Data analysis | Data specialist plus deterministic CSV/TSV/JSON/JSONL profiling, validation, grouped summaries, correlation, and linear regression with reproducibility limitations | No advanced statistical inference, causal analysis, experiment significance testing, visualization pipeline, or automated leakage detection |
 | Cybersecurity | Cyber mode, engagement scope, security tools, security role, and governance exist | Needs broader defensive playbooks, evidence normalization, and safer reusable report outputs |
 | Automation | Shell, browser bridge, task orchestration, autonomy profiles, and goal graphs exist | No unified workflow/action catalog or external event/communication adapter layer |
 | Research | Web search/fetch and parallel scouts exist | Needs source registry, citation/provenance contract, and research deliverables |
 | Browser/computer use | Browser bridge supports status, navigation, snapshot, extraction, click, type, press, and wait | A bridge must be configured; authenticated external actions need explicit user takeover/approval |
 | Email/calendar/external parties | Connectors such as Gmail and Google Calendar are present but disabled in the current session; Elia has no native email tool | Requires user-enabled connectors or a trusted browser/bridge, with confirmation and audit trails |
 | Long-running autonomy | Durable goal graph, checkpoints, run receipts, repair attempts, profiles, and resume support exist | Needs stronger pause/resume semantics and external event delivery |
+
 
 ## Proposed end-to-end architecture
 
@@ -43,8 +45,9 @@ No honest system can guarantee that every possible task is flawless. The correct
 | Priority | Deliverable | Why first |
 |---|---|---|
 | P0 | Capability registry and specialist routing | Makes the broad agent surface discoverable and prevents every task from being treated as generic coding |
+
 | P0 | Unified action policy and external-action audit events | Required before email, browser, calendar, or messaging can be safely used end to end |
-| P1 | Business, data, research, communications, and automation playbooks | Expands the agent beyond the current Marketing/Finance/Tech persona set |
+| P1 | Advanced business, data, research, communications, and automation playbooks | Expands domain-specific verification beyond the current bounded workflows |
 | P1 | Output contracts and domain verification | Converts plausible prose into verifiable work products |
 | P1 | Task state, pause/resume, user-interaction requests, and delivery receipts | Makes long-running delegated work reliable |
 | P2 | Connectors and browser/email/calendar workflows | Depends on enabled user integrations and should not silently guess accounts or recipients |

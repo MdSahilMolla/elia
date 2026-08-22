@@ -10,6 +10,7 @@ export type CapabilityId =
   | 'automation'
   | 'communications'
   | 'ai-ml'
+  | 'production-delivery'
   | 'software'
 
 export type CapabilityRisk = 'low' | 'medium' | 'high'
@@ -40,11 +41,11 @@ export const CAPABILITIES: CapabilitySpec[] = [
     id: 'finance',
     persona: 'finance',
     label: 'Finance and financial analysis',
-    summary: 'Budgets, forecasts, pricing, unit economics, cash flow, ROI, and scenarios.',
+    summary: 'Budgets, forecasts, pricing, unit economics, cash flow, ROI, valuation, DCF, and scenarios.',
     risk: 'high',
-    patterns: [/\b(budget|forecast|\bcost\b|pricing|\broi\b|cash flow|p&l|runway|unit economics)\b/i],
-    preferredTools: ['read_spreadsheet', 'web_search', 'web_fetch'],
-    outputContract: ['assumptions', 'calculations', 'sensitivity or scenarios', 'limitations and disclaimer'],
+    patterns: [/\b(budget|forecast|\bcost\b|pricing|\broi\b|cash flow|p&l|runway|unit economics|dcf|valuation|discount rate|terminal value|enterprise value)\b/i],
+    preferredTools: ['finance', 'read_spreadsheet', 'web_search', 'web_fetch'],
+    outputContract: ['basis and fiscal period', 'assumptions', 'calculations with traceable inputs', 'sensitivity or scenarios', 'limitations and financial-analysis disclaimer'],
   },
   {
     id: 'business-analysis',
@@ -63,8 +64,8 @@ export const CAPABILITIES: CapabilitySpec[] = [
     summary: 'Data quality, exploratory analysis, metrics, cohorts, experiments, anomalies, and reproducibility.',
     risk: 'medium',
     patterns: [/\b(dataset|data analysis|csv|sql|cohort|funnel|dashboard|anomal|regression|statistics|experiment readout)\b/i],
-    preferredTools: ['read_spreadsheet', 'run_command', 'read_file'],
-    outputContract: ['schema and quality checks', 'method and calculations', 'tables or visuals', 'limitations and reproducibility'],
+    preferredTools: ['data_science', 'read_spreadsheet', 'run_command', 'read_file'],
+    outputContract: ['schema, quality, and leakage checks', 'method and reproducible calculations', 'tables or visuals', 'uncertainty and limitations', 'artifact or code path for reproduction'],
   },
   {
     id: 'research',
@@ -115,6 +116,16 @@ export const CAPABILITIES: CapabilitySpec[] = [
     patterns: [/\b(\bAI\b|LLM|model eval|prompt|RAG|embedding|fine-tun|inference|agent architecture)\b/i],
     preferredTools: ['run_command', 'read_spreadsheet', 'browser'],
     outputContract: ['evaluation question', 'model/version and conditions', 'metrics', 'reproducible experiment', 'risk notes'],
+  },
+  {
+    id: 'production-delivery',
+    persona: 'production',
+    label: 'Production SaaS delivery',
+    summary: 'Release readiness, deployment planning, migrations, rollback, observability, and incident operations.',
+    risk: 'high',
+    patterns: [/\b(production|release|deploy(?:ment)?|ci\/cd|observability|rollback|on-call|incident|sre|docker|kubernetes|terraform|migration)\b/i],
+    preferredTools: ['production_readiness', 'project_profile', 'run_command', 'read_file', 'edit_file', 'task'],
+    outputContract: ['release scope and environment', 'preflight evidence', 'migration and rollback plan', 'observability and incident plan', 'approval boundaries and postconditions'],
   },
   {
     id: 'software',

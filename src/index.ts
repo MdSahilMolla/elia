@@ -30,6 +30,7 @@ const REPL_COMMANDS: SlashCommand[] = [
   { name: '/automation', description: 'switch to the Automation persona for this session' },
   { name: '/communications', description: 'switch to the Communications persona for this session' },
   { name: '/ai', description: 'switch to the AI/ML persona for this session' },
+  { name: '/production', description: 'switch to the Production Engineering persona for this session' },
   { name: '/tech', description: 'switch to the Tech agent persona for this session' },
   { name: '/dev', description: "switch back to elia's development mode" },
   { name: '/mode', description: '/mode manual (default) asks only for risky commands, /mode auto never asks' },
@@ -121,7 +122,7 @@ Inside an interactive session:
                               research, CTFs, and defensive work — same tools, a
                               security-focused system prompt with authorization guardrails
   /marketing /finance /business /data /research /cybersecurity
-  /automation /communications /ai /tech
+  /automation /communications /ai /production /tech
                               Switch to that specialist persona for the rest of the session
   /dev                        Switch back to elia's development mode (legacy /normal also accepted)
   /mode auto                  Skip the pre-flight risk prompt; critical actions remain governed
@@ -905,7 +906,7 @@ async function runInteractive(): Promise<void> {
       )
       continue
     }
-    const personaMatch = /^\/(marketing|finance|business|data|research|cybersecurity|automation|communications|ai|tech)$/.exec(trimmed)
+    const personaMatch = /^\/(marketing|finance|business|data|research|cybersecurity|automation|communications|ai|production|tech)$/.exec(trimmed)
     const requestedPersona = personaMatch?.[1] === 'cybersecurity' ? 'cyber' : personaMatch?.[1]
     if (requestedPersona && isAgentPersona(requestedPersona)) {
       persona = requestedPersona

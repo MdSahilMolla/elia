@@ -15,6 +15,7 @@ const OVERRIDE_PATTERNS: { pattern: RegExp; persona: AgentPersona }[] = [
   { pattern: /\bas the automation agent\b|\bautomation take\b/i, persona: 'automation' },
   { pattern: /\bas the communications agent\b|\bcommunications take\b/i, persona: 'communications' },
   { pattern: /\bas the AI agent\b|\bas the AI\/ML agent\b|\bAI take\b/i, persona: 'ai' },
+  { pattern: /\bas the production agent\b|\bas the production engineering agent\b|\bproduction take\b/i, persona: 'production' },
   { pattern: /\bas the tech agent\b|\btech take\b/i, persona: 'tech' },
 ]
 
@@ -44,6 +45,7 @@ Specialist boundaries:
 - automation: workflows, triggers, schedules, APIs, integrations, resumable execution
 - communications: drafting and preparing email, messages, calendar, and stakeholder updates
 - ai: AI/ML systems, model selection, prompts, evaluation, retrieval, inference
+- production: release readiness, deployment, migrations, rollback, observability, and incident operations
 - tech: coding, debugging, infrastructure, implementation, and technical integration
 
 For external communication or security work, route to the specialist even when Tech is also needed. Call submit_route exactly once with the personas in dependency order.`

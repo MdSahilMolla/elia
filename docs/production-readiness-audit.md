@@ -2,7 +2,7 @@
 
 ## Baseline
 
-Elia is a capable supervised autonomous coding agent with hierarchical lead-to-child delegation, provider failover, specialist roles, durable run journals, a durable goal graph, action approvals, task sessions, verification gates, a hardened native CLI, and 387 passing tests on the current `manus` branch.
+Elia is a capable supervised autonomous coding agent with hierarchical lead-to-child delegation, provider failover, specialist roles, durable run journals, a durable goal graph, action approvals, task sessions, verification gates, a hardened native CLI, production-readiness evidence checks, deterministic data-science workflows, deterministic finance calculations, and a growing full-project test suite on the current `manus` branch.
 
 The current system is strongest for bounded workspace-scoped coding tasks with executable verification commands. The main production risks are execution durability and operational correctness rather than lack of model capability.
 
@@ -20,6 +20,7 @@ The current system is strongest for bounded workspace-scoped coding tasks with e
 | P1 | Evidence and acceptance contracts are not uniformly typed across every tool result | A run can finish with a plausible report but weak proof for subjective or external outcomes | Add typed evidence records for artifact, test, external-state, and human-confirmation outcomes. |
 | P2 | Long-running operations lack resource budgets beyond model step counts | Large fleets can consume excessive wall time, child count, output, or provider spend | Add per-run wall-clock, child-count, concurrency, output, and usage budgets. |
 | P2 | Production diagnostics are split between terminal output, journal, receipt, task file, and JSONL | Incident reconstruction requires manually correlating multiple artifacts | Add a stable run/event schema and correlation identifiers across all surfaces. |
+| P1 | Repository readiness cannot prove the health of an external deployment | A passing local audit could be mistaken for a healthy production release | Require staging/production postcondition evidence, deployment identity, health checks, rollback confirmation, and an external delivery receipt before calling a release successful. |
 
 ## Readiness criteria
 

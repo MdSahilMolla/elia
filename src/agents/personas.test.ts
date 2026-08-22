@@ -39,3 +39,11 @@ test('office specialists receive spreadsheet and presentation tools', () => {
     expect(names).toContain('presentation')
   }
 })
+
+test('finance, data, and production specialists receive domain workflows', () => {
+  expect(personaTools('finance').map((tool) => tool.name)).toContain('finance')
+  expect(personaTools('data').map((tool) => tool.name)).toContain('data_science')
+  const productionNames = personaTools('production').map((tool) => tool.name)
+  expect(productionNames).toContain('production_readiness')
+  expect(productionNames).toContain('project_profile')
+})

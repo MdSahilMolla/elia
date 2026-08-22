@@ -16,6 +16,9 @@ import { recallTool } from './recall.ts'
 import { browserTool } from './browser.ts'
 import { communicationTool } from './communication.ts'
 import { projectProfileTool } from './projectProfile.ts'
+import { productionReadinessTool } from './productionReadiness.ts'
+import { financeTool } from './finance.ts'
+import { dataScienceTool } from './dataScience.ts'
 import type { Tool } from './types.ts'
 
 /** The built-in file and shell tools. */
@@ -28,6 +31,9 @@ export const tools: Tool[] = [
   runCommandTool,
   recallTool,
   projectProfileTool,
+  productionReadinessTool,
+  financeTool,
+  dataScienceTool,
 ]
 
 /** Tools that let a fleet of sub-agents coordinate instead of working blind. */

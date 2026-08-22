@@ -90,4 +90,17 @@ describe('autonomy governor', () => {
     expect(assessAction({ name: 'spreadsheet', input: { action: 'write', path: 'workspace/report.xlsx' } }).risk).toBe('review')
     expect(assessAction({ name: 'presentation', input: { action: 'from_workbook', path: 'workspace/report.xlsx' } }).risk).toBe('review')
   })
+
+  test('domain analysis tools are read-only while external data paths are reviewable', () => {
+    expect(assessAction({ name: 'finance', input: { action: 'dcf', baseFreeCashFlow: 100 } }).decision).toBe('allow')
+    expect(assessAction({ name: 'data_science', input: { action: 'profile', path: 'data/events.csv' } }).decision).toBe('allow')
+    expect(assessAction({ name: 'data_science', input: { action: 'profile', path: '/tmp/events.csv' } }, '/repo').risk).toBe('review')
+    expect(assessAction({ name: 'production_readiness', input: {} }).decision).toBe('allow')
+  })
+
+  test('common production mutations are critical', () => {
+    for (const command of ['kubectl apply -f deploy.yaml', 'prisma migrate deploy', 'terraform apply', 'docker push registry.example/app:latest', 'vercel --prod']) {
+      expect(assessAction({ name: 'run_command', input: { command } }).risk).toBe('critical')
+    }
+  })
 })

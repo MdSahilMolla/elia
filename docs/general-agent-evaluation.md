@@ -5,13 +5,14 @@ Elia should be evaluated by repeatable task outcomes, not by a claim of universa
 | Family | Representative scenarios | Required pass conditions |
 |---|---|---|
 | Business analysis | Build-vs-buy memo; process map; KPI definitions; requirements extraction | Facts, assumptions, options, trade-offs, acceptance criteria, and unresolved questions are separated |
-| Finance | Forecast; unit economics; scenario model; spreadsheet review | Math is reproducible, assumptions are explicit, sensitivity is present, and no invented figures appear |
-| Data analysis | Profile CSV; cohort/funnel analysis; anomaly investigation; experiment readout | Schema, missingness, duplicates, units, calculations, limitations, and reproducibility are reported |
+| Finance | Unit economics; runway; DCF; scenario model; spreadsheet review | Math is reproducible, basis/date/source are disclosed, assumptions and sensitivity are present, and no invented figures appear |
+| Data analysis | Profile CSV/JSON; explicit quality validation; grouped summary; correlation; linear regression; cohort/funnel analysis; experiment readout | Schema, types, missingness, duplicates, calculations, non-causal interpretation, limitations, and reproducibility are reported |
 | Research | Competitor brief; literature synthesis; fact check; due diligence | Primary sources are cited, dates are recorded, claims match sources, and confidence/open questions are visible |
 | Cybersecurity | Authorized scope; configuration review; vulnerability triage; retest | Scope is confirmed, evidence is preserved, dangerous actions are blocked, and remediation is testable |
 | Automation | Scheduled workflow; webhook/API integration; synchronization; retry/resume | Steps are idempotent, retries are classified, approval boundaries are explicit, and delivery is verified |
 | Communications | Draft email; prepare calendar invite; send after approval; verify delivery | Draft/send are separate, recipient and content are confirmed, login is user-controlled, and final state is read back |
 | AI/ML | Model comparison; prompt evaluation; retrieval prototype; latency/cost study | Model/version/conditions and metrics are recorded, results are reproducible, and unsupported superiority claims are rejected |
+| Production SaaS | Release readiness; deployment plan; migration/rollback; observability; incident runbook | Repository evidence is scored, preflight and postconditions are explicit, production mutation is governed, and external deployment is never claimed without external evidence |
 | Software | Feature, bug fix, migration, deployment runbook | Tests and postconditions pass, security review is performed, and failures are repaired or reported honestly |
 
 ## Quality thresholds
@@ -20,7 +21,7 @@ A release candidate should pass all deterministic unit and integration tests, co
 
 ## Current verification baseline
 
-The expanded manus branch currently has deterministic specialist/capability tests, exact browser approval-token tests, existing autonomy/provider/orchestration coverage, and the full project suite. The current full suite result is **368 passing tests and 0 failures**, followed by a clean TypeScript typecheck. The benchmark suite under `src/evolve/suite.ts` remains protected from self-modifying candidates and continues to measure coding-agent behavior independently.
+The expanded manus branch currently has deterministic specialist/capability tests, production-readiness tests, finance calculation tests, data-science tests, exact browser approval-token tests, existing autonomy/provider/orchestration coverage, and the full project suite. The full suite count is recorded by the latest verification run and must be followed by a clean TypeScript typecheck. The benchmark suite under `src/evolve/suite.ts` remains protected from self-modifying candidates and continues to measure coding-agent behavior independently.
 
 ## Known environmental prerequisites
 

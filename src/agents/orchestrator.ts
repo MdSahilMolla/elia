@@ -31,12 +31,12 @@ function toolsForPersona(persona: AgentPersona, selectedSkillNames?: string[]) {
   const selected = new Set(selectedSkillNames ?? [])
   const synthesized = new Set(getSynthesizedTools().map((tool) => tool.name))
   const filterSkills = (tools: ReturnType<typeof allWorkerTools>) => tools.filter((tool) => selectedSkillNames === undefined || !synthesized.has(tool.name) || selected.has(tool.name))
-  return persona === 'tech' ? [...filterSkills(allWorkerTools()), taskTool] : personaTools(persona, selectedSkillNames)
+  return persona === 'tech' || persona === 'production' ? [...filterSkills(allWorkerTools()), taskTool] : personaTools(persona, selectedSkillNames)
 }
 
 /**
- * Domain specialists do focused work with scoped toolsets; Tech keeps the full
- * worker set plus task delegation. A bounded budget keeps a stuck specialist
+ * Domain specialists do focused work with scoped toolsets; Tech and Production
+ * keep the full worker set plus task delegation. A bounded budget keeps a stuck specialist
  * from burning tokens for minutes while still allowing multi-step analysis.
  */
 function maxStepsForPersona(persona: AgentPersona): number | undefined {

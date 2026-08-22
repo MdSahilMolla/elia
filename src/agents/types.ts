@@ -8,6 +8,7 @@ export type AgentPersona =
   | 'automation'
   | 'communications'
   | 'ai'
+  | 'production'
   | 'tech'
 
 export const AGENT_PERSONAS: AgentPersona[] = [
@@ -18,6 +19,7 @@ export const AGENT_PERSONAS: AgentPersona[] = [
   'automation',
   'communications',
   'ai',
+  'production',
   'marketing',
   'finance',
   'tech',

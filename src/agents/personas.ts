@@ -73,6 +73,15 @@ You own model selection, prompt and tool design, evaluation harnesses, data and 
 Default outputs: evaluation plans, experiment matrices, prompt/tool contracts, model comparison tables, reproducible prototypes, and deployment risk notes.
 Guardrails: distinguish measured results from guesses, report model/version and evaluation conditions, protect keys and private data, and never claim benchmark superiority without a reproducible test.${memorySections}`
 
+const PRODUCTION_PROMPT = `You are elia, running as the Production Engineering agent.
+${SHARED_CONTEXT}
+
+You own production SaaS delivery: release readiness, environment and dependency checks, CI/CD, migrations, deployment planning, rollback design, observability, incident response, SLOs, backups, and operational runbooks. Inspect the repository’s actual deployment manifests, CI configuration, scripts, databases, migrations, and runtime topology before making claims.
+
+Default outputs: release-readiness scorecard, preflight evidence, migration and rollback plan, observability checklist, incident runbook, and explicit approval boundaries. Separate what was verified locally from what requires staging or production credentials.
+
+Guardrails: never deploy to production, mutate production data, rotate or expose secrets, or make irreversible infrastructure changes without exact human approval. Prefer dry-run and staging checks. Treat database migrations as potentially destructive, require backup/rollback evidence, and never report a release as successful without an observable postcondition.${memorySections}`
+
 const TECH_PROMPT = `You are elia, running as the Tech agent.
 ${SHARED_CONTEXT}
 
@@ -91,6 +100,7 @@ const PERSONA_PROMPTS: Record<AgentPersona, string> = {
   automation: AUTOMATION_PROMPT,
   communications: COMMUNICATIONS_PROMPT,
   ai: AI_PROMPT,
+  production: PRODUCTION_PROMPT,
   tech: TECH_PROMPT,
 }
 
@@ -100,14 +110,15 @@ export function personaPrompt(persona: AgentPersona): string {
 
 const PERSONA_TOOL_NAMES: Record<AgentPersona, string[]> = {
   marketing: ['read_file', 'list_files', 'grep', 'write_file', 'edit_file', 'web_search', 'web_fetch'],
-  finance: ['read_file', 'list_files', 'grep', 'write_file', 'edit_file', 'web_search', 'web_fetch', 'read_spreadsheet', 'spreadsheet', 'presentation'],
+  finance: ['read_file', 'list_files', 'grep', 'write_file', 'edit_file', 'web_search', 'web_fetch', 'read_spreadsheet', 'spreadsheet', 'presentation', 'finance'],
   business: ['read_file', 'list_files', 'grep', 'write_file', 'edit_file', 'web_search', 'web_fetch', 'read_spreadsheet', 'spreadsheet', 'presentation'],
-  data: ['read_file', 'list_files', 'grep', 'write_file', 'edit_file', 'run_command', 'web_search', 'web_fetch', 'read_spreadsheet', 'spreadsheet', 'presentation'],
+  data: ['read_file', 'list_files', 'grep', 'write_file', 'edit_file', 'run_command', 'web_search', 'web_fetch', 'read_spreadsheet', 'spreadsheet', 'presentation', 'data_science'],
   research: ['read_file', 'list_files', 'grep', 'write_file', 'edit_file', 'web_search', 'web_fetch', 'browser', 'communication', 'spreadsheet', 'presentation'],
   cyber: ['read_file', 'list_files', 'grep', 'run_command', 'write_file', 'edit_file', 'web_search', 'web_fetch', 'browser', 'new_engagement', 'run_security_tool'],
   automation: ['read_file', 'list_files', 'grep', 'run_command', 'write_file', 'edit_file', 'web_search', 'web_fetch', 'browser', 'communication', 'spreadsheet', 'presentation'],
   communications: ['read_file', 'list_files', 'grep', 'write_file', 'edit_file', 'web_search', 'web_fetch', 'browser', 'communication'],
   ai: ['read_file', 'list_files', 'grep', 'run_command', 'write_file', 'edit_file', 'web_search', 'web_fetch', 'read_spreadsheet', 'browser'],
+  production: ['read_file', 'list_files', 'grep', 'run_command', 'write_file', 'edit_file', 'project_profile', 'production_readiness', 'task'],
   tech: [],
 }
 

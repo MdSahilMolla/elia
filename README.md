@@ -47,7 +47,7 @@ The selected provider and model remain primary. Use `/model auto` or set `ELIA_R
 
 ### Specialist modes and capability contracts
 
-Elia routes requests across explicit specialist modes: **Marketing**, **Finance**, **Business Analyst**, **Data Analyst**, **Research**, **Cybersecurity**, **Automation**, **Communications**, **AI/ML**, and **Tech**. Automatic routing is available through `elia agent "<request>"`; interactive sessions can pin a mode with `/marketing`, `/finance`, `/business`, `/data`, `/research`, `/cybersecurity`, `/automation`, `/communications`, `/ai`, or `/tech`. Use `/capabilities` to inspect each mode’s risk class, preferred tools, and required output contract.
+Elia routes requests across explicit specialist modes: **Marketing**, **Finance**, **Business Analyst**, **Data Analyst**, **Research**, **Cybersecurity**, **Automation**, **Communications**, **AI/ML**, **Production Engineering**, and **Tech**. Automatic routing is available through `elia agent "<request>"`; interactive sessions can pin a mode with `/marketing`, `/finance`, `/business`, `/data`, `/research`, `/cybersecurity`, `/automation`, `/communications`, `/ai`, `/production`, or `/tech`. Use `/capabilities` to inspect each mode’s risk class, preferred tools, and required output contract.
 
 Each specialist must separate facts, assumptions, recommendations, and unknowns. Finance and cybersecurity work require explicit assumptions or authorized scope; data work requires quality checks and reproducibility; research requires sources and citations; communications and automation require exact approval immediately before consequential external actions.
 
@@ -91,6 +91,18 @@ Tool execution is bounded and cancellable end to end. Shell commands run in proc
 Every delegated plan and proposal may declare `acceptanceCriteria`, `verificationCommands`, `sideEffects`, and `recovery`. These fields are persisted and shown for approval. Verification commands are checked by the same autonomy governor as ordinary shell actions; credential reads and outbound data writes are critical and fail closed when unattended. Structured JSONL events, `--plain`, `--quiet`, `--verbose`, and `--json` modes make long-running and CI execution observable without changing the underlying model prompt or its raw generation behavior.
 
 For specialist work, `elia agent "<request>" --dry-run` performs routing only and prints the selected persona chain and rationale without running specialist tools or side effects. Use this to inspect an execution plan before allowing a full specialist turn.
+
+### Production SaaS delivery
+
+The Production Engineering specialist is routed for release, deployment, migration, rollback, observability, SLO, incident, backup, and CI/CD requests. Its read-only `production_readiness` tool scans the actual repository for CI configuration, deployment manifests, verification scripts, environment/secret hygiene, database and migration evidence, observability, health checks, rollback, incident, and backup artifacts. It returns a scored evidence checklist and recommendations; a detected file is never treated as proof that a production system is safe or deployed.
+
+Production work remains bounded and auditable. Elia can inspect a repository, prepare changes, run dry-run or staging checks, write release and incident plans, and verify observable postconditions. Deployment, production data mutation, destructive migrations, secret rotation, and irreversible infrastructure actions require explicit approval and project-specific credentials. No local repository audit can prove that an external environment is healthy.
+
+### Data science and finance workflows
+
+The `data_science` tool provides deterministic, reproducible workflows for CSV, TSV, JSON, and JSONL files: schema and type profiling, missingness and duplicate detection, explicit data-quality validation, grouped summaries, Pearson correlation, and bounded ordinary-least-squares linear regression. It reports bounded input size, excludes invalid values from aggregates rather than silently repairing them, and clearly states that association is not causation. Advanced statistical inference, causal analysis, experiment design, visualization, and domain-specific leakage review still require project-specific code and acceptance criteria.
+
+The `finance` tool provides deterministic unit-economics, runway, bounded scenario, and DCF valuation calculations with sensitivity cases. Every result includes the input basis, reference date, assumptions, source disclosure, confidence caveat, formulas or interpretation, and the required financial-analysis disclaimer. It does not fetch market data, decide personal investments, establish accounting policy, or substitute for a licensed adviser. For company or investment analysis, use primary filings or approved data sources and preserve fiscal-period and metric-basis traceability.
 
 ### Native Excel and presentation workflows
 
