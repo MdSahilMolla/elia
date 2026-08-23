@@ -31,6 +31,14 @@ No honest system can guarantee that every possible task is flawless. The correct
 | Gemini Spark relationship | Spark-inspired task/schedule/skill/supervision design is documented; Elia can call Gemini through its existing Google provider | Spark is a separate consumer product; no direct Spark account/API integration is claimed, and Gemini Interactions API is not yet an Elia adapter |
 
 
+## Codex-inspired reliability layer
+
+The current `manus` branch adopts a bounded subset of patterns observed in OpenAI’s open-source Codex repository and official safety guidance. Elia’s reviewer phase now creates an explicitly read-only tool context containing only repository reads, blackboard reads, recall, environment inspection, and the structured verdict tool; reviewers cannot run shell commands, invoke network tools, modify files, or delegate work. Coding leads are limited to one bounded child fleet per worker run, in addition to the existing one-level depth and per-call child limits, and delegated prompts/metadata are capped.
+
+Repository instructions now follow a progressive-disclosure entry point: a bounded root `AGENTS.md` is injected as clearly labeled project guidance, with `AGENTS.override.md` taking precedence when present. The text is subordinate to user intent, system policy, and Elia’s safety contract. The architecture comparison and source notes are preserved in [`docs/codex-comparison-notes.md`](codex-comparison-notes.md).
+
+These changes improve control-flow separation, review independence, context discoverability, and bounded multi-agent execution. They are not a claim that Elia has Codex’s complete implementation. Elia still lacks OS/kernel-enforced sandboxing, managed network allow/deny policy, secure OS-keyring credential storage, enterprise compliance telemetry, and hosted always-on execution. The application-level governor, receipts, and redaction remain necessary but are not substitutes for those host-level controls.
+
 ## Proposed end-to-end architecture
 
 1. **Capability registry.** Classify every task into one or more capabilities such as coding, finance, business analysis, data analysis, cybersecurity, research, browser operations, communication, automation, and document/spreadsheet work. The registry should expose required tools, risk level, preferred roles, output contracts, and verification checks.

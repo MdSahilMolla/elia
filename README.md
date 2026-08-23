@@ -78,6 +78,12 @@ Elia can synthesize a repeated routine into a tested skill with `elia skills can
 
 Inside an interactive session, type **`@skills`** and press Enter to browse loaded skills. The picker lets the user make all loaded skills available or select one synthesized skill for subsequent turns. Selection changes the tool set only; it does not rewrite the user’s text, alter the system prompt, or add hidden instructions to the model. `ELIA_SKILLS=off` disables skill loading.
 
+### Codex-inspired architecture
+
+Elia adopts several compatible Codex architecture patterns: an explicit bounded turn loop, durable parent/child task state, policy inheritance through the action governor, one-fleet-per-lead delegation limits, structured verification and postconditions, and a separate read-only reviewer context. Repository guidance is loaded from a bounded `AGENTS.md` or higher-priority `AGENTS.override.md` file as project guidance only; it cannot override the user request, system policy, or Elia’s safety gates.
+
+This improves reliability by keeping planning, execution, verification, review, repair, and delivery distinct and observable. It does **not** make Elia identical to Codex: Elia currently has application-level governance rather than Codex-equivalent OS/kernel sandboxing, managed network policy, secure OS-keyring credential storage, enterprise compliance telemetry, or hosted 24/7 execution. Those boundaries remain explicit in [`docs/codex-comparison-notes.md`](docs/codex-comparison-notes.md) and the capability audit.
+
 ### Self-supervised execution and polish
 
 For a fully autonomous run, use `--autonomous` (an alias for `--yolo`):

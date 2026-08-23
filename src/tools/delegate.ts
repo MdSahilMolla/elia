@@ -11,6 +11,8 @@ import { redactText } from '../ui/redact.ts'
 
 const MAX_DELEGATION_DEPTH = 1
 const MAX_DELEGATION_CONTEXT = 12_000
+const MAX_CHILD_PROMPT_LENGTH = 20_000
+const MAX_CHILD_STRING_LENGTH = 4_000
 
 export interface DelegationToolOptions {
   parentRole: RoleName
@@ -51,6 +53,7 @@ export function createDelegationTool(options: DelegationToolOptions): Tool {
   const definition = roleDefinition(options.parentRole)
   const allowedRoles = definition.delegateRoles ?? []
   const maxChildren = definition.maxChildren ?? 0
+  let delegationUsed = false
 
   return {
     name: 'delegate_tasks',
@@ -89,6 +92,7 @@ export function createDelegationTool(options: DelegationToolOptions): Tool {
       if (!definition.canDelegate || allowedRoles.length === 0) {
         throw new Error(`role ${options.parentRole} is not authorized to delegate child tasks`)
       }
+      if (delegationUsed) throw new Error('this lead may delegate only one child fleet per run')
 
       const raw = input.assignments
       if (!Array.isArray(raw) || raw.length === 0) throw new Error('assignments must be a non-empty array')
@@ -97,10 +101,11 @@ export function createDelegationTool(options: DelegationToolOptions): Tool {
       const assignments: FleetAssignment[] = raw.map((value, index) => {
         if (!value || typeof value !== 'object') throw new Error(`assignments[${index}] must be an object`)
         const item = value as Record<string, unknown>
-        const id = stringValue(item.id) ?? `child-${index + 1}`
-        const title = stringValue(item.title) ?? id
+        const id = (stringValue(item.id) ?? `child-${index + 1}`).slice(0, 120)
+        const title = (stringValue(item.title) ?? id).slice(0, 240)
         const prompt = stringValue(item.prompt)
         if (!prompt) throw new Error(`assignments[${index}].prompt is required`)
+        if (prompt.length > MAX_CHILD_PROMPT_LENGTH) throw new Error(`assignments[${index}].prompt exceeds ${MAX_CHILD_PROMPT_LENGTH} characters`)
         if (!isRoleName(item.role) || !allowedRoles.includes(item.role)) {
           throw new Error(`assignments[${index}].role must be one of: ${allowedRoles.join(', ')}`)
         }
@@ -138,6 +143,7 @@ export function createDelegationTool(options: DelegationToolOptions): Tool {
       if (planned.unreachable.length > 0) {
         throw new Error(`child delegation contains a dependency cycle or unreachable task: ${planned.unreachable.map((item) => item.id).join(', ')}`)
       }
+      delegationUsed = true
 
       const parent = currentAgent()
       const sharedBriefing = [
@@ -213,5 +219,10 @@ function stringValue(value: unknown): string | undefined {
 }
 
 function stringArray(value: unknown): string[] {
-  return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string' && item.trim().length > 0).map((item) => item.trim()) : []
+  return Array.isArray(value)
+    ? value
+        .filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
+        .map((item) => item.trim().slice(0, MAX_CHILD_STRING_LENGTH))
+        .slice(0, 50)
+    : []
 }

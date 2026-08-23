@@ -145,6 +145,8 @@ What makes a good proposal:
 - List every external side effect separately. Drafting is not sending; analysis is not execution; authorized security assessment is not permission to attack. Any consequential action must have an exact approval boundary and a postcondition check.
 - Define recovery: which steps are idempotent, which completed actions must never be repeated, what can be retried, and what user input is needed if credentials, scope, or approval is missing.`
 
+const REVIEWER_TOOL_NAMES = new Set(['read_file', 'list_files', 'grep', 'board_read', 'recall', 'environment'])
+
 const REPAIR_PROMPT = `${DEV_SYSTEM_PROMPT}
 
 ## Right now you are fixing your own work
@@ -637,7 +639,8 @@ Read the changed files in full for context beyond the diff above — a diff hide
       const reviewResults = await Promise.all(
         reviewers.map(async (reviewer) => {
           const verdictCapture = createVerdictTool()
-                      const result = await runSubAgent({
+          const reviewerTools = allWorkerTools().filter((tool) => REVIEWER_TOOL_NAMES.has(tool.name))
+          const result = await runSubAgent({
             role: reviewer.role,
             name: reviewer.name,
             runId,
@@ -645,11 +648,14 @@ Read the changed files in full for context beyond the diff above — a diff hide
             graph,
             nodeId: `review:${reviewer.name}`,
             briefing,
-            extraTools: [verdictCapture.tool],
+            tools: [...reviewerTools, verdictCapture.tool],
             signal: runSignal,
 
-            prompt: `${reviewContext} ${reviewer.focus} Finish by calling submit_verdict.`,
+            prompt: `${reviewContext}
+
+This reviewer session is intentionally read-only. The current diff, status, and verification evidence are already supplied above. Do not run shell commands, use network tools, modify files, delegate work, or treat a claimed result as stronger than the supplied evidence. Read only the files needed to validate the claims, then ${reviewer.focus} Finish by calling submit_verdict.`,
           })
+
           const submittedVerdict = verdictCapture.taken()
           if (!submittedVerdict) {
             // Prose cannot drive a safety gate. Preserve it for diagnosis, then send
