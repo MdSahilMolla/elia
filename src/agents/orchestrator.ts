@@ -7,7 +7,7 @@ import { autoFallbacksFor, tierConfig } from '../config.ts'
 import { writeText, writeNotice } from '../ui/stream.ts'
 import { emitEvent, machineReadable } from '../ui/runtime.ts'
 import type { AgentPersona } from './types.ts'
-import { parseOverride, classifyRequest } from './router.ts'
+import { parseOverride, classifyRequest, deterministicRoute } from './router.ts'
 import { personaPrompt, personaTools } from './personas.ts'
 import { capabilityForPersona } from '../capabilities.ts'
 
@@ -148,6 +148,10 @@ export async function runAgentRequest(request: string, opts: { signal?: AbortSig
   if (override) {
     personas = [override]
     rationale = 'explicit override in the request'
+  } else if (opts.dryRun) {
+    const route = deterministicRoute(request)
+    personas = route.personas
+    rationale = route.rationale
   } else {
     const route = await classifyRequest(request)
     personas = route.personas

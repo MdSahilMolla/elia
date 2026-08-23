@@ -1,6 +1,6 @@
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { paths } from '../config.ts'
+import { paths } from '../statePaths.ts'
 import type { ConversationMessage } from '../agentLoop.ts'
 
 /**

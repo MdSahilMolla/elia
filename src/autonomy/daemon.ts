@@ -1,6 +1,5 @@
 import { emitEvent } from '../ui/runtime.ts'
 import { writeNotice } from '../ui/stream.ts'
-import { autoApprove, runAutonomousTask } from './loop.ts'
 import { ScheduleStore } from './scheduler.ts'
 
 export interface ScheduledDaemonOptions {
@@ -44,6 +43,7 @@ export async function runScheduledDaemon(options: ScheduledDaemonOptions = {}): 
     emitEvent('scheduler_started', { scheduleId: claimed.id, title: claimed.title, goal: claimed.goal })
     writeNotice(`Running scheduled goal: ${claimed.title}`)
     try {
+      const { autoApprove, runAutonomousTask } = await import('./loop.ts')
       const result = await runAutonomousTask({
         goal: claimed.goal,
         approve: autoApprove,

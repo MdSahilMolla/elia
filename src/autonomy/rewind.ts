@@ -1,6 +1,6 @@
 import { listCheckpoints, readCheckpoint, readEvents, runDir, type StoredCheckpoint } from './journal.ts'
 import { readGoalGraphSnapshot } from './goalGraph.ts'
-import { runAutonomousTask, type Approver, type AutonomousRunResult } from './loop.ts'
+import type { Approver, AutonomousRunResult } from './loop.ts'
 
 /**
  * Re-entering a finished run at an earlier decision, with a different decision.
@@ -107,6 +107,7 @@ export async function forkRun(options: ForkOptions): Promise<ForkResult> {
     },
   ]
 
+  const { runAutonomousTask } = await import('./loop.ts')
   const run = await runAutonomousTask({
     goal: `${goal} (forked from ${options.runId}@${options.checkpointId}: ${options.instruction})`,
     approve: options.approve,

@@ -1,4 +1,5 @@
 import { existsSync, readdirSync, statSync } from 'node:fs'
+import { mkdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { ConversationMessage } from './agentLoop.ts'
 import { writeError } from './ui/stream.ts'
@@ -22,7 +23,12 @@ export async function saveSession(
   dir: string = SESSIONS_DIR,
 ): Promise<void> {
   const session: StoredSession = { id, updatedAt: Date.now(), messages }
+  if (!isSafeSessionId(id)) {
+    writeError('Warning: failed to save session: invalid session id')
+    return
+  }
   try {
+    await mkdir(dir, { recursive: true })
     await Bun.write(join(dir, `${id}.json`), JSON.stringify(session))
   } catch (err) {
     writeError(`Warning: failed to save session: ${err instanceof Error ? err.message : String(err)}`)
@@ -30,9 +36,15 @@ export async function saveSession(
 }
 
 export async function loadSession(id: string, dir: string = SESSIONS_DIR): Promise<StoredSession | undefined> {
+  if (!isSafeSessionId(id)) return undefined
   const file = Bun.file(join(dir, `${id}.json`))
   if (!(await file.exists())) return undefined
-  return (await file.json()) as StoredSession
+  try {
+    const parsed: unknown = await file.json()
+    return isStoredSession(parsed) ? parsed : undefined
+  } catch {
+    return undefined
+  }
 }
 
 export async function loadLatestSession(dir: string = SESSIONS_DIR): Promise<StoredSession | undefined> {
@@ -46,4 +58,23 @@ export async function loadLatestSession(dir: string = SESSIONS_DIR): Promise<Sto
     .sort((a, b) => b.mtime - a.mtime)[0]!
 
   return loadSession(newest.name.replace(/\.json$/, ''), dir)
+}
+
+function isSafeSessionId(id: string): boolean {
+  return /^[a-z0-9]+(?:-[a-z0-9]+)?$/i.test(id) && id.length <= 100
+}
+
+function isStoredSession(value: unknown): value is StoredSession {
+  if (!value || typeof value !== 'object') return false
+  const candidate = value as Record<string, unknown>
+  return typeof candidate.id === 'string'
+    && isSafeSessionId(candidate.id)
+    && typeof candidate.updatedAt === 'number'
+    && Number.isFinite(candidate.updatedAt)
+    && Array.isArray(candidate.messages)
+    && candidate.messages.every((message) => {
+      if (!message || typeof message !== 'object') return false
+      const item = message as Record<string, unknown>
+      return (item.role === 'user' || item.role === 'assistant') && Array.isArray(item.content)
+    })
 }

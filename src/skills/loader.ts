@@ -2,7 +2,6 @@ import { existsSync, mkdirSync, readdirSync, renameSync } from 'node:fs'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import type { Tool } from '../tools/types.ts'
-import { registerSynthesizedTool } from '../tools/registry.ts'
 import { PROJECT_SKILLS_DIR, QUARANTINE_DIR, SKILL_SUFFIX, USER_SKILLS_DIR, skillsEnabled } from './paths.ts'
 
 /**
@@ -34,10 +33,15 @@ export async function loadSkills(): Promise<SkillLoadReport> {
   loadedSkillCatalog = []
   if (!skillsEnabled()) return report
 
-  for (const [dir, source] of [
+  const filesBySource = [
     [USER_SKILLS_DIR, 'user'],
     [PROJECT_SKILLS_DIR, 'project'],
-  ] as const) {
+  ] as const
+  const availableFiles = filesBySource.flatMap(([dir]) => skillFilesIn(dir))
+  if (availableFiles.length === 0) return report
+  const { registerSynthesizedTool } = await import('../tools/registry.ts')
+
+  for (const [dir, source] of filesBySource) {
     for (const file of skillFilesIn(dir)) {
       const result = await loadSkillFile(file)
       if ('tool' in result) {

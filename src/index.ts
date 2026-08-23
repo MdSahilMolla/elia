@@ -2,10 +2,9 @@ import * as readline from 'node:readline/promises'
 import type { ConversationMessage, AgentMode } from './agent.ts'
 import { writeNotice, writeError, writeUsageLine } from './ui/stream.ts'
 import { playIntro } from './ui/character.ts'
-import { getSessionSummaryLine, recordTopLevelTurn, formatUsageLine } from './usage.ts'
+import { ZERO_USAGE, getSessionSummaryLine, recordTopLevelTurn, formatUsageLine } from './usage.ts'
 import { createSlashPrompt, type SlashCommand } from './ui/slashPrompt.ts'
 import { confirmOnce } from './ui/confirm.ts'
-import { classifyRisk } from './autonomy/risk.ts'
 import { gold, dim } from './ui/theme.ts'
 import { box, table } from './ui/layout.ts'
 import { pick } from './ui/picker.ts'
@@ -13,7 +12,7 @@ import { createLiveActionWindow, openTaskDashboard } from './ui/taskDashboard.ts
 import { inferTaskKind, taskSessions } from './taskSessions.ts'
 import { isAgentPersona, type AgentPersona } from './agents/types.ts'
 import { CAPABILITIES } from './capabilities.ts'
-import type { ActionApproval, ActionAssessment, ActionRequest } from './autonomy/governor.ts'
+import { MAX_GOVERNED_ACTIONS, type ActionApproval, type ActionAssessment, type ActionRequest } from './autonomy/governor.ts'
 import { emitEvent, machineReadable, plainOutput, quietOutput } from './ui/runtime.ts'
 import { installShutdownHandlers, registerShutdownCleanup } from './ui/shutdown.ts'
 import { redactText } from './ui/redact.ts'
@@ -155,7 +154,7 @@ Inside an interactive session:
   elia --cyber                Start (or run a one-shot prompt) in cyber mode
   elia --json                 Emit stable JSONL lifecycle events for automation
   elia --plain                Disable color, animation, and in-place terminal redraws
-  elia --quiet                Print the final answer and essential failures only
+  elia --quiet                Print the final answer and essential failures only; keep TTY editing
   elia --verbose              Include detailed progress output
   ELIA_MAX_RUN_MS             Default wall-clock budget for autonomous runs; --max-run-ms overrides it
   --max-actions <n>            Bound governed tool requests for one autonomous run
@@ -192,11 +191,20 @@ function hasFlag(...names: string[]): boolean {
 function flagValue(...names: string[]): string | undefined {
   for (const name of names) {
     const index = args.indexOf(name)
-    if (index !== -1) return args[index + 1]
+    if (index !== -1) {
+      const value = args[index + 1]
+      return value === undefined || value.startsWith('--') ? '' : value
+    }
     const inline = args.find((arg) => arg.startsWith(`${name}=`))
     if (inline) return inline.slice(name.length + 1)
   }
   return undefined
+}
+
+function strictInteger(value: string | undefined): number | undefined {
+  if (value === undefined || !/^\d+$/.test(value)) return undefined
+  const parsed = Number(value)
+  return Number.isSafeInteger(parsed) ? parsed : undefined
 }
 
 /** Positional arguments, with flags and their values removed. */
@@ -219,6 +227,11 @@ function userMessage(text: string): ConversationMessage {
   return { role: 'user', content: [{ type: 'text', text }] }
 }
 
+async function classifyCommandRisk(command: string): Promise<{ risky: boolean; reason?: string }> {
+  const { classifyRisk } = await import('./autonomy/risk.ts')
+  return classifyRisk(command)
+}
+
 /** The plan-approval gate for `elia auto`/`elia fork` — thin wrapper over the shared confirmOnce helper. */
 function createInteractiveApprover(rl: readline.Interface) {
   return () => confirmOnce(rl, 'Approve this plan? [y]es / [n]o / [e]dit <what to change>: ')
@@ -230,9 +243,15 @@ function actionApprovalPrompt(assessment: ActionAssessment, request: ActionReque
   return `\n${redactText(assessment.reason, 500)}\nRisk: ${assessment.risk} · reversible: ${assessment.reversible ? 'yes' : 'no'}\nAbout to run ${request.name}: ${intent}\nApprove this exact action? [y]es / [n]o: `
 }
 
+async function loadRuntimeSkills(): Promise<void> {
+  const { loadSkills } = await import('./skills/loader.ts')
+  const skills = await loadSkills()
+  if (skills.loaded.length > 0 && subcommand !== 'skills') {
+    writeUsageLine(`${skills.loaded.length} learned tool(s): ${skills.loaded.map((skill) => skill.name).join(', ')}`)
+  }
+}
+
 async function runAgentCommand(): Promise<void> {
-  const { runAgentRequest } = await import('./agents/orchestrator.ts')
-  const { config } = await import('./config.ts')
   const request = positionals().join(' ').trim()
   if (!request) {
     writeError('Give elia a request: elia agent "write 3 instagram captions for our new product"')
@@ -240,19 +259,31 @@ async function runAgentCommand(): Promise<void> {
     return
   }
 
-  const startedAt = Date.now()
   const dryRun = hasFlag('--dry-run')
-  const result = await runAgentRequest(request, { dryRun })
+  const startedAt = Date.now()
+  if (dryRun) {
+    const { deterministicRoute } = await import('./agents/router.ts')
+    const route = deterministicRoute(request)
+    const elapsedMs = Date.now() - startedAt
+    recordTopLevelTurn(elapsedMs)
+    writeUsageLine(`routing plan: ${route.personas.join(' -> ')}${route.rationale ? ` — ${route.rationale}` : ''}`)
+    writeNotice('Dry run complete: no specialist tools or side effects were executed.')
+    writeUsageLine(formatUsageLine(ZERO_USAGE, elapsedMs, 'dry-run'))
+    return
+  }
+
+  await loadRuntimeSkills()
+  const { runAgentRequest } = await import('./agents/orchestrator.ts')
+  const { config } = await import('./config.ts')
+  const result = await runAgentRequest(request)
   const elapsedMs = Date.now() - startedAt
   recordTopLevelTurn(elapsedMs)
 
-  writeUsageLine(`${dryRun ? 'routing plan' : 'agent(s)'}: ${result.personas.join(' -> ')}${result.rationale ? ` — ${result.rationale}` : ''}`)
-  if (dryRun) writeNotice('Dry run complete: no specialist tools or side effects were executed.')
+  writeUsageLine(`agent(s): ${result.personas.join(' -> ')}${result.rationale ? ` — ${result.rationale}` : ''}`)
   writeUsageLine(formatUsageLine(result.usage, elapsedMs, config.model))
 }
 
 async function runAuto(): Promise<void> {
-  const { runAutonomousTask, autoApprove } = await import('./autonomy/loop.ts')
   const goal = positionals(['--variants', '--run-id', '--max-run-ms', '--max-actions']).join(' ').trim()
   if (!goal) {
     writeError('Give elia a goal: elia auto "add rate limiting to the API client"')
@@ -270,16 +301,16 @@ async function runAuto(): Promise<void> {
   }
   if (resumeGraph) writeNotice(`resuming durable run: ${resumeRunId}`)
   const maxActionsRaw = flagValue('--max-actions')
-  const maxActions = maxActionsRaw === undefined ? undefined : Number.parseInt(maxActionsRaw, 10)
-  if (maxActionsRaw !== undefined && (!Number.isInteger(maxActions) || maxActions! < 1)) {
-    writeError(`--max-actions must be a positive integer, got "${maxActionsRaw}"`)
+  const maxActions = maxActionsRaw === undefined ? undefined : strictInteger(maxActionsRaw)
+  if (maxActionsRaw !== undefined && (maxActions === undefined || maxActions < 1 || maxActions > MAX_GOVERNED_ACTIONS)) {
+    writeError(`--max-actions must be a positive integer between 1 and ${MAX_GOVERNED_ACTIONS}, got "${maxActionsRaw}"`)
     process.exitCode = 1
     return
   }
   if (maxActions !== undefined) writeNotice(`action budget: ${maxActions} governed tool requests`)
   const maxRunMsRaw = flagValue('--max-run-ms')
-  const maxRunMs = maxRunMsRaw === undefined ? undefined : Number.parseInt(maxRunMsRaw, 10)
-  if (maxRunMsRaw !== undefined && (!Number.isInteger(maxRunMs) || maxRunMs! < 1)) {
+  const maxRunMs = maxRunMsRaw === undefined ? undefined : strictInteger(maxRunMsRaw)
+  if (maxRunMsRaw !== undefined && (maxRunMs === undefined || maxRunMs < 1)) {
     writeError(`--max-run-ms must be a positive integer in milliseconds, got "${maxRunMsRaw}"`)
     process.exitCode = 1
     return
@@ -288,8 +319,8 @@ async function runAuto(): Promise<void> {
   if (profile !== 'balanced') writeNotice(`autonomy profile: ${profile}`)
 
   const variantsRaw = flagValue('--variants')
-  const variants = variantsRaw ? Number.parseInt(variantsRaw, 10) : undefined
-  if (variantsRaw && (!Number.isInteger(variants) || variants! < 1)) {
+  const variants = variantsRaw === undefined ? undefined : strictInteger(variantsRaw)
+  if (variantsRaw !== undefined && (variants === undefined || variants < 1)) {
     writeError(`--variants must be a positive integer, got "${variantsRaw}"`)
     process.exitCode = 1
     return
@@ -308,6 +339,8 @@ async function runAuto(): Promise<void> {
     return
   }
 
+  await loadRuntimeSkills()
+  const { runAutonomousTask, autoApprove } = await import('./autonomy/loop.ts')
   const controller = new AbortController()
   const unregisterShutdown = registerShutdownCleanup(() => controller.abort())
   let rl: readline.Interface | undefined
@@ -335,6 +368,7 @@ async function runAuto(): Promise<void> {
 }
 
 async function runBench(): Promise<void> {
+  await loadRuntimeSkills()
   const { measureFitness, renderScorecard } = await import('./evolve/fitness.ts')
   const { ELIA_ROOT } = await import('./config.ts')
 
@@ -350,14 +384,16 @@ async function runBench(): Promise<void> {
 }
 
 async function runEvolve(): Promise<void> {
-  const { evolve } = await import('./evolve/engine.ts')
-  const generations = Number.parseInt(flagValue('--generations', '-n') ?? '1', 10)
-  if (!Number.isFinite(generations) || generations < 1) {
+  const generationsRaw = flagValue('--generations', '-n') ?? '1'
+  const generations = strictInteger(generationsRaw)
+  if (generations === undefined || generations < 1) {
     writeError('--generations must be a positive integer.')
     process.exitCode = 1
     return
   }
 
+  await loadRuntimeSkills()
+  const { evolve } = await import('./evolve/engine.ts')
   const result = await evolve({ generations, dryRun: hasFlag('--dry-run') })
   const promoted = result.generations.filter((record) => record.verdict === 'promoted')
 
@@ -480,6 +516,7 @@ async function runSchedule(): Promise<void> {
       return
     }
     store.resume(id, Date.now())
+    await loadRuntimeSkills()
     const { runScheduledDaemon } = await import('./autonomy/daemon.ts')
     await runScheduledDaemon({ once: true })
     return
@@ -508,38 +545,40 @@ async function runSchedule(): Promise<void> {
   }
   const profileValue = flagValue('--profile')
   const profile = profileValue === 'fast' || profileValue === 'thorough' ? profileValue : 'balanced'
-  if (profileValue && !['fast', 'balanced', 'thorough'].includes(profileValue)) {
+  if (profileValue !== undefined && !['fast', 'balanced', 'thorough'].includes(profileValue)) {
     writeError('--profile must be fast, balanced, or thorough')
     process.exitCode = 1
     return
   }
   const maxRunMsRaw = flagValue('--max-run-ms')
-  const maxRunMs = maxRunMsRaw === undefined ? undefined : Number.parseInt(maxRunMsRaw, 10)
-  if (maxRunMsRaw !== undefined && (!Number.isInteger(maxRunMs) || maxRunMs! < 1)) {
+  const maxRunMs = maxRunMsRaw === undefined ? undefined : strictInteger(maxRunMsRaw)
+  if (maxRunMsRaw !== undefined && (maxRunMs === undefined || maxRunMs < 1)) {
     writeError('--max-run-ms must be a positive integer in milliseconds')
     process.exitCode = 1
     return
   }
   const maxActionsRaw = flagValue('--max-actions')
-  const maxActions = maxActionsRaw === undefined ? undefined : Number.parseInt(maxActionsRaw, 10)
-  if (maxActionsRaw !== undefined && (!Number.isInteger(maxActions) || maxActions! < 1 || maxActions! > MAX_SCHEDULE_ACTIONS)) {
+  const maxActions = maxActionsRaw === undefined ? undefined : strictInteger(maxActionsRaw)
+  if (maxActionsRaw !== undefined && (maxActions === undefined || maxActions < 1 || maxActions > MAX_SCHEDULE_ACTIONS)) {
     writeError(`--max-actions must be an integer between 1 and ${MAX_SCHEDULE_ACTIONS}`)
     process.exitCode = 1
     return
   }
-  const record = store.create({ title: flagValue('--title') ?? goal.slice(0, 80), goal, intervalMs, profile, maxRunMs, maxActions })
+  const title = flagValue('--title') || goal.slice(0, 80)
+  const record = store.create({ title, goal, intervalMs, profile, maxRunMs, maxActions })
   writeNotice(`Scheduled ${record.title} every ${formatScheduleInterval(record.intervalMs)}. id=${record.id}`)
   writeNotice('Run it with: elia daemon --once')
 }
 
 async function runDaemon(): Promise<void> {
   const pollMsRaw = flagValue('--poll-ms')
-  const pollMs = pollMsRaw === undefined ? undefined : Number.parseInt(pollMsRaw, 10)
-  if (pollMsRaw !== undefined && (!Number.isInteger(pollMs) || pollMs! < 1_000)) {
+  const pollMs = pollMsRaw === undefined ? undefined : strictInteger(pollMsRaw)
+  if (pollMsRaw !== undefined && (pollMs === undefined || pollMs < 1_000)) {
     writeError('--poll-ms must be an integer of at least 1000 milliseconds')
     process.exitCode = 1
     return
   }
+  await loadRuntimeSkills()
   const { runScheduledDaemon } = await import('./autonomy/daemon.ts')
   const controller = new AbortController()
   const unregisterShutdown = registerShutdownCleanup(() => controller.abort())
@@ -553,10 +592,10 @@ async function runDaemon(): Promise<void> {
 
 async function runRuns(): Promise<void> {
   const { listRuns } = await import('./autonomy/journal.ts')
-  const { renderRunTimeline } = await import('./autonomy/rewind.ts')
   const runId = positionals()[0]
 
   if (runId) {
+    const { renderRunTimeline } = await import('./autonomy/rewind.ts')
     const timeline = renderRunTimeline(runId)
     if (machineReadable) emitEvent('run_timeline', { runId, timeline })
     else process.stdout.write(`${timeline}\n`)
@@ -578,8 +617,6 @@ async function runRuns(): Promise<void> {
 }
 
 async function runResume(): Promise<void> {
-  const { runAutonomousTask, autoApprove } = await import('./autonomy/loop.ts')
-  const { GoalGraphStore } = await import('./autonomy/goalGraph.ts')
   const { runDir, readEvents } = await import('./autonomy/journal.ts')
   const runId = positionals()[0]
   if (!runId) {
@@ -595,6 +632,7 @@ async function runResume(): Promise<void> {
     return
   }
 
+  const { GoalGraphStore } = await import('./autonomy/goalGraph.ts')
   const graph = GoalGraphStore.open({ runId, goal, dir: runDir(runId) })
   const recovery = graph.leaseRecoverySummary()
   if (recovery.nodes || recovery.actions) writeNotice(`Recovered stale execution leases: ${recovery.nodes} node(s), ${recovery.actions} action(s).`)
@@ -608,6 +646,8 @@ async function runResume(): Promise<void> {
   const rl = process.stdin.isTTY && !hasFlag('--yolo', '-y')
     ? readline.createInterface({ input: process.stdin, output: process.stdout })
     : undefined
+  await loadRuntimeSkills()
+  const { runAutonomousTask, autoApprove } = await import('./autonomy/loop.ts')
   const controller = new AbortController()
   const unregisterShutdown = registerShutdownCleanup(() => controller.abort())
   try {
@@ -641,19 +681,19 @@ async function runResume(): Promise<void> {
 }
 
 async function runFork(): Promise<void> {
-  const { forkRun } = await import('./autonomy/rewind.ts')
-  const { autoApprove } = await import('./autonomy/loop.ts')
-
   const runId = positionals(['--at', '--with']).at(0)
-  const at = Number.parseInt(flagValue('--at') ?? '', 10)
+  const at = strictInteger(flagValue('--at'))
   const instruction = flagValue('--with')
 
-  if (!runId || !Number.isFinite(at) || !instruction) {
+  if (!runId || at === undefined || !instruction) {
     writeError('Usage: elia fork <runId> --at <checkpoint> --with "<what to do differently>"')
     process.exitCode = 1
     return
   }
 
+  await loadRuntimeSkills()
+  const { forkRun } = await import('./autonomy/rewind.ts')
+  const { autoApprove } = await import('./autonomy/loop.ts')
   const rl = process.stdin.isTTY && !hasFlag('--yolo', '-y')
     ? readline.createInterface({ input: process.stdin, output: process.stdout })
     : undefined
@@ -679,6 +719,15 @@ async function runFork(): Promise<void> {
 }
 
 async function runInteractive(): Promise<void> {
+  const continueFlag = hasFlag('--continue', '-c')
+  const resumeId = flagValue('--resume')
+  if (hasFlag('--resume') && !resumeId) {
+    writeError('--resume requires a session id.')
+    process.exitCode = 1
+    return
+  }
+
+  await loadRuntimeSkills()
   const { runTurn } = await import('./agent.ts')
   const { config, describeThinking, getThinking, switchModel, switchThinking, THINKING_EFFORT_BUDGETS, DEFAULT_THINKING_BUDGET } =
     await import('./config.ts')
@@ -689,8 +738,6 @@ async function runInteractive(): Promise<void> {
   const { setActiveLedgerSession, countEpisodes } = await import('./ledger.ts')
   const { renderContextStatus } = await import('./compaction.ts')
 
-  const continueFlag = hasFlag('--continue', '-c')
-  const resumeId = flagValue('--resume')
   const oneShotPrompt = positionals(['--resume']).join(' ').trim()
 
   let mode: AgentMode = hasFlag('--cyber') ? 'cyber' : hasFlag('--sports') ? 'sports' : hasFlag('--fitness') ? 'fitness' : 'dev'
@@ -806,7 +853,7 @@ async function runInteractive(): Promise<void> {
     // to execution — same as today. A real terminal gets the same risk-gated
     // ask as the interactive loop below, unless --yolo skips it.
     if (!hasFlag('--yolo', '-y') && process.stdin.isTTY) {
-      const { risky, reason } = await classifyRisk(commandToRun)
+      const { risky, reason } = await classifyCommandRisk(commandToRun)
       if (risky) {
         const confirmPrompt = createSlashPrompt([])
         const label = `${reason ? `${redactText(reason, 500)}\n` : ''}About to: "${redactText(commandToRun, 500)}" — run it? [y]es / [n]o / [e]dit: `
@@ -955,8 +1002,8 @@ async function runInteractive(): Promise<void> {
     } else if (arg in THINKING_EFFORT_BUDGETS) {
       budgetTokens = THINKING_EFFORT_BUDGETS[arg as keyof typeof THINKING_EFFORT_BUDGETS]
     } else {
-      const parsed = Number.parseInt(arg, 10)
-      if (!Number.isFinite(parsed) || parsed < 1024) {
+      const parsed = strictInteger(arg)
+      if (parsed === undefined || parsed < 1024) {
         writeError('Usage: /thinking off|on|low|medium|high|<token budget ≥1024>')
         return
       }
@@ -1143,7 +1190,7 @@ async function runInteractive(): Promise<void> {
 
     let commandToRun = trimmed
     if (replMode === 'manual') {
-      const { risky, reason } = await classifyRisk(commandToRun)
+      const { risky, reason } = await classifyCommandRisk(commandToRun)
       if (risky) {
         const label = `${reason ? `${redactText(reason, 500)}\n` : ''}About to: "${redactText(commandToRun, 500)}" — run it? [y]es / [n]o / [e]dit: `
         const result = await confirmOnce(prompt, label)
@@ -1175,18 +1222,11 @@ async function runInteractive(): Promise<void> {
 async function main() {
   installShutdownHandlers()
   emitEvent('cli_started', { version: JSON.parse(await Bun.file(new URL('../package.json', import.meta.url)).text()).version, uiMode: machineReadable ? 'json' : plainOutput ? 'plain' : 'normal' })
-  // Skills elia wrote for itself are loaded before anything can call a tool, and a
-  // broken one is quarantined rather than allowed to stop startup.
-  const { loadSkills } = await import('./skills/loader.ts')
   const { flushUsageStats } = await import('./skills/detector.ts')
   // Process-exit handlers must be synchronous, so the flush is registered here,
   // after the module is already loaded.
   process.on('exit', flushUsageStats)
 
-  const skills = await loadSkills()
-  if (skills.loaded.length > 0 && subcommand !== 'skills') {
-    writeUsageLine(`${skills.loaded.length} learned tool(s): ${skills.loaded.map((skill) => skill.name).join(', ')}`)
-  }
   await taskSessions.load()
 
   switch (subcommand) {

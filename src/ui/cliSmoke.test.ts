@@ -1,14 +1,19 @@
 import { expect, test } from 'bun:test'
 
-async function runCli(args: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
+async function runCli(args: string[], overrides: Record<string, string | undefined> = {}): Promise<{ code: number; stdout: string; stderr: string }> {
+  const env: Record<string, string> = {
+    ...process.env,
+    ELIA_ROUTING_MODE: 'selected',
+    ELIA_PROVIDER: 'anthropic',
+    ANTHROPIC_API_KEY: 'test-anthropic-key',
+  }
+  for (const [key, value] of Object.entries(overrides)) {
+    if (value === undefined) delete env[key]
+    else env[key] = value
+  }
   const proc = Bun.spawn([process.execPath, 'src/index.ts', ...args], {
     cwd: process.cwd(),
-    env: {
-      ...process.env,
-      ELIA_ROUTING_MODE: 'selected',
-      ELIA_PROVIDER: 'anthropic',
-      ANTHROPIC_API_KEY: 'test-anthropic-key',
-    },
+    env,
     stdout: 'pipe',
     stderr: 'pipe',
   })
@@ -68,4 +73,101 @@ test('CLI accepts inline value flags and does not treat them as goal text', asyn
   const result = await runCli(['auto', 'do work', '--max-actions=0', '--plain=false'])
   expect(result.code).toBe(1)
   expect(result.stderr).toContain('--max-actions must be a positive integer')
+})
+
+test('CLI rejects malformed numeric values instead of partially parsing them', async () => {
+  const [suffix, negative, tooLarge] = await Promise.all([
+    runCli(['auto', 'do work', '--max-run-ms', '1000ms', '--plain']),
+    runCli(['auto', 'do work', '--max-actions', '-1', '--plain']),
+    runCli(['auto', 'do work', '--max-actions', '10001', '--plain']),
+  ])
+  expect(suffix.code).toBe(1)
+  expect(suffix.stderr).toContain('--max-run-ms must be a positive integer')
+  expect(negative.code).toBe(1)
+  expect(negative.stderr).toContain('--max-actions must be a positive integer')
+  expect(tooLarge.code).toBe(1)
+  expect(tooLarge.stderr).toContain('between 1 and 10000')
+})
+
+test('CLI rejects missing values without consuming the next flag', async () => {
+  const result = await runCli(['auto', 'do work', '--max-actions', '--plain'])
+  expect(result.code).toBe(1)
+  expect(result.stderr).toContain('--max-actions must be a positive integer')
+})
+
+test('CLI rejects empty inline schedule options before persistence', async () => {
+  const result = await runCli(['schedule', 'add', '--every', '1h', '--profile=', 'repository health', '--plain'])
+  expect(result.code).toBe(1)
+  expect(result.stderr).toContain('--profile must be fast, balanced, or thorough')
+})
+
+test('provider-independent validation does not initialize a model', async () => {
+  const withoutProvider = {
+    ELIA_PROVIDER: undefined,
+    ELIA_MODEL: undefined,
+    ELIA_API_KEY: undefined,
+    ANTHROPIC_API_KEY: undefined,
+    OPENAI_API_KEY: undefined,
+    NVIDIA_API_KEY: undefined,
+    GEMINI_API_KEY: undefined,
+  }
+  const [auto, agent, evolve, fork, resume] = await Promise.all([
+    runCli(['auto', 'do work', '--max-run-ms', '1000ms', '--plain'], withoutProvider),
+    runCli(['agent', '--dry-run', '--plain'], withoutProvider),
+    runCli(['evolve', '--generations', '2bad', '--plain'], withoutProvider),
+    runCli(['fork', '--at', 'nope', '--with', 'change', '--plain'], withoutProvider),
+    runCli(['--resume', '--plain'], withoutProvider),
+  ])
+  expect(auto.stderr).toContain('--max-run-ms must be a positive integer')
+  expect(agent.stderr).toContain('Give elia a request')
+  expect(evolve.stderr).toContain('--generations must be a positive integer')
+  expect(fork.stderr).toContain('Usage: elia fork')
+  expect(resume.stderr).toContain('--resume requires a session id')
+  for (const result of [auto, agent, evolve, fork, resume]) {
+    expect(result.code).toBe(1)
+    expect(result.stderr).not.toContain('No API key found')
+  }
+})
+
+test('agent dry-run routes locally without a provider credential', async () => {
+  const result = await runCli(['agent', 'Fix a TypeScript parser bug', '--dry-run', '--plain'], {
+    ELIA_PROVIDER: undefined,
+    ELIA_MODEL: undefined,
+    ELIA_API_KEY: undefined,
+    ANTHROPIC_API_KEY: undefined,
+    OPENAI_API_KEY: undefined,
+    NVIDIA_API_KEY: undefined,
+    GEMINI_API_KEY: undefined,
+  })
+  expect(result.code).toBe(0)
+  expect(result.stdout).toContain('tech')
+  expect(result.stdout).toContain('dry-run')
+  expect(result.stderr).not.toContain('No API key found')
+})
+
+test('metadata commands stay provider-independent', async () => {
+  const withoutProvider = {
+    ELIA_PROVIDER: undefined,
+    ELIA_MODEL: undefined,
+    ELIA_API_KEY: undefined,
+    ANTHROPIC_API_KEY: undefined,
+    OPENAI_API_KEY: undefined,
+    NVIDIA_API_KEY: undefined,
+    GEMINI_API_KEY: undefined,
+  }
+  const [skills, schedules, runs, timeline, daemon] = await Promise.all([
+    runCli(['skills', 'path', '--plain'], withoutProvider),
+    runCli(['schedule', 'list', '--plain'], withoutProvider),
+    runCli(['runs', '--plain'], withoutProvider),
+    runCli(['runs', 'missing-run', '--plain'], withoutProvider),
+    runCli(['daemon', '--once', '--plain'], withoutProvider),
+  ])
+  expect(skills.code).toBe(0)
+  expect(schedules.code).toBe(0)
+  expect(runs.code).toBe(0)
+  expect(timeline.code).toBe(0)
+  expect(daemon.code).toBe(0)
+  for (const result of [skills, schedules, runs, timeline, daemon]) {
+    expect(result.stderr).not.toContain('No API key found')
+  }
 })

@@ -47,6 +47,7 @@ const SECRET_KEY = /(password|passwd|token|secret|api[-_]?key|authorization|cook
 const SENSITIVE_READ_COMMAND = /\b(cat|less|head|tail|sed|awk|grep|printenv|env|set)\b[^\n]*(\.env|id_rsa|\.ssh|credentials?|secret|token|password|shadow)\b/i
 const EXTERNAL_WRITE_COMMAND = /\b(curl|wget)\b[^\n]*(--data(?:-raw)?|\s-d\s|\s-X\s*(POST|PUT|PATCH|DELETE)|--upload-file|--form)\b/i
 const INTERNAL_SAFE_TOOLS = new Set(['flag_risk', 'submit_route', 'submit_proposal', 'submit_verdict', 'submit_lessons', 'delegate_tasks'])
+export const MAX_GOVERNED_ACTIONS = 10_000
 
 export function assessAction(request: ActionRequest, cwd = currentAgent().cwd ?? process.cwd()): ActionAssessment {
   const { name, input } = request
@@ -135,7 +136,7 @@ export function createActionGovernor(options: { mode?: GovernanceMode; approve?:
   const mode = options.mode ?? 'unattended'
   const requestedMaxActions = options.maxActions ?? 0
   const maxActions = Number.isFinite(requestedMaxActions) && requestedMaxActions > 0
-    ? Math.max(1, Math.min(Math.floor(requestedMaxActions), 10_000))
+    ? Math.max(1, Math.min(Math.floor(requestedMaxActions), MAX_GOVERNED_ACTIONS))
     : 0
   let actionCount = 0
   let blockedByBudget = 0

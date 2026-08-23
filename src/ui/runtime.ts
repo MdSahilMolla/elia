@@ -22,8 +22,12 @@ export const plainOutput = uiMode === 'plain' || uiMode === 'quiet' || machineRe
 export const quietOutput = uiMode === 'quiet'
 export const animationsEnabled = uiMode === 'normal' || uiMode === 'verbose'
 
-/** Interactive terminal rendering is opt-in: never emit cursor control sequences in plain/JSON modes. */
-export const interactiveTerminal = Boolean(process.stdin.isTTY && process.stdout.isTTY && !plainOutput)
+/** Interactive terminal rendering is opt-in: quiet suppresses status text but keeps the editor usable in a real TTY. */
+export function isInteractiveTerminal(stdinIsTTY: boolean, stdoutIsTTY: boolean, mode: UiMode): boolean {
+  return stdinIsTTY && stdoutIsTTY && mode !== 'plain' && mode !== 'json'
+}
+
+export const interactiveTerminal = isInteractiveTerminal(Boolean(process.stdin.isTTY), Boolean(process.stdout.isTTY), uiMode)
 
 export interface UiEvent {
   type: string

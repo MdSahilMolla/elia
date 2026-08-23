@@ -1,5 +1,5 @@
-import { dirname, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
+export { ELIA_ROOT, paths, stateDir } from './statePaths.ts'
+import { ELIA_ROOT, paths, stateDir } from './statePaths.ts'
 import {
   PROVIDER_PRESET_NAMES,
   providerPresetDefaultModel,
@@ -198,35 +198,11 @@ export function roleConfig(roleName: RoleName, tier: Tier): TierConfig {
   return config.roleOverrides[roleName] ?? tierConfig(tier)
 }
 
-/**
- * Where elia's own source lives, resolved from this module's location rather than
- * the cwd — `elia evolve` edits *itself*, and the user is normally sitting in some
- * other project when it does.
- */
-export const ELIA_ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
-
-/** Per-project state directory (runs, evolution ledger, synthesized skills). */
-export const stateDir = join(process.cwd(), '.elia')
-
-/** Visible (not dotfile-hidden) home for real work product — prototypes, generated
- * pages, anything the user will want to browse, edit further, or commit. Distinct
- * from `.elia/` above, which is internal state. Created lazily by whatever first
- * needs it (the preview server, on first use), matching how `.elia/sessions` etc.
- * are created lazily by `Bun.write` rather than upfront here. */
-const workspaceDir = join(process.cwd(), 'workspace')
-
-export const paths = {
-  state: stateDir,
-  sessions: join(stateDir, 'sessions'),
-  runs: join(stateDir, 'runs'),
-  evolution: join(stateDir, 'evolution'),
-  lessons: join(stateDir, 'lessons.md'),
-  workspace: workspaceDir,
-}
 
 export const memorySections = buildMemorySections()
 
 export const SHARED_CONTEXT = `You operate in the current working directory: ${process.cwd()}
+Workspace: ${paths.workspace}
 Platform: ${process.platform}.`
 
 export const DEV_SYSTEM_PROMPT = `You are elia in dev mode, an autonomous coding agent running in a CLI, in the user's terminal.
@@ -251,7 +227,7 @@ This is how you work a real coding task on your own initiative, not just somethi
 - If the task spans both UI and server/data work, split it into a \`frontend\` step and a \`backend\` step and dispatch both as parallel \`task\` calls instead of doing both serially yourself.
 - Once you've made a real logic/code change (not a one-line trivial edit, and not a docs/comment-only change — those have no exploit surface or logic to break), before telling the user you're done, run \`git diff\` yourself once and pass its actual content into each sub-agent's prompt rather than telling three of them to each go run \`git diff\` themselves — that only triples the same tool round-trip for identical output. Then fan out \`critic\`, \`security\`, and \`bughunter\` as parallel \`task\` calls against that diff text. Three specialists looking from different angles at once catch more than one generalist pass, and it costs no extra wall-clock time since they run together. Fix anything blocking they raise before reporting done.
 
-When you produce standalone output — a prototype, a generated page, scratch work that isn't an edit to the user's existing project — put it under \`${workspaceDir}\` (the workspace) by default, rather than scattering it through the user's cwd. Use the \`preview\` tool to show the user something visually: it opens a real Chrome window and keeps it live-updated as you keep editing the file.${memorySections}`
+When you produce standalone output — a prototype, a generated page, scratch work that isn't an edit to the user's existing project — put it under \`${paths.workspace}\` (the workspace) by default, rather than scattering it through the user's cwd. Use the \`preview\` tool to show the user something visually: it opens a real Chrome window and keeps it live-updated as you keep editing the file.${memorySections}`
 
 export const SPORTS_SYSTEM_PROMPT = `You are elia in sports mode: an autonomous sports intelligence and operations assistant running in a CLI.
 ${SHARED_CONTEXT}

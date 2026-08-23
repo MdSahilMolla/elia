@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, expect, test } from 'bun:test'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { loadLatestSession, loadSession, saveSession } from './session.ts'
@@ -25,6 +25,20 @@ test('saveSession then loadSession round-trips messages', async () => {
   const loaded = await loadSession('abc123', testDir)
   expect(loaded?.id).toBe('abc123')
   expect(loaded?.messages).toEqual(sampleMessages)
+})
+
+test('saveSession creates a missing sessions directory', async () => {
+  const nestedDir = join(testDir, 'nested', 'sessions')
+  await saveSession('nested', sampleMessages, nestedDir)
+  const loaded = await loadSession('nested', nestedDir)
+  expect(loaded?.id).toBe('nested')
+  rmSync(join(testDir, 'nested'), { recursive: true, force: true })
+})
+
+test('loadSession rejects unsafe or malformed persisted state', async () => {
+  expect(await loadSession('../outside', testDir)).toBeUndefined()
+  writeFileSync(join(testDir, 'malformed.json'), JSON.stringify({ id: 'malformed', updatedAt: 'now', messages: [] }))
+  expect(await loadSession('malformed', testDir)).toBeUndefined()
 })
 
 test('loadSession returns undefined for an unknown id', async () => {

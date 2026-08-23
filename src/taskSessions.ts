@@ -136,7 +136,7 @@ export class TaskSessionStore {
       verificationCommands: meta.verificationCommands?.slice(0, 20),
     }
     this.records.set(record.id, record)
-    this.emit()
+    this.emit(record)
     return { ...record }
   }
 
@@ -159,7 +159,7 @@ export class TaskSessionStore {
     }
     if (patch.status === 'done') record.progress = 1
     if ((patch.status === 'done' || patch.status === 'failed') && !record.finishedAt) record.finishedAt = Date.now()
-    this.emit()
+    this.emit(record)
     return { ...record }
   }
 
@@ -192,10 +192,16 @@ export class TaskSessionStore {
     return () => this.listeners.delete(listener)
   }
 
-  private emit(): void {
+  private emit(changedTask?: TaskSession): void {
     const snapshot = this.list()
     for (const listener of this.listeners) listener(snapshot)
-    if (machineReadable) emitEvent('tasks_updated', { tasks: snapshot })
+    if (machineReadable) {
+      emitEvent('tasks_updated', {
+        tasks: snapshot,
+        changedTaskId: changedTask?.id ?? null,
+        changedTask: changedTask ?? null,
+      })
+    }
     this.persistSoon()
   }
 

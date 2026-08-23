@@ -1,6 +1,5 @@
 import type { Tool } from '../tools/types.ts'
-import { runAgentLoop, type ConversationMessage } from '../agentLoop.ts'
-import { autoFallbacksFor, tierConfig } from '../config.ts'
+import type { ConversationMessage } from '../agentLoop.ts'
 import type { Usage } from '../providers/types.ts'
 import { AGENT_PERSONAS, isAgentPersona, type AgentPersona, type AgentRoute } from './types.ts'
 import { detectCapabilities } from '../capabilities.ts'
@@ -83,7 +82,18 @@ function createRouteTool(): RouteCapture {
   return { tool, taken: () => { const route = captured; captured = undefined; return route } }
 }
 
+export function deterministicRoute(request: string): AgentRoute {
+  const override = parseOverride(request)
+  if (override) return { personas: [override], rationale: 'explicit override in the request' }
+  const hints = keywordHint(request)
+  return hints.length > 0
+    ? { personas: hints, rationale: 'dry-run used deterministic capability hints; full execution uses the model router' }
+    : { personas: ['tech'], rationale: 'dry-run found no capability hint; defaulting to tech' }
+}
+
 export async function classifyRequest(request: string): Promise<AgentRoute & { usage: Usage }> {
+  const { runAgentLoop } = await import('../agentLoop.ts')
+  const { autoFallbacksFor, tierConfig } = await import('../config.ts')
   const routeCapture = createRouteTool()
   const hint = keywordHint(request)
   const hintLine = hint.length > 0 ? `\n\n(Weak keyword signal: ${hint.join(', ')} — use judgment; this is not a decision.)` : ''
