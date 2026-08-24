@@ -1,0 +1,11 @@
+src/**
+test/**
+node_modules/**
+*.tsbuildinfo
+.vscode/**
+.git/**
+.gitignore
+pnpm-lock.yaml
+README.md
+dist/**/*.test.js
+dist/**/*.test.js.map

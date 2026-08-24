@@ -151,6 +151,12 @@ Elia’s Tech and Production workflows can carry a web project through inspect �
 
 Use `{"action":"plan","provider":"vercel","target":"preview"}` to inspect readiness, `{"action":"build","provider":"vercel"}` to run the local build, `{"action":"deploy","provider":"vercel","target":"preview"}` to create a preview, and `{"action":"verify","provider":"vercel","url":"https://...vercel.app"}` to check the live result. Netlify uses the same actions with `"provider":"netlify"`. Preview deployment is reviewable external work. Production deployment is a separate **critical action** requiring exact approval immediately before execution; unattended runs block it. Elia does not create provider projects, perform interactive login, upload secrets, modify domains or environment variables, or report success without provider output and a successful HTTPS postcondition. See [`docs/deployment-workflows.md`](docs/deployment-workflows.md).
 
+### Full VS Code extension
+
+Elia includes a full VS Code client under [`extensions/vscode`](extensions/vscode). It provides an Elia engineering panel, streamed chat and tool events, active-file and selection context, workspace diagnostics, autonomous run controls, task/run/skill tree views, skill-bundle selection, native diff review, environment inspection, receipts, preview deployment, live verification, and production approval controls.
+
+The extension is a thin local client over `elia bridge --json`; it does not duplicate the model layer or weaken Elia’s governance. Install its dependencies and compile it with `cd extensions/vscode && pnpm install && pnpm run compile`, then configure `elia.cliPath` to the absolute `v2/bin/elia.ts` path for a source checkout or leave it as `elia` for an installed executable. The bridge uses the open workspace as its working root, communicates over local stdin/stdout rather than a TCP server, and keeps provider credentials in Elia’s normal process environment. See [`extensions/vscode/README.md`](extensions/vscode/README.md).
+
 ### Skills: create, install, and select
 
 Elia can synthesize a repeated routine into a tested skill with `elia skills candidates` followed by `elia skills synth`. Users can also create or add a skill manually by placing a self-contained `*.skill.ts` module in the project’s `.elia/skills/` directory or the user-wide `~/.elia/skills/` directory. Use `elia skills path` to print the exact folders and contract. Invalid skills are quarantined instead of crashing startup.

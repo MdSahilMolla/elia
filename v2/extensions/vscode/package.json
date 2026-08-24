@@ -1,0 +1,268 @@
+{
+  "name": "elia-vscode",
+  "displayName": "Elia Autonomous Engineering",
+  "description": "A governed VS Code client for Elia's autonomous coding, verification, task orchestration, skills, and deployment workflows.",
+  "version": "0.1.0",
+  "publisher": "mdsahilmolla",
+  "license": "AGPL-3.0-only",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/MdSahilMolla/elia",
+    "directory": "v2/extensions/vscode"
+  },
+  "engines": {
+    "vscode": "^1.95.0"
+  },
+  "categories": [
+    "Other",
+    "Programming Languages",
+    "Machine Learning",
+    "Visualization"
+  ],
+  "keywords": [
+    "elia",
+    "autonomous coding",
+    "agent",
+    "code review",
+    "deployment",
+    "vercel",
+    "netlify"
+  ],
+  "activationEvents": [
+    "onStartupFinished",
+    "onView:elia.tasks",
+    "onView:elia.skills",
+    "onView:elia.runs",
+    "workspaceContains:.elia"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "elia.openPanel",
+        "title": "Elia: Open Engineering Panel",
+        "icon": "$(hubot)"
+      },
+      {
+        "command": "elia.ask",
+        "title": "Elia: Ask About This Workspace",
+        "icon": "$(comment-discussion)"
+      },
+      {
+        "command": "elia.autonomousStart",
+        "title": "Elia: Start Autonomous Engineering Run",
+        "icon": "$(rocket)"
+      },
+      {
+        "command": "elia.refreshTasks",
+        "title": "Elia: Refresh Tasks",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "elia.pauseRun",
+        "title": "Elia: Pause Autonomous Run",
+        "icon": "$(debug-pause)"
+      },
+      {
+        "command": "elia.stopRun",
+        "title": "Elia: Stop Autonomous Run",
+        "icon": "$(debug-stop)"
+      },
+      {
+        "command": "elia.resumeRun",
+        "title": "Elia: Resume Autonomous Run",
+        "icon": "$(debug-start)"
+      },
+      {
+        "command": "elia.selectSkills",
+        "title": "Elia: Select Skills",
+        "icon": "$(symbol-interface)"
+      },
+      {
+        "command": "elia.inspectEnvironment",
+        "title": "Elia: Inspect Environment",
+        "icon": "$(info)"
+      },
+      {
+        "command": "elia.previewDeploy",
+        "title": "Elia: Deploy Preview",
+        "icon": "$(cloud-upload)"
+      },
+      {
+        "command": "elia.productionDeploy",
+        "title": "Elia: Deploy Production",
+        "icon": "$(cloud-upload)"
+      },
+      {
+        "command": "elia.verifyDeployment",
+        "title": "Elia: Verify Deployment",
+        "icon": "$(verified)"
+      },
+      {
+        "command": "elia.openReceipt",
+        "title": "Elia: Open Latest Run Receipt",
+        "icon": "$(file-text)"
+      },
+      {
+        "command": "elia.reviewDiff",
+        "title": "Elia: Review Workspace Diff",
+        "icon": "$(diff)"
+      }
+    ],
+    "configuration": {
+      "title": "Elia",
+      "properties": {
+        "elia.cliPath": {
+          "type": "string",
+          "default": "elia",
+          "description": "Elia executable or path to bin/elia.ts. Use an absolute path for a local checkout."
+        },
+        "elia.runtime": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "bun",
+            "node"
+          ],
+          "enumDescriptions": [
+            "Detect the runtime from the configured CLI path.",
+            "Run a TypeScript Elia checkout with Bun.",
+            "Run a compiled JavaScript Elia bridge with Node."
+          ],
+          "default": "auto",
+          "description": "Runtime used when cliPath points to a TypeScript entrypoint."
+        },
+        "elia.autoStartBridge": {
+          "type": "boolean",
+          "default": true,
+          "description": "Start the local Elia bridge when a workspace opens."
+        },
+        "elia.defaultMode": {
+          "type": "string",
+          "enum": [
+            "dev",
+            "cyber",
+            "sports",
+            "fitness"
+          ],
+          "default": "dev",
+          "description": "Default Elia operating mode for editor chat."
+        },
+        "elia.governanceMode": {
+          "type": "string",
+          "enum": [
+            "supervised",
+            "unattended"
+          ],
+          "default": "supervised",
+          "description": "Supervised mode asks before review/critical actions; unattended mode blocks critical actions."
+        },
+        "elia.profile": {
+          "type": "string",
+          "enum": [
+            "fast",
+            "balanced",
+            "thorough"
+          ],
+          "default": "balanced",
+          "description": "Bounded autonomous-run profile."
+        },
+        "elia.maxRunMs": {
+          "type": "number",
+          "minimum": 60000,
+          "maximum": 86400000,
+          "default": 1800000,
+          "description": "Maximum wall-clock time for an autonomous run."
+        },
+        "elia.maxActions": {
+          "type": "number",
+          "minimum": 1,
+          "maximum": 5000,
+          "default": 300,
+          "description": "Maximum governed tool requests for an autonomous run."
+        },
+        "elia.deploymentProvider": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "vercel",
+            "netlify"
+          ],
+          "default": "auto",
+          "description": "Default provider for deployment commands."
+        },
+        "elia.showThinking": {
+          "type": "boolean",
+          "default": false,
+          "description": "Show streamed reasoning deltas in the Elia panel when available."
+        }
+      }
+    },
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "elia",
+          "title": "Elia",
+          "icon": "$(hubot)"
+        }
+      ]
+    },
+    "views": {
+      "elia": [
+        {
+          "id": "elia.tasks",
+          "name": "Tasks",
+          "when": "true"
+        },
+        {
+          "id": "elia.skills",
+          "name": "Skills",
+          "when": "true"
+        },
+        {
+          "id": "elia.runs",
+          "name": "Runs",
+          "when": "true"
+        }
+      ]
+    },
+    "menus": {
+      "editor/context": [
+        {
+          "command": "elia.ask",
+          "when": "editorTextFocus",
+          "group": "elia@1"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "elia.openPanel"
+        },
+        {
+          "command": "elia.autonomousStart"
+        },
+        {
+          "command": "elia.previewDeploy"
+        },
+        {
+          "command": "elia.productionDeploy"
+        },
+        {
+          "command": "elia.reviewDiff"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./tsconfig.json",
+    "watch": "tsc -p ./tsconfig.json --watch",
+    "test": "pnpm dlx bun test src",
+    "package": "pnpm run compile && vsce package --no-dependencies"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/vscode": "^1.95.0",
+    "@vscode/vsce": "^3.9.2",
+    "typescript": "^5.7.0"
+  }
+}

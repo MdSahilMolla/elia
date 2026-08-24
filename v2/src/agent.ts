@@ -39,6 +39,12 @@ export interface RunTurnOptions {
   skillNames?: string[]
   /** Cooperative cancellation for task-console shutdown and operator control. */
   signal?: AbortSignal
+  /** Optional bridge callback for streamed assistant text. */
+  onText?: (delta: string) => void
+  /** Optional bridge callback for streamed reasoning. */
+  onThinking?: (delta: string) => void
+  /** Suppress terminal rendering and usage output for machine clients. */
+  silent?: boolean
 }
 
 export async function runTurn(
@@ -74,10 +80,10 @@ export async function runTurn(
     messages,
     systemPrompt,
     tools,
-    onText: writeText,
-    onThinking: writeThinking,
-    useAnimation: true,
-    verbose: true,
+    onText: options.onText ?? writeText,
+    onThinking: options.onThinking ?? writeThinking,
+    useAnimation: !options.silent,
+    verbose: !options.silent,
     cache,
     prefetcher,
     signal: options.signal,
@@ -97,7 +103,7 @@ export async function runTurn(
 
   const hits = result.cacheStats?.hits ?? 0
   const prefetchNote = hits > 0 ? ` · ${hits} read${hits === 1 ? '' : 's'} prefetched` : ''
-  writeUsageLine(`${formatUsageLine(result.usage, elapsedMs, config.model)}${prefetchNote}`)
+  if (!options.silent) writeUsageLine(`${formatUsageLine(result.usage, elapsedMs, config.model)}${prefetchNote}`)
 
   return result
 }

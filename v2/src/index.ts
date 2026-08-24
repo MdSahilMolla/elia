@@ -48,7 +48,7 @@ const REPL_COMMANDS: SlashCommand[] = [
 
 const rawArgs = process.argv.slice(2)
 
-const SUBCOMMANDS = ['auto', 'agent', 'evolve', 'bench', 'skills', 'runs', 'fork', 'resume', 'schedule', 'daemon', 'config', 'control'] as const
+const SUBCOMMANDS = ['auto', 'agent', 'evolve', 'bench', 'skills', 'runs', 'fork', 'resume', 'schedule', 'daemon', 'config', 'control', 'bridge'] as const
 type Subcommand = (typeof SUBCOMMANDS)[number]
 
 function printHelp(): void {
@@ -127,6 +127,9 @@ Background autonomy:
   elia schedule run <id>                   Run one scheduled goal immediately
   elia daemon --once                       Run due schedules once and exit
   elia daemon --poll-ms 30000             Keep checking due schedules in the foreground
+
+VS Code integration:
+  elia bridge --json                     Start the local JSONL bridge used by the Elia VS Code extension
 
 Provider setup:
   First interactive run                    Ask for provider, hidden API key, and model
@@ -1813,6 +1816,10 @@ async function main() {
       return runConfig()
     case 'control':
       return runControl()
+    case 'bridge': {
+      const { runVscodeBridge } = await import('./vscodeBridge.ts')
+      return runVscodeBridge()
+    }
     default:
       return runInteractive()
   }
