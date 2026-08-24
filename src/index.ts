@@ -45,7 +45,7 @@ const REPL_COMMANDS: SlashCommand[] = [
 
 const rawArgs = process.argv.slice(2)
 
-const SUBCOMMANDS = ['auto', 'agent', 'evolve', 'bench', 'skills', 'runs', 'fork', 'resume', 'schedule', 'daemon', 'config'] as const
+const SUBCOMMANDS = ['auto', 'agent', 'evolve', 'bench', 'skills', 'runs', 'fork', 'resume', 'schedule', 'daemon', 'config', 'control'] as const
 type Subcommand = (typeof SUBCOMMANDS)[number]
 
 function printHelp(): void {
@@ -130,6 +130,13 @@ Provider setup:
   elia config set --provider custom --base-url <url>
                                            Configure any OpenAI-compatible endpoint
   Use --api-key-env <NAME> or pipe a key with --api-key-stdin; never pass keys as arguments.
+
+Supervisor controls:
+  elia control status                       Show durable runs and pending operator controls
+  elia control pause <run-id>               Request a safe pause of an active autonomous run
+  elia control stop <run-id>                Request a safe stop of an active autonomous run
+  elia resume <run-id>                      Resume only after reviewing the stopped run receipt
+  --supervised                             Require an interactive approval boundary for auto work
 
 Inside an interactive session:
   /                            Type "/" to see available commands — up/down to highlight,
@@ -340,7 +347,21 @@ async function runAuto(): Promise<void> {
     )
   }
 
-  const yolo = hasFlag('--yolo', '-y', '--autonomous', '--self-supervise', '--unattended') || process.env.ELIA_AUTO_APPROVE === '1'
+  const supervisionEnv = process.env.ELIA_SUPERVISION?.trim().toLowerCase()
+  if (supervisionEnv !== undefined && supervisionEnv !== 'supervised' && supervisionEnv !== 'unattended') {
+    writeError('ELIA_SUPERVISION must be either supervised or unattended')
+    process.exitCode = 1
+    return
+  }
+  const unattendedFlag = hasFlag('--yolo', '-y', '--autonomous', '--self-supervise', '--unattended')
+  const supervisedFlag = hasFlag('--supervised') || supervisionEnv === 'supervised'
+  if (supervisedFlag && (unattendedFlag || supervisionEnv === 'unattended')) {
+    writeError('Supervision conflict: choose --supervised/ELIA_SUPERVISION=supervised or an unattended flag, not both')
+    process.exitCode = 1
+    return
+  }
+  const yolo = !supervisedFlag && (unattendedFlag || supervisionEnv === 'unattended' || process.env.ELIA_AUTO_APPROVE === '1')
+  writeNotice(`supervision: ${yolo ? 'unattended (critical actions remain blocked)' : 'supervised (approval required for review and critical actions)'}`)
   let approveAction: ActionApproval | undefined
   if (!yolo && !process.stdin.isTTY) {
     writeError('elia auto needs a terminal to approve the plan. Re-run with --unattended to skip routine approval.')
@@ -481,6 +502,58 @@ async function runSkills(): Promise<void> {
 
   writeError(`Unknown skills action "${action}". Use: list, path, candidates, or synth.`)
   process.exitCode = 1
+}
+
+async function runControl(): Promise<void> {
+  const { listRuns, readEvents } = await import('./autonomy/journal.ts')
+  const { readRunControl, requestRunControl, runControlPath } = await import('./autonomy/control.ts')
+  const values = positionals()
+  const action = values[0] ?? 'status'
+  const runId = values[1]
+
+  if (action === 'status') {
+    const runs = listRuns(20)
+    if (runs.length === 0) {
+      writeNotice('No autonomous runs found in this project.')
+      return
+    }
+    for (const run of runs) {
+      const ended = readEvents(run.runId).some((event) => event.kind === 'run-end')
+      const request = readRunControl(run.runId)
+      const state = ended ? `finished:${run.outcome}` : request ? `control-requested:${request.action}` : 'active-or-interrupted'
+      writeUsageLine(`${run.runId} · ${state} · ${redactText(run.goal, 120)}`)
+    }
+    return
+  }
+
+  if (action !== 'pause' && action !== 'stop') {
+    writeError('Usage: elia control status | elia control pause <run-id> | elia control stop <run-id>')
+    process.exitCode = 1
+    return
+  }
+  if (!runId) {
+    writeError(`control ${action} requires <run-id>`)
+    process.exitCode = 1
+    return
+  }
+  try {
+    runControlPath(runId)
+    if (readEvents(runId).some((event) => event.kind === 'run-end')) {
+      writeError(`Run ${runId} has already finished; inspect its receipt before resuming or forking it.`)
+      process.exitCode = 1
+      return
+    }
+    if (!requestRunControl(runId, action)) {
+      writeError(`No durable run found for ${runId}`)
+      process.exitCode = 1
+      return
+    }
+  } catch {
+    writeError(`Invalid run id: ${runId}`)
+    process.exitCode = 1
+    return
+  }
+  writeNotice(`Supervisor ${action} requested for run ${runId}. The owning process will stop at its next control poll.`)
 }
 
 async function runConfig(): Promise<void> {
@@ -1426,6 +1499,8 @@ async function main() {
       return runDaemon()
     case 'config':
       return runConfig()
+    case 'control':
+      return runControl()
     default:
       return runInteractive()
   }

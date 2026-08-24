@@ -55,6 +55,8 @@ test('help documents autonomous budget and agent dry-run controls', async () => 
   expect(result.stdout).toContain('Dev mode (default)')
   expect(result.stdout).toContain('/dev')
   expect(result.stdout).toContain('--unattended')
+  expect(result.stdout).toContain('--supervised')
+  expect(result.stdout).toContain('elia control stop')
   expect(result.stdout).toContain('--sports')
   expect(result.stdout).toContain('--fitness')
   expect(result.stdout).toContain('/sports')
@@ -166,6 +168,36 @@ test('config set stores a provider key without printing it', async () => {
   const stored = readFileSync(configPath, 'utf8')
   expect(stored).toContain('NVIDIA_API_KEY=setup-test-key')
   expect(stored).toContain('ELIA_MODEL=nvidia/llama-3.3-nemotron-super-49b-v1.5')
+})
+
+test('invalid supervision settings fail before provider initialization', async () => {
+  const result = await runCli(['auto', 'do work', '--plain'], {
+    ELIA_PROVIDER: undefined,
+    ELIA_MODEL: undefined,
+    ELIA_API_KEY: undefined,
+    ANTHROPIC_API_KEY: undefined,
+    ELIA_SUPERVISION: 'unsafe',
+  })
+  expect(result.code).toBe(1)
+  expect(result.stderr).toContain('ELIA_SUPERVISION must be either supervised or unattended')
+  expect(result.stderr).not.toContain('No API key found')
+})
+
+test('conflicting supervision flags fail closed', async () => {
+  const result = await runCli(['auto', 'do work', '--supervised', '--unattended', '--plain'])
+  expect(result.code).toBe(1)
+  expect(result.stderr).toContain('Supervision conflict')
+})
+
+test('control status stays provider-independent', async () => {
+  const result = await runCli(['control', 'status', '--plain'], {
+    ELIA_PROVIDER: undefined,
+    ELIA_MODEL: undefined,
+    ELIA_API_KEY: undefined,
+    ANTHROPIC_API_KEY: undefined,
+  })
+  expect(result.code).toBe(0)
+  expect(result.stderr).not.toContain('No API key found')
 })
 
 test('metadata commands stay provider-independent', async () => {

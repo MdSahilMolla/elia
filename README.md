@@ -56,6 +56,12 @@ cp .env.example .env
 
 Edit `.env` to pick a provider and set its key. `ELIA_PROVIDER` defaults to `anthropic`. The user-level `elia config set` flow and `.env` are alternative configuration paths; you do not need both.
 
+### Proprietary licensing
+
+Elia is **proprietary software**, not an open-source project. The package includes a proprietary license in [`LICENSE`](LICENSE). Unless a separate written commercial agreement says otherwise, the permitted scope is limited to authorized personal evaluation and internal development use; redistribution, resale, hosted third-party use, and derivative works are restricted.
+
+The included license identifies the current project owner and should receive qualified legal review before a public npm release or commercial distribution. Users remain responsible for the providers, credentials, data, browser sessions, commands, and consequential external actions they connect to Elia.
+
 | Provider | `ELIA_PROVIDER` | API key env var | Default model |
 |---|---|---|---|
 | Anthropic | `anthropic` (default) | `ANTHROPIC_API_KEY` | `claude-sonnet-5` |
@@ -137,7 +143,20 @@ For specialist work, `elia agent "<request>" --dry-run` performs routing only an
 
 ### Background autonomy and safe unattended actions
 
-Elia now has a local, durable background control plane for recurring AI goals. For one-off safe work, `elia auto "<goal>" --unattended` runs the plan without routine interactive prompts; it still uses the autonomy governor and stops at consequential actions. Create a schedule, inspect it, pause or resume it, and run due work through a single-flight daemon:
+Elia now has a local, durable background control plane for recurring AI goals. **Autonomous work is supervised by default**: the plan requires an operator decision, and review or critical tool actions require an approval boundary. Use `--supervised` or `ELIA_SUPERVISION=supervised` to make that intent explicit. `--unattended`, `--yolo`, and `--autonomous` are opt-in exceptions; unattended mode still blocks critical actions and never treats the absence of a prompt as permission for publishing, sending, purchasing, authentication, destructive changes, or other irreversible effects.
+
+Operators can inspect or stop a durable run from another terminal without touching its process directly:
+
+```bash
+elia control status
+elia control pause <run-id>
+elia control stop <run-id>
+elia resume <run-id>             # only after reviewing the receipt and blockers
+```
+
+Pause and stop requests are written atomically under the run directory, validated against a safe run-ID format, picked up by the owning process at a bounded polling interval, recorded in the run journal, and propagated to the internal abort signal. `Ctrl+C`, the `/task` dashboard’s `c` control, wall-clock budgets, and governed action budgets remain additional stop boundaries. A stopped run is reported as paused/aborted rather than falsely completed.
+
+For one-off safe work, `elia auto "<goal>" --unattended` runs the plan without routine interactive prompts; it still uses the autonomy governor and stops at consequential actions. Create a schedule, inspect it, pause or resume it, and run due work through a single-flight daemon:
 
 ```bash
 elia schedule add --every 1h --max-actions 300 --title "Repository health" "Inspect the repository, run the declared checks, and report only evidence-backed findings"
@@ -276,6 +295,7 @@ elia --help
 elia --version
 elia config                                      # show provider readiness
 elia config set --provider nvidia                 # securely add an API key
+elia control status                               # inspect active runs and control requests
 
 # Production-friendly output modes
 elia auto "run the verification suite" --json    # stable JSONL lifecycle events for CI/orchestration

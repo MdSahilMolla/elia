@@ -1,0 +1,72 @@
+Elia Proprietary License
+Version 1.0 — Draft for legal review
+
+Copyright (c) 2026 MdSahilMolla / Elia project owner.
+
+This software is proprietary software. It is not open-source software and is not
+licensed under the MIT, Apache-2.0, GPL, or any other open-source license.
+
+1. Limited license grant
+
+Subject to these terms, the copyright holder grants each authorized recipient a
+limited, non-exclusive, non-transferable, non-sublicensable license to install
+and use one copy of Elia for personal evaluation and internal development
+purposes. This license does not transfer ownership of the software or its source
+code.
+
+2. Restrictions
+
+Unless the copyright holder gives prior written permission, you may not:
+
+(a) sell, rent, lease, sublicense, or commercially redistribute Elia;
+(b) publish, mirror, or redistribute Elia or any substantial part of it;
+(c) modify, adapt, translate, reverse engineer, decompile, or create derivative
+    works from Elia, except to the extent a restriction is prohibited by law;
+(d) operate Elia as a hosted, managed, or service-bureau offering for third
+    parties;
+(e) remove or alter copyright, license, attribution, or safety notices; or
+(f) use Elia to bypass authentication, access controls, safety controls, or
+    another party's terms of service.
+
+Commercial production use, enterprise deployment, hosted use, redistribution,
+resale, and support require a separate written commercial agreement unless the
+copyright holder expressly authorizes them in writing.
+
+3. User responsibility and safety
+
+You are responsible for the credentials, data, providers, browser sessions,
+commands, external services, and real-world actions that you connect to Elia.
+Elia's approval gates, supervision controls, and safety mechanisms are safeguards
+rather than a guarantee of a particular outcome. You must review consequential
+plans and outputs before relying on or executing them.
+
+4. Third-party software
+
+Elia includes or depends on third-party software that remains subject to its own
+licenses. Those licenses are not replaced by this license. Nothing here grants
+rights to third-party software beyond the rights supplied by its respective
+license.
+
+5. Termination
+
+This license terminates automatically if you materially breach these terms. On
+termination, you must stop using Elia and delete copies you control, except to
+the extent retention is required by law.
+
+6. Disclaimer and limitation of liability
+
+TO THE MAXIMUM EXTENT PERMITTED BY LAW, ELIA IS PROVIDED "AS IS" AND "AS
+AVAILABLE", WITHOUT WARRANTIES OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING
+WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, TITLE, AND
+NON-INFRINGEMENT. TO THE MAXIMUM EXTENT PERMITTED BY LAW, THE COPYRIGHT HOLDER
+AND CONTRIBUTORS ARE NOT LIABLE FOR INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY,
+CONSEQUENTIAL, OR PUNITIVE DAMAGES, OR FOR LOSS OF DATA, PROFITS, REVENUE,
+BUSINESS, OR ACCESS, ARISING FROM OR RELATED TO ELIA.
+
+7. Contact and changes
+
+Written permissions and commercial terms must be obtained from the copyright
+holder through the project's official repository or another written channel
+identified by the copyright holder. The copyright holder may publish a later
+license version for future releases; a later version does not retroactively
+change the terms for copies already distributed unless separately agreed.

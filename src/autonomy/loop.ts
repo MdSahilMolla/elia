@@ -35,6 +35,7 @@ import { createActionGovernor, withActionGovernor, type ActionApproval, type Act
 import { GoalGraphStore, withGoalGraph, type GoalGraphStore as GoalGraphStoreType } from './goalGraph.ts'
 import { assessCompletion, type CompletionAssessment } from './outcome.ts'
 import { inferTaskKind, taskSessions } from '../taskSessions.ts'
+import { clearRunControl, readRunControl, type SupervisorControlRequest } from './control.ts'
 
 export type ApprovalDecision =
   | { action: 'approve' }
@@ -190,6 +191,7 @@ export async function runAutonomousTask(options: AutonomousRunOptions): Promise<
   const maxPolishPasses = Math.max(0, Math.min(options.maxPolishPasses ?? defaults.maxPolishPasses, 3))
   const captureLearning = options.learn ?? defaults.learn
   const runId = options.runId ?? newRunId()
+  clearRunControl(runId)
   const startedAt = Date.now()
   const parentTask = taskSessions.create(inferTaskKind(goal, goal), `Autonomous: ${goal}`, 'Queued autonomous execution', { role: 'lead' })
   taskSessions.update(parentTask.id, { status: 'running', action: 'Orienting', detail: 'Inspecting the environment and preparing a durable plan' })
@@ -206,7 +208,22 @@ export async function runAutonomousTask(options: AutonomousRunOptions): Promise<
   const maxActions = options.maxActions ?? defaults.maxActions
   const governor = createActionGovernor({ mode: options.governanceMode ?? 'unattended', approve: options.approveAction, maxActions })
 
+  let supervisorTimer: ReturnType<typeof setInterval> | undefined
+  let supervisorRequest: SupervisorControlRequest | undefined
   const journal = createJournal(runId, goal)
+  supervisorTimer = setInterval(() => {
+    const request = readRunControl(runId)
+    if (!request || supervisorRequest) return
+    supervisorRequest = request
+    journal.append('phase', { phase: 'supervisor-control', action: request.action, requestedAt: request.requestedAt })
+    taskSessions.update(parentTask.id, {
+      status: 'paused',
+      action: request.action === 'stop' ? 'Stopping' : 'Pausing',
+      detail: `Supervisor requested ${request.action}; active work is being stopped safely.`,
+      nextAction: 'Inspect the run receipt and resume only after reviewing the stopped work.',
+    })
+    runController.abort()
+  }, 250)
   const graph = GoalGraphStore.open({ runId, goal, dir: journal.dir })
   const board = createBlackboard(`${journal.dir}/board.json`)
   setActiveBlackboard(board)
@@ -224,6 +241,7 @@ export async function runAutonomousTask(options: AutonomousRunOptions): Promise<
     extra: Partial<AutonomousRunResult> = {},
   ): AutonomousRunResult => {
     if (budgetTimer) clearTimeout(budgetTimer)
+    if (supervisorTimer) clearInterval(supervisorTimer)
     if (outcome === 'aborted' && deadlineTriggered && !signal?.aborted) {
       journal.append('phase', { phase: 'budget', maxWallClockMs })
     }
@@ -259,8 +277,8 @@ export async function runAutonomousTask(options: AutonomousRunOptions): Promise<
             : 'failed'
     taskSessions.update(parentTask.id, {
       status: taskStatus,
-      action: completion.state === 'verified' ? 'Verified' : finalOutcome === 'aborted' ? 'Paused' : 'Needs attention',
-      detail: completion.summary,
+      action: completion.state === 'verified' ? 'Verified' : finalOutcome === 'aborted' ? supervisorRequest?.action === 'stop' ? 'Stopped' : 'Paused' : 'Needs attention',
+      detail: supervisorRequest ? `${completion.summary} Supervisor request: ${supervisorRequest.action}.` : completion.summary,
       progress: completion.totalSteps > 0 ? completion.completedSteps / completion.totalSteps : completion.state === 'verified' ? 1 : 0,
       stepsCompleted: completion.completedSteps,
       stepsTotal: completion.totalSteps || undefined,

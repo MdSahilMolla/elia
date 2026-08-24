@@ -56,7 +56,7 @@ export function createLiveActionWindow(store: TaskSessionStore = taskSessions): 
   }
 }
 
-/** Opens a bounded task browser. c=stop/cancel, Enter=inspect, Escape=close. */
+/** Opens a bounded task browser. c=stop/cancel, p=pause, Enter=inspect, Escape=close. */
 export function openTaskDashboard(store: TaskSessionStore = taskSessions, requestedId?: string): Promise<void> {
   const sessions = store.list()
   if (!interactiveTerminal) {
@@ -112,7 +112,7 @@ export function openTaskDashboard(store: TaskSessionStore = taskSessions, reques
       : ['Select a task to see its action details.']
     const range = current.length > 0 ? `showing ${viewportStart + 1}–${Math.min(current.length, viewportStart + visible.length)} of ${current.length}` : 'no tasks'
     const lines = [
-      `${bold('Task sessions')} ${dim('(↑/↓ move · pgup/pgdn page · c stop/cancel · q/esc close)')}`,
+      `${bold('Task sessions')} ${dim('(↑/↓ move · pgup/pgdn page · c stop · p pause · q/esc close)')}`,
       ...listLines,
       dim(range),
       '',
@@ -161,6 +161,7 @@ export function openTaskDashboard(store: TaskSessionStore = taskSessions, reques
       return
     }
     if (key.name === 'c') return invoke('cancel')
+    if (key.name === 'p') return invoke('pause')
     if (current.length === 0) return
     const next = moveTaskSelection(selected, current.length, key)
     if (next !== selected) selected = next
@@ -231,9 +232,9 @@ function kindLabel(kind: TaskSession['kind']): string {
 
 function availableControls(session: TaskSession): string {
   const controls: string[] = []
-      if (session.status === 'running' || session.status === 'pending') controls.push('c stop/cancel')
-    if (session.status === 'paused') controls.push('stopped; submit a new turn to continue')
-    if (session.status === 'failed') controls.push('failed; submit a new turn to retry')
+  if (session.status === 'running' || session.status === 'pending') controls.push('c stop/cancel', 'p pause')
+  if (session.status === 'paused') controls.push('stopped; use elia resume <run-id> after review')
+  if (session.status === 'failed') controls.push('failed; submit a new turn to retry')
 
   return controls.length > 0 ? controls.join(' · ') : 'none'
 }
