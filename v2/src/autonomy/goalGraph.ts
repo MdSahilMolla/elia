@@ -5,6 +5,7 @@ import { AsyncLocalStorage } from 'node:async_hooks'
 import type { Proposal } from './types.ts'
 import type { ActionRequest } from './governor.ts'
 import type { ActionContract, ContractEvaluation } from './actionContract.ts'
+import { canonicalizeCommandForIdentity } from './commandIdentity.ts'
 
 export const GOAL_GRAPH_VERSION = 2
 export const EXECUTION_LEASE_TTL_MS = 120_000
@@ -671,7 +672,10 @@ export function digest(value: unknown): string {
 }
 
 export function actionKey(runId: string, nodeId: string, request: ActionRequest): string {
-  return stableKey(runId, nodeId, request.name, canonicalJson(request.input))
+  const identityInput = request.name === 'run_command' && typeof request.input.command === 'string'
+    ? { ...request.input, command: canonicalizeCommandForIdentity(request.input.command) }
+    : request.input
+  return stableKey(runId, nodeId, request.name, canonicalJson(identityInput))
 }
 
 export function classifyFailure(error: unknown): FailureRecord {

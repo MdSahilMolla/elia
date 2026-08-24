@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { EXECUTION_LEASE_TTL_MS, GoalGraphStore, classifyFailure, type GoalGraphOptions } from './goalGraph.ts'
+import { EXECUTION_LEASE_TTL_MS, GoalGraphStore, actionKey, classifyFailure, type GoalGraphOptions } from './goalGraph.ts'
 import type { Proposal } from './types.ts'
 
 const temporaryDirectories: string[] = []
@@ -79,6 +79,13 @@ describe('durable goal graph', () => {
     expect(graph.reserveAction(secondRequest, 'step:build').decision).toBe('human-review')
     graph.resolveApproval(approval.id, true)
     expect(graph.reserveAction(secondRequest, 'step:build').decision).toBe('execute')
+  })
+
+  test('canonicalizes recognized shell wrapper paths for durable action identity', () => {
+    const request = { name: 'run_command', input: { command: 'bash -lc bun test' } }
+    expect(actionKey('run', 'step:build', request)).toBe(actionKey('run', 'step:build', { name: 'run_command', input: { command: '/bin/bash -lc bun test' } }))
+    expect(actionKey('run', 'step:build', request)).not.toBe(actionKey('run', 'step:build', { name: 'run_command', input: { command: 'bash -c bun test' } }))
+    expect(actionKey('run', 'step:build', request)).not.toBe(actionKey('run', 'step:build', { name: 'run_command', input: { command: '/tmp/bash -lc bun test' } }))
   })
 
   test('reconciles stale node and action leases after interruption', () => {
