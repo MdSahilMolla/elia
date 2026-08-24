@@ -13,6 +13,7 @@ import { noteToolUse } from './ledger.ts'
 import { appendActionAudit } from './autonomy/audit.ts'
 import { createActionGovernor, withActionGovernor, type ActionApproval, type GovernanceMode } from './autonomy/governor.ts'
 import { loadDevelopmentToolHooks, withToolHooks } from './autonomy/devHooks.ts'
+import { expandSkillSelection } from './skills/bundles.ts'
 
 export type { ConversationMessage }
 export type { AgentMode }
@@ -22,9 +23,10 @@ export type { AgentMode }
 // The engagement/scan tools are top-level-only too, and further gated to cyber
 // mode — a dev turn has no business scaffolding a security engagement.
 function topLevelTools(mode: AgentMode, selectedSkillNames?: string[]) {
-  const selected = new Set(selectedSkillNames ?? [])
+  const expandedSelection = expandSkillSelection(selectedSkillNames)
+  const selected = new Set(expandedSelection ?? [])
   const synthesized = new Set(getSynthesizedTools().map((tool) => tool.name))
-  const workerTools = allWorkerTools().filter((tool) => selectedSkillNames === undefined || !synthesized.has(tool.name) || selected.has(tool.name))
+  const workerTools = allWorkerTools().filter((tool) => expandedSelection === undefined || !synthesized.has(tool.name) || selected.has(tool.name))
   return [...workerTools, taskTool, previewTool, ...(mode === 'cyber' ? cyberTools : [])]
 }
 

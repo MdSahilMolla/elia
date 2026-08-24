@@ -1,8 +1,8 @@
 import { existsSync, mkdirSync, readdirSync, renameSync } from 'node:fs'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import type { Tool } from '../tools/types.ts'
-import { PROJECT_SKILLS_DIR, QUARANTINE_DIR, SKILL_SUFFIX, USER_SKILLS_DIR, skillsEnabled } from './paths.ts'
+import { externalSkillDirs, PROJECT_SKILLS_DIR, QUARANTINE_DIR, SKILL_SUFFIX, USER_SKILLS_DIR, skillsEnabled, type SkillSource } from './paths.ts'
 
 /**
  * Loads the tools elia has written for itself.
@@ -18,7 +18,7 @@ import { PROJECT_SKILLS_DIR, QUARANTINE_DIR, SKILL_SUFFIX, USER_SKILLS_DIR, skil
 export interface LoadedSkill {
   name: string
   file: string
-  source: 'user' | 'project'
+  source: SkillSource
 }
 
 export interface SkillLoadReport {
@@ -28,15 +28,16 @@ export interface SkillLoadReport {
 
 let loadedSkillCatalog: LoadedSkill[] = []
 
-export async function loadSkills(): Promise<SkillLoadReport> {
+export async function loadSkills(environment: NodeJS.ProcessEnv = process.env): Promise<SkillLoadReport> {
   const report: SkillLoadReport = { loaded: [], quarantined: [] }
   loadedSkillCatalog = []
   if (!skillsEnabled()) return report
 
-  const filesBySource = [
+  const filesBySource: [string, SkillSource][] = [
+    ...externalSkillDirs(environment).map((dir) => [dir, 'external'] as [string, SkillSource]),
     [USER_SKILLS_DIR, 'user'],
     [PROJECT_SKILLS_DIR, 'project'],
-  ] as const
+  ]
   const availableFiles = filesBySource.flatMap(([dir]) => skillFilesIn(dir))
   if (availableFiles.length === 0) return report
   const { registerSynthesizedTool } = await import('../tools/registry.ts')
@@ -48,7 +49,7 @@ export async function loadSkills(): Promise<SkillLoadReport> {
         registerSynthesizedTool(result.tool)
         report.loaded.push({ name: result.tool.name, file, source })
       } else {
-        quarantine(file, result.reason)
+        quarantine(file, result.reason, source)
         report.quarantined.push({ file, reason: result.reason })
       }
     }
@@ -105,10 +106,11 @@ function looksLikeTool(value: unknown): value is Tool {
   )
 }
 
-function quarantine(file: string, reason: string): void {
+function quarantine(file: string, reason: string, source: SkillSource): void {
   try {
-    mkdirSync(QUARANTINE_DIR, { recursive: true })
-    const target = join(QUARANTINE_DIR, `${Date.now()}-${file.split(/[/\\]/).pop()}`)
+    const quarantineDir = source === 'user' ? QUARANTINE_DIR : join(dirname(file), 'quarantine')
+    mkdirSync(quarantineDir, { recursive: true })
+    const target = join(quarantineDir, `${Date.now()}-${file.split(/[/\\]/).pop()}`)
     renameSync(file, target)
     process.stderr.write(`elia: quarantined skill ${file} (${reason})\n`)
   } catch {
@@ -128,8 +130,9 @@ export function registerLoadedSkill(skill: LoadedSkill): void {
 }
 
 /** Lists installed skills without importing them — used by `elia skills`. */
-export function listSkillFiles(): { file: string; source: 'user' | 'project' }[] {
+export function listSkillFiles(environment: NodeJS.ProcessEnv = process.env): { file: string; source: SkillSource }[] {
   return [
+    ...externalSkillDirs(environment).flatMap((dir) => skillFilesIn(dir).map((file) => ({ file, source: 'external' as const }))),
     ...skillFilesIn(USER_SKILLS_DIR).map((file) => ({ file, source: 'user' as const })),
     ...skillFilesIn(PROJECT_SKILLS_DIR).map((file) => ({ file, source: 'project' as const })),
   ]

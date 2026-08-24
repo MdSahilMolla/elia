@@ -108,6 +108,7 @@ Self-improvement:
 
 Learned tools:
   elia skills                 List the tools elia has written for itself
+  elia skills bundles         List declarative groups of loaded skills
   elia skills candidates      Show repeated work that could become a new tool
   elia skills synth           Write a tool for the strongest candidate
 
@@ -439,14 +440,16 @@ async function runEvolve(): Promise<void> {
 
 async function runSkills(): Promise<void> {
   const { listSkillFiles } = await import('./skills/loader.ts')
+  const { listSkillBundles } = await import('./skills/bundles.ts')
   const { skillCandidates } = await import('./skills/detector.ts')
-  const { PROJECT_SKILLS_DIR, USER_SKILLS_DIR, SKILL_SUFFIX } = await import('./skills/paths.ts')
+  const { PROJECT_SKILLS_DIR, USER_SKILLS_DIR, SKILL_SUFFIX, SKILL_BUNDLES_FILE } = await import('./skills/paths.ts')
   const action = positionals()[0] ?? 'list'
 
   if (action === 'path' || action === 'folder' || action === 'folders') {
     writeNotice(`Project skills: ${PROJECT_SKILLS_DIR}`)
     writeNotice(`User skills:    ${USER_SKILLS_DIR}`)
     writeNotice(`File contract:  create a self-contained ${SKILL_SUFFIX} module exporting a default Tool with name, description, input_schema, and execute(input).`)
+    writeNotice(`Bundle file:    ${SKILL_BUNDLES_FILE}`)
     writeNotice('Skills are validated at startup; invalid modules are moved to the quarantine folder instead of stopping Elia.')
     return
   }
@@ -459,6 +462,19 @@ async function runSkills(): Promise<void> {
     }
     for (const line of table([{ header: 'source' }, { header: 'file' }], files.map(({ source, file }) => [source, file]))) {
       writeUsageLine(`  ${line}`)
+    }
+    return
+  }
+
+  if (action === 'bundles') {
+    const bundles = listSkillBundles()
+    if (bundles.length === 0) {
+      writeNotice(`No skill bundles configured. Create ${SKILL_BUNDLES_FILE} with a JSON object mapping bundle names to { skills: [...] }.`)
+      return
+    }
+    for (const bundle of bundles) {
+      const detail = bundle.description ? ` — ${bundle.description}` : ''
+      writeUsageLine(`  ${bundle.name}: ${bundle.skills.join(', ')}${detail}`)
     }
     return
   }
@@ -502,7 +518,7 @@ async function runSkills(): Promise<void> {
     return
   }
 
-  writeError(`Unknown skills action "${action}". Use: list, path, candidates, or synth.`)
+  writeError(`Unknown skills action "${action}". Use: list, bundles, path, candidates, or synth.`)
   process.exitCode = 1
 }
 
@@ -1303,16 +1319,23 @@ async function runInteractive(): Promise<void> {
 
   async function handleSkillsPicker(): Promise<void> {
     const { listLoadedSkills } = await import('./skills/loader.ts')
+    const { listSkillBundles } = await import('./skills/bundles.ts')
     const { USER_SKILLS_DIR, PROJECT_SKILLS_DIR } = await import('./skills/paths.ts')
     const skills = listLoadedSkills()
-    if (skills.length === 0) {
+    const bundles = listSkillBundles()
+    if (skills.length === 0 && bundles.length === 0) {
       writeNotice(`No loaded skills. Add a validated *.skill.ts file to ${PROJECT_SKILLS_DIR} for this project or ${USER_SKILLS_DIR} for all projects, then restart Elia.`)
       return
     }
 
     const active = new Set(selectedSkillNames ?? skills.map((skill) => skill.name))
     const options = [
-      { label: active.size === skills.length ? 'all loaded skills (current)' : 'all loaded skills', detail: 'make every loaded skill available', value: '__all__' },
+      { label: selectedSkillNames === undefined ? 'all loaded skills (current)' : 'all loaded skills', detail: 'make every loaded skill available', value: '__all__' },
+      ...bundles.map((bundle) => ({
+        label: active.has(bundle.name) ? `${bundle.name} (current)` : `${bundle.name} (bundle)`,
+        detail: `${bundle.description ?? 'skill bundle'} · ${bundle.skills.join(', ')}`,
+        value: `__bundle:${bundle.name}`,
+      })),
       ...skills.map((skill) => ({
         label: active.has(skill.name) && active.size === 1 ? `${skill.name} (current)` : skill.name,
         detail: `${skill.source} · ${skill.file}`,
@@ -1321,8 +1344,9 @@ async function runInteractive(): Promise<void> {
     ]
     const result = await pick('Skills for subsequent turns', options)
     if (result.type !== 'select') return
-    selectedSkillNames = result.value === '__all__' ? undefined : [result.value]
-    writeNotice(selectedSkillNames ? `Skill selected for subsequent turns: ${selectedSkillNames[0]}` : 'All loaded skills are available for subsequent turns.')
+    const selection = result.value as string
+    selectedSkillNames = selection === '__all__' ? undefined : [selection.startsWith('__bundle:') ? selection.slice('__bundle:'.length) : selection]
+    writeNotice(selectedSkillNames ? `Skill selection for subsequent turns: ${selectedSkillNames[0]}` : 'All loaded skills are available for subsequent turns.')
   }
 
   /** Shared by the "/cyber", "/sports", persona slash commands, and the /settings mode picker so both paths stay in sync. */

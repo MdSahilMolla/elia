@@ -135,7 +135,20 @@ Elia uses the target project’s existing package manager and conventions rather
 
 Elia can synthesize a repeated routine into a tested skill with `elia skills candidates` followed by `elia skills synth`. Users can also create or add a skill manually by placing a self-contained `*.skill.ts` module in the project’s `.elia/skills/` directory or the user-wide `~/.elia/skills/` directory. Use `elia skills path` to print the exact folders and contract. Invalid skills are quarantined instead of crashing startup.
 
-Inside an interactive session, type **`@skills`** and press Enter to browse loaded skills. The picker lets the user make all loaded skills available or select one synthesized skill for subsequent turns. Selection changes the tool set only; it does not rewrite the user’s text, alter the system prompt, or add hidden instructions to the model. `ELIA_SKILLS=off` disables skill loading.
+For explicitly selected shared libraries, set `ELIA_SKILL_DIRS` to a colon-separated list on Unix or semicolon-separated list on Windows. External directories are scanned only when configured by the operator and have lower precedence than user and project skills, so a local skill can safely override a shared default. Elia does not discover arbitrary parent directories or remote repositories.
+
+A project can group existing skill names in `.elia/skill-bundles.json`:
+
+```json
+{
+  "frontend-dev": {
+    "description": "UI implementation and review tools",
+    "skills": ["ui_review", "react_test"]
+  }
+}
+```
+
+Use `elia skills bundles` to inspect bundles. Inside an interactive session, type **`@skills`** and press Enter to browse loaded skills and configured bundles. Selecting a bundle expands only to its existing skill tool names; it does not execute configuration, rewrite the user’s text, alter the system prompt, or add hidden instructions to the model. `ELIA_SKILLS=off` disables all skill loading.
 
 ### Codex-inspired architecture
 

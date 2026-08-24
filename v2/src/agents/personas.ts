@@ -2,6 +2,7 @@ import { SHARED_CONTEXT, memorySections } from '../config.ts'
 import { tools as baseTools, businessTools, browserTools, communicationTools, cyberTools, getSynthesizedTools } from '../tools/registry.ts'
 import type { Tool } from '../tools/types.ts'
 import type { AgentPersona } from './types.ts'
+import { expandSkillSelection } from '../skills/bundles.ts'
 
 const MARKETING_PROMPT = `You are elia, running as the Marketing agent.
 ${SHARED_CONTEXT}
@@ -150,7 +151,8 @@ const PERSONA_TOOL_NAMES: Record<AgentPersona, string[]> = {
 export function personaTools(persona: Exclude<AgentPersona, 'tech'>, selectedSkillNames?: string[]): Tool[] {
   const pool = [...baseTools, ...businessTools, ...browserTools, ...communicationTools, ...getSynthesizedTools(), ...(persona === 'cyber' ? cyberTools : [])]
   const allowed = PERSONA_TOOL_NAMES[persona]
-  const selected = new Set(selectedSkillNames ?? [])
+  const expandedSelection = expandSkillSelection(selectedSkillNames)
+  const selected = new Set(expandedSelection ?? [])
   const synthesized = new Set(getSynthesizedTools().map((tool) => tool.name))
-  return pool.filter((tool) => tool.name === 'environment' || allowed.includes(tool.name) || (synthesized.has(tool.name) && (selectedSkillNames === undefined || selected.has(tool.name))))
+  return pool.filter((tool) => tool.name === 'environment' || allowed.includes(tool.name) || (synthesized.has(tool.name) && (expandedSelection === undefined || selected.has(tool.name))))
 }
