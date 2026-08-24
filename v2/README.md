@@ -77,6 +77,10 @@ printf '%s' "$NVIDIA_API_KEY_FROM_SECRET_STORE" | elia config set --provider nvi
 
 Elia writes this configuration to `~/.elia/config.env` with restrictive permissions and never prints the key. Explicit process variables and the project `.env` take precedence over the user-level file. Inspect readiness with `elia config`; it reports configured/not-configured providers without displaying values.
 
+On the first interactive run, if the active provider is not fully configured, Elia opens a setup flow before loading the model runtime. It asks you to choose a provider, enter its API key with input hidden, and select a model from the provider’s discovered list when available. If discovery is unavailable, it asks for a model ID and uses the provider’s documented default when one exists. The saved provider and model are then used for the current process immediately; no restart is required.
+
+During a session, `/settings` → **Provider API keys** lets you add or update another provider, select its model, activate it immediately, or remove a saved provider profile. Removal requires confirmation and never displays the credential. The equivalent noninteractive command is `elia config remove --provider <name>`. The current session may finish using an already-created provider object after removal, but the removed profile will not be loaded by the next process.
+
 For local development from the repository, use:
 
 ```bash

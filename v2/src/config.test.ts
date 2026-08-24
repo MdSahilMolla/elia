@@ -52,6 +52,21 @@ test('switchModel re-resolving the current provider/model succeeds and updates c
   expect(config.model).toBe(originalModel)
 })
 
+test('built-in model switching ignores a stale custom endpoint', () => {
+  if (originalProviderName === 'custom') return
+  const previousBaseURL = process.env.ELIA_BASE_URL
+  process.env.ELIA_BASE_URL = 'http://127.0.0.1:9/v1'
+  try {
+    const result = switchModel({ providerName: originalProviderName, model: originalModel })
+    expect(result.ok).toBe(true)
+    expect(config.providerName).toBe(originalProviderName)
+    expect(config.model).toBe(originalModel)
+  } finally {
+    if (previousBaseURL === undefined) delete process.env.ELIA_BASE_URL
+    else process.env.ELIA_BASE_URL = previousBaseURL
+  }
+})
+
 test('switchModel to an unresolvable provider fails without mutating the live config', () => {
   const result = switchModel({ providerName: 'not-a-real-preset-xyz' })
   expect(result.ok).toBe(false)

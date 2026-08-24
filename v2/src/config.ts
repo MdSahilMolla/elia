@@ -133,10 +133,11 @@ export function switchModel(options: { providerName?: string; model?: string } =
     return { ok: true, label: `auto fallback (${config.providerLabel})` }
   }
 
+  const providerName = options.providerName ?? config.providerName
   const resolved = tryResolveProvider({
-    providerName: options.providerName ?? config.providerName,
+    providerName,
     model: options.model,
-    baseURL: process.env.ELIA_BASE_URL,
+    baseURL: providerName === 'custom' ? process.env.ELIA_BASE_URL : undefined,
     thinking: currentThinking,
     ignoreAmbient: true,
   })
@@ -157,7 +158,7 @@ export function switchThinking(next: ThinkingOption): SwitchResult {
   const resolved = tryResolveProvider({
     providerName: config.providerName,
     model: config.model,
-    baseURL: process.env.ELIA_BASE_URL,
+    baseURL: config.providerName === 'custom' ? process.env.ELIA_BASE_URL : undefined,
     thinking: next,
     ignoreAmbient: true,
   })

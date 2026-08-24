@@ -17,6 +17,28 @@ export function userConfigPath(): string {
   return process.env[USER_CONFIG_ENV_PATH] ?? join(homedir(), '.elia', 'config.env')
 }
 
+export function readUserConfigValues(filePath = userConfigPath()): Record<string, string> {
+  if (!existsSync(filePath)) return {}
+  let content: string
+  try {
+    content = readFileSync(filePath, 'utf8')
+  } catch {
+    return {}
+  }
+  const values: Record<string, string> = {}
+  for (const line of content.split(/\r?\n/)) {
+    const parsed = parseEnvLine(line)
+    if (parsed) values[parsed.key] = parsed.value
+  }
+  return values
+}
+
+export function removeUserConfig(keys: string[], filePath = userConfigPath()): void {
+  if (keys.length === 0 || !existsSync(filePath)) return
+  const values = Object.fromEntries(keys.map((key) => [key, undefined])) as Record<string, string | undefined>
+  writeUserConfig(values, filePath)
+}
+
 export function loadUserConfig(filePath = userConfigPath()): UserConfigLoadResult {
   if (!existsSync(filePath)) return { path: filePath, loaded: [] }
   let content: string

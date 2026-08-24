@@ -18,6 +18,7 @@ import { emitEvent, machineReadable, plainOutput, quietOutput } from './ui/runti
 import { installShutdownHandlers, registerShutdownCleanup } from './ui/shutdown.ts'
 import { redactText } from './ui/redact.ts'
 import { loadUserConfig, userConfigPath, writeUserConfig } from './userConfig.ts'
+import { activeProviderNeedsSetup, removeProviderConfiguration, savedProviderNames, saveProviderConfiguration, type SavedProviderConfiguration } from './providerSettings.ts'
 
 const REPL_COMMANDS: SlashCommand[] = [
   { name: '/capabilities', description: 'list specialist capabilities, risk classes, and output contracts' },
@@ -128,11 +129,14 @@ Background autonomy:
   elia daemon --poll-ms 30000             Keep checking due schedules in the foreground
 
 Provider setup:
+  First interactive run                    Ask for provider, hidden API key, and model
   elia config                               Show provider readiness without printing keys
   elia config set --provider nvidia        Store a provider API key in ~/.elia/config.env
   elia config set --provider custom --base-url <url>
                                            Configure any OpenAI-compatible endpoint
+  elia config remove --provider <name>     Remove that provider's saved API key
   Use --api-key-env <NAME> or pipe a key with --api-key-stdin; never pass keys as arguments.
+  In a session, /settings → Provider API keys adds, updates, selects, or removes profiles.
 
 Supervisor controls:
   elia control status                       Show durable runs and pending operator controls
@@ -291,6 +295,7 @@ async function runAgentCommand(): Promise<void> {
     return
   }
 
+  if (!(await ensureFirstRunProviderSetup())) return
   await loadRuntimeSkills()
   const { runAgentRequest } = await import('./agents/orchestrator.ts')
   const { config } = await import('./config.ts')
@@ -372,6 +377,7 @@ async function runAuto(): Promise<void> {
     return
   }
 
+  if (!(await ensureFirstRunProviderSetup())) return
   await loadRuntimeSkills()
   const { runAutonomousTask, autoApprove } = await import('./autonomy/loop.ts')
   const controller = new AbortController()
@@ -401,6 +407,7 @@ async function runAuto(): Promise<void> {
 }
 
 async function runBench(): Promise<void> {
+  if (!(await ensureFirstRunProviderSetup())) return
   await loadRuntimeSkills()
   const { measureFitness, renderScorecard } = await import('./evolve/fitness.ts')
   const { ELIA_ROOT } = await import('./config.ts')
@@ -425,6 +432,7 @@ async function runEvolve(): Promise<void> {
     return
   }
 
+  if (!(await ensureFirstRunProviderSetup())) return
   await loadRuntimeSkills()
   const { evolve } = await import('./evolve/engine.ts')
   const result = await evolve({ generations, dryRun: hasFlag('--dry-run') })
@@ -591,8 +599,26 @@ async function runConfig(): Promise<void> {
     return
   }
 
+  if (action === 'remove') {
+    const provider = (flagValue('--provider') || '').toLowerCase()
+    if (!provider) {
+      writeError('Usage: elia config remove --provider <name>')
+      process.exitCode = 1
+      return
+    }
+    try {
+      const removed = removeProviderConfiguration(provider)
+      writeNotice(removed.removed ? `Removed saved credentials for ${removed.provider} from ${removed.path}.` : `No saved credentials found for ${removed.provider}.`)
+      writeNotice('The API key value was never displayed.')
+    } catch (error) {
+      writeError(error instanceof Error ? error.message : String(error))
+      process.exitCode = 1
+    }
+    return
+  }
+
   if (action !== 'set') {
-    writeError('Usage: elia config [status|set] [--provider <name>] [--model <id>] [--base-url <url>] [--api-key-env <NAME>|--api-key-stdin]')
+    writeError('Usage: elia config [status|set|remove] [--provider <name>] [--model <id>] [--base-url <url>] [--api-key-env <NAME>|--api-key-stdin]')
     process.exitCode = 1
     return
   }
@@ -700,6 +726,16 @@ async function readStdinText(): Promise<string> {
   return text
 }
 
+async function readLineInput(prompt: string): Promise<string> {
+  if (!process.stdin.isTTY || !process.stdout.isTTY) return ''
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout })
+  try {
+    return (await rl.question(prompt)).trim()
+  } finally {
+    rl.close()
+  }
+}
+
 async function readSecretInput(prompt: string): Promise<string> {
   const stdin = process.stdin
   if (!stdin.isTTY || !stdin.setRawMode) return ''
@@ -737,6 +773,108 @@ async function readSecretInput(prompt: string): Promise<string> {
     }
     stdin.on('data', onData)
   })
+}
+
+async function chooseProviderForSetup(title: string): Promise<string | undefined> {
+  const { PROVIDER_PRESET_NAMES, isProviderPresetConfigured, providerPresetDefaultModel } = await import('./providers/registry.ts')
+  const options = PROVIDER_PRESET_NAMES.map((provider) => ({
+    label: provider,
+    detail: `${isProviderPresetConfigured(provider) ? 'configured' : 'not configured'} · ${providerPresetDefaultModel(provider) ?? 'custom endpoint and model'}`,
+    value: provider,
+  }))
+  const result = await pick(title, options)
+  if (result.type === 'select') return result.value
+  if (result.type === 'cancel') return undefined
+  const entered = (await readLineInput(`Provider [${options[0]?.value ?? 'anthropic'}]: `)).toLowerCase()
+  const selected = entered || options[0]?.value
+  if (!selected || !PROVIDER_PRESET_NAMES.includes(selected)) {
+    writeError(`Unknown provider "${entered}". No credentials were changed.`)
+    return undefined
+  }
+  return selected
+}
+
+async function chooseModelForSetup(provider: string, suggestedModel?: string): Promise<string | undefined> {
+  const { listProviderModels, providerPresetDefaultModel } = await import('./providers/registry.ts')
+  const discovery = await listProviderModels(provider)
+  const defaultModel = suggestedModel ?? providerPresetDefaultModel(provider)
+  if (discovery.models.length > 0) {
+    const options = discovery.models.map((model) => ({
+      label: model.id === defaultModel ? `${model.id} (recommended)` : model.id,
+      detail: model.name ?? model.ownedBy ?? 'available model',
+      value: model.id,
+    }))
+    const result = await pick(`Select a model for ${provider}`, options, Math.max(0, options.findIndex((option) => option.value === defaultModel)))
+    if (result.type === 'select') return result.value
+    if (result.type === 'cancel') return undefined
+  }
+  if (discovery.error) writeNotice(`Model discovery unavailable: ${discovery.error}`)
+  if (!defaultModel) return readLineInput(`Enter the model id for ${provider}: `)
+  const entered = await readLineInput(`Model id [${defaultModel}]: `)
+  return entered || defaultModel
+}
+
+async function interactiveProviderSetup(reason: 'first-run' | 'settings'): Promise<SavedProviderConfiguration | undefined> {
+  const provider = await chooseProviderForSetup(reason === 'first-run' ? 'First-run provider setup' : 'Add or update provider')
+  if (!provider) {
+    writeNotice('Provider setup cancelled. No credentials were changed.')
+    return undefined
+  }
+  const { providerPresetApiKeyEnv } = await import('./providers/registry.ts')
+  const apiKeyEnv = providerPresetApiKeyEnv(provider)
+  if (!apiKeyEnv) {
+    writeError(`Provider "${provider}" does not define an API key variable`)
+    return undefined
+  }
+  const baseURL = provider === 'custom' ? await readLineInput('Custom HTTPS base URL: ') : undefined
+  if (provider === 'custom' && !baseURL) {
+    writeNotice('Provider setup cancelled. A custom provider requires a base URL.')
+    return undefined
+  }
+  const apiKey = await readSecretInput(`Enter ${apiKeyEnv} (input hidden): `)
+  if (!apiKey) {
+    writeNotice('Provider setup cancelled. No credentials were changed.')
+    return undefined
+  }
+
+  const previousKey = process.env[apiKeyEnv]
+  const previousBaseURL = process.env.ELIA_BASE_URL
+  process.env[apiKeyEnv] = apiKey
+  if (baseURL) process.env.ELIA_BASE_URL = baseURL
+  let savedConfiguration: SavedProviderConfiguration | undefined
+  try {
+    const model = await chooseModelForSetup(provider)
+    if (!model) {
+      writeNotice('Provider setup cancelled. No credentials were changed.')
+      return undefined
+    }
+    savedConfiguration = saveProviderConfiguration({ provider, apiKey, model, baseURL })
+    writeNotice(`Saved ${provider} configuration to ${savedConfiguration.path}.`)
+    writeNotice(`Model: ${savedConfiguration.model}`)
+    writeNotice('The API key was saved without displaying its value.')
+    return savedConfiguration
+  } catch (error) {
+    writeError(`Provider setup failed: ${error instanceof Error ? error.message : String(error)}`)
+    return undefined
+  } finally {
+    if (!savedConfiguration) {
+      if (process.env[apiKeyEnv] === apiKey && previousKey !== undefined) process.env[apiKeyEnv] = previousKey
+      else if (previousKey === undefined && process.env[apiKeyEnv] === apiKey) delete process.env[apiKeyEnv]
+      if (baseURL && process.env.ELIA_BASE_URL === baseURL && previousBaseURL !== undefined) process.env.ELIA_BASE_URL = previousBaseURL
+      else if (baseURL && previousBaseURL === undefined && process.env.ELIA_BASE_URL === baseURL) delete process.env.ELIA_BASE_URL
+    }
+  }
+}
+
+async function ensureFirstRunProviderSetup(): Promise<boolean> {
+  if (!activeProviderNeedsSetup()) return true
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    writeError('No provider is configured. Run `elia config set --provider <name> --api-key-stdin --model <model-id>` from a secure shell, or run elia in an interactive terminal for first-run setup.')
+    process.exitCode = 1
+    return false
+  }
+  writeNotice('No complete provider configuration was found. Elia will ask for a provider, hidden API key, and model before starting.')
+  return Boolean(await interactiveProviderSetup('first-run'))
 }
 
 async function runSchedule(): Promise<void> {
@@ -897,6 +1035,7 @@ async function runResume(): Promise<void> {
     return
   }
 
+  if (!(await ensureFirstRunProviderSetup())) return
   const { GoalGraphStore } = await import('./autonomy/goalGraph.ts')
   const graph = GoalGraphStore.open({ runId, goal, dir: runDir(runId) })
   const recovery = graph.leaseRecoverySummary()
@@ -956,6 +1095,7 @@ async function runFork(): Promise<void> {
     return
   }
 
+  if (!(await ensureFirstRunProviderSetup())) return
   await loadRuntimeSkills()
   const { forkRun } = await import('./autonomy/rewind.ts')
   const { autoApprove } = await import('./autonomy/loop.ts')
@@ -992,6 +1132,7 @@ async function runInteractive(): Promise<void> {
     return
   }
 
+  if (!(await ensureFirstRunProviderSetup())) return
   await loadRuntimeSkills()
   const { runTurn } = await import('./agent.ts')
   const { config, describeThinking, getThinking, switchModel, switchThinking, THINKING_EFFORT_BUDGETS, DEFAULT_THINKING_BUDGET } =
@@ -1433,6 +1574,41 @@ async function runInteractive(): Promise<void> {
     else if (result.type === 'unavailable') writeNotice(`Current: ${replMode}`)
   }
 
+  async function handleProviderSettings(): Promise<void> {
+    const saved = savedProviderNames()
+    const options = [
+      { label: 'Add or update provider', detail: 'enter a hidden API key and choose a model', value: 'add' },
+      ...saved.map((provider) => ({ label: `Remove ${provider}`, detail: 'delete its saved API key', value: `remove:${provider}` })),
+    ]
+    const result = await pick('Provider API settings', options)
+    if (result.type === 'unavailable') {
+      writeNotice(saved.length > 0 ? `Saved providers: ${saved.join(', ')}` : 'No saved provider API keys.')
+      return
+    }
+    if (result.type !== 'select') return
+    if (result.value === 'add') {
+      const configured = await interactiveProviderSetup('settings')
+      if (!configured) return
+      const switched = switchModel({ providerName: configured.provider, model: configured.model })
+      if (switched.ok) writeNotice(`Active model: ${switched.label} · ${configured.model}`)
+      else writeError(`Saved the provider, but could not activate it in this session: ${switched.error}`)
+      return
+    }
+    const provider = result.value.slice('remove:'.length)
+    const confirmation = await confirmOnce(prompt, `Remove saved API credentials for ${provider}? This cannot be undone from Elia. [y]es / [n]o: `)
+    if (confirmation.action !== 'approve') {
+      writeNotice('Kept the saved provider credentials.')
+      return
+    }
+    try {
+      const removed = removeProviderConfiguration(provider)
+      writeNotice(removed.removed ? `Removed saved credentials for ${provider}.` : `No saved credentials found for ${provider}.`)
+      writeNotice('The API key value was never displayed.')
+    } catch (error) {
+      writeError(error instanceof Error ? error.message : String(error))
+    }
+  }
+
   /** Top-level settings screen: every switchable setting in one arrow-key menu, looping until esc/cancel. */
   async function handleSettingsCommand(): Promise<void> {
     while (true) {
@@ -1441,6 +1617,7 @@ async function runInteractive(): Promise<void> {
         { label: 'Mode / persona', detail: modeSummary, value: 'mode' },
         { label: 'Risk checks', detail: replMode, value: 'replMode' },
         { label: 'Model & provider', detail: `${config.providerLabel} · ${config.model}`, value: 'model' },
+        { label: 'Provider API keys', detail: `${savedProviderNames().length} saved · add/update/remove`, value: 'providers' },
         { label: 'Reasoning effort', detail: describeThinking(), value: 'thinking' },
         { label: 'Skills', detail: selectedSkillNames ? selectedSkillNames.join(', ') : 'all loaded', value: 'skills' },
       ]
@@ -1453,6 +1630,7 @@ async function runInteractive(): Promise<void> {
       if (result.value === 'mode') await handleModePersonaPicker()
       else if (result.value === 'replMode') await handleReplModePicker()
       else if (result.value === 'model') await handleModelCommand('')
+      else if (result.value === 'providers') await handleProviderSettings()
       else if (result.value === 'thinking') await handleThinkingCommand('')
       else if (result.value === 'skills') await handleSkillsPicker()
     }
