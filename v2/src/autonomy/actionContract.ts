@@ -1,6 +1,5 @@
 import { existsSync, statSync } from 'node:fs'
 import { basename, isAbsolute, relative, resolve } from 'node:path'
-import { runShell } from '../shell.ts'
 import type { ActionRequest } from './governor.ts'
 
 export type ContractFailureDisposition = 'retryable' | 'human-review'
@@ -31,7 +30,6 @@ export interface ContractEvaluation {
 
 const SAFE_BROWSER_ACTIONS = new Set(['status', 'navigate', 'refresh', 'back', 'forward', 'snapshot', 'extract', 'scroll', 'wait', 'wait_for', 'verify'])
 const SHELL_COMMAND = /^(?:[A-Za-z_][A-Za-z0-9_]*=[^\s]+\s+)*(?:command\s+)?([A-Za-z0-9_./-]+)(?:\s|$)/
-const MAX_CHECK_TIMEOUT_MS = 10_000
 
 export function contractForAction(request: ActionRequest, cwd: string, idempotencyKey: string): ActionContract {
   const preconditions: ContractCheck[] = []
@@ -95,8 +93,8 @@ export async function evaluatePreconditions(contract: ActionContract, cwd: strin
       continue
     }
     if (check.kind === 'command-available') {
-      const result = await runShell(`command -v -- ${shellQuote(check.value ?? '')}`, MAX_CHECK_TIMEOUT_MS, cwd, signal)
-      if (result.exitCode === 0 && !result.timedOut) evidence.push(`${check.value} available at ${result.stdout.trim().split(/\r?\n/)[0] ?? 'PATH'}`)
+      const executable = Bun.which(check.value ?? '')
+      if (executable) evidence.push(`${check.value} available at ${executable}`)
       else failures.push(`${check.value} is not available in PATH`)
       continue
     }
@@ -135,18 +133,15 @@ export function evaluatePostconditions(contract: ActionContract, result: string,
     if (check.kind === 'workspace-path') {
       try {
         const target = resolve(cwd, check.value ?? '')
-        if (existsSync(target) && statSync(target).isFile()) evidence.push(`artifact exists: ${relative(cwd, target)}`)
-        else failures.push(`expected file artifact does not exist: ${relative(cwd, target)}`)
+        const rel = relative(cwd, target).replaceAll('\\', '/')
+        if (existsSync(target) && statSync(target).isFile()) evidence.push(`artifact exists: ${rel}`)
+        else failures.push(`expected file artifact does not exist: ${rel}`)
       } catch {
         failures.push(`could not inspect expected file artifact: ${check.value ?? '(unknown)'}`)
       }
     }
   }
   return { ok: failures.length === 0, phase: 'postcondition', failures, evidence, nextAction: failures.length > 0 ? 'Inspect the evidence, repair only when the action is idempotent, otherwise escalate for human review.' : undefined }
-}
-
-function shellQuote(value: string): string {
-  return `'${value.replaceAll("'", "'\\''")}'`
 }
 
 function extractUrl(result: string): string | undefined {

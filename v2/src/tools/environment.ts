@@ -68,13 +68,10 @@ export const environmentTool: Tool = {
       Promise.resolve(detectProject(cwd)),
       runShell('git branch --show-current && git log -1 --oneline', 10_000, cwd, agent.signal),
       runShell('git status --porcelain=v1 --branch', 10_000, cwd, agent.signal),
-      runShell(`for command in ${COMMANDS.join(' ')}; do if command -v "$command" >/dev/null 2>&1; then printf '%s=%s\\n' "$command" "$(command -v "$command")"; else printf '%s=unavailable\\n' "$command"; fi; done`, 10_000, cwd, agent.signal),
+      Promise.resolve(Object.fromEntries(COMMANDS.map((command) => [command, Bun.which(command) ?? 'unavailable']))),
       input.includeGitDiffStat === true ? runShell('git diff --stat', 10_000, cwd, agent.signal) : Promise.resolve(undefined),
     ])
-    const availableRuntimes = Object.fromEntries(runtimes.stdout.split(/\r?\n/).filter(Boolean).map((line) => {
-      const separator = line.indexOf('=')
-      return [line.slice(0, separator), line.slice(separator + 1)]
-    }))
+    const availableRuntimes = runtimes
     const configured = envPresence()
     return JSON.stringify({
       cwd,

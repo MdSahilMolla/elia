@@ -39,6 +39,6 @@ Autonomous runs persist a goal graph, journal, checkpoints, action ledger, task 
 
 The control plane is local to the project and process environment. It is not a hosted management service, does not provide multi-user identity or authorization, and cannot guarantee execution across machine shutdowns. Production or multi-user deployments need an authenticated supervisor service, OS-level service isolation, secret management, audit retention, and explicit operator identity controls.
 
-## Proprietary distribution boundary
+## Open-source distribution boundary
 
-Elia is proprietary software. The root `LICENSE` file is a proprietary license draft and the package metadata uses `SEE LICENSE IN LICENSE`. It grants only the permissions described in that license and does not grant open-source rights. Qualified legal review is required before public npm publication or commercial distribution, and the copyright owner/entity named in the license must be confirmed.
+Elia is open-source software licensed under the GNU Affero General Public License v3.0 (`AGPL-3.0-only`). Distribution and modification must follow the terms in the repository and package `LICENSE` files. In particular, operators who modify Elia and make the modified program available for users to interact with over a network must offer those users the corresponding source as required by the license.

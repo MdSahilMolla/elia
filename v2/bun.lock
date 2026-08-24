@@ -6,6 +6,7 @@
       "name": "elia",
       "dependencies": {
         "@anthropic-ai/sdk": "^0.68.0",
+        "jszip": "^3.10.1",
         "openai": "^7.5.0",
         "pptxgenjs": "^4.0.1",
         "xlsx": "^0.18.5",

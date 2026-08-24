@@ -247,9 +247,9 @@ function assessment(
 }
 
 function isOutside(path: string, cwd: string): boolean {
-  if (!isAbsolute(path)) return false
+  if (!isAbsolute(path) && !path.startsWith('/')) return false
   const rel = relative(cwd, path)
-  return rel === '..' || rel.startsWith(`..${path.includes('\\') ? '\\' : '/'}`)
+  return rel === '..' || rel.startsWith('../') || rel.startsWith('..\\') || isAbsolute(rel)
 }
 
 export function redactActionInput(tool: string, input: Record<string, unknown>): Record<string, unknown> {

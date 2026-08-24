@@ -210,6 +210,8 @@ export function createSlashPrompt(commands: SlashCommand[]): SlashPromptHandle {
       promptLabel = label
       state = { ...state, buffer: '', cursor: 0, selectedIndex: 0 }
       active = true
+      if (stdin.isTTY) stdin.setRawMode(true)
+      stdin.resume()
       render()
       return new Promise((resolve) => {
         resolveLine = resolve

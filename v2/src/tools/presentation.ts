@@ -1,4 +1,5 @@
 import pptxgen from 'pptxgenjs'
+import JSZip from 'jszip'
 import { existsSync, mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { basename, dirname, extname, join, resolve } from 'node:path'
 import { paths } from '../config.ts'
@@ -184,14 +185,8 @@ function parseAnalysis(text: string): AnalysisResult {
 
 async function verifyPresentation(path: string, render: boolean): Promise<string> {
   if (!existsSync(path)) throw new Error(`Presentation not found: ${path}`)
-  const process = Bun.spawn(['unzip', '-Z1', path], { stdout: 'pipe', stderr: 'pipe' })
-  const [stdout, stderr, exitCode] = await Promise.all([
-    readBoundedOutput(process.stdout as ReadableStream<Uint8Array>, MAX_SHELL_OUTPUT_LENGTH),
-    readBoundedOutput(process.stderr as ReadableStream<Uint8Array>, MAX_SHELL_OUTPUT_LENGTH),
-    process.exited,
-  ])
-  if (exitCode !== 0) throw new Error(`could not inspect PPTX package: ${stderr.trim() || `unzip exited with ${exitCode}`}`)
-  const entries = stdout.split(/\r?\n/).filter(Boolean)
+  const archive = await JSZip.loadAsync(await Bun.file(path).arrayBuffer())
+  const entries = Object.keys(archive.files)
   const slideEntries = entries.filter((entry) => /^ppt\/slides\/slide\d+\.xml$/.test(entry))
   const validPackage = entries.includes('ppt/presentation.xml') && entries.includes('[Content_Types].xml') && slideEntries.length > 0
   let rendered = false

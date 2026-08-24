@@ -1,6 +1,6 @@
 import { box, frame, terminalWidth } from './layout.ts'
 import type { KeyEvent } from './picker.ts'
-import { interactiveTerminal, plainOutput } from './runtime.ts'
+import { interactiveTerminal, plainOutput, machineReadable } from './runtime.ts'
 import { gracefulShutdown, registerShutdownCleanup } from './shutdown.ts'
 import { taskSessions, type TaskSession, type TaskSessionStore, type TaskControlAction } from '../taskSessions.ts'
 import { bold, cyan, dim, gold, green, red, reverse } from './theme.ts'
@@ -248,4 +248,37 @@ function shortStatus(session: TaskSession): string {
 function truncate(text: string, max: number): string {
   const flat = text.replace(/\s+/g, ' ').trim()
   return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat
+}
+
+export function renderTaskSummary(store: TaskSessionStore = taskSessions): string {
+  const sessions = store.list()
+  if (sessions.length === 0) return ''
+  const active = sessions.filter((s) => ['pending', 'running', 'paused', 'waiting-input', 'waiting-approval'].includes(s.status)).length
+  const done = sessions.filter((s) => s.status === 'done').length
+  const failed = sessions.filter((s) => s.status === 'failed').length
+
+  const parts: string[] = []
+  if (active > 0) parts.push(`${active} active`)
+  if (done > 0) parts.push(`${done} done`)
+  if (failed > 0) parts.push(`${failed} failed`)
+  if (parts.length === 0) return ''
+  return `tasks: ${parts.join(' · ')}`
+}
+
+export function updateTerminalTaskTitle(store: TaskSessionStore = taskSessions, baseTitle = 'elia'): void {
+  if (!interactiveTerminal || plainOutput || machineReadable) return
+  const sessions = store.list()
+  const active = sessions.filter((s) => ['pending', 'running', 'paused', 'waiting-input', 'waiting-approval'].includes(s.status)).length
+  const done = sessions.filter((s) => s.status === 'done').length
+  const failed = sessions.filter((s) => s.status === 'failed').length
+
+  let label = baseTitle
+  if (sessions.length > 0) {
+    const parts: string[] = []
+    if (active > 0) parts.push(`${active} running`)
+    if (done > 0) parts.push(`${done} done`)
+    if (failed > 0) parts.push(`${failed} failed`)
+    if (parts.length > 0) label = `${baseTitle} [${parts.join(' · ')}]`
+  }
+  process.stdout.write(`\x1b]0;${label}\x07`)
 }

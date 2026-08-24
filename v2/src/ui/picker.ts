@@ -64,6 +64,7 @@ export function pick(title: string, options: PickerOption[], initialIndex = 0): 
   const stdout = process.stdout
   readline.emitKeypressEvents(stdin)
   const wasRaw = stdin.isRaw
+  const wasPaused = stdin.isPaused()
   stdin.setRawMode(true)
   stdin.resume()
 
@@ -104,7 +105,7 @@ export function pick(title: string, options: PickerOption[], initialIndex = 0): 
     finished = true
     stdin.off('keypress', onKeypress)
     if (stdin.isTTY) stdin.setRawMode(wasRaw ?? false)
-    stdin.pause()
+    if (wasPaused) stdin.pause()
   }
 
   const unregisterShutdown = registerShutdownCleanup(cleanup)

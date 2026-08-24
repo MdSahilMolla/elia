@@ -17,8 +17,6 @@ interface BrowserRequest {
   expectText?: string
   expectUrl?: string
   ms?: number
-  confirmed?: boolean
-  confirmationToken?: string
 }
 
 interface BrowserResult {
@@ -29,7 +27,6 @@ interface BrowserResult {
   [key: string]: unknown
 }
 
-const SENSITIVE_WORDS = /\b(buy|purchase|pay|checkout|send|publish|delete|remove|confirm|submit|transfer|wire|post|tweet|message|cancel|subscribe)\b/i
 const MAX_TEXT_LENGTH = 20_000
 const MAX_WAIT_MS = 30_000
 const MAX_SCROLL_PX = 4_000
@@ -37,12 +34,10 @@ const MAX_EXPECTATION_LENGTH = 4_000
 const BROWSER_DEADLINE_MS = 45_000
 const MAX_BROWSER_OUTPUT_LENGTH = 200_000
 const SAFE_RETRY_ACTIONS = new Set<BrowserAction>(['status', 'snapshot', 'extract', 'verify', 'wait_for'])
-const APPROVAL_TTL_MS = 5 * 60_000
-const pendingApprovals = new Map<string, { fingerprint: string; expiresAt: number }>()
 
 export const browserTool: Tool = {
   name: 'browser',
-  description: `Control the user's browser through a configured bridge. Use status first, then navigate, refresh/back/forward, snapshot/extract, click, type, press, scroll, wait_for, or verify as needed. Add expectText or expectUrl after state-changing work so Elia observes the final page instead of assuming a transport success means the UI changed. The bridge can be a user-Chrome connector or a Chrome DevTools endpoint configured outside Elia. Never bypass authentication, CAPTCHAs, paywalls, or site safety controls. Actions that look like sending, purchasing, publishing, deleting, or changing subscriptions pause with an exact approval token; the token must be supplied after the user approves that exact side effect.`,
+  description: `Control the user's browser through a configured bridge. Use status first, then navigate, refresh/back/forward, snapshot/extract, click, type, press, scroll, wait_for, or verify as needed. Add expectText or expectUrl after state-changing work so Elia observes the final page instead of assuming a transport success means the UI changed. The bridge can be a user-Chrome connector or a Chrome DevTools endpoint configured outside Elia. Never bypass authentication, CAPTCHAs, paywalls, or site safety controls. Actions that change page state (click, type, press, scroll, verify) go through Elia's action governor for approval before this tool ever runs them — do not expect or ask for a separate confirmation token here.`,
   input_schema: {
     type: 'object',
     properties: {
@@ -64,28 +59,12 @@ export const browserTool: Tool = {
       expectText: { type: 'string', description: 'Text that must appear in the post-action snapshot' },
       expectUrl: { type: 'string', description: 'URL prefix or exact URL that must match after the action' },
       ms: { type: 'number', description: 'Milliseconds to wait, capped at 30 seconds' },
-      confirmed: {
-        type: 'boolean',
-        description: 'Legacy confirmation flag; sensitive actions also require the exact confirmationToken returned by a paused action',
-      },
-      confirmationToken: {
-        type: 'string',
-        description: 'Exact approval token returned after a sensitive action is paused; expires after five minutes and is bound to the action details',
-      },
     },
     required: ['action'],
   },
   async execute(input) {
     const request = validateRequest(input)
     const session = taskSessions.create('browser', `Browser: ${request.action}`, 'Queued browser action')
-    const sideEffectText = [request.target, request.text, request.url].filter(Boolean).join(' ')
-    const needsConfirmation = SENSITIVE_WORDS.test(sideEffectText) && request.action !== 'status' && request.action !== 'snapshot' && request.action !== 'extract'
-    if (needsConfirmation && !consumeApproval(request)) {
-      const token = createApprovalToken(request)
-      taskSessions.update(session.id, { status: 'paused', action: 'Awaiting confirmation', detail: 'This action may create an external side effect' })
-      return `Confirmation required before browser action "${request.action}". Ask the user to approve this exact action, then retry with confirmationToken=${token}. The token expires in five minutes and cannot be reused for a changed target, recipient, or message. Task session: ${session.id}`
-    }
-
     taskSessions.update(session.id, { status: 'running', action: request.action, detail: request.url ?? request.target ?? request.text?.slice(0, 120) ?? 'Working' })
     try {
       const result = await withDeadline(runBrowserRequest(request), BROWSER_DEADLINE_MS, 'browser action timed out')
@@ -106,7 +85,7 @@ export function validateRequest(input: Record<string, unknown>): BrowserRequest 
     throw new Error('action must be one of status, navigate, refresh, back, forward, snapshot, click, type, press, scroll, wait, wait_for, extract, or verify')
   }
 
-  const request: BrowserRequest = { action: action as BrowserAction, confirmed: input.confirmed === true }
+  const request: BrowserRequest = { action: action as BrowserAction }
   if (action === 'navigate') {
     const url = input.url
     if (typeof url !== 'string' || !/^https?:\/\//i.test(url)) throw new Error('navigate requires an absolute http(s) url')
@@ -135,10 +114,6 @@ export function validateRequest(input: Record<string, unknown>): BrowserRequest 
   if (action === 'wait' || action === 'wait_for') {
     const ms = typeof input.ms === 'number' && Number.isFinite(input.ms) ? Math.round(input.ms) : 500
     request.ms = Math.max(0, Math.min(MAX_WAIT_MS, ms))
-  }
-  if (input.confirmationToken !== undefined) {
-    if (typeof input.confirmationToken !== 'string' || input.confirmationToken.trim().length === 0) throw new Error('confirmationToken must be a non-empty string')
-    request.confirmationToken = input.confirmationToken.trim()
   }
   if (action === 'wait_for' || action === 'verify' || action === 'extract') {
     if (input.selector !== undefined) {
@@ -453,32 +428,4 @@ function formatBrowserResult(value: BrowserResult | string): string {
 
 function browserSetupHint(): string {
   return 'Configure ELIA_BROWSER_MCP_SERVER for an enabled user-Chrome connector, ELIA_BROWSER_BRIDGE_COMMAND for a trusted wrapper, or ELIA_BROWSER_CDP_URL for a Chrome DevTools endpoint. Keep credentials in the bridge environment, not in Elia prompts or source files.'
-}
-
-function requestFingerprint(request: BrowserRequest): string {
-  return JSON.stringify({ action: request.action, url: request.url ?? '', target: request.target ?? '', text: request.text ?? '', key: request.key ?? '', selector: request.selector ?? '', direction: request.direction ?? '', amount: request.amount ?? 0, expectText: request.expectText ?? '', expectUrl: request.expectUrl ?? '', ms: request.ms ?? 0 })
-}
-
-function createApprovalToken(request: BrowserRequest): string {
-  const token = `approval_${crypto.randomUUID()}`
-  pendingApprovals.set(token, { fingerprint: requestFingerprint(request), expiresAt: Date.now() + APPROVAL_TTL_MS })
-  return token
-}
-
-function consumeApproval(request: BrowserRequest): boolean {
-  if (!request.confirmed || !request.confirmationToken) return false
-  const approval = pendingApprovals.get(request.confirmationToken)
-  if (!approval) return false
-  if (approval.expiresAt <= Date.now()) {
-    pendingApprovals.delete(request.confirmationToken)
-    return false
-  }
-  if (approval.fingerprint !== requestFingerprint(request)) return false
-  pendingApprovals.delete(request.confirmationToken)
-  return true
-}
-
-export function isSensitiveBrowserInput(input: Record<string, unknown>): boolean {
-  const text = [input.target, input.text, input.url].filter((value): value is string => typeof value === 'string').join(' ')
-  return SENSITIVE_WORDS.test(text)
 }

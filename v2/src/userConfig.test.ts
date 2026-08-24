@@ -45,9 +45,11 @@ test('writes user config atomically, preserves unrelated lines, and restricts pe
   expect(content).toContain('NVIDIA_API_KEY=test-key')
   expect(content).toContain('ELIA_MODEL=openai/gpt-oss-20b')
   expect(content).not.toContain('ELIA_PROVIDER=anthropic')
-  expect(statSync(path).mode & 0o077).toBe(0)
+  if (process.platform !== 'win32') {
+    expect(statSync(path).mode & 0o077).toBe(0)
 
-  // Make the test explicit about the expected mode even on a permissive umask.
-  chmodSync(path, 0o600)
-  expect(statSync(path).mode & 0o077).toBe(0)
+    // Make the test explicit about the expected mode even on a permissive umask.
+    chmodSync(path, 0o600)
+    expect(statSync(path).mode & 0o077).toBe(0)
+  }
 })

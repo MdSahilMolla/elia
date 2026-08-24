@@ -5,7 +5,7 @@ import type { Tool } from './types.ts'
 import { readBoundedOutput, terminateProcessGroup } from '../shell.ts'
 
 export type CommunicationChannel = 'email' | 'message' | 'calendar' | 'slack' | 'sms' | 'custom'
-type CommunicationStatus = 'draft' | 'awaiting_approval' | 'sending' | 'sent' | 'verified' | 'send_failed' | 'cancelled'
+type CommunicationStatus = 'draft' | 'sending' | 'sent' | 'verified' | 'send_failed' | 'cancelled'
 type CommunicationAction = 'status' | 'draft' | 'inspect' | 'list' | 'send' | 'verify' | 'cancel'
 
 interface CommunicationRequest {
@@ -20,13 +20,6 @@ interface CommunicationRequest {
   attachments?: string[]
   replyTo?: string
   scheduledFor?: string
-  confirmationToken?: string
-}
-
-interface PendingApproval {
-  token: string
-  fingerprint: string
-  expiresAt: number
 }
 
 interface CommunicationDraft {
@@ -47,7 +40,6 @@ interface CommunicationDraft {
   verifiedAt?: string
   externalId?: string
   error?: string
-  pendingApproval?: PendingApproval
 }
 
 interface CommunicationResult {
@@ -62,7 +54,6 @@ interface CommunicationResult {
 const COMMUNICATION_DIR = join(paths.state, 'communications')
 const COMMUNICATION_DEADLINE_MS = 45_000
 const MAX_COMMUNICATION_OUTPUT_LENGTH = 200_000
-const APPROVAL_TTL_MS = 5 * 60_000
 const MAX_BODY_LENGTH = 100_000
 const MAX_RECIPIENT_LENGTH = 2_000
 const MAX_LIST_LENGTH = 50
@@ -70,7 +61,7 @@ const MAX_LIST_LENGTH = 50
 export const communicationTool: Tool = {
   name: 'communication',
   description:
-    'Manage real-world communication as a durable draft-first workflow. Draft and inspect email, messages, calendar invitations, Slack updates, SMS, or custom communications; verify recipients and content; request exact approval immediately before sending; then use a configured communication connector or trusted bridge and record a delivery receipt. Never claim delivery without a connector response or verification result.',
+    "Manage real-world communication as a durable draft-first workflow. Draft and inspect email, messages, calendar invitations, Slack updates, SMS, or custom communications; verify recipients and content; then use a configured communication connector or trusted bridge and record a delivery receipt. The send action goes through Elia's action governor for approval before this tool ever runs it — do not expect or ask for a separate confirmation token here. Never claim delivery without a connector response or verification result.",
   input_schema: {
     type: 'object',
     properties: {
@@ -85,7 +76,6 @@ export const communicationTool: Tool = {
       attachments: { type: 'array', items: { type: 'string' }, description: 'Workspace-relative or connector-supported attachment references' },
       replyTo: { type: 'string', description: 'Optional thread or message reference to reply to' },
       scheduledFor: { type: 'string', description: 'Optional ISO-8601 delivery time; the connector must support scheduling' },
-      confirmationToken: { type: 'string', description: 'Exact token returned by a previous send request for the unchanged draft' },
     },
     required: ['action'],
   },
@@ -100,7 +90,7 @@ export const communicationTool: Tool = {
 
     if (request.action === 'inspect') return renderDraft(draft)
     if (request.action === 'cancel') return cancelDraft(draft)
-    if (request.action === 'send') return sendDraft(draft, request.confirmationToken)
+    if (request.action === 'send') return sendDraft(draft)
     return verifyDraft(draft)
   },
 }
@@ -120,7 +110,7 @@ export function validateCommunicationRequest(input: Record<string, unknown>): Co
     if (!['email', 'message', 'calendar', 'slack', 'sms', 'custom'].includes(String(input.channel))) throw new Error('channel must be email, message, calendar, slack, sms, or custom')
     request.channel = input.channel as CommunicationChannel
   }
-  for (const key of ['recipient', 'subject', 'body', 'replyTo', 'scheduledFor', 'confirmationToken'] as const) {
+  for (const key of ['recipient', 'subject', 'body', 'replyTo', 'scheduledFor'] as const) {
     if (input[key] !== undefined) {
       if (typeof input[key] !== 'string' || input[key].length === 0) throw new Error(`${key} must be a non-empty string`)
       request[key] = input[key]
@@ -149,7 +139,7 @@ function communicationStatus(): string {
     deliveryVerification: bridge || mcp ? 'adapter configured' : 'not configured',
     adapter: bridge ? 'trusted bridge' : mcp ? 'MCP server' : 'none',
     supportedChannels: ['email', 'message', 'calendar', 'slack', 'sms', 'custom'],
-    approval: 'exact five-minute token required before send',
+    approval: "gated by Elia's action governor before send runs",
   }, null, 2)
 }
 
@@ -209,26 +199,13 @@ function renderDraft(draft: CommunicationDraft): string {
   }, null, 2)
 }
 
-async function sendDraft(draft: CommunicationDraft, confirmationToken?: string): Promise<string> {
+async function sendDraft(draft: CommunicationDraft): Promise<string> {
   if (draft.status === 'sent' || draft.status === 'verified') return `Draft ${draft.id} was already sent${draft.externalId ? ` with external id ${draft.externalId}` : ''}. Verify it again if delivery evidence is needed.`
   if (draft.status === 'cancelled') return `Draft ${draft.id} is cancelled and cannot be sent.`
   if (!hasCommunicationAdapter()) return `Cannot send draft ${draft.id}: no communication connector is configured. Configure ELIA_COMMUNICATION_BRIDGE_COMMAND or ELIA_COMMUNICATION_MCP_SERVER, then inspect the unchanged draft again.`
 
-  const fingerprint = draftFingerprint(draft)
-  const approvalValid = Boolean(confirmationToken && draft.pendingApproval && draft.pendingApproval.expiresAt > Date.now() && draft.pendingApproval.token === confirmationToken && draft.pendingApproval.fingerprint === fingerprint)
-  if (!approvalValid) {
-    if (!draft.pendingApproval || draft.pendingApproval.expiresAt <= Date.now() || draft.pendingApproval.fingerprint !== fingerprint) {
-      draft.pendingApproval = { token: `communication_approval_${crypto.randomUUID()}`, fingerprint, expiresAt: Date.now() + APPROVAL_TTL_MS }
-    }
-    draft.status = 'awaiting_approval'
-    draft.updatedAt = new Date().toISOString()
-    saveDraft(draft)
-    return `Approval required before sending draft ${draft.id}. Verify recipient, channel, subject, body, attachments, and timing, then retry the unchanged draft with confirmationToken=${draft.pendingApproval.token}. The token expires in five minutes and is invalid if the draft changes.`
-  }
-
   draft.status = 'sending'
   draft.updatedAt = new Date().toISOString()
-  draft.pendingApproval = undefined
   saveDraft(draft)
   try {
     const result = await callCommunicationAdapter({ action: 'send', draft })
@@ -265,7 +242,6 @@ async function verifyDraft(draft: CommunicationDraft): Promise<string> {
 function cancelDraft(draft: CommunicationDraft): string {
   if (draft.status === 'sent' || draft.status === 'verified') return `Draft ${draft.id} was already sent and cannot be cancelled by Elia.`
   draft.status = 'cancelled'
-  draft.pendingApproval = undefined
   draft.updatedAt = new Date().toISOString()
   saveDraft(draft)
   return `Draft ${draft.id} cancelled. No external action was attempted.`
@@ -292,10 +268,6 @@ function saveDraft(draft: CommunicationDraft): void {
 
 function ensureDirectory(): void {
   mkdirSync(COMMUNICATION_DIR, { recursive: true })
-}
-
-function draftFingerprint(draft: CommunicationDraft): string {
-  return JSON.stringify({ id: draft.id, channel: draft.channel, recipient: draft.recipient, cc: draft.cc, bcc: draft.bcc, subject: draft.subject, body: draft.body, attachments: draft.attachments, replyTo: draft.replyTo, scheduledFor: draft.scheduledFor })
 }
 
 function hasCommunicationAdapter(): boolean {

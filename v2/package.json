@@ -1,38 +1,40 @@
 {
-  "name": "elia",
+  "name": "@mdsahilmolla/elia",
   "version": "0.1.0",
   "description": "A fast, autonomous coding agent for the terminal, with pluggable LLM providers.",
-  "private": false,
-  "license": "SEE LICENSE IN LICENSE",
+  "license": "AGPL-3.0-only",
   "type": "module",
-  "engines": {
-    "bun": ">=1.3.0"
-  },
-  "bin": {
-    "elia": "./bin/elia.ts"
-  },
   "files": [
     "bin",
     "src/**/*.ts",
     "!src/**/*.test.ts",
-    "README.md",
-    "LICENSE",
-    ".env.example"
+    "docs",
+    ".env.example",
+    "tsconfig.json"
   ],
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/",
+    "tag": "latest"
+  },
   "homepage": "https://github.com/MdSahilMolla/elia",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/MdSahilMolla/elia.git"
+    "url": "git+https://github.com/MdSahilMolla/elia.git",
+    "directory": "v2"
   },
   "bugs": {
     "url": "https://github.com/MdSahilMolla/elia/issues"
   },
-  "publishConfig": {
-    "access": "public",
-    "tag": "latest"
+  "engines": {
+    "bun": ">=1.3.0"
+  },
+  "bin": {
+    "elia": "bin/elia.ts"
   },
   "scripts": {
     "dev": "bun run bin/elia.ts",
+    "react": "bun run src/react_server.ts",
     "test": "bun test",
     "typecheck": "tsc --noEmit",
     "prepublishOnly": "bun run typecheck && bun test"
@@ -49,6 +51,7 @@
   ],
   "dependencies": {
     "@anthropic-ai/sdk": "^0.68.0",
+    "jszip": "^3.10.1",
     "openai": "^7.5.0",
     "pptxgenjs": "^4.0.1",
     "xlsx": "^0.18.5"

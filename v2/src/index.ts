@@ -1,3 +1,4 @@
+#!/usr/bin/env bun
 import * as readline from 'node:readline/promises'
 import type { ConversationMessage, AgentMode } from './agent.ts'
 import { writeNotice, writeError, writeUsageLine } from './ui/stream.ts'
@@ -8,7 +9,7 @@ import { confirmOnce } from './ui/confirm.ts'
 import { gold, dim } from './ui/theme.ts'
 import { box, table } from './ui/layout.ts'
 import { pick } from './ui/picker.ts'
-import { createLiveActionWindow, openTaskDashboard } from './ui/taskDashboard.ts'
+import { openTaskDashboard, renderTaskSummary, updateTerminalTaskTitle } from './ui/taskDashboard.ts'
 import { inferTaskKind, taskSessions } from './taskSessions.ts'
 import { isAgentPersona, type AgentPersona } from './agents/types.ts'
 import { CAPABILITIES } from './capabilities.ts'
@@ -40,6 +41,7 @@ const REPL_COMMANDS: SlashCommand[] = [
   { name: '/model', description: 'pick a model with arrow keys, or /model groq, /model claude-opus-5' },
   { name: '/thinking', description: 'pick reasoning effort with arrow keys, or /thinking off/low/medium/high/<n>' },
   { name: '/task', description: 'browse browser, coding, and pending tasks with arrow keys' },
+  { name: '/settings', description: 'browse every setting — mode, model, reasoning effort, risk checks, skills — and switch with arrow keys' },
   { name: '@skills', description: 'browse loaded skills and choose which skill tools are active for the next turn' },
 ]
 
@@ -1030,7 +1032,6 @@ async function runInteractive(): Promise<void> {
       },
     })
     const unregisterShutdown = registerShutdownCleanup(() => controller.abort())
-    const actionWindow = createLiveActionWindow()
     emitEvent('turn_started', { taskId: task.id, sessionId, prompt: redactText(userText, 2000) })
     setActiveTracker(tracker)
     // Lets compaction (mid-loop, several call frames down) and the recall tool
@@ -1044,12 +1045,11 @@ async function runInteractive(): Promise<void> {
         await runPersonaTurn(messages, persona, skillNames, controller.signal)
       } else {
         const turnResult = await runTurn(messages, {
-                      mode,
-            approveAction,
-            skillNames,
-            signal: controller.signal,
-            onTool: (event) => {
-
+          mode,
+          approveAction,
+          skillNames,
+          signal: controller.signal,
+          onTool: (event) => {
             taskSessions.update(task.id, {
               status: 'running',
               action: event.isError ? `Retrying after ${event.name}` : event.name,
@@ -1081,7 +1081,6 @@ async function runInteractive(): Promise<void> {
       unregisterControls()
       unregisterShutdown()
       setActiveTracker(undefined)
-      actionWindow.stop()
     }
     checkpoints.push({
       turn: checkpoints.length,
@@ -1129,17 +1128,21 @@ async function runInteractive(): Promise<void> {
       process.exitCode = 1
     }
     await saveSession(sessionId, messages)
-    writeUsageLine(renderContextStatus(messages, await countEpisodes(sessionId)))
+    const taskSummary = renderTaskSummary(taskSessions)
+    const contextLine = renderContextStatus(messages, await countEpisodes(sessionId))
+    writeUsageLine(taskSummary ? `${contextLine}  ·  ${dim(taskSummary)}` : contextLine)
     return
   }
 
   if (process.stdout.isTTY && !plainOutput && !machineReadable) await playIntro()
   if (!machineReadable && !quietOutput) {
+    const taskSummary = renderTaskSummary(taskSessions)
     process.stdout.write(
       `${box(
         [
           `${dim('provider')}  ${config.providerLabel}${config.routingMode === 'auto' ? dim(' · auto fallback on') : ''}${config.cascadeEnabled ? dim(` · fast tier ${config.tiers.fast.label}`) : ''}`,
           dim(describeThinking()),
+          ...(taskSummary ? [dim(taskSummary)] : []),
         ],
         { title: mode === 'cyber' ? 'elia — cyber mode' : mode === 'sports' ? 'elia — sports mode' : mode === 'fitness' ? 'elia — fitness mode' : 'elia — dev mode', borderColor: gold },
       )}\n`,
@@ -1322,6 +1325,115 @@ async function runInteractive(): Promise<void> {
     writeNotice(selectedSkillNames ? `Skill selected for subsequent turns: ${selectedSkillNames[0]}` : 'All loaded skills are available for subsequent turns.')
   }
 
+  /** Shared by the "/cyber", "/sports", persona slash commands, and the /settings mode picker so both paths stay in sync. */
+  function applyModePersonaChoice(choice: string): void {
+    if (choice === 'cyber') {
+      mode = 'cyber'
+      persona = undefined
+      writeNotice(
+        'cyber mode on — elia will help with authorized security testing, vuln research, and CTFs. Only point it at systems you own or are explicitly authorized to test.',
+      )
+      return
+    }
+    if (choice === 'sports') {
+      mode = 'sports'
+      persona = undefined
+      writeNotice('sports mode on — evidence-aware match, scouting, performance, league, event, and sports-business analysis.')
+      return
+    }
+    if (choice === 'fitness') {
+      mode = 'fitness'
+      persona = undefined
+      writeNotice('fitness mode on — conservative training, habit, recovery, and wellbeing support; not medical advice.')
+      return
+    }
+    const requestedPersona = choice === 'cybersecurity' ? 'cyber' : choice
+    if (isAgentPersona(requestedPersona)) {
+      persona = requestedPersona
+      writeNotice(`${persona.charAt(0).toUpperCase()}${persona.slice(1)} agent on — elia will answer in this persona until /dev.`)
+      return
+    }
+    const hadSpecialist = persona !== undefined || mode !== 'dev'
+    mode = 'dev'
+    persona = undefined
+    writeNotice(hadSpecialist ? 'Specialist mode/persona off — back to dev mode.' : 'dev mode remains active.')
+  }
+
+  const MODE_PERSONA_ENTRIES: { label: string; detail: string; value: string }[] = [
+    { label: 'Dev', detail: "elia's development mode — building, debugging, testing, browser & task workflows", value: 'dev' },
+    { label: 'Cyber', detail: 'authorized security testing, vuln research, CTFs', value: 'cyber' },
+    { label: 'Sports', detail: 'evidence-aware sports intelligence and operations', value: 'sports' },
+    { label: 'Fitness', detail: 'conservative fitness planning and wellbeing support', value: 'fitness' },
+    { label: 'Marketing', detail: 'Marketing agent persona', value: 'marketing' },
+    { label: 'Finance', detail: 'Finance agent persona', value: 'finance' },
+    { label: 'Business', detail: 'Business Analyst persona', value: 'business' },
+    { label: 'Data', detail: 'Data Analyst persona', value: 'data' },
+    { label: 'Research', detail: 'Research persona', value: 'research' },
+    { label: 'Cybersecurity', detail: 'Cybersecurity persona', value: 'cybersecurity' },
+    { label: 'Automation', detail: 'Automation persona', value: 'automation' },
+    { label: 'Communications', detail: 'Communications persona', value: 'communications' },
+    { label: 'AI / ML', detail: 'AI/ML persona', value: 'ai' },
+    { label: 'Production', detail: 'Production Engineering persona', value: 'production' },
+    { label: 'Tech', detail: 'Tech agent persona', value: 'tech' },
+  ]
+
+  async function handleModePersonaPicker(): Promise<void> {
+    const currentValue = persona ? (persona === 'cyber' ? 'cybersecurity' : persona) : mode
+    const currentIndex = Math.max(0, MODE_PERSONA_ENTRIES.findIndex((entry) => entry.value === currentValue))
+    const options = MODE_PERSONA_ENTRIES.map((entry) => ({
+      ...entry,
+      label: entry.value === currentValue ? `${entry.label} (current)` : entry.label,
+    }))
+    const result = await pick('Mode / persona', options, currentIndex)
+    if (result.type === 'select') applyModePersonaChoice(result.value)
+    else if (result.type === 'unavailable') writeNotice(`Current: ${currentValue}`)
+  }
+
+  /** Shared by "/mode auto"|"/mode manual" and the /settings risk-checks picker. */
+  function applyReplModeChoice(value: 'auto' | 'manual'): void {
+    replMode = value
+    writeNotice(
+      value === 'auto'
+        ? 'Auto mode — preliminary risk checks are skipped. Safe work runs immediately; governed irreversible actions still require explicit approval. "/mode manual" to re-enable checks.'
+        : 'Manual mode — elia flags risky commands and asks first; safe commands just run.',
+    )
+  }
+
+  async function handleReplModePicker(): Promise<void> {
+    const options = [
+      { label: replMode === 'manual' ? 'Manual (current)' : 'Manual', detail: 'flags risky commands, asks before running them', value: 'manual' },
+      { label: replMode === 'auto' ? 'Auto (current)' : 'Auto', detail: 'skips the pre-flight prompt; governed irreversible actions still require approval', value: 'auto' },
+    ]
+    const result = await pick('Risk checks', options, replMode === 'auto' ? 1 : 0)
+    if (result.type === 'select') applyReplModeChoice(result.value as 'auto' | 'manual')
+    else if (result.type === 'unavailable') writeNotice(`Current: ${replMode}`)
+  }
+
+  /** Top-level settings screen: every switchable setting in one arrow-key menu, looping until esc/cancel. */
+  async function handleSettingsCommand(): Promise<void> {
+    while (true) {
+      const modeSummary = persona ? `persona: ${persona === 'cyber' ? 'cybersecurity' : persona}` : `mode: ${mode}`
+      const options = [
+        { label: 'Mode / persona', detail: modeSummary, value: 'mode' },
+        { label: 'Risk checks', detail: replMode, value: 'replMode' },
+        { label: 'Model & provider', detail: `${config.providerLabel} · ${config.model}`, value: 'model' },
+        { label: 'Reasoning effort', detail: describeThinking(), value: 'thinking' },
+        { label: 'Skills', detail: selectedSkillNames ? selectedSkillNames.join(', ') : 'all loaded', value: 'skills' },
+      ]
+      const result = await pick('Settings', options)
+      if (result.type === 'unavailable') {
+        for (const option of options) writeUsageLine(`  ${option.label}: ${option.detail}`)
+        return
+      }
+      if (result.type !== 'select') return
+      if (result.value === 'mode') await handleModePersonaPicker()
+      else if (result.value === 'replMode') await handleReplModePicker()
+      else if (result.value === 'model') await handleModelCommand('')
+      else if (result.value === 'thinking') await handleThinkingCommand('')
+      else if (result.value === 'skills') await handleSkillsPicker()
+    }
+  }
+
   while (true) {
     const label = persona ? `${dim(`[${persona}]`)} ` : mode !== 'dev' ? `${dim(`[${mode}]`)} ` : ''
     const line = await prompt.question(`${label}${gold('❯')} `)
@@ -1344,40 +1456,30 @@ async function runInteractive(): Promise<void> {
       continue
     }
     if (trimmed === '/cyber' || trimmed === '/cyber on') {
-      mode = 'cyber'
-      persona = undefined
-      writeNotice(
-        'cyber mode on — elia will help with authorized security testing, vuln research, and CTFs. Only point it at systems you own or are explicitly authorized to test.',
-      )
+      applyModePersonaChoice('cyber')
       continue
     }
     if (trimmed === '/sports') {
-      mode = 'sports'
-      persona = undefined
-      writeNotice('sports mode on — evidence-aware match, scouting, performance, league, event, and sports-business analysis.')
+      applyModePersonaChoice('sports')
       continue
     }
     if (trimmed === '/fitness') {
-      mode = 'fitness'
-      persona = undefined
-      writeNotice('fitness mode on — conservative training, habit, recovery, and wellbeing support; not medical advice.')
+      applyModePersonaChoice('fitness')
       continue
     }
     const personaMatch = /^\/(marketing|finance|business|data|research|cybersecurity|automation|communications|ai|production|tech)$/.exec(trimmed)
-    const requestedPersona = personaMatch?.[1] === 'cybersecurity' ? 'cyber' : personaMatch?.[1]
-    if (requestedPersona && isAgentPersona(requestedPersona)) {
-      persona = requestedPersona
-      writeNotice(
-        `${persona.charAt(0).toUpperCase()}${persona.slice(1)} agent on — elia will answer in this persona until /dev.`,
-      )
+    if (personaMatch) {
+      applyModePersonaChoice(personaMatch[1]!)
       continue
     }
 
     if (trimmed === '/dev' || trimmed === '/normal' || trimmed === '/cyber off') {
-      const hadSpecialist = persona !== undefined || mode !== 'dev'
-      mode = 'dev'
-      persona = undefined
-      writeNotice(hadSpecialist ? 'Specialist mode/persona off — back to dev mode.' : 'dev mode remains active.')
+      applyModePersonaChoice('dev')
+      continue
+    }
+
+    if (trimmed === '/settings') {
+      await handleSettingsCommand()
       continue
     }
 
@@ -1399,14 +1501,18 @@ async function runInteractive(): Promise<void> {
       continue
     }
 
-    if (trimmed === '/mode auto') {
-      replMode = 'auto'
-      writeNotice('Auto mode — preliminary risk checks are skipped. Safe work runs immediately; governed irreversible actions still require explicit approval. "/mode manual" to re-enable checks.')
-      continue
-    }
-    if (trimmed === '/mode manual') {
-      replMode = 'manual'
-      writeNotice('Manual mode — elia flags risky commands and asks first; safe commands just run.')
+    const modeMatch = /^\/mode(?:\s+(.*))?$/.exec(trimmed)
+    if (modeMatch) {
+      const modeArg = modeMatch[1]?.trim()
+      if (!modeArg) {
+        await handleModePersonaPicker()
+      } else if (modeArg === 'auto') {
+        applyReplModeChoice('auto')
+      } else if (modeArg === 'manual') {
+        applyReplModeChoice('manual')
+      } else {
+        applyModePersonaChoice(modeArg)
+      }
       continue
     }
 
@@ -1458,7 +1564,9 @@ async function runInteractive(): Promise<void> {
       writeError(`Error: ${err instanceof Error ? err.message : String(err)}`)
     }
     await saveSession(sessionId, messages)
-    writeUsageLine(renderContextStatus(messages, await countEpisodes(sessionId)))
+    const taskSummary = renderTaskSummary(taskSessions)
+    const contextLine = renderContextStatus(messages, await countEpisodes(sessionId))
+    writeUsageLine(taskSummary ? `${contextLine}  ·  ${dim(taskSummary)}` : contextLine)
   }
 
   prompt.close()
@@ -1475,6 +1583,8 @@ async function main() {
   process.on('exit', flushUsageStats)
 
   await taskSessions.load()
+  updateTerminalTaskTitle(taskSessions)
+  taskSessions.subscribe(() => updateTerminalTaskTitle(taskSessions))
 
   switch (subcommand) {
     case 'auto':

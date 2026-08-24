@@ -23,18 +23,13 @@ test('communication drafts persist and remain unsent until explicitly approved',
   }
 })
 
-test('send requires an exact token and records a connector receipt', async () => {
+test('send runs directly and records a connector receipt — approval is the action governor\'s job, not this tool\'s', async () => {
   const previous = process.env.ELIA_COMMUNICATION_BRIDGE_COMMAND
-  process.env.ELIA_COMMUNICATION_BRIDGE_COMMAND = 'cat'
+  process.env.ELIA_COMMUNICATION_BRIDGE_COMMAND = 'bun -e "process.stdin.pipe(process.stdout)"'
   const created = await communicationTool.execute({ action: 'draft', channel: 'message', recipient: '@cofounder', body: 'Please review the release.' })
   const draftId = draftIdFrom(created)
   try {
-    const pending = await communicationTool.execute({ action: 'send', draftId })
-    const token = pending.match(/confirmationToken=(communication_approval_[^\. ]+)/)?.[1]
-    expect(token).toBeDefined()
-    const changed = await communicationTool.execute({ action: 'send', draftId, confirmationToken: `${token}changed` })
-    expect(changed).toContain('Approval required')
-    const sent = await communicationTool.execute({ action: 'send', draftId, confirmationToken: token })
+    const sent = await communicationTool.execute({ action: 'send', draftId })
     expect(sent).toContain('sent through message')
     const verified = await communicationTool.execute({ action: 'verify', draftId })
     expect(verified).toContain('Delivery verification succeeded')

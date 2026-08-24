@@ -91,6 +91,10 @@ export async function readBoundedOutput(stream: ReadableStream<Uint8Array>, maxL
       const chunk = decoder.decode(value, { stream: true })
       totalLength += chunk.length
       if (output.length < limit) output += chunk.slice(0, limit - output.length)
+      if (totalLength > limit) {
+        await reader.cancel()
+        return `${output}\n[additional characters omitted]`
+      }
     }
     const finalChunk = decoder.decode()
     totalLength += finalChunk.length
@@ -102,7 +106,17 @@ export async function readBoundedOutput(stream: ReadableStream<Uint8Array>, maxL
 }
 
 export function terminateProcessGroup(proc: Bun.Subprocess): void {
-  if (process.platform !== 'win32' && proc.pid) {
+  if (process.platform === 'win32' && proc.pid) {
+    try {
+      Bun.spawnSync(['taskkill.exe', '/PID', String(proc.pid), '/T', '/F'], { stdout: 'ignore', stderr: 'ignore' })
+    } catch {
+      try {
+        proc.kill()
+      } catch {
+        return
+      }
+    }
+  } else if (proc.pid) {
     try {
       process.kill(-proc.pid, 'SIGTERM')
     } catch {

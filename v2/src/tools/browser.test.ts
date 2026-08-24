@@ -1,11 +1,10 @@
 import { expect, test } from 'bun:test'
-import { browserTool, isSensitiveBrowserInput, validateRequest } from './browser.ts'
+import { browserTool, validateRequest } from './browser.ts'
 
 test('validateRequest accepts an absolute navigation URL', () => {
   expect(validateRequest({ action: 'navigate', url: 'https://example.com' })).toEqual({
     action: 'navigate',
     url: 'https://example.com',
-    confirmed: false,
   })
 })
 
@@ -13,35 +12,13 @@ test('validateRequest rejects non-http navigation targets', () => {
   expect(() => validateRequest({ action: 'navigate', url: 'javascript:alert(1)' })).toThrow('absolute http(s) url')
 })
 
-test('sensitive browser inputs are detected conservatively', () => {
-  expect(isSensitiveBrowserInput({ target: 'Buy now' })).toBe(true)
-  expect(isSensitiveBrowserInput({ target: 'Read product details' })).toBe(false)
-})
-
-test('side-effecting actions require an exact approval token and become paused sessions', async () => {
-  const result = await browserTool.execute({ action: 'click', target: 'Publish' })
-  expect(result).toContain('Confirmation required')
-  expect(result).toContain('confirmationToken=approval_')
-  expect(result).toContain('Task session:')
-})
-
-test('approval tokens are bound to the exact target and consumed once', async () => {
-  const pending = await browserTool.execute({ action: 'click', target: 'Send' })
-  const token = pending.match(/confirmationToken=(approval_[^\. ]+)/)?.[1]
-  expect(token).toBeDefined()
-
+test('click actions run directly — approval for state-changing actions is the action governor\'s job, not this tool\'s', async () => {
   const previousBridge = process.env.ELIA_BROWSER_BRIDGE_COMMAND
-  process.env.ELIA_BROWSER_BRIDGE_COMMAND = 'cat'
+  process.env.ELIA_BROWSER_BRIDGE_COMMAND = 'bun -e "process.stdin.pipe(process.stdout)"'
   try {
-    const changedTarget = await browserTool.execute({ action: 'click', target: 'Delete', confirmed: true, confirmationToken: token })
-    expect(changedTarget).toContain('Confirmation required')
-
-    const approved = await browserTool.execute({ action: 'click', target: 'Send', confirmed: true, confirmationToken: token })
-    expect(approved).not.toContain('Confirmation required')
-    expect(approved).toContain('Task session:')
-
-    const reused = await browserTool.execute({ action: 'click', target: 'Send', confirmed: true, confirmationToken: token })
-    expect(reused).toContain('Confirmation required')
+    const result = await browserTool.execute({ action: 'click', target: 'Send' })
+    expect(result).not.toContain('Confirmation required')
+    expect(result).toContain('Task session:')
   } finally {
     if (previousBridge === undefined) delete process.env.ELIA_BROWSER_BRIDGE_COMMAND
     else process.env.ELIA_BROWSER_BRIDGE_COMMAND = previousBridge
@@ -87,7 +64,7 @@ test('verify requires an explicit expectation', () => {
 
 test('post-action URL expectations are checked against a follow-up snapshot', async () => {
   const previousBridge = process.env.ELIA_BROWSER_BRIDGE_COMMAND
-  process.env.ELIA_BROWSER_BRIDGE_COMMAND = "printf '%s' '{\"ok\":true,\"result\":{\"url\":\"https://example.com/done\",\"text\":\"Done\"}}'"
+  process.env.ELIA_BROWSER_BRIDGE_COMMAND = "bun -e \"process.stdin.resume();process.stdin.on('end',()=>console.log(JSON.stringify({ok:true,result:{url:'https://example.com/done',text:'Done'}})))\""
   try {
     const result = await browserTool.execute({ action: 'navigate', url: 'https://example.com/start', expectUrl: 'https://example.com/done' })
     expect(result).toContain('https://example.com/done')

@@ -12,22 +12,35 @@ Beyond the usual loop, elia does three things most terminal agents don't:
 
 - [Bun](https://bun.sh) >= 1.3
 
+## Install
+
+Run without installing:
+
+```bash
+bunx @mdsahilmolla/elia
+```
+
+Or install globally with Bun or npm:
+
+```bash
+bun add --global @mdsahilmolla/elia
+# or
+npm install --global @mdsahilmolla/elia
+
+elia --help
+```
+
+## License
+
+Elia is licensed under the [GNU Affero General Public License v3.0](LICENSE).
+
 ### Dev mode
 
 Elia’s default general-purpose coding mode is called **dev mode**. It covers building, debugging, refactoring, testing, software operations, browser work, and task delegation. Start it explicitly with `elia --dev`, or switch back to it interactively with `/dev`. The old `/normal` command remains accepted as a compatibility alias but is not shown in command completion.
 
 Dev mode is separate from execution policy: manual policy asks before risky actions, while auto policy skips preliminary risk checks but keeps governed irreversible actions behind explicit approval unless unattended execution has been explicitly requested.
 
-## Installation and setup
-
-After the package is published, install the CLI globally with npm or Bun:
-
-```bash
-npm install --global elia
-bun add --global elia
-```
-
-For a one-off invocation without a global install, use `bunx elia --help`.
+## Configuration
 
 The recommended first-run setup stores the selected provider and API key in a user-level file rather than in the project repository:
 
@@ -55,12 +68,6 @@ cp .env.example .env
 ```
 
 Edit `.env` to pick a provider and set its key. `ELIA_PROVIDER` defaults to `anthropic`. The user-level `elia config set` flow and `.env` are alternative configuration paths; you do not need both.
-
-### Proprietary licensing
-
-Elia is **proprietary software**, not an open-source project. The package includes a proprietary license in [`LICENSE`](LICENSE). Unless a separate written commercial agreement says otherwise, the permitted scope is limited to authorized personal evaluation and internal development use; redistribution, resale, hosted third-party use, and derivative works are restricted.
-
-The included license identifies the current project owner and should receive qualified legal review before a public npm release or commercial distribution. Users remain responsible for the providers, credentials, data, browser sessions, commands, and consequential external actions they connect to Elia.
 
 | Provider | `ELIA_PROVIDER` | API key env var | Default model |
 |---|---|---|---|
