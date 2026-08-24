@@ -2,7 +2,7 @@
 
 **Status:** Engineering and provenance decision record
 **Reviewed:** 2026-08-24
-**Elia baseline:** `manus` at `211eeb402927210e9f5154cabbb110d176114f93`
+**Elia baseline:** `manus` at `d95d6c836ac2a787df4e06327a51d55cfb6e09f7`
 **Codex revision inspected:** `2df67054232090af8d2fa197c46b994bc2b0dda1`
 
 > This document is an engineering and provenance assessment, not legal advice. A qualified license review is required before distributing a derivative product that vendors third-party source or binaries.
@@ -69,6 +69,8 @@ The smallest high-value integration is an **optional Codex-compatible backend ad
 
 The selected clean-room command-identity utility is implemented in `src/autonomy/commandIdentity.ts` and integrated into `src/autonomy/goalGraph.ts`. Its tests cover recognized POSIX and PowerShell wrapper paths, exact complex-script preservation, mode separation, unknown executable paths, and durable action-key replay. The utility changes only the durable identity used for replay/approval matching; Elia still stores the raw input digest and executes the original command unchanged. This does not copy Codex source and does not create a third-party license obligation.
 
+The development-mode hook layer is implemented in `src/autonomy/devHooks.ts` and integrated into `src/agentLoop.ts`, `src/agent.ts`, and `src/autonomy/loop.ts`. It independently reimplements the general concept of a declarative pre-tool validator studied in Claude Code’s public examples, using literal JSON-input matching and static explanations rather than scripts, modules, or copied source. Hooks can only block; they cannot grant permission or bypass Elia’s action contracts, autonomy governor, durable goal graph, or external-side-effect approvals. The feature is opt-in and disabled in non-development modes.
+
 Full Rust engine embedding is rejected at this stage. It would add a second execution runtime, cross-platform sandbox complexity, a large transitive dependency graph, separate release and vulnerability-management obligations, and a difficult boundary for Elia’s durable leases and receipts. A helper process could be revisited later if an isolated sandbox requirement cannot be met by the host platform and the helper contract is independently reviewed.
 
 ## Direct-reuse procedure if later approved
@@ -87,7 +89,7 @@ No Claude Code source may enter this procedure unless Anthropic provides separat
 
 ## Implementation record
 
-This change adds no `third_party/` vendor tree, no Rust runtime, no Codex binary, no Claude Code source, and no new package dependency. The only implementation is an independently authored TypeScript utility and its regression tests. It preserves Elia’s raw model behavior, governor decisions, action contracts, execution path, and receipts. A future direct Codex source reuse would require the procedure above and must be reviewed separately.
+This change adds no `third_party/` vendor tree, no Rust runtime, no Codex binary, no Claude Code source, and no new package dependency. The implementation consists of independently authored TypeScript utilities, a supplementary dev-mode hook gate, documentation, and regression tests. It preserves Elia’s raw model behavior, governor decisions, action contracts, execution path, and receipts. A future direct Codex source reuse would require the procedure above and must be reviewed separately.
 
 ## Outcome
 

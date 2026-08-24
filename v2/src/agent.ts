@@ -12,6 +12,7 @@ import { setActiveMode, type AgentMode } from './autonomy/mode.ts'
 import { noteToolUse } from './ledger.ts'
 import { appendActionAudit } from './autonomy/audit.ts'
 import { createActionGovernor, withActionGovernor, type ActionApproval, type GovernanceMode } from './autonomy/governor.ts'
+import { loadDevelopmentToolHooks, withToolHooks } from './autonomy/devHooks.ts'
 
 export type { ConversationMessage }
 export type { AgentMode }
@@ -66,7 +67,8 @@ export async function runTurn(
     approve: options.approveAction,
   })
 
-  const result = await withActionGovernor(governor, () => runAgentLoop({
+  const hooks = mode === 'dev' ? loadDevelopmentToolHooks() : []
+  const result = await withToolHooks(hooks, () => withActionGovernor(governor, () => runAgentLoop({
     messages,
     systemPrompt,
     tools,
@@ -85,7 +87,7 @@ export async function runTurn(
       noteToolUse(event.input)
       options.onTool?.(event)
     },
-  }))
+  })))
   const elapsedMs = Date.now() - startedAt
 
   recordUsage(result.usage)

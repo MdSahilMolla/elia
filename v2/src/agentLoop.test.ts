@@ -2,6 +2,8 @@ import { expect, test } from 'bun:test'
 import type { ConversationMessage } from './agentLoop.ts'
 import type { ContentBlock } from './providers/types.ts'
 import type { Tool } from './tools/types.ts'
+import { createActionGovernor, withActionGovernor } from './autonomy/governor.ts'
+import { parseToolHooks, withToolHooks } from './autonomy/devHooks.ts'
 
 // config.ts resolves a provider at import time and fails fast without a key —
 // set a placeholder before importing so the module loads; we swap in a stub
@@ -68,6 +70,45 @@ test('runAgentLoop sums usage across multiple tool-call round trips, not just th
 
   expect(usage).toEqual({ inputTokens: 150, outputTokens: 15, cacheReadTokens: 20, cacheWriteTokens: 0 })
   expect(call).toBe(2)
+})
+
+test('dev hooks block a matching tool before execution and preserve the normal tool-result loop', async () => {
+  const originalProvider = config.provider
+  let calls = 0
+  let executions = 0
+  config.provider = {
+    async streamTurn() {
+      calls += 1
+      if (calls === 1) return { content: [{ type: 'tool_use', id: 'hooked', name: 'noop', input: { value: 'blocked' } }] as ContentBlock[], usage: { inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 } }
+      return { content: [{ type: 'text', text: 'continued after hook' }] as ContentBlock[], usage: { inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 } }
+    },
+  }
+  const noopTool: Tool = {
+    name: 'noop',
+    description: 'does nothing',
+    input_schema: { type: 'object', properties: {} },
+    async execute() {
+      executions += 1
+      return 'should not execute'
+    },
+  }
+  const messages: ConversationMessage[] = [{ role: 'user', content: [{ type: 'text', text: 'go' }] }]
+  const hooks = parseToolHooks(JSON.stringify([{ id: 'block-noop', tool: 'noop', message: 'noop is disabled for this dev run' }]))
+
+  try {
+    const result = await withToolHooks(hooks, () => withActionGovernor(createActionGovernor({ mode: 'unattended' }), () => runAgentLoop({
+      messages,
+      systemPrompt: 'test',
+      tools: [noopTool],
+      useAnimation: false,
+      verbose: false,
+    })))
+    expect(result.stopReason).toBe('complete')
+    expect(executions).toBe(0)
+    expect(messages.some((message) => Array.isArray(message.content) && message.content.some((block) => block.type === 'tool_result' && block.is_error && block.content.includes('block-noop')))).toBe(true)
+  } finally {
+    config.provider = originalProvider
+  }
 })
 
 test('runAgentLoop retries transient provider failures before output', async () => {

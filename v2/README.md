@@ -40,6 +40,23 @@ Elia’s default general-purpose coding mode is called **dev mode**. It covers b
 
 Dev mode is separate from execution policy: manual policy asks before risky actions, while auto policy skips preliminary risk checks but keeps governed irreversible actions behind explicit approval unless unattended execution has been explicitly requested.
 
+### Dev-mode project hooks
+
+Dev mode can load optional declarative validators from `.elia/dev-hooks.json`, or from the `ELIA_DEV_HOOKS` environment variable. Hooks can block a matching tool request with a static explanation, which is useful for repository conventions such as preferring `rg`, requiring a project-specific command, or disallowing browser mutations in an unsupervised workflow. They match only an exact tool name and/or a literal substring in the tool input; they cannot execute scripts, load modules, call URLs, grant approvals, or override the autonomy governor.
+
+```json
+[
+  {
+    "id": "prefer-rg",
+    "tool": "run_command",
+    "inputContains": "grep ",
+    "message": "Use rg instead of grep for repository searches."
+  }
+]
+```
+
+Malformed or oversized hook configuration fails closed. Hooks are inherited by delegated workers and autonomous repair passes in dev mode, but they are not loaded in Cybersecurity, Sports, or Fitness modes. See [`docs/dev-mode-hooks.md`](docs/dev-mode-hooks.md) for the full contract and safety model.
+
 ## Configuration
 
 The recommended first-run setup stores the selected provider and API key in a user-level file rather than in the project repository:

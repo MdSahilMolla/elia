@@ -13,6 +13,8 @@ import { createToolResultCache } from '../speculation/cache.ts'
 import { createPrefetcher } from '../speculation/prefetch.ts'
 import { createBlackboard, setActiveBlackboard } from './blackboard.ts'
 import { withAgentIdentity } from './context.ts'
+import { activeMode } from './mode.ts'
+import { loadDevelopmentToolHooks, withToolHooks } from './devHooks.ts'
 import { createJournal, newRunId, type Journal } from './journal.ts'
 import { planWaves, runFleet } from './fleet.ts'
 import { runVariants } from './variants.ts'
@@ -167,7 +169,12 @@ Fix everything listed. When you are done, re-run the verification commands yours
  * commit; and each boundary writes a checkpoint, so any of them can be re-entered
  * later with a different decision.
  */
-export async function runAutonomousTask(options: AutonomousRunOptions): Promise<AutonomousRunResult> {
+export function runAutonomousTask(options: AutonomousRunOptions): Promise<AutonomousRunResult> {
+  const hooks = activeMode() === 'dev' ? loadDevelopmentToolHooks() : []
+  return withToolHooks(hooks, () => runAutonomousTaskInternal(options))
+}
+
+async function runAutonomousTaskInternal(options: AutonomousRunOptions): Promise<AutonomousRunResult> {
   const { goal, approve, signal } = options
   const profile = options.profile ?? 'balanced'
   const configuredWallClockMs = options.maxWallClockMs ?? (Number.parseInt(process.env.ELIA_MAX_RUN_MS ?? '0', 10) || 0)
