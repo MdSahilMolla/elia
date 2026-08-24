@@ -23,6 +23,7 @@ import { dataScienceTool } from './dataScience.ts'
 import { sportsTool } from './sports.ts'
 import { fitnessTool } from './fitness.ts'
 import { environmentTool } from './environment.ts'
+import { todoWriteTool } from './todo.ts'
 import type { Tool } from './types.ts'
 
 /** The built-in file and shell tools. */
@@ -33,6 +34,7 @@ export const tools: Tool[] = [
   listFilesTool,
   grepTool,
   runCommandTool,
+  todoWriteTool,
   recallTool,
   projectProfileTool,
   productionReadinessTool,

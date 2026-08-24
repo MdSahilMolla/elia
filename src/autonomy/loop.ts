@@ -12,6 +12,7 @@ import { writeBlock, writeFail, writePass, writePhase, writeSubStep, writeSummar
 import { createToolResultCache } from '../speculation/cache.ts'
 import { createPrefetcher } from '../speculation/prefetch.ts'
 import { createBlackboard, setActiveBlackboard } from './blackboard.ts'
+import { createTodoList, setActiveTodoList } from './todoList.ts'
 import { withAgentIdentity } from './context.ts'
 import { activeMode } from './mode.ts'
 import { loadDevelopmentToolHooks, withToolHooks } from './devHooks.ts'
@@ -233,6 +234,8 @@ async function runAutonomousTaskInternal(options: AutonomousRunOptions): Promise
   }, 250)
   const graph = GoalGraphStore.open({ runId, goal, dir: journal.dir })
   const board = createBlackboard(`${journal.dir}/board.json`)
+  // Per run, like the blackboard: a resumed run should not inherit a stale plan.
+  setActiveTodoList(createTodoList(`${journal.dir}/todo.json`))
   setActiveBlackboard(board)
 
   let usage = ZERO_USAGE

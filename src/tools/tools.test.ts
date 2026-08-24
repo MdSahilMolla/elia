@@ -7,7 +7,7 @@ import { editFileTool } from './editFile.ts'
 import { grepTool } from './grep.ts'
 import { listFilesTool } from './listFiles.ts'
 import { readFileTool } from './readFile.ts'
-import { runCommandTool } from './runCommand.ts'
+import { defaultTimeoutForCommand, runCommandTool } from './runCommand.ts'
 import { writeFileTool } from './writeFile.ts'
 import { dataScienceTool } from './dataScience.ts'
 import { readSpreadsheetTool } from './readSpreadsheet.ts'
@@ -167,4 +167,62 @@ test('file tools reject traversal and symlink escapes without changing outside f
 
   expect(readFileSync(outsideFile, 'utf8')).toBe('original')
   rmSync(outsideDir, { recursive: true, force: true })
+})
+
+test('read_file windows into a section with offset and limit', async () => {
+  const path = join(testDir, 'multiline.txt')
+  writeFileSync(path, Array.from({ length: 10 }, (_, i) => `line ${i + 1}`).join('\n'))
+
+  const window = await executeTool('read_file', { path, offset: 3, limit: 2 })
+  expect(window).toBe('3\tline 3\n4\tline 4\n\n[6 more line(s); pass offset 5 to continue]')
+
+  const rest = await executeTool('read_file', { path, offset: 5 })
+  expect(rest).toContain('5\tline 5')
+  expect(rest).toContain('10\tline 10')
+  expect(rest).not.toContain('more line(s)')
+})
+
+test('read_file rejects a non-positive offset or limit', async () => {
+  const path = join(testDir, 'hello.txt')
+  await expect(executeTool('read_file', { path, offset: 0 })).rejects.toThrow('offset must be a positive integer')
+  await expect(executeTool('read_file', { path, limit: -1 })).rejects.toThrow('limit must be a positive integer')
+})
+
+test('grep filters by glob and can include surrounding context', async () => {
+  writeFileSync(join(testDir, 'grep-target.md'), 'above\nhi from elia\nbelow\n')
+
+  const onlyMd = await executeTool('grep', { pattern: 'hi from', path: testDir, glob: '*.md' })
+  expect(onlyMd).toContain('grep-target.md')
+  expect(onlyMd).not.toContain('hello.txt')
+
+  const withContext = await executeTool('grep', { pattern: 'hi from', path: testDir, glob: '*.md', context: 1 })
+  expect(withContext).toContain('above')
+  expect(withContext).toContain('below')
+})
+
+test('grep rejects an out-of-range context value', async () => {
+  await expect(executeTool('grep', { pattern: 'x', path: testDir, context: -1 })).rejects.toThrow('context must be an integer')
+  await expect(executeTool('grep', { pattern: 'x', path: testDir, context: 21 })).rejects.toThrow('context must be an integer')
+})
+
+test('run_command honors an explicit timeoutMs and kills a command that overruns it', async () => {
+  const command = process.platform === 'win32' ? 'ping -n 5 127.0.0.1 >NUL' : 'sleep 5'
+  const result = await executeTool('run_command', { command, timeoutMs: 1_000 })
+  expect(result).toContain('timed out after')
+})
+
+test('run_command rejects an out-of-range timeoutMs', async () => {
+  await expect(executeTool('run_command', { command: 'echo hi', timeoutMs: 500 })).rejects.toThrow('timeoutMs must be an integer')
+  await expect(executeTool('run_command', { command: 'echo hi', timeoutMs: 700_000 })).rejects.toThrow('timeoutMs must be an integer')
+})
+
+test('run_command gives installs, builds, and test runs a longer default timeout', () => {
+  // A 60s cap killed these midway, leaving a half-installed tree that then
+  // broke every downstream build, test, and verification step.
+  for (const command of ['npm install', 'npm ci', 'pnpm add left-pad', 'bun install', 'pip install -r requirements.txt', 'pip3 install torch', 'npm run build', 'npm run test', 'cargo build --release', 'docker build -t app .']) {
+    expect(defaultTimeoutForCommand(command)).toBe(300_000)
+  }
+  for (const command of ['echo hello', 'git status', 'ls -la']) {
+    expect(defaultTimeoutForCommand(command)).toBe(60_000)
+  }
 })

@@ -131,7 +131,7 @@ export function assessAction(request: ActionRequest, cwd = currentAgent().cwd ??
       : assessment('safe', 'allow', `${name} is workspace-scoped and checkpointable`, name, path ? [path] : [], true)
   }
 
-  if (name === 'read_file' || name === 'list_files' || name === 'grep' || name === 'recall' || name === 'board_read' || name === 'board_post') {
+  if (name === 'read_file' || name === 'list_files' || name === 'grep' || name === 'recall' || name === 'board_read' || name === 'board_post' || name === 'todo_write') {
     const path = typeof input.path === 'string' ? input.path : ''
     return path && !isPathWithinWorkspace(path, cwd)
       ? assessment('critical', 'approve', `${name} may access data outside the active workspace or through an invalid path`, name, [path], false)
