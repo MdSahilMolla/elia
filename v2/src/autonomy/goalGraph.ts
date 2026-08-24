@@ -1,11 +1,12 @@
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { AsyncLocalStorage } from 'node:async_hooks'
 import type { Proposal } from './types.ts'
 import type { ActionRequest } from './governor.ts'
 import type { ActionContract, ContractEvaluation } from './actionContract.ts'
 import { canonicalizeCommandForIdentity } from './commandIdentity.ts'
+import { ensureSecureDirectory, hardenSecureFile, writeSecureFile } from '../securePersistence.ts'
 
 export const GOAL_GRAPH_VERSION = 2
 export const EXECUTION_LEASE_TTL_MS = 120_000
@@ -139,9 +140,10 @@ export class GoalGraphStore {
   }
 
   static open(options: GoalGraphOptions): GoalGraphStore {
-    mkdirSync(options.dir, { recursive: true })
+    ensureSecureDirectory(options.dir)
     const path = join(options.dir, 'goal-graph.json')
     if (existsSync(path)) {
+      hardenSecureFile(path)
       try {
         const parsed = JSON.parse(readFileSync(path, 'utf8')) as GoalGraphSnapshot
         if ((parsed.version === 1 || parsed.version === GOAL_GRAPH_VERSION) && parsed.runId === options.runId) {
@@ -637,10 +639,8 @@ export class GoalGraphStore {
   }
 
   private persist(): void {
-    mkdirSync(this.options.dir, { recursive: true })
-    const temporary = `${this.path}.tmp-${process.pid}`
-    writeFileSync(temporary, JSON.stringify(this.snapshot, null, 2))
-    renameSync(temporary, this.path)
+    ensureSecureDirectory(this.options.dir)
+    writeSecureFile(this.path, JSON.stringify(this.snapshot, null, 2))
   }
 }
 

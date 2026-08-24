@@ -9,6 +9,7 @@ test('redacts credential-shaped keys recursively', () => {
 })
 
 test('redacts common secret-shaped values in free text and bounds previews', () => {
-  expect(redactText('token=ghp_1234567890abcdefghij')).toContain('[REDACTED]')
+  const syntheticToken = ['ghp_', '1234567890abcdefghij'].join('')
+  expect(redactText(`token=${syntheticToken}`)).toContain('[REDACTED]')
   expect(redactText('a '.repeat(200), 30).length).toBe(30)
 })

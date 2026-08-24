@@ -1,4 +1,4 @@
-import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import type { ToolEvent } from '../agentLoop.ts'
 import type { CriticVerdict, Proposal } from './types.ts'
@@ -8,6 +8,7 @@ import type { JournalEvent } from './journal.ts'
 import type { GoalGraphSnapshot } from './goalGraph.ts'
 import type { Usage } from '../providers/types.ts'
 import type { CompletionAssessment } from './outcome.ts'
+import { appendSecureFile, ensureSecureDirectory, writeSecureFile } from '../securePersistence.ts'
 
 export interface ActionLedgerRecord {
   at: number
@@ -78,8 +79,7 @@ export function appendActionAudit(event: ToolEvent, runIdOverride?: string): voi
   const runId = runIdOverride ?? identity.runId
   const filePath = runId ? join(process.cwd(), '.elia', 'runs', runId, 'actions.ndjson') : join(process.cwd(), '.elia', 'action-ledger.ndjson')
   try {
-    mkdirSync(dirname(filePath), { recursive: true })
-    appendFileSync(filePath, `${JSON.stringify(record)}\n`)
+    appendSecureFile(filePath, `${JSON.stringify(record)}\n`)
   } catch {
     // Auditing is best effort and must never take down the task it describes.
   }
@@ -175,9 +175,9 @@ export function writeRunReceipt(input: RunReceiptInput): void {
 
   const dir = join(process.cwd(), '.elia', 'runs', input.runId)
   try {
-    mkdirSync(dir, { recursive: true })
-    writeFileSync(join(dir, 'receipt.json'), JSON.stringify(receipt, null, 2))
-    writeFileSync(join(dir, 'receipt.md'), renderReceipt(receipt))
+    ensureSecureDirectory(dir)
+    writeSecureFile(join(dir, 'receipt.json'), JSON.stringify(receipt, null, 2))
+    writeSecureFile(join(dir, 'receipt.md'), renderReceipt(receipt))
   } catch {
     // A missing receipt should not erase the actual run result.
   }

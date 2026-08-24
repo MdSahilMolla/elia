@@ -1,6 +1,6 @@
 import type { Tool } from './types.ts'
 import { captureBeforeWrite } from '../checkpoint.ts'
-import { resolvePath } from '../autonomy/context.ts'
+import { resolveWorkspacePath } from '../autonomy/context.ts'
 
 export const editFileTool: Tool = {
   name: 'edit_file',
@@ -25,7 +25,7 @@ export const editFileTool: Tool = {
     if (typeof input.new_string !== 'string') {
       throw new Error('edit_file requires a "new_string" string argument (use an empty string to delete old_string).')
     }
-    const path = resolvePath(input.path)
+    const path = resolveWorkspacePath(input.path)
     const oldString = input.old_string
     const newString = input.new_string
 

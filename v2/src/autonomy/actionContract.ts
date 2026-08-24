@@ -1,6 +1,7 @@
 import { existsSync, statSync } from 'node:fs'
-import { basename, isAbsolute, relative, resolve } from 'node:path'
+import { basename } from 'node:path'
 import type { ActionRequest } from './governor.ts'
+import { isPathWithinWorkspace, resolveWorkspacePath } from './context.ts'
 
 export type ContractFailureDisposition = 'retryable' | 'human-review'
 export type ContractCheckKind = 'command-available' | 'browser-transport' | 'workspace-path' | 'shell-exit-zero' | 'result-contains' | 'result-url-prefix'
@@ -63,13 +64,14 @@ export function contractForAction(request: ActionRequest, cwd: string, idempoten
 
   if (request.name === 'write_file' || request.name === 'edit_file') {
     const rawPath = typeof request.input.path === 'string' ? request.input.path : ''
-    const target = rawPath ? resolve(cwd, rawPath) : ''
-    const rel = target ? relative(cwd, target) : ''
-    const outside = !target || rel === '..' || rel.startsWith('../') || rel.startsWith('..\\') || isAbsolute(rel)
-    if (!outside) {
-      preconditions.push({ kind: 'workspace-path', value: target, description: 'the file target must remain inside the active workspace' })
-      postconditions.push({ kind: 'workspace-path', value: target, description: `${basename(target)} must exist after the write` })
+    let target = rawPath
+    try {
+      target = resolveWorkspacePath(rawPath, cwd)
+    } catch {
+      // Preserve the raw value so evaluation records an explicit containment failure.
     }
+    preconditions.push({ kind: 'workspace-path', value: target, description: 'the file target must remain inside the active workspace and contain no symlink escape' })
+    postconditions.push({ kind: 'workspace-path', value: target, description: `${basename(target || rawPath || 'file')} must exist after the write` })
   }
 
   return {
@@ -99,10 +101,14 @@ export async function evaluatePreconditions(contract: ActionContract, cwd: strin
       continue
     }
     if (check.kind === 'workspace-path') {
-      const target = check.value ?? ''
-      const rel = target ? relative(cwd, target) : '..'
-      if (rel !== '..' && !rel.startsWith('../') && !rel.startsWith('..\\') && !isAbsolute(rel)) evidence.push(`workspace target accepted: ${rel || '.'}`)
-      else failures.push('file target escapes the active workspace')
+      try {
+        const target = resolveWorkspacePath(check.value ?? '', cwd)
+        if (isPathWithinWorkspace(target, cwd)) evidence.push(`workspace target accepted: ${target}`)
+        else failures.push('file target escapes the active workspace')
+      } catch {
+        failures.push('file target escapes the active workspace or crosses a symlink boundary')
+      }
+      continue
     }
   }
   return { ok: failures.length === 0, phase: 'precondition', failures, evidence, nextAction: failures.length > 0 ? 'Fix the missing environment or ask the user to take over; do not retry blindly.' : undefined }
@@ -132,12 +138,11 @@ export function evaluatePostconditions(contract: ActionContract, result: string,
     }
     if (check.kind === 'workspace-path') {
       try {
-        const target = resolve(cwd, check.value ?? '')
-        const rel = relative(cwd, target).replaceAll('\\', '/')
-        if (existsSync(target) && statSync(target).isFile()) evidence.push(`artifact exists: ${rel}`)
-        else failures.push(`expected file artifact does not exist: ${rel}`)
+        const target = resolveWorkspacePath(check.value ?? '', cwd)
+        if (existsSync(target) && statSync(target).isFile()) evidence.push(`artifact exists: ${target}`)
+        else failures.push(`expected file artifact does not exist inside the active workspace: ${target}`)
       } catch {
-        failures.push(`could not inspect expected file artifact: ${check.value ?? '(unknown)'}`)
+        failures.push(`could not inspect expected file artifact inside the active workspace: ${check.value ?? '(unknown)'}`)
       }
     }
   }

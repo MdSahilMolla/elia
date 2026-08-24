@@ -1,5 +1,5 @@
 import { existsSync, readdirSync, statSync } from 'node:fs'
-import { mkdir } from 'node:fs/promises'
+import { ensureSecureDirectory, hardenSecureFile, writeSecureBunFile } from './securePersistence.ts'
 import { join } from 'node:path'
 import type { ConversationMessage } from './agentLoop.ts'
 import { writeError } from './ui/stream.ts'
@@ -28,8 +28,9 @@ export async function saveSession(
     return
   }
   try {
-    await mkdir(dir, { recursive: true })
-    await Bun.write(join(dir, `${id}.json`), JSON.stringify(session))
+    const path = join(dir, `${id}.json`)
+    ensureSecureDirectory(dir)
+    await writeSecureBunFile(path, JSON.stringify(session))
   } catch (err) {
     writeError(`Warning: failed to save session: ${err instanceof Error ? err.message : String(err)}`)
   }
@@ -37,8 +38,10 @@ export async function saveSession(
 
 export async function loadSession(id: string, dir: string = SESSIONS_DIR): Promise<StoredSession | undefined> {
   if (!isSafeSessionId(id)) return undefined
-  const file = Bun.file(join(dir, `${id}.json`))
+  const path = join(dir, `${id}.json`)
+  const file = Bun.file(path)
   if (!(await file.exists())) return undefined
+  hardenSecureFile(path)
   try {
     const parsed: unknown = await file.json()
     return isStoredSession(parsed) ? parsed : undefined
@@ -49,6 +52,7 @@ export async function loadSession(id: string, dir: string = SESSIONS_DIR): Promi
 
 export async function loadLatestSession(dir: string = SESSIONS_DIR): Promise<StoredSession | undefined> {
   if (!existsSync(dir)) return undefined
+  ensureSecureDirectory(dir)
 
   const files = readdirSync(dir).filter((name) => name.endsWith('.json'))
   if (files.length === 0) return undefined

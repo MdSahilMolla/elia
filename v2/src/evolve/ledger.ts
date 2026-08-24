@@ -1,6 +1,7 @@
-import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { ELIA_ROOT } from '../config.ts'
+import { appendSecureFile, ensureSecureDirectory, hardenSecureFile } from '../securePersistence.ts'
 
 /**
  * The record of every attempt elia has made to improve itself.
@@ -58,8 +59,8 @@ export interface GenerationRecord {
 
 export function appendGeneration(record: GenerationRecord, path = LEDGER_PATH): void {
   try {
-    mkdirSync(EVOLUTION_DIR, { recursive: true })
-    appendFileSync(path, `${JSON.stringify(record)}\n`)
+    ensureSecureDirectory(EVOLUTION_DIR)
+    appendSecureFile(path, `${JSON.stringify(record)}\n`)
   } catch {
     // Losing a ledger line costs future generations context, not this one's result.
   }
@@ -67,6 +68,7 @@ export function appendGeneration(record: GenerationRecord, path = LEDGER_PATH): 
 
 export function readLedger(path = LEDGER_PATH): GenerationRecord[] {
   if (!existsSync(path)) return []
+  hardenSecureFile(path)
   try {
     return readFileSync(path, 'utf8')
       .split('\n')

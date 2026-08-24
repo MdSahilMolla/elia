@@ -8,6 +8,7 @@ const originalGoogleKey = process.env.GEMINI_API_KEY
 const originalNvidiaKey = process.env.NVIDIA_API_KEY
 const originalOpenRouterKey = process.env.OPENROUTER_API_KEY
 const originalMistralKey = process.env.MISTRAL_API_KEY
+const originalEliaKey = process.env.ELIA_API_KEY
 
 function restore(name: string, value: string | undefined): void {
   if (value === undefined) delete process.env[name]
@@ -22,6 +23,7 @@ beforeEach(() => {
   delete process.env.NVIDIA_API_KEY
   delete process.env.OPENROUTER_API_KEY
   delete process.env.MISTRAL_API_KEY
+  delete process.env.ELIA_API_KEY
 })
 
 afterEach(() => {
@@ -32,6 +34,7 @@ afterEach(() => {
   restore('NVIDIA_API_KEY', originalNvidiaKey)
   restore('OPENROUTER_API_KEY', originalOpenRouterKey)
   restore('MISTRAL_API_KEY', originalMistralKey)
+  restore('ELIA_API_KEY', originalEliaKey)
 })
 
 test('Google Gemini has a documented default model and reports configuration from its key variable', () => {

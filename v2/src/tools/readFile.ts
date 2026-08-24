@@ -1,5 +1,6 @@
 import type { Tool } from './types.ts'
-import { resolvePath } from '../autonomy/context.ts'
+import { resolveWorkspacePath } from '../autonomy/context.ts'
+import { assertSafeFileAccess } from '../autonomy/sensitivePaths.ts'
 
 const MAX_READ_BYTES = 5_000_000
 
@@ -16,7 +17,8 @@ export const readFileTool: Tool = {
   },
   async execute(input) {
     if (typeof input.path !== 'string' || input.path.trim().length === 0) throw new Error('path must be a non-empty string')
-    const path = resolvePath(input.path)
+    const path = resolveWorkspacePath(input.path)
+    assertSafeFileAccess(path)
     const file = Bun.file(path)
     if (!(await file.exists())) {
       throw new Error(`File not found: ${path}`)

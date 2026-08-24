@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { contractForAction, evaluatePostconditions, evaluatePreconditions } from './actionContract.ts'
@@ -38,6 +38,18 @@ describe('action contracts', () => {
     expect(contract.preconditions[0]?.kind).toBe('workspace-path')
     expect(evaluatePostconditions(contract, 'written', cwd)).toMatchObject({ ok: false })
     writeFileSync(target, 'verified')
-    expect(evaluatePostconditions(contract, 'written', cwd)).toMatchObject({ ok: true, evidence: [`artifact exists: out/report.txt`] })
+    expect(evaluatePostconditions(contract, 'written', cwd)).toMatchObject({ ok: true, evidence: [`artifact exists: ${target}`] })
+  })
+
+  test('fails workspace preconditions for traversal and symlink escapes', async () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'elia-contract-escape-'))
+    const outside = mkdtempSync(join(tmpdir(), 'elia-contract-outside-'))
+    symlinkSync(outside, join(cwd, 'link'), 'dir')
+
+    const traversal = contractForAction({ name: 'write_file', input: { path: '../outside.txt' } }, cwd, 'run:file:escape:1')
+    const symlink = contractForAction({ name: 'edit_file', input: { path: 'link/secret.txt' } }, cwd, 'run:file:escape:2')
+
+    expect((await evaluatePreconditions(traversal, cwd)).ok).toBe(false)
+    expect((await evaluatePreconditions(symlink, cwd)).ok).toBe(false)
   })
 })

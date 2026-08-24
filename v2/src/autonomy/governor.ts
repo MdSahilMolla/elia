@@ -1,7 +1,7 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
-import { isAbsolute, relative } from 'node:path'
 import type { ToolEvent } from '../agentLoop.ts'
-import { currentAgent } from './context.ts'
+import { currentAgent, isPathWithinWorkspace } from './context.ts'
+import { commandMayReadSensitiveData } from './sensitivePaths.ts'
 
 export type ActionRisk = 'safe' | 'review' | 'critical'
 export type ActionDecision = 'allow' | 'approve' | 'block'
@@ -43,8 +43,9 @@ export interface ActionGovernor {
 
 const CRITICAL_COMMAND = /\b(rm\s+-rf|rm\s+--no-preserve-root|mkfs|dd\s+if=|shutdown|reboot|poweroff|drop\s+(database|table)|truncate\s+table|git\s+(push|reset\s+--hard|clean\s+-fd)|force[- ]push|sudo\b|chmod\s+777|chown\s+-R|kill\s+-9|kubectl\s+(apply|delete|rollout|scale)|helm\s+(install|upgrade|uninstall)|docker\s+(push|rm|system\s+prune)|terraform\s+(apply|destroy)|prisma\s+migrate\s+(deploy|reset)|alembic\s+upgrade|drizzle-kit\s+push|npm\s+publish|pnpm\s+publish|bun\s+publish|vercel\s+.*--prod|fly\s+deploy|railway\s+up|gcloud\s+.*\bdeploy\b|aws\s+(cloudformation|ecs|rds|lambda)|curl[^\n|]*\|\s*(sh|bash)|wget[^\n|]*\|\s*(sh|bash)|deploy\s+(to\s+)?prod(uction)?|send\s+.*(email|message)|publish\b|tweet\b|buy\b|purchase\b|checkout\b|transfer\b|wire\b)\b/i
 const REVIEW_COMMAND = /\b(git\s+commit|npm\s+install|pnpm\s+install|yarn\s+add|bun\s+(add|install)|pip\s+install|docker\s+build|docker\s+run|curl\b|wget\b|ssh\b|scp\b|gh\s+pr|deploy\b)\b/i
+const READ_ONLY_COMMAND = /^(?:command\s+)?(?:pwd|ls|find|grep|rg|git\s+(?:status|diff|log|show|branch)|bun\s+(?:test|run\s+(?:typecheck|lint|format\s+--check))|npm\s+(?:test|run\s+(?:typecheck|lint|format\s+--check))|node\s+--version|bun\s+--version|npm\s+--version|printf|echo|cat|head|tail|sed|awk)\b/i
+const SHELL_CONTROL_SYNTAX = /[;&|<>`$]|\$\(|\b(?:eval|exec|source)\b/i
 const SECRET_KEY = /(password|passwd|token|secret|api[-_]?key|authorization|cookie|credential)/i
-const SENSITIVE_READ_COMMAND = /\b(cat|less|head|tail|sed|awk|grep|printenv|env|set)\b[^\n]*(\.env|id_rsa|\.ssh|credentials?|secret|token|password|shadow)\b/i
 const EXTERNAL_WRITE_COMMAND = /\b(curl|wget)\b[^\n]*(--data(?:-raw)?|\s-d\s|\s-X\s*(POST|PUT|PATCH|DELETE)|--upload-file|--form)\b/i
 const INTERNAL_SAFE_TOOLS = new Set(['flag_risk', 'submit_route', 'submit_proposal', 'submit_verdict', 'submit_lessons', 'delegate_tasks'])
 export const MAX_GOVERNED_ACTIONS = 10_000
@@ -84,8 +85,8 @@ export function assessAction(request: ActionRequest, cwd = currentAgent().cwd ??
 
   if (name === 'data_science') {
     const path = typeof input.path === 'string' ? input.path : ''
-    return path && isOutside(path, cwd)
-      ? assessment('review', 'approve', 'data-science analysis may access data outside the active workspace', 'data_science', [path], true)
+    return path && !isPathWithinWorkspace(path, cwd)
+      ? assessment('critical', 'approve', 'data-science analysis targets data outside the active workspace or uses an invalid path', 'data_science', [path], false)
       : assessment('safe', 'allow', 'data-science analysis is read-only and does not mutate the dataset', 'data_science', resources, true)
   }
 
@@ -112,16 +113,16 @@ export function assessAction(request: ActionRequest, cwd = currentAgent().cwd ??
 
   if (name === 'write_file' || name === 'edit_file') {
     const path = typeof input.path === 'string' ? input.path : ''
-    const outside = path.length > 0 && isOutside(path, cwd)
+    const outside = path.length === 0 || !isPathWithinWorkspace(path, cwd)
     return outside
-      ? assessment('critical', 'approve', `${name} targets a path outside the active workspace`, name, path ? [path] : [], false)
+      ? assessment('critical', 'approve', `${name} targets a path outside the active workspace or uses an invalid path`, name, path ? [path] : [], false)
       : assessment('safe', 'allow', `${name} is workspace-scoped and checkpointable`, name, path ? [path] : [], true)
   }
 
   if (name === 'read_file' || name === 'list_files' || name === 'grep' || name === 'recall' || name === 'board_read' || name === 'board_post') {
     const path = typeof input.path === 'string' ? input.path : ''
-    return path && isOutside(path, cwd)
-      ? assessment('review', 'approve', `${name} may access data outside the active workspace`, name, [path], true)
+    return path && !isPathWithinWorkspace(path, cwd)
+      ? assessment('critical', 'approve', `${name} may access data outside the active workspace or through an invalid path`, name, [path], false)
       : assessment('safe', 'allow', `${name} is read-only or coordination-only`, name, resources, true)
   }
 
@@ -220,7 +221,11 @@ export function auditActionEvent(event: ToolEvent, governor?: ActionAssessment):
 }
 
 function assessCommand(command: string, cwd: string): ActionAssessment {
-  if (SENSITIVE_READ_COMMAND.test(command)) {
+  if (!command.trim()) return assessment('critical', 'approve', 'shell command is empty or invalid', 'shell', [], false)
+  if (SHELL_CONTROL_SYNTAX.test(command)) {
+    return assessment('critical', 'approve', 'shell control syntax or interpreter evaluation requires an exact approval boundary', 'shell.composed', [], false)
+  }
+  if (commandMayReadSensitiveData(command)) {
     return assessment('critical', 'approve', 'shell command may read credentials or protected system data', 'shell.sensitive-read', [], false)
   }
   if (EXTERNAL_WRITE_COMMAND.test(command)) {
@@ -232,7 +237,10 @@ function assessCommand(command: string, cwd: string): ActionAssessment {
   if (REVIEW_COMMAND.test(command)) {
     return assessment('review', 'approve', 'shell command changes dependencies, reaches a remote system, or creates a durable artifact', 'shell', [], true)
   }
-  return assessment('safe', 'allow', 'shell command is exploratory, local, or verification-oriented', 'shell', [], true)
+  if (READ_ONLY_COMMAND.test(command) && !/\b(?:rm|mv|cp|mkdir|touch|chmod|chown|kill|shutdown|reboot|publish|push|apply|delete|destroy|install|add|upgrade|send|curl|wget|ssh|scp)\b/i.test(command)) {
+    return assessment('safe', 'allow', 'shell command matches the restricted read-only command policy', 'shell.read-only', [], true)
+  }
+  return assessment('critical', 'approve', 'shell command is not in the restricted read-only policy and may cause an unreviewed side effect', 'shell.unknown', [], false)
 }
 
 function assessment(
@@ -246,11 +254,6 @@ function assessment(
   return { risk, decision, reason, intent, resources, reversible }
 }
 
-function isOutside(path: string, cwd: string): boolean {
-  if (!isAbsolute(path) && !path.startsWith('/')) return false
-  const rel = relative(cwd, path)
-  return rel === '..' || rel.startsWith('../') || rel.startsWith('..\\') || isAbsolute(rel)
-}
 
 export function redactActionInput(tool: string, input: Record<string, unknown>): Record<string, unknown> {
   const output: Record<string, unknown> = {}

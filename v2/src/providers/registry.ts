@@ -1,5 +1,6 @@
 import { createAnthropicProvider } from './anthropic.ts'
 import { createOpenAICompatibleProvider } from './openaiCompatible.ts'
+import { assertProviderEndpoint, assertPublicNetworkUrl, validateNetworkUrl } from '../networkPolicy.ts'
 import type { Provider, ThinkingOption } from './types.ts'
 
 interface ProviderPreset {
@@ -119,13 +120,16 @@ export async function listProviderModels(providerName: string): Promise<ModelDis
   const baseURL = providerName === 'custom' ? process.env.ELIA_BASE_URL : preset.baseURL
   if (!baseURL) return { providerName, models: [], error: `Set ELIA_BASE_URL to discover models for ${providerName}` }
 
+  const allowExplicitLocal = providerName === 'custom' && process.env.ELIA_ALLOW_INSECURE_LOCAL_ENDPOINT === '1'
   const endpoint = preset.kind === 'anthropic' ? 'https://api.anthropic.com/v1/models' : `${baseURL.replace(/\/+$/, '')}/models`
   const headers: Record<string, string> = preset.kind === 'anthropic'
     ? { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' }
     : { Authorization: `Bearer ${apiKey}` }
 
   try {
-    const response = await fetch(endpoint, { headers, signal: AbortSignal.timeout(15_000) })
+    if (providerName === 'custom') await assertProviderEndpoint(baseURL)
+    await assertPublicNetworkUrl(endpoint, { allowExplicitLocal })
+    const response = await fetch(endpoint, { redirect: 'manual', headers, signal: AbortSignal.timeout(15_000) })
     if (!response.ok) return { providerName, models: [], error: `Model discovery returned HTTP ${response.status}` }
     const payload = (await response.json()) as { data?: unknown[]; models?: unknown[] }
     const rows = Array.isArray(payload.data) ? payload.data : Array.isArray(payload.models) ? payload.models : []
@@ -204,6 +208,14 @@ export function tryResolveProvider(request: ProviderRequest = {}): ResolvedProvi
       error:
         `Provider "${providerName}" has no known base URL. ` +
         `Set ELIA_BASE_URL in your .env file to the provider's OpenAI-compatible endpoint (e.g. https://api.example.com/v1).`,
+    }
+  }
+
+  if (preset.kind === 'openai-compatible' && baseURL) {
+    try {
+      validateNetworkUrl(baseURL, { allowExplicitLocal: process.env.ELIA_ALLOW_INSECURE_LOCAL_ENDPOINT === '1', requireHttps: true })
+    } catch (error) {
+      return { error: error instanceof Error ? error.message : String(error) }
     }
   }
 

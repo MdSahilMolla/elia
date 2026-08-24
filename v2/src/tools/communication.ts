@@ -1,4 +1,5 @@
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync } from 'node:fs'
+import { hardenSecureFile, writeSecureFile, ensureSecureDirectory } from '../securePersistence.ts'
 import { join } from 'node:path'
 import { paths } from '../config.ts'
 import type { Tool } from './types.ts'
@@ -251,6 +252,7 @@ function loadDraft(id: string | undefined): CommunicationDraft | undefined {
   if (!id) return undefined
   const path = join(COMMUNICATION_DIR, `${id}.json`)
   if (!existsSync(path)) return undefined
+  hardenSecureFile(path)
   try {
     return JSON.parse(readFileSync(path, 'utf8')) as CommunicationDraft
   } catch {
@@ -261,13 +263,11 @@ function loadDraft(id: string | undefined): CommunicationDraft | undefined {
 function saveDraft(draft: CommunicationDraft): void {
   ensureDirectory()
   const path = join(COMMUNICATION_DIR, `${draft.id}.json`)
-  const temp = `${path}.${process.pid}.${Date.now()}.tmp`
-  writeFileSync(temp, JSON.stringify(draft, null, 2))
-  renameSync(temp, path)
+  writeSecureFile(path, JSON.stringify(draft, null, 2))
 }
 
 function ensureDirectory(): void {
-  mkdirSync(COMMUNICATION_DIR, { recursive: true })
+  ensureSecureDirectory(COMMUNICATION_DIR)
 }
 
 function hasCommunicationAdapter(): boolean {

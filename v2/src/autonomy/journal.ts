@@ -1,7 +1,8 @@
-import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { paths } from '../statePaths.ts'
 import type { ConversationMessage } from '../agentLoop.ts'
+import { appendSecureFile, ensureSecureDirectory, hardenSecureFile, writeSecureFile } from '../securePersistence.ts'
 
 /**
  * An append-only log of everything an autonomous run did.
@@ -56,7 +57,8 @@ export function runDir(runId: string): string {
 
 export function createJournal(runId: string, goal: string): Journal {
   const dir = runDir(runId)
-  mkdirSync(join(dir, 'checkpoints'), { recursive: true })
+  ensureSecureDirectory(join(dir, 'checkpoints'))
+  ensureSecureDirectory(dir)
   const logPath = join(dir, 'events.ndjson')
 
   const previousEvents = readEvents(runId)
@@ -76,7 +78,7 @@ export function createJournal(runId: string, goal: string): Journal {
       const event: JournalEvent = { seq: seq++, at: Date.now(), kind, data }
       recorded.push(event)
       try {
-        appendFileSync(logPath, `${JSON.stringify(event)}\n`)
+        appendSecureFile(logPath, `${JSON.stringify(event)}\n`)
       } catch {
         // A journal write failure must never abort the work it is describing.
       }
@@ -85,7 +87,7 @@ export function createJournal(runId: string, goal: string): Journal {
     checkpoint(label, messages) {
       const id = checkpointCount++
       try {
-        writeFileSync(
+        writeSecureFile(
           join(dir, 'checkpoints', `${id}.json`),
           JSON.stringify({ id, label, at: Date.now(), messages }),
         )
@@ -114,6 +116,7 @@ export interface StoredCheckpoint {
 export function readEvents(runId: string): JournalEvent[] {
   const logPath = join(runDir(runId), 'events.ndjson')
   if (!existsSync(logPath)) return []
+  hardenSecureFile(logPath)
   return readFileSync(logPath, 'utf8')
     .split('\n')
     .filter((line) => line.trim().length > 0)
@@ -129,6 +132,7 @@ export function readEvents(runId: string): JournalEvent[] {
 export function readCheckpoint(runId: string, id: number): StoredCheckpoint | undefined {
   const path = join(runDir(runId), 'checkpoints', `${id}.json`)
   if (!existsSync(path)) return undefined
+  hardenSecureFile(path)
   try {
     return JSON.parse(readFileSync(path, 'utf8')) as StoredCheckpoint
   } catch {

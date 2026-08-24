@@ -1,5 +1,6 @@
 import OpenAI from 'openai'
 import type { ChatMessage, ContentBlock, Provider, StreamTurnParams, ThinkingOption, ToolDefinition, Usage } from './types.ts'
+import { validateNetworkUrl } from '../networkPolicy.ts'
 
 export interface OpenAICompatibleProviderOptions {
   thinking?: ThinkingOption
@@ -11,7 +12,11 @@ export function createOpenAICompatibleProvider(
   baseURL?: string,
   options: OpenAICompatibleProviderOptions = {},
 ): Provider {
-  const client = new OpenAI({ apiKey, baseURL, timeout: 180_000, maxRetries: 0 })
+  const allowExplicitLocal = process.env.ELIA_ALLOW_INSECURE_LOCAL_ENDPOINT === '1'
+  const validatedBaseURL = baseURL
+    ? validateNetworkUrl(baseURL, { allowExplicitLocal, requireHttps: true }).toString()
+    : baseURL
+  const client = new OpenAI({ apiKey, baseURL: validatedBaseURL, timeout: 180_000, maxRetries: 0 })
   // Reasoning-capable OpenAI-compatible models (Groq's gpt-oss, DeepSeek's API,
   // others) emit reasoning as a non-standard `reasoning`/`reasoning_content`
   // field with no enable/disable request param — there is nothing to toggle in

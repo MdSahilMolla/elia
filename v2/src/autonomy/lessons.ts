@@ -1,5 +1,6 @@
-import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { dirname } from 'node:path'
+import { appendSecureFile, ensureSecureDirectory, hardenSecureFile } from '../securePersistence.ts'
 import { paths } from '../config.ts'
 import type { Tool } from '../tools/types.ts'
 
@@ -33,9 +34,9 @@ export function appendLessons(texts: string[], path = paths.lessons): void {
   const block = fresh.map((text) => `- ${text} <!-- ${stamp} -->`).join('\n')
 
   try {
-    mkdirSync(dirname(path), { recursive: true })
+    ensureSecureDirectory(dirname(path))
     const header = existsSync(path) ? '' : '# Lessons\n\nThings elia learned about this project, carried into future runs.\n\n'
-    appendFileSync(path, `${header}${block}\n`)
+    appendSecureFile(path, `${header}${block}\n`)
   } catch {
     // Losing a lesson costs future efficiency, not this run's correctness.
   }
@@ -43,6 +44,7 @@ export function appendLessons(texts: string[], path = paths.lessons): void {
 
 export function loadLessons(path = paths.lessons): Lesson[] {
   if (!existsSync(path)) return []
+  hardenSecureFile(path)
   try {
     return readFileSync(path, 'utf8')
       .split('\n')

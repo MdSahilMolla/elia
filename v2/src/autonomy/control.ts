@@ -1,6 +1,7 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, readFileSync, unlinkSync } from 'node:fs'
 import { join } from 'node:path'
 import { paths } from '../statePaths.ts'
+import { ensureSecureDirectory, hardenSecureFile, writeSecureFile } from '../securePersistence.ts'
 
 export type SupervisorControlAction = 'pause' | 'stop'
 
@@ -21,16 +22,15 @@ export function requestRunControl(runId: string, action: SupervisorControlAction
   const path = runControlPath(runId, runsRoot)
   const runDir = join(runsRoot, runId)
   if (!existsSync(runDir)) return false
-  mkdirSync(runDir, { recursive: true })
-  const temporary = `${path}.tmp-${process.pid}`
-  writeFileSync(temporary, `${JSON.stringify({ version: 1, action, requestedAt: Date.now() } satisfies SupervisorControlRequest)}\n`, { mode: 0o600 })
-  renameSync(temporary, path)
+  ensureSecureDirectory(runDir)
+  writeSecureFile(path, `${JSON.stringify({ version: 1, action, requestedAt: Date.now() } satisfies SupervisorControlRequest)}\n`)
   return true
 }
 
 export function readRunControl(runId: string, runsRoot = paths.runs): SupervisorControlRequest | undefined {
   const path = runControlPath(runId, runsRoot)
   if (!existsSync(path)) return undefined
+  hardenSecureFile(path)
   try {
     const parsed = JSON.parse(readFileSync(path, 'utf8')) as Partial<SupervisorControlRequest>
     if (parsed.version !== 1 || (parsed.action !== 'pause' && parsed.action !== 'stop') || typeof parsed.requestedAt !== 'number' || !Number.isFinite(parsed.requestedAt)) return undefined

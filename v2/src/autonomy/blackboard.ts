@@ -1,6 +1,4 @@
-import { mkdirSync, writeFileSync } from 'node:fs'
-import { dirname } from 'node:path'
-
+import { writeSecureFile } from '../securePersistence.ts'
 /**
  * A shared whiteboard for a fleet of sub-agents.
  *
@@ -39,8 +37,7 @@ export function createBlackboard(persistPath?: string): Blackboard {
   function persist(): void {
     if (!persistPath) return
     try {
-      mkdirSync(dirname(persistPath), { recursive: true })
-      writeFileSync(persistPath, JSON.stringify(notes, null, 2))
+      writeSecureFile(persistPath, JSON.stringify(notes, null, 2))
     } catch {
       // The board is primarily in-memory; losing the on-disk copy is not fatal.
     }

@@ -1,25 +1,25 @@
-import { beforeAll, afterAll, expect, test } from 'bun:test'
+import { afterAll, beforeAll, expect, test } from 'bun:test'
 import { existsSync, mkdirSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
-import * as XLSX from 'xlsx'
+import ExcelJS from 'exceljs'
 import { presentationTool } from './presentation.ts'
 
 let testDir: string
 let workbookPath: string
 
-beforeAll(() => {
+beforeAll(async () => {
   testDir = join(process.cwd(), 'workspace', `presentation-test-${process.pid}`)
   mkdirSync(testDir, { recursive: true })
   workbookPath = join(testDir, 'sales.xlsx')
-  const workbook = XLSX.utils.book_new()
-  const sheet = XLSX.utils.aoa_to_sheet([
+  const workbook = new ExcelJS.Workbook()
+  const sheet = workbook.addWorksheet('Sales')
+  sheet.addRows([
     ['Region', 'Sales', 'Profit'],
     ['East', 1000, 200],
     ['West', 700, -50],
     ['North', 400, 80],
   ])
-  XLSX.utils.book_append_sheet(workbook, sheet, 'Sales')
-  XLSX.writeFile(workbook, workbookPath)
+  await workbook.xlsx.writeFile(workbookPath)
 })
 
 afterAll(() => rmSync(testDir, { recursive: true, force: true }))
@@ -41,5 +41,5 @@ test('presentation creates an editable management deck and analysis sidecar from
 })
 
 test('presentation rejects output paths outside the current repository', async () => {
-  await expect(presentationTool.execute({ action: 'from_workbook', path: workbookPath, outputPath: '/tmp/outside.pptx' })).rejects.toThrow('must stay inside')
+  await expect(presentationTool.execute({ action: 'from_workbook', path: workbookPath, outputPath: '/tmp/outside.pptx' })).rejects.toThrow('escapes the active workspace')
 })

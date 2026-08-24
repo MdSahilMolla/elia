@@ -1,6 +1,7 @@
 import type { Tool } from './types.ts'
 import { isIgnored } from './ignoreDirs.ts'
-import { resolvePath } from '../autonomy/context.ts'
+import { resolveWorkspacePath } from '../autonomy/context.ts'
+import { assertSafeFileAccess, isSensitivePath } from '../autonomy/sensitivePaths.ts'
 
 const MAX_PATTERN_LENGTH = 10_000
 const MAX_SEARCH_FILE_BYTES = 5_000_000
@@ -25,7 +26,8 @@ export const grepTool: Tool = {
     // actual filesystem scan resolves against the ambient worktree root, so a
     // variant's grep results don't leak its internal worktree path.
     const inputDir = (input.path as string | undefined) ?? '.'
-    const dir = resolvePath(inputDir)
+    const dir = resolveWorkspacePath(inputDir)
+    assertSafeFileAccess(dir)
 
     const glob = new Bun.Glob('**/*')
     const matches: string[] = []
@@ -39,7 +41,7 @@ export const grepTool: Tool = {
     }
 
     for await (const relPath of glob.scan({ cwd: dir, dot: false })) {
-      if (isIgnored(relPath)) continue
+      if (isIgnored(relPath) || isSensitivePath(relPath)) continue
 
       const fullPath = `${inputDir}/${relPath}`
       const file = Bun.file(`${dir}/${relPath}`)

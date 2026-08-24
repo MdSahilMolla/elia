@@ -1,4 +1,4 @@
-import pptxgen from 'pptxgenjs'
+import { createRequire } from 'node:module'
 import JSZip from 'jszip'
 import { existsSync, mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { basename, dirname, extname, join, resolve } from 'node:path'
@@ -6,6 +6,10 @@ import { paths } from '../config.ts'
 import { analyzeWorkbook, auditWorkbook, readWorkbook, safeOutputPath } from './spreadsheet.ts'
 import type { Tool } from './types.ts'
 import { MAX_SHELL_OUTPUT_LENGTH, readBoundedOutput } from '../shell.ts'
+
+const require = createRequire(import.meta.url)
+const pptxgen = require('../vendor/pptxgen.cjs.js') as any
+type PresentationSlide = any
 
 type PresentationAction = 'from_workbook' | 'verify'
 
@@ -73,24 +77,24 @@ function atomicText(path: string, text: string): void {
   renameSync(temp, path)
 }
 
-function addTitle(slide: pptxgen.Slide, title: string, subtitle: string): void {
+function addTitle(slide: PresentationSlide, title: string, subtitle: string): void {
   slide.addText(title, { x: 0.55, y: 0.28, w: 12.2, h: 0.45, fontFace: FONT, fontSize: 25, bold: true, color: NAVY, margin: 0, fit: 'shrink' })
   slide.addText(subtitle, { x: 0.58, y: 0.82, w: 12, h: 0.25, fontFace: FONT, fontSize: 10, color: MID, margin: 0, fit: 'shrink' })
   slide.addShape(SHAPE_LINE, { x: 0.55, y: 1.22, w: 12.2, h: 0, line: { color: BLUE, width: 1.5 } })
 }
 
-function addFooter(slide: pptxgen.Slide, number: number): void {
+function addFooter(slide: PresentationSlide, number: number): void {
   slide.addText(`Elia management presentation  •  ${number}`, { x: 0.58, y: 7.1, w: 12, h: 0.15, fontFace: FONT, fontSize: 7, color: MID, margin: 0, fit: 'shrink' })
 }
 
-function addKpi(slide: pptxgen.Slide, x: number, label: string, value: string, detail: string, color: string): void {
+function addKpi(slide: PresentationSlide, x: number, label: string, value: string, detail: string, color: string): void {
   slide.addShape(SHAPE_ROUND_RECT, { x, y: 1.55, w: 3.85, h: 1.25, rectRadius: 0.08, fill: { color: LIGHT }, line: { color, width: 1.2 } })
   slide.addText(label.toUpperCase(), { x: x + 0.18, y: 1.72, w: 3.4, h: 0.18, fontFace: FONT, fontSize: 8, bold: true, color: MID, margin: 0, fit: 'shrink' })
   slide.addText(value, { x: x + 0.18, y: 1.98, w: 3.4, h: 0.4, fontFace: FONT, fontSize: 23, bold: true, color, margin: 0, fit: 'shrink' })
   slide.addText(detail, { x: x + 0.18, y: 2.48, w: 3.4, h: 0.18, fontFace: FONT, fontSize: 8, color: MID, margin: 0, fit: 'shrink' })
 }
 
-function addTable(slide: pptxgen.Slide, headers: string[], rows: string[][], x: number, y: number, w: number, h: number): void {
+function addTable(slide: PresentationSlide, headers: string[], rows: string[][], x: number, y: number, w: number, h: number): void {
   const data = [headers.map((text) => ({ text, options: { bold: true, color: WHITE, fill: NAVY } })), ...rows.map((row) => row.map((text) => ({ text, options: { color: NAVY } })))]
   slide.addTable(data as any, {
     x, y, w, h,
@@ -244,7 +248,7 @@ export const presentationTool: Tool = {
   async execute(input) {
     const request = validatePresentationRequest(input)
     if (request.action === 'verify') return verifyPresentation(request.path, request.render ?? false)
-    const workbook = readWorkbook(request.path)
+    const workbook = await readWorkbook(request.path)
     const analysis = parseAnalysis(analyzeWorkbook(workbook, request.sheet, request.groupBy, request.measure))
     const audit = JSON.parse(auditWorkbook(workbook, request.sheet, request.keyColumn)) as AuditResult
     const defaultName = `${basename(request.path, extname(request.path))}-management-review.pptx`

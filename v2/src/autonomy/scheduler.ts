@@ -1,7 +1,8 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { redactText } from '../ui/redact.ts'
 import type { AutonomyProfile, AutonomousRunResult } from './loop.ts'
+import { ensureSecureDirectory, hardenSecureFile, writeSecureFile } from '../securePersistence.ts'
 
 export const SCHEDULE_SCHEMA_VERSION = 1
 export const MIN_SCHEDULE_INTERVAL_MS = 60_000
@@ -66,6 +67,7 @@ export class ScheduleStore {
   static open(path = DEFAULT_FILE, recoverExpired = true): ScheduleStore {
     const store = new ScheduleStore(path)
     if (!existsSync(path)) return store
+    hardenSecureFile(path)
     try {
       const parsed = JSON.parse(readFileSync(path, 'utf8')) as Partial<ScheduleSnapshot>
       for (const raw of Array.isArray(parsed.schedules) ? parsed.schedules : []) {
@@ -241,9 +243,9 @@ export class ScheduleStore {
 
   private withExclusiveLock<T>(fn: () => T): T {
     const lockPath = `${this.path}.lock`
-    mkdirSync(join(this.path, '..'), { recursive: true })
+    ensureSecureDirectory(join(this.path, '..'))
     try {
-      mkdirSync(lockPath)
+      mkdirSync(lockPath, { mode: 0o700 })
     } catch {
       try {
         if (statSync(lockPath).mtimeMs + STORE_LOCK_TTL_MS < Date.now()) rmSync(lockPath, { recursive: true, force: true })
@@ -251,7 +253,7 @@ export class ScheduleStore {
         // A concurrent process may be creating or removing the lock.
       }
       try {
-        mkdirSync(lockPath)
+        ensureSecureDirectory(lockPath)
       } catch {
         throw new Error('schedule store is busy; another daemon is claiming work')
       }
@@ -264,9 +266,7 @@ export class ScheduleStore {
   }
 
   private persist(): void {
-    mkdirSync(join(this.path, '..'), { recursive: true })
-    const temporary = `${this.path}.tmp-${process.pid}`
-    writeFileSync(temporary, JSON.stringify({ version: SCHEDULE_SCHEMA_VERSION, schedules: this.list() }, null, 2))
-    renameSync(temporary, this.path)
+    ensureSecureDirectory(join(this.path, '..'))
+    writeSecureFile(this.path, JSON.stringify({ version: SCHEDULE_SCHEMA_VERSION, schedules: this.list() }, null, 2))
   }
 }

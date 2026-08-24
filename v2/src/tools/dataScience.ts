@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from 'node:fs'
 import { extname } from 'node:path'
-import { resolvePath } from '../autonomy/context.ts'
+import { resolveWorkspacePath } from '../autonomy/context.ts'
+import { assertSafeFileAccess } from '../autonomy/sensitivePaths.ts'
 import type { Tool } from './types.ts'
 
 type DataScienceAction = 'profile' | 'validate' | 'group_summary' | 'correlation' | 'linear_regression'
@@ -85,7 +86,8 @@ function parseJson(text: string, parser: 'json' | 'jsonl'): Row[] {
 }
 
 function readDataset(inputPath: string): Dataset {
-  const path = resolvePath(inputPath)
+  const path = resolveWorkspacePath(inputPath)
+  assertSafeFileAccess(path)
   if (!existsSync(path)) throw new Error(`Dataset not found: ${path}`)
   const extension = extname(path).toLowerCase()
   const text = readFileSync(path, 'utf8')

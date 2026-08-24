@@ -1,8 +1,26 @@
 import { afterAll, beforeAll, expect, test } from 'bun:test'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { toolsByName } from './registry.ts'
+import { withAgentIdentity } from '../autonomy/context.ts'
+import { editFileTool } from './editFile.ts'
+import { grepTool } from './grep.ts'
+import { listFilesTool } from './listFiles.ts'
+import { readFileTool } from './readFile.ts'
+import { runCommandTool } from './runCommand.ts'
+import { writeFileTool } from './writeFile.ts'
+import { dataScienceTool } from './dataScience.ts'
+import { readSpreadsheetTool } from './readSpreadsheet.ts'
+import { spreadsheetTool } from './spreadsheet.ts'
+
+const toolsByName = {
+  edit_file: editFileTool,
+  grep: grepTool,
+  list_files: listFilesTool,
+  read_file: readFileTool,
+  run_command: runCommandTool,
+  write_file: writeFileTool,
+}
 
 let testDir: string
 
@@ -14,8 +32,12 @@ afterAll(() => {
   rmSync(testDir, { recursive: true, force: true })
 })
 
+function executeTool(name: keyof typeof toolsByName, input: Record<string, unknown>) {
+  return withAgentIdentity({ name: 'test', role: 'lead', cwd: testDir }, () => toolsByName[name]!.execute(input))
+}
+
 test('write_file creates a file', async () => {
-  const result = await toolsByName.write_file!.execute({
+  const result = await executeTool('write_file', {
     path: join(testDir, 'hello.txt'),
     content: 'hello from elia',
   })
@@ -24,26 +46,26 @@ test('write_file creates a file', async () => {
 })
 
 test('write_file rejects a missing path with a clear error instead of a raw Node exception', async () => {
-  await expect(toolsByName.write_file!.execute({ content: 'x' })).rejects.toThrow('non-empty "path"')
+  await expect(executeTool('write_file', { content: 'x' })).rejects.toThrow('non-empty "path"')
 })
 
 test('write_file rejects a missing content argument', async () => {
-  await expect(toolsByName.write_file!.execute({ path: join(testDir, 'no-content.txt') })).rejects.toThrow('"content"')
+  await expect(executeTool('write_file', { path: join(testDir, 'no-content.txt') })).rejects.toThrow('"content"')
 })
 
 test('read_file returns content with line numbers', async () => {
-  const result = await toolsByName.read_file!.execute({ path: join(testDir, 'hello.txt') })
+  const result = await executeTool('read_file', { path: join(testDir, 'hello.txt') })
   expect(result).toBe('1\thello from elia')
 })
 
 test('read_file throws on missing file', async () => {
   await expect(
-    toolsByName.read_file!.execute({ path: join(testDir, 'does-not-exist.txt') }),
+    executeTool('read_file', { path: join(testDir, 'does-not-exist.txt') }),
   ).rejects.toThrow('File not found')
 })
 
 test('edit_file replaces a unique substring', async () => {
-  await toolsByName.edit_file!.execute({
+  await executeTool('edit_file', {
     path: join(testDir, 'hello.txt'),
     old_string: 'hello',
     new_string: 'hi',
@@ -53,7 +75,7 @@ test('edit_file replaces a unique substring', async () => {
 
 test('edit_file throws when old_string is not found', async () => {
   await expect(
-    toolsByName.edit_file!.execute({
+    executeTool('edit_file', {
       path: join(testDir, 'hello.txt'),
       old_string: 'nonexistent',
       new_string: 'x',
@@ -63,55 +85,86 @@ test('edit_file throws when old_string is not found', async () => {
 
 test('edit_file rejects a missing old_string with a clear error', async () => {
   await expect(
-    toolsByName.edit_file!.execute({ path: join(testDir, 'hello.txt'), new_string: 'x' }),
+    executeTool('edit_file', { path: join(testDir, 'hello.txt'), new_string: 'x' }),
   ).rejects.toThrow('non-empty "old_string"')
 })
 
 test('edit_file rejects a missing new_string with a clear error', async () => {
   await expect(
-    toolsByName.edit_file!.execute({ path: join(testDir, 'hello.txt'), old_string: 'hi' }),
+    executeTool('edit_file', { path: join(testDir, 'hello.txt'), old_string: 'hi' }),
   ).rejects.toThrow('"new_string"')
 })
 
 test('edit_file throws when old_string is not unique', async () => {
   const dupPath = join(testDir, 'dup.txt')
-  await toolsByName.write_file!.execute({ path: dupPath, content: 'foo foo' })
+  await executeTool('write_file', { path: dupPath, content: 'foo foo' })
   await expect(
-    toolsByName.edit_file!.execute({ path: dupPath, old_string: 'foo', new_string: 'bar' }),
+    executeTool('edit_file', { path: dupPath, old_string: 'foo', new_string: 'bar' }),
   ).rejects.toThrow('multiple locations')
 })
 
 test('list_files finds files matching a glob', async () => {
-  const result = await toolsByName.list_files!.execute({ pattern: '*.txt', cwd: testDir })
+  const result = await executeTool('list_files', { pattern: '*.txt', cwd: testDir })
   expect(result).toContain('hello.txt')
 })
 
 test('list_files skips node_modules', async () => {
   mkdirSync(join(testDir, 'node_modules'), { recursive: true })
   writeFileSync(join(testDir, 'node_modules', 'ignored.txt'), 'x')
-  const result = await toolsByName.list_files!.execute({ pattern: '**/*.txt', cwd: testDir })
+  const result = await executeTool('list_files', { pattern: '**/*.txt', cwd: testDir })
   expect(result).not.toContain('ignored.txt')
 })
 
 test('grep finds a matching line', async () => {
-  const result = await toolsByName.grep!.execute({ pattern: 'hi from', path: testDir })
+  const result = await executeTool('grep', { pattern: 'hi from', path: testDir })
   expect(result).toContain('hi from elia')
 })
 
 test('grep returns no matches message when nothing found', async () => {
-  const result = await toolsByName.grep!.execute({ pattern: 'zzz-not-present-zzz', path: testDir })
+  const result = await executeTool('grep', { pattern: 'zzz-not-present-zzz', path: testDir })
   expect(result).toBe('No matches found.')
 })
 
 test('run_command captures stdout and exit code', async () => {
-  const result = await toolsByName.run_command!.execute({ command: 'echo test123' })
+  const result = await executeTool('run_command', { command: 'echo test123' })
   expect(result).toContain('exit code: 0')
   expect(result).toContain('test123')
 })
 
-
 test('run_command rejects malformed and oversized command inputs', async () => {
-  await expect(toolsByName.run_command!.execute({})).rejects.toThrow('non-empty string')
-  await expect(toolsByName.run_command!.execute({ command: 42 })).rejects.toThrow('non-empty string')
-  await expect(toolsByName.run_command!.execute({ command: 'x'.repeat(100_001) })).rejects.toThrow('exceeds 100000 characters')
+  await expect(executeTool('run_command', {})).rejects.toThrow('non-empty string')
+  await expect(executeTool('run_command', { command: 42 })).rejects.toThrow('non-empty string')
+  await expect(executeTool('run_command', { command: 'x'.repeat(100_001) })).rejects.toThrow('exceeds 100000 characters')
+})
+
+test('content tools deny protected files before bytes reach the model', async () => {
+  const envPath = join(testDir, '.env')
+  writeFileSync(envPath, 'ELIA_TEST_SECRET=do-not-return')
+
+  await expect(executeTool('read_file', { path: envPath })).rejects.toThrow('protected sensitive path')
+  await expect(executeTool('run_command', { command: `cat ${envPath}` })).rejects.toThrow('protected sensitive path')
+  await expect(executeTool('grep', { pattern: 'ELIA_TEST_SECRET', path: testDir })).resolves.not.toContain('ELIA_TEST_SECRET')
+  await expect(executeTool('list_files', { pattern: '**/*', cwd: testDir })).resolves.not.toContain('.env')
+
+  await expect(withAgentIdentity({ name: 'test', role: 'lead', cwd: testDir }, () => dataScienceTool.execute({ action: 'profile', path: envPath }))).rejects.toThrow('protected sensitive path')
+  await expect(withAgentIdentity({ name: 'test', role: 'lead', cwd: testDir }, () => readSpreadsheetTool.execute({ path: envPath }))).rejects.toThrow('protected sensitive path')
+  await expect(withAgentIdentity({ name: 'test', role: 'lead', cwd: testDir }, () => spreadsheetTool.execute({ action: 'inspect', path: envPath }))).rejects.toThrow('protected sensitive path')
+})
+
+test('file tools reject traversal and symlink escapes without changing outside files', async () => {
+  const outsideDir = mkdtempSync(join(tmpdir(), 'elia-test-outside-'))
+  const outsideFile = join(outsideDir, 'secret.txt')
+  const linkPath = join(testDir, 'outside-link')
+  writeFileSync(outsideFile, 'original')
+  symlinkSync(outsideDir, linkPath, 'dir')
+
+  await expect(executeTool('write_file', { path: '../outside.txt', content: 'changed' })).rejects.toThrow('escapes the active workspace')
+  await expect(executeTool('read_file', { path: '../outside.txt' })).rejects.toThrow('escapes the active workspace')
+  await expect(executeTool('edit_file', { path: '../outside.txt', old_string: 'original', new_string: 'changed' })).rejects.toThrow('escapes the active workspace')
+  await expect(executeTool('write_file', { path: 'outside-link/secret.txt', content: 'changed' })).rejects.toThrow('escapes the active workspace')
+  await expect(executeTool('read_file', { path: 'outside-link/secret.txt' })).rejects.toThrow('escapes the active workspace')
+  await expect(executeTool('edit_file', { path: 'outside-link/secret.txt', old_string: 'original', new_string: 'changed' })).rejects.toThrow('escapes the active workspace')
+
+  expect(readFileSync(outsideFile, 'utf8')).toBe('original')
+  rmSync(outsideDir, { recursive: true, force: true })
 })

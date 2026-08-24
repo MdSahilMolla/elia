@@ -15,6 +15,12 @@ test('web_fetch rejects a non-http(s) URL', async () => {
   await expect(webFetchTool.execute({ url: 'file:///etc/passwd' })).rejects.toThrow('Refusing to fetch')
 })
 
+test('web_fetch rejects private, loopback, and metadata targets before fetching', async () => {
+  for (const url of ['http://127.0.0.1:3000', 'http://10.0.0.1', 'http://169.254.169.254/latest/meta-data', 'http://[::1]/']) {
+    await expect(webFetchTool.execute({ url })).rejects.toThrow('private or local')
+  }
+})
+
 test('web_fetch strips HTML tags and scripts down to readable text', async () => {
   globalThis.fetch = (async () =>
     new Response('<html><head><script>evil()</script></head><body><p>Hello <b>world</b></p></body></html>', {

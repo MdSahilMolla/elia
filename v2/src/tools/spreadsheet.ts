@@ -1,9 +1,10 @@
-import * as XLSX from 'xlsx'
-import { existsSync, mkdirSync, renameSync, writeFileSync } from 'node:fs'
-import { dirname, isAbsolute, relative, resolve } from 'node:path'
-import { paths } from '../config.ts'
+import ExcelJS from 'exceljs'
+import { existsSync, mkdirSync, renameSync } from 'node:fs'
+import { dirname } from 'node:path'
 import type { Tool } from './types.ts'
-import { resolvePath } from '../autonomy/context.ts'
+import { resolveAllowedWorkspacePath } from '../autonomy/context.ts'
+import { assertSafeFileAccess } from '../autonomy/sensitivePaths.ts'
+import { paths } from '../config.ts'
 
 type SpreadsheetAction = 'inspect' | 'analyze' | 'audit' | 'write'
 type CellOperation = { sheet: string; cell: string; value: unknown }
@@ -32,62 +33,81 @@ const MAX_GROUP_ROWS = 100
 const MAX_SPREADSHEET_BYTES = 25_000_000
 
 function safeOutputPath(path: string | undefined, fallbackName: string): string {
-  const root = resolve(resolvePath('.'))
-  const candidate = path ? resolve(resolvePath(path)) : resolve(root, fallbackName)
-  const workspace = resolve(paths.workspace)
-  const inside = (base: string) => {
-    const rel = relative(base, candidate)
-    return rel === '' || (!rel.startsWith(`..${requireSeparator()}`) && rel !== '..' && !isAbsolute(rel))
-  }
-  if (!inside(root) && !inside(workspace)) throw new Error(`spreadsheet output must stay inside the current workspace: ${candidate}`)
-  return candidate
-}
-
-function requireSeparator(): string {
-  return process.platform === 'win32' ? '\\' : '/'
+  return resolveAllowedWorkspacePath(path ?? fallbackName, undefined, [paths.workspace])
 }
 
 function ensureParent(path: string): void {
   mkdirSync(dirname(path), { recursive: true })
 }
 
-function atomicWriteWorkbook(workbook: XLSX.WorkBook, outputPath: string): void {
+async function atomicWriteWorkbook(workbook: ExcelJS.Workbook, outputPath: string): Promise<void> {
   ensureParent(outputPath)
-  const temp = `${outputPath}.${process.pid}.${Date.now()}.tmp.xlsx`
-  XLSX.writeFile(workbook, temp)
-  renameSync(temp, outputPath)
+  const temporary = `${outputPath}.${process.pid}.${Date.now()}.tmp.xlsx`
+  const buffer = await workbook.xlsx.writeBuffer()
+  await Bun.write(temporary, buffer)
+  renameSync(temporary, outputPath)
 }
 
-function readWorkbook(path: string): XLSX.WorkBook {
+async function readWorkbook(path: string): Promise<ExcelJS.Workbook> {
+  assertSafeFileAccess(path)
   if (!existsSync(path)) throw new Error(`File not found: ${path}`)
   const size = Bun.file(path).size
   if (size > MAX_SPREADSHEET_BYTES) throw new Error(`spreadsheet exceeds ${MAX_SPREADSHEET_BYTES} bytes`)
-  return XLSX.readFile(path, { cellFormula: true, cellNF: true, cellStyles: true })
+  const workbook = new ExcelJS.Workbook()
+  await workbook.xlsx.readFile(path)
+  return workbook
 }
 
-function sheetData(workbook: XLSX.WorkBook, requestedSheet?: string): SheetData[] {
-  const names = requestedSheet ? [requestedSheet] : workbook.SheetNames
-  const missing = names.filter((name) => !workbook.SheetNames.includes(name))
-  if (missing.length > 0) throw new Error(`Sheet(s) not found: ${missing.join(', ')}. Available: ${workbook.SheetNames.join(', ')}`)
-  return names.map((name) => {
-    const sheet = workbook.Sheets[name]!
-    const matrix = XLSX.utils.sheet_to_json<unknown[]>(sheet, { header: 1, defval: null, raw: true })
-    const rawHeaders = (matrix[0] ?? []).map((header) => String(header ?? '').trim())
+function valueForModel(cell: ExcelJS.Cell): unknown {
+  const value = cell.value
+  if (value && typeof value === 'object') {
+    if ('formula' in value) return 'result' in value ? value.result : null
+    if ('text' in value && typeof value.text === 'string') return value.text
+    if ('richText' in value) return cell.text
+  }
+  return value
+}
+
+function sheetData(workbook: ExcelJS.Workbook, requestedSheet?: string): SheetData[] {
+  const worksheets = requestedSheet ? [workbook.getWorksheet(requestedSheet)].filter((sheet): sheet is ExcelJS.Worksheet => Boolean(sheet)) : workbook.worksheets
+  if (worksheets.length === 0) {
+    const available = workbook.worksheets.map((sheet) => sheet.name).join(', ')
+    throw new Error(`Sheet(s) not found: ${requestedSheet ?? '(none)'}. Available: ${available}`)
+  }
+  if (requestedSheet && worksheets.length !== 1) throw new Error(`Sheet(s) not found: ${requestedSheet}`)
+
+  return worksheets.map((worksheet) => {
+    const maxColumn = Math.max(worksheet.columnCount, 1)
+    const headerRow = worksheet.getRow(1)
+    const rawHeaders = Array.from({ length: maxColumn }, (_, index) => String(valueForModel(headerRow.getCell(index + 1)) ?? '').trim())
     const headers = rawHeaders.map((header, index) => header || `Column ${index + 1}`)
-    const rows = matrix.slice(1).filter((row) => row.some((value) => value !== null && value !== '')).map((row) => {
+    const rows: Record<string, unknown>[] = []
+    for (let rowNumber = 2; rowNumber <= worksheet.rowCount; rowNumber += 1) {
+      const row = worksheet.getRow(rowNumber)
       const output: Record<string, unknown> = {}
-      headers.forEach((header, index) => { output[header] = row[index] ?? null })
-      return output
-    })
+      let populated = false
+      headers.forEach((header, index) => {
+        const value = jsonValue(valueForModel(row.getCell(index + 1)))
+        if (value !== null && value !== undefined && value !== '') populated = true
+        output[header] = value
+      })
+      if (populated) rows.push(output)
+    }
+
     let formulas = 0
     let formulasWithoutCachedValue = 0
-    for (const cell of Object.values(sheet)) {
-      if (cell && typeof cell === 'object' && 'f' in cell && typeof cell.f === 'string') {
-        formulas += 1
-        if (!('v' in cell) || cell.v === undefined || cell.v === null || cell.v === '') formulasWithoutCachedValue += 1
+    for (let rowNumber = 1; rowNumber <= worksheet.rowCount; rowNumber += 1) {
+      const row = worksheet.getRow(rowNumber)
+      for (let columnNumber = 1; columnNumber <= maxColumn; columnNumber += 1) {
+        const cell = row.getCell(columnNumber)
+        if (typeof cell.formula === 'string' && cell.formula.length > 0) {
+          formulas += 1
+          const result = cell.result
+          if (result === undefined || result === null || result === '') formulasWithoutCachedValue += 1
+        }
       }
     }
-    return { name, rows, headers, formulas, formulasWithoutCachedValue }
+    return { name: worksheet.name, rows, headers, formulas, formulasWithoutCachedValue }
   })
 }
 
@@ -104,7 +124,7 @@ function jsonValue(value: unknown): unknown {
   return value
 }
 
-function inspectWorkbook(workbook: XLSX.WorkBook, requestedSheet?: string): string {
+function inspectWorkbook(workbook: ExcelJS.Workbook, requestedSheet?: string): string {
   const sheets = sheetData(workbook, requestedSheet)
   return JSON.stringify({
     action: 'inspect',
@@ -115,12 +135,12 @@ function inspectWorkbook(workbook: XLSX.WorkBook, requestedSheet?: string): stri
       numericColumns: numericColumns(sheet),
       formulaCells: sheet.formulas,
       formulasWithoutCachedValue: sheet.formulasWithoutCachedValue,
-      sample: sheet.rows.slice(0, MAX_SAMPLE_ROWS).map((row) => Object.fromEntries(Object.entries(row).map(([key, value]) => [key, jsonValue(value)]))),
+      sample: sheet.rows.slice(0, MAX_SAMPLE_ROWS),
     })),
   }, null, 2)
 }
 
-function analyzeWorkbook(workbook: XLSX.WorkBook, requestedSheet?: string, requestedGroupBy?: string, requestedMeasure?: string): string {
+function analyzeWorkbook(workbook: ExcelJS.Workbook, requestedSheet?: string, requestedGroupBy?: string, requestedMeasure?: string): string {
   const sheets = sheetData(workbook, requestedSheet)
   const analyses = sheets.map((sheet) => {
     const numbers = numericColumns(sheet)
@@ -161,7 +181,7 @@ function analyzeWorkbook(workbook: XLSX.WorkBook, requestedSheet?: string, reque
   return JSON.stringify({ action: 'analyze', sheets: analyses }, null, 2)
 }
 
-function auditWorkbook(workbook: XLSX.WorkBook, requestedSheet?: string, keyColumn?: string): string {
+function auditWorkbook(workbook: ExcelJS.Workbook, requestedSheet?: string, keyColumn?: string): string {
   const sheets = sheetData(workbook, requestedSheet)
   return JSON.stringify({
     action: 'audit',
@@ -187,26 +207,24 @@ function auditWorkbook(workbook: XLSX.WorkBook, requestedSheet?: string, keyColu
   }, null, 2)
 }
 
-function writeWorkbook(request: SpreadsheetRequest): string {
-  const workbook = readWorkbook(request.path)
+function cellValue(value: unknown): ExcelJS.CellValue {
+  if (value === null || typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean' || value instanceof Date) return value
+  throw new Error('spreadsheet cell values must be strings, numbers, booleans, dates, or null')
+}
+
+async function writeWorkbook(request: SpreadsheetRequest): Promise<string> {
+  const workbook = await readWorkbook(request.path)
   const operations = request.operations ?? []
   if (operations.length === 0) throw new Error('write requires at least one cell operation')
   if (operations.length > 200) throw new Error('write accepts at most 200 cell operations per request')
   for (const operation of operations) {
     if (!operation || typeof operation.sheet !== 'string' || typeof operation.cell !== 'string') throw new Error('each operation requires sheet and cell')
-    if (!workbook.SheetNames.includes(operation.sheet)) throw new Error(`Sheet not found: ${operation.sheet}`)
-    const sheet = workbook.Sheets[operation.sheet]!
-    sheet[operation.cell] = { t: typeof operation.value === 'number' ? 'n' : 's', v: operation.value }
-    const range = XLSX.utils.decode_range(sheet['!ref'] ?? 'A1:A1')
-    const cell = XLSX.utils.decode_cell(operation.cell)
-    range.s.r = Math.min(range.s.r, cell.r)
-    range.s.c = Math.min(range.s.c, cell.c)
-    range.e.r = Math.max(range.e.r, cell.r)
-    range.e.c = Math.max(range.e.c, cell.c)
-    sheet['!ref'] = XLSX.utils.encode_range(range)
+    const worksheet = workbook.getWorksheet(operation.sheet)
+    if (!worksheet) throw new Error(`Sheet not found: ${operation.sheet}`)
+    worksheet.getCell(operation.cell).value = cellValue(operation.value)
   }
   const outputPath = safeOutputPath(request.outputPath, 'edited-workbook.xlsx')
-  atomicWriteWorkbook(workbook, outputPath)
+  await atomicWriteWorkbook(workbook, outputPath)
   return JSON.stringify({ action: 'write', outputPath, operations: operations.length, status: 'written' }, null, 2)
 }
 
@@ -222,7 +240,7 @@ export function validateSpreadsheetRequest(input: Record<string, unknown>): Spre
   const operations = input.operations
   if (action === 'write' && (!Array.isArray(operations) || operations.length === 0)) throw new Error('write requires a non-empty operations array')
   if (operations !== undefined && !Array.isArray(operations)) throw new Error('operations must be an array')
-  return { action: action as SpreadsheetAction, path: resolvePath(input.path.trim()), sheet: typeof input.sheet === 'string' ? input.sheet.trim() || undefined : undefined, groupBy: typeof input.groupBy === 'string' ? input.groupBy.trim() || undefined : undefined, measure: typeof input.measure === 'string' ? input.measure.trim() || undefined : undefined, keyColumn: typeof input.keyColumn === 'string' ? input.keyColumn.trim() || undefined : undefined, outputPath: typeof input.outputPath === 'string' ? input.outputPath.trim() || undefined : undefined, operations: operations as CellOperation[] | undefined }
+  return { action: action as SpreadsheetAction, path: resolveAllowedWorkspacePath(input.path.trim(), undefined, [paths.workspace]), sheet: typeof input.sheet === 'string' ? input.sheet.trim() || undefined : undefined, groupBy: typeof input.groupBy === 'string' ? input.groupBy.trim() || undefined : undefined, measure: typeof input.measure === 'string' ? input.measure.trim() || undefined : undefined, keyColumn: typeof input.keyColumn === 'string' ? input.keyColumn.trim() || undefined : undefined, outputPath: typeof input.outputPath === 'string' ? input.outputPath.trim() || undefined : undefined, operations: operations as CellOperation[] | undefined }
 }
 
 export const spreadsheetTool: Tool = {
@@ -232,19 +250,19 @@ export const spreadsheetTool: Tool = {
     type: 'object',
     properties: {
       action: { type: 'string', enum: ['inspect', 'analyze', 'audit', 'write'] },
-      path: { type: 'string', description: 'Input .xlsx/.xls workbook path' },
+      path: { type: 'string', description: 'Input .xlsx/.xls workbook path inside the active or designated workspace' },
       sheet: { type: 'string', description: 'Optional sheet name' },
       groupBy: { type: 'string', description: 'Optional categorical column for grouped analysis' },
       measure: { type: 'string', description: 'Optional numeric measure column for analysis' },
       keyColumn: { type: 'string', description: 'Optional key column for duplicate detection during audit' },
-      outputPath: { type: 'string', description: 'Write output path; must be inside the current workspace' },
+      outputPath: { type: 'string', description: 'Write output path; must be inside the active or designated workspace' },
       operations: { type: 'array', description: 'For write: up to 200 {sheet, cell, value} operations' },
     },
     required: ['action', 'path'],
   },
   async execute(input) {
     const request = validateSpreadsheetRequest(input)
-    const workbook = readWorkbook(request.path)
+    const workbook = await readWorkbook(request.path)
     if (request.action === 'inspect') return inspectWorkbook(workbook, request.sheet)
     if (request.action === 'analyze') return analyzeWorkbook(workbook, request.sheet, request.groupBy, request.measure)
     if (request.action === 'audit') return auditWorkbook(workbook, request.sheet, request.keyColumn)

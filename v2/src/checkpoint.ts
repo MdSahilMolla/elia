@@ -1,8 +1,9 @@
-import { existsSync, mkdirSync } from 'node:fs'
+import { existsSync } from 'node:fs'
 import { unlink } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { ConversationMessage } from './agentLoop.ts'
 import { SESSIONS_DIR } from './session.ts'
+import { ensureSecureDirectory, hardenSecureFile, writeSecureBunFile } from './securePersistence.ts'
 
 /**
  * Per-turn checkpoints for the interactive session: enough to put both the
@@ -69,8 +70,10 @@ function checkpointsPath(sessionId: string, dir: string): string {
 }
 
 export async function loadCheckpoints(sessionId: string, dir: string = SESSIONS_DIR): Promise<Checkpoint[]> {
-  const file = Bun.file(checkpointsPath(sessionId, dir))
+  const path = checkpointsPath(sessionId, dir)
+  const file = Bun.file(path)
   if (!(await file.exists())) return []
+  hardenSecureFile(path)
   try {
     return (await file.json()) as Checkpoint[]
   } catch {
@@ -83,8 +86,8 @@ export async function saveCheckpoints(
   checkpoints: Checkpoint[],
   dir: string = SESSIONS_DIR,
 ): Promise<void> {
-  mkdirSync(dir, { recursive: true })
-  await Bun.write(checkpointsPath(sessionId, dir), JSON.stringify(checkpoints))
+  ensureSecureDirectory(dir)
+  await writeSecureBunFile(checkpointsPath(sessionId, dir), JSON.stringify(checkpoints))
 }
 
 export interface RestoreResult {

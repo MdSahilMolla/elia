@@ -3,8 +3,8 @@ import { assessAction, createActionGovernor, redactActionInput } from './governo
 
 describe('autonomy governor', () => {
   test('allows local reads and verification commands', () => {
-    expect(assessAction({ name: 'read_file', input: { path: 'src/index.ts' } }, '/repo').decision).toBe('allow')
-    expect(assessAction({ name: 'run_command', input: { command: 'bun test' } }, '/repo').risk).toBe('safe')
+    expect(assessAction({ name: 'read_file', input: { path: 'src/index.ts' } }, process.cwd()).decision).toBe('allow')
+    expect(assessAction({ name: 'run_command', input: { command: 'bun test' } }, process.cwd()).risk).toBe('safe')
   })
 
   test('treats bounded delegation as internal safe orchestration', () => {
@@ -23,6 +23,27 @@ describe('autonomy governor', () => {
     const result = assessAction({ name: 'run_command', input: { command: 'git push --force origin main' } }, '/repo')
     expect(result.risk).toBe('critical')
     expect(result.decision).toBe('approve')
+  })
+
+  test('fails closed for shell variants that are not provably read-only', () => {
+    for (const command of [
+      'rm -r -f target',
+      'x=rm; $x -rf target',
+      'python3 -c "import os; os.remove(\\"target\\")"',
+      'git -c receive.denyCurrentBranch=ignore push origin HEAD',
+    ]) {
+      const result = assessAction({ name: 'run_command', input: { command } }, '/repo')
+      expect(result.risk).toBe('critical')
+      expect(result.decision).toBe('approve')
+    }
+  })
+
+  test('allows only explicit bounded read-only shell commands', () => {
+    for (const command of ['bun test', 'git status', 'ls -la', 'pwd']) {
+      const result = assessAction({ name: 'run_command', input: { command } }, '/repo')
+      expect(result.risk).toBe('safe')
+      expect(result.decision).toBe('allow')
+    }
   })
 
   test('blocks unattended credential reads and outbound data transfer', () => {
@@ -94,7 +115,7 @@ describe('autonomy governor', () => {
   test('domain analysis tools are read-only while external data paths are reviewable', () => {
     expect(assessAction({ name: 'finance', input: { action: 'dcf', baseFreeCashFlow: 100 } }).decision).toBe('allow')
     expect(assessAction({ name: 'data_science', input: { action: 'profile', path: 'data/events.csv' } }).decision).toBe('allow')
-    expect(assessAction({ name: 'data_science', input: { action: 'profile', path: '/tmp/events.csv' } }, '/repo').risk).toBe('review')
+    expect(assessAction({ name: 'data_science', input: { action: 'profile', path: '/tmp/events.csv' } }, '/repo').risk).toBe('critical')
     expect(assessAction({ name: 'production_readiness', input: {} }).decision).toBe('allow')
   })
 

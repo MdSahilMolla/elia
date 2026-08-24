@@ -2,43 +2,45 @@ import { afterAll, beforeAll, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import * as XLSX from 'xlsx'
+import ExcelJS from 'exceljs'
 import { readSpreadsheetTool } from './readSpreadsheet.ts'
 import { withAgentIdentity } from '../autonomy/context.ts'
 
 let testDir: string
 let fixturePath: string
 
-beforeAll(() => {
+beforeAll(async () => {
   testDir = mkdtempSync(join(tmpdir(), 'elia-spreadsheet-test-'))
   fixturePath = join(testDir, 'budget.xlsx')
 
-  const workbook = XLSX.utils.book_new()
-  const revenue = XLSX.utils.aoa_to_sheet([
+  const workbook = new ExcelJS.Workbook()
+  workbook.addWorksheet('Revenue').addRows([
     ['month', 'revenue'],
     ['Jan', 1000],
     ['Feb', 1200],
   ])
-  const costs = XLSX.utils.aoa_to_sheet([
+  workbook.addWorksheet('Costs').addRows([
     ['month', 'costs'],
     ['Jan', 400],
     ['Feb', 450],
   ])
-  XLSX.utils.book_append_sheet(workbook, revenue, 'Revenue')
-  XLSX.utils.book_append_sheet(workbook, costs, 'Costs')
-  XLSX.writeFile(workbook, fixturePath)
+  await workbook.xlsx.writeFile(fixturePath)
 })
 
 afterAll(() => {
   rmSync(testDir, { recursive: true, force: true })
 })
 
+function executeReadSpreadsheet(input: Record<string, unknown>) {
+  return withAgentIdentity({ name: 'test', role: 'lead', cwd: testDir }, () => readSpreadsheetTool.execute(input))
+}
+
 test('read_spreadsheet throws on a missing file', async () => {
-  await expect(readSpreadsheetTool.execute({ path: join(testDir, 'nope.xlsx') })).rejects.toThrow('File not found')
+  await expect(executeReadSpreadsheet({ path: join(testDir, 'nope.xlsx') })).rejects.toThrow('File not found')
 })
 
 test('read_spreadsheet returns every sheet as CSV by default', async () => {
-  const result = await readSpreadsheetTool.execute({ path: fixturePath })
+  const result = await executeReadSpreadsheet({ path: fixturePath })
   expect(result).toContain('## Sheet: Revenue')
   expect(result).toContain('Jan,1000')
   expect(result).toContain('## Sheet: Costs')
@@ -46,19 +48,18 @@ test('read_spreadsheet returns every sheet as CSV by default', async () => {
 })
 
 test('read_spreadsheet returns only the requested sheet', async () => {
-  const result = await readSpreadsheetTool.execute({ path: fixturePath, sheet: 'Costs' })
+  const result = await executeReadSpreadsheet({ path: fixturePath, sheet: 'Costs' })
   expect(result).toContain('## Sheet: Costs')
   expect(result).not.toContain('Revenue')
 })
 
 test('read_spreadsheet throws on an unknown sheet name', async () => {
-  await expect(readSpreadsheetTool.execute({ path: fixturePath, sheet: 'Nope' })).rejects.toThrow('Sheet(s) not found')
+  await expect(executeReadSpreadsheet({ path: fixturePath, sheet: 'Nope' })).rejects.toThrow('Sheet(s) not found')
 })
 
-
 test('read_spreadsheet validates inputs and resolves relative paths against the active agent cwd', async () => {
-  await expect(readSpreadsheetTool.execute({})).rejects.toThrow('path must be a non-empty string')
-  await expect(readSpreadsheetTool.execute({ path: fixturePath, sheet: 42 })).rejects.toThrow('sheet must be a non-empty string')
-  const result = await withAgentIdentity({ name: 'test', role: 'scout', cwd: testDir }, () => readSpreadsheetTool.execute({ path: 'budget.xlsx', sheet: 'Revenue' }))
+  await expect(executeReadSpreadsheet({})).rejects.toThrow('path must be a non-empty string')
+  await expect(executeReadSpreadsheet({ path: fixturePath, sheet: 42 })).rejects.toThrow('sheet must be a non-empty string')
+  const result = await executeReadSpreadsheet({ path: 'budget.xlsx', sheet: 'Revenue' })
   expect(result).toContain('Jan,1000')
 })

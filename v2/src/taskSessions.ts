@@ -1,4 +1,4 @@
-import { mkdirSync, renameSync } from 'node:fs'
+import { ensureSecureDirectory, hardenSecureFile, writeSecureBunFile } from './securePersistence.ts'
 import { join } from 'node:path'
 import { emitEvent, machineReadable } from './ui/runtime.ts'
 import { redactText } from './ui/redact.ts'
@@ -66,6 +66,7 @@ export class TaskSessionStore {
 
   async load(filePath = TASKS_FILE): Promise<void> {
     this.persistencePath = filePath
+    hardenSecureFile(filePath)
     const file = Bun.file(filePath)
     if (!(await file.exists())) return
     try {
@@ -211,10 +212,8 @@ export class TaskSessionStore {
     queueMicrotask(async () => {
       this.writeQueued = false
       try {
-        mkdirSync(join(this.persistencePath, '..'), { recursive: true })
-        const temporary = `${this.persistencePath}.tmp-${process.pid}`
-        await Bun.write(temporary, JSON.stringify({ version: TASKS_SCHEMA_VERSION, tasks: this.list() }, null, 2))
-        renameSync(temporary, this.persistencePath)
+        ensureSecureDirectory(join(this.persistencePath, '..'))
+        await writeSecureBunFile(this.persistencePath, JSON.stringify({ version: TASKS_SCHEMA_VERSION, tasks: this.list() }, null, 2))
       } catch {
         // Persistence is best-effort. The live dashboard remains authoritative.
       }
