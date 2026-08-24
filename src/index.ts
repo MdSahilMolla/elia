@@ -22,27 +22,12 @@ import { activeProviderNeedsSetup, removeProviderConfiguration, savedProviderNam
 
 const REPL_COMMANDS: SlashCommand[] = [
   { name: '/capabilities', description: 'list specialist capabilities, risk classes, and output contracts' },
-  { name: '/cyber', description: 'switch to cyber mode — authorized security testing, vuln research, CTFs' },
-  { name: '/sports', description: 'switch to Sports mode — evidence-aware sports intelligence and operations' },
-  { name: '/fitness', description: 'switch to Fitness mode — conservative fitness planning and wellbeing support' },
-  { name: '/marketing', description: 'switch to the Marketing agent persona for this session' },
-  { name: '/finance', description: 'switch to the Finance agent persona for this session' },
-  { name: '/business', description: 'switch to the Business Analyst persona for this session' },
-  { name: '/data', description: 'switch to the Data Analyst persona for this session' },
-  { name: '/research', description: 'switch to the Research persona for this session' },
-  { name: '/cybersecurity', description: 'switch to the Cybersecurity persona for this session' },
-  { name: '/automation', description: 'switch to the Automation persona for this session' },
-  { name: '/communications', description: 'switch to the Communications persona for this session' },
-  { name: '/ai', description: 'switch to the AI/ML persona for this session' },
-  { name: '/production', description: 'switch to the Production Engineering persona for this session' },
-  { name: '/tech', description: 'switch to the Tech agent persona for this session' },
-  { name: '/dev', description: "switch back to elia's development mode" },
-  { name: '/mode', description: '/mode manual (default) asks only for risky commands, /mode auto never asks' },
+  { name: '/mode', description: 'pick a mode/persona with arrow keys, or /mode dev, /mode cyber, /mode sports, /mode fitness, /mode battmann, /mode marketing, ...' },
   { name: '/rewind', description: 'list rewind points (add a number to restore one, e.g. /rewind 2)' },
   { name: '/model', description: 'pick a model with arrow keys, or /model groq, /model claude-opus-5' },
   { name: '/thinking', description: 'pick reasoning effort with arrow keys, or /thinking off/low/medium/high/<n>' },
   { name: '/task', description: 'browse browser, coding, and pending tasks with arrow keys' },
-  { name: '/settings', description: 'browse every setting — mode, model, reasoning effort, risk checks, skills — and switch with arrow keys' },
+  { name: '/settings', description: 'browse every setting — model, reasoning effort, risk checks, skills — and switch with arrow keys' },
   { name: '@skills', description: 'browse loaded skills and choose which skill tools are active for the next turn' },
 ]
 
@@ -68,8 +53,8 @@ risky (deletes, sends, spending, publishing, system changes, ...) — only
 risky commands get an "About to: ... run it?" prompt, safe ones just run.
 Once a command starts, safe and reversible work finishes end to end without
 interruptions; irreversible tool actions are separately governed. Pass --yolo/-y
-(or "/mode auto" in a session) to skip the pre-flight risk prompt while keeping
-that action governor active.
+(or pick "Risk checks" in "/settings" during a session) to skip the pre-flight
+risk prompt while keeping that action governor active.
 
 Autonomous work:
   elia auto "<goal>"                Plan the work, show you the plan, then execute it with a
@@ -154,15 +139,11 @@ Inside an interactive session:
   rewind                      List rewind points for this session
   rewind <n>                  Restore conversation + files to just before turn <n>
   /capabilities               List specialist capabilities, risk classes, and output contracts
-  /cyber                      Switch to cyber mode: authorized security testing, vuln
-                              research, CTFs, and defensive work — same tools, a
-                              security-focused system prompt with authorization guardrails
-  /sports /fitness /marketing /finance /business /data /research /cybersecurity
-  /automation /communications /ai /production /tech
-                              Switch to that specialist persona for the rest of the session
-  /dev                        Switch back to elia's development mode (legacy /normal also accepted)
-  /mode auto                  Skip the pre-flight risk prompt; critical actions remain governed
-  /mode manual                Go back to risk-checking and asking only when it matters (default)
+  /mode                       Pick a mode/persona with arrow keys: dev, cyber, sports, fitness, battmann,
+                              marketing, finance, business, data, research, cybersecurity,
+                              automation, communications, ai, production, tech
+  /mode <name>                Switch directly, e.g. /mode cyber, /mode dev
+  /settings                   Risk checks (auto/manual), model, reasoning effort, and skills
   /model                      Pick a provider/model or enable auto fallback
   /model auto                 Keep the selected model primary; fail over to another ready provider
   /model <provider>           Switch provider (e.g. /model groq), keeping its default model
@@ -176,6 +157,9 @@ Inside an interactive session:
   elia --dev                  Start explicitly in dev mode (the default)
   elia --sports               Start (or run a one-shot prompt) in Sports mode
   elia --fitness              Start (or run a one-shot prompt) in Fitness mode
+  elia --battmann             Start (or run a one-shot prompt) in Battmann mode — strategic
+                              intelligence across trade, geopolitics, financial markets,
+                              supply chain, policy, and commodities
   elia --cyber                Start (or run a one-shot prompt) in cyber mode
   elia --json                 Emit stable JSONL lifecycle events for automation
   elia --plain                Disable color, animation, and in-place terminal redraws
@@ -1149,7 +1133,7 @@ async function runInteractive(): Promise<void> {
 
   const oneShotPrompt = positionals(['--resume']).join(' ').trim()
 
-  let mode: AgentMode = hasFlag('--cyber') ? 'cyber' : hasFlag('--sports') ? 'sports' : hasFlag('--fitness') ? 'fitness' : 'dev'
+  let mode: AgentMode = hasFlag('--cyber') ? 'cyber' : hasFlag('--sports') ? 'sports' : hasFlag('--fitness') ? 'fitness' : hasFlag('--battmann') ? 'battmann' : 'dev'
   let persona: AgentPersona | undefined
   let selectedSkillNames: string[] | undefined
   let messages: ConversationMessage[] = []
@@ -1157,7 +1141,7 @@ async function runInteractive(): Promise<void> {
   // manual (default): a cheap risk check runs before each command — only
   // commands flagged risky (deletes, sends, spend, publishing, system
   // changes, ...) get an "About to: ... run it?" prompt; everything else just
-  // runs. auto (--yolo or "/mode auto"): skips the pre-flight prompt while the
+  // runs. auto (--yolo, or "/settings" → Risk checks): skips the pre-flight prompt while the
   // shared governor still blocks or requests approval for critical actions.
   // Safe and reversible work runs end to end without interruption.
   let replMode: 'manual' | 'auto' = hasFlag('--yolo', '-y') ? 'auto' : 'manual'
@@ -1304,7 +1288,7 @@ async function runInteractive(): Promise<void> {
           dim(describeThinking()),
           ...(taskSummary ? [dim(taskSummary)] : []),
         ],
-        { title: mode === 'cyber' ? 'elia — cyber mode' : mode === 'sports' ? 'elia — sports mode' : mode === 'fitness' ? 'elia — fitness mode' : 'elia — dev mode', borderColor: gold },
+        { title: mode === 'cyber' ? 'elia — cyber mode' : mode === 'sports' ? 'elia — sports mode' : mode === 'fitness' ? 'elia — fitness mode' : mode === 'battmann' ? 'elia — Battmann mode' : 'elia — dev mode', borderColor: gold },
       )}\n`,
     )
   }
@@ -1315,12 +1299,14 @@ async function runInteractive(): Promise<void> {
         ? 'sports mode on — evidence-aware match, scouting, performance, league, event, and sports-business analysis. type a prompt, "/" to see commands, or "exit" to quit'
         : mode === 'fitness'
           ? 'fitness mode on — conservative training, habit, recovery, and wellbeing support; not medical advice. type a prompt, "/" to see commands, or "exit" to quit'
-          : 'dev mode on — building, debugging, testing, browser, and task workflows available. type a prompt, "/" to see commands, or "exit" to quit (Ctrl+C also works)',
+          : mode === 'battmann'
+            ? 'Battmann mode on — strategic risk intelligence across trade, geopolitics, markets, supply chain, policy, and commodities. type a prompt, "/" to see commands, or "exit" to quit'
+            : 'dev mode on — building, debugging, testing, browser, and task workflows available. type a prompt, "/" to see commands, or "exit" to quit (Ctrl+C also works)',
   )
   writeNotice(
     replMode === 'auto'
-      ? 'auto mode (--yolo) — preliminary risk checks are skipped; safe work runs immediately, while governed irreversible actions still require explicit approval. "/mode manual" to turn checks back on.'
-      : 'manual mode — elia flags risky commands and asks before running them; safe commands just run. "/mode auto" for zero prompts.',
+      ? 'auto mode (--yolo) — preliminary risk checks are skipped; safe work runs immediately, while governed irreversible actions still require explicit approval. "/settings" → Risk checks to turn checks back on.'
+      : 'manual mode — elia flags risky commands and asks before running them; safe commands just run. "/settings" → Risk checks for zero prompts.',
   )
 
   function applyModelChoice(providerName: string, model?: string): void {
@@ -1515,10 +1501,16 @@ async function runInteractive(): Promise<void> {
       writeNotice('fitness mode on — conservative training, habit, recovery, and wellbeing support; not medical advice.')
       return
     }
+    if (choice === 'battmann') {
+      mode = 'battmann'
+      persona = undefined
+      writeNotice('Battmann mode on — strategic intelligence across trade, geopolitics, financial markets, supply chain, policy, and commodities. Every score and claim is sourced or labelled an estimate; elia surfaces intelligence, you decide.')
+      return
+    }
     const requestedPersona = choice === 'cybersecurity' ? 'cyber' : choice
     if (isAgentPersona(requestedPersona)) {
       persona = requestedPersona
-      writeNotice(`${persona.charAt(0).toUpperCase()}${persona.slice(1)} agent on — elia will answer in this persona until /dev.`)
+      writeNotice(`${persona.charAt(0).toUpperCase()}${persona.slice(1)} agent on — elia will answer in this persona until /mode dev.`)
       return
     }
     const hadSpecialist = persona !== undefined || mode !== 'dev'
@@ -1532,6 +1524,7 @@ async function runInteractive(): Promise<void> {
     { label: 'Cyber', detail: 'authorized security testing, vuln research, CTFs', value: 'cyber' },
     { label: 'Sports', detail: 'evidence-aware sports intelligence and operations', value: 'sports' },
     { label: 'Fitness', detail: 'conservative fitness planning and wellbeing support', value: 'fitness' },
+    { label: 'Battmann', detail: 'strategic risk intelligence — trade, geopolitics, markets, supply chain', value: 'battmann' },
     { label: 'Marketing', detail: 'Marketing agent persona', value: 'marketing' },
     { label: 'Finance', detail: 'Finance agent persona', value: 'finance' },
     { label: 'Business', detail: 'Business Analyst persona', value: 'business' },
@@ -1557,12 +1550,12 @@ async function runInteractive(): Promise<void> {
     else if (result.type === 'unavailable') writeNotice(`Current: ${currentValue}`)
   }
 
-  /** Shared by "/mode auto"|"/mode manual" and the /settings risk-checks picker. */
+  /** Set from the /settings risk-checks picker. */
   function applyReplModeChoice(value: 'auto' | 'manual'): void {
     replMode = value
     writeNotice(
       value === 'auto'
-        ? 'Auto mode — preliminary risk checks are skipped. Safe work runs immediately; governed irreversible actions still require explicit approval. "/mode manual" to re-enable checks.'
+        ? 'Auto mode — preliminary risk checks are skipped. Safe work runs immediately; governed irreversible actions still require explicit approval. "/settings" → Risk checks to re-enable checks.'
         : 'Manual mode — elia flags risky commands and asks first; safe commands just run.',
     )
   }
@@ -1615,9 +1608,7 @@ async function runInteractive(): Promise<void> {
   /** Top-level settings screen: every switchable setting in one arrow-key menu, looping until esc/cancel. */
   async function handleSettingsCommand(): Promise<void> {
     while (true) {
-      const modeSummary = persona ? `persona: ${persona === 'cyber' ? 'cybersecurity' : persona}` : `mode: ${mode}`
       const options = [
-        { label: 'Mode / persona', detail: modeSummary, value: 'mode' },
         { label: 'Risk checks', detail: replMode, value: 'replMode' },
         { label: 'Model & provider', detail: `${config.providerLabel} · ${config.model}`, value: 'model' },
         { label: 'Provider API keys', detail: `${savedProviderNames().length} saved · add/update/remove`, value: 'providers' },
@@ -1630,8 +1621,7 @@ async function runInteractive(): Promise<void> {
         return
       }
       if (result.type !== 'select') return
-      if (result.value === 'mode') await handleModePersonaPicker()
-      else if (result.value === 'replMode') await handleReplModePicker()
+      if (result.value === 'replMode') await handleReplModePicker()
       else if (result.value === 'model') await handleModelCommand('')
       else if (result.value === 'providers') await handleProviderSettings()
       else if (result.value === 'thinking') await handleThinkingCommand('')
@@ -1660,29 +1650,6 @@ async function runInteractive(): Promise<void> {
       }
       continue
     }
-    if (trimmed === '/cyber' || trimmed === '/cyber on') {
-      applyModePersonaChoice('cyber')
-      continue
-    }
-    if (trimmed === '/sports') {
-      applyModePersonaChoice('sports')
-      continue
-    }
-    if (trimmed === '/fitness') {
-      applyModePersonaChoice('fitness')
-      continue
-    }
-    const personaMatch = /^\/(marketing|finance|business|data|research|cybersecurity|automation|communications|ai|production|tech)$/.exec(trimmed)
-    if (personaMatch) {
-      applyModePersonaChoice(personaMatch[1]!)
-      continue
-    }
-
-    if (trimmed === '/dev' || trimmed === '/normal' || trimmed === '/cyber off') {
-      applyModePersonaChoice('dev')
-      continue
-    }
-
     if (trimmed === '/settings') {
       await handleSettingsCommand()
       continue
@@ -1709,15 +1676,8 @@ async function runInteractive(): Promise<void> {
     const modeMatch = /^\/mode(?:\s+(.*))?$/.exec(trimmed)
     if (modeMatch) {
       const modeArg = modeMatch[1]?.trim()
-      if (!modeArg) {
-        await handleModePersonaPicker()
-      } else if (modeArg === 'auto') {
-        applyReplModeChoice('auto')
-      } else if (modeArg === 'manual') {
-        applyReplModeChoice('manual')
-      } else {
-        applyModePersonaChoice(modeArg)
-      }
+      if (!modeArg) await handleModePersonaPicker()
+      else applyModePersonaChoice(modeArg)
       continue
     }
 

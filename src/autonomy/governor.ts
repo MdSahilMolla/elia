@@ -63,6 +63,10 @@ export function assessAction(request: ActionRequest, cwd = currentAgent().cwd ??
     return assessment('review', 'approve', 'presentation generation creates a derived document artifact', 'presentation.from_workbook', resources, true)
   }
 
+  if (name === 'project_profile') {
+    return assessment('safe', 'allow', 'project profiling is a local, read-only repository inspection', 'project_profile', resources, true)
+  }
+
   if (name === 'production_readiness') {
     return assessment('safe', 'allow', 'production readiness is a repository-only, read-only evidence audit', 'production_readiness', resources, true)
   }
@@ -136,6 +140,36 @@ export function assessAction(request: ActionRequest, cwd = currentAgent().cwd ??
     return path && !isPathWithinWorkspace(path, cwd)
       ? assessment('critical', 'approve', `${name} may access data outside the active workspace or through an invalid path`, name, [path], false)
       : assessment('safe', 'allow', `${name} is read-only or coordination-only`, name, resources, true)
+  }
+
+  // Retrieval is read-only, but the query or URL does leave the machine, so it
+  // is declared explicitly rather than left to fall through to the fail-closed
+  // unknown-tool branch. web_fetch is further constrained at the tool itself:
+  // http(s) only, public addresses only, redirects refused, response bounded.
+  if (name === 'web_search') {
+    return assessment('safe', 'allow', 'web search is read-only retrieval; the query leaves the machine but no external state changes', 'web_search', resources, true)
+  }
+
+  if (name === 'web_fetch') {
+    return assessment('safe', 'allow', 'web fetch is a bounded read-only GET restricted to public http(s) addresses with redirects refused', 'web_fetch', resources, true)
+  }
+
+  if (name === 'read_spreadsheet') {
+    const path = typeof input.path === 'string' ? input.path : ''
+    return path && !isPathWithinWorkspace(path, cwd)
+      ? assessment('critical', 'approve', 'read_spreadsheet targets a workbook outside the active workspace or uses an invalid path', 'read_spreadsheet', [path], false)
+      : assessment('safe', 'allow', 'read_spreadsheet is a read-only workbook inspection inside the active workspace', 'read_spreadsheet', resources, true)
+  }
+
+  // Cyber-mode tools. new_engagement only writes the local authorization
+  // record; run_security_tool runs a real scanner against a live target, which
+  // is consequential and irreversible from that target's point of view.
+  if (name === 'new_engagement') {
+    return assessment('review', 'approve', 'new_engagement writes the local scope and authorization record for an engagement', 'new_engagement', resources, true)
+  }
+
+  if (name === 'run_security_tool') {
+    return assessment('critical', 'approve', 'run_security_tool executes an active security tool against a live target and needs an authorization record', 'run_security_tool', resources, false)
   }
 
   if (name === 'preview' || name === 'task') {

@@ -281,6 +281,72 @@ export function renderProposal(proposal: Proposal): string {
   return `\n${box(lines, { title: 'Proposal', borderColor: gold })}\n`
 }
 
+/** Renders a proposal as plain Markdown, for the on-disk artifact — `renderProposal` above owns the terminal (ANSI, box-drawn) format; this is the un-styled equivalent for a file that outlives the session. */
+export function renderProposalMarkdown(proposal: Proposal): string {
+  const lines: string[] = []
+  const { waves } = planWaves(proposal.steps)
+
+  lines.push(`# Execution Plan: ${proposal.goal}`)
+
+  if (proposal.understanding) {
+    lines.push('', '## Understanding', proposal.understanding)
+  }
+
+  if (proposal.assumptions.length > 0) {
+    lines.push('', '## Assumptions')
+    for (const assumption of proposal.assumptions) lines.push(`- ${assumption}`)
+  }
+
+  const workerCount = proposal.steps.length
+  const waveWord = waves.length === 1 ? 'wave' : 'waves'
+  lines.push('', `## Plan (${workerCount} ${workerCount === 1 ? 'worker' : 'workers'} in ${waves.length} ${waveWord})`)
+  for (const [index, wave] of waves.entries()) {
+    lines.push('', `### Wave ${index + 1}${wave.length > 1 ? ` (${wave.length} in parallel)` : ''}`)
+    for (const step of wave) {
+      lines.push(`- **${step.role}** \`${step.id}\` — ${step.title}`)
+      if (step.files.length > 0) lines.push(`  - files: ${step.files.join(', ')}`)
+    }
+    for (const collision of fileCollisions(wave)) {
+      lines.push(`  - ⚠ ${collision.file} is claimed by ${collision.steps.join(' and ')} in the same wave`)
+    }
+  }
+
+  if (proposal.acceptanceCriteria?.length) {
+    lines.push('', '## Acceptance Criteria')
+    for (const criterion of proposal.acceptanceCriteria) lines.push(`- ${criterion}`)
+  }
+
+  if (proposal.sideEffects?.length) {
+    lines.push('', '## Side Effects')
+    for (const effect of proposal.sideEffects) lines.push(`- ${effect}`)
+  }
+
+  if (proposal.risks.length > 0) {
+    lines.push('', '## Risks')
+    for (const risk of proposal.risks) lines.push(`- ${risk}`)
+  }
+
+  lines.push('', '## Verification Commands')
+  if (proposal.verification.length > 0) {
+    for (const command of proposal.verification) lines.push(`- \`${command}\``)
+  } else {
+    lines.push('(none given)')
+  }
+
+  if (proposal.recovery?.length) {
+    lines.push('', '## Recovery')
+    for (const item of proposal.recovery) lines.push(`- ${item}`)
+  }
+
+  if (proposal.outOfScope.length > 0) {
+    lines.push('', '## Out of Scope')
+    for (const item of proposal.outOfScope) lines.push(`- ${item}`)
+  }
+
+  lines.push('')
+  return lines.join('\n')
+}
+
 function asString(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim().length > 0 ? value.trim() : undefined
 }

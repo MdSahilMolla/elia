@@ -53,13 +53,13 @@ test('help documents autonomous budget and agent dry-run controls', async () => 
   expect(result.stdout).toContain('spreadsheet')
   expect(result.stdout).toContain('presentation')
   expect(result.stdout).toContain('Dev mode (default)')
-  expect(result.stdout).toContain('/dev')
+  expect(result.stdout).toContain('/mode')
   expect(result.stdout).toContain('--unattended')
   expect(result.stdout).toContain('--supervised')
   expect(result.stdout).toContain('elia control stop')
   expect(result.stdout).toContain('--sports')
   expect(result.stdout).toContain('--fitness')
-  expect(result.stdout).toContain('/sports')
+  expect(result.stdout).toContain('--battmann')
 })
 
 test('invalid autonomous wall-clock budget fails before execution', async () => {

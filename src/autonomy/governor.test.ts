@@ -168,3 +168,35 @@ test('bounded action budget stops runaway unattended tool use', async () => {
   expect(exhausted.message).toContain('Action budget exhausted')
   expect(governor.stats()).toEqual({ maxActions: 2, consumed: 2, exhausted: true, blockedByBudget: 1 })
 })
+
+test('every registered tool declares a governor contract', async () => {
+  // A tool with no contract falls through to the fail-closed "unknown tool"
+  // branch, so the first real run that reaches for it stalls on an approval
+  // prompt instead of working. That shipped twice — once for the cyber tools,
+  // once for the research tools — so it is asserted across the whole registry
+  // rather than tool by tool.
+  const { allWorkerTools, businessTools, cyberTools } = await import('../tools/registry.ts')
+  const { taskTool } = await import('../tools/task.ts')
+  const { previewTool } = await import('../tools/preview.ts')
+
+  const undeclared = [...allWorkerTools(), ...businessTools, ...cyberTools, taskTool, previewTool]
+    .filter((tool) => assessAction({ name: tool.name, input: {} }).reason.includes('no declared safety contract'))
+    .map((tool) => tool.name)
+
+  expect(undeclared).toEqual([])
+})
+
+test('a genuinely unknown tool still fails closed', () => {
+  const assessment = assessAction({ name: 'not_a_real_tool', input: {} })
+  expect(assessment.risk).toBe('critical')
+  expect(assessment.decision).toBe('approve')
+  expect(assessment.reason).toContain('no declared safety contract')
+})
+
+test('research tools are allowed while consequential actions still need approval', () => {
+  expect(assessAction({ name: 'web_search', input: { query: 'x' } }).decision).toBe('allow')
+  expect(assessAction({ name: 'web_fetch', input: { url: 'https://example.com' } }).decision).toBe('allow')
+  expect(assessAction({ name: 'run_security_tool', input: {} }).decision).toBe('approve')
+  expect(assessAction({ name: 'communication', input: { action: 'send' } }).decision).toBe('approve')
+  expect(assessAction({ name: 'browser', input: { action: 'click' } }).decision).toBe('approve')
+})

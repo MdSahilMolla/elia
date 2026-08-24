@@ -1,6 +1,6 @@
-import { config, CYBER_SYSTEM_PROMPT, DEV_SYSTEM_PROMPT, FITNESS_SYSTEM_PROMPT, SPORTS_SYSTEM_PROMPT } from './config.ts'
+import { BATTMANN_SYSTEM_PROMPT, config, CYBER_SYSTEM_PROMPT, DEV_SYSTEM_PROMPT, FITNESS_SYSTEM_PROMPT, SPORTS_SYSTEM_PROMPT } from './config.ts'
 import { runAgentLoop, type ConversationMessage, type RunAgentLoopResult, type ToolEvent } from './agentLoop.ts'
-import { allWorkerTools, cyberTools, getSynthesizedTools } from './tools/registry.ts'
+import { allWorkerTools, businessTools, cyberTools, getSynthesizedTools } from './tools/registry.ts'
 import { taskTool } from './tools/task.ts'
 import { previewTool } from './tools/preview.ts'
 import { writeText, writeThinking, writeUsageLine } from './ui/stream.ts'
@@ -27,7 +27,15 @@ function topLevelTools(mode: AgentMode, selectedSkillNames?: string[]) {
   const selected = new Set(expandedSelection ?? [])
   const synthesized = new Set(getSynthesizedTools().map((tool) => tool.name))
   const workerTools = allWorkerTools().filter((tool) => expandedSelection === undefined || !synthesized.has(tool.name) || selected.has(tool.name))
-  return [...workerTools, taskTool, previewTool, ...(mode === 'cyber' ? cyberTools : [])]
+  // Battmann gets the research and reporting set: an intelligence brief
+  // grounded only in the local filesystem would be fabrication by construction.
+  return [
+    ...workerTools,
+    taskTool,
+    previewTool,
+    ...(mode === 'cyber' ? cyberTools : []),
+    ...(mode === 'battmann' ? businessTools : []),
+  ]
 }
 
 export interface RunTurnOptions {
@@ -63,7 +71,9 @@ export async function runTurn(
       ? SPORTS_SYSTEM_PROMPT
       : mode === 'fitness'
         ? FITNESS_SYSTEM_PROMPT
-        : DEV_SYSTEM_PROMPT
+        : mode === 'battmann'
+          ? BATTMANN_SYSTEM_PROMPT
+          : DEV_SYSTEM_PROMPT
 
   // One cache per turn rather than per session: the turn boundary is the point at
   // which the user may have edited files behind elia's back.

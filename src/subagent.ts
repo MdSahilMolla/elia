@@ -1,7 +1,8 @@
-import { autoFallbacksFor, CYBER_SUBAGENT_SYSTEM_PROMPT, FITNESS_SUBAGENT_SYSTEM_PROMPT, roleConfig, SPORTS_SUBAGENT_SYSTEM_PROMPT, SUBAGENT_SYSTEM_PROMPT } from './config.ts'
+import { autoFallbacksFor, BATTMANN_SUBAGENT_SYSTEM_PROMPT, CYBER_SUBAGENT_SYSTEM_PROMPT, FITNESS_SUBAGENT_SYSTEM_PROMPT, roleConfig, SPORTS_SUBAGENT_SYSTEM_PROMPT, SUBAGENT_SYSTEM_PROMPT } from './config.ts'
 import { runAgentLoop, lastAssistantText, type ConversationMessage, type ToolEvent } from './agentLoop.ts'
 import type { Usage } from './providers/types.ts'
 import type { Tool } from './tools/types.ts'
+import { businessTools } from './tools/registry.ts'
 import { toolsForRole, role as roleDefinition } from './autonomy/roles.ts'
 import { currentAgent, withAgentIdentity } from './autonomy/context.ts'
 import { activeBlackboard } from './autonomy/blackboard.ts'
@@ -92,6 +93,14 @@ export async function runSubAgent(request: SubAgentRequest): Promise<SubAgentRes
   const delegationDepth = request.delegationDepth ?? 0
   const baseTools = request.tools ?? [...toolsForRole(request.role), ...(request.extraTools ?? [])]
   const tools = [...baseTools]
+  // A Battmann worker researching a live trade or geopolitical signal needs the
+  // same external-evidence tools the lead has; without them it can only guess,
+  // which is the one thing this mode must never do.
+  if (activeMode() === 'battmann') {
+    for (const tool of businessTools) {
+      if (!tools.some((existing) => existing.name === tool.name)) tools.push(tool)
+    }
+  }
   if (definition.canDelegate && delegationDepth < 1) {
     tools.push(createDelegationTool({
       parentRole: request.role,
@@ -134,7 +143,9 @@ export async function runSubAgent(request: SubAgentRequest): Promise<SubAgentRes
       ? SPORTS_SUBAGENT_SYSTEM_PROMPT
       : activeMode() === 'fitness'
         ? FITNESS_SUBAGENT_SYSTEM_PROMPT
-        : SUBAGENT_SYSTEM_PROMPT
+        : activeMode() === 'battmann'
+          ? BATTMANN_SUBAGENT_SYSTEM_PROMPT
+          : SUBAGENT_SYSTEM_PROMPT
   const cwd = request.cwd ?? currentAgent().cwd
 
   const result = await withAgentIdentity({ name: request.name, role: request.role, runId, cwd, signal: request.signal }, () =>
