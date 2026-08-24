@@ -124,6 +124,23 @@ describe('autonomy governor', () => {
       expect(assessAction({ name: 'run_command', input: { command } }).risk).toBe('critical')
     }
   })
+
+  test('deployment workflows keep preview reviewable and production critical', async () => {
+    const preview = await createActionGovernor({ mode: 'unattended' }).check({
+      name: 'deployment',
+      input: { action: 'deploy', provider: 'vercel', target: 'preview' },
+    })
+    expect(preview.allowed).toBe(true)
+    expect(preview.assessment.intent).toBe('deployment.preview')
+
+    const production = await createActionGovernor({ mode: 'unattended' }).check({
+      name: 'deployment',
+      input: { action: 'deploy', provider: 'vercel', target: 'production' },
+    })
+    expect(production.allowed).toBe(false)
+    expect(production.assessment.risk).toBe('critical')
+    expect(production.message).toContain('unattended policy')
+  })
 })
 
 test('unattended mode never delegates critical actions to an approval callback', async () => {

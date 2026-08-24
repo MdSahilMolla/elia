@@ -26,10 +26,11 @@ test('communications specialist can use the browser but has no shell tool', () =
   expect(names).not.toContain('run_command')
 })
 
-test('automation specialist can coordinate browser and communication workflows', () => {
+test('automation specialist can coordinate browser, communication, and deployment workflows', () => {
   const names = personaTools('automation').map((tool) => tool.name)
   expect(names).toContain('browser')
   expect(names).toContain('communication')
+  expect(names).toContain('deployment')
 })
 
 test('office specialists receive spreadsheet and presentation tools', () => {
@@ -46,6 +47,7 @@ test('finance, data, and production specialists receive domain workflows', () =>
   const productionNames = personaTools('production').map((tool) => tool.name)
   expect(productionNames).toContain('production_readiness')
   expect(productionNames).toContain('project_profile')
+  expect(productionNames).toContain('deployment')
 })
 
 test('sports specialist receives evidence and analysis tools', () => {

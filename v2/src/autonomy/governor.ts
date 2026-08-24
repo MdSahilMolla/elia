@@ -67,6 +67,18 @@ export function assessAction(request: ActionRequest, cwd = currentAgent().cwd ??
     return assessment('safe', 'allow', 'production readiness is a repository-only, read-only evidence audit', 'production_readiness', resources, true)
   }
 
+  if (name === 'deployment') {
+    const action = typeof input.action === 'string' ? input.action : 'unknown'
+    const target = typeof input.target === 'string' ? input.target : 'unknown'
+    if (action === 'plan' || action === 'build' || action === 'verify') {
+      return assessment('review', 'approve', `deployment ${action} is a bounded release workflow step`, `deployment.${action}`, resources, true)
+    }
+    if (action === 'deploy' && target === 'preview') {
+      return assessment('review', 'approve', 'preview deployment publishes an external build artifact for testing', 'deployment.preview', resources, true)
+    }
+    return assessment('critical', 'approve', 'production deployment changes the user-facing external application', 'deployment.production', resources, false)
+  }
+
   if (name === 'environment') {
     return assessment('safe', 'allow', 'environment discovery is a local, read-only capability snapshot', 'environment.inspect', resources, true)
   }

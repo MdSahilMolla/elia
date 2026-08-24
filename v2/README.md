@@ -141,6 +141,12 @@ Elia’s Tech specialist is compatible with projects built in **Python**, **Type
 
 Elia uses the target project’s existing package manager and conventions rather than assuming one toolchain. Before coding in an unfamiliar repository, the Tech agent can use the deterministic `project_profile` tool to report detected stacks, package manager, manifest signals, and declared verification commands. It can work across these stacks in one delegated task, for example updating a Python API, a TypeScript service, and a React client in separate dependency-aware steps, then running the relevant verification for each.
 
+### End-to-end web deployment
+
+Elia’s Tech and Production workflows can carry a web project through inspect → implement → test → build → preview deploy → live verification. The governed `deployment` tool supports Vercel and Netlify when the project is already linked locally: `.vercel/project.json` for Vercel, or `.netlify/state.json`/`NETLIFY_SITE_ID` for Netlify. It uses the project’s declared build script, returns bounded provider output, extracts the deployment URL, and records a receipt in `.elia/deployments.jsonl`.
+
+Use `{"action":"plan","provider":"vercel","target":"preview"}` to inspect readiness, `{"action":"build","provider":"vercel"}` to run the local build, `{"action":"deploy","provider":"vercel","target":"preview"}` to create a preview, and `{"action":"verify","provider":"vercel","url":"https://...vercel.app"}` to check the live result. Netlify uses the same actions with `"provider":"netlify"`. Preview deployment is reviewable external work. Production deployment is a separate **critical action** requiring exact approval immediately before execution; unattended runs block it. Elia does not create provider projects, perform interactive login, upload secrets, modify domains or environment variables, or report success without provider output and a successful HTTPS postcondition. See [`docs/deployment-workflows.md`](docs/deployment-workflows.md).
+
 ### Skills: create, install, and select
 
 Elia can synthesize a repeated routine into a tested skill with `elia skills candidates` followed by `elia skills synth`. Users can also create or add a skill manually by placing a self-contained `*.skill.ts` module in the project’s `.elia/skills/` directory or the user-wide `~/.elia/skills/` directory. Use `elia skills path` to print the exact folders and contract. Invalid skills are quarantined instead of crashing startup.

@@ -30,6 +30,15 @@ describe('action contracts', () => {
     expect(evaluatePostconditions(contract, '{\n  "url": "https://example.test/done"\n}', process.cwd())).toMatchObject({ ok: true })
   })
 
+  test('requires an exact approval boundary for production deployment and verifies the result', async () => {
+    const contract = contractForAction({ name: 'deployment', input: { action: 'deploy', provider: 'vercel', target: 'production' } }, process.cwd(), 'deploy:production:1')
+    expect(contract.requiresUserTakeover).toBe(true)
+    expect(contract.failureDisposition).toBe('human-review')
+    expect(contract.postconditions).toEqual([{ kind: 'result-contains', value: '"status": "deployed"', description: 'the production deployment must report a deployed status' }])
+    expect((await evaluatePreconditions(contract, process.cwd(), undefined, {})).ok).toBe(false)
+    expect(evaluatePostconditions(contract, '{\n  "status": "deployed",\n  "url": "https://example.vercel.app"\n}', process.cwd())).toMatchObject({ ok: true })
+  })
+
   test('verifies a workspace artifact after a write', () => {
     const cwd = mkdtempSync(join(tmpdir(), 'elia-contract-'))
     mkdirSync(join(cwd, 'out'))

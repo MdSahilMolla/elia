@@ -3,8 +3,8 @@ import { currentAgent } from '../autonomy/context.ts'
 import { runShell } from '../shell.ts'
 import type { Tool } from './types.ts'
 
-const COMMANDS = ['bun', 'node', 'npm', 'pnpm', 'yarn', 'python3', 'python', 'pip3', 'pytest', 'docker', 'kubectl', 'terraform', 'git', 'gh', 'psql', 'mysql', 'curl']
-const SECRET_ENV_NAMES = ['ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'GEMINI_API_KEY', 'NVIDIA_API_KEY', 'ELIA_SEARCH_API_KEY', 'ELIA_BROWSER_MCP_SERVER', 'ELIA_BROWSER_BRIDGE_COMMAND', 'ELIA_BROWSER_CDP_URL']
+const COMMANDS = ['bun', 'node', 'npm', 'pnpm', 'yarn', 'python3', 'python', 'pip3', 'pytest', 'docker', 'kubectl', 'terraform', 'vercel', 'netlify', 'git', 'gh', 'psql', 'mysql', 'curl']
+const SECRET_ENV_NAMES = ['ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'GEMINI_API_KEY', 'NVIDIA_API_KEY', 'ELIA_SEARCH_API_KEY', 'ELIA_BROWSER_MCP_SERVER', 'ELIA_BROWSER_BRIDGE_COMMAND', 'ELIA_BROWSER_CDP_URL', 'VERCEL_TOKEN', 'NETLIFY_AUTH_TOKEN', 'NETLIFY_SITE_ID']
 
 function envPresence(): Record<string, boolean> {
   return Object.fromEntries(SECRET_ENV_NAMES.map((name) => [name, Boolean(process.env[name])]))
@@ -29,7 +29,7 @@ function readiness(status: ReadinessStatus, basis: string, missing?: string[]): 
 function capabilityReadiness(availableRuntimes: Record<string, string>, configured: Record<string, boolean>): Record<string, CapabilityReadiness> {
   const browserConfigured = configured.ELIA_BROWSER_MCP_SERVER || configured.ELIA_BROWSER_BRIDGE_COMMAND || configured.ELIA_BROWSER_CDP_URL
   const modelConfigured = configured.ANTHROPIC_API_KEY || configured.OPENAI_API_KEY || configured.GEMINI_API_KEY || configured.NVIDIA_API_KEY
-  const deploymentCommands = ['docker', 'kubectl', 'terraform'].filter((command) => availableRuntimes[command] && availableRuntimes[command] !== 'unavailable')
+  const deploymentCommands = ['vercel', 'netlify', 'docker', 'kubectl', 'terraform'].filter((command) => availableRuntimes[command] && availableRuntimes[command] !== 'unavailable')
   const missingDataRuntime = ['python3', 'python'].every((command) => !availableRuntimes[command] || availableRuntimes[command] === 'unavailable')
 
   return {
@@ -45,9 +45,10 @@ function capabilityReadiness(availableRuntimes: Record<string, string>, configur
     dataScience: missingDataRuntime
       ? readiness('unavailable', 'No Python executable was detected for local data-science helpers.', ['python3 or python'])
       : readiness('ready', 'A Python executable is available; packages and dataset-specific dependencies were not tested.'),
-    deployment: deploymentCommands.length > 0
-      ? readiness('ready', `Detected local deployment command(s): ${deploymentCommands.join(', ')}; credentials, cluster/account access, and mutation authorization were not tested.`)
-      : readiness('unavailable', 'No supported local deployment command was detected.', ['docker or kubectl or terraform']),
+        deployment: deploymentCommands.length > 0
+      ? readiness('ready', `Detected local deployment command(s): ${deploymentCommands.join(', ')}; credentials, project/site access, and mutation authorization were not tested.`)
+      : readiness('unavailable', 'No supported local deployment command was detected.', ['vercel or netlify or docker or kubectl or terraform']),
+
   }
 }
 

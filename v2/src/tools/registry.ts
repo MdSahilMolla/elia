@@ -17,6 +17,7 @@ import { browserTool } from './browser.ts'
 import { communicationTool } from './communication.ts'
 import { projectProfileTool } from './projectProfile.ts'
 import { productionReadinessTool } from './productionReadiness.ts'
+import { deploymentTool } from './deployment.ts'
 import { financeTool } from './finance.ts'
 import { dataScienceTool } from './dataScience.ts'
 import { sportsTool } from './sports.ts'
@@ -35,6 +36,7 @@ export const tools: Tool[] = [
   recallTool,
   projectProfileTool,
   productionReadinessTool,
+  deploymentTool,
   financeTool,
   dataScienceTool,
   sportsTool,

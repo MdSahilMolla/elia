@@ -136,10 +136,10 @@ const PERSONA_TOOL_NAMES: Record<AgentPersona, string[]> = {
   data: ['read_file', 'list_files', 'grep', 'write_file', 'edit_file', 'run_command', 'web_search', 'web_fetch', 'read_spreadsheet', 'spreadsheet', 'presentation', 'data_science'],
   research: ['read_file', 'list_files', 'grep', 'write_file', 'edit_file', 'web_search', 'web_fetch', 'browser', 'communication', 'spreadsheet', 'presentation'],
   cyber: ['read_file', 'list_files', 'grep', 'run_command', 'write_file', 'edit_file', 'web_search', 'web_fetch', 'browser', 'new_engagement', 'run_security_tool'],
-  automation: ['read_file', 'list_files', 'grep', 'run_command', 'write_file', 'edit_file', 'web_search', 'web_fetch', 'browser', 'communication', 'spreadsheet', 'presentation'],
+  automation: ['read_file', 'list_files', 'grep', 'run_command', 'write_file', 'edit_file', 'web_search', 'web_fetch', 'browser', 'communication', 'spreadsheet', 'presentation', 'deployment'],
   communications: ['read_file', 'list_files', 'grep', 'write_file', 'edit_file', 'web_search', 'web_fetch', 'browser', 'communication'],
   ai: ['read_file', 'list_files', 'grep', 'run_command', 'write_file', 'edit_file', 'web_search', 'web_fetch', 'read_spreadsheet', 'browser'],
-  production: ['read_file', 'list_files', 'grep', 'run_command', 'write_file', 'edit_file', 'project_profile', 'production_readiness', 'task'],
+  production: ['read_file', 'list_files', 'grep', 'run_command', 'write_file', 'edit_file', 'project_profile', 'production_readiness', 'deployment', 'task'],
   tech: [],
 }
 

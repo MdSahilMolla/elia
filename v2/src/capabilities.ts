@@ -146,7 +146,7 @@ export const CAPABILITIES: CapabilitySpec[] = [
     summary: 'Release readiness, deployment planning, migrations, rollback, observability, and incident operations.',
     risk: 'high',
     patterns: [/\b(production|release|deploy(?:ment)?|ci\/cd|observability|rollback|on-call|incident|sre|docker|kubernetes|terraform|migration)\b/i],
-    preferredTools: ['production_readiness', 'project_profile', 'run_command', 'read_file', 'edit_file', 'task'],
+    preferredTools: ['production_readiness', 'project_profile', 'deployment', 'run_command', 'read_file', 'edit_file', 'task'],
     outputContract: ['release scope and environment', 'preflight evidence', 'migration and rollback plan', 'observability and incident plan', 'approval boundaries and postconditions'],
   },
   {
@@ -156,7 +156,7 @@ export const CAPABILITIES: CapabilitySpec[] = [
     summary: 'Coding, debugging, APIs, deployment, infrastructure, and technical integration.',
     risk: 'high',
     patterns: [/\b(bug|\bbuild\b|deploy|script|\bapi\b|error|how do i set up|debug|repository)\b/i],
-    preferredTools: ['run_command', 'read_file', 'edit_file', 'task'],
+    preferredTools: ['run_command', 'read_file', 'edit_file', 'deployment', 'task'],
     outputContract: ['implemented change', 'tests or verification', 'security review', 'operational notes'],
   },
 ]

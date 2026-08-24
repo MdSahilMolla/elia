@@ -38,6 +38,28 @@ export function contractForAction(request: ActionRequest, cwd: string, idempoten
   let requiresUserTakeover = false
   let failureDisposition: ContractFailureDisposition = 'retryable'
 
+  if (request.name === 'deployment') {
+    const action = typeof request.input.action === 'string' ? request.input.action : 'unknown'
+    const provider = typeof request.input.provider === 'string' ? request.input.provider : 'unknown'
+    const target = typeof request.input.target === 'string' ? request.input.target : 'unknown'
+    if (action === 'deploy' && (provider === 'vercel' || provider === 'netlify')) {
+      preconditions.push({ kind: 'command-available', value: provider, description: `${provider} CLI must be available before deployment work runs` })
+    }
+    if (action === 'plan') {
+      postconditions.push({ kind: 'result-contains', value: '"status": "planned"', description: 'the deployment plan must report readiness' })
+    } else if (action === 'build') {
+      postconditions.push({ kind: 'result-contains', value: '"status": "built"', description: 'the local build must report a successful build' })
+    } else if (action === 'deploy' && target === 'production') {
+      requiresUserTakeover = true
+      failureDisposition = 'human-review'
+      postconditions.push({ kind: 'result-contains', value: '"status": "deployed"', description: 'the production deployment must report a deployed status' })
+    } else if (action === 'deploy') {
+      postconditions.push({ kind: 'result-contains', value: '"status": "deployed"', description: 'the preview deployment must report a deployed status' })
+    } else if (action === 'verify') {
+      postconditions.push({ kind: 'result-contains', value: '"status": "verified"', description: 'the deployment URL must respond successfully' })
+    }
+  }
+
   if (request.name === 'run_command') {
     const command = typeof request.input.command === 'string' ? request.input.command.trim() : ''
     const executable = SHELL_COMMAND.exec(command)?.[1]
