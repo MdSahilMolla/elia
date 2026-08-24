@@ -18,14 +18,43 @@ Elia’s default general-purpose coding mode is called **dev mode**. It covers b
 
 Dev mode is separate from execution policy: manual policy asks before risky actions, while auto policy skips preliminary risk checks but keeps governed irreversible actions behind explicit approval unless unattended execution has been explicitly requested.
 
-## Setup
+## Installation and setup
+
+After the package is published, install the CLI globally with npm or Bun:
+
+```bash
+npm install --global elia
+bun add --global elia
+```
+
+For a one-off invocation without a global install, use `bunx elia --help`.
+
+The recommended first-run setup stores the selected provider and API key in a user-level file rather than in the project repository:
+
+```bash
+elia config set --provider nvidia --model openai/gpt-oss-20b
+elia config
+elia "summarize this project"
+```
+
+The interactive API-key prompt does not echo the key. For automation, read the key from an existing environment variable or pipe it through stdin; never put a secret in a command-line argument:
+
+```bash
+export NVIDIA_API_KEY_FROM_SECRET_STORE="..."
+elia config set --provider nvidia --api-key-env NVIDIA_API_KEY_FROM_SECRET_STORE
+printf '%s' "$NVIDIA_API_KEY_FROM_SECRET_STORE" | elia config set --provider nvidia --api-key-stdin
+```
+
+Elia writes this configuration to `~/.elia/config.env` with restrictive permissions and never prints the key. Explicit process variables and the project `.env` take precedence over the user-level file. Inspect readiness with `elia config`; it reports configured/not-configured providers without displaying values.
+
+For local development from the repository, use:
 
 ```bash
 bun install
 cp .env.example .env
 ```
 
-Edit `.env` to pick a provider and set its key. `ELIA_PROVIDER` defaults to `anthropic`.
+Edit `.env` to pick a provider and set its key. `ELIA_PROVIDER` defaults to `anthropic`. The user-level `elia config set` flow and `.env` are alternative configuration paths; you do not need both.
 
 | Provider | `ELIA_PROVIDER` | API key env var | Default model |
 |---|---|---|---|
@@ -39,7 +68,7 @@ Edit `.env` to pick a provider and set its key. `ELIA_PROVIDER` defaults to `ant
 | Inception (Mercury) | `mercury` | `INCEPTION_API_KEY` | `mercury-2` |
 | Any other OpenAI-compatible endpoint | `custom` | `ELIA_API_KEY` | none — set `ELIA_MODEL` |
 
-Any provider's model can be overridden with `ELIA_MODEL`. `openrouter` uses OpenRouter's OpenAI-compatible endpoint and its `openrouter/auto` router by default; set `ELIA_MODEL` to pin a specific OpenRouter model. `mistral` uses Mistral's OpenAI-compatible endpoint and `mistral-large-latest` by default; set `ELIA_MODEL` to choose another Mistral model. `google` uses Google's OpenAI-compatible Gemini endpoint and `gemini-3.7-flash` by default; set `ELIA_MODEL` to choose another compatible Gemini model. `nvidia` uses NVIDIA's hosted NIM OpenAI-compatible endpoint and `nvidia/llama-3.3-nemotron-super-49b-v1.5` by default; set `ELIA_MODEL` to choose another available NIM model. `custom` (and any provider, if you need to point at a proxy or self-hosted gateway) also honors `ELIA_BASE_URL`.
+Any provider's model can be overridden with `ELIA_MODEL`. `openrouter` uses OpenRouter's OpenAI-compatible endpoint and its `openrouter/auto` router by default; set `ELIA_MODEL` to pin a specific OpenRouter model. `mistral` uses Mistral's OpenAI-compatible endpoint and `mistral-large-latest` by default; set `ELIA_MODEL` to choose another Mistral model. `google` uses Google's OpenAI-compatible Gemini endpoint and `gemini-3.7-flash` by default; set `ELIA_MODEL` to choose another compatible Gemini model. `nvidia` uses NVIDIA's hosted NIM OpenAI-compatible endpoint and `nvidia/llama-3.3-nemotron-super-49b-v1.5` by default; set `ELIA_MODEL` to choose another available NIM model. `custom` (and any provider, if you need to point at a proxy or self-hosted gateway) also honors `ELIA_BASE_URL`; configure it with `elia config set --provider custom --base-url <url> --model <model-id>`.
 
 ### Automatic provider fallback
 
@@ -233,6 +262,9 @@ bun run dev skills path                  # print skill folders and the manual sk
 
 bun run dev skills candidates            # show repeated work that could become a new tool
 bun run dev skills synth                 # write a tool for the strongest candidate
+bun run dev config                       # show provider readiness without printing keys
+bun run dev config set --provider nvidia # securely save a provider key and model
+
 bun run dev runs                         # list past autonomous runs
 bun run dev runs <id>                    # show one run's timeline, graph state, and forkable points
 bun run dev fork <id> --at <n> --with "<change>"   # re-plan an earlier run from a checkpoint
@@ -242,6 +274,8 @@ bun run dev agent "<request>" --dry-run       # show specialist routing without 
 elia --dev                    # explicit dev mode (the default)
 elia --help
 elia --version
+elia config                                      # show provider readiness
+elia config set --provider nvidia                 # securely add an API key
 
 # Production-friendly output modes
 elia auto "run the verification suite" --json    # stable JSONL lifecycle events for CI/orchestration

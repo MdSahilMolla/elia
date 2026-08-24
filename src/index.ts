@@ -16,6 +16,7 @@ import { MAX_GOVERNED_ACTIONS, type ActionApproval, type ActionAssessment, type 
 import { emitEvent, machineReadable, plainOutput, quietOutput } from './ui/runtime.ts'
 import { installShutdownHandlers, registerShutdownCleanup } from './ui/shutdown.ts'
 import { redactText } from './ui/redact.ts'
+import { loadUserConfig, userConfigPath, writeUserConfig } from './userConfig.ts'
 
 const REPL_COMMANDS: SlashCommand[] = [
   { name: '/capabilities', description: 'list specialist capabilities, risk classes, and output contracts' },
@@ -44,7 +45,7 @@ const REPL_COMMANDS: SlashCommand[] = [
 
 const rawArgs = process.argv.slice(2)
 
-const SUBCOMMANDS = ['auto', 'agent', 'evolve', 'bench', 'skills', 'runs', 'fork', 'resume', 'schedule', 'daemon'] as const
+const SUBCOMMANDS = ['auto', 'agent', 'evolve', 'bench', 'skills', 'runs', 'fork', 'resume', 'schedule', 'daemon', 'config'] as const
 type Subcommand = (typeof SUBCOMMANDS)[number]
 
 function printHelp(): void {
@@ -123,6 +124,13 @@ Background autonomy:
   elia daemon --once                       Run due schedules once and exit
   elia daemon --poll-ms 30000             Keep checking due schedules in the foreground
 
+Provider setup:
+  elia config                               Show provider readiness without printing keys
+  elia config set --provider nvidia        Store a provider API key in ~/.elia/config.env
+  elia config set --provider custom --base-url <url>
+                                           Configure any OpenAI-compatible endpoint
+  Use --api-key-env <NAME> or pipe a key with --api-key-stdin; never pass keys as arguments.
+
 Inside an interactive session:
   /                            Type "/" to see available commands — up/down to highlight,
                               tab to accept, enter to run, left/right to edit as usual
@@ -164,7 +172,8 @@ Inside an interactive session:
 
   UI output: --json/--jsonl emits machine-readable JSONL events; --plain disables color and redraws;
   --quiet minimizes progress; --verbose includes additional progress detail. Errors go to stderr
-  in human modes. Sessions auto-save to .elia/sessions/. Configure a provider via .env — see .env.example.
+  in human modes. Sessions auto-save to .elia/sessions/. Configure a provider with elia config set
+  or via .env — see .env.example.
 
 Set ELIA_FAST_PROVIDER/ELIA_FAST_MODEL to give elia a cheap fast tier for recon work; it
 routes investigation there and keeps the strong model for planning, building, and review.`)
@@ -472,6 +481,171 @@ async function runSkills(): Promise<void> {
 
   writeError(`Unknown skills action "${action}". Use: list, path, candidates, or synth.`)
   process.exitCode = 1
+}
+
+async function runConfig(): Promise<void> {
+  const { PROVIDER_PRESET_NAMES, isProviderPresetConfigured, providerPresetApiKeyEnv, providerPresetBaseURL, providerPresetDefaultModel } =
+    await import('./providers/registry.ts')
+  const action = positionals()[0] ?? 'status'
+  const configPath = userConfigPath()
+
+  if (action === 'status') {
+    const active = process.env.ELIA_PROVIDER ?? 'anthropic'
+    writeNotice(`User config: ${configPath}`)
+    for (const provider of PROVIDER_PRESET_NAMES) {
+      const marker = provider === active ? ' (active)' : ''
+      writeUsageLine(`  ${provider}${marker}: ${isProviderPresetConfigured(provider) ? 'configured' : 'not configured'}`)
+    }
+    writeNotice('API key values are never displayed. Use: elia config set --provider <name>')
+    return
+  }
+
+  if (action !== 'set') {
+    writeError('Usage: elia config [status|set] [--provider <name>] [--model <id>] [--base-url <url>] [--api-key-env <NAME>|--api-key-stdin]')
+    process.exitCode = 1
+    return
+  }
+
+  const provider = (flagValue('--provider') || process.env.ELIA_PROVIDER || 'anthropic').toLowerCase()
+  if (!PROVIDER_PRESET_NAMES.includes(provider)) {
+    writeError(`Unknown provider "${provider}". Choose one of: ${PROVIDER_PRESET_NAMES.join(', ')}`)
+    process.exitCode = 1
+    return
+  }
+
+  const modelFlag = flagValue('--model')
+  if (modelFlag === '') {
+    writeError('--model requires a non-empty model id')
+    process.exitCode = 1
+    return
+  }
+  const baseURLFlag = flagValue('--base-url')
+  if (baseURLFlag === '') {
+    writeError('--base-url requires a non-empty URL')
+    process.exitCode = 1
+    return
+  }
+  const sourceKeyEnv = flagValue('--api-key-env')
+  if (sourceKeyEnv !== undefined && !/^[A-Za-z_][A-Za-z0-9_]*$/.test(sourceKeyEnv)) {
+    writeError('--api-key-env must be a valid environment variable name')
+    process.exitCode = 1
+    return
+  }
+  if (sourceKeyEnv !== undefined && hasFlag('--api-key-stdin')) {
+    writeError('Choose either --api-key-env or --api-key-stdin, not both')
+    process.exitCode = 1
+    return
+  }
+
+  const targetKeyEnv = providerPresetApiKeyEnv(provider)
+  if (!targetKeyEnv) {
+    writeError(`Provider "${provider}" does not define an API key variable`)
+    process.exitCode = 1
+    return
+  }
+
+  let apiKey: string | undefined
+  if (sourceKeyEnv !== undefined) {
+    apiKey = process.env[sourceKeyEnv]?.trim()
+    if (!apiKey) {
+      writeError(`Environment variable ${sourceKeyEnv} is not set or is empty`)
+      process.exitCode = 1
+      return
+    }
+  } else if (hasFlag('--api-key-stdin')) {
+    apiKey = (await readStdinText()).trim()
+  } else if (process.stdin.isTTY) {
+    apiKey = await readSecretInput(`Enter ${targetKeyEnv} (input hidden): `)
+  } else {
+    writeError('API key input requires --api-key-stdin, --api-key-env <NAME>, or an interactive terminal')
+    process.exitCode = 1
+    return
+  }
+
+  if (!apiKey) {
+    writeError('API key cannot be empty')
+    process.exitCode = 1
+    return
+  }
+
+  const defaultModel = providerPresetDefaultModel(provider)
+  const model = modelFlag ?? defaultModel
+  if (provider === 'custom' && !model) {
+    writeError('Custom providers require --model <model-id>')
+    process.exitCode = 1
+    return
+  }
+  const baseURL = baseURLFlag
+  if (provider === 'custom' && !baseURL) {
+    writeError('Custom providers require --base-url <url>')
+    process.exitCode = 1
+    return
+  }
+
+  const values: Record<string, string | undefined> = {
+    ELIA_PROVIDER: provider,
+    [targetKeyEnv]: apiKey,
+    ELIA_MODEL: model,
+    ELIA_BASE_URL: baseURL,
+  }
+  writeUserConfig(values)
+  process.env.ELIA_PROVIDER = provider
+  process.env[targetKeyEnv] = apiKey
+  if (model) process.env.ELIA_MODEL = model
+  else delete process.env.ELIA_MODEL
+  if (baseURL) process.env.ELIA_BASE_URL = baseURL
+  else delete process.env.ELIA_BASE_URL
+
+  const knownBaseURL = baseURL ?? providerPresetBaseURL(provider)
+  writeNotice(`Saved ${provider} configuration to ${configPath}.`)
+  writeNotice(`Model: ${model ?? defaultModel ?? 'set by ELIA_MODEL'}`)
+  if (knownBaseURL) writeNotice(`Endpoint: ${knownBaseURL}`)
+  writeNotice('The API key was saved without displaying its value. Run `elia config` to inspect readiness.')
+}
+
+async function readStdinText(): Promise<string> {
+  let text = ''
+  for await (const chunk of process.stdin) text += Buffer.from(chunk as Uint8Array).toString('utf8')
+  return text
+}
+
+async function readSecretInput(prompt: string): Promise<string> {
+  const stdin = process.stdin
+  if (!stdin.isTTY || !stdin.setRawMode) return ''
+  process.stdout.write(prompt)
+  stdin.setRawMode(true)
+  stdin.resume()
+  stdin.setEncoding('utf8')
+  return await new Promise<string>((resolve) => {
+    let value = ''
+    const onData = (chunk: string) => {
+      for (const char of chunk) {
+        if (char === '\u0003') {
+          process.stdout.write('\n')
+          cleanup()
+          resolve('')
+          return
+        }
+        if (char === '\r' || char === '\n') {
+          process.stdout.write('\n')
+          cleanup()
+          resolve(value)
+          return
+        }
+        if (char === '\u007f' || char === '\b') {
+          value = value.slice(0, -1)
+          continue
+        }
+        value += char
+      }
+    }
+    const cleanup = () => {
+      stdin.off('data', onData)
+      stdin.setRawMode?.(false)
+      stdin.pause()
+    }
+    stdin.on('data', onData)
+  })
 }
 
 async function runSchedule(): Promise<void> {
@@ -1250,10 +1424,16 @@ async function main() {
       return runSchedule()
     case 'daemon':
       return runDaemon()
+    case 'config':
+      return runConfig()
     default:
       return runInteractive()
   }
 }
+
+// Load ~/.elia/config.env before any command imports provider configuration. Explicit
+// project/process environment values already present in process.env take precedence.
+loadUserConfig()
 
 // Signal handlers are installed by installShutdownHandlers() so every terminal
 // component follows one cleanup path and returns a conventional interrupt code.

@@ -1,4 +1,7 @@
 import { expect, test } from 'bun:test'
+import { mkdtempSync, readFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { tmpdir } from 'node:os'
 
 async function runCli(args: string[], overrides: Record<string, string | undefined> = {}): Promise<{ code: number; stdout: string; stderr: string }> {
   const env: Record<string, string> = {
@@ -143,6 +146,26 @@ test('agent dry-run routes locally without a provider credential', async () => {
   expect(result.stdout).toContain('tech')
   expect(result.stdout).toContain('dry-run')
   expect(result.stderr).not.toContain('No API key found')
+})
+
+test('config set stores a provider key without printing it', async () => {
+  const configPath = join(mkdtempSync(join(tmpdir(), 'elia-cli-config-')), 'config.env')
+  const result = await runCli(['config', 'set', '--provider', 'nvidia', '--api-key-env', 'ELIA_TEST_SETUP_KEY', '--plain'], {
+    ELIA_CONFIG_PATH: configPath,
+    ELIA_PROVIDER: undefined,
+    ELIA_MODEL: undefined,
+    ELIA_API_KEY: undefined,
+    ANTHROPIC_API_KEY: undefined,
+    NVIDIA_API_KEY: undefined,
+    ELIA_TEST_SETUP_KEY: 'setup-test-key',
+  })
+  expect(result.code).toBe(0)
+  expect(result.stdout).toContain('Saved nvidia configuration')
+  expect(result.stdout).not.toContain('setup-test-key')
+  expect(result.stderr).not.toContain('setup-test-key')
+  const stored = readFileSync(configPath, 'utf8')
+  expect(stored).toContain('NVIDIA_API_KEY=setup-test-key')
+  expect(stored).toContain('ELIA_MODEL=nvidia/llama-3.3-nemotron-super-49b-v1.5')
 })
 
 test('metadata commands stay provider-independent', async () => {

@@ -83,6 +83,14 @@ export function providerPresetDefaultModel(providerName: string): string | undef
   return PROVIDER_PRESETS[providerName]?.defaultModel
 }
 
+export function providerPresetApiKeyEnv(providerName: string): string | undefined {
+  return PROVIDER_PRESETS[providerName]?.apiKeyEnv
+}
+
+export function providerPresetBaseURL(providerName: string): string | undefined {
+  return PROVIDER_PRESETS[providerName]?.baseURL
+}
+
 export interface AvailableModel {
   id: string
   name?: string
