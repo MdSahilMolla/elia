@@ -57,7 +57,7 @@
     "nvidia-nim"
   ],
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.68.0",
+    "@anthropic-ai/sdk": "^0.120.0",
     "jszip": "^3.10.1",
     "openai": "^7.5.0",
     "exceljs": "^4.4.0"
