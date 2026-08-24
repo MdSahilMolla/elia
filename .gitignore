@@ -4,5 +4,5 @@ node_modules/
 .elia/
 # Sandboxes, backups, and the ledger from `elia evolve` — elia's own working area.
 .evolution/
-v2/extensions/vscode/dist/
-v2/extensions/vscode/*.vsix
+extensions/vscode/dist/
+extensions/vscode/*.vsix

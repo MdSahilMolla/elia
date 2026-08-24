@@ -28,14 +28,14 @@ All model calls and tool actions remain in Elia. The extension only renders cont
 From the Elia repository:
 
 ```sh
-cd v2/extensions/vscode
+cd extensions/vscode
 pnpm install
 pnpm run compile
 ```
 
 Use VS Code’s **Run Extension** launch flow from a development checkout, or package it with `vsce` after installing the VS Code Extension Manager in the development environment.
 
-By default the extension launches `elia bridge --json` from the configured `elia.cliPath`. For a local checkout, set `elia.cliPath` to the absolute path of `v2/bin/elia.ts`; the extension will launch it with Bun. For a globally installed executable, leave `elia.cliPath` as `elia`.
+By default the extension launches `elia bridge --json` from the configured `elia.cliPath`. For a local checkout, set `elia.cliPath` to the absolute path of `bin/elia.ts`; the extension will launch it with Bun. For a globally installed executable, leave `elia.cliPath` as `elia`.
 
 ## Configuration
 

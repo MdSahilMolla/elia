@@ -4,8 +4,7 @@
 
 | Version line | Security support |
 | --- | --- |
-| `v2` / `@mdsahilmolla/elia` `0.1.x` | Supported on the `manus` branch and subsequent releases |
-| `v1` snapshot | Historical snapshot; no security backports |
+| `@mdsahilmolla/elia` `0.1.x` | Supported on the `manus` branch and subsequent releases |
 
 ## Reporting a vulnerability
 

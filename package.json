@@ -26,8 +26,7 @@
   "homepage": "https://github.com/MdSahilMolla/elia",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/MdSahilMolla/elia.git",
-    "directory": "v2"
+    "url": "git+https://github.com/MdSahilMolla/elia.git"
   },
   "bugs": {
     "url": "https://github.com/MdSahilMolla/elia/issues"

@@ -2,19 +2,16 @@ name: CI
 
 on:
   push:
-    branches: [master, manus]
+    branches: [manus]
   pull_request:
-    branches: [master, manus]
+    branches: [manus]
 
 permissions:
   contents: read
 
 jobs:
-  verify-v2:
+  verify:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: v2
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
