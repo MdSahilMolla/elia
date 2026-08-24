@@ -1,8 +1,36 @@
+# --- Dependencies ---
 node_modules/
+
+# --- Secrets ---
+# Only .env.example is committed; every real env file stays local.
 .env
+.env.*
+!.env.example
+
+# --- Logs and scratch output ---
 *.log
+*.tmp
+tsconfig.tsbuildinfo
+
+# --- elia's own runtime state ---
 .elia/
 # Sandboxes, backups, and the ledger from `elia evolve` — elia's own working area.
 .evolution/
+
+# --- Build output ---
+dist/
 extensions/vscode/dist/
 extensions/vscode/*.vsix
+
+# --- Language/tooling caches ---
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+
+# --- OS cruft ---
+.DS_Store
+Thumbs.db
+
+# --- Archived pre-v2 source, kept for reference only ---
+legacy/

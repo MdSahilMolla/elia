@@ -81,3 +81,31 @@ test('table header and separator widths match the widest cell in each column', (
   const width = stripped[0]!.length
   expect(stripped.every((line) => line.length === width)).toBe(true)
 })
+
+test('table never renders a line wider than the terminal, wrapping an overlong cell instead', () => {
+  const longCell = 'Early-warning, quantified risk probabilities, scenario analysis, trend identification, strategic summaries, hidden-relationship mapping. '.repeat(4)
+  const rows = table(
+    [{ header: 'section' }, { header: 'key points' }],
+    [['Problem Statement', longCell]],
+  )
+  const stripped = rows.map((line) => line.replace(/\x1b\[[0-9;]*m/g, ''))
+  const cap = terminalWidth()
+  expect(stripped.every((line) => line.length <= cap)).toBe(true)
+  // Nothing from the overlong cell was dropped — every word still shows up somewhere in the block.
+  const rendered = stripped.join(' ')
+  for (const word of ['Early-warning,', 'hidden-relationship', 'mapping.']) {
+    expect(rendered).toContain(word)
+  }
+})
+
+test('table treats a literal <br> in a cell as a real line break', () => {
+  const rows = table([{ header: 'notes' }], [['first line<br>second line']])
+  const stripped = rows.map((line) => line.replace(/\x1b\[[0-9;]*m/g, '').trimEnd())
+  expect(stripped).toContain('first line')
+  expect(stripped).toContain('second line')
+})
+
+test('table still renders a single tight line per row when content already fits', () => {
+  const rows = table([{ header: 'name' }, { header: 'count', align: 'right' }], [['alpha', '3']])
+  expect(rows).toHaveLength(3) // header + separator + exactly one data line
+})

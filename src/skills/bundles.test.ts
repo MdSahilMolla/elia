@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { delimiter, join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { expandSkillSelection, listSkillBundles } from './bundles.ts'
 import { externalSkillDirs } from './paths.ts'
@@ -40,7 +40,9 @@ describe('skill bundles and external directories', () => {
     try {
       mkdirSync(join(root, 'shared'))
       writeFileSync(join(root, 'shared', 'one.skill.ts'), 'not imported by this listing test')
-      const environment = { ELIA_SKILL_DIRS: `${join(root, 'shared')}:${join(root, 'shared')}` }
+      // Must use the platform delimiter: ';' on Windows, where ':' is part of
+      // the drive letter and would split "C:\..." into nonsense.
+      const environment = { ELIA_SKILL_DIRS: `${join(root, 'shared')}${delimiter}${join(root, 'shared')}` }
       expect(externalSkillDirs(environment)).toEqual([join(root, 'shared')])
       expect(listSkillFiles(environment).filter((entry) => entry.file.endsWith('one.skill.ts'))).toEqual([
         { file: join(root, 'shared', 'one.skill.ts'), source: 'external' },

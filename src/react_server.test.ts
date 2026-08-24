@@ -12,7 +12,7 @@ test('React static path resolution rejects traversal, malformed encoding, and se
   writeFileSync(join(root, 'assets', 'app.js'), 'console.log(1)')
   writeFileSync(join(root, '.env'), 'ELIA_SECRET=never-serve')
   writeFileSync(join(outside, 'secret.txt'), 'never-serve')
-  symlinkSync(outside, join(root, 'link'), 'dir')
+  symlinkSync(outside, join(root, 'link'), process.platform === 'win32' ? 'junction' : 'dir')
 
   expect(resolveReactStaticPath(root, '/')).toBe(join(root, 'index.html'))
   expect(resolveReactStaticPath(root, '/assets/app.js')).toBe(join(root, 'assets', 'app.js'))

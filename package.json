@@ -1,6 +1,6 @@
 {
   "name": "@mdsahilmolla/elia",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "A fast, autonomous coding agent for the terminal, with pluggable LLM providers.",
   "license": "AGPL-3.0-only",
   "type": "module",
@@ -40,7 +40,7 @@
   "scripts": {
     "dev": "bun run bin/elia.ts",
     "react": "bun run src/react_server.ts",
-    "test": "bun test",
+    "test": "bun test src/",
     "typecheck": "tsc --noEmit",
     "security:scan": "bun run scripts/security-scan.ts",
     "prepublishOnly": "bun run typecheck && bun test && bun run security:scan"

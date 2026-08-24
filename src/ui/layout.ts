@@ -140,25 +140,138 @@ export interface TableColumn {
   align?: 'left' | 'right'
 }
 
+const MIN_COLUMN_WIDTH = 10
+const COLUMN_SEPARATOR = '  '
+
+/**
+ * Scales natural column widths down to fit `available`, proportional to how
+ * wide each column wanted to be, without letting any column collapse below
+ * `minWidth`. Whatever rounding leaves over budget is trimmed from the
+ * widest column(s) — the one with the most room to lose it.
+ */
+function fitColumnWidths(natural: number[], available: number, minWidth: number): number[] {
+  const total = natural.reduce((sum, width) => sum + width, 0)
+  if (total <= available || natural.length === 0) return natural
+
+  const widths = natural.map((width) => Math.max(minWidth, Math.floor((width / total) * available)))
+  let over = widths.reduce((sum, width) => sum + width, 0) - available
+  while (over > 0) {
+    let widestIndex = 0
+    for (let i = 1; i < widths.length; i += 1) if (widths[i]! > widths[widestIndex]!) widestIndex = i
+    if (widths[widestIndex]! <= minWidth) break // every column is already at the floor
+    widths[widestIndex]! -= 1
+    over -= 1
+  }
+  return widths
+}
+
+/** Splits a single visible-width "word" (no internal whitespace, but possibly ANSI-colored) into chunks that each fit `width`, for the rare token too long to wrap normally (a URL, an unbroken id). */
+function hardBreak(word: string, width: number): string[] {
+  const chunks: string[] = []
+  let current = ''
+  let currentWidth = 0
+  let i = 0
+  while (i < word.length) {
+    const escape = /^\x1b\[[0-9;]*m/.exec(word.slice(i))
+    if (escape) {
+      current += escape[0]
+      i += escape[0].length
+      continue
+    }
+    const char = word[i]!
+    const charWidth = visibleWidth(char)
+    if (currentWidth + charWidth > width && current) {
+      chunks.push(current)
+      current = ''
+      currentWidth = 0
+    }
+    current += char
+    currentWidth += charWidth
+    i += 1
+  }
+  if (current) chunks.push(current)
+  return chunks.length > 0 ? chunks : ['']
+}
+
+/** Word-wraps ANSI-colored text (measuring by visible width, not byte length) to a column width, hard-breaking any single token that's wider than the column on its own. */
+function wrapVisible(text: string, width: number): string[] {
+  const words = text.split(/\s+/).filter(Boolean)
+  const lines: string[] = []
+  let current = ''
+  let currentWidth = 0
+  for (const word of words) {
+    const wordWidth = visibleWidth(word)
+    if (wordWidth > width) {
+      if (current) {
+        lines.push(current)
+        current = ''
+        currentWidth = 0
+      }
+      const broken = hardBreak(word, width)
+      lines.push(...broken.slice(0, -1))
+      current = broken.at(-1) ?? ''
+      currentWidth = visibleWidth(current)
+      continue
+    }
+    const nextWidth = currentWidth + wordWidth + (current ? 1 : 0)
+    if (nextWidth > width && current) {
+      lines.push(current)
+      current = word
+      currentWidth = wordWidth
+    } else {
+      current = current ? `${current} ${word}` : word
+      currentWidth = nextWidth
+    }
+  }
+  if (current) lines.push(current)
+  return lines.length > 0 ? lines : ['']
+}
+
+/** A GFM table cell may use literal `<br>` for an intentional line break — split on it before wrapping the rest. */
+function cellLines(text: string, width: number): string[] {
+  const paragraphs = text.replace(/<br\s*\/?>/gi, '\n').split('\n')
+  const lines = paragraphs.flatMap((paragraph) => (visibleLength(paragraph) <= width ? [paragraph] : wrapVisible(paragraph, width)))
+  return lines.length > 0 ? lines : ['']
+}
+
 /**
  * Aligned columns with a header and separator rule, no border — for dense
  * row-oriented listings (bench results, skills, runs) where a full box per
  * entry would be noise. Cells may carry color; the header/separator are dim.
+ *
+ * Column widths follow the content up to the terminal's width; past that,
+ * columns shrink proportionally and cells wrap onto extra lines rather than
+ * running off the edge of the screen — the failure mode this replaced was a
+ * model-generated table with a paragraph in one cell stretching every row to
+ * hundreds of columns wide.
  */
 export function table(columns: TableColumn[], rows: string[][]): string[] {
-  const widths = columns.map((col, i) =>
+  const naturalWidths = columns.map((col, i) =>
     Math.max(visibleLength(col.header), ...rows.map((row) => visibleLength(row[i] ?? '')), 0),
   )
+  const separatorBudget = Math.max(0, columns.length - 1) * COLUMN_SEPARATOR.length
+  const available = Math.max(columns.length * MIN_COLUMN_WIDTH, terminalWidth() - separatorBudget)
+  const widths = fitColumnWidths(naturalWidths, available, MIN_COLUMN_WIDTH)
 
-  const renderRow = (cells: string[]): string =>
-    cells
-      .map((cell, i) => {
-        const width = widths[i] ?? 0
-        return columns[i]?.align === 'right' ? padLeft(cell, width) : padRight(cell, width)
-      })
-      .join('  ')
+  const renderRow = (cells: string[]): string[] => {
+    const wrapped = cells.map((cell, i) => cellLines(cell, widths[i] ?? MIN_COLUMN_WIDTH))
+    const height = Math.max(1, ...wrapped.map((lines) => lines.length))
+    const out: string[] = []
+    for (let line = 0; line < height; line += 1) {
+      out.push(
+        wrapped
+          .map((lines, i) => {
+            const width = widths[i] ?? 0
+            const content = lines[line] ?? ''
+            return columns[i]?.align === 'right' ? padLeft(content, width) : padRight(content, width)
+          })
+          .join(COLUMN_SEPARATOR),
+      )
+    }
+    return out
+  }
 
-  const header = dim(renderRow(columns.map((col) => col.header.toUpperCase())))
-  const separator = dim(widths.map((width) => H.repeat(width)).join('  '))
-  return [header, separator, ...rows.map(renderRow)]
+  const headerLines = renderRow(columns.map((col) => col.header.toUpperCase())).map(dim)
+  const separator = dim(widths.map((width) => H.repeat(width)).join(COLUMN_SEPARATOR))
+  return [...headerLines, separator, ...rows.flatMap(renderRow)]
 }

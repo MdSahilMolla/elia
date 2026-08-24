@@ -37,7 +37,9 @@ test('provider setup saves a selected model atomically and activates it immediat
     expect(content).toContain('ELIA_PROVIDER=nvidia')
     expect(content).toContain('ELIA_MODEL=nvidia/test-model')
     expect(content).toContain('NVIDIA_API_KEY=synthetic-nvidia-key')
-    expect(statSync(path).mode & 0o077).toBe(0)
+    // Windows has no POSIX permission bits — chmod is a no-op and stat reports
+    // 0o666, so "no group/other access" is only assertable on Unix.
+    if (process.platform !== 'win32') expect(statSync(path).mode & 0o077).toBe(0)
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }

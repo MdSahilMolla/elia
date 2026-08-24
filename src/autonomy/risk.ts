@@ -29,6 +29,29 @@ When genuinely unsure, prefer risky = true — a human will just say yes if it's
 
 Call flag_risk exactly once with your decision.`
 
+/**
+ * The fast-tier classifier occasionally stutters and repeats the same
+ * sentence two or three times in one `reason` string — harmless to the
+ * verdict itself, but it shows up verbatim in the confirmation prompt the
+ * user has to read. Collapsing repeats here fixes it for every caller at the
+ * source, rather than patching each place that renders `reason`.
+ */
+export function dedupeRepeatedSentences(text: string): string {
+  const parts = text
+    .split(/(?<=[.!?])\s+|\n+/)
+    .map((part) => part.trim())
+    .filter(Boolean)
+  const seen = new Set<string>()
+  const unique: string[] = []
+  for (const part of parts) {
+    const key = part.toLowerCase()
+    if (seen.has(key)) continue
+    seen.add(key)
+    unique.push(part)
+  }
+  return unique.join(' ')
+}
+
 function createRiskTool(): { tool: Tool; taken(): RiskVerdict | undefined } {
   let captured: RiskVerdict | undefined
 
@@ -46,7 +69,7 @@ function createRiskTool(): { tool: Tool; taken(): RiskVerdict | undefined } {
     async execute(input) {
       captured = {
         risky: input.risky === true,
-        reason: typeof input.reason === 'string' ? input.reason : '',
+        reason: typeof input.reason === 'string' ? dedupeRepeatedSentences(input.reason) : '',
       }
       return 'Risk verdict recorded.'
     },

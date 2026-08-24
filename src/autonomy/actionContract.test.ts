@@ -35,7 +35,16 @@ describe('action contracts', () => {
     expect(contract.requiresUserTakeover).toBe(true)
     expect(contract.failureDisposition).toBe('human-review')
     expect(contract.postconditions).toEqual([{ kind: 'result-contains', value: '"status": "deployed"', description: 'the production deployment must report a deployed status' }])
-    expect((await evaluatePreconditions(contract, process.cwd(), undefined, {})).ok).toBe(false)
+    // The contract must gate production deploys on the provider CLI actually
+    // being present. Asserting a fixed `false` here silently depended on vercel
+    // NOT being installed on the machine running the suite, so it broke the
+    // moment someone installed it. Assert the declared precondition instead,
+    // and that evaluation agrees with the real environment either way.
+    expect(contract.preconditions).toEqual([
+      { kind: 'command-available', value: 'vercel', description: 'vercel CLI must be available before deployment work runs' },
+    ])
+    const preconditions = await evaluatePreconditions(contract, process.cwd(), undefined, {})
+    expect(preconditions.ok).toBe(Bun.which('vercel') !== null)
     expect(evaluatePostconditions(contract, '{\n  "status": "deployed",\n  "url": "https://example.vercel.app"\n}', process.cwd())).toMatchObject({ ok: true })
   })
 
@@ -53,7 +62,7 @@ describe('action contracts', () => {
   test('fails workspace preconditions for traversal and symlink escapes', async () => {
     const cwd = mkdtempSync(join(tmpdir(), 'elia-contract-escape-'))
     const outside = mkdtempSync(join(tmpdir(), 'elia-contract-outside-'))
-    symlinkSync(outside, join(cwd, 'link'), 'dir')
+    symlinkSync(outside, join(cwd, 'link'), process.platform === 'win32' ? 'junction' : 'dir')
 
     const traversal = contractForAction({ name: 'write_file', input: { path: '../outside.txt' } }, cwd, 'run:file:escape:1')
     const symlink = contractForAction({ name: 'edit_file', input: { path: 'link/secret.txt' } }, cwd, 'run:file:escape:2')

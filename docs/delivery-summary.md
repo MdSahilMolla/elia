@@ -19,7 +19,7 @@ The strategic decision was deliberate. Browser control, parallel coding workers,
 | Worker browser observation | Browser access is available to specialist roles for delegated navigation and page inspection. Unattended workers cannot click, type, press keys, submit, publish, purchase, or otherwise mutate browser state. | `src/tools/registry.ts`, `src/autonomy/roles.ts`, `src/autonomy/governor.ts` |
 | Context propagation | Parent run IDs and governor policy flow through planners, fleet workers, variants, reviewers, repair passes, and lesson capture, including nested `task` dispatch. | `src/autonomy/loop.ts`, `src/autonomy/fleet.ts`, `src/autonomy/variants.ts`, `src/subagent.ts` |
 | Baseline reliability | Fixed pre-existing strict TypeScript errors in the bundled chess workspace so the repository-level typecheck is clean. | `workspace/chess/cli.ts`, `workspace/chess/game.ts`, `workspace/chess/game.test.ts` |
-| Product direction | Added a detailed autonomy strategy, differentiated product thesis, implementation priorities, architecture principles, and external capability research notes. | `ELIA_AUTONOMY_ROADMAP.md`, `research/manus-browser-findings.md` |
+| Product direction | Added a detailed autonomy strategy, differentiated product thesis, implementation priorities, architecture principles, and external capability research notes. | `docs/autonomy-roadmap.md`, `research/manus-browser-findings.md` |
 
 ## Why this is differentiated
 

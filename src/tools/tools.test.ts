@@ -156,7 +156,7 @@ test('file tools reject traversal and symlink escapes without changing outside f
   const outsideFile = join(outsideDir, 'secret.txt')
   const linkPath = join(testDir, 'outside-link')
   writeFileSync(outsideFile, 'original')
-  symlinkSync(outsideDir, linkPath, 'dir')
+  symlinkSync(outsideDir, linkPath, process.platform === 'win32' ? 'junction' : 'dir')
 
   await expect(executeTool('write_file', { path: '../outside.txt', content: 'changed' })).rejects.toThrow('escapes the active workspace')
   await expect(executeTool('read_file', { path: '../outside.txt' })).rejects.toThrow('escapes the active workspace')

@@ -30,6 +30,8 @@ npm install --global @mdsahilmolla/elia
 elia --help
 ```
 
+Interactive sessions check npm for a newer Elia release at most once every 24 hours and print the exact global update command when one is available. The check times out quickly and fails silently when offline. Set `ELIA_NO_UPDATE_CHECK=1` to disable it.
+
 ## License
 
 Elia is licensed under the [GNU Affero General Public License v3.0](LICENSE).
@@ -143,7 +145,7 @@ Elia’s Tech specialist is compatible with projects built in **Python**, **Type
 | Bun | `bunfig.toml`, Bun lockfiles, Bun package scripts, `bun test`/`bun run` commands | Bun tests, scripts, typecheck, and build commands |
 | React/TSX | React dependencies, `.jsx`/`.tsx`, Vite/Next configuration, component and route structure | project test, typecheck, lint, and production build scripts |
 
-Elia uses the target project’s existing package manager and conventions rather than assuming one toolchain. Before coding in an unfamiliar repository, the Tech agent can use the deterministic `project_profile` tool to report detected stacks, package manager, manifest signals, and declared verification commands. It can work across these stacks in one delegated task, for example updating a Python API, a TypeScript service, and a React client in separate dependency-aware steps, then running the relevant verification for each.
+Elia uses the target project’s existing package manager and conventions rather than assuming one toolchain. Before coding in an unfamiliar repository, the Tech agent can use the deterministic `project_profile` tool to report detected stacks, package manager, manifest signals, and declared verification commands. It can work across these stacks in one delegated task, for example updating a Python API, a TypeScript service, and a React client in separate dependency-aware steps, then running the relevant verification for each. `run_command` accepts a workspace-confined `cwd`, so Windows projects do not need fragile `cd`, `cmd /c`, or nested PowerShell composition. Its managed background mode returns success only after bounded startup output proves readiness and registers the process for cancellation and shutdown cleanup.
 
 ### End-to-end web deployment
 
@@ -381,6 +383,8 @@ Elia has a `workspace/` folder (created on first use, next to `.elia/` but visib
 
 ## Autonomous work: `elia auto`
 
+For plan-first work, `elia plan "<goal>"` and interactive `/plan <goal>` enter the same structured autonomous workflow as `elia auto`: orient, submit a validated proposal, persist it to `.elia/artifacts/plan.md` and `.elia/runs/<run-id>/plan.md`, request approval, execute dependency waves, verify, and review. A bare `elia plan` or `/plan` displays the latest plan; `elia artifact [name]` or `/artifact [name]` displays a bounded Markdown artifact under `.elia` without initializing a model provider.
+
 ```bash
 elia auto "add rate limiting to the API client"
 elia auto "migrate the config loader to zod" --yolo   # skip the approval gate
@@ -502,6 +506,7 @@ A synthesized skill is only kept if it survives the same gate a human contributi
 - **`src/autonomy/scheduler.ts`** + **`src/autonomy/daemon.ts`** — atomic recurring-goal storage, reclaimable leases, single-flight background execution, pause/resume controls, and explicit local-daemon lifecycle.
 
 - **`src/autonomy/proposal.ts`** — the `submit_proposal` tool, plan validation (unknown step ids, duplicate ids, dependency cycles, and missing verification are all rejected with a message the model can act on), and terminal rendering that shows the wave structure and warns about two steps in one wave claiming the same file.
+- **`src/autonomy/artifacts.ts`** — secure Markdown plan persistence and bounded artifact lookup under `.elia`; arbitrary filesystem reads are rejected.
 - **`src/autonomy/fleet.ts`** — dependency-wave planning and parallel dispatch. Reports `savedMs`: the workers' summed time minus the wall clock actually taken, which keeps the parallelism honest — a "parallel" run that saved nothing means the decomposition was wrong.
 - **`src/autonomy/blackboard.ts`** + **`src/tools/blackboard.ts`** — the shared whiteboard. Sub-agents are normally hermetic, so two of them investigating the same repo rediscover the same facts twice; `board_post`/`board_read` turns a parallel fleet into one that cooperates.
 - **`src/autonomy/context.ts`** — `AsyncLocalStorage` carrying the current worker's identity, so blackboard posts and action receipts are attributed without threading context through every tool signature.
