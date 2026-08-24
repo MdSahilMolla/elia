@@ -1,6 +1,6 @@
 {
   "name": "@mdsahilmolla/elia",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "A fast, autonomous coding agent for the terminal, with pluggable LLM providers.",
   "license": "AGPL-3.0-only",
   "type": "module",
