@@ -20,6 +20,7 @@ import { createJournal, newRunId, type Journal } from './journal.ts'
 import { planWaves, runFleet } from './fleet.ts'
 import { runVariants } from './variants.ts'
 import { createProposalTool, renderProposal } from './proposal.ts'
+import { savePlanArtifact } from './artifacts.ts'
 import { emitEvent, machineReadable } from '../ui/runtime.ts'
 import { redactText } from '../ui/redact.ts'
 import { appendLessons, createLessonsTool, renderLessons } from './lessons.ts'
@@ -425,6 +426,15 @@ async function runAutonomousTaskInternal(options: AutonomousRunOptions): Promise
       if (durableApproval) graph.resolveApproval(durableApproval.id, decision.action === 'approve', decision.action === 'amend' ? decision.feedback : decision.action)
       if (decision.action !== 'approve') return done(decision.action === 'reject' ? 'rejected' : 'needs-attention', { proposal })
       planApproved = true
+    }
+  }
+
+  if (planApproved && proposal) {
+    try {
+      savePlanArtifact(proposal, runId, process.cwd())
+    } catch {
+      // The plan already streamed to the terminal and the journal; a failure to
+      // also mirror it to .elia/artifacts must not block an approved run.
     }
   }
 

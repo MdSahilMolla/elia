@@ -1,6 +1,7 @@
 import type { Tool } from './types.ts'
 import { captureBeforeWrite } from '../checkpoint.ts'
-import { resolveWorkspacePath } from '../autonomy/context.ts'
+import { resolveWorkspacePath, currentAgent } from '../autonomy/context.ts'
+import { diagnosticsForFile, formatDiagnostics } from '../lsp/registry.ts'
 
 export const editFileTool: Tool = {
   name: 'edit_file',
@@ -49,6 +50,9 @@ export const editFileTool: Tool = {
     const updated = text.slice(0, firstIndex) + newString + text.slice(firstIndex + oldString.length)
     await captureBeforeWrite(path)
     await Bun.write(path, updated)
-    return `Edited ${input.path}`
+
+    const root = currentAgent().cwd ?? process.cwd()
+    const diagnostics = await diagnosticsForFile(path, updated, root)
+    return `Edited ${input.path}${diagnostics ? formatDiagnostics(diagnostics, input.path) : ''}`
   },
 }

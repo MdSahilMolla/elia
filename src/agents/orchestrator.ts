@@ -164,6 +164,22 @@ export async function runAgentRequest(request: string, opts: { signal?: AbortSig
 
   if (opts.dryRun) return { personas, rationale, sections: [], usage, dryRun: true }
 
+  // A lone 'tech' route is just "this is a coding/build request" with no other
+  // specialist domain involved — hand it straight to the real dev-mode agent
+  // (agent.ts) instead of running the lighter orchestrator section, so it gets
+  // the action governor, tool-result cache/prefetcher, and task/preview tools
+  // dev mode normally has. Multi-domain routes still run 'tech' as a bounded
+  // section below, since composing several specialists' takes is what the
+  // section runner is for.
+  if (personas.length === 1 && personas[0] === 'tech') {
+    const { runTurn } = await import('../agent.ts')
+    const messages: ConversationMessage[] = [{ role: 'user', content: [{ type: 'text', text: request }] }]
+    const result = await runTurn(messages, { mode: 'dev', signal: opts.signal, skipStats: true })
+    usage = addUsage(usage, result.usage)
+    recordUsage(result.usage)
+    return { personas, rationale, sections: [{ persona: 'tech', report: lastAssistantText(messages, '(no response)') }], usage }
+  }
+
   const sections: AgentSectionResult[] = []
 
   for (const persona of personas) {
@@ -213,6 +229,12 @@ export async function runPersonaTurn(
   selectedSkillNames?: string[],
   signal?: AbortSignal,
 ): Promise<Usage> {
+  if (persona === 'tech') {
+    const { runTurn } = await import('../agent.ts')
+    const result = await runTurn(messages, { mode: 'dev', skillNames: selectedSkillNames, signal, skipStats: true })
+    recordUsage(result.usage)
+    return result.usage
+  }
   warnIfSearchUnconfigured([persona])
   const result = await runAgentLoop({
     messages,

@@ -80,9 +80,29 @@ export function getSynthesizedTools(): Tool[] {
   return [...synthesizedTools]
 }
 
-/** Every tool available to a worker: built-ins, collaboration, and anything elia has synthesized. */
+// Tools proxied from connected MCP servers (see src/mcp/registry.ts), populated
+// once at startup. Kept mutable for the same reason as synthesizedTools above —
+// discovery happens after this module is first imported.
+const mcpTools: Tool[] = []
+
+export function registerMcpTool(tool: Tool): void {
+  const index = mcpTools.findIndex((existing) => existing.name === tool.name)
+  if (index === -1) mcpTools.push(tool)
+  else mcpTools[index] = tool
+}
+
+/** Test-only: clears MCP tool registrations so one test file's fixture servers don't leak into another's assertions. */
+export function clearMcpToolsForTests(): void {
+  mcpTools.length = 0
+}
+
+export function getMcpTools(): Tool[] {
+  return [...mcpTools]
+}
+
+/** Every tool available to a worker: built-ins, collaboration, anything elia has synthesized, and connected MCP servers. */
 export function allWorkerTools(): Tool[] {
-  return [...tools, ...collaborationTools, ...browserTools, ...communicationTools, ...synthesizedTools]
+  return [...tools, ...collaborationTools, ...browserTools, ...communicationTools, ...synthesizedTools, ...mcpTools]
 }
 
 export function findTool(name: string): Tool | undefined {

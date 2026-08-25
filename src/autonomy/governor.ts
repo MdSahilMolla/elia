@@ -2,6 +2,7 @@ import { AsyncLocalStorage } from 'node:async_hooks'
 import type { ToolEvent } from '../agentLoop.ts'
 import { currentAgent, isPathWithinWorkspace } from './context.ts'
 import { commandMayReadSensitiveData } from './sensitivePaths.ts'
+import { pauseToolSpinner, resumeToolSpinner } from '../ui/stream.ts'
 
 export type ActionRisk = 'safe' | 'review' | 'critical'
 export type ActionDecision = 'allow' | 'approve' | 'block'
@@ -176,6 +177,17 @@ export function assessAction(request: ActionRequest, cwd = currentAgent().cwd ??
     return assessment('review', 'approve', `${name} can create an external process or delegate work`, name, resources, true)
   }
 
+  // Tools proxied from a connected MCP server (see src/mcp/registry.ts, tool
+  // names are prefixed mcp_<server>_...): the server is a third-party process
+  // whose actual capability isn't known ahead of time, so it gets one explicit,
+  // named contract instead of silently falling through the generic unknown-tool
+  // branch below. Same practical effect (critical risk, approval required,
+  // not assumed reversible) but documented as an intentional choice for the
+  // whole family rather than an accident of "we forgot to add it."
+  if (name.startsWith('mcp_')) {
+    return assessment('critical', 'approve', `${name} is proxied from a third-party MCP server with no built-in safety contract`, name, resources, false)
+  }
+
   return assessment('critical', 'approve', `unknown tool ${name} has no declared safety contract`, name, resources, false)
 }
 
@@ -233,6 +245,12 @@ export function createActionGovernor(options: { mode?: GovernanceMode; approve?:
         release = resolve
       })
       await previous
+      // The tool's own writeToolCall already started the "running…" spinner
+      // for this action; a per-action approval prompt printed while that
+      // spinner is still ticking would get its lines clobbered by the
+      // spinner's next redraw. Pause it for exactly this prompt, then let it
+      // resume — the tool itself hasn't finished, so its line is still owed.
+      pauseToolSpinner()
       try {
         const approved = await options.approve(assessment, request)
         if (approved) return { allowed: true, assessment: { ...assessment, decision: 'allow' } }
@@ -242,6 +260,7 @@ export function createActionGovernor(options: { mode?: GovernanceMode; approve?:
           message: `Action denied by the user: ${assessment.reason}`,
         }
       } finally {
+        resumeToolSpinner()
         release()
       }
     },

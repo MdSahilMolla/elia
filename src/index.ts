@@ -27,6 +27,7 @@ const REPL_COMMANDS: SlashCommand[] = [
   { name: '/model', description: 'pick a model with arrow keys, or /model groq, /model claude-opus-5' },
   { name: '/thinking', description: 'pick reasoning effort with arrow keys, or /thinking off/low/medium/high/<n>' },
   { name: '/task', description: 'browse browser, coding, and pending tasks with arrow keys' },
+  { name: '/artifact', description: 'browse saved plan artifacts with arrow keys and search, or /artifact <name> to view one directly' },
   { name: '/settings', description: 'browse every setting — model, reasoning effort, risk checks, skills — and switch with arrow keys' },
   { name: '@skills', description: 'browse loaded skills and choose which skill tools are active for the next turn' },
 ]
@@ -141,8 +142,8 @@ Inside an interactive session:
   /capabilities               List specialist capabilities, risk classes, and output contracts
   /mode                       Pick a mode/persona with arrow keys: dev, cyber, sports, fitness, battmann,
                               marketing, finance, business, data, research, cybersecurity,
-                              automation, communications, ai, production, tech
-  /mode <name>                Switch directly, e.g. /mode cyber, /mode dev
+                              automation, communications, ai, production
+  /mode <name>                Switch directly, e.g. /mode cyber, /mode dev ("tech" is an alias for dev)
   /settings                   Risk checks (auto/manual), model, reasoning effort, and skills
   /model                      Pick a provider/model or enable auto fallback
   /model auto                 Keep the selected model primary; fail over to another ready provider
@@ -259,6 +260,14 @@ async function loadRuntimeSkills(): Promise<void> {
   if (skills.loaded.length > 0 && subcommand !== 'skills') {
     writeUsageLine(`${skills.loaded.length} learned tool(s): ${skills.loaded.map((skill) => skill.name).join(', ')}`)
   }
+
+  const { loadMcpTools } = await import('./mcp/registry.ts')
+  const mcp = await loadMcpTools()
+  if (mcp.loaded.length > 0 && subcommand !== 'skills') {
+    writeUsageLine(`${mcp.loaded.length} MCP tool(s) from ${mcp.servers.length} server(s): ${mcp.loaded.map((tool) => tool.name).join(', ')}`)
+  }
+  for (const failure of mcp.failed) writeNotice(`MCP server "${failure.server}" unavailable: ${failure.reason}`)
+  for (const error of mcp.configErrors) writeNotice(`MCP config: ${error}`)
 }
 
 async function runAgentCommand(): Promise<void> {
@@ -1507,6 +1516,13 @@ async function runInteractive(): Promise<void> {
       writeNotice('Battmann mode on — strategic intelligence across trade, geopolitics, financial markets, supply chain, policy, and commodities. Every score and claim is sourced or labelled an estimate; elia surfaces intelligence, you decide.')
       return
     }
+    if (choice === 'tech') {
+      const hadSpecialist = persona !== undefined || mode !== 'dev'
+      mode = 'dev'
+      persona = undefined
+      writeNotice(hadSpecialist ? "Tech and Dev are the same agent — back to dev mode." : 'dev mode remains active.')
+      return
+    }
     const requestedPersona = choice === 'cybersecurity' ? 'cyber' : choice
     if (isAgentPersona(requestedPersona)) {
       persona = requestedPersona
@@ -1535,7 +1551,6 @@ async function runInteractive(): Promise<void> {
     { label: 'Communications', detail: 'Communications persona', value: 'communications' },
     { label: 'AI / ML', detail: 'AI/ML persona', value: 'ai' },
     { label: 'Production', detail: 'Production Engineering persona', value: 'production' },
-    { label: 'Tech', detail: 'Tech agent persona', value: 'tech' },
   ]
 
   async function handleModePersonaPicker(): Promise<void> {
@@ -1673,6 +1688,53 @@ async function runInteractive(): Promise<void> {
       continue
     }
 
+    const artifactMatch = /^\/artifacts?(?:\s+(.*))?$/.exec(trimmed)
+    if (artifactMatch) {
+      const { listArtifacts, readArtifact } = await import('./autonomy/artifacts.ts')
+      const target = artifactMatch[1]?.trim()
+
+      const viewArtifact = async (name: string): Promise<void> => {
+        const artifact = readArtifact(name)
+        if (!artifact) {
+          writeError(`No artifact matches "${name}". Run /artifact to list them.`)
+          return
+        }
+        const { createMarkdownStream } = await import('./ui/markdown.ts')
+        const markdown = createMarkdownStream()
+        process.stdout.write(`\n${markdown.push(artifact.content)}${markdown.flush()}\n`)
+      }
+
+      if (target) {
+        await viewArtifact(target)
+        continue
+      }
+
+      const artifacts = listArtifacts()
+      if (artifacts.length === 0) {
+        writeNotice('No artifacts yet — approve a plan in "elia auto" to save one to .elia/artifacts.')
+        continue
+      }
+
+      const options = artifacts.map((artifact) => ({
+        label: artifact.name,
+        detail: `${new Date(artifact.updatedAt).toLocaleString()} · ${Math.max(1, Math.round(artifact.sizeBytes / 1024))} KB`,
+        value: artifact.name,
+      }))
+      const result = await pick(`Artifacts (${artifacts.length})`, options, 0, { searchable: true })
+      if (result.type === 'select') {
+        await viewArtifact(result.value)
+      } else if (result.type === 'unavailable') {
+        // Not an interactive terminal (piped/scripted) — the picker can't render, so fall back to a plain listing.
+        const rows = table(
+          [{ header: 'name' }, { header: 'updated' }, { header: 'size', align: 'right' }],
+          artifacts.slice(0, 15).map((artifact) => [artifact.name, new Date(artifact.updatedAt).toLocaleString(), `${Math.max(1, Math.round(artifact.sizeBytes / 1024))} KB`]),
+        )
+        process.stdout.write(`\n${rows.join('\n')}\n`)
+        writeUsageLine('/artifact <name> to view one, e.g. /artifact plan')
+      }
+      continue
+    }
+
     const modeMatch = /^\/mode(?:\s+(.*))?$/.exec(trimmed)
     if (modeMatch) {
       const modeArg = modeMatch[1]?.trim()
@@ -1777,6 +1839,18 @@ async function main() {
     case 'control':
       return runControl()
     case 'bridge': {
+      if (hasFlag('--http')) {
+        const portRaw = flagValue('--port') ?? '4319'
+        const port = strictInteger(portRaw)
+        if (port === undefined || port < 1 || port > 65535) {
+          writeError('--port must be an integer between 1 and 65535')
+          process.exitCode = 1
+          return
+        }
+        const hostname = flagValue('--host')
+        const { runHttpBridge } = await import('./bridgeHttp.ts')
+        return runHttpBridge({ port, hostname })
+      }
       const { runVscodeBridge } = await import('./vscodeBridge.ts')
       return runVscodeBridge()
     }

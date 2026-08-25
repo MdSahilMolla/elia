@@ -1,4 +1,4 @@
-import { SHARED_CONTEXT, memorySections } from '../config.ts'
+import { SHARED_CONTEXT, memorySections, DEV_SYSTEM_PROMPT } from '../config.ts'
 import { tools as baseTools, businessTools, browserTools, communicationTools, cyberTools, getSynthesizedTools } from '../tools/registry.ts'
 import type { Tool } from '../tools/types.ts'
 import type { AgentPersona } from './types.ts'
@@ -99,14 +99,13 @@ Default outputs: release-readiness scorecard, preflight evidence, migration and 
 
 Guardrails: never deploy to production, mutate production data, rotate or expose secrets, or make irreversible infrastructure changes without exact human approval. Prefer dry-run and staging checks. Treat database migrations as potentially destructive, require backup/rollback evidence, and never report a release as successful without an observable postcondition.${memorySections}`
 
-const TECH_PROMPT = `You are elia, running as the Tech agent.
-${SHARED_CONTEXT}
-
-You own coding, debugging, architecture, tool/stack selection, integrations, automation implementation, data pipelines, infra/DevOps, and technical troubleshooting across Python, TypeScript/JavaScript, Bun, React/TSX, and adjacent ecosystems.
-Detect the project from its actual files before acting: pyproject.toml/requirements.txt/setup.cfg for Python; tsconfig.json/package.json for TypeScript; bunfig.toml and Bun scripts for Bun; and package.json plus JSX/TSX or Vite/Next configuration for React. Use the project’s declared package manager and scripts, preserve existing conventions, and verify with the strongest available tests, type checks, lint, and build commands.
-Priorities: working solution, maintainability, security, verification, and clear trade-offs. Use task delegation for independent work and run critic/security/bughunter review after meaningful changes.
-Guardrails: never write malicious or security-bypassing code. Proactively flag security and privacy risks.${memorySections}`
-
+// 'tech' is elia's default coding/build persona for the specialist orchestrator's
+// multi-domain composition (e.g. a 'finance' + 'tech' section pair for a "build vs
+// buy" request). It intentionally reuses dev mode's own system prompt rather than
+// maintaining a second, drift-prone description of the same "general coding agent" —
+// a single-persona 'tech' route is delegated straight to runTurn (dev mode) in
+// orchestrator.ts, so this prompt only actually renders for the bounded multi-persona
+// section case.
 const PERSONA_PROMPTS: Record<AgentPersona, string> = {
   marketing: MARKETING_PROMPT,
   sports: SPORTS_PROMPT,
@@ -120,7 +119,7 @@ const PERSONA_PROMPTS: Record<AgentPersona, string> = {
   communications: COMMUNICATIONS_PROMPT,
   ai: AI_PROMPT,
   production: PRODUCTION_PROMPT,
-  tech: TECH_PROMPT,
+  tech: DEV_SYSTEM_PROMPT,
 }
 
 export function personaPrompt(persona: AgentPersona): string {

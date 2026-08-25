@@ -1,6 +1,7 @@
 import type { Tool } from './types.ts'
 import { captureBeforeWrite } from '../checkpoint.ts'
-import { resolveWorkspacePath } from '../autonomy/context.ts'
+import { resolveWorkspacePath, currentAgent } from '../autonomy/context.ts'
+import { diagnosticsForFile, formatDiagnostics } from '../lsp/registry.ts'
 
 export const writeFileTool: Tool = {
   name: 'write_file',
@@ -25,6 +26,9 @@ export const writeFileTool: Tool = {
     const content = input.content
     await captureBeforeWrite(path)
     await Bun.write(path, content)
-    return `Wrote ${content.length} bytes to ${input.path}`
+
+    const root = currentAgent().cwd ?? process.cwd()
+    const diagnostics = await diagnosticsForFile(path, content, root)
+    return `Wrote ${content.length} bytes to ${input.path}${diagnostics ? formatDiagnostics(diagnostics, input.path) : ''}`
   },
 }

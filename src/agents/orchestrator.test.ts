@@ -74,7 +74,7 @@ test('a multi-domain request runs personas in the routed order and produces a co
     }
     if (toolNames.length === 0) return { content: textBlock('finance and tech agree: build it') } // synthesis call
     if (params.system.includes('Finance agent')) return { content: textBlock('finance report') }
-    if (params.system.includes('Tech agent')) return { content: textBlock('tech report') }
+    if (params.system.includes('dev mode')) return { content: textBlock('tech report') }
     throw new Error(`unexpected system prompt: ${params.system}`)
   })
 
@@ -108,7 +108,7 @@ test('duplicate personas from the router are deduped, so a repeated persona only
       return { content: textBlock('') }
     }
     if (toolNames.length === 0) return { content: textBlock('combined') }
-    const persona = params.system.includes('Tech agent') ? 'tech' : 'marketing'
+    const persona = params.system.includes('dev mode') ? 'tech' : 'marketing'
     runsPerPersona[persona] = (runsPerPersona[persona] ?? 0) + 1
     return { content: textBlock(`${persona} report`) }
   })

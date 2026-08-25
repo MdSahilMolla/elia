@@ -53,6 +53,8 @@ export interface RunTurnOptions {
   onThinking?: (delta: string) => void
   /** Suppress terminal rendering and usage output for machine clients. */
   silent?: boolean
+  /** Skip recordUsage/recordTopLevelTurn/the usage-line print — for a caller (e.g. the orchestrator delegating a lone 'tech' route) that aggregates and records stats itself exactly once. */
+  skipStats?: boolean
 }
 
 export async function runTurn(
@@ -108,12 +110,14 @@ export async function runTurn(
   })))
   const elapsedMs = Date.now() - startedAt
 
-  recordUsage(result.usage)
-  recordTopLevelTurn(elapsedMs)
+  if (!options.skipStats) {
+    recordUsage(result.usage)
+    recordTopLevelTurn(elapsedMs)
+  }
 
   const hits = result.cacheStats?.hits ?? 0
   const prefetchNote = hits > 0 ? ` · ${hits} read${hits === 1 ? '' : 's'} prefetched` : ''
-  if (!options.silent) writeUsageLine(`${formatUsageLine(result.usage, elapsedMs, config.model)}${prefetchNote}`)
+  if (!options.silent && !options.skipStats) writeUsageLine(`${formatUsageLine(result.usage, elapsedMs, config.model)}${prefetchNote}`)
 
   return result
 }

@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { applyPickerKey } from './picker.ts'
+import { applyPickerKey, applySearchKey } from './picker.ts'
 
 test('down moves the selection forward', () => {
   expect(applyPickerKey(0, 4, { name: 'down' })).toEqual({ type: 'move', selected: 1 })
@@ -51,4 +51,35 @@ test('page navigation and home/end stay within large catalogs', () => {
   expect(applyPickerKey(9, 50, { name: 'pageup' })).toEqual({ type: 'move', selected: 0 })
   expect(applyPickerKey(9, 50, { name: 'home' })).toEqual({ type: 'move', selected: 0 })
   expect(applyPickerKey(9, 50, { name: 'end' })).toEqual({ type: 'move', selected: 49 })
+})
+
+test('applySearchKey appends a typed character to the query', () => {
+  expect(applySearchKey(0, 10, 'pl', 'a', { name: 'a' })).toEqual({ type: 'query', query: 'pla' })
+})
+
+test('applySearchKey ignores navigation key characters even though they carry a str payload', () => {
+  expect(applySearchKey(0, 10, '', undefined, { name: 'down' })).toEqual({ type: 'move', selected: 1 })
+})
+
+test('applySearchKey backspace trims the query by one character', () => {
+  expect(applySearchKey(0, 10, 'plan', undefined, { name: 'backspace' })).toEqual({ type: 'query', query: 'pla' })
+})
+
+test('applySearchKey backspace on an empty query is a no-op, not a cancel', () => {
+  expect(applySearchKey(0, 10, '', undefined, { name: 'backspace' })).toEqual({ type: 'none' })
+})
+
+test('applySearchKey escape clears a non-empty query before it cancels', () => {
+  expect(applySearchKey(0, 10, 'plan', undefined, { name: 'escape' })).toEqual({ type: 'query', query: '' })
+  expect(applySearchKey(0, 10, '', undefined, { name: 'escape' })).toEqual({ type: 'cancel' })
+})
+
+test('applySearchKey still selects and quits like the plain picker', () => {
+  expect(applySearchKey(2, 5, '', undefined, { name: 'return' })).toEqual({ type: 'select', index: 2 })
+  expect(applySearchKey(0, 5, '', undefined, { name: 'c', ctrl: true })).toEqual({ type: 'quit' })
+})
+
+test('applySearchKey ignores control characters and multi-character escape sequences', () => {
+  expect(applySearchKey(0, 10, 'x', '\t', { name: 'tab' })).toEqual({ type: 'none' })
+  expect(applySearchKey(0, 10, 'x', '\x1b[A', { name: 'up' })).toEqual({ type: 'move', selected: 9 })
 })

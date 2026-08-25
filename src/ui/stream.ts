@@ -54,6 +54,23 @@ function hideSpinner(): void {
   process.stdout.write('\x1b[1A\x1b[2K')
 }
 
+/**
+ * The spinner assumes it owns the terminal's last line for as long as a tool
+ * is pending — true between writeToolCall and writeToolResult, except when a
+ * tool's own execution needs to print something interactive itself (a
+ * per-action approval prompt, mid-run). Without pausing here first, the
+ * spinner's blind cursor-up-and-clear redraw races that prompt and corrupts
+ * both. Safe to call even when no spinner is currently showing (no-op).
+ */
+export function pauseToolSpinner(): void {
+  hideSpinner()
+}
+
+/** Resumes the spinner after pauseToolSpinner, if a tool is still pending. */
+export function resumeToolSpinner(): void {
+  showSpinner()
+}
+
 function closeThinkingBlock(): void {
   if (!inThinkingBlock) return
   inThinkingBlock = false

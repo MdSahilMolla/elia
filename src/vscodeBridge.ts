@@ -36,13 +36,28 @@ interface ActiveProcess {
   process: Bun.Subprocess<'ignore', 'pipe', 'pipe'>
 }
 
+export interface BridgeSession {
+  handleRequest(request: BridgeRequest): Promise<void>
+  isShuttingDown(): boolean
+}
+
+export interface BridgeSessionOptions {
+  /** Called for every response and event this session produces — one per transport connection. */
+  output: (message: BridgeResponse | BridgeEvent) => void
+  /** Called once a `shutdown` request's in-flight work has fully drained. Stdio exits the process; a per-connection transport (e.g. one WebSocket) just closes that connection. */
+  onShutdown?: () => void
+}
+
 /**
- * A deliberately small, local-only protocol server. The VS Code extension is a
- * client of Elia, not a second agent runtime. All model work, tool governance,
- * durable state, and external-action policy remain in this process or in the
- * normal Elia CLI it launches.
+ * One client's worth of bridge state (chat sessions, pending approvals, active
+ * autonomous-run child processes) bound to one `output` sink. Kept as a
+ * factory rather than module-level state so each transport connection —
+ * today the single stdio pipe `runVscodeBridge` reads, potentially several
+ * concurrent WebSocket connections under an HTTP transport — gets its own
+ * isolated session instead of silently sharing one client's chat history or
+ * approvals with another's.
  */
-export async function runVscodeBridge(): Promise<void> {
+export function createBridgeSession(options: BridgeSessionOptions): BridgeSession {
   const sessions = new Map<string, ConversationMessage[]>()
   const pendingApprovals = new Map<string, PendingApproval>()
   const activeProcesses = new Map<string, ActiveProcess>()
@@ -50,15 +65,7 @@ export async function runVscodeBridge(): Promise<void> {
   let shutdownRequested = false
   let inFlight = 0
 
-  try {
-    await loadSkills()
-  } catch {
-    // Skill discovery remains best-effort; the bridge can still serve built-ins.
-  }
-
-  const output = (message: BridgeResponse | BridgeEvent): void => {
-    process.stdout.write(encodeBridgeMessage(message))
-  }
+  const output = options.output
 
   const event = (name: string, data: Record<string, unknown> = {}): void => {
     output({ type: 'event', event: name, data })
@@ -272,29 +279,56 @@ export async function runVscodeBridge(): Promise<void> {
       failure(request.id, error)
     } finally {
       inFlight -= 1
-      if (shutdownRequested && inFlight === 0) process.exit(0)
+      if (shutdownRequested && inFlight === 0) options.onShutdown?.()
     }
   }
+
+  return {
+    handleRequest,
+    isShuttingDown: () => shutdownRequested,
+  }
+}
+
+/**
+ * The stdio transport — one process, one client, spawned fresh per caller
+ * (today: the VS Code extension). All model work, tool governance, durable
+ * state, and external-action policy remain in this process or in the normal
+ * Elia CLI it launches; see bridgeHttp.ts for the multi-client HTTP/WebSocket
+ * transport over the same protocol and the same createBridgeSession core.
+ */
+export async function runVscodeBridge(): Promise<void> {
+  try {
+    await loadSkills()
+  } catch {
+    // Skill discovery remains best-effort; the bridge can still serve built-ins.
+  }
+
+  const output = (message: BridgeResponse | BridgeEvent): void => {
+    process.stdout.write(encodeBridgeMessage(message))
+  }
+  const reject = (error: string): void => output({ type: 'response', id: 'unknown', ok: false, error })
+
+  const session = createBridgeSession({ output, onShutdown: () => process.exit(0) })
 
   const input = readline.createInterface({ input: process.stdin, crlfDelay: Infinity })
   for await (const line of input) {
     if (line.length > MAX_LINE_LENGTH) {
-      failure('unknown', new Error(`Bridge request exceeds ${MAX_LINE_LENGTH} characters`))
+      reject(`Bridge request exceeds ${MAX_LINE_LENGTH} characters`)
       continue
     }
     let parsed: unknown
     try {
       parsed = JSON.parse(line)
     } catch {
-      failure('unknown', new Error('Bridge request must be one JSON object per line'))
+      reject('Bridge request must be one JSON object per line')
       continue
     }
-    if (shutdownRequested) continue
+    if (session.isShuttingDown()) continue
     if (!isBridgeRequest(parsed)) {
-      failure('unknown', new Error('Invalid bridge request envelope'))
+      reject('Invalid bridge request envelope')
       continue
     }
-    void handleRequest(parsed)
+    void session.handleRequest(parsed)
   }
 }
 

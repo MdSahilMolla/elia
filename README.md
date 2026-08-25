@@ -289,6 +289,36 @@ If a connector uses different tool names, override them with variables such as `
 
 A bridge receives one JSON request on stdin and should return one JSON or text response. Keep login credentials in the bridge or browser session, never in Elia prompts, source files, or command-line arguments. Elia must not bypass login challenges, CAPTCHAs, paywalls, or site safety controls. Actions that may send, buy, publish, delete, or change subscriptions pause and return an exact five-minute `confirmationToken`. The user must approve that exact action before the token is supplied; tokens are bound to the action details and cannot be reused for a changed target or message. `wait_for`, `expectText`, and `expectUrl` are intended for stateful sites where navigation or clicks complete asynchronously; they time out rather than claiming success.
 
+### MCP servers
+
+Elia is a real MCP client: any server's tools become available to the dev-mode agent (and everything spawned under it — sub-agents, the autonomous loop's roles, `elia evolve`) automatically, with no per-tool code to write. Configure servers in `.elia/mcp.json` (project, checked into the repo) and/or `~/.elia/mcp.json` (personal — credentials, local paths you don't want in the repo). Project entries override user entries with the same name. Same shape most other MCP hosts use, so an existing config can be copied in as-is:
+
+```json
+{
+  "mcpServers": {
+    "github": { "command": "npx", "args": ["-y", "@modelcontextprotocol/server-github"], "env": { "GITHUB_TOKEN": "..." } },
+    "local-tool": { "command": "/path/to/server", "disabled": true }
+  }
+}
+```
+
+Servers are spawned over stdio and connected once at startup; a server that fails to start or handshake is logged and skipped rather than blocking the rest. Each tool is registered as `mcp_<server>_<tool>` and, like any tool with no built-in safety contract, requires explicit approval before it runs — Elia has no way to know an arbitrary third-party server's tool is safe ahead of time, so it doesn't guess.
+
+### LSP diagnostics on every edit
+
+`write_file` and `edit_file` check the changed file against a real language server, not just a text diff. If a server is available for the file's language, elia opens/updates the document and appends any errors or warnings the server reports directly to the tool result — catching a broken reference or a type error the instant it's introduced, well before the next `tsc`/`pytest`/`go build`. One server process per language is started lazily and reused for the rest of the session.
+
+Elia doesn't install these — bring your own, same as any editor:
+
+| Language | Server it looks for |
+| --- | --- |
+| TypeScript / JavaScript | `typescript-language-server` |
+| Python | `pyright-langserver` |
+| Go | `gopls` |
+| Rust | `rust-analyzer` |
+
+A missing binary just means diagnostics are silently unavailable for that language — the tool's normal result is unchanged, nothing blocks or errors. Set `ELIA_LSP=off` to disable this entirely.
+
 ### Manual model discovery and raw model performance
 
 `/model` first shows every known provider and its readiness. Selecting a provider queries that provider’s models endpoint **on demand**, then opens a second picker containing the available model IDs. Direct selection remains available with `/model <provider> <model-id>` or `/model <model-id>` for the current provider. This keeps startup fast and lets users choose newly released provider models without waiting for a code release. If a provider does not expose a models endpoint, its configured default and direct model-ID syntax still work.
@@ -541,10 +571,10 @@ What can't be covered that way is the model loop itself. `elia bench` is the rea
 
 ## Status
 
-In: parallel role-typed sub-agents, the autonomous work cycle with an approval gate, dependency-wave execution, verification-gated best-of-N execution in isolated worktrees, the shared blackboard, adversarial review, bounded self-repair, cross-run lessons, run forking, predictive prefetch, the two-tier model cascade, benchmark-gated self-evolution, skill synthesis, a central per-tool autonomy governor, delegated read-only browser observation, redacted action ledgers, run receipts, a durable goal graph, resumable approvals, stable action idempotency, failure classification, readiness tiers, action pre/postcondition contracts, recurring schedules, single-flight daemon execution, and evidence-gated completion.
+In: parallel role-typed sub-agents, the autonomous work cycle with an approval gate, dependency-wave execution, verification-gated best-of-N execution in isolated worktrees, the shared blackboard, adversarial review, bounded self-repair, cross-run lessons, run forking, predictive prefetch, the two-tier model cascade, benchmark-gated self-evolution, skill synthesis, a central per-tool autonomy governor, a real MCP client, real-time LSP diagnostics on every edit, delegated read-only browser observation, redacted action ledgers, run receipts, a durable goal graph, resumable approvals, stable action idempotency, failure classification, readiness tiers, action pre/postcondition contracts, recurring schedules, single-flight daemon execution, and evidence-gated completion.
 
 
-Still on the roadmap: provenance-aware memory with expiry/conflict handling, a governed MCP connector registry, user-defined evolution fitness profiles, event-triggered workflows, and provider-backed idempotency adapters for APIs that accept native idempotency keys. `elia evolve` does not commit to git — it copies files in and backs up what it replaced, leaving the commit to you.
+Still on the roadmap: provenance-aware memory with expiry/conflict handling, user-defined evolution fitness profiles, event-triggered workflows, and provider-backed idempotency adapters for APIs that accept native idempotency keys. `elia evolve` does not commit to git — it copies files in and backs up what it replaced, leaving the commit to you.
 
 ### On speed
 

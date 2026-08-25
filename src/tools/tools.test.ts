@@ -103,6 +103,22 @@ test('edit_file throws when old_string is not unique', async () => {
   ).rejects.toThrow('multiple locations')
 })
 
+test('write_file and edit_file leave their result message unchanged for a file type with no configured LSP server', async () => {
+  const path = join(testDir, 'notes.txt')
+  const written = await executeTool('write_file', { path, content: 'first' })
+  expect(written).toBe(`Wrote 5 bytes to ${path}`)
+  const edited = await executeTool('edit_file', { path, old_string: 'first', new_string: 'second' })
+  expect(edited).toBe(`Edited ${path}`)
+})
+
+test('write_file leaves its result message unchanged for a recognized-but-uninstalled language server (fails soft)', async () => {
+  // gopls is not installed in this environment (see src/lsp/registry.test.ts) —
+  // exercises the real "server unavailable" path, not a mock.
+  const path = join(testDir, 'main.go')
+  const result = await executeTool('write_file', { path, content: 'package main' })
+  expect(result).toBe(`Wrote 12 bytes to ${path}`)
+})
+
 test('list_files finds files matching a glob', async () => {
   const result = await executeTool('list_files', { pattern: '*.txt', cwd: testDir })
   expect(result).toContain('hello.txt')

@@ -193,6 +193,15 @@ test('a genuinely unknown tool still fails closed', () => {
   expect(assessment.reason).toContain('no declared safety contract')
 })
 
+test('a proxied MCP tool gets its own explicit fail-closed contract, not the generic unknown-tool one', () => {
+  const assessment = assessAction({ name: 'mcp_github_create_issue', input: {} })
+  expect(assessment.risk).toBe('critical')
+  expect(assessment.decision).toBe('approve')
+  expect(assessment.reversible).toBe(false)
+  expect(assessment.reason).toContain('third-party MCP server')
+  expect(assessment.reason).not.toContain('no declared safety contract')
+})
+
 test('research tools are allowed while consequential actions still need approval', () => {
   expect(assessAction({ name: 'web_search', input: { query: 'x' } }).decision).toBe('allow')
   expect(assessAction({ name: 'web_fetch', input: { url: 'https://example.com' } }).decision).toBe('allow')
