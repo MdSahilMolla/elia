@@ -20,7 +20,7 @@ export interface HttpBridgeOptions {
  * chat history, own pending approvals, own autonomous-run tracking) — nothing
  * is shared between concurrent clients.
  */
-export async function runHttpBridge(options: HttpBridgeOptions): Promise<void> {
+export async function runHttpBridge(options: HttpBridgeOptions) {
   try {
     await loadSkills()
   } catch {
@@ -91,5 +91,8 @@ export async function runHttpBridge(options: HttpBridgeOptions): Promise<void> {
     `Elia HTTP bridge listening on ws://${server.hostname}:${server.port}/bridge` +
       (hostname === '127.0.0.1' ? ' (localhost-only)' : ' — reachable beyond this machine; only bind a non-default host deliberately'),
   )
-  await new Promise<void>(() => {}) // Serves until the process receives a shutdown signal.
+  // Bun.serve's own active listener keeps the process alive — no need to block
+  // here. Returning the server (rather than awaiting forever) is what lets a
+  // test start one on an ephemeral port and call server.stop() afterward.
+  return server
 }

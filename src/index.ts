@@ -114,8 +114,11 @@ Background autonomy:
   elia daemon --once                       Run due schedules once and exit
   elia daemon --poll-ms 30000             Keep checking due schedules in the foreground
 
-VS Code integration:
-  elia bridge --json                     Start the local JSONL bridge used by the Elia VS Code extension
+Editor / external integration:
+  elia bridge                              Start the local JSONL-over-stdio bridge (used by the Elia VS Code extension)
+  elia bridge --http [--port 4319] [--host 127.0.0.1]  Same bridge protocol over WebSocket instead of stdio,
+                                            for any external client — SDKs, a future TUI, other editors. Binds to
+                                            localhost only unless --host is set explicitly.
 
 Provider setup:
   First interactive run                    Ask for provider, hidden API key, and model
@@ -162,6 +165,10 @@ Inside an interactive session:
                               intelligence across trade, geopolitics, financial markets,
                               supply chain, policy, and commodities
   elia --cyber                Start (or run a one-shot prompt) in cyber mode
+  elia --tui                  Start a full terminal UI (scrollback, streaming, borders) instead of
+                              the plain readline prompt. Combine with --cyber/--sports/etc. for that
+                              mode. Not yet a superset of the REPL: no slash commands, --continue,
+                              --resume, or one-shot prompt in this first version.
   elia --json                 Emit stable JSONL lifecycle events for automation
   elia --plain                Disable color, animation, and in-place terminal redraws
   elia --quiet                Print the final answer and essential failures only; keep TTY editing
@@ -1143,6 +1150,16 @@ async function runInteractive(): Promise<void> {
   const oneShotPrompt = positionals(['--resume']).join(' ').trim()
 
   let mode: AgentMode = hasFlag('--cyber') ? 'cyber' : hasFlag('--sports') ? 'sports' : hasFlag('--fitness') ? 'fitness' : hasFlag('--battmann') ? 'battmann' : 'dev'
+
+  if (hasFlag('--tui')) {
+    // A full alternative front end (real conversation view, streaming, scrollback)
+    // over the same runTurn agent loop — not (yet) a superset of the plain REPL's
+    // slash commands, checkpoints, or task dashboard, so --continue/--resume/a
+    // one-shot prompt still go through the readline path below.
+    const { runTui } = await import('./ui/tui.tsx')
+    return runTui(mode)
+  }
+
   let persona: AgentPersona | undefined
   let selectedSkillNames: string[] | undefined
   let messages: ConversationMessage[] = []

@@ -157,7 +157,11 @@ Use `{"action":"plan","provider":"vercel","target":"preview"}` to inspect readin
 
 Elia includes a full VS Code client under [`extensions/vscode`](extensions/vscode). It provides an Elia engineering panel, streamed chat and tool events, active-file and selection context, workspace diagnostics, autonomous run controls, task/run/skill tree views, skill-bundle selection, native diff review, environment inspection, receipts, preview deployment, live verification, and production approval controls.
 
-The extension is a thin local client over `elia bridge --json`; it does not duplicate the model layer or weaken Elia’s governance. Install its dependencies and compile it with `cd extensions/vscode && pnpm install && pnpm run compile`, then configure `elia.cliPath` to the absolute `bin/elia.ts` path for a source checkout or leave it as `elia` for an installed executable. The bridge uses the open workspace as its working root, communicates over local stdin/stdout rather than a TCP server, and keeps provider credentials in Elia’s normal process environment. See [`extensions/vscode/README.md`](extensions/vscode/README.md).
+The extension is a thin local client over `elia bridge`; it does not duplicate the model layer or weaken Elia’s governance. Install its dependencies and compile it with `cd extensions/vscode && pnpm install && pnpm run compile`, then configure `elia.cliPath` to the absolute `bin/elia.ts` path for a source checkout or leave it as `elia` for an installed executable. The bridge uses the open workspace as its working root, communicates over local stdin/stdout rather than a TCP server, and keeps provider credentials in Elia’s normal process environment. See [`extensions/vscode/README.md`](extensions/vscode/README.md).
+
+### Bridge protocol over HTTP (for external clients other than VS Code)
+
+The same request/response/event protocol the VS Code extension speaks is also reachable over WebSocket: `elia bridge --http [--port 4319] [--host 127.0.0.1]`. Binds to localhost only unless you explicitly pass a different `--host` — this opens a network-reachable port, which is a meaningfully different exposure than the stdio bridge's local-pipe-only reach, so that's opt-in. Each WebSocket connection gets its own isolated session (own chat history, own pending approvals) — nothing is shared between concurrent clients. This is the basis for a future SDK or a non-VS-Code client (a TUI, another editor) without re-implementing the protocol.
 
 ### Skills: create, install, and select
 
@@ -303,6 +307,10 @@ Elia is a real MCP client: any server's tools become available to the dev-mode a
 ```
 
 Servers are spawned over stdio and connected once at startup; a server that fails to start or handshake is logged and skipped rather than blocking the rest. Each tool is registered as `mcp_<server>_<tool>` and, like any tool with no built-in safety contract, requires explicit approval before it runs — Elia has no way to know an arbitrary third-party server's tool is safe ahead of time, so it doesn't guess.
+
+### Terminal UI
+
+`elia --tui` starts a full terminal UI — scrollable conversation, live-streamed responses, a bordered input line — instead of the plain readline prompt. Combine it with a mode flag (`elia --tui --cyber`, etc.). It's built on [OpenTUI](https://opentui.com) (`@opentui/core` + `@opentui/solid`), the same real, MIT-licensed, standalone rendering library opencode itself uses — not a port of opencode's own application code, which is tightly coupled to Effect-TS and their internal SDK/plugin packages and wasn't realistic to lift as-is. This first version is deliberately scoped: it runs the same `runTurn` agent loop as everything else, but doesn't yet have the plain REPL's slash commands, checkpoints/rewind, or task dashboard — `--continue`, `--resume`, and one-shot prompts still go through the existing readline path.
 
 ### LSP diagnostics on every edit
 
@@ -571,7 +579,7 @@ What can't be covered that way is the model loop itself. `elia bench` is the rea
 
 ## Status
 
-In: parallel role-typed sub-agents, the autonomous work cycle with an approval gate, dependency-wave execution, verification-gated best-of-N execution in isolated worktrees, the shared blackboard, adversarial review, bounded self-repair, cross-run lessons, run forking, predictive prefetch, the two-tier model cascade, benchmark-gated self-evolution, skill synthesis, a central per-tool autonomy governor, a real MCP client, real-time LSP diagnostics on every edit, delegated read-only browser observation, redacted action ledgers, run receipts, a durable goal graph, resumable approvals, stable action idempotency, failure classification, readiness tiers, action pre/postcondition contracts, recurring schedules, single-flight daemon execution, and evidence-gated completion.
+In: parallel role-typed sub-agents, the autonomous work cycle with an approval gate, dependency-wave execution, verification-gated best-of-N execution in isolated worktrees, the shared blackboard, adversarial review, bounded self-repair, cross-run lessons, run forking, predictive prefetch, the two-tier model cascade, benchmark-gated self-evolution, skill synthesis, a central per-tool autonomy governor, a real MCP client, real-time LSP diagnostics on every edit, a full VS Code extension plus an HTTP/WebSocket transport for its bridge protocol, a real terminal UI, delegated read-only browser observation, redacted action ledgers, run receipts, a durable goal graph, resumable approvals, stable action idempotency, failure classification, readiness tiers, action pre/postcondition contracts, recurring schedules, single-flight daemon execution, and evidence-gated completion.
 
 
 Still on the roadmap: provenance-aware memory with expiry/conflict handling, user-defined evolution fitness profiles, event-triggered workflows, and provider-backed idempotency adapters for APIs that accept native idempotency keys. `elia evolve` does not commit to git — it copies files in and backs up what it replaced, leaving the commit to you.
