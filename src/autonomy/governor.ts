@@ -177,6 +177,15 @@ export function assessAction(request: ActionRequest, cwd = currentAgent().cwd ??
     return assessment('review', 'approve', `${name} can create an external process or delegate work`, name, resources, true)
   }
 
+  // Hands a whole task off to a real, separately-authenticated external agent
+  // (the actual OpenAI Codex CLI) that can read, write, and run shell commands
+  // under its own sandbox — elia's governor has no visibility into what it
+  // does once delegated, unlike task's own governed sub-agents, so this is
+  // stricter than task/preview: critical, not just review.
+  if (name === 'codex_delegate') {
+    return assessment('critical', 'approve', 'codex_delegate runs a real external coding agent with its own file and shell access, outside elia\'s per-action governance', name, resources, false)
+  }
+
   // Tools proxied from a connected MCP server (see src/mcp/registry.ts, tool
   // names are prefixed mcp_<server>_...): the server is a third-party process
   // whose actual capability isn't known ahead of time, so it gets one explicit,

@@ -3,6 +3,7 @@ import { runAgentLoop, type ConversationMessage, type RunAgentLoopResult, type T
 import { allWorkerTools, businessTools, cyberTools, getSynthesizedTools } from './tools/registry.ts'
 import { taskTool } from './tools/task.ts'
 import { previewTool } from './tools/preview.ts'
+import { codexTool } from './tools/codex.ts'
 import { writeText, writeThinking, writeUsageLine } from './ui/stream.ts'
 import { recordUsage, recordTopLevelTurn, formatUsageLine } from './usage.ts'
 import { createToolResultCache } from './speculation/cache.ts'
@@ -35,6 +36,9 @@ function topLevelTools(mode: AgentMode, selectedSkillNames?: string[]) {
     previewTool,
     ...(mode === 'cyber' ? cyberTools : []),
     ...(mode === 'battmann' ? businessTools : []),
+    // A silent sub-agent handing work off to a whole separate external agent
+    // would be even more surprising than task/preview — dev mode only.
+    ...(mode === 'dev' ? [codexTool] : []),
   ]
 }
 

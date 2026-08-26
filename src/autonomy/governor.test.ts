@@ -178,8 +178,9 @@ test('every registered tool declares a governor contract', async () => {
   const { allWorkerTools, businessTools, cyberTools } = await import('../tools/registry.ts')
   const { taskTool } = await import('../tools/task.ts')
   const { previewTool } = await import('../tools/preview.ts')
+  const { codexTool } = await import('../tools/codex.ts')
 
-  const undeclared = [...allWorkerTools(), ...businessTools, ...cyberTools, taskTool, previewTool]
+  const undeclared = [...allWorkerTools(), ...businessTools, ...cyberTools, taskTool, previewTool, codexTool]
     .filter((tool) => assessAction({ name: tool.name, input: {} }).reason.includes('no declared safety contract'))
     .map((tool) => tool.name)
 
@@ -191,6 +192,13 @@ test('a genuinely unknown tool still fails closed', () => {
   expect(assessment.risk).toBe('critical')
   expect(assessment.decision).toBe('approve')
   expect(assessment.reason).toContain('no declared safety contract')
+})
+
+test('codex_delegate requires approval and is not assumed reversible', () => {
+  const assessment = assessAction({ name: 'codex_delegate', input: { prompt: 'fix the bug' } })
+  expect(assessment.risk).toBe('critical')
+  expect(assessment.decision).toBe('approve')
+  expect(assessment.reversible).toBe(false)
 })
 
 test('a proxied MCP tool gets its own explicit fail-closed contract, not the generic unknown-tool one', () => {
