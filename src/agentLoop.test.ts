@@ -1,4 +1,7 @@
 import { expect, test } from 'bun:test'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { join } from 'node:path'
+import { tmpdir } from 'node:os'
 import type { ConversationMessage } from './agentLoop.ts'
 import type { ContentBlock } from './providers/types.ts'
 import type { Tool } from './tools/types.ts'
@@ -253,5 +256,62 @@ test('auto mode falls back to another provider on model unavailability without c
     config.providerLabel = original.providerLabel
     config.routingMode = original.routingMode
     config.fallbacks = original.fallbacks
+  }
+})
+
+test('a blocked repeat of an already-failed action reports the original reason and how to proceed', async () => {
+  // Regression: this message used to be a bare "Action <key> is failed; Elia
+  // will not repeat it automatically. Human review is required." — which told an
+  // unattended agent nothing about what to change, so it would retry the same
+  // doomed edit and burn turns. Observed live in an `elia auto` run that got
+  // stuck looping on a non-unique edit_file old_string.
+  const { GoalGraphStore, withGoalGraph } = await import('./autonomy/goalGraph.ts')
+  const directory = mkdtempSync(join(tmpdir(), 'elia-blocked-action-'))
+  try {
+    const graph = GoalGraphStore.open({ runId: 'blocked-action-run', goal: 'exercise the blocked path', dir: directory })
+    const request = { name: 'edit_file', input: { path: 'src/server.ts', old_string: 'const x', new_string: 'const y' } }
+
+    // First attempt fails the way a real non-unique edit does.
+    const first = graph.reserveAction(request)
+    expect(first.decision).toBe('execute')
+    graph.startAction(first.action.id)
+    graph.finishAction(first.action.id, { ok: false, error: 'old_string matches multiple locations in src/server.ts — include more surrounding context to make it unique' })
+
+    const failingTool: Tool = {
+      name: 'edit_file',
+      description: 'edit a file',
+      input_schema: { type: 'object', properties: {} },
+      async execute() {
+        throw new Error('the tool must never actually run for a blocked repeat')
+      },
+    }
+
+    let turn = 0
+    config.provider = {
+      async streamTurn() {
+        turn += 1
+        if (turn === 1) {
+          return {
+            content: [{ type: 'tool_use', id: 'repeat', name: 'edit_file', input: request.input }] as ContentBlock[],
+            usage: { inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 },
+          }
+        }
+        return { content: [{ type: 'text', text: 'stopping' }] as ContentBlock[], usage: { inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 } }
+      },
+    }
+
+    const messages: ConversationMessage[] = [{ role: 'user', content: [{ type: 'text', text: 'retry that edit' }] }]
+    await withGoalGraph(graph, () => runAgentLoop({ messages, systemPrompt: 'test', tools: [failingTool], useAnimation: false, verbose: false }))
+
+    const toolResult = messages.flatMap((message) => message.content).find((block) => block.type === 'tool_result')
+    const text = JSON.stringify(toolResult)
+    // The agent must learn what actually went wrong...
+    expect(text).toContain('already')
+    expect(text).toContain('old_string matches multiple locations')
+    // ...and what to do about it, rather than a dead-end "human review required".
+    expect(text).toContain('Do not retry it unchanged')
+    expect(text).toContain('more surrounding context')
+  } finally {
+    rmSync(directory, { recursive: true, force: true })
   }
 })

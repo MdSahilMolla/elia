@@ -494,10 +494,29 @@ async function runAutonomousTaskInternal(options: AutonomousRunOptions): Promise
         return graph.node(nodeId)?.status !== 'completed' || graph.needsResumption(nodeId)
       })
       if (pendingWave.length === 0) continue
-      for (const step of pendingWave) graph.startNode(`step:${step.id}`)
+
+      // A step whose dependency didn't actually complete (it failed, or is
+      // blocked pending human review) can never legally start — startNode()
+      // throws "dependencies are incomplete" for it, which used to propagate
+      // all the way to an uncaught top-level error and take the whole run
+      // down. Skip it here instead, mark it blocked with a clear reason, and
+      // let independent steps in the same or later waves still run rather
+      // than one failed step silently aborting the entire plan.
+      const runnable = pendingWave.filter((step) => {
+        const nodeId = `step:${step.id}`
+        const unmetDependency = step.dependsOn.find((depId) => graph.node(`step:${depId}`)?.status !== 'completed')
+        if (!unmetDependency) return true
+        const reason = `blocked: dependency step "${unmetDependency}" did not complete`
+        board.post('scheduler', nodeId, `${step.title} — ${reason}`)
+        journal.append('step-end', { id: step.id, worker: 'scheduler', ok: false, steps: 0, elapsedMs: 0, report: reason })
+        graph.finishNode(nodeId, { ok: false, report: reason, error: reason })
+        return false
+      })
+      if (runnable.length === 0) continue
+      for (const step of runnable) graph.startNode(`step:${step.id}`)
 
       const fleet = await runFleet({
-        assignments: pendingWave.map((step) => ({
+        assignments: runnable.map((step) => ({
           id: step.id,
           title: step.title,
           role: step.role,

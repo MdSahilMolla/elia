@@ -229,7 +229,20 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
         } else if (reservation && reservation.decision !== 'execute') {
           isError = true
           failureClass = reservation.decision === 'human-review' ? 'human-review' : 'authorization'
-          resultText = `Action ${reservation.action.idempotencyKey} is ${reservation.action.state}; Elia will not repeat it automatically. Human review is required.`
+          // The identical call already failed once, so repeating it verbatim is
+          // pointless — but the caller can only route around that if it is told
+          // *why* it failed. Dropping the original reason here (as this used to)
+          // left an unattended agent flailing: it would retry the same edit,
+          // get an opaque "human review required", and burn turns guessing.
+          // The idempotency key is derived from the input, so a genuinely
+          // different input is a different action and runs normally — which is
+          // exactly the advice to give.
+          const original = reservation.action.error?.message
+          resultText = [
+            `This exact ${block.name} call already ${reservation.action.state} earlier in this run, so it was not repeated.`,
+            original ? `The original failure was: ${original}` : undefined,
+            'Do not retry it unchanged. Re-read the current file or state, then either issue a materially different call (for example, a more specific old_string with more surrounding context) or take a different approach.',
+          ].filter(Boolean).join(' ')
         } else {
           const hookDecision = await evaluateToolHooks(activeToolHooks(), request, cwd, activeMode())
           if (!hookDecision.allowed) {

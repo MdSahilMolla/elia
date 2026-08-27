@@ -103,12 +103,61 @@ test('edit_file throws when old_string is not unique', async () => {
   ).rejects.toThrow('multiple locations')
 })
 
-test('write_file and edit_file leave their result message unchanged for a file type with no configured LSP server', async () => {
+test('write_file and edit_file append no LSP suffix for a file type with no configured LSP server', async () => {
   const path = join(testDir, 'notes.txt')
   const written = await executeTool('write_file', { path, content: 'first' })
   expect(written).toBe(`Wrote 5 bytes to ${path}`)
   const edited = await executeTool('edit_file', { path, old_string: 'first', new_string: 'second' })
-  expect(edited).toBe(`Edited ${path}`)
+  expect(edited).toContain(`Edited ${path}`)
+  expect(edited).not.toContain('LSP diagnostics')
+})
+
+test('edit_file rejects an edit that would be a no-op', async () => {
+  const path = join(testDir, 'noop.txt')
+  await executeTool('write_file', { path, content: 'same text' })
+  await expect(
+    executeTool('edit_file', { path, old_string: 'same text', new_string: 'same text' }),
+  ).rejects.toThrow('identical')
+})
+
+test('edit_file matches old_string against \\r\\n content even though the model writes plain \\n', async () => {
+  const path = join(testDir, 'crlf.txt')
+  await Bun.write(path, 'line one\r\nline two\r\nline three')
+  const result = await executeTool('edit_file', { path, old_string: 'line one\nline two', new_string: 'line ONE\nline TWO' })
+  expect(result).toContain(`Edited ${path}`)
+  expect(await Bun.file(path).text()).toBe('line ONE\r\nline TWO\r\nline three')
+})
+
+test('edit_file rejects a write when the file changed on disk since it was read', async () => {
+  const path = join(testDir, 'race.txt')
+  await executeTool('write_file', { path, content: 'original content' })
+
+  // edit_file reads the file twice (initial read, then a recheck right before
+  // writing) on the single `Bun.file(path)` instance it creates internally.
+  // Stub the global Bun.file for the scope of this test to return one shared
+  // instance whose first .text() call injects a concurrent write before
+  // resolving — simulating another process changing the file in the gap
+  // between edit_file's two reads.
+  const originalBunFile = Bun.file
+  const sharedRef = originalBunFile(path)
+  const originalText = sharedRef.text.bind(sharedRef)
+  let calls = 0
+  sharedRef.text = (async () => {
+    calls += 1
+    const value = await originalText()
+    if (calls === 1) await Bun.write(path, 'changed by someone else')
+    return value
+  }) as typeof sharedRef.text
+  ;(Bun as { file: typeof Bun.file }).file = (() => sharedRef) as typeof Bun.file
+
+  try {
+    await expect(
+      executeTool('edit_file', { path, old_string: 'original content', new_string: 'my edit' }),
+    ).rejects.toThrow('changed on disk')
+  } finally {
+    ;(Bun as { file: typeof Bun.file }).file = originalBunFile
+  }
+  expect(await Bun.file(path).text()).toBe('changed by someone else')
 })
 
 test('write_file leaves its result message unchanged for a recognized-but-uninstalled language server (fails soft)', async () => {
