@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test'
-import { isProviderPresetConfigured, listProviderModels, providerPresetDefaultModel, tryResolveProvider } from './registry.ts'
+import { isProviderPresetConfigured, listProviderModels, providerPresetDefaultModel, PROVIDER_PRESET_NAMES, tryResolveProvider } from './registry.ts'
 
 const originalProvider = process.env.ELIA_PROVIDER
 const originalModel = process.env.ELIA_MODEL
@@ -107,6 +107,11 @@ test('Mistral resolves through the OpenAI-compatible adapter', () => {
   if ('error' in resolved) return
   expect(resolved.providerName).toBe('mistral')
   expect(resolved.model).toBe('mistral-large-latest')
+})
+
+test('Codex subscription is an explicit provider with an account-managed catalogue', async () => {
+  expect(providerPresetDefaultModel('codex')).toBe('default')
+  expect(PROVIDER_PRESET_NAMES).toContain('codex')
 })
 
 test('model discovery lists and sorts provider models without changing chat configuration', async () => {

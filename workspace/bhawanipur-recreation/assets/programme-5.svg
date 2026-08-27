@@ -1,7 +1,0 @@
-<?xml version="1.0" encoding="UTF-8"?>
-<svg width="400" height="280" viewBox="0 0 400 280" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title">
-  <title id="title">Programme Placeholder 5</title>
-  <rect width="400" height="280" fill="#f7f7f8"/>
-  <rect x="10" y="10" width="380" height="260" fill="none" stroke="#d8dbe0" stroke-width="2" stroke-dasharray="5 5"/>
-  <text x="200" y="145" text-anchor="middle" fill="#8b93a0" font-family="Inter, Arial" font-size="18">Programme Image 400×280</text>
-</svg>

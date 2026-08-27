@@ -1,11 +1,12 @@
 import { createAnthropicProvider } from './anthropic.ts'
+import { codexSubscriptionConfigured, createCodexSubscriptionProvider, listCodexSubscriptionModels } from './codexSubscription.ts'
 import { createOpenAICompatibleProvider } from './openaiCompatible.ts'
 import { assertProviderEndpoint, assertPublicNetworkUrl, validateNetworkUrl } from '../networkPolicy.ts'
 import type { Provider, ThinkingOption } from './types.ts'
 
 interface ProviderPreset {
-  kind: 'anthropic' | 'openai-compatible'
-  apiKeyEnv: string
+  kind: 'anthropic' | 'openai-compatible' | 'codex-subscription'
+  apiKeyEnv?: string
   baseURL?: string
   defaultModel?: string
 }
@@ -27,6 +28,10 @@ const PROVIDER_PRESETS: Record<string, ProviderPreset> = {
     apiKeyEnv: 'OPENAI_API_KEY',
     baseURL: 'https://api.openai.com/v1',
     defaultModel: 'gpt-4.1',
+  },
+  codex: {
+    kind: 'codex-subscription',
+    defaultModel: 'default',
   },
   openrouter: {
     kind: 'openai-compatible',
@@ -77,6 +82,8 @@ export const PROVIDER_PRESET_NAMES = Object.keys(PROVIDER_PRESETS)
 export function isProviderPresetConfigured(providerName: string): boolean {
   const preset = PROVIDER_PRESETS[providerName]
   if (!preset) return false
+  if (preset.kind === 'codex-subscription') return codexSubscriptionConfigured()
+  if (!preset.apiKeyEnv) return false
   return Boolean(process.env[preset.apiKeyEnv] ?? process.env.ELIA_API_KEY)
 }
 
@@ -96,6 +103,7 @@ export interface AvailableModel {
   id: string
   name?: string
   ownedBy?: string
+  isDefault?: boolean
 }
 
 export interface ModelDiscoveryResult {
@@ -113,6 +121,11 @@ export interface ModelDiscoveryResult {
 export async function listProviderModels(providerName: string): Promise<ModelDiscoveryResult> {
   const preset = PROVIDER_PRESETS[providerName]
   if (!preset) return { providerName, models: [], error: `Unknown provider "${providerName}"` }
+  if (preset.kind === 'codex-subscription') {
+    const discovery = await listCodexSubscriptionModels()
+    return { providerName, models: discovery.models.map(({ id, name, description, isDefault }) => ({ id, name, ownedBy: description, isDefault })), error: discovery.error }
+  }
+  if (!preset.apiKeyEnv) return { providerName, models: [], error: `No authentication method configured for ${providerName}` }
 
   const apiKey = process.env[preset.apiKeyEnv] ?? process.env.ELIA_API_KEY
   if (!apiKey) return { providerName, models: [], error: `No API key set for ${providerName}` }
@@ -188,6 +201,13 @@ export function tryResolveProvider(request: ProviderRequest = {}): ResolvedProvi
   const ambient = request.ignoreAmbient ? {} : process.env
   const providerName = request.providerName ?? ambient.ELIA_PROVIDER ?? 'anthropic'
   const preset = PROVIDER_PRESETS[providerName] ?? PROVIDER_PRESETS.custom!
+
+  if (preset.kind === 'codex-subscription') {
+    if (!codexSubscriptionConfigured()) return { error: 'Codex is not signed in. Select Settings > Provider connections > ChatGPT subscription (Codex) and complete sign-in first.' }
+    const model = request.model ?? ambient.ELIA_MODEL ?? preset.defaultModel ?? 'default'
+    return { provider: createCodexSubscriptionProvider(model), providerName, model }
+  }
+  if (!preset.apiKeyEnv) return { error: `Provider "${providerName}" has no authentication method configured.` }
 
   const apiKey =
     (request.apiKeyEnv ? process.env[request.apiKeyEnv] : undefined) ??

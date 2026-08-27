@@ -380,6 +380,9 @@ function resolveAutoFallbacks(deepTier: TierConfig, fastTier: TierConfig): TierC
 
   for (const providerName of candidateNames) {
     if (providerName === deepTier.providerName || routes.some((route) => route.providerName === providerName)) continue
+    // Codex subscription requests are mediated by a separate local agent and
+    // are intentionally opt-in, never an automatic fallback from an API route.
+    if (providerName === 'codex') continue
 
     const resolved = tryResolveProvider({
       providerName,

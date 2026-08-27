@@ -27,6 +27,7 @@ const REPL_COMMANDS: SlashCommand[] = [
   { name: '/model', description: 'pick a model with arrow keys, or /model groq, /model claude-opus-5' },
   { name: '/thinking', description: 'pick reasoning effort with arrow keys, or /thinking off/low/medium/high/<n>' },
   { name: '/task', description: 'browse browser, coding, and pending tasks with arrow keys' },
+  { name: '/sessions', description: 'see every other elia session running in this project — what each is doing, its model, and its session id to resume it' },
   { name: '/artifact', description: 'browse saved plan artifacts with arrow keys and search, or /artifact <name> to view one directly' },
   { name: '/settings', description: 'browse every setting — model, reasoning effort, risk checks, skills — and switch with arrow keys' },
   { name: '@skills', description: 'browse loaded skills and choose which skill tools are active for the next turn' },
@@ -34,7 +35,7 @@ const REPL_COMMANDS: SlashCommand[] = [
 
 const rawArgs = process.argv.slice(2)
 
-const SUBCOMMANDS = ['auto', 'agent', 'evolve', 'bench', 'skills', 'runs', 'fork', 'resume', 'schedule', 'daemon', 'config', 'control', 'bridge'] as const
+const SUBCOMMANDS = ['auto', 'agent', 'evolve', 'bench', 'skills', 'runs', 'fork', 'resume', 'schedule', 'daemon', 'config', 'codex-login', 'control', 'bridge'] as const
 type Subcommand = (typeof SUBCOMMANDS)[number]
 
 function printHelp(): void {
@@ -127,6 +128,7 @@ Provider setup:
   elia config set --provider custom --base-url <url>
                                            Configure any OpenAI-compatible endpoint
   elia config remove --provider <name>     Remove that provider's saved API key
+  elia codex-login                         Sign in to the installed Codex CLI with ChatGPT
   Use --api-key-env <NAME> or pipe a key with --api-key-stdin; never pass keys as arguments.
   In a session, /settings → Provider API keys adds, updates, selects, or removes profiles.
 
@@ -246,6 +248,13 @@ function userMessage(text: string): ConversationMessage {
 }
 
 async function classifyCommandRisk(command: string): Promise<{ risky: boolean; reason?: string }> {
+  // The subscription adapter invokes Codex in read-only mode and deliberately
+  // does not expose Elia's tools to it. Asking that model to call flag_risk
+  // therefore wastes three full model turns and always fails closed. Its actual
+  // tool/action boundary remains unavailable in this mode, so no pre-turn
+  // approval is needed; normal provider modes still use the classifier.
+  const { config } = await import('./config.ts')
+  if (config.providerName === 'codex') return { risky: false }
   const { classifyRisk } = await import('./autonomy/risk.ts')
   return classifyRisk(command)
 }
@@ -723,6 +732,40 @@ async function runConfig(): Promise<void> {
   writeNotice('The API key was saved without displaying its value. Run `elia config` to inspect readiness.')
 }
 
+/**
+ * Subscription authentication belongs to the official Codex CLI, not Elia's
+ * OpenAI API adapter. Keeping it in the external client means Elia never reads
+ * or persists a ChatGPT session token; the subscription provider invokes the
+ * signed-in client only for its responses.
+ */
+async function runCodexLogin(): Promise<boolean> {
+  const { codexAvailable } = await import('./tools/codex.ts')
+  if (!(await codexAvailable())) {
+    writeError('Codex CLI is not installed or not on PATH. Install @openai/codex, then run `elia codex-login` again.')
+    process.exitCode = 1
+    return false
+  }
+
+  writeNotice('Opening the Codex sign-in flow. Complete authentication in Codex; Elia never receives or stores your ChatGPT credentials.')
+  try {
+    const proc = Bun.spawn(['codex', 'login'], { stdin: 'inherit', stdout: 'inherit', stderr: 'inherit' })
+    const exitCode = await proc.exited
+    if (exitCode === 0) {
+      writeNotice('Codex sign-in finished. You can now select ChatGPT subscription (Codex) as Elia’s active model.')
+      return true
+    }
+    else {
+      writeError(`Codex sign-in ended with exit code ${exitCode}. Your existing Elia API-provider configuration was not changed.`)
+      process.exitCode = 1
+      return false
+    }
+  } catch (error) {
+    writeError(`Could not start Codex sign-in: ${error instanceof Error ? error.message : String(error)}`)
+    process.exitCode = 1
+    return false
+  }
+}
+
 async function readStdinText(): Promise<string> {
   let text = ''
   for await (const chunk of process.stdin) text += Buffer.from(chunk as Uint8Array).toString('utf8')
@@ -822,6 +865,16 @@ async function interactiveProviderSetup(reason: 'first-run' | 'settings'): Promi
   if (!provider) {
     writeNotice('Provider setup cancelled. No credentials were changed.')
     return undefined
+  }
+  if (provider === 'codex') {
+    if (!(await runCodexLogin())) return undefined
+    const model = 'default'
+    const path = userConfigPath()
+    writeUserConfig({ ELIA_PROVIDER: provider, ELIA_MODEL: model, ELIA_BASE_URL: undefined }, path)
+    process.env.ELIA_PROVIDER = provider
+    process.env.ELIA_MODEL = model
+    delete process.env.ELIA_BASE_URL
+    return { provider, apiKeyEnv: 'managed by Codex', model, path }
   }
   const { providerPresetApiKeyEnv } = await import('./providers/registry.ts')
   const apiKeyEnv = providerPresetApiKeyEnv(provider)
@@ -1146,6 +1199,7 @@ async function runInteractive(): Promise<void> {
     await import('./checkpoint.ts')
   const { setActiveLedgerSession, countEpisodes } = await import('./ledger.ts')
   const { renderContextStatus } = await import('./compaction.ts')
+  const { writeSessionHeartbeat, writeSessionEnded } = await import('./sessionRegistry.ts')
 
   const oneShotPrompt = positionals(['--resume']).join(' ').trim()
 
@@ -1186,12 +1240,43 @@ async function runInteractive(): Promise<void> {
   }
 
   const checkpoints = await loadCheckpoints(sessionId)
+  const sessionStartedAt = Date.now()
+
+  /**
+   * Lets every other elia process running in this project see this one's
+   * live status via sessionRegistry.ts (`/sessions`) — separate from and in
+   * addition to taskSessions.ts's own in-process dashboard (`/task`).
+   */
+  function pushHeartbeat(busy: boolean, lastAction: string): void {
+    writeSessionHeartbeat({
+      sessionId,
+      pid: process.pid,
+      mode: persona ?? mode,
+      providerLabel: config.providerLabel,
+      model: config.model,
+      startedAt: sessionStartedAt,
+      busy,
+      lastAction,
+      taskSummary: renderTaskSummary(taskSessions),
+      messageCount: messages.length,
+    })
+  }
+  pushHeartbeat(false, 'Idle at prompt')
+  // The single source of truth for "this session ended," covering every exit
+  // path at once — normal completion (one-shot prompts return before ever
+  // reaching the interactive loop's own Goodbye code below), Ctrl+C, and
+  // signals — since registerShutdownCleanup's callbacks run on process 'exit'
+  // regardless of why the process is exiting (see ui/shutdown.ts).
+  registerShutdownCleanup(() =>
+    writeSessionEnded({ sessionId, pid: process.pid, mode: persona ?? mode, providerLabel: config.providerLabel, model: config.model, startedAt: sessionStartedAt, busy: false, lastAction: 'Session ended', taskSummary: renderTaskSummary(taskSessions), messageCount: messages.length }),
+  )
 
   /** Snapshots messages + touched files around one turn, then records a rewind point. */
   async function runCheckpointedTurn(userText: string, approveAction?: ActionApproval, skillNames = selectedSkillNames): Promise<void> {
     const tracker = createFileTracker()
     const task = taskSessions.create(inferTaskKind(userText, userText), redactText(userText, 160), 'Starting request')
     taskSessions.update(task.id, { status: 'running', action: 'Thinking', detail: 'Planning the next action' })
+    pushHeartbeat(true, redactText(userText, 160))
     const controller = new AbortController()
     let stopRequested = false
     const unregisterControls = taskSessions.registerControls(task.id, {
@@ -1220,12 +1305,14 @@ async function runInteractive(): Promise<void> {
           skillNames,
           signal: controller.signal,
           onTool: (event) => {
+            const action = event.isError ? `Retrying after ${event.name}` : event.name
             taskSessions.update(task.id, {
               status: 'running',
-              action: event.isError ? `Retrying after ${event.name}` : event.name,
+              action,
               detail: event.isError ? redactText(event.result, 500) : 'Action completed successfully',
               stepsCompleted: (taskSessions.get(task.id)?.stepsCompleted ?? 0) + 1,
             })
+            pushHeartbeat(true, action)
           },
         })
         if (turnResult.stopReason === 'aborted') stopRequested = true
@@ -1251,6 +1338,7 @@ async function runInteractive(): Promise<void> {
       unregisterControls()
       unregisterShutdown()
       setActiveTracker(undefined)
+      pushHeartbeat(false, taskSessions.get(task.id)?.action ?? 'Idle at prompt')
     }
     checkpoints.push({
       turn: checkpoints.length,
@@ -1312,6 +1400,7 @@ async function runInteractive(): Promise<void> {
         [
           `${dim('provider')}  ${config.providerLabel}${config.routingMode === 'auto' ? dim(' · auto fallback on') : ''}${config.cascadeEnabled ? dim(` · fast tier ${config.tiers.fast.label}`) : ''}`,
           dim(describeThinking()),
+          `${dim('session')}   ${sessionId}${dim(' · /sessions to see other running sessions')}`,
           ...(taskSummary ? [dim(taskSummary)] : []),
         ],
         { title: mode === 'cyber' ? 'elia — cyber mode' : mode === 'sports' ? 'elia — sports mode' : mode === 'fitness' ? 'elia — fitness mode' : mode === 'battmann' ? 'elia — Battmann mode' : 'elia — dev mode', borderColor: gold },
@@ -1341,6 +1430,19 @@ async function runInteractive(): Promise<void> {
     else writeNotice(`Model switched: ${result.label}`)
   }
 
+  function activateCodexSubscription(model = 'default'): void {
+    const switched = switchModel({ providerName: 'codex', model })
+    if (!switched.ok) {
+      writeError(switched.error)
+      return
+    }
+    writeUserConfig({ ELIA_PROVIDER: 'codex', ELIA_MODEL: model, ELIA_BASE_URL: undefined })
+    process.env.ELIA_PROVIDER = 'codex'
+    process.env.ELIA_MODEL = model
+    delete process.env.ELIA_BASE_URL
+    writeNotice(`Model switched: ${switched.label}`)
+  }
+
   async function handleModelCommand(argLine: string): Promise<void> {
     const args = argLine.split(/\s+/).filter(Boolean)
 
@@ -1353,26 +1455,41 @@ async function runInteractive(): Promise<void> {
         else writeNotice(`No model list or default model is available for ${providerName}. Use /model ${providerName} <model-id>.`)
         return
       }
-      const currentModel = providerName === config.providerName ? config.model : fallbackModel
+      const currentModel = providerName === config.providerName
+        ? config.model
+        : discovery.models.find((model) => model.isDefault)?.id ?? fallbackModel
       const modelOptions = discovery.models.map((model) => ({
         label: model.id === currentModel ? `${model.id} (current)` : model.id,
         detail: model.name ?? model.ownedBy ?? 'available model',
         value: model.id,
       }))
       const result = await pick(`Models for ${providerName} (${modelOptions.length})`, modelOptions, Math.max(0, modelOptions.findIndex((option) => option.value === currentModel)))
-      if (result.type === 'select') applyModelChoice(providerName, result.value)
+      if (result.type === 'select') {
+        if (providerName === 'codex') activateCodexSubscription(result.value)
+        else applyModelChoice(providerName, result.value)
+      }
       else if (result.type === 'unavailable') writeNotice(`${providerName} exposes ${discovery.models.length} selectable model(s).`)
     }
 
     if (args.length === 0) {
-      const currentIndex = config.routingMode === 'auto' ? 0 : PROVIDER_PRESET_NAMES.indexOf(config.providerName) + 1
+      const selectableProviderNames = PROVIDER_PRESET_NAMES.filter((name) => name !== 'codex')
+      const currentIndex = config.routingMode === 'auto'
+        ? 0
+        : config.providerName === 'codex'
+          ? 1
+          : selectableProviderNames.indexOf(config.providerName) + 2
       const options = [
         {
           label: config.routingMode === 'auto' ? 'auto (current)' : 'auto',
           detail: 'transparent fallback across every ready provider',
           value: 'auto',
         },
-        ...PROVIDER_PRESET_NAMES.map((name) => ({
+        {
+          label: 'ChatGPT subscription (Codex)',
+          detail: 'use your signed-in ChatGPT plan as Elia’s active model',
+          value: 'codex-subscription',
+        },
+        ...selectableProviderNames.map((name) => ({
         label: name === config.providerName ? `${name} (current)` : name,
         detail: `${isProviderPresetConfigured(name) ? 'ready' : 'no key set'} · ${providerPresetDefaultModel(name) ?? 'custom'}`,
           value: name,
@@ -1381,6 +1498,9 @@ async function runInteractive(): Promise<void> {
       const result = await pick('Switch model', options, Math.max(0, currentIndex))
       if (result.type === 'select') {
         if (result.value === 'auto') applyModelChoice('auto')
+        else if (result.value === 'codex-subscription') {
+          await chooseModelForProvider('codex')
+        }
         else await chooseModelForProvider(result.value)
         return
       }
@@ -1403,6 +1523,10 @@ async function runInteractive(): Promise<void> {
 
     const [first, second] = args
     if (first === 'auto') applyModelChoice('auto')
+    else if (first === 'codex') {
+      if (second) activateCodexSubscription(second)
+      else await chooseModelForProvider('codex')
+    }
     else if (PROVIDER_PRESET_NAMES.includes(first!)) {
       if (second) applyModelChoice(first!, second)
       else await chooseModelForProvider(first!)
@@ -1605,15 +1729,22 @@ async function runInteractive(): Promise<void> {
   async function handleProviderSettings(): Promise<void> {
     const saved = savedProviderNames()
     const options = [
+      { label: 'ChatGPT subscription (Codex)', detail: 'sign in now with your ChatGPT plan; no API key is copied into Elia', value: 'codex-login' },
       { label: 'Add or update provider', detail: 'enter a hidden API key and choose a model', value: 'add' },
       ...saved.map((provider) => ({ label: `Remove ${provider}`, detail: 'delete its saved API key', value: `remove:${provider}` })),
     ]
-    const result = await pick('Provider API settings', options)
+    const result = await pick('Provider connections', options)
     if (result.type === 'unavailable') {
-      writeNotice(saved.length > 0 ? `Saved providers: ${saved.join(', ')}` : 'No saved provider API keys.')
+      writeNotice(saved.length > 0 ? `Saved API providers: ${saved.join(', ')}. ChatGPT subscription sign-in: elia codex-login` : 'No saved API providers. ChatGPT subscription sign-in: elia codex-login')
       return
     }
     if (result.type !== 'select') return
+    if (result.value === 'codex-login') {
+      // pick() has released its key handler. The dormant REPL prompt does not
+      // consume input, so the user-controlled Codex login can own the terminal.
+      if (await runCodexLogin()) activateCodexSubscription()
+      return
+    }
     if (result.value === 'add') {
       const configured = await interactiveProviderSetup('settings')
       if (!configured) return
@@ -1643,7 +1774,7 @@ async function runInteractive(): Promise<void> {
       const options = [
         { label: 'Risk checks', detail: replMode, value: 'replMode' },
         { label: 'Model & provider', detail: `${config.providerLabel} · ${config.model}`, value: 'model' },
-        { label: 'Provider API keys', detail: `${savedProviderNames().length} saved · add/update/remove`, value: 'providers' },
+        { label: 'Provider connections', detail: `${savedProviderNames().length} API key(s) · ChatGPT subscription`, value: 'providers' },
         { label: 'Reasoning effort', detail: describeThinking(), value: 'thinking' },
         { label: 'Skills', detail: selectedSkillNames ? selectedSkillNames.join(', ') : 'all loaded', value: 'skills' },
       ]
@@ -1702,6 +1833,13 @@ async function runInteractive(): Promise<void> {
     if (trimmed === '/task' || trimmed.startsWith('/task ')) {
       const taskId = trimmed.slice('/task'.length).trim() || undefined
       await openTaskDashboard(taskSessions, taskId)
+      continue
+    }
+
+    if (trimmed === '/sessions' || trimmed === '/session') {
+      const { openSessionsDashboard } = await import('./ui/sessionsDashboard.ts')
+      pushHeartbeat(false, 'Browsing /sessions')
+      await openSessionsDashboard(sessionId)
       continue
     }
 
@@ -1814,7 +1952,11 @@ async function runInteractive(): Promise<void> {
   }
 
   prompt.close()
+  // The registerShutdownCleanup callback registered above already writes the
+  // "ended" heartbeat for this and every other exit path — no separate call
+  // needed here.
   if (messages.length > 0 && !machineReadable) process.stdout.write(`${box([getSessionSummaryLine(config.model)])}\n`)
+  if (messages.length > 0 && !machineReadable) writeNotice(`Resume this session later with: elia --resume ${sessionId}`)
   writeNotice('Goodbye!')
 }
 
@@ -1853,6 +1995,9 @@ async function main() {
       return runDaemon()
     case 'config':
       return runConfig()
+    case 'codex-login':
+      await runCodexLogin()
+      return
     case 'control':
       return runControl()
     case 'bridge': {

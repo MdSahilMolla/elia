@@ -13,6 +13,10 @@ const workspaceDir = join(process.cwd(), 'workspace')
 export const paths = {
   state: stateDir,
   sessions: join(stateDir, 'sessions'),
+  // A separate directory (not sessions/) so a live heartbeat file, which ends
+  // in .json like everything else here, can never be mistaken by
+  // session.ts's own directory scan for a real conversation file.
+  sessionStatus: join(stateDir, 'session-status'),
   runs: join(stateDir, 'runs'),
   evolution: join(stateDir, 'evolution'),
   lessons: join(stateDir, 'lessons.md'),

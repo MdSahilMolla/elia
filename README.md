@@ -83,6 +83,8 @@ On the first interactive run, if the active provider is not fully configured, El
 
 During a session, `/settings` → **Provider API keys** lets you add or update another provider, select its model, activate it immediately, or remove a saved provider profile. Removal requires confirmation and never displays the credential. The equivalent noninteractive command is `elia config remove --provider <name>`. The current session may finish using an already-created provider object after removal, but the removed profile will not be loaded by the next process.
 
+The model picker also shows **ChatGPT subscription (Codex)**. You can select it directly from **Settings** → **Provider connections** with the arrow keys, then press Enter to start the official Codex CLI's ChatGPT sign-in flow. A successful sign-in switches Elia to its subscription-backed `codex` provider immediately and remembers that selection. This is deliberately separate from the `openai` API-key provider: Elia does not expose or save your subscription credentials. A ChatGPT subscription is not copied into `OPENAI_API_KEY` or used for ordinary OpenAI API calls.
+
 For local development from the repository, use:
 
 ```bash

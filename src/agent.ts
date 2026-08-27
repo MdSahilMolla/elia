@@ -121,7 +121,7 @@ export async function runTurn(
 
   const hits = result.cacheStats?.hits ?? 0
   const prefetchNote = hits > 0 ? ` · ${hits} read${hits === 1 ? '' : 's'} prefetched` : ''
-  if (!options.silent && !options.skipStats) writeUsageLine(`${formatUsageLine(result.usage, elapsedMs, config.model)}${prefetchNote}`)
+  if (!options.silent && !options.skipStats) writeUsageLine(`${config.providerLabel} Â· ${formatUsageLine(result.usage, elapsedMs, config.model)}${prefetchNote}`)
 
   return result
 }

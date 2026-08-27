@@ -1,4 +1,4 @@
-import { providerPresetApiKeyEnv, providerPresetBaseURL, providerPresetDefaultModel, PROVIDER_PRESET_NAMES } from './providers/registry.ts'
+import { isProviderPresetConfigured, providerPresetApiKeyEnv, providerPresetBaseURL, providerPresetDefaultModel, PROVIDER_PRESET_NAMES } from './providers/registry.ts'
 import { assertProviderEndpoint, validateNetworkUrl } from './networkPolicy.ts'
 import { removeUserConfig, readUserConfigValues, userConfigPath, writeUserConfig } from './userConfig.ts'
 
@@ -28,6 +28,7 @@ export function savedProviderNames(filePath = userConfigPath()): string[] {
 
 export function activeProviderNeedsSetup(env: NodeJS.ProcessEnv = process.env): boolean {
   const provider = (env.ELIA_PROVIDER ?? 'anthropic').trim().toLowerCase()
+  if (provider === 'codex') return !isProviderPresetConfigured('codex')
   const keyEnv = providerPresetApiKeyEnv(provider)
   if (!keyEnv || !env[keyEnv]?.trim()) return true
   if (provider === 'custom' && !env.ELIA_BASE_URL?.trim()) return true
