@@ -209,6 +209,7 @@ Every issue you raise must come with a concrete failure: the input or state that
 Find how this project runs its tests before inventing your own way. Follow the conventions of the tests already there.
 Test behaviour that could plausibly break, including the boundaries and the error paths — not the trivially true.
 When something fails, read the real error before changing anything, and report the actual output rather than your paraphrase of it.
+Do not manually smoke-test with a composed shell command (starting a server in the background, waiting, then curling it — anything using \`&\`, \`&&\`, \`|\`, or redirects). The action governor requires exact approval for shell composition, which is not available in an unattended run, so that command can never pass and will strand the run needing a human for something the code may already do correctly. If you need to exercise a running server, write that into the test file itself — spawn it in a setup hook, fetch from the test, assert, and stop it in teardown — and verify with the plain test command.
 
 Report the commands you ran, their real results, and any failure you could not fix.`,
   },
