@@ -315,3 +315,46 @@ test('a blocked repeat of an already-failed action reports the original reason a
     rmSync(directory, { recursive: true, force: true })
   }
 })
+
+test('a failed postcondition preserves the tool\'s real output, not just the generic failure line', async () => {
+  // Regression: this used to replace resultText outright with "Action
+  // postcondition failed: ...", discarding stdout/stderr entirely — so a
+  // failing `bun test` reported only "exit code 1" with no assertion output,
+  // no stack trace, nothing to act on. Observed live: an unattended tester
+  // agent cycled through --reporter=json/dot/spec/list trying to coax out
+  // output it could actually see, burning its step budget doing it.
+  const failingOutput = 'exit code: 1\nstdout:\nFAIL src/server.test.ts\n  expect(received).toBe(expected)\n  Expected: 200\n  Received: 500\nstderr:\n'
+  const runCommandStub: Tool = {
+    name: 'run_command',
+    description: 'run a shell command',
+    input_schema: { type: 'object', properties: { command: { type: 'string' } } },
+    async execute() {
+      return failingOutput
+    },
+  }
+
+  let turn = 0
+  config.provider = {
+    async streamTurn() {
+      turn += 1
+      if (turn === 1) {
+        return {
+          content: [{ type: 'tool_use', id: 'run1', name: 'run_command', input: { command: 'bun test' } }] as ContentBlock[],
+          usage: { inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 },
+        }
+      }
+      return { content: [{ type: 'text', text: 'stopping' }] as ContentBlock[], usage: { inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 } }
+    },
+  }
+
+  const messages: ConversationMessage[] = [{ role: 'user', content: [{ type: 'text', text: 'run the tests' }] }]
+  await runAgentLoop({ messages, systemPrompt: 'test', tools: [runCommandStub], useAnimation: false, verbose: false })
+
+  const toolResult = messages.flatMap((message) => message.content).find((block) => block.type === 'tool_result')
+  const text = JSON.stringify(toolResult)
+  expect(text).toContain('Action postcondition failed')
+  // The actual failing assertion must survive, not just the generic wrapper.
+  expect(text).toContain('FAIL src/server.test.ts')
+  expect(text).toContain('Expected: 200')
+  expect(text).toContain('Received: 500')
+})

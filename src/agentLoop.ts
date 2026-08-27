@@ -14,6 +14,7 @@ import { contractForAction, evaluatePostconditions, evaluatePreconditions, type 
 import { currentAgent } from './autonomy/context.ts'
 import { activeMode } from './autonomy/mode.ts'
 import { activeToolHooks, evaluateToolHooks } from './autonomy/devHooks.ts'
+import { clampOutput } from './shell.ts'
 
 export type ConversationMessage = ChatMessage
 
@@ -296,7 +297,16 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
                 if (postcondition && !postcondition.ok) {
                   isError = true
                   failureClass = contract?.failureDisposition ?? 'retryable'
-                  resultText = `Action postcondition failed: ${postcondition.failures.join('; ')}${postcondition.nextAction ? ` ${postcondition.nextAction}` : ''}`
+                  // Keep the tool's real output. This used to replace it outright,
+                  // which meant a failing `bun test`/build/typecheck reported *that*
+                  // it failed but never *why* — the stdout and stderr carrying the
+                  // assertion, stack trace, or compiler error were discarded at
+                  // exactly the moment they mattered most. An unattended agent was
+                  // then debugging blind: observed live cycling through
+                  // `--reporter=json/dot/spec/list` trying to coax out output it
+                  // could actually see, and burning its step budget doing it.
+                  const failureNote = `Action postcondition failed: ${postcondition.failures.join('; ')}${postcondition.nextAction ? ` ${postcondition.nextAction}` : ''}`
+                  resultText = resultText.trim() ? `${failureNote}\n\nActual output:\n${clampOutput(resultText, 8000)}` : failureNote
                   if (reservation) {
                     if (contract?.failureDisposition === 'human-review') graph?.blockAction(reservation.action.id, resultText, true, precondition, postcondition, contract)
                     else graph?.finishAction(reservation.action.id, { ok: false, error: `retryable postcondition failure: ${postcondition.failures.join('; ')}`, postcondition })
