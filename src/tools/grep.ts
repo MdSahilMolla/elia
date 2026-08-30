@@ -49,7 +49,7 @@ export const grepTool: Tool = {
 
     const rg = Bun.which('rg')
     if (rg) return await searchWithRipgrep(rg, pattern, dir, inputDir, glob, context)
-    return await searchWithJs(pattern, dir, inputDir, glob)
+    return await searchWithJs(pattern, dir, inputDir, glob, context)
   },
 }
 
@@ -113,7 +113,7 @@ async function runRipgrep(rg: string, args: string[], dir: string): Promise<{ st
 }
 
 /** Used when ripgrep is not installed. Slower, but the same contract. */
-async function searchWithJs(pattern: string, dir: string, inputDir: string, globPattern: string | undefined): Promise<string> {
+async function searchWithJs(pattern: string, dir: string, inputDir: string, globPattern: string | undefined, context: number | undefined): Promise<string> {
   let regex: RegExp
   try {
     regex = new RegExp(pattern)
@@ -146,11 +146,25 @@ async function searchWithJs(pattern: string, dir: string, inputDir: string, glob
     }
 
     const lines = text.split('\n')
+    const span = context && context > 0 ? context : 0
+    let lastEmitted = -1
     for (let i = 0; i < lines.length; i++) {
-      if (regex.test(lines[i]!)) {
+      if (!regex.test(lines[i]!)) continue
+      if (span > 0) {
+        // ripgrep-style: `path-line-content` for context, `path:line:content`
+        // for the match, `--` between non-adjacent groups.
+        const from = Math.max(0, i - span)
+        const to = Math.min(lines.length - 1, i + span)
+        if (lastEmitted >= 0 && from > lastEmitted + 1) matches.push('--')
+        for (let j = Math.max(from, lastEmitted + 1); j <= to; j++) {
+          const sep = j === i ? ':' : '-'
+          matches.push(`${fullPath}${sep}${j + 1}${sep}${lines[j]}`)
+        }
+        lastEmitted = to
+      } else {
         matches.push(`${fullPath}:${i + 1}:${lines[i]}`)
-        if (matches.length >= MAX_MATCHES) break
       }
+      if (matches.length >= MAX_MATCHES) break
     }
     if (matches.length >= MAX_MATCHES) break
   }
