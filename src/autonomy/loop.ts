@@ -35,7 +35,7 @@ import {
 } from './verify.ts'
 import { assessProgress, failureFingerprints, type AttemptSnapshot } from './progress.ts'
 import { classifyStuck, type StuckRecovery } from './stuck.ts'
-import { recordCompletion } from './calibration.ts'
+import { detectContradictions, recordCompletion } from './calibration.ts'
 import type { CriticVerdict, Proposal } from './types.ts'
 import { appendActionAudit, writeRunReceipt } from './audit.ts'
 import { createActionGovernor, withActionGovernor, type ActionApproval, type ActionGovernor, type ActionGovernorStats, type GovernanceMode } from './governor.ts'
@@ -302,7 +302,7 @@ async function runAutonomousTaskInternal(options: AutonomousRunOptions): Promise
     })
     journal.append('run-end', { outcome: finalOutcome, completion, taskSessionId: parentTask.id, graph: graph.state().nodes.map((node) => ({ id: node.id, status: node.status })) })
     writeRunReceipt({ runId, goal, outcome: finalOutcome, taskSessionId: parentTask.id, proposal: extra.proposal, verdict: extra.verdict, lessons: extra.lessons, completion, events: journal.events(), graph: graph.state(), usage, elapsedMs: Date.now() - startedAt, maxWallClockMs: maxWallClockMs || undefined, actionBudget })
-    recordCompletion(runId, completion, {
+    const completionFacts = {
       verificationPassed,
       reviewPassed,
       completedSteps: completion.completedSteps,
@@ -310,7 +310,13 @@ async function runAutonomousTaskInternal(options: AutonomousRunOptions): Promise
       unresolvedActions: graph.state().actions.filter((action) => action.state !== 'completed').length,
       pendingApprovals: completion.pendingApprovals,
       blockedByBudget: actionBudget.blockedByBudget,
-    })
+    }
+    recordCompletion(runId, completion, completionFacts)
+    const contradictions = detectContradictions(completion.state, completion.confidence, completionFacts)
+    if (contradictions.length > 0) {
+      journal.append('phase', { phase: 'learn', note: `completion contradiction: ${contradictions.join('; ')}` })
+      writeSubStep(`⚠ completion verdict "${completion.state}/${completion.confidence}" doesn't match the facts: ${contradictions.join('; ')}`)
+    }
     emitEvent('run_finished', { runId, goal: redactText(goal, 2000), outcome: finalOutcome, taskSessionId: parentTask.id, completion, elapsedMs: Date.now() - startedAt, usage, graph: graph.state() })
     return {
       runId,
@@ -767,6 +773,11 @@ This reviewer session is intentionally read-only. The current diff, status, and 
     progressHistory.push({ attempt, failures: failureFingerprints(verification, verification.passed ? verdict : undefined) })
     const progress = assessProgress(progressHistory)
     pendingApproachChange = undefined
+    // Show the repair trajectory so a long repair phase reads as progress, not a hang.
+    if (progressHistory.length > 1 && progress.trend !== 'resolved') {
+      const counts = progressHistory.map((snap) => snap.failures.length).join(' → ')
+      writeSubStep(`repair ${attempt}/${maxRepairAttempts} · failures ${counts} · ${progress.trend}`)
+    }
     if (progress.recommendation === 'stop' && (progress.trend === 'stalled' || progress.trend === 'diverging')) {
       const failureText = `${verification.passed ? '' : describeVerification(verification)}\n${describeIssues(verdict?.issues ?? [])}`.trim()
       const stuck = classifyStuck({ failureText, agentReport: lastRepairReport, trend: progress.trend })
