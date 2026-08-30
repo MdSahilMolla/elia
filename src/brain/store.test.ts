@@ -58,3 +58,15 @@ test('keyHash is stable and content-addressed', () => {
   expect(keyHash('hello')).toBe(keyHash('hello'))
   expect(keyHash('hello')).not.toBe(keyHash('world'))
 })
+
+test('explicit paths bypass the in-process cache — a fresh note shows up immediately', async () => {
+  const dir = scratch()
+  const notesPath = join(dir, 'notes.jsonl')
+  const common = { sessionsDir: join(dir, 'sessions'), lessonsPath: join(dir, 'lessons.md'), rationalePath: join(dir, 'rationale.jsonl'), notesPath }
+
+  appendNote({ text: 'first fact' }, notesPath)
+  expect((await loadBrainItems(common)).map((i) => i.render)).toContain('note: first fact')
+
+  appendNote({ text: 'second fact' }, notesPath)
+  expect((await loadBrainItems(common)).map((i) => i.render)).toContain('note: second fact')
+})

@@ -1,4 +1,5 @@
-import { basename } from 'node:path'
+import { statSync } from 'node:fs'
+import { join } from 'node:path'
 import { paths } from '../config.ts'
 import { listLedgerSessionIds, loadLedger, type LedgerRecord } from '../ledger.ts'
 import { loadLessons } from '../autonomy/lessons.ts'
@@ -74,8 +75,43 @@ function episodeItem(record: LedgerRecord, sessionId: string, currentSessionId?:
 }
 
 /** Loads and merges every knowledge source into one typed list. Never throws. */
+// agent.ts calls this on every dev turn that mentions a file, so a repeated
+// load over an unchanged store should be near-free. The cache is only used for
+// the default paths (tests pass explicit ones and bypass it) and is busted by a
+// cheap fingerprint of every source's mtime — a new episode, an appended
+// lesson, or a saved note all move it.
+let cache: { fingerprint: string; items: BrainItem[] } | undefined
+
+function mtime(path: string): number {
+  try {
+    return statSync(path).mtimeMs
+  } catch {
+    return 0
+  }
+}
+
+function defaultFingerprint(sessionsDir: string, currentSessionId: string | undefined): string {
+  const ledgerMtimes = listLedgerSessionIds(sessionsDir).map((id) => mtime(join(sessionsDir, `${id}.ledger.jsonl`)))
+  return [
+    currentSessionId ?? '',
+    ledgerMtimes.length,
+    ...ledgerMtimes,
+    mtime(paths.lessons),
+    mtime(RATIONALE_PATH),
+    mtime(paths.brainNotes),
+  ].join(':')
+}
+
 export async function loadBrainItems(options: LoadBrainOptions = {}): Promise<BrainItem[]> {
   const sessionsDir = options.sessionsDir ?? paths.sessions
+  const usesDefaults = !options.sessionsDir && !options.lessonsPath && !options.rationalePath && !options.notesPath
+
+  let fingerprint: string | undefined
+  if (usesDefaults) {
+    fingerprint = defaultFingerprint(sessionsDir, options.currentSessionId)
+    if (cache && cache.fingerprint === fingerprint) return cache.items
+  }
+
   const items: BrainItem[] = []
 
   for (const sessionId of listLedgerSessionIds(sessionsDir)) {
@@ -125,7 +161,13 @@ export async function loadBrainItems(options: LoadBrainOptions = {}): Promise<Br
     })
   }
 
+  if (fingerprint !== undefined) cache = { fingerprint, items }
   return items
+}
+
+/** Test-only: drops the in-process brain cache. */
+export function resetBrainCache(): void {
+  cache = undefined
 }
 
 /** Bare file paths mentioned in free text, e.g. "the retry logic in src/agentLoop.ts". */

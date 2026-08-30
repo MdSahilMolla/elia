@@ -111,8 +111,10 @@ export async function consolidateBrain(options: ConsolidateOptions = {}): Promis
   const parsed = parseResponse(text)
   if (!parsed) return skip('consolidation response was not usable')
 
-  // Guard against a model that collapses the list to nothing.
+  // Guard against a model that collapses the list to nothing. Mark it done
+  // anyway so a persistently misbehaving model doesn't trigger a call every launch.
   if (lessons.length > 0 && parsed.lessons.length < Math.ceil(lessons.length * (1 - MAX_SHRINK))) {
+    markConsolidated(consolidatedAtPath)
     return skip('consolidation would have removed too much — kept the originals')
   }
 
