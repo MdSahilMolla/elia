@@ -75,6 +75,6 @@ test('toMarkdown renders committed and live turns', () => {
 
 test('redacts secrets in tool input', () => {
   const s = createTranscriptStore()
-  s.toolStart({ id: 't1', name: 'run', input: { token: 'ghp_0123456789abcdef0123' } })
-  expect(JSON.stringify(s.lastTool()?.input)).not.toContain('ghp_0123456789abcdef0123')
+  s.toolStart({ id: 't1', name: 'run', input: { token: 'ghp_0123456789abcdef0123' } }) // pragma: allowlist secret
+  expect(JSON.stringify(s.lastTool()?.input)).not.toContain('ghp_0123456789abcdef0123') // pragma: allowlist secret
 })
