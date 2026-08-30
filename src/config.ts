@@ -51,6 +51,32 @@ export const THINKING_EFFORT_BUDGETS = {
 
 export type ThinkingEffort = keyof typeof THINKING_EFFORT_BUDGETS
 
+/**
+ * Set when the deep tier could not be resolved at startup (no API key, bad
+ * config). We deliberately do NOT `process.exit` here the way this used to:
+ * config.ts is imported transitively by the CLI entrypoint, so exiting at
+ * module load killed `elia --help`, `elia config set`, `elia agent --dry-run`,
+ * and plain argument-validation errors before they could run. The real
+ * execution paths gate on `ensureFirstRunProviderSetup()` (index.ts); anything
+ * that reaches the model without a valid key hits the deferred throw in the
+ * placeholder provider below. Declared up here, above the module-load call to
+ * `resolveDeepTier`, to stay out of its temporal dead zone.
+ */
+let deepTierResolutionError: string | undefined
+
+function unconfiguredTier(error: string): TierConfig {
+  return {
+    provider: {
+      async streamTurn() {
+        throw new Error(error)
+      },
+    },
+    providerName: 'unconfigured',
+    model: '(no provider configured)',
+    label: 'no provider configured',
+  }
+}
+
 // Mutable — `/model` and `/thinking` in the interactive REPL re-resolve and
 // reassign this rather than only setting env vars, so a switch takes effect for
 // the rest of the session without a restart. See switchModel/switchThinking below.
@@ -345,12 +371,18 @@ export function resolveThinking(): ThinkingOption {
   return { enabled: true, budgetTokens: Number.isFinite(budget) && budget >= 1024 ? budget : DEFAULT_THINKING_BUDGET }
 }
 
+/** The startup provider-resolution error, if the deep tier is unconfigured. */
+export function providerConfigError(): string | undefined {
+  return deepTierResolutionError
+}
+
 function resolveDeepTier(thinking: ThinkingOption): TierConfig {
   const resolved = tryResolveProvider({ thinking })
   if ('error' in resolved) {
-    console.error(`Error: ${resolved.error}`)
-    process.exit(1)
+    deepTierResolutionError = resolved.error
+    return unconfiguredTier(resolved.error)
   }
+  deepTierResolutionError = undefined
   return toTierConfig(resolved)
 }
 
