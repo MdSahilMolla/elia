@@ -1116,6 +1116,9 @@ async function runRuns(): Promise<void> {
   )) {
     writeUsageLine(`  ${line}`)
   }
+  const { renderCalibrationLine } = await import('./autonomy/calibration.ts')
+  const calibration = renderCalibrationLine()
+  if (calibration && !machineReadable) writeNotice(calibration)
   writeNotice('Inspect one with: elia runs <id>')
 }
 

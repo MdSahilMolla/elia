@@ -35,6 +35,7 @@ import {
 } from './verify.ts'
 import { assessProgress, failureFingerprints, type AttemptSnapshot } from './progress.ts'
 import { classifyStuck, type StuckRecovery } from './stuck.ts'
+import { recordCompletion } from './calibration.ts'
 import type { CriticVerdict, Proposal } from './types.ts'
 import { appendActionAudit, writeRunReceipt } from './audit.ts'
 import { createActionGovernor, withActionGovernor, type ActionApproval, type ActionGovernor, type ActionGovernorStats, type GovernanceMode } from './governor.ts'
@@ -301,6 +302,15 @@ async function runAutonomousTaskInternal(options: AutonomousRunOptions): Promise
     })
     journal.append('run-end', { outcome: finalOutcome, completion, taskSessionId: parentTask.id, graph: graph.state().nodes.map((node) => ({ id: node.id, status: node.status })) })
     writeRunReceipt({ runId, goal, outcome: finalOutcome, taskSessionId: parentTask.id, proposal: extra.proposal, verdict: extra.verdict, lessons: extra.lessons, completion, events: journal.events(), graph: graph.state(), usage, elapsedMs: Date.now() - startedAt, maxWallClockMs: maxWallClockMs || undefined, actionBudget })
+    recordCompletion(runId, completion, {
+      verificationPassed,
+      reviewPassed,
+      completedSteps: completion.completedSteps,
+      totalSteps: completion.totalSteps,
+      unresolvedActions: graph.state().actions.filter((action) => action.state !== 'completed').length,
+      pendingApprovals: completion.pendingApprovals,
+      blockedByBudget: actionBudget.blockedByBudget,
+    })
     emitEvent('run_finished', { runId, goal: redactText(goal, 2000), outcome: finalOutcome, taskSessionId: parentTask.id, completion, elapsedMs: Date.now() - startedAt, usage, graph: graph.state() })
     return {
       runId,
