@@ -1564,6 +1564,15 @@ async function runInteractive(): Promise<void> {
         ? 'auto mode (--yolo) — preliminary risk checks are skipped; safe work runs immediately, while governed irreversible actions still require explicit approval. "/settings" → Risk checks to turn checks back on.'
         : 'manual mode — elia flags risky commands and asks before running them; safe commands just run. "/settings" → Risk checks for zero prompts.',
     )
+    if (mode === 'dev') {
+      try {
+        const { detectGitHubContext, renderGitHubBanner } = await import('./github/context.ts')
+        const line = renderGitHubBanner(await detectGitHubContext(process.cwd()))
+        if (line) writeNotice(line)
+      } catch {
+        // GitHub context is a convenience readout, never a startup blocker.
+      }
+    }
   }
 
   function applyModelChoice(providerName: string, model?: string): void {

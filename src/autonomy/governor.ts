@@ -88,6 +88,26 @@ export function assessAction(request: ActionRequest, cwd = currentAgent().cwd ??
     return assessment('safe', 'allow', 'environment discovery is a local, read-only capability snapshot', 'environment.inspect', resources, true)
   }
 
+  if (name === 'github') {
+    const action = typeof input.action === 'string' ? input.action : 'unknown'
+    if (action === 'status' || action === 'pr_view' || action === 'pr_checks') {
+      return assessment('safe', 'allow', `github ${action} only reads local git and GitHub state`, `github.${action}`, resources, true)
+    }
+    if (action === 'branch' || action === 'commit') {
+      return assessment('safe', 'allow', `github ${action} is a local, checkpointable change to version control`, `github.${action}`, resources, true)
+    }
+    if (action === 'push') {
+      return input.force === true
+        ? assessment('critical', 'approve', 'github force-push can overwrite remote history and is not safely reversible', 'github.push.force', resources, false)
+        : assessment('review', 'approve', 'github push publishes local commits to the origin remote', 'github.push', resources, true)
+    }
+    if (action === 'pr_create') {
+      return assessment('review', 'approve', 'github pr_create opens a pull request on the remote', 'github.pr_create', resources, true)
+    }
+    // pr_comment posts publicly; pr_merge changes a shared branch — both need an exact boundary.
+    return assessment('critical', 'approve', `github ${action} writes to the shared repository and needs an authorization record`, `github.${action}`, resources, false)
+  }
+
   if (name === 'finance') {
     return assessment('safe', 'allow', 'finance calculations are deterministic and do not mutate external state', 'finance.analysis', resources, true)
   }

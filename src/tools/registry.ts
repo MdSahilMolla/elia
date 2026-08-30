@@ -25,6 +25,7 @@ import { dataScienceTool } from './dataScience.ts'
 import { sportsTool } from './sports.ts'
 import { fitnessTool } from './fitness.ts'
 import { environmentTool } from './environment.ts'
+import { githubTool } from './github.ts'
 import { todoWriteTool } from './todo.ts'
 import type { Tool } from './types.ts'
 
@@ -49,6 +50,7 @@ export const tools: Tool[] = [
   sportsTool,
   fitnessTool,
   environmentTool,
+  githubTool,
 ]
 
 /** Tools that let a fleet of sub-agents coordinate instead of working blind. */

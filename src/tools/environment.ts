@@ -1,6 +1,7 @@
 import { detectProject } from '../project.ts'
 import { currentAgent } from '../autonomy/context.ts'
 import { runShell } from '../shell.ts'
+import { detectGitHubContext } from '../github/context.ts'
 import type { Tool } from './types.ts'
 
 const COMMANDS = ['bun', 'node', 'npm', 'pnpm', 'yarn', 'python3', 'python', 'pip3', 'pytest', 'docker', 'kubectl', 'terraform', 'vercel', 'netlify', 'git', 'gh', 'psql', 'mysql', 'curl']
@@ -26,7 +27,11 @@ function readiness(status: ReadinessStatus, basis: string, missing?: string[]): 
   return missing && missing.length > 0 ? { status, basis, missing } : { status, basis }
 }
 
-function capabilityReadiness(availableRuntimes: Record<string, string>, configured: Record<string, boolean>): Record<string, CapabilityReadiness> {
+function capabilityReadiness(
+  availableRuntimes: Record<string, string>,
+  configured: Record<string, boolean>,
+  github?: { ghInstalled: boolean; ghAuthenticated: boolean; hasRemote: boolean },
+): Record<string, CapabilityReadiness> {
   const browserConfigured = configured.ELIA_BROWSER_MCP_SERVER || configured.ELIA_BROWSER_BRIDGE_COMMAND || configured.ELIA_BROWSER_CDP_URL
   const modelConfigured = configured.ANTHROPIC_API_KEY || configured.OPENAI_API_KEY || configured.GEMINI_API_KEY || configured.NVIDIA_API_KEY
   const deploymentCommands = ['vercel', 'netlify', 'docker', 'kubectl', 'terraform'].filter((command) => availableRuntimes[command] && availableRuntimes[command] !== 'unavailable')
@@ -42,6 +47,13 @@ function capabilityReadiness(availableRuntimes: Record<string, string>, configur
     sourceControl: availableRuntimes.git && availableRuntimes.git !== 'unavailable'
       ? readiness('ready', 'The git executable is available; repository permissions and remote access were not tested.')
       : readiness('unavailable', 'The git executable is not available.', ['git']),
+    github: !github || !github.hasRemote
+      ? readiness('unavailable', 'No GitHub remote is configured for this repository.', ['git remote add origin <github-url>'])
+      : !github.ghInstalled
+        ? readiness('missing-config', 'A GitHub remote exists but the gh CLI is not installed.', ['gh'])
+        : !github.ghAuthenticated
+          ? readiness('missing-config', 'The gh CLI is installed but not authenticated.', ['gh auth login'])
+          : readiness('ready', 'A GitHub remote is set and gh is authenticated; push and PR permission on the repo were not tested.'),
     dataScience: missingDataRuntime
       ? readiness('unavailable', 'No Python executable was detected for local data-science helpers.', ['python3 or python'])
       : readiness('ready', 'A Python executable is available; packages and dataset-specific dependencies were not tested.'),
@@ -54,7 +66,7 @@ function capabilityReadiness(availableRuntimes: Record<string, string>, configur
 
 export const environmentTool: Tool = {
   name: 'environment',
-  description: 'Inspect the current execution environment without changing it: repository/project shape, branch and dirty state, installed runtimes/CLIs, configured capability presence without exposing secret values, and available browser transport presence. Use this before acting on an unfamiliar or real-world task. It does not test credentials by making external requests and does not claim that a configured tool is authorized or healthy.',
+  description: 'Inspect the current execution environment without changing it: repository/project shape, branch and dirty state, installed runtimes/CLIs, GitHub remote and whether the gh CLI is logged in, configured capability presence without exposing secret values, and available browser transport presence. Use this before acting on an unfamiliar or real-world task. Apart from checking gh login state, it does not test credentials by making external requests, and it never claims a configured tool is authorized for the repo at hand.',
   input_schema: {
     type: 'object',
     properties: {
@@ -65,12 +77,13 @@ export const environmentTool: Tool = {
   async execute(input) {
     const agent = currentAgent()
     const cwd = agent.cwd ?? process.cwd()
-    const [project, branch, status, runtimes, diffStat] = await Promise.all([
+    const [project, branch, status, runtimes, diffStat, github] = await Promise.all([
       Promise.resolve(detectProject(cwd)),
       runShell('git branch --show-current && git log -1 --oneline', 10_000, cwd, agent.signal),
       runShell('git status --porcelain=v1 --branch', 10_000, cwd, agent.signal),
       Promise.resolve(Object.fromEntries(COMMANDS.map((command) => [command, Bun.which(command) ?? 'unavailable']))),
       input.includeGitDiffStat === true ? runShell('git diff --stat', 10_000, cwd, agent.signal) : Promise.resolve(undefined),
+      detectGitHubContext(cwd, { signal: agent.signal }).catch(() => undefined),
     ])
     const availableRuntimes = runtimes
     const configured = envPresence()
@@ -83,9 +96,24 @@ export const environmentTool: Tool = {
         status: trimOutput(status.stdout),
         diffStat: diffStat ? trimOutput(diffStat.stdout) : undefined,
       },
+      github: github
+        ? {
+            repo: github.slug,
+            defaultBranch: github.defaultBranch,
+            currentBranch: github.currentBranch,
+            ahead: github.ahead,
+            behind: github.behind,
+            dirty: github.dirty,
+            ghInstalled: github.ghInstalled,
+            ghAuthenticated: github.ghAuthenticated,
+            openPr: github.openPr ? { number: github.openPr.number, title: github.openPr.title, url: github.openPr.url } : undefined,
+            autonomousReady: github.isRepo && github.hasRemote && github.ghInstalled && github.ghAuthenticated,
+            note: 'ghAuthenticated means a token is present; repo push/PR permission was not tested.',
+          }
+        : undefined,
       runtimes: availableRuntimes,
       configuredCapabilityPresence: configured,
-      capabilityReadiness: capabilityReadiness(availableRuntimes, configured),
+      capabilityReadiness: capabilityReadiness(availableRuntimes, configured, github),
       browser: {
         configured: Boolean(process.env.ELIA_BROWSER_MCP_SERVER || process.env.ELIA_BROWSER_BRIDGE_COMMAND || process.env.ELIA_BROWSER_CDP_URL),
         transports: {
