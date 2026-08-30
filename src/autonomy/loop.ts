@@ -16,7 +16,8 @@ import { createTodoList, setActiveTodoList } from './todoList.ts'
 import { withAgentIdentity } from './context.ts'
 import { activeMode } from './mode.ts'
 import { loadDevelopmentToolHooks, withToolHooks } from './devHooks.ts'
-import { createJournal, newRunId, type Journal } from './journal.ts'
+import { createJournal, newRunId, runDir, type Journal } from './journal.ts'
+import { captureTreeSnapshot, discardTreeSnapshot, restoreTreeSnapshot, type TreeSnapshot } from './treeSnapshot.ts'
 import { planWaves, runFleet } from './fleet.ts'
 import { runVariants } from './variants.ts'
 import { createProposalTool, renderProposal } from './proposal.ts'
@@ -246,6 +247,10 @@ async function runAutonomousTaskInternal(options: AutonomousRunOptions): Promise
   let planApproved = false
   let verificationPassed = false
   let reviewPassed = false
+  // The last verified-good tree state, for a wrong-approach rewind. Assigned once
+  // the verify phase begins; declared here so `done()` can always clean it up.
+  let greenSnapshot: TreeSnapshot | undefined
+  let rewoundOnce = false
   const track = (delta: Usage) => {
     usage = addUsage(usage, delta)
   }
@@ -317,6 +322,7 @@ async function runAutonomousTaskInternal(options: AutonomousRunOptions): Promise
       journal.append('phase', { phase: 'learn', note: `completion contradiction: ${contradictions.join('; ')}` })
       writeSubStep(`⚠ completion verdict "${completion.state}/${completion.confidence}" doesn't match the facts: ${contradictions.join('; ')}`)
     }
+    if (greenSnapshot) void discardTreeSnapshot(greenSnapshot)
     emitEvent('run_finished', { runId, goal: redactText(goal, 2000), outcome: finalOutcome, taskSessionId: parentTask.id, completion, elapsedMs: Date.now() - startedAt, usage, graph: graph.state() })
     return {
       runId,
@@ -640,6 +646,9 @@ Read the changed files in full context. Improve only concrete issues directly re
   const escalationsUsed = new Set<StuckRecovery>()
   let lastRepairReport = ''
   let pendingApproachChange: string | undefined
+  // Baseline: the post-execute state. Each passing verification refreshes this
+  // to the current state; a wrong-approach stall rewinds the working tree here.
+  greenSnapshot = await captureTreeSnapshot(process.cwd(), runDir(runId))
 
   while (true) {
     if (runSignal?.aborted) return done('aborted', { proposal, verdict })
@@ -655,6 +664,11 @@ Read the changed files in full context. Improve only concrete issues directly re
       else writeFail(`${label} — ${result.timedOut ? 'timed out' : `exit ${result.exitCode}`}`)
     }
     verificationPassed = verification.passed
+    // A fresh green: this is now the state a "wrong approach" rewind returns to.
+    // captureTreeSnapshot overwrites the single per-run snapshot slot.
+    if (verification.passed && !rewoundOnce) {
+      greenSnapshot = (await captureTreeSnapshot(process.cwd(), runDir(runId))) ?? greenSnapshot
+    }
     const verificationData = {
       passed: verification.passed,
       results: verification.results.map((result) => ({
@@ -790,9 +804,23 @@ This reviewer session is intentionally read-only. The current diff, status, and 
         // One genuine attempt at the different move the diagnosis points to —
         // reconsider the approach, or fix the environment first — before giving up.
         escalationsUsed.add(stuck.recovery)
-        pendingApproachChange = stuck.recovery === 'replan'
+
+        // For a wrong-approach stall, rewind the working tree to the last
+        // verified-good state so the re-plan starts from a clean slate instead
+        // of on top of a pile of failed edits. One rewind per run.
+        let rewindNote = ''
+        if (stuck.recovery === 'replan' && greenSnapshot && !rewoundOnce) {
+          const { reverted, warnings } = await restoreTreeSnapshot(greenSnapshot)
+          rewoundOnce = true
+          const base = greenSnapshot.clean ? 'the pristine starting state (verification never passed)' : 'the last state that passed verification'
+          rewindNote = `\n\nThe working tree has been reset to ${base}: ${reverted.length} file(s) from the failed attempts were discarded.${warnings.length > 0 ? ` (Could not fully restore: ${warnings.join('; ')}.)` : ''} Do not try to re-apply what was there — start the new approach from what is on disk now.`
+          writeSubStep(`Rewound the working tree to the last green checkpoint (${reverted.length} file(s) discarded) before re-planning.`)
+          journal.append('phase', { phase: 'reflect', attempt, note: `tree rewound to last green: ${reverted.length} file(s) discarded${warnings.length ? `; warnings: ${warnings.join('; ')}` : ''}` })
+        }
+
+        pendingApproachChange = (stuck.recovery === 'replan'
           ? `The last ${attempt} repair attempts kept hitting the same wall. Stop patching the current approach. Step back: re-read the relevant code, reconsider whether the chosen approach can work at all, and implement a genuinely different solution to the goal.`
-          : `The failure is an environment problem, not a defect in the change: ${stuck.reason} Fix the environment first (install the missing dependency, create the missing file, free the port), then re-run verification.`
+          : `The failure is an environment problem, not a defect in the change: ${stuck.reason} Fix the environment first (install the missing dependency, create the missing file, free the port), then re-run verification.`) + rewindNote
         writeSubStep(`Not converging (${progress.trend}) — ${stuck.category}: trying a ${stuck.recovery === 'replan' ? 'different approach' : 'environment fix'} once before handing off.`)
         journal.append('phase', { phase: 'reflect', attempt, note: `stall escalation: ${stuck.category} -> ${stuck.recovery}` })
       } else {

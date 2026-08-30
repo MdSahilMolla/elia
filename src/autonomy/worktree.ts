@@ -43,7 +43,7 @@ interface GitResult {
  * before git ever sees it. Spawning git directly sidesteps shell re-lexing
  * entirely, the same way passing a real argv array always has.
  */
-async function runGit(args: string[], cwd?: string): Promise<GitResult> {
+export async function runGit(args: string[], cwd?: string): Promise<GitResult> {
   const proc = Bun.spawn(['git', ...args], { stdout: 'pipe', stderr: 'pipe', ...(cwd ? { cwd } : {}) })
   const [stdout, stderr, exitCode] = await Promise.all([
     readBoundedOutput(proc.stdout, MAX_SHELL_OUTPUT_LENGTH),
