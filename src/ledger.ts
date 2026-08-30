@@ -1,6 +1,6 @@
 import { join } from 'node:path'
 import { appendFile } from 'node:fs/promises'
-import { mkdirSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync } from 'node:fs'
 import { SESSIONS_DIR } from './session.ts'
 import { tierConfig } from './config.ts'
 import type { ChatMessage, ContentBlock } from './providers/types.ts'
@@ -88,6 +88,18 @@ export async function loadLedger(sessionId: string, dir: string = SESSIONS_DIR):
 
 export async function countEpisodes(sessionId: string, dir: string = SESSIONS_DIR): Promise<number> {
   return (await loadLedger(sessionId, dir)).length
+}
+
+/** Every session id that has an archived ledger on disk — the reach of cross-session recall and the brain. */
+export function listLedgerSessionIds(dir: string = SESSIONS_DIR): string[] {
+  if (!existsSync(dir)) return []
+  try {
+    return readdirSync(dir)
+      .filter((name) => name.endsWith('.ledger.jsonl'))
+      .map((name) => name.slice(0, -'.ledger.jsonl'.length))
+  } catch {
+    return []
+  }
 }
 
 async function appendEpisode(sessionId: string, episode: StoredEpisode, dir: string): Promise<void> {

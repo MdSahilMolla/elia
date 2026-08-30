@@ -52,6 +52,7 @@ const REPL_COMMANDS: SlashCommand[] = [
   { name: '/expand', description: 'reprint the last tool result in full (or /expand <n> for the nth), undoing scrollback folding' },
   { name: '/why', description: 'show recorded rationale for a file or topic — the decisions and constraints behind it (/why src/foo.ts)' },
   { name: '/lessons', description: 'show what earlier sessions learned about this project' },
+  { name: '/brain', description: "elia's cross-session project memory — /brain to see what's stored, /brain <query> to search it, /brain consolidate to tidy it" },
   { name: '/verify', description: 'run the project checks now, or /verify on|off to toggle the automatic post-turn check' },
   { name: '/track', description: "elia's track record on this project — how many changes landed clean, by area, and where it's weakest" },
   { name: '/skills', description: 'list the loaded skills (learned tools) available this session' },
@@ -1282,6 +1283,16 @@ async function runInteractive(): Promise<void> {
   const checkpoints = await loadCheckpoints(sessionId)
   const sessionStartedAt = Date.now()
 
+  // Opportunistically tidy the cross-session brain: merge duplicate lessons and
+  // drop stale ones so every future prompt isn't paying to carry them. Fire and
+  // forget — it is one cheap fast-tier call, gated to run at most once a day and
+  // only once there is enough to be worth it, and a failure changes nothing.
+  if (mode === 'dev') {
+    void import('./brain/consolidate.ts')
+      .then(({ consolidateBrain }) => consolidateBrain())
+      .catch(() => {})
+  }
+
   /**
    * Lets every other elia process running in this project see this one's
    * live status via sessionRegistry.ts (`/sessions`) — separate from and in
@@ -2224,6 +2235,11 @@ async function runInteractive(): Promise<void> {
       const rendered = renderLessons()
       return done(rendered.trim() || 'No lessons recorded for this project yet.')
     }
+    const brainMatch = /^\/brain(?:\s+(.+))?$/.exec(trimmed)
+    if (brainMatch) {
+      const { runBrainCommand } = await import('./brain/command.ts')
+      return done(await runBrainCommand(brainMatch[1] ?? ''))
+    }
     if (trimmed === '/track') {
       const { renderCompetence } = await import('./autonomy/outcomes.ts')
       return done(renderCompetence())
@@ -2497,6 +2513,12 @@ async function runInteractive(): Promise<void> {
     if (trimmed === '/lessons') {
       const { renderLessons } = await import('./autonomy/lessons.ts')
       writeUsageLine(renderLessons().trim() || 'No lessons recorded for this project yet.')
+      continue
+    }
+    const brainClassic = /^\/brain(?:\s+(.+))?$/.exec(trimmed)
+    if (brainClassic) {
+      const { runBrainCommand } = await import('./brain/command.ts')
+      writeUsageLine(await runBrainCommand(brainClassic[1] ?? ''))
       continue
     }
     if (trimmed === '/track') {

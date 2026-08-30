@@ -18,7 +18,8 @@ test('environment discovery reports project, git, runtimes, and redacted capabil
   }
   expect(result.cwd).toBe(process.cwd())
   expect(result.project.stacks).toContain('typescript')
-  expect(result.git.branch).toBe('manus')
+  expect(result.git.branch).toBeTruthy()
+  expect(result.git.branch).not.toBe('unavailable')
   expect(result.runtimes.git).not.toBe('unavailable')
   expect(result.configuredCapabilityPresence).not.toHaveProperty('OPENAI_API_KEY', process.env.OPENAI_API_KEY)
   expect(result.capabilityReadiness.sourceControl.status).toBe('ready')

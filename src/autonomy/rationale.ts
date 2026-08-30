@@ -1,5 +1,5 @@
 import { existsSync, readFileSync } from 'node:fs'
-import { basename, join } from 'node:path'
+import { basename } from 'node:path'
 import { appendSecureFile, hardenSecureFile } from '../securePersistence.ts'
 import { paths } from '../config.ts'
 import type { Tool } from '../tools/types.ts'
@@ -19,7 +19,7 @@ import type { Tool } from '../tools/types.ts'
  * path.
  */
 
-const RATIONALE_PATH = join(paths.state, 'rationale.jsonl')
+export const RATIONALE_PATH = paths.rationale
 const MAX_RENDERED = 8
 
 export interface RationaleRecord {

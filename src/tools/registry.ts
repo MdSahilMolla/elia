@@ -13,6 +13,7 @@ import { readSpreadsheetTool } from './readSpreadsheet.ts'
 import { spreadsheetTool } from './spreadsheet.ts'
 import { presentationTool } from './presentation.ts'
 import { recallTool } from './recall.ts'
+import { brainTool } from './brain.ts'
 import { createRationaleTool, createWhyTool } from '../autonomy/rationale.ts'
 import { createDirectLessonsTool } from '../autonomy/lessons.ts'
 import { browserTool } from './browser.ts'
@@ -38,6 +39,7 @@ export const tools: Tool[] = [
   runCommandTool,
   todoWriteTool,
   recallTool,
+  brainTool,
   createWhyTool(),
   createRationaleTool(),
   createDirectLessonsTool(),
