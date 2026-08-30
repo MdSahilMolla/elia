@@ -66,7 +66,17 @@ async function searchWithRipgrep(rg: string, pattern: string, dir: string, input
   if (run.exitCode === 2 && /pcre2/i.test(run.stderr)) run = await runRipgrep(rg, args, dir)
 
   if (run.exitCode === 1) return 'No matches found.'
-  if (run.exitCode === 2) throw new Error(`invalid regular expression: ${run.stderr.trim() || 'ripgrep rejected the pattern'}`)
+  // Exit code 2 means "something went wrong" — but that includes per-file
+  // "Access is denied" on a Windows system directory, where the search still
+  // ran fine everywhere it could reach. Only treat it as a bad pattern when the
+  // error text actually says so; otherwise keep the results and note the rest.
+  const patternError = /regex parse error|error parsing|unclosed group|unrecognized escape|repetition operator|pcre2/i.test(run.stderr)
+  if (run.exitCode === 2 && patternError) {
+    throw new Error(`invalid regular expression: ${run.stderr.trim() || 'ripgrep rejected the pattern'}`)
+  }
+  const accessNote = run.exitCode === 2 && !run.stdout.trim()
+    ? `\n\n[ripgrep reported errors and no matches: ${run.stderr.split('\n').slice(0, 2).join(' ').slice(0, 200)}]`
+    : ''
 
   const lines: string[] = []
   let matchCount = 0
@@ -89,8 +99,8 @@ async function searchWithRipgrep(rg: string, pattern: string, dir: string, input
     lines.push(`${inputDir}/${relPath}${separator}${lineNumber}${separator}${content}`)
   }
 
-  if (lines.length === 0) return 'No matches found.'
-  return `${lines.join('\n')}${truncated ? `\n\n[stopped after ${MAX_MATCHES} matches]` : ''}`
+  if (lines.length === 0) return `No matches found.${accessNote}`
+  return `${lines.join('\n')}${truncated ? `\n\n[stopped after ${MAX_MATCHES} matches]` : ''}${accessNote}`
 }
 
 async function runRipgrep(rg: string, args: string[], dir: string): Promise<{ stdout: string; stderr: string; exitCode: number }> {

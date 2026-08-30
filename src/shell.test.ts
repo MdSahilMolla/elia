@@ -1,6 +1,27 @@
 import { expect, test } from 'bun:test'
 import { runShell } from './shell.ts'
 
+test.if(process.platform === 'win32')('a cmd.exe builtin like mkdir runs even when PATH is broken', async () => {
+  // The failure this guards: `Bun.spawn(['cmd', ...])` -> ENOENT when System32
+  // is missing from PATH, which took out every shell command. runShell now
+  // resolves cmd via %ComSpec%, so a stripped PATH still works.
+  const original = process.env.PATH
+  try {
+    process.env.PATH = 'C:\\nonexistent'
+    const dir = `elia-shell-test-${Date.now()}`
+    const result = await runShell(`mkdir ${dir} && rmdir ${dir}`, 10_000, process.env.TEMP)
+    expect(result.exitCode).toBe(0)
+  } finally {
+    process.env.PATH = original
+  }
+})
+
+test('echo through the shell returns its output', async () => {
+  const result = await runShell('echo elia-shell-ok', 10_000)
+  expect(result.exitCode).toBe(0)
+  expect(result.stdout).toContain('elia-shell-ok')
+})
+
 test('terminates timed-out shell work and returns timeout evidence', async () => {
   const result = await runShell(process.platform === 'win32' ? 'ping 127.0.0.1 -n 3 > nul' : 'sleep 0.2', 30)
   expect(result.timedOut).toBe(true)

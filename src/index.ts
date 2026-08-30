@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
 import * as readline from 'node:readline/promises'
+import * as pathModule from 'node:path'
 import type { ConversationMessage, AgentMode } from './agent.ts'
 import { writeNotice, writeError, writeUsageLine } from './ui/stream.ts'
 import { sessionTranscript } from './ui/transcript.ts'
@@ -247,6 +248,23 @@ function hasFlag(...names: string[]): boolean {
 // end. Distinct from `elia auto --profile <fast|balanced|thorough>`, which
 // selects a run profile. `ELIA_PROFILE=1` in the environment does the same.
 if (hasFlag('--profile-turns')) process.env.ELIA_PROFILE = '1'
+
+/**
+ * Running elia from a filesystem root (`C:\`, `D:\`, `/`) is pathological: the
+ * scratch `workspace/` resolves to `C:\workspace`, recursive searches descend
+ * into `System Volume Information` / `$RECYCLE.BIN` and fail, and the model has
+ * no project to orient against. Warn loudly rather than let a whole session go
+ * sideways.
+ */
+function warnIfAtFilesystemRoot(): void {
+  const cwd = process.cwd()
+  const { root } = pathModule.parse(cwd)
+  if (cwd === root || cwd === root.replace(/[\\/]$/, '')) {
+    writeError(
+      `elia is running at a filesystem root (${cwd}). This works badly — the workspace folder, searches, and project detection all assume a project directory. cd into an actual project first.`,
+    )
+  }
+}
 
 async function printTurnProfileReport(): Promise<void> {
   const { renderProfileReport } = await import('./profile.ts')
@@ -1240,6 +1258,7 @@ async function runInteractive(): Promise<void> {
   }
 
   if (!(await ensureFirstRunProviderSetup())) return
+  warnIfAtFilesystemRoot()
   await loadRuntimeSkills()
   const { runTurn } = await import('./agent.ts')
   const { config, describeThinking, getThinking, switchModel, switchThinking, THINKING_EFFORT_BUDGETS, DEFAULT_THINKING_BUDGET } =

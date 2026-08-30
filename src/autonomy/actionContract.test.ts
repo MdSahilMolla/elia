@@ -19,6 +19,13 @@ describe('action contracts', () => {
     expect(contract.preconditions.some((p) => p.kind === 'command-available')).toBe(false)
   })
 
+  test('cmd.exe builtins (mkdir, copy, del, move) are exempt — they have no PATH entry on Windows', () => {
+    for (const command of ['mkdir cargame', 'md cargame', 'copy a b', 'del a.txt', 'move a b', 'rmdir cargame']) {
+      const contract = contractForAction({ name: 'run_command', input: { command } }, process.cwd(), `run:${command}:1`)
+      expect(contract.preconditions.some((p) => p.kind === 'command-available')).toBe(false)
+    }
+  })
+
   test('a dev-server command gets no exit-zero postcondition (it never exits)', () => {
     const contract = contractForAction({ name: 'run_command', input: { command: 'npm run dev' } }, process.cwd(), 'run:dev:1')
     expect(contract.postconditions).toEqual([])

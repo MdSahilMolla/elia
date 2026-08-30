@@ -66,8 +66,16 @@ export function contractForAction(request: ActionRequest, cwd: string, idempoten
   if (request.name === 'run_command') {
     const command = typeof request.input.command === 'string' ? request.input.command.trim() : ''
     const executable = SHELL_COMMAND.exec(command)?.[1]
-    // Shell builtins have no PATH entry — checking for them always fails.
-    const SHELL_BUILTINS = new Set(['cd', 'echo', 'export', 'set', 'source', 'pushd', 'popd', 'dir', 'type', 'command', 'exit', 'true', 'false'])
+    // Shell builtins have no PATH entry, so a "is it in PATH" check always fails
+    // for them. This covers both sh builtins and — critically on Windows, where
+    // they are cmd.exe builtins rather than real executables — mkdir, copy, del,
+    // and friends. A precondition that fails `mkdir` strands the whole run.
+    const SHELL_BUILTINS = new Set([
+      'cd', 'echo', 'export', 'set', 'source', 'pushd', 'popd', 'dir', 'type', 'command', 'exit', 'true', 'false',
+      'mkdir', 'md', 'rmdir', 'rd', 'copy', 'move', 'del', 'erase', 'ren', 'rename', 'cls', 'ver', 'vol', 'path',
+      'title', 'date', 'time', 'call', 'start', 'assoc', 'ftype', 'color', 'prompt', 'chdir', 'mklink', 'setlocal',
+      'endlocal', 'shift', 'goto', 'rem', 'if', 'for', 'break', 'test',
+    ])
     if (executable && /^[A-Za-z0-9_./-]+$/.test(executable) && !SHELL_BUILTINS.has(executable.toLowerCase())) {
       preconditions.push({ kind: 'command-available', value: executable, description: `${executable} must be available before the command runs` })
     }

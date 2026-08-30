@@ -1,5 +1,25 @@
 /** Shared shell execution. One implementation so the tool, verification, and the evolution gate all behave identically. */
 
+import { existsSync } from 'node:fs'
+import { join } from 'node:path'
+
+/**
+ * The Windows command interpreter, resolved to an absolute path.
+ *
+ * `Bun.spawn(['cmd', ...])` relies on PATH to find `cmd`, and on a machine
+ * where `System32` is missing from PATH (or PATH is otherwise broken) that
+ * fails with `ENOENT ... uv_spawn 'cmd'` — which took out *every* shell command,
+ * including `mkdir`. `%ComSpec%` is set to cmd.exe's full path on every Windows
+ * install; the System32 fallback covers the rare case where even that is unset.
+ */
+function windowsShell(): string {
+  const comSpec = process.env.ComSpec || process.env.COMSPEC
+  if (comSpec && existsSync(comSpec)) return comSpec
+  const systemRoot = process.env.SystemRoot || process.env.windir || 'C:\\Windows'
+  const candidate = join(systemRoot, 'System32', 'cmd.exe')
+  return existsSync(candidate) ? candidate : 'cmd.exe'
+}
+
 export interface ShellResult {
   command: string
   exitCode: number
@@ -21,7 +41,7 @@ export async function runShell(
   signal?: AbortSignal,
 ): Promise<ShellResult> {
   const startedAt = Date.now()
-  const shellArgs = process.platform === 'win32' ? ['cmd', '/c', command] : ['sh', '-c', command]
+  const shellArgs = process.platform === 'win32' ? [windowsShell(), '/d', '/s', '/c', command] : ['sh', '-c', command]
 
   const proc = Bun.spawn(shellArgs, {
     stdout: 'pipe',
@@ -108,7 +128,9 @@ export async function readBoundedOutput(stream: ReadableStream<Uint8Array>, maxL
 export function terminateProcessGroup(proc: Bun.Subprocess): void {
   if (process.platform === 'win32' && proc.pid) {
     try {
-      Bun.spawnSync(['taskkill.exe', '/PID', String(proc.pid), '/T', '/F'], { stdout: 'ignore', stderr: 'ignore' })
+      const systemRoot = process.env.SystemRoot || process.env.windir || 'C:\\Windows'
+      const taskkill = existsSync(join(systemRoot, 'System32', 'taskkill.exe')) ? join(systemRoot, 'System32', 'taskkill.exe') : 'taskkill.exe'
+      Bun.spawnSync([taskkill, '/PID', String(proc.pid), '/T', '/F'], { stdout: 'ignore', stderr: 'ignore' })
     } catch {
       try {
         proc.kill()
