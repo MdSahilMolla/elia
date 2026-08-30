@@ -26,7 +26,7 @@ test('reports and caches a newer npm version', async () => {
 
   expect(update).toEqual({ currentVersion: '0.1.0', latestVersion: '0.1.1' })
   expect(JSON.parse(readFileSync(path, 'utf8'))).toEqual({ checkedAt: 1_000, latestVersion: '0.1.1' })
-  expect(renderUpdateNotice(update!)).toContain('npm install --global elia@latest')
+  expect(renderUpdateNotice(update!)).toContain('npm install --global elia-ai@latest')
 })
 
 test('uses a fresh cache without contacting npm', async () => {

@@ -4,7 +4,7 @@
 
 | Version line | Security support |
 | --- | --- |
-| `elia` `0.1.x` | Supported on the `manus` branch and subsequent releases |
+| `elia-ai` `0.1.x` | Supported on the `manus` branch and subsequent releases |
 
 ## Reporting a vulnerability
 
