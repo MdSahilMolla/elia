@@ -3,7 +3,7 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { writeSecureFile } from './securePersistence.ts'
 
-const REGISTRY_URL = 'https://registry.npmjs.org/@mdsahilmolla%2Felia/latest'
+const REGISTRY_URL = 'https://registry.npmjs.org/elia/latest'
 const DEFAULT_CACHE_TTL_MS = 24 * 60 * 60 * 1000
 const DEFAULT_CACHE_PATH = join(homedir(), '.elia', 'update-check.json')
 
@@ -88,5 +88,5 @@ export async function findAvailableUpdate(currentVersion: string, options: Updat
 }
 
 export function renderUpdateNotice(update: AvailableUpdate): string {
-  return `Update available: ${update.currentVersion} → ${update.latestVersion}. Run: npm install --global @mdsahilmolla/elia@latest`
+  return `Update available: ${update.currentVersion} → ${update.latestVersion}. Run: npm install --global elia@latest`
 }

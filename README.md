@@ -17,15 +17,15 @@ Beyond the usual loop, elia does three things most terminal agents don't:
 Run without installing:
 
 ```bash
-bunx @mdsahilmolla/elia
+bunx elia
 ```
 
 Or install globally with Bun or npm:
 
 ```bash
-bun add --global @mdsahilmolla/elia
+bun add --global elia
 # or
-npm install --global @mdsahilmolla/elia
+npm install --global elia
 
 elia --help
 ```
