@@ -73,5 +73,7 @@ test('battmann research tools stay inside the existing approval boundaries', () 
   // Adding a mode must never hand it a softer governor than any other mode.
   expect(assessAction({ name: 'communication', input: { action: 'send' } }).decision).toBe('approve')
   expect(assessAction({ name: 'browser', input: { action: 'click' } }).decision).toBe('approve')
-  expect(assessAction({ name: 'read_spreadsheet', input: { path: 'C:/Windows/secret.xlsx' } }).decision).toBe('approve')
+  // A path that escapes the workspace on every platform (a bare absolute Windows
+  // path reads as a relative subpath on the Linux CI runner).
+  expect(assessAction({ name: 'read_spreadsheet', input: { path: '../../../../../secret.xlsx' } }).decision).toBe('approve')
 })

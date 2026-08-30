@@ -16,16 +16,19 @@ test('cancels shell work cooperatively', async () => {
   expect(result.stderr).toContain('cancelled')
 })
 
-// 100k lines is ~300KB on Windows ("x\r\n") and ~200KB elsewhere ("x\n"),
-// comfortably past MAX_SHELL_OUTPUT_LENGTH (200,000) while generating far less
-// work than the previous 300k — Windows `for /L` is slow enough that the old
-// count regularly ran past the shell timeout.
+// 30k lines of an 11-byte payload is ~360KB on Windows ("xxxxxxxxxx\r\n") and
+// ~330KB elsewhere ("xxxxxxxxxx\n") — unambiguously past MAX_SHELL_OUTPUT_LENGTH
+// (200,000), so the "omitted" marker is guaranteed. The previous "yes x | head
+// -n 100000" produced exactly 200,000 bytes on Linux, right on the boundary
+// where `totalLength > limit` is false and no marker is appended.
 //
 // The explicit test timeout must stay well above the shell timeout passed to
 // runShell: when they were both 5_000 the harness raced the command's own
 // deadline and this test failed roughly half the time on Windows.
 test('bounds large shell output', async () => {
-  const command = process.platform === 'win32' ? 'for /L %i in (1,1,100000) do @echo x' : "yes x | head -n 100000"
+  const command = process.platform === 'win32'
+    ? 'for /L %i in (1,1,30000) do @echo xxxxxxxxxx'
+    : 'yes xxxxxxxxxx | head -n 30000'
   const result = await runShell(command, 10_000)
   expect(result.stdout.length).toBeLessThanOrEqual(200_100)
   expect(result.stdout).toContain('characters omitted')
