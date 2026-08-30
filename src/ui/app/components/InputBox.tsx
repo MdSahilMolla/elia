@@ -47,6 +47,8 @@ export interface InputBoxProps {
   onEof(): void
   /** Tab on an empty line (no completion menu) — used to toggle plan/build mode. */
   onTabEmpty(): void
+  /** `?` on an empty line — opens the keybinding help. */
+  onHelp?(): void
 }
 
 export function InputBox(props: InputBoxProps) {
@@ -60,6 +62,10 @@ export function InputBox(props: InputBoxProps) {
     }
     if (key.tab && !key.shift && state.buffer.length === 0 && filteredCommands(state.buffer, props.commands).length === 0) {
       props.onTabEmpty()
+      return
+    }
+    if (input === '?' && !key.ctrl && !key.meta && state.buffer.length === 0) {
+      props.onHelp?.()
       return
     }
     const { str, event } = toKeyEvent(input, key)

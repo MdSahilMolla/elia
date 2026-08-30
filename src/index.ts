@@ -4,6 +4,7 @@ import type { ConversationMessage, AgentMode } from './agent.ts'
 import { writeNotice, writeError, writeUsageLine } from './ui/stream.ts'
 import { sessionTranscript } from './ui/transcript.ts'
 import { colorizeDiffBlock } from './ui/render.ts'
+import { approvalPreviewLines } from './ui/approvalPreview.ts'
 import { lastAssistantText, type ToolEvent } from './agentLoop.ts'
 import type { ProviderActivity } from './providers/types.ts'
 import type { SlashOutcome as InkSlashOutcome } from './ui/app/index.tsx'
@@ -252,6 +253,7 @@ async function printTurnProfileReport(): Promise<void> {
   const report = renderProfileReport()
   if (report && !machineReadable) process.stdout.write(`\n${dim(report)}\n`)
 }
+
 
 function flagValue(...names: string[]): string | undefined {
   for (const name of names) {
@@ -2393,10 +2395,14 @@ async function runInteractive(): Promise<void> {
         await runCheckpointedTurn(
           turnText,
           async (assessment, request) =>
-            hooks.approve(`Approve ${request.name}?`, [
-              redactText(assessment.reason, 300),
-              `risk: ${assessment.risk} · reversible: ${assessment.reversible ? 'yes' : 'no'}`,
-            ]),
+            hooks.approve(
+              `Approve ${request.name}?`,
+              [
+                redactText(assessment.reason, 300),
+                `risk: ${assessment.risk} · reversible: ${assessment.reversible ? 'yes' : 'no'}`,
+              ],
+              approvalPreviewLines(request.name, request.input),
+            ),
           undefined,
           {
             onText: hooks.onText,

@@ -12,6 +12,7 @@ import { Picker, type PickerRequest } from './components/Picker.tsx'
 import { TextPrompt, type TextPromptRequest } from './components/TextPrompt.tsx'
 import { WorkingIndicator } from './components/WorkingIndicator.tsx'
 import { WorkspacePanel } from './components/WorkspacePanel.tsx'
+import { HelpOverlay } from './components/HelpOverlay.tsx'
 import { activeTodoList, type TodoItem } from '../../autonomy/todoList.ts'
 import { taskSessions, type TaskSession } from '../../taskSessions.ts'
 import type { PickerOption } from '../picker.ts'
@@ -28,7 +29,7 @@ export interface TurnHooks {
   onActivity(activity: import('../../providers/types.ts').ProviderActivity): void
   onTool(event: import('../../agentLoop.ts').ToolEvent): void
   onToolStart(call: { id: string; name: string; input: Record<string, unknown> }): void
-  approve(title: string, lines: string[]): Promise<boolean>
+  approve(title: string, lines: string[], preview?: string[]): Promise<boolean>
   signal: AbortSignal
   planMode: boolean
   /** Drained by the agent loop at each step boundary — operator guidance typed mid-run. */
@@ -100,6 +101,8 @@ export function App(props: AppProps) {
   const [picker, setPicker] = useState<PickerRequest | null>(null)
   const [textPrompt, setTextPrompt] = useState<TextPromptRequest | null>(null)
   const [expandedAll, setExpandedAll] = useState(false)
+  const [showHelp, setShowHelp] = useState(false)
+  const [steeringCount, setSteeringCount] = useState(0)
   const [queue, setQueue] = useState<string[]>([])
   const [status, setStatus] = useState('')
   const [turnStartedAt, setTurnStartedAt] = useState(0)
@@ -175,6 +178,7 @@ export function App(props: AppProps) {
       }
       if (steeringRef.current.length > 0) {
         steeringRef.current = []
+        setSteeringCount(0)
         store.notice('Pending steering cleared.')
       }
       if (busy) abortRef.current?.abort()
@@ -228,13 +232,14 @@ export function App(props: AppProps) {
           setStatus(`Running ${c.name}`)
           store.toolStart(c)
         },
-        approve: (title, lines) =>
-          new Promise<boolean>((resolve) => setConfirm({ title, lines, resolve: (ok) => { setConfirm(null); resolve(ok) } })),
+        approve: (title, lines, preview) =>
+          new Promise<boolean>((resolve) => setConfirm({ title, lines, preview, resolve: (ok) => { setConfirm(null); resolve(ok) } })),
         signal: controller.signal,
         planMode: modeRef.current === 'plan',
         drainSteering: () => {
           const pending = steeringRef.current
           steeringRef.current = []
+          setSteeringCount(0)
           if (pending.length > 0) setStatus('Steering applied')
           return pending
         },
@@ -278,6 +283,7 @@ export function App(props: AppProps) {
           return
         }
         steeringRef.current = [...steeringRef.current, trimmed]
+        setSteeringCount(steeringRef.current.length)
         store.notice(`↳ steering — elia will take this at the next step (${steeringRef.current.length})`)
         return
       }
@@ -388,8 +394,17 @@ export function App(props: AppProps) {
       <Transcript committed={snap.committed} live={snap.live} expandedAll={expandedAll} />
 
       {snap.committed.length === 0 && snap.live.length === 0 && (
-        <Box marginTop={1}>
+        <Box flexDirection="column" marginTop={1} borderStyle="round" borderColor={palette.muted} paddingX={1}>
           <Text color={palette.muted}>{props.greeting}</Text>
+          <Box marginTop={1} flexDirection="column">
+            <Text color={palette.muted}>Try:</Text>
+            <Text color={palette.toolName}>  fix the failing test in src/</Text>
+            <Text color={palette.toolName}>  add a --json flag to the export command and update the help text</Text>
+            <Text color={palette.toolName}>  what does the autonomy governor actually block? walk me through it</Text>
+          </Box>
+          <Box marginTop={1}>
+            <Text color={palette.muted}>? keys · / commands · Tab plan mode · type while it works to steer it</Text>
+          </Box>
         </Box>
       )}
 
@@ -404,6 +419,7 @@ export function App(props: AppProps) {
         </Box>
       )}
       {busy && !confirm && <WorkingIndicator startedAt={turnStartedAt} status={status} />}
+      {showHelp && <HelpOverlay onClose={() => setShowHelp(false)} />}
       {confirm && <Confirm request={confirm} />}
       {picker && <Picker request={picker} />}
       {textPrompt && <TextPrompt request={textPrompt} />}
@@ -428,11 +444,13 @@ export function App(props: AppProps) {
           costUsd={estimateCostUsd(env.model, usage.usage)}
           busy={busy}
           queued={queue.length}
+          steering={steeringCount}
         />
         <InputBox
           commands={props.commands}
           onTabEmpty={() => setMode((m) => (m === 'plan' ? 'manual' : 'plan'))}
-          disabled={confirm !== null || picker !== null || textPrompt !== null || planReady}
+          onHelp={() => setShowHelp(true)}
+          disabled={confirm !== null || picker !== null || textPrompt !== null || planReady || showHelp}
           placeholder={
             busy
               ? 'working — type to steer elia now · / ! wait for the turn to finish · Esc to stop'
