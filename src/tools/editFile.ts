@@ -2,6 +2,9 @@ import type { Tool } from './types.ts'
 import { captureBeforeWrite } from '../checkpoint.ts'
 import { resolveWorkspacePath, currentAgent } from '../autonomy/context.ts'
 import { diagnosticsForFile, formatDiagnostics } from '../lsp/registry.ts'
+import { diffStat, fencedDiff, unifiedDiff } from '../ui/diff.ts'
+import { multipleMatchMessage, notFoundMessage } from './editMatch.ts'
+import { noteFileRead } from './fileAccess.ts'
 
 function detectLineEnding(text: string): '\n' | '\r\n' {
   return text.includes('\r\n') ? '\r\n' : '\n'
@@ -13,23 +16,17 @@ function toLineEnding(text: string, ending: '\n' | '\r\n'): string {
   return ending === '\n' ? normalized : normalized.replace(/\n/g, '\r\n')
 }
 
-function diffPreview(oldString: string, newString: string): string {
-  const shorten = (line: string) => (line.length > 240 ? `${line.slice(0, 240)}...` : line)
-  const removed = oldString.split('\n').slice(0, 6).map((line) => `-${shorten(line)}`)
-  const added = newString.split('\n').slice(0, 6).map((line) => `+${shorten(line)}`)
-  return ['```diff', ...removed, ...added, '```'].join('\n')
-}
-
 export const editFileTool: Tool = {
   name: 'edit_file',
   description:
-    'Replace an exact, unique substring within a file with new text. Fails if old_string is not found or matches more than once — include enough surrounding context to make it unique.',
+    "Replace an exact substring within a file with new text. By default old_string must be unique — include enough surrounding lines to make it so, matching the file's real indentation (copy it from a read_file). Pass replace_all:true to change every occurrence (e.g. renaming a symbol).",
   input_schema: {
     type: 'object',
     properties: {
       path: { type: 'string', description: 'Path to the file to edit' },
-      old_string: { type: 'string', description: 'Exact text to find (must be unique in the file)' },
+      old_string: { type: 'string', description: 'Exact text to find (must be unique unless replace_all is true)' },
       new_string: { type: 'string', description: 'Text to replace it with' },
+      replace_all: { type: 'boolean', description: 'Replace every occurrence instead of requiring a unique match (default false)' },
     },
     required: ['path', 'old_string', 'new_string'],
   },
@@ -53,22 +50,24 @@ export const editFileTool: Tool = {
       throw new Error(`File not found: ${input.path}`)
     }
     const text = await file.text()
+    noteFileRead(path)
     const ending = detectLineEnding(text)
     const oldString = toLineEnding(input.old_string, ending)
     const newString = toLineEnding(input.new_string, ending)
 
+    const replaceAll = input.replace_all === true
     const firstIndex = text.indexOf(oldString)
     if (firstIndex === -1) {
-      throw new Error(`old_string not found in ${input.path}`)
+      throw new Error(notFoundMessage(text, oldString, input.path))
     }
     const lastIndex = text.lastIndexOf(oldString)
-    if (firstIndex !== lastIndex) {
-      throw new Error(
-        `old_string matches multiple locations in ${input.path} — include more surrounding context to make it unique`,
-      )
+    if (!replaceAll && firstIndex !== lastIndex) {
+      throw new Error(multipleMatchMessage(text, oldString, input.path))
     }
 
-    const updated = text.slice(0, firstIndex) + newString + text.slice(firstIndex + oldString.length)
+    const updated = replaceAll
+      ? text.split(oldString).join(newString)
+      : text.slice(0, firstIndex) + newString + text.slice(firstIndex + oldString.length)
 
     // Re-read immediately before writing and compare to what this edit was
     // computed from. Elia's own repo is routinely edited by a concurrent
@@ -87,6 +86,10 @@ export const editFileTool: Tool = {
 
     const root = currentAgent().cwd ?? process.cwd()
     const diagnostics = await diagnosticsForFile(path, updated, root)
-    return `Edited ${input.path}\n${diffPreview(oldString, newString)}${diagnostics ? formatDiagnostics(diagnostics, input.path) : ''}`
+    // A real unified patch against the whole file: correct line numbers, proper
+    // hunk context, and applyable as-is — computed on \n-normalized text so the
+    // patch reads cleanly regardless of the file's on-disk line ending.
+    const diff = unifiedDiff(text.replace(/\r\n/g, '\n'), updated.replace(/\r\n/g, '\n'), input.path)
+    return `Edited ${input.path} (${diffStat(diff)})\n${fencedDiff(diff)}${diagnostics ? formatDiagnostics(diagnostics, input.path) : ''}`
   },
 }

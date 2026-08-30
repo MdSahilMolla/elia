@@ -1,10 +1,21 @@
 import { boldGold, colorEnabled, dim, dimCyan, gold, green, raw, red } from './theme.ts'
 import { emitEvent, interactiveTerminal, machineReadable, quietOutput } from './runtime.ts'
-import { redactRecord, redactText } from './redact.ts'
+import { redactRecord, redactSecrets, redactText } from './redact.ts'
+import { colorizeDiffBlock, foldText, isDiffResult } from './render.ts'
 import { createMarkdownStream, type MarkdownStream } from './markdown.ts'
 import { registerShutdownCleanup } from './shutdown.ts'
+import type { ProviderActivity } from '../providers/types.ts'
 
 const REPLY_MARKER = `${boldGold('●')} `
+
+// When the Ink REPL is mounted it owns the screen — any stray process.stdout
+// write from a deep handler corrupts its frame. While a sink is installed,
+// notice/usage/error text is handed to it instead of stdout. Tool and stream
+// output already route through the Ink app's own callbacks (silent runTurn).
+let inkSink: ((kind: 'notice' | 'usage' | 'error', text: string) => void) | undefined
+export function setInkSink(sink: typeof inkSink): void {
+  inkSink = sink
+}
 
 let inThinkingBlock = false
 let replyStarted = false
@@ -175,6 +186,20 @@ export function writeToolResult(name: string, result: string, isError: boolean, 
   // dump; on error the full (capped) text stays, since that's what you need to
   // actually debug the failure — the model still sees the untouched `result`
   // either way, this only changes what's echoed to the screen.
+  // A file-mutation patch is worth showing in full colour (folded), not
+  // one-line summarising — a diff is the whole point of the tool.
+  if (!isError && isDiffResult(name)) {
+    const [headline = `${name}`, ...bodyLines] = result.split('\n')
+    process.stdout.write(`    ${dim('⎿')} ${coloredMark} ${dim(`${name}${timing} ${redactText(headline, 200)}`)}\n`)
+    const folded = foldText(colorizeDiffBlock(redactSecrets(bodyLines.join('\n')).trim()), { headLines: 40, maxBytes: 8_000 })
+    if (folded.text.trim()) {
+      for (const line of folded.text.split('\n')) process.stdout.write(`      ${line}\n`)
+    }
+    spinnerFrame = 0
+    showSpinner()
+    return
+  }
+
   const display = isError ? safeResult : summarizeResult(name, result)
   const rest = dim(`${name}${timing} ${display}`)
   process.stdout.write(`    ${dim('⎿')} ${coloredMark} ${rest}\n`)
@@ -189,7 +214,35 @@ export function writeNotice(text: string): void {
     return
   }
   if (quietOutput) return
+  if (inkSink) return inkSink('notice', text)
   process.stdout.write(`${gold(text)}\n`)
+}
+
+/** Plain rendering shared by the native terminal, TUI, and machine clients. */
+export function providerActivityText(activity: ProviderActivity): string {
+  const title = redactText(activity.title, 240)
+  const detail = activity.detail ? boundedRedactedMultiline(activity.detail, 4_000) : ''
+  return detail ? `${title}\n${detail}` : title
+}
+
+/** Displays progress from an agentic provider without mixing it into the final answer. */
+export function writeProviderActivity(activity: ProviderActivity): void {
+  const safe = providerActivityText(activity)
+  const [title = '', ...details] = safe.split('\n')
+  if (machineReadable) {
+    emitEvent('provider_activity', { kind: activity.kind, status: activity.status, title, detail: details.join('\n') || undefined })
+    return
+  }
+  if (quietOutput) return
+  closeThinkingBlock()
+  hideSpinner()
+  if (!toolBlockOpen) {
+    toolBlockOpen = true
+    process.stdout.write('\n')
+  }
+  const mark = activity.status === 'failed' ? red('✗') : activity.status === 'completed' ? green('✓') : activity.status === 'warning' ? gold('!') : gold('●')
+  process.stdout.write(`  ${mark} ${dimCyan(title)}\n`)
+  for (const line of details) process.stdout.write(`    ${dim(line)}\n`)
 }
 
 /** A failure the user needs to notice. Human diagnostics go to stderr. */
@@ -198,6 +251,7 @@ export function writeError(text: string): void {
     emitEvent('error', { message: redactText(text, 2000) })
     return
   }
+  if (inkSink) return inkSink('error', text)
   process.stderr.write(`${red(text)}\n`)
 }
 
@@ -207,7 +261,13 @@ export function writeUsageLine(text: string): void {
     return
   }
   if (quietOutput) return
+  if (inkSink) return inkSink('usage', text)
   process.stdout.write(`${dim(text)}\n`)
+}
+
+function boundedRedactedMultiline(text: string, maxLength: number): string {
+  const redacted = redactSecrets(text).replace(/\r\n/g, '\n').trim()
+  return redacted.length > maxLength ? `${redacted.slice(0, maxLength - 1)}…` : redacted
 }
 
 // Config/plumbing fields that are almost always the default and rarely what

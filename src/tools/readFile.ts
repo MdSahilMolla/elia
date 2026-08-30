@@ -1,6 +1,7 @@
 import type { Tool } from './types.ts'
 import { resolveWorkspacePath } from '../autonomy/context.ts'
 import { assertSafeFileAccess } from '../autonomy/sensitivePaths.ts'
+import { noteFileRead } from './fileAccess.ts'
 
 const MAX_READ_BYTES = 5_000_000
 const DEFAULT_LIMIT = 2000
@@ -30,6 +31,7 @@ export const readFileTool: Tool = {
     }
     if (file.size > MAX_READ_BYTES) throw new Error(`file exceeds ${MAX_READ_BYTES} bytes; use a narrower search or inspect it with a specialized tool`)
     const text = await file.text()
+    noteFileRead(path)
     const allLines = text.split('\n')
     const offset = (input.offset as number | undefined) ?? 1
     const limit = (input.limit as number | undefined) ?? DEFAULT_LIMIT

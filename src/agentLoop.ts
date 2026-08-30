@@ -1,6 +1,6 @@
 import { autoFallbacksFor, config } from './config.ts'
 import { maybeCompact } from './compaction.ts'
-import type { ChatMessage, ContentBlock, Provider, Usage } from './providers/types.ts'
+import type { ChatMessage, ContentBlock, Provider, ProviderActivity, Usage } from './providers/types.ts'
 import type { Tool } from './tools/types.ts'
 import { endTextTurn, writeNotice, writeToolCall, writeToolResult } from './ui/stream.ts'
 import { startThinkingAnimation } from './ui/animator.ts'
@@ -15,6 +15,8 @@ import { currentAgent } from './autonomy/context.ts'
 import { activeMode } from './autonomy/mode.ts'
 import { activeToolHooks, evaluateToolHooks } from './autonomy/devHooks.ts'
 import { clampOutput } from './shell.ts'
+import { isRepoMutatingTool, withRepoLock } from './repoLock.ts'
+import { profilingEnabled, recordModelCall } from './profile.ts'
 
 export type ConversationMessage = ChatMessage
 
@@ -39,6 +41,8 @@ export interface ProviderRoute {
 }
 
 export interface ToolEvent {
+  /** The provider's tool_use id — pairs a result with its earlier onToolStart. */
+  id?: string
   name: string
   input: Record<string, unknown>
   result: string
@@ -58,10 +62,19 @@ export interface ToolEvent {
 export interface RunAgentLoopOptions {
   messages: ConversationMessage[]
   systemPrompt: string
+  /**
+   * Per-turn system content that changes between user turns (query-ranked
+   * memory, mode hints). Passed to the provider separately from `systemPrompt`
+   * so it does not invalidate the cached stable prefix. Omit for callers whose
+   * whole system prompt is static (sub-agents, personas).
+   */
+  systemDynamicPrompt?: string
   tools: Tool[]
   onText?: (delta: string) => void
   /** Streamed reasoning, when the provider produces any (not every provider/turn does). */
   onThinking?: (delta: string) => void
+  /** Structured live progress from an agentic provider. */
+  onActivity?: (activity: ProviderActivity) => void
   /** Show the thinking animation and emit a trailing newline after streamed text (top-level only). */
   useAnimation: boolean
   /** Log tool calls/results to stdout as they happen (off for silent sub-agents so parallel runs don't interleave). */
@@ -78,6 +91,8 @@ export interface RunAgentLoopOptions {
   maxSteps?: number
   /** Called after every tool result — used by the journal and the skill-synthesis detector. */
   onTool?: (event: ToolEvent) => void
+  /** Called when a tool call is dispatched, before it runs — lets a live UI show a pending card. */
+  onToolStart?: (call: { id: string; name: string; input: Record<string, unknown> }) => void
   /** Speculative read cache; when present, matching read-only calls resolve instantly. */
   cache?: ToolResultCache
   /** Predicts and pre-runs the reads the model is likely to ask for next. */
@@ -107,9 +122,11 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
   const {
     messages,
     systemPrompt,
+    systemDynamicPrompt,
     tools,
     onText,
     onThinking,
+    onActivity,
     useAnimation,
     verbose,
     provider,
@@ -118,6 +135,7 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
     fallbacks,
     maxSteps = DEFAULT_MAX_STEPS,
     onTool,
+    onToolStart,
     cache,
     prefetcher,
     signal,
@@ -192,6 +210,9 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
 
     if (verbose) {
       for (const block of toolUseBlocks) writeToolCall(block.name, block.input)
+    }
+    if (onToolStart) {
+      for (const block of toolUseBlocks) onToolStart({ id: block.id, name: block.name, input: block.input })
     }
 
     // A batch that writes anything invalidates every speculative read: the model
@@ -291,7 +312,11 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
                   resultText = await pending
                 } else {
                   if (!tool) throw new Error(`Unknown tool: ${block.name}`)
-                  resultText = await tool.execute(block.input)
+                  // Serialize the actual file mutation so parallel edits (within
+                  // this batch, or from a concurrent turn) can't interleave.
+                  resultText = isRepoMutatingTool(block.name)
+                    ? await withRepoLock(() => tool.execute(block.input))
+                    : await tool.execute(block.input)
                 }
                 postcondition = contract ? evaluatePostconditions(contract, resultText, cwd) : undefined
                 if (postcondition && !postcondition.ok) {
@@ -331,7 +356,7 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
 
       const durationMs = Date.now() - startedAt
       if (verbose) writeToolResult(block.name, resultText, isError, cached)
-      onTool?.({ name: block.name, input: block.input, result: resultText, isError, durationMs, cached, assessment, actionId: reservation?.action.id, idempotencyKey: reservation?.action.idempotencyKey, replayed, failureClass })
+      onTool?.({ id: block.id, name: block.name, input: block.input, result: resultText, isError, durationMs, cached, assessment, actionId: reservation?.action.id, idempotencyKey: reservation?.action.idempotencyKey, replayed, failureClass })
       if (!isError) observed.push({ name: block.name, input: block.input, result: resultText })
 
       return {
@@ -377,36 +402,39 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
     const now = Date.now()
     const healthyRoutes = routes.filter((route) => (providerHealth.get(providerHealthKey(route))?.cooldownUntil ?? 0) <= now)
     const activeRoutes = healthyRoutes.length > 0 ? healthyRoutes : routes
+    let emittedOutput = false
+    let firstOutputAt: number | undefined
+    const noteFirstOutput = () => {
+      if (firstOutputAt === undefined) firstOutputAt = Date.now()
+    }
     try {
-
-      let emittedOutput = false
       let lastError: unknown
       for (let routeIndex = 0; routeIndex < activeRoutes.length; routeIndex += 1) {
         const route = activeRoutes[routeIndex]!
         for (let attempt = 1; ; attempt++) {
+          const callStartedAt = Date.now()
+          firstOutputAt = undefined
           try {
-            const result = await route.provider.streamTurn({
-            system: systemPrompt,
-            messages,
-            tools: toolDefinitions,
-            onText: (delta) => {
-              emittedOutput = true
-              stopAnimation()
-              cursor?.beforeText()
-              onText?.(delta)
-              cursor?.afterText()
-            },
-            onThinking: (delta) => {
-              // Reasoning is real output too — a retry after some has been shown
-              // would duplicate it in the terminal exactly like retrying after text.
-              emittedOutput = true
-              stopAnimation()
-              onThinking?.(delta)
-            },
-            signal,
-            })
+            const result = await streamProvider(route)
             totalUsage = addUsage(totalUsage, result.usage)
             providerHealth.delete(providerHealthKey(route))
+            if (profilingEnabled()) {
+              recordModelCall({
+                callIndex: steps,
+                actor: currentAgent().name,
+                wallMs: Date.now() - callStartedAt,
+                ttftMs: firstOutputAt ? firstOutputAt - callStartedAt : undefined,
+                inputTokens: result.usage.inputTokens,
+                cacheReadTokens: result.usage.cacheReadTokens,
+                cacheWriteTokens: result.usage.cacheWriteTokens,
+                outputTokens: result.usage.outputTokens,
+                toolCalls: result.content.filter((block) => block.type === 'tool_use').length,
+                systemChars: systemPrompt.length,
+                dynamicSystemChars: systemDynamicPrompt?.length ?? 0,
+                toolDefs: toolDefinitions.length,
+                messageCount: messages.length,
+              })
+            }
             return result.content
           } catch (error) {
             lastError = error
@@ -440,6 +468,72 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
       stopAnimation()
       cursor?.stop()
       if (useAnimation) endTextTurn()
+    }
+
+    async function streamProvider(route: ProviderRoute) {
+      // A ChatGPT subscription is backed by the separately authenticated Codex
+      // CLI, which executes its own workspace tools. Treat that hand-off as one
+      // critical, approval-gated action rather than silently bypassing Elia's
+      // safety boundary. Normal API providers still return Elia tool calls.
+      const delegated = route.providerName === 'codex'
+      const request = { name: 'codex_delegate', input: { model: route.model, path: process.cwd() } }
+      const startedAt = Date.now()
+      let assessment: ActionAssessment | undefined
+      if (delegated) {
+        const gate = await activeActionGovernor().check(request)
+        assessment = gate.assessment
+        if (!gate.allowed) throw new Error(gate.message ?? `Codex subscription execution blocked: ${gate.assessment.reason}`)
+        if (verbose) writeToolCall(request.name, request.input)
+      }
+
+      try {
+        const result = await route.provider.streamTurn({
+            system: systemPrompt,
+            systemDynamic: systemDynamicPrompt,
+            messages,
+            tools: toolDefinitions,
+            onText: (delta) => {
+              emittedOutput = true
+              noteFirstOutput()
+              stopAnimation()
+              cursor?.beforeText()
+              onText?.(delta)
+              cursor?.afterText()
+            },
+            onThinking: (delta) => {
+              // Reasoning is real output too — a retry after some has been shown
+              // would duplicate it in the terminal exactly like retrying after text.
+              emittedOutput = true
+              noteFirstOutput()
+              stopAnimation()
+              onThinking?.(delta)
+            },
+            onActivity: onActivity ? (activity) => {
+              // Provider activity can include commands and file edits. Once it
+              // is visible or actionable, retrying another route could repeat
+              // work, so it has the same no-retry boundary as streamed text.
+              emittedOutput = true
+              noteFirstOutput()
+              stopAnimation()
+              cursor?.beforeText()
+              onActivity?.(activity)
+              cursor?.afterText()
+            } : undefined,
+            signal,
+          })
+        if (delegated) {
+          if (verbose) writeToolResult(request.name, 'Codex completed its workspace run.', false, false, Date.now() - startedAt)
+          onTool?.({ name: request.name, input: request.input, result: 'Codex completed its workspace run.', isError: false, durationMs: Date.now() - startedAt, cached: false, assessment })
+        }
+        return result
+      } catch (error) {
+        if (delegated) {
+          const result = error instanceof Error ? error.message : String(error)
+          if (verbose) writeToolResult(request.name, result, true, false, Date.now() - startedAt)
+          onTool?.({ name: request.name, input: request.input, result, isError: true, durationMs: Date.now() - startedAt, cached: false, assessment })
+        }
+        throw error
+      }
     }
   }
 }

@@ -24,11 +24,15 @@ export function createOpenAICompatibleProvider(
   const passthroughReasoning = options.thinking?.enabled ?? true
 
   return {
-    async streamTurn({ system, messages, tools, onText, onThinking, signal }: StreamTurnParams) {
+    async streamTurn({ system, systemDynamic, messages, tools, onText, onThinking, signal }: StreamTurnParams) {
+      // The stable prompt stays first so an OpenAI-compatible endpoint's
+      // automatic prefix caching still matches on it; the per-turn dynamic
+      // suffix follows it.
+      const fullSystem = systemDynamic && systemDynamic.trim() ? `${system}\n\n${systemDynamic}` : system
       const runner = client.chat.completions
         .stream({
           model,
-          messages: toOpenAIMessages(system, messages),
+          messages: toOpenAIMessages(fullSystem, messages),
           tools: toOpenAITools(tools),
           // Without this the final streamed response has no usage data at all.
           stream_options: { include_usage: true },
@@ -58,7 +62,7 @@ export function createOpenAICompatibleProvider(
         if (!isStreamingUnsupported(err)) throw err
         const completion = await client.chat.completions.create({
           model,
-          messages: toOpenAIMessages(system, messages),
+          messages: toOpenAIMessages(fullSystem, messages),
           tools: toOpenAITools(tools),
           stream: false,
         }, signal ? { signal } : undefined)

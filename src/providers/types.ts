@@ -29,12 +29,26 @@ export interface ToolDefinition {
 }
 
 export interface StreamTurnParams {
+  /**
+   * The stable system prompt — fixed for the whole session. Providers that
+   * support prompt caching pin this to their longest cache TTL so a slow tool
+   * call or a long pause between user turns does not force it to be reprocessed.
+   */
   system: string
+  /**
+   * Optional per-turn system content that changes between user turns (e.g.
+   * query-ranked project memory). Kept separate from `system` so it does not
+   * invalidate the cached stable prefix; providers append it right after
+   * `system` with its own shorter-lived cache breakpoint.
+   */
+  systemDynamic?: string
   messages: ChatMessage[]
   tools: ToolDefinition[]
   onText: (delta: string) => void
   /** Streamed reasoning, when the provider/model produces any. Never guaranteed to fire. */
   onThinking?: (delta: string) => void
+  /** Structured progress from agentic providers (plans, commands, edits, and runtime status). */
+  onActivity?: (activity: ProviderActivity) => void
   /** Abort the in-flight provider request when the owning run is cancelled. */
   signal?: AbortSignal
 }
@@ -57,6 +71,14 @@ export interface Usage {
   outputTokens: number
   cacheReadTokens: number
   cacheWriteTokens: number
+}
+
+/** User-visible progress emitted by agentic providers while a turn is running. */
+export interface ProviderActivity {
+  kind: 'turn' | 'plan' | 'command' | 'command_output' | 'file_change' | 'diff' | 'tool' | 'model' | 'warning' | 'status'
+  title: string
+  detail?: string
+  status?: 'started' | 'updated' | 'completed' | 'failed' | 'warning'
 }
 
 export interface Provider {

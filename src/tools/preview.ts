@@ -1,16 +1,26 @@
+import { existsSync, readFileSync } from 'node:fs'
+import { dirname, join, relative } from 'node:path'
 import type { Tool } from './types.ts'
 import { ensurePreviewServer } from '../preview/server.ts'
 import { launchInBrowser } from '../preview/launchChrome.ts'
+import { resolveWorkspacePath } from '../autonomy/context.ts'
+import { paths } from '../config.ts'
+import { runShell } from '../shell.ts'
+import { activeActionGovernor } from '../autonomy/governor.ts'
+
+const BUNDLER = /\b(vite|webpack|parcel|rollup|esbuild|@vitejs|next|@remix-run|astro|@sveltejs)\b/
+const BUILD_TIMEOUT_MS = 240_000
 
 export const previewTool: Tool = {
   name: 'preview',
   description:
-    'Open something visually in a real Chrome window. Pass `path` for a file under the workspace directory (served locally with push-based live-reload — the window updates automatically as you keep editing the file). Pass `url` instead for an already-running server (e.g. one you started with run_command) — opened directly, without live-reload.',
+    'Open something visually in a real Chrome window. Pass `path` for a file under the workspace (served locally with push-based live-reload). If the file belongs to a project that needs a build (Vite, Next, etc.), preview runs its `build` script first and serves the output — so you never have to start a dev server. Pass `url` instead for an already-running server, opened directly.',
   input_schema: {
     type: 'object',
     properties: {
-      path: { type: 'string', description: 'Path relative to the workspace directory, e.g. "index.html"' },
+      path: { type: 'string', description: 'Path relative to the workspace, e.g. "airbnb-mvp/index.html"' },
       url: { type: 'string', description: 'An already-running URL to open directly, e.g. "http://localhost:3000"' },
+      build: { type: 'boolean', description: 'Force (true) or skip (false) the build step. Default: auto — build when the project has a bundler and a build script.' },
     },
   },
   async execute(input) {
@@ -18,9 +28,9 @@ export const previewTool: Tool = {
     const url = input.url === undefined ? undefined : typeof input.url === 'string' ? input.url.trim() : undefined
     if (input.path !== undefined && typeof input.path !== 'string') throw new Error('preview "path" must be a string')
     if (input.url !== undefined && typeof input.url !== 'string') throw new Error('preview "url" must be a string')
-
     if (!path && !url) throw new Error('preview requires either "path" or "url"')
     if (path && url) throw new Error('preview accepts only one of "path" or "url", not both')
+
     if (url) {
       let parsed: URL
       try {
@@ -29,16 +39,76 @@ export const previewTool: Tool = {
         throw new Error(`preview URL is invalid: ${url}`)
       }
       if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') throw new Error('preview URL must use http or https')
+      return (await launchInBrowser(url)).message
     }
 
-    const target = url ?? buildWorkspaceUrl(path!)
-    const result = await launchInBrowser(target)
-    return result.message
+    let servePath = path!
+    let serveRoot = paths.workspace
+    let note = ''
+
+    const project = findProject(resolveWorkspacePath(path!))
+    if (project && input.build !== false) {
+      const built = pickBuildOutput(project.dir)
+      const wants = input.build === true || (project.hasBuildScript && project.usesBundler && !built)
+      if (wants) {
+        const command = `${project.runner} run build`
+        const gate = await activeActionGovernor().check({ name: 'run_command', input: { command } })
+        if (!gate.allowed) return `preview wanted to build this project first (${command}) but that was not approved. Approve it, or point preview at a plain HTML file.`
+        const result = await runShell(command, BUILD_TIMEOUT_MS, project.dir)
+        if (result.exitCode !== 0 || result.timedOut) {
+          return `Build failed — nothing to preview yet.\n$ ${command}\n${(result.stderr || result.stdout).slice(-1500)}`
+        }
+      }
+      const out = pickBuildOutput(project.dir)
+      if (out) {
+        serveRoot = out
+        servePath = 'index.html'
+        note = ` (served the built output from ${relative(paths.workspace, out) || '.'})`
+      }
+    }
+
+    const server = ensurePreviewServer(serveRoot)
+    const target = `${server.baseUrl}/${servePath.replace(/^\/+/, '').split('/').map(encodeURIComponent).join('/')}`
+    return `${(await launchInBrowser(target)).message}${note}`
   },
 }
 
-function buildWorkspaceUrl(relativePath: string): string {
-  const server = ensurePreviewServer()
-  const encodedPath = relativePath.replace(/^\/+/, '').split('/').map((segment) => encodeURIComponent(segment)).join('/')
-  return `${server.baseUrl}/${encodedPath}`
+interface ProjectInfo {
+  dir: string
+  runner: 'bun' | 'npm' | 'pnpm' | 'yarn'
+  hasBuildScript: boolean
+  usesBundler: boolean
+}
+
+function findProject(fileOrDir: string): ProjectInfo | undefined {
+  let dir = existsSync(fileOrDir) && !fileOrDir.match(/\.[a-z]+$/i) ? fileOrDir : dirname(fileOrDir)
+  for (let i = 0; i < 6; i += 1) {
+    const pkgPath = join(dir, 'package.json')
+    if (existsSync(pkgPath)) {
+      try {
+        const pkg = JSON.parse(readFileSync(pkgPath, 'utf8')) as { scripts?: Record<string, string>; dependencies?: Record<string, string>; devDependencies?: Record<string, string> }
+        const deps = JSON.stringify({ ...pkg.dependencies, ...pkg.devDependencies, ...pkg.scripts })
+        return {
+          dir,
+          runner: existsSync(join(dir, 'bun.lock')) || existsSync(join(dir, 'bun.lockb')) ? 'bun' : existsSync(join(dir, 'pnpm-lock.yaml')) ? 'pnpm' : existsSync(join(dir, 'yarn.lock')) ? 'yarn' : 'npm',
+          hasBuildScript: Boolean(pkg.scripts?.build),
+          usesBundler: BUNDLER.test(deps),
+        }
+      } catch {
+        return undefined
+      }
+    }
+    const parent = dirname(dir)
+    if (parent === dir) return undefined
+    dir = parent
+  }
+  return undefined
+}
+
+function pickBuildOutput(projectDir: string): string | undefined {
+  for (const name of ['dist', 'build', 'out', '.output/public']) {
+    const candidate = join(projectDir, name)
+    if (existsSync(join(candidate, 'index.html'))) return candidate
+  }
+  return undefined
 }

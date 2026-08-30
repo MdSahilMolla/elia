@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test'
 import { todoWriteTool } from './todo.ts'
-import { resetActiveTodoList } from '../autonomy/todoList.ts'
+import { activeTodoList, createTodoList, resetActiveTodoList, withTodoList } from '../autonomy/todoList.ts'
 
 test('todo_write renders the list with status markers', async () => {
   resetActiveTodoList()
@@ -39,4 +39,23 @@ test('todo_write validates item shape', async () => {
   await expect(todoWriteTool.execute({ items: 'not-an-array' })).rejects.toThrow('items must be an array')
   await expect(todoWriteTool.execute({ items: [{ content: '', status: 'pending' }] })).rejects.toThrow('content must be a non-empty string')
   await expect(todoWriteTool.execute({ items: [{ content: 'x', status: 'bogus' }] })).rejects.toThrow('status must be one of')
+})
+
+test('simultaneous chats keep independent working plans', async () => {
+  const first = createTodoList()
+  const second = createTodoList()
+
+  await Promise.all([
+    withTodoList(first, async () => {
+      await todoWriteTool.execute({ items: [{ content: 'first chat plan', status: 'in_progress' }] })
+      expect(activeTodoList()).toBe(first)
+    }),
+    withTodoList(second, async () => {
+      await todoWriteTool.execute({ items: [{ content: 'second chat plan', status: 'pending' }] })
+      expect(activeTodoList()).toBe(second)
+    }),
+  ])
+
+  expect(first.render()).toBe('[~] first chat plan')
+  expect(second.render()).toBe('[ ] second chat plan')
 })

@@ -14,6 +14,18 @@ describe('action contracts', () => {
     expect(evaluatePostconditions(contract, 'exit code: 0\nstdout:\n1.2.3', process.cwd())).toMatchObject({ ok: true, phase: 'postcondition' })
   })
 
+  test('shell builtins like cd are exempt from the command-available precondition', () => {
+    const contract = contractForAction({ name: 'run_command', input: { command: 'cd my-app && npm install' } }, process.cwd(), 'run:cd:1')
+    expect(contract.preconditions.some((p) => p.kind === 'command-available')).toBe(false)
+  })
+
+  test('a dev-server command gets no exit-zero postcondition (it never exits)', () => {
+    const contract = contractForAction({ name: 'run_command', input: { command: 'npm run dev' } }, process.cwd(), 'run:dev:1')
+    expect(contract.postconditions).toEqual([])
+    const normal = contractForAction({ name: 'run_command', input: { command: 'npm run build' } }, process.cwd(), 'run:build:1')
+    expect(normal.postconditions).toHaveLength(1)
+  })
+
   test('does not mark a timed-out or non-zero command as verified', () => {
     const contract = contractForAction({ name: 'run_command', input: { command: 'bun test' } }, process.cwd(), 'run:command:2')
     expect(evaluatePostconditions(contract, 'exit code: 1\nstderr:\nfailed', process.cwd())).toMatchObject({ ok: false, failures: ['command did not return exit code 0 (exit code 1)'] })

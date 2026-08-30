@@ -32,6 +32,9 @@ export interface ContractEvaluation {
 const SAFE_BROWSER_ACTIONS = new Set(['status', 'navigate', 'refresh', 'back', 'forward', 'snapshot', 'extract', 'scroll', 'wait', 'wait_for', 'verify'])
 const SHELL_COMMAND = /^(?:[A-Za-z_][A-Za-z0-9_]*=[^\s]+\s+)*(?:command\s+)?([A-Za-z0-9_./-]+)(?:\s|$)/
 
+/** Commands that start a server and never return — measured on "did it come up", not "exit 0". */
+const LONG_RUNNING_SERVER = /\b(?:(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?(?:dev|start|serve|preview)|vite(?:\s|$)|next\s+(?:dev|start)|nodemon|ts-node-dev|concurrently|http-server|serve(?:\s|$)|flask\s+run|uvicorn|gunicorn|rails\s+s(?:erver)?|php\s+artisan\s+serve)\b/i
+
 export function contractForAction(request: ActionRequest, cwd: string, idempotencyKey: string): ActionContract {
   const preconditions: ContractCheck[] = []
   const postconditions: ContractCheck[] = []
@@ -63,10 +66,18 @@ export function contractForAction(request: ActionRequest, cwd: string, idempoten
   if (request.name === 'run_command') {
     const command = typeof request.input.command === 'string' ? request.input.command.trim() : ''
     const executable = SHELL_COMMAND.exec(command)?.[1]
-    if (executable && /^[A-Za-z0-9_./-]+$/.test(executable)) {
+    // Shell builtins have no PATH entry — checking for them always fails.
+    const SHELL_BUILTINS = new Set(['cd', 'echo', 'export', 'set', 'source', 'pushd', 'popd', 'dir', 'type', 'command', 'exit', 'true', 'false'])
+    if (executable && /^[A-Za-z0-9_./-]+$/.test(executable) && !SHELL_BUILTINS.has(executable.toLowerCase())) {
       preconditions.push({ kind: 'command-available', value: executable, description: `${executable} must be available before the command runs` })
     }
-    postconditions.push({ kind: 'shell-exit-zero', description: 'the command must return exit code 0 and not time out' })
+    // A long-running server (npm run dev, vite, next dev, a bare `serve`) never
+    // exits, so "exit 0" is the wrong bar — it would always look like a failure
+    // and drive a repair loop. Those are started differently (see run_command's
+    // own guidance); everything else must still exit clean.
+    if (!LONG_RUNNING_SERVER.test(command)) {
+      postconditions.push({ kind: 'shell-exit-zero', description: 'the command must return exit code 0 and not time out' })
+    }
   }
 
   if (request.name === 'browser') {

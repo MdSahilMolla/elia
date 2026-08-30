@@ -13,6 +13,8 @@ import { readSpreadsheetTool } from './readSpreadsheet.ts'
 import { spreadsheetTool } from './spreadsheet.ts'
 import { presentationTool } from './presentation.ts'
 import { recallTool } from './recall.ts'
+import { createRationaleTool, createWhyTool } from '../autonomy/rationale.ts'
+import { createDirectLessonsTool } from '../autonomy/lessons.ts'
 import { browserTool } from './browser.ts'
 import { communicationTool } from './communication.ts'
 import { projectProfileTool } from './projectProfile.ts'
@@ -36,6 +38,9 @@ export const tools: Tool[] = [
   runCommandTool,
   todoWriteTool,
   recallTool,
+  createWhyTool(),
+  createRationaleTool(),
+  createDirectLessonsTool(),
   projectProfileTool,
   productionReadinessTool,
   deploymentTool,

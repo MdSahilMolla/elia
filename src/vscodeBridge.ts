@@ -118,6 +118,14 @@ export function createBridgeSession(options: BridgeSessionOptions): BridgeSessio
         streamedThinking += delta
         event('thinking_delta', { requestId: request.id, sessionId, text: delta })
       },
+      onActivity: (activity) => event('provider_activity', {
+        requestId: request.id,
+        sessionId,
+        kind: activity.kind,
+        status: activity.status,
+        title: redactText(activity.title, 240),
+        detail: activity.detail ? redactText(activity.detail, 4_000) : undefined,
+      }),
       approveAction: governanceMode === 'supervised'
         ? async (assessment, action) => waitForApproval(request.id, 'action', { assessment, request: redactActionInput(action.name, action.input) })
         : undefined,

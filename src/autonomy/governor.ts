@@ -44,7 +44,7 @@ export interface ActionGovernor {
 
 const CRITICAL_COMMAND = /\b(rm\s+-rf|rm\s+--no-preserve-root|mkfs|dd\s+if=|shutdown|reboot|poweroff|drop\s+(database|table)|truncate\s+table|git\s+(push|reset\s+--hard|clean\s+-fd)|force[- ]push|sudo\b|chmod\s+777|chown\s+-R|kill\s+-9|kubectl\s+(apply|delete|rollout|scale)|helm\s+(install|upgrade|uninstall)|docker\s+(push|rm|system\s+prune)|terraform\s+(apply|destroy)|prisma\s+migrate\s+(deploy|reset)|alembic\s+upgrade|drizzle-kit\s+push|npm\s+publish|pnpm\s+publish|bun\s+publish|vercel\s+.*--prod|fly\s+deploy|railway\s+up|gcloud\s+.*\bdeploy\b|aws\s+(cloudformation|ecs|rds|lambda)|curl[^\n|]*\|\s*(sh|bash)|wget[^\n|]*\|\s*(sh|bash)|deploy\s+(to\s+)?prod(uction)?|send\s+.*(email|message)|publish\b|tweet\b|buy\b|purchase\b|checkout\b|transfer\b|wire\b)\b/i
 const REVIEW_COMMAND = /\b(git\s+commit|npm\s+install|pnpm\s+install|yarn\s+add|bun\s+(add|install)|pip\s+install|docker\s+build|docker\s+run|curl\b|wget\b|ssh\b|scp\b|gh\s+pr|deploy\b)\b/i
-const READ_ONLY_COMMAND = /^(?:command\s+)?(?:pwd|ls|find|grep|rg|git\s+(?:status|diff|log|show|branch)|bun\s+(?:test|run\s+(?:typecheck|lint|format\s+--check))|npm\s+(?:test|run\s+(?:typecheck|lint|format\s+--check))|node\s+--version|bun\s+--version|npm\s+--version|printf|echo|cat|head|tail|sed|awk)\b/i
+const READ_ONLY_COMMAND = /^(?:command\s+)?(?:pwd|ls|find|grep|rg|git\s+(?:status|diff|log|show|branch)|(?:bun|npm|pnpm|yarn)\s+(?:test|run\s+(?:test|typecheck|type-check|tsc|check-types|lint|format\s+--check|check))|npx\s+(?:--no-install\s+)?tsc\s+--noEmit|cargo\s+(?:check|test|clippy)|go\s+(?:build|test|vet)\b[^\n]*|pytest\b[^\n]*|mypy\b[^\n]*|node\s+--version|bun\s+--version|npm\s+--version|printf|echo|cat|head|tail|sed|awk)\b/i
 const SHELL_CONTROL_SYNTAX = /[;&|<>`$]|\$\(|\b(?:eval|exec|source)\b/i
 const SECRET_KEY = /(password|passwd|token|secret|api[-_]?key|authorization|cookie|credential)/i
 const EXTERNAL_WRITE_COMMAND = /\b(curl|wget)\b[^\n]*(--data(?:-raw)?|\s-d\s|\s-X\s*(POST|PUT|PATCH|DELETE)|--upload-file|--form)\b/i
@@ -136,7 +136,7 @@ export function assessAction(request: ActionRequest, cwd = currentAgent().cwd ??
       : assessment('safe', 'allow', `${name} is workspace-scoped and checkpointable`, name, path ? [path] : [], true)
   }
 
-  if (name === 'read_file' || name === 'list_files' || name === 'grep' || name === 'recall' || name === 'board_read' || name === 'board_post' || name === 'todo_write') {
+  if (name === 'read_file' || name === 'list_files' || name === 'grep' || name === 'recall' || name === 'board_read' || name === 'board_post' || name === 'todo_write' || name === 'why' || name === 'record_rationale' || name === 'note_lesson') {
     const path = typeof input.path === 'string' ? input.path : ''
     return path && !isPathWithinWorkspace(path, cwd)
       ? assessment('critical', 'approve', `${name} may access data outside the active workspace or through an invalid path`, name, [path], false)

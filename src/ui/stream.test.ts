@@ -1,5 +1,14 @@
 import { expect, test } from 'bun:test'
-import { summarizeResult } from './stream.ts'
+import { providerActivityText, summarizeResult } from './stream.ts'
+
+test('provider activity preserves useful multiline progress while redacting secrets', () => {
+  expect(providerActivityText({
+    kind: 'command_output',
+    title: 'Command output',
+    detail: 'building\nsk-1234567890abcdef\nfinished',
+    status: 'updated',
+  })).toBe('Command output\nbuilding\n[REDACTED]\nfinished')
+})
 
 test('summarizes a successful shell result to status plus its last output line', () => {
   const result = 'exit code: 0\nstdout:\nbun test v1.3.14\n 569 pass\n 0 fail\nRan 569 tests across 81 files. [12.8s]\n'

@@ -2,6 +2,24 @@
 import * as readline from 'node:readline/promises'
 import type { ConversationMessage, AgentMode } from './agent.ts'
 import { writeNotice, writeError, writeUsageLine } from './ui/stream.ts'
+import { sessionTranscript } from './ui/transcript.ts'
+import { colorizeDiffBlock } from './ui/render.ts'
+import { lastAssistantText, type ToolEvent } from './agentLoop.ts'
+import type { ProviderActivity } from './providers/types.ts'
+import type { SlashOutcome as InkSlashOutcome } from './ui/app/index.tsx'
+import type { PackageKind } from './marketplace/registry.ts'
+
+interface TurnUiHooks {
+  onText?: (delta: string) => void
+  onThinking?: (delta: string) => void
+  onActivity?: (activity: ProviderActivity) => void
+  onTool?: (event: ToolEvent) => void
+  onToolStart?: (call: { id: string; name: string; input: Record<string, unknown> }) => void
+  /** External cancellation (the Ink app's Esc handler). */
+  signal?: AbortSignal
+  /** Read-only "propose a plan first" turn. */
+  planMode?: boolean
+}
 import { playIntro } from './ui/character.ts'
 import { ZERO_USAGE, getSessionSummaryLine, recordTopLevelTurn, formatUsageLine } from './usage.ts'
 import { createSlashPrompt, type SlashCommand } from './ui/slashPrompt.ts'
@@ -14,7 +32,8 @@ import { inferTaskKind, taskSessions } from './taskSessions.ts'
 import { isAgentPersona, type AgentPersona } from './agents/types.ts'
 import { CAPABILITIES } from './capabilities.ts'
 import { MAX_GOVERNED_ACTIONS, type ActionApproval, type ActionAssessment, type ActionRequest } from './autonomy/governor.ts'
-import { emitEvent, machineReadable, plainOutput, quietOutput } from './ui/runtime.ts'
+import { emitEvent, interactiveTerminal, machineReadable, plainOutput, quietOutput } from './ui/runtime.ts'
+import { renderWorkspacePanel } from './ui/workspacePanel.ts'
 import { installShutdownHandlers, registerShutdownCleanup } from './ui/shutdown.ts'
 import { redactText } from './ui/redact.ts'
 import { loadUserConfig, userConfigPath, writeUserConfig } from './userConfig.ts'
@@ -30,6 +49,17 @@ const REPL_COMMANDS: SlashCommand[] = [
   { name: '/sessions', description: 'see every other elia session running in this project — what each is doing, its model, and its session id to resume it' },
   { name: '/artifact', description: 'browse saved plan artifacts with arrow keys and search, or /artifact <name> to view one directly' },
   { name: '/settings', description: 'browse every setting — model, reasoning effort, risk checks, skills — and switch with arrow keys' },
+  { name: '/expand', description: 'reprint the last tool result in full (or /expand <n> for the nth), undoing scrollback folding' },
+  { name: '/why', description: 'show recorded rationale for a file or topic — the decisions and constraints behind it (/why src/foo.ts)' },
+  { name: '/lessons', description: 'show what earlier sessions learned about this project' },
+  { name: '/verify', description: 'run the project checks now, or /verify on|off to toggle the automatic post-turn check' },
+  { name: '/track', description: "elia's track record on this project — how many changes landed clean, by area, and where it's weakest" },
+  { name: '/skills', description: 'list the loaded skills (learned tools) available this session' },
+  { name: '/marketplace', description: 'search and install: npm/bun packages, pip packages, skills — /marketplace npm <query>' },
+  { name: '/packages', description: 'everything installed for this project — packages and skills — select one to remove it' },
+  { name: '/status', description: 'show the workspace panel — session, other chats, plan, subagents, artifacts' },
+  { name: '/cost', description: 'show the session token and estimated-dollar breakdown' },
+  { name: '/export', description: 'write the whole conversation to Markdown (/export <path> to choose the file)' },
   { name: '@skills', description: 'browse loaded skills and choose which skill tools are active for the next turn' },
 ]
 
@@ -118,7 +148,7 @@ Background autonomy:
 Editor / external integration:
   elia bridge                              Start the local JSONL-over-stdio bridge (used by the Elia VS Code extension)
   elia bridge --http [--port 4319] [--host 127.0.0.1]  Same bridge protocol over WebSocket instead of stdio,
-                                            for any external client — SDKs, a future TUI, other editors. Binds to
+                                            for any external client — SDKs, other editors. Binds to
                                             localhost only unless --host is set explicitly.
 
 Provider setup:
@@ -167,10 +197,6 @@ Inside an interactive session:
                               intelligence across trade, geopolitics, financial markets,
                               supply chain, policy, and commodities
   elia --cyber                Start (or run a one-shot prompt) in cyber mode
-  elia --tui                  Start a full terminal UI (scrollback, streaming, borders) instead of
-                              the plain readline prompt. Combine with --cyber/--sports/etc. for that
-                              mode. Not yet a superset of the REPL: no slash commands, --continue,
-                              --resume, or one-shot prompt in this first version.
   elia --json                 Emit stable JSONL lifecycle events for automation
   elia --plain                Disable color, animation, and in-place terminal redraws
   elia --quiet                Print the final answer and essential failures only; keep TTY editing
@@ -185,6 +211,10 @@ Inside an interactive session:
   --quiet minimizes progress; --verbose includes additional progress detail. Errors go to stderr
   in human modes. Sessions auto-save to .elia/sessions/. Configure a provider with elia config set
   or via .env — see .env.example.
+
+  Diagnostics: --profile-turns (or ELIA_PROFILE=1) records every model call's
+  cache-read/write split and time-to-first-token and prints a table at the end —
+  use it to see how well the prompt cache is holding across a session.
 
 Set ELIA_FAST_PROVIDER/ELIA_FAST_MODEL to give elia a cheap fast tier for recon work; it
 routes investigation there and keeps the strong model for planning, building, and review.`)
@@ -206,6 +236,18 @@ const args = subcommand ? rawArgs.slice(1) : rawArgs
 
 function hasFlag(...names: string[]): boolean {
   return args.some((arg) => names.some((name) => arg === name || arg === `${name}=true`))
+}
+
+// `--profile-turns` is a session-wide diagnostic: every model round-trip records
+// its cache-read/write split and time-to-first-token, and a table prints at the
+// end. Distinct from `elia auto --profile <fast|balanced|thorough>`, which
+// selects a run profile. `ELIA_PROFILE=1` in the environment does the same.
+if (hasFlag('--profile-turns')) process.env.ELIA_PROFILE = '1'
+
+async function printTurnProfileReport(): Promise<void> {
+  const { renderProfileReport } = await import('./profile.ts')
+  const report = renderProfileReport()
+  if (report && !machineReadable) process.stdout.write(`\n${dim(report)}\n`)
 }
 
 function flagValue(...names: string[]): string | undefined {
@@ -248,13 +290,14 @@ function userMessage(text: string): ConversationMessage {
 }
 
 async function classifyCommandRisk(command: string): Promise<{ risky: boolean; reason?: string }> {
-  // The subscription adapter invokes Codex in read-only mode and deliberately
-  // does not expose Elia's tools to it. Asking that model to call flag_risk
-  // therefore wastes three full model turns and always fails closed. Its actual
-  // tool/action boundary remains unavailable in this mode, so no pre-turn
-  // approval is needed; normal provider modes still use the classifier.
+  // Codex is an autonomous workspace-writing agent, not an Elia tool-calling
+  // model — every prompt hands the whole task to it. That hand-off is always
+  // worth an explicit confirmation, so flag it risky rather than skipping the
+  // check. (The Ink REPL confirms this directly; this covers the classic path.)
   const { config } = await import('./config.ts')
-  if (config.providerName === 'codex') return { risky: false }
+  if (config.providerName === 'codex') {
+    return { risky: true, reason: `${config.model} (Codex) will run this task autonomously in your workspace — it can read, edit, and run commands.` }
+  }
   const { classifyRisk } = await import('./autonomy/risk.ts')
   return classifyRisk(command)
 }
@@ -1205,15 +1248,6 @@ async function runInteractive(): Promise<void> {
 
   let mode: AgentMode = hasFlag('--cyber') ? 'cyber' : hasFlag('--sports') ? 'sports' : hasFlag('--fitness') ? 'fitness' : hasFlag('--battmann') ? 'battmann' : 'dev'
 
-  if (hasFlag('--tui')) {
-    // A full alternative front end (real conversation view, streaming, scrollback)
-    // over the same runTurn agent loop — not (yet) a superset of the plain REPL's
-    // slash commands, checkpoints, or task dashboard, so --continue/--resume/a
-    // one-shot prompt still go through the readline path below.
-    const { runTui } = await import('./ui/tui.tsx')
-    return runTui(mode)
-  }
-
   let persona: AgentPersona | undefined
   let selectedSkillNames: string[] | undefined
   let messages: ConversationMessage[] = []
@@ -1225,6 +1259,12 @@ async function runInteractive(): Promise<void> {
   // shared governor still blocks or requests approval for critical actions.
   // Safe and reversible work runs end to end without interruption.
   let replMode: 'manual' | 'auto' = hasFlag('--yolo', '-y') ? 'auto' : 'manual'
+  // After a turn that changed code, run the project's own checks and repair any
+  // failure before reporting done. On by default; --no-verify or /verify off.
+  let autoVerify = !hasFlag('--no-verify')
+  // Output from `!cmd` lines, held until the next real prompt so the model sees
+  // what the user just ran without an extra round-trip.
+  const carriedShellContext: string[] = []
 
   if (continueFlag || resumeId) {
     const loaded = resumeId ? await loadSession(resumeId) : await loadLatestSession()
@@ -1272,13 +1312,18 @@ async function runInteractive(): Promise<void> {
   )
 
   /** Snapshots messages + touched files around one turn, then records a rewind point. */
-  async function runCheckpointedTurn(userText: string, approveAction?: ActionApproval, skillNames = selectedSkillNames): Promise<void> {
+  async function runCheckpointedTurn(userText: string, approveAction?: ActionApproval, skillNames = selectedSkillNames, uiHooks?: TurnUiHooks): Promise<void> {
     const tracker = createFileTracker()
     const task = taskSessions.create(inferTaskKind(userText, userText), redactText(userText, 160), 'Starting request')
     taskSessions.update(task.id, { status: 'running', action: 'Thinking', detail: 'Planning the next action' })
     pushHeartbeat(true, redactText(userText, 160))
     const controller = new AbortController()
     let stopRequested = false
+    // Signals for the per-turn outcome record (competence map + regret nudge).
+    let toolErrorCount = 0
+    let editRetryCount = 0
+    let verifyResult: import('./autonomy/outcomes.ts').VerifyResult = 'none'
+    let repairAttempts = 0
     const unregisterControls = taskSessions.registerControls(task.id, {
       cancel: () => {
         stopRequested = true
@@ -1287,6 +1332,10 @@ async function runInteractive(): Promise<void> {
       },
     })
     const unregisterShutdown = registerShutdownCleanup(() => controller.abort())
+    if (uiHooks?.signal) {
+      if (uiHooks.signal.aborted) controller.abort()
+      else uiHooks.signal.addEventListener('abort', () => controller.abort(), { once: true })
+    }
     emitEvent('turn_started', { taskId: task.id, sessionId, prompt: redactText(userText, 2000) })
     setActiveTracker(tracker)
     // Lets compaction (mid-loop, several call frames down) and the recall tool
@@ -1294,27 +1343,49 @@ async function runInteractive(): Promise<void> {
     setActiveLedgerSession({ id: sessionId, turn: checkpoints.length })
     const messagesBefore = structuredClone(messages)
     messages.push(userMessage(userText))
+    sessionTranscript.appendUser(userText)
+
+    const runModelTurn = () =>
+      runTurn(messages, {
+        mode,
+        approveAction,
+        skillNames,
+        signal: controller.signal,
+        silent: Boolean(uiHooks),
+        planMode: uiHooks?.planMode,
+        onText: uiHooks?.onText,
+        onThinking: uiHooks?.onThinking,
+        onToolStart: uiHooks?.onToolStart,
+        onActivity: (activity) => {
+          const action = redactText(activity.title, 120)
+          taskSessions.update(task.id, { status: 'running', action, detail: redactText(activity.detail ?? activity.title, 500) })
+          uiHooks?.onActivity?.(activity)
+          pushHeartbeat(true, action)
+        },
+        onTool: (event) => {
+          const action = event.isError ? `Retrying after ${event.name}` : event.name
+          if (event.isError) {
+            toolErrorCount += 1
+            if (event.name === 'edit_file' || event.name === 'write_file') editRetryCount += 1
+          }
+          taskSessions.update(task.id, {
+            status: 'running',
+            action,
+            detail: event.isError ? redactText(event.result, 500) : 'Action completed successfully',
+            stepsCompleted: (taskSessions.get(task.id)?.stepsCompleted ?? 0) + 1,
+          })
+          sessionTranscript.recordTool(event)
+          uiHooks?.onTool?.(event)
+          pushHeartbeat(true, action)
+        },
+      })
+
     try {
       if (persona) {
         const { runPersonaTurn } = await import('./agents/orchestrator.ts')
         await runPersonaTurn(messages, persona, skillNames, controller.signal)
       } else {
-        const turnResult = await runTurn(messages, {
-          mode,
-          approveAction,
-          skillNames,
-          signal: controller.signal,
-          onTool: (event) => {
-            const action = event.isError ? `Retrying after ${event.name}` : event.name
-            taskSessions.update(task.id, {
-              status: 'running',
-              action,
-              detail: event.isError ? redactText(event.result, 500) : 'Action completed successfully',
-              stepsCompleted: (taskSessions.get(task.id)?.stepsCompleted ?? 0) + 1,
-            })
-            pushHeartbeat(true, action)
-          },
-        })
+        const turnResult = await runModelTurn()
         if (turnResult.stopReason === 'aborted') stopRequested = true
       }
       if (stopRequested || controller.signal.aborted) {
@@ -1322,6 +1393,67 @@ async function runInteractive(): Promise<void> {
         emitEvent('turn_finished', { taskId: task.id, sessionId, outcome: 'aborted' })
         return
       }
+
+      // Domain-aware self-defense: if this change touched an area elia has a poor
+      // track record in on this project, force one hard self-review of the diff
+      // before it can claim done — it reviews itself harder exactly where it has
+      // proven unreliable.
+      if (!persona && !uiHooks?.planMode && !controller.signal.aborted) {
+        const { touchedWeakDomain } = await import('./autonomy/outcomes.ts')
+        const weak = touchedWeakDomain(Object.keys(tracker.snapshot()))
+        if (weak.length > 0) {
+          const label = `Self-reviewing ${weak.join('/')} change (weak area)`
+          taskSessions.update(task.id, { status: 'running', action: 'Self-review', detail: label })
+          uiHooks?.onActivity?.({ kind: 'status', status: 'updated', title: label })
+          if (!uiHooks) writeNotice(label)
+          messages.push(
+            userMessage(
+              `This change is in "${weak.join('/')}", an area where past turns on this project landed clean less than 75% of the time. Before you finish: run \`git diff\`, then dispatch a \`critic\` and a \`bughunter\` sub-agent in parallel against that diff, and fix anything blocking they raise. Do not skip this.`,
+            ),
+          )
+          await runModelTurn()
+        }
+      }
+
+      // Green-by-construction: a turn that changed code isn't done until the
+      // project's own checks pass. Detect them, run them, and hand any failure
+      // back for a bounded repair — the "done!" that isn't is the single most
+      // common way an autonomous agent wastes your time.
+      if (!persona && autoVerify && !uiHooks?.planMode) {
+        const { changedCodeFiles, checkRoot, detectChecks } = await import('./autonomy/detectChecks.ts')
+        const { runVerification, describeVerification } = await import('./autonomy/verify.ts')
+        const changedAll = Object.keys(tracker.snapshot())
+        const changed = changedCodeFiles(changedAll)
+        const root = checkRoot(changedAll, process.cwd())
+        const checks = changed.length > 0 ? detectChecks(root) : []
+        if (checks.length > 0) {
+          const where = root === process.cwd() ? '' : ` in ${root}`
+          taskSessions.update(task.id, { status: 'running', action: 'Verifying', detail: `${checks.join(' && ')}${where}` })
+          uiHooks?.onActivity?.({ kind: 'status', status: 'updated', title: `Verifying${where} — ${checks.join(', ')}` })
+          if (!uiHooks) writeNotice(`Verifying${where}: ${checks.join(' && ')}`)
+          let outcome = await runVerification(checks, root, controller.signal)
+          for (let attempt = 1; !outcome.passed && attempt <= 2 && !controller.signal.aborted; attempt += 1) {
+            repairAttempts = attempt
+            const summary = `Verification failed (repair ${attempt}/2)`
+            uiHooks?.onActivity?.({ kind: 'status', status: 'warning', title: summary })
+            if (!uiHooks) writeNotice(`${summary} — ${describeVerification(outcome).split('\n')[0]}`)
+            messages.push(
+              userMessage(
+                `The project's checks fail after your changes — the task is not done:\n\n${describeVerification(outcome)}\n\nFix what broke. Run the check yourself to confirm before you stop.`,
+              ),
+            )
+            await runModelTurn()
+            outcome = await runVerification(checks, root, controller.signal)
+          }
+          verifyResult = outcome.passed ? 'pass' : 'fail'
+          const verdict = outcome.passed
+            ? `✓ verified — ${checks.join(', ')} pass`
+            : `⚠ checks still failing after 2 repair attempts — ${describeVerification(outcome).split('\n')[0]}`
+          uiHooks?.onActivity?.({ kind: 'status', status: outcome.passed ? 'completed' : 'warning', title: verdict })
+          if (!uiHooks) writeNotice(verdict)
+        }
+      }
+
       taskSessions.update(task.id, { status: 'done', action: 'Finished', detail: 'Request completed and session saved' })
       emitEvent('turn_finished', { taskId: task.id, sessionId, outcome: 'completed' })
     } catch (error) {
@@ -1338,7 +1470,23 @@ async function runInteractive(): Promise<void> {
       unregisterControls()
       unregisterShutdown()
       setActiveTracker(undefined)
+      sessionTranscript.appendAssistant(lastAssistantText(messages, ''))
+      sessionTranscript.endTurn()
       pushHeartbeat(false, taskSessions.get(task.id)?.action ?? 'Idle at prompt')
+      if (!persona) {
+        const { recordOutcome, domainsOf } = await import('./autonomy/outcomes.ts')
+        const changedPaths = Object.keys(tracker.snapshot())
+        recordOutcome({
+          prompt: redactText(userText, 120),
+          filesChanged: changedPaths.length,
+          domains: domainsOf(changedPaths),
+          editRetries: editRetryCount,
+          toolErrors: toolErrorCount,
+          verify: verifyResult,
+          repairAttempts,
+          aborted: stopRequested || controller.signal.aborted,
+        })
+      }
     }
     checkpoints.push({
       turn: checkpoints.length,
@@ -1389,40 +1537,34 @@ async function runInteractive(): Promise<void> {
     const taskSummary = renderTaskSummary(taskSessions)
     const contextLine = renderContextStatus(messages, await countEpisodes(sessionId))
     writeUsageLine(taskSummary ? `${contextLine}  ·  ${dim(taskSummary)}` : contextLine)
+    await printTurnProfileReport()
     return
   }
 
-  if (process.stdout.isTTY && !plainOutput && !machineReadable) await playIntro()
-  if (!machineReadable && !quietOutput) {
-    const taskSummary = renderTaskSummary(taskSessions)
-    process.stdout.write(
-      `${box(
-        [
-          `${dim('provider')}  ${config.providerLabel}${config.routingMode === 'auto' ? dim(' · auto fallback on') : ''}${config.cascadeEnabled ? dim(` · fast tier ${config.tiers.fast.label}`) : ''}`,
-          dim(describeThinking()),
-          `${dim('session')}   ${sessionId}${dim(' · /sessions to see other running sessions')}`,
-          ...(taskSummary ? [dim(taskSummary)] : []),
-        ],
-        { title: mode === 'cyber' ? 'elia — cyber mode' : mode === 'sports' ? 'elia — sports mode' : mode === 'fitness' ? 'elia — fitness mode' : mode === 'battmann' ? 'elia — Battmann mode' : 'elia — dev mode', borderColor: gold },
-      )}\n`,
+  if (process.stdout.isTTY && !plainOutput && !machineReadable && !interactiveTerminal) await playIntro()
+  // The live Ink REPL renders its own header/greeting; the classic readline path
+  // keeps the workspace-panel snapshot.
+  if (!machineReadable && !quietOutput && !interactiveTerminal) {
+    process.stdout.write(`${renderWorkspacePanel({ sessionId, mode, providerLabel: config.providerLabel, model: config.model })}\n`)
+  }
+  if (!interactiveTerminal) {
+    writeNotice(
+      mode === 'cyber'
+        ? 'cyber mode on — authorized security testing, vuln research, and CTFs only. type a prompt, "/" to see commands, or "exit" to quit'
+        : mode === 'sports'
+          ? 'sports mode on — evidence-aware match, scouting, performance, league, event, and sports-business analysis. type a prompt, "/" to see commands, or "exit" to quit'
+          : mode === 'fitness'
+            ? 'fitness mode on — conservative training, habit, recovery, and wellbeing support; not medical advice. type a prompt, "/" to see commands, or "exit" to quit'
+            : mode === 'battmann'
+              ? 'Battmann mode on — strategic risk intelligence across trade, geopolitics, markets, supply chain, policy, and commodities. type a prompt, "/" to see commands, or "exit" to quit'
+              : 'dev mode on — building, debugging, testing, browser, and task workflows available. type a prompt, "/" to see commands, or "exit" to quit (Ctrl+C also works)',
+    )
+    writeNotice(
+      replMode === 'auto'
+        ? 'auto mode (--yolo) — preliminary risk checks are skipped; safe work runs immediately, while governed irreversible actions still require explicit approval. "/settings" → Risk checks to turn checks back on.'
+        : 'manual mode — elia flags risky commands and asks before running them; safe commands just run. "/settings" → Risk checks for zero prompts.',
     )
   }
-  writeNotice(
-    mode === 'cyber'
-      ? 'cyber mode on — authorized security testing, vuln research, and CTFs only. type a prompt, "/" to see commands, or "exit" to quit'
-      : mode === 'sports'
-        ? 'sports mode on — evidence-aware match, scouting, performance, league, event, and sports-business analysis. type a prompt, "/" to see commands, or "exit" to quit'
-        : mode === 'fitness'
-          ? 'fitness mode on — conservative training, habit, recovery, and wellbeing support; not medical advice. type a prompt, "/" to see commands, or "exit" to quit'
-          : mode === 'battmann'
-            ? 'Battmann mode on — strategic risk intelligence across trade, geopolitics, markets, supply chain, policy, and commodities. type a prompt, "/" to see commands, or "exit" to quit'
-            : 'dev mode on — building, debugging, testing, browser, and task workflows available. type a prompt, "/" to see commands, or "exit" to quit (Ctrl+C also works)',
-  )
-  writeNotice(
-    replMode === 'auto'
-      ? 'auto mode (--yolo) — preliminary risk checks are skipped; safe work runs immediately, while governed irreversible actions still require explicit approval. "/settings" → Risk checks to turn checks back on.'
-      : 'manual mode — elia flags risky commands and asks before running them; safe commands just run. "/settings" → Risk checks for zero prompts.',
-  )
 
   function applyModelChoice(providerName: string, model?: string): void {
     const result = switchModel({ providerName, model })
@@ -1792,6 +1934,455 @@ async function runInteractive(): Promise<void> {
     }
   }
 
+  /** Run a read-only command and return its stdout, or '' if it fails / isn't installed. */
+  async function runShellQuiet(command: string): Promise<string> {
+    try {
+      const { runShell } = await import('./shell.ts')
+      const result = await runShell(command, 15_000, process.cwd())
+      return result.exitCode === 0 ? result.stdout : ''
+    } catch {
+      return ''
+    }
+  }
+
+  async function handleSlashForInk(input: string): Promise<InkSlashOutcome> {
+    const trimmed = input.trim()
+    const done = (text?: string): InkSlashOutcome => ({ handled: true, text })
+
+    // --- arrow-key pickers, now native to the Ink UI ---
+
+    if (trimmed === '/model' || trimmed === '/provider') {
+      const selectable = PROVIDER_PRESET_NAMES.filter((n) => n !== 'codex')
+      const options = [
+        { label: config.routingMode === 'auto' ? 'auto (current)' : 'auto', detail: 'transparent fallback across every ready provider', value: 'auto' },
+        { label: 'ChatGPT subscription (Codex)', detail: 'use your signed-in ChatGPT plan', value: 'codex' },
+        ...selectable.map((name) => ({
+          label: name === config.providerName ? `${name} (current)` : name,
+          detail: `${isProviderPresetConfigured(name) ? 'ready' : 'no key set'} · ${providerPresetDefaultModel(name) ?? 'custom'}`,
+          value: name,
+        })),
+      ]
+      return {
+        handled: true,
+        picker: {
+          title: 'Switch model — provider',
+          options,
+          onSelect: async (provider) => {
+            if (!provider) return
+            if (provider === 'auto') {
+              applyModelChoice('auto')
+              return
+            }
+            const discovery = await listProviderModels(provider)
+            if (discovery.models.length === 0) {
+              const fallback = provider === config.providerName ? config.model : providerPresetDefaultModel(provider)
+              if (provider === 'codex') activateCodexSubscription(fallback ?? 'default')
+              else if (fallback) applyModelChoice(provider, fallback)
+              else return `${provider}: no model list available — use /model ${provider} <model-id> in the classic prompt.`
+              return
+            }
+            const current = provider === config.providerName ? config.model : discovery.models.find((m) => m.isDefault)?.id
+            return {
+              handled: true,
+              picker: {
+                title: `${provider} — model`,
+                searchable: discovery.models.length > 8,
+                initialIndex: Math.max(0, discovery.models.findIndex((m) => m.id === current)),
+                options: discovery.models.map((m) => ({
+                  label: m.id === current ? `${m.id} (current)` : m.id,
+                  detail: m.name ?? m.ownedBy ?? 'available model',
+                  value: m.id,
+                })),
+                onSelect: (modelId) => {
+                  if (!modelId) return
+                  if (provider === 'codex') activateCodexSubscription(modelId)
+                  else applyModelChoice(provider, modelId)
+                },
+              },
+            }
+          },
+        },
+      }
+    }
+
+    const modeArg = /^\/mode(?:\s+(.+))?$/.exec(trimmed)
+    if (modeArg) {
+      if (modeArg[1]) {
+        applyModePersonaChoice(modeArg[1].trim())
+        return done()
+      }
+      const current = persona ? (persona === 'cyber' ? 'cybersecurity' : persona) : mode
+      return {
+        handled: true,
+        picker: {
+          title: 'Mode / persona',
+          initialIndex: Math.max(0, MODE_PERSONA_ENTRIES.findIndex((e) => e.value === current)),
+          options: MODE_PERSONA_ENTRIES.map((e) => ({
+            label: e.value === current ? `${e.label} (current)` : e.label,
+            detail: e.detail,
+            value: e.value,
+          })),
+          onSelect: (value) => {
+            if (value) applyModePersonaChoice(value)
+          },
+        },
+      }
+    }
+
+    const thinkingArg = /^\/thinking(?:\s+(.+))?$/.exec(trimmed)
+    if (thinkingArg) {
+      if (thinkingArg[1]) {
+        applyThinkingChoice(thinkingArg[1].trim().toLowerCase())
+        return done()
+      }
+      const levels = [
+        { label: 'Off', value: 'off', detail: 'no reasoning' },
+        { label: 'Low', value: 'low', detail: `${THINKING_EFFORT_BUDGETS.low.toLocaleString()} tokens` },
+        { label: 'Medium', value: 'medium', detail: `${THINKING_EFFORT_BUDGETS.medium.toLocaleString()} tokens` },
+        { label: 'High', value: 'high', detail: `${THINKING_EFFORT_BUDGETS.high.toLocaleString()} tokens` },
+      ]
+      return {
+        handled: true,
+        picker: {
+          title: 'Reasoning effort',
+          options: levels,
+          onSelect: (value) => {
+            if (value) applyThinkingChoice(value)
+          },
+        },
+      }
+    }
+
+    if (trimmed === '/settings') {
+      return {
+        handled: true,
+        picker: {
+          title: 'Settings',
+          options: [
+            { label: 'Risk checks', detail: replMode, value: 'risk' },
+            { label: 'Model & provider', detail: `${config.providerLabel} · ${config.model}`, value: 'model' },
+            { label: 'Reasoning effort', detail: describeThinking(), value: 'thinking' },
+            { label: 'Mode / persona', detail: persona ?? mode, value: 'mode' },
+          ],
+          onSelect: (value) => {
+            if (value === 'risk') {
+              return {
+                handled: true,
+                picker: {
+                  title: 'Risk checks',
+                  options: [
+                    { label: replMode === 'manual' ? 'Manual (current)' : 'Manual', detail: 'flag risky commands, ask first', value: 'manual' },
+                    { label: replMode === 'auto' ? 'Auto (current)' : 'Auto', detail: 'skip the pre-flight prompt; governor still gates critical actions', value: 'auto' },
+                  ],
+                  onSelect: (v) => {
+                    if (v === 'manual' || v === 'auto') applyReplModeChoice(v)
+                  },
+                },
+              }
+            }
+            if (value === 'model') return handleSlashForInk('/model')
+            if (value === 'thinking') return handleSlashForInk('/thinking')
+            if (value === 'mode') return handleSlashForInk('/mode')
+          },
+        },
+      }
+    }
+
+    if (trimmed === '@skills' || trimmed === '/skills') {
+      const { listLoadedSkills } = await import('./skills/loader.ts')
+      const skills = listLoadedSkills()
+      if (skills.length === 0) return done('No loaded skills.')
+      return {
+        handled: true,
+        picker: {
+          title: 'Skills for subsequent turns',
+          searchable: skills.length > 8,
+          options: [
+            { label: selectedSkillNames === undefined ? 'all loaded skills (current)' : 'all loaded skills', detail: 'every loaded skill available', value: '__all__' },
+            ...skills.map((s) => ({ label: s.name, detail: `${s.source} · ${s.file}`, value: s.name })),
+          ],
+          onSelect: (value) => {
+            if (!value) return
+            selectedSkillNames = value === '__all__' ? undefined : [value]
+            return selectedSkillNames ? `Skills: ${selectedSkillNames[0]}` : 'All loaded skills available.'
+          },
+        },
+      }
+    }
+
+    const artifactArg = /^\/artifacts?(?:\s+(.+))?$/.exec(trimmed)
+    if (artifactArg) {
+      const { listArtifacts, readArtifact } = await import('./autonomy/artifacts.ts')
+      const view = (name: string): InkSlashOutcome => {
+        const a = readArtifact(name)
+        return done(a ? `── ${name} ──\n${a.content}` : `No artifact matches "${name}".`)
+      }
+      if (artifactArg[1]) return view(artifactArg[1].trim())
+      const artifacts = listArtifacts()
+      if (artifacts.length === 0) return done('No artifacts yet.')
+      return {
+        handled: true,
+        picker: {
+          title: `Artifacts (${artifacts.length})`,
+          searchable: artifacts.length > 8,
+          options: artifacts.map((a) => ({ label: a.name, detail: `${new Date(a.updatedAt).toLocaleString()} · ${Math.max(1, Math.round(a.sizeBytes / 1024))} KB`, value: a.name })),
+          onSelect: (value) => (value ? view(value) : undefined),
+        },
+      }
+    }
+
+    if (trimmed === '/task' || trimmed === '/tasks') {
+      const list = taskSessions.list()
+      if (list.length === 0) return done('No tasks yet this session.')
+      return done(
+        list
+          .slice(-20)
+          .map((t) => `${t.status.padEnd(8)} ${t.role ? `${t.role} · ` : ''}${t.title} — ${t.action}`)
+          .join('\n'),
+      )
+    }
+
+    if (trimmed === '/sessions' || trimmed === '/session') {
+      const { listKnownSessions } = await import('./sessionRegistry.ts')
+      const others = listKnownSessions().filter((s) => s.sessionId !== sessionId)
+      if (others.length === 0) return done('No other elia sessions in this project.')
+      return done(
+        others
+          .map((s) => `${s.sessionId} · ${s.model} · ${s.busy ? 'working' : 'idle'} · ${s.lastAction}`)
+          .join('\n'),
+      )
+    }
+
+    // --- text-only commands ---
+
+    if (trimmed === '/help' || trimmed === '/?') {
+      return { handled: true, text: REPL_COMMANDS.map((c) => `${c.name}  —  ${c.description}`).join('\n') }
+    }
+    if (trimmed === '/status') {
+      return { handled: true, text: renderWorkspacePanel({ sessionId, mode, providerLabel: config.providerLabel, model: config.model }) }
+    }
+    const expandMatch = /^\/expand(?:\s+(\d+))?$/.exec(trimmed)
+    if (expandMatch) {
+      const total = sessionTranscript.toolCount()
+      if (total === 0) return { handled: true, text: 'No tool output recorded yet this session.' }
+      const item = expandMatch[1] ? sessionTranscript.tool(Number.parseInt(expandMatch[1], 10) - 1) : sessionTranscript.tool()
+      if (!item) return { handled: true, text: `No tool call ${expandMatch[1]}. This session has ${total}.` }
+      return { handled: true, text: `⎿ ${item.name} · full output (${item.status})\n${colorizeDiffBlock(item.result)}` }
+    }
+    if (trimmed === '/cost') {
+      const { sessionUsageSnapshot, estimateCostUsd, formatCostUsd, formatTokenCount, formatElapsed } = await import('./usage.ts')
+      const s = sessionUsageSnapshot()
+      return {
+        handled: true,
+        text: [
+          `input       ${formatTokenCount(s.usage.inputTokens)}`,
+          `output      ${formatTokenCount(s.usage.outputTokens)}`,
+          `cache read  ${formatTokenCount(s.usage.cacheReadTokens)}`,
+          `cache write ${formatTokenCount(s.usage.cacheWriteTokens)}`,
+          `turns       ${s.turns}`,
+          `elapsed     ${formatElapsed(s.elapsedMs)}`,
+          `est. cost   ${formatCostUsd(estimateCostUsd(config.model, s.usage))} (${config.model})`,
+        ].join('\n'),
+      }
+    }
+    const exportMatch = /^\/export(?:\s+(.+))?$/.exec(trimmed)
+    if (exportMatch) {
+      const target = exportMatch[1]?.trim() || `.elia/exports/${sessionId}-${Date.now()}.md`
+      try {
+        await Bun.write(target, sessionTranscript.toMarkdown(`elia session ${sessionId}`))
+        return { handled: true, text: `Exported ${sessionTranscript.turns()} turn(s) to ${target}` }
+      } catch (error) {
+        return { handled: true, text: `Could not write ${target}: ${error instanceof Error ? error.message : String(error)}` }
+      }
+    }
+    if (trimmed === 'rewind' || trimmed === '/rewind') {
+      return { handled: true, text: renderCheckpointList(checkpoints) }
+    }
+    const rewindN = /^\/?rewind\s+(\d+)$/.exec(trimmed)
+    if (rewindN) {
+      const n = Number.parseInt(rewindN[1]!, 10)
+      const checkpoint = checkpoints[n]
+      if (!checkpoint) return done(`No rewind point ${n}. Type /rewind to list them.`)
+      const result = await restoreCheckpoint(checkpoint)
+      messages.length = 0
+      messages.push(...checkpoint.messagesBefore)
+      checkpoints.length = n
+      await saveCheckpoints(sessionId, checkpoints)
+      await saveSession(sessionId, messages)
+      return done(`Rewound to before turn ${n} ("${checkpoint.label}") — restored ${result.restored} file(s), removed ${result.deleted}.`)
+    }
+    if (trimmed === '/capabilities') {
+      return done(CAPABILITIES.map((c) => `${c.label} [${c.persona}] · risk: ${c.risk} · ${c.summary}`).join('\n'))
+    }
+    const whyMatch = /^\/why(?:\s+(.+))?$/.exec(trimmed)
+    if (whyMatch) {
+      const { explainRationale } = await import('./autonomy/rationale.ts')
+      return done(whyMatch[1] ? explainRationale(whyMatch[1].trim()) : 'Usage: /why <path or topic>')
+    }
+    if (trimmed === '/lessons') {
+      const { renderLessons } = await import('./autonomy/lessons.ts')
+      const rendered = renderLessons()
+      return done(rendered.trim() || 'No lessons recorded for this project yet.')
+    }
+    if (trimmed === '/track') {
+      const { renderCompetence } = await import('./autonomy/outcomes.ts')
+      return done(renderCompetence())
+    }
+
+    if (trimmed === '/skills' || trimmed === '@skills-list') {
+      const { listLoadedSkills } = await import('./skills/loader.ts')
+      const skills = listLoadedSkills()
+      if (skills.length === 0) return done('No skills loaded. Add a *.skill.ts file to .elia/skills, or find one with /marketplace.')
+      return done(['Loaded skills:', ...skills.map((s) => `  ${s.name}  (${s.source} · ${s.file})`)].join('\n'))
+    }
+
+    const marketMatch = /^\/marketplace(?:\s+(npm|bun|pip|skill|skills)?\s*(.*))?$/.exec(trimmed)
+    if (marketMatch) {
+      const { searchMarket, installCommand } = await import('./marketplace/registry.ts')
+      const resultsPicker = async (kind: PackageKind, query: string): Promise<InkSlashOutcome> => {
+        let results
+        try {
+          results = await searchMarket(kind, query)
+        } catch (error) {
+          return done(`Search failed: ${error instanceof Error ? error.message : String(error)}`)
+        }
+        if (results.length === 0) return done(`Nothing found for "${query}" on ${kind}.`)
+        return {
+          handled: true,
+          picker: {
+            title: `${kind} — results for "${query}"`,
+            searchable: results.length > 8,
+            options: results.map((r) => ({ label: `${r.name}${r.version ? ` @${r.version}` : ''}`, detail: (r.description ?? '').slice(0, 80), value: r.name })),
+            onSelect: (name) => {
+              if (!name) return
+              try {
+                return { handled: true, runCommand: { command: installCommand(kind, name, process.cwd()), description: `Install ${name} (${kind})` } }
+              } catch (error) {
+                return error instanceof Error ? error.message : String(error)
+              }
+            },
+          },
+        }
+      }
+      const askThenSearch = (kind: PackageKind): InkSlashOutcome => ({
+        handled: true,
+        prompt: { label: `Search ${kind} for:`, placeholder: 'package name or keywords', onSubmit: (q) => resultsPicker(kind, q) },
+      })
+      const kindArg: PackageKind | undefined = marketMatch[1] === 'skills' ? 'skill' : (marketMatch[1] as PackageKind | undefined)
+      const queryArg = marketMatch[2]?.trim()
+      if (kindArg === 'skill') return done('Skill marketplace: no remote registry yet. Drop a validated *.skill.ts into .elia/skills; run "elia skills candidates" to see what elia could synthesize for you.')
+      if (kindArg && queryArg) return resultsPicker(kindArg, queryArg)
+      if (kindArg) return askThenSearch(kindArg)
+      return {
+        handled: true,
+        picker: {
+          title: 'Marketplace — pick a source',
+          options: [
+            { label: 'npm', detail: 'JavaScript/TypeScript packages (installed with bun/npm)', value: 'npm' },
+            { label: 'pip', detail: 'Python packages (exact name)', value: 'pip' },
+            { label: 'skills', detail: "elia's learned tools", value: 'skill' },
+          ],
+          onSelect: (kind) => {
+            if (kind === 'skill') return 'Skill marketplace: no remote registry yet — drop a *.skill.ts into .elia/skills.'
+            if (kind === 'npm' || kind === 'pip') return askThenSearch(kind)
+          },
+        },
+      }
+    }
+
+    if (trimmed === '/packages') {
+      const { listInstalled, removeCommand, parsePipList } = await import('./marketplace/registry.ts')
+      let items = listInstalled(process.cwd())
+      const pip = await runShellQuiet('pip list --format=json')
+      if (pip) items = [...items, ...parsePipList(pip)]
+      if (items.length === 0) return done('Nothing installed to show (no package.json deps, skills, or pip packages found).')
+      return {
+        handled: true,
+        picker: {
+          title: `Installed (${items.length}) — select to remove`,
+          searchable: items.length > 8,
+          options: items.map((i) => ({ label: `${i.name}`, detail: `${i.kind} · ${i.detail}`, value: `${i.kind}:${i.name}` })),
+          onSelect: async (value) => {
+            if (!value) return
+            const item = items.find((i) => `${i.kind}:${i.name}` === value)
+            if (!item) return
+            if (item.kind === 'skill' && item.file) {
+              return { handled: true, runCommand: { command: process.platform === 'win32' ? `del "${item.file}"` : `rm "${item.file}"`, description: `Delete skill "${item.name}" (${item.file})` } }
+            }
+            const cmd = removeCommand(item, process.cwd())
+            return cmd ? { handled: true, runCommand: { command: cmd, description: `Uninstall ${item.name} (${item.kind}) — removes it from disk` } } : `Cannot remove ${item.name}.`
+          },
+        },
+      }
+    }
+    const verifyMatch = /^\/verify(?:\s+(on|off))?$/.exec(trimmed)
+    if (verifyMatch) {
+      if (verifyMatch[1]) {
+        autoVerify = verifyMatch[1] === 'on'
+        return done(`Automatic post-turn verification ${autoVerify ? 'on' : 'off'}.`)
+      }
+      const { detectChecks } = await import('./autonomy/detectChecks.ts')
+      const { runVerification, describeVerification } = await import('./autonomy/verify.ts')
+      const checks = detectChecks(process.cwd())
+      if (checks.length === 0) return done('No project checks detected (looked for package.json scripts, Cargo.toml, go.mod, pytest).')
+      const outcome = await runVerification(checks, process.cwd())
+      return done(`${outcome.passed ? '✓ all checks pass' : '✗ checks failing'}\n${describeVerification(outcome)}`)
+    }
+
+    return done(`Unknown command: ${trimmed.split(/\s+/)[0]}. Type /help for the list.`)
+  }
+
+  if (interactiveTerminal) {
+    const { runInkRepl } = await import('./ui/app/index.tsx')
+    const greeting =
+      mode === 'dev'
+        ? 'dev mode — building, debugging, testing, browser & task workflows. Type a prompt, "/" for commands, "!" to run a shell command.'
+        : `${mode} mode. Type a prompt, "/" for commands, "!" to run a shell command.`
+
+    await runInkRepl({
+      getEnv: () => ({ model: config.model, providerLabel: config.providerLabel, providerName: config.providerName }),
+      commands: REPL_COMMANDS,
+      initialReplMode: replMode,
+      messages,
+      greeting,
+      classifyRisk: (command) => classifyCommandRisk(command),
+      runShellLine: async (command) => {
+        const { runShell, formatShellResult, clampOutput } = await import('./shell.ts')
+        const result = await runShell(command, undefined, process.cwd())
+        const rendered = clampOutput(formatShellResult(result), 8_000)
+        sessionTranscript.shell(command, rendered)
+        carriedShellContext.push(`<local-command>${command}</local-command>\n<output>\n${clampOutput(formatShellResult(result), 4_000)}\n</output>`)
+        return rendered
+      },
+      handleSlash: handleSlashForInk,
+      submitTurn: async (text, hooks) => {
+        const turnText = carriedShellContext.length > 0
+          ? `${carriedShellContext.splice(0).join('\n\n')}\n\n${text}`
+          : text
+        await runCheckpointedTurn(
+          turnText,
+          async (assessment, request) =>
+            hooks.approve(`Approve ${request.name}?`, [
+              redactText(assessment.reason, 300),
+              `risk: ${assessment.risk} · reversible: ${assessment.reversible ? 'yes' : 'no'}`,
+            ]),
+          undefined,
+          {
+            onText: hooks.onText,
+            onThinking: hooks.onThinking,
+            onActivity: hooks.onActivity,
+            onTool: hooks.onTool,
+            onToolStart: hooks.onToolStart,
+            signal: hooks.signal,
+          },
+        )
+        await saveSession(sessionId, messages)
+      },
+    })
+    prompt.close()
+    return
+  }
+
   while (true) {
     const label = persona ? `${dim(`[${persona}]`)} ` : mode !== 'dev' ? `${dim(`[${mode}]`)} ` : ''
     const line = await prompt.question(`${label}${gold('❯')} `)
@@ -1800,6 +2391,86 @@ async function runInteractive(): Promise<void> {
     const trimmed = line.trim()
     if (trimmed === 'exit' || trimmed === 'quit') break
     if (trimmed === '') continue
+
+    // !cmd — run a shell command now, print its output, and carry it into the
+    // next turn as context. No model round-trip.
+    if (trimmed.startsWith('!')) {
+      const command = trimmed.slice(1).trim()
+      if (!command) continue
+      if (replMode === 'manual') {
+        const { risky, reason } = await classifyCommandRisk(command)
+        if (risky) {
+          const decision = await confirmOnce(prompt, `${reason ? `${redactText(reason, 500)}\n` : ''}About to run: "${redactText(command, 500)}" — run it? [y]es / [n]o: `)
+          if (decision.action !== 'approve') {
+            writeNotice('Skipped.')
+            continue
+          }
+        }
+      }
+      const { runShell, formatShellResult, clampOutput } = await import('./shell.ts')
+      const shellResult = await runShell(command, undefined, process.cwd())
+      const rendered = clampOutput(formatShellResult(shellResult), 8_000)
+      process.stdout.write(`${dim(`$ ${command}`)}\n${rendered}\n`)
+      sessionTranscript.shell(command, rendered)
+      carriedShellContext.push(`<local-command>${command}</local-command>\n<output>\n${clampOutput(formatShellResult(shellResult), 4_000)}\n</output>`)
+      continue
+    }
+
+    // /expand [n] — reprint a tool result that scrollback folded.
+    const expandMatch = /^\/expand(?:\s+(\d+))?$/.exec(trimmed)
+    if (expandMatch) {
+      const toolTotal = sessionTranscript.toolCount()
+      if (toolTotal === 0) {
+        writeNotice('No tool output has been recorded yet this session.')
+        continue
+      }
+      const item = expandMatch[1]
+        ? sessionTranscript.tool(Number.parseInt(expandMatch[1], 10) - 1)
+        : sessionTranscript.tool()
+      if (!item) {
+        writeNotice(`No tool call ${expandMatch[1]}. This session has ${toolTotal}.`)
+        continue
+      }
+      process.stdout.write(`${dim(`⎿ ${item.name} · full output (${item.status})`)}\n${colorizeDiffBlock(item.result)}\n`)
+      continue
+    }
+
+    // /status — the full workspace panel, on demand.
+    if (trimmed === '/status') {
+      process.stdout.write(`${renderWorkspacePanel({ sessionId, mode, providerLabel: config.providerLabel, model: config.model })}\n`)
+      continue
+    }
+
+    // /cost — session token and estimated-dollar breakdown.
+    if (trimmed === '/cost') {
+      const { sessionUsageSnapshot } = await import('./usage.ts')
+      const { estimateCostUsd, formatCostUsd, formatTokenCount, formatElapsed } = await import('./usage.ts')
+      const snap = sessionUsageSnapshot()
+      const rows: string[][] = [
+        ['input', formatTokenCount(snap.usage.inputTokens)],
+        ['output', formatTokenCount(snap.usage.outputTokens)],
+        ['cache read', formatTokenCount(snap.usage.cacheReadTokens)],
+        ['cache write', formatTokenCount(snap.usage.cacheWriteTokens)],
+        ['turns', String(snap.turns)],
+        ['elapsed', formatElapsed(snap.elapsedMs)],
+        ['est. cost', `${formatCostUsd(estimateCostUsd(config.model, snap.usage))} (${config.model})`],
+      ]
+      for (const costLine of table([{ header: 'metric' }, { header: 'value', align: 'right' }], rows)) writeUsageLine(`  ${costLine}`)
+      continue
+    }
+
+    // /export [path] — write the whole conversation to Markdown.
+    const exportMatch = /^\/export(?:\s+(.+))?$/.exec(trimmed)
+    if (exportMatch) {
+      const target = exportMatch[1]?.trim() || `.elia/exports/${sessionId}-${Date.now()}.md`
+      try {
+        await Bun.write(target, sessionTranscript.toMarkdown(`elia session ${sessionId}`))
+        writeNotice(`Exported ${sessionTranscript.turns()} turn(s) to ${target}`)
+      } catch (error) {
+        writeError(`Could not write ${target}: ${error instanceof Error ? error.message : String(error)}`)
+      }
+      continue
+    }
 
     if (trimmed === '@skills') {
       await handleSkillsPicker()
@@ -1815,6 +2486,71 @@ async function runInteractive(): Promise<void> {
     }
     if (trimmed === '/settings') {
       await handleSettingsCommand()
+      continue
+    }
+    const whyClassic = /^\/why(?:\s+(.+))?$/.exec(trimmed)
+    if (whyClassic) {
+      const { explainRationale } = await import('./autonomy/rationale.ts')
+      writeUsageLine(whyClassic[1] ? explainRationale(whyClassic[1].trim()) : 'Usage: /why <path or topic>')
+      continue
+    }
+    if (trimmed === '/lessons') {
+      const { renderLessons } = await import('./autonomy/lessons.ts')
+      writeUsageLine(renderLessons().trim() || 'No lessons recorded for this project yet.')
+      continue
+    }
+    if (trimmed === '/track') {
+      const { renderCompetence } = await import('./autonomy/outcomes.ts')
+      writeUsageLine(renderCompetence())
+      continue
+    }
+    if (trimmed === '/skills') {
+      const { listLoadedSkills } = await import('./skills/loader.ts')
+      const skills = listLoadedSkills()
+      writeUsageLine(skills.length === 0 ? 'No skills loaded.' : ['Loaded skills:', ...skills.map((s) => `  ${s.name}  (${s.source})`)].join('\n'))
+      continue
+    }
+    const marketClassic = /^\/marketplace(?:\s+(npm|bun|pip)\s+(.+))?$/.exec(trimmed)
+    if (marketClassic) {
+      if (!marketClassic[1]) {
+        writeNotice('Usage: /marketplace <npm|pip> <query> — then run the printed install command. Full browse/install UI is in the interactive terminal.')
+        continue
+      }
+      const { searchMarket, installCommand } = await import('./marketplace/registry.ts')
+      try {
+        const results = await searchMarket(marketClassic[1] as PackageKind, marketClassic[2]!)
+        if (results.length === 0) writeNotice('Nothing found.')
+        else {
+          for (const r of results.slice(0, 12)) writeUsageLine(`  ${r.name}${r.version ? `@${r.version}` : ''}  ${(r.description ?? '').slice(0, 70)}`)
+          writeNotice(`Install with: ${installCommand(marketClassic[1] as PackageKind, results[0]!.name)}`)
+        }
+      } catch (error) {
+        writeError(`Search failed: ${error instanceof Error ? error.message : String(error)}`)
+      }
+      continue
+    }
+    if (trimmed === '/packages') {
+      const { listInstalled } = await import('./marketplace/registry.ts')
+      const items = listInstalled(process.cwd())
+      writeUsageLine(items.length === 0 ? 'Nothing installed to show.' : items.map((i) => `  ${i.kind.padEnd(6)} ${i.name}  ${i.detail}`).join('\n'))
+      writeNotice('Remove packages interactively from the new terminal UI, or with the usual uninstall command.')
+      continue
+    }
+    const verifyClassic = /^\/verify(?:\s+(on|off))?$/.exec(trimmed)
+    if (verifyClassic) {
+      if (verifyClassic[1]) {
+        autoVerify = verifyClassic[1] === 'on'
+        writeNotice(`Automatic post-turn verification ${autoVerify ? 'on' : 'off'}.`)
+        continue
+      }
+      const { detectChecks } = await import('./autonomy/detectChecks.ts')
+      const { runVerification, describeVerification } = await import('./autonomy/verify.ts')
+      const checks = detectChecks(process.cwd())
+      if (checks.length === 0) writeNotice('No project checks detected.')
+      else {
+        const outcome = await runVerification(checks, process.cwd())
+        writeUsageLine(`${outcome.passed ? '✓ all checks pass' : '✗ checks failing'}\n${describeVerification(outcome)}`)
+      }
       continue
     }
 
@@ -1937,8 +2673,11 @@ async function runInteractive(): Promise<void> {
       }
     }
 
+    const turnText = carriedShellContext.length > 0
+      ? `${carriedShellContext.splice(0).join('\n\n')}\n\n${commandToRun}`
+      : commandToRun
     try {
-      await runCheckpointedTurn(commandToRun, async (assessment, request) => {
+      await runCheckpointedTurn(turnText, async (assessment, request) => {
         const result = await confirmOnce(prompt, actionApprovalPrompt(assessment, request))
         return result.action === 'approve'
       })
@@ -1948,7 +2687,10 @@ async function runInteractive(): Promise<void> {
     await saveSession(sessionId, messages)
     const taskSummary = renderTaskSummary(taskSessions)
     const contextLine = renderContextStatus(messages, await countEpisodes(sessionId))
-    writeUsageLine(taskSummary ? `${contextLine}  ·  ${dim(taskSummary)}` : contextLine)
+    const { formatCompactUsage } = await import('./usage.ts')
+    writeUsageLine([contextLine, dim(formatCompactUsage(config.model)), taskSummary ? dim(taskSummary) : ''].filter(Boolean).join('  ·  '))
+    // The full workspace panel is shown once at startup and on demand via
+    // /status — reprinting all 14 lines after every turn buried the conversation.
   }
 
   prompt.close()
@@ -1956,6 +2698,7 @@ async function runInteractive(): Promise<void> {
   // "ended" heartbeat for this and every other exit path — no separate call
   // needed here.
   if (messages.length > 0 && !machineReadable) process.stdout.write(`${box([getSessionSummaryLine(config.model)])}\n`)
+  await printTurnProfileReport()
   if (messages.length > 0 && !machineReadable) writeNotice(`Resume this session later with: elia --resume ${sessionId}`)
   writeNotice('Goodbye!')
 }

@@ -100,15 +100,26 @@ test('edit_file throws when old_string is not unique', async () => {
   await executeTool('write_file', { path: dupPath, content: 'foo foo' })
   await expect(
     executeTool('edit_file', { path: dupPath, old_string: 'foo', new_string: 'bar' }),
-  ).rejects.toThrow('multiple locations')
+  ).rejects.toThrow('matches 2 locations')
+})
+
+test('edit_file replace_all changes every occurrence', async () => {
+  const path = join(testDir, 'rename.ts')
+  await executeTool('write_file', { path, content: 'const oldName = 1\nreturn oldName + oldName\n' })
+  const result = await executeTool('edit_file', { path, old_string: 'oldName', new_string: 'newName', replace_all: true })
+  expect(result).toContain('Edited')
+  expect(readFileSync(path, 'utf8')).toBe('const newName = 1\nreturn newName + newName\n')
 })
 
 test('write_file and edit_file append no LSP suffix for a file type with no configured LSP server', async () => {
   const path = join(testDir, 'notes.txt')
   const written = await executeTool('write_file', { path, content: 'first' })
-  expect(written).toBe(`Wrote 5 bytes to ${path}`)
+  expect(written).toContain(`Created ${path}`)
+  expect(written).not.toContain('LSP diagnostics')
   const edited = await executeTool('edit_file', { path, old_string: 'first', new_string: 'second' })
   expect(edited).toContain(`Edited ${path}`)
+  expect(edited).toContain('-first')
+  expect(edited).toContain('+second')
   expect(edited).not.toContain('LSP diagnostics')
 })
 
@@ -160,12 +171,25 @@ test('edit_file rejects a write when the file changed on disk since it was read'
   expect(await Bun.file(path).text()).toBe('changed by someone else')
 })
 
-test('write_file leaves its result message unchanged for a recognized-but-uninstalled language server (fails soft)', async () => {
+test('write_file refuses to overwrite a non-empty file the agent has not read', async () => {
+  const path = join(testDir, 'hand-written.html')
+  writeFileSync(path, '<html>\n  <body>precious</body>\n</html>\n')
+  await expect(executeTool('write_file', { path, content: 'clobbered' })).rejects.toThrow('has not been read this session')
+  // After a read it goes through.
+  await executeTool('read_file', { path })
+  const result = await executeTool('write_file', { path, content: 'deliberate' })
+  expect(result).toContain('Overwrote')
+  expect(readFileSync(path, 'utf8')).toBe('deliberate')
+})
+
+test('write_file appends no LSP suffix for a recognized-but-uninstalled language server (fails soft)', async () => {
   // gopls is not installed in this environment (see src/lsp/registry.test.ts) —
   // exercises the real "server unavailable" path, not a mock.
   const path = join(testDir, 'main.go')
   const result = await executeTool('write_file', { path, content: 'package main' })
-  expect(result).toBe(`Wrote 12 bytes to ${path}`)
+  expect(result).toContain(`Created ${path}`)
+  expect(result).not.toContain('LSP diagnostics')
+  expect(result).not.toContain('gopls')
 })
 
 test('list_files finds files matching a glob', async () => {

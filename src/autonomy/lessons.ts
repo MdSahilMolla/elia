@@ -121,3 +121,23 @@ Never record what happened in this run, what the code currently contains, praise
     },
   }
 }
+
+/**
+ * The same contract as `createLessonsTool`, but it persists immediately instead
+ * of buffering for an end-of-run collector — for the interactive loop, which has
+ * no single "run end" the way `elia auto` does.
+ */
+export function createDirectLessonsTool(): Tool {
+  const { tool } = createLessonsTool()
+  return {
+    ...tool,
+    name: 'note_lesson',
+    async execute(input) {
+      const lessons = Array.isArray(input.lessons)
+        ? input.lessons.filter((lesson): lesson is string => typeof lesson === 'string')
+        : []
+      appendLessons(lessons)
+      return `Recorded ${lessons.length} lesson(s) for future sessions in this project.`
+    },
+  }
+}

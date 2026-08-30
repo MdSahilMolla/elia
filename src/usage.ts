@@ -91,6 +91,23 @@ export function recordTopLevelTurn(elapsedMs: number): void {
   sessionElapsedMs += elapsedMs
 }
 
+export interface SessionUsageSnapshot {
+  usage: Usage
+  turns: number
+  elapsedMs: number
+}
+
+/** The running session totals, for a detailed `/cost` breakdown. */
+export function sessionUsageSnapshot(): SessionUsageSnapshot {
+  return { usage: sessionUsage, turns: sessionTurns, elapsedMs: sessionElapsedMs }
+}
+
+/** A compact one-line token/cost tag for the post-turn status line. */
+export function formatCompactUsage(model: string): string {
+  const cost = estimateCostUsd(model, sessionUsage)
+  return `${formatTokenCount(sessionUsage.inputTokens + sessionUsage.cacheReadTokens)} in · ${formatTokenCount(sessionUsage.outputTokens)} out · ${formatCostUsd(cost)}`
+}
+
 export function getSessionSummaryLine(model: string): string {
   const cost = estimateCostUsd(model, sessionUsage)
   const tokens = totalTokens(sessionUsage)

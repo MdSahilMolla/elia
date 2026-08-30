@@ -34,3 +34,10 @@ Thumbs.db
 
 # --- Archived pre-v2 source, kept for reference only ---
 legacy/
+
+# --- Local-only analysis notes ---
+gap.md
+lacking/
+
+# --- Scratch workspace: elia builds throwaway projects here ---
+workspace/

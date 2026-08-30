@@ -34,8 +34,8 @@ export interface Role {
   maxChildren?: number
 }
 
-const READ_TOOLS = ['read_file', 'list_files', 'grep', 'board_post', 'board_read', 'browser', 'todo_write']
-const WRITE_TOOLS = [...READ_TOOLS, 'write_file', 'edit_file']
+const READ_TOOLS = ['read_file', 'list_files', 'grep', 'board_post', 'board_read', 'browser', 'todo_write', 'why']
+const WRITE_TOOLS = [...READ_TOOLS, 'write_file', 'edit_file', 'record_rationale', 'note_lesson']
 const FULL_TOOLS = [...WRITE_TOOLS, 'run_command']
 
 export const ROLES: Record<RoleName, Role> = {

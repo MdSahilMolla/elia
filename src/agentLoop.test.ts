@@ -34,6 +34,41 @@ test('safe read-only tool batches use bounded fast concurrency while mutating ba
   }
 })
 
+test('ChatGPT subscription execution requires one explicit delegated-agent approval', async () => {
+  let calls = 0
+  const codexProvider = {
+    async streamTurn(params: { onActivity?: (activity: { kind: 'command'; title: string; status: 'started' }) => void }) {
+      calls += 1
+      params.onActivity?.({ kind: 'command', title: 'Running command', status: 'started' })
+      return { content: [{ type: 'text', text: 'completed' }] as ContentBlock[], usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 } }
+    },
+  }
+  const options = {
+    messages: [{ role: 'user' as const, content: [{ type: 'text' as const, text: 'fix the bug' }] }],
+    systemPrompt: 'test',
+    tools: [],
+    provider: codexProvider,
+    providerName: 'codex',
+    model: 'gpt-5.3-codex',
+    useAnimation: false,
+    verbose: false,
+  }
+
+  await expect(withActionGovernor(createActionGovernor({ mode: 'unattended' }), () => runAgentLoop(options))).rejects.toThrow('unattended policy')
+  expect(calls).toBe(0)
+
+  const events: string[] = []
+  const activities: string[] = []
+  await withActionGovernor(createActionGovernor({ mode: 'supervised', approve: async () => true }), () => runAgentLoop({
+    ...options,
+    onTool: (event) => events.push(event.name),
+    onActivity: (activity) => activities.push(activity.title),
+  }))
+  expect(calls).toBe(1)
+  expect(events).toEqual(['codex_delegate'])
+  expect(activities).toEqual(['Running command'])
+})
+
 test('runAgentLoop sums usage across multiple tool-call round trips, not just the last one', async () => {
   let call = 0
   config.provider = {
@@ -73,6 +108,68 @@ test('runAgentLoop sums usage across multiple tool-call round trips, not just th
 
   expect(usage).toEqual({ inputTokens: 150, outputTokens: 15, cacheReadTokens: 20, cacheWriteTokens: 0 })
   expect(call).toBe(2)
+})
+
+test('systemDynamicPrompt is forwarded to the provider separately from the stable system prompt', async () => {
+  const originalProvider = config.provider
+  const seen: { system: string; systemDynamic?: string }[] = []
+  config.provider = {
+    async streamTurn({ system, systemDynamic }) {
+      seen.push({ system, systemDynamic })
+      return { content: [{ type: 'text', text: 'done' }] as ContentBlock[], usage: { inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 } }
+    },
+  }
+  try {
+    await runAgentLoop({
+      messages: [{ role: 'user', content: [{ type: 'text', text: 'go' }] }],
+      systemPrompt: 'STABLE PROMPT',
+      systemDynamicPrompt: 'RANKED MEMORY',
+      tools: [],
+      useAnimation: false,
+      verbose: false,
+    })
+  } finally {
+    config.provider = originalProvider
+  }
+  expect(seen).toEqual([{ system: 'STABLE PROMPT', systemDynamic: 'RANKED MEMORY' }])
+})
+
+test('the profiler records one sample per model call only when ELIA_PROFILE is set', async () => {
+  const { resetProfilerForTests, profileReport } = await import('./profile.ts')
+  const originalProvider = config.provider
+  const originalEnv = process.env.ELIA_PROFILE
+  let call = 0
+  config.provider = {
+    async streamTurn({ onText }) {
+      call += 1
+      if (call === 1) {
+        onText('hello')
+        return { content: [{ type: 'tool_use', id: 't1', name: 'noop', input: {} }] as ContentBlock[], usage: { inputTokens: 10, outputTokens: 2, cacheReadTokens: 0, cacheWriteTokens: 900 } }
+      }
+      return { content: [{ type: 'text', text: 'done' }] as ContentBlock[], usage: { inputTokens: 3, outputTokens: 1, cacheReadTokens: 950, cacheWriteTokens: 5 } }
+    },
+  }
+  const noopTool: Tool = { name: 'noop', description: 'x', input_schema: { type: 'object', properties: {} }, async execute() { return 'ok' } }
+  try {
+    process.env.ELIA_PROFILE = '1'
+    resetProfilerForTests()
+    await runAgentLoop({
+      messages: [{ role: 'user', content: [{ type: 'text', text: 'go' }] }],
+      systemPrompt: 'S',
+      tools: [noopTool],
+      useAnimation: false,
+      verbose: false,
+    })
+    const report = profileReport()
+    expect(report.calls).toBe(2)
+    expect(report.totalCacheWrite).toBe(905)
+    expect(report.totalCacheRead).toBe(950)
+  } finally {
+    config.provider = originalProvider
+    if (originalEnv === undefined) delete process.env.ELIA_PROFILE
+    else process.env.ELIA_PROFILE = originalEnv
+    resetProfilerForTests()
+  }
 })
 
 test('dev hooks block a matching tool before execution and preserve the normal tool-result loop', async () => {

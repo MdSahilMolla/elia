@@ -176,7 +176,11 @@ export function createSlashPrompt(commands: SlashCommand[]): SlashPromptHandle {
 
   function finish(line: string | null): void {
     active = false
-    stdout.write(`\r\x1b[0J${promptLabel}${line ?? state.buffer}\n`)
+    // An empty submit (bare Enter) just re-prompts — don't leave a blank "❯"
+    // row behind for each one. A real line is echoed and committed with a
+    // newline so scrollback shows what was sent.
+    if (line === '') stdout.write('\r\x1b[0J')
+    else stdout.write(`\r\x1b[0J${promptLabel}${line ?? state.buffer}\n`)
     const resolve = resolveLine
     resolveLine = undefined
     resolve?.(line)
@@ -207,7 +211,18 @@ export function createSlashPrompt(commands: SlashCommand[]): SlashPromptHandle {
 
   return {
     question(label: string) {
-      promptLabel = label
+      // A multi-line label (e.g. an action-approval prompt with a reason and
+      // risk line above the "[y]es / [n]o:" row) is split: the leading lines are
+      // printed once as a static banner, and only the final line becomes the
+      // re-rendered prompt row. Otherwise every keystroke's `\r\x1b[0J` redraw
+      // reprints the whole block, stacking duplicate copies down the screen.
+      const lastNewline = label.lastIndexOf('\n')
+      if (lastNewline >= 0) {
+        stdout.write(label.slice(0, lastNewline + 1))
+        promptLabel = label.slice(lastNewline + 1)
+      } else {
+        promptLabel = label
+      }
       state = { ...state, buffer: '', cursor: 0, selectedIndex: 0 }
       active = true
       if (stdin.isTTY) stdin.setRawMode(true)

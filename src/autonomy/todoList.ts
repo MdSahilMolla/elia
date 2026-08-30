@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from 'node:async_hooks'
 import { writeSecureFile } from '../securePersistence.ts'
 
 /**
@@ -71,13 +72,19 @@ export function createTodoList(persistPath?: string): TodoList {
 // list, so `todo_write` in a plain interactive session works instead of erroring.
 
 let activeList: TodoList = createTodoList()
+const listStorage = new AsyncLocalStorage<TodoList>()
 
 export function setActiveTodoList(list: TodoList): void {
   activeList = list
 }
 
 export function activeTodoList(): TodoList {
-  return activeList
+  return listStorage.getStore() ?? activeList
+}
+
+/** Keeps simultaneous chat turns from overwriting each other's working plan. */
+export function withTodoList<T>(list: TodoList, fn: () => Promise<T>): Promise<T> {
+  return listStorage.run(list, fn)
 }
 
 export function resetActiveTodoList(): void {

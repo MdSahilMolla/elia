@@ -1,7 +1,16 @@
 import Anthropic from '@anthropic-ai/sdk'
-import type { ChatMessage, ContentBlock, Provider, StreamTurnParams, ThinkingOption, Usage } from './types.ts'
+import type { ChatMessage, ContentBlock, Provider, StreamTurnParams, ThinkingOption, ToolDefinition, Usage } from './types.ts'
 
 const EPHEMERAL_CACHE: Anthropic.CacheControlEphemeral = { type: 'ephemeral' }
+// The stable prefix of an agent-loop request — the system prompt and the tool
+// definitions — does not change for the life of a session. A tool call can take
+// several minutes (a slow `bun test`, an install), and a user can sit thinking
+// for longer, either of which blows the default 5-minute cache TTL and forces
+// the whole prefix to be reprocessed on the next call. Pinning the stable
+// blocks to the 1-hour TTL keeps them cached across those gaps; the moving tail
+// of the conversation stays on the cheaper 5-minute default since it is
+// rewritten every step anyway.
+const EPHEMERAL_CACHE_1H: Anthropic.CacheControlEphemeral = { type: 'ephemeral', ttl: '1h' }
 // Sonnet 5 supports up to 128k output tokens; this is just a generous ceiling
 // (billed by actual usage, not the cap) so large refactors don't get truncated.
 const MAX_TOKENS = 32_000
@@ -20,27 +29,11 @@ export function createAnthropicProvider(
   const thinkingBudget = options.thinking?.enabled ? options.thinking.budgetTokens : undefined
 
   return {
-    async streamTurn({ system, messages, tools, onText, onThinking, signal }: StreamTurnParams) {
-      const stream = client.messages.stream({
-        model,
-        // Extended thinking's budget counts toward max_tokens, so the ceiling has
-        // to clear the budget with real room left for the answer itself.
-        max_tokens: thinkingBudget ? Math.max(MAX_TOKENS, thinkingBudget + 8_000) : MAX_TOKENS,
-        ...(thinkingBudget ? { thinking: { type: 'enabled' as const, budget_tokens: thinkingBudget } } : {}),
-        // Cache breakpoints (system, tools, tail of history) so an unchanged
-        // prefix of an agent loop's growing request is reused turn to turn
-        // instead of reprocessed from scratch — this is the biggest lever for
-        // both latency and cost in a tool-calling loop.
-        system: [{ type: 'text', text: system, cache_control: EPHEMERAL_CACHE }],
-        messages: withCacheControlOnTail(messages.map(toAnthropicMessage)),
-        tools: withCacheControlOnLastTool(
-          tools.map((tool) => ({
-            name: tool.name,
-            description: tool.description,
-            input_schema: tool.input_schema,
-          })),
-        ),
-      }, signal ? { signal } : undefined)
+    async streamTurn({ system, systemDynamic, messages, tools, onText, onThinking, signal }: StreamTurnParams) {
+      const stream = client.messages.stream(
+        buildAnthropicRequest({ model, thinkingBudget, system, systemDynamic, messages, tools }),
+        signal ? { signal } : undefined,
+      )
 
       stream.on('text', (delta) => onText(delta))
       if (thinkingBudget) stream.on('thinking', (delta) => onThinking?.(delta))
@@ -74,6 +67,55 @@ export function createAnthropicProvider(
 
       return { content, usage }
     },
+  }
+}
+
+export interface AnthropicRequestParts {
+  model: string
+  /** Anthropic extended-thinking budget, or undefined when thinking is off. */
+  thinkingBudget?: number
+  /** The stable, session-long system prompt. Cached under the 1-hour TTL. */
+  system: string
+  /**
+   * Per-turn dynamic system content (query-ranked memory, mode hints). Sent as
+   * a second system block with its own 5-minute breakpoint so it does not bust
+   * the stable prefix's cache when it changes between user turns.
+   */
+  systemDynamic?: string
+  messages: ChatMessage[]
+  tools: ToolDefinition[]
+}
+
+/**
+ * Builds the Messages API request, applying all four cache breakpoints:
+ * the stable system prompt and the tool block on the 1-hour TTL (they never
+ * change in a session), the dynamic system suffix and the tail of the
+ * conversation on the default 5-minute TTL (they change every turn). Pure and
+ * exported so the breakpoint layout can be asserted without a live API client.
+ */
+export function buildAnthropicRequest(parts: AnthropicRequestParts): Anthropic.MessageStreamParams {
+  const { model, thinkingBudget, system, systemDynamic, messages, tools } = parts
+
+  const systemBlocks: Anthropic.TextBlockParam[] = [{ type: 'text', text: system, cache_control: EPHEMERAL_CACHE_1H }]
+  if (systemDynamic && systemDynamic.trim()) {
+    systemBlocks.push({ type: 'text', text: systemDynamic, cache_control: EPHEMERAL_CACHE })
+  }
+
+  return {
+    model,
+    // Extended thinking's budget counts toward max_tokens, so the ceiling has
+    // to clear the budget with real room left for the answer itself.
+    max_tokens: thinkingBudget ? Math.max(MAX_TOKENS, thinkingBudget + 8_000) : MAX_TOKENS,
+    ...(thinkingBudget ? { thinking: { type: 'enabled' as const, budget_tokens: thinkingBudget } } : {}),
+    system: systemBlocks,
+    messages: withCacheControlOnTail(messages.map(toAnthropicMessage)),
+    tools: withCacheControlOnLastTool(
+      tools.map((tool) => ({
+        name: tool.name,
+        description: tool.description,
+        input_schema: tool.input_schema as Anthropic.Tool.InputSchema,
+      })),
+    ),
   }
 }
 
@@ -125,11 +167,15 @@ function withCacheControlOnTail(messages: Anthropic.MessageParam[]): Anthropic.M
   return messages_
 }
 
-/** Marks the last tool definition so the whole (static) tools block caches. */
+/**
+ * Marks the last tool definition so the whole (static) tools block caches. The
+ * tool set is fixed for the life of a session, so it gets the 1-hour TTL — a
+ * slow tool call or a long pause between user turns must not evict it.
+ */
 function withCacheControlOnLastTool(tools: Anthropic.Tool[]): Anthropic.Tool[] {
   if (tools.length === 0) return tools
   const lastIndex = tools.length - 1
   const tools_ = [...tools]
-  tools_[lastIndex] = { ...tools_[lastIndex]!, cache_control: EPHEMERAL_CACHE }
+  tools_[lastIndex] = { ...tools_[lastIndex]!, cache_control: EPHEMERAL_CACHE_1H }
   return tools_
 }
