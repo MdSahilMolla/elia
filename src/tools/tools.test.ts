@@ -179,6 +179,12 @@ test('write_file refuses to overwrite a non-empty file the agent has not read', 
   expect(readFileSync(path, 'utf8')).toBe('deliberate')
 })
 
+test('write_file with a relative path reports the absolute location it landed at', async () => {
+  const result = await executeTool('write_file', { path: 'notes/todo.md', content: '- thing\n' })
+  expect(result).toContain('Created notes/todo.md')
+  expect(result).toContain(`at ${join(testDir, 'notes', 'todo.md')}`)
+})
+
 test('write_file appends no LSP suffix for a recognized-but-uninstalled language server (fails soft)', async () => {
   // gopls is not installed in this environment (see src/lsp/registry.test.ts) —
   // exercises the real "server unavailable" path, not a mock.

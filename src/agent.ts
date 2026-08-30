@@ -23,6 +23,7 @@ import { activeTodoList, type TodoList, withTodoList } from './autonomy/todoList
 import { renderLessons } from './autonomy/lessons.ts'
 import { renderRationale } from './autonomy/rationale.ts'
 import { regretNudge, weakDomainCaution } from './autonomy/outcomes.ts'
+import { disputeNudge } from './autonomy/disputeNudge.ts'
 import { renderSkillHint } from './skills/relevance.ts'
 
 /** The most recent user message text — the query project memory is ranked against. */
@@ -149,7 +150,7 @@ async function runScopedTurn(
   // empty (and free) until the brain has something anchored to those paths.
   const brainCards = mode === 'dev' && turnPaths.length > 0 ? await renderBrainCards(turnPaths) : ''
   const projectMemory = mode === 'dev'
-    ? `${renderLessons()}${renderRationale(turnQuery, turnPaths)}${brainCards}${renderSkillHint(turnQuery)}${weakDomainCaution(turnQuery, turnPaths)}${regretNudge()}`
+    ? `${renderLessons()}${renderRationale(turnQuery, turnPaths)}${brainCards}${renderSkillHint(turnQuery)}${weakDomainCaution(turnQuery, turnPaths)}${regretNudge()}${disputeNudge(turnQuery)}`
     : ''
 
   // The system prompt is split so prompt caching survives across user turns:

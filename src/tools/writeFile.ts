@@ -56,6 +56,10 @@ export const writeFileTool: Tool = {
       : unifiedDiff(priorText.replace(/\r\n/g, '\n'), content.replace(/\r\n/g, '\n'), input.path)
     const verb = priorText === undefined ? 'Created' : 'Overwrote'
     const body = diff.hunks.length > 0 ? `\n${fencedDiff(diff)}` : ''
-    return `${verb} ${input.path} (${diffStat(diff)})${body}${diagnostics ? formatDiagnostics(diagnostics, input.path) : ''}`
+    // State the absolute path so "where did the file go?" is never ambiguous —
+    // relative paths resolve against the run's cwd, which is not always what the
+    // model (or the user) assumes, especially for scratch projects.
+    const at = path !== input.path ? `\n  at ${path}` : ''
+    return `${verb} ${input.path} (${diffStat(diff)})${at}${body}${diagnostics ? formatDiagnostics(diagnostics, input.path) : ''}`
   },
 }
