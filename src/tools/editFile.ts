@@ -1,3 +1,4 @@
+import { readFile } from 'node:fs/promises'
 import type { Tool } from './types.ts'
 import { captureBeforeWrite } from '../checkpoint.ts'
 import { resolveWorkspacePath, currentAgent } from '../autonomy/context.ts'
@@ -5,6 +6,7 @@ import { diagnosticsForFile, formatDiagnostics } from '../lsp/registry.ts'
 import { diffStat, fencedDiff, unifiedDiff } from '../ui/diff.ts'
 import { multipleMatchMessage, notFoundMessage } from './editMatch.ts'
 import { noteFileRead } from './fileAccess.ts'
+import { atomicWrite } from './atomicWrite.ts'
 
 function detectLineEnding(text: string): '\n' | '\r\n' {
   return text.includes('\r\n') ? '\r\n' : '\n'
@@ -49,7 +51,11 @@ export const editFileTool: Tool = {
     if (!(await file.exists())) {
       throw new Error(`File not found: ${input.path}`)
     }
-    const text = await file.text()
+    // `Bun.file().text()` silently strips a leading UTF-8 BOM, so editing a
+    // BOM-prefixed file (common for Windows-authored source) through it would
+    // drop the BOM on write — a change the edit never asked for. `fs.readFile`
+    // preserves every byte.
+    const text = await readFile(path, 'utf8')
     noteFileRead(path)
     const ending = detectLineEnding(text)
     const oldString = toLineEnding(input.old_string, ending)
@@ -76,13 +82,20 @@ export const editFileTool: Tool = {
     // this check and the write below, but it closes the actually-observed
     // window (minutes of "thinking" time) rather than the theoretical one
     // (microseconds).
-    const current = await file.text()
+    const current = await readFile(path, 'utf8')
     if (current !== text) {
       throw new Error(`${input.path} changed on disk since it was read — read it again before editing.`)
     }
 
+    // Last check before the mutation: if the run was cancelled while this edit
+    // was being computed, stop here rather than landing a write the operator
+    // just asked to abort.
+    if (currentAgent().signal?.aborted) {
+      throw new Error('Edit cancelled before writing — the run was aborted.')
+    }
+
     await captureBeforeWrite(path)
-    await Bun.write(path, updated)
+    await atomicWrite(path, updated)
 
     const root = currentAgent().cwd ?? process.cwd()
     const diagnostics = await diagnosticsForFile(path, updated, root)

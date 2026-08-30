@@ -228,6 +228,16 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
       const tool = toolsByName[block.name]
       const startedAt = Date.now()
 
+      // Cancellation lands mid-batch: a wide read/scan wave may have a dozen
+      // calls still queued behind the concurrency limit when the operator hits
+      // Ctrl+C. Don't dispatch new tool work once the run is aborted — return a
+      // uniform cancelled result so the loop unwinds cleanly instead of
+      // finishing the whole batch first.
+      if (signal?.aborted) {
+        onTool?.({ id: block.id, name: block.name, input: block.input, result: 'Run aborted before this tool ran.', isError: true, durationMs: 0, cached: false, failureClass: 'aborted' })
+        return { type: 'tool_result' as const, tool_use_id: block.id, content: 'Run aborted before this tool ran.', is_error: true }
+      }
+
       let resultText = ''
       let isError = false
       let cached = false

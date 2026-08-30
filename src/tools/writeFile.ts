@@ -4,6 +4,7 @@ import { resolveWorkspacePath, currentAgent } from '../autonomy/context.ts'
 import { diagnosticsForFile, formatDiagnostics } from '../lsp/registry.ts'
 import { addOnlyDiff, diffStat, fencedDiff, unifiedDiff } from '../ui/diff.ts'
 import { hasReadFile, noteFileRead } from './fileAccess.ts'
+import { atomicWrite } from './atomicWrite.ts'
 
 export const writeFileTool: Tool = {
   name: 'write_file',
@@ -38,8 +39,12 @@ export const writeFileTool: Tool = {
       )
     }
 
+    if (currentAgent().signal?.aborted) {
+      throw new Error('Write cancelled before writing — the run was aborted.')
+    }
+
     await captureBeforeWrite(path)
-    await Bun.write(path, content)
+    await atomicWrite(path, content)
     noteFileRead(path)
 
     const root = currentAgent().cwd ?? process.cwd()

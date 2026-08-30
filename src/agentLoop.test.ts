@@ -172,6 +172,43 @@ test('the profiler records one sample per model call only when ELIA_PROFILE is s
   }
 })
 
+test('a run aborted mid-turn does not dispatch the queued tool batch and stops as aborted', async () => {
+  const originalProvider = config.provider
+  const controller = new AbortController()
+  let providerCalls = 0
+  let toolExecutions = 0
+  config.provider = {
+    async streamTurn() {
+      providerCalls += 1
+      // The operator hits Ctrl+C while the model is producing this turn's tool calls.
+      controller.abort()
+      return {
+        content: [
+          { type: 'tool_use', id: 'a', name: 'noop', input: {} },
+          { type: 'tool_use', id: 'b', name: 'noop', input: {} },
+        ] as ContentBlock[],
+        usage: { inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 },
+      }
+    },
+  }
+  const noopTool: Tool = { name: 'noop', description: 'x', input_schema: { type: 'object', properties: {} }, async execute() { toolExecutions += 1; return 'ok' } }
+  try {
+    const result = await runAgentLoop({
+      messages: [{ role: 'user', content: [{ type: 'text', text: 'go' }] }],
+      systemPrompt: 'S',
+      tools: [noopTool],
+      useAnimation: false,
+      verbose: false,
+      signal: controller.signal,
+    })
+    expect(result.stopReason).toBe('aborted')
+    expect(providerCalls).toBe(1)
+    expect(toolExecutions).toBe(0)
+  } finally {
+    config.provider = originalProvider
+  }
+})
+
 test('dev hooks block a matching tool before execution and preserve the normal tool-result loop', async () => {
   const originalProvider = config.provider
   let calls = 0

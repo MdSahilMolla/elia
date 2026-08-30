@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, expect, test } from 'bun:test'
+import { afterAll, beforeAll, expect, spyOn, test } from 'bun:test'
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -143,30 +143,27 @@ test('edit_file rejects a write when the file changed on disk since it was read'
   const path = join(testDir, 'race.txt')
   await executeTool('write_file', { path, content: 'original content' })
 
-  // edit_file reads the file twice (initial read, then a recheck right before
-  // writing) on the single `Bun.file(path)` instance it creates internally.
-  // Stub the global Bun.file for the scope of this test to return one shared
-  // instance whose first .text() call injects a concurrent write before
-  // resolving — simulating another process changing the file in the gap
-  // between edit_file's two reads.
-  const originalBunFile = Bun.file
-  const sharedRef = originalBunFile(path)
-  const originalText = sharedRef.text.bind(sharedRef)
+  // edit_file reads the file's content, computes the edit, then re-reads right
+  // before writing to catch a concurrent change in that window. Spy on the first
+  // read so it injects a concurrent write before resolving; the recheck then
+  // sees the mismatch and refuses.
+  const fsp = await import('node:fs/promises')
+  const realReadFile = fsp.readFile
+  const spy = spyOn(fsp, 'readFile')
   let calls = 0
-  sharedRef.text = (async () => {
+  spy.mockImplementation((async (...args: Parameters<typeof realReadFile>) => {
     calls += 1
-    const value = await originalText()
+    const value = await (realReadFile as (...a: unknown[]) => Promise<unknown>)(...args)
     if (calls === 1) await Bun.write(path, 'changed by someone else')
     return value
-  }) as typeof sharedRef.text
-  ;(Bun as { file: typeof Bun.file }).file = (() => sharedRef) as typeof Bun.file
+  }) as typeof realReadFile)
 
   try {
     await expect(
       executeTool('edit_file', { path, old_string: 'original content', new_string: 'my edit' }),
     ).rejects.toThrow('changed on disk')
   } finally {
-    ;(Bun as { file: typeof Bun.file }).file = originalBunFile
+    spy.mockRestore()
   }
   expect(await Bun.file(path).text()).toBe('changed by someone else')
 })
