@@ -1,5 +1,5 @@
-import { mkdirSync, watch } from 'node:fs'
-import { resolve, sep } from 'node:path'
+import { mkdirSync, statSync, watch } from 'node:fs'
+import { join, resolve, sep } from 'node:path'
 import type { ServerWebSocket } from 'bun'
 import { paths } from '../config.ts'
 
@@ -86,8 +86,18 @@ export function resetPreviewServerForTests(): void {
 }
 
 async function serveStatic(root: string, pathname: string): Promise<Response> {
-  const resolvedPath = resolveWithinRoot(root, pathname)
+  let resolvedPath = resolveWithinRoot(root, pathname)
   if (!resolvedPath) return new Response('Forbidden', { status: 403 })
+
+  // A request for a directory (`/car-racing`) serves that directory's
+  // index.html, the way every static server does — otherwise it 404s and the
+  // browser falls back to the root, which is how a preview ends up showing a
+  // sibling project's leftover page.
+  try {
+    if (statSync(resolvedPath).isDirectory()) resolvedPath = join(resolvedPath, 'index.html')
+  } catch {
+    // Not a real path — the exists() check below returns the 404.
+  }
 
   const file = Bun.file(resolvedPath)
   if (!(await file.exists())) return new Response('Not found', { status: 404 })

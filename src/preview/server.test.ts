@@ -1,5 +1,5 @@
 import { afterAll, afterEach, beforeAll, expect, test } from 'bun:test'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { ensurePreviewServer, injectReloadScript, resetPreviewServerForTests, resolveWithinRoot } from './server.ts'
@@ -66,6 +66,17 @@ test('server returns 404 for a missing file', async () => {
   const server = ensurePreviewServer(testDir)
   const res = await fetch(`${server.baseUrl}/does-not-exist.html`)
   expect(res.status).toBe(404)
+})
+
+test("a request for a subdirectory serves that subdirectory's index.html, not the root page", async () => {
+  mkdirSync(join(testDir, 'game'), { recursive: true })
+  writeFileSync(join(testDir, 'game', 'index.html'), '<html><body>the game</body></html>')
+  writeFileSync(join(testDir, 'index.html'), '<html><body>root page</body></html>')
+  const server = ensurePreviewServer(testDir)
+
+  const res = await fetch(`${server.baseUrl}/game`)
+  expect(res.status).toBe(200)
+  expect(await res.text()).toContain('the game')
 })
 
 test('server returns 403 for a path-traversal request over HTTP', async () => {

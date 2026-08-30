@@ -1,5 +1,5 @@
-import { existsSync, readFileSync } from 'node:fs'
-import { dirname, join, relative } from 'node:path'
+import { existsSync, readFileSync, statSync } from 'node:fs'
+import { basename, dirname, join, relative } from 'node:path'
 import type { Tool } from './types.ts'
 import { ensurePreviewServer } from '../preview/server.ts'
 import { launchInBrowser } from '../preview/launchChrome.ts'
@@ -42,11 +42,18 @@ export const previewTool: Tool = {
       return (await launchInBrowser(url)).message
     }
 
-    let servePath = path!
-    let serveRoot = paths.workspace
+    // Scope the static server to the target's own directory, not all of
+    // workspace/. Serving the whole workspace meant a request that missed
+    // (e.g. a bare directory path) fell back to workspace/index.html — a
+    // different project's leftover page — which is exactly the "preview shows
+    // the wrong thing" bug. Each preview now sees only its own files.
+    const resolvedTarget = resolveWorkspacePath(path!)
+    const targetIsDir = existsSync(resolvedTarget) && statSync(resolvedTarget).isDirectory()
+    let serveRoot = targetIsDir ? resolvedTarget : dirname(resolvedTarget)
+    let servePath = targetIsDir ? 'index.html' : basename(resolvedTarget)
     let note = ''
 
-    const project = findProject(resolveWorkspacePath(path!))
+    const project = findProject(resolvedTarget)
     if (project && input.build !== false) {
       const built = pickBuildOutput(project.dir)
       const wants = input.build === true || (project.hasBuildScript && project.usesBundler && !built)
