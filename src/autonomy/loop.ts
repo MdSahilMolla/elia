@@ -1,5 +1,5 @@
 import { DEV_SYSTEM_PROMPT, config, tierConfig } from '../config.ts'
-import { runAgentLoop, type ConversationMessage } from '../agentLoop.ts'
+import { lastAssistantText, runAgentLoop, type ConversationMessage } from '../agentLoop.ts'
 import { taskTool } from '../tools/task.ts'
 import { allWorkerTools } from '../tools/registry.ts'
 import { environmentTool } from '../tools/environment.ts'
@@ -34,6 +34,7 @@ import {
   runVerification,
 } from './verify.ts'
 import { assessProgress, failureFingerprints, type AttemptSnapshot } from './progress.ts'
+import { classifyStuck, type StuckRecovery } from './stuck.ts'
 import type { CriticVerdict, Proposal } from './types.ts'
 import { appendActionAudit, writeRunReceipt } from './audit.ts'
 import { createActionGovernor, withActionGovernor, type ActionApproval, type ActionGovernor, type ActionGovernorStats, type GovernanceMode } from './governor.ts'
@@ -617,6 +618,12 @@ Read the changed files in full context. Improve only concrete issues directly re
   // first — the input to the deterministic "are repairs actually converging?"
   // check that stops a thrashing run early instead of at the budget.
   const progressHistory: AttemptSnapshot[] = []
+  // Each stall-recovery move (reconsider the approach, fix the environment) is
+  // allowed once — after that a repeat stall is a genuine handoff, not another
+  // lap.
+  const escalationsUsed = new Set<StuckRecovery>()
+  let lastRepairReport = ''
+  let pendingApproachChange: string | undefined
 
   while (true) {
     if (runSignal?.aborted) return done('aborted', { proposal, verdict })
@@ -749,11 +756,31 @@ This reviewer session is intentionally read-only. The current diff, status, and 
     // its budget rediscovering the same wall.
     progressHistory.push({ attempt, failures: failureFingerprints(verification, verification.passed ? verdict : undefined) })
     const progress = assessProgress(progressHistory)
+    pendingApproachChange = undefined
     if (progress.recommendation === 'stop' && (progress.trend === 'stalled' || progress.trend === 'diverging')) {
-      writeSubStep(`Stopping repair early — not converging: ${progress.reason}`)
-      journal.append('phase', { phase: 'reflect', attempt, note: `stopped early (${progress.trend}): ${progress.reason}` })
-      const lessons = await captureLessons(goal, proposal, 'unresolved', journal, track, governor, graph, runSignal)
-      return done('needs-attention', { proposal, verdict, lessons })
+      const failureText = `${verification.passed ? '' : describeVerification(verification)}\n${describeIssues(verdict?.issues ?? [])}`.trim()
+      const stuck = classifyStuck({ failureText, agentReport: lastRepairReport, trend: progress.trend })
+      const canEscalate =
+        attempt < maxRepairAttempts &&
+        (stuck.recovery === 'replan' || stuck.recovery === 'fix-environment') &&
+        !escalationsUsed.has(stuck.recovery)
+
+      if (canEscalate) {
+        // One genuine attempt at the different move the diagnosis points to —
+        // reconsider the approach, or fix the environment first — before giving up.
+        escalationsUsed.add(stuck.recovery)
+        pendingApproachChange = stuck.recovery === 'replan'
+          ? `The last ${attempt} repair attempts kept hitting the same wall. Stop patching the current approach. Step back: re-read the relevant code, reconsider whether the chosen approach can work at all, and implement a genuinely different solution to the goal.`
+          : `The failure is an environment problem, not a defect in the change: ${stuck.reason} Fix the environment first (install the missing dependency, create the missing file, free the port), then re-run verification.`
+        writeSubStep(`Not converging (${progress.trend}) — ${stuck.category}: trying a ${stuck.recovery === 'replan' ? 'different approach' : 'environment fix'} once before handing off.`)
+        journal.append('phase', { phase: 'reflect', attempt, note: `stall escalation: ${stuck.category} -> ${stuck.recovery}` })
+      } else {
+        writeSubStep(`Stopping repair — ${stuck.category}: ${stuck.reason}`)
+        if (stuck.question) writeBlock('Needs a decision from you', stuck.question)
+        journal.append('phase', { phase: 'reflect', attempt, note: `stopped (${progress.trend} / ${stuck.category}): ${stuck.reason}${stuck.question ? ` Question: ${stuck.question}` : ''}` })
+        const lessons = await captureLessons(goal, proposal, 'unresolved', journal, track, governor, graph, runSignal)
+        return done('needs-attention', { proposal, verdict, lessons })
+      }
     }
 
     if (attempt >= maxRepairAttempts) {
@@ -780,13 +807,17 @@ This reviewer session is intentionally read-only. The current diff, status, and 
       ? `\n\n## These specific failures have persisted through ${attempt - 1} earlier repair attempt(s) — a different approach is needed on them, not the same fix again:\n${progress.repeated.map((f) => `- ${f.replace(/^(verify|review):/, '')}`).join('\n')}`
       : ''
 
+    // A stall the classifier flagged for a specific recovery move overrides the
+    // ordinary "fix what went wrong" framing for this one attempt.
+    const directive = pendingApproachChange ? `\n\n## Change of tack\n${pendingApproachChange}` : ''
+
     const repairMessages: ConversationMessage[] = [
       {
         role: 'user',
         content: [
           {
             type: 'text',
-            text: `${briefing}\n\n## What went wrong\n${problem}${persisted}\n\nFix all of it, then re-run: ${proposal.verification.join(' && ') || '(no verification commands were defined)'}`,
+            text: `${briefing}\n\n## What went wrong\n${problem}${persisted}${directive}\n\nFix all of it, then re-run: ${proposal.verification.join(' && ') || '(no verification commands were defined)'}`,
           },
         ],
       },
@@ -810,6 +841,10 @@ This reviewer session is intentionally read-only. The current diff, status, and 
     }))))
     track(repair.usage)
     recordUsage(repair.usage)
+    // Kept so the next stall check can read the repair agent's own account of
+    // what it could or couldn't do — the signal behind the missing-information
+    // and wrong-approach classifications.
+    lastRepairReport = lastAssistantText(repairMessages, '')
   }
 
   // --- Learn ---------------------------------------------------------------
