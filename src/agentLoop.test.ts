@@ -172,6 +172,74 @@ test('the profiler records one sample per model call only when ELIA_PROFILE is s
   }
 })
 
+test('operator steering is spliced into the running turn at the next step boundary', async () => {
+  const originalProvider = config.provider
+  const seen: string[] = []
+  const steering: string[] = []
+  let call = 0
+  config.provider = {
+    async streamTurn({ messages }) {
+      call += 1
+      // Record the text of the last user message the model was handed.
+      const lastUser = [...messages].reverse().find((m) => m.role === 'user')
+      seen.push(lastUser!.content.map((b) => (b.type === 'text' ? b.text : `[${b.type}]`)).join(' '))
+      if (call === 1) {
+        // The operator types this while the first tool call is running.
+        steering.push('actually use a token bucket')
+        return { content: [{ type: 'tool_use', id: 't1', name: 'noop', input: {} }] as ContentBlock[], usage: { inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 } }
+      }
+      return { content: [{ type: 'text', text: 'done' }] as ContentBlock[], usage: { inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 } }
+    },
+  }
+  const noopTool: Tool = { name: 'noop', description: 'x', input_schema: { type: 'object', properties: {} }, async execute() { return 'ok' } }
+  try {
+    await runAgentLoop({
+      messages: [{ role: 'user', content: [{ type: 'text', text: 'add rate limiting' }] }],
+      systemPrompt: 'S',
+      tools: [noopTool],
+      useAnimation: false,
+      verbose: false,
+      drainSteering: () => steering.splice(0),
+    })
+  } finally {
+    config.provider = originalProvider
+  }
+  // Call 1 saw only the original ask; call 2 (after the tool round-trip) saw the steering folded in.
+  expect(seen[0]).toContain('add rate limiting')
+  expect(seen[1]).toContain('token bucket')
+  expect(seen[1]).toContain('Operator steering')
+})
+
+test('steering after the model is ready to stop keeps the turn going instead of ending', async () => {
+  const originalProvider = config.provider
+  const steering: string[] = []
+  let call = 0
+  config.provider = {
+    async streamTurn() {
+      call += 1
+      if (call === 1) {
+        steering.push('one more thing: add a comment explaining why')
+        return { content: [{ type: 'text', text: 'all done' }] as ContentBlock[], usage: { inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 } }
+      }
+      return { content: [{ type: 'text', text: 'done for real' }] as ContentBlock[], usage: { inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 } }
+    },
+  }
+  try {
+    const result = await runAgentLoop({
+      messages: [{ role: 'user', content: [{ type: 'text', text: 'go' }] }],
+      systemPrompt: 'S',
+      tools: [],
+      useAnimation: false,
+      verbose: false,
+      drainSteering: () => steering.splice(0),
+    })
+    expect(call).toBe(2)
+    expect(result.stopReason).toBe('complete')
+  } finally {
+    config.provider = originalProvider
+  }
+})
+
 test('a run aborted mid-turn does not dispatch the queued tool batch and stops as aborted', async () => {
   const originalProvider = config.provider
   const controller = new AbortController()

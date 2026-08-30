@@ -31,6 +31,8 @@ export interface TurnHooks {
   approve(title: string, lines: string[]): Promise<boolean>
   signal: AbortSignal
   planMode: boolean
+  /** Drained by the agent loop at each step boundary — operator guidance typed mid-run. */
+  drainSteering(): string[]
 }
 
 export interface SlashPickerRequest {
@@ -105,6 +107,7 @@ export function App(props: AppProps) {
   const [agents, setAgents] = useState<TaskSession[]>(() => taskSessions.list())
   const [previewUrl, setPreviewUrl] = useState<string | null>(null)
   const queueRef = useRef<string[]>([])
+  const steeringRef = useRef<string[]>([])
   const abortRef = useRef<AbortController | null>(null)
   const lastUserText = useRef('')
 
@@ -170,6 +173,10 @@ export function App(props: AppProps) {
         setQueue([])
         store.notice('Queue cleared.')
       }
+      if (steeringRef.current.length > 0) {
+        steeringRef.current = []
+        store.notice('Pending steering cleared.')
+      }
       if (busy) abortRef.current?.abort()
     }
     if (key.shift && key.tab) setMode((m) => (m === 'manual' ? 'auto' : m === 'auto' ? 'plan' : 'manual'))
@@ -225,6 +232,12 @@ export function App(props: AppProps) {
           new Promise<boolean>((resolve) => setConfirm({ title, lines, resolve: (ok) => { setConfirm(null); resolve(ok) } })),
         signal: controller.signal,
         planMode: modeRef.current === 'plan',
+        drainSteering: () => {
+          const pending = steeringRef.current
+          steeringRef.current = []
+          if (pending.length > 0) setStatus('Steering applied')
+          return pending
+        },
       }
       try {
         await props.submitTurn(text, hooks)
@@ -257,7 +270,15 @@ export function App(props: AppProps) {
         return
       }
       if (busy) {
-        pushQueue(trimmed)
+        // Slash commands and shell escapes can't be applied to a turn already in
+        // flight — those still wait. Plain text becomes live steering: it's
+        // spliced into the running turn at the next step boundary.
+        if (trimmed.startsWith('/') || trimmed.startsWith('@') || trimmed.startsWith('!')) {
+          pushQueue(trimmed)
+          return
+        }
+        steeringRef.current = [...steeringRef.current, trimmed]
+        store.notice(`↳ steering — elia will take this at the next step (${steeringRef.current.length})`)
         return
       }
 
@@ -414,7 +435,7 @@ export function App(props: AppProps) {
           disabled={confirm !== null || picker !== null || textPrompt !== null || planReady}
           placeholder={
             busy
-              ? 'working — type to queue a follow-up…'
+              ? 'working — type to steer elia now · / ! wait for the turn to finish · Esc to stop'
               : mode === 'plan'
                 ? 'PLAN MODE — describe the task; elia researches & proposes, then you approve.  Tab to exit'
                 : 'Ask elia…   Tab = plan mode · / commands · ! shell · Ctrl+C quit'

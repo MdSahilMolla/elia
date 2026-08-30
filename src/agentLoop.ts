@@ -99,6 +99,14 @@ export interface RunAgentLoopOptions {
   prefetcher?: Prefetcher
   /** Cooperative cancellation, checked between steps. */
   signal?: AbortSignal
+  /**
+   * Mid-run steering: called at each step boundary. Anything it returns is
+   * spliced into the conversation as an operator message before the next model
+   * call, so the user can redirect a working agent ("actually use zod", "that
+   * file is generated") without stopping and restarting the turn. Must return
+   * and clear its own buffer.
+   */
+  drainSteering?: () => string[]
 }
 
 export type StopReason = 'complete' | 'step-budget' | 'aborted'
@@ -139,7 +147,27 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
     cache,
     prefetcher,
     signal,
+    drainSteering,
   } = opts
+
+  /**
+   * Splices any pending operator steering into `messages` as a user turn.
+   * Returns true when something was injected. Consecutive user messages are
+   * merged by every provider, so this is safe to call right after a tool-result
+   * user message.
+   */
+  const injectSteering = (): boolean => {
+    const pending = drainSteering?.() ?? []
+    if (pending.length === 0) return false
+    const text = pending.join('\n').trim()
+    if (!text) return false
+    messages.push({
+      role: 'user',
+      content: [{ type: 'text', text: `[Operator steering — the user sent this while you were working. Take it as a direct instruction and adjust course now.]\n${text}` }],
+    })
+    if (verbose) writeNotice('elia: operator steering applied')
+    return true
+  }
 
   const toolDefinitions = tools.map((tool) => ({
     name: tool.name,
@@ -160,6 +188,10 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
 
   while (true) {
     if (signal?.aborted) return finish('aborted')
+
+    // Fold in any guidance the operator typed during the previous model call or
+    // tool batch, before the next model call sees the conversation.
+    injectSteering()
 
     // A growing history costs more to attend to every turn even with prompt
     // caching (which makes it cheap to *re-send*, not smaller), and is
@@ -206,7 +238,12 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
       (block): block is Extract<ContentBlock, { type: 'tool_use' }> => block.type === 'tool_use',
     )
 
-    if (toolUseBlocks.length === 0) return finish('complete')
+    if (toolUseBlocks.length === 0) {
+      // The model is ready to stop — but if the operator sent steering during
+      // this last response, don't end the turn: fold it in and keep going.
+      if (injectSteering()) continue
+      return finish('complete')
+    }
 
     if (verbose) {
       for (const block of toolUseBlocks) writeToolCall(block.name, block.input)

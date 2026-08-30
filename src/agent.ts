@@ -106,6 +106,8 @@ export interface RunTurnOptions {
   silent?: boolean
   /** Skip recordUsage/recordTopLevelTurn/the usage-line print — for a caller (e.g. the orchestrator delegating a lone 'tech' route) that aggregates and records stats itself exactly once. */
   skipStats?: boolean
+  /** Mid-run steering: pending operator messages to splice in at the next step boundary (see runAgentLoop). */
+  drainSteering?: () => string[]
 }
 
 export async function runTurn(
@@ -192,6 +194,7 @@ async function runScopedTurn(
     cache,
     prefetcher,
     signal: options.signal,
+    drainSteering: options.drainSteering,
     onToolStart: options.onToolStart,
     onTool: (event) => {
       // Every call is a data point for deciding which tool elia should write itself next.

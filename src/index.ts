@@ -19,6 +19,8 @@ interface TurnUiHooks {
   signal?: AbortSignal
   /** Read-only "propose a plan first" turn. */
   planMode?: boolean
+  /** Mid-run steering: drained at each step boundary and spliced into the turn. */
+  drainSteering?: () => string[]
 }
 import { playIntro } from './ui/character.ts'
 import { ZERO_USAGE, getSessionSummaryLine, recordTopLevelTurn, formatUsageLine } from './usage.ts'
@@ -1367,6 +1369,7 @@ async function runInteractive(): Promise<void> {
         signal: controller.signal,
         silent: Boolean(uiHooks),
         planMode: uiHooks?.planMode,
+        drainSteering: uiHooks?.drainSteering,
         onText: uiHooks?.onText,
         onThinking: uiHooks?.onThinking,
         onToolStart: uiHooks?.onToolStart,
@@ -2402,6 +2405,7 @@ async function runInteractive(): Promise<void> {
             onTool: hooks.onTool,
             onToolStart: hooks.onToolStart,
             signal: hooks.signal,
+            drainSteering: hooks.drainSteering,
           },
         )
         await saveSession(sessionId, messages)
