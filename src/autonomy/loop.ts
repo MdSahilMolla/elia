@@ -33,6 +33,7 @@ import {
   requireCriticVerdict,
   runVerification,
 } from './verify.ts'
+import { assessProgress, failureFingerprints, type AttemptSnapshot } from './progress.ts'
 import type { CriticVerdict, Proposal } from './types.ts'
 import { appendActionAudit, writeRunReceipt } from './audit.ts'
 import { createActionGovernor, withActionGovernor, type ActionApproval, type ActionGovernor, type ActionGovernorStats, type GovernanceMode } from './governor.ts'
@@ -612,6 +613,10 @@ Read the changed files in full context. Improve only concrete issues directly re
 
   let verdict: CriticVerdict | undefined
   let attempt = 0
+  // Fingerprints of what was still failing after each verify+review pass, oldest
+  // first — the input to the deterministic "are repairs actually converging?"
+  // check that stops a thrashing run early instead of at the budget.
+  const progressHistory: AttemptSnapshot[] = []
 
   while (true) {
     if (runSignal?.aborted) return done('aborted', { proposal, verdict })
@@ -738,6 +743,19 @@ This reviewer session is intentionally read-only. The current diff, status, and 
       writeBlock('Issues found', describeIssues(verdict.issues))
     }
 
+    // Record this pass's failure fingerprints and check the trajectory. A run
+    // that reproduces the same failures attempt after attempt, or regresses, is
+    // told to stop now with a precise diagnosis rather than spending the rest of
+    // its budget rediscovering the same wall.
+    progressHistory.push({ attempt, failures: failureFingerprints(verification, verification.passed ? verdict : undefined) })
+    const progress = assessProgress(progressHistory)
+    if (progress.recommendation === 'stop' && (progress.trend === 'stalled' || progress.trend === 'diverging')) {
+      writeSubStep(`Stopping repair early — not converging: ${progress.reason}`)
+      journal.append('phase', { phase: 'reflect', attempt, note: `stopped early (${progress.trend}): ${progress.reason}` })
+      const lessons = await captureLessons(goal, proposal, 'unresolved', journal, track, governor, graph, runSignal)
+      return done('needs-attention', { proposal, verdict, lessons })
+    }
+
     if (attempt >= maxRepairAttempts) {
       writeSubStep(`Stopping after ${attempt} repair attempt${attempt === 1 ? '' : 's'} — this needs a human.`)
       const lessons = await captureLessons(goal, proposal, 'unresolved', journal, track, governor, graph, runSignal)
@@ -755,13 +773,20 @@ This reviewer session is intentionally read-only. The current diff, status, and 
       ? `Adversarial review found blocking problems:\n\n${describeIssues(verdict?.issues ?? [])}`
       : `Verification failed:\n\n${describeVerification(verification)}`
 
+    // When earlier repair passes have not shifted a particular failure, tell the
+    // repair agent explicitly so it stops re-applying the same fix and tries a
+    // genuinely different approach on the parts that are stuck.
+    const persisted = progress.trend === 'converging' && progress.repeated.length > 0
+      ? `\n\n## These specific failures have persisted through ${attempt - 1} earlier repair attempt(s) — a different approach is needed on them, not the same fix again:\n${progress.repeated.map((f) => `- ${f.replace(/^(verify|review):/, '')}`).join('\n')}`
+      : ''
+
     const repairMessages: ConversationMessage[] = [
       {
         role: 'user',
         content: [
           {
             type: 'text',
-            text: `${briefing}\n\n## What went wrong\n${problem}\n\nFix all of it, then re-run: ${proposal.verification.join(' && ') || '(no verification commands were defined)'}`,
+            text: `${briefing}\n\n## What went wrong\n${problem}${persisted}\n\nFix all of it, then re-run: ${proposal.verification.join(' && ') || '(no verification commands were defined)'}`,
           },
         ],
       },
