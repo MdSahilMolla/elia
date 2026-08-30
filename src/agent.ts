@@ -11,7 +11,10 @@ import { createToolResultCache } from './speculation/cache.ts'
 import { createPrefetcher } from './speculation/prefetch.ts'
 import { observeToolCall } from './skills/detector.ts'
 import { setActiveMode, type AgentMode } from './autonomy/mode.ts'
-import { noteToolUse } from './ledger.ts'
+import { getActiveLedgerSession, noteToolUse } from './ledger.ts'
+import { loadBrainItems } from './brain/store.ts'
+import { renderCards } from './brain/cards.ts'
+import { noteBrainToolUse } from './brain/relevance.ts'
 import { appendActionAudit } from './autonomy/audit.ts'
 import { createActionGovernor, withActionGovernor, type ActionApproval, type GovernanceMode } from './autonomy/governor.ts'
 import { loadDevelopmentToolHooks, withToolHooks } from './autonomy/devHooks.ts'
@@ -36,6 +39,16 @@ function lastUserTextFor(messages: ConversationMessage[]): string {
 /** Bare paths mentioned in a prompt, e.g. "fix src/foo/bar.ts" — used to surface rationale anchored to those files. */
 function filePathsIn(text: string): string[] {
   return [...text.matchAll(/[\w./-]+\.[a-z]{1,5}\b/gi)].map((m) => m[0]).slice(0, 8)
+}
+
+/** The second brain's per-file knowledge cards for the paths a turn is about. Never throws — a brain read must not break a turn. */
+async function renderBrainCards(activePaths: string[]): Promise<string> {
+  try {
+    const items = await loadBrainItems({ currentSessionId: getActiveLedgerSession()?.id })
+    return renderCards(items, activePaths)
+  } catch {
+    return ''
+  }
 }
 
 export type { ConversationMessage }
@@ -128,8 +141,13 @@ async function runScopedTurn(
   // shaped the way it is, ranked against what this turn is about. This is the
   // compounding edge — the longer elia works a repo, the more it carries in.
   const turnQuery = lastUserTextFor(messages)
+  const turnPaths = filePathsIn(turnQuery)
+  // Knowledge cards: what every past session accumulated about the specific
+  // files this turn is about to touch. Derived on read from the second brain;
+  // empty (and free) until the brain has something anchored to those paths.
+  const brainCards = mode === 'dev' && turnPaths.length > 0 ? await renderBrainCards(turnPaths) : ''
   const projectMemory = mode === 'dev'
-    ? `${renderLessons()}${renderRationale(turnQuery, filePathsIn(turnQuery))}${renderSkillHint(turnQuery)}${weakDomainCaution(turnQuery, filePathsIn(turnQuery))}${regretNudge()}`
+    ? `${renderLessons()}${renderRationale(turnQuery, turnPaths)}${brainCards}${renderSkillHint(turnQuery)}${weakDomainCaution(turnQuery, turnPaths)}${regretNudge()}`
     : ''
 
   // The system prompt is split so prompt caching survives across user turns:
@@ -179,8 +197,9 @@ async function runScopedTurn(
       // Every call is a data point for deciding which tool elia should write itself next.
       appendActionAudit(event)
       observeToolCall(event.name, event.input)
-      // And a data point for whether a recently recalled episode actually mattered — see ledger.ts.
+      // And a data point for whether a recently recalled episode or brain hit actually mattered.
       noteToolUse(event.input)
+      noteBrainToolUse(event.input)
       options.onTool?.(event)
     },
   })))

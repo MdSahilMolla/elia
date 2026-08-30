@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from 'node:fs'
 import { dirname } from 'node:path'
-import { appendSecureFile, ensureSecureDirectory, hardenSecureFile } from '../securePersistence.ts'
+import { appendSecureFile, ensureSecureDirectory, hardenSecureFile, writeSecureFile } from '../securePersistence.ts'
 import { paths } from '../config.ts'
 import type { Tool } from '../tools/types.ts'
 
@@ -60,6 +60,25 @@ export function loadLessons(path = paths.lessons): Lesson[] {
       .filter((lesson) => lesson.text.length > 0)
   } catch {
     return []
+  }
+}
+
+const LESSONS_HEADER = '# Lessons\n\nThings elia learned about this project, carried into future runs.\n\n'
+
+/**
+ * Replaces the whole lessons file with a curated set — used only by the brain's
+ * consolidation pass (brain/consolidate.ts), which merges near-duplicates and
+ * drops lessons that have gone stale. Each lesson keeps its original timestamp
+ * so recency ordering survives the rewrite.
+ */
+export function rewriteLessons(lessons: Lesson[], path = paths.lessons): void {
+  try {
+    const body = lessons
+      .map((lesson) => `- ${lesson.text.replace(/\s+/g, ' ').trim()} <!-- ${new Date(lesson.at || Date.now()).toISOString()} -->`)
+      .join('\n')
+    writeSecureFile(path, body ? `${LESSONS_HEADER}${body}\n` : LESSONS_HEADER)
+  } catch {
+    // Consolidation is best-effort; the existing file staying in place is safe.
   }
 }
 
