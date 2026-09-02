@@ -47,12 +47,11 @@ test('the battmann sub-agent prompt carries the same no-fabrication guardrails',
   expect(prompt).toContain('untrusted data')
 })
 
-test('battmann mode supplies the external-evidence tools the base worker set lacks', () => {
+test('all modes get web evidence while battmann adds industry reporting tools', () => {
   const base = allWorkerTools().map((tool) => tool.name)
   const added = businessTools.map((tool) => tool.name).filter((name) => !base.includes(name))
-  // Without these an intelligence brief could only be guesswork.
-  expect(added).toContain('web_search')
-  expect(added).toContain('web_fetch')
+  expect(base).toContain('web_search')
+  expect(base).toContain('web_fetch')
   expect(added).toContain('presentation')
 })
 
@@ -76,4 +75,6 @@ test('battmann research tools stay inside the existing approval boundaries', () 
   // A path that escapes the workspace on every platform (a bare absolute Windows
   // path reads as a relative subpath on the Linux CI runner).
   expect(assessAction({ name: 'read_spreadsheet', input: { path: '../../../../../secret.xlsx' } }).decision).toBe('approve')
+  expect(assessAction({ name: 'battmann', input: { action: 'workspace_snapshot', storePath: '../../../../../secret.sqlite' } }).risk).toBe('critical')
+  expect(assessAction({ name: 'battmann', input: { action: 'report_from_store', outputPath: '../../../../../report.md' } }).risk).toBe('critical')
 })

@@ -40,3 +40,9 @@ The implementation target is not unrestricted autonomy. The target is **bounded,
 | Performance | Independent work executes in parallel within provider and resource budgets; no unbounded recursive fan-out. |
 | Operator control | Pause/cancel/resume/retry states are truthful and do not advertise unsupported controls. |
 | Generality | Coding, browser observation, external-action planning, and at least one supervised side-effect workflow have explicit contracts. |
+
+## Battmann readiness boundary
+
+Battmann's local decision-intelligence path is designed for auditable single-workspace use. SQLite transactions protect its system of record; forecast revisions, claim reviews, and resolution events are append-only; observed ledger timestamps cannot be future-dated; evidence is rejected when its publication or retrieval time is later than the forecast/report cutoff; live scoring rejects forecasts physically recorded after resolution; terminal outcomes cannot be silently overwritten; and final report bundles require supported claim reviews. The printable HTML and JSON companions are local artifacts, not proof of external distribution or publication.
+
+This is not equivalent to a hosted Palantir-class enterprise platform. Production deployment for multiple organizations still requires authenticated tenant isolation, row/object/property authorization, enforceable classification propagation, secure key management, encrypted backups, high availability, disaster recovery, managed connector credentials, data-residency controls, audit export, monitoring, and independently tested incident procedures. Browser MCP, Exa, Serper, and other configured adapters must be revalidated at runtime; credential presence alone does not prove authorization or health.

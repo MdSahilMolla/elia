@@ -14,10 +14,13 @@ Elia should be evaluated by repeatable task outcomes, not by a claim of universa
 | AI/ML | Model comparison; prompt evaluation; retrieval prototype; latency/cost study | Model/version/conditions and metrics are recorded, results are reproducible, and unsupported superiority claims are rejected |
 | Production SaaS | Release readiness; deployment plan; migration/rollback; observability; incident runbook | Repository evidence is scored, preflight and postconditions are explicit, production mutation is governed, and external deployment is never claimed without external evidence |
 | Software | Feature, bug fix, migration, deployment runbook | Tests and postconditions pass, security review is performed, and failures are repaired or reported honestly |
+| Strategic intelligence | Trade/sanctions/supply-chain brief; resolvable forecast; scenario watchlist; decision/outcome review | Every material claim maps to a dated source excerpt and review state; quantities are classified; forecasts have explicit horizons/resolution criteria and immutable revisions; correlated signals are not double-counted; live forecasts were physically recorded before resolution; historical replays cannot enter the live scorecard; scenarios, decisions, and outcomes remain linked; and final reports fail closed on unresolved claim review |
 
 ## Quality thresholds
 
 A release candidate should pass all deterministic unit and integration tests, compile cleanly, block every unauthorized consequential browser action, preserve an exact approval token boundary, and complete specialist routing tests without a fallback-to-tech surprise for recognized domains. Performance should be tracked as median and p95 wall-clock time for router, specialist, synthesis, and external-action phases; speed improvements are valid only when success and safety remain stable.
+
+Battmann forecast-superiority claims require a frozen chronological evaluation window, at least 500 independently resolved live questions, zero detected time-cutoff violations, a positive paired Brier improvement whose reported 95% interval remains above zero, domain/horizon breakdowns, and comparison against uninformed, historical-base-rate, and credible external baselines. This is a minimum statistical gate, not a substitute for independent replication or source-quality review. Backtest-class forecasts never satisfy the live gate.
 
 ## Current verification baseline
 

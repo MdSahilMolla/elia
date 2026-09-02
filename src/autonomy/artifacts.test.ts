@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from 'bun:test'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { savePlanArtifact } from './artifacts.ts'
@@ -49,4 +49,18 @@ test('readArtifact resolves state artifacts but rejects paths outside .elia', ()
   expect(readArtifact(outside, root)).toBeNull()
   expect(readArtifact('../secret.md', root)).toBeNull()
   expect(readArtifact('missing', root)).toBeNull()
+})
+
+test('artifact reader indexes Battmann Markdown, JSON, and printable HTML companions', () => {
+  const root = fixtureRoot()
+  const dir = join(root, '.elia', 'artifacts')
+  mkdirSync(dir, { recursive: true })
+  writeFileSync(join(dir, 'brief.md'), '# Brief')
+  writeFileSync(join(dir, 'brief.json'), '{"reportSchemaVersion":2}')
+  writeFileSync(join(dir, 'brief.html'), '<!doctype html><title>Brief</title>')
+  writeFileSync(join(dir, 'ignore.txt'), 'not an artifact')
+
+  expect(listArtifacts(root).map((artifact) => artifact.name).sort()).toEqual(['brief.html', 'brief.json', 'brief.md'])
+  expect(readArtifact('brief.json', root)?.content).toContain('reportSchemaVersion')
+  expect(readArtifact('brief.html', root)?.content).toContain('<!doctype html>')
 })

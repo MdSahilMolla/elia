@@ -189,6 +189,7 @@ export function createDelegationTool(options: DelegationToolOptions): Tool {
           journal: options.journal,
           signal: options.signal,
           onTool: options.onTool,
+          wave: waveIndex + 1,
         })
         for (const child of result.results) {
           const report = redactText(child.report, 3_000)

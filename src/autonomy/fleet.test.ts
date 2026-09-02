@@ -102,12 +102,16 @@ test('dependency-ready steps that claim the same file are serialized', () => {
 })
 
 test('fleetConcurrency matches the old fixed default when everyone shares one provider', () => {
-  expect(fleetConcurrency(['anthropic (claude-sonnet-5)', 'anthropic (claude-sonnet-5)', 'anthropic (claude-sonnet-5)'])).toBe(4)
+  expect(fleetConcurrency(['anthropic', 'anthropic', 'anthropic'])).toBe(4)
+})
+
+test('fleetConcurrency does not mistake two models on one provider for separate rate limits', () => {
+  expect(fleetConcurrency(['anthropic', 'anthropic'])).toBe(4)
 })
 
 test('fleetConcurrency widens per distinct provider so one rate limit does not throttle the whole fleet', () => {
-  expect(fleetConcurrency(['groq (a)', 'anthropic (b)'])).toBe(8)
-  expect(fleetConcurrency(['groq (a)', 'anthropic (b)', 'openai (c)'])).toBe(12)
+  expect(fleetConcurrency(['groq', 'anthropic'])).toBe(8)
+  expect(fleetConcurrency(['groq', 'anthropic', 'openai'])).toBe(12)
 })
 
 test('fleetConcurrency is capped even with many distinct providers', () => {

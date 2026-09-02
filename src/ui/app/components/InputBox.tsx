@@ -89,6 +89,17 @@ export function InputBox(props: InputBoxProps) {
   const menu = filteredCommands(state.buffer, props.commands)
   const selected = Math.min(state.selectedIndex, Math.max(0, menu.length - 1))
 
+  // The menu can be longer than we want to draw. Scroll a fixed window so the
+  // highlighted row is always visible instead of clipping everything past row 8.
+  const MAX_VISIBLE = 10
+  const start =
+    menu.length <= MAX_VISIBLE
+      ? 0
+      : Math.min(Math.max(0, selected - Math.floor(MAX_VISIBLE / 2)), menu.length - MAX_VISIBLE)
+  const visible = menu.slice(start, start + MAX_VISIBLE)
+  const hiddenAbove = start
+  const hiddenBelow = menu.length - (start + visible.length)
+
   return (
     <Box flexDirection="column">
       <Box borderStyle="round" borderColor={props.disabled ? palette.muted : palette.accent} paddingX={1}>
@@ -98,11 +109,13 @@ export function InputBox(props: InputBoxProps) {
       </Box>
       {menu.length > 0 && (
         <Box flexDirection="column" marginLeft={2}>
-          {menu.slice(0, 8).map((cmd, i) => (
-            <Text key={cmd.name} inverse={i === selected}>
+          {hiddenAbove > 0 && <Text color={palette.muted}>↑ {hiddenAbove} more</Text>}
+          {visible.map((cmd) => (
+            <Text key={cmd.name} inverse={menu[selected]?.name === cmd.name}>
               {cmd.name} <Text color={palette.muted}>{cmd.description}</Text>
             </Text>
           ))}
+          {hiddenBelow > 0 && <Text color={palette.muted}>↓ {hiddenBelow} more</Text>}
         </Box>
       )}
     </Box>

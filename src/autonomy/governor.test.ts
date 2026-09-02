@@ -125,6 +125,13 @@ describe('autonomy governor', () => {
     }
   })
 
+  test('allows bounded workspace visualizations and rejects unsafe slugs', () => {
+    const chart = assessAction({ name: 'visualize', input: { type: 'bar', title: 'Revenue', slug: 'revenue' } }, '/repo')
+    expect(chart.decision).toBe('allow')
+    expect(chart.resources).toEqual(['.elia/artifacts/revenue.svg', '.elia/artifacts/revenue.md'])
+    expect(assessAction({ name: 'visualize', input: { slug: '../outside' } }, '/repo').risk).toBe('critical')
+  })
+
   test('deployment workflows keep preview reviewable and production critical', async () => {
     const preview = await createActionGovernor({ mode: 'unattended' }).check({
       name: 'deployment',
@@ -175,12 +182,12 @@ test('every registered tool declares a governor contract', async () => {
   // prompt instead of working. That shipped twice — once for the cyber tools,
   // once for the research tools — so it is asserted across the whole registry
   // rather than tool by tool.
-  const { allWorkerTools, businessTools, cyberTools } = await import('../tools/registry.ts')
+  const { allWorkerTools, battmannTools, businessTools, cyberTools } = await import('../tools/registry.ts')
   const { taskTool } = await import('../tools/task.ts')
   const { previewTool } = await import('../tools/preview.ts')
   const { codexTool } = await import('../tools/codex.ts')
 
-  const undeclared = [...allWorkerTools(), ...businessTools, ...cyberTools, taskTool, previewTool, codexTool]
+  const undeclared = [...allWorkerTools(), ...businessTools, ...battmannTools, ...cyberTools, taskTool, previewTool, codexTool]
     .filter((tool) => assessAction({ name: tool.name, input: {} }).reason.includes('no declared safety contract'))
     .map((tool) => tool.name)
 

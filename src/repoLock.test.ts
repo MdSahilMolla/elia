@@ -4,6 +4,7 @@ import { isRepoMutatingTool, withRepoLock } from './repoLock.ts'
 test('classifies the file-mutating tools', () => {
   expect(isRepoMutatingTool('edit_file')).toBe(true)
   expect(isRepoMutatingTool('write_file')).toBe(true)
+  expect(isRepoMutatingTool('visualize')).toBe(true)
   expect(isRepoMutatingTool('read_file')).toBe(false)
   expect(isRepoMutatingTool('run_command')).toBe(false)
 })

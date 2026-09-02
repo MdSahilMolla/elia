@@ -2,7 +2,7 @@ import { afterEach, beforeEach, expect, test } from 'bun:test'
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { installCommand, listInstalled, parsePipList, removeCommand } from './registry.ts'
+import { installCommand, listInstalled, parsePipList, removeCommand, suggestedInstalls } from './registry.ts'
 
 let dir: string
 beforeEach(() => {
@@ -39,6 +39,20 @@ test('listInstalled reports package.json deps and skills', () => {
   } finally {
     process.chdir(cwd)
   }
+})
+
+test('suggestedInstalls hides packages the project already has', () => {
+  writeFileSync(join(dir, 'package.json'), JSON.stringify({ devDependencies: { typescript: '5', prettier: '3' } }))
+  const names = suggestedInstalls('npm', dir).map((s) => s.name)
+  expect(names).not.toContain('typescript')
+  expect(names).not.toContain('prettier')
+  expect(names).toContain('vitest')
+})
+
+test('suggestedInstalls maps bun to the npm shortlist and pip to its own', () => {
+  expect(suggestedInstalls('bun', dir).some((s) => s.name === 'zod')).toBe(true)
+  expect(suggestedInstalls('pip', dir).some((s) => s.name === 'pytest')).toBe(true)
+  expect(suggestedInstalls('pip', dir).some((s) => s.name === 'vitest')).toBe(false)
 })
 
 test('parsePipList turns pip json into rows', () => {

@@ -71,6 +71,8 @@ export interface FleetRunOptions {
   delegationDepth?: number
   /** Shared tool-event observer for nested task dashboards and telemetry. */
   onTool?: (event: import('../agentLoop.ts').ToolEvent) => void
+  /** One-based dependency wave shown in worker task sessions. */
+  wave?: number
 }
 
 export interface FleetResult {
@@ -94,15 +96,19 @@ export async function runFleet(options: FleetRunOptions): Promise<FleetResult> {
   const showBoard = options.showBoard ?? true
   const startedAt = Date.now()
 
-  const named = assignments.map((assignment, index) => ({
-    ...assignment,
-    // Worker names are what show up in blackboard attribution, so they need to be
-    // distinct and readable: "scout#1", "builder#2".
-    workerName: `${assignment.role}#${index + 1}`,
-    providerLabel: roleConfig(assignment.role, roleDefinition(assignment.role).tier).label,
-  }))
+  const named = assignments.map((assignment, index) => {
+    const route = roleConfig(assignment.role, roleDefinition(assignment.role).tier)
+    return {
+      ...assignment,
+      // Worker names are what show up in blackboard attribution, so they need to be
+      // distinct and readable: "scout#1", "builder#2".
+      workerName: `${assignment.role}#${index + 1}`,
+      providerName: route.providerName,
+      model: route.model,
+    }
+  })
 
-  const concurrency = options.concurrency ?? fleetConcurrency(named.map((item) => item.providerLabel))
+  const concurrency = options.concurrency ?? fleetConcurrency(named.map((item) => item.providerName))
 
   const board = showBoard
     ? createFleetBoard(named.map((item) => ({ name: item.workerName, role: item.role, title: item.title })))
@@ -115,6 +121,9 @@ export async function runFleet(options: FleetRunOptions): Promise<FleetResult> {
       parentId: options.parentNodeId,
       depth: options.delegationDepth ?? 0,
       role: item.role,
+      providerName: item.providerName,
+      model: item.model,
+      wave: options.wave ?? 1,
       acceptanceCriteria: item.acceptanceCriteria,
       verificationCommands: item.verificationCommands,
     })
@@ -263,8 +272,8 @@ export async function runFleet(options: FleetRunOptions): Promise<FleetResult> {
  * separate rate-limit budgets, so it can safely run wider without any one of
  * them being hammered harder than a single-provider fleet already is.
  */
-export function fleetConcurrency(providerLabels: string[]): number {
-  const distinctProviders = new Set(providerLabels).size || 1
+export function fleetConcurrency(providerNames: string[]): number {
+  const distinctProviders = new Set(providerNames).size || 1
   return Math.min(MAX_FLEET_CONCURRENCY, DEFAULT_FLEET_CONCURRENCY * distinctProviders)
 }
 

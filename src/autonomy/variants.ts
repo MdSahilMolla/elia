@@ -116,7 +116,7 @@ async function runOneVariant(
   const variantBriefing = `${briefing}\n\n## You are implementation attempt ${index + 1} of a best-of-N run\nOther independent attempts at this exact same goal are running in parallel in their own isolated copies of the repo right now. Work in yours as if it were the only one — implement your best, most direct solution to the goal and the verification commands. You don't need to hedge or match what another attempt might choose.`
 
   try {
-    for (const wave of waves) {
+    for (const [waveIndex, wave] of waves.entries()) {
       if (signal?.aborted) break
       const fleet = await runFleet({
         assignments: wave.map((step) => ({ id: step.id, title: step.title, role: step.role, instructions: step.instructions })),
@@ -128,6 +128,7 @@ async function runOneVariant(
         governor,
         graph,
         signal,
+        wave: waveIndex + 1,
       })
       usage = addUsage(usage, fleet.usage)
     }

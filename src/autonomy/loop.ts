@@ -1,4 +1,4 @@
-import { DEV_SYSTEM_PROMPT, config, tierConfig } from '../config.ts'
+import { config, systemPromptForMode, tierConfig } from '../config.ts'
 import { lastAssistantText, runAgentLoop, type ConversationMessage } from '../agentLoop.ts'
 import { taskTool } from '../tools/task.ts'
 import { allWorkerTools } from '../tools/registry.ts'
@@ -14,7 +14,7 @@ import { createPrefetcher } from '../speculation/prefetch.ts'
 import { createBlackboard, setActiveBlackboard } from './blackboard.ts'
 import { createTodoList, setActiveTodoList } from './todoList.ts'
 import { withAgentIdentity } from './context.ts'
-import { activeMode } from './mode.ts'
+import { activeMode, withActiveMode, type AgentMode } from './mode.ts'
 import { loadDevelopmentToolHooks, withToolHooks } from './devHooks.ts'
 import { createJournal, newRunId, runDir, type Journal } from './journal.ts'
 import { captureTreeSnapshot, discardTreeSnapshot, restoreTreeSnapshot, type TreeSnapshot } from './treeSnapshot.ts'
@@ -57,6 +57,8 @@ export const autoApprove: Approver = async () => ({ action: 'approve' })
 export interface AutonomousRunOptions {
   goal: string
   approve: Approver
+  /** Operating mode inherited by planning, workers, repair, and reports. */
+  mode?: AgentMode
   /** How many repair cycles to attempt when verification or review fails (default 2). */
   maxRepairAttempts?: number
   /** How many times the user may send the plan back for changes (default 3). */
@@ -128,7 +130,7 @@ export interface AutonomousRunResult {
   actionBudget: ActionGovernorStats
 }
 
-const PLANNER_PROMPT = `${DEV_SYSTEM_PROMPT}
+const plannerPromptForMode = (mode: AgentMode) => `${systemPromptForMode(mode)}
 
 ## Right now you are planning, not building
 
@@ -156,7 +158,7 @@ What makes a good proposal:
 
 const REVIEWER_TOOL_NAMES = new Set(['read_file', 'list_files', 'grep', 'board_read', 'recall', 'environment'])
 
-const REPAIR_PROMPT = `${DEV_SYSTEM_PROMPT}
+const repairPromptForMode = (mode: AgentMode) => `${systemPromptForMode(mode)}
 
 ## Right now you are fixing your own work
 
@@ -176,8 +178,9 @@ Fix everything listed. When you are done, re-run the verification commands yours
  * later with a different decision.
  */
 export function runAutonomousTask(options: AutonomousRunOptions): Promise<AutonomousRunResult> {
-  const hooks = activeMode() === 'dev' ? loadDevelopmentToolHooks() : []
-  return withToolHooks(hooks, () => runAutonomousTaskInternal(options))
+  const mode = options.mode ?? activeMode()
+  const hooks = mode === 'dev' ? loadDevelopmentToolHooks() : []
+  return withActiveMode(mode, () => withToolHooks(hooks, () => runAutonomousTaskInternal(options)))
 }
 
 async function runAutonomousTaskInternal(options: AutonomousRunOptions): Promise<AutonomousRunResult> {
@@ -343,11 +346,12 @@ async function runAutonomousTaskInternal(options: AutonomousRunOptions): Promise
   const snapshot = options.resumeGraph ? '(resuming from the durable goal graph; inspect only files needed for unfinished nodes)' : await projectSnapshot(runId, runSignal)
 
   const proposalCapture = createProposalTool()
+  const basePlannerPrompt = plannerPromptForMode(activeMode())
   const plannerPrompt = profile === 'fast'
-    ? `${PLANNER_PROMPT}\n\n## Fast bounded mode\nThis is a time-sensitive task. Prefer 3–6 high-value steps, combine edits that share a coherent UI or subsystem, and keep independent steps in the same wave. Do not create separate steps for trivial assets, documentation, or cosmetic micro-edits. The goal is a complete verified result, not an exhaustive project plan.`
-    : PLANNER_PROMPT
+    ? `${basePlannerPrompt}\n\n## Fast bounded mode\nThis is a time-sensitive task. Prefer 3–6 high-value steps, combine edits that share a coherent UI or subsystem, and keep independent steps in the same wave. Do not create separate steps for trivial assets, documentation, or cosmetic micro-edits. The goal is a complete verified result, not an exhaustive project plan.`
+    : basePlannerPrompt
   const planningTools = [
-    ...allWorkerTools().filter((tool) => ['read_file', 'list_files', 'grep', 'board_read', 'board_post', 'environment'].includes(tool.name)),
+    ...allWorkerTools().filter((tool) => ['read_file', 'list_files', 'grep', 'web_search', 'web_fetch', 'browser', 'board_read', 'board_post', 'environment'].includes(tool.name)),
     taskTool,
     proposalCapture.tool,
   ]
@@ -555,6 +559,7 @@ async function runAutonomousTaskInternal(options: AutonomousRunOptions): Promise
         governor,
         graph,
         signal: runSignal,
+        wave: index + 1,
       })
       track(fleet.usage)
       totalSavedMs += fleet.savedMs
@@ -877,7 +882,7 @@ This reviewer session is intentionally read-only. The current diff, status, and 
     const repairTools = [...allWorkerTools(), taskTool]
     const repair = await withAgentIdentity({ name: 'lead', role: 'lead', runId, cwd: process.cwd(), signal: runSignal }, () => withActionGovernor(governor, () => withGoalGraph(graph, () => runAgentLoop({
       messages: repairMessages,
-      systemPrompt: REPAIR_PROMPT,
+      systemPrompt: repairPromptForMode(activeMode()),
       tools: repairTools,
       onText: writeText,
       useAnimation: true,

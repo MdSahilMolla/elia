@@ -1,7 +1,7 @@
-import { BATTMANN_SYSTEM_PROMPT, config, CYBER_SYSTEM_PROMPT, DEV_SYSTEM_PROMPT, FITNESS_SYSTEM_PROMPT, SPORTS_SYSTEM_PROMPT } from './config.ts'
+import { config, systemPromptForMode } from './config.ts'
 import { runAgentLoop, type ConversationMessage, type RunAgentLoopResult, type ToolEvent } from './agentLoop.ts'
 import type { Provider, ProviderActivity } from './providers/types.ts'
-import { allWorkerTools, businessTools, cyberTools, getSynthesizedTools } from './tools/registry.ts'
+import { allWorkerTools, battmannTools, businessTools, cyberTools, getSynthesizedTools } from './tools/registry.ts'
 import { taskTool } from './tools/task.ts'
 import { previewTool } from './tools/preview.ts'
 import { codexTool } from './tools/codex.ts'
@@ -10,7 +10,7 @@ import { recordUsage, recordTopLevelTurn, formatUsageLine } from './usage.ts'
 import { createToolResultCache } from './speculation/cache.ts'
 import { createPrefetcher } from './speculation/prefetch.ts'
 import { observeToolCall } from './skills/detector.ts'
-import { setActiveMode, type AgentMode } from './autonomy/mode.ts'
+import { withActiveMode, type AgentMode } from './autonomy/mode.ts'
 import { getActiveLedgerSession, noteToolUse } from './ledger.ts'
 import { loadBrainItems } from './brain/store.ts'
 import { renderCards } from './brain/cards.ts'
@@ -71,7 +71,7 @@ function topLevelTools(mode: AgentMode, selectedSkillNames?: string[]) {
     taskTool,
     previewTool,
     ...(mode === 'cyber' ? cyberTools : []),
-    ...(mode === 'battmann' ? businessTools : []),
+    ...(mode === 'battmann' ? [...businessTools, ...battmannTools] : []),
     // A silent sub-agent handing work off to a whole separate external agent
     // would be even more surprising than task/preview — dev mode only.
     ...(mode === 'dev' ? [codexTool] : []),
@@ -116,7 +116,8 @@ export async function runTurn(
   options: RunTurnOptions = {},
 ): Promise<RunAgentLoopResult> {
   const todoList = options.todoList ?? activeTodoList()
-  return withTodoList(todoList, () => runScopedTurn(messages, options))
+  const mode = options.mode ?? 'dev'
+  return withTodoList(todoList, () => withActiveMode(mode, () => runScopedTurn(messages, options)))
 }
 
 async function runScopedTurn(
@@ -127,19 +128,10 @@ async function runScopedTurn(
   const mode = options.mode ?? 'dev'
   // Ambient for the whole turn, including sub-agents dispatched via the task
   // tool arbitrarily deep in a tool call — see autonomy/mode.ts.
-  setActiveMode(mode)
   const PLAN_MODE_TOOLS = new Set(['read_file', 'list_files', 'grep', 'web_search', 'web_fetch', 'todo_write'])
   const allTools = topLevelTools(mode, options.skillNames)
   const tools = options.planMode ? allTools.filter((tool) => PLAN_MODE_TOOLS.has(tool.name)) : allTools
-  const baseSystemPrompt = mode === 'cyber'
-    ? CYBER_SYSTEM_PROMPT
-    : mode === 'sports'
-      ? SPORTS_SYSTEM_PROMPT
-      : mode === 'fitness'
-        ? FITNESS_SYSTEM_PROMPT
-        : mode === 'battmann'
-          ? BATTMANN_SYSTEM_PROMPT
-          : DEV_SYSTEM_PROMPT
+  const baseSystemPrompt = systemPromptForMode(mode)
   // Project memory: what earlier sessions learned, and why this codebase is
   // shaped the way it is, ranked against what this turn is about. This is the
   // compounding edge — the longer elia works a repo, the more it carries in.

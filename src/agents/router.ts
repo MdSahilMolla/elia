@@ -51,7 +51,7 @@ Specialist boundaries:
 - production: release readiness, deployment, migrations, rollback, observability, and incident operations
 - tech: coding, debugging, infrastructure, implementation, and technical integration
 
-For external communication or security work, route to the specialist even when Tech is also needed. Call submit_route exactly once with the personas in dependency order.`
+For external communication or security work, route to the specialist even when Tech is also needed. Call submit_route exactly once with the personas in dependency order. You may also provide dependency waves: put personas in the same wave only when they can independently investigate without writing or taking external actions. Any persona that must implement, send, publish, deploy, or mutate shared state belongs in a singleton wave after its dependencies.`
 
 interface RouteCapture {
   tool: Tool
@@ -67,6 +67,7 @@ function createRouteTool(): RouteCapture {
       type: 'object',
       properties: {
         personas: { type: 'array', items: { type: 'string', enum: AGENT_PERSONAS }, description: 'One or more specialist names in dependency order' },
+        waves: { type: 'array', items: { type: 'array', items: { type: 'string', enum: AGENT_PERSONAS } }, description: 'Optional dependency waves. Personas in one wave run concurrently in read-only mode; waves run in order.' },
         rationale: { type: 'string', description: 'One sentence explaining the route' },
       },
       required: ['personas', 'rationale'],
@@ -75,7 +76,14 @@ function createRouteTool(): RouteCapture {
       const raw = Array.isArray(input.personas) ? input.personas.filter(isAgentPersona) : []
       const personas = [...new Set(raw)]
       if (personas.length === 0) throw new Error(`personas must include at least one of: ${AGENT_PERSONAS.join(', ')}`)
-      captured = { personas, rationale: typeof input.rationale === 'string' ? input.rationale : '' }
+      const candidateWaves = Array.isArray(input.waves)
+        ? input.waves.map((wave) => Array.isArray(wave) ? [...new Set(wave.filter(isAgentPersona))] : []).filter((wave) => wave.length > 0)
+        : []
+      const flattened = candidateWaves.flat()
+      const waves = flattened.length === personas.length && new Set(flattened).size === personas.length && personas.every((persona) => flattened.includes(persona))
+        ? candidateWaves
+        : undefined
+      captured = { personas, rationale: typeof input.rationale === 'string' ? input.rationale : '', waves }
       return 'Route recorded.'
     },
   }

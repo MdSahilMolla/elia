@@ -5,7 +5,7 @@
 // same file at the same instant would interleave reads and writes and corrupt
 // it. Reads and commands stay fully parallel; only the actual mutation is
 // serialized, and only for as long as the write takes.
-const MUTATING_TOOLS = new Set(['edit_file', 'write_file'])
+const MUTATING_TOOLS = new Set(['edit_file', 'write_file', 'visualize'])
 
 let tail: Promise<unknown> = Promise.resolve()
 

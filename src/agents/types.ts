@@ -37,4 +37,6 @@ export function isAgentPersona(value: unknown): value is AgentPersona {
 export interface AgentRoute {
   personas: AgentPersona[]
   rationale: string
+  /** Dependency waves; personas in one wave are independent read-only peers. */
+  waves?: AgentPersona[][]
 }

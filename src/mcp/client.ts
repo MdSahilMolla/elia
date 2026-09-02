@@ -1,8 +1,13 @@
 import type { PipedSubprocess } from 'bun'
 import type { McpServerConfig } from './config.ts'
+import type { McpTransport } from './transport.ts'
 import { isJsonRpcResponse, MCP_CLIENT_INFO, MCP_PROTOCOL_VERSION, type JsonRpcResponse, type McpToolCallResult, type McpToolsListResult } from './protocol.ts'
+import { terminateProcessGroup } from '../shell.ts'
 
-const CONNECT_TIMEOUT_MS = 15_000
+// npx-backed browser servers can cold-start slowly on Windows while the package
+// runner validates its cache. Keep the boundary finite, but allow one full
+// startup/list-tools window before declaring an otherwise healthy MCP missing.
+const CONNECT_TIMEOUT_MS = 30_000
 const CALL_TIMEOUT_MS = 120_000
 
 interface Pending {
@@ -14,7 +19,7 @@ interface Pending {
  * One live connection to an MCP server over stdio. Line-delimited JSON-RPC 2.0,
  * per the MCP stdio transport spec — no Content-Length framing, one message per line.
  */
-export class McpClient {
+export class McpClient implements McpTransport {
   readonly name: string
   private proc: PipedSubprocess | undefined
   private nextId = 1
@@ -28,6 +33,7 @@ export class McpClient {
   }
 
   async connect(): Promise<void> {
+    if (!this.config.command) throw new Error(`MCP server "${this.name}" has no "command" to spawn`)
     this.proc = Bun.spawn([this.config.command, ...(this.config.args ?? [])], {
       stdin: 'pipe',
       stdout: 'pipe',
@@ -71,7 +77,8 @@ export class McpClient {
     for (const pending of this.pending.values()) pending.reject(new Error(`MCP server "${this.name}" closed`))
     this.pending.clear()
     try {
-      this.proc?.kill()
+      if (process.platform === 'win32' && this.proc) terminateProcessGroup(this.proc)
+      else this.proc?.kill()
     } catch {
       // Best-effort — process may already be gone.
     }

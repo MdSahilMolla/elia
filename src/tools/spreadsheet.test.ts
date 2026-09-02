@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import ExcelJS from 'exceljs'
 import { withAgentIdentity } from '../autonomy/context.ts'
@@ -9,7 +10,7 @@ let testDir: string
 let workbookPath: string
 
 beforeAll(async () => {
-  testDir = mkdtempSync(join('/tmp', 'elia-spreadsheet-workflow-'))
+  testDir = mkdtempSync(join(tmpdir(), 'elia-spreadsheet-workflow-'))
   workbookPath = join(testDir, 'sales.xlsx')
   const workbook = new ExcelJS.Workbook()
   const sheet = workbook.addWorksheet('Sales')
@@ -74,7 +75,7 @@ test('spreadsheet write rejects outputs outside the workspace or repository root
   await expect(spreadsheetTool.execute({
     action: 'write',
     path: workbookPath,
-    outputPath: '/tmp/elia-outside.xlsx',
+    outputPath: join(tmpdir(), 'elia-outside.xlsx'),
     operations: [{ sheet: 'Sales', cell: 'E1', value: 'Blocked' }],
   })).rejects.toThrow('escapes the active workspace')
 })

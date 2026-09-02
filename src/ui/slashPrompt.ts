@@ -150,12 +150,28 @@ export function createSlashPrompt(commands: SlashCommand[]): SlashPromptHandle {
     const menu = filteredCommands(state.buffer, commands)
     if (menu.length > 0) {
       const selected = Math.min(state.selectedIndex, menu.length - 1)
-      for (const [i, cmd] of menu.entries()) {
-        const highlighted = i === selected
+      // Scroll a fixed window so the highlighted row is always on screen even
+      // when the command list is longer than the terminal is tall.
+      const maxVisible = 10
+      const start = menu.length <= maxVisible ? 0 : Math.min(Math.max(0, selected - Math.floor(maxVisible / 2)), menu.length - maxVisible)
+      const visible = menu.slice(start, start + maxVisible)
+      const hiddenBelow = menu.length - (start + visible.length)
+      let rows = 0
+      if (start > 0) {
+        stdout.write(`\n${dim(`↑ ${start} more`)}`)
+        rows++
+      }
+      for (const [i, cmd] of visible.entries()) {
+        const highlighted = start + i === selected
         const name = highlighted ? reverse(cmd.name) : cmd.name
         stdout.write(`\n${name}  ${dim(cmd.description)}`)
+        rows++
       }
-      stdout.write(`\x1b[${menu.length}A`) // back up to the prompt row
+      if (hiddenBelow > 0) {
+        stdout.write(`\n${dim(`↓ ${hiddenBelow} more`)}`)
+        rows++
+      }
+      stdout.write(`\x1b[${rows}A`) // back up to the prompt row
     }
 
     stdout.write('\r')

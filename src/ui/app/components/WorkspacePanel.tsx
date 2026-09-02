@@ -21,9 +21,9 @@ function agentGlyph(status: TaskSession['status']): string {
  * calls; the fleet from taskSessions. Kept to a bounded height and full width so
  * a long plan can't blow the panel out past the terminal edge.
  */
-export function WorkspacePanel({ plan, agents }: { plan: TodoItem[]; agents: TaskSession[] }) {
+export function WorkspacePanel({ plan, agents, chats = [], artifacts = [] }: { plan: TodoItem[]; agents: TaskSession[]; chats?: string[]; artifacts?: string[] }) {
   const active = agents.filter((a) => a.role && a.role !== 'lead')
-  if (plan.length === 0 && active.length === 0) return null
+  if (plan.length === 0 && active.length === 0 && chats.length === 0 && artifacts.length === 0) return null
 
   // Show what's happening, not the whole backlog: done items + the current one +
   // a couple ahead.
@@ -65,10 +65,26 @@ export function WorkspacePanel({ plan, agents }: { plan: TodoItem[]; agents: Tas
               </Text>
               <Text wrap="truncate-end">
                 <Text bold>{agent.role}</Text>
+                {agent.providerName && agent.model && <Text color={palette.muted}> · {agent.providerName}/{agent.model}</Text>}
+                {agent.wave && <Text color={palette.muted}> · wave {agent.wave}</Text>}
                 <Text color={palette.muted}> · {agent.action || agent.title}</Text>
               </Text>
             </Box>
           ))}
+        </Box>
+      )}
+
+      {chats.length > 0 && (
+        <Box flexDirection="column" marginTop={plan.length > 0 || active.length > 0 ? 1 : 0}>
+          <Text color={palette.muted}>CHATS</Text>
+          {chats.slice(0, 3).map((chat) => <Text key={chat} wrap="truncate-end">  {chat}</Text>)}
+        </Box>
+      )}
+
+      {artifacts.length > 0 && (
+        <Box flexDirection="column" marginTop={plan.length > 0 || active.length > 0 || chats.length > 0 ? 1 : 0}>
+          <Text color={palette.muted}>ARTIFACTS</Text>
+          {artifacts.slice(0, 4).map((artifact) => <Text key={artifact} wrap="truncate-end">  {artifact}</Text>)}
         </Box>
       )}
     </Box>

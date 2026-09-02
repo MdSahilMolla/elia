@@ -3,8 +3,9 @@ import { join } from 'node:path'
 import { redactText } from '../ui/redact.ts'
 import type { AutonomyProfile, AutonomousRunResult } from './loop.ts'
 import { ensureSecureDirectory, hardenSecureFile, writeSecureFile } from '../securePersistence.ts'
+import type { AgentMode } from './mode.ts'
 
-export const SCHEDULE_SCHEMA_VERSION = 1
+export const SCHEDULE_SCHEMA_VERSION = 2
 export const MIN_SCHEDULE_INTERVAL_MS = 60_000
 export const MAX_SCHEDULE_INTERVAL_MS = 30 * 24 * 60 * 60_000
 export const MAX_SCHEDULE_ACTIONS = 10_000
@@ -22,6 +23,7 @@ export interface ScheduleRecord {
   nextRunAt: number
   status: ScheduleStatus
   profile: AutonomyProfile
+  mode: AgentMode
   maxRunMs?: number
   maxActions?: number
   createdAt: number
@@ -83,6 +85,7 @@ export class ScheduleStore {
           nextRunAt: Number.isFinite(raw.nextRunAt) ? raw.nextRunAt : Date.now() + intervalMs,
           status: raw.status === 'paused' || raw.status === 'running' ? raw.status : 'active',
           profile: raw.profile === 'fast' || raw.profile === 'thorough' ? raw.profile : 'balanced',
+          mode: raw.mode === 'cyber' || raw.mode === 'sports' || raw.mode === 'fitness' || raw.mode === 'battmann' ? raw.mode : 'dev',
           maxRunMs: typeof raw.maxRunMs === 'number' && Number.isFinite(raw.maxRunMs) ? Math.max(1, Math.min(24 * 60 * 60_000, raw.maxRunMs)) : undefined,
           maxActions: typeof raw.maxActions === 'number' && Number.isFinite(raw.maxActions) && raw.maxActions > 0 ? Math.max(1, Math.min(MAX_SCHEDULE_ACTIONS, Math.floor(raw.maxActions))) : undefined,
           createdAt: Number.isFinite(raw.createdAt) ? raw.createdAt : Date.now(),
@@ -106,7 +109,7 @@ export class ScheduleStore {
     return [...this.records.values()].sort((a, b) => a.nextRunAt - b.nextRunAt).map((record) => structuredClone(record))
   }
 
-  create(input: { title: string; goal: string; intervalMs: number; profile?: AutonomyProfile; maxRunMs?: number; maxActions?: number; now?: number }): ScheduleRecord {
+  create(input: { title: string; goal: string; intervalMs: number; profile?: AutonomyProfile; mode?: AgentMode; maxRunMs?: number; maxActions?: number; now?: number }): ScheduleRecord {
     return this.withExclusiveLock(() => {
       this.reloadFromDisk()
       const now = input.now ?? Date.now()
@@ -124,6 +127,7 @@ export class ScheduleStore {
         nextRunAt: now + input.intervalMs,
         status: 'active',
         profile: input.profile ?? 'balanced',
+        mode: input.mode ?? 'dev',
         maxRunMs: input.maxRunMs === undefined ? undefined : Math.max(1, Math.min(24 * 60 * 60_000, input.maxRunMs)),
         maxActions: input.maxActions,
         createdAt: now,

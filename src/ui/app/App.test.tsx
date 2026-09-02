@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test'
 import { render } from 'ink-testing-library'
-import { App } from './App.tsx'
+import { App, providerPlanItems } from './App.tsx'
 import { REPL_COMMANDS_FOR_TEST } from './testFixtures.ts'
 
 const SHIFT_TAB = '[Z'
@@ -109,4 +109,12 @@ test('every codex prompt asks for confirmation, even in auto mode', async () => 
   stdin.write('n')
   await Bun.sleep(40)
   expect(submitted).toBe(false)
+})
+
+test('maps structured provider plan activity into workspace todo state', () => {
+  expect(providerPlanItems('Reason for the plan\n[done] inspect\n[active] implement\n[pending] verify')).toEqual([
+    { content: 'inspect', status: 'completed' },
+    { content: 'implement', status: 'in_progress' },
+    { content: 'verify', status: 'pending' },
+  ])
 })

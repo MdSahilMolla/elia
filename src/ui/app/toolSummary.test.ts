@@ -47,3 +47,10 @@ test('rollupLine summarizes a mixed batch', () => {
   expect(line).toContain('read 1 file')
   expect(line).toContain('+8 −1')
 })
+
+test('visualize surfaces the chart title', () => {
+  const s = summarizeTool(tool({ name: 'visualize', input: { type: 'bar', title: 'Quarterly revenue' } }))
+  expect(s.verb).toBe('Visualized')
+  expect(s.target).toBe('Quarterly revenue')
+  expect(s.expandable).toBe(true)
+})

@@ -134,6 +134,20 @@ Sports mode supports evidence-aware match and opponent analysis, scouting, athle
 
 Fitness mode supports sustainable goal setting, workout organization, strength and conditioning basics, mobility, cardio, habit tracking, recovery reflection, sleep and activity summaries, and conservative plan adaptation. Its deterministic `fitness` tool can create a bounded generic weekly template, summarize supplied activity logs, and validate tracking rows. It is not a doctor, physiotherapist, dietitian, or emergency service: it does not diagnose, prescribe treatment, guarantee results, or infer health conditions from wearable data. Pain, injury, concerning symptoms, eating-disorder concerns, pregnancy-related questions, and medical conditions require qualified professional guidance.
 
+### Battmann strategic-intelligence mode
+
+Start with `elia --battmann`, switch with `/mode battmann`, or run governed autonomy with `elia auto --battmann "<goal>"`. Battmann produces evidence-backed strategic briefs across trade, geopolitics, financial markets, supply chains, policy, and commodities. Its workspace-local SQLite system of record defaults to `.elia/battmann.sqlite` and preserves evidence, claim-level excerpts and reviews, resolvable questions, immutable forecast revisions, accepted/disputed resolution events, versioned ontology objects, links, scenarios, decisions, outcomes, and benchmark runs.
+
+The deterministic `battmann` tool supports dependence-aware evidence updates and ensembles, Brier score/log loss/calibration diagnostics, chronological domain/base-rate benchmarks, and as-of-safe reports. Observed ledger timestamps cannot be future-dated; future forecast and scenario horizons remain valid. Live scoring excludes forecasts not physically recorded before accepted resolution; historical replays must use `forecastClass: "backtest"` and cannot support a live-superiority claim. A final system-backed report fails closed until every included claim has a supported review; draft reports surface unresolved reviews. `report_from_store` writes Markdown, machine-readable JSON, and printable HTML. Use an output such as `.elia/artifacts/risk-brief.md` to expose all three companions in Elia's artifact panel.
+
+These controls make forecasts reproducible and harder to contaminate; they do not establish that Battmann is universally more accurate than external forecasting systems. That requires a large independently resolved live sample, a frozen evaluation protocol, competitive baselines, and external review. SQLite is a local single-workspace store, and document classification labels are metadata rather than enterprise access control.
+
+Recurring intelligence runs preserve the mode: `elia schedule add --mode battmann --every 6h "refresh the supply-chain risk brief"`. The daemon is local and runs only while its host is online.
+
+### Web research providers
+
+`web_search` is available in every Elia mode and normalizes Exa, Serper, and Brave results into one dated source format. Set `ELIA_SEARCH_PROVIDER=auto` and one or more of `EXA_API_KEY`, `SERPER_API_KEY`, or `ELIA_SEARCH_API_KEY` (Brave). Auto selection prefers Exa, then Serper, then Brave. A returned snippet is discovery evidence, not proof; agents should fetch and inspect material primary sources before relying on a claim.
+
 The capability inventory, architecture boundaries, and current limitations are documented in [`docs/agent-capability-audit.md`](docs/agent-capability-audit.md). The repeatable evaluation matrix and quality thresholds are in [`docs/general-agent-evaluation.md`](docs/general-agent-evaluation.md). Use `/capabilities` inside a session to inspect the live registry of specialist domains, risk classes, preferred tools, and output contracts.
 
 ### Coding language and framework support
@@ -250,7 +264,9 @@ Production work remains bounded and auditable. Elia can inspect a repository, pr
 
 ### Data science and finance workflows
 
-The `data_science` tool provides deterministic, reproducible workflows for CSV, TSV, JSON, and JSONL files: schema and type profiling, missingness and duplicate detection, explicit data-quality validation, grouped summaries, Pearson correlation, and bounded ordinary-least-squares linear regression. It reports bounded input size, excludes invalid values from aggregates rather than silently repairing them, and clearly states that association is not causation. Advanced statistical inference, causal analysis, experiment design, visualization, and domain-specific leakage review still require project-specific code and acceptance criteria.
+The `data_science` tool provides deterministic, reproducible workflows for CSV, TSV, JSON, and JSONL files: schema and type profiling, missingness and duplicate detection, explicit data-quality validation, grouped summaries, Pearson correlation, and bounded ordinary-least-squares linear regression. It reports bounded input size, excludes invalid values from aggregates rather than silently repairing them, and clearly states that association is not causation. Advanced statistical inference, causal analysis, experiment design, and domain-specific leakage review still require project-specific code and acceptance criteria.
+
+The `visualize` tool creates bounded bar charts and flow diagrams from structured values. It renders a readable terminal preview immediately, then saves a deterministic SVG and accessible Markdown companion under `.elia/artifacts/` for `/artifact` and the existing local `preview` workflow. It rejects raw HTML/SVG/scripts/URLs, validates finite values and graph edges, strips terminal controls, escapes generated markup, serializes repository writes, and refuses to replace a different artifact with the same slug.
 
 The `finance` tool provides deterministic unit-economics, runway, bounded scenario, and DCF valuation calculations with sensitivity cases. Every result includes the input basis, reference date, assumptions, source disclosure, confidence caveat, formulas or interpretation, and the required financial-analysis disclaimer. It does not fetch market data, decide personal investments, establish accounting policy, or substitute for a licensed adviser. For company or investment analysis, use primary filings or approved data sources and preserve fiscal-period and metric-basis traceability.
 
@@ -284,6 +300,8 @@ The browser tool connects through an enabled user-browser connector, a trusted l
 
 ```bash
 # Direct connector route, when the enabled connector exposes browser_navigate, browser_snapshot, etc.
+# Browser MCP tools configured in .elia/mcp.json are auto-detected.
+# Set this only to select one server when several provide browser_* tools:
 ELIA_BROWSER_MCP_SERVER="My Browser" bun run dev "open the dashboard and summarize its current status"
 # or
 ELIA_BROWSER_BRIDGE_COMMAND="/path/to/your/browser-bridge" bun run dev "open the dashboard and summarize its current status"
@@ -291,7 +309,7 @@ ELIA_BROWSER_BRIDGE_COMMAND="/path/to/your/browser-bridge" bun run dev "open the
 ELIA_BROWSER_CDP_URL=http://127.0.0.1:9222 bun run dev "inspect the active page"
 ```
 
-If a connector uses different tool names, override them with variables such as `ELIA_BROWSER_NAVIGATE_TOOL` and `ELIA_BROWSER_SNAPSHOT_TOOL`.
+Connected MCP tools named `browser_*` are called through Elia's existing live MCP client, so `manus-mcp-cli` is not required for configured `.elia/mcp.json` servers. If only the legacy external MCP route is configured, override nonstandard tool names with variables such as `ELIA_BROWSER_NAVIGATE_TOOL` and `ELIA_BROWSER_SNAPSHOT_TOOL`.
 
 A bridge receives one JSON request on stdin and should return one JSON or text response. Keep login credentials in the bridge or browser session, never in Elia prompts, source files, or command-line arguments. Elia must not bypass login challenges, CAPTCHAs, paywalls, or site safety controls. Actions that may send, buy, publish, delete, or change subscriptions pause and return an exact five-minute `confirmationToken`. The user must approve that exact action before the token is supplied; tokens are bound to the action details and cannot be reused for a changed target or message. `wait_for`, `expectText`, and `expectUrl` are intended for stateful sites where navigation or clicks complete asynchronously; they time out rather than claiming success.
 
@@ -310,15 +328,52 @@ Elia is a real MCP client: any server's tools become available to the dev-mode a
 
 Servers are spawned over stdio and connected once at startup; a server that fails to start or handshake is logged and skipped rather than blocking the rest. Each tool is registered as `mcp_<server>_<tool>` and, like any tool with no built-in safety contract, requires explicit approval before it runs — Elia has no way to know an arbitrary third-party server's tool is safe ahead of time, so it doesn't guess.
 
+#### Adding servers and connectors from the terminal
+
+You don't have to hand-edit `mcp.json`. In the interactive terminal:
+
+- **`/mcp`** — everything configured, connected or not, with its tools. Add a server from a curated catalog (GitHub, Filesystem, Postgres, Slack, Playwright, …) or by hand, `reload` after an edit, and per-server **test connection / enable / disable / remove**. `/marketplace` → `mcp` (or `connector`) opens the same thing as a sub-menu: **Installed / configured**, **Suggested** (the catalog), **Add custom** — the same shape every `/marketplace` source uses (npm, pip, skills all get an *Installed* list and a *Suggested* shortlist too).
+- **`/connector`** — the same, scoped to **remote** MCP servers reached over HTTP instead of a local process. Pick one from the catalog (DeepWiki, Context7, Hugging Face, Notion, Linear, Sentry, Stripe, hosted GitHub, …) or paste any Streamable-HTTP endpoint URL plus an auth header. Elia writes the entry, reconnects, and tells you the tool count right away.
+
+Every add ends with a live reconnect, so the tools are usable in the same session — and you choose whether the entry lands in the project file or your personal `~/.elia/mcp.json`.
+
+#### Remote connectors
+
+A `url` instead of a `command` makes an entry a **connector** — a hosted MCP endpoint, no local process:
+
+```json
+{
+  "mcpServers": {
+    "deepwiki": { "url": "https://mcp.deepwiki.com/mcp" },
+    "notion":   { "url": "https://mcp.notion.com/mcp", "headers": { "Authorization": "Bearer ntn_..." } },
+    "linear":   { "url": "https://mcp.linear.app/sse", "transport": "sse" }
+  }
+}
+```
+
+Connectors use the MCP **Streamable HTTP** transport (JSON or SSE responses, `Mcp-Session-Id` handled automatically). `headers` carries auth and is never logged. `"transport": "sse"` marks a legacy SSE-only endpoint, which Elia does not connect to — ask the provider for a `/mcp` Streamable HTTP URL. Connector tools are governed exactly like stdio ones: `mcp_<name>_<tool>`, approval required.
+
+For browser use, a configured Playwright MCP server is detected automatically and routed through Elia's governed `browser` tool:
+
+```json
+{
+  "mcpServers": {
+    "playwright": { "command": "npx", "args": ["-y", "@playwright/mcp@latest"] }
+  }
+}
+```
+
+Use `browser` with `status`/`snapshot` first. Accessibility-snapshot targets can then be passed to click or type. Login, CAPTCHA, payment, sensitive input, publishing, sending, purchasing, deletion, and account changes retain their existing approval or user-takeover boundaries.
+
 ### Delegating to the real OpenAI Codex CLI
 
 The `codex_delegate` tool (dev mode, top-level only) hands a task to the real, separately-installed [OpenAI Codex CLI](https://github.com/openai/codex) — `npm install -g @openai/codex`, then `codex login` with your own ChatGPT subscription or an API key, exactly as you would use it standalone. Elia only shells out to the real binary (`codex exec ... --approve-for-me`, scoped to a given directory, its final answer captured and returned) — it does not implement Codex's authentication itself, does not read or reuse its stored credentials, and does not route elia's own model calls through it. If `codex` isn't installed or not signed in, the tool says so and stops rather than trying to authenticate on your behalf. Like `task`/`preview`, this is governed as a `critical`-risk action requiring explicit approval — elia's governor has no visibility into what Codex does once a task is delegated to it.
 
 ### Terminal UI
 
-The `bun run dev` / `elia` readline session opens with a compact two-column workspace snapshot: the conversation and session context stay on the left, while the right-side `Workspace` panel shows Chats, Plan, Subagents, and Artifacts. It refreshes after each completed turn alongside the readline editor, slash commands, approvals, and scrollback.
+On a real TTY, `bun run dev` / `elia` uses the Ink terminal workspace; plain or piped output keeps the streaming fallback. Assistant replies render headings, lists, checklists, blockquotes, fenced code, tables, rules, and safe visible links without exposing terminal control sequences. The live Workspace panel shows structured plans, parallel subagents with their provider/model and dependency wave, other chats, and recent artifacts.
 
-`edit_file` and `write_file` results render as a colored unified diff (folded to the changed hunks; `/expand` reprints any tool result the scrollback truncated). A line starting with `!` runs the rest as a shell command and carries its output into the next turn as context. `/cost` shows the session token and estimated-dollar breakdown; `/export [path]` writes the whole conversation to Markdown.
+`edit_file` and `write_file` results render as a colored unified diff (folded to the changed hunks; `/expand` reprints any tool result the scrollback truncated). Visualizations render their terminal chart without requiring expansion. A line starting with `!` runs the rest as a shell command and carries its output into the next turn as context. `/team` shows the active deep/fast tiers and configured role routes; `/cost` shows usage; `/export [path]` writes the conversation to Markdown.
 
 ### LSP diagnostics on every edit
 
@@ -370,6 +425,8 @@ ELIA_SCOUT_MODEL=openai/gpt-oss-20b
 The pattern is `ELIA_<ROLE>_PROVIDER` / `ELIA_<ROLE>_MODEL` / `ELIA_<ROLE>_BASE_URL` / `ELIA_<ROLE>_API_KEY` for any of `SCOUT`, `BUILDER`, `FRONTEND`, `BACKEND`, `CRITIC`, `SECURITY`, `BUGHUNTER`, `TESTER`, `SCRIBE`. Unset roles fall back to their tier exactly as before.
 
 This is what makes a fleet a genuine multi-model system rather than one model wearing different hats: a wave of five scouts and a critic isn't five-plus-one calls to the same provider's rate limit, it can be two calls to two providers running fully in parallel. Fleet concurrency scales with how many distinct providers a batch actually uses (`fleetConcurrency` in `src/autonomy/fleet.ts`), so spreading roles across providers also widens how much runs at once — a single-provider fleet still caps at 4 concurrent workers, but a two-provider fleet can run 8, up to a hard ceiling of 16.
+
+Use `/team` during an interactive session to see the routes Elia actually resolved. Independent workers share a dependency wave only when their work is separable; colliding or dependent writers remain serialized, and multi-persona parallel investigation waves are read-only before deep-tier synthesis.
 
 ## Usage
 

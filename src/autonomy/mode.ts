@@ -1,3 +1,5 @@
+import { AsyncLocalStorage } from 'node:async_hooks'
+
 /**
  * Which operating mode the current top-level turn is running as: dev, cyber,
  * sports, fitness, or battmann.
@@ -12,6 +14,7 @@
 export type AgentMode = 'dev' | 'cyber' | 'sports' | 'fitness' | 'battmann'
 
 let current: AgentMode = 'dev'
+const storage = new AsyncLocalStorage<AgentMode>()
 
 /** Set once at the top of `runTurn`, for it and everything it (and its sub-agents) awaits. */
 export function setActiveMode(mode: AgentMode): void {
@@ -19,5 +22,10 @@ export function setActiveMode(mode: AgentMode): void {
 }
 
 export function activeMode(): AgentMode {
-  return current
+  return storage.getStore() ?? current
+}
+
+/** Scope a mode to one async turn so concurrent bridge clients cannot leak modes into each other. */
+export function withActiveMode<T>(mode: AgentMode, fn: () => Promise<T>): Promise<T> {
+  return storage.run(mode, fn)
 }

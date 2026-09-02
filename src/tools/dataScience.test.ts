@@ -1,10 +1,11 @@
 import { afterAll, expect, test } from 'bun:test'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { withAgentIdentity } from '../autonomy/context.ts'
 import { dataScienceTool } from './dataScience.ts'
 
-const testDir = mkdtempSync(join('/tmp', 'elia-data-science-'))
+const testDir = mkdtempSync(join(tmpdir(), 'elia-data-science-'))
 const datasetPath = join(testDir, 'events.csv')
 mkdirSync(testDir, { recursive: true })
 writeFileSync(datasetPath, 'id,region,revenue\n1,East,100\n2,West,50\n2,West,70\n3,East,80\n')

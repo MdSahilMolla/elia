@@ -2,10 +2,13 @@ import { expect, test, afterEach } from 'bun:test'
 import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { loadMcpTools, resetMcpLoadStateForTests } from './registry.ts'
+import { loadMcpTools, mcpStatusReport, reloadMcpTools, resetMcpLoadStateForTests } from './registry.ts'
 import { findTool, getMcpTools } from '../tools/registry.ts'
 
 const FIXTURE = join(import.meta.dir, 'fixtures', 'echoServer.ts')
+
+// Never merge in this machine's real ~/.elia/mcp.json — point the user layer at a path that won't exist.
+process.env.ELIA_MCP_USER_CONFIG = join(tmpdir(), 'elia-registry-test-no-such-user-mcp.json')
 
 afterEach(async () => {
   await resetMcpLoadStateForTests()
@@ -88,4 +91,40 @@ test('loadMcpTools is idempotent within a process — a second call reuses the c
   const first = await loadMcpTools(cwd)
   const second = await loadMcpTools(cwd)
   expect(second).toBe(first)
+})
+
+test('report.status describes every configured server, connected or disabled', async () => {
+  const cwd = mkdtempSync(join(tmpdir(), 'elia-mcp-registry-'))
+  mkdirSync(join(cwd, '.elia'), { recursive: true })
+  writeFileSync(
+    join(cwd, '.elia', 'mcp.json'),
+    JSON.stringify({
+      mcpServers: {
+        echo: { command: process.execPath, args: [FIXTURE] },
+        off: { command: process.execPath, args: [FIXTURE], disabled: true },
+      },
+    }),
+    'utf8',
+  )
+  const report = await loadMcpTools(cwd)
+  const byName = Object.fromEntries(report.status.map((s) => [s.name, s]))
+  expect(byName.echo!.connected).toBe(true)
+  expect(byName.echo!.toolCount).toBe(2)
+  expect(byName.off!.disabled).toBe(true)
+  expect(byName.off!.connected).toBe(false)
+  expect(mcpStatusReport()).toBe(report)
+})
+
+test('reloadMcpTools picks up a newly added server without a process restart', async () => {
+  const cwd = mkdtempSync(join(tmpdir(), 'elia-mcp-registry-'))
+  mkdirSync(join(cwd, '.elia'), { recursive: true })
+  const configPath = join(cwd, '.elia', 'mcp.json')
+  writeFileSync(configPath, JSON.stringify({ mcpServers: {} }), 'utf8')
+
+  expect((await loadMcpTools(cwd)).servers).toEqual([])
+
+  writeFileSync(configPath, JSON.stringify({ mcpServers: { echo: { command: process.execPath, args: [FIXTURE] } } }), 'utf8')
+  const reloaded = await reloadMcpTools(cwd)
+  expect(reloaded.servers).toEqual(['echo'])
+  expect(findTool('mcp_echo_echo')).toBeDefined()
 })

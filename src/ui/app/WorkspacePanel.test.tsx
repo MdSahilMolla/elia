@@ -45,7 +45,7 @@ test('shows active subagents and what each is doing', () => {
     <WorkspacePanel
       plan={[]}
       agents={[
-        agent({ id: '1', role: 'builder', action: 'editing src/foo.ts' }),
+        agent({ id: '1', role: 'builder', providerName: 'anthropic', model: 'claude-test', wave: 2, action: 'editing src/foo.ts' }),
         agent({ id: '2', role: 'tester', status: 'done', action: 'ran 42 tests' }),
         agent({ id: '3', role: 'lead', action: 'orchestrating' }),
       ]}
@@ -54,7 +54,25 @@ test('shows active subagents and what each is doing', () => {
   const frame = lastFrame() ?? ''
   expect(frame).toContain('SUBAGENTS')
   expect(frame).toContain('builder')
+  expect(frame).toContain('anthropic/claude-test')
+  expect(frame).toContain('wave 2')
   expect(frame).toContain('editing src/foo.ts')
   expect(frame).toContain('tester')
   expect(frame).not.toContain('lead') // the lead agent is not a "subagent"
+})
+
+test('shows bounded chat and artifact context', () => {
+  const { lastFrame } = render(
+    <WorkspacePanel
+      plan={[]}
+      agents={[]}
+      chats={['session-a · running', 'session-b · idle']}
+      artifacts={['revenue.md', 'release-flow.md']}
+    />,
+  )
+  const frame = lastFrame() ?? ''
+  expect(frame).toContain('CHATS')
+  expect(frame).toContain('session-a · running')
+  expect(frame).toContain('ARTIFACTS')
+  expect(frame).toContain('release-flow.md')
 })

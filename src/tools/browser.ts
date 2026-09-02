@@ -1,6 +1,7 @@
 import type { Tool } from './types.ts'
 import { taskSessions } from '../taskSessions.ts'
 import { readBoundedOutput, terminateProcessGroup } from '../shell.ts'
+import { browserMcpReadiness, findBrowserMcpTool } from '../mcp/browserRegistry.ts'
 
 /** Actions supported by the browser bridge. The bridge can be a user-Chrome MCP wrapper or CDP endpoint. */
 export type BrowserAction = 'status' | 'navigate' | 'refresh' | 'back' | 'forward' | 'snapshot' | 'click' | 'type' | 'press' | 'scroll' | 'wait' | 'wait_for' | 'extract' | 'verify'
@@ -99,6 +100,7 @@ export function validateRequest(input: Record<string, unknown>): BrowserRequest 
     if (typeof input.text !== 'string') throw new Error('type requires text')
     if (input.text.length > MAX_TEXT_LENGTH) throw new Error(`type text exceeds ${MAX_TEXT_LENGTH} characters`)
     request.text = input.text
+    if (typeof input.target === 'string' && input.target.trim()) request.target = input.target.trim()
   }
   if (action === 'press') {
     if (typeof input.key !== 'string' || input.key.trim().length === 0) throw new Error('press requires key')
@@ -200,6 +202,12 @@ async function dispatchBrowserRequest(request: BrowserRequest): Promise<BrowserR
   if (bridgeCommand) return callBridge(bridgeCommand, request)
 
   const mcpServer = process.env.ELIA_BROWSER_MCP_SERVER?.trim()
+  const connectedMcp = findBrowserMcpTool(request.action, mcpServer)
+  if (connectedMcp) {
+    const output = await connectedMcp.tool.execute(connectedMcpInput(connectedMcp.originalName, request))
+    if (output.startsWith('MCP tool error:')) throw new Error(output)
+    return parseBridgeOutput(output)
+  }
   if (mcpServer) return callMcpTool(mcpServer, request)
 
   const cdpUrl = process.env.ELIA_BROWSER_CDP_URL?.trim()
@@ -237,14 +245,16 @@ function parseBridgeOutput(stdout: string): BrowserResult | string {
   const raw = stdout.trim()
   if (!raw) return '(browser bridge returned no output)'
   const lastLine = raw.split('\n').at(-1) ?? raw
+  let parsed: BrowserResult
   try {
-    const parsed = JSON.parse(lastLine) as BrowserResult
-    if (parsed.ok === false || parsed.error) throw new Error(parsed.error ?? 'browser bridge reported failure')
-    return parsed
-  } catch (error) {
-    if (error instanceof Error && error.message !== 'Unexpected end of JSON input' && !error.message.startsWith('Unexpected token')) throw error
+    parsed = JSON.parse(lastLine) as BrowserResult
+  } catch {
+    // Browser MCPs commonly return Markdown accessibility snapshots rather than
+    // JSON. Treat all parse failures as text; only parsed bridge errors fail.
     return raw
   }
+  if (parsed.ok === false || parsed.error) throw new Error(parsed.error ?? 'browser bridge reported failure')
+  return parsed
 }
 
 function defaultMcpToolName(action: BrowserAction): string {
@@ -427,5 +437,18 @@ function formatBrowserResult(value: BrowserResult | string): string {
 }
 
 function browserSetupHint(): string {
-  return 'Configure ELIA_BROWSER_MCP_SERVER for an enabled user-Chrome connector, ELIA_BROWSER_BRIDGE_COMMAND for a trusted wrapper, or ELIA_BROWSER_CDP_URL for a Chrome DevTools endpoint. Keep credentials in the bridge environment, not in Elia prompts or source files.'
+  const readiness = browserMcpReadiness()
+  const detected = readiness.tools.length ? ` Connected browser MCP tools: ${readiness.tools.join(', ')}.` : ''
+  return `Configure a browser MCP server in .elia/mcp.json (auto-detected), ELIA_BROWSER_MCP_SERVER to select one, ELIA_BROWSER_BRIDGE_COMMAND for a trusted wrapper, or ELIA_BROWSER_CDP_URL for Chrome DevTools.${detected} Keep credentials in the browser or bridge environment, not in Elia prompts or source files.`
+}
+
+function connectedMcpInput(toolName: string, request: BrowserRequest): Record<string, unknown> {
+  if (toolName === 'browser_snapshot' || toolName === 'browser_status' || toolName.includes('back') || toolName.includes('forward') || toolName.includes('reload') || toolName.includes('refresh')) return request.selector ? { target: request.selector } : {}
+  if (toolName === 'browser_navigate') return { url: request.url }
+  if (toolName === 'browser_click') return { target: request.target, element: request.target }
+  if (toolName === 'browser_type') return { target: request.target, element: request.target, text: request.text }
+  if (toolName === 'browser_press_key' || toolName === 'browser_press') return { key: request.key }
+  if (toolName === 'browser_wait_for') return { time: (request.ms ?? 0) / 1_000, text: request.expectText }
+  if (toolName === 'browser_wait') return { time: (request.ms ?? 0) / 1_000 }
+  return { ...request }
 }

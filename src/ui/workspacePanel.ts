@@ -46,7 +46,11 @@ export function renderWorkspacePanel(input: WorkspacePanelInput): string {
     ...planLines.map((line) => `  ${line}`),
     '',
     cyan('SUBAGENTS'),
-    ...(agents.length > 0 ? agents.map((task) => `  ${task.status} · ${task.role}: ${task.title}`) : ['  No subagents yet']),
+    ...(agents.length > 0 ? agents.map((task) => {
+      const route = task.providerName && task.model ? ` · ${task.providerName}/${task.model}` : ''
+      const wave = task.wave ? ` · wave ${task.wave}` : ''
+      return `  ${task.status} · ${task.role}${route}${wave}: ${task.title}`
+    }) : ['  No subagents yet']),
     '',
     cyan('ARTIFACTS'),
     ...(artifacts.length > 0 ? artifacts.map((artifact) => `  ${artifact.name}`) : ['  No saved plan artifacts']),

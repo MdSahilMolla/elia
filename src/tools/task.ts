@@ -6,6 +6,8 @@ import { inferTaskKind, taskSessions } from '../taskSessions.ts'
 import { currentAgent } from '../autonomy/context.ts'
 import { activeActionGovernor } from '../autonomy/governor.ts'
 import { runVerification } from '../autonomy/verify.ts'
+import { roleConfig } from '../config.ts'
+import { role as roleDefinition } from '../autonomy/roles.ts'
 
 let dispatched = 0
 
@@ -42,7 +44,16 @@ Scouts run on a faster, cheaper model and cannot modify anything, so prefer a ha
     const description = typeof input.description === 'string' ? input.description.trim().slice(0, 160) : `${role} task`
     const acceptanceCriteria = Array.isArray(input.acceptanceCriteria) ? input.acceptanceCriteria.filter((value): value is string => typeof value === 'string' && value.trim().length > 0).map((value) => value.trim().slice(0, 4_000)).slice(0, 20) : undefined
     const verificationCommands = Array.isArray(input.verificationCommands) ? input.verificationCommands.filter((value): value is string => typeof value === 'string' && value.trim().length > 0).map((value) => value.trim().slice(0, 4_000)).slice(0, 20) : undefined
-    const session = taskSessions.create(inferTaskKind(description, prompt), description, 'Waiting for a worker', { role, depth: 0, acceptanceCriteria, verificationCommands })
+    const route = roleConfig(role, roleDefinition(role).tier)
+    const session = taskSessions.create(inferTaskKind(description, prompt), description, 'Waiting for a worker', {
+      role,
+      depth: 0,
+      providerName: route.providerName,
+      model: route.model,
+      wave: 1,
+      acceptanceCriteria,
+      verificationCommands,
+    })
     taskSessions.update(session.id, { status: 'running', action: 'Starting worker', detail: `Role: ${role}`, nextAction: 'Worker is orienting and will report evidence' })
 
     try {

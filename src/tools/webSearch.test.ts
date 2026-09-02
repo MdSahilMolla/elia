@@ -4,10 +4,14 @@ import { webSearchTool } from './webSearch.ts'
 const originalFetch = globalThis.fetch
 const originalApiKey = process.env.ELIA_SEARCH_API_KEY
 const originalProvider = process.env.ELIA_SEARCH_PROVIDER
+const originalExaKey = process.env.EXA_API_KEY
+const originalSerperKey = process.env.SERPER_API_KEY
 
 beforeEach(() => {
   process.env.ELIA_SEARCH_API_KEY = 'test-key'
   delete process.env.ELIA_SEARCH_PROVIDER
+  delete process.env.EXA_API_KEY
+  delete process.env.SERPER_API_KEY
 })
 
 afterEach(() => {
@@ -16,11 +20,15 @@ afterEach(() => {
   else process.env.ELIA_SEARCH_API_KEY = originalApiKey
   if (originalProvider === undefined) delete process.env.ELIA_SEARCH_PROVIDER
   else process.env.ELIA_SEARCH_PROVIDER = originalProvider
+  if (originalExaKey === undefined) delete process.env.EXA_API_KEY
+  else process.env.EXA_API_KEY = originalExaKey
+  if (originalSerperKey === undefined) delete process.env.SERPER_API_KEY
+  else process.env.SERPER_API_KEY = originalSerperKey
 })
 
 test('web_search fails clearly when no API key is configured', async () => {
   delete process.env.ELIA_SEARCH_API_KEY
-  await expect(webSearchTool.execute({ query: 'anything' })).rejects.toThrow('ELIA_SEARCH_API_KEY')
+  await expect(webSearchTool.execute({ query: 'anything' })).rejects.toThrow('EXA_API_KEY')
 })
 
 test('web_search rejects an unsupported provider', async () => {
@@ -61,7 +69,29 @@ test('web_search reports no results plainly', async () => {
   globalThis.fetch = (async () =>
     new Response(JSON.stringify({ web: { results: [] } }), { status: 200 })) as unknown as typeof fetch
   const result = await webSearchTool.execute({ query: 'nothing matches this' })
-  expect(result).toBe('No results found.')
+  expect(result).toContain('No results found.')
+})
+
+test('web_search normalizes Exa results and sends date/domain filters', async () => {
+  process.env.EXA_API_KEY = 'exa-key'; process.env.ELIA_SEARCH_PROVIDER = 'exa'
+  let request: RequestInit | undefined
+  globalThis.fetch = (async (_url, init) => { request = init; return new Response(JSON.stringify({ results: [{ title: 'Primary source', url: 'https://example.gov/report', publishedDate: '2026-08-01T00:00:00Z', highlights: ['Material evidence'] }] }), { status: 200 }) }) as typeof fetch
+  const result = await webSearchTool.execute({ query: 'trade disruption', includeDomains: ['example.gov'], startPublishedDate: '2026-01-01', count: 5 })
+  expect((request?.headers as Record<string, string>)['x-api-key']).toBe('exa-key')
+  expect(String(request?.body)).toContain('example.gov')
+  expect(result).toContain('Search provider: exa')
+  expect(result).toContain('Material evidence')
+})
+
+test('web_search normalizes Serper organic results', async () => {
+  process.env.SERPER_API_KEY = 'serper-key'; process.env.ELIA_SEARCH_PROVIDER = 'serper'
+  let calledUrl = ''; let request: RequestInit | undefined
+  globalThis.fetch = (async (url, init) => { calledUrl = String(url); request = init; return new Response(JSON.stringify({ organic: [{ title: 'Policy notice', link: 'https://example.gov/policy', snippet: 'Official notice', date: 'Aug 1, 2026' }] }), { status: 200 }) }) as typeof fetch
+  const result = await webSearchTool.execute({ query: 'policy', country: 'us', language: 'en' })
+  expect(calledUrl).toBe('https://google.serper.dev/search')
+  expect((request?.headers as Record<string, string>)['X-API-KEY']).toBe('serper-key')
+  expect(result).toContain('Search provider: serper')
+  expect(result).toContain('Policy notice')
 })
 
 test('web_search surfaces a non-ok response as an error', async () => {

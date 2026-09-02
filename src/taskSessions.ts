@@ -34,6 +34,12 @@ export interface TaskSession {
   depth?: number
   /** Worker role responsible for this task. */
   role?: string
+  /** Configured provider route for this worker. */
+  providerName?: string
+  /** Configured model route for this worker. */
+  model?: string
+  /** One-based dependency wave this worker belongs to. */
+  wave?: number
 }
 
 export type TaskSessionPatch = Partial<Pick<TaskSession, 'status' | 'action' | 'detail' | 'stepsCompleted' | 'stepsTotal' | 'progress' | 'attempts' | 'lastHeartbeatAt' | 'nextAction' | 'blockedReason' | 'acceptanceCriteria' | 'verificationCommands' | 'error'>>
@@ -41,6 +47,9 @@ export interface TaskSessionMeta {
   parentId?: string
   depth?: number
   role?: string
+  providerName?: string
+  model?: string
+  wave?: number
   acceptanceCriteria?: string[]
   verificationCommands?: string[]
 }
@@ -54,7 +63,7 @@ export interface TaskControls {
 export type TaskSessionListener = (sessions: TaskSession[]) => void
 
 const TASKS_FILE = join(process.cwd(), '.elia', 'tasks.json')
-const TASKS_SCHEMA_VERSION = 3
+const TASKS_SCHEMA_VERSION = 4
 const STALE_TASK_HEARTBEAT_MS = 5 * 60_000
 
 export class TaskSessionStore {
@@ -106,6 +115,9 @@ export class TaskSessionStore {
           parentId: typeof item.parentId === 'string' ? item.parentId : undefined,
           depth: Number.isFinite(item.depth) ? item.depth : undefined,
           role: typeof item.role === 'string' ? item.role : undefined,
+          providerName: typeof item.providerName === 'string' ? redactText(item.providerName, 80) : undefined,
+          model: typeof item.model === 'string' ? redactText(item.model, 160) : undefined,
+          wave: typeof item.wave === 'number' && Number.isFinite(item.wave) ? Math.max(1, Math.floor(item.wave)) : undefined,
         })
       }
       // Loading is intentionally silent. Subscribers receive the complete loaded
@@ -133,6 +145,9 @@ export class TaskSessionStore {
       parentId: meta.parentId,
       depth: meta.depth,
       role: meta.role,
+      providerName: meta.providerName ? redactText(meta.providerName, 80) : undefined,
+      model: meta.model ? redactText(meta.model, 160) : undefined,
+      wave: typeof meta.wave === 'number' && Number.isFinite(meta.wave) ? Math.max(1, Math.floor(meta.wave)) : undefined,
       acceptanceCriteria: meta.acceptanceCriteria?.slice(0, 20),
       verificationCommands: meta.verificationCommands?.slice(0, 20),
     }

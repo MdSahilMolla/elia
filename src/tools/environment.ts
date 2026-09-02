@@ -5,7 +5,9 @@ import { detectGitHubContext } from '../github/context.ts'
 import type { Tool } from './types.ts'
 
 const COMMANDS = ['bun', 'node', 'npm', 'pnpm', 'yarn', 'python3', 'python', 'pip3', 'pytest', 'docker', 'kubectl', 'terraform', 'vercel', 'netlify', 'git', 'gh', 'psql', 'mysql', 'curl']
-const SECRET_ENV_NAMES = ['ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'GEMINI_API_KEY', 'NVIDIA_API_KEY', 'ELIA_SEARCH_API_KEY', 'ELIA_BROWSER_MCP_SERVER', 'ELIA_BROWSER_BRIDGE_COMMAND', 'ELIA_BROWSER_CDP_URL', 'VERCEL_TOKEN', 'NETLIFY_AUTH_TOKEN', 'NETLIFY_SITE_ID']
+import { browserMcpReadiness } from '../mcp/browserRegistry.ts'
+
+const SECRET_ENV_NAMES = ['ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'GEMINI_API_KEY', 'NVIDIA_API_KEY', 'EXA_API_KEY', 'SERPER_API_KEY', 'ELIA_SEARCH_API_KEY', 'ELIA_BROWSER_MCP_SERVER', 'ELIA_BROWSER_BRIDGE_COMMAND', 'ELIA_BROWSER_CDP_URL', 'VERCEL_TOKEN', 'NETLIFY_AUTH_TOKEN', 'NETLIFY_SITE_ID']
 
 function envPresence(): Record<string, boolean> {
   return Object.fromEntries(SECRET_ENV_NAMES.map((name) => [name, Boolean(process.env[name])]))
@@ -32,7 +34,8 @@ function capabilityReadiness(
   configured: Record<string, boolean>,
   github?: { ghInstalled: boolean; ghAuthenticated: boolean; hasRemote: boolean },
 ): Record<string, CapabilityReadiness> {
-  const browserConfigured = configured.ELIA_BROWSER_MCP_SERVER || configured.ELIA_BROWSER_BRIDGE_COMMAND || configured.ELIA_BROWSER_CDP_URL
+  const connectedBrowserMcp = browserMcpReadiness().tools.length > 0
+  const browserConfigured = connectedBrowserMcp || configured.ELIA_BROWSER_MCP_SERVER || configured.ELIA_BROWSER_BRIDGE_COMMAND || configured.ELIA_BROWSER_CDP_URL
   const modelConfigured = configured.ANTHROPIC_API_KEY || configured.OPENAI_API_KEY || configured.GEMINI_API_KEY || configured.NVIDIA_API_KEY
   const deploymentCommands = ['vercel', 'netlify', 'docker', 'kubectl', 'terraform'].filter((command) => availableRuntimes[command] && availableRuntimes[command] !== 'unavailable')
   const missingDataRuntime = ['python3', 'python'].every((command) => !availableRuntimes[command] || availableRuntimes[command] === 'unavailable')
@@ -115,9 +118,9 @@ export const environmentTool: Tool = {
       configuredCapabilityPresence: configured,
       capabilityReadiness: capabilityReadiness(availableRuntimes, configured, github),
       browser: {
-        configured: Boolean(process.env.ELIA_BROWSER_MCP_SERVER || process.env.ELIA_BROWSER_BRIDGE_COMMAND || process.env.ELIA_BROWSER_CDP_URL),
+        configured: Boolean(browserMcpReadiness().tools.length || process.env.ELIA_BROWSER_MCP_SERVER || process.env.ELIA_BROWSER_BRIDGE_COMMAND || process.env.ELIA_BROWSER_CDP_URL),
         transports: {
-          mcp: Boolean(process.env.ELIA_BROWSER_MCP_SERVER),
+          mcp: Boolean(browserMcpReadiness().tools.length || process.env.ELIA_BROWSER_MCP_SERVER),
           bridge: Boolean(process.env.ELIA_BROWSER_BRIDGE_COMMAND),
           cdp: Boolean(process.env.ELIA_BROWSER_CDP_URL),
         },

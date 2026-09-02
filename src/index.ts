@@ -60,15 +60,22 @@ const REPL_COMMANDS: SlashCommand[] = [
   { name: '/verify', description: 'run the project checks now, or /verify on|off to toggle the automatic post-turn check' },
   { name: '/track', description: "elia's track record on this project — how many changes landed clean, by area, and where it's weakest" },
   { name: '/skills', description: 'list the loaded skills (learned tools) available this session' },
-  { name: '/marketplace', description: 'search and install: npm/bun packages, pip packages, skills — /marketplace npm <query>' },
+  { name: '/marketplace', description: 'per source (npm, pip, skills, mcp, connector): what is installed, a suggested shortlist, and search/add' },
   { name: '/packages', description: 'everything installed for this project — packages and skills — select one to remove it' },
+  { name: '/mcp', description: 'connected MCP servers and their tools — add one from the catalog, reload, enable/disable, or remove' },
+  { name: '/connector', description: 'hosted MCP connectors (Notion, Linear, Sentry, GitHub, …) — add by URL, test the connection, enable/disable, remove' },
   { name: '/status', description: 'show the workspace panel — session, other chats, plan, subagents, artifacts' },
+  { name: '/team', description: 'show deep/fast model tiers and per-role routes used by parallel workers' },
   { name: '/cost', description: 'show the session token and estimated-dollar breakdown' },
   { name: '/export', description: 'write the whole conversation to Markdown (/export <path> to choose the file)' },
   { name: '@skills', description: 'browse loaded skills and choose which skill tools are active for the next turn' },
 ]
 
 const rawArgs = process.argv.slice(2)
+
+function requestedAgentMode(): AgentMode {
+  return hasFlag('--cyber') ? 'cyber' : hasFlag('--sports') ? 'sports' : hasFlag('--fitness') ? 'fitness' : hasFlag('--battmann') ? 'battmann' : 'dev'
+}
 
 const SUBCOMMANDS = ['auto', 'agent', 'evolve', 'bench', 'skills', 'runs', 'fork', 'resume', 'schedule', 'daemon', 'config', 'codex-login', 'control', 'bridge'] as const
 type Subcommand = (typeof SUBCOMMANDS)[number]
@@ -143,7 +150,7 @@ Time travel:
   elia resume <id>            Continue a durable goal from its persisted graph and approvals
 
 Background autonomy:
-  elia schedule add --every 1h [--max-actions N] "<goal>"  Persist a recurring goal for the local daemon
+  elia schedule add --every 1h [--mode battmann] [--max-actions N] "<goal>"  Persist a recurring goal for the local daemon
   elia schedule list                       Show scheduled goals and last outcomes
   elia schedule pause|resume|remove <id>  Control a scheduled goal
   elia schedule run <id>                   Run one scheduled goal immediately
@@ -463,7 +470,7 @@ async function runAuto(): Promise<void> {
   let rl: readline.Interface | undefined
   try {
     if (yolo) {
-      const result = await runAutonomousTask({ goal, approve: autoApprove, variants, profile, resumeGraph, runId: resumeRunId, polish: !hasFlag('--no-polish'), governanceMode: 'unattended', signal: controller.signal, maxWallClockMs: maxRunMs, maxActions })
+      const result = await runAutonomousTask({ goal, approve: autoApprove, mode: requestedAgentMode(), variants, profile, resumeGraph, runId: resumeRunId, polish: !hasFlag('--no-polish'), governanceMode: 'unattended', signal: controller.signal, maxWallClockMs: maxRunMs, maxActions })
       if (result.outcome !== 'completed') process.exitCode = 1
       return
     }
@@ -476,7 +483,7 @@ async function runAuto(): Promise<void> {
       const result = await confirmOnce(interactiveRl, label)
       return result.action === 'approve'
     }
-    const result = await runAutonomousTask({ goal, approve: createInteractiveApprover(interactiveRl), variants, profile, resumeGraph, runId: resumeRunId, polish: !hasFlag('--no-polish'), governanceMode: 'supervised', approveAction, signal: controller.signal, maxWallClockMs: maxRunMs, maxActions })
+    const result = await runAutonomousTask({ goal, approve: createInteractiveApprover(interactiveRl), mode: requestedAgentMode(), variants, profile, resumeGraph, runId: resumeRunId, polish: !hasFlag('--no-polish'), governanceMode: 'supervised', approveAction, signal: controller.signal, maxWallClockMs: maxRunMs, maxActions })
     if (result.outcome !== 'completed' && result.outcome !== 'rejected') process.exitCode = 1
   } finally {
     rl?.close()
@@ -1001,7 +1008,7 @@ async function ensureFirstRunProviderSetup(): Promise<boolean> {
 
 async function runSchedule(): Promise<void> {
   const { MAX_SCHEDULE_ACTIONS, ScheduleStore, formatScheduleInterval, parseScheduleInterval } = await import('./autonomy/scheduler.ts')
-  const action = positionals(['--every', '--title', '--profile', '--max-run-ms', '--max-actions'])[0] ?? 'list'
+  const action = positionals(['--every', '--title', '--profile', '--mode', '--max-run-ms', '--max-actions'])[0] ?? 'list'
   const store = ScheduleStore.open()
 
   if (action === 'list') {
@@ -1011,8 +1018,8 @@ async function runSchedule(): Promise<void> {
       return
     }
     for (const line of table(
-      [{ header: 'id' }, { header: 'title' }, { header: 'status' }, { header: 'every' }, { header: 'actions' }, { header: 'next run' }, { header: 'runs', align: 'right' }, { header: 'last outcome' }, { header: 'goal' }],
-      records.map((record) => [record.id, record.title, record.status, formatScheduleInterval(record.intervalMs), record.maxActions ? String(record.maxActions) : 'profile default', new Date(record.nextRunAt).toISOString(), String(record.runCount), record.lastOutcome ?? '—', record.goal.slice(0, 60)]),
+      [{ header: 'id' }, { header: 'title' }, { header: 'mode' }, { header: 'status' }, { header: 'every' }, { header: 'actions' }, { header: 'next run' }, { header: 'runs', align: 'right' }, { header: 'last outcome' }, { header: 'goal' }],
+      records.map((record) => [record.id, record.title, record.mode, record.status, formatScheduleInterval(record.intervalMs), record.maxActions ? String(record.maxActions) : 'profile default', new Date(record.nextRunAt).toISOString(), String(record.runCount), record.lastOutcome ?? '—', record.goal.slice(0, 60)]),
     )) writeUsageLine(`  ${line}`)
     return
   }
@@ -1053,10 +1060,10 @@ async function runSchedule(): Promise<void> {
     return
   }
 
-  const goal = positionals(['--every', '--title', '--profile', '--max-run-ms', '--max-actions']).slice(1).join(' ').trim()
+  const goal = positionals(['--every', '--title', '--profile', '--mode', '--max-run-ms', '--max-actions']).slice(1).join(' ').trim()
   const every = flagValue('--every')
   if (!goal || !every) {
-    writeError('Usage: elia schedule add --every 1h [--title "Short title"] [--max-actions N] "<goal>"')
+    writeError('Usage: elia schedule add --every 1h [--mode battmann] [--title "Short title"] [--max-actions N] "<goal>"')
     process.exitCode = 1
     return
   }
@@ -1075,6 +1082,12 @@ async function runSchedule(): Promise<void> {
     process.exitCode = 1
     return
   }
+  const modeValue = flagValue('--mode') ?? 'dev'
+  if (!['dev', 'cyber', 'sports', 'fitness', 'battmann'].includes(modeValue)) {
+    writeError('--mode must be dev, cyber, sports, fitness, or battmann')
+    process.exitCode = 1
+    return
+  }
   const maxRunMsRaw = flagValue('--max-run-ms')
   const maxRunMs = maxRunMsRaw === undefined ? undefined : strictInteger(maxRunMsRaw)
   if (maxRunMsRaw !== undefined && (maxRunMs === undefined || maxRunMs < 1)) {
@@ -1090,7 +1103,7 @@ async function runSchedule(): Promise<void> {
     return
   }
   const title = flagValue('--title') || goal.slice(0, 80)
-  const record = store.create({ title, goal, intervalMs, profile, maxRunMs, maxActions })
+  const record = store.create({ title, goal, intervalMs, profile, mode: modeValue as AgentMode, maxRunMs, maxActions })
   writeNotice(`Scheduled ${record.title} every ${formatScheduleInterval(record.intervalMs)}. id=${record.id}`)
   writeNotice('Run it with: elia daemon --once')
 }
@@ -1273,10 +1286,21 @@ async function runInteractive(): Promise<void> {
 
   const oneShotPrompt = positionals(['--resume']).join(' ').trim()
 
-  let mode: AgentMode = hasFlag('--cyber') ? 'cyber' : hasFlag('--sports') ? 'sports' : hasFlag('--fitness') ? 'fitness' : hasFlag('--battmann') ? 'battmann' : 'dev'
+  let mode: AgentMode = requestedAgentMode()
 
   let persona: AgentPersona | undefined
   let selectedSkillNames: string[] | undefined
+
+  const renderTeamStatus = (): string => {
+    const roles = Object.entries(config.roleOverrides).flatMap(([role, route]) => route ? [`${role.padEnd(13)} ${route.providerName}/${route.model}`] : [])
+    return [
+      `deep          ${config.tiers.deep.providerName}/${config.tiers.deep.model}`,
+      `fast          ${config.tiers.fast.providerName}/${config.tiers.fast.model}${config.cascadeEnabled ? '' : ' (same as deep)'}`,
+      ...(roles.length > 0 ? ['', 'role routes', ...roles] : ['', 'role routes   none configured; roles use their fast/deep tier']),
+      '',
+      'Independent dependency-wave workers run concurrently; shared-provider capacity is bounded and file collisions are serialized.',
+    ].join('\n')
+  }
   let messages: ConversationMessage[] = []
   let sessionId = newSessionId()
   // manual (default): a cheap risk check runs before each command — only
@@ -2208,6 +2232,7 @@ async function runInteractive(): Promise<void> {
     if (trimmed === '/status') {
       return { handled: true, text: renderWorkspacePanel({ sessionId, mode, providerLabel: config.providerLabel, model: config.model }) }
     }
+    if (trimmed === '/team') return { handled: true, text: renderTeamStatus() }
     const expandMatch = /^\/expand(?:\s+(\d+))?$/.exec(trimmed)
     if (expandMatch) {
       const total = sessionTranscript.toolCount()
@@ -2288,58 +2313,10 @@ async function runInteractive(): Promise<void> {
       return done(['Loaded skills:', ...skills.map((s) => `  ${s.name}  (${s.source} · ${s.file})`)].join('\n'))
     }
 
-    const marketMatch = /^\/marketplace(?:\s+(npm|bun|pip|skill|skills)?\s*(.*))?$/.exec(trimmed)
+    const marketMatch = /^\/marketplace(?:\s+([a-z]+)?\s*(.*))?$/.exec(trimmed)
     if (marketMatch) {
-      const { searchMarket, installCommand } = await import('./marketplace/registry.ts')
-      const resultsPicker = async (kind: PackageKind, query: string): Promise<InkSlashOutcome> => {
-        let results
-        try {
-          results = await searchMarket(kind, query)
-        } catch (error) {
-          return done(`Search failed: ${error instanceof Error ? error.message : String(error)}`)
-        }
-        if (results.length === 0) return done(`Nothing found for "${query}" on ${kind}.`)
-        return {
-          handled: true,
-          picker: {
-            title: `${kind} — results for "${query}"`,
-            searchable: results.length > 8,
-            options: results.map((r) => ({ label: `${r.name}${r.version ? ` @${r.version}` : ''}`, detail: (r.description ?? '').slice(0, 80), value: r.name })),
-            onSelect: (name) => {
-              if (!name) return
-              try {
-                return { handled: true, runCommand: { command: installCommand(kind, name, process.cwd()), description: `Install ${name} (${kind})` } }
-              } catch (error) {
-                return error instanceof Error ? error.message : String(error)
-              }
-            },
-          },
-        }
-      }
-      const askThenSearch = (kind: PackageKind): InkSlashOutcome => ({
-        handled: true,
-        prompt: { label: `Search ${kind} for:`, placeholder: 'package name or keywords', onSubmit: (q) => resultsPicker(kind, q) },
-      })
-      const kindArg: PackageKind | undefined = marketMatch[1] === 'skills' ? 'skill' : (marketMatch[1] as PackageKind | undefined)
-      const queryArg = marketMatch[2]?.trim()
-      if (kindArg === 'skill') return done('Skill marketplace: no remote registry yet. Drop a validated *.skill.ts into .elia/skills; run "elia skills candidates" to see what elia could synthesize for you.')
-      if (kindArg && queryArg) return resultsPicker(kindArg, queryArg)
-      if (kindArg) return askThenSearch(kindArg)
-      return {
-        handled: true,
-        picker: {
-          title: 'Marketplace — pick a source',
-          options: [
-            { label: 'npm', detail: 'JavaScript/TypeScript packages (installed with bun/npm)', value: 'npm' },
-            { label: 'pip', detail: 'Python packages (exact name)', value: 'pip' },
-            { label: 'skills', detail: "elia's learned tools", value: 'skill' },
-          ],
-          onSelect: (kind) => {
-            if (kind === 'skill') return 'Skill marketplace: no remote registry yet — drop a *.skill.ts into .elia/skills.'
-            if (kind === 'npm' || kind === 'pip') return askThenSearch(kind)
-          },
-        },
-      }
+      const { marketplaceOutcome } = await import('./marketplace/slash.ts')
+      return marketplaceOutcome(marketMatch[1], marketMatch[2]?.trim() || undefined)
     }
 
     if (trimmed === '/packages') {
@@ -2367,6 +2344,17 @@ async function runInteractive(): Promise<void> {
         },
       }
     }
+    const mcpMatch = /^\/mcp(?:\s+(.+))?$/.exec(trimmed)
+    if (mcpMatch) {
+      const { mcpManageOutcome } = await import('./mcp/slash.ts')
+      return mcpManageOutcome(mcpMatch[1] ?? '', false)
+    }
+    const connectorMatch = /^\/connectors?(?:\s+(.+))?$/.exec(trimmed)
+    if (connectorMatch) {
+      const { mcpManageOutcome } = await import('./mcp/slash.ts')
+      return mcpManageOutcome(connectorMatch[1] ?? '', true)
+    }
+
     const verifyMatch = /^\/verify(?:\s+(on|off))?$/.exec(trimmed)
     if (verifyMatch) {
       if (verifyMatch[1]) {
@@ -2392,6 +2380,7 @@ async function runInteractive(): Promise<void> {
         : `${mode} mode. Type a prompt, "/" for commands, "!" to run a shell command.`
 
     await runInkRepl({
+      sessionId,
       getEnv: () => ({ model: config.model, providerLabel: config.providerLabel, providerName: config.providerName }),
       commands: REPL_COMMANDS,
       initialReplMode: replMode,
@@ -2497,6 +2486,10 @@ async function runInteractive(): Promise<void> {
       process.stdout.write(`${renderWorkspacePanel({ sessionId, mode, providerLabel: config.providerLabel, model: config.model })}\n`)
       continue
     }
+    if (trimmed === '/team') {
+      process.stdout.write(`${renderTeamStatus()}\n`)
+      continue
+    }
 
     // /cost — session token and estimated-dollar breakdown.
     if (trimmed === '/cost') {
@@ -2597,6 +2590,17 @@ async function runInteractive(): Promise<void> {
       const items = listInstalled(process.cwd())
       writeUsageLine(items.length === 0 ? 'Nothing installed to show.' : items.map((i) => `  ${i.kind.padEnd(6)} ${i.name}  ${i.detail}`).join('\n'))
       writeNotice('Remove packages interactively from the new terminal UI, or with the usual uninstall command.')
+      continue
+    }
+    const mcpClassic = /^\/(mcp|connectors?)(?:\s+(reload))?$/.exec(trimmed)
+    if (mcpClassic) {
+      const connectorsOnly = mcpClassic[1] !== 'mcp'
+      const { mcpStatusReport, reloadMcpTools } = await import('./mcp/registry.ts')
+      const report = mcpClassic[2] === 'reload' ? await reloadMcpTools(process.cwd()) : mcpStatusReport()
+      const rows = (connectorsOnly ? report.status.filter((s) => s.connector) : report.status)
+      if (rows.length === 0) writeNotice(`No ${connectorsOnly ? 'connectors' : 'MCP servers'} configured. Add one from the interactive terminal: /${connectorsOnly ? 'connector' : 'mcp'}.`)
+      else writeUsageLine(rows.map((s) => `  ${s.connected ? '●' : '○'} ${s.name}  ${s.transport}${s.connector ? ' connector' : ''}  ${s.disabled ? 'disabled' : s.connected ? `${s.toolCount} tool(s)` : s.error ?? 'offline'}`).join('\n'))
+      writeNotice('Add / test / enable / disable / remove interactively in the new terminal UI.')
       continue
     }
     const verifyClassic = /^\/verify(?:\s+(on|off))?$/.exec(trimmed)
@@ -2834,7 +2838,10 @@ loadUserConfig()
 // Signal handlers are installed by installShutdownHandlers() so every terminal
 // component follows one cleanup path and returns a conventional interrupt code.
 
-main().catch((err: unknown) => {
+await main().catch((err: unknown) => {
   writeError(`Error: ${err instanceof Error ? err.message : String(err)}`)
   process.exitCode = 1
+}).finally(async () => {
+  const { shutdownMcpTools } = await import('./mcp/registry.ts')
+  await shutdownMcpTools()
 })

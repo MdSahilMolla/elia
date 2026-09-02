@@ -57,9 +57,11 @@ test('persists explicit waiting metadata without exposing unbounded text', () =>
   expect(saved?.verificationCommands).toEqual(['bun test'])
 })
 
-test('invokes registered task controls and unregisters them', () => {
+test('invokes registered task controls and keeps worker route metadata', () => {
   const store = new TaskSessionStore()
-  const session = store.create('code', 'Cancelable work', 'Queued', { parentId: 'step:frontend', depth: 1, role: 'tester' })
+  const session = store.create('code', 'Cancelable work', 'Queued', {
+    parentId: 'step:frontend', depth: 1, role: 'tester', providerName: 'openai', model: 'gpt-test', wave: 2,
+  })
   let cancelled = 0
   const unregister = store.registerControls(session.id, { cancel: () => { cancelled += 1 } })
   expect(store.control(session.id, 'cancel')).toBe(true)
@@ -69,6 +71,9 @@ test('invokes registered task controls and unregisters them', () => {
   expect(store.get(session.id)?.parentId).toBe('step:frontend')
   expect(store.get(session.id)?.depth).toBe(1)
   expect(store.get(session.id)?.role).toBe('tester')
+  expect(store.get(session.id)?.providerName).toBe('openai')
+  expect(store.get(session.id)?.model).toBe('gpt-test')
+  expect(store.get(session.id)?.wave).toBe(2)
 })
 
 test('persists and reloads task sessions while ignoring malformed history', async () => {
@@ -76,7 +81,9 @@ test('persists and reloads task sessions while ignoring malformed history', asyn
   const file = join(dir, 'tasks.json')
   try {
     const store = new TaskSessionStore()
-    const original = store.create('browser', 'Read account page', 'Queued', { parentId: 'step:web', depth: 1, role: 'accessibility' })
+    const original = store.create('browser', 'Read account page', 'Queued', {
+      parentId: 'step:web', depth: 1, role: 'accessibility', providerName: 'anthropic', model: 'claude-test', wave: 3,
+    })
     store.update(original.id, { status: 'paused', action: 'Awaiting confirmation' })
     await Bun.write(file, JSON.stringify([...store.list(), { invalid: true }]))
 
@@ -86,6 +93,9 @@ test('persists and reloads task sessions while ignoring malformed history', asyn
     expect(loaded.get(original.id)?.parentId).toBe('step:web')
     expect(loaded.get(original.id)?.depth).toBe(1)
     expect(loaded.get(original.id)?.role).toBe('accessibility')
+    expect(loaded.get(original.id)?.providerName).toBe('anthropic')
+    expect(loaded.get(original.id)?.model).toBe('claude-test')
+    expect(loaded.get(original.id)?.wave).toBe(3)
     expect(loaded.list()).toHaveLength(1)
   } finally {
     await rm(dir, { recursive: true, force: true })

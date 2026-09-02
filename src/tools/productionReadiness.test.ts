@@ -1,10 +1,11 @@
 import { afterAll, expect, test } from 'bun:test'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { withAgentIdentity } from '../autonomy/context.ts'
 import { productionReadinessTool } from './productionReadiness.ts'
 
-const testDir = mkdtempSync(join('/tmp', 'elia-production-readiness-'))
+const testDir = mkdtempSync(join(tmpdir(), 'elia-production-readiness-'))
 mkdirSync(join(testDir, '.github', 'workflows'), { recursive: true })
 mkdirSync(join(testDir, 'migrations'), { recursive: true })
 mkdirSync(join(testDir, 'src', 'observability'), { recursive: true })
@@ -31,7 +32,7 @@ test('production readiness detects delivery evidence without claiming deployment
 })
 
 test('production readiness remains conservative for an empty repository', async () => {
-  const emptyRoot = mkdtempSync(join('/tmp', 'elia-empty-production-'))
+  const emptyRoot = mkdtempSync(join(tmpdir(), 'elia-empty-production-'))
   try {
     const result = JSON.parse(await withAgentIdentity({ name: 'test', role: 'lead', cwd: emptyRoot }, () => productionReadinessTool.execute({}))) as { readiness: string; score: number }
     expect(result.readiness).toBe('insufficient-evidence')

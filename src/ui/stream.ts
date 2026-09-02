@@ -5,6 +5,7 @@ import { colorizeDiffBlock, foldText, isDiffResult } from './render.ts'
 import { createMarkdownStream, type MarkdownStream } from './markdown.ts'
 import { registerShutdownCleanup } from './shutdown.ts'
 import type { ProviderActivity } from '../providers/types.ts'
+import { visualizationTerminalPreview } from '../tools/visualize.ts'
 
 const REPLY_MARKER = `${boldGold('●')} `
 
@@ -195,6 +196,15 @@ export function writeToolResult(name: string, result: string, isError: boolean, 
     if (folded.text.trim()) {
       for (const line of folded.text.split('\n')) process.stdout.write(`      ${line}\n`)
     }
+    spinnerFrame = 0
+    showSpinner()
+    return
+  }
+
+  if (!isError && name === 'visualize') {
+    const headline = result.split('\n', 1)[0] ?? 'Visualization created.'
+    process.stdout.write(`    ${dim('⎿')} ${coloredMark} ${dim(`${name}${timing} ${redactText(headline, 200)}`)}\n`)
+    for (const line of redactSecrets(visualizationTerminalPreview(result)).split('\n')) process.stdout.write(`      ${line}\n`)
     spinnerFrame = 0
     showSpinner()
     return

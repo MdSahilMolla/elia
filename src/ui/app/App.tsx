@@ -22,6 +22,8 @@ import { palette } from './theme.ts'
 import { estimateTokens } from '../../compaction.ts'
 import { sessionUsageSnapshot, estimateCostUsd } from '../../usage.ts'
 import type { ChatMessage } from '../../providers/types.ts'
+import { listKnownSessions } from '../../sessionRegistry.ts'
+import { listArtifacts } from '../../autonomy/artifactReader.ts'
 
 export interface TurnHooks {
   onText(delta: string): void
@@ -73,6 +75,7 @@ export interface AppEnv {
 }
 
 export interface AppProps {
+  sessionId?: string
   /** Live provider/model — read every render so a `/model` switch shows immediately. */
   getEnv(): AppEnv
   commands: SlashCommand[]
@@ -83,6 +86,16 @@ export interface AppProps {
   classifyRisk(command: string): Promise<{ risky: boolean; reason?: string }>
   handleSlash(command: string): Promise<SlashOutcome>
   greeting: string
+}
+
+export function providerPlanItems(detail?: string): TodoItem[] {
+  if (!detail) return []
+  return detail.split(/\r?\n/).flatMap((line) => {
+    const match = /^\[(done|active|pending)\]\s+(.+)$/.exec(line.trim())
+    if (!match) return []
+    const status = match[1] === 'done' ? 'completed' : match[1] === 'active' ? 'in_progress' : 'pending'
+    return [{ content: match[2]!, status } as TodoItem]
+  })
 }
 
 export function App(props: AppProps) {
@@ -107,6 +120,7 @@ export function App(props: AppProps) {
   const [status, setStatus] = useState('')
   const [turnStartedAt, setTurnStartedAt] = useState(0)
   const [plan, setPlan] = useState<TodoItem[]>([])
+  const [providerPlan, setProviderPlan] = useState<TodoItem[]>([])
   const [agents, setAgents] = useState<TaskSession[]>(() => taskSessions.list())
   const [previewUrl, setPreviewUrl] = useState<string | null>(null)
   const queueRef = useRef<string[]>([])
@@ -218,10 +232,17 @@ export function App(props: AppProps) {
         },
         onActivity: (a) => {
           setStatus(a.title)
+          if (a.kind === 'plan') {
+            const parsed = providerPlanItems(a.detail)
+            if (parsed.length > 0) setProviderPlan(parsed)
+          }
           store.activity(a)
         },
         onTool: (e) => {
-          if (e.name === 'todo_write' && !e.isError) setPlan(activeTodoList().read())
+          if (e.name === 'todo_write' && !e.isError) {
+            setPlan(activeTodoList().read())
+            setProviderPlan([])
+          }
           if (e.name === 'preview' && !e.isError) {
             const url = /https?:\/\/[^\s)]+/.exec(e.result)?.[0]
             if (url) setPreviewUrl(url)
@@ -388,6 +409,12 @@ export function App(props: AppProps) {
   )
 
   const contextTokens = useMemo(() => estimateTokens(props.messages), [props.messages, snap.version])
+  const chats = useMemo(
+    () => listKnownSessions().filter((session) => session.sessionId !== props.sessionId).slice(0, 3).map((session) => `${session.sessionId} · ${session.liveStatus}`),
+    [props.sessionId, snap.version],
+  )
+  const artifacts = useMemo(() => listArtifacts().slice(0, 4).map((artifact) => artifact.name), [snap.version, busy])
+  const visiblePlan = plan.length > 0 ? plan : providerPlan
 
   return (
     <Box flexDirection="column">
@@ -408,7 +435,7 @@ export function App(props: AppProps) {
         </Box>
       )}
 
-      <WorkspacePanel plan={plan} agents={agents} />
+      <WorkspacePanel plan={visiblePlan} agents={agents} chats={chats} artifacts={artifacts} />
       {previewUrl && (
         <Box marginTop={1}>
           <Text color={palette.toolName}>▸ Preview </Text>

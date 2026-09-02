@@ -6,6 +6,7 @@ import { summarizeTool } from '../toolSummary.ts'
 import { summarizeResult } from '../../stream.ts'
 import { foldText } from '../../render.ts'
 import { redactText } from '../../redact.ts'
+import { visualizationTerminalPreview } from '../../../tools/visualize.ts'
 
 /** Splits a `… ```diff … ``` …` result into a plain preamble and the diff body lines. */
 function splitDiff(result: string): { diff: string[] } {
@@ -46,7 +47,7 @@ export function ToolCard({ tool, expanded }: { tool: ToolItem; expanded: boolean
   const s = summarizeTool(tool)
   const running = tool.status === 'running'
   const isError = tool.status === 'error'
-  const showBody = (expanded || isError) && !running && tool.result
+  const showBody = (tool.name === 'visualize' || expanded || isError) && !running && tool.result
 
   const markColor = isError ? palette.failure : running ? palette.toolName : palette.success
   const mark = running ? null : isError ? glyphs.error : tool.status === 'cached' ? glyphs.cached : glyphs.ok
@@ -79,6 +80,13 @@ export function ToolCard({ tool, expanded }: { tool: ToolItem; expanded: boolean
 }
 
 function renderBody(tool: ToolItem, s: ReturnType<typeof summarizeTool>, expanded: boolean) {
+  if (tool.name === 'visualize' && tool.status !== 'error') {
+    return (
+      <Box marginLeft={4} flexDirection="column">
+        <Text>{visualizationTerminalPreview(tool.result ?? '')}</Text>
+      </Box>
+    )
+  }
   if ((tool.name === 'edit_file' || tool.name === 'write_file') && tool.status !== 'error') {
     const { diff } = splitDiff(tool.result ?? '')
     if (diff.length > 0) return <DiffBody lines={diff} limit={expanded ? 400 : 24} />

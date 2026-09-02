@@ -2,7 +2,7 @@ import { autoFallbacksFor, BATTMANN_SUBAGENT_SYSTEM_PROMPT, CYBER_SUBAGENT_SYSTE
 import { runAgentLoop, lastAssistantText, type ConversationMessage, type ToolEvent } from './agentLoop.ts'
 import type { Usage } from './providers/types.ts'
 import type { Tool } from './tools/types.ts'
-import { businessTools } from './tools/registry.ts'
+import { battmannTools, businessTools } from './tools/registry.ts'
 import { toolsForRole, role as roleDefinition } from './autonomy/roles.ts'
 import { currentAgent, withAgentIdentity } from './autonomy/context.ts'
 import { activeBlackboard } from './autonomy/blackboard.ts'
@@ -97,7 +97,10 @@ export async function runSubAgent(request: SubAgentRequest): Promise<SubAgentRes
   // same external-evidence tools the lead has; without them it can only guess,
   // which is the one thing this mode must never do.
   if (activeMode() === 'battmann') {
-    for (const tool of businessTools) {
+    const modeTools = definition.canWrite
+      ? [...businessTools, ...battmannTools]
+      : businessTools.filter((tool) => tool.name === 'read_spreadsheet')
+    for (const tool of modeTools) {
       if (!tools.some((existing) => existing.name === tool.name)) tools.push(tool)
     }
   }

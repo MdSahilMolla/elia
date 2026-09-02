@@ -59,3 +59,10 @@ test('persists a bounded action budget for scheduled runs', () => {
   expect(() => store.create({ title: 'Invalid', goal: 'x', intervalMs: MIN_SCHEDULE_INTERVAL_MS, maxActions: 0 })).toThrow('between 1 and 10000')
   expect(() => store.create({ title: 'Invalid', goal: 'x', intervalMs: MIN_SCHEDULE_INTERVAL_MS, maxActions: 10_001 })).toThrow('between 1 and 10000')
 })
+
+test('persists Battmann mode for recurring intelligence runs', () => {
+  const path = join(mkdtempSync(join(tmpdir(), 'elia-schedule-')), 'schedules.json')
+  const store = ScheduleStore.open(path)
+  store.create({ title: 'Risk watch', goal: 'Refresh the risk brief', intervalMs: MIN_SCHEDULE_INTERVAL_MS, mode: 'battmann', now: 1_000 })
+  expect(ScheduleStore.open(path).list()[0]?.mode).toBe('battmann')
+})

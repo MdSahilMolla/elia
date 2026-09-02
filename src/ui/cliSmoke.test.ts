@@ -1,9 +1,9 @@
 import { expect, test } from 'bun:test'
-import { mkdtempSync, readFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 
-async function runCli(args: string[], overrides: Record<string, string | undefined> = {}): Promise<{ code: number; stdout: string; stderr: string }> {
+async function runCli(args: string[], overrides: Record<string, string | undefined> = {}, cwd = process.cwd()): Promise<{ code: number; stdout: string; stderr: string }> {
   const env: Record<string, string> = {
     ...process.env,
     ELIA_ROUTING_MODE: 'selected',
@@ -14,8 +14,8 @@ async function runCli(args: string[], overrides: Record<string, string | undefin
     if (value === undefined) delete env[key]
     else env[key] = value
   }
-  const proc = Bun.spawn([process.execPath, 'src/index.ts', ...args], {
-    cwd: process.cwd(),
+  const proc = Bun.spawn([process.execPath, join(import.meta.dir, '..', 'index.ts'), ...args], {
+    cwd,
     env,
     stdout: 'pipe',
     stderr: 'pipe',
@@ -201,6 +201,7 @@ test('control status stays provider-independent', async () => {
 })
 
 test('metadata commands stay provider-independent', async () => {
+  const metadataCwd = mkdtempSync(join(tmpdir(), 'elia-cli-metadata-'))
   const withoutProvider = {
     ELIA_PROVIDER: undefined,
     ELIA_MODEL: undefined,
@@ -209,20 +210,25 @@ test('metadata commands stay provider-independent', async () => {
     OPENAI_API_KEY: undefined,
     NVIDIA_API_KEY: undefined,
     GEMINI_API_KEY: undefined,
+    ELIA_MCP_USER_CONFIG: join(metadataCwd, 'missing-user-mcp.json'),
   }
-  const [skills, schedules, runs, timeline, daemon] = await Promise.all([
-    runCli(['skills', 'path', '--plain'], withoutProvider),
-    runCli(['schedule', 'list', '--plain'], withoutProvider),
-    runCli(['runs', '--plain'], withoutProvider),
-    runCli(['runs', 'missing-run', '--plain'], withoutProvider),
-    runCli(['daemon', '--once', '--plain'], withoutProvider),
-  ])
-  expect(skills.code).toBe(0)
-  expect(schedules.code).toBe(0)
-  expect(runs.code).toBe(0)
-  expect(timeline.code).toBe(0)
-  expect(daemon.code).toBe(0)
-  for (const result of [skills, schedules, runs, timeline, daemon]) {
-    expect(result.stderr).not.toContain('No API key found')
+  try {
+    const [skills, schedules, runs, timeline, daemon] = await Promise.all([
+      runCli(['skills', 'path', '--plain'], withoutProvider, metadataCwd),
+      runCli(['schedule', 'list', '--plain'], withoutProvider, metadataCwd),
+      runCli(['runs', '--plain'], withoutProvider, metadataCwd),
+      runCli(['runs', 'missing-run', '--plain'], withoutProvider, metadataCwd),
+      runCli(['daemon', '--once', '--plain'], withoutProvider, metadataCwd),
+    ])
+    expect(skills.code).toBe(0)
+    expect(schedules.code).toBe(0)
+    expect(runs.code).toBe(0)
+    expect(timeline.code).toBe(0)
+    expect(daemon.code).toBe(0)
+    for (const result of [skills, schedules, runs, timeline, daemon]) {
+      expect(result.stderr).not.toContain('No API key found')
+    }
+  } finally {
+    rmSync(metadataCwd, { recursive: true, force: true })
   }
-})
+}, 15_000)

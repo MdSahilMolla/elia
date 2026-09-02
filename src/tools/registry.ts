@@ -28,6 +28,8 @@ import { fitnessTool } from './fitness.ts'
 import { environmentTool } from './environment.ts'
 import { githubTool } from './github.ts'
 import { todoWriteTool } from './todo.ts'
+import { battmannTool } from './battmann.ts'
+import { visualizeTool } from './visualize.ts'
 import type { Tool } from './types.ts'
 
 /** The built-in file and shell tools. */
@@ -38,6 +40,9 @@ export const tools: Tool[] = [
   listFilesTool,
   grepTool,
   runCommandTool,
+  webSearchTool,
+  webFetchTool,
+  visualizeTool,
   todoWriteTool,
   recallTool,
   brainTool,
@@ -68,7 +73,8 @@ export const communicationTools: Tool[] = [communicationTool]
 export const cyberTools: Tool[] = [newEngagementTool, runSecurityToolTool]
 
 /** Real external data for the Marketing/Finance personas — see src/agents/personas.ts. Tech's toolset is unchanged. */
-export const businessTools: Tool[] = [webSearchTool, webFetchTool, readSpreadsheetTool, spreadsheetTool, presentationTool]
+export const businessTools: Tool[] = [readSpreadsheetTool, spreadsheetTool, presentationTool]
+export const battmannTools: Tool[] = [battmannTool]
 
 export const toolsByName: Record<string, Tool> = Object.fromEntries(
   tools.map((tool) => [tool.name, tool]),
@@ -100,10 +106,13 @@ export function registerMcpTool(tool: Tool): void {
   else mcpTools[index] = tool
 }
 
-/** Test-only: clears MCP tool registrations so one test file's fixture servers don't leak into another's assertions. */
-export function clearMcpToolsForTests(): void {
+/** Drops every proxied MCP tool — used on `/mcp reload` before reconnecting, and by tests for isolation. */
+export function clearMcpTools(): void {
   mcpTools.length = 0
 }
+
+/** @deprecated alias for {@link clearMcpTools}. */
+export const clearMcpToolsForTests = clearMcpTools
 
 export function getMcpTools(): Tool[] {
   return [...mcpTools]

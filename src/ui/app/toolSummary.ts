@@ -72,6 +72,8 @@ export function summarizeTool(tool: ToolItem): ToolSummary {
       return { verb: 'Delegated to', target: firstString(input, 'role', 'description') ?? 'a subagent', stat, expandable: done }
     case 'todo_write':
       return { verb: 'Updated the plan', target: '', stat, expandable: done }
+    case 'visualize':
+      return { verb: 'Visualized', target: firstString(input, 'title', 'type') ?? 'data', stat, expandable: done }
     default: {
       const arg = Object.values(input).find((v) => typeof v === 'string') as string | undefined
       return { verb: tool.name, target: arg ? (arg.length > 50 ? `${arg.slice(0, 49)}…` : arg) : '', stat, expandable: done }

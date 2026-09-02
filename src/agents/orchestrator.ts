@@ -4,7 +4,7 @@ import { runAgentLoop, lastAssistantText, type ConversationMessage } from '../ag
 import { allWorkerTools, getSynthesizedTools } from '../tools/registry.ts'
 import { taskTool } from '../tools/task.ts'
 import { autoFallbacksFor, tierConfig } from '../config.ts'
-import { writeText, writeNotice } from '../ui/stream.ts'
+import { endTextTurn, writeText, writeNotice } from '../ui/stream.ts'
 import { emitEvent, machineReadable } from '../ui/runtime.ts'
 import type { AgentPersona } from './types.ts'
 import { parseOverride, classifyRequest, deterministicRoute } from './router.ts'
@@ -34,6 +34,8 @@ function toolsForPersona(persona: AgentPersona, selectedSkillNames?: string[]) {
   return persona === 'tech' || persona === 'production' ? [...filterSkills(allWorkerTools()), taskTool] : personaTools(persona, selectedSkillNames)
 }
 
+const PARALLEL_READ_TOOLS = new Set(['environment', 'read_file', 'list_files', 'grep', 'web_search', 'web_fetch', 'read_spreadsheet', 'data_science', 'finance'])
+
 /**
  * Domain specialists do focused work with scoped toolsets; Tech and Production
  * keep the full worker set plus task delegation. A bounded budget keeps a stuck specialist
@@ -47,32 +49,38 @@ function capitalize(text: string): string {
   return text.charAt(0).toUpperCase() + text.slice(1)
 }
 
-/** Runs one persona's turn, given everything prior personas in this request already found. */
+/** Runs one persona with context from completed dependency waves. */
 async function runSection(
   persona: AgentPersona,
   request: string,
   priorSections: AgentSectionResult[],
   signal?: AbortSignal,
   selectedSkillNames?: string[],
+  streamOutput = true,
+  readOnly = false,
 ): Promise<{ section: AgentSectionResult; usage: Usage }> {
-  const handoff =
-    priorSections.length > 0
-      ? `\n\n## What the other agent(s) already found\n${priorSections.map((s) => `### ${capitalize(s.persona)}\n${s.report}`).join('\n\n')}`
-      : ''
-
+  const handoff = priorSections.length > 0
+    ? `\n\n## What completed dependency waves found\n${priorSections.map((section) => `### ${capitalize(section.persona)}\n${section.report}`).join('\n\n')}`
+    : ''
   const messages: ConversationMessage[] = [{ role: 'user', content: [{ type: 'text', text: `${request}${handoff}` }] }]
   const capability = capabilityForPersona(persona)
   const contract = capability
     ? `\n\n## Capability contract\nRisk class: ${capability.risk}.\nRequired output elements: ${capability.outputContract.join('; ')}.\nPreferred tools: ${capability.preferredTools.join(', ')}.\nDo not claim completion until the required elements are addressed or explicitly marked unavailable.`
     : ''
 
+  const route = tierConfig(readOnly ? 'fast' : 'deep')
+  const tools = toolsForPersona(persona, selectedSkillNames)
   const result = await runAgentLoop({
     messages,
-    systemPrompt: `${personaPrompt(persona)}${contract}`,
-    tools: toolsForPersona(persona, selectedSkillNames),
-    onText: writeText,
-    useAnimation: true,
-    verbose: true,
+    systemPrompt: `${personaPrompt(persona)}${contract}${readOnly ? '\n\nThis is a parallel investigation wave. Read and analyze only; do not modify files, run commands, use a browser, communicate externally, or create artifacts. A dependent wave will integrate your report.' : ''}`,
+    tools: readOnly ? tools.filter((tool) => PARALLEL_READ_TOOLS.has(tool.name)) : tools,
+    provider: route.provider,
+    providerName: route.providerName,
+    model: route.model,
+    fallbacks: autoFallbacksFor(route.providerName),
+    onText: streamOutput ? writeText : undefined,
+    useAnimation: streamOutput,
+    verbose: streamOutput,
     maxSteps: maxStepsForPersona(persona),
     signal,
   })
@@ -81,12 +89,12 @@ async function runSection(
 }
 
 /**
- * Cheap fast-tier pass that reconciles what each persona produced into one
+ * Deep-tier pass that reconciles what each persona produced into one
  * recommendation, surfacing conflicts instead of silently picking a side — per
  * the orchestrator's handoff rules.
  */
 async function synthesize(request: string, sections: AgentSectionResult[]): Promise<{ text: string; usage: Usage }> {
-  const fast = tierConfig('fast')
+  const deep = tierConfig('deep')
   const messages: ConversationMessage[] = [
     {
       role: 'user',
@@ -103,10 +111,10 @@ async function synthesize(request: string, sections: AgentSectionResult[]): Prom
     messages,
     systemPrompt: 'You reconcile the outputs of specialist agents into one short, direct recommendation for the user.',
     tools: [],
-    provider: fast.provider,
-    providerName: fast.providerName,
-    model: fast.model,
-    fallbacks: autoFallbacksFor(fast.providerName),
+    provider: deep.provider,
+    providerName: deep.providerName,
+    model: deep.model,
+    fallbacks: autoFallbacksFor(deep.providerName),
     useAnimation: false,
     verbose: false,
   })
@@ -134,10 +142,9 @@ function warnIfSearchUnconfigured(personas: AgentPersona[]): void {
 }
 
 /**
- * Routes a request to one or more specialist personas and runs each in
- * dependency order, carrying context forward so later agents don't repeat
- * earlier work. A single persona answers in that persona's voice; multi-domain
- * requests get labeled sections plus a combined recommendation.
+ * Routes a request to one or more specialist personas. Independent specialist
+ * sections run in parallel; the combined recommendation waits for the whole
+ * wave. A single persona answers directly in that persona's voice.
  */
 export async function runAgentRequest(request: string, opts: { signal?: AbortSignal; skillNames?: string[]; dryRun?: boolean } = {}): Promise<AgentRunResult> {
   const override = parseOverride(request)
@@ -145,17 +152,21 @@ export async function runAgentRequest(request: string, opts: { signal?: AbortSig
 
   let personas: AgentPersona[]
   let rationale: string
+  let routeWaves: AgentPersona[][] | undefined
   if (override) {
     personas = [override]
     rationale = 'explicit override in the request'
+    routeWaves = [[override]]
   } else if (opts.dryRun) {
     const route = deterministicRoute(request)
     personas = route.personas
     rationale = route.rationale
+    routeWaves = route.waves
   } else {
     const route = await classifyRequest(request)
     personas = route.personas
     rationale = route.rationale
+    routeWaves = route.waves
     usage = addUsage(usage, route.usage)
     recordUsage(route.usage)
   }
@@ -180,27 +191,35 @@ export async function runAgentRequest(request: string, opts: { signal?: AbortSig
     return { personas, rationale, sections: [{ persona: 'tech', report: lastAssistantText(messages, '(no response)') }], usage }
   }
 
+  const multiPersona = personas.length > 1
+  const executionWaves = routeWaves ?? personas.map((persona) => [persona])
   const sections: AgentSectionResult[] = []
-
-  for (const persona of personas) {
+  for (const [waveIndex, wave] of executionWaves.entries()) {
     if (opts.signal?.aborted) break
-    if (personas.length > 1) {
-      if (machineReadable) emitEvent('persona_started', { persona })
-      else process.stdout.write(`\n## ${capitalize(persona)} take\n\n`)
-    }
-
-    // One persona's turn failing (a provider error, a tool crash) shouldn't take
-    // down a multi-domain request that's otherwise fine — report the failure as
-    // that section's content and let the remaining personas still run.
-    try {
-      const { section, usage: sectionUsage } = await runSection(persona, request, sections, opts.signal, opts.skillNames)
+    const priorSections = [...sections]
+    const parallel = wave.length > 1
+    for (const persona of wave) if (multiPersona && machineReadable) emitEvent('persona_started', { persona, wave: waveIndex + 1, providerTier: parallel ? 'fast' : 'deep' })
+    const sectionRuns = await Promise.all(wave.map(async (persona) => {
+      try {
+        return await runSection(persona, request, priorSections, opts.signal, opts.skillNames, !multiPersona, parallel)
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err)
+        writeNotice(`${capitalize(persona)} agent failed: ${message}`)
+        return { section: { persona, report: `(this agent failed: ${message})`, failed: true }, usage: ZERO_USAGE }
+      }
+    }))
+    for (const { section, usage: sectionUsage } of sectionRuns) {
       sections.push(section)
       usage = addUsage(usage, sectionUsage)
       recordUsage(sectionUsage)
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err)
-      writeNotice(`${capitalize(persona)} agent failed: ${message}`)
-      sections.push({ persona, report: `(this agent failed: ${message})`, failed: true })
+      if (multiPersona) {
+        if (machineReadable) emitEvent('persona_completed', { persona: section.persona, report: section.report, failed: section.failed ?? false, wave: waveIndex + 1 })
+        else {
+          process.stdout.write(`\n## ${capitalize(section.persona)} take\n\n`)
+          writeText(section.report)
+          endTextTurn()
+        }
+      }
     }
   }
 

@@ -8,6 +8,12 @@ export interface ArtifactInfo {
   sizeBytes: number
 }
 
+const TEXT_ARTIFACT_EXTENSIONS = ['.md', '.html', '.json'] as const
+
+function isTextArtifact(path: string): boolean {
+  return TEXT_ARTIFACT_EXTENSIONS.some((extension) => path.toLowerCase().endsWith(extension))
+}
+
 export function getArtifactsDir(cwd = process.cwd()): string {
   return join(cwd, '.elia', 'artifacts')
 }
@@ -19,7 +25,7 @@ export function listArtifacts(cwd = process.cwd()): ArtifactInfo[] {
   if (existsSync(artifactsDir)) {
     try {
       for (const file of readdirSync(artifactsDir)) {
-        if (!file.endsWith('.md')) continue
+        if (!isTextArtifact(file)) continue
         const path = join(artifactsDir, file)
         const stats = statSync(path)
         results.push({ name: file, path, updatedAt: stats.mtimeMs, sizeBytes: stats.size })
@@ -57,11 +63,11 @@ export function readArtifact(target?: string, cwd = process.cwd()): { path: stri
   }
 
   if (target) {
-    const artifactName = target.endsWith('.md') ? target : `${target}.md`
+    const artifactName = isTextArtifact(target) ? target : `${target}.md`
     const direct = isAbsolute(target) ? resolve(target) : resolve(cwd, target)
     for (const candidate of [direct, resolve(artifactsDir, artifactName), resolve(stateDir, target)]) {
       const fromState = relative(stateDir, candidate)
-      if (fromState.startsWith('..') || isAbsolute(fromState) || !candidate.endsWith('.md')) continue
+      if (fromState.startsWith('..') || isAbsolute(fromState) || !isTextArtifact(candidate)) continue
       if (existsSync(candidate) && statSync(candidate).isFile()) return { path: candidate, content: readFileSync(candidate, 'utf8') }
     }
     return null

@@ -9,27 +9,28 @@ process.env.ANTHROPIC_API_KEY ??= 'test-key-for-orchestrator-test'
 const { config } = await import('../config.ts')
 const { runAgentRequest } = await import('./orchestrator.ts')
 
-type Responder = (params: StreamTurnParams, toolNames: string[]) => { content: ContentBlock[] }
+type Responder = (params: StreamTurnParams, toolNames: string[]) => { content: ContentBlock[] } | Promise<{ content: ContentBlock[] }>
 
-/** Stubs both the ambient provider (used by persona turns) and the fast tier (used by the router/synthesis). */
+/** Stubs both the ambient provider and the fast tier used by routing and parallel read-only waves. */
 function stubProvider(respond: Responder): void {
   const provider: Provider = {
     async streamTurn(params) {
       const toolNames = params.tools.map((tool) => tool.name)
-      const { content } = respond(params, toolNames)
+      const { content } = await respond(params, toolNames)
       return { content, usage: { inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 } }
     },
   }
   config.provider = provider
   config.tiers.deep.provider = provider
+  config.tiers.fast.provider = provider
 }
 
 function textBlock(text: string): ContentBlock[] {
   return [{ type: 'text', text }]
 }
 
-function routeBlock(personas: string[], rationale: string): ContentBlock[] {
-  return [{ type: 'tool_use', id: 'route1', name: 'submit_route', input: { personas, rationale } }]
+function routeBlock(personas: string[], rationale: string, waves?: string[][]): ContentBlock[] {
+  return [{ type: 'tool_use', id: 'route1', name: 'submit_route', input: { personas, rationale, waves } }]
 }
 
 test('a single-persona request answers directly with no headers or combined section', async () => {
@@ -85,6 +86,33 @@ test('a multi-domain request runs personas in the routed order and produces a co
   expect(result.sections[0]!.report).toBe('finance report')
   expect(result.sections[1]!.report).toBe('tech report')
   expect(result.combined).toBe('finance and tech agree: build it')
+})
+
+test('independent persona sections overlap while preserving routed result order', async () => {
+  let routed = false
+  let inFlight = 0
+  let maxInFlight = 0
+  stubProvider(async (params, toolNames) => {
+    if (toolNames.includes('submit_route')) {
+      if (!routed) {
+        routed = true
+        return { content: routeBlock(['finance', 'marketing'], 'parallel review', [['finance', 'marketing']]) }
+      }
+      return { content: textBlock('') }
+    }
+    if (toolNames.length === 0) return { content: textBlock('combined') }
+    inFlight += 1
+    maxInFlight = Math.max(maxInFlight, inFlight)
+    await Bun.sleep(params.system.includes('Finance agent') ? 40 : 10)
+    inFlight -= 1
+    return { content: textBlock(params.system.includes('Finance agent') ? 'finance report' : 'marketing report') }
+  })
+
+  const result = await runAgentRequest('compare the financial and marketing plans')
+
+  expect(maxInFlight).toBe(2)
+  expect(result.sections.map((section) => section.persona)).toEqual(['finance', 'marketing'])
+  expect(result.sections.map((section) => section.report)).toEqual(['finance report', 'marketing report'])
 })
 
 test('falls back to tech when the router never calls submit_route', async () => {

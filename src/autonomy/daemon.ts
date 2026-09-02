@@ -47,6 +47,7 @@ export async function runScheduledDaemon(options: ScheduledDaemonOptions = {}): 
       const result = await runAutonomousTask({
         goal: claimed.goal,
         approve: autoApprove,
+        mode: claimed.mode,
         profile: claimed.profile,
         maxWallClockMs: claimed.maxRunMs,
         maxActions: claimed.maxActions,

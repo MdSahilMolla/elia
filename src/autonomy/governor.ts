@@ -175,6 +175,31 @@ export function assessAction(request: ActionRequest, cwd = currentAgent().cwd ??
     return assessment('safe', 'allow', 'web fetch is a bounded read-only GET restricted to public http(s) addresses with redirects refused', 'web_fetch', resources, true)
   }
 
+  if (name === 'visualize') {
+    const slug = typeof input.slug === 'string' ? input.slug : ''
+    if (slug && !/^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/.test(slug)) {
+      return assessment('critical', 'approve', 'visualization slug is invalid and cannot be mapped to a safe workspace artifact path', 'visualize', [], false)
+    }
+    const artifactPaths = slug ? [`.elia/artifacts/${slug}.svg`, `.elia/artifacts/${slug}.md`] : ['.elia/artifacts']
+    return assessment('safe', 'allow', 'visualize creates deterministic, workspace-scoped SVG and Markdown artifacts from bounded structured data', 'visualize', artifactPaths, true)
+  }
+
+  if (name === 'battmann') {
+    const action = typeof input.action === 'string' ? input.action : ''
+    if (action === 'report' || action === 'report_from_store') {
+      const path = typeof input.outputPath === 'string' ? input.outputPath : ''
+      return path && isPathWithinWorkspace(path, cwd)
+        ? assessment('review', 'approve', 'Battmann report writes checkpointed local Markdown and JSON artifacts', 'battmann', [path], true)
+        : assessment('critical', 'approve', 'Battmann report output is missing or outside the active workspace', 'battmann', path ? [path] : [], false)
+    }
+    const storePath = typeof input.storePath === 'string' ? input.storePath : '.elia/battmann.sqlite'
+    if (!isPathWithinWorkspace(storePath, cwd)) return assessment('critical', 'approve', 'Battmann store path is outside the active workspace or invalid', `battmann.${action || 'unknown'}`, [storePath], false)
+    const readOnly = new Set(['forecast', 'backtest', 'question_detail', 'list_questions', 'scorecard', 'workspace_snapshot'])
+    return readOnly.has(action)
+      ? assessment('safe', 'allow', `Battmann ${action} is a deterministic calculation or workspace-local read`, `battmann.${action}`, [storePath], true)
+      : assessment('safe', 'allow', `Battmann ${action} is an append-only or versioned write to the workspace-local intelligence store`, `battmann.${action || 'unknown'}`, [storePath], true)
+  }
+
   if (name === 'read_spreadsheet') {
     const path = typeof input.path === 'string' ? input.path : ''
     return path && !isPathWithinWorkspace(path, cwd)
