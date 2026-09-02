@@ -13,7 +13,6 @@
     "src/**/*.js",
     "src/**/*.cjs",
     "src/vendor/PPTXGENJS-LICENSE.txt",
-    "docs",
     ".env.example",
     "tsconfig.json"
   ],

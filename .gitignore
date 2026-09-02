@@ -1,5 +1,13 @@
 # --- Dependencies ---
 node_modules/
+# npm lockfile — this is a bun project, bun.lock is authoritative
+package-lock.json
+
+# --- Editor / AI-assistant tooling (local, per-machine) ---
+.agents/
+.claude/
+.cursor/
+.devin/
 
 # --- Secrets ---
 # Only .env.example is committed; every real env file stays local.
