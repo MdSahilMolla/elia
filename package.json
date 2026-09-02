@@ -1,6 +1,6 @@
 {
   "name": "elia-ai",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "A fast, autonomous coding agent for the terminal, with pluggable LLM providers.",
   "license": "AGPL-3.0-only",
   "type": "module",
