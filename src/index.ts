@@ -44,31 +44,31 @@ import { loadUserConfig, userConfigPath, writeUserConfig } from './userConfig.ts
 import { activeProviderNeedsSetup, removeProviderConfiguration, savedProviderNames, saveProviderConfiguration, type SavedProviderConfiguration } from './providerSettings.ts'
 
 const REPL_COMMANDS: SlashCommand[] = [
-  { name: '/capabilities', description: 'list specialist capabilities, risk classes, and output contracts' },
-  { name: '/mode', description: 'pick a mode/persona with arrow keys, or /mode dev, /mode cyber, /mode sports, /mode fitness, /mode battmann, /mode marketing, ...' },
-  { name: '/rewind', description: 'list rewind points (add a number to restore one, e.g. /rewind 2)' },
-  { name: '/model', description: 'pick a model with arrow keys, or /model groq, /model claude-opus-5' },
-  { name: '/thinking', description: 'pick reasoning effort with arrow keys, or /thinking off/low/medium/high/<n>' },
-  { name: '/task', description: 'browse browser, coding, and pending tasks with arrow keys' },
-  { name: '/sessions', description: 'see every other elia session running in this project — what each is doing, its model, and its session id to resume it' },
-  { name: '/artifact', description: 'browse saved plan artifacts with arrow keys and search, or /artifact <name> to view one directly' },
-  { name: '/settings', description: 'browse every setting — model, reasoning effort, risk checks, skills — and switch with arrow keys' },
-  { name: '/expand', description: 'reprint the last tool result in full (or /expand <n> for the nth), undoing scrollback folding' },
-  { name: '/why', description: 'show recorded rationale for a file or topic — the decisions and constraints behind it (/why src/foo.ts)' },
-  { name: '/lessons', description: 'show what earlier sessions learned about this project' },
-  { name: '/brain', description: "elia's cross-session project memory — /brain to see what's stored, /brain <query> to search it, /brain consolidate to tidy it" },
-  { name: '/verify', description: 'run the project checks now, or /verify on|off to toggle the automatic post-turn check' },
-  { name: '/track', description: "elia's track record on this project — how many changes landed clean, by area, and where it's weakest" },
-  { name: '/skills', description: 'list the loaded skills (learned tools) available this session' },
-  { name: '/marketplace', description: 'per source (npm, pip, skills, mcp, connector): what is installed, a suggested shortlist, and search/add' },
-  { name: '/packages', description: 'everything installed for this project — packages and skills — select one to remove it' },
-  { name: '/mcp', description: 'connected MCP servers and their tools — add one from the catalog, reload, enable/disable, or remove' },
-  { name: '/connector', description: 'hosted MCP connectors (Notion, Linear, Sentry, GitHub, …) — add by URL, test the connection, enable/disable, remove' },
-  { name: '/status', description: 'show the workspace panel — session, other chats, plan, subagents, artifacts' },
-  { name: '/team', description: 'show deep/fast model tiers and per-role routes used by parallel workers' },
-  { name: '/cost', description: 'show the session token and estimated-dollar breakdown' },
-  { name: '/export', description: 'write the whole conversation to Markdown (/export <path> to choose the file)' },
-  { name: '@skills', description: 'browse loaded skills and choose which skill tools are active for the next turn' },
+  { name: '/model', description: 'switch model / provider' },
+  { name: '/mode', description: 'switch mode or persona' },
+  { name: '/thinking', description: 'set reasoning effort' },
+  { name: '/rewind', description: 'restore an earlier checkpoint' },
+  { name: '/settings', description: 'model, effort, risk checks, skills' },
+  { name: '/mcp', description: 'MCP servers — add, test, reload, remove' },
+  { name: '/connector', description: 'hosted MCP connectors — add, test, remove' },
+  { name: '/marketplace', description: 'packages, skills, MCP: installed · suggested · add' },
+  { name: '/packages', description: 'installed packages & skills — remove one' },
+  { name: '/skills', description: 'list loaded skills' },
+  { name: '/task', description: 'browse tasks and subagents' },
+  { name: '/sessions', description: 'other elia sessions in this project' },
+  { name: '/artifact', description: 'browse saved plan artifacts' },
+  { name: '/verify', description: 'run project checks · /verify on|off' },
+  { name: '/cost', description: 'token & cost breakdown' },
+  { name: '/status', description: 'session, plan, subagents, artifacts' },
+  { name: '/expand', description: 'reprint the last tool result in full' },
+  { name: '/export', description: 'save the conversation to Markdown' },
+  { name: '/brain', description: 'cross-session project memory' },
+  { name: '/lessons', description: 'what earlier sessions learned here' },
+  { name: '/why', description: 'recorded rationale for a file or topic' },
+  { name: '/track', description: "elia's track record on this project" },
+  { name: '/team', description: 'model tiers & per-role routing' },
+  { name: '/capabilities', description: 'specialist capabilities & risk classes' },
+  { name: '@skills', description: 'choose active skill tools for the next turn' },
 ]
 
 const rawArgs = process.argv.slice(2)
@@ -353,7 +353,8 @@ async function loadRuntimeSkills(): Promise<void> {
   const { loadMcpTools } = await import('./mcp/registry.ts')
   const mcp = await loadMcpTools()
   if (mcp.loaded.length > 0 && subcommand !== 'skills') {
-    writeUsageLine(`${mcp.loaded.length} MCP tool(s) from ${mcp.servers.length} server(s): ${mcp.loaded.map((tool) => tool.name).join(', ')}`)
+    // One line, not a wall of tool names — the full list is a `/mcp` away.
+    writeUsageLine(`${mcp.loaded.length} MCP tool(s) from ${mcp.servers.join(', ')} · /mcp`)
   }
   for (const failure of mcp.failed) writeNotice(`MCP server "${failure.server}" unavailable: ${failure.reason}`)
   for (const error of mcp.configErrors) writeNotice(`MCP config: ${error}`)

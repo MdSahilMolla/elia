@@ -61,18 +61,9 @@ test('shows active subagents and what each is doing', () => {
   expect(frame).not.toContain('lead') // the lead agent is not a "subagent"
 })
 
-test('shows bounded chat and artifact context', () => {
-  const { lastFrame } = render(
-    <WorkspacePanel
-      plan={[]}
-      agents={[]}
-      chats={['session-a · running', 'session-b · idle']}
-      artifacts={['revenue.md', 'release-flow.md']}
-    />,
-  )
-  const frame = lastFrame() ?? ''
-  expect(frame).toContain('CHATS')
-  expect(frame).toContain('session-a · running')
-  expect(frame).toContain('ARTIFACTS')
-  expect(frame).toContain('release-flow.md')
+test('is not a dashboard — a fresh chat with other sessions and old artifacts still shows nothing', () => {
+  // The panel intentionally takes no chats/artifacts props any more; those live
+  // in /sessions and /artifact. Only current activity (plan, fleet) shows here.
+  const { lastFrame } = render(<WorkspacePanel plan={[]} agents={[]} />)
+  expect((lastFrame() ?? '').trim()).toBe('')
 })

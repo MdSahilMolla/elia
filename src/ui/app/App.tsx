@@ -22,8 +22,6 @@ import { palette } from './theme.ts'
 import { estimateTokens } from '../../compaction.ts'
 import { sessionUsageSnapshot, estimateCostUsd } from '../../usage.ts'
 import type { ChatMessage } from '../../providers/types.ts'
-import { listKnownSessions } from '../../sessionRegistry.ts'
-import { listArtifacts } from '../../autonomy/artifactReader.ts'
 
 export interface TurnHooks {
   onText(delta: string): void
@@ -409,11 +407,6 @@ export function App(props: AppProps) {
   )
 
   const contextTokens = useMemo(() => estimateTokens(props.messages), [props.messages, snap.version])
-  const chats = useMemo(
-    () => listKnownSessions().filter((session) => session.sessionId !== props.sessionId).slice(0, 3).map((session) => `${session.sessionId} · ${session.liveStatus}`),
-    [props.sessionId, snap.version],
-  )
-  const artifacts = useMemo(() => listArtifacts().slice(0, 4).map((artifact) => artifact.name), [snap.version, busy])
   const visiblePlan = plan.length > 0 ? plan : providerPlan
 
   return (
@@ -435,7 +428,7 @@ export function App(props: AppProps) {
         </Box>
       )}
 
-      <WorkspacePanel plan={visiblePlan} agents={agents} chats={chats} artifacts={artifacts} />
+      <WorkspacePanel plan={visiblePlan} agents={agents} />
       {previewUrl && (
         <Box marginTop={1}>
           <Text color={palette.toolName}>▸ Preview </Text>

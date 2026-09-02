@@ -17,13 +17,15 @@ function agentGlyph(status: TaskSession['status']): string {
 }
 
 /**
- * The live plan + subagent fleet. The plan comes from the agent's own todo_write
- * calls; the fleet from taskSessions. Kept to a bounded height and full width so
- * a long plan can't blow the panel out past the terminal edge.
+ * What elia is doing *right now*: the live plan + the subagent fleet. The plan
+ * comes from the agent's own todo_write calls; the fleet from taskSessions.
+ * Deliberately not a dashboard — other sessions live in /sessions, saved
+ * artifacts in /artifact — so a fresh chat shows nothing here at all.
+ * Bounded height and full width so a long plan can't blow past the terminal edge.
  */
-export function WorkspacePanel({ plan, agents, chats = [], artifacts = [] }: { plan: TodoItem[]; agents: TaskSession[]; chats?: string[]; artifacts?: string[] }) {
+export function WorkspacePanel({ plan, agents }: { plan: TodoItem[]; agents: TaskSession[] }) {
   const active = agents.filter((a) => a.role && a.role !== 'lead')
-  if (plan.length === 0 && active.length === 0 && chats.length === 0 && artifacts.length === 0) return null
+  if (plan.length === 0 && active.length === 0) return null
 
   // Show what's happening, not the whole backlog: done items + the current one +
   // a couple ahead.
@@ -74,19 +76,6 @@ export function WorkspacePanel({ plan, agents, chats = [], artifacts = [] }: { p
         </Box>
       )}
 
-      {chats.length > 0 && (
-        <Box flexDirection="column" marginTop={plan.length > 0 || active.length > 0 ? 1 : 0}>
-          <Text color={palette.muted}>CHATS</Text>
-          {chats.slice(0, 3).map((chat) => <Text key={chat} wrap="truncate-end">  {chat}</Text>)}
-        </Box>
-      )}
-
-      {artifacts.length > 0 && (
-        <Box flexDirection="column" marginTop={plan.length > 0 || active.length > 0 || chats.length > 0 ? 1 : 0}>
-          <Text color={palette.muted}>ARTIFACTS</Text>
-          {artifacts.slice(0, 4).map((artifact) => <Text key={artifact} wrap="truncate-end">  {artifact}</Text>)}
-        </Box>
-      )}
     </Box>
   )
 }
