@@ -1,5 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk'
 import type { ChatMessage, ContentBlock, Provider, StreamTurnParams, ThinkingOption, ToolDefinition, Usage } from './types.ts'
+import { warmConnection } from './prewarm.ts'
 
 const EPHEMERAL_CACHE: Anthropic.CacheControlEphemeral = { type: 'ephemeral' }
 // The stable prefix of an agent-loop request — the system prompt and the tool
@@ -29,7 +30,11 @@ export function createAnthropicProvider(
   const thinkingBudget = options.thinking?.enabled ? options.thinking.budgetTokens : undefined
 
   return {
-    async streamTurn({ system, systemDynamic, messages, tools, onText, onThinking, signal }: StreamTurnParams) {
+    prewarm() {
+      warmConnection(client.baseURL)
+    },
+
+    async streamTurn({ system, systemDynamic, messages, tools, onText, onThinking, onToolBlock, signal }: StreamTurnParams) {
       const stream = client.messages.stream(
         buildAnthropicRequest({ model, thinkingBudget, system, systemDynamic, messages, tools }),
         signal ? { signal } : undefined,
@@ -37,6 +42,16 @@ export function createAnthropicProvider(
 
       stream.on('text', (delta) => onText(delta))
       if (thinkingBudget) stream.on('thinking', (delta) => onThinking?.(delta))
+      if (onToolBlock) {
+        // `content_block_stop` — the block is fully streamed and its input JSON
+        // parsed, but the turn is still going. Hand tool_use blocks up now so a
+        // read-only call can be started before finalMessage() resolves.
+        stream.on('contentBlock', (block) => {
+          if (block.type === 'tool_use') {
+            onToolBlock({ type: 'tool_use', id: block.id, name: block.name, input: block.input as Record<string, unknown> })
+          }
+        })
+      }
 
       const finalMessage = await stream.finalMessage()
 

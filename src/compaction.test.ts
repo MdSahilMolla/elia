@@ -7,7 +7,7 @@ import type { ChatMessage, ContentBlock } from './providers/types.ts'
 process.env.ANTHROPIC_API_KEY ??= 'test-key-for-compaction-test'
 
 const { config } = await import('./config.ts')
-const { estimateTokens, findSafeCutIndex, maybeCompact, renderContextStatus, COMPACTION_TOKEN_THRESHOLD } = await import(
+const { beginCompaction, estimateTokens, findSafeCutIndex, maybeCompact, renderContextStatus, COMPACTION_TOKEN_THRESHOLD } = await import(
   './compaction.ts'
 )
 
@@ -161,6 +161,74 @@ test('renderContextStatus caps the percentage at 100 for a history well past the
   const huge = [userText('x'.repeat(COMPACTION_TOKEN_THRESHOLD * 10))]
   const line = renderContextStatus(huge, 0)
   expect(line).toContain('(100%)')
+})
+
+function bigHistory(turns = 10): ChatMessage[] {
+  const filler = 'lorem ipsum '.repeat(3000)
+  const messages: ChatMessage[] = []
+  for (let i = 0; i < turns; i++) {
+    messages.push(userText(`${filler} old turn ${i}`))
+    messages.push(assistantText(`${filler} old reply ${i}`))
+  }
+  for (let i = 0; i < 8; i++) {
+    messages.push(userText(`recent turn ${i}`))
+    messages.push(assistantText(`recent reply ${i}`))
+  }
+  return messages
+}
+
+test('beginCompaction returns undefined below the threshold', () => {
+  expect(beginCompaction([userText('hi'), assistantText('hey')])).toBeUndefined()
+})
+
+test('beginCompaction runs the archive in the background: apply() is a no-op until it settles, then folds in', async () => {
+  let release: (summary: string) => void = () => {}
+  config.tiers.fast.provider = {
+    async streamTurn({ onText }) {
+      const summary = await new Promise<string>((resolve) => {
+        release = resolve
+      })
+      onText(summary)
+      return { content: [{ type: 'text', text: summary }] as ContentBlock[], usage: { inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 } }
+    },
+  }
+
+  const messages = bigHistory()
+  const lengthBefore = messages.length
+  const pending = beginCompaction(messages)
+  expect(pending).toBeDefined()
+
+  // Archive still in flight — the loop can keep going, history is untouched.
+  expect(pending!.settled).toBe(false)
+  expect(pending!.apply(messages)).toBe(false)
+  expect(messages.length).toBe(lengthBefore)
+
+  release('SUMMARY: the earlier turns, condensed.')
+  await pending!.flush(messages)
+
+  expect(pending!.settled).toBe(true)
+  expect(messages.length).toBeLessThan(lengthBefore)
+  expect((messages[0]!.content[0] as { text: string }).text).toContain('SUMMARY: the earlier turns, condensed.')
+  // Idempotent — a second apply() does nothing.
+  const afterFirst = messages.length
+  expect(pending!.apply(messages)).toBe(false)
+  expect(messages.length).toBe(afterFirst)
+})
+
+test('beginCompaction: a failed archive settles without touching the history', async () => {
+  config.tiers.fast.provider = {
+    async streamTurn() {
+      throw new Error('provider down')
+    },
+  }
+  const messages = bigHistory()
+  const before = JSON.stringify(messages)
+  const pending = beginCompaction(messages)!
+  const foldedIn = await pending.flush(messages)
+
+  expect(foldedIn).toBe(false)
+  expect(pending.settled).toBe(true)
+  expect(JSON.stringify(messages)).toBe(before)
 })
 
 test('maybeCompact leaves messages untouched if the summarizer fails', async () => {

@@ -28,7 +28,20 @@ export interface McpServerStatus {
 }
 
 let loadedOnce = false
+let loadPromise: Promise<McpLoadReport> | undefined
 let lastReport: McpLoadReport = emptyReport()
+
+/**
+ * How long any startup path waits for MCP servers to finish connecting before it
+ * proceeds. A healthy local stdio server handshakes in well under a second; a
+ * cold `npx -y some-mcp-server` can take 10-30s to resolve and download. Neither
+ * a one-shot `elia agent` nor the REPL should sit blocked for the slow case —
+ * stragglers keep connecting in the background and their tools register (and
+ * become usable on the next turn) whenever they're ready.
+ */
+function mcpSoftDeadlineMs(): number {
+  return Number.parseInt(process.env.ELIA_MCP_CONNECT_DEADLINE_MS ?? '', 10) || 2_500
+}
 const liveClients: McpTransport[] = []
 let shutdownRegistered = false
 
@@ -52,6 +65,20 @@ function makeClient(config: McpServerConfig): McpTransport {
  * command path) return the cached report instead of respawning every server.
  * Use `reloadMcpTools` to force a reconnect after editing the config.
  */
+/**
+ * Kicks off {@link loadMcpTools} without waiting for it, and hands back the
+ * single in-flight promise so a later caller can await the same connect pass
+ * instead of racing it (a second bare `loadMcpTools()` call while the first is
+ * still connecting would see `loadedOnce` already set and return the empty
+ * report). Call this at the very top of an interactive startup so MCP servers
+ * spawn and handshake *while* the intro plays and the user reads the prompt,
+ * rather than blocking the REPL for the sum of every server's startup time.
+ */
+export function beginMcpLoad(cwd = process.cwd()): Promise<McpLoadReport> {
+  if (!loadPromise) loadPromise = loadMcpTools(cwd)
+  return loadPromise
+}
+
 export async function loadMcpTools(cwd = process.cwd()): Promise<McpLoadReport> {
   if (loadedOnce) return lastReport
   loadedOnce = true
@@ -74,7 +101,19 @@ export async function loadMcpTools(cwd = process.cwd()): Promise<McpLoadReport> 
   }
 
   const enabled = servers.filter((server) => !server.disabled)
-  await Promise.all(enabled.map((server) => connectServer(server, report, statusByName.get(server.name)!)))
+  // connectServer mutates `report` and registers tools as each server finishes,
+  // whenever that is — so a straggler that lands after the deadline still becomes
+  // usable, it just isn't counted in the report handed back to the startup path.
+  const allConnected = Promise.all(enabled.map((server) => connectServer(server, report, statusByName.get(server.name)!)))
+  let deadlineTimer: ReturnType<typeof setTimeout> | undefined
+  const deadline = new Promise<void>((resolve) => {
+    deadlineTimer = setTimeout(resolve, mcpSoftDeadlineMs())
+  })
+  await Promise.race([allConnected, deadline])
+  if (deadlineTimer) clearTimeout(deadlineTimer)
+  // A straggler keeps connecting and registering its tools; just make sure a
+  // rejection from the abandoned wait can't surface as an unhandled rejection.
+  void allConnected.catch(() => {})
 
   if (liveClients.length > 0 && !shutdownRegistered) {
     shutdownRegistered = true
@@ -94,6 +133,7 @@ export async function reloadMcpTools(cwd = process.cwd()): Promise<McpLoadReport
   clearMcpTools()
   clearBrowserMcpToolsForTests()
   loadedOnce = false
+  loadPromise = undefined
   lastReport = emptyReport()
   return loadMcpTools(cwd)
 }
@@ -170,6 +210,7 @@ function flattenContent(content: { type: string; text?: string }[] | undefined):
 /** Test-only: resets the load-once guard so a fresh loadMcpTools() call reconnects. */
 export async function resetMcpLoadStateForTests(): Promise<void> {
   loadedOnce = false
+  loadPromise = undefined
   lastReport = emptyReport()
   // Wait for each subprocess to actually be reaped, not just signaled — otherwise
   // bun test's cross-file dangling-process sweep can race a still-tearing-down

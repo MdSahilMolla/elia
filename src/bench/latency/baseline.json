@@ -1,0 +1,70 @@
+{
+  "generatedAt": "2026-09-02T17:38:35.275Z",
+  "coldStartMsMedian": 559,
+  "modelPacing": {
+    "ttftMs": 0,
+    "tokenMs": 0
+  },
+  "scenarios": [
+    {
+      "id": "pure-text",
+      "description": "One turn, streamed text, no tools — the floor cost of a turn.",
+      "runs": 7,
+      "wallMsMedian": 0.1,
+      "wallMsMin": 0.1,
+      "firstTokenMsMedian": 0,
+      "roundTrips": 1,
+      "toolCalls": 0,
+      "cachedToolCalls": 0,
+      "speculativeHits": 0,
+      "speculativeMisses": 0,
+      "structuralOk": true,
+      "notes": []
+    },
+    {
+      "id": "parallel-reads",
+      "description": "Six independent reads in one turn — tests batch concurrency and mid-stream speculative dispatch.",
+      "runs": 7,
+      "wallMsMedian": 9.2,
+      "wallMsMin": 7.7,
+      "firstTokenMsMedian": 0.1,
+      "roundTrips": 2,
+      "toolCalls": 6,
+      "cachedToolCalls": 6,
+      "speculativeHits": 6,
+      "speculativeMisses": 0,
+      "structuralOk": true,
+      "notes": []
+    },
+    {
+      "id": "read-then-edit",
+      "description": "Two reads, then an edit — mid-stream dispatch on the reads, repo-lock on the write.",
+      "runs": 7,
+      "wallMsMedian": 10.5,
+      "wallMsMin": 8.2,
+      "firstTokenMsMedian": 0.1,
+      "roundTrips": 3,
+      "toolCalls": 3,
+      "cachedToolCalls": 2,
+      "speculativeHits": 2,
+      "speculativeMisses": 0,
+      "structuralOk": true,
+      "notes": []
+    },
+    {
+      "id": "grep-chain",
+      "description": "grep, then open a hit — tests the prefetcher following grep output into reads.",
+      "runs": 7,
+      "wallMsMedian": 21,
+      "wallMsMin": 20.6,
+      "firstTokenMsMedian": 0.1,
+      "roundTrips": 3,
+      "toolCalls": 2,
+      "cachedToolCalls": 2,
+      "speculativeHits": 2,
+      "speculativeMisses": 0,
+      "structuralOk": true,
+      "notes": []
+    }
+  ]
+}

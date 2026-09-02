@@ -1,5 +1,6 @@
 import { autoFallbacksFor, config } from './config.ts'
-import { maybeCompact } from './compaction.ts'
+import { beginCompaction, type PendingCompaction } from './compaction.ts'
+import { createRedundantReadTracker, isLoneBatchableRead, serialReadNudge } from './autonomy/toolBatchingNudge.ts'
 import type { ChatMessage, ContentBlock, Provider, ProviderActivity, Usage } from './providers/types.ts'
 import type { Tool } from './tools/types.ts'
 import { endTextTurn, writeNotice, writeToolCall, writeToolResult } from './ui/stream.ts'
@@ -178,6 +179,11 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
 
   let totalUsage = ZERO_USAGE
   let steps = 0
+  let pendingCompaction: PendingCompaction | undefined
+  // Consecutive turns where the model made exactly one batchable read — see
+  // toolBatchingNudge.ts. Reset whenever it batches or stops reading.
+  let loneReadStreak = 0
+  const redundantReads = createRedundantReadTracker()
 
   const finish = (stopReason: StopReason): RunAgentLoopResult => ({
     usage: totalUsage,
@@ -185,6 +191,19 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
     stopReason,
     cacheStats: cache?.stats(),
   })
+
+  // The history-shrinking archive is a model call of its own. Rather than stall
+  // the first step of a turn on it (every turn, in a long `--continue` session),
+  // await it here at the end — the response has already streamed, so this is off
+  // the latency path — and only if a background step boundary didn't fold it in
+  // first.
+  const finishAndFlush = async (stopReason: StopReason): Promise<RunAgentLoopResult> => {
+    if (pendingCompaction) {
+      await pendingCompaction.flush(messages)
+      pendingCompaction = undefined
+    }
+    return finish(stopReason)
+  }
 
   while (true) {
     if (signal?.aborted) return finish('aborted')
@@ -194,12 +213,19 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
     injectSteering()
 
     // A growing history costs more to attend to every turn even with prompt
-    // caching (which makes it cheap to *re-send*, not smaller), and is
-    // eventually finite regardless of provider. Cheap no-op check below the
-    // threshold; only pays for a summary call once it's actually crossed.
-    if (await maybeCompact(messages)) {
-      if (verbose) writeNotice('elia: conversation history compacted to keep things fast')
+    // caching (which makes it cheap to *re-send*, not smaller), and is eventually
+    // finite regardless of provider. Cheap no-op check below the threshold; over
+    // it, the archive runs in the background (beginCompaction) and its summary is
+    // folded in at whichever later step boundary it's ready by.
+    if (pendingCompaction) {
+      if (pendingCompaction.apply(messages)) {
+        if (verbose) writeNotice('elia: earlier history compacted in the background')
+        pendingCompaction = undefined
+      } else if (pendingCompaction.settled) {
+        pendingCompaction = undefined // archive failed or produced nothing — drop it
+      }
     }
+    pendingCompaction ??= beginCompaction(messages)
 
     if (steps >= maxSteps) {
       messages.push({
@@ -221,7 +247,7 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
         if (signal?.aborted) return finish('aborted')
         throw error
       }
-      return finish('step-budget')
+      return finishAndFlush('step-budget')
     }
 
     steps += 1
@@ -242,7 +268,7 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
       // The model is ready to stop — but if the operator sent steering during
       // this last response, don't end the turn: fold it in and keep going.
       if (injectSteering()) continue
-      return finish('complete')
+      return finishAndFlush('complete')
     }
 
     if (verbose) {
@@ -418,6 +444,20 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
 
     messages.push({ role: 'user', content: toolResults })
 
+    // Watch for a model reading one file per turn and, once it's a clear habit,
+    // remind it to batch — the biggest single win on round-trip count. Consecutive
+    // user messages are merged by every provider, so a standalone note here is safe.
+    loneReadStreak = isLoneBatchableRead(toolUseBlocks.map((block) => block.name)) ? loneReadStreak + 1 : 0
+    const redundantReadNudge = redundantReads.observe(
+      toolUseBlocks.map((block) => ({ name: block.name, path: typeof block.input.path === 'string' ? block.input.path : undefined })),
+    )
+    const nudge = redundantReadNudge ?? serialReadNudge(loneReadStreak)
+    if (nudge) {
+      messages.push({ role: 'user', content: [{ type: 'text', text: nudge }] })
+      loneReadStreak = 0
+      if (verbose) writeNotice(redundantReadNudge ? 'elia: told the model to stop re-reading files' : 'elia: reminded the model to batch its reads')
+    }
+
     // Kick off predicted reads *before* looping back, so they run in parallel with
     // the model generating its next message rather than after it.
     prefetcher?.observe(observed)
@@ -555,6 +595,23 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
               stopAnimation()
               onThinking?.(delta)
             },
+            // The model has actually emitted a complete tool_use block and the
+            // turn is still streaming. If it is a read-only tool, run it now into
+            // the speculative cache so the real dispatch a moment later takes a
+            // finished result instead of waiting on a disk round-trip. Only
+            // SPECULABLE_TOOLS (read_file/list_files/grep) ever run — canSpeculate
+            // and cache.speculate both gate on that — and any batch that turns
+            // out to mutate discards the cache before dispatch, so the worst case
+            // of a mid-stream guess is one wasted read.
+            onToolBlock: cache
+              ? (block) => {
+                  if (block.type !== 'tool_use' || signal?.aborted) return
+                  if (!cache.canSpeculate(block.name)) return
+                  const tool = toolsByName[block.name]
+                  if (!tool) return
+                  cache.speculate(block.name, block.input, () => tool.execute(block.input))
+                }
+              : undefined,
             onActivity: onActivity ? (activity) => {
               // Provider activity can include commands and file edits. Once it
               // is visible or actionable, retrying another route could repeat

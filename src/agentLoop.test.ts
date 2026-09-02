@@ -110,6 +110,58 @@ test('runAgentLoop sums usage across multiple tool-call round trips, not just th
   expect(call).toBe(2)
 })
 
+test('a read-only tool_use block streamed mid-turn is executed speculatively and the real dispatch takes the cached result', async () => {
+  const { createToolResultCache } = await import('./speculation/cache.ts')
+  const originalProvider = config.provider
+  let execCount = 0
+  const readTool: Tool = {
+    name: 'read_file',
+    description: 'read a file',
+    input_schema: { type: 'object', properties: { path: { type: 'string' } } },
+    async execute(input) {
+      execCount += 1
+      return `contents of ${(input as { path: string }).path}`
+    },
+  }
+
+  let call = 0
+  config.provider = {
+    async streamTurn(params) {
+      call += 1
+      if (call === 1) {
+        const block = { type: 'tool_use' as const, id: 'r1', name: 'read_file', input: { path: 'x.ts' } }
+        // Model emits the block mid-stream; the rest of the turn is still going.
+        params.onToolBlock?.(block)
+        // Let the speculative read settle before the turn "finishes".
+        await new Promise((resolve) => setTimeout(resolve, 25))
+        return { content: [block] as ContentBlock[], usage: { inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 } }
+      }
+      return { content: [{ type: 'text', text: 'done' }] as ContentBlock[], usage: { inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 } }
+    },
+  }
+
+  const cache = createToolResultCache()
+  const events: { name: string; cached: boolean; result: string }[] = []
+  try {
+    await runAgentLoop({
+      messages: [{ role: 'user', content: [{ type: 'text', text: 'go' }] }],
+      systemPrompt: 'test',
+      tools: [readTool],
+      cache,
+      useAnimation: false,
+      verbose: false,
+      onTool: (event) => events.push({ name: event.name, cached: event.cached, result: event.result }),
+    })
+  } finally {
+    config.provider = originalProvider
+  }
+
+  expect(execCount).toBe(1) // run once speculatively, not again on dispatch
+  expect(events).toHaveLength(1)
+  expect(events[0]).toMatchObject({ name: 'read_file', cached: true, result: 'contents of x.ts' })
+  expect(cache.stats().hits).toBe(1)
+})
+
 test('systemDynamicPrompt is forwarded to the provider separately from the stable system prompt', async () => {
   const originalProvider = config.provider
   const seen: { system: string; systemDynamic?: string }[] = []

@@ -326,7 +326,7 @@ Elia is a real MCP client: any server's tools become available to the dev-mode a
 }
 ```
 
-Servers are spawned over stdio and connected once at startup; a server that fails to start or handshake is logged and skipped rather than blocking the rest. Each tool is registered as `mcp_<server>_<tool>` and, like any tool with no built-in safety contract, requires explicit approval before it runs — Elia has no way to know an arbitrary third-party server's tool is safe ahead of time, so it doesn't guess.
+Servers are spawned over stdio and connected once at startup; a server that fails to start or handshake is logged and skipped rather than blocking the rest. In the interactive terminal the connect pass is kicked off first and runs *while* the intro plays and you read the prompt, so spawning a slow server's child process and handshake no longer holds up the REPL — its tools attach as soon as they're ready and are available from the next turn. Each tool is registered as `mcp_<server>_<tool>` and, like any tool with no built-in safety contract, requires explicit approval before it runs — Elia has no way to know an arbitrary third-party server's tool is safe ahead of time, so it doesn't guess.
 
 #### Adding servers and connectors from the terminal
 
@@ -586,6 +586,24 @@ And what keeps it honest:
 
 `elia evolve` makes real API calls and, on success, modifies elia's own source. Use `--dry-run` to see what it would do first.
 
+### `elia bench-latency` — the overhead the model doesn't explain
+
+`elia bench` needs a real model and measures whether elia is *correct*. `elia bench-latency` needs neither an API key nor a network, and measures whether elia is *fast* — specifically, how much wall-clock elia's own machinery adds on top of whatever the model costs.
+
+```bash
+elia bench-latency                     # compare against the committed baseline
+elia bench-latency --realistic         # add simulated 400ms TTFT + 8ms/token model pacing
+elia bench-latency --live              # run the scenarios against the real configured model (real API calls)
+elia bench-latency --update-baseline   # record the current numbers as the new baseline
+elia bench-latency --strict            # fail (not just warn) on a wall-clock regression — same-machine only
+```
+
+`--live` reports real round-trips, output tokens, tokens/sec, and wall-clock per scenario for whatever provider is configured — useful for seeing how a given model actually behaves (does it batch its reads, or walk the directory one turn at a time?).
+
+A deterministic scripted provider replays the assistant turns a competent model *would* make on each scenario (`src/bench/latency/scenarios.ts`), so the only thing that moves between runs is elia. The scenarios target the paths whose cost elia owns: streaming a bare turn, running six independent reads in one batch, a read→edit cycle, and a grep followed by opening its hit. For each it records round-trips, how many tool reads were served from the speculative cache instead of blocking, time-to-first-token, and median wall-clock — plus a separate cold-start measurement (a bare `elia` process loading its module graph and exiting).
+
+The structural metrics — round-trips and speculative hits — are fully deterministic, so **`bun test` gates on them**: a change that adds a model round-trip or makes a previously pre-run read block fails CI. Wall-clock has run-to-run noise even with a scripted model, so it only warns unless `--strict`, and the committed baseline's absolute millisecond numbers are machine-specific.
+
 ## Learned tools: `elia skills`
 
 ```bash
@@ -600,7 +618,7 @@ A synthesized skill is only kept if it survives the same gate a human contributi
 
 ## How it works
 
-- **`src/agentLoop.ts`** — the shared core loop: send messages to the active provider, stream text, execute tool calls (in parallel, up to 4 at a time), feed results back, repeat. Takes an optional provider (for tier routing), a step budget, a tool-event hook, and a speculative cache. Used by the top-level agent, sub-agents, the planner, and the evolution engine.
+- **`src/agentLoop.ts`** — the shared core loop: send messages to the active provider, stream text, execute tool calls (in parallel — 8 read-only, 4 if any mutate), feed results back, repeat. Runs read-only tools speculatively the moment their block finishes streaming, and folds a background compaction's summary in at a step boundary. Takes an optional provider (for tier routing), a step budget, a tool-event hook, and a speculative cache. Used by the top-level agent, sub-agents, the planner, and the evolution engine.
 - **`src/agent.ts`** — the top-level agent: full tool set (including `task` and `preview`), live streaming, thinking animation, prefetch, and usage accounting.
 - **`src/subagent.ts`** + **`src/autonomy/roles.ts`** + **`src/tools/task.ts`** — role-typed sub-agents. The role resolves to a model tier, a tool allowlist, a step budget, and a specialised prompt. Sub-agents can't spawn sub-agents (no role's allowlist contains `task`), which caps recursion at one level.
 - **`src/autonomy/loop.ts`** — the orient → propose → execute → verify → reflect → learn cycle, with durable graph resumption across process boundaries.
@@ -617,10 +635,11 @@ A synthesized skill is only kept if it survives the same gate a human contributi
 - **`src/autonomy/verify.ts`** — fail-fast verification runner and the critic's `submit_verdict` tool. The verdict is structured because it drives control flow; "did the model mean yes" is not something to infer from prose.
 - **`src/autonomy/journal.ts`** + **`src/autonomy/rewind.ts`** — the append-only run log and phase checkpoints that make forking possible.
 - **`src/autonomy/lessons.ts`** — durable, deduplicated, cross-run lessons in `.elia/lessons.md`.
-- **`src/speculation/`** — predictive prefetch. `prefetch.ts` follows the edges agents actually read along (grep hits → open them; a module → open its imports) and `cache.ts` holds the results. Any mutating tool call invalidates the cache, and a batch mixing reads and writes bypasses it entirely, so the model can never be handed a pre-write snapshot. Prefetched results show a `⚡` in the tool log.
+- **`src/speculation/`** — predictive prefetch. `prefetch.ts` follows the edges agents actually read along (grep hits → open them; a module → open its imports) and `cache.ts` holds the results. On top of that, a read-only `tool_use` block is run the moment the model finishes *streaming* it (`streamTurn`'s `onToolBlock`, wired through both provider adapters) — so by the time the turn ends and the real dispatch runs, the disk round-trip is already done. Any mutating tool call invalidates the cache, and a batch mixing reads and writes bypasses it entirely, so the model can never be handed a pre-write snapshot; the worst case of a mid-stream guess is one wasted read. Speculative results show a `⚡` in the tool log.
 - **`src/evolve/`** — `suite.ts` (the fitness function), `benchTask.ts` (one task, one child process, cwd already set), `fitness.ts` (scoring and the promotion rules), `sandbox.ts` (isolated copies, the immutable-file guard, transactional promote/rollback), `candidateTools.ts` (sandbox-confined mutation tools), `ledger.ts` (the generation record), `engine.ts` (the loop).
+- **`src/bench/latency/`** — the model-free latency benchmark. `scriptedProvider.ts` (a deterministic provider with simulated pacing), `scenarios.ts` (the corpus + its structural invariants), `harness.ts` (runs each scenario through the real loop, medians the runs, measures cold start), `report.ts` (render + baseline comparison), `baseline.json` (committed numbers). `bun test` gates on the structural metrics; `elia bench-latency` is the local tool for wall-clock work.
 - **`src/skills/`** — `detector.ts` (free repetition counting), `synthesize.ts` (write + gate a new tool), `loader.ts` (hot-load and quarantine).
-- **`src/providers/`** — a small provider abstraction with two adapters: `anthropic.ts` (native Messages API; `buildAnthropicRequest` lays out the four cache breakpoints — stable system + tools on the 1-hour TTL, dynamic system suffix + history tail on the 5-minute default) and `openaiCompatible.ts` (Groq, OpenAI, OpenRouter, Google Gemini, NVIDIA NIM, Mercury, and anything else via `baseURL`). `registry.ts` resolves env vars into a concrete provider; `tryResolveProvider` returns an error instead of exiting so the optional fast tier can degrade silently.
+- **`src/providers/`** — a small provider abstraction with two adapters: `anthropic.ts` (native Messages API; `buildAnthropicRequest` lays out the four cache breakpoints — stable system + tools on the 1-hour TTL, dynamic system suffix + history tail on the 5-minute default) and `openaiCompatible.ts` (Groq, OpenAI, OpenRouter, Google Gemini, NVIDIA NIM, Mercury, and anything else via `baseURL`). `registry.ts` resolves env vars into a concrete provider; `tryResolveProvider` returns an error instead of exiting so the optional fast tier can degrade silently. `prewarm.ts` opens a pooled connection to every configured model host (deep tier, a distinct fast tier, role overrides) at startup and after a `/model` or `/thinking` switch — one unauthenticated `HEAD`, result ignored, deduped per origin — so the first request on each skips DNS, the TLS handshake, and HTTP/2 setup on the path you're waiting on.
 - **`src/tools/`** — `read_file`, `write_file`, `edit_file`, `list_files`, `grep`, `run_command`, `browser`, `board_post`, `board_read`, `task`, `preview`, plus any synthesized skills.
 - **`src/shell.ts`** — one shell implementation shared by the `run_command` tool, verification, and the evolution gate, so all three behave identically.
 - **`src/memory.ts`** — loads `ELIA.md` (project, in the cwd) and `~/.elia/ELIA.md` (user, global) into the system prompt at startup.
@@ -651,13 +670,18 @@ Still on the roadmap: provenance-aware memory with expiry/conflict handling, use
 
 ### On speed
 
-Five things, roughly in order of impact:
+Roughly in order of impact:
 
 1. **Prompt caching** (Anthropic): the system prompt, tool definitions, and the tail of history are cache breakpoints, so the unchanged prefix of a growing tool-calling loop is reused rather than reprocessed. Two refinements keep the cache actually holding: the stable prefix (system prompt + tools, fixed for the whole session) is pinned to the **1-hour** cache TTL so a slow `bun test` or a long pause between messages can't evict it, and the per-turn query-ranked project memory is sent as a **separate system block** so it never invalidates that stable prefix when it changes from one user message to the next. Run with `--profile-turns` (or `ELIA_PROFILE=1`) to print a per-call table of the cache-read/write split and time-to-first-token and see how well the cache is holding.
 2. **Parallel sub-agents in dependency waves** — the widest safe wave at each point, rather than everything at once (which corrupts files two workers both edit) or everything in order (which wastes the fleet).
 3. **The fast tier** — recon and summarising go to a cheap quick model; only decisions pay for the strong one.
-4. **Parallel tool execution** — up to 4 tool calls in flight per turn.
-5. **Predictive prefetch** — the reads the model is about to make happen *while it's still generating*, so the tool phase often costs ~0ms instead of a disk round-trip per file.
+4. **Parallel tool execution** — up to 8 read-only tool calls in flight per turn, 4 when any of them mutates.
+5. **Predictive prefetch and mid-stream dispatch** — a read-only tool call is run *while the model is still generating*: predicted reads the moment a grep or import points at them, and any read-only `tool_use` block the instant it finishes streaming. The tool phase often costs ~0ms instead of a disk round-trip per file.
+6. **Connection prewarm** — every configured model host gets a pooled connection opened at startup, so the first request skips DNS + TLS + HTTP/2 setup.
+7. **Non-blocking startup and compaction** — MCP servers connect in the background instead of gating the prompt; a slow one (a cold `npx` server) is left connecting past a ~2.5s soft deadline (`ELIA_MCP_CONNECT_DEADLINE_MS`) rather than blocking a one-shot run for its full connect timeout; the history-shrinking archive (itself a model call) overlaps the turn that triggers it instead of stalling that turn's first token.
+8. **Round-trip discipline** — `parallel_tool_calls` is requested explicitly, and the loop watches for a model reading files one per turn (or re-reading a file it already has) and injects one plain reminder to batch. Fewer model round-trips is the single biggest lever on wall-clock, especially with a fast-token / weaker-agent model.
+
+`elia bench-latency` measures items 4–7 directly, with a scripted model so the numbers are all elia, and gates CI on the ones that are deterministic.
 
 `max_tokens` for Anthropic is 32,000 (Sonnet 5 supports up to 128k). Billing is by tokens actually generated, not the ceiling, so this only removes the risk of truncated output on large refactors, with no cost downside.
 

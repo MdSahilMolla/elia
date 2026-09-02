@@ -63,14 +63,15 @@ export function createToolResultCache(): ToolResultCache {
       const k = key(name, input)
       if (entries.has(k)) return
       stats.speculated += 1
-      // A speculative miss is not an error — swallow it so an unhandled rejection
-      // can't take the process down, and let the real call surface the failure.
-      entries.set(
-        k,
-        run().catch((err: unknown) => {
-          throw err instanceof Error ? err : new Error(String(err))
-        }),
-      )
+      const pending = run().catch((err: unknown) => {
+        throw err instanceof Error ? err : new Error(String(err))
+      })
+      // A speculation that rejects but is never `take`n — the model didn't end
+      // up asking for it, or the batch mutated and the cache was dropped — must
+      // not surface as an unhandledRejection. This detached handler settles that
+      // case; a real `take()` consumer still awaits `pending` and sees the throw.
+      void pending.catch(() => {})
+      entries.set(k, pending)
     },
 
     take(name, input) {

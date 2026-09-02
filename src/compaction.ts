@@ -58,37 +58,100 @@ export function findSafeCutIndex(messages: ChatMessage[], beforeIndex: number): 
   return undefined
 }
 
-/**
- * Compacts `messages` in place if they've grown past the threshold, folding a
- * summary of everything before a safe cut point into that cut point's own
- * message rather than inserting a new standalone one — Anthropic-family APIs
- * expect strict user/assistant alternation, and a synthetic user message
- * sitting next to a real one would violate that. Returns whether it fired.
- */
-export async function maybeCompact(messages: ChatMessage[]): Promise<boolean> {
-  if (messages.length <= KEEP_RECENT_MESSAGES) return false
-  if (estimateTokens(messages) < COMPACTION_TOKEN_THRESHOLD) return false
-
-  const cutIndex = findSafeCutIndex(messages, messages.length - KEEP_RECENT_MESSAGES)
-  if (cutIndex === undefined || cutIndex === 0) return false
-
-  const toArchive = messages.slice(0, cutIndex)
-  // archiveEpisode both returns the prose fold-in below AND, when a session is
-  // active (see ledger.ts), persists the full structured episode to disk — so
-  // what leaves the live window here is never actually gone, just no longer
-  // taking up prompt space. That's the difference between this and a plain
-  // shrink-and-forget compactor.
-  const summary = await archiveEpisode(toArchive)
-  if (!summary) return false
-
-  const boundary = messages[cutIndex]!
+function foldSummaryIn(messages: ChatMessage[], cutIndex: number, archivedCount: number, summary: string): boolean {
+  const boundary = messages[cutIndex]
+  if (!boundary) return false
+  // Fold the summary into the cut point's own message rather than inserting a
+  // new standalone one — Anthropic-family APIs expect strict user/assistant
+  // alternation, and a synthetic user message next to a real one would violate it.
   const summaryBlock: ContentBlock = {
     type: 'text',
-    text: `## Summary of earlier conversation (auto-compacted, ${toArchive.length} messages)\n${summary}`,
+    text: `## Summary of earlier conversation (auto-compacted, ${archivedCount} messages)\n${summary}`,
   }
-
   messages.splice(0, cutIndex + 1, { role: 'user', content: [summaryBlock, ...boundary.content] })
   return true
+}
+
+/**
+ * Compacts `messages` in place if they've grown past the threshold. Blocks on
+ * the archive model call — kept for callers that want the whole thing done
+ * before they continue; the agent loop uses {@link beginCompaction} instead so
+ * the archive doesn't stall a turn.
+ */
+export async function maybeCompact(messages: ChatMessage[]): Promise<boolean> {
+  const pending = beginCompaction(messages)
+  if (!pending) return false
+  return pending.flush(messages)
+}
+
+export interface PendingCompaction {
+  /** True once the background archive has finished — successfully or not. */
+  readonly settled: boolean
+  /**
+   * If the archive is done and produced a summary, fold it into `messages` and
+   * return true. Still running, or failed/empty: return false. Idempotent.
+   */
+  apply(messages: ChatMessage[]): boolean
+  /** Await the archive, then apply it. For end-of-turn, off the latency path. */
+  flush(messages: ChatMessage[]): Promise<boolean>
+}
+
+/**
+ * Starts compaction in the background when the history is over threshold, and
+ * hands back a handle to fold the summary in once it is ready. The archive is a
+ * full (fast-tier) model call; running it inline stalled the first step of every
+ * turn in a long `--continue` session. Prompt caching already makes re-sending
+ * the un-compacted history cheap for one more turn, so the fix is to overlap the
+ * archive with that turn instead of blocking on it.
+ *
+ * `cutIndex` stays valid for the life of the handle: the loop only ever appends
+ * past it, never rewrites the stable prefix the archive covers.
+ */
+export function beginCompaction(messages: ChatMessage[]): PendingCompaction | undefined {
+  if (messages.length <= KEEP_RECENT_MESSAGES) return undefined
+  if (estimateTokens(messages) < COMPACTION_TOKEN_THRESHOLD) return undefined
+
+  const cutIndex = findSafeCutIndex(messages, messages.length - KEEP_RECENT_MESSAGES)
+  if (cutIndex === undefined || cutIndex === 0) return undefined
+
+  const toArchive = messages.slice(0, cutIndex)
+  const archivedCount = toArchive.length
+
+  // archiveEpisode both returns the prose fold-in AND, when a session is active
+  // (see ledger.ts), persists the full structured episode to disk — so what
+  // leaves the live window is never actually gone, just no longer taking up
+  // prompt space. That's the difference between this and a shrink-and-forget
+  // compactor.
+  let settledSummary: string | undefined
+  let settled = false
+  let applied = false
+  const promise = archiveEpisode(toArchive)
+    .then((summary) => {
+      settledSummary = summary ?? undefined
+    })
+    .catch(() => {
+      settledSummary = undefined
+    })
+    .finally(() => {
+      settled = true
+    })
+
+  const apply = (msgs: ChatMessage[]): boolean => {
+    if (applied || !settled || !settledSummary) return false
+    applied = foldSummaryIn(msgs, cutIndex, archivedCount, settledSummary)
+    return applied
+  }
+
+  return {
+    get settled() {
+      return settled
+    },
+    apply,
+    async flush(msgs) {
+      await promise
+      return apply(msgs)
+    },
+  }
 }
 
 /**

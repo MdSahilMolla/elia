@@ -2,7 +2,7 @@ import { expect, test, afterEach } from 'bun:test'
 import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { loadMcpTools, mcpStatusReport, reloadMcpTools, resetMcpLoadStateForTests } from './registry.ts'
+import { beginMcpLoad, loadMcpTools, mcpStatusReport, reloadMcpTools, resetMcpLoadStateForTests } from './registry.ts'
 import { findTool, getMcpTools } from '../tools/registry.ts'
 
 const FIXTURE = join(import.meta.dir, 'fixtures', 'echoServer.ts')
@@ -93,6 +93,28 @@ test('loadMcpTools is idempotent within a process — a second call reuses the c
   expect(second).toBe(first)
 })
 
+test('beginMcpLoad hands every caller the same in-flight connect pass, not an empty report', async () => {
+  const cwd = projectWithServer()
+  // Two callers race for the load before it has resolved (the interactive
+  // startup kickoff, then loadRuntimeSkills awaiting it) — both must get the
+  // real connected report, never the pre-connect empty one.
+  const [a, b] = await Promise.all([beginMcpLoad(cwd), beginMcpLoad(cwd)])
+  expect(a).toBe(b)
+  expect(a.servers).toEqual(['echo'])
+})
+
+test('reloadMcpTools resets beginMcpLoad so it reflects the new config', async () => {
+  const cwd = mkdtempSync(join(tmpdir(), 'elia-mcp-registry-'))
+  mkdirSync(join(cwd, '.elia'), { recursive: true })
+  const configPath = join(cwd, '.elia', 'mcp.json')
+  writeFileSync(configPath, JSON.stringify({ mcpServers: {} }), 'utf8')
+  expect((await beginMcpLoad(cwd)).servers).toEqual([])
+
+  writeFileSync(configPath, JSON.stringify({ mcpServers: { echo: { command: process.execPath, args: [FIXTURE] } } }), 'utf8')
+  await reloadMcpTools(cwd)
+  expect((await beginMcpLoad(cwd)).servers).toEqual(['echo'])
+})
+
 test('report.status describes every configured server, connected or disabled', async () => {
   const cwd = mkdtempSync(join(tmpdir(), 'elia-mcp-registry-'))
   mkdirSync(join(cwd, '.elia'), { recursive: true })
@@ -113,6 +135,36 @@ test('report.status describes every configured server, connected or disabled', a
   expect(byName.off!.disabled).toBe(true)
   expect(byName.off!.connected).toBe(false)
   expect(mcpStatusReport()).toBe(report)
+})
+
+test('a hung server does not block loadMcpTools past the soft deadline; healthy servers still register', async () => {
+  const cwd = mkdtempSync(join(tmpdir(), 'elia-mcp-registry-'))
+  mkdirSync(join(cwd, '.elia'), { recursive: true })
+  const slow = join(import.meta.dir, 'fixtures', 'slowServer.ts')
+  writeFileSync(
+    join(cwd, '.elia', 'mcp.json'),
+    JSON.stringify({
+      mcpServers: {
+        echo: { command: process.execPath, args: [FIXTURE] },
+        hung: { command: process.execPath, args: [slow] },
+      },
+    }),
+    'utf8',
+  )
+
+  const startedAt = Date.now()
+  process.env.ELIA_MCP_CONNECT_DEADLINE_MS = '800'
+  try {
+    const report = await loadMcpTools(cwd)
+    const elapsed = Date.now() - startedAt
+    // Returned well before the 30s connect timeout the hung server would hit.
+    expect(elapsed).toBeLessThan(5000)
+    // The healthy server still connected and registered its tools.
+    expect(report.servers).toContain('echo')
+    expect(findTool('mcp_echo_echo')).toBeDefined()
+  } finally {
+    delete process.env.ELIA_MCP_CONNECT_DEADLINE_MS
+  }
 })
 
 test('reloadMcpTools picks up a newly added server without a process restart', async () => {

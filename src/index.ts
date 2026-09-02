@@ -77,7 +77,7 @@ function requestedAgentMode(): AgentMode {
   return hasFlag('--cyber') ? 'cyber' : hasFlag('--sports') ? 'sports' : hasFlag('--fitness') ? 'fitness' : hasFlag('--battmann') ? 'battmann' : 'dev'
 }
 
-const SUBCOMMANDS = ['auto', 'agent', 'evolve', 'bench', 'skills', 'runs', 'fork', 'resume', 'schedule', 'daemon', 'config', 'codex-login', 'control', 'bridge'] as const
+const SUBCOMMANDS = ['auto', 'agent', 'evolve', 'bench', 'bench-latency', 'skills', 'runs', 'fork', 'resume', 'schedule', 'daemon', 'config', 'codex-login', 'control', 'bridge'] as const
 type Subcommand = (typeof SUBCOMMANDS)[number]
 
 function printHelp(): void {
@@ -131,6 +131,8 @@ Office workflows:
 
 Self-improvement:
   elia bench                  Score the current elia against its own benchmark suite
+  elia bench-latency          Measure elia's own loop/startup/speculation overhead (deterministic,
+                              no API key); --update-baseline to record, --strict to fail on wall drift
   elia evolve                 Improve elia's own source: hypothesise one change, build it
                               in a sandbox, and promote it only if the benchmark agrees
   elia evolve -n 3            Run three generations, each building on the last
@@ -343,21 +345,39 @@ function actionApprovalPrompt(assessment: ActionAssessment, request: ActionReque
   return `\n${redactText(assessment.reason, 500)}\nRisk: ${assessment.risk} · reversible: ${assessment.reversible ? 'yes' : 'no'}\nAbout to run ${request.name}: ${intent}\nApprove this exact action? [y]es / [n]o: `
 }
 
-async function loadRuntimeSkills(): Promise<void> {
+/**
+ * @param deferMcp  When true, return as soon as local skills are loaded and let
+ *   the MCP connect pass finish in the background — its "N MCP tools" / failure
+ *   notices are emitted whenever it settles (routed into the live transcript if
+ *   the Ink frame is already up). Used by the interactive REPL so a slow stdio
+ *   server can't hold up the prompt. Every non-interactive path leaves it false
+ *   and still awaits MCP fully, so a one-shot run has its full toolset on turn 1.
+ */
+async function loadRuntimeSkills({ deferMcp = false }: { deferMcp?: boolean } = {}): Promise<void> {
   const { loadSkills } = await import('./skills/loader.ts')
   const skills = await loadSkills()
   if (skills.loaded.length > 0 && subcommand !== 'skills') {
     writeUsageLine(`${skills.loaded.length} learned tool(s): ${skills.loaded.map((skill) => skill.name).join(', ')}`)
   }
 
-  const { loadMcpTools } = await import('./mcp/registry.ts')
-  const mcp = await loadMcpTools()
-  if (mcp.loaded.length > 0 && subcommand !== 'skills') {
-    // One line, not a wall of tool names — the full list is a `/mcp` away.
-    writeUsageLine(`${mcp.loaded.length} MCP tool(s) from ${mcp.servers.join(', ')} · /mcp`)
+  const { beginMcpLoad } = await import('./mcp/registry.ts')
+  // beginMcpLoad is idempotent and memoised: if interactive startup already
+  // kicked the connect pass off (so it could run during the intro), this awaits
+  // that same pass; otherwise it starts and awaits it now.
+  const announce = (mcp: Awaited<ReturnType<typeof beginMcpLoad>>): void => {
+    if (mcp.loaded.length > 0 && subcommand !== 'skills') {
+      // One line, not a wall of tool names — the full list is a `/mcp` away.
+      writeUsageLine(`${mcp.loaded.length} MCP tool(s) from ${mcp.servers.join(', ')} · /mcp`)
+    }
+    for (const failure of mcp.failed) writeNotice(`MCP server "${failure.server}" unavailable: ${failure.reason}`)
+    for (const error of mcp.configErrors) writeNotice(`MCP config: ${error}`)
   }
-  for (const failure of mcp.failed) writeNotice(`MCP server "${failure.server}" unavailable: ${failure.reason}`)
-  for (const error of mcp.configErrors) writeNotice(`MCP config: ${error}`)
+
+  if (deferMcp) {
+    void beginMcpLoad().then(announce).catch(() => {})
+    return
+  }
+  announce(await beginMcpLoad())
 }
 
 async function runAgentCommand(): Promise<void> {
@@ -507,6 +527,74 @@ async function runBench(): Promise<void> {
   if (machineReadable) emitEvent('benchmark_scorecard', { stage: 'current', scorecard: card })
   else process.stdout.write(renderScorecard(card, 'elia'))
   if (card.passRate < 1) process.exitCode = 1
+}
+
+async function runBenchLatency(): Promise<void> {
+  // A bare `elia bench-latency --startup-probe` exists only so the harness can
+  // time process load + exit from the outside; do nothing and return.
+  if (hasFlag('--startup-probe') || process.env.ELIA_STARTUP_PROBE === '1') return
+
+  const { runLatencyHarness } = await import('./bench/latency/harness.ts')
+  const { renderLatencyReport, compareLatency } = await import('./bench/latency/report.ts')
+  const { readFileSync, writeFileSync, existsSync } = await import('node:fs')
+  const { join } = await import('node:path')
+  const { ELIA_ROOT } = await import('./config.ts')
+
+  const baselinePath = join(ELIA_ROOT, 'src', 'bench', 'latency', 'baseline.json')
+  const update = hasFlag('--update-baseline')
+  const strict = hasFlag('--strict')
+  const realistic = hasFlag('--realistic')
+  const live = hasFlag('--live')
+  const runs = strictInteger(flagValue('--runs') ?? (live ? '1' : '3')) ?? (live ? 1 : 3)
+  const only = flagValue('--only')?.split(',').map((id) => id.trim()).filter(Boolean)
+  const skipColdStart = hasFlag('--skip-cold-start')
+
+  if (live && !(await ensureFirstRunProviderSetup())) return
+
+  writeNotice(
+    live
+      ? "Running the latency scenarios against the real configured model — this makes real API calls."
+      : `Measuring elia's own loop, startup, and speculation overhead — deterministic scripted model${realistic ? ' with realistic pacing' : ''}, no API key needed.`,
+  )
+  const report = await runLatencyHarness({
+    runsPerScenario: runs,
+    only,
+    live,
+    skipColdStart: skipColdStart || live,
+    pacing: realistic ? { ttftMs: 400, tokenMs: 8 } : { ttftMs: 0, tokenMs: 0 },
+    onScenarioDone: (result) =>
+      writeUsageLine(
+        live
+          ? `  ${result.id} — ${result.roundTrips} trips, ${result.cachedToolCalls}/${result.toolCalls} reads pre-run, ${result.outputTokensMedian} out tok, ${result.tokensPerSecMedian} tok/s, ${result.wallMsMedian}ms`
+          : `  ${result.structuralOk ? '✓' : '✗'} ${result.id} — ${result.roundTrips} trips, ${result.cachedToolCalls}/${result.toolCalls} reads pre-run, ${result.wallMsMedian}ms wall`,
+      ),
+  })
+
+  const baseline = !live && existsSync(baselinePath) ? (JSON.parse(readFileSync(baselinePath, 'utf8')) as import('./bench/latency/harness.ts').LatencyReport) : undefined
+
+  if (machineReadable) {
+    emitEvent('latency_report', { report, comparison: baseline ? compareLatency(baseline, report, { strict }) : undefined })
+  } else {
+    process.stdout.write(renderLatencyReport(report, baseline))
+  }
+
+  if (live) return
+
+  if (update) {
+    writeFileSync(baselinePath, `${JSON.stringify(report, null, 2)}\n`)
+    writeNotice(`Baseline updated: ${baselinePath}`)
+    return
+  }
+
+  if (baseline) {
+    const comparison = compareLatency(baseline, report, { strict })
+    if (!comparison.ok) {
+      writeError(`Latency regressed:\n${comparison.regressions.map((line) => `  - ${line}`).join('\n')}`)
+      process.exitCode = 1
+    }
+  } else {
+    writeNotice('No baseline yet — run `elia bench-latency --update-baseline` to record one.')
+  }
 }
 
 async function runEvolve(): Promise<void> {
@@ -997,14 +1085,47 @@ async function interactiveProviderSetup(reason: 'first-run' | 'settings'): Promi
 }
 
 async function ensureFirstRunProviderSetup(): Promise<boolean> {
-  if (!activeProviderNeedsSetup()) return true
+  if (!activeProviderNeedsSetup()) {
+    prewarmActiveProvider()
+    return true
+  }
   if (!process.stdin.isTTY || !process.stdout.isTTY) {
     writeError('No provider is configured. Run `elia config set --provider <name> --api-key-stdin --model <model-id>` from a secure shell, or run elia in an interactive terminal for first-run setup.')
     process.exitCode = 1
     return false
   }
   writeNotice('No complete provider configuration was found. Elia will ask for a provider, hidden API key, and model before starting.')
-  return Boolean(await interactiveProviderSetup('first-run'))
+  const ok = Boolean(await interactiveProviderSetup('first-run'))
+  if (ok) prewarmActiveProvider()
+  return ok
+}
+
+/**
+ * Fire-and-forget: open a pooled connection to the active model host so the
+ * first turn's request skips DNS + TLS + HTTP/2 setup on its critical path.
+ * Runs while the user is still reading the intro or typing. Never throws.
+ */
+/**
+ * Open a pooled connection to every model host a run might touch — the deep
+ * tier, the fast tier if it is a distinct provider, and any role override — so
+ * the first request on each (an orientation scout is often the very first thing
+ * a task does, on the fast tier) skips connection setup. `warmConnection`
+ * dedupes per origin, so tiers that share a host cost one probe.
+ */
+function prewarmActiveProvider(): void {
+  void import('./config.ts')
+    .then(({ config }) => {
+      const seen = new Set<import('./providers/types.ts').Provider>()
+      const warm = (provider?: { prewarm?: () => void }): void => {
+        if (!provider || seen.has(provider as import('./providers/types.ts').Provider)) return
+        seen.add(provider as import('./providers/types.ts').Provider)
+        provider.prewarm?.()
+      }
+      warm(config.tiers.deep.provider)
+      warm(config.tiers.fast.provider)
+      for (const route of Object.values(config.roleOverrides)) warm(route?.provider)
+    })
+    .catch(() => {})
 }
 
 async function runSchedule(): Promise<void> {
@@ -1271,9 +1392,18 @@ async function runInteractive(): Promise<void> {
     return
   }
 
+  // Start connecting to MCP servers now, before the first-run check, the intro
+  // animation, and session loading — every stdio server spawns a child process
+  // and does a JSON-RPC handshake, and awaiting that serially was dead air on
+  // the REPL. loadRuntimeSkills() below awaits the same in-flight pass, by which
+  // point it has been running concurrently with all of the above.
+  void (await import('./mcp/registry.ts')).beginMcpLoad()
+
   if (!(await ensureFirstRunProviderSetup())) return
   warnIfAtFilesystemRoot()
-  await loadRuntimeSkills()
+  // The live REPL routes late notices into the transcript (setInkSink), so MCP
+  // can finish connecting in the background instead of gating the prompt.
+  await loadRuntimeSkills({ deferMcp: interactiveTerminal })
   const { runTurn } = await import('./agent.ts')
   const { config, describeThinking, getThinking, switchModel, switchThinking, THINKING_EFFORT_BUDGETS, DEFAULT_THINKING_BUDGET } =
     await import('./config.ts')
@@ -1641,7 +1771,11 @@ async function runInteractive(): Promise<void> {
   function applyModelChoice(providerName: string, model?: string): void {
     const result = switchModel({ providerName, model })
     if (!result.ok) writeError(result.error)
-    else writeNotice(`Model switched: ${result.label}`)
+    else {
+      writeNotice(`Model switched: ${result.label}`)
+      // The newly resolved provider is a cold client — warm it before the next turn.
+      prewarmActiveProvider()
+    }
   }
 
   function activateCodexSubscription(model = 'default'): void {
@@ -1751,7 +1885,10 @@ async function runInteractive(): Promise<void> {
     if (arg === 'off') {
       const result = switchThinking({ enabled: false, budgetTokens: 0 })
       if (!result.ok) writeError(result.error)
-      else writeNotice(describeThinking())
+      else {
+        writeNotice(describeThinking())
+        prewarmActiveProvider()
+      }
       return
     }
 
@@ -1776,6 +1913,7 @@ async function runInteractive(): Promise<void> {
       return
     }
     writeNotice(describeThinking())
+    prewarmActiveProvider()
     if (config.providerName !== 'anthropic') {
       writeNotice(
         `Note: ${config.providerLabel} doesn't take a reasoning budget — this only controls whether elia displays reasoning it sends automatically.`,
@@ -2792,6 +2930,8 @@ async function main() {
       return runEvolve()
     case 'bench':
       return runBench()
+    case 'bench-latency':
+      return runBenchLatency()
     case 'skills':
       return runSkills()
     case 'runs':

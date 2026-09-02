@@ -47,6 +47,15 @@ export interface StreamTurnParams {
   onText: (delta: string) => void
   /** Streamed reasoning, when the provider/model produces any. Never guaranteed to fire. */
   onThinking?: (delta: string) => void
+  /**
+   * Fires with each fully-formed content block the moment the provider finishes
+   * streaming it — before the turn as a whole completes. The agent loop uses
+   * this to start a read-only `tool_use` call speculatively while the model is
+   * still generating the rest of the message, so the tool phase is already done
+   * (or in flight) by the time the turn ends. Only providers that stream block
+   * boundaries emit it; a `tool_use` block's `input` is the fully parsed JSON.
+   */
+  onToolBlock?: (block: ContentBlock) => void
   /** Structured progress from agentic providers (plans, commands, edits, and runtime status). */
   onActivity?: (activity: ProviderActivity) => void
   /** Abort the in-flight provider request when the owning run is cancelled. */
@@ -83,4 +92,13 @@ export interface ProviderActivity {
 
 export interface Provider {
   streamTurn(params: StreamTurnParams): Promise<{ content: ContentBlock[]; usage: Usage }>
+  /**
+   * Optional, fire-and-forget: open a connection to the provider's host before
+   * the first real request needs it, so that request doesn't pay DNS + TLS +
+   * HTTP/2 setup (typically 150–400 ms) on its critical path. Called once at
+   * startup while the user is still reading the intro / typing. Never throws,
+   * never awaited, and a failure is silently ignored — it is pure latency
+   * hygiene, not a health check.
+   */
+  prewarm?(): void
 }

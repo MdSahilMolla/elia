@@ -1,6 +1,7 @@
 import OpenAI from 'openai'
 import type { ChatMessage, ContentBlock, Provider, StreamTurnParams, ThinkingOption, ToolDefinition, Usage } from './types.ts'
 import { validateNetworkUrl } from '../networkPolicy.ts'
+import { warmConnection } from './prewarm.ts'
 
 export interface OpenAICompatibleProviderOptions {
   thinking?: ThinkingOption
@@ -24,20 +25,46 @@ export function createOpenAICompatibleProvider(
   const passthroughReasoning = options.thinking?.enabled ?? true
 
   return {
-    async streamTurn({ system, systemDynamic, messages, tools, onText, onThinking, signal }: StreamTurnParams) {
+    prewarm() {
+      warmConnection(validatedBaseURL ?? client.baseURL)
+    },
+
+    async streamTurn({ system, systemDynamic, messages, tools, onText, onThinking, onToolBlock, signal }: StreamTurnParams) {
       // The stable prompt stays first so an OpenAI-compatible endpoint's
       // automatic prefix caching still matches on it; the per-turn dynamic
       // suffix follows it.
       const fullSystem = systemDynamic && systemDynamic.trim() ? `${system}\n\n${systemDynamic}` : system
+      const openAITools = toOpenAITools(tools)
       const runner = client.chat.completions
         .stream({
           model,
           messages: toOpenAIMessages(fullSystem, messages),
-          tools: toOpenAITools(tools),
+          tools: openAITools,
+          // Let the model emit several tool calls in one response so elia can run
+          // them in parallel — the single biggest lever on agent wall-clock is
+          // fewer model round-trips. Only sent when tools are actually offered;
+          // some endpoints reject the field on a tool-less request.
+          ...(openAITools.length > 0 ? { parallel_tool_calls: true } : {}),
           // Without this the final streamed response has no usage data at all.
           stream_options: { include_usage: true },
         }, signal ? { signal } : undefined)
         .on('content', (delta) => onText(delta))
+
+      if (onToolBlock) {
+        // A tool call has finished streaming its arguments while the rest of the
+        // turn is still generating — hand it up so a read-only call can start now.
+        runner.on('tool_calls.function.arguments.done', (event) => {
+          let input: Record<string, unknown>
+          try {
+            input = event.arguments ? (JSON.parse(event.arguments) as Record<string, unknown>) : {}
+          } catch {
+            return
+          }
+          if (input && typeof input === 'object') {
+            onToolBlock({ type: 'tool_use', id: `stream_${event.index}`, name: event.name, input })
+          }
+        })
+      }
 
       if (passthroughReasoning) {
         runner.on('chunk', (chunk) => {
@@ -63,7 +90,8 @@ export function createOpenAICompatibleProvider(
         const completion = await client.chat.completions.create({
           model,
           messages: toOpenAIMessages(fullSystem, messages),
-          tools: toOpenAITools(tools),
+          tools: openAITools,
+          ...(openAITools.length > 0 ? { parallel_tool_calls: true } : {}),
           stream: false,
         }, signal ? { signal } : undefined)
         const message = completion.choices[0]?.message
