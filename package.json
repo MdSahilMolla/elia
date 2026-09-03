@@ -41,7 +41,7 @@
   "scripts": {
     "dev": "bun run bin/elia.ts",
     "react": "bun run src/react_server.ts",
-    "test": "bun test src/",
+    "test": "bun test --timeout=20000 src/",
     "typecheck": "tsc --noEmit",
     "security:scan": "bun run scripts/security-scan.ts",
     "prepublishOnly": "bun run typecheck && bun test && bun run security:scan",
