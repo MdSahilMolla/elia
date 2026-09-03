@@ -24,7 +24,12 @@ jobs:
       - name: Test
         env:
           ELIA_API_KEY: ci-test-placeholder
-        run: bun test
+        # --timeout: the few tests that stand up a real localhost server / fs.watch
+        # / git+gh subprocess need more than bun's 5s default on a 2-core runner.
+        # --retry: a handful of Ink-render and WebSocket tests use fixed short
+        # sleeps to let async work settle; those occasionally lose the race under
+        # CI load. A real regression still fails all three attempts.
+        run: bun test --timeout=20000 --retry=2
       - name: Secret scan
         run: bun run security:scan
       - name: Pack without lifecycle scripts

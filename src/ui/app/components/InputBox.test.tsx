@@ -1,6 +1,7 @@
 import { expect, test } from 'bun:test'
 import { render } from 'ink-testing-library'
 import { InputBox } from './InputBox.tsx'
+import { waitForFrame } from '../testFixtures.ts'
 import type { SlashCommand } from '../../slashPrompt.ts'
 
 const noop = () => {}
@@ -26,22 +27,18 @@ function mount(commands: SlashCommand[]) {
 test('typing "/" opens the completion menu with a scroll hint instead of clipping the list', async () => {
   const { stdin, lastFrame } = mount(many)
   stdin.write('/')
-  await new Promise((r) => setTimeout(r, 20))
-  const frame = lastFrame() ?? ''
+  const frame = await waitForFrame(lastFrame, /↓ \d+ more/)
 
   // First page of entries is visible...
   expect(frame).toContain('/cmd00')
   // ...and the rest is reachable, flagged rather than silently dropped.
-  expect(frame).toMatch(/↓ \d+ more/)
   expect(frame).not.toContain('/cmd24') // not on the first page, but the hint says it exists
 })
 
 test('a short command list shows every entry with no scroll hints', async () => {
   const { stdin, lastFrame } = mount(many.slice(0, 4))
   stdin.write('/')
-  await new Promise((r) => setTimeout(r, 20))
-  const frame = lastFrame() ?? ''
+  const frame = await waitForFrame(lastFrame, '/cmd03')
   expect(frame).toContain('/cmd00')
-  expect(frame).toContain('/cmd03')
   expect(frame).not.toContain('more')
 })

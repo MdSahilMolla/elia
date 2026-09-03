@@ -1,9 +1,10 @@
 import { expect, test } from 'bun:test'
 import { render } from 'ink-testing-library'
 import { App, providerPlanItems } from './App.tsx'
-import { REPL_COMMANDS_FOR_TEST } from './testFixtures.ts'
+import { REPL_COMMANDS_FOR_TEST, waitForFrame } from './testFixtures.ts'
 
-const SHIFT_TAB = '[Z'
+const SHIFT_TAB = '\x1b[Z'
+const settle = () => new Promise((resolve) => setTimeout(resolve, 30))
 
 function baseProps() {
   return {
@@ -24,23 +25,22 @@ function baseProps() {
   }
 }
 
-test('App shows the greeting before any turn', () => {
+test('App shows the greeting before any turn', async () => {
   const { lastFrame } = render(<App {...baseProps()} />)
-  expect(lastFrame() ?? '').toContain('dev mode — say hi')
-  expect(lastFrame() ?? '').toContain('mercury-2 · manual')
+  const frame = await waitForFrame(lastFrame, 'dev mode — say hi')
+  expect(frame).toContain('mercury-2 · manual')
 })
 
 test('App streams a turn: user line, tool card, assistant text', async () => {
   const { stdin, lastFrame } = render(<App {...baseProps()} />)
-  await Bun.sleep(20)
+  await waitForFrame(lastFrame, 'mercury-2 · manual')
+  await settle()
   stdin.write('hi there')
-  await Bun.sleep(20)
+  await waitForFrame(lastFrame, 'hi there')
   stdin.write('\r')
-  await Bun.sleep(80)
-  const frame = lastFrame() ?? ''
+  const frame = await waitForFrame(lastFrame, 'Hello world')
   expect(frame).toContain('hi there')
   expect(frame).toContain('Read x') // compact "verb target" tool line
-  expect(frame).toContain('Hello world')
 })
 
 test('Shift+Tab into plan mode makes the turn read-only and offers to execute', async () => {
@@ -53,39 +53,36 @@ test('Shift+Tab into plan mode makes the turn read-only and offers to execute', 
     },
   }
   const { stdin, lastFrame } = render(<App {...props} />)
-  await Bun.sleep(20)
-  stdin.write(SHIFT_TAB) // manual → auto
-  await Bun.sleep(15)
-  stdin.write(SHIFT_TAB) // auto → plan
-  await Bun.sleep(15)
-  expect(lastFrame() ?? '').toContain('· plan ·')
+  await waitForFrame(lastFrame, 'mercury-2 · manual')
+  await settle()
+  stdin.write(SHIFT_TAB) // manual → auto-accept
+  await waitForFrame(lastFrame, '· auto-accept ·')
+  stdin.write(SHIFT_TAB) // auto-accept → plan
+  await waitForFrame(lastFrame, '· plan ·')
   stdin.write('research the task')
-  await Bun.sleep(10)
+  await waitForFrame(lastFrame, 'research the task')
   stdin.write('\r')
-  await Bun.sleep(60)
+  await waitForFrame(lastFrame, 'Plan ready')
   expect(sawPlanMode).toBe(true)
-  expect(lastFrame() ?? '').toContain('Plan ready')
 })
 
 test('App routes a slash command through handleSlash', async () => {
   const { stdin, lastFrame } = render(<App {...baseProps()} />)
-  await Bun.sleep(20)
+  await waitForFrame(lastFrame, 'mercury-2 · manual')
+  await settle()
   stdin.write('/cost')
-  await Bun.sleep(20)
+  await waitForFrame(lastFrame, '/cost')
   stdin.write('\r')
-  await Bun.sleep(40)
-  expect(lastFrame() ?? '').toContain('slash ok')
+  await waitForFrame(lastFrame, 'slash ok')
 })
 
 test('status bar reflects a live model change from getEnv', async () => {
   let model = 'mercury-2'
   const { lastFrame, rerender } = render(<App {...baseProps()} getEnv={() => ({ model, providerLabel: 'X', providerName: 'inception' })} />)
-  await Bun.sleep(20)
-  expect(lastFrame() ?? '').toContain('mercury-2 · manual')
+  await waitForFrame(lastFrame, 'mercury-2 · manual')
   model = 'gpt-5.6-terra'
   rerender(<App {...baseProps()} getEnv={() => ({ model, providerLabel: 'X', providerName: 'codex' })} />)
-  await Bun.sleep(20)
-  expect(lastFrame() ?? '').toContain('gpt-5.6-terra · manual')
+  await waitForFrame(lastFrame, 'gpt-5.6-terra · manual')
 })
 
 test('every codex prompt asks for confirmation, even in auto mode', async () => {
@@ -99,15 +96,15 @@ test('every codex prompt asks for confirmation, even in auto mode', async () => 
     },
   }
   const { stdin, lastFrame } = render(<App {...props} />)
-  await Bun.sleep(30)
+  await waitForFrame(lastFrame, 'gpt-5.6-terra · auto-accept')
+  await settle()
   stdin.write('build me a thing')
-  await Bun.sleep(20)
+  await waitForFrame(lastFrame, 'build me a thing')
   stdin.write('\r')
-  await Bun.sleep(60)
-  expect(lastFrame() ?? '').toContain('Hand this task to Codex?')
+  await waitForFrame(lastFrame, 'Hand this task to Codex?')
   expect(submitted).toBe(false)
   stdin.write('n')
-  await Bun.sleep(40)
+  await new Promise((resolve) => setTimeout(resolve, 40))
   expect(submitted).toBe(false)
 })
 
