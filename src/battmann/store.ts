@@ -37,7 +37,7 @@ function isoDate(value: unknown, name: string): string {
 
 function observedDate(value: unknown, name: string): string {
   const result = isoDate(value, name)
-  if (Date.parse(result) > Date.now() + 60_000) throw new Error(`${name} cannot be in the future`)
+  if (Date.parse(result) > Date.now() + 60_000) throw new Error(`${name} (${result}) cannot be in the future; the current time is ${new Date().toISOString()} — pass a real past or present date, not a projected one`)
   return result
 }
 
@@ -461,7 +461,7 @@ function assertEvidence(db: Database, ids: string[], asOf?: string): void {
   for (const id of new Set(ids)) {
     const row = db.query('SELECT id, published_at, retrieved_at FROM evidence WHERE id = ?').get(id) as Row | null
     if (!row) throw new Error(`unknown evidence id: ${id}`)
-    if (asOf && (String(row.published_at) > asOf || String(row.retrieved_at) > asOf)) throw new Error(`evidence ${id} was not available by ${asOf}`)
+    if (asOf && (String(row.published_at) > asOf || String(row.retrieved_at) > asOf)) throw new Error(`evidence ${id} (published ${row.published_at}, retrieved ${row.retrieved_at}) was not available by the asOf time ${asOf}; set asOf to when the analysis is being made, not a past cutoff`)
   }
 }
 

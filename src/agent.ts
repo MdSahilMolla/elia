@@ -1,4 +1,4 @@
-import { config, systemPromptForMode } from './config.ts'
+import { config, systemPromptForMode, turnContextPrompt } from './config.ts'
 import { runAgentLoop, type ConversationMessage, type RunAgentLoopResult, type ToolEvent } from './agentLoop.ts'
 import type { Provider, ProviderActivity } from './providers/types.ts'
 import { allWorkerTools, battmannTools, businessTools, cyberTools, getSynthesizedTools } from './tools/registry.ts'
@@ -153,7 +153,10 @@ async function runScopedTurn(
   const systemPrompt = options.planMode
     ? `${baseSystemPrompt}\n\n# PLAN MODE\nYou are planning, not doing. Use only the read-only tools to investigate. Do NOT write files, run commands, or make any change. When you have enough understanding, stop and present a concrete plan: a short numbered list of the exact steps you would take (files to touch, what changes, how you would verify). Keep it tight. The user will approve, edit, or reject it before anything runs.`
     : baseSystemPrompt
-  const systemDynamicPrompt = projectMemory.trim() ? projectMemory : undefined
+  // The wall-clock date leads the dynamic block in every mode: it must reflect
+  // real time, and it must not bake into the cached stable prefix (a daemon can
+  // stay up across midnight, or for days).
+  const systemDynamicPrompt = [turnContextPrompt(), projectMemory].map((part) => part.trim()).filter(Boolean).join('\n\n') || undefined
 
   // One cache per turn rather than per session: the turn boundary is the point at
   // which the user may have edited files behind elia's back.

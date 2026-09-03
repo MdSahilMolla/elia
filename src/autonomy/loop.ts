@@ -1,4 +1,4 @@
-import { config, systemPromptForMode, tierConfig } from '../config.ts'
+import { config, systemPromptForMode, tierConfig, turnContextPrompt } from '../config.ts'
 import { lastAssistantText, runAgentLoop, type ConversationMessage } from '../agentLoop.ts'
 import { taskTool } from '../tools/task.ts'
 import { allWorkerTools } from '../tools/registry.ts'
@@ -132,6 +132,8 @@ export interface AutonomousRunResult {
 
 const plannerPromptForMode = (mode: AgentMode) => `${systemPromptForMode(mode)}
 
+${turnContextPrompt()}
+
 ## Right now you are planning, not building
 
 You are in the orient-and-propose phase of an autonomous run. You must NOT change anything yet — you have no write tools in this phase, by design.
@@ -159,6 +161,8 @@ What makes a good proposal:
 const REVIEWER_TOOL_NAMES = new Set(['read_file', 'list_files', 'grep', 'board_read', 'recall', 'environment'])
 
 const repairPromptForMode = (mode: AgentMode) => `${systemPromptForMode(mode)}
+
+${turnContextPrompt()}
 
 ## Right now you are fixing your own work
 

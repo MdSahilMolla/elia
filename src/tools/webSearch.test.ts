@@ -94,6 +94,29 @@ test('web_search normalizes Serper organic results', async () => {
   expect(result).toContain('Policy notice')
 })
 
+test('web_search recencyDays sends a clock-derived date window to Exa and headers it', async () => {
+  process.env.EXA_API_KEY = 'exa-key'; process.env.ELIA_SEARCH_PROVIDER = 'exa'
+  let request: RequestInit | undefined
+  globalThis.fetch = (async (_url, init) => { request = init; return new Response(JSON.stringify({ results: [] }), { status: 200 }) }) as typeof fetch
+  const result = await webSearchTool.execute({ query: 'nepal government', recencyDays: 30 })
+  const body = JSON.parse(String(request?.body)) as { startPublishedDate?: string }
+  expect(body.startPublishedDate).toBeString()
+  expect(Date.parse(body.startPublishedDate!)).toBeGreaterThan(Date.now() - 31 * 86_400_000)
+  expect(result).toContain('Recency filter: last 30 day(s)')
+})
+
+test('web_search rejects an out-of-range recencyDays', async () => {
+  await expect(webSearchTool.execute({ query: 'x', recencyDays: 0 })).rejects.toThrow('recencyDays')
+  await expect(webSearchTool.execute({ query: 'x', recencyDays: 5000 })).rejects.toThrow('recencyDays')
+})
+
+test('web_search maps recencyDays to a Brave freshness parameter', async () => {
+  let calledUrl = ''
+  globalThis.fetch = (async (input: Parameters<typeof fetch>[0]) => { calledUrl = String(input); return new Response(JSON.stringify({ web: { results: [] } }), { status: 200 }) }) as unknown as typeof fetch
+  await webSearchTool.execute({ query: 'example', recencyDays: 7 })
+  expect(calledUrl).toContain('freshness=pw')
+})
+
 test('web_search surfaces a non-ok response as an error', async () => {
   globalThis.fetch = (async () =>
     new Response('nope', { status: 500, statusText: 'Internal Server Error' })) as unknown as typeof fetch

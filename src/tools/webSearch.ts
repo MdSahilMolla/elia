@@ -48,10 +48,26 @@ async function requestJson(url: string, init: RequestInit): Promise<Record<strin
   } finally { clearTimeout(timeout) }
 }
 
-async function braveSearch(query: string, count: number, include?: string[], exclude?: string[]): Promise<SearchResult[]> {
+/** Server-authoritative recency: the model cannot be trusted to compute "last N days" from a date it may have wrong. */
+function recencyStart(recencyDays: number | undefined): string | undefined {
+  if (recencyDays === undefined) return undefined
+  return new Date(Date.now() - recencyDays * 86_400_000).toISOString()
+}
+function braveFreshness(recencyDays: number | undefined): string | undefined {
+  if (recencyDays === undefined) return undefined
+  return recencyDays <= 1 ? 'pd' : recencyDays <= 7 ? 'pw' : recencyDays <= 31 ? 'pm' : recencyDays <= 366 ? 'py' : undefined
+}
+function serperRecency(recencyDays: number | undefined): string | undefined {
+  if (recencyDays === undefined) return undefined
+  return recencyDays <= 1 ? 'qdr:d' : recencyDays <= 7 ? 'qdr:w' : recencyDays <= 31 ? 'qdr:m' : recencyDays <= 366 ? 'qdr:y' : undefined
+}
+
+async function braveSearch(query: string, count: number, include?: string[], exclude?: string[], recencyDays?: number): Promise<SearchResult[]> {
   const url = new URL('https://api.search.brave.com/res/v1/web/search')
   url.searchParams.set('q', [query, ...(include?.map((d) => `site:${d}`) ?? []), ...(exclude?.map((d) => `-site:${d}`) ?? [])].join(' '))
   url.searchParams.set('count', String(count))
+  const freshness = braveFreshness(recencyDays)
+  if (freshness) url.searchParams.set('freshness', freshness)
   const data = await requestJson(url.toString(), { headers: { Accept: 'application/json', 'X-Subscription-Token': providerKey('brave')! } })
   const web = data.web as { results?: Array<{ title?: string; url?: string; description?: string; age?: string }> } | undefined
   return (web?.results ?? []).map((r) => ({ title: r.title ?? '(untitled)', url: r.url ?? '', snippet: stripTags(r.description ?? ''), publishedAt: r.age }))
@@ -66,17 +82,20 @@ async function exaSearch(query: string, count: number, include?: string[], exclu
   }))
 }
 
-async function serperSearch(query: string, count: number, country?: unknown, language?: unknown): Promise<SearchResult[]> {
-  const data = await requestJson('https://google.serper.dev/search', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-API-KEY': providerKey('serper')! }, body: JSON.stringify({ q: query, num: count, ...(typeof country === 'string' && country.trim() ? { gl: country.trim() } : {}), ...(typeof language === 'string' && language.trim() ? { hl: language.trim() } : {}) }) })
+async function serperSearch(query: string, count: number, country?: unknown, language?: unknown, recencyDays?: number): Promise<SearchResult[]> {
+  const tbs = serperRecency(recencyDays)
+  const data = await requestJson('https://google.serper.dev/search', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-API-KEY': providerKey('serper')! }, body: JSON.stringify({ q: query, num: count, ...(tbs ? { tbs } : {}), ...(typeof country === 'string' && country.trim() ? { gl: country.trim() } : {}), ...(typeof language === 'string' && language.trim() ? { hl: language.trim() } : {}) }) })
   return (Array.isArray(data.organic) ? data.organic as Array<Record<string, unknown>> : []).slice(0, count).map((r) => ({ title: typeof r.title === 'string' ? r.title : '(untitled)', url: typeof r.link === 'string' ? r.link : '', snippet: typeof r.snippet === 'string' ? r.snippet : '', publishedAt: typeof r.date === 'string' ? r.date : undefined }))
 }
 
 export const webSearchTool: Tool = {
   name: 'web_search',
-  description: 'Search current web evidence through Exa, Serper, or Brave and return normalized source URLs, snippets, dates, authors, provider, and retrieval time. Available in every Elia mode. Prefer primary sources and fetch selected pages before treating snippets as evidence.',
+  description: 'Search current web evidence through Exa, Serper, or Brave and return normalized source URLs, snippets, dates, authors, provider, and retrieval time. Available in every Elia mode. Prefer primary sources and fetch selected pages before treating snippets as evidence. Pass recencyDays to restrict results to the last N days when the question turns on current events — it is computed against the real clock, so use it instead of guessing a startPublishedDate.',
   input_schema: { type: 'object', properties: {
     query: { type: 'string' }, provider: { type: 'string', enum: ['auto', 'exa', 'serper', 'brave'] }, count: { type: 'number', description: '1-20 results' },
-    includeDomains: { type: 'array' }, excludeDomains: { type: 'array' }, startPublishedDate: { type: 'string' }, endPublishedDate: { type: 'string' }, country: { type: 'string' }, language: { type: 'string' },
+    includeDomains: { type: 'array' }, excludeDomains: { type: 'array' }, startPublishedDate: { type: 'string' }, endPublishedDate: { type: 'string' },
+    recencyDays: { type: 'number', description: 'Only results published within the last N days (1-3650), applied from the server clock. Overrides startPublishedDate when both are given.' },
+    country: { type: 'string' }, language: { type: 'string' },
   }, required: ['query'] },
   async execute(input) {
     if (typeof input.query !== 'string' || !input.query.trim()) throw new Error('query must be a non-empty string')
@@ -84,10 +103,15 @@ export const webSearchTool: Tool = {
     const query = input.query.trim(); const provider = resolveProvider(input.provider)
     const count = input.count === undefined ? 8 : typeof input.count === 'number' && Number.isFinite(input.count) ? Math.max(1, Math.min(20, Math.round(input.count))) : (() => { throw new Error('count must be a number') })()
     const include = stringArray(input.includeDomains, 'includeDomains'); const exclude = stringArray(input.excludeDomains, 'excludeDomains')
-    const start = isoDate(input.startPublishedDate, 'startPublishedDate'); const end = isoDate(input.endPublishedDate, 'endPublishedDate')
+    let recencyDays: number | undefined
+    if (input.recencyDays !== undefined) {
+      if (typeof input.recencyDays !== 'number' || !Number.isFinite(input.recencyDays) || input.recencyDays < 1 || input.recencyDays > 3650) throw new Error('recencyDays must be a number between 1 and 3650')
+      recencyDays = Math.round(input.recencyDays)
+    }
+    const start = recencyStart(recencyDays) ?? isoDate(input.startPublishedDate, 'startPublishedDate'); const end = isoDate(input.endPublishedDate, 'endPublishedDate')
     if (start && end && start > end) throw new Error('startPublishedDate must not be after endPublishedDate')
-    const results = provider === 'exa' ? await exaSearch(query, count, include, exclude, start, end) : provider === 'serper' ? await serperSearch(query, count, input.country, input.language) : await braveSearch(query, count, include, exclude)
-    const header = [`Search provider: ${provider}`, `Retrieved: ${new Date().toISOString()}`, `Query: ${query}`]
+    const results = provider === 'exa' ? await exaSearch(query, count, include, exclude, start, end) : provider === 'serper' ? await serperSearch(query, count, input.country, input.language, recencyDays) : await braveSearch(query, count, include, exclude, recencyDays)
+    const header = [`Search provider: ${provider}`, `Retrieved: ${new Date().toISOString()}`, `Query: ${query}`, ...(recencyDays ? [`Recency filter: last ${recencyDays} day(s)`] : [])]
     if (!results.length) return [...header, 'No results found.'].join('\n')
     return [...header, '', ...results.map((r, i) => [`${i + 1}. ${r.title}`, `   ${r.url}`, r.publishedAt ? `   Published: ${r.publishedAt}` : '', r.author ? `   Author: ${r.author}` : '', r.snippet ? `   ${stripTags(r.snippet).slice(0, 2_000)}` : ''].filter(Boolean).join('\n'))].join('\n')
   },

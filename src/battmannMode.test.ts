@@ -36,6 +36,11 @@ test('the battmann prompt forbids fabricating intelligence and requires labelled
   expect(prompt).toContain('confidence')
   expect(prompt).toContain('model estimate')
   expect(prompt).toContain('untrusted data')
+  // Currency is rigour: the mode must anchor to today's date and re-confirm the
+  // current situation before analysing it — the failure that shipped a
+  // two-year-stale brief written as if it were 2024.
+  expect(prompt).toContain('currency is part of rigour')
+  expect(prompt).toContain("today's date")
   // It analyses; it does not advise on trades or profile private individuals.
   expect(prompt).toContain('not a licensed financial')
   expect(prompt).toContain('private individuals')
@@ -46,6 +51,7 @@ test('the battmann sub-agent prompt carries the same no-fabrication guardrails',
   expect(prompt).toContain('never invent')
   expect(prompt).toContain('confidence')
   expect(prompt).toContain('untrusted data')
+  expect(prompt).toContain("today's date")
 })
 
 test('all modes get web evidence while battmann adds industry reporting tools', () => {

@@ -1,6 +1,6 @@
 import { afterEach, expect, test } from 'bun:test'
 
-const { resolveThinking, describeThinking, config, getThinking, switchModel, switchThinking } = await import('./config.ts')
+const { resolveThinking, describeThinking, config, getThinking, switchModel, switchThinking, turnContextPrompt } = await import('./config.ts')
 
 afterEach(() => {
   delete process.env.ELIA_THINKING
@@ -17,6 +17,12 @@ const originalThinking = getThinking()
 afterEach(() => {
   switchModel({ providerName: originalProviderName, model: originalModel })
   switchThinking(originalThinking)
+})
+
+test('turnContextPrompt states the given wall-clock date as authoritative over training data', () => {
+  const prompt = turnContextPrompt(new Date('2026-09-04T12:00:00Z'))
+  expect(prompt).toContain("Today's date is 2026-09-04")
+  expect(prompt.toLowerCase()).toContain('never from your training data')
 })
 
 test('resolveThinking defaults to enabled with the default budget', () => {

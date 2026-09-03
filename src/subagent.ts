@@ -1,4 +1,4 @@
-import { autoFallbacksFor, BATTMANN_SUBAGENT_SYSTEM_PROMPT, CYBER_SUBAGENT_SYSTEM_PROMPT, FITNESS_SUBAGENT_SYSTEM_PROMPT, roleConfig, SPORTS_SUBAGENT_SYSTEM_PROMPT, SUBAGENT_SYSTEM_PROMPT } from './config.ts'
+import { autoFallbacksFor, BATTMANN_SUBAGENT_SYSTEM_PROMPT, CYBER_SUBAGENT_SYSTEM_PROMPT, FITNESS_SUBAGENT_SYSTEM_PROMPT, roleConfig, SPORTS_SUBAGENT_SYSTEM_PROMPT, SUBAGENT_SYSTEM_PROMPT, turnContextPrompt } from './config.ts'
 import { runAgentLoop, lastAssistantText, type ConversationMessage, type ToolEvent } from './agentLoop.ts'
 import type { Usage } from './providers/types.ts'
 import type { Tool } from './tools/types.ts'
@@ -154,7 +154,7 @@ export async function runSubAgent(request: SubAgentRequest): Promise<SubAgentRes
   const result = await withAgentIdentity({ name: request.name, role: request.role, runId, cwd, signal: request.signal }, () =>
     withActionGovernor(governor, () => withGoalGraphIfAvailable(graph, () => withGoalNode(nodeId, () => runAgentLoop({
       messages,
-      systemPrompt: `${basePrompt}\n\n## Your role\n${definition.prompt}`,
+      systemPrompt: `${basePrompt}\n\n${turnContextPrompt()}\n\n## Your role\n${definition.prompt}`,
       tools,
       provider: tier.provider,
       providerName: tier.providerName,
