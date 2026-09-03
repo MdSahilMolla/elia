@@ -37,6 +37,14 @@ function handle(line: string): void {
     const input = Array.isArray(params.input) ? params.input[0] : undefined
     const text = input && typeof input === 'object' && 'text' in input ? String(input.text) : ''
     send({ id: message.id, result: { turn: { id: turnId, status: 'inProgress', items: [] } } })
+    if (text === 'diffspam') {
+      send({ method: 'turn/diff/updated', params: { threadId: 'thread-1', turnId, diff: '+ a' } })
+      send({ method: 'turn/diff/updated', params: { threadId: 'thread-1', turnId, diff: '+ a\n+ b' } })
+      send({ method: 'turn/diff/updated', params: { threadId: 'thread-1', turnId, diff: '+ a\n+ b\n+ c' } })
+      send({ method: 'item/agentMessage/delta', params: { threadId: 'thread-1', turnId, itemId: 'message-1', delta: `done:${text}` } })
+      send({ method: 'turn/completed', params: { threadId: 'thread-1', turn: { id: turnId, status: 'completed', items: [] } } })
+      return
+    }
     if (text === 'first') {
       send({ method: 'turn/plan/updated', params: { turnId, explanation: 'Build safely', plan: [{ step: 'Inspect files', status: 'inProgress' }] } })
       send({ method: 'item/started', params: { threadId: 'thread-1', turnId, item: { id: 'command-1', type: 'commandExecution', command: 'bun test', cwd: process.cwd(), status: 'inProgress' } } })

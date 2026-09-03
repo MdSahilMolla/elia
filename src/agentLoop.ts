@@ -18,6 +18,7 @@ import { activeToolHooks, evaluateToolHooks } from './autonomy/devHooks.ts'
 import { clampOutput } from './shell.ts'
 import { isRepoMutatingTool, withRepoLock } from './repoLock.ts'
 import { profilingEnabled, recordModelCall } from './profile.ts'
+import { codexSubscriptionApprovedThisSession, markCodexSubscriptionApproved } from './providers/codexSubscription.ts'
 
 export type ConversationMessage = ChatMessage
 
@@ -33,6 +34,9 @@ const providerHealth = new Map<string, { failures: number; cooldownUntil: number
  * terminates and reports *why* it stopped.
  */
 const DEFAULT_MAX_STEPS = 80
+
+/** How the ChatGPT-subscription hand-off is labelled in the terminal — the user sees the provider, not Codex's internal tool calls. */
+const DELEGATED_DISPLAY_NAME = 'ChatGPT subscription'
 
 export interface ProviderRoute {
   provider: Provider
@@ -564,13 +568,28 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
       // safety boundary. Normal API providers still return Elia tool calls.
       const delegated = route.providerName === 'codex'
       const request = { name: 'codex_delegate', input: { model: route.model, path: process.cwd() } }
+      const DELEGATED_ID = 'codex-subscription-run'
       const startedAt = Date.now()
       let assessment: ActionAssessment | undefined
       if (delegated) {
-        const gate = await activeActionGovernor().check(request)
-        assessment = gate.assessment
-        if (!gate.allowed) throw new Error(gate.message ?? `Codex subscription execution blocked: ${gate.assessment.reason}`)
-        if (verbose) writeToolCall(request.name, request.input)
+        // Selecting the ChatGPT subscription as the model is confirmed once per
+        // session, not re-approved on every message. The first turn goes through
+        // the governor as `codex_subscription`; after that it is silent.
+        if (!codexSubscriptionApprovedThisSession()) {
+          const gate = await activeActionGovernor().check({ name: 'codex_subscription', input: request.input })
+          assessment = gate.assessment
+          if (!gate.allowed) throw new Error(gate.message ?? `ChatGPT subscription execution blocked: ${gate.assessment.reason}`)
+          markCodexSubscriptionApproved()
+        }
+        // The terminal shows the hand-off as a single line — "ChatGPT
+        // subscription" — not Codex's internal command/plan/diff stream. Its own
+        // tools run inside its sandbox; surfacing every one of them here is
+        // noise, and the structured receipt still records the full run.
+        if (verbose) writeToolCall(DELEGATED_DISPLAY_NAME, {})
+        onToolStart?.({ id: DELEGATED_ID, name: request.name, input: request.input })
+        // Once the user has seen the hand-off, we are committed to it: a silent
+        // retry or fallback would duplicate work or swap providers mid-answer.
+        emittedOutput = true
       }
 
       try {
@@ -619,6 +638,11 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
               emittedOutput = true
               noteFirstOutput()
               stopAnimation()
+              // For the ChatGPT subscription, collapse Codex's internal activity
+              // stream: only warnings (usage limits, safety) and model reroutes
+              // reach the transcript — everything else is covered by the single
+              // hand-off line and the final result.
+              if (delegated && activity.kind !== 'warning' && activity.kind !== 'model') return
               cursor?.beforeText()
               onActivity?.(activity)
               cursor?.afterText()
@@ -626,15 +650,15 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
             signal,
           })
         if (delegated) {
-          if (verbose) writeToolResult(request.name, 'Codex completed its workspace run.', false, false, Date.now() - startedAt)
-          onTool?.({ name: request.name, input: request.input, result: 'Codex completed its workspace run.', isError: false, durationMs: Date.now() - startedAt, cached: false, assessment })
+          if (verbose) writeToolResult(DELEGATED_DISPLAY_NAME, 'Finished the workspace run.', false, false, Date.now() - startedAt)
+          onTool?.({ id: DELEGATED_ID, name: request.name, input: request.input, result: 'Codex completed its workspace run.', isError: false, durationMs: Date.now() - startedAt, cached: false, assessment })
         }
         return result
       } catch (error) {
         if (delegated) {
           const result = error instanceof Error ? error.message : String(error)
-          if (verbose) writeToolResult(request.name, result, true, false, Date.now() - startedAt)
-          onTool?.({ name: request.name, input: request.input, result, isError: true, durationMs: Date.now() - startedAt, cached: false, assessment })
+          if (verbose) writeToolResult(DELEGATED_DISPLAY_NAME, result, true, false, Date.now() - startedAt)
+          onTool?.({ id: DELEGATED_ID, name: request.name, input: request.input, result, isError: true, durationMs: Date.now() - startedAt, cached: false, assessment })
         }
         throw error
       }

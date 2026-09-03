@@ -19,6 +19,34 @@ function keywordHint(command: string): string {
     : ''
 }
 
+// Shell-ish / destructive tokens that, on their own, mean "actually run the
+// full classifier" even if the message opens like a question.
+const ACTS_ON_THE_WORLD = /[;&|`$]|\b(rm|mv|cp|dd|chmod|chown|kill|curl|wget|npm|pnpm|yarn|bun|pip|docker|kubectl|ssh|scp)\b|\bgit\s+(push|reset|clean|rebase|checkout)\b/i
+
+/**
+ * A local, zero-latency pre-filter for manual mode's per-message risk check.
+ * When a message carries none of the risk keywords or shell tokens and reads
+ * as a question or a request to explain rather than an instruction to act, it
+ * cannot itself be a risky command — so skip the fast-tier round-trip that
+ * otherwise sits between the user pressing Enter and the turn starting.
+ *
+ * This only removes a *courtesy pre-warning*: anything the model then decides
+ * to actually do is still assessed per-action by the autonomy governor, which
+ * is the real safety boundary. Conservative by construction — any doubt
+ * (keywords, shell syntax, length, a non-interrogative opening) falls through
+ * to the model classifier.
+ */
+export function looksObviouslySafe(command: string): boolean {
+  const t = command.trim()
+  if (t.length === 0 || t.length > 280) return false
+  if (RISK_KEYWORDS.test(t) || ACTS_ON_THE_WORLD.test(t)) return false
+  // Short interrogatives take a word boundary ("is" but not "isotope");
+  // explain-style openers match as a prefix ("summ" covers "summarize").
+  const interrogative = /^(what|why|how|who|whom|whose|when|where|which|is|are|was|were|do|does|did|can|could|should|would|will)\b/i
+  const askToExplain = /^(explain|describe|summ|tell me|show me|walk me|give me|help me understand|remind me)/i
+  return interrogative.test(t) || askToExplain.test(t)
+}
+
 const RISK_PROMPT = `You are the safety gate in front of an autonomous coding/PC agent. It is about to run a command with no further confirmation once it starts — read the command and decide whether it needs a human to confirm first.
 
 Flag risky = true when the command could plausibly cause an irreversible or high-impact effect: deleting or overwriting files/data outside easy version-control recovery, destructive or system-level shell commands (rm -rf, format, drop table, sudo, force-push, hard reset), sending a message/email on the user's behalf, posting or publishing anything publicly, spending money or committing an ad/purchase, changing account or security settings, or anything the user would be upset to discover happened without being asked.

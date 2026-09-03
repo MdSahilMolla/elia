@@ -330,7 +330,10 @@ async function classifyCommandRisk(command: string): Promise<{ risky: boolean; r
   if (config.providerName === 'codex') {
     return { risky: true, reason: `${config.model} (Codex) will run this task autonomously in your workspace — it can read, edit, and run commands.` }
   }
-  const { classifyRisk } = await import('./autonomy/risk.ts')
+  const { classifyRisk, looksObviouslySafe } = await import('./autonomy/risk.ts')
+  // Skip the fast-tier round-trip for a plain question — it can't be a risky
+  // command, and it's the common case sitting between Enter and the turn.
+  if (looksObviouslySafe(command)) return { risky: false }
   return classifyRisk(command)
 }
 
@@ -1113,15 +1116,19 @@ async function ensureFirstRunProviderSetup(): Promise<boolean> {
  * dedupes per origin, so tiers that share a host cost one probe.
  */
 function prewarmActiveProvider(): void {
-  void import('./config.ts')
-    .then(({ config }) => {
+  void Promise.all([import('./config.ts'), import('./autonomy/mode.ts')])
+    .then(([{ config, systemPromptForMode }, { activeMode }]) => {
+      // Give the deep tier the resolved session prompt so an agentic provider
+      // (the ChatGPT subscription) can pre-start its workspace thread, not just
+      // its connection. The fast tier / role overrides only need a connection.
+      const deepHint = { system: systemPromptForMode(activeMode()) }
       const seen = new Set<import('./providers/types.ts').Provider>()
-      const warm = (provider?: { prewarm?: () => void }): void => {
+      const warm = (provider?: { prewarm?: (hint?: { system?: string }) => void }, hint?: { system?: string }): void => {
         if (!provider || seen.has(provider as import('./providers/types.ts').Provider)) return
         seen.add(provider as import('./providers/types.ts').Provider)
-        provider.prewarm?.()
+        provider.prewarm?.(hint)
       }
-      warm(config.tiers.deep.provider)
+      warm(config.tiers.deep.provider, deepHint)
       warm(config.tiers.fast.provider)
       for (const route of Object.values(config.roleOverrides)) warm(route?.provider)
     })
@@ -1789,6 +1796,9 @@ async function runInteractive(): Promise<void> {
     process.env.ELIA_MODEL = model
     delete process.env.ELIA_BASE_URL
     writeNotice(`Model switched: ${switched.label}`)
+    // Bring the Codex app-server up now so the first subscription turn does not
+    // pay process spawn + initialize on its critical path.
+    prewarmActiveProvider()
   }
 
   async function handleModelCommand(argLine: string): Promise<void> {

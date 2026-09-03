@@ -85,14 +85,17 @@ test('status bar reflects a live model change from getEnv', async () => {
   await waitForFrame(lastFrame, 'gpt-5.6-terra · manual')
 })
 
-test('every codex prompt asks for confirmation, even in auto mode', async () => {
-  let submitted = false
+test('a codex-subscription message submits without a per-turn hand-off prompt', async () => {
+  // The subscription is confirmed once per session by the agent loop's own
+  // governor, not re-approved on every message, so the App submits straight
+  // through and never renders the old "Hand this task to Codex?" confirmation.
+  let submitted = ''
   const props = {
     ...baseProps(),
     initialReplMode: 'auto' as const,
     getEnv: () => ({ model: 'gpt-5.6-terra', providerLabel: 'Codex', providerName: 'codex' }),
-    submitTurn: async () => {
-      submitted = true
+    submitTurn: async (text: string) => {
+      submitted = text
     },
   }
   const { stdin, lastFrame } = render(<App {...props} />)
@@ -101,11 +104,9 @@ test('every codex prompt asks for confirmation, even in auto mode', async () => 
   stdin.write('build me a thing')
   await waitForFrame(lastFrame, 'build me a thing')
   stdin.write('\r')
-  await waitForFrame(lastFrame, 'Hand this task to Codex?')
-  expect(submitted).toBe(false)
-  stdin.write('n')
-  await new Promise((resolve) => setTimeout(resolve, 40))
-  expect(submitted).toBe(false)
+  await new Promise((resolve) => setTimeout(resolve, 60))
+  expect(lastFrame()).not.toContain('Hand this task to Codex?')
+  expect(submitted).toBe('build me a thing')
 })
 
 test('maps structured provider plan activity into workspace todo state', () => {

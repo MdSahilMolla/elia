@@ -254,9 +254,16 @@ export function assessAction(request: ActionRequest, cwd = currentAgent().cwd ??
   // (the actual OpenAI Codex CLI) that can read, write, and run shell commands
   // under its own sandbox — elia's governor has no visibility into what it
   // does once delegated, unlike task's own governed sub-agents, so this is
-  // stricter than task/preview: critical, not just review.
+  // stricter than task/preview: critical, not just review. Distinct names for
+  // the two ways it happens: `codex_delegate` is another model reaching for the
+  // tool mid-task (surprising — full critical prompt); `codex_subscription` is
+  // the user having selected the ChatGPT subscription as their model, which the
+  // agent loop confirms once per session, not on every message.
   if (name === 'codex_delegate') {
     return assessment('critical', 'approve', 'codex_delegate runs a real external coding agent with its own file and shell access, outside elia\'s per-action governance', name, resources, false)
+  }
+  if (name === 'codex_subscription') {
+    return assessment('critical', 'approve', 'the ChatGPT subscription (Codex) runs in this workspace with its own file and shell access — Elia governs the hand-off, not each action Codex then takes', name, resources, false)
   }
 
   // Tools proxied from a connected MCP server (see src/mcp/registry.ts, tool

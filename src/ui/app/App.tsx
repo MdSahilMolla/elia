@@ -211,11 +211,14 @@ export function App(props: AppProps) {
   })
 
   const runOne = useCallback(
-    async (text: string) => {
+    async (text: string, opts?: { echo?: boolean }) => {
       setBusy(true)
       setStatus('')
       setTurnStartedAt(Date.now())
-      store.appendUser(text)
+      // onSubmit echoes the message the instant Enter is pressed so it never
+      // waits behind the risk check; the other callers (queue drain, plan
+      // execution) still echo here.
+      if (opts?.echo !== false) store.appendUser(text)
       lastUserText.current = text
       const controller = new AbortController()
       abortRef.current = controller
@@ -370,23 +373,25 @@ export function App(props: AppProps) {
           setConfirm({ title, lines: lines.filter(Boolean), resolve: (v) => { setConfirm(null); resolve(v) } }),
         )
 
-      // Codex is a black-box agent that reads, edits, and runs commands in the
-      // workspace on its own. Every hand-off gets a confirmation, regardless of
-      // manual/auto — you're approving an autonomous run, not a single command.
+      // Echo the message immediately — before the risk check — so pressing
+      // Enter always feels instant, not gated on a fast-tier round-trip.
+      store.appendUser(trimmed)
+      lastUserText.current = trimmed
+
+      // When the ChatGPT subscription is the selected model, running Codex in
+      // the workspace is the whole point of that choice — it is confirmed once
+      // per session by the agent loop's own governor prompt, not re-approved on
+      // every message, and it skips the risky-prompt classifier (its prompts
+      // expose no Elia tools for the classifier to reason about).
       const live = props.getEnv()
-      if (live.providerName === 'codex') {
-        const ok = await ask('Hand this task to Codex?', [
-          `${live.model} runs autonomously in this workspace — it can read, edit, and run commands.`,
-          `Task: ${trimmed.length > 200 ? `${trimmed.slice(0, 200)}…` : trimmed}`,
-        ])
-        if (!ok) {
-          store.notice('Skipped.')
-          store.commit()
-          return
-        }
-      } else if (mode === 'manual') {
-        const { risky, reason } = await props.classifyRisk(trimmed)
+      if (live.providerName !== 'codex' && mode === 'manual') {
+        setBusy(true)
+        setTurnStartedAt(Date.now())
+        setStatus('Checking whether this needs confirmation…')
+        const { risky, reason } = await props.classifyRisk(trimmed).catch(() => ({ risky: true, reason: 'risk check failed — asking to be safe' }))
         if (risky) {
+          setBusy(false)
+          setStatus('')
           const ok = await ask('This looks risky', [reason ?? '', `About to: ${trimmed}`])
           if (!ok) {
             store.notice('Skipped.')
@@ -396,7 +401,7 @@ export function App(props: AppProps) {
         }
       }
 
-      await runOne(trimmed)
+      await runOne(trimmed, { echo: false })
 
       // Drain anything queued while that turn ran.
       for (let next = shiftQueue(); next !== undefined; next = shiftQueue()) {

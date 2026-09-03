@@ -3,10 +3,25 @@ import { readBoundedOutput } from '../shell.ts'
 import type { ProviderActivity, Usage } from './types.ts'
 
 const CONNECT_TIMEOUT_MS = 10_000
+// Starting a thread or a turn can involve a model-catalogue fetch and cold
+// process work on the Codex side; 10s (the request default) is too tight and
+// surfaced as spurious turn failures and retries. The turn itself keeps the
+// long ceiling.
+const TURN_SETUP_TIMEOUT_MS = 60_000
 const TURN_TIMEOUT_MS = 10 * 60_000
 const MAX_STDERR_LENGTH = 20_000
 const MAX_ACTIVITY_DETAIL_LENGTH = 8_000
-const MAX_COMMAND_OUTPUT_LENGTH = 12_000
+// Codex streams command stdout/stderr in fine-grained deltas. One activity per
+// line floods the transcript (a single `bun test` is hundreds of lines), so
+// each command's output is buffered to a rolling window and surfaced once, as a
+// bounded tail digest when the command finishes — the shape Elia already uses
+// for its own `run_command`.
+const COMMAND_OUTPUT_WINDOW_CHARS = 16_000
+const COMMAND_OUTPUT_TAIL_LINES = 12
+const COMMAND_OUTPUT_TAIL_CHARS = 1_400
+// The cumulative workspace diff is re-sent on every keystroke Codex makes.
+// Emit it at most this often while the turn runs, then force the final one.
+const DIFF_MIN_INTERVAL_MS = 3_000
 
 type RequestId = number | string
 type Message = Record<string, unknown>
@@ -95,9 +110,11 @@ export class CodexAppServerClient {
     let streamedText = ''
     let finalText = ''
     let usage: Usage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 }
-    const commandOutput = new Map<string, { buffer: string; accepted: number; truncated: boolean }>()
+    const commandOutput = new Map<string, string>()
     let lastPlan = ''
     let lastDiff = ''
+    let pendingDiff = ''
+    let lastDiffEmitAt = 0
     let resolveCompleted!: (message: Message) => void
     let rejectCompleted!: (error: Error) => void
     const completed = new Promise<Message>((resolve, reject) => {
@@ -108,35 +125,28 @@ export class CodexAppServerClient {
     const emit = (activity: ProviderActivity | undefined) => {
       if (activity) options.onActivity?.(activity)
     }
-    const flushCommandOutput = (itemId: string, flushRemainder = false) => {
-      const state = commandOutput.get(itemId)
-      if (!state) return
-      let newline: number
-      while ((newline = state.buffer.indexOf('\n')) !== -1) {
-        const line = state.buffer.slice(0, newline).replace(/\r$/, '')
-        state.buffer = state.buffer.slice(newline + 1)
-        if (line.trim()) emit({ kind: 'command_output', title: 'Command output', detail: line, status: 'updated' })
-      }
-      if (flushRemainder && state.buffer.trim()) {
-        emit({ kind: 'command_output', title: 'Command output', detail: state.buffer, status: 'updated' })
-        state.buffer = ''
-      }
-      if (flushRemainder) commandOutput.delete(itemId)
-    }
     const appendCommandOutput = (itemId: string, delta: string) => {
-      const state = commandOutput.get(itemId) ?? { buffer: '', accepted: 0, truncated: false }
-      commandOutput.set(itemId, state)
-      const remaining = Math.max(0, MAX_COMMAND_OUTPUT_LENGTH - state.accepted)
-      if (remaining > 0) {
-        const accepted = delta.slice(0, remaining)
-        state.buffer += accepted
-        state.accepted += accepted.length
-        flushCommandOutput(itemId)
+      const next = (commandOutput.get(itemId) ?? '') + delta
+      commandOutput.set(itemId, next.length > COMMAND_OUTPUT_WINDOW_CHARS ? next.slice(next.length - COMMAND_OUTPUT_WINDOW_CHARS) : next)
+    }
+    const emitCommandOutput = (itemId: string) => {
+      const buffer = commandOutput.get(itemId) ?? commandOutput.get('command')
+      commandOutput.delete(itemId)
+      commandOutput.delete('command')
+      if (buffer && buffer.trim()) {
+        emit({ kind: 'command_output', title: 'Command output', detail: tailLines(buffer, COMMAND_OUTPUT_TAIL_LINES, COMMAND_OUTPUT_TAIL_CHARS), status: 'updated' })
       }
-      if (delta.length > remaining && !state.truncated) {
-        state.truncated = true
-        emit({ kind: 'warning', title: 'Command output capped', detail: `Only the first ${MAX_COMMAND_OUTPUT_LENGTH.toLocaleString()} characters are displayed.`, status: 'warning' })
+    }
+    const emitDiff = (diff: string, force: boolean) => {
+      if (!diff || diff === lastDiff) return
+      if (!force && Date.now() - lastDiffEmitAt < DIFF_MIN_INTERVAL_MS) {
+        pendingDiff = diff
+        return
       }
+      lastDiff = diff
+      pendingDiff = ''
+      lastDiffEmitAt = Date.now()
+      emit({ kind: 'diff', title: 'Workspace diff updated', detail: diff, status: 'updated' })
     }
 
     const removeListener = this.onMessage((message) => {
@@ -159,10 +169,16 @@ export class CodexAppServerClient {
       } else if (method === 'item/started' && isObject(params.item)) {
         emit(activityForItem(params.item, false))
       } else if (method === 'item/completed' && isObject(params.item)) {
-        const itemId = typeof params.item.id === 'string' ? params.item.id : 'command'
-        flushCommandOutput(itemId, true)
-        if (params.item.type === 'agentMessage' && typeof params.item.text === 'string') finalText = params.item.text
-        else emit(activityForItem(params.item, true))
+        const item = params.item
+        const itemId = typeof item.id === 'string' ? item.id : 'command'
+        if (item.type === 'agentMessage' && typeof item.text === 'string') {
+          finalText = item.text
+        } else if (item.type === 'commandExecution') {
+          emitCommandOutput(itemId)
+          emit(activityForItem(item, true))
+        } else {
+          emit(activityForItem(item, true))
+        }
       } else if (method === 'turn/plan/updated' && Array.isArray(params.plan)) {
         const plan = formatPlan(params.plan, typeof params.explanation === 'string' ? params.explanation : undefined)
         if (plan && plan !== lastPlan) {
@@ -170,11 +186,7 @@ export class CodexAppServerClient {
           emit({ kind: 'plan', title: 'Plan updated', detail: plan, status: 'updated' })
         }
       } else if (method === 'turn/diff/updated' && typeof params.diff === 'string') {
-        const diff = boundText(params.diff, MAX_ACTIVITY_DETAIL_LENGTH)
-        if (diff && diff !== lastDiff) {
-          lastDiff = diff
-          emit({ kind: 'diff', title: 'Workspace diff updated', detail: diff, status: 'updated' })
-        }
+        emitDiff(boundText(params.diff, MAX_ACTIVITY_DETAIL_LENGTH), false)
       } else if (method === 'warning' && typeof params.message === 'string') {
         emit({ kind: 'warning', title: 'Codex warning', detail: params.message, status: 'warning' })
       } else if (method === 'configWarning') {
@@ -195,6 +207,8 @@ export class CodexAppServerClient {
       } else if (method === 'thread/tokenUsage/updated' && isObject(params.tokenUsage) && isObject(params.tokenUsage.last)) {
         usage = usageFrom(params.tokenUsage.last)
       } else if (method === 'turn/completed' && isObject(params.turn)) {
+        for (const itemId of [...commandOutput.keys()]) emitCommandOutput(itemId)
+        if (pendingDiff) emitDiff(pendingDiff, true)
         resolveCompleted(params.turn)
       } else if (method === 'error') {
         const error = isObject(params.error) && typeof params.error.message === 'string'
@@ -227,7 +241,7 @@ export class CodexAppServerClient {
           excludeSlashTmp: false,
         },
         ...(options.model && options.model !== 'default' ? { model: options.model } : {}),
-      })
+      }, TURN_SETUP_TIMEOUT_MS)
       if (!isObject(start) || !isObject(start.turn) || typeof start.turn.id !== 'string') {
         throw new Error('Codex app server returned no turn id')
       }
@@ -476,6 +490,14 @@ function safeJson(value: unknown): string | undefined {
 
 function boundText(value: string, maxLength: number): string {
   return value.length > maxLength ? `${value.slice(0, maxLength - 1)}…` : value
+}
+
+/** The last `maxLines` non-trailing-blank lines of `value`, capped at `maxChars` (kept from the end). */
+function tailLines(value: string, maxLines: number, maxChars: number): string {
+  const lines = value.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n')
+  while (lines.length > 0 && lines[lines.length - 1]!.trim() === '') lines.pop()
+  const kept = lines.slice(Math.max(0, lines.length - maxLines)).join('\n').trimStart()
+  return kept.length > maxChars ? `…${kept.slice(kept.length - maxChars + 1)}` : kept
 }
 
 function finalAgentText(turn: Message): string {

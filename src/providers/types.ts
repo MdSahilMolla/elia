@@ -98,7 +98,9 @@ export interface Provider {
    * HTTP/2 setup (typically 150–400 ms) on its critical path. Called once at
    * startup while the user is still reading the intro / typing. Never throws,
    * never awaited, and a failure is silently ignored — it is pure latency
-   * hygiene, not a health check.
+   * hygiene, not a health check. `hint.system` carries the resolved session
+   * system prompt when the caller knows it, so an agentic provider can also
+   * pre-establish a session/thread keyed on it.
    */
-  prewarm?(): void
+  prewarm?(hint?: { system?: string }): void
 }

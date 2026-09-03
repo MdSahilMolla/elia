@@ -191,7 +191,13 @@ async function runScopedTurn(
     prefetcher,
     signal: options.signal,
     drainSteering: options.drainSteering,
-    onToolStart: options.onToolStart,
+    // A ChatGPT-subscription turn is one internal `codex_delegate` action for
+    // the audit ledger and skill detector, but the client (terminal card,
+    // desktop app) should see it as "ChatGPT subscription", with none of Codex's
+    // model id or working-path plumbing.
+    onToolStart: options.onToolStart
+      ? (call) => options.onToolStart!(call.name === 'codex_delegate' ? { ...call, name: 'ChatGPT subscription', input: {} } : call)
+      : undefined,
     onTool: (event) => {
       // Every call is a data point for deciding which tool elia should write itself next.
       appendActionAudit(event)
@@ -199,7 +205,7 @@ async function runScopedTurn(
       // And a data point for whether a recently recalled episode or brain hit actually mattered.
       noteToolUse(event.input)
       noteBrainToolUse(event.input)
-      options.onTool?.(event)
+      options.onTool?.(event.name === 'codex_delegate' ? { ...event, name: 'ChatGPT subscription', input: {} } : event)
     },
   })))
   const elapsedMs = Date.now() - startedAt

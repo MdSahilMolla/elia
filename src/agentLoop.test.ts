@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import type { ConversationMessage } from './agentLoop.ts'
-import type { ContentBlock } from './providers/types.ts'
+import type { ContentBlock, ProviderActivity } from './providers/types.ts'
 import type { Tool } from './tools/types.ts'
 import { createActionGovernor, withActionGovernor } from './autonomy/governor.ts'
 import { parseToolHooks, withToolHooks } from './autonomy/devHooks.ts'
@@ -15,6 +15,7 @@ process.env.ANTHROPIC_API_KEY ??= 'test-key-for-agentloop-test'
 
 const { config } = await import('./config.ts')
 const { resetProviderHealthForTests, runAgentLoop, toolBatchConcurrency } = await import('./agentLoop.ts')
+const { resetCodexSubscriptionApprovalForTests } = await import('./providers/codexSubscription.ts')
 
 test('safe read-only tool batches use bounded fast concurrency while mutating batches stay conservative', () => {
   const original = process.env.ELIA_TOOL_CONCURRENCY
@@ -35,11 +36,15 @@ test('safe read-only tool batches use bounded fast concurrency while mutating ba
 })
 
 test('ChatGPT subscription execution requires one explicit delegated-agent approval', async () => {
+  resetCodexSubscriptionApprovalForTests()
   let calls = 0
   const codexProvider = {
-    async streamTurn(params: { onActivity?: (activity: { kind: 'command'; title: string; status: 'started' }) => void }) {
+    async streamTurn(params: { onActivity?: (activity: ProviderActivity) => void }) {
       calls += 1
+      // Codex's internal command/plan/diff stream is suppressed for the
+      // subscription; only warnings and model reroutes reach the transcript.
       params.onActivity?.({ kind: 'command', title: 'Running command', status: 'started' })
+      params.onActivity?.({ kind: 'warning', title: 'Codex warning', status: 'warning' })
       return { content: [{ type: 'text', text: 'completed' }] as ContentBlock[], usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 } }
     },
   }
@@ -66,7 +71,14 @@ test('ChatGPT subscription execution requires one explicit delegated-agent appro
   }))
   expect(calls).toBe(1)
   expect(events).toEqual(['codex_delegate'])
-  expect(activities).toEqual(['Running command'])
+  expect(activities).toEqual(['Codex warning'])
+
+  // Second turn in the same session: approved once already, so no approval
+  // callback is consulted and the turn just runs.
+  let approvals = 0
+  await withActionGovernor(createActionGovernor({ mode: 'supervised', approve: async () => { approvals += 1; return true } }), () => runAgentLoop(options))
+  expect(approvals).toBe(0)
+  expect(calls).toBe(2)
 })
 
 test('runAgentLoop sums usage across multiple tool-call round trips, not just the last one', async () => {
