@@ -118,6 +118,17 @@ Durable run state, checkpoints, task snapshots, journals, ledgers, schedules, co
 
 The React artifact server binds to loopback and uses a bounded, traversal-safe resolver. It is intended for local preview, not public hosting. Elia remains a local application rather than a hardened multi-user sandbox: it does not provide kernel isolation, hosted identity, a secure keyring, or guaranteed protection from a user who grants the process broad operating-system access. See [`SECURITY.md`](SECURITY.md) for reporting and supported-version guidance.
 
+#### Deterministic policy: `.elia/policy.json`
+
+A checked-in `.elia/policy.json` tightens the autonomy governor before the model runs — enforced by code at the tool boundary, not by a prompt the model can argue its way around. It can only make the governor stricter, never looser. Fields (all optional):
+
+- `denyTools` — tool names blocked outright, e.g. `["codex_delegate", "communication"]`.
+- `denyIntents` — governor intents blocked outright, e.g. `["github.push", "browser.click"]` (a `tool.action` pair, so `github.push` is denied while `github.commit` is not).
+- `denyCommandPatterns` — case-insensitive regular expressions; a `run_command` is blocked when any matches.
+- `requireApprovalAtOrAbove` — `"safe"`, `"review"`, or `"critical"` (default). Any action assessed at this risk or higher stops being auto-allowed in unattended mode and needs an explicit approval.
+
+A malformed policy file fails loudly rather than being ignored. A refused action reports `Blocked by .elia/policy.json`.
+
 ### Automatic provider fallback
 
 The selected provider and model remain primary. Use `/model auto` or set `ELIA_ROUTING_MODE=auto` to try another configured provider when the selected route fails before output because of a missing model, outage, network error, rate limit, or retryable server response. Fallback is immediate when another ready provider exists and never retries after partial output.
@@ -143,6 +154,19 @@ The deterministic `battmann` tool supports dependence-aware evidence updates and
 These controls make forecasts reproducible and harder to contaminate; they do not establish that Battmann is universally more accurate than external forecasting systems. That requires a large independently resolved live sample, a frozen evaluation protocol, competitive baselines, and external review. SQLite is a local single-workspace store, and document classification labels are metadata rather than enterprise access control.
 
 Recurring intelligence runs preserve the mode: `elia schedule add --mode battmann --every 6h "refresh the supply-chain risk brief"`. The daemon is local and runs only while its host is online.
+
+### Cybersecurity mode
+
+Start with `elia --cyber` or switch with `/mode cyber`. Cyber mode is for **authorized** security testing, CTF, vulnerability research, and defensive hardening — it acts only against systems the user owns or has written authorization to test, and refuses destructive techniques, denial-of-service, opportunistic scanning of third-party infrastructure, and detection-evasion tooling built for malicious use.
+
+Work is organised around an **engagement** — a `workspace/engagements/<slug>/` folder scaffolded by `new_engagement` with a `SCOPE.md` authorization record that every downstream action stays inside:
+
+- **`run_security_tool`** runs any installed scanner (nmap, nuclei, sqlmap, gobuster, …) for a scaffolded engagement and saves the raw output under `recon/`.
+- **`http_probe`** sends one HTTP request to an in-scope target and records the full request/response pair to `recon/traffic.jsonl`. The target host must appear in `SCOPE.md` — hostnames, IPs, and IPv4 CIDR ranges are matched, and an out-of-scope host is refused.
+- **`log_finding`** records a confirmed finding and *requires evidence*: one or more files under `recon/` that actually exist. A claim with no tool output behind it is rejected — a finding cites a file or it does not get logged. Findings land in `findings.jsonl` and `findings.md`.
+- **`engagement_report`** compiles `report.md` from the logged findings, ordered by severity, with an excerpt of each finding's evidence embedded for reproducibility. Any finding whose evidence file has since gone missing is flagged and the report is marked a **draft**.
+
+`http_probe` and `run_security_tool` reach a live target, so they are critical actions that need an authorization boundary; in unattended mode they are blocked, while `log_finding` (a workspace-local write) is not. Recurring authorized re-tests preserve the mode: `elia schedule add --mode cyber --every 6h "re-run recon for the acme-webapp engagement"`.
 
 ### Web research providers
 

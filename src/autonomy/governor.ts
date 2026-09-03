@@ -3,6 +3,7 @@ import type { ToolEvent } from '../agentLoop.ts'
 import { currentAgent, isPathWithinWorkspace } from './context.ts'
 import { commandMayReadSensitiveData } from './sensitivePaths.ts'
 import { pauseToolSpinner, resumeToolSpinner } from '../ui/stream.ts'
+import { applyPolicy } from './policy.ts'
 
 export type ActionRisk = 'safe' | 'review' | 'critical'
 export type ActionDecision = 'allow' | 'approve' | 'block'
@@ -218,6 +219,24 @@ export function assessAction(request: ActionRequest, cwd = currentAgent().cwd ??
     return assessment('critical', 'approve', 'run_security_tool executes an active security tool against a live target and needs an authorization record', 'run_security_tool', resources, false)
   }
 
+  // http_probe sends a live request to a target the engagement's SCOPE.md
+  // already authorizes (the tool refuses an out-of-scope host itself), but it
+  // still reaches a real system and can carry an exploit payload, so it needs
+  // the same authorization boundary as run_security_tool.
+  if (name === 'http_probe') {
+    return assessment('critical', 'approve', 'http_probe sends a live HTTP request to an engagement target and needs an authorization record', 'http_probe', resources, false)
+  }
+
+  // log_finding and engagement_report only write inside the engagement folder
+  // under workspace/ — no target is touched. engagement_report produces a
+  // document artifact, so it is a review-level write like the other reporters.
+  if (name === 'log_finding') {
+    return assessment('safe', 'allow', 'log_finding appends a workspace-local finding record backed by existing recon evidence', 'log_finding', resources, true)
+  }
+  if (name === 'engagement_report') {
+    return assessment('review', 'approve', 'engagement_report compiles a workspace-local Markdown report from logged findings', 'engagement_report', resources, true)
+  }
+
   if (name === 'preview' || name === 'task') {
     return assessment('review', 'approve', `${name} can create an external process or delegate work`, name, resources, true)
   }
@@ -258,7 +277,15 @@ export function createActionGovernor(options: { mode?: GovernanceMode; approve?:
   return {
     stats: () => ({ maxActions, consumed: actionCount, exhausted: maxActions > 0 && actionCount >= maxActions, blockedByBudget }),
     async check(request) {
-      const assessment = assessAction(request, options.cwd)
+      const baseAssessment = assessAction(request, options.cwd)
+      // A checked-in .elia/policy.json can only tighten this: block the action
+      // outright, or raise its decision from allow to approve. Applied before
+      // the budget check so a policy-blocked action never consumes budget.
+      const policied = applyPolicy(baseAssessment, request, options.cwd)
+      const assessment = policied.assessment
+      if (policied.blocked) {
+        return { allowed: false, assessment, message: policied.message }
+      }
       if (maxActions > 0 && actionCount >= maxActions) {
         blockedByBudget += 1
         return {
