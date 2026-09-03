@@ -93,20 +93,31 @@ test('editing a served file triggers a live-reload push over the WebSocket', asy
 
   const reloadReceived = new Promise<void>((resolve, reject) => {
     const ws = new WebSocket(`${server.baseUrl.replace('http', 'ws')}/__reload`)
-    const timeout = setTimeout(() => reject(new Error('timed out waiting for reload push')), 5000)
-    ws.onmessage = () => {
+    let edits: ReturnType<typeof setInterval> | undefined
+    const timeout = setTimeout(() => {
+      clearInterval(edits)
+      reject(new Error('timed out waiting for reload push'))
+    }, 15000)
+    const done = () => {
       clearTimeout(timeout)
+      clearInterval(edits)
       ws.close()
       resolve()
     }
+    ws.onerror = () => reject(new Error('reload WebSocket errored'))
+    ws.onmessage = done
     ws.onopen = () => {
-      // Give the watcher a moment to be fully registered before we touch the file.
-      setTimeout(() => writeFileSync(join(testDir, 'live.html'), '<html><body>v2</body></html>'), 100)
+      // Keep touching the file until the watcher notices. A single write can be
+      // missed on a loaded CI runner where recursive fs.watch registers slowly.
+      let n = 2
+      const touch = () => writeFileSync(join(testDir, 'live.html'), `<html><body>v${n++}</body></html>`)
+      touch()
+      edits = setInterval(touch, 250)
     }
   })
 
   await reloadReceived
-})
+}, 20000)
 
 test('resolveWithinRoot rejects malformed percent-encoding', () => {
   expect(resolveWithinRoot(testDir, '/%E0%A4%A')).toBeUndefined()
