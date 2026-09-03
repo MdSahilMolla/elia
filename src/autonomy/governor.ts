@@ -187,15 +187,24 @@ export function assessAction(request: ActionRequest, cwd = currentAgent().cwd ??
 
   if (name === 'battmann') {
     const action = typeof input.action === 'string' ? input.action : ''
-    if (action === 'report' || action === 'report_from_store') {
+    if (action === 'report' || action === 'report_from_store' || action === 'dashboard') {
       const path = typeof input.outputPath === 'string' ? input.outputPath : ''
       return path && isPathWithinWorkspace(path, cwd)
-        ? assessment('review', 'approve', 'Battmann report writes checkpointed local Markdown and JSON artifacts', 'battmann', [path], true)
-        : assessment('critical', 'approve', 'Battmann report output is missing or outside the active workspace', 'battmann', path ? [path] : [], false)
+        ? assessment('review', 'approve', 'Battmann report and dashboard actions write checkpointed local Markdown, JSON, and HTML artifacts', 'battmann', [path], true)
+        : assessment('critical', 'approve', 'Battmann artifact output is missing or outside the active workspace', 'battmann', path ? [path] : [], false)
     }
     const storePath = typeof input.storePath === 'string' ? input.storePath : '.elia/battmann.sqlite'
     if (!isPathWithinWorkspace(storePath, cwd)) return assessment('critical', 'approve', 'Battmann store path is outside the active workspace or invalid', `battmann.${action || 'unknown'}`, [storePath], false)
-    const readOnly = new Set(['forecast', 'backtest', 'question_detail', 'list_questions', 'scorecard', 'workspace_snapshot'])
+    if (action === 'stage_deployment') {
+      const reportPath = typeof input.reportPath === 'string' ? input.reportPath : ''
+      return reportPath && isPathWithinWorkspace(reportPath, cwd)
+        ? assessment('review', 'approve', 'Battmann stage_deployment writes a versioned deployment manifest into .elia/artifacts/deploy; nothing leaves the machine', 'battmann.stage_deployment', ['.elia/artifacts/deploy'], true)
+        : assessment('critical', 'approve', 'Battmann stage_deployment needs an existing report path inside the active workspace', 'battmann.stage_deployment', reportPath ? [reportPath] : [], false)
+    }
+    const readOnly = new Set([
+      'forecast', 'ensemble', 'backtest', 'risk_assessment', 'consequence_chain', 'exposure_assessment', 'posture_assessment', 'effector_pairing', 'alternatives', 'question_detail', 'list_questions', 'scorecard', 'workspace_snapshot',
+      'object_detail', 'list_objects', 'find_path', 'explain_causality', 'list_datasets', 'dataset_lineage', 'list_action_proposals', 'geo_query', 'situation_snapshot', 'deployment_status', 'audit_trail', 'list_indicators', 'indicator_series',
+    ])
     return readOnly.has(action)
       ? assessment('safe', 'allow', `Battmann ${action} is a deterministic calculation or workspace-local read`, `battmann.${action}`, [storePath], true)
       : assessment('safe', 'allow', `Battmann ${action} is an append-only or versioned write to the workspace-local intelligence store`, `battmann.${action || 'unknown'}`, [storePath], true)
