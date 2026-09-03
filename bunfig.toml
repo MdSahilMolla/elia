@@ -1,0 +1,7 @@
+[test]
+# A handful of tests exercise real IO — a localhost HTTP/WebSocket bridge,
+# recursive fs.watch, subprocess probes (git/gh). On a loaded CI runner the
+# cold first run of one of these can exceed bun's default 5s per-test deadline
+# even though the assertion itself is fast. 20s keeps genuine hangs bounded
+# while giving those tests headroom.
+timeout = 20000
