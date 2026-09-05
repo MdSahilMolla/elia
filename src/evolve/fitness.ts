@@ -20,6 +20,18 @@ import { MAX_SHELL_OUTPUT_LENGTH, readBoundedOutput, terminateProcessGroup } fro
 
 /** A single task gets a generous ceiling; a candidate that hangs should score badly, not stall the run forever. */
 const TASK_TIMEOUT_MS = 300_000
+
+/**
+ * A task's own ceiling, scaled to the budget it asked for.
+ *
+ * A wall-clock limit tuned for 30 steps in a fixture repo would score an
+ * 80-step task in a real repository as a hang, which measures the timeout
+ * instead of the agent. Tasks that say nothing keep the original ceiling.
+ */
+function timeoutFor(task: BenchTask): number {
+  if (!task.maxSteps) return TASK_TIMEOUT_MS
+  return Math.max(TASK_TIMEOUT_MS, Math.round((TASK_TIMEOUT_MS / 30) * task.maxSteps))
+}
 /** Parallel tasks are faster, but provider rate limits turn a high number into retries and noise. */
 const DEFAULT_CONCURRENCY = 2
 
@@ -165,10 +177,11 @@ async function runOneTask(task: BenchTask, sourceRoot: string): Promise<TaskOutc
     })
 
     let timedOut = false
+    const taskTimeoutMs = timeoutFor(task)
     const timeout = setTimeout(() => {
       timedOut = true
       terminateProcessGroup(proc)
-    }, TASK_TIMEOUT_MS)
+    }, taskTimeoutMs)
 
     let stdout = ''
     let stderr = ''
@@ -187,7 +200,7 @@ async function runOneTask(task: BenchTask, sourceRoot: string): Promise<TaskOutc
 
     const run = parseRunOutput(stdout)
     if (timedOut) {
-      return { ...base, error: `timed out after ${TASK_TIMEOUT_MS}ms`, detail: 'agent did not finish', keptDir: dir }
+      return { ...base, error: `timed out after ${taskTimeoutMs}ms`, detail: 'agent did not finish', keptDir: dir }
     }
     if (!run) {
       return {

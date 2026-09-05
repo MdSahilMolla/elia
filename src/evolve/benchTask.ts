@@ -68,7 +68,8 @@ try {
     verbose: false,
     cache,
     prefetcher: createPrefetcher({ tools, cache }),
-    maxSteps: 30,
+    // A fixture-repo default; a task in a real repository asks for its own.
+    maxSteps: task.maxSteps ?? 30,
   })
 
   emit({

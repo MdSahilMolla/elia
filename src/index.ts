@@ -131,7 +131,10 @@ Office workflows:
   Excel workbooks; presentation creates an editable management .pptx plus analysis sidecar.
 
 Self-improvement:
-  elia bench                  Score the current elia against its own benchmark suite
+  elia bench                  Score the current elia against its synthetic benchmark suite
+  elia bench --history        Score it on tasks taken from this repository's own git history
+  elia bench --all            Score it on both suites
+  elia bench --harvest        Rebuild the history task set from git (no model calls)
   elia bench-latency          Measure elia's own loop/startup/speculation overhead (deterministic,
                               no API key); --update-baseline to record, --strict to fail on wall drift
   elia evolve                 Improve elia's own source: hypothesise one change, build it
@@ -522,14 +525,61 @@ async function runAuto(): Promise<void> {
   }
 }
 
+/**
+ * Rebuilds the history-derived task set from this repository's own git log.
+ *
+ * Runs no model and needs no API key: it only checks out past trees and runs
+ * their tests, twice per candidate, to prove each task fails before the real
+ * commit and passes after it.
+ */
+async function runBenchHarvest(): Promise<void> {
+  const { harvest, writeTasksFile, TASKS_FILE } = await import('./evolve/history/harvest.ts')
+
+  const scan = strictInteger(flagValue('--scan') ?? '200') ?? 200
+  const limit = strictInteger(flagValue('--limit') ?? '12') ?? 12
+
+  writeNotice(
+    `Harvesting benchmark tasks from the last ${scan} commits. Each candidate is checked out and its tests run twice — this makes no model calls.`,
+  )
+  const result = await harvest({ scan, limit, onProgress: (message) => writeUsageLine(message) })
+
+  if (result.tasks.length === 0) {
+    writeNotice(`No task could be validated out of ${result.considered} candidates; leaving the existing set alone.`)
+    process.exitCode = 1
+    return
+  }
+
+  writeTasksFile(result.tasks)
+  writeNotice(
+    `Wrote ${result.tasks.length} validated tasks to ${TASKS_FILE} (${result.rejected.length} of ${result.considered} candidates could not be proven).`,
+  )
+}
+
 async function runBench(): Promise<void> {
+  if (hasFlag('--harvest')) return runBenchHarvest()
+
+  const { BENCH_TASKS, allBenchTasks } = await import('./evolve/suite.ts')
+  const { historyTasks } = await import('./evolve/history/suite.ts')
+
+  // Synthetic tasks stay the default: they are seconds each, and they are the
+  // set the evolution loop has always compared candidates on. The history tasks
+  // are real checkouts of this repository and cost minutes, so they are asked
+  // for explicitly.
+  const tasks = hasFlag('--all') ? allBenchTasks() : hasFlag('--history') ? historyTasks() : BENCH_TASKS
+  if (tasks.length === 0) {
+    writeNotice('No tasks to run. `elia bench --harvest` builds the history-derived set.')
+    process.exitCode = 1
+    return
+  }
+
   if (!(await ensureFirstRunProviderSetup())) return
   await loadRuntimeSkills()
   const { measureFitness, renderScorecard } = await import('./evolve/fitness.ts')
   const { ELIA_ROOT } = await import('./config.ts')
 
-  writeNotice('Scoring the current elia against its own benchmark suite — this runs real agent loops.')
+  writeNotice(`Scoring the current elia against ${tasks.length} benchmark tasks — this runs real agent loops.`)
   const card = await measureFitness({
+    tasks,
     sourceRoot: ELIA_ROOT,
     onTaskDone: (outcome) =>
       writeUsageLine(`  ${outcome.passed ? '✓' : '✗'} ${outcome.taskId} — ${outcome.error ?? outcome.detail}`),
@@ -1427,6 +1477,7 @@ async function runInteractive(): Promise<void> {
     await import('./checkpoint.ts')
   const { setActiveLedgerSession, countEpisodes } = await import('./ledger.ts')
   const { renderContextStatus } = await import('./compaction.ts')
+  const { compactionThresholdFor } = await import('./contextWindow.ts')
   const { writeSessionHeartbeat, writeSessionEnded } = await import('./sessionRegistry.ts')
 
   const oneShotPrompt = positionals(['--resume']).join(' ').trim()
@@ -1785,7 +1836,7 @@ async function runInteractive(): Promise<void> {
     }
     await persistInteractiveSession()
     const taskSummary = renderTaskSummary(taskSessions)
-    const contextLine = renderContextStatus(messages, await countEpisodes(sessionId))
+    const contextLine = renderContextStatus(messages, await countEpisodes(sessionId), compactionThresholdFor(config.model))
     writeUsageLine(taskSummary ? `${contextLine}  ·  ${dim(taskSummary)}` : contextLine)
     await printTurnProfileReport()
     return
@@ -3010,7 +3061,7 @@ async function runInteractive(): Promise<void> {
     }
     await persistInteractiveSession()
     const taskSummary = renderTaskSummary(taskSessions)
-    const contextLine = renderContextStatus(messages, await countEpisodes(sessionId))
+    const contextLine = renderContextStatus(messages, await countEpisodes(sessionId), compactionThresholdFor(config.model))
     const { formatCompactUsage } = await import('./usage.ts')
     writeUsageLine([contextLine, dim(formatCompactUsage(config.model)), taskSummary ? dim(taskSummary) : ''].filter(Boolean).join('  ·  '))
     // The full workspace panel is shown once at startup and on demand via

@@ -2,6 +2,10 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { runShell } from '../shell.ts'
+import { historyTasks } from './history/suite.ts'
+import type { BenchCheck, BenchTask } from './task.ts'
+
+export type { BenchCheck, BenchTask } from './task.ts'
 
 /**
  * Elia's fitness function.
@@ -18,22 +22,6 @@ import { runShell } from '../shell.ts'
  * There is no partial credit and no model in the scoring path.
  */
 
-export interface BenchCheck {
-  passed: boolean
-  detail: string
-}
-
-export interface BenchTask {
-  id: string
-  /** Relative importance in the weighted pass rate. */
-  weight: number
-  /** What elia is asked to do, verbatim. */
-  prompt: string
-  /** Builds the starting repository in `dir`. */
-  setup(dir: string): Promise<void>
-  /** Decides pass/fail by inspecting `dir` afterwards. Must never call a model. */
-  check(dir: string): Promise<BenchCheck>
-}
 
 function write(dir: string, relativePath: string, content: string): void {
   const target = join(dir, relativePath)
@@ -639,8 +627,24 @@ test('inclusiveRange handles a single value', () => {
   },
 ]
 
+/**
+ * Every task elia can be measured on: the synthetic competency tasks above, plus
+ * whatever `elia bench --harvest` has validated out of this repository's own
+ * history.
+ *
+ * Kept as one lookup because the child process in benchTask.ts only ever gets a
+ * task id, and should not have to know which suite it came from.
+ */
+export function allBenchTasks(): BenchTask[] {
+  return [...BENCH_TASKS, ...historyTasks()]
+}
+
 export function taskById(id: string): BenchTask | undefined {
-  return BENCH_TASKS.find((task) => task.id === id)
+  return allBenchTasks().find((task) => task.id === id)
 }
 
 export const TOTAL_WEIGHT = BENCH_TASKS.reduce((sum, task) => sum + task.weight, 0)
+
+export function totalWeight(tasks: BenchTask[]): number {
+  return tasks.reduce((sum, task) => sum + task.weight, 0)
+}

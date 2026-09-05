@@ -43,8 +43,18 @@ interface GitResult {
  * before git ever sees it. Spawning git directly sidesteps shell re-lexing
  * entirely, the same way passing a real argv array always has.
  */
-export async function runGit(args: string[], cwd?: string): Promise<GitResult> {
-  const proc = Bun.spawn(['git', ...args], { stdout: 'pipe', stderr: 'pipe', ...(cwd ? { cwd } : {}) })
+export async function runGit(args: string[], cwd?: string, env?: Record<string, string>): Promise<GitResult> {
+  const proc = Bun.spawn(['git', ...args], {
+    stdout: 'pipe',
+    stderr: 'pipe',
+    ...(cwd ? { cwd } : {}),
+    // Merged rather than replacing the environment: git still needs PATH, and on
+    // Windows it needs the rest of the ambient environment to find its own
+    // helpers. Callers pass only the variables they mean to override — notably
+    // GIT_INDEX_FILE, which is how a tree can be written out to some other
+    // directory without staging anything in the real repository's index.
+    ...(env ? { env: { ...process.env, ...env } } : {}),
+  })
   const [stdout, stderr, exitCode] = await Promise.all([
     readBoundedOutput(proc.stdout, MAX_SHELL_OUTPUT_LENGTH),
     readBoundedOutput(proc.stderr, MAX_SHELL_OUTPUT_LENGTH),

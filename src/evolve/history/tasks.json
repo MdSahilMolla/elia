@@ -1,0 +1,232 @@
+[
+  {
+    "id": "hist-f3e622a",
+    "sha": "f3e622a18e16bdc600ff339f0b9ff9a05da3d784",
+    "parent": "18367d71751872744ab21485a77719bee345027f",
+    "subject": "Make the Ink render tests wait on frame content, not a fixed sleep",
+    "testFiles": [
+      "src/ui/app/App.test.tsx",
+      "src/ui/app/components/InputBox.test.tsx"
+    ],
+    "sourceFiles": [
+      "src/ui/app/testFixtures.ts"
+    ],
+    "verifyCommand": "bun test --timeout=20000 src/ui/app/App.test.tsx src/ui/app/components/InputBox.test.tsx",
+    "evidence": {
+      "failingBefore": 2,
+      "passingAfter": 9
+    },
+    "weight": 2
+  },
+  {
+    "id": "hist-43c1f6c",
+    "sha": "43c1f6ccb071fb7064d4b68431653f2ce0e50738",
+    "parent": "e2783b107cc15e93f3ad3e1190421362e2303ce8",
+    "subject": "Report where a file landed, and re-verify when the user says elia is wrong",
+    "testFiles": [
+      "src/autonomy/disputeNudge.test.ts",
+      "src/tools/tools.test.ts"
+    ],
+    "sourceFiles": [
+      "src/agent.ts",
+      "src/autonomy/disputeNudge.ts",
+      "src/tools/writeFile.ts"
+    ],
+    "verifyCommand": "bun test --timeout=20000 src/autonomy/disputeNudge.test.ts src/tools/tools.test.ts",
+    "evidence": {
+      "failingBefore": 2,
+      "passingAfter": 36
+    },
+    "weight": 2
+  },
+  {
+    "id": "hist-e2783b1",
+    "sha": "e2783b107cc15e93f3ad3e1190421362e2303ce8",
+    "parent": "22942798987cf1e469655541aca8fa2ba7e658b6",
+    "subject": "Scope the preview server to the target's own directory + serve directory indexes",
+    "testFiles": [
+      "src/preview/server.test.ts"
+    ],
+    "sourceFiles": [
+      "src/preview/server.ts",
+      "src/tools/preview.ts"
+    ],
+    "verifyCommand": "bun test --timeout=20000 src/preview/server.test.ts",
+    "evidence": {
+      "failingBefore": 1,
+      "passingAfter": 12
+    },
+    "weight": 2
+  },
+  {
+    "id": "hist-98a1b3f",
+    "sha": "98a1b3f5a7cb022c0057fa2422a74047869d52aa",
+    "parent": "b4101fc394f71c3759b0fbc344a844cb9e123d3f",
+    "subject": "Rewind the working tree to the last green checkpoint on a wrong-approach stall",
+    "testFiles": [
+      "src/autonomy/treeSnapshot.test.ts"
+    ],
+    "sourceFiles": [
+      "src/autonomy/loop.ts",
+      "src/autonomy/treeSnapshot.ts",
+      "src/autonomy/worktree.ts"
+    ],
+    "verifyCommand": "bun test --timeout=20000 src/autonomy/treeSnapshot.test.ts",
+    "evidence": {
+      "failingBefore": 1,
+      "passingAfter": 5
+    },
+    "weight": 2
+  },
+  {
+    "id": "hist-a74115b",
+    "sha": "a74115b19c6d6b2d3233cefff21b1c5329c67201",
+    "parent": "1c5350a59781edb8c46691406509c4e1b9f83e1d",
+    "subject": "Use `elia-ai` as the npm package name",
+    "testFiles": [
+      "src/updateCheck.test.ts"
+    ],
+    "sourceFiles": [
+      "src/updateCheck.ts"
+    ],
+    "verifyCommand": "bun test --timeout=20000 src/updateCheck.test.ts",
+    "evidence": {
+      "failingBefore": 1,
+      "passingAfter": 4
+    },
+    "weight": 2
+  },
+  {
+    "id": "hist-5995574",
+    "sha": "59955747fc9b6fe08c2a4676b139d4e9535a2ee4",
+    "parent": "ef56807698ebfb03ccf0e2f9ee2b809b64bd1b4b",
+    "subject": "Rename package to unscoped `elia` for `npm install elia`",
+    "testFiles": [
+      "src/updateCheck.test.ts"
+    ],
+    "sourceFiles": [
+      "src/updateCheck.ts"
+    ],
+    "verifyCommand": "bun test --timeout=20000 src/updateCheck.test.ts",
+    "evidence": {
+      "failingBefore": 1,
+      "passingAfter": 4
+    },
+    "weight": 2
+  },
+  {
+    "id": "hist-42154fe",
+    "sha": "42154fe497fb3beaf9b83defa4d4a8c7fa79525a",
+    "parent": "73c0c6a7e5806e6aca4f60db2579980ed9f1be61",
+    "subject": "Log completion-assessor calibration and flag verdict/fact contradictions",
+    "testFiles": [
+      "src/autonomy/calibration.test.ts"
+    ],
+    "sourceFiles": [
+      "src/autonomy/calibration.ts",
+      "src/autonomy/loop.ts",
+      "src/index.ts"
+    ],
+    "verifyCommand": "bun test --timeout=20000 src/autonomy/calibration.test.ts",
+    "evidence": {
+      "failingBefore": 1,
+      "passingAfter": 7
+    },
+    "weight": 2
+  },
+  {
+    "id": "hist-73c0c6a",
+    "sha": "73c0c6a7e5806e6aca4f60db2579980ed9f1be61",
+    "parent": "2f3e2e12cead747f18bf0ff08bebf6c8b988f8db",
+    "subject": "Classify why a repair loop is stuck and act on it, not just stop",
+    "testFiles": [
+      "src/autonomy/stuck.test.ts"
+    ],
+    "sourceFiles": [
+      "src/autonomy/loop.ts",
+      "src/autonomy/stuck.ts"
+    ],
+    "verifyCommand": "bun test --timeout=20000 src/autonomy/stuck.test.ts",
+    "evidence": {
+      "failingBefore": 1,
+      "passingAfter": 10
+    },
+    "weight": 2
+  },
+  {
+    "id": "hist-bfd7bab",
+    "sha": "bfd7bab645eecc4b75504b44868fb0c0162a5f45",
+    "parent": "697cc56eebc9686012cababe9e244631634e47dc",
+    "subject": "Stop a thrashing repair loop early with a deterministic progress signal",
+    "testFiles": [
+      "src/autonomy/progress.test.ts"
+    ],
+    "sourceFiles": [
+      "src/autonomy/loop.ts",
+      "src/autonomy/progress.ts"
+    ],
+    "verifyCommand": "bun test --timeout=20000 src/autonomy/progress.test.ts",
+    "evidence": {
+      "failingBefore": 1,
+      "passingAfter": 12
+    },
+    "weight": 2
+  },
+  {
+    "id": "hist-697cc56",
+    "sha": "697cc56eebc9686012cababe9e244631634e47dc",
+    "parent": "871821fa80399a528744affdf496042d801c230b",
+    "subject": "Detect Edge/Brave/Chromium for preview, not just Chrome",
+    "testFiles": [
+      "src/preview/launchChrome.test.ts"
+    ],
+    "sourceFiles": [
+      "src/preview/launchChrome.ts"
+    ],
+    "verifyCommand": "bun test --timeout=20000 src/preview/launchChrome.test.ts",
+    "evidence": {
+      "failingBefore": 1,
+      "passingAfter": 5
+    },
+    "weight": 2
+  },
+  {
+    "id": "hist-341e1f3",
+    "sha": "341e1f38f60f1b6fde959f850a56122e4f67158e",
+    "parent": "1a0594532fe7ccd18232a05104b2da85b6cbc0e2",
+    "subject": "Preserve real tool output on a failed action postcondition",
+    "testFiles": [
+      "src/agentLoop.test.ts"
+    ],
+    "sourceFiles": [
+      "src/agentLoop.ts"
+    ],
+    "verifyCommand": "bun test --timeout=20000 src/agentLoop.test.ts",
+    "evidence": {
+      "failingBefore": 1,
+      "passingAfter": 10
+    },
+    "weight": 2
+  },
+  {
+    "id": "hist-1a05945",
+    "sha": "1a0594532fe7ccd18232a05104b2da85b6cbc0e2",
+    "parent": "305b7c2ce9e2f39897c19373776913f0a923ed10",
+    "subject": "Fix two autonomous-loop failures found by running real end-to-end tasks",
+    "testFiles": [
+      "src/agentLoop.test.ts",
+      "src/tools/tools.test.ts"
+    ],
+    "sourceFiles": [
+      "src/agentLoop.ts",
+      "src/autonomy/loop.ts",
+      "src/tools/editFile.ts"
+    ],
+    "verifyCommand": "bun test --timeout=20000 src/agentLoop.test.ts src/tools/tools.test.ts",
+    "evidence": {
+      "failingBefore": 4,
+      "passingAfter": 39
+    },
+    "weight": 2
+  }
+]
