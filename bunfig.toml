@@ -1,0 +1,4 @@
+[test]
+# Pin the terminal size before any test module loads, so Ink never shells out
+# to `tput` mid-render. See scripts/testPreload.ts for the full story.
+preload = ["./scripts/testPreload.ts"]
