@@ -1,5 +1,6 @@
 import { autoFallbacksFor, config } from './config.ts'
 import { beginCompaction, type PendingCompaction } from './compaction.ts'
+import { compactionThresholdFor } from './contextWindow.ts'
 import { createRedundantReadTracker, isLoneBatchableRead, serialReadNudge } from './autonomy/toolBatchingNudge.ts'
 import type { ChatMessage, ContentBlock, Provider, ProviderActivity, Usage } from './providers/types.ts'
 import type { Tool } from './tools/types.ts'
@@ -238,7 +239,9 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
         pendingCompaction = undefined // archive failed or produced nothing — drop it
       }
     }
-    pendingCompaction ??= beginCompaction(messages)
+    // Budget derived from the model actually in use, so a 200k-window model is
+    // not compacted at the same point as an unknown 50k one.
+    pendingCompaction ??= beginCompaction(messages, compactionThresholdFor(config.model))
 
     if (steps >= maxSteps) {
       messages.push({

@@ -2,6 +2,7 @@ import type { ChatMessage, ContentBlock } from './providers/types.ts'
 import { archiveEpisode } from './ledger.ts'
 import { formatTokenCount } from './usage.ts'
 import { gold } from './ui/theme.ts'
+import { compactionThresholdFor } from './contextWindow.ts'
 
 /**
  * Auto-compacts a long-running conversation so a growing `--continue` session
@@ -14,8 +15,15 @@ import { gold } from './ui/theme.ts'
 
 /** Rough chars-per-token; good enough for a trigger threshold, not for billing. */
 const CHARS_PER_TOKEN_ESTIMATE = 4
-/** Compact once the tracked history crosses this many estimated tokens. Conservative on purpose — elia is multi-provider, and some configurable models have far smaller context windows than the big frontier ones. */
-export const COMPACTION_TOKEN_THRESHOLD = 30_000
+/**
+ * Fallback trigger for callers that cannot say which model is in use.
+ *
+ * Kept as the historical constant so nothing silently gets a *smaller* working
+ * window than it had; callers that know the model should pass its own budget
+ * from `contextWindow.ts` instead, which is larger wherever the model can
+ * actually hold more.
+ */
+export const COMPACTION_TOKEN_THRESHOLD = compactionThresholdFor('')
 /** Always keep at least this many of the most recent messages verbatim. */
 const KEEP_RECENT_MESSAGES = 12
 
@@ -107,9 +115,9 @@ export interface PendingCompaction {
  * `cutIndex` stays valid for the life of the handle: the loop only ever appends
  * past it, never rewrites the stable prefix the archive covers.
  */
-export function beginCompaction(messages: ChatMessage[]): PendingCompaction | undefined {
+export function beginCompaction(messages: ChatMessage[], threshold = COMPACTION_TOKEN_THRESHOLD): PendingCompaction | undefined {
   if (messages.length <= KEEP_RECENT_MESSAGES) return undefined
-  if (estimateTokens(messages) < COMPACTION_TOKEN_THRESHOLD) return undefined
+  if (estimateTokens(messages) < threshold) return undefined
 
   const cutIndex = findSafeCutIndex(messages, messages.length - KEEP_RECENT_MESSAGES)
   if (cutIndex === undefined || cutIndex === 0) return undefined
@@ -160,10 +168,10 @@ export function beginCompaction(messages: ChatMessage[]): PendingCompaction | un
  * anything is actually lost. Deliberately only claims "effectively ∞" once
  * there's real archived history to point to, never as a standing promise.
  */
-export function renderContextStatus(messages: ChatMessage[], archivedEpisodes: number): string {
+export function renderContextStatus(messages: ChatMessage[], archivedEpisodes: number, threshold = COMPACTION_TOKEN_THRESHOLD): string {
   const used = estimateTokens(messages)
-  const pct = Math.min(100, Math.round((used / COMPACTION_TOKEN_THRESHOLD) * 100))
-  const base = `context: ${formatTokenCount(used)} / ${formatTokenCount(COMPACTION_TOKEN_THRESHOLD)} tokens (${pct}%)`
+  const pct = Math.min(100, Math.round((used / threshold) * 100))
+  const base = `context: ${formatTokenCount(used)} / ${formatTokenCount(threshold)} tokens (${pct}%)`
 
   if (archivedEpisodes === 0) return base
   const episodeWord = archivedEpisodes === 1 ? 'episode' : 'episodes'

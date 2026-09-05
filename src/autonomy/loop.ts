@@ -39,6 +39,7 @@ import { classifyStuck, type StuckRecovery } from './stuck.ts'
 import { detectContradictions, recordCompletion } from './calibration.ts'
 import type { CriticVerdict, Proposal } from './types.ts'
 import { appendActionAudit, writeRunReceipt } from './audit.ts'
+import { buildReviewDiffSection } from './reviewContext.ts'
 import { createActionGovernor, withActionGovernor, type ActionApproval, type ActionGovernor, type ActionGovernorStats, type GovernanceMode } from './governor.ts'
 import { GoalGraphStore, withGoalGraph, type GoalGraphStore as GoalGraphStoreType } from './goalGraph.ts'
 import { assessCompletion, type CompletionAssessment } from './outcome.ts'
@@ -699,9 +700,15 @@ Read the changed files in full context. Improve only concrete issues directly re
       // them independently spending a tool round-trip (reasoning + tool_use +
       // tool_result, all billed) to ask git the same question. Three reviewers
       // asking separately used to cost 3x this round-trip for identical output.
-      const [diff, status] = await Promise.all([runShell('git diff HEAD', 30_000, undefined, runSignal), runShell('git status --porcelain=v1', 30_000, undefined, runSignal)])
-      const diffText = diff.stdout.trim() ? clampOutput(diff.stdout.trim(), 8000) : '(no diff against HEAD — check git status below)'
-      const changedFiles = [...diff.stdout.matchAll(/^diff --git a\/(.+) b\/.+$/gm)].map((match) => match[1] ?? '')
+      const [diff, numstat, status] = await Promise.all([
+        runShell('git diff HEAD', 30_000, undefined, runSignal),
+        // The file inventory comes from --numstat rather than from the clamped
+        // diff text, so it stays complete even when the diff itself is cut.
+        runShell('git diff --numstat HEAD', 30_000, undefined, runSignal),
+        runShell('git status --porcelain=v1', 30_000, undefined, runSignal),
+      ])
+      const diffSection = buildReviewDiffSection({ diff: diff.stdout, numstat: numstat.stdout })
+      const changedFiles = diffSection.files.map((file) => file.path)
       // A diff that only touches prose has no exploit surface and no logic to
       // break, so paying for a security and a bug-hunt pass on it is waste —
       // skip straight to the one reviewer whose job (was this actually done?)
@@ -723,8 +730,7 @@ ${proposal.steps.map((step) => `- ${step.id} (${step.role}): ${step.title} — f
 ## Risks flagged during planning
 ${proposal.risks.length > 0 ? proposal.risks.map((risk) => `- ${risk}`).join('\n') : '(none flagged)'}
 
-## What actually changed (git diff HEAD)
-${diffText}
+${diffSection.text}
 
 ## git status
 ${status.stdout.trim() || '(clean)'}

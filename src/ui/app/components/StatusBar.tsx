@@ -1,6 +1,5 @@
 import { Box, Text } from 'ink'
 import { palette } from '../theme.ts'
-import { COMPACTION_TOKEN_THRESHOLD } from '../../../compaction.ts'
 import { formatCostUsd, formatTokenCount } from '../../../usage.ts'
 
 export type ReplMode = 'manual' | 'auto' | 'plan'
@@ -20,6 +19,13 @@ export interface StatusBarProps {
   model: string
   mode: ReplMode
   contextTokens: number
+  /**
+   * Tokens of history allowed before compaction, for the model in use. Passed in
+   * rather than read from a constant here: the budget is model-derived now (see
+   * contextWindow.ts), and a meter filling against the wrong denominator would
+   * read 100% on a model with most of its window still free.
+   */
+  contextLimit: number
   sessionInput: number
   sessionOutput: number
   costUsd: number | undefined
@@ -30,7 +36,7 @@ export interface StatusBarProps {
 }
 
 export function StatusBar(props: StatusBarProps) {
-  const pct = Math.min(100, Math.round((props.contextTokens / COMPACTION_TOKEN_THRESHOLD) * 100))
+  const pct = Math.min(100, Math.round((props.contextTokens / props.contextLimit) * 100))
   // The context meter earns attention as it fills — a compaction pass is coming.
   const meterColor = pct >= 85 ? palette.failure : pct >= 60 ? palette.accent : palette.success
   return (

@@ -20,6 +20,7 @@ import type { ToolItem } from './store.ts'
 import { rollupLine, rollupTools } from './toolSummary.ts'
 import { palette } from './theme.ts'
 import { estimateTokens } from '../../compaction.ts'
+import { compactionThresholdFor } from '../../contextWindow.ts'
 import { sessionUsageSnapshot, estimateCostUsd } from '../../usage.ts'
 import type { ChatMessage } from '../../providers/types.ts'
 
@@ -416,6 +417,7 @@ export function App(props: AppProps) {
   )
 
   const contextTokens = useMemo(() => estimateTokens(props.messages), [props.messages, snap.version])
+  const contextLimit = useMemo(() => compactionThresholdFor(env.model), [env.model])
   const visiblePlan = plan.length > 0 ? plan : providerPlan
 
   return (
@@ -468,6 +470,7 @@ export function App(props: AppProps) {
           model={env.model}
           mode={mode}
           contextTokens={contextTokens}
+          contextLimit={contextLimit}
           sessionInput={usage.usage.inputTokens + usage.usage.cacheReadTokens}
           sessionOutput={usage.usage.outputTokens}
           costUsd={estimateCostUsd(env.model, usage.usage)}
