@@ -4,12 +4,11 @@
 // tool result the screen truncated, `/export` writes the whole conversation to
 // Markdown, `/cost` walks the turn boundaries.
 //
-// Kept deliberately small and framework-free. It is fed from index.ts's
-// `runCheckpointedTurn` (which already receives every `onTool` event plus the
-// turn boundaries) — not from stream.ts — so there is exactly one writer and no
-// risk of double-recording.
-import type { ToolEvent } from '../agentLoop.ts'
-import { redactRecord, redactText } from './redact.ts'
+// index.ts records user turns and local shell output; the shared agent loop
+// records model output, provider activity, and tools for the lead and its children.
+import type { ToolEvent, ConversationMessage } from '../agentLoop.ts'
+import { AsyncLocalStorage } from 'node:async_hooks'
+import { redactArchiveValue, redactSecrets, redactText } from './redact.ts'
 
 export interface TranscriptUserItem {
   kind: 'user'
@@ -41,6 +40,8 @@ export interface TranscriptToolItem {
   status: 'ok' | 'error' | 'cached'
   result: string
   durationMs: number
+  actor?: string
+  decision?: string
 }
 
 export interface TranscriptNoticeItem {
@@ -64,7 +65,7 @@ export interface Transcript {
   appendUser(text: string): void
   appendAssistant(text: string): void
   appendThinking(text: string): void
-  recordTool(event: ToolEvent): void
+  recordTool(event: ToolEvent, actor?: string): void
   notice(text: string): void
   error(text: string): void
   shell(command: string, output: string): void
@@ -74,7 +75,52 @@ export interface Transcript {
   tool(n?: number): TranscriptToolItem | undefined
   toolCount(): number
   clear(): void
+  snapshot(): TranscriptSnapshot
+  restore(snapshot: TranscriptSnapshot): void
   toMarkdown(title?: string): string
+}
+
+export interface TranscriptSnapshot {
+  items: TranscriptItem[]
+  turns: number
+}
+
+export function isTranscriptSnapshot(value: unknown): value is TranscriptSnapshot {
+  if (!value || typeof value !== 'object') return false
+  const snapshot = value as TranscriptSnapshot
+  return Number.isInteger(snapshot.turns) && snapshot.turns >= 0 && Array.isArray(snapshot.items)
+    && snapshot.items.every((item) => item && Number.isInteger(item.id) && Number.isInteger(item.turn)
+      && (item.kind === 'tool'
+        ? typeof item.name === 'string' && typeof item.result === 'string' && !!item.input && typeof item.input === 'object'
+          && ['ok', 'error', 'cached'].includes(item.status) && typeof item.durationMs === 'number'
+        : ['user', 'assistant', 'thinking', 'notice', 'error', 'shell'].includes(item.kind) && typeof item.text === 'string'))
+}
+
+// The same recording follows child agents across awaits without mixing separate sessions.
+const recording = new AsyncLocalStorage<Transcript>()
+export const activeSessionTranscript = (): Transcript | undefined => recording.getStore()
+export function withSessionTranscript<T>(transcript: Transcript, work: () => Promise<T>): Promise<T> {
+  return recording.run(transcript, work)
+}
+
+/** Older sessions can recover the messages they retained, but cannot recreate discarded history. */
+export function transcriptFromMessages(messages: ConversationMessage[]): TranscriptSnapshot {
+  const transcript = createTranscript()
+  const calls = new Map<string, { name: string; input: Record<string, unknown> }>()
+  for (const message of messages) {
+    for (const block of message.content) {
+      if (block.type === 'text') {
+        if (message.role === 'user') transcript.appendUser(block.text)
+        else transcript.appendAssistant(block.text)
+      } else if (block.type === 'tool_use') calls.set(block.id, block)
+      else if (block.type === 'tool_result') {
+        const call = calls.get(block.tool_use_id)
+        transcript.recordTool({ name: call?.name ?? 'unknown', input: call?.input ?? {}, result: block.content, isError: block.is_error, cached: false, durationMs: 0 })
+      }
+    }
+    if (message.role === 'assistant' && !message.content.some((block) => block.type === 'tool_use')) transcript.endTurn()
+  }
+  return transcript.snapshot()
 }
 
 export function createTranscript(): Transcript {
@@ -98,16 +144,18 @@ export function createTranscript(): Transcript {
     appendThinking(text) {
       if (text.trim()) push({ kind: 'thinking', id: nextId++, turn, text })
     },
-    recordTool(event) {
+    recordTool(event, actor) {
       push({
         kind: 'tool',
         id: nextId++,
         turn,
         name: event.name,
-        input: redactRecord(event.input),
+        input: redactArchiveValue(event.input) as Record<string, unknown>,
         status: event.isError ? 'error' : event.cached ? 'cached' : 'ok',
         result: event.result,
         durationMs: event.durationMs,
+        actor,
+        decision: event.assessment?.decision,
       })
     },
     notice(text) {
@@ -134,6 +182,20 @@ export function createTranscript(): Transcript {
       nextId = 1
       turn = 0
     },
+    snapshot() {
+      return {
+        turns: turn,
+        items: list.filter((item) => item.kind !== 'thinking').map((item) => item.kind === 'tool'
+          ? { ...item, input: redactArchiveValue(item.input) as Record<string, unknown>, result: redactSecrets(item.result) }
+          : { ...item, text: redactSecrets(item.text) }),
+      }
+    },
+    restore(snapshot) {
+      if (!isTranscriptSnapshot(snapshot)) throw new Error('Invalid saved session transcript.')
+      list.splice(0, list.length, ...structuredClone(snapshot.items))
+      nextId = list.reduce((max, item) => Math.max(max, item.id + 1), 1)
+      turn = snapshot.turns
+    },
     toMarkdown(title) {
       const out: string[] = [`# ${title ?? 'elia session'}`, '']
       let currentTurn = -1
@@ -153,7 +215,9 @@ export function createTranscript(): Transcript {
             `<details><summary>🔧 ${item.name}${summary ? `(${summary})` : ''} · ${item.status}</summary>`,
             '',
             '```',
-            redactText(item.result, 8_000),
+            JSON.stringify(redactArchiveValue(item.input), null, 2),
+            '',
+            redactSecrets(item.result),
             '```',
             '',
             '</details>',
@@ -165,7 +229,7 @@ export function createTranscript(): Transcript {
           out.push(`> ${item.kind === 'error' ? '⚠️ ' : ''}${item.text}`, '')
         }
       }
-      return out.join('\n')
+      return redactSecrets(out.join('\n'))
     },
   }
 }

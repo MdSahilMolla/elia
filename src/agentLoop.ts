@@ -19,6 +19,7 @@ import { clampOutput } from './shell.ts'
 import { isRepoMutatingTool, withRepoLock } from './repoLock.ts'
 import { profilingEnabled, recordModelCall } from './profile.ts'
 import { codexSubscriptionApprovedThisSession, markCodexSubscriptionApproved } from './providers/codexSubscription.ts'
+import { activeSessionTranscript } from './ui/transcript.ts'
 
 export type ConversationMessage = ChatMessage
 
@@ -147,13 +148,20 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
     model,
     fallbacks,
     maxSteps = DEFAULT_MAX_STEPS,
-    onTool,
+    onTool: toolListener,
     onToolStart,
     cache,
     prefetcher,
     signal,
     drainSteering,
   } = opts
+
+  const transcript = activeSessionTranscript()
+  const actor = currentAgent().name
+  const onTool = (event: ToolEvent): void => {
+    transcript?.recordTool(event, actor)
+    toolListener?.(event)
+  }
 
   /**
    * Splices any pending operator steering into `messages` as a user turn.
@@ -166,6 +174,7 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
     if (pending.length === 0) return false
     const text = pending.join('\n').trim()
     if (!text) return false
+    transcript?.appendUser(text)
     messages.push({
       role: 'user',
       content: [{ type: 'text', text: `[Operator steering — the user sent this while you were working. Take it as a direct instruction and adjust course now.]\n${text}` }],
@@ -592,6 +601,13 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
         emittedOutput = true
       }
 
+      let recordedText = ''
+      let streamedText = false
+      const flushRecordedText = (): void => {
+        if (recordedText.trim()) transcript?.appendAssistant(actor === 'lead' ? recordedText : `[${actor}] ${recordedText}`)
+        recordedText = ''
+      }
+      transcript?.notice(`Model: ${route.providerName}/${route.model} · agent: ${actor}`)
       try {
         const result = await route.provider.streamTurn({
             system: systemPrompt,
@@ -599,6 +615,8 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
             messages,
             tools: toolDefinitions,
             onText: (delta) => {
+              if (transcript) recordedText += delta
+              streamedText = true
               emittedOutput = true
               noteFirstOutput()
               stopAnimation()
@@ -631,7 +649,9 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
                   cache.speculate(block.name, block.input, () => tool.execute(block.input))
                 }
               : undefined,
-            onActivity: onActivity ? (activity) => {
+            onActivity: onActivity || transcript ? (activity) => {
+              flushRecordedText()
+              transcript?.notice(`[${actor}] ${activity.kind}: ${activity.title}${activity.detail ? `\n${activity.detail}` : ''}`)
               // Provider activity can include commands and file edits. Once it
               // is visible or actionable, retrying another route could repeat
               // work, so it has the same no-retry boundary as streamed text.
@@ -649,12 +669,15 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
             } : undefined,
             signal,
           })
+        if (!streamedText) recordedText = result.content.flatMap((block) => block.type === 'text' ? [block.text] : []).join('\n')
+        flushRecordedText()
         if (delegated) {
           if (verbose) writeToolResult(DELEGATED_DISPLAY_NAME, 'Finished the workspace run.', false, false, Date.now() - startedAt)
           onTool?.({ id: DELEGATED_ID, name: request.name, input: request.input, result: 'Codex completed its workspace run.', isError: false, durationMs: Date.now() - startedAt, cached: false, assessment })
         }
         return result
       } catch (error) {
+        flushRecordedText()
         if (delegated) {
           const result = error instanceof Error ? error.message : String(error)
           if (verbose) writeToolResult(DELEGATED_DISPLAY_NAME, result, true, false, Date.now() - startedAt)

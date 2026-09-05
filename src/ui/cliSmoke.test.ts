@@ -60,6 +60,7 @@ test('help documents autonomous budget and agent dry-run controls', async () => 
   expect(result.stdout).toContain('--sports')
   expect(result.stdout).toContain('--fitness')
   expect(result.stdout).toContain('--battmann')
+  expect(result.stdout).toContain('/eliabook')
 })
 
 test('invalid autonomous wall-clock budget fails before execution', async () => {

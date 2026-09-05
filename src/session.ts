@@ -3,6 +3,8 @@ import { ensureSecureDirectory, hardenSecureFile, writeSecureBunFile } from './s
 import { join } from 'node:path'
 import type { ConversationMessage } from './agentLoop.ts'
 import { writeError } from './ui/stream.ts'
+import { isTranscriptSnapshot, type TranscriptSnapshot } from './ui/transcript.ts'
+import type { SessionUsageSnapshot } from './usage.ts'
 
 export const SESSIONS_DIR = join(process.cwd(), '.elia', 'sessions')
 
@@ -10,6 +12,8 @@ export interface StoredSession {
   id: string
   updatedAt: number
   messages: ConversationMessage[]
+  recording?: TranscriptSnapshot
+  usage?: SessionUsageSnapshot
 }
 
 export function newSessionId(): string {
@@ -21,8 +25,9 @@ export async function saveSession(
   id: string,
   messages: ConversationMessage[],
   dir: string = SESSIONS_DIR,
+  extra: Pick<StoredSession, 'recording' | 'usage'> = {},
 ): Promise<void> {
-  const session: StoredSession = { id, updatedAt: Date.now(), messages }
+  const session: StoredSession = { id, updatedAt: Date.now(), messages, ...extra }
   if (!isSafeSessionId(id)) {
     writeError('Warning: failed to save session: invalid session id')
     return
@@ -54,7 +59,7 @@ export async function loadLatestSession(dir: string = SESSIONS_DIR): Promise<Sto
   if (!existsSync(dir)) return undefined
   ensureSecureDirectory(dir)
 
-  const files = readdirSync(dir).filter((name) => name.endsWith('.json'))
+  const files = readdirSync(dir).filter((name) => name.endsWith('.json') && isSafeSessionId(name.slice(0, -5)))
   if (files.length === 0) return undefined
 
   const newest = files
@@ -76,9 +81,18 @@ function isStoredSession(value: unknown): value is StoredSession {
     && typeof candidate.updatedAt === 'number'
     && Number.isFinite(candidate.updatedAt)
     && Array.isArray(candidate.messages)
+    && (candidate.recording === undefined || isTranscriptSnapshot(candidate.recording))
+    && (candidate.usage === undefined || isSessionUsage(candidate.usage))
     && candidate.messages.every((message) => {
       if (!message || typeof message !== 'object') return false
       const item = message as Record<string, unknown>
       return (item.role === 'user' || item.role === 'assistant') && Array.isArray(item.content)
     })
+}
+
+function isSessionUsage(value: unknown): value is SessionUsageSnapshot {
+  if (!value || typeof value !== 'object') return false
+  const snapshot = value as SessionUsageSnapshot
+  return !!snapshot.usage && [snapshot.turns, snapshot.elapsedMs, snapshot.usage.inputTokens, snapshot.usage.outputTokens,
+    snapshot.usage.cacheReadTokens, snapshot.usage.cacheWriteTokens].every((item) => typeof item === 'number' && Number.isFinite(item) && item >= 0)
 }

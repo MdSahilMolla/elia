@@ -3,7 +3,7 @@ import * as readline from 'node:readline/promises'
 import * as pathModule from 'node:path'
 import type { ConversationMessage, AgentMode } from './agent.ts'
 import { writeNotice, writeError, writeUsageLine } from './ui/stream.ts'
-import { sessionTranscript } from './ui/transcript.ts'
+import { sessionTranscript, transcriptFromMessages, withSessionTranscript } from './ui/transcript.ts'
 import { colorizeDiffBlock } from './ui/render.ts'
 import { approvalPreviewLines } from './ui/approvalPreview.ts'
 import { lastAssistantText, type ToolEvent } from './agentLoop.ts'
@@ -25,7 +25,7 @@ interface TurnUiHooks {
   drainSteering?: () => string[]
 }
 import { playIntro } from './ui/character.ts'
-import { ZERO_USAGE, getSessionSummaryLine, recordTopLevelTurn, formatUsageLine } from './usage.ts'
+import { ZERO_USAGE, addUsage, getSessionSummaryLine, recordTopLevelTurn, formatUsageLine, sessionUsageSnapshot, type SessionUsageSnapshot } from './usage.ts'
 import { createSlashPrompt, type SlashCommand } from './ui/slashPrompt.ts'
 import { confirmOnce } from './ui/confirm.ts'
 import { gold, dim } from './ui/theme.ts'
@@ -64,6 +64,7 @@ const REPL_COMMANDS: SlashCommand[] = [
   { name: '/export', description: 'save the conversation to Markdown' },
   { name: '/brain', description: 'cross-session project memory' },
   { name: '/lessons', description: 'what earlier sessions learned here' },
+  { name: '/eliabook', description: 'recorded insights & reusable verified workflows' },
   { name: '/why', description: 'recorded rationale for a file or topic' },
   { name: '/track', description: "elia's track record on this project" },
   { name: '/team', description: 'model tiers & per-role routing' },
@@ -189,6 +190,12 @@ Inside an interactive session:
   rewind                      List rewind points for this session
   rewind <n>                  Restore conversation + files to just before turn <n>
   /capabilities               List specialist capabilities, risk classes, and output contracts
+  /eliabook                   Open Save this session / Saved Elia Books
+  /eliabook save [book-id]    Save the complete current session as a reusable Book
+  /eliabook saved             Browse saved session playbooks
+  /eliabook create <run-id>   Create a Book from a complete autonomous-run recording
+  /eliabook run <book-id>     Run its active verified procedure in this session
+  /eliabook improve <book-id> <run-id>  Promote a measurably better verified run
   /mode                       Pick a mode/persona with arrow keys: dev, cyber, sports, fitness, battmann,
                               marketing, finance, business, data, research, cybersecurity,
                               automation, communications, ai, production
@@ -1441,6 +1448,7 @@ async function runInteractive(): Promise<void> {
   }
   let messages: ConversationMessage[] = []
   let sessionId = newSessionId()
+  let priorUsage: SessionUsageSnapshot = { usage: ZERO_USAGE, turns: 0, elapsedMs: 0 }
   // manual (default): a cheap risk check runs before each command — only
   // commands flagged risky (deletes, sends, spend, publishing, system
   // changes, ...) get an "About to: ... run it?" prompt; everything else just
@@ -1460,6 +1468,9 @@ async function runInteractive(): Promise<void> {
     if (loaded) {
       messages = loaded.messages
       sessionId = loaded.id
+      sessionTranscript.restore(loaded.recording ?? transcriptFromMessages(loaded.messages))
+      if (!loaded.recording) sessionTranscript.notice('Legacy session: only previously retained messages are available; earlier discarded activity cannot be recovered.')
+      if (loaded.usage) priorUsage = loaded.usage
       writeNotice(`Resumed session ${sessionId} (${messages.length} messages)`)
     } else {
       writeNotice(
@@ -1500,6 +1511,35 @@ async function runInteractive(): Promise<void> {
       messageCount: messages.length,
     })
   }
+
+  function cumulativeSessionUsage(): SessionUsageSnapshot {
+    const snapshot = sessionUsageSnapshot()
+    return { usage: addUsage(priorUsage.usage, snapshot.usage), turns: priorUsage.turns + snapshot.turns, elapsedMs: priorUsage.elapsedMs + snapshot.elapsedMs }
+  }
+
+  async function persistInteractiveSession(): Promise<void> {
+    await saveSession(sessionId, messages, undefined, { recording: sessionTranscript.snapshot(), usage: cumulativeSessionUsage() })
+  }
+
+  function currentEliaBookSession() {
+    const snapshot = cumulativeSessionUsage()
+    return {
+      sessionId,
+      messages: structuredClone(messages),
+      transcriptMarkdown: sessionTranscript.toMarkdown(`elia session ${sessionId}`),
+      recording: sessionTranscript.snapshot(),
+      checkpoints: checkpoints.map((checkpoint) => ({
+        turn: checkpoint.turn,
+        at: checkpoint.at,
+        label: checkpoint.label,
+        files: Object.keys(checkpoint.files),
+      })),
+      usage: { ...snapshot.usage, turns: snapshot.turns, elapsedMs: snapshot.elapsedMs },
+      providerLabel: config.providerLabel,
+      model: config.model,
+      mode: persona ?? mode,
+    }
+  }
   pushHeartbeat(false, 'Idle at prompt')
   // The single source of truth for "this session ended," covering every exit
   // path at once — normal completion (one-shot prompts return before ever
@@ -1512,6 +1552,14 @@ async function runInteractive(): Promise<void> {
 
   /** Snapshots messages + touched files around one turn, then records a rewind point. */
   async function runCheckpointedTurn(userText: string, approveAction?: ActionApproval, skillNames = selectedSkillNames, uiHooks?: TurnUiHooks): Promise<void> {
+    try {
+      await withSessionTranscript(sessionTranscript, () => runRecordedTurn(userText, approveAction, skillNames, uiHooks))
+    } finally {
+      await persistInteractiveSession()
+    }
+  }
+
+  async function runRecordedTurn(userText: string, approveAction?: ActionApproval, skillNames = selectedSkillNames, uiHooks?: TurnUiHooks): Promise<void> {
     const tracker = createFileTracker()
     const task = taskSessions.create(inferTaskKind(userText, userText), redactText(userText, 160), 'Starting request')
     taskSessions.update(task.id, { status: 'running', action: 'Thinking', detail: 'Planning the next action' })
@@ -1574,7 +1622,6 @@ async function runInteractive(): Promise<void> {
             detail: event.isError ? redactText(event.result, 500) : 'Action completed successfully',
             stepsCompleted: (taskSessions.get(task.id)?.stepsCompleted ?? 0) + 1,
           })
-          sessionTranscript.recordTool(event)
           uiHooks?.onTool?.(event)
           pushHeartbeat(true, action)
         },
@@ -1632,6 +1679,7 @@ async function runInteractive(): Promise<void> {
           uiHooks?.onActivity?.({ kind: 'status', status: 'updated', title: `Verifying${where} — ${checks.join(', ')}` })
           if (!uiHooks) writeNotice(`Verifying${where}: ${checks.join(' && ')}`)
           let outcome = await runVerification(checks, root, controller.signal)
+          sessionTranscript.notice(describeVerification(outcome))
           for (let attempt = 1; !outcome.passed && attempt <= 2 && !controller.signal.aborted; attempt += 1) {
             repairAttempts = attempt
             const summary = `Verification failed (repair ${attempt}/2)`
@@ -1644,6 +1692,7 @@ async function runInteractive(): Promise<void> {
             )
             await runModelTurn()
             outcome = await runVerification(checks, root, controller.signal)
+            sessionTranscript.notice(describeVerification(outcome))
           }
           verifyResult = outcome.passed ? 'pass' : 'fail'
           const verdict = outcome.passed
@@ -1658,6 +1707,7 @@ async function runInteractive(): Promise<void> {
       emitEvent('turn_finished', { taskId: task.id, sessionId, outcome: 'completed' })
     } catch (error) {
       const detail = redactText(error instanceof Error ? error.message : String(error), 2000)
+      sessionTranscript.error(detail)
       if (stopRequested || controller.signal.aborted) {
         taskSessions.update(task.id, { status: 'paused', action: 'Stopped', detail: 'Stopped by operator; no further tool calls will run' })
         emitEvent('turn_finished', { taskId: task.id, sessionId, outcome: 'aborted' })
@@ -1670,7 +1720,7 @@ async function runInteractive(): Promise<void> {
       unregisterControls()
       unregisterShutdown()
       setActiveTracker(undefined)
-      sessionTranscript.appendAssistant(lastAssistantText(messages, ''))
+      sessionTranscript.notice(`Turn outcome: ${taskSessions.get(task.id)?.status ?? 'unknown'}; verification: ${verifyResult}; touched files: ${Object.keys(tracker.snapshot()).join(', ') || 'none'}`)
       sessionTranscript.endTurn()
       pushHeartbeat(false, taskSessions.get(task.id)?.action ?? 'Idle at prompt')
       if (!persona) {
@@ -1733,7 +1783,7 @@ async function runInteractive(): Promise<void> {
       writeError(`Error: ${err instanceof Error ? err.message : String(err)}`)
       process.exitCode = 1
     }
-    await saveSession(sessionId, messages)
+    await persistInteractiveSession()
     const taskSummary = renderTaskSummary(taskSessions)
     const contextLine = renderContextStatus(messages, await countEpisodes(sessionId))
     writeUsageLine(taskSummary ? `${contextLine}  ·  ${dim(taskSummary)}` : contextLine)
@@ -2429,7 +2479,8 @@ async function runInteractive(): Promise<void> {
       messages.push(...checkpoint.messagesBefore)
       checkpoints.length = n
       await saveCheckpoints(sessionId, checkpoints)
-      await saveSession(sessionId, messages)
+      sessionTranscript.notice(`Rewound workspace and model context to checkpoint ${n}. Earlier activity remains in the session recording.`)
+      await persistInteractiveSession()
       return done(`Rewound to before turn ${n} ("${checkpoint.label}") — restored ${result.restored} file(s), removed ${result.deleted}.`)
     }
     if (trimmed === '/capabilities') {
@@ -2453,6 +2504,11 @@ async function runInteractive(): Promise<void> {
     if (trimmed === '/track') {
       const { renderCompetence } = await import('./autonomy/outcomes.ts')
       return done(renderCompetence())
+    }
+    const eliaBookMatch = /^\/eliabook(?:\s+(.*))?$/.exec(trimmed)
+    if (eliaBookMatch) {
+      const { eliaBookMenu } = await import('./eliaBook.ts')
+      return eliaBookMenu(eliaBookMatch[1] ?? '', currentEliaBookSession)
     }
 
     if (trimmed === '/skills' || trimmed === '@skills-list') {
@@ -2540,7 +2596,8 @@ async function runInteractive(): Promise<void> {
         const { runShell, formatShellResult, clampOutput } = await import('./shell.ts')
         const result = await runShell(command, undefined, process.cwd())
         const rendered = clampOutput(formatShellResult(result), 8_000)
-        sessionTranscript.shell(command, rendered)
+        sessionTranscript.shell(command, formatShellResult(result))
+        await persistInteractiveSession()
         carriedShellContext.push(`<local-command>${command}</local-command>\n<output>\n${clampOutput(formatShellResult(result), 4_000)}\n</output>`)
         return rendered
       },
@@ -2571,7 +2628,7 @@ async function runInteractive(): Promise<void> {
             drainSteering: hooks.drainSteering,
           },
         )
-        await saveSession(sessionId, messages)
+        await persistInteractiveSession()
       },
     })
     prompt.close()
@@ -2606,7 +2663,8 @@ async function runInteractive(): Promise<void> {
       const shellResult = await runShell(command, undefined, process.cwd())
       const rendered = clampOutput(formatShellResult(shellResult), 8_000)
       process.stdout.write(`${dim(`$ ${command}`)}\n${rendered}\n`)
-      sessionTranscript.shell(command, rendered)
+      sessionTranscript.shell(command, formatShellResult(shellResult))
+      await persistInteractiveSession()
       carriedShellContext.push(`<local-command>${command}</local-command>\n<output>\n${clampOutput(formatShellResult(shellResult), 4_000)}\n</output>`)
       continue
     }
@@ -2842,6 +2900,55 @@ async function runInteractive(): Promise<void> {
       continue
     }
 
+    let eliaBookRunPrompt: string | undefined
+    const eliaBookMatch = /^\/eliabook(?:\s+(.*))?$/.exec(trimmed)
+    if (eliaBookMatch) {
+      const { ELIA_BOOK_MENU_OPTIONS, handleEliaBookCommand, listEliaBooks, renderEliaBook, eliaBookUsage } = await import('./eliaBook.ts')
+      let argument = eliaBookMatch[1]?.trim() ?? ''
+      if (!argument) {
+        const choice = await pick('Elia Book', [...ELIA_BOOK_MENU_OPTIONS])
+        if (choice.type === 'cancel') continue
+        if (choice.type === 'unavailable') {
+          writeNotice(eliaBookUsage())
+          continue
+        }
+        argument = choice.value
+      }
+      if (argument === 'saved' || argument === 'list') {
+        const books = listEliaBooks()
+        if (books.length === 0) {
+          writeNotice('No saved Elia Books yet. Use /eliabook save after completing some work.')
+          continue
+        }
+        const choice = await pick(
+          `Saved Elia Books (${books.length})`,
+          books.map((book) => ({ label: book.title, detail: `${book.id} · ${book.status} · v${book.activeVersion}`, value: book.id })),
+          0,
+          { searchable: books.length > 8 },
+        )
+        if (choice.type === 'select') {
+          const book = books.find((item) => item.id === choice.value)
+          if (book) {
+            const { createMarkdownStream } = await import('./ui/markdown.ts')
+            const markdown = createMarkdownStream()
+            const content = `${renderEliaBook(book)}\nRun it with: /eliabook run ${book.id}`
+            process.stdout.write(`\n${markdown.push(content)}${markdown.flush()}\n`)
+          }
+        } else if (choice.type === 'unavailable') {
+          writeNotice(handleEliaBookCommand('saved').text)
+        }
+        continue
+      }
+      const result = handleEliaBookCommand(argument, process.cwd(), currentEliaBookSession())
+      if (result.submitText) {
+        writeNotice(result.text)
+        eliaBookRunPrompt = result.submitText
+      } else {
+        writeNotice(result.text)
+        continue
+      }
+    }
+
     const modeMatch = /^\/mode(?:\s+(.*))?$/.exec(trimmed)
     if (modeMatch) {
       const modeArg = modeMatch[1]?.trim()
@@ -2868,14 +2975,15 @@ async function runInteractive(): Promise<void> {
       messages.push(...checkpoint.messagesBefore)
       checkpoints.length = n // later rewind points described a future that no longer exists
       await saveCheckpoints(sessionId, checkpoints)
-      await saveSession(sessionId, messages)
+      sessionTranscript.notice(`Rewound workspace and model context to checkpoint ${n}. Earlier activity remains in the session recording.`)
+      await persistInteractiveSession()
       writeNotice(
         `Rewound to before turn ${n} ("${checkpoint.label}") — restored ${result.restored} file(s), removed ${result.deleted} file(s) created since.`,
       )
       continue
     }
 
-    let commandToRun = trimmed
+    let commandToRun = eliaBookRunPrompt ?? trimmed
     if (replMode === 'manual') {
       const { risky, reason } = await classifyCommandRisk(commandToRun)
       if (risky) {
@@ -2900,7 +3008,7 @@ async function runInteractive(): Promise<void> {
     } catch (err) {
       writeError(`Error: ${err instanceof Error ? err.message : String(err)}`)
     }
-    await saveSession(sessionId, messages)
+    await persistInteractiveSession()
     const taskSummary = renderTaskSummary(taskSessions)
     const contextLine = renderContextStatus(messages, await countEpisodes(sessionId))
     const { formatCompactUsage } = await import('./usage.ts')

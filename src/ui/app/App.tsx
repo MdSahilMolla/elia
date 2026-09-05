@@ -59,6 +59,8 @@ export interface SlashRunRequest {
 export interface SlashOutcome {
   handled: boolean
   text?: string
+  /** Submit a reusable workflow as the next governed model turn. */
+  submitText?: string
   picker?: SlashPickerRequest
   /** Ask the user to type a value (e.g. a marketplace search query). */
   prompt?: SlashPromptRequest
@@ -362,9 +364,11 @@ export function App(props: AppProps) {
           }
           break
         }
+        const submitText = typeof outcome === 'object' && outcome ? outcome.submitText : undefined
         const finalText = typeof outcome === 'string' ? outcome : outcome?.text
         if (finalText) store.notice(finalText)
         store.commit()
+        if (submitText) await runOne(submitText)
         return
       }
 

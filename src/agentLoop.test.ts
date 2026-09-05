@@ -7,6 +7,9 @@ import type { ContentBlock, ProviderActivity } from './providers/types.ts'
 import type { Tool } from './tools/types.ts'
 import { createActionGovernor, withActionGovernor } from './autonomy/governor.ts'
 import { parseToolHooks, withToolHooks } from './autonomy/devHooks.ts'
+import { createTranscript, withSessionTranscript } from './ui/transcript.ts'
+import { withAgentIdentity } from './autonomy/context.ts'
+import { ZERO_USAGE } from './usage.ts'
 
 // config.ts resolves a provider at import time and fails fast without a key —
 // set a placeholder before importing so the module loads; we swap in a stub
@@ -16,6 +19,53 @@ process.env.ANTHROPIC_API_KEY ??= 'test-key-for-agentloop-test'
 const { config } = await import('./config.ts')
 const { resetProviderHealthForTests, runAgentLoop, toolBatchConcurrency } = await import('./agentLoop.ts')
 const { resetCodexSubscriptionApprovalForTests } = await import('./providers/codexSubscription.ts')
+
+test('session recording captures nested agent tools and provider activity without crossing session boundaries', async () => {
+  const transcript = createTranscript()
+  const outside = createTranscript()
+  let call = 0
+  let childCall = 0
+  const inner = () => withAgentIdentity({ name: 'scout#1', role: 'scout' }, () => runAgentLoop({
+    messages: [], systemPrompt: 'test', providerName: 'anthropic', model: 'recording-test', useAnimation: false, verbose: false,
+    tools: [{ name: 'grep', description: 'Test child read', input_schema: { type: 'object', properties: {} }, async execute() { return 'Child search result' } }],
+    provider: { async streamTurn(params) {
+      if (++childCall === 1) return { content: [{ type: 'tool_use', id: 'child-1', name: 'grep', input: { pattern: 'parser' } }], usage: ZERO_USAGE }
+      params.onActivity?.({ kind: 'file_change', title: 'Changed parser', detail: 'src/parser.ts\n+ fix' })
+      params.onText('Child report')
+      return { content: [{ type: 'text', text: 'Child report' }], usage: ZERO_USAGE }
+    } },
+  }))
+  await Promise.all([
+    withSessionTranscript(transcript, () => runAgentLoop({
+      messages: [], systemPrompt: 'test', providerName: 'anthropic', model: 'recording-test', useAnimation: false, verbose: false,
+      tools: [{ name: 'read_file', description: 'Test nested work', input_schema: { type: 'object', properties: {} }, async execute() { await inner(); return 'nested result' } }],
+      provider: { async streamTurn(params) {
+        call += 1
+        if (call === 1) return { content: [{ type: 'tool_use', id: 'r1', name: 'read_file', input: { path: 'test.ts' } }], usage: ZERO_USAGE }
+        params.onText('Lead reply')
+        return { content: [{ type: 'text', text: 'Lead reply' }], usage: ZERO_USAGE }
+      } },
+    })),
+    withSessionTranscript(outside, async () => { await Promise.resolve(); outside.appendAssistant('Other session') }),
+  ])
+  expect(transcript.toolCount()).toBe(2)
+  expect(transcript.tool(0)?.actor).toBe('scout#1')
+  const saved = JSON.stringify(transcript.snapshot())
+  expect(saved).toContain('nested result')
+  expect(saved).toContain('[scout#1] Child report')
+  expect(saved).toContain('Changed parser')
+  expect(saved).not.toContain('Other session')
+  expect(transcript.items().filter((item) => item.kind === 'assistant' && item.text === 'Lead reply')).toHaveLength(1)
+})
+
+test('session recording keeps partial replies when a provider fails midstream', async () => {
+  const transcript = createTranscript()
+  await expect(withSessionTranscript(transcript, () => runAgentLoop({
+    messages: [], systemPrompt: 'test', tools: [], providerName: 'anthropic', model: 'partial-recording-test', useAnimation: false, verbose: false,
+    provider: { async streamTurn(params) { params.onText('Partial explanation'); throw new Error('stream interrupted') } },
+  }))).rejects.toThrow('stream interrupted')
+  expect(transcript.toMarkdown()).toContain('Partial explanation')
+})
 
 test('safe read-only tool batches use bounded fast concurrency while mutating batches stay conservative', () => {
   const original = process.env.ELIA_TOOL_CONCURRENCY

@@ -50,6 +50,8 @@ test('loadLatestSession picks the most recently saved session', async () => {
   await saveSession('older', sampleMessages, testDir)
   await new Promise((resolve) => setTimeout(resolve, 5))
   await saveSession('newer', sampleMessages, testDir)
+  await new Promise((resolve) => setTimeout(resolve, 5))
+  writeFileSync(join(testDir, 'newer.checkpoints.json'), '[]')
 
   const latest = await loadLatestSession(testDir)
   expect(latest?.id).toBe('newer')

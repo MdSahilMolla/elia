@@ -2,6 +2,10 @@ import { expect, test } from 'bun:test'
 import { render } from 'ink-testing-library'
 import { App, providerPlanItems } from './App.tsx'
 import { REPL_COMMANDS_FOR_TEST, waitForFrame } from './testFixtures.ts'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { join } from 'node:path'
+import { tmpdir } from 'node:os'
+import { eliaBookMenu, listEliaBooks } from '../../eliaBook.ts'
 
 const SHIFT_TAB = '\x1b[Z'
 const settle = () => new Promise((resolve) => setTimeout(resolve, 30))
@@ -74,6 +78,65 @@ test('App routes a slash command through handleSlash', async () => {
   await waitForFrame(lastFrame, '/cost')
   stdin.write('\r')
   await waitForFrame(lastFrame, 'slash ok')
+})
+
+test('App submits an Elia Book workflow returned by a slash command', async () => {
+  let submitted = ''
+  const props = {
+    ...baseProps(),
+    handleSlash: async () => ({ handled: true, text: 'Running Elia Book.', submitText: '<elia-book>verified workflow</elia-book>' }),
+    submitTurn: async (text: string) => {
+      submitted = text
+    },
+  }
+  const { stdin, lastFrame } = render(<App {...props} />)
+  await waitForFrame(lastFrame, 'mercury-2 · manual')
+  await settle()
+  stdin.write('/eliabook run verified-workflow')
+  await waitForFrame(lastFrame, '/eliabook run verified-workflow')
+  stdin.write('\r')
+  await waitForFrame(lastFrame, 'Running Elia Book.')
+  await new Promise((resolve) => setTimeout(resolve, 60))
+  expect(submitted).toBe('<elia-book>verified workflow</elia-book>')
+})
+
+test('Elia Book menu saves the session with Enter and lets the user browse the saved Book', async () => {
+  const cwd = mkdtempSync(join(tmpdir(), 'elia-book-menu-'))
+  const session = {
+    sessionId: 'menu-123', messages: [{ role: 'user' as const, content: [{ type: 'text' as const, text: 'Fix the menu' }] }],
+    transcriptMarkdown: '# Menu session', checkpoints: [],
+    usage: { inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0, turns: 1, elapsedMs: 10 },
+    providerLabel: 'Test', model: 'test', mode: 'dev',
+  }
+  let modelCalls = 0
+  const { stdin, lastFrame, unmount } = render(<App {...baseProps()}
+    handleSlash={async (command) => eliaBookMenu(command.slice('/eliabook'.length), () => session, cwd)}
+    submitTurn={async () => { modelCalls += 1 }} />)
+  try {
+    await waitForFrame(lastFrame, 'mercury-2 · manual')
+    await settle()
+    stdin.write('/eliabook')
+    await waitForFrame(lastFrame, '/eliabook')
+    stdin.write('\r')
+    const menu = await waitForFrame(lastFrame, 'Save this session')
+    expect(menu).toContain('Saved Elia Books')
+    await settle()
+    stdin.write('\r')
+    await waitForFrame(lastFrame, 'Saved this session as Elia Book')
+    expect(listEliaBooks(cwd)).toHaveLength(1)
+    await settle()
+    stdin.write('/eliabook saved')
+    await waitForFrame(lastFrame, '/eliabook saved')
+    stdin.write('\r')
+    await waitForFrame(lastFrame, 'Saved Elia Books (1)')
+    await settle()
+    stdin.write('\r')
+    await waitForFrame(lastFrame, 'Run it with: /eliabook run fix-the-menu')
+    expect(modelCalls).toBe(0)
+  } finally {
+    unmount()
+    rmSync(cwd, { recursive: true, force: true })
+  }
 })
 
 test('status bar reflects a live model change from getEnv', async () => {

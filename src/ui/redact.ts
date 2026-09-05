@@ -25,3 +25,14 @@ export function redactValue(value: unknown, key?: string): unknown {
 export function redactRecord(input: Record<string, unknown>): Record<string, unknown> {
   return Object.fromEntries(Object.entries(input).map(([key, value]) => [key, redactValue(value, key)]))
 }
+
+/** Archive redaction preserves multiline evidence and full non-secret tool arguments. */
+export function redactArchiveValue(value: unknown, key?: string): unknown {
+  if (key && SECRET_KEY.test(key)) return '[REDACTED]'
+  if (typeof value === 'string') return redactSecrets(value)
+  if (Array.isArray(value)) return value.map((item) => redactArchiveValue(item))
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value).map(([name, item]) => [name, redactArchiveValue(item, name)]))
+  }
+  return value
+}

@@ -647,6 +647,39 @@ And what keeps it honest:
 
 `elia evolve` makes real API calls and, on success, modifies elia's own source. Use `--dry-run` to see what it would do first.
 
+### Elia Book — session insights and reusable improvement playbooks
+
+Open `/eliabook` during any interactive session to choose **Save this session**
+or **Saved Elia Books**. Saving captures the session conversation, model/tool
+activity, results, usage, checkpoint metadata, touched file paths, insights, and
+reusable procedure in a local snapshot under `.elia/books/`. Credential-shaped
+values are redacted. Workspace files are not separately backed up.
+
+Each save captures activity up to that point and appears in **Saved Elia Books**.
+Save again to create another snapshot as the session progresses. Recordings include
+full available tool output, intermediate replies, child-agent actions, and provider
+activity. They survive model-context compaction and session resume. Older sessions
+without a recording can only recover the messages they previously retained.
+Source tools/providers may limit their output; private model reasoning is excluded.
+
+```text
+/eliabook                         # open Save this session / Saved Elia Books
+/eliabook save [id]               # save the complete current session
+/eliabook saved                   # browse saved session playbooks
+/eliabook create <run-id> [id]   # create one from a recorded autonomous run
+/eliabook show <id>              # inspect its insights, procedure, and evidence
+/eliabook run <id> [instruction] # run the active version in this session
+/eliabook improve <id> <run-id>  # promote a better verified run as a new version
+/eliabook rollback <id>          # restore the previous version
+```
+
+A recursive Book improvement is correctness-first: the candidate run must have
+evidence-backed verified completion, must not increase failed or blocked actions,
+and must improve at least one recorded measure such as actions, tokens, or elapsed
+time. The previous version remains available for rollback. This complements
+`elia evolve`; source-code self-improvement still runs in an isolated sandbox and
+must pass Elia's protected benchmark before promotion.
+
 ### `elia bench-latency` — the overhead the model doesn't explain
 
 `elia bench` needs a real model and measures whether elia is *correct*. `elia bench-latency` needs neither an API key nor a network, and measures whether elia is *fast* — specifically, how much wall-clock elia's own machinery adds on top of whatever the model costs.
