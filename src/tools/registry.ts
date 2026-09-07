@@ -28,6 +28,7 @@ import { dataScienceTool } from './dataScience.ts'
 import { sportsTool } from './sports.ts'
 import { fitnessTool } from './fitness.ts'
 import { environmentTool } from './environment.ts'
+import { provisionEnvironmentTool } from './provisionEnvironment.ts'
 import { githubTool } from './github.ts'
 import { todoWriteTool } from './todo.ts'
 import { battmannTool } from './battmann.ts'
@@ -59,6 +60,7 @@ export const tools: Tool[] = [
   sportsTool,
   fitnessTool,
   environmentTool,
+  provisionEnvironmentTool,
   githubTool,
 ]
 

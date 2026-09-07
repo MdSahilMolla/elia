@@ -22,6 +22,8 @@ import { planWaves, runFleet } from './fleet.ts'
 import { runVariants } from './variants.ts'
 import { createProposalTool, renderProposal } from './proposal.ts'
 import { savePlanArtifact } from './artifacts.ts'
+import { commitAll, scaffoldProject } from './scaffold.ts'
+import { publishProject } from './publish.ts'
 import { emitEvent, machineReadable } from '../ui/runtime.ts'
 import { redactText } from '../ui/redact.ts'
 import { appendLessons, createLessonsTool, renderLessons } from './lessons.ts'
@@ -35,12 +37,19 @@ import {
   runVerification,
 } from './verify.ts'
 import { assessProgress, failureFingerprints, type AttemptSnapshot } from './progress.ts'
+import { filesFromGitStatus, hygieneVerdict, scanProjectFiles, type HygieneInput } from './hygiene.ts'
+import { acceptanceVerdict, createAcceptanceTool } from './acceptance.ts'
+import { applyPlanRevisions, createPlanRevisionTool, MAX_PLAN_REVISIONS } from './replan.ts'
+import { assumptionOutcome, auditPlanFeasibility, createAssumptionTool } from './assumptions.ts'
+import { isSensitivePath } from './sensitivePaths.ts'
 import { classifyStuck, type StuckRecovery } from './stuck.ts'
+import { detectChecks } from './detectChecks.ts'
 import { detectContradictions, recordCompletion } from './calibration.ts'
+import { reliabilitySignal } from './reliability.ts'
 import type { CriticVerdict, Proposal } from './types.ts'
 import { appendActionAudit, writeRunReceipt } from './audit.ts'
 import { buildReviewDiffSection } from './reviewContext.ts'
-import { createActionGovernor, withActionGovernor, type ActionApproval, type ActionGovernor, type ActionGovernorStats, type GovernanceMode } from './governor.ts'
+import { blockedInUnattendedMode, createActionGovernor, withActionGovernor, type ActionApproval, type ActionGovernor, type ActionGovernorStats, type GovernanceMode } from './governor.ts'
 import { GoalGraphStore, withGoalGraph, type GoalGraphStore as GoalGraphStoreType } from './goalGraph.ts'
 import { assessCompletion, type CompletionAssessment } from './outcome.ts'
 import { inferTaskKind, taskSessions } from '../taskSessions.ts'
@@ -140,7 +149,7 @@ ${turnContextPrompt()}
 You are in the orient-and-propose phase of an autonomous run. You must NOT change anything yet — you have no write tools in this phase, by design.
 
 Work like an engineer picking up an unfamiliar ticket:
-1. Look at the shape of the project and call environment before forming any opinion; verify runtimes, credentials presence, browser transport presence, git state, and the detected project shape.
+1. Look at the shape of the project and call environment before forming any opinion; verify runtimes, credentials presence, browser transport presence, git state, and the detected project shape. If \`environmentReadiness\` reports blockers (a lockfile with no installed dependencies, a missing toolchain, a compose service the app needs), make the first step of the plan a call to \`provision_environment\` — a run that discovers a broken environment mid-build wastes its whole budget on failures that have nothing to do with the change.
 2. Send several scouts out in parallel (call \`task\` with role "scout" multiple times in one turn) to answer the specific questions you need answered. Scouts are fast and cheap; serial investigation is the single biggest waste of wall-clock time available to you, so batch it.
 3. Read the handful of files that actually decide the design yourself.
 4. Then call \`submit_proposal\` exactly once and stop.
@@ -158,6 +167,9 @@ What makes a good proposal:
 - Define an acceptance contract for the final result: artifact or action delivered, evidence required, domain-specific quality checks, unresolved uncertainty, and what the user must approve.
 - List every external side effect separately. Drafting is not sending; analysis is not execution; authorized security assessment is not permission to attack. Any consequential action must have an exact approval boundary and a postcondition check.
 - Define recovery: which steps are idempotent, which completed actions must never be repeated, what can be retried, and what user input is needed if credentials, scope, or approval is missing.`
+
+/** An assumption is checked by looking: read the tree, run a read-only probe. */
+const ASSUMPTION_TOOL_NAMES = new Set(['read_file', 'list_files', 'grep', 'run_command', 'environment', 'web_search'])
 
 const REVIEWER_TOOL_NAMES = new Set(['read_file', 'list_files', 'grep', 'board_read', 'recall', 'environment'])
 
@@ -206,6 +218,9 @@ async function runAutonomousTaskInternal(options: AutonomousRunOptions): Promise
     runController.abort()
   }, maxWallClockMs) : undefined
   const defaults = autonomyProfileDefaults(profile)
+  // Past runs in this project that claimed more than they delivered → extra
+  // adversarial review this run (reliability.ts, fed by the calibration ledger).
+  const reliability = reliabilitySignal(process.cwd())
   const maxRepairAttempts = options.maxRepairAttempts ?? defaults.maxRepairAttempts
   const maxAmendments = options.maxAmendments ?? defaults.maxAmendments
   const runPolish = options.polish ?? defaults.polish
@@ -462,12 +477,88 @@ async function runAutonomousTaskInternal(options: AutonomousRunOptions): Promise
     }
   }
 
+  // A verification command the unattended governor will always refuse — a
+  // backgrounded server, a shell chain, anything that needs an exact approval
+  // boundary — makes the run's gate unwinnable: it cannot go green, so every
+  // repair attempt is spent on a command that was never going to run. Seen
+  // live on a plan whose only check was
+  // `bun run src/server.ts & sleep 2 && curl ...`, which returned exit 126 on
+  // every attempt. Drop those and fall back to the project's own inferred
+  // checks, which are the same ones the interactive loop uses.
+  // Only in unattended mode: a supervised run puts the same command in front of
+  // the user for an approval decision instead of refusing it outright.
+  // Some plans are impossible before anything runs, and elia can tell from its
+  // own policy. A step scheduled to write a credential path will be refused
+  // every time it is attempted; a plan that assumes it *can* be written is
+  // resting on something already known to be false. One run declared exactly
+  // that assumption, planned around it, and then spent its budget discovering
+  // the wall it had described in advance.
+  if (planApproved) {
+    const infeasible = auditPlanFeasibility(proposal, process.cwd())
+    for (const issue of infeasible) writeSubStep(`⚠ plan cannot work as written — ${issue.detail}`)
+    if (infeasible.length > 0) {
+      journal.append('phase', { phase: 'propose', note: 'plan feasibility', issues: infeasible })
+      // Strip the impossible targets rather than letting each step fail on them.
+      // The work itself still stands; only the unreachable file does not.
+      proposal = {
+        ...proposal,
+        steps: proposal.steps.map((step) => ({ ...step, files: step.files.filter((file) => !isSensitivePath(file)) })),
+      }
+    }
+  }
+
+  if (planApproved && proposal.verification.length > 0 && (options.governanceMode ?? 'unattended') === 'unattended') {
+    const refused = proposal.verification.filter((command) => blockedInUnattendedMode(command))
+    if (refused.length > 0) {
+      const usable = proposal.verification.filter((command) => !refused.includes(command))
+      const replacement = usable.length > 0 ? usable : detectChecks(process.cwd())
+      proposal = { ...proposal, verification: replacement }
+      writeSubStep(
+        `${refused.length} planned verification command(s) can never run unattended (${refused.map((command) => command.slice(0, 60)).join('; ')}) — ` +
+          (replacement.length > 0 ? `verifying with ${replacement.join(' · ')} instead` : 'no runnable check remains, so review alone decides this run'),
+      )
+      journal.append('phase', { phase: 'propose', note: `verification rewritten: refused ${JSON.stringify(refused)}, using ${JSON.stringify(replacement)}` })
+    }
+  }
+
   if (planApproved && proposal) {
     try {
       savePlanArtifact(proposal, runId, process.cwd())
     } catch {
       // The plan already streamed to the terminal and the journal; a failure to
       // also mirror it to .elia/artifacts must not block an approved run.
+    }
+  }
+
+  // --- Scaffold -------------------------------------------------------------
+
+  // An approved plan needs somewhere to live before the first worker touches
+  // anything: a repository (so there is a rollback point and a reviewable
+  // history at all), ignore rules (so the first commit is not node_modules and
+  // an .env full of live keys), and the project's own documents. Runs used to
+  // produce a folder of files with no history and no way back — the tree-rewind
+  // recovery silently did nothing in a non-git directory, because it needs git.
+  if (planApproved) {
+    writePhase('scaffold', 'repository, ignore rules, and project documents')
+    const scaffold = await scaffoldProject({ cwd: process.cwd(), goal, proposal, signal: runSignal })
+    if (scaffold.initialized) writeSubStep('initialised a git repository for this project')
+    if (scaffold.documents.length > 0) writeSubStep(`wrote ${scaffold.documents.join(', ')}`)
+    for (const commit of scaffold.commits) writeSubStep(`committed: ${commit}`)
+    for (const warning of scaffold.warnings) writeSubStep(`⚠ ${warning}`)
+    journal.append('phase', { phase: 'scaffold', initialized: scaffold.initialized, documents: scaffold.documents, commits: scaffold.commits.length, warnings: scaffold.warnings })
+
+    // Publishing is the one outward-facing act in the whole run, so it goes
+    // through the governor: one question, once, and never a guess. Everything
+    // above already happened locally, so a run that cannot or may not publish
+    // still has its full history and documents.
+    if (scaffold.commits.length > 0) {
+      const published = await publishProject({ cwd: process.cwd(), proposal, governor, signal: runSignal })
+      if (published.status === 'created') writeSubStep(`created and pushed ${published.url ?? 'the GitHub repository'}`)
+      else if (published.status === 'pushed') writeSubStep(`pushed to ${published.url ?? 'origin'}`)
+      else if (published.reason) writeSubStep(`not published — ${published.reason}`)
+      if (published.issues > 0) writeSubStep(`tracked the plan as ${published.issues} issue(s) across ${published.milestones} milestone(s)`)
+      for (const warning of published.warnings) writeSubStep(`⚠ ${warning}`)
+      journal.append('phase', { phase: 'scaffold', published: published.status, url: published.url, issues: published.issues, milestones: published.milestones, reason: published.reason })
     }
   }
 
@@ -481,7 +572,53 @@ async function runAutonomousTaskInternal(options: AutonomousRunOptions): Promise
     acceptanceCriteria: proposal.acceptanceCriteria,
     verificationCommands: proposal.verification,
   })
-  const briefing = `## The goal of this run\n${proposal.goal}\n\n## What we established while planning\n${proposal.understanding}`
+  // Check what the plan believes before building on it.
+  //
+  // `assumptions` was the planner's own list of what it had not verified, and
+  // nothing ever read it back — the highest-leverage field in the whole plan sat
+  // inert while every worker built on top of it. A falsified assumption is not a
+  // failure here; it is the most valuable thing a run can learn, and learning it
+  // before the first edit is the entire point.
+  let assumptionBriefing = ''
+  if (planApproved && proposal.assumptions.length > 0) {
+    writePhase('scaffold', `checking ${proposal.assumptions.length} assumption(s) the plan rests on`)
+    const capture = createAssumptionTool(proposal.assumptions)
+    const checker = await runSubAgent({
+      role: 'scout',
+      name: 'assumptions#1',
+      runId,
+      governor,
+      graph,
+      nodeId: 'check:assumptions',
+      tools: [...allWorkerTools().filter((tool) => ASSUMPTION_TOOL_NAMES.has(tool.name)), capture.tool],
+      signal: runSignal,
+      prompt: `The plan for this run rests on assumptions nobody has verified:
+
+${proposal.assumptions.map((assumption, index) => `${index + 1}. ${assumption}`).join('\n')}
+
+Goal: ${proposal.goal}
+
+The work has NOT been done yet — that is the point of checking now. So do not look for evidence that an assumption has already been carried out; the project is empty or unfinished by design, and "no source file does this yet" is never an answer.
+
+Ask the right question for each kind:
+
+- An assumption about **the world** ("bcryptjs is compatible with Bun", "the .env file can be created by the builder", "port 3000 is free") is a claim you can settle now. Settle it: install it and import it, run the read-only command, check the version, try the write in a scratch path, read the policy. Report holds or false.
+- An assumption that states an **intention** ("validation will use zod", "tests will use bun:test", "the server will use Bun.serve") is a decision, not a belief. Judge whether the decision is *workable here* — is the package installable and compatible, does the runtime support it, does anything in this environment prevent it? Workable is holds; a decision that cannot work here is false, and that is the most valuable thing you can find.
+
+Only report unverifiable when the answer genuinely depends on the user's preference and no amount of looking would settle it. "I could not find it in the code" is not unverifiable.
+
+Finding that an assumption is FALSE is worth more than a confident guess on every other one. Finish by calling submit_assumptions with one entry per assumption.`,
+    })
+    track(checker.usage)
+    const outcome = assumptionOutcome(proposal.assumptions, capture.taken())
+    assumptionBriefing = outcome.briefing
+    writeSubStep(outcome.summary)
+    for (const wrong of outcome.falsified) writeSubStep(`✗ WRONG: ${wrong.assumption} — ${wrong.evidence}`)
+    for (const open of outcome.unverifiable) writeSubStep(`? open: ${open.assumption} — ${open.evidence}`)
+    journal.append('phase', { phase: 'scaffold', note: 'assumptions checked', summary: outcome.summary, falsified: outcome.falsified, unverifiable: outcome.unverifiable })
+  }
+
+  const briefing = `## The goal of this run\n${proposal.goal}\n\n## What we established while planning\n${proposal.understanding}${assumptionBriefing ? `\n\n${assumptionBriefing}` : ''}`
   let totalSavedMs = 0
   const variantCount = options.variants ?? 1
 
@@ -509,11 +646,28 @@ async function runAutonomousTaskInternal(options: AutonomousRunOptions): Promise
       progress: proposal.steps.length > 0 ? 1 : 0,
     })
   } else {
-    const { waves } = planWaves(proposal.steps)
-    writePhase('execute', `${proposal.steps.length} steps in ${waves.length} wave${waves.length === 1 ? '' : 's'}`)
+    // The plan is no longer frozen at approval. Workers can report that it is
+    // wrong — work nobody planned, a step that has to happen first, a step that
+    // cannot be done as written — and it is amended between waves. Every one of
+    // those was seen: three dependent steps scheduled in one parallel wave, a
+    // step told to write a policy-protected file, and a whole goal left to the
+    // repair phase because the plan's first step collapsed. Repairing code
+    // could not fix any of them, because the code was never the problem.
+    // Bound once here as a definitely-present value: re-planning reassigns it
+    // below, and a reassignment inside a loop would otherwise widen it back to
+    // `Proposal | undefined` for the whole block.
+    let plan: Proposal = proposal
+    let waves = planWaves(plan.steps).waves
+    const planRevisions = createPlanRevisionTool()
+    let revisionsApplied = 0
+    writePhase('execute', `${plan.steps.length} steps in ${waves.length} wave${waves.length === 1 ? '' : 's'}`)
     journal.append('phase', { phase: 'execute', waves: waves.length })
 
-    for (const [index, wave] of waves.entries()) {
+    let waveCursor = 0
+    while (waveCursor < waves.length) {
+      const index = waveCursor
+      const wave = waves[index]!
+      waveCursor += 1
       if (runSignal?.aborted) return done('aborted', { proposal })
       if (waves.length > 1) writeSubStep(`wave ${index + 1} of ${waves.length}`)
       taskSessions.update(parentTask.id, {
@@ -548,16 +702,26 @@ async function runAutonomousTaskInternal(options: AutonomousRunOptions): Promise
       if (runnable.length === 0) continue
       for (const step of runnable) graph.startNode(`step:${step.id}`)
 
+      // The project's verification commands only mean anything once the project
+      // exists. Applying them to every step made early steps fail by
+      // construction — a step whose whole job is to write package.json cannot
+      // pass `bun test`, because there are no tests yet — and each false failure
+      // then blocked every step behind it. Seen live: a run where step 1 did its
+      // work correctly, was marked failed twice by a premature `bun test`, and
+      // took the other three steps down with it. The verify phase owns this gate,
+      // where it runs against a finished project and has repair attached.
+      const finalWave = index === waves.length - 1
       const fleet = await runFleet({
         assignments: runnable.map((step) => ({
           id: step.id,
           title: step.title,
           role: step.role,
           instructions: step.instructions,
-          acceptanceCriteria: proposal.acceptanceCriteria,
-          verificationCommands: proposal.verification,
-          sideEffects: proposal.sideEffects,
+          acceptanceCriteria: plan.acceptanceCriteria,
+          ...(finalWave ? { verificationCommands: plan.verification } : {}),
+          sideEffects: plan.sideEffects,
         })),
+        extraTools: [planRevisions.tool],
         briefing,
         journal,
         runId,
@@ -588,13 +752,134 @@ async function runAutonomousTaskInternal(options: AutonomousRunOptions): Promise
           }],
         })
       }
+      // A failed step takes the rest of the plan down with it: every dependent
+      // is blocked, and the run can reach verification with none of its planned
+      // work done — leaving the repair loop to rebuild the whole goal by itself
+      // in the couple of attempts it has. Both end-to-end runs this was
+      // observed on collapsed exactly that way, on their very first step. Give
+      // a failed step one more shot with the failure in front of it before the
+      // cascade starts.
+      const retryable = fleet.results.filter((result) => !result.ok && graph.reopenNode(`step:${result.id}`, result.report))
+      if (retryable.length > 0 && !runSignal.aborted) {
+        const stepById = new Map(runnable.map((step) => [step.id, step]))
+        const retries = retryable.flatMap((result) => {
+          const step = stepById.get(result.id)
+          return step ? [{ step, report: result.report }] : []
+        })
+        // Some failures are a statement about the next few seconds rather than
+        // about the request — a rate limit above all. Retrying those instantly
+        // spends the one retry each step gets on a wall that has not moved yet,
+        // so honour the delay the failure classification already worked out.
+        const backoffMs = Math.min(
+          60_000,
+          Math.max(0, ...retries.map(({ step }) => graph.node(`step:${step.id}`)?.lastError?.retryAfter ?? 0)),
+        )
+        if (backoffMs > 0) {
+          writeSubStep(`waiting ${Math.round(backoffMs / 1000)}s before retrying — the failure will not clear any sooner`)
+          await delay(backoffMs, runSignal)
+        }
+        if (runSignal.aborted) break
+
+        writeSubStep(`retrying ${retries.length} failed step(s) once, with the failure report in hand`)
+        journal.append('phase', { phase: 'execute', note: `retrying ${retries.map(({ step }) => step.id).join(', ')}`, backoffMs })
+        for (const { step } of retries) graph.startNode(`step:${step.id}`)
+
+        const retryFleet = await runFleet({
+          assignments: retries.map(({ step, report }) => ({
+            id: step.id,
+            title: step.title,
+            role: step.role,
+            instructions: `${step.instructions}
+
+## This assignment already failed once
+${clampOutput(report, 2000)}
+
+Do not repeat whatever failed. If a file is protected, a path is refused, or a command is blocked, route around it: use a different path, a different mechanism, or leave that one piece out and finish everything else in the assignment. Coming back with the rest of the work done beats coming back with nothing.`,
+            acceptanceCriteria: plan.acceptanceCriteria,
+            ...(finalWave ? { verificationCommands: plan.verification } : {}),
+            sideEffects: plan.sideEffects,
+          })),
+          extraTools: [planRevisions.tool],
+          briefing,
+          journal,
+          runId,
+          governor,
+          graph,
+          signal: runSignal,
+          wave: index + 1,
+        })
+        track(retryFleet.usage)
+        totalSavedMs += retryFleet.savedMs
+
+        for (const result of retryFleet.results) {
+          board.post(result.name, `step:${result.id}`, `${result.title} (retry) — ${result.report}`)
+          graph.finishNode(`step:${result.id}`, {
+            ok: result.ok,
+            report: result.report,
+            error: result.ok ? undefined : result.report,
+            evidence: [{
+              id: `evidence:step:${result.id}:${graph.node(`step:${result.id}`)?.attemptCount ?? 0}`,
+              nodeId: `step:${result.id}`,
+              kind: 'action',
+              passed: result.ok,
+              summary: result.ok ? `${result.title} completed by ${result.name} on retry` : `${result.title} failed again in ${result.name}`,
+              data: { worker: result.name, steps: result.steps, report: result.report, retry: true },
+              at: Date.now(),
+            }],
+          })
+        }
+      }
+
+      // A checkpoint per wave, not per step: everything inside a wave runs
+      // concurrently against the same tree, so their edits genuinely cannot be
+      // separated into one commit each. The wave is the real increment
+      // boundary, and committing it gives both a rollback point and a history
+      // the user can actually read afterwards.
+      const landed = wave
+        .filter((step) => graph.node(`step:${step.id}`)?.status === 'completed')
+        .map((step) => `${step.id}: ${step.title}`)
+      if (landed.length > 0) {
+        const commit = await commitAll(
+          process.cwd(),
+          `Wave ${index + 1}: ${landed.length === 1 ? landed[0] : `${landed.length} steps`}\n\n${landed.map((entry) => `- ${entry}`).join('\n')}`,
+          runSignal,
+        )
+        if (commit.committed) writeSubStep(`committed wave ${index + 1} (${landed.length} step(s))`)
+        if (commit.excluded.length > 0) writeSubStep(`⚠ kept out of the commit because they hold secrets: ${commit.excluded.join(', ')}`)
+      }
+
+      // Amend the plan before scheduling anything else, so a missing step is
+      // built in the right order rather than bolted on at the end.
+      const requested = planRevisions.taken()
+      if (requested.length > 0 && revisionsApplied < MAX_PLAN_REVISIONS) {
+        const completedIds = new Set(
+          graph.state().nodes.filter((node) => node.kind === 'step' && node.status === 'completed').map((node) => node.id.replace(/^step:/, '')),
+        )
+        const revision = applyPlanRevisions(plan, requested, completedIds)
+        for (const change of revision.applied) writeSubStep(`plan revised — ${change}`)
+        for (const refusal of revision.rejected) writeSubStep(`⚠ plan revision refused — ${refusal}`)
+        journal.append('phase', { phase: 'execute', note: 'plan revised', applied: revision.applied, rejected: revision.rejected })
+        if (revision.applied.length > 0) {
+          revisionsApplied += revision.applied.length
+          plan = revision.proposal
+          proposal = plan
+          graph.seedProposal(plan)
+          // Re-schedule from the top: completed steps fall out as empty waves,
+          // and a newly added step lands wherever its dependencies put it
+          // rather than always at the end.
+          waves = planWaves(plan.steps).waves
+          waveCursor = 0
+          taskSessions.update(parentTask.id, { stepsTotal: plan.steps.length })
+        }
+      }
+
       const completedSteps = graph.state().nodes.filter((node) => node.kind === 'step' && node.status === 'completed').length
       taskSessions.update(parentTask.id, {
         status: 'running',
         action: 'Wave finished',
-        detail: `${completedSteps}/${proposal.steps.length} planned step(s) have completed; continuing with remaining work or verification`,
+        detail: `${completedSteps}/${plan.steps.length} planned step(s) have completed; continuing with remaining work or verification`,
         stepsCompleted: completedSteps,
-        progress: proposal.steps.length > 0 ? completedSteps / proposal.steps.length : 0,
+        progress: plan.steps.length > 0 ? completedSteps / plan.steps.length : 0,
       })
     }
   }
@@ -646,6 +931,14 @@ Read the changed files in full context. Improve only concrete issues directly re
 
   let verdict: CriticVerdict | undefined
   let attempt = 0
+  // Getting a broken build green and fixing what the reviewers then find are two
+  // different jobs, and the review only ever runs on a change that already
+  // builds. Sharing one counter meant a run that spent its repairs reaching a
+  // green build arrived at its first review with no budget left to act on it —
+  // stopping at the exact point where the most is known about the change. Each
+  // gate therefore gets its own allowance of `maxRepairAttempts`.
+  let buildRepairs = 0
+  let reviewRepairs = 0
   // Fingerprints of what was still failing after each verify+review pass, oldest
   // first — the input to the deterministic "are repairs actually converging?"
   // check that stops a thrashing run early instead of at the budget.
@@ -750,6 +1043,15 @@ Read the changed files in full for context beyond the diff above — a diff hide
             { role: 'bughunter', name: 'bughunter#1', focus: 'Focus only on functional/logic bugs in what changed.' },
           ]
 
+      // This project has a track record of over-claiming completion — add
+      // reviewers whose whole job is to check "done" against the actual diff.
+      if (!docsOnly && reliability.extraReviewers > 0) {
+        reviewers.push({ role: 'bughunter', name: 'bughunter#2', focus: `${reliability.note} Verify every claimed step against the real diff; find where the work is incomplete or the claim is wrong.` })
+        if (reliability.extraReviewers >= 2) {
+          reviewers.push({ role: 'critic', name: 'critic#2', focus: 'Assume this run over-claims. Name every step it said it did that it did not fully do.' })
+        }
+      }
+
       const reviewResults = await Promise.all(
         reviewers.map(async (reviewer) => {
           const verdictCapture = createVerdictTool()
@@ -781,7 +1083,57 @@ This reviewer session is intentionally read-only. The current diff, status, and 
       )
 
       for (const result of reviewResults) track(result.usage)
-      verdict = mergeVerdicts(reviewResults.map(({ reviewer, verdict }) => ({ reviewer, verdict })))
+
+      // The run wrote down what "done" means; this is the only thing that reads
+      // it back. Every other gate judges process — steps completed, exit codes,
+      // open-ended review — and none of them knows what was promised, so a run
+      // could pass all of them while quietly not doing the thing it said it
+      // would. Narrower than the other reviewers on purpose: a fixed list of
+      // questions the run set itself, which is what makes the answers checkable.
+      const criteria = proposal.acceptanceCriteria ?? []
+      let acceptance: CriticVerdict = acceptanceVerdict([], undefined)
+      if (criteria.length > 0) {
+        const acceptanceCapture = createAcceptanceTool(criteria)
+        const acceptanceResult = await runSubAgent({
+          role: 'critic',
+          name: 'acceptance#1',
+          runId,
+          governor,
+          graph,
+          nodeId: 'review:acceptance',
+          briefing,
+          tools: [...allWorkerTools().filter((tool) => REVIEWER_TOOL_NAMES.has(tool.name)), acceptanceCapture.tool],
+          signal: runSignal,
+          prompt: `${reviewContext}
+
+## The acceptance criteria this run declared
+
+${criteria.map((criterion, index) => `${index + 1}. ${criterion}`).join('\n')}
+
+Read the delivered code and tests and decide, for each criterion above, whether the work actually meets it. This session is read-only: do not run commands, modify files, or delegate.
+
+Judge what is there, not what the code looks like it would probably do. A criterion about behaviour is met when a test exercises that behaviour and passes, or when the code path plainly implements it — not when a function with a matching name exists. Say what the evidence is, and when a criterion is not met, say exactly what is missing. Finish by calling submit_acceptance with one entry per criterion.`,
+        })
+        track(acceptanceResult.usage)
+        const reported = acceptanceCapture.taken()
+        if (!reported) writeBlock('Acceptance check (unstructured)', acceptanceResult.report)
+        acceptance = acceptanceVerdict(criteria, reported)
+        writeSubStep(acceptance.summary)
+        journal.append('verdict', { reviewer: 'acceptance', criteria, reported: reported ?? null })
+      }
+
+      // A deterministic reviewer alongside the model ones. It catches the two
+      // defects a green test suite structurally cannot — a package imported but
+      // never declared (Bun auto-installs it, so the tests pass and the project
+      // is broken for everyone else) and scratch files left in the deliverable —
+      // and it votes through the same merge, so the repair loop treats its
+      // findings exactly like a critic's.
+      const hygiene = hygieneVerdict(deliverableFiles(status.stdout, changedFiles, startedAt))
+      verdict = mergeVerdicts([
+        ...reviewResults.map(({ reviewer, verdict }) => ({ reviewer, verdict })),
+        { reviewer: 'acceptance', verdict: acceptance },
+        { reviewer: 'hygiene', verdict: hygiene },
+      ])
 
       journal.append('verdict', { ...verdict })
       reviewPassed = !hasBlockingIssues(verdict)
@@ -802,16 +1154,24 @@ This reviewer session is intentionally read-only. The current diff, status, and 
     progressHistory.push({ attempt, failures: failureFingerprints(verification, verification.passed ? verdict : undefined) })
     const progress = assessProgress(progressHistory)
     pendingApproachChange = undefined
+    // Which allowance this pass draws on: the build gate while verification is
+    // red, the review gate once it is green.
+    const gate = verification.passed ? 'review' : 'build'
+    const repairsSpent = verification.passed ? reviewRepairs : buildRepairs
     // Show the repair trajectory so a long repair phase reads as progress, not a hang.
     if (progressHistory.length > 1 && progress.trend !== 'resolved') {
       const counts = progressHistory.map((snap) => snap.failures.length).join(' → ')
-      writeSubStep(`repair ${attempt}/${maxRepairAttempts} · failures ${counts} · ${progress.trend}`)
+      writeSubStep(`repair ${gate} ${repairsSpent}/${maxRepairAttempts} · failures ${counts} · ${progress.trend}`)
     }
     if (progress.recommendation === 'stop' && (progress.trend === 'stalled' || progress.trend === 'diverging')) {
-      const failureText = `${verification.passed ? '' : describeVerification(verification)}\n${describeIssues(verdict?.issues ?? [])}`.trim()
-      const stuck = classifyStuck({ failureText, agentReport: lastRepairReport, trend: progress.trend })
+      // Command output and review prose are kept apart on purpose: a security
+      // reviewer writing "an attacker gains unauthorized access" is describing a
+      // defect, not reporting that elia is blocked on a credential.
+      const failureText = verification.passed ? '' : describeVerification(verification)
+      const reviewText = describeIssues(verdict?.issues ?? [])
+      const stuck = classifyStuck({ failureText, reviewText, agentReport: lastRepairReport, trend: progress.trend })
       const canEscalate =
-        attempt < maxRepairAttempts &&
+        repairsSpent < maxRepairAttempts &&
         (stuck.recovery === 'replan' || stuck.recovery === 'fix-environment') &&
         !escalationsUsed.has(stuck.recovery)
 
@@ -847,8 +1207,8 @@ This reviewer session is intentionally read-only. The current diff, status, and 
       }
     }
 
-    if (attempt >= maxRepairAttempts) {
-      writeSubStep(`Stopping after ${attempt} repair attempt${attempt === 1 ? '' : 's'} — this needs a human.`)
+    if (repairsSpent >= maxRepairAttempts) {
+      writeSubStep(`Stopping after ${attempt} repair attempt${attempt === 1 ? '' : 's'} (${gate} gate exhausted) — this needs a human.`)
       const lessons = await captureLessons(goal, proposal, 'unresolved', journal, track, governor, graph, runSignal)
       return done('needs-attention', { proposal, verdict, lessons })
     }
@@ -856,13 +1216,27 @@ This reviewer session is intentionally read-only. The current diff, status, and 
     // --- Reflect & repair ---------------------------------------------------
 
     attempt += 1
-    taskSessions.update(parentTask.id, { status: 'running', action: 'Repairing', detail: `Addressing verification or review failures (attempt ${attempt} of ${maxRepairAttempts})` })
-    writePhase('reflect', `attempt ${attempt} of ${maxRepairAttempts}`)
-    journal.append('phase', { phase: 'reflect', attempt })
+    if (verification.passed) reviewRepairs += 1
+    else buildRepairs += 1
+    const gateAttempt = verification.passed ? reviewRepairs : buildRepairs
+    taskSessions.update(parentTask.id, { status: 'running', action: 'Repairing', detail: `Addressing ${gate} failures (${gate} attempt ${gateAttempt} of ${maxRepairAttempts})` })
+    writePhase('reflect', `${gate} attempt ${gateAttempt} of ${maxRepairAttempts}`)
+    journal.append('phase', { phase: 'reflect', attempt, gate, gateAttempt })
 
     const problem = verification.passed
       ? `Adversarial review found blocking problems:\n\n${describeIssues(verdict?.issues ?? [])}`
       : `Verification failed:\n\n${describeVerification(verification)}`
+
+    // When the plan collapsed — a step failed and every step behind it was
+    // blocked — the repair agent otherwise sees only a red or green gate and
+    // has no idea most of the goal was never attempted. Name the missing work
+    // so the repair delivers it instead of only patching what the gate said.
+    const unfinished = graph.state().nodes.filter((node) => node.kind === 'step' && node.status !== 'completed')
+    const planGap = unfinished.length > 0
+      ? `\n\n## ${unfinished.length} of ${proposal.steps.length} planned step(s) never completed — this work is still owed and is part of this repair\n${unfinished
+          .map((node) => `- ${node.title} (${node.status})${node.lastError ? `: ${node.lastError.message.slice(0, 200)}` : ''}`)
+          .join('\n')}`
+      : ''
 
     // When earlier repair passes have not shifted a particular failure, tell the
     // repair agent explicitly so it stops re-applying the same fix and tries a
@@ -881,7 +1255,7 @@ This reviewer session is intentionally read-only. The current diff, status, and 
         content: [
           {
             type: 'text',
-            text: `${briefing}\n\n## What went wrong\n${problem}${persisted}${directive}\n\nFix all of it, then re-run: ${proposal.verification.join(' && ') || '(no verification commands were defined)'}`,
+            text: `${briefing}\n\n## What went wrong\n${problem}${planGap}${persisted}${directive}\n\nFix all of it, then re-run: ${proposal.verification.join(' && ') || '(no verification commands were defined)'}`,
           },
         ],
       },
@@ -991,6 +1365,38 @@ Read the shared blackboard with \`board_read\` to see what the workers actually 
  * with real commands so the planner starts from facts instead of spending its
  * first three tool calls asking what kind of project this is.
  */
+/** A wait that a cancelled run does not have to sit through. */
+function delay(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) return Promise.resolve()
+  return new Promise<void>((resolve) => {
+    const timer = setTimeout(finish, ms)
+    function finish(): void {
+      clearTimeout(timer)
+      signal?.removeEventListener('abort', finish)
+      resolve()
+    }
+    signal?.addEventListener('abort', finish, { once: true })
+  })
+}
+
+/**
+ * What the hygiene audit should look at. Git is the precise answer whenever the
+ * deliverable lives in a repo. A run that scaffolded a project from nothing into
+ * an empty directory has no git at all, and there every file present is one the
+ * run created — which is exactly the case the audit exists for, so falling back
+ * to a tree scan keeps it covered instead of silently checking nothing.
+ */
+function deliverableFiles(statusOutput: string, diffChanged: string[], runStartedAt: number): HygieneInput {
+  const cwd = process.cwd()
+  const fromGit = filesFromGitStatus(statusOutput)
+  const changedFiles = [...new Set([...fromGit.changed, ...diffChanged])].filter(Boolean)
+  if (changedFiles.length > 0) return { cwd, addedFiles: fromGit.added, changedFiles }
+  // Without git, only the run's own mtimes distinguish what it created from what
+  // was already sitting in the directory — and a scratch-looking file the user
+  // already had is not this run's to delete.
+  return { cwd, addedFiles: scanProjectFiles(cwd, { modifiedSince: runStartedAt }), changedFiles: scanProjectFiles(cwd) }
+}
+
 async function projectSnapshot(runId: string, signal?: AbortSignal): Promise<string> {
   const environment = await withAgentIdentity({ name: 'lead', role: 'lead', runId, cwd: process.cwd(), signal }, () => environmentTool.execute({}))
   const [tree, status, branch] = await Promise.all([

@@ -23,8 +23,16 @@ function agentGlyph(status: TaskSession['status']): string {
  * artifacts in /artifact — so a fresh chat shows nothing here at all.
  * Bounded height and full width so a long plan can't blow past the terminal edge.
  */
-export function WorkspacePanel({ plan, agents }: { plan: TodoItem[]; agents: TaskSession[] }) {
-  const active = agents.filter((a) => a.role && a.role !== 'lead')
+const DONE_STATUS = new Set<TaskSession['status']>(['done', 'failed'])
+
+export function WorkspacePanel({ plan, agents, since = 0 }: { plan: TodoItem[]; agents: TaskSession[]; since?: number }) {
+  // `.elia/tasks.json` is reloaded on every startup, so the fleet list carries
+  // subagents from past REPLs. Show a non-lead worker only if it's still going,
+  // or it finished during *this* session — a "✓ critic" from yesterday's run is
+  // history (it lives in /sessions), not what elia is doing now.
+  const active = agents.filter(
+    (a) => a.role && a.role !== 'lead' && (!DONE_STATUS.has(a.status) || (a.finishedAt ?? a.updatedAt) >= since),
+  )
   if (plan.length === 0 && active.length === 0) return null
 
   // Show what's happening, not the whole backlog: done items + the current one +

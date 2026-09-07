@@ -25,7 +25,7 @@ const PYTHON_PATTERNS = [
 ]
 
 /** Trims a bare import specifier down to the installable package name (drops subpaths, keeps @scope). */
-function packageRoot(specifier: string): string {
+export function packageRoot(specifier: string): string {
   if (specifier.startsWith('@')) {
     const [scope, name] = specifier.split('/')
     return name ? `${scope}/${name}` : scope!

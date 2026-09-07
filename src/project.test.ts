@@ -37,6 +37,35 @@ test('detectProject identifies TypeScript and Bun projects from manifests and sc
   expect(profile.verificationCommands).toContain('typescript:tsc-or-project-typecheck')
 })
 
+test('detectProject identifies Rust and Go projects from their manifests', () => {
+  const rust = fixture({ 'Cargo.toml': '[package]\nname = "x"\n', 'src/main.rs': 'fn main() {}\n' })
+  const rustProfile = detectProject(rust)
+  expect(rustProfile.stacks).toContain('rust')
+  expect(rustProfile.verificationCommands).toContain('rust:cargo-check-and-test')
+
+  const go = fixture({ 'go.mod': 'module x\n', 'main.go': 'package main\n' })
+  const goProfile = detectProject(go)
+  expect(goProfile.stacks).toContain('go')
+  expect(goProfile.verificationCommands).toContain('go:build-and-test')
+})
+
+test('detectProject identifies Maven and Gradle Java projects', () => {
+  const maven = fixture({ 'pom.xml': '<project/>', 'src/main/java/App.java': 'class App {}\n' })
+  const mavenProfile = detectProject(maven)
+  expect(mavenProfile.stacks).toContain('java')
+  expect(mavenProfile.verificationCommands).toContain('java:mvn-test')
+
+  const gradle = fixture({ 'build.gradle.kts': '', 'src/main/java/App.java': 'class App {}\n' })
+  expect(detectProject(gradle).verificationCommands).toContain('java:gradle-build')
+})
+
+test('detectProject identifies a CMake C++ project', () => {
+  const root = fixture({ 'CMakeLists.txt': 'project(x)\n', 'src/main.cpp': 'int main() { return 0; }\n' })
+  const profile = detectProject(root)
+  expect(profile.stacks).toContain('cpp')
+  expect(profile.verificationCommands).toContain('cpp:cmake-build')
+})
+
 test('detectProject identifies React/TSX projects and preserves pnpm conventions', () => {
   const root = fixture({
     'package.json': JSON.stringify({ dependencies: { react: '^18.0.0' } }),

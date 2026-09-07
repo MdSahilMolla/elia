@@ -1,4 +1,6 @@
 import type { Tool } from './types.ts'
+import { existsSync } from 'node:fs'
+import { optionalString } from './args.ts'
 import { isIgnored, SKIP_DIRS } from './ignoreDirs.ts'
 import { resolveWorkspacePath } from '../autonomy/context.ts'
 import { assertSafeFileAccess, isSensitivePath } from '../autonomy/sensitivePaths.ts'
@@ -33,7 +35,7 @@ export const grepTool: Tool = {
   async execute(input) {
     if (typeof input.pattern !== 'string' || input.pattern.length === 0) throw new Error('pattern must be a non-empty string')
     if (input.pattern.length > MAX_PATTERN_LENGTH) throw new Error(`pattern exceeds ${MAX_PATTERN_LENGTH} characters`)
-    if (input.path !== undefined && (typeof input.path !== 'string' || input.path.trim().length === 0)) throw new Error('path must be a non-empty string when provided')
+    const pathArgument = optionalString(input.path, 'path')
     if (input.glob !== undefined && (typeof input.glob !== 'string' || input.glob.length === 0 || input.glob.length > MAX_GLOB_LENGTH)) throw new Error(`glob must be a non-empty string up to ${MAX_GLOB_LENGTH} characters when provided`)
     if (input.context !== undefined && (typeof input.context !== 'number' || !Number.isInteger(input.context) || input.context < 0 || input.context > MAX_CONTEXT_LINES)) throw new Error(`context must be an integer from 0 to ${MAX_CONTEXT_LINES} when provided`)
 
@@ -43,12 +45,28 @@ export const grepTool: Tool = {
     // Displayed paths stay relative to what the model asked for; only the
     // actual filesystem scan resolves against the ambient worktree root, so a
     // variant's grep results don't leak its internal worktree path.
-    const inputDir = (input.path as string | undefined) ?? '.'
+    const inputDir = pathArgument ?? '.'
     const dir = resolveWorkspacePath(inputDir)
     assertSafeFileAccess(dir)
 
+    // Searching a directory that isn't there produced `ENOENT ... uv_spawn
+    // '<path to rg.exe>'` — because a spawn whose cwd does not exist fails
+    // naming the *binary*, not the missing directory. That reads as "ripgrep is
+    // broken" and sent a run looking in the wrong place entirely.
+    if (!existsSync(dir)) throw new Error(`no such directory: ${inputDir}`)
+
     const rg = Bun.which('rg')
-    if (rg) return await searchWithRipgrep(rg, pattern, dir, inputDir, glob, context)
+    if (rg) {
+      try {
+        return await searchWithRipgrep(rg, pattern, dir, inputDir, glob, context)
+      } catch (error) {
+        // A ripgrep that cannot be spawned (a stale shim, a half-finished
+        // install) is not a reason to fail the search — there is a pure-JS
+        // implementation right here.
+        if (isSpawnFailure(error)) return await searchWithJs(pattern, dir, inputDir, glob, context)
+        throw error
+      }
+    }
     return await searchWithJs(pattern, dir, inputDir, glob, context)
   },
 }
@@ -101,6 +119,12 @@ async function searchWithRipgrep(rg: string, pattern: string, dir: string, input
 
   if (lines.length === 0) return `No matches found.${accessNote}`
   return `${lines.join('\n')}${truncated ? `\n\n[stopped after ${MAX_MATCHES} matches]` : ''}${accessNote}`
+}
+
+/** A spawn that never started — a missing or unusable binary, not a search result. */
+function isSpawnFailure(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error)
+  return /uv_spawn|ENOENT|EACCES|ENOEXEC|spawn/i.test(message)
 }
 
 async function runRipgrep(rg: string, args: string[], dir: string): Promise<{ stdout: string; stderr: string; exitCode: number }> {

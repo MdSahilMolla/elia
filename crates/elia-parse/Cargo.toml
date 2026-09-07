@@ -1,0 +1,15 @@
+[package]
+name = "elia-parse"
+description = "Rust bindings for the elia-parse C++ structural edit check (native/elia-parse)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+
+[build-dependencies]
+cc = "1"

@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 
-export type ProjectStack = 'python' | 'typescript' | 'bun' | 'react'
+export type ProjectStack = 'python' | 'typescript' | 'bun' | 'react' | 'rust' | 'go' | 'java' | 'cpp'
 export type PackageManager = 'bun' | 'pnpm' | 'yarn' | 'npm' | 'unknown'
 
 export interface ProjectProfile {
@@ -45,12 +45,38 @@ export function detectProject(root: string): ProjectProfile {
     signals.push('React dependency, component source, or framework configuration detected')
   }
 
+  const rust = files.includes('Cargo.toml') || sourceFiles.some((file) => file.endsWith('.rs'))
+  if (rust) {
+    stacks.push('rust')
+    signals.push('Cargo manifest or Rust source detected')
+  }
+
+  const go = files.includes('go.mod') || sourceFiles.some((file) => file.endsWith('.go'))
+  if (go) {
+    stacks.push('go')
+    signals.push('Go module or source detected')
+  }
+
+  const gradle = files.some((file) => ['build.gradle', 'build.gradle.kts', 'settings.gradle', 'settings.gradle.kts'].includes(file))
+  const maven = files.includes('pom.xml')
+  const java = gradle || maven || sourceFiles.some((file) => file.endsWith('.java'))
+  if (java) {
+    stacks.push('java')
+    signals.push(maven ? 'Maven project detected' : gradle ? 'Gradle project detected' : 'Java source detected')
+  }
+
+  const cpp = files.some((file) => ['CMakeLists.txt', 'Makefile', 'makefile'].includes(file)) || sourceFiles.some((file) => /\.(?:c|cc|cpp|cxx|h|hh|hpp|hxx)$/.test(file))
+  if (cpp) {
+    stacks.push('cpp')
+    signals.push(files.includes('CMakeLists.txt') ? 'CMake project detected' : 'C/C++ source or Makefile detected')
+  }
+
   return {
     root,
     stacks,
     packageManager: detectPackageManager(files, packageJson?.packageManager),
     signals,
-    verificationCommands: verificationCommands(packageJson, python, typescript),
+    verificationCommands: verificationCommands(packageJson, { python, typescript, rust, go, java, maven, gradle, cpp, cmake: files.includes('CMakeLists.txt') }),
   }
 }
 
@@ -76,7 +102,7 @@ function collectSourceExtensions(root: string): string[] {
       if (entry.name.startsWith('.') || entry.name === 'node_modules' || entry.name === 'dist' || entry.name === 'build') continue
       const path = join(dir, entry.name)
       if (entry.isDirectory()) visit(path, depth + 1)
-      else if (/\.(py|ts|tsx|js|jsx)$/.test(entry.name)) found.push(entry.name)
+      else if (/\.(py|ts|tsx|js|jsx|rs|go|java|c|cc|cpp|cxx|h|hh|hpp|hxx)$/.test(entry.name)) found.push(entry.name)
     }
   }
   visit(root, 0)
@@ -106,13 +132,30 @@ function detectPackageManager(files: string[], declared: unknown): PackageManage
   return 'unknown'
 }
 
-function verificationCommands(packageJson: Record<string, unknown> | undefined, python: boolean, typescript: boolean): string[] {
+interface StackFlags {
+  python: boolean
+  typescript: boolean
+  rust: boolean
+  go: boolean
+  java: boolean
+  maven: boolean
+  gradle: boolean
+  cpp: boolean
+  cmake: boolean
+}
+
+function verificationCommands(packageJson: Record<string, unknown> | undefined, flags: StackFlags): string[] {
   const scripts = packageJson?.scripts as Record<string, unknown> | undefined
   const commands: string[] = []
   for (const name of ['test', 'typecheck', 'lint', 'build']) {
     if (typeof scripts?.[name] === 'string') commands.push(`package-script:${name}`)
   }
-  if (python) commands.push('python:project-tests-or-pytest')
-  if (typescript) commands.push('typescript:tsc-or-project-typecheck')
+  if (flags.python) commands.push('python:project-tests-or-pytest')
+  if (flags.typescript) commands.push('typescript:tsc-or-project-typecheck')
+  if (flags.rust) commands.push('rust:cargo-check-and-test')
+  if (flags.go) commands.push('go:build-and-test')
+  if (flags.maven) commands.push('java:mvn-test')
+  else if (flags.gradle) commands.push('java:gradle-build')
+  if (flags.cpp) commands.push(flags.cmake ? 'cpp:cmake-build' : 'cpp:make')
   return commands
 }

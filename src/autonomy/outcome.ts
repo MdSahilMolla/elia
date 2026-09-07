@@ -1,4 +1,4 @@
-import type { GoalGraphSnapshot } from './goalGraph.ts'
+import { outstandingActions, pendingApprovals as approvalsAwaitingAPerson, type GoalGraphSnapshot } from './goalGraph.ts'
 
 export type CompletionState = 'verified' | 'partial' | 'blocked' | 'failed' | 'aborted'
 export type CompletionConfidence = 'high' | 'medium' | 'low'
@@ -27,8 +27,10 @@ export interface CompletionInput {
 export function assessCompletion(input: CompletionInput): CompletionAssessment {
   const steps = input.graph?.nodes.filter((node) => node.kind === 'step' || node.kind === 'delegation') ?? []
   const completedSteps = steps.filter((node) => node.status === 'completed').length
-  const unresolvedActions = input.graph?.actions.filter((action) => action.state !== 'completed') ?? []
-  const pendingApprovals = input.graph?.approvals.filter((approval) => approval.status === 'pending').length ?? 0
+  // Same rule the goal graph uses to decide whether the goal may complete, so
+  // the report and the gate can never disagree about whether work is owed.
+  const unresolvedActions = input.graph ? outstandingActions(input.graph) : []
+  const pendingApprovals = input.graph ? approvalsAwaitingAPerson(input.graph).length : 0
   const blockers: string[] = []
   const evidence: string[] = []
   const nextActions: string[] = []

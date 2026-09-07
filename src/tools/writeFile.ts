@@ -4,7 +4,9 @@ import { resolveWorkspacePath, currentAgent } from '../autonomy/context.ts'
 import { diagnosticsForFile, formatDiagnostics } from '../lsp/registry.ts'
 import { addOnlyDiff, diffStat, fencedDiff, unifiedDiff } from '../ui/diff.ts'
 import { hasReadFile, noteFileRead } from './fileAccess.ts'
+import { isSensitivePath } from '../autonomy/sensitivePaths.ts'
 import { atomicWrite } from './atomicWrite.ts'
+import { preflightStructuralCheck } from '../native/parseCheck.ts'
 
 export const writeFileTool: Tool = {
   name: 'write_file',
@@ -31,6 +33,22 @@ export const writeFileTool: Tool = {
     const existing = Bun.file(path)
     const priorText = (await existing.exists()) ? await existing.text() : undefined
 
+    // A protected file that already has content is never overwritten, and the
+    // refusal has to say so plainly.
+    //
+    // The read-before-overwrite guard below used to catch these and answer
+    // "read_file it first" — but read_file *denies* a sensitive path, so the
+    // agent was told to do the one thing it could not do. Observed live: a run
+    // burned four actions bouncing between a write it could not make and a read
+    // it was not allowed, on a .env holding the user's real API keys. Creating a
+    // .env that does not exist yet is still fine; destroying one that does is
+    // not.
+    if (priorText !== undefined && priorText.trim().length > 0 && isSensitivePath(path)) {
+      throw new Error(
+        `${input.path} is a protected path that already has content, so elia will not overwrite it — and cannot read it first to merge, by the same rule. Do not retry this write. If a value needs to go in there, finish the rest of the work and tell the user exactly what to add.`,
+      )
+    }
+
     // Guard against clobbering a file the agent never looked at. An empty file
     // has nothing to lose; a file it has already read (or written) is fair game.
     if (priorText !== undefined && priorText.trim().length > 0 && !hasReadFile(path)) {
@@ -42,6 +60,12 @@ export const writeFileTool: Tool = {
     if (currentAgent().signal?.aborted) {
       throw new Error('Write cancelled before writing — the run was aborted.')
     }
+
+    // Reject content that is structurally broken (unbalanced brackets, an
+    // unterminated string/comment) when the file it replaces was fine — a
+    // sub-ms native check in place of a failed build. No-ops without the daemon.
+    const structural = await preflightStructuralCheck(path, priorText, content)
+    if (structural) throw new Error(structural)
 
     await captureBeforeWrite(path)
     await atomicWrite(path, content)

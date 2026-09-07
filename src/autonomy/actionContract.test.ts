@@ -90,3 +90,22 @@ describe('action contracts', () => {
     expect((await evaluatePreconditions(symlink, cwd)).ok).toBe(false)
   })
 })
+
+test('a call with no path is told its path is missing, not that it escaped the workspace', async () => {
+  // Observed live: two blocked writes reported "escapes the active workspace or
+  // crosses a symlink boundary" when the real problem was an empty `path`,
+  // sending the run looking for a sandboxing fault that did not exist.
+  const contract = contractForAction({ name: 'write_file', input: { path: '', content: 'x' } }, process.cwd(), 'key-empty')
+  const evaluation = await evaluatePreconditions(contract, process.cwd())
+
+  expect(evaluation.ok).toBe(false)
+  expect(evaluation.failures.join(' ')).toContain('no file path was given')
+  expect(evaluation.failures.join(' ')).not.toContain('symlink')
+})
+
+test('a real path inside the workspace still passes', async () => {
+  const contract = contractForAction({ name: 'write_file', input: { path: 'src/index.ts', content: 'x' } }, process.cwd(), 'key-real')
+  const evaluation = await evaluatePreconditions(contract, process.cwd())
+
+  expect(evaluation.ok).toBe(true)
+})

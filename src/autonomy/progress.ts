@@ -98,6 +98,11 @@ export function failureFingerprints(verification: VerificationOutcome, verdict?:
   return [...out].sort()
 }
 
+/** Which gate a fingerprint came from. `failureFingerprints` prefixes every one. */
+function isVerifyFailure(fingerprint: string): boolean {
+  return fingerprint.startsWith('verify:')
+}
+
 function sameSet(a: string[], b: string[]): boolean {
   if (a.length !== b.length) return false
   const bs = new Set(b)
@@ -132,6 +137,36 @@ export function assessProgress(history: AttemptSnapshot[]): ProgressAssessment {
       trend: 'stalled',
       recommendation: 'stop',
       reason: `repair attempt ${latest.attempt} reproduced exactly the same ${latest.failures.length} failure(s) as attempt ${previous.attempt}: ${short(repeated)}. Further attempts along this line are very unlikely to help.`,
+      repeated,
+    }
+  }
+
+  // The two gates are staged: the review only ever runs on a change that already
+  // builds, so an attempt that failed verification contributes no review
+  // fingerprints — not because the reviewers approved, but because they never
+  // looked. Comparing raw counts across that transition reads the run's biggest
+  // step forward (the build finally goes green and the reviewers get their first
+  // look) as a regression, and stops the run at the exact moment it started
+  // making progress.
+  const prevVerify = previous.failures.filter(isVerifyFailure)
+  const latestVerify = latest.failures.filter(isVerifyFailure)
+  if (prevVerify.length > 0 && latestVerify.length === 0) {
+    return {
+      trend: 'converging',
+      recommendation: 'continue',
+      reason: `verification now passes (attempt ${previous.attempt} left ${prevVerify.length} verification failure(s)); the ${latest.failures.length} remaining item(s) are review findings seen for the first time, not new regressions`,
+      repeated,
+    }
+  }
+
+  // The mirror image, and a real regression: the change used to build and no
+  // longer does. Worth stopping to reconsider rather than patching forward,
+  // since the loop can rewind to the last green state.
+  if (prevVerify.length === 0 && latestVerify.length > 0) {
+    return {
+      trend: 'diverging',
+      recommendation: 'stop',
+      reason: `repair attempt ${latest.attempt} broke verification, which was passing at attempt ${previous.attempt}: ${short(latestVerify)}. The change is regressing, not converging.`,
       repeated,
     }
   }

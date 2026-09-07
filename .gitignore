@@ -30,6 +30,14 @@ dist/
 extensions/vscode/dist/
 extensions/vscode/*.vsix
 
+# --- Rust (crates/, native addon) ---
+/target/
+**/*.rs.bk
+
+# --- JVM (jvm/elia-jvm-bridge) ---
+jvm/**/build/
+*.class
+
 # --- Language/tooling caches ---
 __pycache__/
 *.py[cod]
@@ -51,3 +59,4 @@ research/
 
 # --- Scratch workspace: elia builds throwaway projects here ---
 workspace/
+meat-awareness/

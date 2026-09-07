@@ -1,4 +1,5 @@
 import type { Tool } from './types.ts'
+import { optionalString } from './args.ts'
 import { activeBlackboard } from '../autonomy/blackboard.ts'
 import { currentAgent } from '../autonomy/context.ts'
 
@@ -41,8 +42,8 @@ export const boardReadTool: Tool = {
     },
   },
   async execute(input) {
-    if (input.topic !== undefined && (typeof input.topic !== 'string' || input.topic.trim().length === 0)) throw new Error('topic must be a non-empty string when provided')
-    const topic = typeof input.topic === 'string' ? input.topic.trim().slice(0, 200) : undefined
+    const topicArgument = optionalString(input.topic, 'topic')
+    const topic = topicArgument?.trim().slice(0, 200)
     return activeBlackboard().render(topic)
   },
 }

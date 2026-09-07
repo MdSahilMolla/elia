@@ -59,3 +59,23 @@ test('simultaneous chats keep independent working plans', async () => {
   expect(first.render()).toBe('[~] first chat plan')
   expect(second.render()).toBe('[ ] second chat plan')
 })
+
+test('two workers laying out plans at the same time do not wipe each other', async () => {
+  // todo_write replaces the list it writes to. Every sub-agent used to resolve
+  // the single ambient run-level list, so parallel workers in one wave would
+  // have silently clobbered each other's plans.
+  const workerA = createTodoList()
+  const workerB = createTodoList()
+
+  await Promise.all([
+    withTodoList(workerA, async () => {
+      activeTodoList().write([{ content: 'build the schema', status: 'in_progress' }])
+    }),
+    withTodoList(workerB, async () => {
+      activeTodoList().write([{ content: 'write the tests', status: 'pending' }])
+    }),
+  ])
+
+  expect(workerA.read()).toEqual([{ content: 'build the schema', status: 'in_progress' }])
+  expect(workerB.read()).toEqual([{ content: 'write the tests', status: 'pending' }])
+})

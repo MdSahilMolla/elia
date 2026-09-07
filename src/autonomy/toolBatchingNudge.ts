@@ -81,3 +81,60 @@ export function createRedundantReadTracker(): RedundantReadTracker {
     },
   }
 }
+
+/**
+ * A nudge for an agent doing substantial multi-step work with no written plan.
+ *
+ * The system prompt already asks for `todo_write` on anything past a couple of
+ * real steps, and every role is allowed the tool — but across four end-to-end
+ * runs it was called **zero times in 578 actions**, while one worker made 19
+ * tool calls in a single assignment with nothing written down. That is the exact
+ * shape the instruction exists to prevent: no externally visible plan, so the
+ * model loses track of what it has finished, and neither the user nor the loop
+ * can see what it thinks is left.
+ *
+ * Deliberately not a mandate. A step whose whole job is writing one file should
+ * not produce a checklist, and the prompt says so. This fires only once the work
+ * is unambiguously multi-step — several actions in, with real changes made — and
+ * never again for that agent, whether or not it takes the advice.
+ */
+const CHANGING_TOOLS = new Set(['write_file', 'edit_file', 'run_command'])
+
+/** Total tool calls before an absent plan is worth mentioning. */
+export const PLANLESS_CALL_THRESHOLD = 8
+
+/** Of those, how many must have actually changed something. */
+export const PLANLESS_CHANGE_THRESHOLD = 3
+
+export interface PlanlessWorkTracker {
+  /** Record a completed batch; returns the nudge text the first time it is warranted. */
+  observe(toolNames: string[]): string | undefined
+}
+
+export function createPlanlessWorkTracker(): PlanlessWorkTracker {
+  let calls = 0
+  let changes = 0
+  let done = false
+
+  return {
+    observe(toolNames) {
+      if (done) return undefined
+      for (const name of toolNames) {
+        // It wrote a plan. Nothing to say, now or later.
+        if (name === 'todo_write') {
+          done = true
+          return undefined
+        }
+        calls += 1
+        if (CHANGING_TOOLS.has(name)) changes += 1
+      }
+      if (calls < PLANLESS_CALL_THRESHOLD || changes < PLANLESS_CHANGE_THRESHOLD) return undefined
+      done = true
+      return (
+        `[elia] You are ${calls} tool calls into this task and have changed ${changes} thing(s) without writing down a plan. ` +
+        `Call todo_write now with the remaining steps, keep exactly one item in_progress, and mark each one completed the ` +
+        `moment it is actually done. It keeps you from losing a step, and it is the only way the user can see what you think is left.`
+      )
+    },
+  }
+}

@@ -81,6 +81,6 @@ export interface CriticVerdict {
   issues: CriticIssue[]
 }
 
-export type PhaseName = 'orient' | 'propose' | 'execute' | 'verify' | 'reflect' | 'polish' | 'learn'
+export type PhaseName = 'orient' | 'propose' | 'scaffold' | 'execute' | 'verify' | 'reflect' | 'polish' | 'learn'
 
-export const PHASE_ORDER: PhaseName[] = ['orient', 'propose', 'execute', 'verify', 'reflect', 'polish', 'learn']
+export const PHASE_ORDER: PhaseName[] = ['orient', 'propose', 'scaffold', 'execute', 'verify', 'reflect', 'polish', 'learn']

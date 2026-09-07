@@ -9,6 +9,7 @@ import type { Usage } from '../providers/types.ts'
 import type { Journal } from './journal.ts'
 import type { ActionGovernor } from './governor.ts'
 import type { GoalGraphStore } from './goalGraph.ts'
+import type { Tool } from '../tools/types.ts'
 import type { ProposalStep, RoleName } from './types.ts'
 import { inferTaskKind, taskSessions } from '../taskSessions.ts'
 import { runVerification } from './verify.ts'
@@ -41,6 +42,8 @@ export interface FleetAssignment {
 
 export interface FleetRunOptions {
   assignments: FleetAssignment[]
+  /** Tools every worker in this fleet gets on top of its role's allowlist. */
+  extraTools?: Tool[]
   /** Shared context every worker is given — the goal, and what has happened so far. */
   briefing?: string
   concurrency?: number
@@ -91,6 +94,31 @@ export interface FleetResult {
  * point of a fleet, and reporting it keeps the parallelism honest — if a
  * "parallel" run saved nothing, the decomposition was wrong.
  */
+/**
+ * The contract appended to a worker's assignment.
+ *
+ * Whether a tool gets called at all depends almost entirely on how it is framed.
+ * Measured on this project's default model: capture tools presented as *how you
+ * finish* ("Finish by calling submit_verdict") were used in every run; a tool
+ * offered as merely available along the way was used zero times in 578 actions.
+ * So reporting a broken plan is stated here as part of finishing — and only when
+ * the worker was actually handed the tool, since promising one it does not have
+ * is worse than saying nothing.
+ */
+export function buildWorkerContract(
+  item: Pick<FleetAssignment, 'acceptanceCriteria' | 'verificationCommands' | 'sideEffects'>,
+  hasPlanRevision: boolean,
+): string {
+  return [
+    item.acceptanceCriteria?.length ? `## Acceptance criteria\n${item.acceptanceCriteria.map((criterion) => `- ${criterion}`).join('\n')}` : undefined,
+    item.verificationCommands?.length ? `## Verification commands\n${item.verificationCommands.map((command) => `- ${command}`).join('\n')}` : undefined,
+    item.sideEffects?.length ? `## Side-effect boundary\n${item.sideEffects.map((effect) => `- ${effect}`).join('\n')}` : undefined,
+    hasPlanRevision
+      ? '## Before you finish\nIf you found that the PLAN is wrong — work it is missing, a step that has to happen before another one, or something it asks for that cannot be done — call revise_plan once to say so. Finish your own assignment either way. Reporting a broken plan is part of the job, not an interruption to it; nobody else can see what you just saw.'
+      : undefined,
+  ].filter(Boolean).join('\n\n')
+}
+
 export async function runFleet(options: FleetRunOptions): Promise<FleetResult> {
   const { assignments, briefing, journal, signal, cwd, stripBoardTools } = options
   const showBoard = options.showBoard ?? true
@@ -113,6 +141,8 @@ export async function runFleet(options: FleetRunOptions): Promise<FleetResult> {
   const board = showBoard
     ? createFleetBoard(named.map((item) => ({ name: item.workerName, role: item.role, title: item.title })))
     : undefined
+
+  const hasPlanRevision = (options.extraTools ?? []).some((tool) => tool.name === 'revise_plan')
 
   const results = await runWithConcurrencyLimit(named, concurrency, async (item) => {
     board?.update(item.workerName, 'running')
@@ -157,11 +187,7 @@ export async function runFleet(options: FleetRunOptions): Promise<FleetResult> {
         }
       }, 30_000)
     }
-    const contract = [
-      item.acceptanceCriteria?.length ? `## Acceptance criteria\n${item.acceptanceCriteria.map((criterion) => `- ${criterion}`).join('\n')}` : undefined,
-      item.verificationCommands?.length ? `## Verification commands\n${item.verificationCommands.map((command) => `- ${command}`).join('\n')}` : undefined,
-      item.sideEffects?.length ? `## Side-effect boundary\n${item.sideEffects.map((effect) => `- ${effect}`).join('\n')}` : undefined,
-    ].filter(Boolean).join('\n\n')
+    const contract = buildWorkerContract(item, hasPlanRevision)
     let result = await runSubAgent({
       prompt: contract ? `${item.instructions}\n\n${contract}` : item.instructions,
       role: item.role,
@@ -176,6 +202,7 @@ export async function runFleet(options: FleetRunOptions): Promise<FleetResult> {
       delegationDepth: options.delegationDepth,
       journal: options.journal,
       tools: stripBoardTools ? toolsForRole(item.role).filter((tool) => !BOARD_TOOL_NAMES.includes(tool.name)) : undefined,
+      extraTools: options.extraTools,
       signal,
       onTool: (event) => {
         toolCount += 1
@@ -317,12 +344,65 @@ function collisionFreeWaves(steps: ProposalStep[]): ProposalStep[][] {
   const waves: ProposalStep[][] = []
 
   for (const step of steps) {
-    const target = waves.find((wave) => fileCollisions([...wave, step]).length === 0 && !unscopedWriterCollision(wave, step))
+    const target = waves.find(
+      (wave) => fileCollisions([...wave, step]).length === 0 && !unscopedWriterCollision(wave, step) && !manifestPrecedence(wave, step) && !testsFollowSource(wave, step),
+    )
     if (target) target.push(step)
     else waves.push([step])
   }
 
   return waves
+}
+
+/** The file that declares a project's dependencies and scripts. */
+const MANIFESTS = new Set(['package.json', 'pyproject.toml', 'requirements.txt', 'cargo.toml', 'go.mod', 'gemfile', 'composer.json', 'pom.xml', 'build.gradle', 'build.gradle.kts', 'cmakelists.txt', 'makefile'])
+
+const SOURCE_FILE = /\.(?:[cm]?[jt]sx?|py|rb|go|rs|java|php|c|h|cc|cpp|cxx|hh|hpp|hxx)$/i
+
+function writesManifest(step: ProposalStep): boolean {
+  return step.files.some((file) => MANIFESTS.has(posix.basename(normalizeOwnedFile(file)).toLowerCase()))
+}
+
+/**
+ * The manifest has to exist before anything that imports a dependency it
+ * declares. Planners routinely leave that `dependsOn` off — the two steps touch
+ * different files, so nothing else here separates them — and the result is a
+ * wave where source and tests are written in parallel with the very
+ * `bun install` they need. Seen live: three steps (manifest, source, tests) all
+ * placed in one wave with no declared dependencies.
+ *
+ * This is a fact about how projects work rather than a guess about intent, so it
+ * is enforced here instead of hoped for in the planner's prompt.
+ */
+/**
+ * Tests come after the code they test.
+ *
+ * A `tester` step with no declared dependency lands in the first wave and runs
+ * against a tree where the implementation does not exist yet — it either writes
+ * tests for imagined code or fails outright. Seen live: a plan whose three steps
+ * (manifest, source, tests) were all placed in one parallel wave with no
+ * `dependsOn` between any of them.
+ *
+ * Like the manifest rule, this is a fact about how software gets built rather
+ * than a guess at intent, so it is enforced rather than left to the planner
+ * remembering to declare it.
+ */
+function testsFollowSource(wave: ProposalStep[], candidate: ProposalStep): boolean {
+  const writesSource = (step: ProposalStep) =>
+    step.role !== 'tester' && step.files.some((file) => SOURCE_FILE.test(file) && !TEST_FILE.test(file))
+  if (candidate.role === 'tester') return wave.some(writesSource)
+  return writesSource(candidate) && wave.some((step) => step.role === 'tester')
+}
+
+const TEST_FILE = /(?:^|[\\/])(?:__tests__|tests?)[\\/]|[.-](?:test|spec)\.[cm]?[jt]sx?$/i
+
+function manifestPrecedence(wave: ProposalStep[], candidate: ProposalStep): boolean {
+  const candidateManifest = writesManifest(candidate)
+  const candidateSource = candidate.files.some((file) => SOURCE_FILE.test(file))
+  return wave.some((step) => {
+    const stepManifest = writesManifest(step)
+    return (stepManifest && candidateSource) || (candidateManifest && step.files.some((file) => SOURCE_FILE.test(file)))
+  })
 }
 
 /** Missing file ownership is safe for read-only roles but ambiguous for writers. */

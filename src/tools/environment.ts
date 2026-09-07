@@ -2,6 +2,8 @@ import { detectProject } from '../project.ts'
 import { currentAgent } from '../autonomy/context.ts'
 import { runShell } from '../shell.ts'
 import { detectGitHubContext } from '../github/context.ts'
+import { assessEnvironment } from '../autonomy/envReadiness.ts'
+import { reliabilitySignal } from '../autonomy/reliability.ts'
 import type { Tool } from './types.ts'
 
 const COMMANDS = ['bun', 'node', 'npm', 'pnpm', 'yarn', 'python3', 'python', 'pip3', 'pytest', 'docker', 'kubectl', 'terraform', 'vercel', 'netlify', 'git', 'gh', 'psql', 'mysql', 'curl']
@@ -15,6 +17,16 @@ function envPresence(): Record<string, boolean> {
 
 function trimOutput(value: string, limit = 2000): string {
   return value.trim().slice(0, limit)
+}
+
+/** `<cmd> --version` output, empty string when the command is absent or errors. */
+function versionOf(command: string): string {
+  try {
+    const out = Bun.spawnSync([command, '--version'], { stdout: 'pipe', stderr: 'pipe' })
+    return (out.stdout?.toString() ?? '').trim() || (out.stderr?.toString() ?? '').trim()
+  } catch {
+    return ''
+  }
 }
 
 type ReadinessStatus = 'ready' | 'missing-config' | 'unavailable'
@@ -69,7 +81,7 @@ function capabilityReadiness(
 
 export const environmentTool: Tool = {
   name: 'environment',
-  description: 'Inspect the current execution environment without changing it: repository/project shape, branch and dirty state, installed runtimes/CLIs, GitHub remote and whether the gh CLI is logged in, configured capability presence without exposing secret values, and available browser transport presence. Use this before acting on an unfamiliar or real-world task. Apart from checking gh login state, it does not test credentials by making external requests, and it never claims a configured tool is authorized for the repo at hand.',
+  description: 'Inspect the current execution environment without changing it: repository/project shape, branch and dirty state, installed runtimes/CLIs, GitHub remote and whether the gh CLI is logged in, configured capability presence without exposing secret values, available browser transport presence, an `environmentReadiness` assessment of what the project declares it needs (lockfiles, version pins, compose services, devcontainer, nix) versus what this machine has — with suggested setup commands — and a `projectTrackRecord` of whether past autonomous runs here tended to over-claim completion. Use this before acting on an unfamiliar or real-world task. Apart from checking gh login state, it does not test credentials by making external requests, and it never claims a configured tool is authorized for the repo at hand.',
   input_schema: {
     type: 'object',
     properties: {
@@ -90,9 +102,26 @@ export const environmentTool: Tool = {
     ])
     const availableRuntimes = runtimes
     const configured = envPresence()
+    // Declared-vs-available: what the project expects that this machine does not
+    // have, so the orient phase catches a broken environment before the run
+    // spends its budget discovering it.
+    const readiness = assessEnvironment({
+      cwd,
+      has: (command) => Boolean(availableRuntimes[command] && availableRuntimes[command] !== 'unavailable'),
+      versions: {
+        node: availableRuntimes.node && availableRuntimes.node !== 'unavailable' ? versionOf('node') : '',
+        python3: availableRuntimes.python3 && availableRuntimes.python3 !== 'unavailable' ? versionOf('python3') : '',
+      },
+    })
+    // The project's own track record: do past autonomous runs here tend to
+    // claim more than the facts support? Feeds the acceptance contract the
+    // orient phase writes for this run.
+    const trackRecord = reliabilitySignal(cwd)
     return JSON.stringify({
       cwd,
       project,
+      environmentReadiness: readiness,
+      projectTrackRecord: trackRecord,
       git: {
         branch: trimOutput(branch.stdout.split(/\r?\n/)[0] ?? ''),
         head: trimOutput(branch.stdout.split(/\r?\n/)[1] ?? ''),

@@ -123,6 +123,9 @@ export function App(props: AppProps) {
   const [plan, setPlan] = useState<TodoItem[]>([])
   const [providerPlan, setProviderPlan] = useState<TodoItem[]>([])
   const [agents, setAgents] = useState<TaskSession[]>(() => taskSessions.list())
+  // When this REPL started — the fleet panel uses it to drop finished subagents
+  // that belong to earlier sessions (loaded from .elia/tasks.json on startup).
+  const sessionStartedAt = useRef(Date.now()).current
   const [previewUrl, setPreviewUrl] = useState<string | null>(null)
   const queueRef = useRef<string[]>([])
   const steeringRef = useRef<string[]>([])
@@ -439,7 +442,7 @@ export function App(props: AppProps) {
         </Box>
       )}
 
-      <WorkspacePanel plan={visiblePlan} agents={agents} />
+      <WorkspacePanel plan={visiblePlan} agents={agents} since={sessionStartedAt} />
       {previewUrl && (
         <Box marginTop={1}>
           <Text color={palette.toolName}>▸ Preview </Text>

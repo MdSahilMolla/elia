@@ -488,7 +488,15 @@ async function runAuto(): Promise<void> {
     return
   }
   const yolo = !supervisedFlag && (unattendedFlag || supervisionEnv === 'unattended' || process.env.ELIA_AUTO_APPROVE === '1')
-  writeNotice(`supervision: ${yolo ? 'unattended (critical actions remain blocked)' : 'supervised (approval required for review and critical actions)'}`)
+  writeNotice(
+    `supervision: ${
+      yolo
+        ? process.stdin.isTTY
+          ? 'unattended (a critical action asks once, then runs freely for the rest of the run)'
+          : 'unattended with no terminal (critical actions are refused)'
+        : 'supervised (approval required for review and critical actions)'
+    }`,
+  )
   let approveAction: ActionApproval | undefined
   if (!yolo && !process.stdin.isTTY) {
     writeError('elia auto needs a terminal to approve the plan. Re-run with --unattended to skip routine approval.')
@@ -504,7 +512,22 @@ async function runAuto(): Promise<void> {
   let rl: readline.Interface | undefined
   try {
     if (yolo) {
-      const result = await runAutonomousTask({ goal, approve: autoApprove, mode: requestedAgentMode(), variants, profile, resumeGraph, runId: resumeRunId, polish: !hasFlag('--no-polish'), governanceMode: 'unattended', signal: controller.signal, maxWallClockMs: maxRunMs, maxActions })
+      // Unattended means "stop asking me about routine work", not "refuse
+      // anything risky and spend the run failing on it". With a terminal
+      // present, a critical action gets exactly one question — and the answer
+      // then covers every action of that kind for the rest of the run. With no
+      // terminal (CI, the scheduler daemon) there is nobody to ask, so the
+      // governor refuses as before.
+      if (process.stdin.isTTY) {
+        rl = readline.createInterface({ input: process.stdin, output: process.stdout })
+        const unattendedRl = rl
+        approveAction = async (assessment, request) => {
+          const label = `${actionApprovalPrompt(assessment, request)}\n  Answering here settles every "${assessment.intent}" action for the rest of this run.`
+          const result = await confirmOnce(unattendedRl, label)
+          return result.action === 'approve'
+        }
+      }
+      const result = await runAutonomousTask({ goal, approve: autoApprove, mode: requestedAgentMode(), variants, profile, resumeGraph, runId: resumeRunId, polish: !hasFlag('--no-polish'), governanceMode: 'unattended', approveAction, signal: controller.signal, maxWallClockMs: maxRunMs, maxActions })
       if (result.outcome !== 'completed') process.exitCode = 1
       return
     }
@@ -2620,7 +2643,7 @@ async function runInteractive(): Promise<void> {
       const { detectChecks } = await import('./autonomy/detectChecks.ts')
       const { runVerification, describeVerification } = await import('./autonomy/verify.ts')
       const checks = detectChecks(process.cwd())
-      if (checks.length === 0) return done('No project checks detected (looked for package.json scripts, Cargo.toml, go.mod, pytest).')
+      if (checks.length === 0) return done('No project checks detected (looked for package.json scripts, Cargo.toml, go.mod, pytest, pom.xml/Gradle, CMake/Makefile).')
       const outcome = await runVerification(checks, process.cwd())
       return done(`${outcome.passed ? '✓ all checks pass' : '✗ checks failing'}\n${describeVerification(outcome)}`)
     }
