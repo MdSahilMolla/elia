@@ -82,8 +82,36 @@ let sessionUsage: Usage = ZERO_USAGE
 let sessionTurns = 0
 let sessionElapsedMs = 0
 
-export function recordUsage(usage: Usage): void {
+// Per-model breakdown. Most call sites don't have the model id handy, so
+// `recordUsage` falls back to whatever `setCurrentUsageModel` was last told —
+// index.ts sets it at startup and on every `/model` switch. Sub-agents run on
+// their own tier and pass their model explicitly.
+const usageByModel = new Map<string, Usage>()
+let currentModel = 'unknown'
+
+export function setCurrentUsageModel(model: string): void {
+  const trimmed = model?.trim()
+  if (trimmed) currentModel = trimmed
+}
+
+export function recordUsage(usage: Usage, model?: string): void {
   sessionUsage = addUsage(sessionUsage, usage)
+  const key = model?.trim() || currentModel
+  usageByModel.set(key, addUsage(usageByModel.get(key) ?? ZERO_USAGE, usage))
+}
+
+export interface ModelUsage {
+  model: string
+  usage: Usage
+  /** Undefined when the model isn't in the pricing table. */
+  costUsd: number | undefined
+}
+
+/** This session's token totals grouped by the model that produced them, largest first. */
+export function sessionUsageByModel(): ModelUsage[] {
+  return [...usageByModel.entries()]
+    .map(([model, usage]) => ({ model, usage, costUsd: estimateCostUsd(model, usage) }))
+    .sort((a, b) => totalTokens(b.usage) - totalTokens(a.usage))
 }
 
 export function recordTopLevelTurn(elapsedMs: number): void {
@@ -113,4 +141,51 @@ export function getSessionSummaryLine(model: string): string {
   const tokens = totalTokens(sessionUsage)
   const turnWord = sessionTurns === 1 ? 'turn' : 'turns'
   return `Session: ${sessionTurns} ${turnWord} · ${formatTokenCount(tokens)} tokens · ${formatCostUsd(cost)} · ${formatElapsed(sessionElapsedMs)}`
+}
+
+/** A ten-cell block meter for the `/usage` sub-views. */
+export function tokenMeter(pct: number): string {
+  const clamped = Math.min(100, Math.max(0, pct))
+  const filled = Math.round((clamped / 100) * 10)
+  return '▓'.repeat(filled) + '░'.repeat(10 - filled)
+}
+
+/**
+ * The full token-consumption breakdown shown by `/usage` → "Tokens this session".
+ * `snapshot` is the cumulative session total (including any usage carried over
+ * from a resumed session); the per-model rows only cover the live process.
+ */
+export function renderUsageBreakdown(snapshot: SessionUsageSnapshot, model: string, costLabel?: string): string {
+  const u = snapshot.usage
+  const total = totalTokens(u)
+  const perTurn = snapshot.turns > 0 ? Math.round(total / snapshot.turns) : 0
+  const lines = [
+    'Tokens this session',
+    '',
+    `  input         ${formatTokenCount(u.inputTokens)}`,
+    `  output        ${formatTokenCount(u.outputTokens)}`,
+    `  cache read    ${formatTokenCount(u.cacheReadTokens)}`,
+    `  cache write   ${formatTokenCount(u.cacheWriteTokens)}`,
+    `  ───────────`,
+    `  total         ${formatTokenCount(total)}`,
+    '',
+    `  turns         ${snapshot.turns}`,
+    `  elapsed       ${formatElapsed(snapshot.elapsedMs)}`,
+    `  per turn      ~${formatTokenCount(perTurn)} tokens`,
+    `  est. cost     ${costLabel ?? `${formatCostUsd(estimateCostUsd(model, u))}  (${model})`}`,
+  ]
+  const byModel = sessionUsageByModel()
+  if (byModel.length > 1) {
+    lines.push('', '  by model')
+    for (const entry of byModel) {
+      lines.push(`    ${entry.model.padEnd(26)} ${formatTokenCount(totalTokens(entry.usage)).padStart(12)}  ${formatCostUsd(entry.costUsd)}`)
+    }
+  }
+  lines.push(
+    '',
+    costLabel
+      ? '  Token counts are reported by the provider; this plan is not billed per token.'
+      : '  Estimated from published per-token rates for orientation — not an\n  authoritative bill. Cache reads are billed well below fresh input.',
+  )
+  return lines.join('\n')
 }

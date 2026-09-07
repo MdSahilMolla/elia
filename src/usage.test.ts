@@ -6,6 +6,11 @@ import {
   formatElapsed,
   formatTokenCount,
   formatUsageLine,
+  recordUsage,
+  renderUsageBreakdown,
+  sessionUsageByModel,
+  setCurrentUsageModel,
+  tokenMeter,
   totalTokens,
   ZERO_USAGE,
 } from './usage.ts'
@@ -68,4 +73,45 @@ test('formatElapsed scales units sensibly', () => {
 test('formatUsageLine combines time, tokens, and cost into one line', () => {
   const usage = { inputTokens: 1_000_000, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 }
   expect(formatUsageLine(usage, 2500, 'gpt-4.1')).toBe('2.5s · 1,000,000 tokens · $2.00')
+})
+
+test('tokenMeter fills proportionally and clamps out-of-range input', () => {
+  expect(tokenMeter(0)).toBe('░░░░░░░░░░')
+  expect(tokenMeter(50)).toBe('▓▓▓▓▓░░░░░')
+  expect(tokenMeter(100)).toBe('▓▓▓▓▓▓▓▓▓▓')
+  expect(tokenMeter(999)).toBe('▓▓▓▓▓▓▓▓▓▓')
+})
+
+test('recordUsage attributes tokens to the model that produced them', () => {
+  const before = new Map(sessionUsageByModel().map((entry) => [entry.model, totalTokens(entry.usage)]))
+  recordUsage({ inputTokens: 100, outputTokens: 40, cacheReadTokens: 0, cacheWriteTokens: 0 }, 'model-a')
+  recordUsage({ inputTokens: 10, outputTokens: 5, cacheReadTokens: 0, cacheWriteTokens: 0 }, 'model-b')
+  recordUsage({ inputTokens: 100, outputTokens: 40, cacheReadTokens: 0, cacheWriteTokens: 0 }, 'model-a')
+
+  const byModel = new Map(sessionUsageByModel().map((entry) => [entry.model, totalTokens(entry.usage)]))
+  expect((byModel.get('model-a') ?? 0) - (before.get('model-a') ?? 0)).toBe(280)
+  expect((byModel.get('model-b') ?? 0) - (before.get('model-b') ?? 0)).toBe(15)
+})
+
+test('recordUsage falls back to the model set by setCurrentUsageModel', () => {
+  setCurrentUsageModel('fallback-model')
+  recordUsage({ inputTokens: 7, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 })
+  const entry = sessionUsageByModel().find((e) => e.model === 'fallback-model')
+  expect(entry?.usage.inputTokens).toBeGreaterThanOrEqual(7)
+})
+
+test('sessionUsageByModel is ordered by total tokens, largest first', () => {
+  const totals = sessionUsageByModel().map((entry) => totalTokens(entry.usage))
+  expect(totals).toEqual([...totals].sort((a, b) => b - a))
+})
+
+test('renderUsageBreakdown shows the token table and a cost estimate for a known model', () => {
+  const out = renderUsageBreakdown(
+    { usage: { inputTokens: 1_000_000, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 }, turns: 2, elapsedMs: 4000 },
+    'gpt-4.1',
+  )
+  expect(out).toContain('input         1,000,000')
+  expect(out).toContain('total         1,000,000')
+  expect(out).toContain('turns         2')
+  expect(out).toContain('$2.00')
 })

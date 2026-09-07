@@ -37,7 +37,7 @@ test('renders rich blocks without raw markdown syntax', () => {
   )
   const plain = strip(output)
 
-  expect(plain).toContain('━━ Result')
+  expect(plain).toContain('Result')
   expect(plain).toContain('• fast path')
   expect(plain).toContain('✓ tested')
   expect(plain).toContain('□ deploy')

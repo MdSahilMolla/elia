@@ -8,6 +8,8 @@ import { Transcript } from './components/Transcript.tsx'
 import { StatusBar, type ReplMode } from './components/StatusBar.tsx'
 import { InputBox } from './components/InputBox.tsx'
 import { Confirm, type ConfirmRequest } from './components/Confirm.tsx'
+import { ApprovalMenu, type ApprovalRequest } from './components/ApprovalMenu.tsx'
+import type { ApprovalResult } from '../../autonomy/governor.ts'
 import { Picker, type PickerRequest } from './components/Picker.tsx'
 import { TextPrompt, type TextPromptRequest } from './components/TextPrompt.tsx'
 import { WorkingIndicator } from './components/WorkingIndicator.tsx'
@@ -19,9 +21,11 @@ import type { PickerOption } from '../picker.ts'
 import type { ToolItem } from './store.ts'
 import { rollupLine, rollupTools } from './toolSummary.ts'
 import { palette } from './theme.ts'
+import { repoLabel } from './gitInfo.ts'
 import { estimateTokens } from '../../compaction.ts'
-import { compactionThresholdFor } from '../../contextWindow.ts'
+import { compactionThresholdFor, contextWindowFor } from '../../contextWindow.ts'
 import { sessionUsageSnapshot, estimateCostUsd } from '../../usage.ts'
+import { codexContextTokens } from '../../providers/codexSubscription.ts'
 import type { ChatMessage } from '../../providers/types.ts'
 
 export interface TurnHooks {
@@ -30,7 +34,15 @@ export interface TurnHooks {
   onActivity(activity: import('../../providers/types.ts').ProviderActivity): void
   onTool(event: import('../../agentLoop.ts').ToolEvent): void
   onToolStart(call: { id: string; name: string; input: Record<string, unknown> }): void
-  approve(title: string, lines: string[], preview?: string[]): Promise<boolean>
+  approve(req: {
+    title: string
+    lines: string[]
+    preview?: string[]
+    /** What an "always allow" covers — e.g. "`git` commands". */
+    ruleLabel: string
+    /** run_command only — enables the "Edit command" option. */
+    command?: string
+  }): Promise<ApprovalResult>
   signal: AbortSignal
   planMode: boolean
   /** Drained by the agent loop at each step boundary — operator guidance typed mid-run. */
@@ -112,6 +124,7 @@ export function App(props: AppProps) {
   const [planReady, setPlanReady] = useState(false)
   const [busy, setBusy] = useState(false)
   const [confirm, setConfirm] = useState<ConfirmRequest | null>(null)
+  const [approval, setApproval] = useState<ApprovalRequest | null>(null)
   const [picker, setPicker] = useState<PickerRequest | null>(null)
   const [textPrompt, setTextPrompt] = useState<TextPromptRequest | null>(null)
   const [expandedAll, setExpandedAll] = useState(false)
@@ -130,6 +143,9 @@ export function App(props: AppProps) {
   const queueRef = useRef<string[]>([])
   const steeringRef = useRef<string[]>([])
   const abortRef = useRef<AbortController | null>(null)
+  // Set when the user stops a turn with Esc/Ctrl+C — tells the post-turn drain
+  // not to auto-send steering that was captured before the stop.
+  const abortedRef = useRef(false)
   const lastUserText = useRef('')
 
   const MAX_QUEUE = 5
@@ -173,9 +189,11 @@ export function App(props: AppProps) {
   useEffect(() => taskSessions.subscribe(setAgents), [])
 
   const ctrlCAt = useRef(0)
+  const escAt = useRef(0)
   useInput((input, key) => {
     if (key.ctrl && input === 'c') {
       if (busy) {
+        abortedRef.current = true
         abortRef.current?.abort()
         return
       }
@@ -188,18 +206,37 @@ export function App(props: AppProps) {
       return
     }
     if (key.ctrl && input === 'o') setExpandedAll((v) => !v)
+    // While the approval menu owns the screen, let it handle Esc (go back / no).
+    if (approval) return
     if (key.escape) {
+      // Staged, so one stray Esc never wipes work: a running turn stops first
+      // (queued/steering messages are kept); then the queue; and pending
+      // steering only drops on a deliberate double-tap.
+      if (busy) {
+        abortedRef.current = true
+        abortRef.current?.abort()
+        if (steeringRef.current.length > 0 || queueRef.current.length > 0) {
+          store.notice('Turn stopped. Queued & steering messages kept — send anything to apply, or Esc again to drop them.')
+        }
+        return
+      }
       if (queueRef.current.length > 0) {
         queueRef.current = []
         setQueue([])
         store.notice('Queue cleared.')
+        return
       }
       if (steeringRef.current.length > 0) {
-        steeringRef.current = []
-        setSteeringCount(0)
-        store.notice('Pending steering cleared.')
+        const now = Date.now()
+        if (now - escAt.current < 2_000) {
+          steeringRef.current = []
+          setSteeringCount(0)
+          store.notice('Pending steering dropped.')
+        } else {
+          escAt.current = now
+          store.notice(`Press Esc again to drop ${steeringRef.current.length} pending steering message${steeringRef.current.length === 1 ? '' : 's'}.`)
+        }
       }
-      if (busy) abortRef.current?.abort()
     }
     if (key.shift && key.tab) setMode((m) => (m === 'manual' ? 'auto' : m === 'auto' ? 'plan' : 'manual'))
   })
@@ -220,6 +257,7 @@ export function App(props: AppProps) {
     async (text: string, opts?: { echo?: boolean }) => {
       setBusy(true)
       setStatus('')
+      abortedRef.current = false
       setTurnStartedAt(Date.now())
       // onSubmit echoes the message the instant Enter is pressed so it never
       // waits behind the risk check; the other callers (queue drain, plan
@@ -243,6 +281,13 @@ export function App(props: AppProps) {
             const parsed = providerPlanItems(a.detail)
             if (parsed.length > 0) setProviderPlan(parsed)
           }
+          // The turn runner offers a live preview after scaffolding a site
+          // (including Codex-subscription turns, which never call the tool).
+          // The dedicated Preview line renders it — don't also log it as activity.
+          if (a.title === 'Preview ready' && a.detail && /^https?:\/\//.test(a.detail)) {
+            setPreviewUrl(a.detail)
+            return
+          }
           store.activity(a)
         },
         onTool: (e) => {
@@ -260,8 +305,10 @@ export function App(props: AppProps) {
           setStatus(`Running ${c.name}`)
           store.toolStart(c)
         },
-        approve: (title, lines, preview) =>
-          new Promise<boolean>((resolve) => setConfirm({ title, lines, preview, resolve: (ok) => { setConfirm(null); resolve(ok) } })),
+        approve: (req) =>
+          new Promise<ApprovalResult>((resolve) =>
+            setApproval({ ...req, resolve: (r) => { setApproval(null); resolve(r) } }),
+          ),
         signal: controller.signal,
         planMode: modeRef.current === 'plan',
         drainSteering: () => {
@@ -310,9 +357,18 @@ export function App(props: AppProps) {
           pushQueue(trimmed)
           return
         }
+        // Don't stack the same steering twice — a frustrated re-send while the
+        // current step is still running shouldn't get folded in N times.
+        if (steeringRef.current.includes(trimmed) || lastUserText.current === trimmed) {
+          store.notice('↳ steering already captured — it applies when the current step finishes')
+          return
+        }
         steeringRef.current = [...steeringRef.current, trimmed]
         setSteeringCount(steeringRef.current.length)
-        store.notice(`↳ steering — elia will take this at the next step (${steeringRef.current.length})`)
+        store.notice(
+          `↳ steering captured (${steeringRef.current.length}) — elia folds it in at the next step. `
+            + 'A running task or Codex turn finishes first; Esc stops the turn.',
+        )
         return
       }
 
@@ -415,12 +471,35 @@ export function App(props: AppProps) {
       for (let next = shiftQueue(); next !== undefined; next = shiftQueue()) {
         await runOne(next)
       }
+
+      // Steering that landed in the gap after the loop's last fold-in check —
+      // it was never applied. Send it as its own turn rather than silently
+      // prepending it to whatever the user types next. Not after an Esc/Ctrl+C
+      // stop: there the user chose to halt, so an auto follow-up isn't wanted.
+      while (steeringRef.current.length > 0 && !abortedRef.current) {
+        const pending = steeringRef.current.join('\n')
+        steeringRef.current = []
+        setSteeringCount(0)
+        store.notice('↳ sending steering that arrived as the turn ended')
+        await runOne(pending)
+      }
     },
     [busy, mode, props, store, runOne, exit],
   )
 
-  const contextTokens = useMemo(() => estimateTokens(props.messages), [props.messages, snap.version])
-  const contextLimit = useMemo(() => compactionThresholdFor(env.model), [env.model])
+  const repo = useMemo(() => repoLabel(), [])
+  // In ChatGPT-subscription mode Elia's own `messages` array stays near-empty
+  // (Codex keeps the real transcript in its thread), so meter against Codex's
+  // reported prompt size and its model's real window instead.
+  const isCodex = env.providerName === 'codex'
+  const contextTokens = useMemo(
+    () => (isCodex ? codexContextTokens() : estimateTokens(props.messages)),
+    [isCodex, props.messages, snap.version, busy],
+  )
+  const contextLimit = useMemo(
+    () => (isCodex ? contextWindowFor(env.model) : compactionThresholdFor(env.model)),
+    [isCodex, env.model],
+  )
   const visiblePlan = plan.length > 0 ? plan : providerPlan
 
   return (
@@ -430,6 +509,10 @@ export function App(props: AppProps) {
       {snap.committed.length === 0 && snap.live.length === 0 && (
         <Box flexDirection="column" marginTop={1} borderStyle="round" borderColor={palette.muted} paddingX={1}>
           <Text color={palette.muted}>{props.greeting}</Text>
+          <Box marginTop={1}>
+            <Text color={palette.toolName}>{repo}</Text>
+            <Text color={palette.muted}>  ·  {env.model}  ·  {env.providerLabel}</Text>
+          </Box>
           <Box marginTop={1} flexDirection="column">
             <Text color={palette.muted}>Try:</Text>
             <Text color={palette.toolName}>  fix the failing test in src/</Text>
@@ -452,9 +535,10 @@ export function App(props: AppProps) {
           <Text color={palette.muted}> · live-reloading as files change</Text>
         </Box>
       )}
-      {busy && !confirm && <WorkingIndicator startedAt={turnStartedAt} status={status} />}
+      {busy && !confirm && !approval && <WorkingIndicator startedAt={turnStartedAt} status={status} steeringPending={steeringCount} />}
       {showHelp && <HelpOverlay onClose={() => setShowHelp(false)} />}
       {confirm && <Confirm request={confirm} />}
+      {approval && <ApprovalMenu request={approval} />}
       {picker && <Picker request={picker} />}
       {textPrompt && <TextPrompt request={textPrompt} />}
       {planReady && !busy && (
@@ -477,15 +561,17 @@ export function App(props: AppProps) {
           sessionInput={usage.usage.inputTokens + usage.usage.cacheReadTokens}
           sessionOutput={usage.usage.outputTokens}
           costUsd={estimateCostUsd(env.model, usage.usage)}
+          providerName={env.providerName}
           busy={busy}
           queued={queue.length}
           steering={steeringCount}
+          repo={repo}
         />
         <InputBox
           commands={props.commands}
           onTabEmpty={() => setMode((m) => (m === 'plan' ? 'manual' : 'plan'))}
           onHelp={() => setShowHelp(true)}
-          disabled={confirm !== null || picker !== null || textPrompt !== null || planReady || showHelp}
+          disabled={confirm !== null || approval !== null || picker !== null || textPrompt !== null || planReady || showHelp}
           placeholder={
             busy
               ? 'working — type to steer elia now · / ! wait for the turn to finish · Esc to stop'

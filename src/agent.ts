@@ -1,5 +1,6 @@
 import { config, systemPromptForMode, turnContextPrompt } from './config.ts'
 import { runAgentLoop, type ConversationMessage, type RunAgentLoopResult, type ToolEvent } from './agentLoop.ts'
+import { setParentSteering } from './autonomy/steering.ts'
 import type { Provider, ProviderActivity } from './providers/types.ts'
 import { allWorkerTools, battmannTools, businessTools, cyberTools, getSynthesizedTools } from './tools/registry.ts'
 import { taskTool } from './tools/task.ts'
@@ -169,49 +170,58 @@ async function runScopedTurn(
   })
 
   const hooks = mode === 'dev' ? loadDevelopmentToolHooks() : []
-  const result = await withToolHooks(hooks, () => withActionGovernor(governor, () => runAgentLoop({
-    messages,
-    systemPrompt,
-    systemDynamicPrompt,
-    tools,
-    provider: options.provider,
-    providerName: options.providerName,
-    model: options.model,
-    onText: options.onText ?? writeText,
-    onThinking: options.onThinking ?? writeThinking,
-    onActivity: !options.silent || options.onActivity
-      ? (activity) => {
-          if (!options.silent) writeProviderActivity(activity)
-          options.onActivity?.(activity)
-        }
-      : undefined,
-    useAnimation: !options.silent,
-    verbose: !options.silent,
-    cache,
-    prefetcher,
-    signal: options.signal,
-    drainSteering: options.drainSteering,
-    // A ChatGPT-subscription turn is one internal `codex_delegate` action for
-    // the audit ledger and skill detector, but the client (terminal card,
-    // desktop app) should see it as "ChatGPT subscription", with none of Codex's
-    // model id or working-path plumbing.
-    onToolStart: options.onToolStart
-      ? (call) => options.onToolStart!(call.name === 'codex_delegate' ? { ...call, name: 'ChatGPT subscription', input: {} } : call)
-      : undefined,
-    onTool: (event) => {
-      // Every call is a data point for deciding which tool elia should write itself next.
-      appendActionAudit(event)
-      observeToolCall(event.name, event.input)
-      // And a data point for whether a recently recalled episode or brain hit actually mattered.
-      noteToolUse(event.input)
-      noteBrainToolUse(event.input)
-      options.onTool?.(event.name === 'codex_delegate' ? { ...event, name: 'ChatGPT subscription', input: {} } : event)
-    },
-  })))
+  // Expose this turn's steering to any sub-agent it dispatches: while the
+  // top-level loop is blocked inside a long `task` call it has no step boundary
+  // to fold steering into, so the running sub-agent drains it instead.
+  setParentSteering(options.drainSteering)
+  let result: RunAgentLoopResult
+  try {
+    result = await withToolHooks(hooks, () => withActionGovernor(governor, () => runAgentLoop({
+      messages,
+      systemPrompt,
+      systemDynamicPrompt,
+      tools,
+      provider: options.provider,
+      providerName: options.providerName,
+      model: options.model,
+      onText: options.onText ?? writeText,
+      onThinking: options.onThinking ?? writeThinking,
+      onActivity: !options.silent || options.onActivity
+        ? (activity) => {
+            if (!options.silent) writeProviderActivity(activity)
+            options.onActivity?.(activity)
+          }
+        : undefined,
+      useAnimation: !options.silent,
+      verbose: !options.silent,
+      cache,
+      prefetcher,
+      signal: options.signal,
+      drainSteering: options.drainSteering,
+      // A ChatGPT-subscription turn is one internal `codex_delegate` action for
+      // the audit ledger and skill detector, but the client (terminal card,
+      // desktop app) should see it as "ChatGPT subscription", with none of Codex's
+      // model id or working-path plumbing.
+      onToolStart: options.onToolStart
+        ? (call) => options.onToolStart!(call.name === 'codex_delegate' ? { ...call, name: 'ChatGPT subscription', input: {} } : call)
+        : undefined,
+      onTool: (event) => {
+        // Every call is a data point for deciding which tool elia should write itself next.
+        appendActionAudit(event)
+        observeToolCall(event.name, event.input)
+        // And a data point for whether a recently recalled episode or brain hit actually mattered.
+        noteToolUse(event.input)
+        noteBrainToolUse(event.input)
+        options.onTool?.(event.name === 'codex_delegate' ? { ...event, name: 'ChatGPT subscription', input: {} } : event)
+      },
+    })))
+  } finally {
+    setParentSteering(undefined)
+  }
   const elapsedMs = Date.now() - startedAt
 
   if (!options.skipStats) {
-    recordUsage(result.usage)
+    recordUsage(result.usage, config.model)
     recordTopLevelTurn(elapsedMs)
   }
 

@@ -29,10 +29,14 @@ export interface StatusBarProps {
   sessionInput: number
   sessionOutput: number
   costUsd: number | undefined
+  /** Provider id — 'codex' switches the cost readout to "ChatGPT plan" since subscription turns aren't metered in dollars. */
+  providerName?: string
   busy: boolean
   queued: number
   /** Operator messages waiting to be folded into the running turn. */
   steering?: number
+  /** "elia ⎇ production" — cwd + branch. */
+  repo?: string
 }
 
 export function StatusBar(props: StatusBarProps) {
@@ -43,8 +47,9 @@ export function StatusBar(props: StatusBarProps) {
     <Box>
       <Text color={palette.muted}>
         <Text color={palette.accent}>{props.busy ? '● ' : '  '}</Text>
+        {props.repo ? <Text color={palette.toolName}>{props.repo} · </Text> : null}
         {props.model} · {MODE_LABEL[props.mode]} · <Text color={meterColor}>{meter(pct)}</Text> {pct}% ctx ·{' '}
-        {formatTokenCount(props.sessionInput)} in · {formatTokenCount(props.sessionOutput)} out · {formatCostUsd(props.costUsd)}
+        {formatTokenCount(props.sessionInput)} in · {formatTokenCount(props.sessionOutput)} out · {props.providerName === 'codex' ? 'ChatGPT plan' : formatCostUsd(props.costUsd)}
         {props.steering ? <Text color={palette.accent}> · {props.steering} steering</Text> : ''}
         {props.queued > 0 ? ` · ${props.queued} queued` : ''}
       </Text>

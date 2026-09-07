@@ -6,7 +6,7 @@ import { palette } from '../theme.ts'
 const VERBS = ['Thinking', 'Working', 'Pondering', 'Digging', 'Wiring things up', 'Reticulating']
 
 /** The "still working" line: spinner · elapsed · a rotating verb (or the live status). */
-export function WorkingIndicator({ startedAt, status }: { startedAt: number; status?: string }) {
+export function WorkingIndicator({ startedAt, status, steeringPending = 0 }: { startedAt: number; status?: string; steeringPending?: number }) {
   const [, force] = useState(0)
   useEffect(() => {
     const timer = setInterval(() => force((n) => n + 1), 1000)
@@ -24,6 +24,9 @@ export function WorkingIndicator({ startedAt, status }: { startedAt: number; sta
         {' '}
         {label} · {clock} · esc to interrupt
       </Text>
+      {steeringPending > 0 && (
+        <Text color={palette.accent}> · {steeringPending} steering queued (folds in at the next step)</Text>
+      )}
     </Box>
   )
 }

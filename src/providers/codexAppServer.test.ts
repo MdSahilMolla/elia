@@ -61,6 +61,27 @@ test('Codex app-server reuses one connection and streams consecutive turns', asy
   }
 })
 
+test('consecutive agent messages in one turn are separated by a blank line', async () => {
+  const fixture = fileURLToPath(new URL('./fixtures/codexAppServer.ts', import.meta.url))
+  const client = new CodexAppServerClient([process.execPath, fixture])
+  try {
+    await client.connect()
+    const thread = await client.request('thread/start', {}) as { thread: { id: string } }
+    const deltas: string[] = []
+    const result = await client.runTurn({
+      threadId: thread.thread.id,
+      text: 'multimsg',
+      cwd: process.cwd(),
+      onText: (delta) => deltas.push(delta),
+    })
+    // Without the separator this is "Working on it now.All done."
+    expect(result.text).toBe('Working on it now.\n\nAll done.')
+    expect(deltas).toEqual(['Working on it now.', '\n\n', 'All done.'])
+  } finally {
+    await client.closeAndWait()
+  }
+})
+
 test('rapid workspace-diff updates are debounced to the first and the final one', async () => {
   const fixture = fileURLToPath(new URL('./fixtures/codexAppServer.ts', import.meta.url))
   const client = new CodexAppServerClient([process.execPath, fixture])

@@ -6,6 +6,7 @@ import { writeNotice, writeError, writeUsageLine } from './ui/stream.ts'
 import { sessionTranscript, transcriptFromMessages, withSessionTranscript } from './ui/transcript.ts'
 import { colorizeDiffBlock } from './ui/render.ts'
 import { approvalPreviewLines } from './ui/approvalPreview.ts'
+import { ruleFor, ruleLabel } from './autonomy/allowStore.ts'
 import { lastAssistantText, type ToolEvent } from './agentLoop.ts'
 import type { ProviderActivity } from './providers/types.ts'
 import type { SlashOutcome as InkSlashOutcome } from './ui/app/index.tsx'
@@ -25,7 +26,7 @@ interface TurnUiHooks {
   drainSteering?: () => string[]
 }
 import { playIntro } from './ui/character.ts'
-import { ZERO_USAGE, addUsage, getSessionSummaryLine, recordTopLevelTurn, formatUsageLine, sessionUsageSnapshot, type SessionUsageSnapshot } from './usage.ts'
+import { ZERO_USAGE, addUsage, getSessionSummaryLine, recordTopLevelTurn, formatUsageLine, sessionUsageSnapshot, setCurrentUsageModel, type SessionUsageSnapshot } from './usage.ts'
 import { createSlashPrompt, type SlashCommand } from './ui/slashPrompt.ts'
 import { confirmOnce } from './ui/confirm.ts'
 import { gold, dim } from './ui/theme.ts'
@@ -59,6 +60,7 @@ const REPL_COMMANDS: SlashCommand[] = [
   { name: '/artifact', description: 'browse saved plan artifacts' },
   { name: '/verify', description: 'run project checks · /verify on|off' },
   { name: '/cost', description: 'token & cost breakdown' },
+  { name: '/usage', description: 'live token consumption, context & limits' },
   { name: '/status', description: 'session, plan, subagents, artifacts' },
   { name: '/expand', description: 'reprint the last tool result in full' },
   { name: '/export', description: 'save the conversation to Markdown' },
@@ -212,6 +214,8 @@ Inside an interactive session:
   /thinking off|on            Turn reasoning off, or back on at its last budget
   /thinking low|medium|high   Switch reasoning effort to a preset token budget
   /thinking <n>               Switch reasoning to an exact token budget (Anthropic only)
+  /usage                      Live token consumption, context-window fill, and the limits in
+                              effect (context, reasoning, autonomous-run, provider/plan)
 
   Other:
   elia --dev                  Start explicitly in dev mode (the default)
@@ -1494,13 +1498,14 @@ async function runInteractive(): Promise<void> {
   const { runTurn } = await import('./agent.ts')
   const { config, describeThinking, getThinking, switchModel, switchThinking, THINKING_EFFORT_BUDGETS, DEFAULT_THINKING_BUDGET } =
     await import('./config.ts')
+  setCurrentUsageModel(config.model)
   const { PROVIDER_PRESET_NAMES, isProviderPresetConfigured, providerPresetDefaultModel, listProviderModels } = await import('./providers/registry.ts')
   const { newSessionId, loadSession, loadLatestSession, saveSession } = await import('./session.ts')
   const { createFileTracker, setActiveTracker, loadCheckpoints, saveCheckpoints, restoreCheckpoint, renderCheckpointList } =
     await import('./checkpoint.ts')
   const { setActiveLedgerSession, countEpisodes } = await import('./ledger.ts')
-  const { renderContextStatus } = await import('./compaction.ts')
-  const { compactionThresholdFor } = await import('./contextWindow.ts')
+  const { renderContextStatus, estimateTokens } = await import('./compaction.ts')
+  const { compactionThresholdFor, contextWindowFor, contextWindowOverride } = await import('./contextWindow.ts')
   const { writeSessionHeartbeat, writeSessionEnded } = await import('./sessionRegistry.ts')
 
   const oneShotPrompt = positionals(['--resume']).join(' ').trim()
@@ -1635,11 +1640,14 @@ async function runInteractive(): Promise<void> {
 
   async function runRecordedTurn(userText: string, approveAction?: ActionApproval, skillNames = selectedSkillNames, uiHooks?: TurnUiHooks): Promise<void> {
     const tracker = createFileTracker()
+    const turnStartedAt = Date.now()
     const task = taskSessions.create(inferTaskKind(userText, userText), redactText(userText, 160), 'Starting request')
     taskSessions.update(task.id, { status: 'running', action: 'Thinking', detail: 'Planning the next action' })
     pushHeartbeat(true, redactText(userText, 160))
     const controller = new AbortController()
     let stopRequested = false
+    // Skip the post-turn auto-preview when the model already opened one itself.
+    let previewedThisTurn = false
     // Signals for the per-turn outcome record (competence map + regret nudge).
     let toolErrorCount = 0
     let editRetryCount = 0
@@ -1686,6 +1694,7 @@ async function runInteractive(): Promise<void> {
         },
         onTool: (event) => {
           const action = event.isError ? `Retrying after ${event.name}` : event.name
+          if (event.name === 'preview' && !event.isError) previewedThisTurn = true
           if (event.isError) {
             toolErrorCount += 1
             if (event.name === 'edit_file' || event.name === 'write_file') editRetryCount += 1
@@ -1729,7 +1738,10 @@ async function runInteractive(): Promise<void> {
           if (!uiHooks) writeNotice(label)
           messages.push(
             userMessage(
-              `This change is in "${weak.join('/')}", an area where past turns on this project landed clean less than 75% of the time. Before you finish: run \`git diff\`, then dispatch a \`critic\` and a \`bughunter\` sub-agent in parallel against that diff, and fix anything blocking they raise. Do not skip this.`,
+              `This change is in "${weak.join('/')}", an area where past turns on this project landed clean less than 75% of the time. Before you finish:\n`
+                + '1. Run `git diff` to capture the full change.\n'
+                + '2. In one message, make two `task` calls in parallel — one with role "critic", one with role "bughunter". Each call MUST include a non-empty `prompt` that pastes the diff in full and a short `description`; the sub-agents cannot see this conversation.\n'
+                + '3. Fix anything blocking they raise, then verify. Do not skip this.',
             ),
           )
           await runModelTurn()
@@ -1774,6 +1786,26 @@ async function runInteractive(): Promise<void> {
             : `⚠ checks still failing after 2 repair attempts — ${describeVerification(outcome).split('\n')[0]}`
           uiHooks?.onActivity?.({ kind: 'status', status: outcome.passed ? 'completed' : 'warning', title: verdict })
           if (!uiHooks) writeNotice(verdict)
+        }
+      }
+
+      // Auto-preview: a turn that just scaffolded a static site under workspace/
+      // should offer the live URL without the user asking — this also covers
+      // ChatGPT-subscription turns, whose file writes never reach the `preview`
+      // tool (Codex writes directly, and its own browser launch is sandboxed).
+      if (!previewedThisTurn && !uiHooks?.planMode && !controller.signal.aborted && interactiveTerminal && !machineReadable) {
+        try {
+          const { findFreshPreviewTarget } = await import('./preview/autoPreview.ts')
+          const target = findFreshPreviewTarget(turnStartedAt - 3_000)
+          if (target) {
+            const { ensurePreviewServer } = await import('./preview/server.ts')
+            const server = ensurePreviewServer(pathModule.dirname(target))
+            const url = `${server.baseUrl}/${encodeURIComponent(pathModule.basename(target))}`
+            if (uiHooks) uiHooks.onActivity?.({ kind: 'status', status: 'completed', title: 'Preview ready', detail: url })
+            else writeNotice(`▸ Preview ready — ${url} · live-reloading as files change`)
+          }
+        } catch {
+          // Preview is a convenience; never fail a completed turn over it.
         }
       }
 
@@ -1903,6 +1935,7 @@ async function runInteractive(): Promise<void> {
     const result = switchModel({ providerName, model })
     if (!result.ok) writeError(result.error)
     else {
+      setCurrentUsageModel(config.model)
       writeNotice(`Model switched: ${result.label}`)
       // The newly resolved provider is a cold client — warm it before the next turn.
       prewarmActiveProvider()
@@ -1915,6 +1948,7 @@ async function runInteractive(): Promise<void> {
       writeError(switched.error)
       return
     }
+    setCurrentUsageModel(config.model)
     writeUserConfig({ ELIA_PROVIDER: 'codex', ELIA_MODEL: model, ELIA_BASE_URL: undefined })
     process.env.ELIA_PROVIDER = 'codex'
     process.env.ELIA_MODEL = model
@@ -2530,6 +2564,106 @@ async function runInteractive(): Promise<void> {
         ].join('\n'),
       }
     }
+
+    if (trimmed === '/usage' || trimmed === '/limits') {
+      const { renderUsageBreakdown, tokenMeter, totalTokens, estimateCostUsd, formatCostUsd, formatTokenCount } = await import('./usage.ts')
+      const { codexContextTokens } = await import('./providers/codexSubscription.ts')
+      const cum = cumulativeSessionUsage()
+      const isCodex = config.providerName === 'codex'
+      const costLabel = isCodex ? 'included in ChatGPT plan (subscription turns are not metered in $)' : undefined
+      // In subscription mode Elia's `messages` stay near-empty; meter against
+      // Codex's reported prompt size and its model's real window.
+      const threshold = isCodex ? contextWindowFor(config.model) : compactionThresholdFor(config.model)
+      const contextUsed = isCodex ? codexContextTokens() : estimateTokens(messages)
+      const ctxPct = threshold > 0 ? Math.min(100, Math.round((contextUsed / threshold) * 100)) : 0
+
+      const contextView = async (): Promise<string> => {
+        const override = contextWindowOverride()
+        if (isCodex) {
+          return [
+            `Context window — ${config.model} (ChatGPT subscription)`,
+            '',
+            `  ${tokenMeter(ctxPct)}  ${ctxPct}%`,
+            '',
+            `  last turn prompt   ${contextUsed > 0 ? formatTokenCount(contextUsed) : 'no turn yet'} tokens`,
+            `  model window       ${formatTokenCount(threshold)} tokens`,
+            '',
+            '  Codex keeps the working transcript in its own thread and compacts it',
+            "  itself — Elia's own context stays small in this mode.",
+          ].join('\n')
+        }
+        return [
+          `Context window — ${config.model}`,
+          '',
+          `  ${tokenMeter(ctxPct)}  ${ctxPct}%`,
+          '',
+          `  in context     ${formatTokenCount(contextUsed)} tokens (estimated)`,
+          `  compact at     ${formatTokenCount(threshold)} tokens`,
+          `  model window   ${formatTokenCount(contextWindowFor(config.model))} tokens`,
+          `  override       ${override ? `ELIA_CONTEXT_WINDOW=${override}` : 'none (ELIA_CONTEXT_WINDOW unset)'}`,
+          '',
+          `  ${renderContextStatus(messages, await countEpisodes(sessionId), threshold)}`,
+          '',
+          '  At the compaction point older turns are summarised into recallable',
+          '  episodes, so the effective working memory outlasts this meter.',
+        ].join('\n')
+      }
+
+      const limitsView = (): string => {
+        const thinking = getThinking()
+        const runMs = process.env.ELIA_MAX_RUN_MS?.trim()
+        const providerLine =
+          config.providerName === 'codex'
+            ? '  ChatGPT subscription — capacity is capped by your ChatGPT plan and is\n  not metered by Elia. At the cap a turn fails with "usage limit reached\n  — resets ...".'
+            : `  ${config.providerLabel} — billed per token by the provider. Elia enforces no\n  spend cap; set limits in your provider dashboard.`
+        return [
+          'Limits',
+          '',
+          'Context',
+          isCodex
+            ? `  model window                ${formatTokenCount(threshold)} tokens (${config.model}; Codex compacts its own thread)`
+            : `  compaction threshold        ${formatTokenCount(threshold)} tokens (${config.model})`,
+          `  ELIA_CONTEXT_WINDOW         ${contextWindowOverride() ?? 'unset'}`,
+          '',
+          'Reasoning',
+          `  effort                      ${describeThinking()}`,
+          `  budget                      ${thinking.enabled ? `${formatTokenCount(thinking.budgetTokens)} tokens / turn` : 'n/a (thinking off)'}`,
+          '',
+          'Autonomous runs (elia auto)',
+          `  wall-clock (ELIA_MAX_RUN_MS) ${runMs ? `${runMs} ms` : 'unset — no default cap; pass --max-run-ms'}`,
+          '  action budget               unlimited unless --max-actions is passed',
+          '',
+          'Provider / plan',
+          providerLine,
+          '',
+          'Elia does not impose a dollar or token spend limit of its own.',
+        ].join('\n')
+      }
+
+      return {
+        handled: true,
+        picker: {
+          title: 'Usage',
+          options: [
+            {
+              label: 'Tokens this session',
+              detail: `${formatTokenCount(totalTokens(cum.usage))} tokens · ${isCodex ? 'ChatGPT plan' : formatCostUsd(estimateCostUsd(config.model, cum.usage))} · ${cum.turns} turn${cum.turns === 1 ? '' : 's'}`,
+              value: 'tokens',
+            },
+            { label: 'Context window', detail: isCodex ? `${ctxPct}% of ${formatTokenCount(threshold)} window (Codex thread)` : `${ctxPct}% of ${formatTokenCount(threshold)} before compaction`, value: 'context' },
+            { label: 'Limits', detail: 'context, reasoning, run & provider caps', value: 'limits' },
+            { label: 'Usage-affecting settings', detail: `${config.model} · ${describeThinking()}`, value: 'settings' },
+          ],
+          onSelect: async (value) => {
+            if (value === 'tokens') return done(renderUsageBreakdown(cum, config.model, costLabel))
+            if (value === 'context') return done(await contextView())
+            if (value === 'limits') return done(limitsView())
+            if (value === 'settings') return handleSlashForInk('/settings')
+          },
+        },
+      }
+    }
+
     const exportMatch = /^\/export(?:\s+(.+))?$/.exec(trimmed)
     if (exportMatch) {
       const target = exportMatch[1]?.trim() || `.elia/exports/${sessionId}-${Date.now()}.md`
@@ -2652,6 +2786,11 @@ async function runInteractive(): Promise<void> {
   }
 
   if (interactiveTerminal) {
+    // Re-run prewarm now that the provider, mode, and session prompt are fully
+    // resolved: for the ChatGPT subscription this starts the workspace thread
+    // (not just the connection) so the first turn skips cold start. Idempotent —
+    // ensureThread dedupes on the resolved instructions.
+    prewarmActiveProvider()
     const { runInkRepl } = await import('./ui/app/index.tsx')
     const greeting =
       mode === 'dev'
@@ -2683,14 +2822,19 @@ async function runInteractive(): Promise<void> {
         await runCheckpointedTurn(
           turnText,
           async (assessment, request) =>
-            hooks.approve(
-              `Approve ${request.name}?`,
-              [
+            hooks.approve({
+              title: `Approve ${request.name}?`,
+              lines: [
                 redactText(assessment.reason, 300),
                 `risk: ${assessment.risk} · reversible: ${assessment.reversible ? 'yes' : 'no'}`,
               ],
-              approvalPreviewLines(request.name, request.input),
-            ),
+              preview: approvalPreviewLines(request.name, request.input),
+              ruleLabel: ruleLabel(ruleFor(request, assessment)),
+              command:
+                request.name === 'run_command' && typeof request.input.command === 'string'
+                  ? request.input.command
+                  : undefined,
+            }),
           undefined,
           {
             onText: hooks.onText,
@@ -2787,6 +2931,36 @@ async function runInteractive(): Promise<void> {
         ['est. cost', `${formatCostUsd(estimateCostUsd(config.model, snap.usage))} (${config.model})`],
       ]
       for (const costLine of table([{ header: 'metric' }, { header: 'value', align: 'right' }], rows)) writeUsageLine(`  ${costLine}`)
+      continue
+    }
+
+    // /usage — token consumption, context window, and the limits in effect.
+    if (trimmed === '/usage' || trimmed === '/limits') {
+      const { renderUsageBreakdown, tokenMeter, formatTokenCount } = await import('./usage.ts')
+      const { codexContextTokens } = await import('./providers/codexSubscription.ts')
+      const isCodexUsage = config.providerName === 'codex'
+      const threshold = isCodexUsage ? contextWindowFor(config.model) : compactionThresholdFor(config.model)
+      const contextUsed = isCodexUsage ? codexContextTokens() : estimateTokens(messages)
+      const ctxPct = threshold > 0 ? Math.min(100, Math.round((contextUsed / threshold) * 100)) : 0
+      const thinking = getThinking()
+      const runMs = process.env.ELIA_MAX_RUN_MS?.trim()
+      writeUsageLine(renderUsageBreakdown(cumulativeSessionUsage(), config.model, isCodexUsage ? 'included in ChatGPT plan (not metered in $)' : undefined))
+      writeUsageLine('')
+      writeUsageLine(
+        isCodexUsage
+          ? `Context — ${tokenMeter(ctxPct)} ${ctxPct}%  ·  ${contextUsed > 0 ? formatTokenCount(contextUsed) : 'no turn yet'} / ${formatTokenCount(threshold)} tokens (Codex thread)`
+          : `Context — ${tokenMeter(ctxPct)} ${ctxPct}%  ·  ${formatTokenCount(contextUsed)} / ${formatTokenCount(threshold)} tokens before compaction`,
+      )
+      writeUsageLine(`  model window ${formatTokenCount(contextWindowFor(config.model))} · ELIA_CONTEXT_WINDOW ${contextWindowOverride() ?? 'unset'}`)
+      writeUsageLine('')
+      writeUsageLine('Limits')
+      writeUsageLine(`  reasoning budget   ${thinking.enabled ? `${formatTokenCount(thinking.budgetTokens)} tokens/turn` : 'off'}`)
+      writeUsageLine(`  autonomous run     ELIA_MAX_RUN_MS ${runMs ? `${runMs} ms` : 'unset — no default cap'}`)
+      writeUsageLine(
+        config.providerName === 'codex'
+          ? '  provider           ChatGPT plan cap (not metered by Elia)'
+          : `  provider           ${config.providerLabel} — per-token billing, no Elia spend cap`,
+      )
       continue
     }
 

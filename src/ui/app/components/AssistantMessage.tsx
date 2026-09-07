@@ -8,7 +8,8 @@ function InlineText({ runs }: { runs: InlineRun[] }) {
     <>
       {runs.map((run, index) => {
         if (run.kind === 'strong') return <Text key={index} bold>{run.text}</Text>
-        if (run.kind === 'code') return <Text key={index} color={palette.toolName}>{run.text}</Text>
+        // A shaded pill for inline code — easier to spot in a wall of prose than colour alone.
+        if (run.kind === 'code') return <Text key={index} color={palette.toolName} backgroundColor={palette.codeBg}>{run.text}</Text>
         if (run.kind === 'link') {
           const visible = run.text === run.url ? run.url : `${run.text} (${run.url})`
           return <Text key={index} color={palette.toolName} underline>{visible}</Text>
@@ -45,14 +46,18 @@ function TableCell({ runs, header, align, cursor }: { runs: InlineRun[]; header?
 
 function BlockBody({ block, cursor }: { block: MarkdownBlock; cursor: boolean }) {
   switch (block.kind) {
-    case 'heading':
+    case 'heading': {
+      // A visible hierarchy, like Devin's: gold → cyan → green, then plain bold.
+      const headingColor =
+        block.level === 1 ? palette.accent : block.level === 2 ? palette.toolName : block.level === 3 ? palette.success : undefined
       return (
-        <Text bold color={block.level <= 2 ? palette.accent : undefined} wrap="wrap">
-          {block.level === 1 ? '━━ ' : block.level === 2 ? '◆ ' : '▸ '}
+        <Text bold color={headingColor} wrap="wrap">
+          {block.level <= 2 ? '' : '▸ '}
           <InlineText runs={block.content} />
           {cursor ? <Cursor /> : null}
         </Text>
       )
+    }
     case 'paragraph':
       return (
         <Text wrap="wrap">

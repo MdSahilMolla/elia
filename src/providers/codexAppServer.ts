@@ -167,6 +167,15 @@ export class CodexAppServerClient {
       } else if (method === 'item/commandExecution/outputDelta' && typeof params.delta === 'string') {
         appendCommandOutput(typeof params.itemId === 'string' ? params.itemId : 'command', params.delta)
       } else if (method === 'item/started' && isObject(params.item)) {
+        // Codex emits several `agentMessage` items in one turn — progress notes
+        // while it works, then the final answer. Their deltas stream into one
+        // buffer with no separator, so without this the tail of one message and
+        // the head of the next run together ("…dependencies.The page is built").
+        // Put a paragraph break between them.
+        if (params.item.type === 'agentMessage' && streamedText && !streamedText.endsWith('\n')) {
+          streamedText += '\n\n'
+          options.onText('\n\n')
+        }
         emit(activityForItem(params.item, false))
       } else if (method === 'item/completed' && isObject(params.item)) {
         const item = params.item

@@ -36,7 +36,13 @@ Scouts run on a faster, cheaper model and cannot modify anything, so prefer a ha
     required: ['description', 'prompt'],
   },
   async execute(input) {
-    if (typeof input.prompt !== 'string' || input.prompt.trim().length === 0) throw new Error('prompt must be a non-empty string')
+    if (typeof input.prompt !== 'string' || input.prompt.trim().length === 0) {
+      throw new Error(
+        'task requires a non-empty "prompt" with the full, self-contained instructions for the sub-agent '
+          + '(it cannot see this conversation). Re-issue the call with both "prompt" and a short "description", '
+          + 'e.g. { "description": "review the diff", "role": "critic", "prompt": "Review this git diff for regressions:\\n<diff>" }.',
+      )
+    }
     if (input.prompt.length > 200_000) throw new Error('prompt exceeds 200000 characters')
     const descriptionArgument = optionalString(input.description, 'description')
     const prompt = input.prompt

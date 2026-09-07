@@ -45,6 +45,18 @@ function handle(line: string): void {
       send({ method: 'turn/completed', params: { threadId: 'thread-1', turn: { id: turnId, status: 'completed', items: [] } } })
       return
     }
+    if (text === 'multimsg') {
+      // Two separate agent messages in one turn, each announced by item/started
+      // — the shape that produced "…done.The next thing" run-ons.
+      send({ method: 'item/started', params: { threadId: 'thread-1', turnId, item: { id: 'message-1', type: 'agentMessage' } } })
+      send({ method: 'item/agentMessage/delta', params: { threadId: 'thread-1', turnId, itemId: 'message-1', delta: 'Working on it now.' } })
+      send({ method: 'item/completed', params: { threadId: 'thread-1', turnId, item: { id: 'message-1', type: 'agentMessage', text: 'Working on it now.' } } })
+      send({ method: 'item/started', params: { threadId: 'thread-1', turnId, item: { id: 'message-2', type: 'agentMessage' } } })
+      send({ method: 'item/agentMessage/delta', params: { threadId: 'thread-1', turnId, itemId: 'message-2', delta: 'All done.' } })
+      send({ method: 'item/completed', params: { threadId: 'thread-1', turnId, item: { id: 'message-2', type: 'agentMessage', text: 'All done.' } } })
+      send({ method: 'turn/completed', params: { threadId: 'thread-1', turn: { id: turnId, status: 'completed', items: [] } } })
+      return
+    }
     if (text === 'first') {
       send({ method: 'turn/plan/updated', params: { turnId, explanation: 'Build safely', plan: [{ step: 'Inspect files', status: 'inProgress' }] } })
       send({ method: 'item/started', params: { threadId: 'thread-1', turnId, item: { id: 'command-1', type: 'commandExecution', command: 'bun test', cwd: process.cwd(), status: 'inProgress' } } })

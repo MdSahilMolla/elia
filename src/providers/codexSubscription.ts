@@ -19,6 +19,18 @@ let loginConfirmed = false
 let loginPrimePromise: Promise<boolean> | undefined
 let subscriptionApprovedThisSession = false
 
+// The last turn's total prompt tokens (fresh + cached). Codex resends the whole
+// thread on every turn, so this is a close proxy for "how full is the Codex
+// context right now" — the number the status bar should show in subscription
+// mode, where Elia's own `messages` array stays near-empty.
+let lastCodexContextTokens = 0
+export function recordCodexContextTokens(tokens: number): void {
+  if (Number.isFinite(tokens) && tokens >= 0) lastCodexContextTokens = tokens
+}
+export function codexContextTokens(): number {
+  return lastCodexContextTokens
+}
+
 /**
  * Whether the user has already approved running Codex in this workspace during
  * this session. Selecting the ChatGPT subscription as the model is a deliberate
@@ -103,9 +115,18 @@ export async function listCodexSubscriptionModels(): Promise<{ models: CodexSubs
   }
 }
 
+/**
+ * How much of the prior conversation to send verbatim when a thread starts.
+ * Codex keeps its own thread after turn 0, so this transcript only seeds the
+ * first turn — the newest exchanges are what matter; older ones are collapsed
+ * to a one-line note rather than shipped in full (a long API-mode history was
+ * adding tens of thousands of tokens to every first subscription turn).
+ */
+const FIRST_TURN_TRANSCRIPT_BUDGET = 12_000
+
 /** Builds the initial transcript sent once when a subscription thread starts. */
 export function buildCodexSubscriptionPrompt(messages: ChatMessage[], model = 'default'): string {
-  const transcript = messages
+  const rendered = messages
     .map((message) => {
       const text = message.content
         .filter((block) => block.type === 'text' || block.type === 'tool_result')
@@ -114,7 +135,22 @@ export function buildCodexSubscriptionPrompt(messages: ChatMessage[], model = 'd
       return text ? `${message.role}:\n${text}` : ''
     })
     .filter(Boolean)
-    .join('\n\n')
+
+  // Keep the most recent entries whole, up to the budget; always keep at least
+  // the final one (the request being worked on) no matter how large.
+  const kept: string[] = []
+  let used = 0
+  for (let i = rendered.length - 1; i >= 0; i--) {
+    const entry = rendered[i]!
+    if (kept.length > 0 && used + entry.length > FIRST_TURN_TRANSCRIPT_BUDGET) break
+    kept.unshift(entry)
+    used += entry.length
+  }
+  const dropped = rendered.length - kept.length
+  const transcript = [
+    dropped > 0 ? `[${dropped} earlier message${dropped === 1 ? '' : 's'} omitted for brevity]` : '',
+    ...kept,
+  ].filter(Boolean).join('\n\n')
 
   const env = `Working directory: ${process.cwd()}\nPlatform: ${process.platform}\nNetwork: disabled inside this sandbox`
   return `Selected Codex model: ${model}\n\n${env}\n\nConversation:\n${transcript}\n\nWork on the latest user request now and report changes and verification honestly.`
@@ -273,6 +309,7 @@ export function createCodexSubscriptionProvider(model = 'default'): Provider {
         })
         lastDynamic = dynamic
         completedTurns++
+        recordCodexContextTokens(result.usage.inputTokens + result.usage.cacheReadTokens)
         return { content: [{ type: 'text' as const, text: result.text }], usage: result.usage }
       } catch (error) {
         throw describeCodexFailure(error)

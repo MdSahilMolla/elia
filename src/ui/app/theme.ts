@@ -9,6 +9,8 @@ export const palette = {
   muted: 'gray',
   user: 'cyan',
   text: undefined as string | undefined,
+  /** Background for inline-code pills. A near-black grey — subtle on dark terminals, still legible on light. */
+  codeBg: '#2f2f2f',
 } as const
 
 export const glyphs = {
@@ -19,6 +21,7 @@ export const glyphs = {
   cached: '⚡',
   running: '◐',
   branch: '⎿',
+  skill: '✦',
 } as const
 
 /** Spinner frames shared with src/ui/stream.ts's tool spinner. */

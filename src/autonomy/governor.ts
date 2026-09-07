@@ -4,6 +4,7 @@ import { currentAgent, isPathWithinWorkspace } from './context.ts'
 import { commandMayReadSensitiveData } from './sensitivePaths.ts'
 import { pauseToolSpinner, resumeToolSpinner } from '../ui/stream.ts'
 import { applyPolicy } from './policy.ts'
+import { addAllowRule, isAllowlisted, ruleFor, type AllowScope } from './allowStore.ts'
 
 export type ActionRisk = 'safe' | 'review' | 'critical'
 export type ActionDecision = 'allow' | 'approve' | 'block'
@@ -29,7 +30,27 @@ export interface ActionGateResult {
   assessment: ActionAssessment
 }
 
-export type ActionApproval = (assessment: ActionAssessment, request: ActionRequest) => Promise<boolean>
+/**
+ * What an approver hands back. A bare `boolean` still works (that is the whole
+ * legacy surface); an object lets the interactive approver also say "and
+ * remember this" or "no — here is what to do instead".
+ */
+export interface ApprovalOutcome {
+  approved: boolean
+  /**
+   * Persist a rule so this class of action stops prompting:
+   *   - `session` → in memory, this run only
+   *   - `project` → `.elia/allow.json`
+   *   - `global`  → `~/.elia/allow.json`
+   */
+  remember?: 'session' | AllowScope
+  /** On a denial: operator guidance to surface back to the model. */
+  feedback?: string
+}
+
+export type ApprovalResult = boolean | ApprovalOutcome
+
+export type ActionApproval = (assessment: ActionAssessment, request: ActionRequest) => Promise<ApprovalResult>
 
 export interface ActionGovernorStats {
   maxActions: number
@@ -323,6 +344,12 @@ export function createActionGovernor(options: { mode?: GovernanceMode; approve?:
   let approvalQueue = Promise.resolve()
   /** One remembered decision per class of action, for the life of this run. Unattended mode only. */
   const classDecisions = new Map<string, boolean>()
+  /** "Allow for this session" choices from the supervised approval menu. */
+  const sessionAllow = new Set<string>()
+  const sessionKey = (request: ActionRequest, assessment: ActionAssessment): string =>
+    request.name === 'run_command'
+      ? `run_command:${String((request.input.command ?? '')).trim().split(/[\s;|&]+/, 1)[0] ?? ''}`
+      : `${request.name}:${assessment.intent}`
 
   return {
     stats: () => ({ maxActions, consumed: actionCount, exhausted: maxActions > 0 && actionCount >= maxActions, blockedByBudget }),
@@ -346,6 +373,18 @@ export function createActionGovernor(options: { mode?: GovernanceMode; approve?:
       }
       actionCount += 1
       if (assessment.decision === 'allow') return { allowed: true, assessment }
+
+      // A standing "always allow" — persisted (.elia/allow.json or ~/.elia/allow.json)
+      // or chosen for this session at the approval menu — clears the prompt.
+      // Supervised only: an unattended run keeps its strict per-run boundary, so
+      // a critical action never rides in on a rule written during some past
+      // interactive session.
+      if (
+        mode === 'supervised' &&
+        (sessionAllow.has(sessionKey(request, assessment)) || isAllowlisted(request, assessment, options.cwd))
+      ) {
+        return { allowed: true, assessment: { ...assessment, decision: 'allow' } }
+      }
 
       // Unattended mode used to refuse every critical action outright. That is
       // a wall, not a safeguard: a run whose plan needs one such action spends
@@ -413,13 +452,27 @@ export function createActionGovernor(options: { mode?: GovernanceMode; approve?:
       // resume — the tool itself hasn't finished, so its line is still owed.
       pauseToolSpinner()
       try {
-        const approved = await options.approve(assessment, request)
+        const outcome = await options.approve(assessment, request)
+        const approved = outcome === true || (typeof outcome === 'object' && outcome.approved)
+        const remember = typeof outcome === 'object' ? outcome.remember : undefined
+        const feedback = typeof outcome === 'object' ? outcome.feedback : undefined
         if (mode === 'unattended') classDecisions.set(decisionKey, approved)
+        if (approved && remember === 'session') sessionAllow.add(sessionKey(request, assessment))
+        if (approved && (remember === 'project' || remember === 'global')) {
+          try {
+            addAllowRule(ruleFor(request, assessment), remember, options.cwd)
+          } catch {
+            // A write failure (read-only fs, permissions) must not block the
+            // action the user just approved — it just won't be remembered.
+          }
+        }
         if (approved) return { allowed: true, assessment: { ...assessment, decision: 'allow' } }
         return {
           allowed: false,
           assessment: { ...assessment, decision: 'block' },
-          message: `Action denied by the user: ${assessment.reason}`,
+          message: feedback
+            ? `Action declined by the user. Their guidance: ${feedback}`
+            : `Action denied by the user: ${assessment.reason}`,
         }
       } finally {
         resumeToolSpinner()

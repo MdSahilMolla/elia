@@ -5,6 +5,7 @@ import type { Tool } from './tools/types.ts'
 import { battmannTools, businessTools } from './tools/registry.ts'
 import { toolsForRole, role as roleDefinition } from './autonomy/roles.ts'
 import { currentAgent, withAgentIdentity } from './autonomy/context.ts'
+import { drainParentSteering } from './autonomy/steering.ts'
 import { activeBlackboard } from './autonomy/blackboard.ts'
 import { createTodoList, withTodoList } from './autonomy/todoList.ts'
 import { activeMode } from './autonomy/mode.ts'
@@ -178,10 +179,15 @@ export async function runSubAgent(request: SubAgentRequest): Promise<SubAgentRes
       cache,
       prefetcher,
       signal: request.signal,
+      // While this worker runs, the top-level loop is blocked awaiting it and
+      // cannot fold in steering the user types — so the worker picks it up at
+      // its own step boundaries instead. Parallel workers share the source;
+      // whichever iterates first consumes it.
+      drainSteering: drainParentSteering,
     }))))),
   )
 
-  recordUsage(result.usage)
+  recordUsage(result.usage, tier.model)
 
   return {
     name: request.name,

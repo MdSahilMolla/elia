@@ -34,6 +34,15 @@ function diffStatOf(result: string | undefined): string {
   return added || removed ? `+${added} −${removed}` : ''
 }
 
+/** "exit 0" / "exit 1" / "timed out" pulled from a run_command result's first line. */
+export function shellExitStat(result: string | undefined): string {
+  if (!result) return ''
+  const first = result.split('\n', 1)[0] ?? ''
+  if (/timed out/i.test(first)) return 'timed out'
+  const code = /exit code:\s*(-?\d+)/i.exec(first)
+  return code ? `exit ${code[1]}` : ''
+}
+
 export interface ToolSummary {
   verb: string
   target: string
@@ -48,8 +57,18 @@ export function summarizeTool(tool: ToolItem): ToolSummary {
   const stat = tool.name === 'edit_file' || tool.name === 'write_file' ? diffStatOf(tool.result) : ''
 
   switch (tool.name) {
-    case 'read_file':
-      return { verb: 'Read', target: basename(firstString(input, 'path') ?? ''), stat, expandable: false }
+    case 'read_file': {
+      const name = basename(firstString(input, 'path') ?? '')
+      const offset = typeof input.offset === 'number' ? input.offset : undefined
+      const limit = typeof input.limit === 'number' ? input.limit : undefined
+      const range =
+        offset !== undefined
+          ? `:${offset}-${offset + (limit ?? 2000) - 1}`
+          : limit !== undefined
+            ? `:1-${limit}`
+            : ''
+      return { verb: 'Read', target: `${name}${range}`, stat, expandable: done }
+    }
     case 'edit_file':
       return { verb: 'Edited', target: basename(firstString(input, 'path') ?? ''), stat, expandable: done }
     case 'write_file': {
@@ -62,7 +81,12 @@ export function summarizeTool(tool: ToolItem): ToolSummary {
       return { verb: 'Searched', target: firstString(input, 'pattern') ?? '', stat, expandable: done }
     case 'run_command': {
       const cmd = firstString(input, 'command') ?? ''
-      return { verb: 'Ran', target: cmd.length > 60 ? `${cmd.slice(0, 59)}…` : cmd, stat, expandable: done }
+      return {
+        verb: 'Ran',
+        target: cmd.length > 60 ? `${cmd.slice(0, 59)}…` : cmd,
+        stat: done ? shellExitStat(tool.result) : '',
+        expandable: done,
+      }
     }
     case 'web_search':
       return { verb: 'Searched the web', target: firstString(input, 'query') ?? '', stat, expandable: done }

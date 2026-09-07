@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { buildCodexSubscriptionPrompt, describeCodexFailure, parseCodexSubscriptionModels } from './codexSubscription.ts'
+import { buildCodexSubscriptionPrompt, codexContextTokens, describeCodexFailure, parseCodexSubscriptionModels, recordCodexContextTokens } from './codexSubscription.ts'
 
 test('describeCodexFailure reframes a usage-limit error as the plan cap, not an Elia bug', () => {
   const friendly = describeCodexFailure(new Error('You have hit your usage limit. Resets in 3 hours 20 minutes.'))
@@ -32,6 +32,31 @@ test('Codex subscription initial prompt preserves the user conversation without 
   expect(prompt).toContain('Selected Codex model: default')
   expect(prompt).toContain('Work on the latest user request now')
   expect(prompt).not.toContain('Do not read credentials')
+})
+
+test('the first-turn transcript keeps the latest exchanges and collapses older ones', () => {
+  const big = 'x'.repeat(9_000)
+  const prompt = buildCodexSubscriptionPrompt([
+    { role: 'user', content: [{ type: 'text', text: `old one ${big}` }] },
+    { role: 'user', content: [{ type: 'text', text: `old two ${big}` }] },
+    { role: 'user', content: [{ type: 'text', text: 'build the egg site' }] },
+  ])
+  expect(prompt).toContain('build the egg site')
+  expect(prompt).toContain('earlier message')
+  expect(prompt).not.toContain('old one')
+})
+
+test('the final user request is kept verbatim even when it alone exceeds the budget', () => {
+  const huge = 'do this: ' + 'y'.repeat(20_000)
+  const prompt = buildCodexSubscriptionPrompt([{ role: 'user', content: [{ type: 'text', text: huge }] }])
+  expect(prompt).toContain(huge)
+})
+
+test('recordCodexContextTokens feeds the status-bar context readout', () => {
+  recordCodexContextTokens(123_456)
+  expect(codexContextTokens()).toBe(123_456)
+  recordCodexContextTokens(-5)
+  expect(codexContextTokens()).toBe(123_456)
 })
 
 test('Codex subscription models use the account-provided execution slug and display name', () => {
