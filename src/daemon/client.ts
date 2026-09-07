@@ -19,6 +19,8 @@ import { ELIA_ROOT } from '../statePaths.ts'
 import {
   PROTOCOL_VERSION,
   type DaemonInfo,
+  type JvmCheckParams,
+  type JvmCheckResult,
   type ParseCheckParams,
   type ParseCheckResult,
   type RpcResponse,
@@ -102,6 +104,19 @@ function safeReaddir(dir: string): string[] {
   }
 }
 
+/** The `elia-jvm-bridge` jar, so the daemon can find it (it has no notion of the
+ * repo root). Honoured via `ELIA_JVM_BRIDGE_JAR`, which we set when spawning. */
+export function resolveJvmBridgeJar(): string | undefined {
+  if (process.env.ELIA_JVM_BRIDGE_JAR && existsSync(process.env.ELIA_JVM_BRIDGE_JAR)) {
+    return process.env.ELIA_JVM_BRIDGE_JAR
+  }
+  const candidates = [
+    join(ELIA_ROOT, 'node_modules', '@elia/native', 'elia-jvm-bridge.jar'),
+    join(ELIA_ROOT, 'jvm', 'elia-jvm-bridge', 'build', 'elia-jvm-bridge.jar'),
+  ]
+  return candidates.find((p) => existsSync(p))
+}
+
 interface Pending {
   resolve: (value: unknown) => void
   reject: (err: Error) => void
@@ -178,6 +193,7 @@ class DaemonClient {
     this.spawnedThisProcess = true
     const bin = resolveEliadPath()
     if (!bin) throw new DaemonUnavailable('eliad binary not found (build crates/eliad or install @elia/native)')
+    const jar = resolveJvmBridgeJar()
     const child = Bun.spawn([bin], {
       stdin: 'ignore',
       stdout: 'ignore',
@@ -185,7 +201,7 @@ class DaemonClient {
       // Bun snapshots the environment at spawn and does not pick up runtime
       // `process.env` writes unless `env` is passed explicitly — the daemon must
       // see the same ELIA_* vars this process has.
-      env: { ...process.env },
+      env: { ...process.env, ...(jar ? { ELIA_JVM_BRIDGE_JAR: jar } : {}) },
       // Outlive this CLI invocation so the next one reuses it.
       detached: true,
     })
@@ -339,6 +355,18 @@ export async function daemonParseCheck(params: ParseCheckParams): Promise<ParseC
   if (!daemonEnabled()) throw new DaemonUnavailable('ELIA_DAEMON=off')
   const { result } = await daemonClient().call('parse.check', params, 5_000)
   return result as ParseCheckResult
+}
+
+/**
+ * Type-check a proposed Java edit with the JDK compiler, via the daemon's
+ * `elia-jvm-bridge` (Java) child. First call pays JVM start (~1s); warm calls
+ * are a few hundred ms. Throws {@link DaemonUnavailable} when the daemon is off,
+ * or a plain error when no JDK / bridge jar is available.
+ */
+export async function daemonJvmCheck(params: JvmCheckParams): Promise<JvmCheckResult> {
+  if (!daemonEnabled()) throw new DaemonUnavailable('ELIA_DAEMON=off')
+  const { result } = await daemonClient().call('jvm.check', params, 35_000)
+  return result as JvmCheckResult
 }
 
 function sleep(ms: number): Promise<void> {

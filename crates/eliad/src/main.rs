@@ -6,6 +6,7 @@
 //! version does not match. Everything it does has an in-process fallback on the
 //! TypeScript side, so a daemon that will not start is never fatal.
 
+mod jvm;
 mod protocol;
 mod server;
 mod shell;

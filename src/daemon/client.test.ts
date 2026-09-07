@@ -8,6 +8,7 @@ import {
   daemonEnabled,
   daemonMode,
   resolveEliadPath,
+  resolveJvmBridgeJar,
   resetDaemonClientForTests,
   socketPath,
 } from './client.ts'
@@ -111,3 +112,15 @@ maybe('parse.check flags a structurally broken edit', async () => {
   expect(broken.ok).toBe(false)
   expect(broken.errors[0]?.message).toBe("unclosed '{'")
 }, 30_000)
+
+const withJvm = binary && resolveJvmBridgeJar() ? test : test.skip
+
+withJvm('jvm.check type-checks a Java edit via elia-jvm-bridge', async () => {
+  const { daemonJvmCheck } = await import('./client.ts')
+  const clean = await daemonJvmCheck({ source: 'public class Ok { int x = 1; }', path: 'Ok.java' })
+  expect(clean.ok).toBe(true)
+
+  const broken = await daemonJvmCheck({ source: 'public class Bad { int x = ; }', path: 'Bad.java' })
+  expect(broken.ok).toBe(false)
+  expect(broken.errors[0]?.severity).toBe('error')
+}, 40_000)

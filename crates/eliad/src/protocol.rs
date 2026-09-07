@@ -67,7 +67,6 @@ impl Response {
 pub mod codes {
     pub const METHOD_NOT_FOUND: i32 = -32601;
     pub const INVALID_PARAMS: i32 = -32602;
-    #[allow(dead_code)] // part of the documented protocol; not yet emitted
     pub const INTERNAL: i32 = -32603;
     pub const SHELL_SPAWN_FAILED: i32 = -32000;
 }
@@ -82,6 +81,9 @@ pub struct DaemonInfo {
     pub uptime_ms: u64,
     /// Number of live persistent shell workers.
     pub shell_workers: usize,
+    /// Whether a JDK + the elia-jvm-bridge jar were found (the `jvm.*` methods
+    /// work). The JVM child itself starts lazily on first use.
+    pub jvm_available: bool,
 }
 
 // ---- shell.exec ----
@@ -134,3 +136,10 @@ pub struct ParseCheckParams {
 
 // The result is `elia_parse::CheckResult`, serialized directly:
 //   { "ok": bool, "errors": [{ "line", "column", "message" }] }
+
+// ---- jvm.check / jvm.info ----
+//
+// Forwarded verbatim to the `elia-jvm-bridge` child (see `jvm.rs`). `jvm.check`
+// params: { source, path, classpath?: string[] }; result:
+//   { "ok": bool, "errors": [{ "line", "column", "message", "severity" }] }
+// `jvm.info` takes no params.

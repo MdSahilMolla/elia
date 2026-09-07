@@ -3,10 +3,12 @@ export {
   DaemonUnavailable,
   daemonClient,
   daemonEnabled,
+  daemonJvmCheck,
   daemonMode,
   daemonParseCheck,
   daemonShellExec,
   resolveEliadPath,
+  resolveJvmBridgeJar,
   socketPath,
   type DaemonMode,
   type DaemonShellRequest,
@@ -14,6 +16,7 @@ export {
 export {
   PROTOCOL_VERSION,
   type DaemonInfo,
+  type JvmCheckResult,
   type ParseCheckResult,
   type ShellExecResult,
 } from './types.ts'

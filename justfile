@@ -12,7 +12,7 @@
 bun := env_var_or_default("ELIA_BUN", "bun")
 
 # Everything: native layer + a typecheck.
-build: build-rust
+build: build-rust build-jvm
     {{bun}} run typecheck
 
 # The Rust workspace (debug). Release: `just build-rust-release`.
@@ -21,6 +21,14 @@ build-rust:
 
 build-rust-release:
     cargo build --workspace --release
+
+# elia-jvm-bridge — plain javac + jar (no Gradle needed yet).
+build-jvm:
+    cd jvm/elia-jvm-bridge && \
+      mkdir -p build/classes && \
+      javac -d build/classes $(find src -name '*.java') && \
+      jar --create --file build/elia-jvm-bridge.jar \
+        --main-class com.elia.jvmbridge.Bridge -C build/classes .
 
 # All tests: Rust unit + integration, then the full TypeScript suite.
 test: test-rust test-ts

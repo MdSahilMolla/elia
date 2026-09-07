@@ -29,11 +29,18 @@ the address. The envelope and every method live in
 | `shell.exec` | `{ command, cwd, timeout_ms }` | `{ exit_code, stdout, stderr, elapsed_ms, timed_out }` |
 | `shell.cancel` | `{ target: <exec request id> }` | `{ ok: true }` |
 | `parse.check` | `{ source, path?, language? }` | `{ ok, errors: [{ line, column, message }] }` |
+| `jvm.check` | `{ source, path?, classpath? }` | `{ ok, errors: [{ line, column, message, severity }] }` |
+| `jvm.info` | – | `{ version, protocol, java_version, java_home }` |
 
 `parse.check` runs the C++ structural validator ([`native/elia-parse`](../../native/elia-parse),
 via the `elia-parse` crate) — a sub-millisecond check for unbalanced brackets
 and unterminated strings/comments, so a broken `edit_file` result is caught
 before a build round-trip.
+
+`jvm.*` is forwarded to [`elia-jvm-bridge`](../../jvm/elia-jvm-bridge) (Java),
+a JVM child this daemon spawns and supervises lazily — it type-checks a Java
+edit with the JDK compiler in a few hundred ms warm. Needs a JDK and the bridge
+jar (`daemon.info`'s `jvm_available` says whether both were found).
 
 Bump `PROTOCOL_VERSION` on any breaking change. The client checks it on connect
 and replaces a daemon that does not match.

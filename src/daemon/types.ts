@@ -67,6 +67,28 @@ export interface ParseCheckResult {
   errors: ParseCheckError[]
 }
 
+export interface JvmCheckParams {
+  /** Full proposed contents of a single `.java` file. */
+  source: string
+  /** File path — the class/package name is read from `source`, this is the fallback. */
+  path?: string
+  /** Optional classpath entries for resolving imports. */
+  classpath?: string[]
+}
+
+export interface JvmDiagnostic {
+  line: number
+  column: number
+  message: string
+  severity: 'error' | 'warning'
+}
+
+/** Result of `jvm.check` — from the JDK compiler via elia-jvm-bridge (Java). */
+export interface JvmCheckResult {
+  ok: boolean
+  errors: JvmDiagnostic[]
+}
+
 /** Negative RPC error codes are transport/daemon problems; the client treats
  * them as "fall back to the in-process path". A command that exits non-zero is a
  * successful RPC with `exit_code !== 0`, never an error. */
