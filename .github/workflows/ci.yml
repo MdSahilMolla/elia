@@ -21,6 +21,8 @@ jobs:
         run: bun install --frozen-lockfile
       - name: Typecheck
         run: bun run typecheck
+      # This job runs with ELIA_DAEMON unset (i.e. "off"), so the whole suite
+      # here is also the proof that everything works on the pure-TS path.
       - name: Test
         env:
           ELIA_API_KEY: ci-test-placeholder
@@ -39,3 +41,36 @@ jobs:
           npm install --package-lock-only --ignore-scripts --no-audit --no-fund
           npm audit --omit=dev
           rm -f package-lock.json
+
+  # The native systems layer (crates/): the `eliad` daemon today, the napi addon
+  # next. Kept separate so a Rust toolchain problem never blocks the TS suite,
+  # and vice versa.
+  native:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Rust tests
+        run: cargo test --workspace
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.0
+      - name: Install locked dependencies
+        run: bun install --frozen-lockfile
+      - name: Daemon-backed TypeScript tests
+        env:
+          ELIA_DAEMON: auto
+        # Build the daemon first so `resolveEliadPath()` finds it and the
+        # end-to-end tests run instead of skipping.
+        run: |
+          cargo build -p eliad
+          bun test src/daemon/ --timeout=30000

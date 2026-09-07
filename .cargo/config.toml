@@ -1,0 +1,8 @@
+# This project's Rust code (crates/, and later the napi addon) is plain
+# cross-platform Rust. It builds with the standard toolchain on Linux and macOS.
+#
+# On Windows it needs a GNU/LLVM-MinGW toolchain rather than MSVC:
+#   rustup toolchain install stable-x86_64-pc-windows-gnu
+#   rustup override set stable-x86_64-pc-windows-gnu     # run once, in the repo root
+# LLVM-MinGW (clang + lld + UCRT) provides the linker. CI and the release
+# workflow pass `--target` explicitly; see the `justfile`.

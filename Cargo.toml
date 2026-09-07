@@ -1,0 +1,25 @@
+# Elia's native systems layer. TypeScript in `src/` stays the conductor and ships
+# as source; this workspace builds to per-platform binaries that `src/daemon/` and
+# `src/native/` load at runtime, with a pure-TS fallback whenever they are absent.
+[workspace]
+resolver = "2"
+members = ["crates/eliad"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-only"
+repository = "https://github.com/MdSahilMolla/elia"
+rust-version = "1.85"
+
+[workspace.dependencies]
+tokio = { version = "1.40", features = ["rt-multi-thread", "macros", "net", "process", "io-util", "sync", "time", "signal"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+dirs = "5"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+strip = true

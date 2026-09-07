@@ -2,6 +2,7 @@
 
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
+import { DaemonUnavailable, daemonMode, daemonShellExec } from './daemon/index.ts'
 
 /**
  * The Windows command interpreter, resolved to an absolute path.
@@ -40,6 +41,33 @@ export async function runShell(
   /** Cooperative cancellation for autonomous runs. */
   signal?: AbortSignal,
 ): Promise<ShellResult> {
+  // When the resident daemon is enabled it runs the command in a warm shell,
+  // skipping the per-command process spawn (20–80ms on Windows). Any transport
+  // problem falls through to the in-process path below; `ELIA_DAEMON=require`
+  // surfaces the failure instead, for benchmarking the intended path.
+  const mode = daemonMode()
+  if (mode !== 'off') {
+    try {
+      const r = await daemonShellExec({
+        command,
+        cwd: cwd ?? process.cwd(),
+        timeoutMs: Math.max(1, timeoutMs),
+        signal,
+      })
+      return {
+        command,
+        exitCode: r.exit_code,
+        stdout: clampOutput(r.stdout, MAX_SHELL_OUTPUT_LENGTH),
+        stderr: clampOutput(r.stderr, MAX_SHELL_OUTPUT_LENGTH),
+        elapsedMs: r.elapsed_ms,
+        timedOut: r.timed_out,
+      }
+    } catch (err) {
+      if (mode === 'require' || !(err instanceof DaemonUnavailable)) throw err
+      // auto: fall through to the in-process shell.
+    }
+  }
+
   const startedAt = Date.now()
   const shellArgs = process.platform === 'win32' ? [windowsShell(), '/d', '/s', '/c', command] : ['sh', '-c', command]
 
