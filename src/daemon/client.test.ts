@@ -115,6 +115,29 @@ maybe('parse.check flags a structurally broken edit', async () => {
 
 const withJvm = binary && resolveJvmBridgeJar() ? test : test.skip
 
+maybe('mcp.ensure keeps a stdio server resident and mcp.call proxies to it', async () => {
+  process.env.ELIA_ELIAD_SOCKET = socketAddr
+  process.env.ELIA_DAEMON = 'auto'
+  resetDaemonClientForTests()
+
+  const echoServer = join(import.meta.dir, '..', 'mcp', 'fixtures', 'echoServer.ts')
+  const config = { name: 'echofix', command: process.execPath, args: ['run', echoServer], env: {} }
+
+  const { daemonEnsureMcp, daemonCallMcp } = await import('../mcp/daemonBridge.ts')
+  const ensured = await daemonEnsureMcp([config])
+  expect(ensured.failed).toEqual([])
+  expect(ensured.tools.map((t) => t.name).sort()).toEqual(['echo', 'explode'])
+  expect(ensured.tools[0]?.server).toBe('echofix')
+
+  // A second ensure with the same config is a no-op — the server stays up.
+  const again = await daemonEnsureMcp([config])
+  expect(again.tools.length).toBe(2)
+
+  const result = await daemonCallMcp('echofix', 'echo', { text: 'through-the-daemon' })
+  expect(result.isError).toBeFalsy()
+  expect(result.content?.[0]?.text).toContain('through-the-daemon')
+}, 40_000)
+
 withJvm('jvm.check type-checks a Java edit via elia-jvm-bridge', async () => {
   const { daemonJvmCheck } = await import('./client.ts')
   const clean = await daemonJvmCheck({ source: 'public class Ok { int x = 1; }', path: 'Ok.java' })

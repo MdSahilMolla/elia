@@ -31,6 +31,8 @@ the address. The envelope and every method live in
 | `parse.check` | `{ source, path?, language? }` | `{ ok, errors: [{ line, column, message }] }` |
 | `jvm.check` | `{ source, path?, classpath? }` | `{ ok, errors: [{ line, column, message, severity }] }` |
 | `jvm.info` | – | `{ version, protocol, java_version, java_home }` |
+| `mcp.ensure` | `{ servers: [{ name, command, args, env }] }` | `{ tools: [{ server, name, description?, inputSchema? }], failed: [{ server, reason }] }` |
+| `mcp.call` | `{ server, tool, arguments }` | the server's raw `tools/call` result |
 
 `parse.check` runs the C++ structural validator ([`native/elia-parse`](../../native/elia-parse),
 via the `elia-parse` crate) — a sub-millisecond check for unbalanced brackets
@@ -41,6 +43,11 @@ before a build round-trip.
 a JVM child this daemon spawns and supervises lazily — it type-checks a Java
 edit with the JDK compiler in a few hundred ms warm. Needs a JDK and the bridge
 jar (`daemon.info`'s `jvm_available` says whether both were found).
+
+`mcp.*` keeps stdio MCP servers (`command`-style, e.g. `npx some-mcp-server`)
+spawned and handshaken across `elia` invocations, so a cold `elia agent` skips
+the spawn + `initialize` + `tools/list` round-trip. `src/mcp/registry.ts` parses
+the config and delegates here; HTTP connectors stay on the in-process client.
 
 Bump `PROTOCOL_VERSION` on any breaking change. The client checks it on connect
 and replaces a daemon that does not match.

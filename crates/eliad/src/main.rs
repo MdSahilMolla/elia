@@ -7,6 +7,7 @@
 //! TypeScript side, so a daemon that will not start is never fatal.
 
 mod jvm;
+mod mcp;
 mod protocol;
 mod server;
 mod shell;

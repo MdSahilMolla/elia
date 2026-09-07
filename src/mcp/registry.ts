@@ -6,6 +6,13 @@ import { McpHttpClient } from './httpClient.ts'
 import type { McpTransport } from './transport.ts'
 import { registerShutdownCleanup } from '../ui/shutdown.ts'
 import { clearBrowserMcpToolsForTests, registerBrowserMcpTool } from './browserRegistry.ts'
+import { DaemonUnavailable } from '../daemon/index.ts'
+import {
+  daemonCallMcp,
+  daemonEnsureMcp,
+  daemonMcpEnabled,
+  type DaemonMcpToolDescriptor,
+} from './daemonBridge.ts'
 
 export interface McpLoadReport {
   servers: string[]
@@ -101,10 +108,18 @@ export async function loadMcpTools(cwd = process.cwd()): Promise<McpLoadReport> 
   }
 
   const enabled = servers.filter((server) => !server.disabled)
+
+  // Hand stdio servers to the daemon when it is enabled: it keeps them resident
+  // across `elia` invocations, so this is usually instant and turn 1 already has
+  // their tools. Whatever the daemon does not take (it is off, unreachable, or a
+  // server failed there) falls through to the in-process client below.
+  const daemonHandled = await connectStdioViaDaemon(enabled, report, statusByName)
+
   // connectServer mutates `report` and registers tools as each server finishes,
   // whenever that is — so a straggler that lands after the deadline still becomes
   // usable, it just isn't counted in the report handed back to the startup path.
-  const allConnected = Promise.all(enabled.map((server) => connectServer(server, report, statusByName.get(server.name)!)))
+  const throughClient = enabled.filter((server) => !daemonHandled.has(server.name))
+  const allConnected = Promise.all(throughClient.map((server) => connectServer(server, report, statusByName.get(server.name)!)))
   let deadlineTimer: ReturnType<typeof setTimeout> | undefined
   const deadline = new Promise<void>((resolve) => {
     deadlineTimer = setTimeout(resolve, mcpSoftDeadlineMs())
@@ -146,6 +161,76 @@ export async function shutdownMcpTools(): Promise<void> {
 /** The last load/reload result — what `/mcp` and `/connector` render without reconnecting. */
 export function mcpStatusReport(): McpLoadReport {
   return lastReport
+}
+
+/**
+ * Ask the daemon to keep the stdio servers resident and register their tools as
+ * daemon-proxied wrappers. Returns the set of server names the daemon now owns;
+ * those are skipped by the in-process connect pass. On any daemon problem it
+ * returns an empty set and every server goes the in-process route.
+ */
+async function connectStdioViaDaemon(
+  enabled: McpServerConfig[],
+  report: McpLoadReport,
+  statusByName: Map<string, McpServerStatus>,
+): Promise<Set<string>> {
+  const handled = new Set<string>()
+  if (!daemonMcpEnabled()) return handled
+  const stdio = enabled.filter((s) => mcpTransportKind(s) === 'stdio' && typeof s.command === 'string')
+  if (stdio.length === 0) return handled
+
+  try {
+    const { tools, failed } = await daemonEnsureMcp(stdio)
+    const failedNames = new Set(failed.map((f) => f.server))
+
+    for (const descriptor of tools) {
+      const tool = wrapDaemonMcpTool(descriptor)
+      registerMcpTool(tool)
+      registerBrowserMcpTool(descriptor.server, descriptor.name, tool)
+      report.loaded.push({ name: tool.name, server: descriptor.server })
+      const status = statusByName.get(descriptor.server)
+      if (status) {
+        status.tools.push(tool.name)
+        status.toolCount = status.tools.length
+        status.connected = true
+        status.error = undefined
+      }
+    }
+
+    for (const server of stdio) {
+      if (failedNames.has(server.name)) continue
+      handled.add(server.name)
+      report.servers.push(server.name)
+    }
+    for (const failure of failed) {
+      report.failed.push(failure)
+      const status = statusByName.get(failure.server)
+      if (status) status.error = failure.reason
+    }
+  } catch (err) {
+    if (!(err instanceof DaemonUnavailable)) throw err
+    // Daemon unreachable — leave `handled` empty; the in-process pass covers all.
+  }
+  return handled
+}
+
+function wrapDaemonMcpTool(descriptor: DaemonMcpToolDescriptor): Tool {
+  const schema = descriptor.inputSchema
+  const input_schema: Tool['input_schema'] = {
+    type: 'object',
+    properties: schema && typeof schema.properties === 'object' && schema.properties !== null ? schema.properties : {},
+    required: schema?.required,
+  }
+  return {
+    name: toolName(descriptor.server, descriptor.name),
+    description: `[MCP: ${descriptor.server}] ${descriptor.description ?? descriptor.name}`,
+    input_schema,
+    async execute(input) {
+      const result = await daemonCallMcp(descriptor.server, descriptor.name, input)
+      const text = flattenContent(result.content)
+      return result.isError ? `MCP tool error: ${text}` : text
+    },
+  }
 }
 
 async function connectServer(config: McpServerConfig, report: McpLoadReport, status: McpServerStatus): Promise<void> {

@@ -9,9 +9,10 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::{mpsc, oneshot, Mutex, Notify};
 
 use crate::jvm::JvmBridge;
+use crate::mcp::McpSupervisor;
 use crate::protocol::{
-    codes, DaemonInfo, ParseCheckParams, Request, Response, ShellCancelParams, ShellExecParams,
-    ShellExecResult, PROTOCOL_VERSION,
+    codes, DaemonInfo, McpCallParams, McpEnsureParams, ParseCheckParams, Request, Response,
+    ShellCancelParams, ShellExecParams, ShellExecResult, PROTOCOL_VERSION,
 };
 use crate::shell::{ExecStop, ShellPool};
 
@@ -19,6 +20,7 @@ pub struct AppState {
     pub started: Instant,
     pub shell: ShellPool,
     pub jvm: JvmBridge,
+    pub mcp: McpSupervisor,
     /// In-flight `shell.exec` requests, keyed by request id, each with a sender
     /// that cancels it when `shell.cancel` arrives.
     in_flight: Mutex<HashMap<u64, oneshot::Sender<()>>>,
@@ -33,6 +35,7 @@ impl AppState {
             started: Instant::now(),
             shell: ShellPool::new(),
             jvm: JvmBridge::new(),
+            mcp: McpSupervisor::new(),
             in_flight: Mutex::new(HashMap::new()),
             last_activity: Mutex::new(Instant::now()),
             shutdown: Notify::new(),
@@ -110,6 +113,8 @@ async fn dispatch(state: Arc<AppState>, req: Request) -> Option<Response> {
         "shell.exec" => Some(shell_exec(state, id, req.params).await),
         "parse.check" => Some(parse_check(id, req.params)),
         "jvm.check" | "jvm.info" => Some(jvm_forward(state, id, &req.method, req.params).await),
+        "mcp.ensure" => Some(mcp_ensure(state, id, req.params).await),
+        "mcp.call" => Some(mcp_call(state, id, req.params).await),
         "shell.cancel" => match serde_json::from_value::<ShellCancelParams>(req.params) {
             Ok(params) => {
                 if let Some(sender) = state.in_flight.lock().await.remove(&params.target) {
@@ -135,6 +140,7 @@ async fn daemon_info(state: &AppState) -> Value {
         uptime_ms: state.started.elapsed().as_millis() as u64,
         shell_workers: state.shell.worker_count().await,
         jvm_available: JvmBridge::available(),
+        mcp_servers: state.mcp.server_count().await,
     };
     serde_json::to_value(info).unwrap_or(Value::Null)
 }
@@ -196,6 +202,30 @@ async fn shell_exec(state: Arc<AppState>, id: u64, params: Value) -> Response {
 
 async fn jvm_forward(state: Arc<AppState>, id: u64, method: &str, params: Value) -> Response {
     match state.jvm.call(method, params).await {
+        Ok(result) => Response::ok(id, result),
+        Err(err) => Response::err(id, codes::INTERNAL, err.to_string()),
+    }
+}
+
+async fn mcp_ensure(state: Arc<AppState>, id: u64, params: Value) -> Response {
+    let params: McpEnsureParams = match serde_json::from_value(params) {
+        Ok(p) => p,
+        Err(err) => return Response::err(id, codes::INVALID_PARAMS, err.to_string()),
+    };
+    let result = state.mcp.ensure(params.servers).await;
+    Response::ok(id, serde_json::to_value(result).unwrap_or(Value::Null))
+}
+
+async fn mcp_call(state: Arc<AppState>, id: u64, params: Value) -> Response {
+    let params: McpCallParams = match serde_json::from_value(params) {
+        Ok(p) => p,
+        Err(err) => return Response::err(id, codes::INVALID_PARAMS, err.to_string()),
+    };
+    match state
+        .mcp
+        .call(&params.server, &params.tool, params.arguments)
+        .await
+    {
         Ok(result) => Response::ok(id, result),
         Err(err) => Response::err(id, codes::INTERNAL, err.to_string()),
     }

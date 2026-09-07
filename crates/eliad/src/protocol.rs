@@ -84,6 +84,8 @@ pub struct DaemonInfo {
     /// Whether a JDK + the elia-jvm-bridge jar were found (the `jvm.*` methods
     /// work). The JVM child itself starts lazily on first use.
     pub jvm_available: bool,
+    /// Number of resident MCP servers.
+    pub mcp_servers: usize,
 }
 
 // ---- shell.exec ----
@@ -143,3 +145,23 @@ pub struct ParseCheckParams {
 // params: { source, path, classpath?: string[] }; result:
 //   { "ok": bool, "errors": [{ "line", "column", "message", "severity" }] }
 // `jvm.info` takes no params.
+
+// ---- mcp.ensure / mcp.call ----
+
+#[derive(Debug, Deserialize)]
+pub struct McpEnsureParams {
+    /// Resolved stdio server configs (the TS side parses `.elia/mcp.json`).
+    pub servers: Vec<crate::mcp::McpServerConfig>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct McpCallParams {
+    pub server: String,
+    pub tool: String,
+    #[serde(default)]
+    pub arguments: serde_json::Value,
+}
+
+// mcp.ensure result: { tools: [{ server, name, description?, inputSchema? }],
+//                      failed: [{ server, reason }] }
+// mcp.call result:   the server's raw `tools/call` result.
