@@ -153,11 +153,16 @@ class DaemonClient {
     return new Promise((resolve, reject) => {
       const socket = net.createConnection({ path: socketPath() })
       const onError = (err: Error) => {
+        socket.removeListener('connect', onConnect)
+        // A failed connect can emit a *second* error event (e.g. ECONNREFUSED
+        // then ECONNRESET) as the socket tears down. Without a listener that is
+        // an unhandled 'error' that crashes the process — and under `bun test`
+        // it fails whichever test happens to be running. Keep a no-op handler.
+        socket.on('error', () => {})
         socket.destroy()
         reject(err)
       }
-      socket.once('error', onError)
-      socket.once('connect', () => {
+      const onConnect = () => {
         socket.removeListener('error', onError)
         socket.setNoDelay(true)
         socket.setEncoding('utf8')
@@ -166,7 +171,9 @@ class DaemonClient {
         socket.on('error', () => this.onClose())
         this.socket = socket
         resolve()
-      })
+      }
+      socket.once('error', onError)
+      socket.once('connect', onConnect)
     })
   }
 
