@@ -159,10 +159,20 @@ class DaemonClient {
    */
   private dial(): Promise<boolean> {
     return new Promise((resolve) => {
+      const path = socketPath()
+      // bun 1.3.0's node:net raises the ENOENT from a missing unix socket inside
+      // its own connect callback, where neither this try/catch nor a
+      // `socket.on('error')` listener can intercept it — under `bun test` it
+      // fails whichever test is mid-flight. When the socket file plainly isn't
+      // there yet (the cold-start path), skip the dial entirely.
+      if (process.platform !== 'win32' && !existsSync(path)) {
+        resolve(false)
+        return
+      }
       let settled = false
       let socket: net.Socket
       try {
-        socket = net.createConnection({ path: socketPath() })
+        socket = net.createConnection({ path })
       } catch {
         resolve(false)
         return
