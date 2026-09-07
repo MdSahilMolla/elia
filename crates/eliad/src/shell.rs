@@ -1,14 +1,14 @@
 //! Persistent shell workers.
 //!
 //! The cost this removes: on Windows every `run_command` in the old path spawned
-//! a fresh `cmd.exe` (measured at 20–80ms). Here one shell process per working
-//! directory stays alive for the life of the daemon, and each command is framed
-//! between random markers so we can read exactly its stdout, its stderr, and its
-//! exit code back out of the long-lived streams.
+//! a fresh `cmd.exe` (measured at 20–80ms). Here a small pool of shell processes
+//! per working directory stays alive for the life of the daemon, and each
+//! command is framed between random markers so we can read exactly its stdout,
+//! its stderr, and its exit code back out of the long-lived streams.
 //!
 //! A command that overruns its timeout, or is cancelled, kills its worker — the
 //! shell can't be reused while a runaway child still holds its pipes — and the
-//! next command for that directory transparently spawns a fresh one.
+//! next command for that slot transparently spawns a fresh one.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -40,31 +40,49 @@ pub enum ExecStop {
 
 const MAX_CAPTURE_BYTES: usize = 2_000_000;
 
+/// One directory's shells. A small fixed set of slots so a burst of parallel
+/// `run_command`s in the same directory actually runs in parallel (the old
+/// path spawned a fresh `cmd.exe` per call, so serialising here would be a
+/// regression). Each slot is an independent persistent shell, created on demand.
+type CwdSlots = Vec<Arc<Mutex<Option<ShellWorker>>>>;
+
+fn slots_per_cwd() -> usize {
+    std::env::var("ELIA_SHELL_POOL")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .map(|n| n.clamp(1, 16))
+        .unwrap_or(4)
+}
+
 pub struct ShellPool {
-    workers: Mutex<HashMap<PathBuf, Arc<Mutex<Option<ShellWorker>>>>>,
+    by_cwd: Mutex<HashMap<PathBuf, Arc<CwdSlots>>>,
+    rotation: AtomicU64,
 }
 
 impl ShellPool {
     pub fn new() -> Self {
         Self {
-            workers: Mutex::new(HashMap::new()),
+            by_cwd: Mutex::new(HashMap::new()),
+            rotation: AtomicU64::new(0),
         }
     }
 
     pub async fn worker_count(&self) -> usize {
-        let map = self.workers.lock().await;
+        let map = self.by_cwd.lock().await;
         let mut live = 0;
-        for slot in map.values() {
-            if slot.lock().await.is_some() {
-                live += 1;
+        for slots in map.values() {
+            for slot in slots.iter() {
+                if slot.lock().await.is_some() {
+                    live += 1;
+                }
             }
         }
         live
     }
 
-    /// Runs `command` in `cwd`. Serialised per directory (one shell, one command
-    /// at a time); different directories run in parallel. `cancel` resolving
-    /// aborts the command and discards the worker.
+    /// Runs `command` in `cwd`. Commands to the same directory share a small
+    /// pool of persistent shells; different directories never contend. `cancel`
+    /// resolving aborts the command and discards its worker.
     pub async fn exec(
         &self,
         command: &str,
@@ -73,14 +91,30 @@ impl ShellPool {
         cancel: oneshot::Receiver<()>,
     ) -> Result<std::result::Result<ExecOutcome, ExecStop>> {
         let key = canonical_key(cwd);
-        let slot = {
-            let mut map = self.workers.lock().await;
+        let slots = {
+            let mut map = self.by_cwd.lock().await;
             map.entry(key.clone())
-                .or_insert_with(|| Arc::new(Mutex::new(None)))
+                .or_insert_with(|| {
+                    Arc::new(
+                        (0..slots_per_cwd())
+                            .map(|_| Arc::new(Mutex::new(None)))
+                            .collect(),
+                    )
+                })
                 .clone()
         };
 
-        let mut guard = slot.lock().await;
+        // Take the first idle shell; if every one is busy, wait on a rotating
+        // pick so load spreads evenly. Owned guards so the guard outlives the
+        // per-slot `Arc`.
+        let mut guard = match slots.iter().find_map(|s| s.clone().try_lock_owned().ok()) {
+            Some(g) => g,
+            None => {
+                let idx = (self.rotation.fetch_add(1, Ordering::Relaxed) as usize) % slots.len();
+                slots[idx].clone().lock_owned().await
+            }
+        };
+
         if guard.is_none() {
             *guard = Some(
                 ShellWorker::spawn(&key)
@@ -413,6 +447,36 @@ mod tests {
         run(&pool, "echo one").await;
         run(&pool, "echo two").await;
         assert_eq!(pool.worker_count().await, 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn parallel_commands_in_one_dir_use_separate_shells() {
+        let pool = Arc::new(ShellPool::new());
+        let sleep = if cfg!(windows) {
+            "ping -n 2 127.0.0.1 >nul"
+        } else {
+            "sleep 1"
+        };
+        let handles: Vec<_> = (0..3)
+            .map(|_| {
+                let pool = pool.clone();
+                tokio::spawn(async move {
+                    let (_tx, rx) = oneshot::channel();
+                    pool.exec(sleep, ".", 20_000, rx)
+                        .await
+                        .unwrap()
+                        .ok()
+                        .unwrap();
+                })
+            })
+            .collect();
+        for h in handles {
+            h.await.unwrap();
+        }
+        assert!(
+            pool.worker_count().await >= 2,
+            "expected the pool to fan out"
+        );
     }
 
     #[tokio::test]
