@@ -86,6 +86,55 @@ test('a Rust crate without cargo is a blocker', () => {
   expect(a.blockers.some((b) => b.what.includes('Rust toolchain'))).toBe(true)
 })
 
+test('a Go module without the go toolchain is a blocker', () => {
+  file('go.mod', 'module example.com/x\n')
+  expect(assessEnvironment({ cwd: dir, has: has(), versions: {} }).blockers.some((b) => b.what.includes('Go toolchain'))).toBe(true)
+  expect(assessEnvironment({ cwd: dir, has: has('go'), versions: {} }).ready).toBe(true)
+})
+
+test('a Gemfile without Ruby is a blocker; with Ruby + lock it suggests bundle install', () => {
+  file('Gemfile', "source 'https://rubygems.org'\n")
+  expect(assessEnvironment({ cwd: dir, has: has(), versions: {} }).blockers.some((b) => b.what.includes('Ruby'))).toBe(true)
+  file('Gemfile.lock', 'GEM\n')
+  expect(assessEnvironment({ cwd: dir, has: has('ruby', 'bundle'), versions: {} }).setup).toContain('bundle install')
+})
+
+test('Python deps: no interpreter is a blocker; interpreter but no venv picks the right installer', () => {
+  file('pyproject.toml', '[project]\nname = "x"\n')
+  file('poetry.lock', '')
+  expect(assessEnvironment({ cwd: dir, has: has(), versions: {} }).blockers.some((b) => b.what.includes('Python runtime'))).toBe(true)
+  const withPy = assessEnvironment({ cwd: dir, has: has('python3'), versions: {} })
+  expect(withPy.setup).toContain('poetry install')
+  expect(withPy.warnings.some((w) => w.toLowerCase().includes('virtualenv'))).toBe(true)
+})
+
+test('requirements.txt with no venv suggests venv + pip install', () => {
+  file('requirements.txt', 'flask\n')
+  const a = assessEnvironment({ cwd: dir, has: has('python3'), versions: {} })
+  expect(a.setup.some((c) => c.includes('venv') && c.includes('pip install -r requirements.txt'))).toBe(true)
+})
+
+test('uv.lock picks `uv sync`', () => {
+  file('pyproject.toml', '[project]\nname = "x"\n')
+  file('uv.lock', '')
+  expect(assessEnvironment({ cwd: dir, has: has('python3'), versions: {} }).setup).toContain('uv sync')
+})
+
+test('a nix env file without nix is a warning, not a blocker', () => {
+  file('flake.nix', '{ }')
+  const a = assessEnvironment({ cwd: dir, has: has(), versions: {} })
+  expect(a.ready).toBe(true)
+  expect(a.declared).toContain('Nix environment')
+  expect(a.warnings.some((w) => w.toLowerCase().includes('nix'))).toBe(true)
+})
+
+test('a Makefile setup target is declared and suggested', () => {
+  file('Makefile', 'setup:\n\tnpm ci && npm run build\n\ntest:\n\tnpm test\n')
+  const a = assessEnvironment({ cwd: dir, has: has(), versions: {} })
+  expect(a.declared.some((d) => d.includes('setup'))).toBe(true)
+  expect(a.setup).toContain('make setup')
+})
+
 test('.env.example without .env is a warning, not a blocker', () => {
   file('.env.example', 'API_KEY=')
   const a = assessEnvironment({ cwd: dir, has: has(), versions: {} })

@@ -162,7 +162,6 @@ export function assessEnvironment(ctx: Ctx): EnvironmentAssessment {
   }
 
   // --- Python ---
-  const pyLock = fileExists(cwd, 'poetry.lock', 'Pipfile.lock', 'pdm.lock', 'uv.lock')
   const pyDeps = fileExists(cwd, 'requirements.txt', 'pyproject.toml', 'Pipfile')
   if (pyDeps) {
     declared.push('Python dependencies')
@@ -178,7 +177,7 @@ export function assessEnvironment(ctx: Ctx): EnvironmentAssessment {
             : fileExists(cwd, 'Pipfile.lock')
               ? 'pipenv install --dev'
               : existsSync(join(cwd, 'requirements.txt'))
-                ? 'python3 -m venv .venv && . .venv/bin/activate && pip install -r requirements.txt'
+                ? 'python3 -m venv .venv && .venv/bin/pip install -r requirements.txt'
                 : 'pip install -e .'
         warnings.push('No virtualenv detected — Python dependencies may not be installed for this project.')
         addSetup(cmd)

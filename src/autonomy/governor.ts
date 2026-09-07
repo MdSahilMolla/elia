@@ -45,11 +45,11 @@ export interface ActionGovernor {
 
 const CRITICAL_COMMAND = /\b(rm\s+-rf|rm\s+--no-preserve-root|mkfs|dd\s+if=|shutdown|reboot|poweroff|drop\s+(database|table)|truncate\s+table|git\s+(push|reset\s+--hard|clean\s+-fd)|force[- ]push|sudo\b|chmod\s+777|chown\s+-R|kill\s+-9|kubectl\s+(apply|delete|rollout|scale)|helm\s+(install|upgrade|uninstall)|docker\s+(push|rm|system\s+prune)|terraform\s+(apply|destroy)|prisma\s+migrate\s+(deploy|reset)|alembic\s+upgrade|drizzle-kit\s+push|npm\s+publish|pnpm\s+publish|bun\s+publish|vercel\s+.*--prod|fly\s+deploy|railway\s+up|gcloud\s+.*\bdeploy\b|aws\s+(cloudformation|ecs|rds|lambda)|curl[^\n|]*\|\s*(sh|bash)|wget[^\n|]*\|\s*(sh|bash)|deploy\s+(to\s+)?prod(uction)?|send\s+.*(email|message)|publish\b|tweet\b|buy\b|purchase\b|checkout\b|transfer\b|wire\b)\b/i
 const REVIEW_COMMAND = /\b(git\s+commit|npm\s+install|pnpm\s+install|yarn\s+add|bun\s+(add|install)|pip\s+install|docker\s+build|docker\s+run|curl\b|wget\b|ssh\b|scp\b|gh\s+pr|deploy\b)\b/i
-const READ_ONLY_COMMAND = /^(?:command\s+)?(?:pwd|ls|find|grep|rg|git\s+(?:status|diff|log|show|branch)|(?:bun|npm|pnpm|yarn)\s+(?:test|run\s+(?:test|typecheck|type-check|tsc|check-types|lint|format\s+--check|check))|npx\s+(?:--no-install\s+)?tsc\s+--noEmit|cargo\s+(?:check|test|clippy)|go\s+(?:build|test|vet)\b[^\n]*|pytest\b[^\n]*|mypy\b[^\n]*|node\s+--version|bun\s+--version|npm\s+--version|printf|echo|cat|head|tail|sed|awk)\b/i
+const READ_ONLY_COMMAND = /^(?:command\s+)?(?:pwd|ls|find|grep|rg|git\s+(?:status|diff|log|show|branch)|(?:bun|npm|pnpm|yarn)\s+(?:test|run\s+(?:test|typecheck|type-check|tsc|check-types|lint|format\s+--check|check))|npx\s+(?:--no-install\s+)?tsc\s+--noEmit|cargo\s+(?:check|test|clippy)|go\s+(?:build|test|vet)\b[^\n]*|mvn\s+(?:-[^\s]+\s+)*(?:compile|test-compile|test)\b[^\n]*|(?:\.\/)?gradlew(?:\.bat)?\s+(?:build|test|check|compileJava|compileTestJava)\b[^\n]*|gradle\s+(?:build|test|check|compileJava|compileTestJava)\b[^\n]*|ctest\b[^\n]*|pytest\b[^\n]*|mypy\b[^\n]*|node\s+--version|bun\s+--version|npm\s+--version|printf|echo|cat|head|tail|sed|awk)\b/i
 const SHELL_CONTROL_SYNTAX = /[;&|<>`$]|\$\(|\b(?:eval|exec|source)\b/i
 const SECRET_KEY = /(password|passwd|token|secret|api[-_]?key|authorization|cookie|credential)/i
 const EXTERNAL_WRITE_COMMAND = /\b(curl|wget)\b[^\n]*(--data(?:-raw)?|\s-d\s|\s-X\s*(POST|PUT|PATCH|DELETE)|--upload-file|--form)\b/i
-const INTERNAL_SAFE_TOOLS = new Set(['flag_risk', 'submit_route', 'submit_proposal', 'submit_verdict', 'submit_lessons', 'delegate_tasks'])
+const INTERNAL_SAFE_TOOLS = new Set(['flag_risk', 'submit_route', 'submit_proposal', 'submit_verdict', 'submit_acceptance', 'revise_plan', 'submit_assumptions', 'submit_lessons', 'delegate_tasks'])
 export const MAX_GOVERNED_ACTIONS = 10_000
 
 export function assessAction(request: ActionRequest, cwd = currentAgent().cwd ?? process.cwd()): ActionAssessment {
@@ -89,6 +89,10 @@ export function assessAction(request: ActionRequest, cwd = currentAgent().cwd ??
     return assessment('safe', 'allow', 'environment discovery is a local, read-only capability snapshot', 'environment.inspect', resources, true)
   }
 
+  if (name === 'provision_environment') {
+    return assessment('review', 'approve', 'provisioning installs dependencies and starts local services from a fixed setup-command allowlist', 'environment.provision', resources, true)
+  }
+
   if (name === 'github') {
     const action = typeof input.action === 'string' ? input.action : 'unknown'
     if (action === 'status' || action === 'pr_view' || action === 'pr_checks') {
@@ -104,6 +108,17 @@ export function assessAction(request: ActionRequest, cwd = currentAgent().cwd ??
     }
     if (action === 'pr_create') {
       return assessment('review', 'approve', 'github pr_create opens a pull request on the remote', 'github.pr_create', resources, true)
+    }
+    // Creating a repository publishes the whole project under a new name on the
+    // user's account. It is a one-time, clearly describable act — repo name and
+    // visibility — so it is asked once rather than refused, but never assumed.
+    if (action === 'repo_create') {
+      return assessment('critical', 'approve', 'github repo_create publishes this project as a new repository on the user’s account', 'github.repo_create', resources, false)
+    }
+    // Issues and milestones are project bookkeeping in a repository the run is
+    // already pushing to, and they are reversible — closing one costs nothing.
+    if (action === 'issue_create' || action === 'milestone_create') {
+      return assessment('review', 'approve', `github ${action} records planned work in the project's own tracker`, `github.${action}`, resources, true)
     }
     // pr_comment posts publicly; pr_merge changes a shared branch — both need an exact boundary.
     return assessment('critical', 'approve', `github ${action} writes to the shared repository and needs an authorization record`, `github.${action}`, resources, false)
@@ -280,6 +295,23 @@ export function assessAction(request: ActionRequest, cwd = currentAgent().cwd ??
   return assessment('critical', 'approve', `unknown tool ${name} has no declared safety contract`, name, resources, false)
 }
 
+/**
+ * The only critical classes where one answer can settle the rest of the run.
+ *
+ * These are local, repeatable, and confined to the project: a compound shell
+ * command, a command with no recognised read-only contract. They are what makes
+ * an unattended run feel like a wall — the plan needs one, gets refused, and
+ * burns its budget failing on it.
+ *
+ * Everything else critical stays refused in unattended mode: sending a message,
+ * deploying, force-pushing, commenting on or merging a PR, driving a browser,
+ * probing a live host, delegating to an external agent, or touching a path
+ * outside the workspace. Those reach other people or the world beyond this
+ * project, and there one "yes" must never authorize the next one. That is the
+ * distinction the old blanket refusal was protecting, and it is kept.
+ */
+const SETTLEABLE_ONCE = new Set(['shell', 'shell.composed', 'shell.unknown', 'github.repo_create'])
+
 export function createActionGovernor(options: { mode?: GovernanceMode; approve?: ActionApproval; cwd?: string; maxActions?: number } = {}): ActionGovernor {
   const mode = options.mode ?? 'unattended'
   const requestedMaxActions = options.maxActions ?? 0
@@ -289,6 +321,8 @@ export function createActionGovernor(options: { mode?: GovernanceMode; approve?:
   let actionCount = 0
   let blockedByBudget = 0
   let approvalQueue = Promise.resolve()
+  /** One remembered decision per class of action, for the life of this run. Unattended mode only. */
+  const classDecisions = new Map<string, boolean>()
 
   return {
     stats: () => ({ maxActions, consumed: actionCount, exhausted: maxActions > 0 && actionCount >= maxActions, blockedByBudget }),
@@ -313,17 +347,47 @@ export function createActionGovernor(options: { mode?: GovernanceMode; approve?:
       actionCount += 1
       if (assessment.decision === 'allow') return { allowed: true, assessment }
 
-      // Unattended mode may continue reversible review work, but it must never
-      // use a supplied callback to authorize a critical external side effect.
-      if (mode === 'unattended' && assessment.risk === 'critical') {
+      // Unattended mode used to refuse every critical action outright. That is
+      // a wall, not a safeguard: a run whose plan needs one such action spends
+      // its entire budget failing on it, and the user is told to start over in
+      // a different mode. When somebody is reachable, ask them once for this
+      // *kind* of action and then carry on unattended — one boundary per run
+      // rather than one per call. With no approval channel at all (a scheduled
+      // run, CI, nobody at the terminal) it still refuses, because a question
+      // nobody will hear is not consent.
+      if (mode === 'unattended' && assessment.risk === 'critical' && !SETTLEABLE_ONCE.has(assessment.intent)) {
         return {
           allowed: false,
           assessment: { ...assessment, decision: 'block' },
-          message: `Action blocked by Elia’s unattended policy: ${assessment.reason}. Resume in supervised mode for an exact approval boundary.`,
+          message: `Action blocked by Elia’s unattended policy: ${assessment.reason}. This kind of action reaches outside the project, so one approval can never stand for the next — resume in supervised mode for an exact per-action boundary.`,
+        }
+      }
+      if (mode === 'unattended' && assessment.risk === 'critical' && !options.approve) {
+        return {
+          allowed: false,
+          assessment: { ...assessment, decision: 'block' },
+          message: `Action blocked by Elia’s unattended policy: ${assessment.reason}. No terminal is attached, so there is nobody to ask.`,
         }
       }
       if (assessment.risk === 'review' && mode === 'unattended') {
         return { allowed: true, assessment: { ...assessment, decision: 'allow' } }
+      }
+
+      // Unattended means asked once, not asked repeatedly: a decision about a
+      // class of action stands for the rest of the run. Supervised mode
+      // deliberately does not remember — a per-action boundary is the whole
+      // point of it.
+      const decisionKey = `${assessment.risk}:${assessment.intent}`
+      if (mode === 'unattended') {
+        const remembered = classDecisions.get(decisionKey)
+        if (remembered === true) return { allowed: true, assessment: { ...assessment, decision: 'allow' } }
+        if (remembered === false) {
+          return {
+            allowed: false,
+            assessment: { ...assessment, decision: 'block' },
+            message: `Action denied earlier in this run for every "${assessment.intent}" action: ${assessment.reason}.`,
+          }
+        }
       }
 
       if (!options.approve) {
@@ -350,6 +414,7 @@ export function createActionGovernor(options: { mode?: GovernanceMode; approve?:
       pauseToolSpinner()
       try {
         const approved = await options.approve(assessment, request)
+        if (mode === 'unattended') classDecisions.set(decisionKey, approved)
         if (approved) return { allowed: true, assessment: { ...assessment, decision: 'allow' } }
         return {
           allowed: false,
@@ -380,6 +445,17 @@ export function auditActionEvent(event: ToolEvent, governor?: ActionAssessment):
   // the append-only action ledger, and autonomous run journals.
   void governor
   void event
+}
+
+/**
+ * Whether an unattended run will refuse this command outright. Unattended mode
+ * blocks the `critical` band rather than queueing it for approval, so a plan
+ * that names such a command as its verification gate can never go green.
+ * Exported so the plan can be checked against the policy before the run commits
+ * to it, instead of discovering at verification time that the gate is unwinnable.
+ */
+export function blockedInUnattendedMode(command: string, cwd = process.cwd()): boolean {
+  return assessCommand(command, cwd).risk === 'critical'
 }
 
 function assessCommand(command: string, cwd: string): ActionAssessment {
