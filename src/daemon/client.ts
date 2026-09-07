@@ -149,17 +149,24 @@ class DaemonClient {
 
   /**
    * Try once to connect. Resolves `true` on success (and stashes the socket),
-   * `false` on any failure — it never rejects. A rejected promise here would be
-   * flagged as "unhandled" by `bun test` even when the caller awaits it in a
-   * try/catch, failing whichever test is mid-flight; and a failed unix-socket
-   * connect can emit a trailing 'error' on the dead socket that would otherwise
-   * be an unhandled process exception. Both are neutralised by resolving a flag
-   * and keeping a no-op 'error' listener on the discarded socket.
+   * `false` on any failure — it never rejects and never lets an error escape.
+   * Three separate failure shapes are swallowed here:
+   *   - `net.createConnection` throwing *synchronously* on a missing socket path
+   *     (bun's node:net does this for ENOENT rather than emitting 'error');
+   *   - the async 'error' event on a refused/missing socket;
+   *   - a trailing 'error' on the now-destroyed socket.
+   * Under `bun test` any of these otherwise fails whichever test is mid-flight.
    */
   private dial(): Promise<boolean> {
     return new Promise((resolve) => {
       let settled = false
-      const socket = net.createConnection({ path: socketPath() })
+      let socket: net.Socket
+      try {
+        socket = net.createConnection({ path: socketPath() })
+      } catch {
+        resolve(false)
+        return
+      }
       const onError = () => {
         if (settled) return
         settled = true
