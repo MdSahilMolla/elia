@@ -7,6 +7,7 @@ import { diffStat, fencedDiff, unifiedDiff } from '../ui/diff.ts'
 import { multipleMatchMessage, notFoundMessage } from './editMatch.ts'
 import { noteFileRead } from './fileAccess.ts'
 import { atomicWrite } from './atomicWrite.ts'
+import { preflightStructuralCheck } from '../native/parseCheck.ts'
 
 function detectLineEnding(text: string): '\n' | '\r\n' {
   return text.includes('\r\n') ? '\r\n' : '\n'
@@ -93,6 +94,12 @@ export const editFileTool: Tool = {
     if (currentAgent().signal?.aborted) {
       throw new Error('Edit cancelled before writing — the run was aborted.')
     }
+
+    // Reject an edit that would leave the file's brackets/strings/comments
+    // broken (when they were fine before) — a sub-ms native check in place of a
+    // failed build. No-ops unless the daemon is enabled.
+    const structural = await preflightStructuralCheck(path, text, updated)
+    if (structural) throw new Error(structural)
 
     await captureBeforeWrite(path)
     await atomicWrite(path, updated)
