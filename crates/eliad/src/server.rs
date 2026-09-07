@@ -9,8 +9,8 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::{mpsc, oneshot, Mutex, Notify};
 
 use crate::protocol::{
-    codes, DaemonInfo, Request, Response, ShellCancelParams, ShellExecParams, ShellExecResult,
-    PROTOCOL_VERSION,
+    codes, DaemonInfo, ParseCheckParams, Request, Response, ShellCancelParams, ShellExecParams,
+    ShellExecResult, PROTOCOL_VERSION,
 };
 use crate::shell::{ExecStop, ShellPool};
 
@@ -105,6 +105,7 @@ async fn dispatch(state: Arc<AppState>, req: Request) -> Option<Response> {
             Some(Response::ok(id, json!({ "ok": true })))
         }
         "shell.exec" => Some(shell_exec(state, id, req.params).await),
+        "parse.check" => Some(parse_check(id, req.params)),
         "shell.cancel" => match serde_json::from_value::<ShellCancelParams>(req.params) {
             Ok(params) => {
                 if let Some(sender) = state.in_flight.lock().await.remove(&params.target) {
@@ -186,6 +187,20 @@ async fn shell_exec(state: Arc<AppState>, id: u64, params: Value) -> Response {
         }
         Err(err) => Response::err(id, codes::SHELL_SPAWN_FAILED, err.to_string()),
     }
+}
+
+fn parse_check(id: u64, params: Value) -> Response {
+    let params: ParseCheckParams = match serde_json::from_value(params) {
+        Ok(p) => p,
+        Err(err) => return Response::err(id, codes::INVALID_PARAMS, err.to_string()),
+    };
+    let lang = params
+        .language
+        .as_deref()
+        .and_then(elia_parse::Language::from_hint)
+        .unwrap_or_else(|| elia_parse::Language::from_path(&params.path));
+    let result = elia_parse::check(&params.source, lang);
+    Response::ok(id, serde_json::to_value(result).unwrap_or(Value::Null))
 }
 
 /// Ticks every 30s; shuts the daemon down once it has been idle (no requests,
@@ -299,6 +314,26 @@ mod tests {
         let (addr, _state) = spawn_server().await;
         let res = call(&addr, r#"{"id":2,"method":"nope.nope","params":{}}"#).await;
         assert_eq!(res["error"]["code"], codes::METHOD_NOT_FOUND);
+        transport::cleanup(&addr);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn parse_check_flags_a_broken_edit() {
+        let (addr, _state) = spawn_server().await;
+        let clean = call(
+            &addr,
+            r#"{"id":1,"method":"parse.check","params":{"source":"export const x = { a: 1 }","path":"a.ts"}}"#,
+        )
+        .await;
+        assert_eq!(clean["result"]["ok"], true);
+
+        let broken = call(
+            &addr,
+            r#"{"id":2,"method":"parse.check","params":{"source":"export function f() {\n  return 1;\n","path":"a.ts"}}"#,
+        )
+        .await;
+        assert_eq!(broken["result"]["ok"], false);
+        assert_eq!(broken["result"]["errors"][0]["message"], "unclosed '{'");
         transport::cleanup(&addr);
     }
 

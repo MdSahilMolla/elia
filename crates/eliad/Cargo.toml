@@ -17,6 +17,7 @@ serde.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true
 dirs.workspace = true
+elia-parse = { path = "../elia-parse" }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

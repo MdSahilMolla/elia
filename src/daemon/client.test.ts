@@ -16,8 +16,10 @@ import { runShell } from '../shell.ts'
 
 const binary = resolveEliadPath()
 const scratch = mkdtempSync(join(tmpdir(), 'eliad-test-'))
-// A socket name unique to this run so we never collide with a real daemon.
-const socketName = `elia-eliad-test-${process.pid}`
+// A socket name unique to this run so we never collide with a real daemon or a
+// leftover one from an earlier run (Windows reuses pids).
+const runId = `${process.pid}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
+const socketName = `elia-eliad-test-${runId}`
 const socketAddr = process.platform === 'win32' ? socketName : join(scratch, 'd.sock')
 
 const originalEnv = { ...process.env }
@@ -98,4 +100,14 @@ maybe('a non-zero exit is a normal result, not an error', async () => {
   const bad = process.platform === 'win32' ? 'cmd /c exit 5' : '(exit 5)'
   const r = await runShell(bad, 20_000, process.cwd())
   expect(r.exitCode).toBe(5)
+}, 30_000)
+
+maybe('parse.check flags a structurally broken edit', async () => {
+  const { daemonParseCheck } = await import('./client.ts')
+  const clean = await daemonParseCheck({ source: 'export const x = { a: 1 }\n', path: 'x.ts' })
+  expect(clean.ok).toBe(true)
+
+  const broken = await daemonParseCheck({ source: 'function f() {\n  return 1;\n', path: 'x.ts' })
+  expect(broken.ok).toBe(false)
+  expect(broken.errors[0]?.message).toBe("unclosed '{'")
 }, 30_000)

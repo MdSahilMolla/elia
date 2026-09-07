@@ -116,3 +116,21 @@ pub struct ShellCancelParams {
     /// The `id` of the in-flight `shell.exec` request to abort.
     pub target: u64,
 }
+
+// ---- parse.check ----
+
+#[derive(Debug, Deserialize)]
+pub struct ParseCheckParams {
+    /// The full proposed file contents to check.
+    pub source: String,
+    /// The file path — its extension selects the lexical rules.
+    #[serde(default)]
+    pub path: String,
+    /// Optional explicit language override: "js" | "ts" | "py" | "rs" | "go" |
+    /// "generic". Takes precedence over `path`.
+    #[serde(default)]
+    pub language: Option<String>,
+}
+
+// The result is `elia_parse::CheckResult`, serialized directly:
+//   { "ok": bool, "errors": [{ "line", "column", "message" }] }

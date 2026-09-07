@@ -28,6 +28,12 @@ the address. The envelope and every method live in
 | `daemon.shutdown` | – | `{ ok: true }` |
 | `shell.exec` | `{ command, cwd, timeout_ms }` | `{ exit_code, stdout, stderr, elapsed_ms, timed_out }` |
 | `shell.cancel` | `{ target: <exec request id> }` | `{ ok: true }` |
+| `parse.check` | `{ source, path?, language? }` | `{ ok, errors: [{ line, column, message }] }` |
+
+`parse.check` runs the C++ structural validator ([`native/elia-parse`](../../native/elia-parse),
+via the `elia-parse` crate) — a sub-millisecond check for unbalanced brackets
+and unterminated strings/comments, so a broken `edit_file` result is caught
+before a build round-trip.
 
 Bump `PROTOCOL_VERSION` on any breaking change. The client checks it on connect
 and replaces a daemon that does not match.

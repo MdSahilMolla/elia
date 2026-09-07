@@ -13,12 +13,14 @@
  */
 
 import net from 'node:net'
-import { existsSync, readdirSync } from 'node:fs'
+import { existsSync, readdirSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { ELIA_ROOT } from '../statePaths.ts'
 import {
   PROTOCOL_VERSION,
   type DaemonInfo,
+  type ParseCheckParams,
+  type ParseCheckResult,
   type RpcResponse,
   type ShellExecResult,
 } from './types.ts'
@@ -63,24 +65,33 @@ export function socketPath(): string {
   return join(dir, `eliad-${userTag()}.sock`)
 }
 
-/** Locate the `eliad` binary: explicit override, then a published platform
- * package, then a local cargo build. */
+/** Locate the `eliad` binary: an explicit override, then a published platform
+ * package, then whichever local cargo build is newest (so `cargo build` and
+ * `cargo build --release` both "just work" during development). */
 export function resolveEliadPath(): string | undefined {
   const exe = process.platform === 'win32' ? 'eliad.exe' : 'eliad'
-  const candidates = [
-    process.env.ELIA_ELIAD_PATH,
-    join(ELIA_ROOT, 'node_modules', `@elia/native-${process.platform}-${process.arch}`, exe),
-    join(ELIA_ROOT, 'target', 'release', exe),
-    join(ELIA_ROOT, 'target', 'debug', exe),
-  ]
-  // A forced cross-target build (Windows here uses the gnullvm triple) lands in
-  // target/<triple>/{release,debug}/.
-  for (const profile of ['release', 'debug']) {
-    for (const entry of safeReaddir(join(ELIA_ROOT, 'target'))) {
-      candidates.push(join(ELIA_ROOT, 'target', entry, profile, exe))
+  if (process.env.ELIA_ELIAD_PATH && existsSync(process.env.ELIA_ELIAD_PATH)) {
+    return process.env.ELIA_ELIAD_PATH
+  }
+  const published = join(ELIA_ROOT, 'node_modules', `@elia/native-${process.platform}-${process.arch}`, exe)
+  if (existsSync(published)) return published
+
+  // Local builds: target/{debug,release}/ and target/<triple>/{debug,release}/.
+  const targetRoot = join(ELIA_ROOT, 'target')
+  const dirs = ['', ...safeReaddir(targetRoot)]
+  let newest: { path: string; mtimeMs: number } | undefined
+  for (const dir of dirs) {
+    for (const profile of ['debug', 'release']) {
+      const candidate = join(targetRoot, dir, profile, exe)
+      try {
+        const { mtimeMs } = statSync(candidate)
+        if (!newest || mtimeMs > newest.mtimeMs) newest = { path: candidate, mtimeMs }
+      } catch {
+        // not built for this profile/target
+      }
     }
   }
-  return candidates.find((p): p is string => !!p && existsSync(p))
+  return newest?.path
 }
 
 function safeReaddir(dir: string): string[] {
@@ -316,6 +327,18 @@ export async function daemonShellExec(req: DaemonShellRequest): Promise<ShellExe
     else req.signal.addEventListener('abort', () => client.cancel(id), { once: true })
   }
   return result as ShellExecResult
+}
+
+/**
+ * Structural check of a proposed file edit, via the daemon's C++ validator
+ * (`native/elia-parse`). Sub-millisecond; catches unbalanced brackets and
+ * unterminated strings/comments before a build round-trip does. Throws
+ * {@link DaemonUnavailable} when the daemon is off or unreachable.
+ */
+export async function daemonParseCheck(params: ParseCheckParams): Promise<ParseCheckResult> {
+  if (!daemonEnabled()) throw new DaemonUnavailable('ELIA_DAEMON=off')
+  const { result } = await daemonClient().call('parse.check', params, 5_000)
+  return result as ParseCheckResult
 }
 
 function sleep(ms: number): Promise<void> {

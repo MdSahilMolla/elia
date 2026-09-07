@@ -3,7 +3,7 @@
 # `src/native/` load at runtime, with a pure-TS fallback whenever they are absent.
 [workspace]
 resolver = "2"
-members = ["crates/eliad"]
+members = ["crates/eliad", "crates/elia-parse"]
 
 [workspace.package]
 version = "0.1.0"

@@ -46,6 +46,27 @@ export interface ShellExecResult {
   timed_out: boolean
 }
 
+export interface ParseCheckParams {
+  /** The full proposed file contents. */
+  source: string
+  /** File path — its extension selects the lexical rules. */
+  path?: string
+  /** Explicit language override: "js" | "ts" | "py" | "rs" | "go" | "generic". */
+  language?: string
+}
+
+export interface ParseCheckError {
+  line: number
+  column: number
+  message: string
+}
+
+/** Result of `parse.check` — from the C++ structural validator (native/elia-parse). */
+export interface ParseCheckResult {
+  ok: boolean
+  errors: ParseCheckError[]
+}
+
 /** Negative RPC error codes are transport/daemon problems; the client treats
  * them as "fall back to the in-process path". A command that exits non-zero is a
  * successful RPC with `exit_code !== 0`, never an error. */

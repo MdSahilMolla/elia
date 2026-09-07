@@ -4,10 +4,16 @@ export {
   daemonClient,
   daemonEnabled,
   daemonMode,
+  daemonParseCheck,
   daemonShellExec,
   resolveEliadPath,
   socketPath,
   type DaemonMode,
   type DaemonShellRequest,
 } from './client.ts'
-export { PROTOCOL_VERSION, type DaemonInfo, type ShellExecResult } from './types.ts'
+export {
+  PROTOCOL_VERSION,
+  type DaemonInfo,
+  type ParseCheckResult,
+  type ShellExecResult,
+} from './types.ts'
