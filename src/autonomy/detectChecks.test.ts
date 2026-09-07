@@ -11,7 +11,7 @@ beforeEach(() => {
 afterEach(() => rmSync(dir, { recursive: true, force: true }))
 
 test('changedCodeFiles keeps source files, drops the rest', () => {
-  expect(changedCodeFiles(['src/a.ts', 'README.md', 'x/b.py', 'style.css', 'c.go'])).toEqual(['src/a.ts', 'x/b.py', 'c.go'])
+  expect(changedCodeFiles(['src/a.ts', 'README.md', 'x/b.py', 'style.css', 'c.go', 'Main.java', 'lib.cpp'])).toEqual(['src/a.ts', 'x/b.py', 'c.go', 'Main.java', 'lib.cpp'])
 })
 
 test('npm project: typecheck + test scripts', () => {
@@ -42,6 +42,38 @@ test('no check when the project declares only unrelated scripts', () => {
 test('rust project', () => {
   writeFileSync(join(dir, 'Cargo.toml'), '[package]')
   expect(detectChecks(dir)).toEqual(['cargo check', 'cargo test'])
+})
+
+test('maven project', () => {
+  writeFileSync(join(dir, 'pom.xml'), '<project/>')
+  expect(detectChecks(dir)).toEqual(['mvn -q -B test'])
+})
+
+test('gradle project uses the wrapper when present', () => {
+  writeFileSync(join(dir, 'build.gradle.kts'), '')
+  writeFileSync(join(dir, process.platform === 'win32' ? 'gradlew.bat' : 'gradlew'), '')
+  expect(detectChecks(dir)).toEqual([process.platform === 'win32' ? 'gradlew.bat build' : './gradlew build'])
+})
+
+test('gradle project without a wrapper falls back to system gradle', () => {
+  writeFileSync(join(dir, 'build.gradle'), '')
+  expect(detectChecks(dir)).toEqual(['gradle build'])
+})
+
+test('cmake project configures then builds when there is no build tree', () => {
+  writeFileSync(join(dir, 'CMakeLists.txt'), 'project(x)')
+  expect(detectChecks(dir)).toEqual(['cmake -B build', 'cmake --build build'])
+})
+
+test('cmake project with an existing build tree only builds', () => {
+  writeFileSync(join(dir, 'CMakeLists.txt'), 'project(x)')
+  mkdirSync(join(dir, 'build'))
+  expect(detectChecks(dir)).toEqual(['cmake --build build'])
+})
+
+test('plain Makefile project', () => {
+  writeFileSync(join(dir, 'Makefile'), 'all:\n\ttrue\n')
+  expect(detectChecks(dir)).toEqual(['make'])
 })
 
 test('python + pytest', () => {

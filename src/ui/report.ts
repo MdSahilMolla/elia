@@ -9,6 +9,7 @@ const PHASE_LABELS: Record<string, string> = {
   execute: 'Working',
   verify: 'Verifying',
   reflect: 'Repairing',
+  scaffold: 'Scaffolding',
   learn: 'Learning',
 }
 

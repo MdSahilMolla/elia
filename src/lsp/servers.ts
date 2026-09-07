@@ -22,6 +22,18 @@ const EXTENSION_MAP: Record<string, LanguageServerSpec> = {
   '.py': { languageId: 'python', command: 'pyright-langserver', args: ['--stdio'] },
   '.go': { languageId: 'go', command: 'gopls', args: [] },
   '.rs': { languageId: 'rust', command: 'rust-analyzer', args: [] },
+  '.java': { languageId: 'java', command: 'jdtls', args: [] },
+  // clangd resolves flags from compile_commands.json / compile_flags.txt when
+  // present; without one it still parses and reports syntax and obvious semantic
+  // errors, which is the point here.
+  '.c': { languageId: 'c', command: 'clangd', args: ['--background-index'] },
+  '.h': { languageId: 'c', command: 'clangd', args: ['--background-index'] },
+  '.cc': { languageId: 'cpp', command: 'clangd', args: ['--background-index'] },
+  '.cpp': { languageId: 'cpp', command: 'clangd', args: ['--background-index'] },
+  '.cxx': { languageId: 'cpp', command: 'clangd', args: ['--background-index'] },
+  '.hpp': { languageId: 'cpp', command: 'clangd', args: ['--background-index'] },
+  '.hh': { languageId: 'cpp', command: 'clangd', args: ['--background-index'] },
+  '.hxx': { languageId: 'cpp', command: 'clangd', args: ['--background-index'] },
 }
 
 export function languageServerFor(path: string): LanguageServerSpec | undefined {

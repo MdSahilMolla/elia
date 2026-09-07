@@ -6,6 +6,7 @@ import { battmannTools, businessTools } from './tools/registry.ts'
 import { toolsForRole, role as roleDefinition } from './autonomy/roles.ts'
 import { currentAgent, withAgentIdentity } from './autonomy/context.ts'
 import { activeBlackboard } from './autonomy/blackboard.ts'
+import { createTodoList, withTodoList } from './autonomy/todoList.ts'
 import { activeMode } from './autonomy/mode.ts'
 import type { RoleName } from './autonomy/types.ts'
 import { createToolResultCache } from './speculation/cache.ts'
@@ -151,7 +152,14 @@ export async function runSubAgent(request: SubAgentRequest): Promise<SubAgentRes
           : SUBAGENT_SYSTEM_PROMPT
   const cwd = request.cwd ?? currentAgent().cwd
 
+  // Each worker gets its own working list. `todo_write` *replaces* the list it
+  // writes to, and until now every sub-agent resolved the single ambient
+  // run-level one — so two workers in the same wave, both laying out their plan,
+  // would have silently wiped each other's. Nothing surfaced it only because no
+  // worker has ever called `todo_write` (0 calls in 578 actions across four
+  // runs); the collision was waiting for the first one that did.
   const result = await withAgentIdentity({ name: request.name, role: request.role, runId, cwd, signal: request.signal }, () =>
+    withTodoList(createTodoList(), () =>
     withActionGovernor(governor, () => withGoalGraphIfAvailable(graph, () => withGoalNode(nodeId, () => runAgentLoop({
       messages,
       systemPrompt: `${basePrompt}\n\n${turnContextPrompt()}\n\n## Your role\n${definition.prompt}`,
@@ -170,7 +178,7 @@ export async function runSubAgent(request: SubAgentRequest): Promise<SubAgentRes
       cache,
       prefetcher,
       signal: request.signal,
-    })))),
+    }))))),
   )
 
   recordUsage(result.usage)

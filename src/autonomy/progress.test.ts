@@ -103,3 +103,32 @@ test('a failure that survives every one of three-plus attempts is a stall even w
 test('the latest attempt passing is reported as resolved', () => {
   expect(assessProgress([snap(0, ['verify:a::1']), snap(1, [])]).trend).toBe('resolved')
 })
+
+// --- staged gates: verification failing hides the review entirely ---
+
+test('the build going green is progress, not divergence, even when the review then reports more issues than the build had', () => {
+  // The review only runs on a change that already builds, so the first two
+  // attempts contribute no review fingerprints — the reviewers never looked.
+  // Counting 1 -> 4 across that transition used to read as a regression and
+  // stopped the run at the moment it made its biggest advance.
+  const a = assessProgress([
+    snap(0, ['verify:bun test::syntaxerror unexpected token']),
+    snap(1, ['verify:bun test::syntaxerror unexpected token']),
+    snap(2, ['review:blocker:src/server.ts:a', 'review:blocker:src/server.ts:b', 'review:major:src/server.ts:c', 'review:blocker:t.test.ts:d']),
+  ])
+  expect(a.trend).toBe('converging')
+  expect(a.recommendation).toBe('continue')
+  expect(a.reason).toContain('verification now passes')
+})
+
+test('breaking a previously green build is a real regression', () => {
+  const a = assessProgress([snap(0, ['review:blocker:src/a.ts:x']), snap(1, ['verify:bun test::typeerror undefined is not a function'])])
+  expect(a.trend).toBe('diverging')
+  expect(a.recommendation).toBe('stop')
+  expect(a.reason).toContain('broke verification')
+})
+
+test('a run still stuck at the build gate is judged on the build failures alone', () => {
+  expect(assessProgress([snap(0, ['verify:a::1']), snap(1, ['verify:a::1', 'verify:b::2'])]).trend).toBe('diverging')
+  expect(assessProgress([snap(0, ['verify:a::1', 'verify:b::2']), snap(1, ['verify:a::1'])]).trend).toBe('converging')
+})

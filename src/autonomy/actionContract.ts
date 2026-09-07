@@ -142,12 +142,20 @@ export async function evaluatePreconditions(contract: ActionContract, cwd: strin
       continue
     }
     if (check.kind === 'workspace-path') {
+      // No path at all is a malformed call, not an escape attempt. Reporting it
+      // as "escapes the active workspace or crosses a symlink boundary" sent a
+      // run hunting for a sandboxing problem that did not exist, when the tool
+      // call was simply missing its `path`.
+      if (!check.value || check.value.trim().length === 0) {
+        failures.push('no file path was given — the call needs a "path" argument')
+        continue
+      }
       try {
-        const target = resolveWorkspacePath(check.value ?? '', cwd)
+        const target = resolveWorkspacePath(check.value, cwd)
         if (isPathWithinWorkspace(target, cwd)) evidence.push(`workspace target accepted: ${target}`)
-        else failures.push('file target escapes the active workspace')
+        else failures.push(`file target escapes the active workspace: ${check.value}`)
       } catch {
-        failures.push('file target escapes the active workspace or crosses a symlink boundary')
+        failures.push(`file target escapes the active workspace or crosses a symlink boundary: ${check.value}`)
       }
       continue
     }

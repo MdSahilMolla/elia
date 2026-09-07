@@ -1,6 +1,6 @@
 import { autoFallbacksFor, config } from './config.ts'
 import { beginCompaction, type PendingCompaction } from './compaction.ts'
-import { createRedundantReadTracker, isLoneBatchableRead, serialReadNudge } from './autonomy/toolBatchingNudge.ts'
+import { createPlanlessWorkTracker, createRedundantReadTracker, isLoneBatchableRead, serialReadNudge } from './autonomy/toolBatchingNudge.ts'
 import type { ChatMessage, ContentBlock, Provider, ProviderActivity, Usage } from './providers/types.ts'
 import type { Tool } from './tools/types.ts'
 import { endTextTurn, writeNotice, writeToolCall, writeToolResult } from './ui/stream.ts'
@@ -197,6 +197,7 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
   // toolBatchingNudge.ts. Reset whenever it batches or stops reading.
   let loneReadStreak = 0
   const redundantReads = createRedundantReadTracker()
+  const planlessWork = createPlanlessWorkTracker()
 
   const finish = (stopReason: StopReason): RunAgentLoopResult => ({
     usage: totalUsage,
@@ -464,11 +465,12 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
     const redundantReadNudge = redundantReads.observe(
       toolUseBlocks.map((block) => ({ name: block.name, path: typeof block.input.path === 'string' ? block.input.path : undefined })),
     )
-    const nudge = redundantReadNudge ?? serialReadNudge(loneReadStreak)
+    const planlessNudge = planlessWork.observe(toolUseBlocks.map((block) => block.name))
+    const nudge = redundantReadNudge ?? serialReadNudge(loneReadStreak) ?? planlessNudge
     if (nudge) {
       messages.push({ role: 'user', content: [{ type: 'text', text: nudge }] })
       loneReadStreak = 0
-      if (verbose) writeNotice(redundantReadNudge ? 'elia: told the model to stop re-reading files' : 'elia: reminded the model to batch its reads')
+      if (verbose) writeNotice(redundantReadNudge ? 'elia: told the model to stop re-reading files' : nudge === planlessNudge ? 'elia: asked the model to write down its plan' : 'elia: reminded the model to batch its reads')
     }
 
     // Kick off predicted reads *before* looping back, so they run in parallel with

@@ -355,6 +355,31 @@ export class GoalGraphStore {
     return structuredClone(node)
   }
 
+  /**
+   * Puts a step that just failed back in line for one more attempt.
+   *
+   * A failed step blocks every step that depends on it, so a single failure
+   * near the root of a plan voids the whole thing — the run then reaches
+   * verification with none of its planned work done. Most first failures are
+   * recoverable once the worker can see what went wrong, so the wave executor
+   * reopens them here rather than reaching into node state itself. Returns
+   * false when the node has no attempts left, has already completed, or is
+   * still running, so the caller can fall through to the ordinary cascade.
+   */
+  reopenNode(id: string, reason: string): boolean {
+    const node = this.requireNode(id)
+    if (node.status === 'completed' || node.status === 'running') return false
+    if (node.attemptCount >= node.maxAttempts) return false
+    if (!this.dependenciesComplete(node)) return false
+    node.status = 'waiting-retry'
+    node.lastError = { ...classifyFailure(reason), class: 'retryable' }
+    node.finishedAt = undefined
+    node.updatedAt = Date.now()
+    this.refreshReadyStates()
+    this.persist()
+    return true
+  }
+
   failRun(error: unknown): void {
     const root = this.requireNode(this.snapshot.rootId)
     root.status = 'failed'
@@ -476,7 +501,7 @@ export class GoalGraphStore {
     const verification = this.snapshot.evidence.some((evidence) => evidence.kind === 'verification' && evidence.passed)
     const review = this.snapshot.evidence.some((evidence) => evidence.kind === 'review' && evidence.passed)
     const approval = this.snapshot.approvals.some((item) => item.kind === 'plan' && item.status === 'approved')
-    const actionsResolved = this.snapshot.actions.every((action) => action.state === 'completed')
+    const actionsResolved = outstandingActions(this.snapshot).length === 0
     return workNodes.length > 0 && workNodes.every((node) => node.status === 'completed') && actionsResolved && verification && review && approval
   }
 
@@ -678,6 +703,54 @@ export function actionKey(runId: string, nodeId: string, request: ActionRequest)
   return stableKey(runId, nodeId, request.name, canonicalJson(identityInput))
 }
 
+/**
+ * The actions that still represent an outstanding obligation.
+ *
+ * An action is one *attempt*; the step is the unit of work. An `edit_file`
+ * whose `old_string` matched three places fails, the worker varies the call,
+ * and the step completes — nothing is owed. Counting that failed attempt
+ * against the run meant no run that ever had to try something twice could
+ * report success, which is every real run: a run with 4 of 4 steps done,
+ * verification green and review passed still came back `needs-attention`
+ * because eight intermediate tool calls had failed along the way.
+ *
+ * So a mechanical failure — `failed` or `retryable`, the attempt itself went
+ * wrong — is settled once the step it belonged to completed: the work happened
+ * anyway, by some other route.
+ *
+ * Nothing else is. `planned` and `running` mean nobody ever learned the
+ * outcome, and unknown is not settled. `blocked` and `human-review` mean the
+ * governor decided a person should look at this, and a step completing by
+ * another route does not discharge that — the person still has not looked.
+ *
+ * Actions owned by the root are judged by the verification and review evidence
+ * in `canCompleteGoal`, not here — the root's completion is the very thing
+ * being decided.
+ */
+export function outstandingActions(snapshot: GoalGraphSnapshot): DurableActionRecord[] {
+  return snapshot.actions.filter((action) => {
+    if (action.state === 'completed') return false
+    if (action.state !== 'failed' && action.state !== 'retryable') return true
+    const owner = snapshot.nodes.find((node) => node.id === action.nodeId)
+    if (!owner || owner.id === snapshot.rootId) return false
+    return owner.status !== 'completed'
+  })
+}
+
+/**
+ * Approvals still genuinely waiting on a person. An approval requested for an
+ * action that is no longer outstanding is moot — the work it guarded either got
+ * done another way or belongs to a step that finished.
+ */
+export function pendingApprovals(snapshot: GoalGraphSnapshot): ApprovalRecord[] {
+  const outstanding = new Set(outstandingActions(snapshot).map((action) => action.idempotencyKey))
+  return snapshot.approvals.filter((approval) => {
+    if (approval.status !== 'pending') return false
+    if (approval.kind !== 'action') return true
+    return outstanding.has(approval.subject)
+  })
+}
+
 export function classifyFailure(error: unknown): FailureRecord {
   const message = error instanceof Error ? error.message : String(error)
   const lower = message.toLowerCase()
@@ -686,7 +759,11 @@ export function classifyFailure(error: unknown): FailureRecord {
   if (/blocked by elia|denied by the user|approval|unauthori[sz]ed|forbidden|captcha|login required/.test(lower)) failureClass = 'authorization'
   else if (/timeout|timed out|econnreset|econnrefused|network|rate limit|\b429\b|\b5\d\d\b|temporar|retryable|exit code/.test(lower)) {
     failureClass = 'retryable'
-    retryAfter = 1000
+    // A rate limit is the one retryable failure that retrying immediately
+    // cannot possibly fix — it is a statement about the next N seconds, not
+    // about the request. A run once burned all five of its step retries
+    // re-hitting the same 429 within milliseconds.
+    retryAfter = /rate limit|\b429\b|quota exceeded|too many requests/.test(lower) ? 30_000 : 1000
   } else if (/enoent|no such file|not found|missing|executable|provider unavailable|configuration|invalid environment/.test(lower)) failureClass = 'environment'
   else if (/conflict|ambiguous|unknown whether|partially|manual|human|irreversible/.test(lower)) failureClass = 'human-review'
   return { class: failureClass, message: message.slice(0, 2000), at: Date.now(), retryAfter }

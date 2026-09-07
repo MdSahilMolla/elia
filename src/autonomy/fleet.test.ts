@@ -1,4 +1,5 @@
 import { expect, test } from 'bun:test'
+import { buildWorkerContract } from './fleet.ts'
 import type { ProposalStep } from './types.ts'
 
 // fleet.ts reaches config.ts through the sub-agent runner, which resolves a
@@ -121,4 +122,67 @@ test('fleetConcurrency is capped even with many distinct providers', () => {
 
 test('fleetConcurrency defaults to 4 for an empty batch rather than dividing by zero', () => {
   expect(fleetConcurrency([])).toBe(4)
+})
+
+test('the manifest is written before the source that depends on it, even when the planner declared no dependency', () => {
+  // Observed live: a planner put "initialize package.json", "create source" and
+  // "add tests" in one parallel wave with no dependsOn between them, so source
+  // and tests were written alongside the very install they needed.
+  const steps: ProposalStep[] = [
+    { id: 's1', title: 'Initialize package.json', role: 'builder', instructions: '', files: ['package.json'], dependsOn: [] },
+    { id: 's2', title: 'Create source', role: 'builder', instructions: '', files: ['src/server.ts', 'src/db.ts'], dependsOn: [] },
+    { id: 's3', title: 'Add tests', role: 'tester', instructions: '', files: ['tests/api.test.ts'], dependsOn: [] },
+  ]
+
+  const { waves } = planWaves(steps)
+  const manifestWave = waves.findIndex((wave) => wave.some((step) => step.id === 's1'))
+  const sourceWave = waves.findIndex((wave) => wave.some((step) => step.id === 's2'))
+  const testWave = waves.findIndex((wave) => wave.some((step) => step.id === 's3'))
+
+  expect(manifestWave).toBeLessThan(sourceWave)
+  expect(manifestWave).toBeLessThan(testWave)
+})
+
+test('steps that touch no manifest still run in parallel', () => {
+  const steps: ProposalStep[] = [
+    { id: 'a', title: 'Frontend', role: 'frontend', instructions: '', files: ['src/App.tsx'], dependsOn: [] },
+    { id: 'b', title: 'Backend', role: 'backend', instructions: '', files: ['src/api.ts'], dependsOn: [] },
+  ]
+
+  expect(planWaves(steps).waves).toHaveLength(1)
+})
+
+test('tests are scheduled after the code they test, even when the planner declared no dependency', () => {
+  const steps: ProposalStep[] = [
+    { id: 's1', title: 'Source', role: 'backend', instructions: '', files: ['src/server.ts'], dependsOn: [] },
+    { id: 's2', title: 'Tests', role: 'tester', instructions: '', files: ['tests/api.test.ts'], dependsOn: [] },
+  ]
+
+  const { waves } = planWaves(steps)
+  const sourceWave = waves.findIndex((wave) => wave.some((step) => step.id === 's1'))
+  const testWave = waves.findIndex((wave) => wave.some((step) => step.id === 's2'))
+
+  expect(sourceWave).toBeLessThan(testWave)
+})
+
+test('two testers writing different test files still run together', () => {
+  const steps: ProposalStep[] = [
+    { id: 'a', title: 'Auth tests', role: 'tester', instructions: '', files: ['tests/auth.test.ts'], dependsOn: [] },
+    { id: 'b', title: 'Expense tests', role: 'tester', instructions: '', files: ['tests/expenses.test.ts'], dependsOn: [] },
+  ]
+
+  expect(planWaves(steps).waves).toHaveLength(1)
+})
+
+test('a worker is told to report a broken plan only when it actually has the tool', () => {
+  // Framing decides whether a tool gets called at all on this project's model:
+  // "how you finish" is used, "available along the way" is not. But promising a
+  // tool the worker was never given is worse than saying nothing.
+  const withTool = buildWorkerContract({ acceptanceCriteria: ['it works'] }, true)
+  const withoutTool = buildWorkerContract({ acceptanceCriteria: ['it works'] }, false)
+
+  expect(withTool).toContain('revise_plan')
+  expect(withTool).toContain('Before you finish')
+  expect(withoutTool).not.toContain('revise_plan')
+  expect(withoutTool).toContain('it works')
 })

@@ -1,4 +1,5 @@
 import type { Tool } from './types.ts'
+import { optionalString } from './args.ts'
 import { isIgnored } from './ignoreDirs.ts'
 import { resolveWorkspacePath } from '../autonomy/context.ts'
 import { assertSafeFileAccess, isSensitivePath } from '../autonomy/sensitivePaths.ts'
@@ -19,9 +20,9 @@ export const listFilesTool: Tool = {
   async execute(input) {
     if (typeof input.pattern !== 'string' || input.pattern.trim().length === 0) throw new Error('pattern must be a non-empty string')
     if (input.pattern.length > MAX_GLOB_LENGTH) throw new Error(`pattern exceeds ${MAX_GLOB_LENGTH} characters`)
-    if (input.cwd !== undefined && (typeof input.cwd !== 'string' || input.cwd.trim().length === 0)) throw new Error('cwd must be a non-empty string when provided')
+    const cwdArgument = optionalString(input.cwd, 'cwd')
     const pattern = input.pattern
-    const cwd = resolveWorkspacePath((input.cwd as string | undefined) ?? '.')
+    const cwd = resolveWorkspacePath(cwdArgument ?? '.')
     assertSafeFileAccess(cwd)
     const glob = new Bun.Glob(pattern)
     const results: string[] = []

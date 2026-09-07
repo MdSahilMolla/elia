@@ -24,9 +24,21 @@ export interface StuckDiagnosis {
   question?: string
 }
 
-const ENVIRONMENT = /\b(?:command not found|not recognized as an internal or external command|ENOENT|cannot find module|module not found|no such file or directory|permission denied|EACCES|EPERM\b|ECONNREFUSED| ETIMEDOUT|getaddrinfo|could not resolve host|connection refused|address already in use|EADDRINUSE|no matching version found|unable to resolve dependency|python: not found|command failed: (?:pip|npm|bun|cargo|go|poetry)\b)/i
+const ENVIRONMENT = /\b(?:command not found|not recognized as an internal or external command|ENOENT|cannot find module|module not found|no such file or directory|permission denied|EACCES|EPERM\b|ECONNREFUSED| ETIMEDOUT|getaddrinfo|could not resolve host|connection refused|address already in use|EADDRINUSE|no matching version found|unable to resolve dependency|python: not found|command failed: (?:pip|npm|bun|cargo|go|poetry|mvn|gradle|make|cmake)\b)/i
 
-const EXTERNAL_BLOCKER = /\b(?:blocked by .{0,40}governor|requires? .{0,20}approval|exact approval|approval (?:is )?required|awaiting approval|rate limit|HTTP 429|\b429\b|quota exceeded|not signed in|unauthorized|HTTP 401|\b401\b|invalid api key|authentication (?:failed|required)|credentials? (?:missing|not found))/i
+/**
+ * Unambiguous evidence that *elia itself* is blocked. These phrases don't occur
+ * in a description of a defect, so they are safe to look for anywhere.
+ */
+const BLOCKER_STRONG = /\b(?:blocked by .{0,40}governor|requires? .{0,20}approval|exact approval|approval (?:is )?required|awaiting approval|rate limit|HTTP 429|\b429\b|quota exceeded|invalid api key)/i
+
+/**
+ * The same idea, in words that read identically whether elia is blocked or a
+ * reviewer is describing an auth bug in the code ("an attacker gains
+ * unauthorized access", "returns 401"). Only meaningful in the output of a
+ * command that actually ran — never in prose about the deliverable.
+ */
+const BLOCKER_WEAK = /\b(?:not signed in|unauthorized|HTTP 401|\b401\b|authentication (?:failed|required)|credentials? (?:missing|not found))/i
 
 const MISSING_INFO = /\bI (?:could|can) ?n[o']t (?:determine|find|tell|figure out|locate|establish|be sure)\b|\bunclear (?:what|whether|how|which|if)\b|\bambiguous\b|\bneed(?:s|ed)? (?:more (?:info|information|context)|clarification|to know)\b|\bnot sure (?:what|which|whether|how|if)\b|\b(?:which|what) .{0,60}(?:did you (?:mean|intend)|is intended|should (?:it|I))\b|\bno (?:documentation|spec|example) (?:for|of)\b/i
 
@@ -44,12 +56,21 @@ export function extractQuestion(text: string): string | undefined {
   return (decisionLike ?? sentences[0]!).trim().slice(0, 300)
 }
 
-export function classifyStuck(input: { failureText: string; agentReport?: string; trend: ProgressTrend }): StuckDiagnosis {
+/**
+ * `failureText` is command output — what actually ran and what it printed.
+ * `reviewText` is a critic describing defects in the deliverable, which is a
+ * different kind of text entirely: a security finding says "an attacker gains
+ * unauthorized access", and reading that as "elia is blocked on a credential"
+ * stopped a run with repair budget still in hand. Review prose therefore only
+ * ever votes on whether the approach is wrong, never on whether elia is blocked.
+ */
+export function classifyStuck(input: { failureText: string; reviewText?: string; agentReport?: string; trend: ProgressTrend }): StuckDiagnosis {
   const failure = input.failureText ?? ''
+  const review = input.reviewText ?? ''
   const report = input.agentReport ?? ''
   const haystack = `${failure}\n${report}`
 
-  if (EXTERNAL_BLOCKER.test(haystack)) {
+  if (BLOCKER_STRONG.test(haystack) || BLOCKER_WEAK.test(failure)) {
     return {
       category: 'external-blocker',
       recovery: 'resolve-approval',
@@ -74,11 +95,23 @@ export function classifyStuck(input: { failureText: string; agentReport?: string
     }
   }
 
-  if ((input.trend === 'stalled' || input.trend === 'diverging') && LOGIC_FAILURE.test(failure)) {
-    return {
-      category: 'wrong-approach',
-      recovery: 'replan',
-      reason: 'The same logic/type failures are surviving every repair attempt — the approach itself, not just this fix, needs reconsidering.',
+  if (input.trend === 'stalled' || input.trend === 'diverging') {
+    if (LOGIC_FAILURE.test(failure)) {
+      return {
+        category: 'wrong-approach',
+        recovery: 'replan',
+        reason: 'The same logic/type failures are surviving every repair attempt — the approach itself, not just this fix, needs reconsidering.',
+      }
+    }
+    // Nothing failed to run and the reviewers keep finding blockers: the code
+    // builds and its tests pass, so this is neither an environment nor an
+    // access problem. It is the design, and that is a re-plan.
+    if (!failure.trim() && review.trim()) {
+      return {
+        category: 'wrong-approach',
+        recovery: 'replan',
+        reason: 'Verification passes, but review keeps finding blocking defects that the repair attempts are not clearing — the approach itself needs reconsidering.',
+      }
     }
   }
 

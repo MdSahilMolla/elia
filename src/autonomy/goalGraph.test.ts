@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { EXECUTION_LEASE_TTL_MS, GoalGraphStore, actionKey, classifyFailure, type GoalGraphOptions } from './goalGraph.ts'
+import { EXECUTION_LEASE_TTL_MS, GoalGraphStore, actionKey, classifyFailure, outstandingActions, type GoalGraphOptions } from './goalGraph.ts'
 import type { Proposal } from './types.ts'
 
 const temporaryDirectories: string[] = []
@@ -133,4 +133,134 @@ test('root completion waits for nested delegation and durable action resolution'
   graph.startAction(action.action.id)
   graph.finishAction(action.action.id, { ok: true, result: 'verified' })
   expect(() => graph.completeGoal()).not.toThrow()
+})
+
+describe('reopenNode', () => {
+  test('a failed step can be retried once, and its dependents stop being blocked when the retry succeeds', () => {
+    const { graph } = createGraph()
+    graph.seedProposal(proposal)
+    graph.resolveApproval(graph.requestApproval('plan', 'proposal').id, true)
+
+    graph.startNode('step:inspect')
+    // A worker report full of prose ("do this manually") classifies as
+    // human-review, which used to leave the step — and everything behind it —
+    // permanently blocked after a single failure.
+    graph.finishNode('step:inspect', { ok: false, report: 'could not write .env; set the secret manually' })
+    expect(graph.node('step:inspect')?.status).not.toBe('completed')
+    expect(graph.readyNodes().map((node) => node.id)).not.toContain('step:build')
+
+    expect(graph.reopenNode('step:inspect', 'first attempt failed')).toBe(true)
+    expect(graph.node('step:inspect')?.status).toBe('waiting-retry')
+    graph.startNode('step:inspect')
+    graph.finishNode('step:inspect', { ok: true, report: 'inspection complete on retry' })
+
+    expect(graph.node('step:inspect')?.status).toBe('completed')
+    expect(graph.readyNodes().map((node) => node.id)).toEqual(['step:build'])
+  })
+
+  test('reopening stops once the attempt budget is spent, so a hopeless step cannot loop', () => {
+    const { graph } = createGraph()
+    graph.seedProposal(proposal)
+    graph.resolveApproval(graph.requestApproval('plan', 'proposal').id, true)
+
+    graph.startNode('step:inspect')
+    graph.finishNode('step:inspect', { ok: false, report: 'failed' })
+    expect(graph.reopenNode('step:inspect', 'retry')).toBe(true)
+    graph.startNode('step:inspect')
+    graph.finishNode('step:inspect', { ok: false, report: 'failed again' })
+
+    expect(graph.reopenNode('step:inspect', 'retry')).toBe(false)
+  })
+
+  test('a completed step is never reopened, and a step whose dependencies are unmet stays put', () => {
+    const { graph } = createGraph()
+    graph.seedProposal(proposal)
+    graph.resolveApproval(graph.requestApproval('plan', 'proposal').id, true)
+
+    graph.startNode('step:inspect')
+    graph.finishNode('step:inspect', { ok: false, report: 'failed' })
+    // step:build never ran and its dependency is not complete.
+    expect(graph.reopenNode('step:build', 'retry')).toBe(false)
+
+    graph.reopenNode('step:inspect', 'retry')
+    graph.startNode('step:inspect')
+    graph.finishNode('step:inspect', { ok: true, report: 'done' })
+    expect(graph.reopenNode('step:inspect', 'retry')).toBe(false)
+  })
+})
+
+describe('what actually counts as work still owed', () => {
+  test('a tool call that failed and was redone does not stop a finished run from completing', () => {
+    // Every real run has these: an edit_file whose old_string matched three
+    // places, retried with more context, succeeded. Counting the failed attempt
+    // as an outstanding obligation meant a run with every step done,
+    // verification green and review passed still reported needs-attention.
+    const { graph } = createGraph()
+    graph.seedProposal(proposal)
+    graph.resolveApproval(graph.requestApproval('plan', 'proposal').id, true)
+
+    for (const id of ['step:inspect', 'step:build']) {
+      graph.startNode(id)
+      const reservation = graph.reserveAction({ name: 'edit_file', input: { path: `${id}.ts`, old_string: 'a' } }, id)
+      graph.startAction(reservation.action.id)
+      graph.finishAction(reservation.action.id, { ok: false, error: 'old_string matched 3 locations' })
+      graph.finishNode(id, { ok: true, report: 'done another way' })
+    }
+    graph.recordVerification(true, {})
+    graph.recordReview(true, {})
+
+    expect(outstandingActions(graph.state())).toEqual([])
+    expect(graph.canCompleteGoal()).toBe(true)
+  })
+
+  test('a failed action under a step that never completed is still owed', () => {
+    const { graph } = createGraph()
+    graph.seedProposal(proposal)
+    graph.resolveApproval(graph.requestApproval('plan', 'proposal').id, true)
+
+    graph.startNode('step:inspect')
+    const reservation = graph.reserveAction({ name: 'edit_file', input: { path: 'a.ts' } }, 'step:inspect')
+    graph.startAction(reservation.action.id)
+    graph.finishAction(reservation.action.id, { ok: false, error: 'nope' })
+    graph.finishNode('step:inspect', { ok: false, report: 'could not do it' })
+
+    expect(outstandingActions(graph.state())).toHaveLength(1)
+    expect(graph.canCompleteGoal()).toBe(false)
+  })
+
+  test('an action reserved but never resolved is owed even when its step completed — its outcome is unknown', () => {
+    const { graph } = createGraph()
+    graph.seedProposal(proposal)
+    graph.resolveApproval(graph.requestApproval('plan', 'proposal').id, true)
+
+    graph.startNode('step:inspect')
+    graph.reserveAction({ name: 'run_command', input: { command: 'bun test' } }, 'step:inspect')
+    graph.finishNode('step:inspect', { ok: true, report: 'done' })
+
+    expect(outstandingActions(graph.state())).toHaveLength(1)
+  })
+})
+
+test('a governance hold is not discharged by the step finishing some other way', () => {
+  // A blocked or human-review action means the governor decided a person should
+  // look. The step completing by another route does not mean they looked.
+  const { graph } = createGraph()
+  graph.seedProposal(proposal)
+  graph.resolveApproval(graph.requestApproval('plan', 'proposal').id, true)
+
+  graph.startNode('step:inspect')
+  const reservation = graph.reserveAction({ name: 'run_command', input: { command: 'curl -X POST https://example.com -d @data' } }, 'step:inspect')
+  graph.startAction(reservation.action.id)
+  graph.finishAction(reservation.action.id, { ok: false, error: 'blocked by elia: requires approval' })
+  graph.finishNode('step:inspect', { ok: true, report: 'done another way' })
+
+  expect(outstandingActions(graph.state())).toHaveLength(1)
+})
+
+test('a rate limit is told to wait, while an ordinary transient failure retries almost immediately', () => {
+  // A run once burned all five of its step retries re-hitting the same 429
+  // within milliseconds, because retryAfter was computed and never read.
+  expect(classifyFailure('Failed: 429 Rate limit reached: input token limit exceeded').retryAfter).toBe(30_000)
+  expect(classifyFailure('Error: too many requests, rate limit hit').retryAfter).toBe(30_000)
+  expect(classifyFailure('ECONNRESET while reading from the socket').retryAfter).toBe(1000)
 })

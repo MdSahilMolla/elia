@@ -62,3 +62,28 @@ test('extractQuestion prefers a decision-shaped question over a rhetorical one',
 test('extractQuestion returns undefined when there is no question', () => {
   expect(extractQuestion('I fixed the thing and it works now.')).toBeUndefined()
 })
+
+test('a security reviewer describing an auth defect is not elia being blocked on a credential', () => {
+  // Observed live: the run stopped with repair budget still in hand because a
+  // finding about a hard-coded JWT secret contained the word "unauthorized".
+  const diagnosis = classifyStuck({
+    failureText: '',
+    reviewText: [
+      '- [major] src/auth.ts: JWT secret defaults to the hard-coded string "supersecret". An attacker can forge valid JWTs and gain unauthorized access.',
+      '- [blocker] src/auth.ts: "express" is imported but is not declared in package.json.',
+    ].join('\n'),
+    trend: 'diverging',
+  })
+  expect(diagnosis.category).toBe('wrong-approach')
+  expect(diagnosis.recovery).toBe('replan')
+})
+
+test('a command that actually failed on authorization is still an external blocker', () => {
+  const diagnosis = classifyStuck({ failureText: '$ gh pr create — FAILED (exit 1)\nHTTP 401: Bad credentials', trend: 'stalled' })
+  expect(diagnosis.category).toBe('external-blocker')
+})
+
+test('a governor refusal is an external blocker wherever it is reported', () => {
+  const diagnosis = classifyStuck({ failureText: '', agentReport: 'The action was blocked by the autonomy governor and requires approval.', trend: 'stalled' })
+  expect(diagnosis.category).toBe('external-blocker')
+})

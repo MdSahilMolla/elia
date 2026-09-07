@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from 'node:fs'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 
-const PROJECT_MARKERS = ['package.json', 'Cargo.toml', 'go.mod', 'pyproject.toml', 'pytest.ini']
+const PROJECT_MARKERS = ['package.json', 'Cargo.toml', 'go.mod', 'pyproject.toml', 'pytest.ini', 'pom.xml', 'build.gradle', 'build.gradle.kts', 'CMakeLists.txt', 'Makefile']
 
 /**
  * Where to run the checks. The agent's changes may be entirely inside a
@@ -106,6 +106,24 @@ export function detectChecks(cwd: string = process.cwd()): string[] {
   if (existsSync(join(cwd, 'pyproject.toml')) || existsSync(join(cwd, 'pytest.ini')) || existsSync(join(cwd, 'setup.cfg'))) {
     return existsSync(join(cwd, 'mypy.ini')) || hasMypyConfig(cwd) ? ['mypy .', 'pytest -q'] : ['pytest -q']
   }
+
+  // JVM. A Gradle wrapper is the project's own pinned Gradle; prefer it over a
+  // system `gradle` that may be the wrong version. `build` already runs `test`
+  // plus compilation, which is exactly the gate we want.
+  if (existsSync(join(cwd, 'build.gradle')) || existsSync(join(cwd, 'build.gradle.kts')) || existsSync(join(cwd, 'settings.gradle')) || existsSync(join(cwd, 'settings.gradle.kts'))) {
+    const wrapper = existsSync(join(cwd, process.platform === 'win32' ? 'gradlew.bat' : 'gradlew'))
+    return [wrapper ? `${process.platform === 'win32' ? 'gradlew.bat' : './gradlew'} build` : 'gradle build']
+  }
+  if (existsSync(join(cwd, 'pom.xml'))) return ['mvn -q -B test']
+
+  // C / C++. Build systems vary and a configure step may be needed, so this is
+  // best-effort: a plain `make` or, for CMake, whatever the conventional
+  // `build/` tree already has configured. clangd carries the rest via
+  // per-edit diagnostics.
+  if (existsSync(join(cwd, 'CMakeLists.txt'))) {
+    return existsSync(join(cwd, 'build')) ? ['cmake --build build'] : ['cmake -B build', 'cmake --build build']
+  }
+  if (existsSync(join(cwd, 'Makefile')) || existsSync(join(cwd, 'makefile'))) return ['make']
 
   return []
 }
