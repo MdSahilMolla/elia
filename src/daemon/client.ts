@@ -140,24 +140,53 @@ class DaemonClient {
   }
 
   private async connect(): Promise<void> {
-    try {
-      await this.dial()
-    } catch {
+    if (!(await this.dial())) {
       await this.spawnDaemon()
       await this.dialWithRetry()
     }
     await this.handshake()
   }
 
-  private dial(): Promise<void> {
-    return new Promise((resolve, reject) => {
-      const socket = net.createConnection({ path: socketPath() })
-      const onError = (err: Error) => {
-        socket.destroy()
-        reject(err)
+  /**
+   * Try once to connect. Resolves `true` on success (and stashes the socket),
+   * `false` on any failure — it never rejects and never lets an error escape.
+   * Three separate failure shapes are swallowed here:
+   *   - `net.createConnection` throwing *synchronously* on a missing socket path
+   *     (bun's node:net does this for ENOENT rather than emitting 'error');
+   *   - the async 'error' event on a refused/missing socket;
+   *   - a trailing 'error' on the now-destroyed socket.
+   * Under `bun test` any of these otherwise fails whichever test is mid-flight.
+   */
+  private dial(): Promise<boolean> {
+    return new Promise((resolve) => {
+      const path = socketPath()
+      // bun 1.3.0's node:net raises the ENOENT from a missing unix socket inside
+      // its own connect callback, where neither this try/catch nor a
+      // `socket.on('error')` listener can intercept it — under `bun test` it
+      // fails whichever test is mid-flight. When the socket file plainly isn't
+      // there yet (the cold-start path), skip the dial entirely.
+      if (process.platform !== 'win32' && !existsSync(path)) {
+        resolve(false)
+        return
       }
-      socket.once('error', onError)
-      socket.once('connect', () => {
+      let settled = false
+      let socket: net.Socket
+      try {
+        socket = net.createConnection({ path })
+      } catch {
+        resolve(false)
+        return
+      }
+      const onError = () => {
+        if (settled) return
+        settled = true
+        socket.removeListener('connect', onConnect)
+        socket.on('error', () => {})
+        socket.destroy()
+        resolve(false)
+      }
+      const onConnect = () => {
+        settled = true
         socket.removeListener('error', onError)
         socket.setNoDelay(true)
         socket.setEncoding('utf8')
@@ -165,24 +194,20 @@ class DaemonClient {
         socket.on('close', () => this.onClose())
         socket.on('error', () => this.onClose())
         this.socket = socket
-        resolve()
-      })
+        resolve(true)
+      }
+      socket.once('error', onError)
+      socket.once('connect', onConnect)
     })
   }
 
   private async dialWithRetry(): Promise<void> {
     const deadline = Date.now() + 8_000
-    let lastErr: unknown
     while (Date.now() < deadline) {
-      try {
-        await this.dial()
-        return
-      } catch (err) {
-        lastErr = err
-        await sleep(120)
-      }
+      if (await this.dial()) return
+      await sleep(120)
     }
-    throw new DaemonUnavailable(`eliad did not come up: ${String(lastErr)}`)
+    throw new DaemonUnavailable('eliad did not come up within 8s of being spawned')
   }
 
   private async spawnDaemon(): Promise<void> {

@@ -249,7 +249,7 @@ test('a secret-shaped name assigned a literal is caught, and the finding never q
 
 test('issuer-shaped credentials are caught by their format', () => {
   manifest({})
-  const file = write('src/keys.ts', ['const a = "AKIAQ7RZ4NPLMWXC2VBD"', 'const b = "ghp_' + 'A'.repeat(36) + '"'].join('\n'))
+  const file = write('src/keys.ts', ['const a = "AKIAQ7RZ4NPLMWXC2VBD"', 'const b = "ghp_' + 'A'.repeat(36) + '"'].join('\n')) // pragma: allowlist secret
 
   const descriptions = hardcodedSecrets({ cwd: dir, addedFiles: [file], changedFiles: [file] }).map((entry) => entry.description)
   expect(descriptions.some((text) => text.includes('AWS'))).toBe(true)
@@ -322,7 +322,7 @@ test('writing into process.env is test setup, not a hardcoded secret', () => {
 test('test files are scanned for real issuer-format keys but not for secret-shaped names', () => {
   manifest({})
   const fixtures = write('src/thing.test.ts', ['const JWT_SECRET = process.env.JWT_SECRET || "fixture-secret"', 'const password = "hunter2hunter2"'].join('\n'))
-  const leak = write('src/other.test.ts', 'const key = "AKIAQ7RZ4NPLMWXC2VBD"')
+  const leak = write('src/other.test.ts', 'const key = "AKIAQ7RZ4NPLMWXC2VBD"') // pragma: allowlist secret
 
   expect(hardcodedSecrets({ cwd: dir, addedFiles: [], changedFiles: [fixtures] })).toEqual([])
   expect(hardcodedSecrets({ cwd: dir, addedFiles: [], changedFiles: [leak] })).toHaveLength(1)
@@ -330,7 +330,7 @@ test('test files are scanned for real issuer-format keys but not for secret-shap
 
 test("an issuer's own documented example key is documentation, not a credential", () => {
   manifest({})
-  const file = write('src/docs.ts', 'const example = "AKIAIOSFODNN7EXAMPLE"')
+  const file = write('src/docs.ts', 'const example = "AKIAIOSFODNN7EXAMPLE"') // pragma: allowlist secret
 
   expect(hardcodedSecrets({ cwd: dir, addedFiles: [], changedFiles: [file] })).toEqual([])
 })

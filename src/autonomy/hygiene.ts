@@ -236,7 +236,7 @@ export function hardcodedSecrets(input: HygieneInput): HardcodedSecret[] {
 
     for (const { name, pattern } of KNOWN_KEY_FORMATS) {
       const match = pattern.exec(source)
-      // Issuers publish example keys (AWS's own docs use AKIAIOSFODNN7EXAMPLE);
+      // Issuers publish example keys (AWS's own docs use AKIAIOSFODNN7EXAMPLE); pragma: allowlist secret
       // those are documentation, not credentials.
       if (match && !PLACEHOLDER.test(match[0])) {
         found.push({ file: relative, line: lineOf(source, match.index), description: `what looks like ${name}` })
