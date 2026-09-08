@@ -5,25 +5,18 @@ import { isIgnored, SKIP_DIRS } from './ignoreDirs.ts'
 import { resolveWorkspacePath } from '../autonomy/context.ts'
 import { assertSafeFileAccess, isSensitivePath } from '../autonomy/sensitivePaths.ts'
 import { readBoundedOutput, terminateProcessGroup } from '../shell.ts'
+import { boundedMap, registerCache } from '../cacheRegistry.ts'
 
-// Cache for compiled regex patterns to avoid recompilation
-const regexCache = new Map<string, RegExp>()
-const REGEX_CACHE_MAX_SIZE = 100
+// Compiled-regex cache for the pure-JS search path — recompiling the same
+// pattern for every file in a scan is pure waste. Bounded so a long session
+// that greps hundreds of distinct patterns can't grow it without limit.
+const regexCache = boundedMap<string, RegExp>(100)
+registerCache('grep-regex', () => regexCache.clear(), () => regexCache.size)
 
 function getCachedRegex(pattern: string): RegExp {
   const cached = regexCache.get(pattern)
   if (cached) return cached
-  
   const regex = new RegExp(pattern)
-  
-  // Simple LRU eviction
-  if (regexCache.size >= REGEX_CACHE_MAX_SIZE) {
-    const firstKey = regexCache.keys().next().value
-    if (firstKey !== undefined) {
-      regexCache.delete(firstKey)
-    }
-  }
-  
   regexCache.set(pattern, regex)
   return regex
 }

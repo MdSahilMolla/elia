@@ -15,6 +15,8 @@
  * pre-write snapshot of a file it just changed.
  */
 
+import { boundedMap, registerCache } from '../cacheRegistry.ts'
+
 /** Tools that are safe to run speculatively: no side effects, idempotent, cheap. */
 export const SPECULABLE_TOOLS = new Set(['read_file', 'list_files', 'grep'])
 
@@ -25,7 +27,18 @@ export interface CacheStats {
   hits: number
   /** Real calls that found nothing cached. */
   misses: number
+  /** Entries currently held. */
+  size: number
+  /** Entries dropped because the cache was at its entry cap. */
+  evictions: number
 }
+
+/**
+ * Entry-count cap. A single loop is bounded to 80 speculative reads by the
+ * prefetcher (MAX_PREDICTIONS_PER_LOOP) plus mid-stream dispatch, so this is
+ * well clear of normal use and only bites a pathological run.
+ */
+const MAX_CACHE_ENTRIES = 512
 
 export interface ToolResultCache {
   /** True when this tool may be speculated at all. */
@@ -41,8 +54,18 @@ export interface ToolResultCache {
 }
 
 export function createToolResultCache(): ToolResultCache {
-  const entries = new Map<string, Promise<string>>()
-  const stats: CacheStats = { speculated: 0, hits: 0, misses: 0 }
+  let evictions = 0
+  const entries = boundedMap<string, Promise<string>>(MAX_CACHE_ENTRIES, (dropped) => {
+    evictions += 1
+    // The dropped speculation may still be in flight and will never be `take`n now.
+    void dropped.catch(() => {})
+  })
+  const counters = { speculated: 0, hits: 0, misses: 0 }
+
+  // Registered so a checkpoint restore drops it along with every other cache.
+  // Loops and sub-agents each make their own; the most recent wins the name,
+  // which is all clearAllCaches (a lead-loop operation) needs.
+  registerCache('speculation', () => entries.clear(), () => entries.size)
 
   function key(name: string, input: Record<string, unknown>): string {
     // Sorted keys so `{a,b}` and `{b,a}` are the same call. JSON.stringify on
@@ -64,7 +87,7 @@ export function createToolResultCache(): ToolResultCache {
       if (!SPECULABLE_TOOLS.has(name)) return
       const k = key(name, input)
       if (entries.has(k)) return
-      stats.speculated += 1
+      counters.speculated += 1
       const pending = run().catch((err: unknown) => {
         throw err instanceof Error ? err : new Error(String(err))
       })
@@ -81,11 +104,11 @@ export function createToolResultCache(): ToolResultCache {
       const k = key(name, input)
       const hit = entries.get(k)
       if (!hit) {
-        stats.misses += 1
+        counters.misses += 1
         return undefined
       }
       entries.delete(k)
-      stats.hits += 1
+      counters.hits += 1
       return hit
     },
 
@@ -94,12 +117,12 @@ export function createToolResultCache(): ToolResultCache {
     },
 
     stats() {
-      return { ...stats }
+      return { ...counters, size: entries.size, evictions }
     },
 
     hitRate() {
-      const attempts = stats.hits + stats.misses
-      return attempts === 0 ? 0 : stats.hits / attempts
+      const attempts = counters.hits + counters.misses
+      return attempts === 0 ? 0 : counters.hits / attempts
     },
   }
 }

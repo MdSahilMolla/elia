@@ -5,6 +5,7 @@ import { listLedgerSessionIds, loadLedger, type LedgerRecord } from '../ledger.t
 import { loadLessons } from '../autonomy/lessons.ts'
 import { loadRationale, RATIONALE_PATH } from '../autonomy/rationale.ts'
 import { loadNotes } from './notes.ts'
+import { registerCache } from '../cacheRegistry.ts'
 
 /**
  * The read layer of elia's second brain: one merged, typed view over every
@@ -172,10 +173,12 @@ export async function loadBrainItems(options: LoadBrainOptions = {}): Promise<Br
   return items
 }
 
-/** Test-only: drops the in-process brain cache. */
+/** Drops the in-process brain cache. Used by tests and by a checkpoint restore. */
 export function resetBrainCache(): void {
   cache = undefined
 }
+
+registerCache('brain', resetBrainCache, () => (cache ? cache.items.length : 0))
 
 /** Bare file paths mentioned in free text, e.g. "the retry logic in src/agentLoop.ts". */
 export function pathsIn(text: string): string[] {

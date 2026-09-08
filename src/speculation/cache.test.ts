@@ -8,7 +8,22 @@ test('a speculated result is returned instantly and counted as a hit', async () 
   const hit = cache.take('read_file', { path: 'a.ts' })
   expect(hit).toBeDefined()
   expect(await hit!).toBe('contents of a')
-  expect(cache.stats()).toEqual({ speculated: 1, hits: 1, misses: 0 })
+  expect(cache.stats()).toEqual({ speculated: 1, hits: 1, misses: 0, size: 0, evictions: 0 })
+})
+
+test('the entry count is capped and over-cap speculations evict oldest-first', async () => {
+  const cache = createToolResultCache()
+  // 600 distinct speculations, more than the 512-entry cap.
+  for (let i = 0; i < 600; i++) cache.speculate('read_file', { path: `f${i}.ts` }, async () => `body ${i}`)
+
+  const stats = cache.stats()
+  expect(stats.size).toBe(512)
+  expect(stats.evictions).toBe(88)
+  expect(stats.speculated).toBe(600)
+
+  // The earliest entries were evicted; a recent one is still a hit.
+  expect(cache.take('read_file', { path: 'f0.ts' })).toBeUndefined()
+  expect(await cache.take('read_file', { path: 'f599.ts' })!).toBe('body 599')
 })
 
 test('a call that was never speculated is a miss', () => {

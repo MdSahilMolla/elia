@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import type { ConversationMessage } from './agentLoop.ts'
 import { SESSIONS_DIR } from './session.ts'
 import { ensureSecureDirectory, hardenSecureFile, writeSecureBunFile } from './securePersistence.ts'
+import { clearAllCaches } from './cacheRegistry.ts'
 
 /**
  * Per-turn checkpoints for the interactive session: enough to put both the
@@ -112,6 +113,9 @@ export async function restoreCheckpoint(checkpoint: Checkpoint): Promise<Restore
     await Bun.write(path, content)
     restored += 1
   }
+  // Every in-process cache — speculated reads, compiled greps, the brain
+  // fingerprint — now describes a workspace that no longer exists on disk.
+  clearAllCaches()
   return { restored, deleted }
 }
 

@@ -142,7 +142,7 @@ async function runScenarioOnce(scenario: LatencyScenario, options: ScenarioRunOp
     })
 
     const wallMs = performance.now() - startedAt
-    const stats = result.cacheStats ?? { speculated: 0, hits: 0, misses: 0 }
+    const stats = result.cacheStats ?? { speculated: 0, hits: 0, misses: 0, size: 0, evictions: 0 }
     return {
       wallMs,
       firstTokenMs,
