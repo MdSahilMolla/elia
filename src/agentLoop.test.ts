@@ -17,7 +17,7 @@ import { ZERO_USAGE } from './usage.ts'
 process.env.ANTHROPIC_API_KEY ??= 'test-key-for-agentloop-test'
 
 const { config } = await import('./config.ts')
-const { resetProviderHealthForTests, runAgentLoop, toolBatchConcurrency, DEFAULT_PARALLEL_TOOLS } = await import('./agentLoop.ts')
+const { resetProviderHealthForTests, runAgentLoop, toolBatchConcurrency, DEFAULT_PARALLEL_TOOLS, lastAssistantText } = await import('./agentLoop.ts')
 const { resetCodexSubscriptionApprovalForTests } = await import('./providers/codexSubscription.ts')
 
 test('session recording captures nested agent tools and provider activity without crossing session boundaries', async () => {
@@ -433,6 +433,45 @@ test('dev hooks block a matching tool before execution and preserve the normal t
   } finally {
     config.provider = originalProvider
   }
+})
+
+test('runAgentLoop ends the step early when every tool call keeps failing', async () => {
+  config.routingMode = 'selected'
+  let calls = 0
+  config.provider = {
+    async streamTurn(params) {
+      calls += 1
+      // After enough failed turns elia lifts tool use and asks for a report; the
+      // model then answers with text and the loop finishes.
+      const askedForReport = params.messages.some(
+        (m) => m.role === 'user' && m.content.some((b) => b.type === 'text' && b.text.includes('Every tool call has failed')),
+      )
+      if (askedForReport) {
+        return { content: [{ type: 'text', text: 'I could not get past the error.' }] as ContentBlock[], usage: ZERO_USAGE }
+      }
+      return {
+        content: [{ type: 'tool_use', id: `t${calls}`, name: 'edit_file', input: { path: 'x.ts', old_string: 'a', new_string: 'b' } }] as ContentBlock[],
+        usage: ZERO_USAGE,
+      }
+    },
+  }
+
+  const alwaysFails: Tool = {
+    name: 'edit_file',
+    description: 'always fails',
+    input_schema: { type: 'object', properties: {} },
+    async execute() {
+      throw new Error('old_string not found')
+    },
+  }
+
+  const messages: ConversationMessage[] = [{ role: 'user', content: [{ type: 'text', text: 'go' }] }]
+  const result = await runAgentLoop({ messages, systemPrompt: 'test', tools: [alwaysFails], useAnimation: false, verbose: false, maxSteps: 80 })
+
+  expect(result.stopReason).toBe('no-progress')
+  // 6 failing turns + 1 wrap-up, not the full 80-call budget.
+  expect(result.steps).toBeLessThanOrEqual(8)
+  expect(lastAssistantText(messages, '')).toContain('could not get past')
 })
 
 test('runAgentLoop retries transient provider failures before output', async () => {

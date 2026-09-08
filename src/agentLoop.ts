@@ -138,7 +138,12 @@ export interface RunAgentLoopOptions {
   drainSteering?: () => string[]
 }
 
-export type StopReason = 'complete' | 'step-budget' | 'aborted'
+export type StopReason = 'complete' | 'step-budget' | 'aborted' | 'no-progress'
+
+/** Consecutive all-error tool turns before elia firmly tells the model to change tack. */
+const UNPRODUCTIVE_NUDGE_AT = 3
+/** Consecutive all-error tool turns before elia ends the step rather than burn the rest of the budget flailing. */
+const UNPRODUCTIVE_STOP_AT = 6
 
 export interface RunAgentLoopResult {
   /** Usage summed across every model call this loop made (including ones behind tool-call round-trips). */
@@ -227,6 +232,11 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
   // Consecutive turns where the model made exactly one batchable read — see
   // toolBatchingNudge.ts. Reset whenever it batches or stops reading.
   let loneReadStreak = 0
+  // Consecutive tool turns in which every single call errored. A model that has
+  // read the error, changed nothing that worked, and tried again — over and over
+  // — is not going to get there on turn 40 either; end the step early so the
+  // autonomy layer can retry it or hand off, instead of spending 80 model calls.
+  let unproductiveStreak = 0
   const redundantReads = createRedundantReadTracker()
   const planlessWork = createPlanlessWorkTracker()
 
@@ -274,18 +284,10 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
     // not compacted at the same point as an unknown 50k one.
     pendingCompaction ??= beginCompaction(messages, compactionThresholdFor(config.model))
 
-    if (steps >= maxSteps) {
-      messages.push({
-        role: 'user',
-        content: [
-          {
-            type: 'text',
-            text: `[elia] Step budget of ${maxSteps} model calls reached. Stop calling tools and summarise what you completed, what is left, and what you would do next.`,
-          },
-        ],
-      })
-      // One final call, with the budget lifted, so the run ends with a real report
-      // rather than being cut off mid-thought.
+    // One final call, with tool use waved off, so a forced stop still ends with a
+    // real report rather than being cut off mid-thought.
+    const wrapUpAndFinish = async (prompt: string, stopReason: StopReason): Promise<RunAgentLoopResult> => {
+      messages.push({ role: 'user', content: [{ type: 'text', text: prompt }] })
       steps += 1
       try {
         const wrapUp = await streamOnce()
@@ -294,7 +296,14 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
         if (signal?.aborted) return finish('aborted')
         throw error
       }
-      return finishAndFlush('step-budget')
+      return finishAndFlush(stopReason)
+    }
+
+    if (steps >= maxSteps) {
+      return wrapUpAndFinish(
+        `[elia] Step budget of ${maxSteps} model calls reached. Stop calling tools and summarise what you completed, what is left, and what you would do next.`,
+        'step-budget',
+      )
     }
 
     steps += 1
@@ -514,6 +523,31 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
     if (batchMutates) cache?.invalidate()
 
     messages.push({ role: 'user', content: toolResults })
+
+    // No-progress circuit breaker. A turn where every tool call errored is a turn
+    // that moved nothing forward; a run of them is thrashing. Nudge once, hard,
+    // then stop the step so the caller can decide what happens next.
+    const everyCallErrored = toolResults.length > 0 && toolResults.every((result) => result.is_error)
+    unproductiveStreak = everyCallErrored ? unproductiveStreak + 1 : 0
+    if (unproductiveStreak >= UNPRODUCTIVE_STOP_AT) {
+      if (verbose) writeNotice(`elia: ${unproductiveStreak} tool turns in a row failed entirely — ending the step`)
+      return wrapUpAndFinish(
+        `[elia] Every tool call has failed for ${unproductiveStreak} turns straight. Stop now. Do not try another variation. Summarise exactly what you were trying, the error you kept hitting, and what a different approach would need — that report is the only useful thing left to produce here.`,
+        'no-progress',
+      )
+    }
+    if (unproductiveStreak === UNPRODUCTIVE_NUDGE_AT) {
+      messages.push({
+        role: 'user',
+        content: [
+          {
+            type: 'text',
+            text: `[elia] That is ${unproductiveStreak} turns in a row where every tool call failed. Repeating slight variations of the same call is not working. Stop and do one of: (a) re-read the actual current state of the file or system you are acting on, (b) take a genuinely different approach, or (c) if something external is blocking you, say so plainly and stop.`,
+          },
+        ],
+      })
+      if (verbose) writeNotice('elia: warned the model it is not making progress')
+    }
 
     // Watch for a model reading one file per turn and, once it's a clear habit,
     // remind it to batch — the biggest single win on round-trip count. Consecutive
