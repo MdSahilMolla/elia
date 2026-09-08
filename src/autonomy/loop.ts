@@ -419,6 +419,12 @@ async function runAutonomousTaskInternal(options: AutonomousRunOptions): Promise
     if (runSignal?.aborted) return done('aborted')
 
     journal.append('phase', { phase: 'propose', attempt: amendments })
+    // Orienting is almost entirely read_file/grep/list_files, and those reads
+    // chain as predictably here as anywhere else (grep a symbol, open the hits;
+    // open a module, open its imports). Give the planner the same speculative
+    // cache and heuristic prefetch every sub-agent already gets, so the reads
+    // run while the model is still generating instead of after it.
+    const planningCache = createToolResultCache()
     const planning = await withAgentIdentity({ name: 'lead', role: 'lead', runId, cwd: process.cwd(), signal: runSignal }, () => withActionGovernor(governor, () => withGoalGraph(graph, () => runAgentLoop({
       messages,
       systemPrompt: plannerPrompt,
@@ -427,6 +433,8 @@ async function runAutonomousTaskInternal(options: AutonomousRunOptions): Promise
       useAnimation: true,
       verbose: true,
       maxSteps: defaults.plannerSteps,
+      cache: planningCache,
+      prefetcher: createPrefetcher({ tools: planningTools, cache: planningCache }),
       signal: runSignal,
       onTool: (event) => appendActionAudit(event, runId),
     }))))
