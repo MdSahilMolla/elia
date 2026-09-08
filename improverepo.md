@@ -403,3 +403,88 @@ governance/contract layer, continuum memory. This plan adds no new
 differentiator — it removes waste and closes small, measured gaps in what exists.
 That is the correct scope. Inventing "superiority features" on a roadmap nobody
 can measure is how v1 happened.
+
+---
+
+## 10. Remaining optimization opportunities (post-v3)
+
+With all v3 items shipped, the following optimization opportunities have been
+identified through codebase analysis. These are **not** committed as a formal v4
+plan — they are documented here for future consideration, pending measurement
+and prioritization.
+
+### 10.1 Workspace performance (NEW - High Priority)
+
+The workspace collaboration system (M1-M6 commits) represents a major new
+surface area that needs performance attention:
+
+- **SQLite query optimization**: Add composite indexes for common query patterns
+  (objective_id, task_id, actor_id), implement query plan analysis, add query
+  performance monitoring
+- **Projection materialization**: Materialize frequently-accessed projections
+  (tasks, agents, objectives) with incremental updates
+- **WebSocket optimization**: Connection pooling, backpressure handling, batch
+  event delivery, connection health monitoring
+
+**Files**: `src/workspace/store.ts`, `src/workspace/schema.ts`,
+`src/workspace/events.ts`, `src/workspace/server.ts`
+
+### 10.2 Advanced caching strategies
+
+Building on the solid caching foundation:
+
+- **Cache warming strategies**: Pre-warm caches for known hot paths from profiling
+  data, background cache warming for frequently-accessed files
+- **Intelligent cache invalidation**: Fine-grained invalidation based on actual
+  changes, dependency tracking between cache entries
+- **Cache hit prediction**: ML-enhanced prediction for better cache utilization
+  (requires measurement infrastructure)
+
+**Files**: `src/cacheRegistry.ts`, `src/speculation/cache.ts`,
+`src/speculation/deterministicCache.ts`, `src/speculation/prefetch.ts`
+
+### 10.3 Concurrency & parallelism
+
+- **Subagent worker pool**: Reuse subagent processes to reduce spawn overhead
+  (deferred from v1, now worth revisiting if `bench-latency --live` shows fleet
+  spin-up dominating)
+- **Parallel verification**: Parallel execution for independent verification steps
+  while maintaining fail-fast semantics for critical failures
+- **Load-adaptive scaling**: Dynamically adjust concurrency limits based on system
+  metrics (CPU, memory, I/O)
+
+**Files**: `src/subagent.ts`, `src/autonomy/fleet.ts`, `src/autonomy/verify.ts`,
+`src/agentLoop.ts`
+
+### 10.4 Database & storage optimization
+
+- **Brain store optimization**: Incremental brain loading (only changed sessions),
+  optimized fingerprint computation, parallel session loading, search index
+  optimization
+- **Ledger compaction**: Background compaction of old ledger entries,
+  configurable compaction policies, compaction during idle periods
+
+**Files**: `src/brain/store.ts`, `src/brain/search.ts`, `src/ledger.ts`,
+`src/compaction.ts`
+
+### 10.5 Network & I/O optimization
+
+- **HTTP client optimization**: Connection pooling and reuse, request batching,
+  adaptive timeout based on response patterns, DNS caching optimization
+- **File I/O optimization**: Batch file operations, async file operation
+  optimization, file handle pooling, reduced system call overhead
+
+**Files**: `src/tools/webFetch.ts`, `src/tools/webSearch.ts`,
+`src/tools/readFile.ts`, `src/tools/editFile.ts`
+
+### 10.6 Measurement discipline for future work
+
+Any future optimization work should follow the v3 measurement discipline:
+
+- Each item must add measurement scenario to latency harness where applicable
+- Include before/after metrics in commit messages
+- Pass existing `bench-latency --strict` checks
+- Include performance regression tests
+- Document measurement methodology
+
+**Key principle**: If it can't be measured, it isn't claimed.
