@@ -1,7 +1,7 @@
 import type { Tool } from './types.ts'
 import { DEFAULT_SHELL_TIMEOUT_MS, formatShellResult, runShell, type ShellResult } from '../shell.ts'
-import { existsSync } from 'node:fs'
-import { isAbsolute, join } from 'node:path'
+import { existsSync, readdirSync } from 'node:fs'
+import { delimiter, isAbsolute, join, relative } from 'node:path'
 import { currentAgent, resolveWorkspacePath } from '../autonomy/context.ts'
 import { paths } from '../config.ts'
 import { commandMayReadSensitiveData } from '../autonomy/sensitivePaths.ts'
@@ -25,6 +25,19 @@ const LONG_RUNNING_TIMEOUT_MS = 300_000
  */
 const LONG_RUNNING_COMMAND = /\b(?:npm|pnpm|yarn|bun)\s+(?:install|i|ci|add|update|upgrade|run\s+(?:build|test)|build|test)\b|\bpip3?\s+install\b|\bpoetry\s+(?:install|update)\b|\bcargo\s+(?:build|install|test)\b|\bgo\s+(?:build|install|mod\s+(?:download|tidy))\b|\bcomposer\s+install\b|\bbundle\s+install\b|\bdocker\s+build\b|\bmake\b|\bmvn\b|\bgradle(?:w)?(?:\.bat)?\b|\bcmake\b/i
 
+/** Commands that resolve a package binary and therefore need the project's own
+ * `node_modules` present — `npx prisma …`, `npm run build`, a bare local bin. */
+const NEEDS_NODE_MODULES = /^\s*(?:npx|pnpm\s+dlx|yarn\s+dlx|bunx)\s+\S|\b(?:npm|pnpm|yarn|bun)\s+(?:run|exec)\b/i
+
+/** `node_modules` exists and holds more than a stray `.package-lock.json`. */
+function nodeModulesPopulated(cwd: string): boolean {
+  try {
+    return readdirSync(join(cwd, 'node_modules')).some((e) => !e.startsWith('.'))
+  } catch {
+    return false
+  }
+}
+
 /** Starts a server that never exits — the model must not block a turn on one. */
 const DEV_SERVER_COMMAND = /\b(?:(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?(?:dev|start|serve|preview)|vite(?:\s|$)|next\s+(?:dev|start)|nodemon|ts-node-dev|concurrently|http-server|flask\s+run|uvicorn|gunicorn|rails\s+s(?:erver)?)\b/i
 
@@ -46,6 +59,35 @@ export function resolveRunCwd(rawCwd: string, base = currentAgent().cwd ?? proce
 /** Exported so the default can be unit-tested without spawning a real install. */
 export function defaultTimeoutForCommand(command: string): number {
   return LONG_RUNNING_COMMAND.test(command) ? LONG_RUNNING_TIMEOUT_MS : DEFAULT_SHELL_TIMEOUT_MS
+}
+
+/**
+ * A command running inside a scaffolded sub-project must resolve `node`, `npx`,
+ * and package binaries against *its own* `node_modules`, not elia's. Node walks
+ * the directory tree upward, so from `workspace/my-app` it otherwise finds
+ * `D:\elia\node_modules\.bin\prisma` — which is `@prisma/composer`'s CLI, not
+ * Prisma ORM — and `npx prisma generate` fails with `CLI.UNKNOWN_COMMAND`.
+ *
+ * When `cwd` is a sub-directory of the workspace, return an environment that
+ * puts the sub-project's `.bin` first on `PATH` and drops any `NODE_PATH`
+ * inherited from elia. Returns `undefined` for the workspace root itself and for
+ * anything outside it (no scoping needed / wanted). This is a backstop — the
+ * durable fix is installing the sub-project's own deps before its bins run.
+ */
+export function workspaceScopedEnv(cwd: string): Record<string, string> | undefined {
+  const rel = relative(paths.workspace, cwd)
+  if (!rel || rel.startsWith('..') || isAbsolute(rel)) return undefined
+  const base: Record<string, string> = {}
+  for (const [k, v] of Object.entries(process.env)) if (v !== undefined) base[k] = v
+  delete base.NODE_PATH
+  const binDir = join(cwd, 'node_modules', '.bin')
+  // Windows env vars are case-insensitive but the object here is not — normalise
+  // onto PATH so the prepend can't be shadowed by a stale `Path`.
+  const pathKey = Object.keys(base).find((k) => k.toUpperCase() === 'PATH')
+  const currentPath = pathKey ? base[pathKey]! : ''
+  if (pathKey && pathKey !== 'PATH') delete base[pathKey]
+  base.PATH = currentPath ? `${binDir}${delimiter}${currentPath}` : binDir
+  return base
 }
 
 export const runCommandTool: Tool = {
@@ -77,7 +119,39 @@ Do NOT run dev servers (\`npm run dev\`, \`vite\`, \`next dev\`, …) here — t
     const timeoutMs = typeof input.timeoutMs === 'number' ? input.timeoutMs : defaultTimeoutForCommand(input.command)
     const cwd = resolveRunCwd(typeof input.cwd === 'string' ? input.cwd.trim() : '')
     const signal = currentAgent().signal
-    const result = await runShell(input.command, timeoutMs, cwd, signal)
+    const env = workspaceScopedEnv(cwd)
+
+    // A scaffolded sub-project's bins can't run before its deps are installed —
+    // and if elia runs `npx prisma` from `workspace/app` with an empty
+    // `node_modules`, Node walks up and finds elia's own (`@prisma/composer`'s
+    // `prisma` shim → `CLI.UNKNOWN_COMMAND`). Install first, once, through the
+    // governor, when the command clearly needs the local tree.
+    if (
+      AUTO_INSTALL &&
+      env && // only inside the workspace
+      NEEDS_NODE_MODULES.test(input.command) &&
+      existsSync(join(cwd, 'package.json')) &&
+      !nodeModulesPopulated(cwd) &&
+      !isInstallCommand(input.command)
+    ) {
+      const installCmd = existsSync(join(cwd, 'bun.lock')) || existsSync(join(cwd, 'bun.lockb'))
+        ? 'bun install'
+        : existsSync(join(cwd, 'pnpm-lock.yaml'))
+          ? 'pnpm install'
+          : existsSync(join(cwd, 'yarn.lock'))
+            ? 'yarn install'
+            : 'npm install'
+      const gate = await activeActionGovernor().check({ name: 'run_command', input: { command: installCmd } })
+      if (gate.allowed) {
+        const pre = await runShell(installCmd, LONG_RUNNING_TIMEOUT_MS, cwd, signal, env)
+        if (pre.exitCode === 0) {
+          const done = await runShell(input.command, timeoutMs, cwd, signal, env)
+          return [`[installed sub-project dependencies first: ${installCmd}]`, formatShellResult(done)].join('\n')
+        }
+      }
+    }
+
+    const result = await runShell(input.command, timeoutMs, cwd, signal, env)
 
     // A command that failed only because a dependency is missing: install it
     // (through the governor, so manual mode still asks) and re-run once. The
@@ -88,9 +162,9 @@ Do NOT run dev servers (\`npm run dev\`, \`vite\`, \`next dev\`, …) here — t
         const installCmd = installCommandFor(missing, cwd ?? process.cwd())
         const gate = await activeActionGovernor().check({ name: 'run_command', input: { command: installCmd } })
         if (gate.allowed) {
-          const installResult = await runShell(installCmd, LONG_RUNNING_TIMEOUT_MS, cwd, signal)
+          const installResult = await runShell(installCmd, LONG_RUNNING_TIMEOUT_MS, cwd, signal, env)
           if (installResult.exitCode === 0) {
-            const retry = await runShell(input.command, timeoutMs, cwd, signal)
+            const retry = await runShell(input.command, timeoutMs, cwd, signal, env)
             return [
               `[auto-installed missing dependency: ${installCmd}]`,
               formatShellResult(retry),

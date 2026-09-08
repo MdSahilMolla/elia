@@ -79,11 +79,17 @@ export function resolveEliadPath(): string | undefined {
   if (existsSync(published)) return published
 
   // Local builds: target/{debug,release}/ and target/<triple>/{debug,release}/.
+  // Prefer the release build — it starts several times faster than a 30 MB+
+  // debug binary, and picking purely by mtime meant a stale `cargo build` could
+  // shadow a fresh `cargo build --release`. `ELIA_ELIAD_PROFILE=debug` forces
+  // the debug build for iterating on the daemon itself. Within the chosen
+  // profile, newest wins (covers multiple target triples).
   const targetRoot = join(ELIA_ROOT, 'target')
   const dirs = ['', ...safeReaddir(targetRoot)]
-  let newest: { path: string; mtimeMs: number } | undefined
-  for (const dir of dirs) {
-    for (const profile of ['debug', 'release']) {
+  const preferred = process.env.ELIA_ELIAD_PROFILE === 'debug' ? ['debug', 'release'] : ['release', 'debug']
+  for (const profile of preferred) {
+    let newest: { path: string; mtimeMs: number } | undefined
+    for (const dir of dirs) {
       const candidate = join(targetRoot, dir, profile, exe)
       try {
         const { mtimeMs } = statSync(candidate)
@@ -92,8 +98,9 @@ export function resolveEliadPath(): string | undefined {
         // not built for this profile/target
       }
     }
+    if (newest) return newest.path
   }
-  return newest?.path
+  return undefined
 }
 
 function safeReaddir(dir: string): string[] {

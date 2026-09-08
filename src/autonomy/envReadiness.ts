@@ -87,6 +87,17 @@ function installCommand(pm: 'bun' | 'pnpm' | 'yarn' | 'npm'): string {
   }
 }
 
+/** True when a package.json string lists at least one runtime or dev dependency. */
+function declaresDependencies(pkgJson: string | undefined): boolean {
+  if (!pkgJson) return false
+  try {
+    const pkg = JSON.parse(pkgJson) as { dependencies?: object; devDependencies?: object }
+    return Object.keys(pkg.dependencies ?? {}).length > 0 || Object.keys(pkg.devDependencies ?? {}).length > 0
+  } catch {
+    return false
+  }
+}
+
 /** Parse a version pin like "20", "v20.11.0", "lts/iron" to a major number. */
 function majorFromPin(raw: string): number | undefined {
   const trimmed = raw.trim().replace(/^v/, '')
@@ -139,6 +150,14 @@ export function assessEnvironment(ctx: Ctx): EnvironmentAssessment {
           fix: pm.name === 'bun' ? 'curl -fsSL https://bun.sh/install | bash' : `npm i -g ${pm.name}`,
         })
       }
+    } else if (declaresDependencies(read(pkgPath)) && !nodeModulesInstalled(cwd)) {
+      // A freshly scaffolded project: package.json lists deps but there is no
+      // lockfile yet and nothing is installed. Without this, the plan runs the
+      // project's own bins (`npx prisma`, `vite build`) against elia's
+      // node_modules and gets baffling errors.
+      declared.push('JS dependencies (package.json, no lockfile yet)')
+      warnings.push('package.json declares dependencies but node_modules is missing — install them before running the project or its tooling.')
+      addSetup('npm install')
     }
 
     const nodePin = fileExists(cwd, '.nvmrc', '.node-version')

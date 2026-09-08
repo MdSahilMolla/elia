@@ -106,7 +106,7 @@ function requestedAgentMode(): AgentMode {
   return 'dev'
 }
 
-const SUBCOMMANDS = ['auto', 'agent', 'evolve', 'bench', 'bench-latency', 'skills', 'runs', 'fork', 'resume', 'schedule', 'daemon', 'config', 'codex-login', 'control', 'bridge'] as const
+const SUBCOMMANDS = ['auto', 'agent', 'evolve', 'bench', 'bench-latency', 'skills', 'runs', 'fork', 'resume', 'schedule', 'daemon', 'doctor', 'config', 'codex-login', 'control', 'bridge'] as const
 type Subcommand = (typeof SUBCOMMANDS)[number]
 
 function printHelp(): void {
@@ -190,6 +190,7 @@ Background autonomy:
   elia schedule run <id>                   Run one scheduled goal immediately
   elia daemon --once                       Run due schedules once and exit
   elia daemon --poll-ms 30000             Keep checking due schedules in the foreground
+  elia doctor                              Check native-stack health: eliad daemon, C++ validator, Java bridge
 
 Editor / external integration:
   elia bridge                              Start the local JSONL-over-stdio bridge (used by the Elia VS Code extension)
@@ -1367,6 +1368,56 @@ async function runDaemon(): Promise<void> {
   } finally {
     unregisterShutdown()
   }
+}
+
+/**
+ * `elia doctor` — one screen answering "is the native stack actually working?".
+ * Prints the daemon mode, the resolved `eliad` binary and whether it runs, live
+ * socket reachability, the Java bridge jar + `java` on PATH, and the reason the
+ * last structural pre-flight (if any) did nothing.
+ */
+async function runDoctor(): Promise<void> {
+  const { daemonMode, resolveEliadPath, resolveJvmBridgeJar, daemonClient, DaemonUnavailable, socketPath } = await import('./daemon/client.ts')
+  const { lastPreflightSkipReason } = await import('./native/parseCheck.ts')
+  const lines: string[] = []
+  const mode = daemonMode()
+  lines.push(`ELIA_DAEMON        ${mode}${mode === 'off' ? '  (set ELIA_DAEMON=auto to enable the warm shell pool + structural pre-flight)' : ''}`)
+
+  const eliad = resolveEliadPath()
+  if (eliad) {
+    const profile = /[\\/]release[\\/]/.test(eliad) ? 'release' : /[\\/]debug[\\/]/.test(eliad) ? 'debug' : 'published'
+    let version = 'did not run'
+    try {
+      const probe = Bun.spawnSync([eliad, '--version'])
+      if (probe.exitCode === 0) version = new TextDecoder().decode(probe.stdout).trim()
+    } catch {
+      // reported as "did not run"
+    }
+    lines.push(`eliad binary       ${eliad}`)
+    lines.push(`                   profile ${profile} · ${version}`)
+  } else {
+    lines.push('eliad binary       not found (build: cargo build --release -p eliad, or install @elia/native)')
+  }
+
+  lines.push(`socket             ${socketPath()}`)
+  if (mode !== 'off') {
+    try {
+      const info = await daemonClient().info()
+      lines.push(`daemon             reachable · protocol ${info.protocol}`)
+    } catch (err) {
+      lines.push(`daemon             not reachable · ${err instanceof DaemonUnavailable ? err.message : String(err)}`)
+    }
+  }
+
+  const jar = resolveJvmBridgeJar()
+  lines.push(`jvm bridge jar     ${jar ?? 'not found (build: jvm/elia-jvm-bridge → elia-jvm-bridge.jar)'}`)
+  lines.push(`java on PATH        ${Bun.which('java') ?? 'no (Java pre-flight for .java edits will be skipped)'}`)
+
+  const skip = lastPreflightSkipReason()
+  if (skip) lines.push(`last pre-flight     skipped — ${skip}`)
+
+  if (machineReadable) emitEvent('doctor', { report: lines.join('\n') })
+  else process.stdout.write(`${lines.join('\n')}\n`)
 }
 
 async function runRuns(): Promise<void> {
@@ -3351,6 +3402,8 @@ async function main() {
       return runSchedule()
     case 'daemon':
       return runDaemon()
+    case 'doctor':
+      return runDoctor()
     case 'config':
       return runConfig()
     case 'codex-login':

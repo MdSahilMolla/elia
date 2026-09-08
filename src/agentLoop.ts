@@ -5,6 +5,7 @@ import { compactionThresholdFor } from './contextWindow.ts'
 import { createPlanlessWorkTracker, createRedundantReadTracker, isLoneBatchableRead, serialReadNudge } from './autonomy/toolBatchingNudge.ts'
 import type { ChatMessage, ContentBlock, Provider, ProviderActivity, Usage } from './providers/types.ts'
 import type { Tool } from './tools/types.ts'
+import { unknownToolMessage } from './tools/toolNameSuggest.ts'
 import { endTextTurn, writeNotice, writeToolCall, writeToolResult } from './ui/stream.ts'
 import { startThinkingAnimation } from './ui/animator.ts'
 import { createStreamCursor } from './ui/streamCursor.ts'
@@ -361,6 +362,17 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
       if (signal?.aborted) {
         onTool?.({ id: block.id, name: block.name, input: block.input, result: 'Run aborted before this tool ran.', isError: true, durationMs: 0, cached: false, failureClass: 'aborted' })
         return { type: 'tool_result' as const, tool_use_id: block.id, content: 'Run aborted before this tool ran.', is_error: true }
+      }
+
+      // The model named a tool that doesn't exist. Answer with the nearest real
+      // name and the full list instead of a bare "Unknown tool" — and skip the
+      // reservation / contract / governor machinery, since there is nothing to
+      // run. A hallucinated name is not a retryable failure.
+      if (!tool) {
+        const resultText = unknownToolMessage(block.name, Object.keys(toolsByName))
+        if (verbose) writeToolResult(block.name, resultText, true, false)
+        onTool?.({ id: block.id, name: block.name, input: block.input, result: resultText, isError: true, durationMs: Date.now() - startedAt, cached: false, failureClass: 'invalid-request' })
+        return { type: 'tool_result' as const, tool_use_id: block.id, content: resultText, is_error: true }
       }
 
       let resultText = ''

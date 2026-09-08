@@ -26,8 +26,30 @@ test('a tool call splits the streaming assistant paragraph', () => {
   const s = createTranscriptStore()
   s.assistantDelta('working')
   s.toolStart({ id: 't1', name: 'read_file', input: { path: 'a' } })
-  const assistant = s.getSnapshot().live.find((i) => i.kind === 'assistant') as { streaming: boolean }
+  // The settled paragraph is flushed into committed the moment the tool starts.
+  const { committed, live } = s.getSnapshot()
+  const assistant = [...committed, ...live].find((i) => i.kind === 'assistant') as { streaming: boolean }
   expect(assistant.streaming).toBe(false)
+})
+
+test('flushSettled keeps the live region bounded across a long tool batch', () => {
+  const s = createTranscriptStore()
+  s.appendUser('do a lot')
+  const naive: string[] = []
+  for (let i = 0; i < 30; i += 1) {
+    s.toolStart({ id: `t${i}`, name: 'grep', input: { pattern: String(i) } })
+    s.toolEnd(evt({ id: `t${i}`, name: 'grep', result: `r${i}` }))
+    naive.push(`t${i}`)
+  }
+  s.assistantDelta('all done')
+  const snap = s.getSnapshot()
+  // Everything that settled moved to <Static>; the live region never piles up.
+  expect(snap.live.length).toBeLessThanOrEqual(3)
+  // Order across the two lists still matches a single append-only list.
+  const toolIds = [...snap.committed, ...snap.live].filter((i) => i.kind === 'tool').map((i) => i.id)
+  expect(toolIds).toEqual(naive)
+  expect(s.toolCount()).toBe(30)
+  expect(s.turnItems().filter((i) => i.kind === 'tool')).toHaveLength(30)
 })
 
 test('toolEnd matches the running card by id', () => {

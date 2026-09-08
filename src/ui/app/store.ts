@@ -76,6 +76,9 @@ export interface TranscriptStore {
   /** The most recent tool item across the whole session (for `/expand`). */
   lastTool(n?: number): ToolItem | undefined
   toolCount(): number
+  /** Everything belonging to the in-progress turn — `committed` items flushed
+   * mid-turn plus whatever is still `live`. Empty once `commit()` has run. */
+  turnItems(): readonly Item[]
   toMarkdown(title?: string): string
   reset(): void
 }
@@ -83,6 +86,10 @@ export interface TranscriptStore {
 export function createTranscriptStore(): TranscriptStore {
   let committed: Item[] = []
   let live: Item[] = []
+  // Index into `committed` where the current turn's items begin. `flushSettled`
+  // moves live items into `committed` mid-turn, so "this turn's items" is
+  // `committed.slice(turnBase)` followed by whatever is still `live`.
+  let turnBase = 0
   let turn = 0
   let version = 0
   let idSeq = 0
@@ -92,12 +99,36 @@ export function createTranscriptStore(): TranscriptStore {
   const nextId = (): string => `i${++idSeq}`
 
   const changed = (): void => {
+    flushSettled()
     version += 1
     snapshot = { committed, live, turn, version }
     for (const listener of listeners) listener()
   }
 
   const lastLive = (): Item | undefined => live[live.length - 1]
+
+  // Ink re-renders the whole `live` region every frame and repaints it with a
+  // blind cursor-up. Once that region grows past the viewport height the repaint
+  // miscounts and the scrollback jumps / duplicates. So during a turn, keep
+  // migrating everything that has *settled* — finished tool cards, paragraphs
+  // that stopped streaming, notices — into `committed`, where <Static> prints it
+  // once and never touches it again. Stops at the first item still in motion so
+  // ordering is never broken; `commit()` at turn end just flushes the tail.
+  const isSettled = (item: Item): boolean => {
+    if (item.kind === 'tool') return item.status !== 'running'
+    if (item.kind === 'assistant' || item.kind === 'thinking') return !item.streaming
+    return true // user / notice / error / shell never change after being added
+  }
+  const flushSettled = (): void => {
+    // Migrate the settled prefix, but always leave the final live item in place:
+    // it may be a streaming paragraph still repainting, and keeping `live`
+    // non-empty during a turn keeps `commit()`'s end-of-turn contract simple.
+    let cut = 0
+    while (cut < live.length - 1 && isSettled(live[cut]!)) cut += 1
+    if (cut === 0) return
+    committed = [...committed, ...live.slice(0, cut)]
+    live = live.slice(cut)
+  }
 
   return {
     getSnapshot: () => snapshot,
@@ -107,6 +138,7 @@ export function createTranscriptStore(): TranscriptStore {
     },
 
     appendUser(text) {
+      if (live.length === 0) turnBase = committed.length
       live = [...live, { id: nextId(), kind: 'user', text }]
       changed()
     },
@@ -202,6 +234,7 @@ export function createTranscriptStore(): TranscriptStore {
       const tools = [...committed, ...live].filter((item): item is ToolItem => item.kind === 'tool')
       return n === undefined ? tools[tools.length - 1] : tools[n]
     },
+    turnItems: () => [...committed.slice(turnBase), ...live],
     toolCount() {
       return [...committed, ...live].filter((item) => item.kind === 'tool').length
     },
@@ -244,6 +277,7 @@ export function createTranscriptStore(): TranscriptStore {
     reset() {
       committed = []
       live = []
+      turnBase = 0
       turn = 0
       idSeq = 0
       changed()

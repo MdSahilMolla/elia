@@ -939,6 +939,12 @@ Read the changed files in full context. Improve only concrete issues directly re
   // gate therefore gets its own allowance of `maxRepairAttempts`.
   let buildRepairs = 0
   let reviewRepairs = 0
+  // Per-gate budgets bound the common path, but a change that flips verification
+  // red↔green across review repairs can draw on both gates in a way that adds up.
+  // This is the absolute ceiling on model repair passes for the whole run — once
+  // hit, the run hands off regardless of which gate is open.
+  const MAX_TOTAL_REPAIRS = maxRepairAttempts * 2 + 1
+  let totalRepairs = 0
   // Fingerprints of what was still failing after each verify+review pass, oldest
   // first — the input to the deterministic "are repairs actually converging?"
   // check that stops a thrashing run early instead of at the budget.
@@ -1208,8 +1214,9 @@ Judge what is there, not what the code looks like it would probably do. A criter
       }
     }
 
-    if (repairsSpent >= maxRepairAttempts) {
-      writeSubStep(`Stopping after ${attempt} repair attempt${attempt === 1 ? '' : 's'} (${gate} gate exhausted) — this needs a human.`)
+    if (repairsSpent >= maxRepairAttempts || totalRepairs >= MAX_TOTAL_REPAIRS) {
+      const why = repairsSpent >= maxRepairAttempts ? `${gate} gate exhausted` : `repair ceiling reached (${totalRepairs})`
+      writeSubStep(`Stopping after ${attempt} repair attempt${attempt === 1 ? '' : 's'} (${why}) — this needs a human.`)
       // Only draw the lesson when the trajectory actually stalled/regressed — a
       // run that was still converging when the budget ran out has no dead
       // approach to warn a future run about.
@@ -1222,6 +1229,7 @@ Judge what is there, not what the code looks like it would probably do. A criter
     // --- Reflect & repair ---------------------------------------------------
 
     attempt += 1
+    totalRepairs += 1
     if (verification.passed) reviewRepairs += 1
     else buildRepairs += 1
     const gateAttempt = verification.passed ? reviewRepairs : buildRepairs

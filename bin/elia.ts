@@ -1,3 +1,2 @@
 #!/usr/bin/env bun
-
-await import('../src/index.ts')
+import '../src/index.ts'

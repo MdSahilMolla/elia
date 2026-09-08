@@ -29,6 +29,22 @@ import {
   type ParseCheckResult,
 } from '../daemon/index.ts'
 
+/**
+ * The reason the most recent pre-flight did nothing, or `undefined` when it
+ * actually ran. `elia doctor` reads this; in `ELIA_DAEMON=require` mode it is
+ * also echoed to stderr, so "why is the native check not firing?" has an answer
+ * instead of silence.
+ */
+let lastSkipReason: string | undefined
+export function lastPreflightSkipReason(): string | undefined {
+  return lastSkipReason
+}
+function skip(reason: string): undefined {
+  lastSkipReason = reason
+  if (daemonMode() === 'require') process.stderr.write(`[elia] structural pre-flight skipped: ${reason}\n`)
+  return undefined
+}
+
 /** Extensions the C++ validator's lexers handle well. Everything else is skipped
  * — prose, config, and data files have brackets it would misread. */
 const STRUCTURAL_EXTENSIONS = new Set([
@@ -82,17 +98,20 @@ export async function preflightStructuralCheck(
   before: string | undefined,
   after: string,
 ): Promise<string | undefined> {
-  if (daemonMode() === 'off') return undefined
-  if (after.length > MAX_CHECK_BYTES) return undefined
+  if (daemonMode() === 'off') return skip('ELIA_DAEMON=off (set ELIA_DAEMON=auto to enable it)')
+  if (after.length > MAX_CHECK_BYTES) return skip(`file over ${MAX_CHECK_BYTES} bytes`)
   const ext = extensionOf(path)
 
   try {
-    if (ext === 'java') return await javaPreflight(path, before, after)
-    if (STRUCTURAL_EXTENSIONS.has(ext)) return await structuralPreflight(path, before, after)
-    return undefined
+    let result: string | undefined
+    if (ext === 'java') result = await javaPreflight(path, before, after)
+    else if (STRUCTURAL_EXTENSIONS.has(ext)) result = await structuralPreflight(path, before, after)
+    else return skip(`no checker for .${ext || '(no extension)'}`)
+    lastSkipReason = undefined
+    return result
   } catch (err) {
-    if (err instanceof DaemonUnavailable) return undefined
-    return undefined // any checker problem: fail open
+    if (err instanceof DaemonUnavailable) return skip(`daemon unavailable: ${err.message}`)
+    return skip(`checker error: ${err instanceof Error ? err.message : String(err)}`)
   }
 }
 

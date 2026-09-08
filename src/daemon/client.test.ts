@@ -48,6 +48,20 @@ afterAll(async () => {
   rmSync(scratch, { recursive: true, force: true })
 })
 
+test('resolveEliadPath prefers the release build over a newer debug build', () => {
+  const { existsSync } = require('node:fs') as typeof import('node:fs')
+  const { ELIA_ROOT } = require('../statePaths.ts') as typeof import('../statePaths.ts')
+  const exe = process.platform === 'win32' ? 'eliad.exe' : 'eliad'
+  const release = join(ELIA_ROOT, 'target', 'release', exe)
+  const debug = join(ELIA_ROOT, 'target', 'debug', exe)
+  if (!existsSync(release) || !existsSync(debug)) return // only meaningful when both are built
+  delete process.env.ELIA_ELIAD_PATH
+  delete process.env.ELIA_ELIAD_PROFILE
+  expect(resolveEliadPath()).toBe(release)
+  process.env.ELIA_ELIAD_PROFILE = 'debug'
+  expect(resolveEliadPath()).toBe(debug)
+})
+
 test('daemonMode reads ELIA_DAEMON', () => {
   process.env.ELIA_DAEMON = 'off'
   expect(daemonMode()).toBe('off')

@@ -40,13 +40,20 @@ export async function runShell(
   cwd?: string,
   /** Cooperative cancellation for autonomous runs. */
   signal?: AbortSignal,
+  /**
+   * Complete environment for the spawned process. When supplied it is used
+   * verbatim (the caller is responsible for spreading `process.env`), and the
+   * command runs in-process — the resident daemon's warm shell has a fixed
+   * environment and cannot honour a per-command override.
+   */
+  env?: Record<string, string>,
 ): Promise<ShellResult> {
   // When the resident daemon is enabled it runs the command in a warm shell,
   // skipping the per-command process spawn (20–80ms on Windows). Any transport
   // problem falls through to the in-process path below; `ELIA_DAEMON=require`
   // surfaces the failure instead, for benchmarking the intended path.
   const mode = daemonMode()
-  if (mode !== 'off') {
+  if (mode !== 'off' && !env) {
     try {
       const r = await daemonShellExec({
         command,
@@ -75,6 +82,7 @@ export async function runShell(
     stdout: 'pipe',
     stderr: 'pipe',
     ...(cwd ? { cwd } : {}),
+    ...(env ? { env } : {}),
     ...(process.platform === 'win32' ? {} : { detached: true }),
   })
 

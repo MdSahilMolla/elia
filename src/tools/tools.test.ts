@@ -1,13 +1,14 @@
 import { afterAll, beforeAll, expect, spyOn, test } from 'bun:test'
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { delimiter, join } from 'node:path'
 import { withAgentIdentity } from '../autonomy/context.ts'
 import { editFileTool } from './editFile.ts'
 import { grepTool, searchWithJs } from './grep.ts'
 import { listFilesTool } from './listFiles.ts'
 import { readFileTool } from './readFile.ts'
-import { defaultTimeoutForCommand, runCommandTool } from './runCommand.ts'
+import { defaultTimeoutForCommand, runCommandTool, workspaceScopedEnv } from './runCommand.ts'
+import { paths } from '../config.ts'
 import { writeFileTool } from './writeFile.ts'
 import { dataScienceTool } from './dataScience.ts'
 import { readSpreadsheetTool } from './readSpreadsheet.ts'
@@ -325,6 +326,20 @@ test('run_command honors an explicit timeoutMs and kills a command that overruns
 test('run_command rejects an out-of-range timeoutMs', async () => {
   await expect(executeTool('run_command', { command: 'echo hi', timeoutMs: 500 })).rejects.toThrow('timeoutMs must be an integer')
   await expect(executeTool('run_command', { command: 'echo hi', timeoutMs: 700_000 })).rejects.toThrow('timeoutMs must be an integer')
+})
+
+test('workspaceScopedEnv scopes a sub-project, leaves everything else alone', () => {
+  const sub = join(paths.workspace, 'my-app')
+  const env = workspaceScopedEnv(sub)
+  expect(env).toBeDefined()
+  const binDir = join(sub, 'node_modules', '.bin')
+  const pathVar = env?.PATH ?? ''
+  expect(pathVar.startsWith(binDir + delimiter) || pathVar === binDir).toBe(true)
+  expect(env?.NODE_PATH).toBeUndefined()
+
+  // The workspace root itself and anything outside it: no scoping.
+  expect(workspaceScopedEnv(paths.workspace)).toBeUndefined()
+  expect(workspaceScopedEnv(process.cwd())).toBeUndefined()
 })
 
 test('run_command gives installs, builds, and test runs a longer default timeout', () => {

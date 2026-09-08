@@ -325,7 +325,7 @@ export function App(props: AppProps) {
         store.error(`Error: ${error instanceof Error ? error.message : String(error)}`)
       } finally {
         abortRef.current = null
-        const tools = store.getSnapshot().live.filter((i): i is ToolItem => i.kind === 'tool')
+        const tools = store.turnItems().filter((i): i is ToolItem => i.kind === 'tool')
         if (tools.length > 2) {
           const line = rollupLine(rollupTools(tools))
           if (line) store.notice(`⏺ ${line}`)
