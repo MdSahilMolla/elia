@@ -4,20 +4,24 @@
  * Before `edit_file` / `write_file` commits a change, check the *proposed*
  * contents:
  *
+ *  - every supported non-Java source file goes through the C++ structural
+ *    validator (`native/elia-parse`). This runs **in-process** via `bun:ffi`
+ *    (`./ffi.ts`) whenever the `elia-native` library is built — no daemon, no
+ *    socket, works with the default `ELIA_DAEMON=off`. The daemon's `parse.check`
+ *    is only a fallback for when the library is missing but a daemon is up.
  *  - `.java` goes through the JDK compiler (`jvm.check`, Java bridge), filtered
  *    to syntax/structure errors only — import-resolution noise from a missing
- *    classpath is ignored.
- *  - every other supported source file goes through the C++ structural validator
- *    (`native/elia-parse`, `parse.check`).
+ *    classpath is ignored. This genuinely needs the resident daemon, so a `.java`
+ *    pre-flight is skipped unless `ELIA_DAEMON` is `auto`/`require`.
  *
  * If the edit newly breaks the file — the old contents were fine and the new
  * ones are not — reject the write and hand the model the exact positions. That
  * trades a sub-millisecond (a few hundred ms for Java) check for a failed build
  * round-trip.
  *
- * Fails open in every uncertain case: daemon off or unreachable, unknown file
- * type, file already broken before the edit, checker error. It never blocks an
- * edit it is not confident about.
+ * Fails open in every uncertain case: no checker available, unknown file type,
+ * file already broken before the edit, checker error. It never blocks an edit it
+ * is not confident about.
  */
 
 import {
@@ -28,6 +32,7 @@ import {
   type JvmCheckResult,
   type ParseCheckResult,
 } from '../daemon/index.ts'
+import { nativeParseCheck, nativeUnavailableReason } from './ffi.ts'
 
 /**
  * The reason the most recent pre-flight did nothing, or `undefined` when it
@@ -43,6 +48,15 @@ function skip(reason: string): undefined {
   lastSkipReason = reason
   if (daemonMode() === 'require') process.stderr.write(`[elia] structural pre-flight skipped: ${reason}\n`)
   return undefined
+}
+
+/** Which structural checker actually handled the last edit: the in-process
+ * `bun:ffi` library, the daemon's `parse.check`, or neither. `elia doctor` reads
+ * this. */
+export type StructuralBackend = 'native' | 'daemon' | 'none'
+let lastBackend: StructuralBackend = 'none'
+export function lastStructuralBackend(): StructuralBackend {
+  return lastBackend
 }
 
 /** Extensions the C++ validator's lexers handle well. Everything else is skipped
@@ -98,15 +112,26 @@ export async function preflightStructuralCheck(
   before: string | undefined,
   after: string,
 ): Promise<string | undefined> {
-  if (daemonMode() === 'off') return skip('ELIA_DAEMON=off (set ELIA_DAEMON=auto to enable it)')
   if (after.length > MAX_CHECK_BYTES) return skip(`file over ${MAX_CHECK_BYTES} bytes`)
   const ext = extensionOf(path)
 
   try {
     let result: string | undefined
-    if (ext === 'java') result = await javaPreflight(path, before, after)
-    else if (STRUCTURAL_EXTENSIONS.has(ext)) result = await structuralPreflight(path, before, after)
-    else return skip(`no checker for .${ext || '(no extension)'}`)
+    if (ext === 'java') {
+      if (daemonMode() === 'off') return skip('ELIA_DAEMON=off — the Java pre-flight needs the daemon (set ELIA_DAEMON=auto)')
+      result = await javaPreflight(path, before, after)
+    } else if (STRUCTURAL_EXTENSIONS.has(ext)) {
+      const structural = await structuralPreflight(path, before, after)
+      if (structural === NO_STRUCTURAL_CHECKER) {
+        return skip(
+          `no structural checker available — ${nativeUnavailableReason() ?? 'native library not loaded'}` +
+            (daemonMode() === 'off' ? ' and ELIA_DAEMON=off' : ''),
+        )
+      }
+      result = structural
+    } else {
+      return skip(`no checker for .${ext || '(no extension)'}`)
+    }
     lastSkipReason = undefined
     return result
   } catch (err) {
@@ -115,17 +140,39 @@ export async function preflightStructuralCheck(
   }
 }
 
+/** Distinguishes "the check ran and the edit is fine" (`undefined`) from "no
+ * checker was available at all" — the latter is a skip, not an allow. */
+const NO_STRUCTURAL_CHECKER = Symbol('no-structural-checker')
+
+/**
+ * Run the C++ structural validator on `source`. Prefers the in-process library
+ * (`bun:ffi`); falls back to the daemon's `parse.check` only when the library is
+ * absent but a daemon is enabled. Returns `undefined` when neither is available.
+ */
+async function runStructural(source: string, path: string): Promise<ParseCheckResult | undefined> {
+  const inProcess = nativeParseCheck(source, { path })
+  if (inProcess) {
+    lastBackend = 'native'
+    return inProcess
+  }
+  if (daemonMode() === 'off') return undefined
+  const result = await daemonParseCheck({ source, path })
+  lastBackend = 'daemon'
+  return result
+}
+
 async function structuralPreflight(
   path: string,
   before: string | undefined,
   after: string,
-): Promise<string | undefined> {
-  const afterResult = await daemonParseCheck({ source: after, path })
+): Promise<string | undefined | typeof NO_STRUCTURAL_CHECKER> {
+  const afterResult = await runStructural(after, path)
+  if (!afterResult) return NO_STRUCTURAL_CHECKER
   if (isClean(afterResult)) return undefined
 
   if (before !== undefined && before.trim().length > 0) {
-    const beforeResult = await daemonParseCheck({ source: before, path })
-    if (!beforeResult.ok) return undefined // already broken; a repair must not be blocked
+    const beforeResult = await runStructural(before, path)
+    if (beforeResult && !beforeResult.ok) return undefined // already broken; a repair must not be blocked
   }
 
   return reject(path, afterResult.errors.slice(0, 5).map((e) => `  line ${e.line}:${e.column} — ${e.message}`))

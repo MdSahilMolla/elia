@@ -1,9 +1,14 @@
 # Elia's native systems layer. TypeScript in `src/` stays the conductor and ships
 # as source; this workspace builds to per-platform binaries that `src/daemon/` and
 # `src/native/` load at runtime, with a pure-TS fallback whenever they are absent.
+#
+#   crates/eliad        the resident daemon (`src/daemon/` spawns + dials it)
+#   crates/elia-parse   safe Rust bindings for the C++ structural validator
+#   crates/elia-native  cdylib `src/native/ffi.ts` dlopen's via bun:ffi — the
+#                       in-process structural edit-check, no daemon hop
 [workspace]
 resolver = "2"
-members = ["crates/eliad", "crates/elia-parse"]
+members = ["crates/eliad", "crates/elia-parse", "crates/elia-native"]
 
 [workspace.package]
 version = "0.1.0"

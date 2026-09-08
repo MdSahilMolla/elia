@@ -37,7 +37,10 @@ the address. The envelope and every method live in
 `parse.check` runs the C++ structural validator ([`native/elia-parse`](../../native/elia-parse),
 via the `elia-parse` crate) — a sub-millisecond check for unbalanced brackets
 and unterminated strings/comments, so a broken `edit_file` result is caught
-before a build round-trip.
+before a build round-trip. **This is a fallback path:** by default the
+TypeScript side runs the same check in-process via `bun:ffi` and the
+[`elia-native`](../elia-native) cdylib, and only falls back to this RPC when the
+library is missing but a daemon is up.
 
 `jvm.*` is forwarded to [`elia-jvm-bridge`](../../jvm/elia-jvm-bridge) (Java),
 a JVM child this daemon spawns and supervises lazily — it type-checks a Java

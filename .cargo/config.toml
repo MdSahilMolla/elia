@@ -6,3 +6,11 @@
 #   rustup override set stable-x86_64-pc-windows-gnu     # run once, in the repo root
 # LLVM-MinGW (clang + lld + UCRT) provides the linker. CI and the release
 # workflow pass `--target` explicitly; see the `justfile`.
+#
+# `elia_native.dll` links libc++ (the C++ validator uses std::string/std::vector)
+# and so needs `libc++.dll` + `libunwind.dll` beside it at load time. On a dev
+# box the LLVM-MinGW toolchain puts those on PATH. The published
+# `@elia/native-win32-*` package ships them next to the .dll. If neither is
+# present the dlopen just fails and `src/native/` falls back to the daemon and
+# then the pure-TS path — never a hard error. (No such issue on Linux/macOS:
+# libc++ / libstdc++ is a system library there.)

@@ -52,6 +52,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "elia-native"
+version = "0.1.0"
+dependencies = [
+ "elia-parse",
+ "serde_json",
+]
+
+[[package]]
 name = "elia-parse"
 version = "0.1.0"
 dependencies = [

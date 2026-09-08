@@ -2,9 +2,11 @@
 #
 # The TypeScript conductor in `src/` needs none of this — it runs straight from
 # source with `bun`. These recipes build the native layer:
-#   - crates/       Rust: the `eliad` daemon (+ later the napi addon)
-#   - native/       C/C++: tree-sitter host, embedding host  (WS5+, not yet present)
-#   - jvm/          Java: the JVM-project bridge              (WS7+, not yet present)
+#   - crates/eliad        Rust: the resident daemon (warm shells, MCP supervisor)
+#   - crates/elia-parse   Rust: safe bindings for the C++ structural validator
+#   - crates/elia-native  Rust: cdylib the TS side dlopen's via bun:ffi
+#   - native/elia-parse   C++: the structural edit-check scanner
+#   - jvm/elia-jvm-bridge Java: JDK-compiler type-check for .java edits
 #
 # `just` is optional. `cargo`, `bun`, etc. work directly; this just wires the
 # cross-language steps together and pins the targets CI uses.
@@ -16,11 +18,17 @@ build: build-rust build-jvm
     {{bun}} run typecheck
 
 # The Rust workspace (debug). Release: `just build-rust-release`.
+# Building the whole workspace also builds `elia-native`; the TS side finds the
+# cdylib in target/{release,debug}/ on its own (see src/native/ffi.ts).
 build-rust:
     cargo build --workspace
 
 build-rust-release:
     cargo build --workspace --release
+
+# Just the in-process structural-check library (release), for `src/native/ffi.ts`.
+build-native:
+    cargo build -p elia-native --release
 
 # elia-jvm-bridge — plain javac + jar (no Gradle needed yet).
 build-jvm:

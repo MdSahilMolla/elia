@@ -1,0 +1,17 @@
+[package]
+name = "elia-native"
+description = "In-process C ABI over elia-parse. Built as a shared library so the TypeScript conductor can run the structural edit check via bun:ffi — no daemon, no socket hop, works with ELIA_DAEMON=off."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lib]
+# cdylib: a plain shared library (.so / .dylib / .dll) that `bun:ffi` dlopen's.
+# rlib: so `cargo test -p elia-native` can exercise the wrappers directly.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+elia-parse = { path = "../elia-parse" }
+serde_json.workspace = true

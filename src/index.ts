@@ -1392,10 +1392,20 @@ async function runDaemon(): Promise<void> {
  */
 async function runDoctor(): Promise<void> {
   const { daemonMode, resolveEliadPath, resolveJvmBridgeJar, daemonClient, DaemonUnavailable, socketPath } = await import('./daemon/client.ts')
-  const { lastPreflightSkipReason } = await import('./native/parseCheck.ts')
+  const { lastPreflightSkipReason, lastStructuralBackend } = await import('./native/parseCheck.ts')
+  const { nativeAvailable, nativeUnavailableReason, nativeLibPath, nativeVersion } = await import('./native/ffi.ts')
   const lines: string[] = []
   const mode = daemonMode()
-  lines.push(`ELIA_DAEMON        ${mode}${mode === 'off' ? '  (set ELIA_DAEMON=auto to enable the warm shell pool + structural pre-flight)' : ''}`)
+  lines.push(`ELIA_DAEMON        ${mode}${mode === 'off' ? '  (warm shell pool + Java pre-flight need auto; the structural pre-flight does not)' : ''}`)
+
+  if (nativeAvailable()) {
+    lines.push(`elia-native        in-process · ${nativeLibPath()}`)
+    lines.push(`                   v${nativeVersion() ?? '?'} · structural pre-flight runs without the daemon`)
+  } else {
+    lines.push(`elia-native        not loaded — ${nativeUnavailableReason() ?? 'unknown'}`)
+    lines.push('                   build: cargo build -p elia-native --release')
+  }
+  lines.push(`last structural    ${lastStructuralBackend()}`)
 
   const eliad = resolveEliadPath()
   if (eliad) {

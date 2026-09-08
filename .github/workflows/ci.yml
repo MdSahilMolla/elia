@@ -42,9 +42,9 @@ jobs:
           npm audit --omit=dev
           rm -f package-lock.json
 
-  # The native systems layer (crates/): the `eliad` daemon today, the napi addon
-  # next. Kept separate so a Rust toolchain problem never blocks the TS suite,
-  # and vice versa.
+  # The native systems layer (crates/): the `eliad` daemon and `elia-native`, the
+  # in-process structural-check library the TS side dlopen's via bun:ffi. Kept
+  # separate so a Rust toolchain problem never blocks the TS suite, and vice versa.
   native:
     runs-on: ubuntu-latest
     steps:
@@ -77,6 +77,13 @@ jobs:
             --main-class com.elia.jvmbridge.Bridge -C build/classes .
       - name: Install locked dependencies
         run: bun install --frozen-lockfile
+      - name: In-process native check (bun:ffi → elia-native cdylib)
+        # Builds the cdylib so `src/native/ffi.ts` finds it in target/release and
+        # the `withNative` tests run instead of skipping. Daemon left off — this
+        # path is meant to work without it.
+        run: |
+          cargo build -p elia-native --release
+          bun test src/native/ --timeout=20000
       - name: Daemon-backed TypeScript tests (shell + C++ parse + JVM check + MCP)
         env:
           ELIA_DAEMON: auto
