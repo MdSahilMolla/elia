@@ -12,6 +12,8 @@ import type { WorkspaceStore } from './store.ts'
 import type { AgentMessageRecord, DecisionRecord, TaskRecord } from './types.ts'
 
 export interface ContextPack {
+  /** `build` = do the work; `review` = adversarially check work already done. */
+  mode: 'build' | 'review'
   objectiveGoal: string
   acceptanceCriteria: string[]
   verificationCommands: string[]
@@ -22,6 +24,8 @@ export interface ContextPack {
     instructions: string
     files: string[]
     reviewNotes?: string
+    /** On a review job: the report the completing agent gave. */
+    workReport?: string
   }
   dependencyReports: { taskId: string; title: string; report: string }[]
   decisions: { title: string; detail: string }[]
@@ -55,13 +59,16 @@ export function buildContextPack(store: WorkspaceStore, taskId: string, agentId?
     .slice(-12)
     .map((message) => ({ from: message.fromId, kind: message.kind, topic: message.topic, body: message.body.slice(0, 800) }))
 
+  const mode: ContextPack['mode'] = task.status === 'in-review' ? 'review' : 'build'
   const pack: ContextPack = {
+    mode,
     objectiveGoal: objective.goal,
     acceptanceCriteria: task.acceptanceCriteria,
     verificationCommands: task.verificationCommands,
     task: {
       id: task.id, title: task.title, role: task.role, instructions: task.instructions,
       files: task.files, reviewNotes: task.reviewNotes,
+      workReport: mode === 'review' ? task.resultReport ?? task.reviewNotes : undefined,
     },
     dependencyReports,
     decisions: decisions.map((d) => ({ title: d.title, detail: d.detail })),
@@ -75,6 +82,17 @@ export function buildContextPack(store: WorkspaceStore, taskId: string, agentId?
 
 function renderBriefing(pack: ContextPack): string {
   const lines: string[] = [`# Shared objective\n${pack.objectiveGoal}`]
+
+  if (pack.mode === 'review') {
+    lines.push(
+      `\n## You are reviewing work already done`,
+      `The task "${pack.task.title}" was completed by another agent. Read the diff for the files it owns` +
+        ` (${pack.task.files.join(', ') || 'the working tree'}), verify its report against what the code actually does,` +
+        ` and check it against the acceptance criteria${pack.acceptanceCriteria.length ? ` (${pack.acceptanceCriteria.join('; ')})` : ''}.`,
+      pack.task.workReport ? `\n### The completing agent's report\n${pack.task.workReport}` : '',
+      `\nFinish by reporting a verdict: state clearly whether the work is APPROVED or needs REVISION, and for revision list every concrete change required.`,
+    )
+  }
 
   if (pack.decisions.length) {
     lines.push(`\n## Decisions already made (do not relitigate)\n${pack.decisions.map((d) => `- ${d.title}: ${d.detail}`).join('\n')}`)

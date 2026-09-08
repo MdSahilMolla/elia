@@ -340,7 +340,7 @@ export function applyProjection(db: Database, event: PersistedEvent): void {
       return
     }
     case 'ReviewRequested': {
-      setTaskStatus(db, String(event.taskId), 'in-review')
+      setTaskStatus(db, String(event.taskId), 'in-review', p.report !== undefined ? { result_report: String(p.report) } : {})
       return
     }
     case 'ReviewCompleted': {

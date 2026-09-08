@@ -136,10 +136,10 @@ test('presence tracks connected participants and clears on disconnect', async ()
   expect(status3.presence.length).toBe(1)
 })
 
-test('not-yet-implemented methods report their milestone instead of failing opaquely', async () => {
+test('an unknown RPC method is rejected with a clear error', async () => {
   const { server, owner } = await fixture()
   const client = await connect(server, owner)
-  expect(await rejection(client.call('review.submit', { taskId: 'x' }))).toMatch(/M5/)
+  expect(await rejection(client.call('does.not.exist' as never, {}))).toMatch(/unknown workspace RPC method/i)
 })
 
 test('objective.add plans a task graph; approval activates it and makes wave-1 tasks ready', async () => {

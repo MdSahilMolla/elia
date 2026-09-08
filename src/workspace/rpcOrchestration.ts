@@ -21,9 +21,7 @@ const AGENT_METHODS = new Set<WorkspaceRpcMethod>([
   'task.assign', 'task.reassign', 'task.instruct',
 ])
 
-const PENDING: Partial<Record<WorkspaceRpcMethod, string>> = {
-  'review.submit': 'M5 (reviews)',
-}
+const PENDING: Partial<Record<WorkspaceRpcMethod, string>> = {}
 
 type Params = Record<string, unknown>
 
@@ -191,6 +189,24 @@ export async function dispatchOrchestrationRpc(
       requireCapability(caller, 'assign_task')
       const taskId = reqStr(params, 'taskId', 100)
       store.append({ type: 'TaskUnblocked', actorKind: caller.kind, actorId: caller.id, taskId, objectiveId: store.task(taskId)?.objectiveId, payload: {} })
+      return store.task(taskId)
+    }
+
+    case 'review.submit': {
+      requireCapability(caller, 'review_ai_work')
+      const taskId = reqStr(params, 'taskId', 100)
+      const task = store.task(taskId)
+      if (!task) throw new RpcError(`unknown task ${taskId}`)
+      if (task.status !== 'in-review') throw new RpcError(`task ${taskId} is ${task.status}, not in review`)
+      const verdict = reqStr(params, 'verdict', 20).toLowerCase()
+      if (!['approve', 'revise'].includes(verdict)) throw new RpcError('verdict must be approve or revise')
+      store.append({
+        type: 'ReviewCompleted', actorKind: 'member', actorId: caller.id, objectiveId: task.objectiveId, taskId,
+        payload: { passed: verdict === 'approve', notes: optStr(params, 'notes', 8_000) ?? (verdict === 'approve' ? 'approved' : 'changes requested') },
+      })
+      // Free a reviewer agent that was assigned this job.
+      const reviewer = store.agents().find((agent) => agent.currentTaskId === taskId)
+      if (reviewer) store.append({ type: 'AgentStateChanged', actorKind: 'member', actorId: caller.id, payload: { id: reviewer.id, status: 'idle', currentTaskId: null } })
       return store.task(taskId)
     }
 

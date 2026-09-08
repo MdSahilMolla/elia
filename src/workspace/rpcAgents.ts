@@ -60,14 +60,18 @@ export async function dispatchAgentRpc(
       const instance = store.agent(id)
       if (!instance) throw new RpcError('call agent.connect before agent.claim')
       if (instance.status === 'paused') throw new RpcError('this agent is paused')
-      const task = store.tasks({ status: 'assigned' }).find((candidate) => candidate.assigneeId === id)
+      // A build task the orchestrator assigned, or a review job (an in-review
+      // task the orchestrator routed to this reviewer).
+      const task = store.tasks({ status: ['assigned', 'in-review'] }).find((candidate) => candidate.assigneeId === id)
       if (!task) return { task: null }
 
-      store.append({ type: 'AgentStateChanged', actorKind: 'agent', actorId: agent.id, payload: { id, status: 'working', currentTaskId: task.id } })
-      store.append({
-        type: 'TaskStarted', actorKind: 'agent', actorId: agent.id, objectiveId: task.objectiveId, taskId: task.id,
-        payload: { leaseOwner: id, leaseExpiresAt: Date.now() + LEASE_TTL_MS, worktreeRef: optStr(params, 'worktreeRef', 200) },
-      })
+      store.append({ type: 'AgentStateChanged', actorKind: 'agent', actorId: agent.id, payload: { id, status: task.status === 'in-review' ? 'reviewing' : 'working', currentTaskId: task.id } })
+      if (task.status === 'assigned') {
+        store.append({
+          type: 'TaskStarted', actorKind: 'agent', actorId: agent.id, objectiveId: task.objectiveId, taskId: task.id,
+          payload: { leaseOwner: id, leaseExpiresAt: Date.now() + LEASE_TTL_MS, worktreeRef: optStr(params, 'worktreeRef', 200) },
+        })
+      }
       const project = store.project(task.projectId)
       return { task: store.task(task.id), pack: buildContextPack(store, task.id, id), repoRoot: project?.repoRoot }
     }
@@ -97,14 +101,26 @@ export async function dispatchAgentRpc(
       const report = optStr(params, 'report', 8_000) ?? (ok ? 'completed' : 'failed without a report')
       const filesChanged = Array.isArray(params.filesChanged) ? params.filesChanged.map(String).slice(0, 200) : []
 
+      // A verdict on a review job.
+      if (task.status === 'in-review') {
+        const passed = params.verdict !== undefined
+          ? String(params.verdict).toLowerCase().startsWith('approv')
+          : ok && !/\b(revis|reject|blocker|must fix|change[sd]? request)/i.test(report)
+        store.append({ type: 'ReviewCompleted', actorKind: 'agent', actorId: agent.id, objectiveId: task.objectiveId, taskId, payload: { passed, notes: report } })
+        store.append({ type: 'AgentStateChanged', actorKind: 'agent', actorId: agent.id, payload: { id, status: 'idle', currentTaskId: null } })
+        return { status: passed ? 'done' : 'changes-requested' }
+      }
+
       for (const file of filesChanged) {
         store.append({ type: 'FileChanged', actorKind: 'agent', actorId: agent.id, objectiveId: task.objectiveId, taskId, payload: { path: file } })
       }
       releaseForTask(store, taskId, 'orchestrator')
 
-      // A review gate can be requested by the runtime (M5 wires automatic
-      // review dispatch); otherwise completion is direct.
-      const wantsReview = ok && params.requestReview === true
+      const identity = store.agentIdentity(agent.id)
+      const reviewerAvailable = store.agentIdentities().some((i) => REVIEWER_ROLES.has(i.role))
+      const wantsReview = ok && !task.reviewNotes && !identity?.canMergeWithoutReview
+        && REVIEWABLE_ROLES.has(task.role) && (params.requestReview === true || reviewerAvailable)
+
       if (ok && wantsReview) {
         store.append({ type: 'ReviewRequested', actorKind: 'agent', actorId: agent.id, objectiveId: task.objectiveId, taskId, payload: { report } })
       } else if (ok) {
@@ -209,3 +225,8 @@ export async function dispatchAgentRpc(
       throw new RpcError(`unhandled agent RPC method: ${method}`)
   }
 }
+
+/** Roles whose output is worth an adversarial review pass. */
+export const REVIEWABLE_ROLES: ReadonlySet<string> = new Set(['builder', 'frontend', 'backend', 'tester', 'polisher'])
+/** Roles that can perform a review job. */
+export const REVIEWER_ROLES: ReadonlySet<string> = new Set(['critic', 'security', 'bughunter'])

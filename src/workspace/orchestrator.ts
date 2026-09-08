@@ -20,6 +20,7 @@ import { posix } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { classifyFailure } from '../autonomy/goalGraph.ts'
 import { acquireForTask, reconcileReservations, releaseForTask } from './reservations.ts'
+import { REVIEWER_ROLES } from './rpcAgents.ts'
 import type { WorkspaceStore } from './store.ts'
 import type { PersistedEvent } from './events.ts'
 import type { AgentRecord, TaskRecord } from './types.ts'
@@ -102,6 +103,7 @@ export class Orchestrator {
     reconcileReservations(this.store, now)
     this.reconcileAgents()
     this.handleFailures()
+    this.requeueRevisions()
 
     const objectives = this.store.objectives().filter((objective) => objective.status === 'active')
     if (objectives.length === 0) return
@@ -110,6 +112,24 @@ export class Orchestrator {
     const idleAgents = this.store.agents().filter((agent) => agent.status === 'idle' && agent.connectionId)
 
     for (const objective of objectives) {
+      // Route in-review tasks to an available reviewer (read-only, no reservation).
+      for (const task of this.store.tasks({ objectiveId: objective.id, status: 'in-review' })) {
+        if (task.assigneeId && this.store.agent(task.assigneeId)?.status === 'reviewing') continue
+        const reviewer = idleAgents.find((agent) => {
+          const identity = this.store.agentIdentity(agent.identityId)
+          return identity && REVIEWER_ROLES.has(identity.role)
+        })
+        if (!reviewer) continue
+        // TaskReassigned keeps the in-review status (unlike TaskAssigned).
+        this.store.append({
+          type: 'TaskReassigned', actorKind: 'system', actorId: 'orchestrator',
+          objectiveId: objective.id, taskId: task.id,
+          payload: { assigneeKind: 'agent', assigneeId: reviewer.id },
+        })
+        this.store.append({ type: 'AgentStateChanged', actorKind: 'system', actorId: 'orchestrator', payload: { id: reviewer.id, status: 'assigned', currentTaskId: task.id } })
+        idleAgents.splice(idleAgents.indexOf(reviewer), 1)
+      }
+
       const ready = this.store.tasks({ objectiveId: objective.id, status: 'ready' })
         .sort((a, b) => (a.wave ?? 99) - (b.wave ?? 99) || a.createdAt.localeCompare(b.createdAt))
 
@@ -182,6 +202,20 @@ export class Orchestrator {
           payload: { id: agent.id, status: 'idle', currentTaskId: null },
         })
       }
+    }
+  }
+
+  /** A task a reviewer sent back re-enters the queue with the review notes attached. */
+  private requeueRevisions(): void {
+    for (const task of this.store.tasks({ status: 'changes-requested' })) {
+      this.store.append({
+        type: 'TaskStatusChanged', actorKind: 'system', actorId: 'orchestrator',
+        objectiveId: task.objectiveId, taskId: task.id, payload: { status: 'ready' },
+      })
+      this.store.append({
+        type: 'AgentMessageCreated', actorKind: 'system', actorId: 'orchestrator', objectiveId: task.objectiveId, taskId: task.id,
+        payload: { topic: `task:${task.id}`, kind: 'warning', body: `review sent "${task.title}" back: ${(task.reviewNotes ?? '').slice(0, 400)}`, refs: { taskId: task.id } },
+      })
     }
   }
 

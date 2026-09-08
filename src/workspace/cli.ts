@@ -73,6 +73,7 @@ const HELP = `elia workspace — multi-user, multi-agent collaborative workspace
   elia workspace objective add "GOAL" [--project ID]        plan an objective into a task graph
   elia workspace objective list | show ID
   elia workspace approve OBJECTIVE_ID | reject ID --reason "..."
+  elia workspace review TASK_ID approve|revise [--reason "what to change"]
   elia workspace task list [--objective ID] | show ID
   elia workspace task add "TITLE" --objective ID --role ROLE [--paths g,g] [--detail "..."]
   elia workspace task comment ID "TEXT" | block ID [--reason ...] | unblock ID
@@ -118,12 +119,16 @@ export async function runWorkspace(rawArgs: string[]): Promise<void> {
         return await withClient(async (client) => emit(await client.call('objective.approve', { objectiveId: positionals[1] })))
       case 'reject':
         return await withClient(async (client) => emit(await client.call('objective.reject', { objectiveId: positionals[1], reason: flags.get('--reason') })))
+      case 'review':
+        return await withClient(async (client) => emit(await client.call('review.submit', { taskId: positionals[1], verdict: positionals[2], notes: flags.get('--reason') ?? flags.get('--detail') })))
       case 'message':
         return await runMessage(positionals.slice(1), flags)
       case 'decision':
         return await runDecision(positionals.slice(1), flags)
       case 'feed':
         return await runFeed(flags, bools)
+      case 'watch':
+        return await runWatch()
       case 'stop':
         return await withClient(async (client) => emit(await client.call('shutdown')))
       default:
@@ -344,10 +349,8 @@ async function runFeed(flags: Map<string, string>, bools: Set<string>): Promise<
   let streaming = false
   await withClient(async (client) => {
     const backlog = await client.call<PersistedEvent[]>('events.query', { sinceSeq: since, limit: 500 })
-    for (const event of backlog) {
-      printEvent(event)
-      backlogSeq = Math.max(backlogSeq, event.seq)
-    }
+    for (const event of backlog) backlogSeq = Math.max(backlogSeq, event.seq)
+    for (const event of backlog) printEvent(event)
     if (!follow) return
     streaming = true
     process.stdout.write(machineReadable ? '' : '— following (Ctrl+C to stop) —\n')
@@ -361,6 +364,46 @@ async function runFeed(flags: Map<string, string>, bools: Set<string>): Promise<
     // Suppress live events until the backlog has printed, then only show new ones.
     onEvent: (event) => {
       if (streaming && event.seq > backlogSeq) printEvent(event)
+    },
+  })
+}
+
+async function runWatch(): Promise<void> {
+  const { renderWorkspaceBoard } = await import('../ui/workspaceBoard.ts')
+  const feed: PersistedEvent[] = []
+  await withClient(async (client) => {
+    const refresh = async () => {
+      const [status, objectives, tasks, agentListing] = await Promise.all([
+        client.call('workspace.status'),
+        client.call('objective.list'),
+        client.call('task.list', {}),
+        client.call<{ runtimes: unknown[] }>('agent.list'),
+      ])
+      const lines = renderWorkspaceBoard({
+        status: status as never,
+        objectives: objectives as never,
+        tasks: tasks as never,
+        agents: (agentListing.runtimes ?? []) as never,
+        feed,
+      }, !process.stdout.isTTY)
+      if (process.stdout.isTTY) process.stdout.write(`\x1b[2J\x1b[H${lines.join('\n')}\n`)
+      else process.stdout.write(`${lines.join('\n')}\n\n`)
+    }
+    const backlog = await client.call<PersistedEvent[]>('events.query', { limit: 40 })
+    feed.push(...backlog)
+    await refresh()
+    const timer = setInterval(() => void refresh().catch(() => {}), 1_000)
+    await new Promise<void>((resolve) => {
+      process.on('SIGINT', () => {
+        clearInterval(timer)
+        client.close()
+        resolve()
+      })
+    })
+  }, {
+    onEvent: (event) => {
+      feed.push(event)
+      if (feed.length > 200) feed.splice(0, feed.length - 200)
     },
   })
 }

@@ -154,8 +154,8 @@ export const AGENT_STATUSES: AgentStatus[] = [
  * interventions (pause/resume/stop) and failure edges.
  */
 export const AGENT_TRANSITIONS: Record<AgentStatus, AgentStatus[]> = {
-  idle: ['assigned', 'cancelled', 'paused'],
-  assigned: ['planning', 'working', 'idle', 'paused', 'cancelled', 'failed'],
+  idle: ['assigned', 'reviewing', 'cancelled', 'paused'],
+  assigned: ['planning', 'working', 'reviewing', 'idle', 'paused', 'cancelled', 'failed'],
   planning: ['working', 'waiting', 'idle', 'blocked', 'failed', 'paused', 'cancelled', 'needs-human'],
   working: ['waiting', 'reviewing', 'completed', 'idle', 'blocked', 'failed', 'paused', 'cancelled', 'needs-human'],
   waiting: ['working', 'reviewing', 'idle', 'blocked', 'failed', 'paused', 'cancelled', 'needs-human'],

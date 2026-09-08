@@ -54,6 +54,8 @@ export interface AgentRuntimeOptions {
 
 /** The default executor: run the role's sub-agent in an isolated worktree, merge back. */
 export const worktreeExecutor: AgentExecutor = async (job) => {
+  if (job.pack.mode === 'review') return reviewInPlace(job)
+
   const runId = `ws-${job.task.id}`.replace(/[^A-Za-z0-9._-]/g, '-').slice(0, 60)
   const worktree = await createWorktree(runId, 0, job.repoRoot, paths.state)
   try {
@@ -73,6 +75,16 @@ export const worktreeExecutor: AgentExecutor = async (job) => {
   } finally {
     await removeWorktree(worktree, job.repoRoot)
   }
+}
+
+/** A review job is read-only — no worktree, run the reviewer role against the repo. */
+async function reviewInPlace(job: AgentJob): Promise<AgentJobResult> {
+  const prompt = `${job.pack.briefing}\n\nStart from \`git diff\` and \`git status\`, then read the changed files in full context.`
+  const result = await withAgentIdentity(
+    { name: `review:${job.role}`, role: job.role, cwd: job.repoRoot, signal: job.signal },
+    () => runSubAgent({ prompt, role: job.role, name: `review:${job.role}`, cwd: job.repoRoot, signal: job.signal }),
+  )
+  return { ok: result.ok, report: result.report }
 }
 
 export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<void> {
