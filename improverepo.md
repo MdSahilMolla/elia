@@ -5,9 +5,38 @@
 > already exist, quoted impact numbers with no way to measure them, and several
 > items contradicted deliberate design decisions.
 > *v2* — reality‑checked against `src/`; cut to 6 items with day‑level estimates.
-> *v3* (this) — every item now carries exact `file:line` anchors, an API sketch,
+> *v3* — every item now carries exact `file:line` anchors, an API sketch,
 > acceptance criteria wired to the real latency harness fields, a rollback, and a
 > one‑command validation. Claims verified against the code are marked ✔.
+
+---
+
+## 0. Status — all 8 items shipped (branch `production`)
+
+| # | Item | Commit | Notes on what actually shipped |
+|---|---|---|---|
+| 3.0 | Settle uncommitted micro‑opts | `improverepo 3.0` | Reverted the cache‑key builder (proven collision); kept the brain parallel load, dropped its mtime TTL; kept the grep regex cache + EOF‑context regression test. |
+| 3.6 | Per‑tool profiler timing | `improverepo 3.6` | `recordToolCall` / `toolProfileReport` / `renderToolProfile` in `profile.ts`, fed from the loop's `onTool`. Verified end‑to‑end via the harness. |
+| 3.1 | Bounded cache registry | `improverepo 3.1` | `src/cacheRegistry.ts` (`boundedMap`, `registerCache`, `clearAllCaches`); speculation cache capped at 512 with `size`/`evictions` stats; grep + brain registered; `restoreCheckpoint` clears all. Bound unit‑tested (600 → 512, 88 evictions) rather than a pathological scenario. |
+| 3.3 | CPU‑derived tool concurrency | `improverepo 3.3` | `DEFAULT_PARALLEL_TOOLS = clamp(cores‑1, 4, 8)`; `MAX_PARALLEL_WRITE_TOOLS` stays a literal 4. |
+| 3.4 | Windowed reads for >5 MB files | `improverepo 3.4` | Streamed line window, ≤512 KB / 2000 lines; bare read still refused. `src/tools/readFile.test.ts`. |
+| 3.5 | Widen prefetch heuristics | `improverepo 3.5` | Test⇄source pairing (JS/TS + Python). Verified `PATH_PATTERN` already catches framed stack traces — the real gap was that **errored** `run_command` output was never observed; now it is (path extraction only). |
+| 3.2 | Cross‑turn read memoization | `improverepo 3.2` | `src/speculation/deterministicCache.ts`, `read_file` only, `mtime:size` stamp + per‑path flush on edits + wholesale clear on opaque mutation. `ELIA_NO_READ_MEMO=1` kill‑switch. Stale‑read matrix + full‑loop integration test. |
+| 3.7 | Auto‑lesson on repeated repair failure | `improverepo 3.7` | `repeatedFailureLesson()` turns `assessProgress().repeated` into one `[auto]`‑tagged durable lesson, recorded before the model pass at both unresolved exits. |
+
+Whole suite green throughout (1341 tests); `bench-latency --strict` reports **no
+regressions** at every step. The latency `baseline.json` was left untouched — the
+structural invariants (the real gate) never moved and the wall‑clock numbers are
+machine‑specific.
+
+**Decisions taken on the §8 open questions:** (1) grep/`list_files` memoization
+was **cut** — no cheap correct stamp; `read_file` only. (2) Evicting an in‑flight
+speculation is left as‑is (safe, wastes the work). (3) Signature normalization
+reuses the existing `errorSignature()` (paths/numbers/hashes already stripped).
+
+**Not done / deferred, unchanged from below:** everything in §7 Non‑goals, plus
+3.2 for `list_files`/`grep`, a `list_files` sibling stamp, and a subagent worker
+pool.
 
 ---
 
