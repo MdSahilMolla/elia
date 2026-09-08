@@ -1,3 +1,4 @@
+import { availableParallelism, cpus } from 'node:os'
 import { autoFallbacksFor, config } from './config.ts'
 import { beginCompaction, type PendingCompaction } from './compaction.ts'
 import { compactionThresholdFor } from './contextWindow.ts'
@@ -24,8 +25,28 @@ import { activeSessionTranscript } from './ui/transcript.ts'
 
 export type ConversationMessage = ChatMessage
 
-const MAX_PARALLEL_TOOLS = 4
+/** Any batch that mutates the repo or touches the outside world stays on this conservative ceiling. */
+const MAX_PARALLEL_WRITE_TOOLS = 4
+/** Hard cap on the read-only pool, whatever the machine or the env override asks for. */
 const MAX_SAFE_PARALLEL_TOOLS = 8
+
+/**
+ * Default read-only pool when nothing is configured: one per core, leaving a
+ * core for everything else, clamped to [MAX_PARALLEL_WRITE_TOOLS, MAX_SAFE_PARALLEL_TOOLS].
+ * A 4-core box keeps the old behaviour; an 8+-core box gets a wider recon fan-out.
+ */
+function detectCoreCount(): number {
+  try {
+    return availableParallelism()
+  } catch {
+    try {
+      return cpus().length
+    } catch {
+      return 4
+    }
+  }
+}
+export const DEFAULT_PARALLEL_TOOLS = Math.max(MAX_PARALLEL_WRITE_TOOLS, Math.min(MAX_SAFE_PARALLEL_TOOLS, detectCoreCount() - 1))
 const MAX_PROVIDER_ATTEMPTS = 3
 const PROVIDER_HEALTH_COOLDOWN_MS = 30_000
 const providerHealth = new Map<string, { failures: number; cooldownUntil: number; lastError?: string }>()
@@ -731,9 +752,9 @@ type ToolBatch = Array<{ name: string; input: Record<string, unknown> }>
  */
 export function toolBatchConcurrency(batch: ToolBatch): number {
   const configured = Number.parseInt(process.env.ELIA_TOOL_CONCURRENCY ?? '', 10)
-  const requested = Number.isInteger(configured) && configured > 0 ? Math.min(configured, MAX_SAFE_PARALLEL_TOOLS) : MAX_PARALLEL_TOOLS
+  const requested = Number.isInteger(configured) && configured > 0 ? Math.min(configured, MAX_SAFE_PARALLEL_TOOLS) : DEFAULT_PARALLEL_TOOLS
   if (batch.length === 0) return requested
-  return batch.every(isReadOnlyToolCall) ? requested : Math.min(requested, MAX_PARALLEL_TOOLS)
+  return batch.every(isReadOnlyToolCall) ? requested : Math.min(requested, MAX_PARALLEL_WRITE_TOOLS)
 }
 
 function isReadOnlyToolCall(block: { name: string; input: Record<string, unknown> }): boolean {

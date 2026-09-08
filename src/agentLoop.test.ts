@@ -17,7 +17,7 @@ import { ZERO_USAGE } from './usage.ts'
 process.env.ANTHROPIC_API_KEY ??= 'test-key-for-agentloop-test'
 
 const { config } = await import('./config.ts')
-const { resetProviderHealthForTests, runAgentLoop, toolBatchConcurrency } = await import('./agentLoop.ts')
+const { resetProviderHealthForTests, runAgentLoop, toolBatchConcurrency, DEFAULT_PARALLEL_TOOLS } = await import('./agentLoop.ts')
 const { resetCodexSubscriptionApprovalForTests } = await import('./providers/codexSubscription.ts')
 
 test('session recording captures nested agent tools and provider activity without crossing session boundaries', async () => {
@@ -71,8 +71,13 @@ test('safe read-only tool batches use bounded fast concurrency while mutating ba
   const original = process.env.ELIA_TOOL_CONCURRENCY
   try {
     delete process.env.ELIA_TOOL_CONCURRENCY
-    expect(toolBatchConcurrency([{ name: 'read_file', input: { path: 'src/a.ts' } }, { name: 'grep', input: { pattern: 'x' } }])).toBe(4)
-    expect(toolBatchConcurrency([{ name: 'read_file', input: { path: 'src/a.ts' } }, { name: 'read_file', input: { path: 'src/b.ts' } }, { name: 'read_file', input: { path: 'src/c.ts' } }, { name: 'read_file', input: { path: 'src/d.ts' } }, { name: 'read_file', input: { path: 'src/e.ts' } }])).toBe(4)
+    // Unconfigured, a read-only batch gets the CPU-derived default (4 on a
+    // 4-core box, wider on bigger machines, hard-capped at 8).
+    expect(DEFAULT_PARALLEL_TOOLS).toBeGreaterThanOrEqual(4)
+    expect(DEFAULT_PARALLEL_TOOLS).toBeLessThanOrEqual(8)
+    expect(toolBatchConcurrency([{ name: 'read_file', input: { path: 'src/a.ts' } }, { name: 'grep', input: { pattern: 'x' } }])).toBe(DEFAULT_PARALLEL_TOOLS)
+    expect(toolBatchConcurrency([{ name: 'read_file', input: { path: 'src/a.ts' } }, { name: 'read_file', input: { path: 'src/b.ts' } }, { name: 'read_file', input: { path: 'src/c.ts' } }, { name: 'read_file', input: { path: 'src/d.ts' } }, { name: 'read_file', input: { path: 'src/e.ts' } }])).toBe(DEFAULT_PARALLEL_TOOLS)
+    // Any write in the batch pins it to the conservative ceiling regardless of cores.
     expect(toolBatchConcurrency([{ name: 'write_file', input: { path: 'src/a.ts' } }, { name: 'read_file', input: { path: 'src/b.ts' } }])).toBe(4)
     process.env.ELIA_TOOL_CONCURRENCY = '99'
     expect(toolBatchConcurrency([{ name: 'read_file', input: { path: 'src/a.ts' } }])).toBe(8)
