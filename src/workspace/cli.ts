@@ -9,16 +9,16 @@
  * (`--token` / `$ELIA_WORKSPACE_TOKEN`), then makes one call.
  */
 
-import { existsSync, readFileSync } from 'node:fs'
-import { fileURLToPath } from 'node:url'
+import { existsSync } from 'node:fs'
 import { writeError, writeNotice } from '../ui/stream.ts'
 import { table } from '../ui/layout.ts'
 import { paths } from '../statePaths.ts'
 import { machineReadable } from '../ui/runtime.ts'
 import { WorkspaceStore } from './store.ts'
 import { createWorkspace } from './admin.ts'
-import { serveWorkspace, type WorkspaceServerInfo } from './server.ts'
+import { serveWorkspace } from './server.ts'
 import { WorkspaceClient } from './client.ts'
+import { resolveServer as resolveWorkspaceServer } from './connection.ts'
 import type { WorkspaceRpcMethod } from './protocol.ts'
 import type { PersistedEvent } from './events.ts'
 import { MEMBER_ROLES } from './types.ts'
@@ -428,42 +428,8 @@ async function withClient(fn: (client: WorkspaceClient) => Promise<void>, extras
 }
 
 async function resolveServer(): Promise<{ url: string; spawned: boolean }> {
-  const explicit = flagFromArgv('--server') || process.env.ELIA_WORKSPACE_SERVER?.trim()
-  if (explicit) return { url: normalizeUrl(explicit), spawned: false }
-
-  const advertised = readServerInfo()
-  if (advertised) return { url: advertised.url, spawned: false }
-
-  // Auto-spawn a local server and wait for it to advertise its address.
-  const entry = fileURLToPath(new URL('../../bin/elia.ts', import.meta.url))
-  const child = Bun.spawn([process.execPath, entry, 'workspace', 'serve'], {
-    stdin: 'ignore', stdout: 'ignore', stderr: 'ignore', detached: true,
-    env: { ...process.env, NO_COLOR: '1' },
-  })
-  child.unref()
-  const deadline = Date.now() + 8_000
-  while (Date.now() < deadline) {
-    const info = readServerInfo()
-    if (info) return { url: info.url, spawned: true }
-    await Bun.sleep(120)
-  }
-  throw new Error('auto-started workspace server did not come up within 8s; start it with "elia workspace serve"')
-}
-
-function readServerInfo(): WorkspaceServerInfo | undefined {
-  if (!existsSync(paths.workspaceServerInfo)) return undefined
-  try {
-    const info = JSON.parse(readFileSync(paths.workspaceServerInfo, 'utf8')) as WorkspaceServerInfo
-    return typeof info.url === 'string' && info.url.startsWith('ws') ? info : undefined
-  } catch {
-    return undefined
-  }
-}
-
-function normalizeUrl(raw: string): string {
-  const trimmed = raw.trim()
-  if (trimmed.startsWith('ws://') || trimmed.startsWith('wss://')) return trimmed.includes('/workspace') ? trimmed : `${trimmed.replace(/\/$/, '')}/workspace`
-  return `ws://${trimmed.replace(/\/$/, '')}/workspace`
+  const resolved = await resolveWorkspaceServer({ explicit: flagFromArgv('--server'), autoSpawn: true })
+  return { url: resolved.url, spawned: resolved.spawned }
 }
 
 // --- output helpers ---

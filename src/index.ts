@@ -61,6 +61,7 @@ const REPL_COMMANDS: SlashCommand[] = [
   { name: '/skills', description: 'list loaded skills' },
   { name: '/task', description: 'browse tasks and subagents' },
   { name: '/sessions', description: 'other elia sessions in this project' },
+  { name: '/eliaspace', description: 'collaborative workspace — status, feed, members, agents' },
   { name: '/artifact', description: 'browse saved plan artifacts' },
   { name: '/verify', description: 'run project checks · /verify on|off' },
   { name: '/auto', description: 'auto-escalate big builds to the autonomous pipeline · /auto on|off' },
@@ -2723,6 +2724,31 @@ async function runInteractive(): Promise<void> {
       )
     }
 
+    if (trimmed === '/eliaspace') {
+      const { collectEliaspaceSnapshot, renderEliaspacePanel, renderEliaspaceView } = await import('./workspace/panel.ts')
+      const snap = await collectEliaspaceSnapshot()
+      const panel = renderEliaspacePanel(snap)
+      if (!snap.configured || !snap.reachable) return { handled: true, text: panel }
+      return {
+        handled: true,
+        picker: {
+          title: `${snap.status?.workspace?.name ?? 'workspace'} — drill in`,
+          options: [
+            { label: 'Feed', detail: 'recent activity', value: 'feed' },
+            { label: 'Members', detail: String(snap.status?.members ?? 0), value: 'members' },
+            { label: 'Agents', detail: String(snap.status?.agents.total ?? 0), value: 'agents' },
+            { label: 'Objectives', detail: String(snap.status?.objectives.total ?? 0), value: 'objectives' },
+            { label: 'Tasks', detail: String(snap.status?.tasks.total ?? 0), value: 'tasks' },
+            { label: 'Connection', detail: 'how clients attach', value: 'connection' },
+          ],
+          onSelect: async (value) => {
+            if (!value) return panel
+            return `${panel}\n\n${await renderEliaspaceView(value as never)}`
+          },
+        },
+      }
+    }
+
     // --- text-only commands ---
 
     if (trimmed === '/help' || trimmed === '/?') {
@@ -3305,6 +3331,24 @@ async function runInteractive(): Promise<void> {
       const { openSessionsDashboard } = await import('./ui/sessionsDashboard.ts')
       pushHeartbeat(false, 'Browsing /sessions')
       await openSessionsDashboard(sessionId)
+      continue
+    }
+
+    if (trimmed === '/eliaspace') {
+      const { collectEliaspaceSnapshot, renderEliaspacePanel, renderEliaspaceView } = await import('./workspace/panel.ts')
+      const snap = await collectEliaspaceSnapshot()
+      process.stdout.write(`\n${renderEliaspacePanel(snap)}\n`)
+      if (snap.configured && snap.reachable) {
+        const result = await pick('Workspace — drill in', [
+          { label: 'Feed', detail: 'recent activity', value: 'feed' },
+          { label: 'Members', detail: String(snap.status?.members ?? 0), value: 'members' },
+          { label: 'Agents', detail: String(snap.status?.agents.total ?? 0), value: 'agents' },
+          { label: 'Objectives', detail: String(snap.status?.objectives.total ?? 0), value: 'objectives' },
+          { label: 'Tasks', detail: String(snap.status?.tasks.total ?? 0), value: 'tasks' },
+          { label: 'Connection', detail: 'how clients attach', value: 'connection' },
+        ], 0)
+        if (result.type === 'select') process.stdout.write(`\n${await renderEliaspaceView(result.value as never)}\n`)
+      }
       continue
     }
 
