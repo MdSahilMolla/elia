@@ -276,7 +276,7 @@ export function renderToolProfile(): string {
   const totalCached = rows.reduce((sum, r) => sum + r.cachedCalls, 0)
   const totalWall = rows.reduce((sum, r) => sum + r.totalWallMs, 0)
   const divider = `  ${'─'.repeat(header.length - 2)}`
-  const summary = `  ${totalCalls} tool calls · ${ms(totalWall)} total tool wall time · ${pct(totalCalls === 0 ? 0 : totalCached / totalCalls)} served from speculative cache`
+  const summary = `  ${totalCalls} tool calls · ${ms(totalWall)} total tool wall time · ${pct(totalCalls === 0 ? 0 : totalCached / totalCalls)} served from cache (speculation + read memo)`
 
   return ['Tool profile', header, ...body, divider, summary].join('\n')
 }

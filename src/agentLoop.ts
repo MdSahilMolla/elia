@@ -10,11 +10,12 @@ import { startThinkingAnimation } from './ui/animator.ts'
 import { createStreamCursor } from './ui/streamCursor.ts'
 import { ZERO_USAGE, addUsage } from './usage.ts'
 import { SPECULABLE_TOOLS, type CacheStats, type ToolResultCache } from './speculation/cache.ts'
+import { readMemo } from './speculation/deterministicCache.ts'
 import type { Prefetcher } from './speculation/prefetch.ts'
 import { activeActionGovernor, assessAction, redactActionInput, type ActionAssessment } from './autonomy/governor.ts'
 import { activeGoalGraph, activeGoalNode, type ActionReservation, classifyFailure } from './autonomy/goalGraph.ts'
 import { contractForAction, evaluatePostconditions, evaluatePreconditions, type ActionContract, type ContractEvaluation } from './autonomy/actionContract.ts'
-import { currentAgent } from './autonomy/context.ts'
+import { currentAgent, resolveWorkspacePath } from './autonomy/context.ts'
 import { activeMode } from './autonomy/mode.ts'
 import { activeToolHooks, evaluateToolHooks } from './autonomy/devHooks.ts'
 import { clampOutput } from './shell.ts'
@@ -330,6 +331,12 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
     // within a parallel batch there is no ordering guarantee between them.
     const batchMutates = toolUseBlocks.some((block) => !SPECULABLE_TOOLS.has(block.name))
     if (batchMutates) cache?.invalidate()
+    // The deterministic read cache tolerates elia's own edits (flushed per-path
+    // below), but anything opaque in the batch — a shell command, a sub-agent —
+    // could have rewritten files we can't track. Clear it wholesale then.
+    if (toolUseBlocks.some((block) => !SPECULABLE_TOOLS.has(block.name) && block.name !== 'edit_file' && block.name !== 'write_file')) {
+      readMemo.clear()
+    }
 
     const observed: { name: string; input: Record<string, unknown>; result: string }[] = []
 
@@ -431,11 +438,25 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
                   resultText = await pending
                 } else {
                   if (!tool) throw new Error(`Unknown tool: ${block.name}`)
-                  // Serialize the actual file mutation so parallel edits (within
-                  // this batch, or from a concurrent turn) can't interleave.
-                  resultText = isRepoMutatingTool(block.name)
-                    ? await withRepoLock(() => tool.execute(block.input))
-                    : await tool.execute(block.input)
+                  const memoized = block.name === 'read_file' && !batchMutates ? readMemo.get(block.input) : undefined
+                  if (memoized !== undefined) {
+                    cached = true
+                    resultText = memoized
+                  } else {
+                    // Serialize the actual file mutation so parallel edits (within
+                    // this batch, or from a concurrent turn) can't interleave.
+                    resultText = isRepoMutatingTool(block.name)
+                      ? await withRepoLock(() => tool.execute(block.input))
+                      : await tool.execute(block.input)
+                    if (block.name === 'read_file' && !batchMutates) readMemo.put(block.input, resultText)
+                    else if ((block.name === 'edit_file' || block.name === 'write_file') && typeof block.input.path === 'string') {
+                      try {
+                        readMemo.invalidatePath(resolveWorkspacePath(block.input.path))
+                      } catch {
+                        // A path that won't resolve was never cached either.
+                      }
+                    }
+                  }
                 }
                 postcondition = contract ? evaluatePostconditions(contract, resultText, cwd) : undefined
                 if (postcondition && !postcondition.ok) {

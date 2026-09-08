@@ -132,7 +132,7 @@ test('renderToolProfile shows a table and a speculative-cache share line', () =>
   const text = renderToolProfile()
   expect(text).toContain('Tool profile')
   expect(text).toContain('read_file')
-  expect(text).toContain('50% served from speculative cache')
+  expect(text).toContain('50% served from cache')
 })
 
 test('renderProfileReport appends the tool table when both model and tool calls were recorded', () => {

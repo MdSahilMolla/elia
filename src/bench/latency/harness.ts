@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import { ELIA_ROOT } from '../../statePaths.ts'
 import { runAgentLoop } from '../../agentLoop.ts'
 import { createToolResultCache } from '../../speculation/cache.ts'
+import { clearAllCaches } from '../../cacheRegistry.ts'
 import { createPrefetcher } from '../../speculation/prefetch.ts'
 import { readFileTool } from '../../tools/readFile.ts'
 import { editFileTool } from '../../tools/editFile.ts'
@@ -105,6 +106,10 @@ async function runScenarioOnce(scenario: LatencyScenario, options: ScenarioRunOp
   try {
     scenario.setup(dir)
     process.chdir(dir)
+
+    // Each scenario run simulates a cold session — drop any process-wide cache
+    // (the deterministic read memo) carried over from a prior run.
+    clearAllCaches()
 
     const cache = createToolResultCache()
     const prefetcher = createPrefetcher({ tools: SCENARIO_TOOLS, cache, cwd: dir })
