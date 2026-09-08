@@ -70,6 +70,12 @@ const HELP = `elia workspace — multi-user, multi-agent collaborative workspace
   elia workspace agent list
   elia workspace agent register NAME --role ROLE [--paths g,g] [--max-tasks N]
   elia workspace agent remove ID
+  elia workspace objective add "GOAL" [--project ID]        plan an objective into a task graph
+  elia workspace objective list | show ID
+  elia workspace approve OBJECTIVE_ID | reject ID --reason "..."
+  elia workspace task list [--objective ID] | show ID
+  elia workspace task add "TITLE" --objective ID --role ROLE [--paths g,g] [--detail "..."]
+  elia workspace task comment ID "TEXT" | block ID [--reason ...] | unblock ID
   elia workspace message post "BODY" --topic T --kind K [--to ID] [--objective ID]
   elia workspace decision record "TITLE" --objective ID [--detail "..."]
   elia workspace feed [--follow] [--since SEQ] [--json]     the live activity stream
@@ -104,6 +110,14 @@ export async function runWorkspace(rawArgs: string[]): Promise<void> {
         return await runAgent(positionals.slice(1), flags)
       case 'token':
         return await runToken(positionals.slice(1))
+      case 'objective':
+        return await runObjective(positionals.slice(1), flags)
+      case 'task':
+        return await runTask(positionals.slice(1), flags)
+      case 'approve':
+        return await withClient(async (client) => emit(await client.call('objective.approve', { objectiveId: positionals[1] })))
+      case 'reject':
+        return await withClient(async (client) => emit(await client.call('objective.reject', { objectiveId: positionals[1], reason: flags.get('--reason') })))
       case 'message':
         return await runMessage(positionals.slice(1), flags)
       case 'decision':
@@ -230,6 +244,54 @@ async function runAgent(sub: string[], flags: Map<string, string>): Promise<void
       process.stdout.write('\nRuntimes:\n')
       printTable(['id', 'name', 'status', 'task'], listing.runtimes.map((a) => [String(a.id), String(a.name), String(a.status), String(a.currentTaskId ?? '')]))
     }
+  })
+}
+
+async function runObjective(sub: string[], flags: Map<string, string>): Promise<void> {
+  await withClient(async (client) => {
+    if (sub[0] === 'add') {
+      if (!sub[1]) throw new Error('usage: elia workspace objective add "<goal>"')
+      writeNotice('Planning the objective… (this runs the planner and can take a minute)')
+      const result = await client.call<{ objectiveId: string; steps: Array<Record<string, unknown>>; waves: string[][] }>(
+        'objective.add', { goal: sub[1], projectId: flags.get('--project') }, 300_000,
+      )
+      if (machineReadable) return emit(result)
+      writeNotice(`Objective ${result.objectiveId} planned — ${result.steps.length} tasks, ${result.waves.length} waves. Approve it with:`)
+      process.stdout.write(`\n    elia workspace approve ${result.objectiveId}\n\n`)
+      printTable(['step', 'title', 'role', 'dependsOn'], result.steps.map((s) => [String(s.id), String(s.title), String(s.role), (s.dependsOn as string[] ?? []).join(', ')]))
+      return
+    }
+    if (sub[0] === 'show') {
+      const view = await client.call('objective.show', { objectiveId: sub[1] })
+      return emit(view)
+    }
+    const list = await client.call<Array<Record<string, unknown>>>('objective.list')
+    if (machineReadable) return emit(list)
+    printTable(['id', 'status', 'tasks', 'goal'], list.map((o) => [String(o.id), String(o.status), String(o.taskCount), String(o.goal).slice(0, 60)]))
+  })
+}
+
+async function runTask(sub: string[], flags: Map<string, string>): Promise<void> {
+  await withClient(async (client) => {
+    if (sub[0] === 'show') return emit(await client.call('task.show', { taskId: sub[1] }))
+    if (sub[0] === 'add') {
+      return emit(await client.call('task.add', {
+        objectiveId: flags.get('--objective'),
+        title: sub[1],
+        role: flags.get('--role'),
+        instructions: flags.get('--detail'),
+        files: splitList(flags.get('--paths')),
+      }))
+    }
+    if (sub[0] === 'comment') return emit(await client.call('task.comment', { taskId: sub[1], body: sub[2] }))
+    if (sub[0] === 'block') return emit(await client.call('task.block', { taskId: sub[1], reason: flags.get('--reason') }))
+    if (sub[0] === 'unblock') return emit(await client.call('task.unblock', { taskId: sub[1] }))
+    const list = await client.call<Array<Record<string, unknown>>>('task.list', { objectiveId: flags.get('--objective') })
+    if (machineReadable) return emit(list)
+    printTable(
+      ['id', 'status', 'role', 'wave', 'assignee', 'title'],
+      list.map((t) => [String(t.id), String(t.status), String(t.role), String(t.wave ?? ''), String(t.assigneeId ?? ''), String(t.title).slice(0, 40)]),
+    )
   })
 }
 

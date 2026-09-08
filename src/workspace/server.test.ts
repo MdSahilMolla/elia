@@ -19,13 +19,21 @@ afterEach(() => {
   }
 })
 
+const stubPlanner = async () => ({
+  goal: 'ship it', understanding: 'fresh', assumptions: [], risks: [], verification: ['bun test'], outOfScope: [],
+  steps: [
+    { id: 'a', title: 'API', role: 'backend' as const, instructions: 'build api', files: ['api.ts'], dependsOn: [] },
+    { id: 'b', title: 'Tests', role: 'tester' as const, instructions: 'test api', files: ['api.test.ts'], dependsOn: ['a'] },
+  ],
+})
+
 async function fixture() {
   const dir = mkdtempSync(join(tmpdir(), 'elia-ws-srv-'))
   const store = WorkspaceStore.open(join(dir, 'workspace.sqlite'))
   const created = createWorkspace(store, { name: 'demo', ownerName: 'owner' })
   const contributor = addMember(store, { name: 'dev', role: 'contributor', actorId: created.ownerMemberId })
   const agent = registerAgentIdentity(store, { name: 'fe', role: 'frontend', actorId: created.ownerMemberId })
-  const server: RunningWorkspaceServer = runWorkspaceServer({ port: 0, store })
+  const server: RunningWorkspaceServer = runWorkspaceServer({ port: 0, store, planner: stubPlanner })
   cleanup.push(() => server.stop())
   cleanup.push(() => store.close())
   cleanup.push(() => {
@@ -131,5 +139,23 @@ test('presence tracks connected participants and clears on disconnect', async ()
 test('not-yet-implemented methods report their milestone instead of failing opaquely', async () => {
   const { server, owner } = await fixture()
   const client = await connect(server, owner)
-  expect(await rejection(client.call('objective.add', { goal: 'x' }))).toMatch(/M3/)
+  expect(await rejection(client.call('task.assign', { taskId: 'x' }))).toMatch(/M4/)
+})
+
+test('objective.add plans a task graph; approval activates it and makes wave-1 tasks ready', async () => {
+  const { server, owner, contributor } = await fixture()
+  const owns = await connect(server, owner)
+  const devs = await connect(server, contributor)
+
+  const planned = await devs.call<{ objectiveId: string; steps: unknown[] }>('objective.add', { goal: 'build auth' })
+  expect(planned.steps).toHaveLength(2)
+  expect((await owns.call<{ objective: { status: string } }>('objective.show', { objectiveId: planned.objectiveId })).objective.status).toBe('awaiting-approval')
+
+  // A contributor cannot approve.
+  expect(await rejection(devs.call('objective.approve', { objectiveId: planned.objectiveId }))).toMatch(/permitted/i)
+
+  await owns.call('objective.approve', { objectiveId: planned.objectiveId })
+  const tasks = await owns.call<Array<{ title: string; status: string }>>('task.list', { objectiveId: planned.objectiveId })
+  expect(tasks.find((t) => t.title === 'API')!.status).toBe('ready')
+  expect(tasks.find((t) => t.title === 'Tests')!.status).toBe('pending')
 })

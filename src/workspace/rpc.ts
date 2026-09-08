@@ -24,6 +24,10 @@ export interface RpcContext {
   connectionId: string
   /** Ask the transport to shut the server down after this response flushes. */
   requestShutdown: () => void
+  /** Objective planner override; defaults to the model-backed planner. */
+  planner?: import('./decompose.ts').ObjectivePlanner
+  /** Cooperative cancellation for long operations (decomposition). */
+  signal?: AbortSignal
 }
 
 export class RpcError extends Error {}

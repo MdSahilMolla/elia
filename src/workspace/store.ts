@@ -395,27 +395,35 @@ function rowToEvent(row: Row): PersistedEvent {
 }
 
 /**
- * Bound and secret-scrub payload strings before they reach the durable log or
- * the wire, without flattening whitespace (agents' instructions carry meaningful
- * newlines). `hash` is the one field left untouched — it is a one-way digest,
- * safe to persist, and the secret regex would otherwise mistake it for a token.
+ * Prepare a payload for the durable log and the wire.
+ *
+ * Redaction is opt-IN by key: only the free-text fields a human or agent could
+ * paste a credential into are secret-scrubbed. Everything else (ids, hashes,
+ * globs, file paths, resource names) is length-bounded only — running the secret
+ * regex over an identifier like `tsk_..._api` corrupts it (`sk_...` looks like a
+ * key), which then collides two rows on one primary key.
  */
-const LONG_TEXT_KEYS = new Set(['goal', 'instructions', 'body', 'detail', 'instruction'])
-const STRUCTURAL_KEYS = new Set(['hash'])
+const FREE_TEXT_KEYS = new Set([
+  'goal', 'instructions', 'instruction', 'body', 'detail', 'error', 'reason',
+  'notes', 'note', 'title', 'focus', 'report', 'blockedReason', 'summary',
+])
+const LONG_TEXT_KEYS = new Set(['goal', 'instructions', 'instruction', 'body', 'detail', 'report'])
 
-function bound(value: string, max: number): string {
-  const safe = redactSecrets(value)
-  return safe.length > max ? `${safe.slice(0, max - 1)}…` : safe
+function boundText(value: string, max: number): string {
+  return value.length > max ? `${value.slice(0, max - 1)}…` : value
 }
 
 function redactPayload(payload: Record<string, unknown>): Record<string, unknown> {
   const out: Record<string, unknown> = {}
   for (const [key, value] of Object.entries(payload)) {
-    if (STRUCTURAL_KEYS.has(key)) out[key] = value
-    else if (typeof value === 'string') out[key] = bound(value, LONG_TEXT_KEYS.has(key) ? MAX_PAYLOAD_TEXT : 4_000)
-    else if (Array.isArray(value)) out[key] = value.slice(0, 500).map((item) => (typeof item === 'string' ? bound(item, 4_000) : item))
-    else if (value && typeof value === 'object') out[key] = value
-    else out[key] = value
+    if (typeof value === 'string') {
+      const max = LONG_TEXT_KEYS.has(key) ? MAX_PAYLOAD_TEXT : 4_000
+      out[key] = FREE_TEXT_KEYS.has(key) ? boundText(redactSecrets(value), max) : boundText(value, max)
+    } else if (Array.isArray(value)) {
+      out[key] = value.slice(0, 500).map((item) => (typeof item === 'string' ? boundText(item, 4_000) : item))
+    } else {
+      out[key] = value
+    }
   }
   return out
 }

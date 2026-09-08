@@ -37,6 +37,8 @@ export interface WorkspaceServerOptions {
   dbPath?: string
   /** Injected in tests; defaults to opening `dbPath`. */
   store?: WorkspaceStore
+  /** Objective planner override; defaults to the model-backed planner. */
+  planner?: import('./decompose.ts').ObjectivePlanner
 }
 
 export interface RunningWorkspaceServer {
@@ -128,6 +130,7 @@ export function runWorkspaceServer(options: WorkspaceServerOptions = {}): Runnin
           caller: ws.data.caller,
           connectionId: ws.data.connectionId,
           requestShutdown: () => queueMicrotask(() => stop()),
+          planner: options.planner,
         }
         try {
           const result = await dispatchRpc(ctx, parsed.method, parsed.params ?? {})
