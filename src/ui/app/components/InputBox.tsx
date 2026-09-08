@@ -51,6 +51,37 @@ export interface InputBoxProps {
   onHelp?(): void
 }
 
+/**
+ * Renders the input buffer with a block caret sitting at `cursor` rather than
+ * always pinned to the end of the line. The character under the cursor is drawn
+ * inverse; when the cursor is past the last character (or the line is empty) an
+ * inverse space stands in for it. See issue #11 — the caret used to be a fixed
+ * trailing glyph, so its position never tracked left/right/home/end moves.
+ */
+function BufferView(props: { buffer: string; cursor: number; placeholder: string; showCursor: boolean }) {
+  const { buffer, cursor, placeholder, showCursor } = props
+
+  if (buffer.length === 0) {
+    return (
+      <Text>
+        {showCursor && <Text inverse> </Text>}
+        <Text color={palette.muted}>{placeholder}</Text>
+      </Text>
+    )
+  }
+
+  if (!showCursor) return <Text>{buffer}</Text>
+
+  const clamped = Math.max(0, Math.min(cursor, buffer.length))
+  return (
+    <Text>
+      {buffer.slice(0, clamped)}
+      <Text inverse>{buffer.slice(clamped, clamped + 1) || ' '}</Text>
+      {buffer.slice(clamped + 1)}
+    </Text>
+  )
+}
+
 export function InputBox(props: InputBoxProps) {
   const [state, setState] = useState<PromptState>(initialState)
 
@@ -104,8 +135,7 @@ export function InputBox(props: InputBoxProps) {
     <Box flexDirection="column">
       <Box borderStyle="round" borderColor={props.disabled ? palette.muted : palette.accent} paddingX={1}>
         <Text color={palette.accent}>{glyphs.user} </Text>
-        <Text>{state.buffer || <Text color={palette.muted}>{props.placeholder}</Text>}</Text>
-        {!props.disabled && <Text color={palette.muted}>▏</Text>}
+        <BufferView buffer={state.buffer} cursor={state.cursor} placeholder={props.placeholder} showCursor={!props.disabled} />
       </Box>
       {menu.length > 0 && (
         <Box flexDirection="column" marginLeft={2}>
