@@ -6,6 +6,28 @@ import { resolveWorkspacePath } from '../autonomy/context.ts'
 import { assertSafeFileAccess, isSensitivePath } from '../autonomy/sensitivePaths.ts'
 import { readBoundedOutput, terminateProcessGroup } from '../shell.ts'
 
+// Cache for compiled regex patterns to avoid recompilation
+const regexCache = new Map<string, RegExp>()
+const REGEX_CACHE_MAX_SIZE = 100
+
+function getCachedRegex(pattern: string): RegExp {
+  const cached = regexCache.get(pattern)
+  if (cached) return cached
+  
+  const regex = new RegExp(pattern)
+  
+  // Simple LRU eviction
+  if (regexCache.size >= REGEX_CACHE_MAX_SIZE) {
+    const firstKey = regexCache.keys().next().value
+    if (firstKey !== undefined) {
+      regexCache.delete(firstKey)
+    }
+  }
+  
+  regexCache.set(pattern, regex)
+  return regex
+}
+
 const MAX_PATTERN_LENGTH = 10_000
 const MAX_GLOB_LENGTH = 500
 const MAX_SEARCH_FILE_BYTES = 5_000_000
@@ -147,10 +169,11 @@ async function runRipgrep(rg: string, args: string[], dir: string): Promise<{ st
 }
 
 /** Used when ripgrep is not installed. Slower, but the same contract. */
-async function searchWithJs(pattern: string, dir: string, inputDir: string, globPattern: string | undefined, context: number | undefined): Promise<string> {
+/** Exported for tests: the pure-JS search path, used directly so a test doesn't depend on `rg` being absent from PATH. */
+export async function searchWithJs(pattern: string, dir: string, inputDir: string, globPattern: string | undefined, context: number | undefined): Promise<string> {
   let regex: RegExp
   try {
-    regex = new RegExp(pattern)
+    regex = getCachedRegex(pattern)
   } catch (error) {
     throw new Error(`invalid regular expression: ${error instanceof Error ? error.message : String(error)}`)
   }
@@ -179,11 +202,17 @@ async function searchWithJs(pattern: string, dir: string, inputDir: string, glob
       continue // binary or unreadable file
     }
 
+    // Process lines in a single pass without creating intermediate arrays
     const lines = text.split('\n')
     const span = context && context > 0 ? context : 0
     let lastEmitted = -1
+    
     for (let i = 0; i < lines.length; i++) {
-      if (!regex.test(lines[i]!)) continue
+      const line = lines[i]!
+      if (!regex.test(line)) continue
+      
+      if (matches.length >= MAX_MATCHES) break
+      
       if (span > 0) {
         // ripgrep-style: `path-line-content` for context, `path:line:content`
         // for the match, `--` between non-adjacent groups.
@@ -196,9 +225,8 @@ async function searchWithJs(pattern: string, dir: string, inputDir: string, glob
         }
         lastEmitted = to
       } else {
-        matches.push(`${fullPath}:${i + 1}:${lines[i]}`)
+        matches.push(`${fullPath}:${i + 1}:${line}`)
       }
-      if (matches.length >= MAX_MATCHES) break
     }
     if (matches.length >= MAX_MATCHES) break
   }

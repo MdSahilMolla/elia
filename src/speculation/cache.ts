@@ -45,7 +45,9 @@ export function createToolResultCache(): ToolResultCache {
   const stats: CacheStats = { speculated: 0, hits: 0, misses: 0 }
 
   function key(name: string, input: Record<string, unknown>): string {
-    // Sorted keys so `{a,b}` and `{b,a}` are the same call.
+    // Sorted keys so `{a,b}` and `{b,a}` are the same call. JSON.stringify on
+    // each value keeps the encoding unambiguous — a hand-rolled `k=v` join left
+    // `{pattern:'x',path:'y'}` and `{path:'y&pattern=x'}` with the same key.
     const normalized = Object.keys(input)
       .sort()
       .map((k) => `${k}=${JSON.stringify(input[k])}`)

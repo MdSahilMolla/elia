@@ -114,14 +114,21 @@ export async function loadBrainItems(options: LoadBrainOptions = {}): Promise<Br
 
   const items: BrainItem[] = []
 
-  for (const sessionId of listLedgerSessionIds(sessionsDir)) {
+  // Load sessions in parallel for better performance
+  const sessionIds = listLedgerSessionIds(sessionsDir)
+  const sessionPromises = sessionIds.map(async (sessionId) => {
     try {
-      for (const record of await loadLedger(sessionId, sessionsDir)) {
-        items.push(episodeItem(record, sessionId, options.currentSessionId))
-      }
+      const records = await loadLedger(sessionId, sessionsDir)
+      return records.map((record) => episodeItem(record, sessionId, options.currentSessionId))
     } catch {
       // A torn ledger for one session must not sink the whole brain.
+      return []
     }
+  })
+  
+  const sessionResults = await Promise.all(sessionPromises)
+  for (const sessionItems of sessionResults) {
+    items.push(...sessionItems)
   }
 
   for (const lesson of loadLessons(options.lessonsPath)) {

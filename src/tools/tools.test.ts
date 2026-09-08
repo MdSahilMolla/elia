@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { withAgentIdentity } from '../autonomy/context.ts'
 import { editFileTool } from './editFile.ts'
-import { grepTool } from './grep.ts'
+import { grepTool, searchWithJs } from './grep.ts'
 import { listFilesTool } from './listFiles.ts'
 import { readFileTool } from './readFile.ts'
 import { defaultTimeoutForCommand, runCommandTool } from './runCommand.ts'
@@ -290,6 +290,25 @@ test('grep filters by glob and can include surrounding context', async () => {
   const withContext = await executeTool('grep', { pattern: 'hi from', path: testDir, glob: '*.md', context: 1 })
   expect(withContext).toContain('above')
   expect(withContext).toContain('below')
+})
+
+test('grep (JS path) emits trailing context for a match on the last line', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'elia-grep-eof-'))
+  try {
+    // No trailing newline: the match is the final line, and its "after" context
+    // window runs past the end of the file.
+    writeFileSync(join(dir, 'eof.txt'), 'one\ntwo\nthree\nNEEDLE')
+    writeFileSync(join(dir, 'gap.txt'), 'NEEDLE\nfiller\nfiller\nfiller\nNEEDLE')
+    const result = await searchWithJs('NEEDLE', dir, dir, undefined, 1)
+    // The last-line match still emits, with its one line of leading context and
+    // no crash reaching past the end.
+    expect(result).toContain(':4:NEEDLE')
+    expect(result).toContain('-3-three')
+    // Two non-adjacent match groups in gap.txt stay separated by `--`.
+    expect(result).toContain('\n--\n')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
 })
 
 test('grep rejects an out-of-range context value', async () => {
