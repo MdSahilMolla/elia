@@ -19,6 +19,7 @@ import { paths } from '../statePaths.ts'
 import { ensureSecureDirectory, writeSecureFile } from '../securePersistence.ts'
 import { WorkspaceStore, DEFAULT_WORKSPACE_DB } from './store.ts'
 import { resolveCaller, type Caller } from './identity.ts'
+import { Orchestrator } from './orchestrator.ts'
 import { dispatchRpc, RpcError, type RpcContext } from './rpc.ts'
 import { isWorkspaceRpcRequest, WORKSPACE_PROTOCOL_VERSION, type WorkspaceServerMessage } from './protocol.ts'
 import { HEARTBEAT_INTERVAL_MS } from './types.ts'
@@ -39,12 +40,19 @@ export interface WorkspaceServerOptions {
   store?: WorkspaceStore
   /** Objective planner override; defaults to the model-backed planner. */
   planner?: import('./decompose.ts').ObjectivePlanner
+  /** Run the orchestration reactor in-process (default true). */
+  orchestrate?: boolean
+  /** Ceiling on concurrently dispatched tasks (default 8). */
+  maxConcurrentDispatch?: number
+  /** Orchestrator safety-net sweep cadence in ms (default 5000). */
+  sweepMs?: number
 }
 
 export interface RunningWorkspaceServer {
   url: string
   port: number
   store: WorkspaceStore
+  orchestrator?: Orchestrator
   stop(): void
 }
 
@@ -75,6 +83,11 @@ export function runWorkspaceServer(options: WorkspaceServerOptions = {}): Runnin
       // A transient lock; the next tick retries.
     }
   }, HEARTBEAT_INTERVAL_MS)
+
+  const orchestrator = options.orchestrate === false
+    ? undefined
+    : new Orchestrator({ store, maxConcurrentDispatch: options.maxConcurrentDispatch, sweepMs: options.sweepMs })
+  orchestrator?.start()
 
   let stopping = false
   const server = Bun.serve<ConnectionData>({
@@ -160,6 +173,7 @@ export function runWorkspaceServer(options: WorkspaceServerOptions = {}): Runnin
     if (stopping) return
     stopping = true
     clearInterval(reconcileTimer)
+    orchestrator?.stop()
     unsubscribe()
     for (const ws of connections) {
       try {
@@ -174,7 +188,7 @@ export function runWorkspaceServer(options: WorkspaceServerOptions = {}): Runnin
 
   const port = server.port ?? options.port ?? 0
   const url = `ws://${hostname}:${port}/workspace`
-  return { url, port, store, stop }
+  return { url, port, store, orchestrator, stop }
 }
 
 function send(ws: ServerWebSocket<ConnectionData>, message: WorkspaceServerMessage): void {

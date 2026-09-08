@@ -89,6 +89,7 @@ export function toTask(row: Row): TaskRecord {
     worktreeRef: opt(row.worktree_ref), leaseOwner: opt(row.lease_owner), leaseExpiresAt: optNum(row.lease_expires_at),
     createdBy: str(row.created_by), createdAt: str(row.created_at), updatedAt: str(row.updated_at),
     startedAt: opt(row.started_at), finishedAt: opt(row.finished_at), lastError: opt(row.last_error), reviewNotes: opt(row.review_notes),
+    resultReport: opt(row.result_report),
   }
 }
 

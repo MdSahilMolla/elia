@@ -139,7 +139,7 @@ test('presence tracks connected participants and clears on disconnect', async ()
 test('not-yet-implemented methods report their milestone instead of failing opaquely', async () => {
   const { server, owner } = await fixture()
   const client = await connect(server, owner)
-  expect(await rejection(client.call('task.assign', { taskId: 'x' }))).toMatch(/M4/)
+  expect(await rejection(client.call('review.submit', { taskId: 'x' }))).toMatch(/M5/)
 })
 
 test('objective.add plans a task graph; approval activates it and makes wave-1 tasks ready', async () => {

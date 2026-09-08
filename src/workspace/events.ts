@@ -309,6 +309,7 @@ export function applyProjection(db: Database, event: PersistedEvent): void {
     case 'TaskCompleted': {
       setTaskStatus(db, String(event.taskId), 'done', {
         finished_at: event.at, lease_owner: null, lease_expires_at: null, last_error: null, review_notes: null,
+        ...(p.report !== undefined ? { result_report: String(p.report) } : {}),
       })
       const task = toTask(requireTaskRow(db, String(event.taskId)))
       refreshTaskReadiness(db, task.objectiveId)

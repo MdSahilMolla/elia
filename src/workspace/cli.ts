@@ -220,6 +220,23 @@ async function runMember(sub: string[], flags: Map<string, string>): Promise<voi
 }
 
 async function runAgent(sub: string[], flags: Map<string, string>): Promise<void> {
+  if (sub[0] === 'run') {
+    const token = process.env.ELIA_WORKSPACE_TOKEN?.trim() || flagFromArgv('--token')
+    if (!token) throw new Error('elia workspace agent run needs the agent service token (--token or $ELIA_WORKSPACE_TOKEN)')
+    const { url } = await resolveServer()
+    const { runAgentRuntime } = await import('./agentRuntime.ts')
+    writeNotice(`Starting agent runtime against ${url} — Ctrl+C to detach.`)
+    await runAgentRuntime({ serverUrl: url, token, once: process.argv.includes('--once') })
+    return
+  }
+  if (sub[0] === 'pause' || sub[0] === 'resume' || sub[0] === 'stop') {
+    await withClient(async (client) => emit(await client.call('agent.control', { agent: sub[1], action: sub[0] })))
+    return
+  }
+  if (sub[0] === 'explain') {
+    await withClient(async (client) => emit(await client.call('agent.explain', { agent: sub[1] })))
+    return
+  }
   await withClient(async (client) => {
     if (sub[0] === 'register') {
       const result = await client.call('agent.register', {

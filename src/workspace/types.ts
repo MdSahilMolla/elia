@@ -156,10 +156,10 @@ export const AGENT_STATUSES: AgentStatus[] = [
 export const AGENT_TRANSITIONS: Record<AgentStatus, AgentStatus[]> = {
   idle: ['assigned', 'cancelled', 'paused'],
   assigned: ['planning', 'working', 'idle', 'paused', 'cancelled', 'failed'],
-  planning: ['working', 'waiting', 'blocked', 'failed', 'paused', 'cancelled', 'needs-human'],
-  working: ['waiting', 'reviewing', 'completed', 'blocked', 'failed', 'paused', 'cancelled', 'needs-human'],
-  waiting: ['working', 'reviewing', 'blocked', 'failed', 'paused', 'cancelled', 'needs-human'],
-  reviewing: ['completed', 'working', 'blocked', 'failed', 'paused', 'cancelled', 'needs-human'],
+  planning: ['working', 'waiting', 'idle', 'blocked', 'failed', 'paused', 'cancelled', 'needs-human'],
+  working: ['waiting', 'reviewing', 'completed', 'idle', 'blocked', 'failed', 'paused', 'cancelled', 'needs-human'],
+  waiting: ['working', 'reviewing', 'idle', 'blocked', 'failed', 'paused', 'cancelled', 'needs-human'],
+  reviewing: ['completed', 'working', 'idle', 'blocked', 'failed', 'paused', 'cancelled', 'needs-human'],
   completed: ['idle'],
   blocked: ['idle', 'working', 'failed', 'cancelled', 'needs-human'],
   failed: ['idle', 'cancelled'],
@@ -307,6 +307,8 @@ export interface TaskRecord {
   lastError?: string
   /** Set by a review verdict; the agent must clear these before re-completing. */
   reviewNotes?: string
+  /** The completing agent's final report — fed to dependent tasks as scoped context. */
+  resultReport?: string
 }
 
 // --- Coordination: reservations, messages, decisions, approvals, presence ---

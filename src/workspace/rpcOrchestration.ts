@@ -11,21 +11,18 @@ import { randomUUID } from 'node:crypto'
 import { RpcError, type RpcContext } from './rpc.ts'
 import { requireCapability } from './identity.ts'
 import { decomposeObjective } from './decompose.ts'
+import { dispatchAgentRpc } from './rpcAgents.ts'
 import { isRoleName } from '../autonomy/types.ts'
 import { OPEN_TASK_STATUSES, type TaskRecord } from './types.ts'
 import type { WorkspaceRpcMethod } from './protocol.ts'
 
+const AGENT_METHODS = new Set<WorkspaceRpcMethod>([
+  'agent.connect', 'agent.claim', 'agent.progress', 'agent.complete', 'agent.explain', 'agent.control',
+  'task.assign', 'task.reassign', 'task.instruct',
+])
+
 const PENDING: Partial<Record<WorkspaceRpcMethod, string>> = {
-  'task.assign': 'M4 (orchestrator)',
-  'task.reassign': 'M4 (orchestrator)',
-  'task.instruct': 'M4 (orchestrator)',
   'review.submit': 'M5 (reviews)',
-  'agent.connect': 'M4 (agent runtime)',
-  'agent.control': 'M4 (agent runtime)',
-  'agent.claim': 'M4 (agent runtime)',
-  'agent.progress': 'M4 (agent runtime)',
-  'agent.complete': 'M4 (agent runtime)',
-  'agent.explain': 'M4 (agent runtime)',
 }
 
 type Params = Record<string, unknown>
@@ -59,6 +56,8 @@ export async function dispatchOrchestrationRpc(
   params: Params,
 ): Promise<unknown> {
   const { store, caller } = ctx
+
+  if (AGENT_METHODS.has(method)) return dispatchAgentRpc(ctx, method, params)
 
   switch (method) {
     case 'objective.list':

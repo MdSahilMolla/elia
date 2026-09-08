@@ -12,7 +12,7 @@ import type { Database } from 'bun:sqlite'
  * Bump `PRAGMA user_version` and add an idempotent `ALTER`/`CREATE` below on any
  * change; never rewrite an existing statement.
  */
-export const SCHEMA_VERSION = 1
+export const SCHEMA_VERSION = 2
 
 export function migrate(db: Database): void {
   db.exec(`
@@ -134,7 +134,8 @@ export function migrate(db: Database): void {
       started_at            TEXT,
       finished_at           TEXT,
       last_error            TEXT,
-      review_notes          TEXT
+      review_notes          TEXT,
+      result_report         TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_tasks_objective ON tasks(objective_id);
     CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
@@ -216,5 +217,13 @@ export function migrate(db: Database): void {
       created_at TEXT NOT NULL
     );
   `)
+
+  // Idempotent forward migrations for databases created by an earlier version.
+  const addColumn = (tableName: string, column: string, definition: string): void => {
+    const columns = db.query(`PRAGMA table_info(${tableName})`).all() as Array<{ name: string }>
+    if (!columns.some((row) => row.name === column)) db.exec(`ALTER TABLE ${tableName} ADD COLUMN ${column} ${definition}`)
+  }
+  addColumn('tasks', 'result_report', 'TEXT')
+
   db.exec(`PRAGMA user_version = ${SCHEMA_VERSION};`)
 }
