@@ -83,6 +83,56 @@ test('task readiness follows dependencies: dependent tasks stay pending until de
   expect(store.task('t_tests')!.status).toBe('ready')
 })
 
+test('unblocking a task with satisfied dependencies makes it ready, not stranded pending', () => {
+  const { store, ownerId, projectId } = bootstrap()
+  const objectiveId = seedObjective(store, ownerId, projectId)
+  store.append({ type: 'TaskCreated', actorKind: 'member', actorId: ownerId, objectiveId, payload: { id: 't_api', objectiveId, projectId, title: 'API', role: 'backend', dependsOn: [], files: [] } })
+  store.append({ type: 'TaskCreated', actorKind: 'member', actorId: ownerId, objectiveId, payload: { id: 't_tests', objectiveId, projectId, title: 'Tests', role: 'tester', dependsOn: ['t_api'], files: [] } })
+  store.append({ type: 'ObjectiveStatusChanged', actorKind: 'member', actorId: ownerId, objectiveId, payload: { status: 'awaiting-approval' } })
+  store.append({ type: 'ObjectiveStatusChanged', actorKind: 'member', actorId: ownerId, objectiveId, payload: { status: 'active', approvedBy: ownerId } })
+  store.append({ type: 'TaskAssigned', actorKind: 'system', actorId: 'orch', objectiveId, taskId: 't_api', payload: { assigneeKind: 'agent', assigneeId: 'a1' } })
+  store.append({ type: 'TaskStarted', actorKind: 'agent', actorId: 'a1', objectiveId, taskId: 't_api', payload: {} })
+  store.append({ type: 'TaskCompleted', actorKind: 'agent', actorId: 'a1', objectiveId, taskId: 't_api', payload: {} })
+  expect(store.task('t_tests')!.status).toBe('ready')
+
+  // A member blocks then unblocks the dependent task. Its one dependency is done,
+  // so it must return to `ready` — not sit in `pending` with nothing to re-derive it.
+  store.append({ type: 'TaskBlocked', actorKind: 'member', actorId: ownerId, objectiveId, taskId: 't_tests', payload: { reason: 'hold' } })
+  expect(store.task('t_tests')!.status).toBe('blocked')
+  store.append({ type: 'TaskUnblocked', actorKind: 'member', actorId: ownerId, objectiveId, taskId: 't_tests', payload: {} })
+  expect(store.task('t_tests')!.status).toBe('ready')
+})
+
+test('blocking then unblocking the last open task still lets the objective complete', () => {
+  const { store, ownerId, projectId } = bootstrap()
+  const objectiveId = seedObjective(store, ownerId, projectId)
+  store.append({ type: 'TaskCreated', actorKind: 'member', actorId: ownerId, objectiveId, payload: { id: 't1', objectiveId, projectId, title: 'One', role: 'builder', dependsOn: [], files: [] } })
+  store.append({ type: 'ObjectiveStatusChanged', actorKind: 'member', actorId: ownerId, objectiveId, payload: { status: 'awaiting-approval' } })
+  store.append({ type: 'ObjectiveStatusChanged', actorKind: 'member', actorId: ownerId, objectiveId, payload: { status: 'active', approvedBy: ownerId } })
+  store.append({ type: 'TaskBlocked', actorKind: 'member', actorId: ownerId, objectiveId, taskId: 't1', payload: { reason: 'hold' } })
+  store.append({ type: 'TaskUnblocked', actorKind: 'member', actorId: ownerId, objectiveId, taskId: 't1', payload: {} })
+  expect(store.task('t1')!.status).toBe('ready')
+  store.append({ type: 'TaskAssigned', actorKind: 'system', actorId: 'orch', objectiveId, taskId: 't1', payload: { assigneeKind: 'agent', assigneeId: 'a1' } })
+  store.append({ type: 'TaskStarted', actorKind: 'agent', actorId: 'a1', objectiveId, taskId: 't1', payload: {} })
+  store.append({ type: 'TaskCompleted', actorKind: 'agent', actorId: 'a1', objectiveId, taskId: 't1', payload: {} })
+  expect(store.objective(objectiveId)!.status).toBe('completed')
+})
+
+test('a task that names an unknown dependency is never dispatched (not treated as satisfied)', () => {
+  const { store, ownerId, projectId } = bootstrap()
+  const objectiveId = seedObjective(store, ownerId, projectId)
+  store.append({ type: 'TaskCreated', actorKind: 'member', actorId: ownerId, objectiveId, payload: { id: 't_real', objectiveId, projectId, title: 'Real', role: 'backend', dependsOn: [], files: [] } })
+  store.append({ type: 'TaskCreated', actorKind: 'member', actorId: ownerId, objectiveId, payload: { id: 't_bad', objectiveId, projectId, title: 'Bad dep', role: 'tester', dependsOn: ['t_typo'], files: [] } })
+  store.append({ type: 'ObjectiveStatusChanged', actorKind: 'member', actorId: ownerId, objectiveId, payload: { status: 'awaiting-approval' } })
+  store.append({ type: 'ObjectiveStatusChanged', actorKind: 'member', actorId: ownerId, objectiveId, payload: { status: 'active', approvedBy: ownerId } })
+  // Complete the real task — this triggers a readiness refresh that, under the old
+  // `?? 'done'` default, would have flipped t_bad to `ready`.
+  store.append({ type: 'TaskAssigned', actorKind: 'system', actorId: 'orch', objectiveId, taskId: 't_real', payload: { assigneeKind: 'agent', assigneeId: 'a1' } })
+  store.append({ type: 'TaskStarted', actorKind: 'agent', actorId: 'a1', objectiveId, taskId: 't_real', payload: {} })
+  store.append({ type: 'TaskCompleted', actorKind: 'agent', actorId: 'a1', objectiveId, taskId: 't_real', payload: {} })
+  expect(store.task('t_bad')!.status).toBe('pending')
+})
+
 test('an objective completes once all its tasks are done', () => {
   const { store, ownerId, projectId } = bootstrap()
   const objectiveId = seedObjective(store, ownerId, projectId)

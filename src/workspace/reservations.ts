@@ -103,7 +103,13 @@ function split(resource: string): [string, string] {
 export function renewForTask(store: WorkspaceStore, taskId: string, now = Date.now()): number {
   const held = store.reservations(true).filter((reservation) => reservation.taskId === taskId)
   for (const reservation of held) {
-    store.raw().query('UPDATE reservations SET expires_at = ? WHERE id = ? AND released_at IS NULL').run(now + LEASE_TTL_MS, reservation.id)
+    store.append({
+      type: 'ReservationRenewed',
+      actorKind: 'system',
+      actorId: 'orchestrator',
+      taskId,
+      payload: { id: reservation.id, expiresAt: now + LEASE_TTL_MS },
+    })
   }
   return held.length
 }

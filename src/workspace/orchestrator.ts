@@ -102,17 +102,19 @@ export class Orchestrator {
   tick(now = Date.now()): void {
     reconcileReservations(this.store, now)
     this.reconcileAgents()
-    this.handleFailures()
+    this.handleFailures(now)
     this.requeueRevisions()
 
     const objectives = this.store.objectives().filter((objective) => objective.status === 'active')
     if (objectives.length === 0) return
 
-    let inFlight = this.store.tasks({ status: ['assigned', 'in-progress'] }).length
     const idleAgents = this.store.agents().filter((agent) => agent.status === 'idle' && agent.connectionId)
 
+    // Pass 1 — route in-review tasks to a reviewer. Read-only, no reservation,
+    // never counted against the dispatch ceiling, so it runs for every objective
+    // before any dispatch: a saturated objective earlier in the list must not
+    // starve a later one's reviews.
     for (const objective of objectives) {
-      // Route in-review tasks to an available reviewer (read-only, no reservation).
       for (const task of this.store.tasks({ objectiveId: objective.id, status: 'in-review' })) {
         if (task.assigneeId && this.store.agent(task.assigneeId)?.status === 'reviewing') continue
         const reviewer = idleAgents.find((agent) => {
@@ -129,12 +131,21 @@ export class Orchestrator {
         this.store.append({ type: 'AgentStateChanged', actorKind: 'system', actorId: 'orchestrator', payload: { id: reviewer.id, status: 'assigned', currentTaskId: task.id } })
         idleAgents.splice(idleAgents.indexOf(reviewer), 1)
       }
+    }
+
+    // Pass 2 — dispatch ready work up to the concurrency ceiling. `break`, not
+    // `return`: hitting the ceiling inside one objective must not abandon the
+    // objectives after it (they may free up within this same tick as reviews
+    // complete, and a later sweep is not guaranteed to reach them first).
+    let inFlight = this.store.tasks({ status: ['assigned', 'in-progress'] }).length
+    for (const objective of objectives) {
+      if (inFlight >= this.maxConcurrent) break
 
       const ready = this.store.tasks({ objectiveId: objective.id, status: 'ready' })
         .sort((a, b) => (a.wave ?? 99) - (b.wave ?? 99) || a.createdAt.localeCompare(b.createdAt))
 
       for (const task of ready) {
-        if (inFlight >= this.maxConcurrent) return
+        if (inFlight >= this.maxConcurrent) break
         const agent = this.pickAgent(task, idleAgents)
         if (!agent) continue
 
@@ -219,7 +230,7 @@ export class Orchestrator {
     }
   }
 
-  private handleFailures(): void {
+  private handleFailures(now = Date.now()): void {
     for (const task of this.store.tasks({ status: 'failed' })) {
       releaseForTask(this.store, task.id, 'orchestrator')
       const failure = classifyFailure(task.lastError ?? 'task failed', { source: 'report' })
@@ -230,6 +241,16 @@ export class Orchestrator {
         this.store.append({ type: 'AgentStateChanged', actorKind: 'system', actorId: 'orchestrator', payload: { id: agent.id, status: 'idle', currentTaskId: null } })
       }
       if (canRetry) {
+        // Some failures — a rate limit above all — describe the next few seconds,
+        // not the request. Requeuing instantly burns one of the task's few
+        // attempts against a wall that has not moved. Wait out the delay the
+        // failure classifier worked out; `task.updatedAt` is the TaskFailed
+        // projection time, and the periodic sweep revisits.
+        const retryAfter = failure.retryAfter ?? 0
+        if (retryAfter > 0) {
+          const readyAt = Date.parse(task.updatedAt) + retryAfter
+          if (Number.isFinite(readyAt) && now < readyAt) continue
+        }
         this.store.append({
           type: 'TaskStatusChanged', actorKind: 'system', actorId: 'orchestrator',
           objectiveId: task.objectiveId, taskId: task.id, payload: { status: 'ready' },

@@ -90,6 +90,65 @@ test('a manual tick dispatches wave-1 tasks to matching agents and leaves the de
   expect(store.reservations(true).map((r) => r.resource).sort()).toEqual(['path:api/a.ts', 'path:ui/b.tsx'])
 })
 
+test('a rate-limited failure waits out its backoff before being re-queued', async () => {
+  const { store, result, orchestrator } = await scenario()
+  orchestrator.tick()
+  const a = store.tasks({ objectiveId: result.objectiveId }).find((t) => t.title === 'Backend A')!
+  expect(a.status).toBe('assigned')
+
+  store.append({ type: 'TaskStarted', actorKind: 'agent', actorId: a.assigneeId!, objectiveId: result.objectiveId, taskId: a.id, payload: {} })
+  store.append({ type: 'TaskFailed', actorKind: 'agent', actorId: a.assigneeId!, objectiveId: result.objectiveId, taskId: a.id, payload: { error: 'rate limit exceeded (429), retry later' } })
+  const failedAt = Date.parse(store.task(a.id)!.updatedAt)
+
+  const requeues = () => store.events({ objectiveId: result.objectiveId, types: ['TaskStatusChanged'] })
+    .filter((event) => event.taskId === a.id && (event.payload as { status?: string }).status === 'ready').length
+
+  orchestrator.tick(failedAt + 1_000)
+  expect(store.task(a.id)!.status).toBe('failed') // still inside the 30s rate-limit backoff
+  expect(requeues()).toBe(0)
+
+  orchestrator.tick(failedAt + 31_000)
+  expect(store.task(a.id)!.status).not.toBe('failed') // backoff elapsed — re-queued (and re-dispatched)
+  expect(requeues()).toBe(1)
+})
+
+test('a saturated objective does not starve a later objective of reviewer routing', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'elia-ws-orch-'))
+  dirs.push(dir)
+  const store = WorkspaceStore.open(join(dir, 'workspace.sqlite'))
+  stores.push(store)
+  const created = createWorkspace(store, { name: 'demo' })
+  registerAgentIdentity(store, { name: 'be', role: 'backend', pathScopes: [], actorId: created.ownerMemberId })
+  registerAgentIdentity(store, { name: 'rev', role: 'security', pathScopes: [], actorId: created.ownerMemberId })
+  for (const name of ['be', 'rev']) {
+    const identity = store.agentIdentity(name)!
+    store.append({ type: 'AgentStarted', actorKind: 'agent', actorId: identity.id, payload: { id: agentInstanceId(identity.id), identityId: identity.id, name, role: identity.role, connectionId: `conn_${name}` } })
+  }
+  const projectId = store.projects()[0]!.id
+  const seed = (objectiveId: string, tasks: Array<{ id: string; role: string }>) => {
+    store.append({ type: 'ObjectiveCreated', actorKind: 'member', actorId: created.ownerMemberId, objectiveId, payload: { id: objectiveId, workspaceId: store.workspace()!.id, projectId, goal: 'g', runId: 'r' } })
+    for (const task of tasks) {
+      store.append({ type: 'TaskCreated', actorKind: 'member', actorId: created.ownerMemberId, objectiveId, payload: { id: task.id, objectiveId, projectId, title: task.id, role: task.role, dependsOn: [], files: [] } })
+    }
+    store.append({ type: 'ObjectiveStatusChanged', actorKind: 'member', actorId: created.ownerMemberId, objectiveId, payload: { status: 'awaiting-approval' } })
+    store.append({ type: 'ObjectiveStatusChanged', actorKind: 'member', actorId: created.ownerMemberId, objectiveId, payload: { status: 'active', approvedBy: created.ownerMemberId } })
+  }
+
+  // Objective A (first in the list) has two ready tasks but a dispatch ceiling of 1.
+  seed('obj_a', [{ id: 'a1', role: 'backend' }, { id: 'a2', role: 'backend' }])
+  // Objective B (later) has a task waiting on review.
+  seed('obj_b', [{ id: 'b1', role: 'backend' }])
+  store.append({ type: 'TaskAssigned', actorKind: 'system', actorId: 'orch', objectiveId: 'obj_b', taskId: 'b1', payload: { assigneeKind: 'agent', assigneeId: 'x' } })
+  store.append({ type: 'TaskStarted', actorKind: 'agent', actorId: 'x', objectiveId: 'obj_b', taskId: 'b1', payload: {} })
+  store.append({ type: 'ReviewRequested', actorKind: 'agent', actorId: 'x', objectiveId: 'obj_b', taskId: 'b1', payload: {} })
+  expect(store.task('b1')!.status).toBe('in-review')
+
+  new Orchestrator({ store, maxConcurrentDispatch: 1 }).tick()
+
+  // A's ceiling is hit, but B's review still gets routed to the idle reviewer.
+  expect(store.task('b1')!.assigneeId).toBe(agentInstanceId(store.agentIdentity('rev')!.id))
+})
+
 test('an exclusive reservation stops a second task from being dispatched onto the same file', async () => {
   const { store, created, result, orchestrator } = await scenario()
   // Add a rogue second backend task on the same file as Backend A, no dependency.

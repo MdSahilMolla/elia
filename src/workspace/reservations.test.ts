@@ -75,10 +75,14 @@ test('an expired reservation is reclaimed and does not block', () => {
   expect('acquired' in acquireForTask(store, { taskId: 't2', objectiveId, holderKind: 'agent', holderId: 'a2', resources: ['api/login.ts'] })).toBe(true)
 })
 
-test('renewForTask pushes the lease out', () => {
+test('renewForTask pushes the lease out — on the event spine, not a raw write', () => {
   const { store, objectiveId } = bootstrap()
   acquireForTask(store, { taskId: 't1', objectiveId, holderKind: 'agent', holderId: 'a1', resources: ['api/login.ts'] })
   const before = store.reservations(true)[0]!.expiresAt
   renewForTask(store, 't1', Date.now() + 1_000)
   expect(store.reservations(true)[0]!.expiresAt).toBeGreaterThan(before)
+  // The renewal is a durable event — a projection rebuilt from the log keeps it,
+  // instead of every live lease reverting to its acquire-time expiry.
+  expect(store.events({ types: ['ReservationRenewed'] })).toHaveLength(1)
+  expect(store.auditChainIntact()).toBe(true)
 })

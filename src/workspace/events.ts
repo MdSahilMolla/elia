@@ -27,7 +27,7 @@ export const WORKSPACE_EVENT_TYPES = [
   'TaskStarted', 'TaskProgress', 'TaskCompleted', 'TaskFailed',
   'TaskBlocked', 'TaskUnblocked', 'TaskCancelled', 'TaskInstructionAdded',
   'ReviewRequested', 'ReviewCompleted', 'ChangesRequested',
-  'FileChanged', 'ReservationAcquired', 'ReservationReleased', 'ReservationExpired', 'ConflictDetected',
+  'FileChanged', 'ReservationAcquired', 'ReservationReleased', 'ReservationExpired', 'ReservationRenewed', 'ConflictDetected',
   'AgentMessageCreated', 'DecisionRecorded', 'CommentPosted',
   'ApprovalRequired', 'ApprovalGranted', 'ApprovalRejected',
   'PresenceJoined', 'PresenceUpdated', 'PresenceLeft',
@@ -93,6 +93,17 @@ export const events = {
 const nowIso = (): string => new Date().toISOString()
 const jstr = (value: unknown): string => JSON.stringify(Array.isArray(value) ? value : value ?? [])
 
+/** Epoch ms for an event's own timestamp — used wherever a projection needs a
+ * clock, so replaying the same log twice yields byte-identical projections. */
+const eventMs = (event: PersistedEvent): number => {
+  const parsed = Date.parse(event.at)
+  return Number.isFinite(parsed) ? parsed : Date.now()
+}
+
+/** A dependency is satisfied once it reaches a terminal state. `cancelled` counts:
+ * a dependent that waited on `done` only would strand forever behind a cancel. */
+const TERMINAL_DEP_STATUSES: ReadonlySet<TaskStatus> = new Set(['done', 'cancelled'])
+
 function requireTaskRow(db: Database, taskId: string): Row {
   const row = db.query('SELECT * FROM tasks WHERE id = ?').get(taskId) as Row | null
   if (!row) throw new Error(`unknown task ${taskId}`)
@@ -155,7 +166,13 @@ export function refreshTaskReadiness(db: Database, objectiveId: string): string[
   const changed: string[] = []
   for (const task of byId.values()) {
     if (task.status !== 'pending' && task.status !== 'ready') continue
-    const depsDone = task.dependsOn.every((depId) => (byId.get(depId)?.status ?? 'done') === 'done')
+    // An unknown dependency id (typo, stale ref after a re-plan) is NOT treated
+    // as satisfied — a task that can never be scheduled correctly is a louder,
+    // more debuggable failure than one dispatched before its real prerequisite.
+    const depsDone = task.dependsOn.every((depId) => {
+      const dep = byId.get(depId)
+      return dep ? TERMINAL_DEP_STATUSES.has(dep.status) : false
+    })
     const next: TaskStatus = depsDone ? 'ready' : 'pending'
     if (next !== task.status) {
       db.query('UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?').run(next, nowIso(), task.id)
@@ -296,14 +313,14 @@ export function applyProjection(db: Database, event: PersistedEvent): void {
       setTaskStatus(db, String(event.taskId), 'in-progress', {
         started_at: event.at,
         lease_owner: p.leaseOwner == null ? null : String(p.leaseOwner),
-        lease_expires_at: Number(p.leaseExpiresAt ?? Date.now() + 120_000),
+        lease_expires_at: Number(p.leaseExpiresAt ?? eventMs(event) + 120_000),
         attempt_count: Number(toTask(requireTaskRow(db, String(event.taskId))).attemptCount) + 1,
       })
       return
     }
     case 'TaskProgress': {
       db.query('UPDATE tasks SET lease_expires_at = ?, updated_at = ? WHERE id = ?')
-        .run(Number(p.leaseExpiresAt ?? Date.now() + 120_000), event.at, String(event.taskId))
+        .run(Number(p.leaseExpiresAt ?? eventMs(event) + 120_000), event.at, String(event.taskId))
       return
     }
     case 'TaskCompleted': {
@@ -326,8 +343,12 @@ export function applyProjection(db: Database, event: PersistedEvent): void {
     }
     case 'TaskUnblocked': {
       const task = toTask(requireTaskRow(db, String(event.taskId)))
-      const depsDone = task.dependsOn.length === 0
-      setTaskStatus(db, String(event.taskId), depsDone ? 'ready' : 'pending', { last_error: null })
+      // Back to `pending`, then let the shared readiness pass promote it if its
+      // dependencies are in fact complete. Deciding readiness inline here — and
+      // only for zero-dependency tasks — stranded any task with a *satisfied*
+      // ordering edge in `pending` forever, because nothing re-derives it.
+      setTaskStatus(db, String(event.taskId), 'pending', { last_error: null })
+      refreshTaskReadiness(db, task.objectiveId)
       return
     }
     case 'TaskCancelled': {
@@ -365,12 +386,21 @@ export function applyProjection(db: Database, event: PersistedEvent): void {
       db.query(`INSERT INTO reservations (id, resource, mode, holder_kind, holder_id, task_id, acquired_at, expires_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
         .run(String(p.id), String(p.resource), String(p.mode ?? 'exclusive'), String(p.holderKind), String(p.holderId),
-          String(event.taskId), Number(p.acquiredAt ?? Date.now()), Number(p.expiresAt ?? Date.now() + 120_000))
+          String(event.taskId), Number(p.acquiredAt ?? eventMs(event)), Number(p.expiresAt ?? eventMs(event) + 120_000))
       return
     }
     case 'ReservationReleased':
     case 'ReservationExpired': {
-      db.query('UPDATE reservations SET released_at = ? WHERE id = ? AND released_at IS NULL').run(Date.now(), String(p.id))
+      db.query('UPDATE reservations SET released_at = ? WHERE id = ? AND released_at IS NULL').run(eventMs(event), String(p.id))
+      return
+    }
+    case 'ReservationRenewed': {
+      // Heartbeat lease renewal. On the event spine (not a raw UPDATE) so a
+      // projection rebuilt from the log keeps every renewal — otherwise every
+      // live reservation reverts to its acquire-time expiry and the next
+      // reconcile frees files that are still actively held.
+      db.query('UPDATE reservations SET expires_at = ? WHERE id = ? AND released_at IS NULL')
+        .run(Number(p.expiresAt ?? eventMs(event) + 120_000), String(p.id))
       return
     }
     case 'ConflictDetected': {
