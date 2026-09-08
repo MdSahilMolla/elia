@@ -346,7 +346,11 @@ export class GoalGraphStore {
       node.status = 'completed'
       node.lastError = undefined
     } else {
-      const failure = classifyFailure(result.error ?? result.report ?? 'node failed')
+      // A real error classifies on its own text; falling back to the worker's
+      // prose report, its wording carries no verdict (source: 'report').
+      const failure = result.error
+        ? classifyFailure(result.error)
+        : classifyFailure(result.report ?? 'node failed', { source: 'report' })
       node.lastError = failure
       node.status = failure.class === 'retryable' && node.attemptCount < node.maxAttempts ? 'waiting-retry' : failure.class === 'authorization' || failure.class === 'human-review' ? 'blocked' : 'failed'
     }
@@ -751,11 +755,35 @@ export function pendingApprovals(snapshot: GoalGraphSnapshot): ApprovalRecord[] 
   })
 }
 
-export function classifyFailure(error: unknown): FailureRecord {
+/**
+ * `source` says what the text is:
+ *  - `'error'` (default): an exception message, an exit-code failure, an elia
+ *    policy string. Every marker applies — this text is machine-generated.
+ *  - `'report'`: a worker sub-agent's prose summary of why a step didn't finish.
+ *    Prose words carry no verdict — a report saying the user must set a secret
+ *    "manually", or that a reviewer found an attacker could gain "unauthorized"
+ *    access, is not an authorization failure or a human-review gate. Only elia's
+ *    own unambiguous strings and hard machine signals classify; everything else
+ *    is `retryable`, so the wave executor's retry pass gets a shot at it instead
+ *    of the node being permanently blocked on a turn of phrase.
+ */
+export function classifyFailure(error: unknown, opts: { source?: 'error' | 'report' } = {}): FailureRecord {
   const message = error instanceof Error ? error.message : String(error)
   const lower = message.toLowerCase()
-  let failureClass: FailureClass = 'fatal'
+  const fromReport = opts.source === 'report'
   let retryAfter: number | undefined
+
+  // A worker's prose report: only hard machine signals and elia's own gate
+  // strings classify. Anything else is retryable — the retry pass, not a
+  // permanent block, handles a step that merely "didn't finish".
+  if (fromReport) {
+    let reportClass: FailureClass = 'retryable'
+    if (/blocked by elia|denied by the user|action approval (?:denied|required)/.test(lower)) reportClass = 'authorization'
+    else if (/rate limit|\b429\b|quota exceeded|too many requests/.test(lower)) retryAfter = 30_000
+    return { class: reportClass, message: message.slice(0, 2000), at: Date.now(), retryAfter }
+  }
+
+  let failureClass: FailureClass = 'fatal'
   if (/blocked by elia|denied by the user|approval|unauthori[sz]ed|forbidden|captcha|login required/.test(lower)) failureClass = 'authorization'
   else if (/timeout|timed out|econnreset|econnrefused|network|rate limit|\b429\b|\b5\d\d\b|temporar|retryable|exit code/.test(lower)) {
     failureClass = 'retryable'

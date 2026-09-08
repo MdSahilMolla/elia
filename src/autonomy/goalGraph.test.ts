@@ -110,6 +110,17 @@ describe('durable goal graph', () => {
     expect(classifyFailure('ENOENT: no such file').class).toBe('environment')
     expect(classifyFailure('action partially completed').class).toBe('human-review')
   })
+
+  test('a worker prose report never becomes human-review or authorization on a turn of phrase', () => {
+    // These exact phrasings each stranded a real run (see loop-debugging notes).
+    expect(classifyFailure('The user must set JWT_SECRET manually in their environment.', { source: 'report' }).class).toBe('retryable')
+    expect(classifyFailure('This is a partial implementation; the frontend still needs wiring.', { source: 'report' }).class).toBe('retryable')
+    expect(classifyFailure('The reviewer noted an attacker could gain unauthorized access.', { source: 'report' }).class).toBe('retryable')
+    expect(classifyFailure('There is a merge conflict in the approach that needs a human.', { source: 'report' }).class).toBe('retryable')
+    // But elia's own gate strings still classify, wherever they appear.
+    expect(classifyFailure('Action blocked by Elia’s autonomy governor', { source: 'report' }).class).toBe('authorization')
+    expect(classifyFailure('hit a 429 rate limit', { source: 'report' }).retryAfter).toBe(30_000)
+  })
 })
 
 
