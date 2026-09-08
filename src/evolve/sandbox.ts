@@ -34,6 +34,7 @@ const TRACKED_ROOT_FILES = ['package.json', 'tsconfig.json']
  */
 export const IMMUTABLE_FILES = [
   'src/evolve/suite.ts',
+  'src/evolve/hardSuite.ts',
   'src/evolve/fitness.ts',
   'src/evolve/engine.ts',
   'src/evolve/ledger.ts',

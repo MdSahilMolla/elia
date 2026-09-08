@@ -3,6 +3,7 @@ import { dirname, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { runShell } from '../shell.ts'
 import { historyTasks } from './history/suite.ts'
+import { HARD_BENCH_TASKS } from './hardSuite.ts'
 import type { BenchCheck, BenchTask } from './task.ts'
 
 export type { BenchCheck, BenchTask } from './task.ts'
@@ -247,7 +248,7 @@ const SERVICE_TIMEOUTS: { file: string; name: string; timeoutMs: number }[] = [
   { file: 'service-j.json', name: 'sessions', timeoutMs: 2900 },
 ]
 
-export const BENCH_TASKS: BenchTask[] = [
+const SYNTHETIC_BENCH_TASKS: BenchTask[] = [
   {
     id: 'precise-edit',
     weight: 1,
@@ -626,6 +627,15 @@ test('inclusiveRange handles a single value', () => {
     },
   },
 ]
+
+/**
+ * The set the evolution loop compares candidates on: the single-file competency
+ * tasks, plus the long-horizon tasks from `hardSuite.ts`. The hard tasks are in
+ * the default set on purpose — a self-improvement loop only gets better at what
+ * it is scored on, and sustained multi-file autonomy is the capability worth
+ * pulling toward.
+ */
+export const BENCH_TASKS: BenchTask[] = [...SYNTHETIC_BENCH_TASKS, ...HARD_BENCH_TASKS]
 
 /**
  * Every task elia can be measured on: the synthetic competency tasks above, plus
