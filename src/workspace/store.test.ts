@@ -191,6 +191,32 @@ test('agent messages are scoped: a directed message is visible to its recipient 
   expect(store.messages({ objectiveId, toId: 'a3' })).toHaveLength(1)
 })
 
+test('the hot read paths are index-backed, not full scans', () => {
+  const { store, ownerId, projectId } = bootstrap()
+  const objectiveId = seedObjective(store, ownerId, projectId)
+  const plan = (sql: string, ...params: unknown[]): string =>
+    (store.raw().query(`EXPLAIN QUERY PLAN ${sql}`).all(...params as never[]) as Array<{ detail: string }>)
+      .map((row) => row.detail)
+      .join(' | ')
+
+  // messages() — always ORDER BY seq DESC LIMIT, usually per-objective.
+  const messagesPlan = plan('SELECT * FROM agent_messages WHERE objective_id = ? ORDER BY seq DESC LIMIT 200', objectiveId)
+  expect(messagesPlan).toContain('idx_messages_objective_seq')
+  expect(messagesPlan).not.toContain('SCAN agent_messages')
+
+  // events() — the server's per-objective catch-up since a sequence number.
+  // seq IS the rowid here, so idx_events_objective already carries the seq range
+  // and returns rows in seq order: an index range scan with no sort.
+  const eventsPlan = plan('SELECT * FROM workspace_events WHERE seq > ? AND objective_id = ? ORDER BY seq ASC LIMIT 500', 0, objectiveId)
+  expect(eventsPlan).toContain('idx_events_objective')
+  expect(eventsPlan).not.toContain('SCAN workspace_events')
+  expect(eventsPlan).not.toContain('USE TEMP B-TREE')
+
+  // tasks({ objectiveId, status }) — the board view / orchestrator readiness query.
+  const tasksPlan = plan("SELECT * FROM tasks WHERE objective_id = ? AND status IN ('ready') ORDER BY created_at", objectiveId)
+  expect(tasksPlan).toContain('idx_tasks_objective_status')
+})
+
 test('projections survive a reopen — SQLite is the source of truth', () => {
   const dir = mkdtempSync(join(tmpdir(), 'elia-ws-'))
   dirs.push(dir)

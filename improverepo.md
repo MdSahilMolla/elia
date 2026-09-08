@@ -408,6 +408,12 @@ can measure is how v1 happened.
 
 ## 10. Remaining optimization opportunities (post-v3)
 
+> **Superseded in part by §11.** §10 was a broad, unanchored sketch. §11 is the
+> grounded pass — every item there carries `file:line`, a verified symptom, A/C,
+> V, R, matching v3 discipline. Where they overlap (§10.1 SQLite ⇄ §11.1,
+> §10.4 brain ⇄ §11.2) §11 is authoritative. §10 is kept for the ideas §11
+> hasn't reached yet (cache warming, ledger compaction, HTTP client).
+
 With all v3 items shipped, the following optimization opportunities have been
 identified through codebase analysis. These are **not** committed as a formal v4
 plan — they are documented here for future consideration, pending measurement
@@ -488,3 +494,218 @@ Any future optimization work should follow the v3 measurement discipline:
 - Document measurement methodology
 
 **Key principle**: If it can't be measured, it isn't claimed.
+
+---
+
+## 11. v4 candidate slate — grounded (post-v3 codebase sweep, 2026-09-09)
+
+Same rigour as §3: every item has verified `file:line` anchors, a symptom read
+straight from the code, acceptance criteria, a one-command validation (**V**),
+and a rollback (**R**). Ordered by (payoff ÷ risk). Nothing here is a rewrite of
+a working subsystem; each closes a specific, named gap.
+
+Legend: **A/C** = acceptance criteria · **V** = validation · **R** = rollback.
+
+### 11.0 — Status
+
+| # | Item | State |
+|---|---|---|
+| 11.1 | Workspace hot-path query indexes | ✅ **shipped this pass** — `schema.ts` v2→v3 |
+| 11.2 | Incremental (per-session) brain load | pending |
+| 11.3 | WebSocket fan-out backpressure guard | pending |
+| 11.4 | Batch `reconcileLeases` recovery | pending |
+| 11.5 | Streaming audit-chain verification | pending (low priority) |
+| 11.6 | Prefetch: stop blocking the loop on `statSync` | pending (measure via 3.6 first) |
+
+---
+
+### 11.1 — Workspace hot-path query indexes · 0.5 d · ✅ SHIPPED
+
+**Files:** `src/workspace/schema.ts` (`SCHEMA_VERSION` 2 → 3),
+`src/workspace/store.test.ts`.
+
+**Symptom (verified):**
+- `agent_messages` had **no index touching `seq`**, yet every `store.messages()`
+  call ends `ORDER BY seq DESC LIMIT n` (`store.ts:272`) — a full table scan +
+  filesort on every client poll / catch-up.
+- `store.tasks({ objectiveId, status })` (`store.ts:227‑241`) — the board view and
+  the orchestrator's readiness query — filters `objective_id` **and** `status`
+  together, but only single-column `idx_tasks_objective` / `idx_tasks_status`
+  existed.
+- `workspace_events` needed **nothing**: `seq` is `INTEGER PRIMARY KEY
+  AUTOINCREMENT` = the rowid, so `idx_events_objective` already carries the
+  `seq > ?` range and returns rows in `seq` order (verified via
+  `EXPLAIN QUERY PLAN`: `SEARCH … USING INDEX idx_events_objective
+  (objective_id=? AND rowid>?)`, no B-tree sort). Adding a composite there was
+  pure redundancy and was dropped.
+
+**Change shipped:** three idempotent `CREATE INDEX IF NOT EXISTS` —
+`idx_messages_objective_seq (objective_id, seq)`, `idx_messages_seq (seq)`,
+`idx_tasks_objective_status (objective_id, status)` — plus the
+`SCHEMA_VERSION` bump the file's own header mandates. Indexes live in the main
+`migrate()` exec block, so existing DBs pick them up on next open.
+
+- **A/C:** new `store.test.ts` case asserts `EXPLAIN QUERY PLAN` for the three
+  hot queries is index-backed — names the expected index, no `SCAN`, no
+  `USE TEMP B-TREE`. Whole workspace suite green (62 tests).
+- **V:** `bun test src/workspace/store.test.ts && bun run typecheck`
+- **R:** one revert; `CREATE INDEX IF NOT EXISTS` + a version bump are additive
+  and safe to drop.
+
+---
+
+### 11.2 — Incremental, per-session brain load · 2 d
+
+**Files:** `src/brain/store.ts:84` (module `cache`), `:94‑104`
+(`defaultFingerprint`), `:106‑133` (`loadBrainItems`).
+
+**Symptom (verified):** `defaultFingerprint` folds **every** session ledger's
+mtime into one string. The *current* session's ledger is rewritten every turn
+(`agent.ts` appends an episode), so on essentially every dev turn the single
+whole-brain `cache` misses and `loadBrainItems` re-runs `loadLedger` for **all**
+historical sessions — steady-state cost is O(total sessions ever) when it should
+be O(1 changed ledger). The parallel `Promise.all` (shipped in 3.0) softens the
+constant but not the scaling.
+
+**Change:** replace the one-shot `cache` with a per-session parse memo —
+`Map<sessionId, { stamp: 'mtimeMs:size'; items: BrainItem[] }>`. On load, stat
+each ledger, reuse the memoized slice where `stamp` matches, re-parse only the
+misses, concat. Lessons/rationale/notes keep their existing single mtime check.
+Register the memo with `cacheRegistry` (bounded) and clear it in
+`resetBrainCache()`.
+
+- **A/C:** unit test — 20 historical ledger fixtures + 1 current; append one
+  episode to the current ledger; assert exactly one `loadLedger` call on the
+  second `loadBrainItems` (spy), output identical to a cold load. Stale check:
+  a ledger rewritten with same length but different content (size moves) ⇒
+  re-parsed.
+- **V:** `bun test src/brain/store.test.ts`
+- **R:** revert to the single-fingerprint cache (current behaviour).
+- **Risk:** Low‑Medium — same staleness class as 3.2; `mtimeMs:size` stamp, not
+  mtime alone; `resetBrainCache()` on checkpoint restore already wired.
+
+---
+
+### 11.3 — WebSocket fan-out backpressure guard · 1.5 d
+
+**Files:** `src/workspace/server.ts:66‑75` (the `store.subscribe` fan-out).
+
+**Symptom (verified):** the fan-out does `ws.send(frame)` for every connection
+and **ignores the result** and `ws.getBufferedAmount()`. The event spine is
+chatty (presence, `AgentHeartbeat`, `TaskProgress`), so one stalled client's
+outbound buffer grows without bound — a server-side memory leak driven by a
+remote peer.
+
+**Change:** after `ws.send`, if the return is `-1` (Bun backpressure signal) or
+`ws.getBufferedAmount()` exceeds a ceiling (e.g. 4 MB), stop sending live frames
+to that socket and mark it `desynced`; on its next inbound message (or a short
+timer) send one `{ type: 'resync', latestSeq }` frame and let the client refetch
+via the existing `events({ sinceSeq })` path. Count `desyncs` for the profiler.
+
+- **A/C:** `server.test.ts` — a client that never drains receives a bounded
+  number of frames then a `resync`; server RSS stays flat while 10k events are
+  appended; a healthy client on the same server misses nothing.
+- **V:** `bun test src/workspace/server.test.ts`
+- **R:** revert; fan-out goes back to unconditional `send` (today's behaviour).
+- **Risk:** Low — the resync path is the same one used on every fresh connect.
+
+---
+
+### 11.4 — Batch `reconcileLeases` recovery into one transaction · 1 d
+
+**Files:** `src/workspace/store.ts:325‑367`, called at `server.ts:78` (startup)
+and every `HEARTBEAT_INTERVAL_MS` (`server.ts:79‑85`).
+
+**Symptom (verified):** each recovered task / agent / reservation is a separate
+`this.append()` — its own SQLite transaction **and** a full listener fan-out.
+A server restarting after a crash with many in-flight tasks does N synchronous
+commits before `Bun.serve` starts accepting connections, and each fires the
+(at startup, empty but soon-populated) subscriber list.
+
+**Change:** add a private `appendMany(inputs)` that runs the whole batch inside
+one `db.transaction`, still writing one event row + one audit row per input, and
+fans listeners out once after commit. `reconcileLeases` collects its recovery
+events and flushes them through `appendMany`.
+
+- **A/C:** unit test — seed 200 expired leases, one `reconcileLeases` call
+  produces 200 events in one transaction (assert via a single
+  `wal_checkpoint`-visible commit or a txn spy), history and audit chain intact
+  (`auditChainIntact()` still true), recovered statuses correct.
+- **V:** `bun test src/workspace/store.test.ts`
+- **R:** revert; `reconcileLeases` goes back to per-event `append`.
+- **Risk:** Low — same rows written, just grouped; rollback semantics strictly
+  safer (all-or-nothing recovery).
+
+---
+
+### 11.5 — Streaming audit-chain verification · 0.5 d · low priority
+
+**Files:** `src/workspace/store.ts:136‑148` (`auditChainIntact`).
+
+**Symptom (verified):** `SELECT * FROM audit_log ORDER BY seq ASC` materialises
+the **entire** audit history in memory and rehashes every row on each call.
+O(all history) time and memory. Not a hot path (verification / debug only), so
+this is filed low.
+
+**Change:** iterate with a prepared statement cursor instead of `.all()`;
+optionally accept a `fromSeq` + trusted prior `entry_hash` to verify only the
+tail. No schema change.
+
+- **A/C:** existing audit-chain test still passes; a 50k-row fixture verifies
+  without a memory spike; tamper in the middle still detected.
+- **V:** `bun test src/workspace/store.test.ts`
+- **R:** revert to `.all()`.
+
+---
+
+### 11.6 — Prefetch: don't block the loop thread on `statSync` · 1 d · measure first
+
+**Files:** `src/speculation/prefetch.ts:180‑189` (`isSpeculativelyReadable`),
+`:108‑117` (`extractPaths`), `:80‑104` (`observe`).
+
+**Symptom (verified):** `observe()` runs **synchronously** after every tool
+round, and `extractPaths` calls `isSpeculativelyReadable` → `statSync` for every
+path-shaped token in the output *before* the slice to
+`MAX_PREDICTIONS_PER_ROUND`. A wide grep result = dozens of blocking `statSync`
+calls on the critical path between the model's tool batch and the next request.
+
+**Change:** cap the number of candidates stat-checked per round (slice the regex
+matches first, then stat), **or** drop the pre-stat entirely and let
+`cache.speculate` attempt the read — a missing/oversized file fails cheap in the
+already-async speculation body. Keep the ignore-dir check (string-only, no I/O).
+
+- **A/C:** `prefetch.test.ts` — a 500-hit synthetic grep result triggers ≤
+  `MAX_PREDICTIONS_PER_ROUND` stats (or zero); `grep-chain` scenario still 2/2
+  cached; no new real reads for non-existent paths land in the transcript.
+- **V:** `bun test src/speculation/prefetch.test.ts && elia bench-latency --only grep-chain`
+- **R:** revert; pre-stat filter restored.
+- **Risk:** Low — caps and the ignore filter are unchanged; worst case is a
+  cheap failed speculative read (already handled, `cache.ts:61`).
+
+---
+
+### 11.7 — Sequencing
+
+| # | Item | Days | Gate |
+|---|---|---|---|
+| 1 | 11.1 Workspace indexes | 0.5 | ✅ done — EXPLAIN test green |
+| 2 | 11.2 Incremental brain load | 2 | one `loadLedger` on steady-state turn |
+| 3 | 11.4 Batch lease recovery | 1 | 200-lease recovery = 1 txn, chain intact |
+| 4 | 11.3 WS backpressure guard | 1.5 | server RSS flat under a stalled client |
+| 5 | 11.6 Prefetch stat cap | 1 | measured on 3.6 numbers first |
+| 6 | 11.5 Streaming audit verify | 0.5 | 50k-row verify, no spike |
+
+**Total ≈ 6.5 engineering days.** All six are gap-closers on the workspace /
+brain / speculation surfaces — no new module, no new differentiator, consistent
+with §9.
+
+---
+
+## 12. Out-of-plan work landed on `production`
+
+Feature work, not perf/reliability — recorded here only so the branch history is
+legible alongside this plan.
+
+| Date | Commit | What |
+|---|---|---|
+| 2026-09-09 | `45ac154` | **Image input in the terminal.** New `image` `ContentBlock`; `src/attachments.ts` (magic-byte sniff, path extraction, 5 MB cap); Anthropic base64 source + OpenAI `image_url` data URL + Codex text-marker fallback; `/attach <path>` and inline paste/drag detection in both REPLs; compaction counts an image at ~1.5k tokens. Tests: `src/attachments.test.ts` + provider/compaction cases. |

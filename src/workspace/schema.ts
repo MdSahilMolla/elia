@@ -12,7 +12,7 @@ import type { Database } from 'bun:sqlite'
  * Bump `PRAGMA user_version` and add an idempotent `ALTER`/`CREATE` below on any
  * change; never rewrite an existing statement.
  */
-export const SCHEMA_VERSION = 2
+export const SCHEMA_VERSION = 3
 
 export function migrate(db: Database): void {
   db.exec(`
@@ -139,6 +139,9 @@ export function migrate(db: Database): void {
     );
     CREATE INDEX IF NOT EXISTS idx_tasks_objective ON tasks(objective_id);
     CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
+    -- tasks({ objectiveId, status }) -- the board view and the orchestrator's
+    -- "what's ready under this objective" query -- filters both columns together.
+    CREATE INDEX IF NOT EXISTS idx_tasks_objective_status ON tasks(objective_id, status);
 
     CREATE TABLE IF NOT EXISTS reservations (
       id          TEXT PRIMARY KEY,
@@ -168,6 +171,10 @@ export function migrate(db: Database): void {
     );
     CREATE INDEX IF NOT EXISTS idx_messages_objective ON agent_messages(objective_id);
     CREATE INDEX IF NOT EXISTS idx_messages_to ON agent_messages(to_id);
+    -- messages() always ends in ORDER BY seq DESC LIMIT n, usually scoped to an
+    -- objective -- without this it's a full scan + filesort on every poll.
+    CREATE INDEX IF NOT EXISTS idx_messages_objective_seq ON agent_messages(objective_id, seq);
+    CREATE INDEX IF NOT EXISTS idx_messages_seq ON agent_messages(seq);
 
     CREATE TABLE IF NOT EXISTS decisions (
       id              TEXT PRIMARY KEY,
