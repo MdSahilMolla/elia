@@ -36,7 +36,7 @@ import {
   requireCriticVerdict,
   runVerification,
 } from './verify.ts'
-import { assessProgress, failureFingerprints, type AttemptSnapshot } from './progress.ts'
+import { assessProgress, failureFingerprints, repeatedFailureLesson, type AttemptSnapshot } from './progress.ts'
 import { filesFromGitStatus, hygieneVerdict, scanProjectFiles, type HygieneInput } from './hygiene.ts'
 import { acceptanceVerdict, createAcceptanceTool } from './acceptance.ts'
 import { applyPlanRevisions, createPlanRevisionTool, MAX_PLAN_REVISIONS } from './replan.ts'
@@ -1202,14 +1202,20 @@ Judge what is there, not what the code looks like it would probably do. A criter
         writeSubStep(`Stopping repair — ${stuck.category}: ${stuck.reason}`)
         if (stuck.question) writeBlock('Needs a decision from you', stuck.question)
         journal.append('phase', { phase: 'reflect', attempt, note: `stopped (${progress.trend} / ${stuck.category}): ${stuck.reason}${stuck.question ? ` Question: ${stuck.question}` : ''}` })
-        const lessons = await captureLessons(goal, proposal, 'unresolved', journal, track, governor, graph, runSignal)
+        const auto = repeatedFailureLesson({ goal, gate, repeated: progress.repeated, attempts: attempt })
+        const lessons = await captureLessons(goal, proposal, 'unresolved', journal, track, governor, graph, runSignal, auto ? [auto] : [])
         return done('needs-attention', { proposal, verdict, lessons })
       }
     }
 
     if (repairsSpent >= maxRepairAttempts) {
       writeSubStep(`Stopping after ${attempt} repair attempt${attempt === 1 ? '' : 's'} (${gate} gate exhausted) — this needs a human.`)
-      const lessons = await captureLessons(goal, proposal, 'unresolved', journal, track, governor, graph, runSignal)
+      // Only draw the lesson when the trajectory actually stalled/regressed — a
+      // run that was still converging when the budget ran out has no dead
+      // approach to warn a future run about.
+      const recurred = progress.trend === 'stalled' || progress.trend === 'diverging' ? progress.repeated : []
+      const auto = repeatedFailureLesson({ goal, gate, repeated: recurred, attempts: attempt })
+      const lessons = await captureLessons(goal, proposal, 'unresolved', journal, track, governor, graph, runSignal, auto ? [auto] : [])
       return done('needs-attention', { proposal, verdict, lessons })
     }
 
@@ -1320,9 +1326,20 @@ async function captureLessons(
   governor: ActionGovernor,
   graph: GoalGraphStoreType,
   signal?: AbortSignal,
+  /** Deterministic lessons the loop already knows to record (e.g. a repeated repair failure). */
+  deterministic: string[] = [],
 ): Promise<string[]> {
   writePhase('learn')
   journal.append('phase', { phase: 'learn' })
+
+  // Recorded first and unconditionally: the model-driven pass below can decide
+  // there is "nothing durable", but a repair loop that gave up against the same
+  // failure twice has already produced a fact worth carrying forward.
+  if (deterministic.length > 0) {
+    appendLessons(deterministic)
+    journal.append('lesson', { lessons: deterministic, source: 'deterministic' })
+    for (const lesson of deterministic) writeSubStep(`learned: ${lesson}`)
+  }
 
   const capture = createLessonsTool()
 
@@ -1354,10 +1371,10 @@ Read the shared blackboard with \`board_read\` to see what the workers actually 
     appendLessons(lessons)
     journal.append('lesson', { lessons })
     for (const lesson of lessons) writeSubStep(`learned: ${lesson}`)
-  } else {
+  } else if (deterministic.length === 0) {
     writeSubStep('nothing durable worth keeping from this run')
   }
-  return lessons
+  return [...deterministic, ...lessons]
 }
 
 /**

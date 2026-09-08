@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { assessProgress, errorSignature, failureFingerprints, type AttemptSnapshot } from './progress.ts'
+import { assessProgress, errorSignature, failureFingerprints, repeatedFailureLesson, type AttemptSnapshot } from './progress.ts'
 import type { VerificationOutcome } from './verify.ts'
 import type { CriticVerdict } from './types.ts'
 
@@ -131,4 +131,35 @@ test('breaking a previously green build is a real regression', () => {
 test('a run still stuck at the build gate is judged on the build failures alone', () => {
   expect(assessProgress([snap(0, ['verify:a::1']), snap(1, ['verify:a::1', 'verify:b::2'])]).trend).toBe('diverging')
   expect(assessProgress([snap(0, ['verify:a::1', 'verify:b::2']), snap(1, ['verify:a::1'])]).trend).toBe('converging')
+})
+
+test('repeatedFailureLesson summarises a recurring verify failure into a durable, tagged lesson', () => {
+  const lesson = repeatedFailureLesson({
+    goal: 'add rate limiting to the API client',
+    gate: 'build',
+    repeated: ['verify:bun test::assertionerror: expected <n> to be <n>', 'verify:bun test::<n> failing'],
+    attempts: 2,
+  })
+  expect(lesson).toBeDefined()
+  expect(lesson).toContain('[auto]')
+  expect(lesson).toContain('add rate limiting to the API client')
+  expect(lesson).toContain('bun test')
+  expect(lesson).toContain('assertionerror: expected <n> to be <n>')
+  expect(lesson).toContain('+1 other recurring failure')
+})
+
+test('repeatedFailureLesson handles a recurring review finding', () => {
+  const lesson = repeatedFailureLesson({
+    goal: 'g',
+    gate: 'review',
+    repeated: ['review:blocker:src/x.ts:the retry has an off-by-one'],
+    attempts: 3,
+  })
+  expect(lesson).toContain('the retry has an off-by-one')
+  expect(lesson).toContain('review gate')
+})
+
+test('repeatedFailureLesson returns undefined when nothing recurred or only one attempt was made', () => {
+  expect(repeatedFailureLesson({ goal: 'g', gate: 'build', repeated: [], attempts: 3 })).toBeUndefined()
+  expect(repeatedFailureLesson({ goal: 'g', gate: 'build', repeated: ['verify:x::y'], attempts: 1 })).toBeUndefined()
 })

@@ -208,3 +208,34 @@ export function assessProgress(history: AttemptSnapshot[]): ProgressAssessment {
 function short(fingerprints: string[]): string {
   return fingerprints.slice(0, 3).map((f) => f.replace(/^(verify|review):/, '')).join(' | ') + (fingerprints.length > 3 ? ` (+${fingerprints.length - 3} more)` : '')
 }
+
+/**
+ * A durable, deterministic lesson from a repair loop that gave up against the
+ * same failure attempt after attempt. Written directly (no model) so the exact
+ * signature survives even when the model-driven learning pass decides there is
+ * "nothing durable" — a future run on similar work then sees this approach did
+ * not clear it. `undefined` when nothing recurred (no clear lesson to draw).
+ */
+export function repeatedFailureLesson(input: {
+  goal: string
+  gate: 'build' | 'review'
+  repeated: string[]
+  attempts: number
+}): string | undefined {
+  const { goal, gate, repeated, attempts } = input
+  if (repeated.length === 0 || attempts < 2) return undefined
+
+  const goalHint = goal.replace(WS, ' ').trim().slice(0, 90)
+  const primary = repeated[0]!
+  // verify:<command>::<signature>  |  review:<severity>:<file>:<detail>
+  const verifyMatch = /^verify:(.+?)::(.+)$/.exec(primary)
+  const detail = verifyMatch
+    ? `\`${verifyMatch[1]}\` kept failing with "${verifyMatch[2]}"`
+    : `the reviewer kept flagging "${primary.replace(/^review:[^:]*:[^:]*:/, '').trim()}"`
+  const more = repeated.length > 1 ? ` (+${repeated.length - 1} other recurring failure(s))` : ''
+
+  return (
+    `[auto] While working on "${goalHint}", ${attempts} repair attempts could not clear the ${gate} gate: ${detail}${more}. ` +
+    `The approach taken did not resolve this — a future run should diagnose this failure's root cause before committing to a plan.`
+  )
+}
