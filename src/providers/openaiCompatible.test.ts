@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { toContentBlocks } from './openaiCompatible.ts'
+import { toContentBlocks, toOpenAIMessages } from './openaiCompatible.ts'
 
 test('text content becomes a text block', () => {
   expect(toContentBlocks({ content: 'hello' })).toEqual([{ type: 'text', text: 'hello' }])
@@ -28,6 +28,26 @@ test('a hole in the tool_calls array is skipped instead of crashing the turn', (
   const blocks = toContentBlocks({ tool_calls: sparse })
 
   expect(blocks).toEqual([{ type: 'tool_use', id: 'call_1', name: 'grep', input: { pattern: 'x' } }])
+})
+
+test('an attached image is sent as a data-URL image_url part alongside the text', () => {
+  const messages = toOpenAIMessages('SYS', [
+    {
+      role: 'user',
+      content: [
+        { type: 'image', mediaType: 'image/png', data: 'aGk=', alt: 'shot.png' },
+        { type: 'text', text: 'explain' },
+      ],
+    },
+  ])
+
+  expect(messages[1]).toEqual({
+    role: 'user',
+    content: [
+      { type: 'image_url', image_url: { url: 'data:image/png;base64,aGk=' } },
+      { type: 'text', text: 'explain' },
+    ],
+  })
 })
 
 test('explicit null entries are skipped too', () => {

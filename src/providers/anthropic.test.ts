@@ -57,6 +57,24 @@ test('extended-thinking budget lifts max_tokens to leave room for the answer', (
   expect(noThinking.thinking).toBeUndefined()
 })
 
+test('an attached image becomes a base64 image source block', () => {
+  const message: ChatMessage = {
+    role: 'user',
+    content: [
+      { type: 'image', mediaType: 'image/png', data: 'aGVsbG8=', alt: 'screenshot.png' },
+      { type: 'text', text: 'what is wrong here?' },
+    ],
+  }
+
+  expect(toAnthropicMessage(message)).toEqual({
+    role: 'user',
+    content: [
+      { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'aGVsbG8=' } },
+      { type: 'text', text: 'what is wrong here?' },
+    ],
+  })
+})
+
 test('a thinking block round-trips into history with its signature intact', () => {
   const message: ChatMessage = {
     role: 'assistant',

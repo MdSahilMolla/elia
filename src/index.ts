@@ -69,6 +69,7 @@ const REPL_COMMANDS: SlashCommand[] = [
   { name: '/usage', description: 'live token consumption, context & limits' },
   { name: '/status', description: 'session, plan, subagents, artifacts' },
   { name: '/expand', description: 'reprint the last tool result in full' },
+  { name: '/attach', description: 'attach an image to your next message · /attach <path>' },
   { name: '/export', description: 'save the conversation to Markdown' },
   { name: '/brain', description: 'cross-session project memory' },
   { name: '/lessons', description: 'what earlier sessions learned here' },
@@ -374,8 +375,19 @@ function positionals(valueFlags: string[] = []): string[] {
   return result
 }
 
-function userMessage(text: string): ConversationMessage {
-  return { role: 'user', content: [{ type: 'text', text }] }
+function userMessage(text: string, images: import('./attachments.ts').ImageAttachment[] = []): ConversationMessage {
+  if (images.length === 0) return { role: 'user', content: [{ type: 'text', text }] }
+  // Images before text — the order every vision model is tuned for. A prompt
+  // that was *only* an image path keeps an empty text block so provider
+  // adapters that key off "the last text block" still have one.
+  const content: ConversationMessage['content'] = images.map((img) => ({
+    type: 'image' as const,
+    mediaType: img.mediaType,
+    data: img.data,
+    alt: img.alt,
+  }))
+  content.push({ type: 'text', text })
+  return { role: 'user', content }
 }
 
 async function classifyCommandRisk(command: string): Promise<{ risky: boolean; reason?: string }> {
@@ -1650,6 +1662,10 @@ async function runInteractive(): Promise<void> {
   // Output from `!cmd` lines, held until the next real prompt so the model sees
   // what the user just ran without an extra round-trip.
   const carriedShellContext: string[] = []
+  // Images queued by `/attach <path>`, folded into the next prompt as `image`
+  // content blocks. Inline paths pasted/dragged straight into a prompt line are
+  // resolved separately, in runRecordedTurn.
+  const pendingAttachments: import('./attachments.ts').ImageAttachment[] = []
 
   if (continueFlag || resumeId) {
     const loaded = resumeId ? await loadSession(resumeId) : await loadLatestSession()
@@ -1814,6 +1830,31 @@ async function runInteractive(): Promise<void> {
     }
   }
 
+  /**
+   * `/attach <path>` — queue an image for the next prompt. No arg lists what's
+   * queued; `/attach clear` empties the queue. Pasting or dragging an image
+   * path straight into a prompt works too and doesn't need this command.
+   */
+  async function runAttachCommand(arg: string | undefined): Promise<string> {
+    const { loadImageAttachment, formatBytes } = await import('./attachments.ts')
+    if (!arg) {
+      if (pendingAttachments.length === 0) return 'No images queued. Use /attach <path>, or just paste/drag an image into your message.'
+      return ['Queued for your next message:', ...pendingAttachments.map((a) => `  📎 ${a.alt} (${formatBytes(a.bytes)}, ${a.mediaType})`)].join('\n')
+    }
+    if (arg === 'clear') {
+      const n = pendingAttachments.length
+      pendingAttachments.length = 0
+      return n === 0 ? 'Nothing was queued.' : `Cleared ${n} queued image${n === 1 ? '' : 's'}.`
+    }
+    if (config.providerName === 'codex') {
+      return 'The ChatGPT-subscription (Codex) provider has no image input — it runs in a sandbox with no vision channel. Switch to an API provider with /model to send images.'
+    }
+    const loaded = await loadImageAttachment(arg)
+    if (typeof loaded === 'string') return `Could not attach — ${loaded}`
+    pendingAttachments.push(loaded)
+    return `📎 Attached ${loaded.alt} (${formatBytes(loaded.bytes)}, ${loaded.mediaType}) — sent with your next message. /attach clear to undo.`
+  }
+
   async function runCheckpointedTurn(userText: string, approveAction?: ActionApproval, skillNames = selectedSkillNames, uiHooks?: TurnUiHooks): Promise<void> {
     try {
       await withSessionTranscript(sessionTranscript, () => runRecordedTurn(userText, approveAction, skillNames, uiHooks))
@@ -1822,7 +1863,21 @@ async function runInteractive(): Promise<void> {
     }
   }
 
-  async function runRecordedTurn(userText: string, approveAction?: ActionApproval, skillNames = selectedSkillNames, uiHooks?: TurnUiHooks): Promise<void> {
+  async function runRecordedTurn(submittedText: string, approveAction?: ActionApproval, skillNames = selectedSkillNames, uiHooks?: TurnUiHooks): Promise<void> {
+    // Fold in any images: ones queued with `/attach`, plus image-file paths the
+    // user pasted or dragged straight into this line (stripped from the text).
+    const { resolveInlineAttachments } = await import('./attachments.ts')
+    // Only scan what the user actually typed — `!cmd` output carried into the
+    // turn can contain filenames from a directory listing that aren't attachments.
+    const typedRegion = submittedText.replace(/<local-command>[\s\S]*?<\/output>/g, '')
+    const resolved = await resolveInlineAttachments(submittedText, process.cwd(), typedRegion)
+    const attachments = [...pendingAttachments.splice(0), ...resolved.images]
+    for (const error of resolved.errors) writeNotice(`Attachment skipped — ${error}`)
+    if (attachments.length > 0) {
+      writeNotice(`📎 ${attachments.length} image${attachments.length === 1 ? '' : 's'} attached to this message: ${attachments.map((a) => a.alt).join(', ')}`)
+    }
+    const userText = resolved.text || (attachments.length > 0 ? `[image attached: ${attachments.map((a) => a.alt).join(', ')}]` : submittedText)
+
     const tracker = createFileTracker()
     const turnStartedAt = Date.now()
     const task = taskSessions.create(inferTaskKind(userText, userText), redactText(userText, 160), 'Starting request')
@@ -1855,7 +1910,7 @@ async function runInteractive(): Promise<void> {
     // find this session's ledger — see ledger.ts's setActiveLedgerSession doc.
     setActiveLedgerSession({ id: sessionId, turn: checkpoints.length })
     const messagesBefore = structuredClone(messages)
-    messages.push(userMessage(userText))
+    messages.push(userMessage(userText, attachments))
     sessionTranscript.appendUser(userText)
 
     const escalation = classifyEscalation(userText)
@@ -2528,6 +2583,9 @@ async function runInteractive(): Promise<void> {
     const trimmed = input.trim()
     const done = (text?: string): InkSlashOutcome => ({ handled: true, text })
 
+    const attachMatch = /^\/(?:attach|image|img)(?:\s+(.+))?$/.exec(trimmed)
+    if (attachMatch) return done(await runAttachCommand(attachMatch[1]?.trim()))
+
     // --- arrow-key pickers, now native to the Ink UI ---
 
     if (trimmed === '/model' || trimmed === '/provider') {
@@ -3098,6 +3156,14 @@ async function runInteractive(): Promise<void> {
     const trimmed = line.trim()
     if (trimmed === 'exit' || trimmed === 'quit') break
     if (trimmed === '') continue
+
+    // /attach <path> — queue an image for the next prompt. Inline image paths
+    // pasted/dragged into a normal prompt are resolved later, inside the turn.
+    const attachClassic = /^\/(?:attach|image|img)(?:\s+(.+))?$/.exec(trimmed)
+    if (attachClassic) {
+      writeUsageLine(await runAttachCommand(attachClassic[1]?.trim()))
+      continue
+    }
 
     // !cmd — run a shell command now, print its output, and carry it into the
     // next turn as context. No model round-trip.

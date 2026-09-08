@@ -47,21 +47,26 @@ function blockChars(block: ContentBlock): number {
       return block.name.length + JSON.stringify(block.input).length
     case 'tool_result':
       return block.content.length
+    case 'image':
+      // A typical screenshot lands around 1.5k tokens once the vision encoder
+      // tiles it; this is only feeding a threshold check, so a flat estimate in
+      // char-equivalents (×CHARS_PER_TOKEN_ESTIMATE) is close enough.
+      return 1_500 * CHARS_PER_TOKEN_ESTIMATE
   }
 }
 
 /**
  * Finds the latest message at or before `beforeIndex` that safely starts a
- * fresh turn — a plain user text message with no tool_result blocks. Cutting
- * anywhere else would strand a tool_use without its result a few messages
- * later, which every provider in this codebase rejects outright. Returns
- * undefined if no safe boundary exists in range (e.g. one very long turn with
- * no intervening plain user message).
+ * fresh turn — a plain user message (text, and/or attached images) with no
+ * tool_result blocks. Cutting anywhere else would strand a tool_use without its
+ * result a few messages later, which every provider in this codebase rejects
+ * outright. Returns undefined if no safe boundary exists in range (e.g. one
+ * very long turn with no intervening plain user message).
  */
 export function findSafeCutIndex(messages: ChatMessage[], beforeIndex: number): number | undefined {
   for (let i = Math.min(beforeIndex, messages.length - 1); i >= 1; i--) {
     const message = messages[i]!
-    if (message.role === 'user' && message.content.every((block) => block.type === 'text')) return i
+    if (message.role === 'user' && message.content.every((block) => block.type === 'text' || block.type === 'image')) return i
   }
   return undefined
 }

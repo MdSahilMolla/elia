@@ -12,6 +12,17 @@ export type ContentBlock =
   | { type: 'redacted_thinking'; data: string }
   | { type: 'tool_use'; id: string; name: string; input: Record<string, unknown> }
   | { type: 'tool_result'; tool_use_id: string; content: string; is_error: boolean }
+  /**
+   * An image the user attached to a prompt (a pasted/dragged screenshot, or
+   * `/attach <path>`). `data` is the raw file base64-encoded; `mediaType` is one
+   * of the four types every vision-capable provider accepts. `alt` is an
+   * optional human label (usually the original filename) shown in the transcript
+   * and forwarded to providers that can't take images so the model still knows
+   * one was sent. Only ever appears on a `user` message.
+   */
+  | { type: 'image'; mediaType: ImageMediaType; data: string; alt?: string }
+
+export type ImageMediaType = 'image/png' | 'image/jpeg' | 'image/gif' | 'image/webp'
 
 export interface ChatMessage {
   role: 'user' | 'assistant'

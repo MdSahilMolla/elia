@@ -34,6 +34,21 @@ test('Codex subscription initial prompt preserves the user conversation without 
   expect(prompt).not.toContain('Do not read credentials')
 })
 
+test('an attached image is flattened to a text marker (Codex has no vision channel)', () => {
+  const prompt = buildCodexSubscriptionPrompt([
+    {
+      role: 'user',
+      content: [
+        { type: 'image', mediaType: 'image/png', data: 'aGk=', alt: 'error.png' },
+        { type: 'text', text: 'why does this crash?' },
+      ],
+    },
+  ])
+  expect(prompt).toContain('why does this crash?')
+  expect(prompt).toContain('[user attached an image "error.png" — not visible in this sandbox]')
+  expect(prompt).not.toContain('aGk=')
+})
+
 test('the first-turn transcript keeps the latest exchanges and collapses older ones', () => {
   const big = 'x'.repeat(9_000)
   const prompt = buildCodexSubscriptionPrompt([

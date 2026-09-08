@@ -161,7 +161,7 @@ export function toContentBlocks(message: CompletionMessageLike, includeReasoning
   return content
 }
 
-function toOpenAIMessages(
+export function toOpenAIMessages(
   system: string,
   messages: ChatMessage[],
 ): OpenAI.Chat.ChatCompletionMessageParam[] {
@@ -195,7 +195,21 @@ function toOpenAIMessages(
     const textParts = message.content.filter(
       (b): b is Extract<ContentBlock, { type: 'text' }> => b.type === 'text',
     )
-    if (textParts.length > 0) {
+    const imageParts = message.content.filter(
+      (b): b is Extract<ContentBlock, { type: 'image' }> => b.type === 'image',
+    )
+    if (imageParts.length > 0) {
+      // Chat Completions vision format: images and text as typed parts. Data
+      // URLs keep it self-contained — no separate upload step.
+      const parts: OpenAI.Chat.ChatCompletionContentPart[] = [
+        ...imageParts.map((b) => ({
+          type: 'image_url' as const,
+          image_url: { url: `data:${b.mediaType};base64,${b.data}` },
+        })),
+        ...(textParts.length > 0 ? [{ type: 'text' as const, text: textParts.map((b) => b.text).join('') }] : []),
+      ]
+      result.push({ role: 'user', content: parts })
+    } else if (textParts.length > 0) {
       result.push({ role: 'user', content: textParts.map((b) => b.text).join('') })
     }
 

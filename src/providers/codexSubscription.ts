@@ -125,13 +125,27 @@ export async function listCodexSubscriptionModels(): Promise<{ models: CodexSubs
 const FIRST_TURN_TRANSCRIPT_BUDGET = 12_000
 
 /** Builds the initial transcript sent once when a subscription thread starts. */
+/**
+ * Flattens one message's content to plain text. Codex runs in its own sandbox
+ * with no image channel, so an attached image becomes a text marker — the model
+ * still learns one was sent and can ask the user to describe it.
+ */
+function messageToText(message: ChatMessage): string {
+  return message.content
+    .map((block) => {
+      if (block.type === 'text') return block.text
+      if (block.type === 'tool_result') return block.content
+      if (block.type === 'image') return `[user attached an image "${block.alt ?? 'image'}" — not visible in this sandbox]`
+      return ''
+    })
+    .filter(Boolean)
+    .join('\n')
+}
+
 export function buildCodexSubscriptionPrompt(messages: ChatMessage[], model = 'default'): string {
   const rendered = messages
     .map((message) => {
-      const text = message.content
-        .filter((block) => block.type === 'text' || block.type === 'tool_result')
-        .map((block) => block.type === 'text' ? block.text : block.content)
-        .join('\n')
+      const text = messageToText(message)
       return text ? `${message.role}:\n${text}` : ''
     })
     .filter(Boolean)
@@ -160,11 +174,7 @@ function latestUserText(messages: ChatMessage[]): string {
   for (let index = messages.length - 1; index >= 0; index--) {
     const message = messages[index]
     if (message?.role !== 'user') continue
-    const text = message.content
-      .filter((block) => block.type === 'text' || block.type === 'tool_result')
-      .map((block) => block.type === 'text' ? block.text : block.content)
-      .join('\n')
-      .trim()
+    const text = messageToText(message).trim()
     if (text) return text
   }
   return 'Continue the current task.'

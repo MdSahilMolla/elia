@@ -112,6 +112,8 @@ export function transcriptFromMessages(messages: ConversationMessage[]): Transcr
       if (block.type === 'text') {
         if (message.role === 'user') transcript.appendUser(block.text)
         else transcript.appendAssistant(block.text)
+      } else if (block.type === 'image' && message.role === 'user') {
+        transcript.appendUser(`📎 ${block.alt ?? 'image'}`)
       } else if (block.type === 'tool_use') calls.set(block.id, block)
       else if (block.type === 'tool_result') {
         const call = calls.get(block.tool_use_id)

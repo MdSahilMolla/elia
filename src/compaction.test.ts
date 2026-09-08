@@ -51,6 +51,20 @@ test('findSafeCutIndex returns undefined when nothing safe exists in range', () 
   expect(findSafeCutIndex(messages, 2)).toBeUndefined()
 })
 
+test('a user message with an attached image is still a safe cut boundary and counts toward the token estimate', () => {
+  const withImage: ChatMessage = {
+    role: 'user',
+    content: [
+      { type: 'image', mediaType: 'image/png', data: 'x'.repeat(200), alt: 'a.png' },
+      { type: 'text', text: 'take a look' },
+    ],
+  }
+  const messages: ChatMessage[] = [userText('turn 1'), assistantText('ok'), withImage, toolUse('t1'), toolResult('t1')]
+  expect(findSafeCutIndex(messages, 4)).toBe(2)
+  // The image contributes a flat ~1.5k-token estimate, dwarfing the short text.
+  expect(estimateTokens([withImage])).toBeGreaterThan(1000)
+})
+
 test('maybeCompact does nothing under the token threshold', async () => {
   const messages: ChatMessage[] = [userText('hello'), assistantText('hi there')]
   const before = JSON.stringify(messages)

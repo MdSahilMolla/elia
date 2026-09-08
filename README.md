@@ -436,6 +436,8 @@ On a real TTY, `bun run dev` / `elia` uses the Ink terminal workspace; plain or 
 
 `edit_file` and `write_file` results render as a colored unified diff (folded to the changed hunks; `/expand` reprints any tool result the scrollback truncated). Visualizations render their terminal chart without requiring expansion. A line starting with `!` runs the rest as a shell command and carries its output into the next turn as context. `/team` shows the active deep/fast tiers and configured role routes; `/cost` shows usage; `/export [path]` writes the conversation to Markdown.
 
+**Images.** Paste or drag an image file (`.png`, `.jpg`, `.gif`, `.webp`) straight onto the prompt line — Elia reads it, strips the path from your text, and sends the picture along with the message. `/attach <path>` queues one explicitly for your next message (`/attach` lists what's queued, `/attach clear` empties it). Images go to any vision-capable API model; the ChatGPT-subscription (Codex) provider has no image channel, so an attachment there becomes a text marker naming the file.
+
 ### LSP diagnostics on every edit
 
 `write_file` and `edit_file` check the changed file against a real language server, not just a text diff. If a server is available for the file's language, elia opens/updates the document and appends any errors or warnings the server reports directly to the tool result — catching a broken reference or a type error the instant it's introduced, well before the next `tsc`/`pytest`/`go build`. One server process per language is started lazily and reused for the rest of the session.

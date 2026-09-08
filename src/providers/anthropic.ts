@@ -156,6 +156,11 @@ export function toAnthropicMessage(message: ChatMessage): Anthropic.MessageParam
             content: block.content,
             is_error: block.is_error,
           }
+        case 'image':
+          return {
+            type: 'image',
+            source: { type: 'base64', media_type: block.mediaType, data: block.data },
+          }
       }
     }),
   }

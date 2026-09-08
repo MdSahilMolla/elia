@@ -23,6 +23,7 @@ import { rollupLine, rollupTools } from './toolSummary.ts'
 import { palette } from './theme.ts'
 import { repoLabel } from './gitInfo.ts'
 import { estimateTokens } from '../../compaction.ts'
+import { looksLikeImageAttachmentLine } from '../../attachments.ts'
 import { compactionThresholdFor, contextWindowFor } from '../../contextWindow.ts'
 import { sessionUsageSnapshot, estimateCostUsd } from '../../usage.ts'
 import { codexContextTokens } from '../../providers/codexSubscription.ts'
@@ -382,7 +383,13 @@ export function App(props: AppProps) {
         return
       }
 
-      if (trimmed.startsWith('/') || trimmed.startsWith('@')) {
+      // A bare image path pasted or dragged into the line falls through to a
+      // normal turn (where it's read, encoded, and stripped from the text) even
+      // though a POSIX path starts with "/". "/attach" stays a real command.
+      const isAttachCommand = /^\/(?:attach|image|img)\b/.test(trimmed)
+      const routeAsImagePrompt = !isAttachCommand && looksLikeImageAttachmentLine(trimmed)
+
+      if (!routeAsImagePrompt && (trimmed.startsWith('/') || trimmed.startsWith('@'))) {
         let outcome: SlashOutcome | string | void = await props.handleSlash(trimmed)
         // An outcome step may chain another: a picker → another picker
         // (/model → provider → model), a category picker → a search prompt →
