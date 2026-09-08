@@ -1,0 +1,376 @@
+# Elia Performance & Reliability Plan (v3 — grounded & actionable)
+
+> **Revision history.**
+> *v1* — an ungrounded 18‑item, 17–24 week roadmap. Rebuilt subsystems that
+> already exist, quoted impact numbers with no way to measure them, and several
+> items contradicted deliberate design decisions.
+> *v2* — reality‑checked against `src/`; cut to 6 items with day‑level estimates.
+> *v3* (this) — every item now carries exact `file:line` anchors, an API sketch,
+> acceptance criteria wired to the real latency harness fields, a rollback, and a
+> one‑command validation. Claims verified against the code are marked ✔.
+
+---
+
+## 1. Reality check — what Elia already has
+
+New work builds on this or it does not land.
+
+| Capability | Where | Verified detail |
+|---|---|---|
+| Speculative read execution | `src/speculation/cache.ts`, `prefetch.ts` | ✔ Prefetches grep hits + relative imports while the model streams. Caps: 10/round, 80/loop, 256 KB/file (`prefetch.ts:32‑35`). Mutating batch ⇒ `cache.invalidate()` (`agentLoop.ts:460`). `take()` deletes the entry (single‑use). |
+| Mid‑stream tool dispatch | `agentLoop.ts:399` (`cache?.take`), `:648‑654` (`cache.speculate` during codex delegation) | ✔ Real call at `:399` consumes a speculated result or falls through to `tool.execute`. |
+| Per‑turn profiling | `src/profile.ts` — `ELIA_PROFILE=1` / `--profile-turns` (`index.ts:301`) | ✔ Records wall, TTFT, exact cache‑read/write/fresh split, prefix‑cache misses per **model** call. No per‑**tool** timing yet. Cheap early return when off (`profile.ts:64`). |
+| Latency regression harness | `src/bench/latency/` — `elia bench-latency` (`index.ts:647`) | ✔ 4 deterministic scripted‑provider scenarios, `baseline.json`, `--strict` gate, `--live`, `--realistic` pacing. Structural invariants (`roundTrips` / `toolCalls` / `cachedToolCalls`) are gated hard; wall‑clock is advisory. **This is the measurement tool for every item below.** |
+| Scored task benchmark | `src/bench/` — `elia bench` | ✔ Pass‑rate scorecard; drives `elia evolve` promotion. |
+| Provider retry / backoff | `agentLoop.ts:519` (`for attempt`), `:566‑567` (`Bun.sleep(250 * 2**(attempt-1))`) | ✔ SDK `maxRetries: 0` (`providers/anthropic.ts:28`, `openaiCompatible.ts:20`) is deliberate — the loop owns retry so streamed output isn't duplicated. |
+| Adaptive tool concurrency | `agentLoop.ts:27‑28` (`MAX_PARALLEL_TOOLS=4`, `MAX_SAFE_PARALLEL_TOOLS=8`), `:726‑728` | ✔ Read‑only batch ⇒ up to 8; any write ⇒ 4. `configured` value clamped to 8. |
+| Fleet concurrency | `autonomy/fleet.ts:139‑147` (`runWithConcurrencyLimit`) | ✔ Per‑provider sizing. |
+| Action governor / budgets | `autonomy/governor.ts:336` | ✔ Action‑count budget, policy gate, `blockedByBudget` accounting. |
+| Brain store caching | `src/brain/store.ts` | ✔ Fingerprint cache + (uncommitted) mtime TTL map + parallel `Promise.all` session load. |
+| Bounded file / search I/O | `tools/readFile.ts:6` (5 MB hard throw), `grep.ts` (5 MB/file, `MAX_MATCHES`) | ✔ Limits, not streaming — intentional (multi‑MB text is useless in a context window). |
+| Re‑read nudge | `agentLoop.ts:468` (`redundantReads.observe`) | ✔ Already tells the model to stop re‑reading files. Memoization (3.2) covers the case where it re‑reads anyway or the repair loop does. |
+| Failure memory | `autonomy/lessons.ts`, `rationale.ts`, `calibration.ts` | ✔ Retrieval + confidence weighting exist. Gap: no *automatic* capture on repeated repair failure. |
+
+---
+
+## 2. Disposition of the v1 roadmap
+
+| v1 item | Verdict | Reason (verified) |
+|---|---|---|
+| 1.1 Unified memory pool / pressure eviction | **Keep — scoped to a bounded‑cache registry** | Real: `speculation/cache.ts` `entries` map, `brain/store.ts` `mtimeCache`, `grep.ts` `regexCache` all grow unbounded (regex cache has a 100 cap; the other two don't). Worth one shared LRU + one `clearAll`. A "100 MB global budget with graceful degradation" is not. |
+| 1.2 Streaming file operations | **Redefine** | `read_file` refuses >5 MB *by design* (`readFile.ts:32`). Streaming 5 MB into the model is wrong. Real gap: no way to *window* into an over‑limit file. → 3.4. |
+| 1.3 Connection pooling + backoff | **Already done** | Bun `fetch` keep‑alives by default; loop backoff at `agentLoop.ts:566`. No work. |
+| 2.1 Dynamic concurrency (CPU/mem aware) | **Keep — small** | `MAX_PARALLEL_TOOLS` is a literal `4` (`agentLoop.ts:27`). A `os.availableParallelism()`‑derived default is cheap. Load‑adaptive scaling isn't worth it for one user. → 3.3. |
+| 2.2 Parallel typecheck / lint / test | **Drop** | `verify.ts:15‑23` is sequential fail‑fast *on purpose* ("a typecheck failure makes the test output noise rather than information"). **There is also no lint script** — `package.json` has none, no eslint/biome config exists. |
+| 2.3 Worker pool for subagents | **Defer** | Not a measured bottleneck. Revisit only if `bench-latency --live` shows fleet spin‑up dominating. |
+| 3.1 L1/L2/L3 cache hierarchy | **Partial** | An L2 (in‑process, cross‑turn) memoization of deterministic reads is worth it → 3.2. "L3 network cache coordination for distributed setups" — Elia isn't distributed. Out. |
+| 3.2 ML‑based prefetching | **Drop — widen heuristics instead** | `prefetch.ts:7‑16` explicitly rejects model‑driven prediction ("an extra LLM round‑trip would cost more latency than the reads it saves"). A learned model needs training + telemetry infra for a heuristic that already hits 6/6 and 2/2 in the harness scenarios. → 3.5 widens the *rules*. |
+| 3.3 Result memoization for deterministic reads | **Keep** | Genuine in repair/debug loops re‑reading unchanged files across turns. → 3.2. |
+| 4.1 Genetic‑algorithm prompt evolution | **Drop** | `elia evolve` already does benchmark‑gated promotion. GA search over prompts is a research project with unbounded risk. |
+| 4.2 Enhanced learning from failures | **Mostly built** | One real gap: auto‑capture a lesson when a repair loop fails twice on the same gate. → 3.7. |
+| 4.3 Performance profiling system | **Keep — extend `profile.ts`, don't build `src/performance/`** | Add per‑tool timing to the existing profiler. → 3.6. |
+| 5.1 Advanced checkpoints | **Drop for now** | `checkpoint.ts` is git‑based; no measurement says it's slow. |
+| 5.2 Robust error recovery (multi‑strategy) | **Defer** | `stuck.ts` + `replan.ts` exist and were hardened recently. Needs a specific reproduced failure mode first. |
+| 5.3 Per‑action CPU/mem/disk limits | **Drop** | Action‑count budget exists; OS‑level per‑action sandboxing is heavy and low‑upside for a local tool. |
+| 6.1 Comprehensive telemetry | **Drop** | `usage.ts` + `profile.ts` cover a local CLI. |
+| 6.2 Distributed tracing / OpenTelemetry | **Drop** | Nothing distributed to trace. |
+| 6.3 Signed / tamper‑evident audit logs | **Drop** | `audit.ts` exists; signing local logs on a single‑user machine is theatre. |
+
+Net: **6 kept**, 3 already done, 9 dropped/deferred.
+
+---
+
+## 3. The plan
+
+Ordered by (payoff ÷ risk). Every item: land a commit that also updates
+`src/bench/latency/baseline.json`, and add a scenario if it claims a speedup.
+Nothing merges that regresses `bench-latency --strict` or drops `bench` pass‑rate.
+
+Legend: **A/C** = acceptance criteria · **V** = one‑command validation · **R** = rollback.
+
+---
+
+### 3.0 — Cleanup: settle the uncommitted micro‑optimizations · 0.5 d
+
+Three uncommitted perf edits are in the tree (v1's "recently implemented" list).
+Land them deliberately.
+
+**`src/brain/store.ts`** — mtime TTL cache + `Promise.all` session load. **Keep.**
+`resetBrainCache()` clears both (`store.ts:188`). The parallel load is the real
+win; the 1 s mtime TTL is marginal and adds a staleness window. *Recommended:*
+drop `MTIME_CACHE_TTL_MS` to `0` (or delete the map) and keep only the parallel
+load — or keep the TTL and add a test that a ledger written inside the window is
+still seen on the next `loadBrainItems` (fingerprint is recomputed each call).
+
+**`src/tools/grep.ts`** — regex LRU (100) + tighter match loop. **Keep.** The
+`MAX_MATCHES` check moved *before* emission (`grep.ts:210`). Add one test: "regex
+match on the last line of a file, `context > 0`" — confirm the trailing context
+group still emits and the `--` separator logic is unaffected.
+
+**`src/speculation/cache.ts`** — hand‑rolled key builder replacing
+`JSON.stringify` (`cache.ts:47‑63`). **Revert.** Verified collision: with the new
+builder,
+
+```
+key('grep', { pattern: 'x', path: 'y' })      → "grep?path=y&pattern=x"
+key('grep', { path: 'y&pattern=x' })          → "grep?path=y&pattern=x"   // same!
+```
+
+because keys/values aren't escaped before the `&`/`=` join. `null` and
+`undefined` also now collide. `JSON.stringify` had neither problem. The
+speculation cache returning the wrong file's contents to the model is a
+correctness bug that dwarfs the ~microseconds saved, and this was never a
+measured hotspot. Revert to the original three lines; if key‑gen ever shows up in
+a profile, revisit with a *escaped* encoder.
+
+- **A/C:** working tree clean; `bun test src/` green; `elia bench-latency` shows no
+  structural change (this is hygiene, not a speedup).
+- **V:** `bun test src/speculation/ src/brain/ src/tools/ && bun run typecheck`
+- **R:** `git revert` the single commit.
+
+---
+
+### 3.6 — Per‑tool timing in the profiler · 2 d  *(done early on purpose)*
+
+**Why first:** it produces the real per‑tool numbers that justify or kill 3.2 and
+3.5. Measurement before optimization.
+
+**Files:** `src/profile.ts`, `src/agentLoop.ts:162‑165` (the internal `onTool`).
+
+**Sketch:**
+```ts
+// profile.ts
+export interface ToolCallSample {
+  name: string; actor: string; wallMs: number; bytesOut: number
+  cached: boolean; isError: boolean
+}
+export function recordToolCall(s: ToolCallSample): void { if (!profilingEnabled()) return; toolSamples.push(s) }
+// renderProfileReport(): append a per-tool table — count, p50/p90 wall, total ms, cache-hit %, error %
+```
+```ts
+// agentLoop.ts, inside the existing onTool wrapper (:162)
+const onTool = (event: ToolEvent): void => {
+  transcript?.recordTool(event, actor)
+  recordToolCall({ name: event.name, actor, wallMs: event.durationMs,
+                   bytesOut: event.result.length, cached: event.cached, isError: event.isError })
+  toolListener?.(event)
+}
+```
+`event.durationMs`, `event.cached`, `event.isError` already exist on `ToolEvent`
+(`agentLoop.ts:50‑60`).
+
+- **A/C:** `ELIA_PROFILE=1 elia "…"` prints a per‑tool table under the existing
+  model‑call table; `profile.ts` off ⇒ still a one‑line early return;
+  `profile.test.ts` covers the new aggregation (p50/p90, cache‑hit %).
+- **V:** `bun test src/profile.test.ts && ELIA_PROFILE=1 bun run bin/elia.ts agent "read src/index.ts and summarise it"`
+- **R:** revert; feature is inert when `ELIA_PROFILE` unset.
+
+---
+
+### 3.1 — Bounded cache registry · 2 d
+
+**Files:** new `src/cacheRegistry.ts`; wire `speculation/cache.ts:44`,
+`brain/store.ts:86`, `tools/grep.ts:regexCache`.
+
+**Sketch:**
+```ts
+// cacheRegistry.ts
+export function boundedMap<K, V>(maxEntries: number): Map<K, V>  // insertion-order LRU on set()
+export function registerCache(name: string, clear: () => void): void
+export function clearAllCaches(): void   // used by tests + /rewind + repo checkpoint restore
+```
+Replace the three ad‑hoc maps with `boundedMap`. `speculation/cache.ts` `entries`
+gets a cap (e.g. 512) — on eviction, `void entry.catch(() => {})` is already
+attached (`cache.ts:82`) so dropping a pending promise is safe. Extend
+`CacheStats` with `size` and `evictions`. No global byte budget, no pressure
+monitor.
+
+- **A/C:** new latency scenario `cache-bound` — 600 distinct speculated reads in
+  one loop; assert `cacheStats.size <= cap` and `evictions > 0`, and that a
+  *hot* re‑read within the window is still a `cachedToolCalls` hit; peak RSS in
+  the harness not worse than baseline.
+- **V:** `elia bench-latency --only cache-bound` + `bun test src/speculation/ src/brain/`
+- **R:** revert; maps go back to unbounded (current behaviour, safe under today's caps).
+
+---
+
+### 3.3 — CPU‑derived default tool concurrency · 1 d
+
+**Files:** `src/agentLoop.ts:27`, `:726‑728`.
+
+**Change:** `MAX_PARALLEL_TOOLS` default becomes
+`Math.max(2, Math.min(8, (os.availableParallelism?.() ?? 4) - 1))`.
+Explicit config still wins (`:726` already `Math.min(configured, MAX_SAFE_PARALLEL_TOOLS)`).
+`MAX_SAFE_PARALLEL_TOOLS` stays `8`. The "any write ⇒ 4" rule (`:728`) is
+**unchanged** — keep it a literal `4`, not the derived value, so write batches
+stay conservative.
+
+- **A/C:** `parallel-reads` scenario (6 reads, `expect.cachedToolCalls: 6`) still
+  passes structurally; on an ≥8‑core CI runner, `wallMsMedian` for a *non‑cached*
+  6‑read batch improves vs the fixed‑4 baseline; on a 4‑core box, no change.
+- **V:** `elia bench-latency --only parallel-reads --realistic`
+- **R:** one‑line revert to `= 4`.
+
+---
+
+### 3.4 — Windowed read for over‑limit files · 1 d
+
+**Files:** `src/tools/readFile.ts:32`.
+
+**Change:** if `file.size > MAX_READ_BYTES` **and** the call passes `offset`+`limit`,
+serve that window (bounded to `min(limit, 2000)` lines and 256 KB of text) with a
+header line stating total bytes/lines. A bare read of an over‑limit file still
+throws, now with a message that names the offset/limit escape hatch. Update the
+tool `description` so the model knows.
+
+- **A/C:** unit tests — bare read of a 6 MB file throws with the new guidance;
+  `offset`/`limit` read of the same file returns exactly that slice with the
+  size header; window is clamped. New scenario `big-file-window` reading a slice
+  of a generated 8 MB file (`expect.toolCalls: 1`).
+- **V:** `bun test src/tools/readFile` *(add `readFile.test.ts`)*
+- **R:** revert; back to unconditional throw.
+
+---
+
+### 3.5 — Widen prefetch heuristics · 2 d
+
+**Files:** `src/speculation/prefetch.ts` (`observe` at `:80`, `extractPaths` `:105`).
+
+**Two grounded edges, no ML:**
+1. **Test ⇄ source pairing** — a `read_file` of `foo.ts` also schedules
+   `foo.test.ts` / `foo.spec.ts` (and the reverse), respecting existing
+   `isSpeculativelyReadable` + caps.
+2. **Framed stack‑trace paths** — `PATH_PATTERN` (`:22`) catches bare paths but
+   not `at fn (src/x.ts:42:9)` / `src/x.ts:42:9` frames common in vitest/pytest
+   failure output. Add a `FRAME_PATTERN`, strip `:line:col`, and push those with
+   priority (they're what the model inspects next after a failing test).
+
+All existing caps unchanged; a wrong guess still costs one <256 KB read.
+
+- **A/C:** new prefetch unit tests with real vitest + pytest failure‑output
+  fixtures; scenario `debug-failing-test` (grep/read a test, "run" it via scripted
+  failure, open the framed source) shows `cachedToolCalls / toolCalls` up vs
+  baseline; `grep-chain` still 2/2.
+- **V:** `bun test src/speculation/prefetch.test.ts && elia bench-latency --only debug-failing-test`
+- **R:** revert the two edges; core heuristics untouched.
+
+---
+
+### 3.2 — Cross‑turn memoization of deterministic reads (L2) · 3 d
+
+**Files:** new `src/speculation/deterministicCache.ts`; wire
+`agentLoop.ts:399` (consume), `:407‑409` (populate after a real
+`read_file`/`list_files`/`grep`), `:460` (targeted flush on mutation);
+`runAgentLoop` opts (`agentLoop.ts:~106`) + `bench/latency/harness.ts:109‑133`
+(thread it through the scenario runner).
+
+**Difference from the speculation cache:** the speculation cache is single‑use
+(`take()` deletes) and wholesale‑flushed on any mutation (`:460`). This one
+**survives across turns**, is keyed by content identity, and is flushed
+**per‑path** on writes to that path.
+
+**Sketch:**
+```ts
+interface DetKey { name: 'read_file'|'list_files'|'grep'; input: Record<string,unknown>; stamp: string }
+// stamp = `${mtimeMs}:${size}` of the target file (read_file/list_files dir),
+// or of every file the grep touched — if any stamp changes, entry is stale.
+get(name, input): string | undefined          // returns cached result iff stamps still match
+put(name, input, result, stampNow): void
+invalidatePath(path): void                     // called for each edit_file/write_file target
+```
+At `:399`: `const memo = batchMutates ? undefined : detCache.get(block.name, block.input)`
+tried *after* the speculation `cache.take` miss. At `:460`: instead of only
+`cache?.invalidate()`, also `for (const p of mutatedPaths) detCache.invalidatePath(p)`.
+Env opt‑out `ELIA_NO_READ_MEMO=1`.
+
+- **A/C:** scenario `repair-loop` — read A, read B, scripted verification failure,
+  re‑read A + B, edit A, re‑read B. Assert: the re‑reads of unchanged files land
+  as `cachedToolCalls`; after the edit, re‑read of **A** is a real call
+  (stamp changed) while **B** is still cached; `wallMsMedian` down.
+  **Stale‑read matrix** (unit): file changed on disk by a shell command between
+  reads ⇒ next read is a real call, not the stale entry.
+- **V:** `elia bench-latency --only repair-loop && bun test src/speculation/deterministicCache.test.ts`
+- **R:** revert; `ELIA_NO_READ_MEMO=1` disables it in the field meanwhile.
+- **Risk:** Medium — a stale read handed to the model is a correctness bug.
+  Mitigations: `mtime+size` stamp (not mtime alone), per‑path flush on the write
+  path, the stale‑read test matrix, and the env kill‑switch.
+
+---
+
+### 3.7 — Auto‑capture a lesson on repeated repair failure · 2 d
+
+**Files:** `src/autonomy/lessons.ts`, the repair path around
+`src/autonomy/replan.ts` / the autonomous loop's verification‑retry.
+
+**Change:** when a repair attempt fails verification **twice on the same gate**
+with a similar error signature (normalize: gate command + top error line +
+failure class), write a structured lesson automatically — `{ gate, errorClass,
+triedSummary, signature }` — deduped against existing lessons by `signature`,
+capped at N auto‑lessons per run. Today this depends on the model choosing to
+remember.
+
+- **A/C:** a `bench` autonomous scenario that currently loops on one failure ends
+  with ≥1 auto‑lesson; a second run on the same task retrieves it and skips the
+  dead approach (fewer round trips, visible in the scorecard's step count).
+  Auto‑lessons never exceed the per‑run cap; identical signatures dedupe.
+- **V:** `bun test src/autonomy/lessons.test.ts` + targeted `elia bench --only <scenario>`
+- **R:** revert; manual lesson capture unaffected.
+- **Risk:** Medium — noisy auto‑lessons pollute retrieval. Mitigations: the
+  two‑failure threshold, signature dedupe, per‑run cap, and tagging them
+  `source: auto` so retrieval can down‑weight if needed.
+
+---
+
+## 4. Sequencing & effort
+
+| # | Item | Days | Gate to proceed |
+|---|---|---|---|
+| 1 | 3.0 Cleanup (revert cache key, land grep/brain) | 0.5 | tree clean, `bench-latency` flat |
+| 2 | 3.6 Per‑tool profiler timing | 2 | table renders, `profile.test.ts` green |
+| 3 | 3.1 Bounded cache registry | 2 | caps enforced, RSS not worse |
+| 4 | 3.3 CPU concurrency default | 1 | multicore scenario faster, 4‑core flat |
+| 5 | 3.4 Windowed reads | 1 | `readFile.test.ts` green |
+| 6 | 3.5 Prefetch heuristics | 2 | cache‑hit ratio up in `debug-failing-test` |
+| 7 | 3.2 Cross‑turn read memoization | 3 | stale‑read matrix green |
+| 8 | 3.7 Auto‑lessons on repeat failure | 2 | repeated‑failure scenario improves |
+
+**Total ≈ 13.5 engineering days** (~3 weeks with review), vs v1's 17–24 weeks.
+
+---
+
+## 5. Measurement discipline
+
+- Each item's commit updates `src/bench/latency/baseline.json` and adds its
+  scenario in the same change.
+- CI runs `elia bench-latency --strict`; a structural regression fails the build.
+- Commit messages cite `ELIA_PROFILE` / `bench-latency --live` output — **not**
+  estimates. If it can't be measured, it isn't claimed.
+- `elia bench` pass‑rate must not drop.
+- Honest expectation: model time dominates a turn, so tool‑phase wins are
+  single‑digit‑% end‑to‑end. They compound over long autonomous runs — that's the
+  case for doing them, stated plainly rather than inflated to "40–60%".
+
+---
+
+## 6. Definition of done (per item)
+
+1. `file:line` insertion points from §3 implemented, no TODOs.
+2. Unit tests for the new logic + the failure/edge cases named in **A/C**.
+3. New latency scenario added; `baseline.json` regenerated in the same commit.
+4. `bun run typecheck` clean; `bun test src/` green; `elia bench-latency --strict` green.
+5. Commit body: what moved, the before/after number, how it was measured.
+6. Feature has an env kill‑switch or is a pure default change (revertable in one line).
+
+---
+
+## 7. Non‑goals (explicit)
+
+Distributed anything, OpenTelemetry, signed audit logs, GA/ML over prompts or
+prefetch, per‑action OS resource sandboxing, subagent worker‑process pools,
+parallelised verification, connection‑pool rewrites, a `src/performance/` or
+`src/telemetry/` module. In v1; out until a measurement says otherwise.
+
+---
+
+## 8. Open questions
+
+- **3.2 grep stamping cost:** stamping every file a grep touched could be
+  expensive on a huge result. Options: cap memoization to greps under N hits, or
+  stamp only the directory tree's aggregate mtime. Decide with 3.6's numbers.
+- **3.1 eviction of pending speculations:** evicting an in‑flight speculated read
+  wastes the work but is safe. Acceptable, or should eviction skip unsettled
+  promises? Lean: skip unsettled, evict settled first.
+- **3.7 signature normalization:** how much to normalize the error line (paths?
+  line numbers? hashes?) before comparing. Start strict (exact top line minus
+  absolute paths), loosen if dedupe misses obvious repeats.
+
+---
+
+## 9. Honest positioning
+
+Elia's real edge over Devin‑class agents already ships: speculative execution,
+the multi‑tier model cascade, goal‑graph persistence, `elia evolve`, the
+governance/contract layer, continuum memory. This plan adds no new
+differentiator — it removes waste and closes small, measured gaps in what exists.
+That is the correct scope. Inventing "superiority features" on a roadmap nobody
+can measure is how v1 happened.
