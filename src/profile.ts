@@ -46,8 +46,25 @@ export interface ModelCallSample {
   messageCount: number
 }
 
+/** One tool execution within the loop — recorded alongside the model calls it sits between. */
+export interface ToolCallSample {
+  /** Tool name, e.g. "read_file". */
+  name: string
+  /** "top" for the lead loop, or a sub-agent label. */
+  actor: string
+  /** Wall-clock time the tool took (0 when served from the speculative cache). */
+  wallMs: number
+  /** Characters of result text handed back to the model. */
+  bytesOut: number
+  /** True when the result came from the speculative cache instead of a real run. */
+  cached: boolean
+  /** True when the tool errored. */
+  isError: boolean
+}
+
 let enabled = readEnabled()
 let samples: ModelCallSample[] = []
+let toolSamples: ToolCallSample[] = []
 
 function readEnabled(): boolean {
   const value = process.env.ELIA_PROFILE
@@ -65,13 +82,56 @@ export function recordModelCall(sample: ModelCallSample): void {
   samples.push(sample)
 }
 
+export function recordToolCall(sample: ToolCallSample): void {
+  if (!profilingEnabled()) return
+  toolSamples.push(sample)
+}
+
 export function profileSampleCount(): number {
   return samples.length
 }
 
 export function resetProfilerForTests(): void {
   samples = []
+  toolSamples = []
   enabled = readEnabled()
+}
+
+export interface ToolProfileRow {
+  name: string
+  calls: number
+  cachedCalls: number
+  errorCalls: number
+  totalWallMs: number
+  p50WallMs: number
+  p90WallMs: number
+  totalBytesOut: number
+}
+
+/** Per-tool aggregates, busiest first (by call count). */
+export function toolProfileReport(): ToolProfileRow[] {
+  const byName = new Map<string, ToolCallSample[]>()
+  for (const sample of toolSamples) {
+    const bucket = byName.get(sample.name)
+    if (bucket) bucket.push(sample)
+    else byName.set(sample.name, [sample])
+  }
+
+  const rows = [...byName.entries()].map(([name, entries]): ToolProfileRow => {
+    const wall = entries.map((entry) => entry.wallMs)
+    return {
+      name,
+      calls: entries.length,
+      cachedCalls: entries.filter((entry) => entry.cached).length,
+      errorCalls: entries.filter((entry) => entry.isError).length,
+      totalWallMs: wall.reduce((sum, value) => sum + value, 0),
+      p50WallMs: percentile(wall, 50) ?? 0,
+      p90WallMs: percentile(wall, 90) ?? 0,
+      totalBytesOut: entries.reduce((sum, entry) => sum + entry.bytesOut, 0),
+    }
+  })
+
+  return rows.sort((a, b) => b.calls - a.calls)
 }
 
 function cacheHitRate(input: number, read: number, write: number): number {
@@ -142,7 +202,8 @@ export function profileReport(): ProfileReport {
 
 /** A dim, terminal-friendly table of every model call this run made. Empty string when there is nothing to show. */
 export function renderProfileReport(): string {
-  if (samples.length === 0) return ''
+  if (samples.length === 0 && toolSamples.length === 0) return ''
+  if (samples.length === 0) return renderToolProfile()
   const report = profileReport()
 
   const row = (cells: [string, string, string, string, string, string, string, string, string, string]): string =>
@@ -186,5 +247,36 @@ export function renderProfileReport(): string {
       : `  no prefix cache misses — the stable system+tools prefix was reused on every follow-up call`,
   ].join('\n')
 
-  return ['Turn profile (ELIA_PROFILE)', header, ...rows, divider, summary].join('\n')
+  const toolProfile = renderToolProfile()
+  return ['Turn profile (ELIA_PROFILE)', header, ...rows, divider, summary, ...(toolProfile ? ['', toolProfile] : [])].join('\n')
+}
+
+/** A per-tool table: where the loop's tool phase actually spent its time. Empty string when no tools ran. */
+export function renderToolProfile(): string {
+  const rows = toolProfileReport()
+  if (rows.length === 0) return ''
+
+  const line = (cells: [string, string, string, string, string, string, string]): string =>
+    '  ' +
+    [
+      cells[0].slice(0, 16).padEnd(16),
+      cells[1].padStart(5),
+      cells[2].padStart(7),
+      cells[3].padStart(7),
+      cells[4].padStart(8),
+      cells[5].padStart(7),
+      cells[6].padStart(7),
+    ].join('  ')
+
+  const header = line(['tool', 'calls', 'cached', 'errors', 'total', 'p50', 'p90'])
+  const body = rows.map((r) =>
+    line([r.name, String(r.calls), String(r.cachedCalls), String(r.errorCalls), ms(r.totalWallMs), ms(r.p50WallMs), ms(r.p90WallMs)]),
+  )
+  const totalCalls = rows.reduce((sum, r) => sum + r.calls, 0)
+  const totalCached = rows.reduce((sum, r) => sum + r.cachedCalls, 0)
+  const totalWall = rows.reduce((sum, r) => sum + r.totalWallMs, 0)
+  const divider = `  ${'─'.repeat(header.length - 2)}`
+  const summary = `  ${totalCalls} tool calls · ${ms(totalWall)} total tool wall time · ${pct(totalCalls === 0 ? 0 : totalCached / totalCalls)} served from speculative cache`
+
+  return ['Tool profile', header, ...body, divider, summary].join('\n')
 }

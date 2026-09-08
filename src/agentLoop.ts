@@ -18,7 +18,7 @@ import { activeMode } from './autonomy/mode.ts'
 import { activeToolHooks, evaluateToolHooks } from './autonomy/devHooks.ts'
 import { clampOutput } from './shell.ts'
 import { isRepoMutatingTool, withRepoLock } from './repoLock.ts'
-import { profilingEnabled, recordModelCall } from './profile.ts'
+import { profilingEnabled, recordModelCall, recordToolCall } from './profile.ts'
 import { codexSubscriptionApprovedThisSession, markCodexSubscriptionApproved } from './providers/codexSubscription.ts'
 import { activeSessionTranscript } from './ui/transcript.ts'
 
@@ -161,6 +161,14 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
   const actor = currentAgent().name
   const onTool = (event: ToolEvent): void => {
     transcript?.recordTool(event, actor)
+    recordToolCall({
+      name: event.name,
+      actor,
+      wallMs: event.durationMs,
+      bytesOut: event.result.length,
+      cached: event.cached,
+      isError: event.isError,
+    })
     toolListener?.(event)
   }
 

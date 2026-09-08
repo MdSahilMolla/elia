@@ -1,5 +1,16 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test'
-import { profileReport, profilingEnabled, recordModelCall, renderProfileReport, resetProfilerForTests, type ModelCallSample } from './profile.ts'
+import {
+  profileReport,
+  profilingEnabled,
+  recordModelCall,
+  recordToolCall,
+  renderProfileReport,
+  renderToolProfile,
+  resetProfilerForTests,
+  toolProfileReport,
+  type ModelCallSample,
+  type ToolCallSample,
+} from './profile.ts'
 
 const original = process.env.ELIA_PROFILE
 
@@ -82,4 +93,53 @@ test('renderProfileReport returns empty string with no samples and a table once 
   const text = renderProfileReport()
   expect(text).toContain('Turn profile')
   expect(text).toContain('cache hit rate')
+})
+
+function toolSample(overrides: Partial<ToolCallSample> = {}): ToolCallSample {
+  return { name: 'read_file', actor: 'top', wallMs: 5, bytesOut: 100, cached: false, isError: false, ...overrides }
+}
+
+test('recordToolCall is a no-op when ELIA_PROFILE is unset', () => {
+  delete process.env.ELIA_PROFILE
+  recordToolCall(toolSample())
+  process.env.ELIA_PROFILE = '1'
+  expect(toolProfileReport()).toHaveLength(0)
+})
+
+test('toolProfileReport aggregates per tool, busiest first, with cached/error counts and percentiles', () => {
+  for (const wallMs of [2, 4, 6, 8, 100]) recordToolCall(toolSample({ name: 'read_file', wallMs }))
+  recordToolCall(toolSample({ name: 'read_file', wallMs: 0, cached: true }))
+  recordToolCall(toolSample({ name: 'grep', wallMs: 40, isError: true }))
+
+  const rows = toolProfileReport()
+  expect(rows.map((r) => r.name)).toEqual(['read_file', 'grep'])
+
+  const read = rows[0]!
+  expect(read.calls).toBe(6)
+  expect(read.cachedCalls).toBe(1)
+  expect(read.errorCalls).toBe(0)
+  expect(read.totalWallMs).toBe(120)
+  expect(read.p90WallMs).toBe(100)
+  expect(read.p50WallMs).toBeLessThan(read.p90WallMs)
+
+  expect(rows[1]!.errorCalls).toBe(1)
+})
+
+test('renderToolProfile shows a table and a speculative-cache share line', () => {
+  expect(renderToolProfile()).toBe('')
+  recordToolCall(toolSample({ name: 'read_file', cached: true }))
+  recordToolCall(toolSample({ name: 'read_file', cached: false }))
+  const text = renderToolProfile()
+  expect(text).toContain('Tool profile')
+  expect(text).toContain('read_file')
+  expect(text).toContain('50% served from speculative cache')
+})
+
+test('renderProfileReport appends the tool table when both model and tool calls were recorded', () => {
+  recordModelCall(sample())
+  recordToolCall(toolSample({ name: 'grep' }))
+  const text = renderProfileReport()
+  expect(text).toContain('Turn profile')
+  expect(text).toContain('Tool profile')
+  expect(text).toContain('grep')
 })
