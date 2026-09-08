@@ -8,7 +8,13 @@ import { runShell, clampOutput } from '../shell.ts'
 import { ZERO_USAGE, addUsage, formatElapsed, recordUsage } from '../usage.ts'
 import type { Usage } from '../providers/types.ts'
 import { writeText } from '../ui/stream.ts'
-import { writeBlock, writeFail, writePass, writePhase, writeSubStep, writeSummary } from '../ui/report.ts'
+import { reportSinkActive, writeBlock, writeFail, writePass, writePhase, writeSubStep, writeSummary } from '../ui/report.ts'
+
+// When a report sink is installed (the Ink REPL escalated into this pipeline),
+// the raw planner/repair token stream would have to be shredded into hundreds of
+// transcript items — the phase reports and the rendered proposal carry the
+// signal there instead. `elia auto` (no sink) still streams to stdout.
+const streamOnText = (): ((delta: string) => void) | undefined => (reportSinkActive() ? undefined : writeText)
 import { createToolResultCache } from '../speculation/cache.ts'
 import { createPrefetcher } from '../speculation/prefetch.ts'
 import { createBlackboard, setActiveBlackboard } from './blackboard.ts'
@@ -17,7 +23,7 @@ import { withAgentIdentity } from './context.ts'
 import { activeMode, withActiveMode, type AgentMode } from './mode.ts'
 import { loadDevelopmentToolHooks, withToolHooks } from './devHooks.ts'
 import { createJournal, newRunId, runDir, type Journal } from './journal.ts'
-import { captureTreeSnapshot, discardTreeSnapshot, restoreTreeSnapshot, type TreeSnapshot } from './treeSnapshot.ts'
+import { captureTreeSnapshot, discardTreeSnapshot, dirtyPaths, restoreTreeSnapshot, type TreeSnapshot } from './treeSnapshot.ts'
 import { planWaves, runFleet } from './fleet.ts'
 import { runVariants } from './variants.ts'
 import { createProposalTool, renderProposal } from './proposal.ts'
@@ -102,6 +108,13 @@ export interface AutonomousRunOptions {
   learn?: boolean
   /** Optional hard wall-clock budget for the entire run; 0 means no additional deadline. */
   maxWallClockMs?: number
+  /**
+   * Repo-relative paths the run must never stage or commit — the operator's
+   * unrelated uncommitted work. The loop also auto-detects this from the working
+   * tree at start; this is for callers that want to be explicit (e.g. a REPL
+   * turn escalating into the pipeline mid-edit).
+   */
+  protectedPaths?: readonly string[]
 }
 
 export type AutonomyProfile = 'fast' | 'balanced' | 'thorough'
@@ -229,6 +242,13 @@ async function runAutonomousTaskInternal(options: AutonomousRunOptions): Promise
   const runId = options.runId ?? newRunId()
   clearRunControl(runId)
   const startedAt = Date.now()
+  // Whatever was already uncommitted in this repo before the run — the scaffold
+  // and per-wave commits must never sweep the operator's unrelated work into
+  // elia's history. Captured once, here, before anything is written.
+  const protectedPaths = [...new Set([
+    ...(options.protectedPaths ?? []),
+    ...(await dirtyPaths(process.cwd()).catch(() => [])),
+  ])]
   const parentTask = taskSessions.create(inferTaskKind(goal, goal), `Autonomous: ${goal}`, 'Queued autonomous execution', { role: 'lead' })
   taskSessions.update(parentTask.id, { status: 'running', action: 'Orienting', detail: 'Inspecting the environment and preparing a durable plan' })
   const unregisterParentControls = taskSessions.registerControls(parentTask.id, {
@@ -403,7 +423,7 @@ async function runAutonomousTaskInternal(options: AutonomousRunOptions): Promise
       messages,
       systemPrompt: plannerPrompt,
       tools: planningTools,
-      onText: writeText,
+      onText: streamOnText(),
       useAnimation: true,
       verbose: true,
       maxSteps: defaults.plannerSteps,
@@ -433,6 +453,7 @@ async function runAutonomousTaskInternal(options: AutonomousRunOptions): Promise
 
     journal.append('proposal', { proposal })
     if (machineReadable) emitEvent('proposal_ready', { proposal })
+    else if (reportSinkActive()) writeBlock('Plan', renderProposal(proposal).replace(/\x1b\[[0-9;]*m/g, '').trim())
     else process.stdout.write(renderProposal(proposal))
     journal.checkpoint('after-propose', messages)
 
@@ -540,7 +561,7 @@ async function runAutonomousTaskInternal(options: AutonomousRunOptions): Promise
   // recovery silently did nothing in a non-git directory, because it needs git.
   if (planApproved) {
     writePhase('scaffold', 'repository, ignore rules, and project documents')
-    const scaffold = await scaffoldProject({ cwd: process.cwd(), goal, proposal, signal: runSignal })
+    const scaffold = await scaffoldProject({ cwd: process.cwd(), goal, proposal, signal: runSignal, protect: protectedPaths })
     if (scaffold.initialized) writeSubStep('initialised a git repository for this project')
     if (scaffold.documents.length > 0) writeSubStep(`wrote ${scaffold.documents.join(', ')}`)
     for (const commit of scaffold.commits) writeSubStep(`committed: ${commit}`)
@@ -843,6 +864,7 @@ Do not repeat whatever failed. If a file is protected, a path is refused, or a c
           process.cwd(),
           `Wave ${index + 1}: ${landed.length === 1 ? landed[0] : `${landed.length} steps`}\n\n${landed.map((entry) => `- ${entry}`).join('\n')}`,
           runSignal,
+          protectedPaths,
         )
         if (commit.committed) writeSubStep(`committed wave ${index + 1} (${landed.length} step(s))`)
         if (commit.excluded.length > 0) writeSubStep(`⚠ kept out of the commit because they hold secrets: ${commit.excluded.join(', ')}`)
@@ -1282,7 +1304,7 @@ Judge what is there, not what the code looks like it would probably do. A criter
       messages: repairMessages,
       systemPrompt: repairPromptForMode(activeMode()),
       tools: repairTools,
-      onText: writeText,
+      onText: streamOnText(),
       useAnimation: true,
       verbose: true,
       maxSteps: 50,

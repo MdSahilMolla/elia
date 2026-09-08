@@ -56,6 +56,16 @@ async function dirtyEntries(root: string): Promise<Entry[]> {
   return parsePorcelainZ(result.stdout)
 }
 
+/**
+ * Paths that are already dirty or untracked in `root` right now (relative,
+ * forward-slashed). The autonomous loop captures this before it scaffolds or
+ * commits anything, so a run inside a repo that has unrelated uncommitted work
+ * never sweeps that work into its own commits.
+ */
+export async function dirtyPaths(root: string): Promise<string[]> {
+  return (await dirtyEntries(root)).map((entry) => entry.path.replace(/\\/g, '/'))
+}
+
 export async function isGitRepo(root: string): Promise<boolean> {
   const result = await runGit(['rev-parse', '--is-inside-work-tree'], root)
   return result.exitCode === 0 && result.stdout.trim() === 'true'

@@ -24,9 +24,11 @@ interface TurnUiHooks {
   planMode?: boolean
   /** Mid-run steering: drained at each step boundary and spliced into the turn. */
   drainSteering?: () => string[]
+  /** Ink approval menu — used for the plan gate when a turn escalates into the autonomous pipeline. */
+  approve?: (req: { title: string; lines: string[]; preview?: string[]; ruleLabel: string }) => Promise<import('./autonomy/governor.ts').ApprovalResult>
 }
 import { playIntro } from './ui/character.ts'
-import { ZERO_USAGE, addUsage, getSessionSummaryLine, recordTopLevelTurn, formatUsageLine, sessionUsageSnapshot, setCurrentUsageModel, type SessionUsageSnapshot } from './usage.ts'
+import { ZERO_USAGE, addUsage, getSessionSummaryLine, recordTopLevelTurn, formatUsageLine, formatElapsed, sessionUsageSnapshot, setCurrentUsageModel, type SessionUsageSnapshot } from './usage.ts'
 import { createSlashPrompt, type SlashCommand } from './ui/slashPrompt.ts'
 import { confirmOnce } from './ui/confirm.ts'
 import { gold, dim } from './ui/theme.ts'
@@ -37,6 +39,7 @@ import { inferTaskKind, taskSessions } from './taskSessions.ts'
 import { isAgentPersona, type AgentPersona } from './agents/types.ts'
 import { CAPABILITIES } from './capabilities.ts'
 import { MAX_GOVERNED_ACTIONS, type ActionApproval, type ActionAssessment, type ActionRequest } from './autonomy/governor.ts'
+import { classifyEscalation } from './autonomy/escalation.ts'
 import { emitEvent, interactiveTerminal, machineReadable, plainOutput, quietOutput } from './ui/runtime.ts'
 import { renderWorkspacePanel } from './ui/workspacePanel.ts'
 import { installShutdownHandlers, registerShutdownCleanup } from './ui/shutdown.ts'
@@ -60,6 +63,7 @@ const REPL_COMMANDS: SlashCommand[] = [
   { name: '/sessions', description: 'other elia sessions in this project' },
   { name: '/artifact', description: 'browse saved plan artifacts' },
   { name: '/verify', description: 'run project checks · /verify on|off' },
+  { name: '/auto', description: 'auto-escalate big builds to the autonomous pipeline · /auto on|off' },
   { name: '/cost', description: 'token & cost breakdown' },
   { name: '/usage', description: 'live token consumption, context & limits' },
   { name: '/status', description: 'session, plan, subagents, artifacts' },
@@ -117,9 +121,13 @@ Usage:
   elia "<prompt>"             Run a single prompt and exit
   elia --continue, -c         Resume the most recent session in this directory
   elia --resume <id>          Resume a specific session by id
+  elia --no-escalate          Never auto-route a big "build me an X" request through the autonomous pipeline
 
 Dev mode (default): elia is the general-purpose development mode for building,
-debugging, testing, refactoring, and operating software.
+debugging, testing, refactoring, and operating software. A request that reads as
+a whole new project ("build an end-to-end X") is automatically planned and run
+through the autonomous pipeline — plan, parallel workers, review, verify, repair
+— instead of a single plain turn. Toggle with /auto on|off or --no-escalate.
 
 Execution policy (manual by default): before running a command, elia checks whether it looks
 risky (deletes, sends, spending, publishing, system changes, ...) — only
@@ -1617,6 +1625,12 @@ async function runInteractive(): Promise<void> {
   // After a turn that changed code, run the project's own checks and repair any
   // failure before reporting done. On by default; --no-verify or /verify off.
   let autoVerify = !hasFlag('--no-verify')
+  // When the first line of a request reads as a whole new project ("build me an
+  // end-to-end X"), route it through the autonomous pipeline — plan, parallel
+  // workers, adversarial review, verify, repair — instead of letting the plain
+  // turn wing a twenty-file scaffold. On by default in dev mode; --no-escalate
+  // or /auto off. Targeted edits and questions always stay on the fast path.
+  let autoEscalate = !hasFlag('--no-escalate')
   // Output from `!cmd` lines, held until the next real prompt so the model sees
   // what the user just ran without an extra round-trip.
   const carriedShellContext: string[] = []
@@ -1709,6 +1723,81 @@ async function runInteractive(): Promise<void> {
   )
 
   /** Snapshots messages + touched files around one turn, then records a rewind point. */
+  /**
+   * A request that reads as "build a whole new project" runs through the
+   * autonomous pipeline (orient → plan → parallel workers → verify → repair)
+   * instead of a plain turn. Report output routes into the REPL transcript via
+   * the report sink; the plan gate uses the Ink approval menu. Follow-up turns
+   * see a one-line summary of the run.
+   */
+  async function runEscalatedTurn(
+    goal: string,
+    reason: string,
+    approveAction: ActionApproval | undefined,
+    signal: AbortSignal,
+    uiHooks?: TurnUiHooks,
+  ): Promise<void> {
+    const { runAutonomousTask, autoApprove } = await import('./autonomy/loop.ts')
+    const { setReportSink } = await import('./ui/report.ts')
+    const { renderProposal } = await import('./autonomy/proposal.ts')
+    const stripAnsi = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, '')
+
+    const note = (title: string, detail?: string) => {
+      if (uiHooks?.onActivity) uiHooks.onActivity({ kind: 'status', status: 'updated', title, detail })
+      else writeNotice(detail ? `${title}\n${detail}` : title)
+    }
+    note(`This looks like a full build (${reason}) — planning it properly.`)
+
+    if (uiHooks) {
+      setReportSink((kind, text) => {
+        if (kind === 'block' || kind === 'summary') {
+          const [title, ...body] = text.split('\n')
+          uiHooks.onActivity?.({ kind: 'plan', status: 'updated', title: title ?? text, detail: body.join('\n') || undefined })
+        } else {
+          uiHooks.onActivity?.({ kind: 'status', status: kind === 'fail' ? 'warning' : 'updated', title: text })
+        }
+      })
+    }
+
+    const ttyApprover = !uiHooks && process.stdin.isTTY && !hasFlag('--yolo', '-y')
+    const approvalRl = ttyApprover ? createSlashPrompt([]) : undefined
+    const approve: import('./autonomy/loop.ts').Approver = uiHooks?.approve
+      ? async (proposal) => {
+          const preview = stripAnsi(renderProposal(proposal)).split('\n').slice(0, 60)
+          const res = await uiHooks.approve!({ title: 'Approve this plan?', lines: [redactText(proposal.goal, 200)], preview, ruleLabel: 'run this plan' })
+          const outcome = typeof res === 'boolean' ? { approved: res, feedback: undefined } : res
+          if (outcome.approved) return { action: 'approve' }
+          if ('feedback' in outcome && outcome.feedback) return { action: 'amend', feedback: outcome.feedback }
+          return { action: 'reject' }
+        }
+      : approvalRl
+        ? () => confirmOnce(approvalRl, 'Approve this plan? [y]es / [n]o / [e]dit <what to change>: ')
+        : autoApprove
+
+    try {
+      const result = await runAutonomousTask({
+        goal,
+        approve,
+        approveAction,
+        mode,
+        profile: 'balanced',
+        governanceMode: 'supervised',
+        signal,
+        polish: true,
+      })
+      const summary =
+        `[autonomous run: ${result.outcome}] ${redactText(result.proposal?.goal ?? goal, 200)} · `
+        + `${result.actionBudget?.consumed ?? 0} actions · ${formatElapsed(result.elapsedMs)}`
+        + (result.lessons.length > 0 ? `\nLessons captured: ${result.lessons.join('; ')}` : '')
+      messages.push({ role: 'assistant', content: [{ type: 'text', text: summary }] })
+      sessionTranscript.notice(summary)
+      note(summary)
+    } finally {
+      setReportSink(undefined)
+      approvalRl?.close()
+    }
+  }
+
   async function runCheckpointedTurn(userText: string, approveAction?: ActionApproval, skillNames = selectedSkillNames, uiHooks?: TurnUiHooks): Promise<void> {
     try {
       await withSessionTranscript(sessionTranscript, () => runRecordedTurn(userText, approveAction, skillNames, uiHooks))
@@ -1753,6 +1842,9 @@ async function runInteractive(): Promise<void> {
     messages.push(userMessage(userText))
     sessionTranscript.appendUser(userText)
 
+    const escalation = classifyEscalation(userText)
+    let escalated = false
+
     const runModelTurn = () =>
       runTurn(messages, {
         mode,
@@ -1793,6 +1885,9 @@ async function runInteractive(): Promise<void> {
       if (persona) {
         const { runPersonaTurn } = await import('./agents/orchestrator.ts')
         await runPersonaTurn(messages, persona, skillNames, controller.signal)
+      } else if (autoEscalate && mode === 'dev' && !uiHooks?.planMode && escalation.escalate) {
+        escalated = true
+        await runEscalatedTurn(userText, escalation.reason, approveAction, controller.signal, uiHooks)
       } else {
         const turnResult = await runModelTurn()
         if (turnResult.stopReason === 'aborted') stopRequested = true
@@ -1807,7 +1902,7 @@ async function runInteractive(): Promise<void> {
       // track record in on this project, force one hard self-review of the diff
       // before it can claim done — it reviews itself harder exactly where it has
       // proven unreliable.
-      if (!persona && !uiHooks?.planMode && !controller.signal.aborted) {
+      if (!persona && !escalated && !uiHooks?.planMode && !controller.signal.aborted) {
         const { touchedWeakDomain } = await import('./autonomy/outcomes.ts')
         const weak = touchedWeakDomain(Object.keys(tracker.snapshot()))
         if (weak.length > 0) {
@@ -1831,7 +1926,7 @@ async function runInteractive(): Promise<void> {
       // project's own checks pass. Detect them, run them, and hand any failure
       // back for a bounded repair — the "done!" that isn't is the single most
       // common way an autonomous agent wastes your time.
-      if (!persona && autoVerify && !uiHooks?.planMode) {
+      if (!persona && !escalated && autoVerify && !uiHooks?.planMode) {
         const { changedCodeFiles, checkRoot, detectChecks } = await import('./autonomy/detectChecks.ts')
         const { runVerification, describeVerification } = await import('./autonomy/verify.ts')
         const changedAll = Object.keys(tracker.snapshot())
@@ -2874,6 +2969,14 @@ async function runInteractive(): Promise<void> {
       return done(`${outcome.passed ? '✓ all checks pass' : '✗ checks failing'}\n${describeVerification(outcome)}`)
     }
 
+    const escalateMatch = /^\/(?:auto|escalate)(?:\s+(on|off))?$/.exec(trimmed)
+    if (escalateMatch) {
+      if (escalateMatch[1]) autoEscalate = escalateMatch[1] === 'on'
+      return done(
+        `Auto-escalation ${autoEscalate ? 'on' : 'off'} — a request that reads as a whole new project ${autoEscalate ? 'routes through the autonomous pipeline (plan → workers → verify → repair)' : 'runs as a plain turn'}. Targeted edits are unaffected.`,
+      )
+    }
+
     return done(`Unknown command: ${trimmed.split(/\s+/)[0]}. Type /help for the list.`)
   }
 
@@ -2936,6 +3039,7 @@ async function runInteractive(): Promise<void> {
             onToolStart: hooks.onToolStart,
             signal: hooks.signal,
             drainSteering: hooks.drainSteering,
+            approve: hooks.approve,
           },
         )
         await persistInteractiveSession()
@@ -3165,6 +3269,12 @@ async function runInteractive(): Promise<void> {
         const outcome = await runVerification(checks, process.cwd())
         writeUsageLine(`${outcome.passed ? '✓ all checks pass' : '✗ checks failing'}\n${describeVerification(outcome)}`)
       }
+      continue
+    }
+    const escalateClassic = /^\/(?:auto|escalate)(?:\s+(on|off))?$/.exec(trimmed)
+    if (escalateClassic) {
+      if (escalateClassic[1]) autoEscalate = escalateClassic[1] === 'on'
+      writeNotice(`Auto-escalation ${autoEscalate ? 'on' : 'off'} — big new-project requests ${autoEscalate ? 'route through the autonomous pipeline' : 'run as a plain turn'}.`)
       continue
     }
 

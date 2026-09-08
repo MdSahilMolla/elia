@@ -20,6 +20,8 @@ export interface ScaffoldOptions {
   signal?: AbortSignal
   /** Skip document generation; the repository work still happens. */
   documents?: boolean
+  /** Repo-relative paths that were already dirty before the run — never committed. */
+  protect?: readonly string[]
 }
 
 export interface ScaffoldResult {
@@ -104,30 +106,53 @@ export async function ensureRepository(cwd: string, signal?: AbortSignal): Promi
 /**
  * Stages everything and commits, refusing to include a file that looks like it
  * holds secrets even if the project's ignore rules missed it.
+ *
+ * `protect` is a set of repo-relative paths that were already dirty or untracked
+ * before the run started and that the run did not touch — a run inside a repo
+ * with unrelated uncommitted work must never sweep it into its own commit.
  */
-export async function commitAll(cwd: string, message: string, signal?: AbortSignal): Promise<CommitResult> {
+export async function commitAll(
+  cwd: string,
+  message: string,
+  signal?: AbortSignal,
+  protect: readonly string[] = [],
+): Promise<CommitResult> {
   const add = await execCapture('git', ['add', '-A'], cwd, signal)
   if (!add.ok) return { committed: false, excluded: [], warning: `git add failed: ${add.stderr || add.stdout}` }
 
   const staged = await execCapture('git', ['diff', '--cached', '--name-only'], cwd, signal)
   const paths = staged.stdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean)
+  const protectedSet = new Set(protect.map((p) => p.replace(/\\/g, '/')))
 
   // Second line of defence behind .gitignore. A commit is one `git push` away
-  // from being public and permanent, so a secret must never reach one.
+  // from being public and permanent, so a secret must never reach one. Same
+  // mechanism keeps the operator's pre-existing uncommitted work out.
   const excluded: string[] = []
+  const preserved: string[] = []
   for (const path of paths) {
-    if (!isSensitivePath(path)) continue
+    const isSecret = isSensitivePath(path)
+    const isPreExisting = protectedSet.has(path.replace(/\\/g, '/'))
+    if (!isSecret && !isPreExisting) continue
     await execCapture('git', ['reset', '--quiet', '--', path], cwd, signal)
-    excluded.push(path)
+    if (isSecret) excluded.push(path)
+    else preserved.push(path)
   }
-  if (paths.length === excluded.length) {
-    return { committed: false, excluded, ...(excluded.length > 0 ? { warning: `nothing to commit: every changed file holds secrets (${excluded.join(', ')})` } : {}) }
+  if (paths.length === excluded.length + preserved.length) {
+    const why = [
+      excluded.length > 0 ? `hold secrets (${excluded.join(', ')})` : '',
+      preserved.length > 0 ? `were already modified before this run (${preserved.join(', ')})` : '',
+    ].filter(Boolean).join('; ')
+    return { committed: false, excluded, ...(why ? { warning: `nothing to commit: every changed file ${why}` } : {}) }
   }
 
   const identity = await commitIdentity(cwd, signal)
   const commit = await execCapture('git', [...identity, 'commit', '-m', message], cwd, signal)
   if (!commit.ok) return { committed: false, excluded, warning: `git commit failed: ${commit.stderr || commit.stdout}` }
-  return { committed: true, excluded }
+  return {
+    committed: true,
+    excluded,
+    ...(preserved.length > 0 ? { warning: `left your pre-existing uncommitted changes out of the commit: ${preserved.join(', ')}` } : {}),
+  }
 }
 
 /**
@@ -334,7 +359,7 @@ export async function scaffoldProject(options: ScaffoldOptions): Promise<Scaffol
   const message = result.initialized
     ? `Initial commit: plan and project documents\n\n${proposal.goal}`
     : `Add project documents for: ${proposal.goal}`
-  const commit = await commitAll(cwd, message, signal)
+  const commit = await commitAll(cwd, message, signal, options.protect)
   if (commit.committed) result.commits.push(message.split('\n')[0]!)
   if (commit.warning) result.warnings.push(commit.warning)
   if (commit.excluded.length > 0) {

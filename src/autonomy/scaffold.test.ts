@@ -107,6 +107,36 @@ test('a commit with nothing but secrets in it is not made at all', async () => {
   expect(result.excluded).toEqual(['.env'])
 })
 
+test('pre-existing uncommitted work is protected — committed on disk, not swept into the run commit', async () => {
+  await ensureRepository(dir)
+  writeFileSync(join(dir, 'existing.ts'), 'export const wip = true')
+  writeFileSync(join(dir, 'scaffolded.ts'), 'export const fresh = true')
+
+  const result = await commitAll(dir, 'run commit', undefined, ['existing.ts'])
+  expect(result.committed).toBe(true)
+
+  const tracked = (await git('ls-files')).stdout
+  expect(tracked).toContain('scaffolded.ts')
+  expect(tracked).not.toContain('existing.ts')
+  // The protected file is untouched on disk and still visible as a change.
+  expect(readFileSync(join(dir, 'existing.ts'), 'utf8')).toBe('export const wip = true')
+  expect((await git('status', '--porcelain')).stdout).toContain('existing.ts')
+})
+
+test('scaffoldProject in a dirty repo leaves the operator’s changes alone', async () => {
+  await ensureRepository(dir)
+  writeFileSync(join(dir, 'seed.ts'), 'export const seed = 1')
+  await git('add', '-A')
+  await git('-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-m', 'seed')
+  writeFileSync(join(dir, 'seed.ts'), 'export const seed = 2 // my uncommitted edit')
+
+  const result = await scaffoldProject({ cwd: dir, goal: 'goal', proposal, protect: ['seed.ts'] })
+  expect(result.warnings.join(' ')).not.toContain('git commit failed')
+
+  expect((await git('show', 'HEAD:seed.ts')).stdout.trim()).toBe('export const seed = 1')
+  expect(readFileSync(join(dir, 'seed.ts'), 'utf8')).toContain('my uncommitted edit')
+})
+
 // --- the whole scaffold ---
 
 test('scaffolding an empty directory leaves a repository, ignore rules, documents, and one commit', async () => {
