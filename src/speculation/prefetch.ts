@@ -88,6 +88,9 @@ export function createPrefetcher({ tools, cache, cwd = process.cwd() }: Prefetch
           if (path) {
             seen.add(normalizePath(path, cwd))
             predictions.push(...resolveImports(call.result, path, cwd))
+            // Open a source file and you usually open its test next (and the
+            // reverse when a test just failed).
+            predictions.push(...testSourceSiblings(path, cwd))
           }
           continue
         }
@@ -111,6 +114,45 @@ export function extractPaths(text: string, cwd: string): string[] {
     if (isSpeculativelyReadable(normalized, cwd)) found.push(normalized)
   }
   return dedupe(found)
+}
+
+/**
+ * Given a file the model just read, the test/source counterparts worth reading
+ * next: `foo.ts` <-> `foo.test.ts` / `foo.spec.ts`, `foo.py` <-> `test_foo.py` /
+ * `foo_test.py`. Only counterparts that exist on disk and pass the speculative
+ * readability rules are returned.
+ */
+export function testSourceSiblings(fromPath: string, cwd: string): string[] {
+  const normalized = normalizePath(fromPath, cwd)
+  const slash = normalized.lastIndexOf('/')
+  const dir = slash >= 0 ? normalized.slice(0, slash + 1) : ''
+  const file = slash >= 0 ? normalized.slice(slash + 1) : normalized
+
+  const lastDot = file.lastIndexOf('.')
+  if (lastDot <= 0) return []
+  const ext = file.slice(lastDot) // ".ts", ".py", ...
+  const base = file.slice(0, lastDot) // "foo", "foo.test", "test_foo", "foo_test"
+
+  const isJsTs = /^\.(ts|tsx|js|jsx|mjs|cjs)$/.test(ext)
+  const isPy = ext === '.py'
+  if (!isJsTs && !isPy) return []
+
+  const candidates: string[] = []
+  const jsTest = /\.(test|spec)$/
+
+  if (isJsTs && jsTest.test(base)) {
+    candidates.push(`${dir}${base.replace(jsTest, '')}${ext}`)
+  } else if (isJsTs) {
+    candidates.push(`${dir}${base}.test${ext}`, `${dir}${base}.spec${ext}`)
+  } else if (isPy && /^test_/.test(base)) {
+    candidates.push(`${dir}${base.replace(/^test_/, '')}${ext}`)
+  } else if (isPy && /_test$/.test(base)) {
+    candidates.push(`${dir}${base.replace(/_test$/, '')}${ext}`)
+  } else if (isPy) {
+    candidates.push(`${dir}test_${base}${ext}`, `${dir}${base}_test${ext}`)
+  }
+
+  return dedupe(candidates).filter((candidate) => candidate !== normalized && isSpeculativelyReadable(candidate, cwd))
 }
 
 /** Resolves the relative imports of a just-read file to concrete paths on disk. */

@@ -477,6 +477,10 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
       if (verbose) writeToolResult(block.name, resultText, isError, cached)
       onTool?.({ id: block.id, name: block.name, input: block.input, result: resultText, isError, durationMs, cached, assessment, actionId: reservation?.action.id, idempotencyKey: reservation?.action.idempotencyKey, replayed, failureClass })
       if (!isError) observed.push({ name: block.name, input: block.input, result: resultText })
+      // A *failed* command is where stack traces and compiler errors live — the
+      // files the model is about to open. Feed those to the prefetcher even
+      // though the call errored (path extraction only; nothing is "run").
+      else if (block.name === 'run_command') observed.push({ name: block.name, input: block.input, result: resultText })
 
       return {
         type: 'tool_result' as const,

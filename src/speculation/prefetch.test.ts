@@ -2,7 +2,7 @@ import { afterAll, beforeAll, expect, test } from 'bun:test'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { extractPaths, resolveImports } from './prefetch.ts'
+import { extractPaths, resolveImports, testSourceSiblings } from './prefetch.ts'
 
 let dir: string
 
@@ -15,6 +15,9 @@ beforeAll(() => {
   writeFileSync(join(dir, 'src', 'index.ts'), "import { a } from './net/client.ts'\nimport pkg from 'some-package'\n")
   writeFileSync(join(dir, 'src', 'net', 'client.ts'), 'export const a = 1\n')
   writeFileSync(join(dir, 'src', 'net', 'config.ts'), 'export const t = 1\n')
+  writeFileSync(join(dir, 'src', 'net', 'client.test.ts'), 'test("a", () => {})\n')
+  writeFileSync(join(dir, 'src', 'net', 'widget.py'), 'x = 1\n')
+  writeFileSync(join(dir, 'src', 'net', 'test_widget.py'), 'x = 1\n')
   writeFileSync(join(dir, 'src', 'deep', 'index.ts'), 'export const d = 1\n')
   writeFileSync(join(dir, 'node_modules', 'pkg', 'index.ts'), 'export const p = 1\n')
   writeFileSync(join(dir, 'README.md'), '# readme\n')
@@ -73,4 +76,23 @@ test('an import that resolves to nothing is dropped rather than guessed at', () 
 
 test('a parent-relative import resolves correctly', () => {
   expect(resolveImports("import { x } from '../index.ts'", 'src/net/client.ts', dir)).toEqual(['src/index.ts'])
+})
+
+test('reading a source file predicts its test sibling, and vice versa', () => {
+  expect(testSourceSiblings('src/net/client.ts', dir)).toEqual(['src/net/client.test.ts'])
+  expect(testSourceSiblings('src/net/client.test.ts', dir)).toEqual(['src/net/client.ts'])
+})
+
+test('test/source pairing follows Python test_ naming', () => {
+  expect(testSourceSiblings('src/net/widget.py', dir)).toEqual(['src/net/test_widget.py'])
+  expect(testSourceSiblings('src/net/test_widget.py', dir)).toEqual(['src/net/widget.py'])
+})
+
+test('a test sibling that does not exist on disk is not predicted', () => {
+  expect(testSourceSiblings('src/net/config.ts', dir)).toEqual([])
+  expect(testSourceSiblings('src/index.ts', dir)).toEqual([])
+})
+
+test('non-code files have no test sibling', () => {
+  expect(testSourceSiblings('README.md', dir)).toEqual([])
 })
