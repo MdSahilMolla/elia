@@ -39,11 +39,25 @@ export interface EventQuery {
   types?: string[]
 }
 
+export type EventListener = (event: PersistedEvent) => void
+
 export class WorkspaceStore {
+  private readonly listeners = new Set<EventListener>()
+
   private constructor(
     readonly path: string,
     private readonly db: Database,
   ) {}
+
+  /**
+   * Observe every committed event. The workspace server uses this to fan events
+   * out to connected clients; the listener runs after the transaction commits,
+   * and a throwing listener never rolls back the write.
+   */
+  subscribe(listener: EventListener): () => void {
+    this.listeners.add(listener)
+    return () => this.listeners.delete(listener)
+  }
 
   static open(path: string = DEFAULT_WORKSPACE_DB): WorkspaceStore {
     ensureSecureDirectory(dirname(path))
@@ -92,7 +106,15 @@ export class WorkspaceStore {
       this.appendAudit(event)
       return event
     })
-    return run()
+    const event = run()
+    for (const listener of this.listeners) {
+      try {
+        listener(event)
+      } catch {
+        // A subscriber (e.g. a dropped WebSocket) must not break the writer.
+      }
+    }
+    return event
   }
 
   private appendAudit(event: PersistedEvent): void {

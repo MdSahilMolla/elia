@@ -110,7 +110,7 @@ function requestedAgentMode(): AgentMode {
   return 'dev'
 }
 
-const SUBCOMMANDS = ['auto', 'agent', 'evolve', 'bench', 'bench-latency', 'skills', 'runs', 'fork', 'resume', 'schedule', 'daemon', 'doctor', 'config', 'codex-login', 'control', 'bridge'] as const
+const SUBCOMMANDS = ['auto', 'agent', 'evolve', 'bench', 'bench-latency', 'skills', 'runs', 'fork', 'resume', 'schedule', 'daemon', 'doctor', 'config', 'codex-login', 'control', 'bridge', 'workspace'] as const
 type Subcommand = (typeof SUBCOMMANDS)[number]
 
 function printHelp(): void {
@@ -205,6 +205,11 @@ Editor / external integration:
   elia bridge --http [--port 4319] [--host 127.0.0.1]  Same bridge protocol over WebSocket instead of stdio,
                                             for any external client — SDKs, other editors. Binds to
                                             localhost only unless --host is set explicitly.
+
+  elia workspace serve                     Start the multi-user, multi-agent collaborative workspace server
+  elia workspace init --name <name>        Bootstrap a workspace and print its owner token
+  elia workspace status | feed [--follow]  Live counts, presence, and the shared activity stream
+  elia workspace --help                    All workspace commands (members, agents, messages, decisions)
 
 Provider setup:
   First interactive run                    Ask for provider, hidden API key, and model
@@ -3521,6 +3526,10 @@ async function main() {
       return
     case 'control':
       return runControl()
+    case 'workspace': {
+      const { runWorkspace } = await import('./workspace/cli.ts')
+      return runWorkspace(args)
+    }
     case 'bridge': {
       if (hasFlag('--http')) {
         const portRaw = flagValue('--port') ?? '4319'

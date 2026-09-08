@@ -29,4 +29,9 @@ export const paths = {
   evolution: join(stateDir, 'evolution'),
   lessons: join(stateDir, 'lessons.md'),
   workspace: workspaceDir,
+  // Collaborative multi-user workspace: the SQLite event store, its per-objective
+  // scratch (blackboards, worktree metadata), and the running-server pointer.
+  workspaceDb: join(stateDir, 'workspace.sqlite'),
+  workspaceState: join(stateDir, 'workspace'),
+  workspaceServerInfo: join(stateDir, 'workspace', 'server.json'),
 }
