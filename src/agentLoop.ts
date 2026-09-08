@@ -3,6 +3,7 @@ import { autoFallbacksFor, config } from './config.ts'
 import { beginCompaction, type PendingCompaction } from './compaction.ts'
 import { compactionThresholdFor } from './contextWindow.ts'
 import { createPlanlessWorkTracker, createRedundantReadTracker, isLoneBatchableRead, serialReadNudge } from './autonomy/toolBatchingNudge.ts'
+import { createReadAhead } from './autonomy/readAhead.ts'
 import type { ChatMessage, ContentBlock, Provider, ProviderActivity, Usage } from './providers/types.ts'
 import type { Tool } from './tools/types.ts'
 import { unknownToolMessage } from './tools/toolNameSuggest.ts'
@@ -240,6 +241,19 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
   let unproductiveStreak = 0
   const redundantReads = createRedundantReadTracker()
   const planlessWork = createPlanlessWorkTracker()
+  // Deterministically pulls the rest of a just-searched worklist into the same
+  // turn, for models that ignore the batch-your-reads nudge (measured: mercury-2
+  // taking 9 round-trips where 2 is ideal). Reuses read_file's own cross-turn memo.
+  const readAhead = createReadAhead(currentAgent().cwd ?? process.cwd())
+  const readAheadFetch = async (path: string): Promise<string> => {
+    const memo = readMemo.get({ path })
+    if (memo !== undefined) return memo
+    const tool = toolsByName.read_file
+    if (!tool) throw new Error('read_file is not available to this agent')
+    const text = await tool.execute({ path })
+    readMemo.put({ path }, text)
+    return text
+  }
 
   const finish = (stopReason: StopReason): RunAgentLoopResult => ({
     usage: totalUsage,
@@ -561,6 +575,22 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
       if (verbose) writeNotice('elia: warned the model it is not making progress')
     }
 
+    // The model opened one file from a list it just searched. Rather than only
+    // nudge and let it walk the list one round-trip at a time, read the rest of
+    // that worklist now and hand it back in the same turn.
+    const readAheadExpansion = batchMutates
+      ? undefined
+      : await readAhead.expand(
+          toolUseBlocks.map((block) => ({ name: block.name, input: block.input })),
+          readAheadFetch,
+        )
+    readAhead.observe(observed)
+    if (readAheadExpansion) {
+      messages.push({ role: 'user', content: [{ type: 'text', text: readAheadExpansion.text }] })
+      loneReadStreak = 0
+      if (verbose) writeNotice(`elia: read ahead ${readAheadExpansion.paths.length} worklist file(s) to save round-trips`)
+    }
+
     // Watch for a model reading one file per turn and, once it's a clear habit,
     // remind it to batch — the biggest single win on round-trip count. Consecutive
     // user messages are merged by every provider, so a standalone note here is safe.
@@ -569,7 +599,9 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
       toolUseBlocks.map((block) => ({ name: block.name, path: typeof block.input.path === 'string' ? block.input.path : undefined })),
     )
     const planlessNudge = planlessWork.observe(toolUseBlocks.map((block) => block.name))
-    const nudge = redundantReadNudge ?? serialReadNudge(loneReadStreak) ?? planlessNudge
+    // A read-ahead expansion already did the batching for the model this turn;
+    // don't also scold it for not batching.
+    const nudge = redundantReadNudge ?? (readAheadExpansion ? undefined : serialReadNudge(loneReadStreak)) ?? planlessNudge
     if (nudge) {
       messages.push({ role: 'user', content: [{ type: 'text', text: nudge }] })
       loneReadStreak = 0
