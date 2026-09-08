@@ -110,10 +110,11 @@ export function ToolCard({ tool, expanded }: { tool: ToolItem; expanded: boolean
   const running = tool.status === 'running'
   const isError = tool.status === 'error'
   const isShell = tool.name === 'run_command'
+  const isEdit = (tool.name === 'edit_file' || tool.name === 'write_file') && !isError
   const isSkill = listLoadedSkills().some((skill) => skill.name === tool.name)
   const badExit = isShell && (s.stat === 'timed out' || (s.stat.startsWith('exit ') && s.stat !== 'exit 0'))
   const showBody =
-    (tool.name === 'visualize' || (isShell && tool.result) || expanded || isError) && !running && tool.result
+    (tool.name === 'visualize' || (isShell && tool.result) || isEdit || expanded || isError) && !running && tool.result
   const summaryLine =
     !running && !isError && !expanded && tool.result && SUMMARY_LINE_TOOLS.has(tool.name)
       ? summarizeResult(tool.name, tool.result)

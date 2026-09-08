@@ -29,7 +29,7 @@ test('edit_file surfaces the diff stat from a (+N −M) result', () => {
     tool({ name: 'edit_file', input: { path: 'a/b/store.ts' }, result: 'Edited store.ts (+16 −2)\n```diff\n@@\n```' }),
   )
   expect(s.verb).toBe('Edited')
-  expect(s.target).toBe('store.ts')
+  expect(s.target).toBe('a/b/store.ts')
   expect(s.stat).toBe('+16 −2')
 })
 

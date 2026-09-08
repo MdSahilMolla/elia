@@ -8,6 +8,13 @@ function basename(path: string): string {
   return parts[parts.length - 1] ?? path
 }
 
+/** Workspace-relative path for edit/write headers, matching the transcript's "Edited src/x.ts" style. */
+function relPath(path: string): string {
+  const normalized = path.replace(/\\/g, '/')
+  const cwd = process.cwd().replace(/\\/g, '/')
+  return normalized.startsWith(`${cwd}/`) ? normalized.slice(cwd.length + 1) : normalized
+}
+
 function firstString(input: Record<string, unknown>, ...keys: string[]): string | undefined {
   for (const key of keys) {
     const value = input[key]
@@ -70,10 +77,10 @@ export function summarizeTool(tool: ToolItem): ToolSummary {
       return { verb: 'Read', target: `${name}${range}`, stat, expandable: done }
     }
     case 'edit_file':
-      return { verb: 'Edited', target: basename(firstString(input, 'path') ?? ''), stat, expandable: done }
+      return { verb: 'Edited', target: relPath(firstString(input, 'path') ?? ''), stat, expandable: done }
     case 'write_file': {
       const created = tool.result?.startsWith('Created') ?? true
-      return { verb: created ? 'Created' : 'Overwrote', target: basename(firstString(input, 'path') ?? ''), stat, expandable: done }
+      return { verb: created ? 'Created' : 'Overwrote', target: relPath(firstString(input, 'path') ?? ''), stat, expandable: done }
     }
     case 'list_files':
       return { verb: 'Listed', target: firstString(input, 'pattern', 'path') ?? 'files', stat, expandable: done }

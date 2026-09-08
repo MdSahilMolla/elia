@@ -62,7 +62,7 @@ test('a read shows a ⎿ result summary without expansion', () => {
   expect(frame).toContain('3 matches in 2 files')
 })
 
-test('edit_file diff renders a line-number gutter', () => {
+test('edit_file diff renders a line-number gutter without expansion', () => {
   const tool: ToolItem = {
     id: 'edit-1',
     kind: 'tool',
@@ -71,7 +71,25 @@ test('edit_file diff renders a line-number gutter', () => {
     status: 'ok',
     result: 'Edited x.ts (+1 −1)\n```diff\n@@ -10,3 +10,3 @@\n context\n-old line\n+new line\n```',
   }
-  const frame = render(<ToolCard tool={tool} expanded />).lastFrame() ?? ''
-  expect(frame).toContain('new line')
+  const frame = render(<ToolCard tool={tool} expanded={false} />).lastFrame() ?? ''
+  expect(frame).toContain('Edited src/x.ts')
+  expect(frame).toContain('- old line')
+  expect(frame).toContain('+ new line')
   expect(frame).toContain('11') // the changed line's number in the gutter
+})
+
+test('a long edit_file diff collapses to a Ctrl+O footer until expanded', () => {
+  const body = Array.from({ length: 40 }, (_, i) => `+added line ${i}`).join('\n')
+  const tool: ToolItem = {
+    id: 'edit-2',
+    kind: 'tool',
+    name: 'edit_file',
+    input: { path: 'src/big.ts' },
+    status: 'ok',
+    result: `Edited big.ts (+40 −0)\n\`\`\`diff\n@@ -1,0 +1,40 @@\n${body}\n\`\`\``,
+  }
+  const collapsed = render(<ToolCard tool={tool} expanded={false} />).lastFrame() ?? ''
+  expect(collapsed).toContain('Ctrl+O')
+  const expanded = render(<ToolCard tool={tool} expanded />).lastFrame() ?? ''
+  expect(expanded).toContain('added line 39')
 })
