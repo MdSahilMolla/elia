@@ -46,7 +46,8 @@ import { activeProviderNeedsSetup, removeProviderConfiguration, savedProviderNam
 
 const REPL_COMMANDS: SlashCommand[] = [
   { name: '/model', description: 'switch model / provider' },
-  { name: '/mode', description: 'switch mode or persona' },
+  { name: '/mode', description: 'switch mode: dev, cyber, battmann' },
+  { name: '/betamode', description: 'experimental modes & personas — sports, fitness, marketing, finance, …' },
   { name: '/thinking', description: 'set reasoning effort' },
   { name: '/rewind', description: 'restore an earlier checkpoint' },
   { name: '/settings', description: 'model, effort, risk checks, skills' },
@@ -76,8 +77,33 @@ const REPL_COMMANDS: SlashCommand[] = [
 
 const rawArgs = process.argv.slice(2)
 
+/** Beta (experimental) modes — reached via `--beta <name>` on the CLI and `/betamode` in a session. */
+const BETA_MODES = ['sports', 'fitness'] as const
+
+let warnedDeprecatedModeFlag = false
+
 function requestedAgentMode(): AgentMode {
-  return hasFlag('--cyber') ? 'cyber' : hasFlag('--sports') ? 'sports' : hasFlag('--fitness') ? 'fitness' : hasFlag('--battmann') ? 'battmann' : 'dev'
+  if (hasFlag('--cyber')) return 'cyber'
+  if (hasFlag('--battmann')) return 'battmann'
+  const beta = flagValue('--beta')
+  if (beta && (BETA_MODES as readonly string[]).includes(beta)) return beta as AgentMode
+  if (beta) {
+    if (!warnedDeprecatedModeFlag) {
+      warnedDeprecatedModeFlag = true
+      writeError(`--beta ${beta} is not a beta mode. Available: ${BETA_MODES.join(', ')}. Starting in dev mode.`)
+    }
+    return 'dev'
+  }
+  // Back-compat: the old dedicated flags still work but are deprecated in favour of `--beta`.
+  if (hasFlag('--sports') || hasFlag('--fitness')) {
+    const legacy: AgentMode = hasFlag('--sports') ? 'sports' : 'fitness'
+    if (!warnedDeprecatedModeFlag) {
+      warnedDeprecatedModeFlag = true
+      writeNotice(`--${legacy} is deprecated; use "--beta ${legacy}".`)
+    }
+    return legacy
+  }
+  return 'dev'
 }
 
 const SUBCOMMANDS = ['auto', 'agent', 'evolve', 'bench', 'bench-latency', 'skills', 'runs', 'fork', 'resume', 'schedule', 'daemon', 'config', 'codex-login', 'control', 'bridge'] as const
@@ -201,10 +227,12 @@ Inside an interactive session:
   /eliabook create <run-id>   Create a Book from a complete autonomous-run recording
   /eliabook run <book-id>     Run its active verified procedure in this session
   /eliabook improve <book-id> <run-id>  Promote a measurably better verified run
-  /mode                       Pick a mode/persona with arrow keys: dev, cyber, sports, fitness, battmann,
-                              marketing, finance, business, data, research, cybersecurity,
-                              automation, communications, ai, production
+  /mode                       Pick a core mode with arrow keys: dev, cyber, battmann
   /mode <name>                Switch directly, e.g. /mode cyber, /mode dev ("tech" is an alias for dev)
+  /betamode                   Pick an experimental mode or persona: sports, fitness, marketing,
+                              finance, business, data, research, cybersecurity, automation,
+                              communications, ai, production
+  /betamode <name>            Switch directly, e.g. /betamode sports
   /settings                   Risk checks (auto/manual), model, reasoning effort, and skills
   /model                      Pick a provider/model or enable auto fallback
   /model auto                 Keep the selected model primary; fail over to another ready provider
@@ -219,12 +247,12 @@ Inside an interactive session:
 
   Other:
   elia --dev                  Start explicitly in dev mode (the default)
-  elia --sports               Start (or run a one-shot prompt) in Sports mode
-  elia --fitness              Start (or run a one-shot prompt) in Fitness mode
+  elia --cyber                Start (or run a one-shot prompt) in cyber mode
   elia --battmann             Start (or run a one-shot prompt) in Battmann mode — strategic
                               intelligence across trade, geopolitics, financial markets,
                               supply chain, policy, and commodities
-  elia --cyber                Start (or run a one-shot prompt) in cyber mode
+  elia --beta <mode>          Start in an experimental mode: sports, fitness
+                              (the old --sports / --fitness flags still work, deprecated)
   elia --json                 Emit stable JSONL lifecycle events for automation
   elia --plain                Disable color, animation, and in-place terminal redraws
   elia --quiet                Print the final answer and essential failures only; keep TTY editing
@@ -398,7 +426,7 @@ async function loadRuntimeSkills({ deferMcp = false }: { deferMcp?: boolean } = 
 }
 
 async function runAgentCommand(): Promise<void> {
-  const request = positionals().join(' ').trim()
+  const request = positionals(['--beta']).join(' ').trim()
   if (!request) {
     writeError('Give elia a request: elia agent "write 3 instagram captions for our new product"')
     process.exitCode = 1
@@ -431,7 +459,7 @@ async function runAgentCommand(): Promise<void> {
 }
 
 async function runAuto(): Promise<void> {
-  const goal = positionals(['--variants', '--run-id', '--max-run-ms', '--max-actions']).join(' ').trim()
+  const goal = positionals(['--variants', '--run-id', '--max-run-ms', '--max-actions', '--beta']).join(' ').trim()
   if (!goal) {
     writeError('Give elia a goal: elia auto "add rate limiting to the API client"')
     process.exitCode = 1
@@ -1508,7 +1536,7 @@ async function runInteractive(): Promise<void> {
   const { compactionThresholdFor, contextWindowFor, contextWindowOverride } = await import('./contextWindow.ts')
   const { writeSessionHeartbeat, writeSessionEnded } = await import('./sessionRegistry.ts')
 
-  const oneShotPrompt = positionals(['--resume']).join(' ').trim()
+  const oneShotPrompt = positionals(['--resume', '--beta']).join(' ').trim()
 
   let mode: AgentMode = requestedAgentMode()
 
@@ -2149,7 +2177,7 @@ async function runInteractive(): Promise<void> {
     writeNotice(selectedSkillNames ? `Skill selection for subsequent turns: ${selectedSkillNames[0]}` : 'All loaded skills are available for subsequent turns.')
   }
 
-  /** Shared by the "/cyber", "/sports", persona slash commands, and the /settings mode picker so both paths stay in sync. */
+  /** Shared by the `/mode` and `/betamode` pickers, their direct `<name>` forms, and the /settings mode picker so every path stays in sync. */
   function applyModePersonaChoice(choice: string): void {
     if (choice === 'cyber') {
       mode = 'cyber'
@@ -2162,13 +2190,13 @@ async function runInteractive(): Promise<void> {
     if (choice === 'sports') {
       mode = 'sports'
       persona = undefined
-      writeNotice('sports mode on — evidence-aware match, scouting, performance, league, event, and sports-business analysis.')
+      writeNotice('sports mode (beta) on — evidence-aware match, scouting, performance, league, event, and sports-business analysis. /mode dev to leave.')
       return
     }
     if (choice === 'fitness') {
       mode = 'fitness'
       persona = undefined
-      writeNotice('fitness mode on — conservative training, habit, recovery, and wellbeing support; not medical advice.')
+      writeNotice('fitness mode (beta) on — conservative training, habit, recovery, and wellbeing support; not medical advice. /mode dev to leave.')
       return
     }
     if (choice === 'battmann') {
@@ -2196,12 +2224,17 @@ async function runInteractive(): Promise<void> {
     writeNotice(hadSpecialist ? 'Specialist mode/persona off — back to dev mode.' : 'dev mode remains active.')
   }
 
-  const MODE_PERSONA_ENTRIES: { label: string; detail: string; value: string }[] = [
+  // The core modes live in `/mode`. Everything experimental — the beta modes and
+  // every agent persona — moves to `/betamode` so the primary picker stays short.
+  const MODE_ENTRIES: { label: string; detail: string; value: string }[] = [
     { label: 'Dev', detail: "elia's development mode — building, debugging, testing, browser & task workflows", value: 'dev' },
     { label: 'Cyber', detail: 'authorized security testing, vuln research, CTFs', value: 'cyber' },
-    { label: 'Sports', detail: 'evidence-aware sports intelligence and operations', value: 'sports' },
-    { label: 'Fitness', detail: 'conservative fitness planning and wellbeing support', value: 'fitness' },
     { label: 'Battmann', detail: 'strategic risk intelligence — trade, geopolitics, markets, supply chain', value: 'battmann' },
+  ]
+
+  const BETA_MODE_ENTRIES: { label: string; detail: string; value: string }[] = [
+    { label: 'Sports', detail: 'beta — evidence-aware sports intelligence and operations', value: 'sports' },
+    { label: 'Fitness', detail: 'beta — conservative fitness planning and wellbeing support', value: 'fitness' },
     { label: 'Marketing', detail: 'Marketing agent persona', value: 'marketing' },
     { label: 'Finance', detail: 'Finance agent persona', value: 'finance' },
     { label: 'Business', detail: 'Business Analyst persona', value: 'business' },
@@ -2214,17 +2247,23 @@ async function runInteractive(): Promise<void> {
     { label: 'Production', detail: 'Production Engineering persona', value: 'production' },
   ]
 
-  async function handleModePersonaPicker(): Promise<void> {
+  async function runModePicker(
+    title: string,
+    entries: { label: string; detail: string; value: string }[],
+  ): Promise<void> {
     const currentValue = persona ? (persona === 'cyber' ? 'cybersecurity' : persona) : mode
-    const currentIndex = Math.max(0, MODE_PERSONA_ENTRIES.findIndex((entry) => entry.value === currentValue))
-    const options = MODE_PERSONA_ENTRIES.map((entry) => ({
+    const currentIndex = Math.max(0, entries.findIndex((entry) => entry.value === currentValue))
+    const options = entries.map((entry) => ({
       ...entry,
       label: entry.value === currentValue ? `${entry.label} (current)` : entry.label,
     }))
-    const result = await pick('Mode / persona', options, currentIndex)
+    const result = await pick(title, options, currentIndex)
     if (result.type === 'select') applyModePersonaChoice(result.value)
     else if (result.type === 'unavailable') writeNotice(`Current: ${currentValue}`)
   }
+
+  const handleModePersonaPicker = (): Promise<void> => runModePicker('Mode', MODE_ENTRIES)
+  const handleBetaModePicker = (): Promise<void> => runModePicker('Beta modes & personas', BETA_MODE_ENTRIES)
 
   /** Set from the /settings risk-checks picker. */
   function applyReplModeChoice(value: 'auto' | 'manual'): void {
@@ -2383,19 +2422,21 @@ async function runInteractive(): Promise<void> {
       }
     }
 
-    const modeArg = /^\/mode(?:\s+(.+))?$/.exec(trimmed)
+    const modeArg = /^\/(betamode|mode)(?:\s+(.+))?$/.exec(trimmed)
     if (modeArg) {
-      if (modeArg[1]) {
-        applyModePersonaChoice(modeArg[1].trim())
+      const isBeta = modeArg[1] === 'betamode'
+      if (modeArg[2]) {
+        applyModePersonaChoice(modeArg[2].trim())
         return done()
       }
       const current = persona ? (persona === 'cyber' ? 'cybersecurity' : persona) : mode
+      const entries = isBeta ? BETA_MODE_ENTRIES : MODE_ENTRIES
       return {
         handled: true,
         picker: {
-          title: 'Mode / persona',
-          initialIndex: Math.max(0, MODE_PERSONA_ENTRIES.findIndex((e) => e.value === current)),
-          options: MODE_PERSONA_ENTRIES.map((e) => ({
+          title: isBeta ? 'Beta modes & personas' : 'Mode',
+          initialIndex: Math.max(0, entries.findIndex((e) => e.value === current)),
+          options: entries.map((e) => ({
             label: e.value === current ? `${e.label} (current)` : e.label,
             detail: e.detail,
             value: e.value,
@@ -3197,10 +3238,10 @@ async function runInteractive(): Promise<void> {
       }
     }
 
-    const modeMatch = /^\/mode(?:\s+(.*))?$/.exec(trimmed)
+    const modeMatch = /^\/(betamode|mode)(?:\s+(.*))?$/.exec(trimmed)
     if (modeMatch) {
-      const modeArg = modeMatch[1]?.trim()
-      if (!modeArg) await handleModePersonaPicker()
+      const modeArg = modeMatch[2]?.trim()
+      if (!modeArg) await (modeMatch[1] === 'betamode' ? handleBetaModePicker() : handleModePersonaPicker())
       else applyModePersonaChoice(modeArg)
       continue
     }
