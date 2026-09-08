@@ -58,5 +58,5 @@ docs/
 research/
 
 # --- Scratch workspace: elia builds throwaway projects here ---
-workspace/
+/workspace/
 meat-awareness/
