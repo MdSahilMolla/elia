@@ -140,7 +140,7 @@ export async function commitAll(
   if (paths.length === excluded.length + preserved.length) {
     const why = [
       excluded.length > 0 ? `hold secrets (${excluded.join(', ')})` : '',
-      preserved.length > 0 ? `were already modified before this run (${preserved.join(', ')})` : '',
+      preserved.length > 0 ? `was already modified before this run (${preserved.join(', ')})` : '',
     ].filter(Boolean).join('; ')
     return { committed: false, excluded, ...(why ? { warning: `nothing to commit: every changed file ${why}` } : {}) }
   }
