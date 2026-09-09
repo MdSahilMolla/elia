@@ -11,7 +11,15 @@ permissions:
 
 jobs:
   verify:
-    runs-on: ubuntu-latest
+    # Windows is a first-class target (runShell's %ComSpec% path, taskkill /T tree
+    # kill, CRLF output bounds, Windows-path resolution) and ~20 source files carry
+    # a `process.platform === 'win32'` branch. Run the TS suite on both so those
+    # paths — and the win32-only tests that `test.if` skips on Linux — are covered.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
       - uses: oven-sh/setup-bun@v2
@@ -34,9 +42,13 @@ jobs:
         run: bun test --timeout=20000 --retry=2
       - name: Secret scan
         run: bun run security:scan
+      # Packaging checks are OS-independent — run them once, on Linux (the `/tmp`
+      # path and shell here assume a POSIX runner).
       - name: Pack without lifecycle scripts
+        if: matrix.os == 'ubuntu-latest'
         run: npm pack --ignore-scripts --json > /tmp/elia-pack.json
       - name: Audit production dependency graph
+        if: matrix.os == 'ubuntu-latest'
         run: |
           npm install --package-lock-only --ignore-scripts --no-audit --no-fund
           npm audit --omit=dev
