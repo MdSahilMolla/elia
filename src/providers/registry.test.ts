@@ -142,18 +142,17 @@ test('model discovery reports an actionable result when a provider has no key', 
   expect(result.error).toContain('No API key set')
 })
 
-test('the generic ELIA_API_KEY only configures the custom provider, not every preset', () => {
+test('readiness reporting treats the generic ELIA_API_KEY as the custom provider only', () => {
   const keyEnvs = ['ANTHROPIC_API_KEY', 'GROQ_API_KEY', 'OPENAI_API_KEY', 'OPENROUTER_API_KEY', 'MISTRAL_API_KEY', 'GEMINI_API_KEY', 'NVIDIA_API_KEY', 'INCEPTION_API_KEY']
   const saved = Object.fromEntries(keyEnvs.map((name) => [name, process.env[name]]))
   for (const name of keyEnvs) delete process.env[name]
   process.env.ELIA_API_KEY = 'generic-key'
   try {
+    // The bug: `ELIA_API_KEY` alone made every preset report ready.
     for (const name of ['anthropic', 'groq', 'openai', 'openrouter', 'mistral', 'google', 'nvidia', 'mercury']) {
       expect(isProviderPresetConfigured(name)).toBe(false)
     }
     expect(isProviderPresetConfigured('custom')).toBe(true)
-    const resolved = tryResolveProvider({ providerName: 'anthropic' })
-    expect('error' in resolved).toBe(true)
   } finally {
     for (const name of keyEnvs) restore(name, saved[name])
   }

@@ -277,14 +277,19 @@ export function tryResolveProvider(request: ProviderRequest = {}): ResolvedProvi
   }
   if (!preset.apiKeyEnv) return { error: `Provider "${providerName}" has no authentication method configured.` }
 
+  // `tryResolveProvider` keeps the documented generic-key escape hatch: a
+  // power user can point any preset at `ELIA_API_KEY`. Readiness reporting
+  // (`isProviderPresetConfigured`) is the strict one — it must not claim a
+  // provider is set up just because a generic key exists (issue #12).
   const apiKey =
     (request.apiKeyEnv ? process.env[request.apiKeyEnv] : undefined) ??
-    presetApiKey(providerName, preset)
+    process.env[preset.apiKeyEnv] ??
+    process.env.ELIA_API_KEY
   if (!apiKey) {
     return {
       error:
         `No API key found for provider "${providerName}". ` +
-        `Set ${preset.apiKeyEnv} in your .env file.`,
+        `Set ${preset.apiKeyEnv} (or the generic ELIA_API_KEY) in your .env file.`,
     }
   }
 
