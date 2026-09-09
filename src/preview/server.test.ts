@@ -1,5 +1,5 @@
 import { afterAll, afterEach, beforeAll, expect, test } from 'bun:test'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { ensurePreviewServer, injectReloadScript, resetPreviewServerForTests, resolveWithinRoot } from './server.ts'
@@ -121,4 +121,42 @@ test('editing a served file triggers a live-reload push over the WebSocket', asy
 
 test('resolveWithinRoot rejects malformed percent-encoding', () => {
   expect(resolveWithinRoot(testDir, '/%E0%A4%A')).toBeUndefined()
+})
+
+test('resolveWithinRoot rejects a symlink that escapes the root', () => {
+  const outside = mkdtempSync(join(tmpdir(), 'elia-preview-outside-'))
+  writeFileSync(join(outside, 'secret.txt'), 'top secret')
+  let linked = true
+  try {
+    symlinkSync(join(outside, 'secret.txt'), join(testDir, 'leak.txt'))
+  } catch {
+    linked = false // e.g. Windows without the symlink privilege
+  }
+  try {
+    if (linked) expect(resolveWithinRoot(testDir, '/leak.txt')).toBeUndefined()
+  } finally {
+    rmSync(join(testDir, 'leak.txt'), { force: true })
+    rmSync(outside, { recursive: true, force: true })
+  }
+})
+
+test('server refuses to serve a file reached through an escaping symlink', async () => {
+  const outside = mkdtempSync(join(tmpdir(), 'elia-preview-outside-'))
+  writeFileSync(join(outside, 'secret.txt'), 'top secret')
+  let linked = true
+  try {
+    symlinkSync(join(outside, 'secret.txt'), join(testDir, 'leak.txt'))
+  } catch {
+    linked = false
+  }
+  try {
+    if (linked) {
+      const server = ensurePreviewServer(testDir)
+      const res = await fetch(`${server.baseUrl}/leak.txt`)
+      expect(res.status).not.toBe(200)
+    }
+  } finally {
+    rmSync(join(testDir, 'leak.txt'), { force: true })
+    rmSync(outside, { recursive: true, force: true })
+  }
 })

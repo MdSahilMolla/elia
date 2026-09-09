@@ -53,7 +53,12 @@ export function closestRegions(text: string, needle: string, k = 2): { line: num
   if (target.length === 0) return []
 
   const scored: { line: number; score: number }[] = []
-  for (let i = 0; i + height <= fileLines.length + height - 1 && i < fileLines.length; i += 1) {
+  // Only slide full-height windows: a truncated window at the file's tail can
+  // never match every needle line, so `hits / target.length` under-scores a
+  // genuine match there and it gets ranked below a worse region or dropped by
+  // the threshold below.
+  const maxStart = fileLines.length - height
+  for (let i = 0; i <= maxStart; i += 1) {
     const window = fileLines.slice(i, i + height).map(normalizeWs)
     let hits = 0
     for (const t of target) if (window.some((w) => w === t || (w.length > 8 && (w.includes(t) || t.includes(w))))) hits += 1

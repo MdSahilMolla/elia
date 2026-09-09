@@ -31,6 +31,11 @@ test('closestRegions locates text whose indentation differs', () => {
   expect(regions[0]?.line).toBe(6)
 })
 
+test('closestRegions finds a multi-line match at the very end of the file', () => {
+  const regions = closestRegions(file, 'function b() {\n  return 2\n}\n', 1)
+  expect(regions[0]?.line).toBe(5)
+})
+
 test('notFoundMessage flags a whitespace-only mismatch and shows the real text', () => {
   const msg = notFoundMessage(file, 'return 2', 'x.ts') // missing the 2-space indent
   expect(msg).toContain('whitespace/indentation differs')

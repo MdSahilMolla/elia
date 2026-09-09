@@ -1,4 +1,4 @@
-import { mkdirSync, statSync, watch } from 'node:fs'
+import { mkdirSync, realpathSync, statSync, watch } from 'node:fs'
 import { join, resolve, sep } from 'node:path'
 import type { ServerWebSocket } from 'bun'
 import { paths } from '../config.ts'
@@ -123,7 +123,22 @@ export function resolveWithinRoot(root: string, pathname: string): string | unde
   const resolvedPath = resolve(resolvedRoot, relative)
   const rootWithSep = resolvedRoot.endsWith(sep) ? resolvedRoot : resolvedRoot + sep
   if (resolvedPath !== resolvedRoot && !resolvedPath.startsWith(rootWithSep)) return undefined
-  return resolvedPath
+
+  // `resolve` is lexical: it will return a path that sits under `root` but is a
+  // symlink pointing outside it. Resolve symlinks for real and re-check
+  // containment — against the realpath of the root too, since the root itself can
+  // live behind one (e.g. macOS /var → /private/var). A path that does not exist
+  // yet cannot leak anything (serveStatic's exists() check turns it into a 404),
+  // so fall back to the lexical result on ENOENT.
+  try {
+    const realRoot = realpathSync(resolvedRoot)
+    const realPath = realpathSync(resolvedPath)
+    const realRootWithSep = realRoot.endsWith(sep) ? realRoot : realRoot + sep
+    if (realPath !== realRoot && !realPath.startsWith(realRootWithSep)) return undefined
+    return realPath
+  } catch {
+    return resolvedPath
+  }
 }
 
 /** Exported for direct testing. */
