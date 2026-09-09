@@ -3111,13 +3111,12 @@ async function runInteractive(): Promise<void> {
     // ensureThread dedupes on the resolved instructions.
     prewarmActiveProvider()
     const { runInkRepl } = await import('./ui/app/index.tsx')
-    const greeting =
-      mode === 'dev'
-        ? 'dev mode — building, debugging, testing, browser & task workflows. Type a prompt, "/" for commands, "!" to run a shell command.'
-        : `${mode} mode. Type a prompt, "/" for commands, "!" to run a shell command.`
+    const greeting = `${mode} mode · "/" for commands · "!" for shell`
+    const cliVersion = JSON.parse(await Bun.file(new URL('../package.json', import.meta.url)).text()).version as string
 
     await runInkRepl({
       sessionId,
+      version: cliVersion,
       getEnv: () => ({ model: config.model, providerLabel: config.providerLabel, providerName: config.providerName }),
       commands: REPL_COMMANDS,
       initialReplMode: replMode,

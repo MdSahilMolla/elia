@@ -6,6 +6,7 @@ import { createTranscriptStore } from './store.ts'
 import { useTranscript } from './useSyncStore.ts'
 import { Transcript } from './components/Transcript.tsx'
 import { StatusBar, type ReplMode } from './components/StatusBar.tsx'
+import { Banner } from './components/Banner.tsx'
 import { InputBox } from './components/InputBox.tsx'
 import { Confirm, type ConfirmRequest } from './components/Confirm.tsx'
 import { ApprovalMenu, type ApprovalRequest } from './components/ApprovalMenu.tsx'
@@ -100,6 +101,8 @@ export interface AppProps {
   classifyRisk(command: string): Promise<{ risky: boolean; reason?: string }>
   handleSlash(command: string): Promise<SlashOutcome>
   greeting: string
+  /** CLI version, for the startup banner. */
+  version: string
 }
 
 export function providerPlanItems(detail?: string): TodoItem[] {
@@ -191,14 +194,24 @@ export function App(props: AppProps) {
 
   const ctrlCAt = useRef(0)
   const escAt = useRef(0)
+  const stopAt = useRef(0)
   useInput((input, key) => {
     if (key.ctrl && input === 'c') {
+      const now = Date.now()
       if (busy) {
+        // First press asks the turn to stop. A second press within a few
+        // seconds force-quits — the escape hatch when a running command is
+        // ignoring the abort signal and `busy` never clears.
+        if (abortedRef.current && now - ctrlCAt.current < 4_000) {
+          exit()
+          return
+        }
         abortedRef.current = true
         abortRef.current?.abort()
+        ctrlCAt.current = now
+        store.notice('Stopping… if a command is still running, press Ctrl+C again to force-quit.')
         return
       }
-      const now = Date.now()
       if (now - ctrlCAt.current < 1_000) exit()
       else {
         ctrlCAt.current = now
@@ -214,10 +227,20 @@ export function App(props: AppProps) {
       // (queued/steering messages are kept); then the queue; and pending
       // steering only drops on a deliberate double-tap.
       if (busy) {
+        const now = Date.now()
+        // "Turn stopped" was a lie when a shell command ignored the signal.
+        // Say what's actually happening, and on a second Esc that still hasn't
+        // taken, point at the force-quit.
+        const stillStuck = abortedRef.current && now - stopAt.current < 4_000
         abortedRef.current = true
         abortRef.current?.abort()
-        if (steeringRef.current.length > 0 || queueRef.current.length > 0) {
-          store.notice('Turn stopped. Queued & steering messages kept — send anything to apply, or Esc again to drop them.')
+        stopAt.current = now
+        if (stillStuck) {
+          store.notice('Still working — a running command may not be interruptible. Press Ctrl+C twice to force-quit.')
+        } else if (steeringRef.current.length > 0 || queueRef.current.length > 0) {
+          store.notice('Stopping the turn — queued & steering messages kept. Send anything to apply, or Esc again to drop them.')
+        } else {
+          store.notice('Stopping the turn…')
         }
         return
       }
@@ -514,20 +537,10 @@ export function App(props: AppProps) {
       <Transcript committed={snap.committed} live={snap.live} expandedAll={expandedAll} />
 
       {snap.committed.length === 0 && snap.live.length === 0 && (
-        <Box flexDirection="column" marginTop={1} borderStyle="round" borderColor={palette.muted} paddingX={1}>
-          <Text color={palette.muted}>{props.greeting}</Text>
+        <Box flexDirection="column" marginTop={1}>
+          <Banner version={props.version} />
           <Box marginTop={1}>
-            <Text color={palette.toolName}>{repo}</Text>
-            <Text color={palette.muted}>  ·  {env.model}  ·  {env.providerLabel}</Text>
-          </Box>
-          <Box marginTop={1} flexDirection="column">
-            <Text color={palette.muted}>Try:</Text>
-            <Text color={palette.toolName}>  fix the failing test in src/</Text>
-            <Text color={palette.toolName}>  add a --json flag to the export command and update the help text</Text>
-            <Text color={palette.toolName}>  what does the autonomy governor actually block? walk me through it</Text>
-          </Box>
-          <Box marginTop={1}>
-            <Text color={palette.muted}>? keys · / commands · Tab plan mode · type while it works to steer it</Text>
+            <Text color={palette.muted}>{props.greeting}</Text>
           </Box>
         </Box>
       )}
@@ -560,20 +573,6 @@ export function App(props: AppProps) {
       )}
 
       <Box marginTop={1} flexDirection="column">
-        <StatusBar
-          model={env.model}
-          mode={mode}
-          contextTokens={contextTokens}
-          contextLimit={contextLimit}
-          sessionInput={usage.usage.inputTokens + usage.usage.cacheReadTokens}
-          sessionOutput={usage.usage.outputTokens}
-          costUsd={estimateCostUsd(env.model, usage.usage)}
-          providerName={env.providerName}
-          busy={busy}
-          queued={queue.length}
-          steering={steeringCount}
-          repo={repo}
-        />
         <InputBox
           commands={props.commands}
           onTabEmpty={() => setMode((m) => (m === 'plan' ? 'manual' : 'plan'))}
@@ -592,6 +591,20 @@ export function App(props: AppProps) {
             else exit()
           }}
           onEof={() => exit()}
+        />
+        <StatusBar
+          model={env.model}
+          mode={mode}
+          contextTokens={contextTokens}
+          contextLimit={contextLimit}
+          sessionInput={usage.usage.inputTokens + usage.usage.cacheReadTokens}
+          sessionOutput={usage.usage.outputTokens}
+          costUsd={estimateCostUsd(env.model, usage.usage)}
+          providerName={env.providerName}
+          busy={busy}
+          queued={queue.length}
+          steering={steeringCount}
+          repo={repo}
         />
       </Box>
     </Box>

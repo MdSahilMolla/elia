@@ -133,7 +133,15 @@ export function InputBox(props: InputBoxProps) {
 
   return (
     <Box flexDirection="column">
-      <Box borderStyle="round" borderColor={props.disabled ? palette.muted : palette.accent} paddingX={1}>
+      <Box
+        borderStyle="single"
+        borderColor={props.disabled ? palette.muted : palette.accent}
+        borderTop
+        borderBottom
+        borderLeft={false}
+        borderRight={false}
+        paddingX={1}
+      >
         <Text color={palette.accent}>{glyphs.user} </Text>
         <BufferView buffer={state.buffer} cursor={state.cursor} placeholder={props.placeholder} showCursor={!props.disabled} />
       </Box>

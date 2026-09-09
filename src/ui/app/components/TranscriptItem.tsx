@@ -1,6 +1,6 @@
 import { Box, Text } from 'ink'
 import type { Item } from '../store.ts'
-import { palette, glyphs } from '../theme.ts'
+import { palette } from '../theme.ts'
 import { AssistantMessage } from './AssistantMessage.tsx'
 import { Thinking } from './Thinking.tsx'
 import { ToolCard } from './ToolCard.tsx'
@@ -8,10 +8,14 @@ import { ToolCard } from './ToolCard.tsx'
 export function TranscriptItemView({ item, expanded }: { item: Item; expanded: boolean }) {
   switch (item.kind) {
     case 'user':
+      // elia's own turn marker: a thin accent rule down the left of what you
+      // sent — the terminal equivalent of a quote bar. Distinct from the live
+      // input's `❯` prompt, so a committed turn reads differently from the
+      // thing you're still typing, and no full-width fill to stay minimal.
       return (
         <Box marginTop={1}>
-          <Text color={palette.user}>{glyphs.user} </Text>
-          <Text color={palette.user}>{item.text}</Text>
+          <Text color={palette.accent}>▎ </Text>
+          <Text>{item.text}</Text>
         </Box>
       )
     case 'assistant':

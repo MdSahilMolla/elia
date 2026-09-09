@@ -43,15 +43,20 @@ export function StatusBar(props: StatusBarProps) {
   const pct = Math.min(100, Math.round((props.contextTokens / props.contextLimit) * 100))
   // The context meter earns attention as it fills — a compaction pass is coming.
   const meterColor = pct >= 85 ? palette.failure : pct >= 60 ? palette.accent : palette.success
+  const cost = props.providerName === 'codex' ? 'ChatGPT plan' : formatCostUsd(props.costUsd)
   return (
-    <Box>
+    <Box marginTop={1} justifyContent="space-between">
       <Text color={palette.muted}>
         <Text color={palette.accent}>{props.busy ? '● ' : '  '}</Text>
-        {props.repo ? <Text color={palette.toolName}>{props.repo} · </Text> : null}
-        {props.model} · {MODE_LABEL[props.mode]} · <Text color={meterColor}>{meter(pct)}</Text> {pct}% ctx ·{' '}
-        {formatTokenCount(props.sessionInput)} in · {formatTokenCount(props.sessionOutput)} out · {props.providerName === 'codex' ? 'ChatGPT plan' : formatCostUsd(props.costUsd)}
+        {props.repo ? <Text color={palette.toolName}>{props.repo}</Text> : null}
+        {props.repo ? ' · ' : null}
+        {props.model} · {MODE_LABEL[props.mode]}
         {props.steering ? <Text color={palette.accent}> · {props.steering} steering</Text> : ''}
         {props.queued > 0 ? ` · ${props.queued} queued` : ''}
+      </Text>
+      <Text color={palette.muted}>
+        <Text color={meterColor}>{meter(pct)}</Text> {pct}% ctx · {formatTokenCount(props.sessionInput)} in ·{' '}
+        {formatTokenCount(props.sessionOutput)} out · {cost}
       </Text>
     </Box>
   )

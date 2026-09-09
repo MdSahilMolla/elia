@@ -17,6 +17,7 @@ function baseProps() {
     initialReplMode: 'manual' as const,
     messages: [],
     greeting: 'dev mode — say hi',
+    version: '0.0.0-test',
     classifyRisk: async () => ({ risky: false }),
     runShellLine: async (c: string) => `ran ${c}`,
     handleSlash: async () => ({ handled: true, text: 'slash ok' }),
@@ -60,9 +61,9 @@ test('Shift+Tab into plan mode makes the turn read-only and offers to execute', 
   await waitForFrame(lastFrame, 'mercury-2 · manual')
   await settle()
   stdin.write(SHIFT_TAB) // manual → auto-accept
-  await waitForFrame(lastFrame, '· auto-accept ·')
+  await waitForFrame(lastFrame, '· auto-accept')
   stdin.write(SHIFT_TAB) // auto-accept → plan
-  await waitForFrame(lastFrame, '· plan ·')
+  await waitForFrame(lastFrame, '· plan')
   stdin.write('research the task')
   await waitForFrame(lastFrame, 'research the task')
   stdin.write('\r')
