@@ -83,6 +83,22 @@ test('subscribe fires on mutation and version increases', () => {
   expect(s.getSnapshot().version).toBeGreaterThan(v0)
 })
 
+test('an immediately-repeated notice collapses to one line with a ×N counter', () => {
+  const s = createTranscriptStore()
+  s.notice('Press Esc again to force-quit.')
+  s.notice('Press Esc again to force-quit.')
+  s.notice('Press Esc again to force-quit.')
+  const isNotice = (i: { kind: string }): i is { kind: 'notice'; id: string; text: string } => i.kind === 'notice'
+  const notices = [...s.getSnapshot().committed, ...s.getSnapshot().live].filter(isNotice)
+  expect(notices).toHaveLength(1)
+  expect(notices[0]!.text).toBe('Press Esc again to force-quit.  ×3')
+  // A different notice in between resets the run.
+  s.notice('other')
+  s.notice('Press Esc again to force-quit.')
+  const after = [...s.getSnapshot().committed, ...s.getSnapshot().live].filter(isNotice)
+  expect(after).toHaveLength(3)
+})
+
 test('toMarkdown renders committed and live turns', () => {
   const s = createTranscriptStore()
   s.appendUser('build it')

@@ -76,14 +76,22 @@ export function contractForAction(request: ActionRequest, cwd: string, idempoten
       'title', 'date', 'time', 'call', 'start', 'assoc', 'ftype', 'color', 'prompt', 'chdir', 'mklink', 'setlocal',
       'endlocal', 'shift', 'goto', 'rem', 'if', 'for', 'break', 'test',
     ])
-    if (executable && /^[A-Za-z0-9_./-]+$/.test(executable) && !SHELL_BUILTINS.has(executable.toLowerCase())) {
+    // A capability probe is *how you discover* whether a tool is installed.
+    // Gating it on that tool already being on PATH means "is X available?" can
+    // never run — and a probe that reports "not found" via a non-zero exit is
+    // giving an answer, not failing. So a probe gets neither the availability
+    // precondition nor the exit-zero postcondition.
+    const isProbe =
+      /^(?:which|where|where\.exe|type|hash|command\s+-[vV]|get-command|gcm|test-path)\b/i.test(command)
+      || /^[\w./\\-]+(?:\.exe)?\s+(?:--version|-v|-V|--help|-h|version)\s*$/i.test(command)
+    if (executable && /^[A-Za-z0-9_./-]+$/.test(executable) && !SHELL_BUILTINS.has(executable.toLowerCase()) && !isProbe) {
       preconditions.push({ kind: 'command-available', value: executable, description: `${executable} must be available before the command runs` })
     }
     // A long-running server (npm run dev, vite, next dev, a bare `serve`) never
     // exits, so "exit 0" is the wrong bar — it would always look like a failure
     // and drive a repair loop. Those are started differently (see run_command's
     // own guidance); everything else must still exit clean.
-    if (!LONG_RUNNING_SERVER.test(command)) {
+    if (!LONG_RUNNING_SERVER.test(command) && !isProbe) {
       postconditions.push({ kind: 'shell-exit-zero', description: 'the command must return exit code 0 and not time out' })
     }
   }

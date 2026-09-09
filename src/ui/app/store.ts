@@ -207,6 +207,19 @@ export function createTranscriptStore(): TranscriptStore {
     },
 
     notice(text) {
+      // A hammered key (Esc on a turn that won't stop) would otherwise print the
+      // same line 20 times. Collapse an immediately-repeated notice into one
+      // line with a ×N counter.
+      const last = lastLive()
+      if (last?.kind === 'notice') {
+        const base = /^(.*?)(?:  ×\d+)?$/s.exec(last.text)?.[1]
+        if (base === text) {
+          const n = Number(/  ×(\d+)$/.exec(last.text)?.[1] ?? '1') + 1
+          live = live.map((item) => (item === last ? { ...last, text: `${text}  ×${n}` } : item))
+          changed()
+          return
+        }
+      }
       live = [...live, { id: nextId(), kind: 'notice', text }]
       changed()
     },

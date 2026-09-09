@@ -6,12 +6,22 @@ import { contractForAction, evaluatePostconditions, evaluatePreconditions } from
 
 describe('action contracts', () => {
   test('creates an idempotent command contract with a precondition and exit-code postcondition', async () => {
-    const contract = contractForAction({ name: 'run_command', input: { command: 'bun --version' } }, process.cwd(), 'run:command:1')
+    const contract = contractForAction({ name: 'run_command', input: { command: 'bun run build' } }, process.cwd(), 'run:command:1')
     expect(contract.idempotencyKey).toBe('run:command:1')
     expect(contract.preconditions[0]).toMatchObject({ kind: 'command-available', value: 'bun' })
     expect(contract.postconditions).toEqual([{ kind: 'shell-exit-zero', description: 'the command must return exit code 0 and not time out' }])
     expect((await evaluatePreconditions(contract, process.cwd())).ok).toBe(true)
-    expect(evaluatePostconditions(contract, 'exit code: 0\nstdout:\n1.2.3', process.cwd())).toMatchObject({ ok: true, phase: 'postcondition' })
+    expect(evaluatePostconditions(contract, 'exit code: 0\nstdout:\nbuilt', process.cwd())).toMatchObject({ ok: true, phase: 'postcondition' })
+  })
+
+  test('a capability probe gets neither the availability precondition nor the exit-zero postcondition', () => {
+    // "is X installed?" cannot be gated on X already being on PATH, and a probe
+    // that answers "no" via a non-zero exit is not a failure to repair.
+    for (const command of ['which python3', 'where docker', 'command -v uv', 'docker --version', 'python3 --version', 'node -v', 'Get-Command rustc']) {
+      const contract = contractForAction({ name: 'run_command', input: { command } }, process.cwd(), `run:probe:${command}`)
+      expect(contract.preconditions.some((p) => p.kind === 'command-available')).toBe(false)
+      expect(contract.postconditions).toEqual([])
+    }
   })
 
   test('shell builtins like cd are exempt from the command-available precondition', () => {

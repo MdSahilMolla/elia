@@ -117,6 +117,21 @@ maybe('a non-zero exit is a normal result, not an error', async () => {
   expect(r.exitCode).toBe(5)
 }, 30_000)
 
+maybe('aborting the signal abandons an in-flight daemon command promptly', async () => {
+  // The regression: the abort listener used to be wired only *after* the
+  // response was awaited, so Esc during a long command did nothing until it
+  // finished on its own.
+  const controller = new AbortController()
+  const sleep = process.platform === 'win32'
+    ? 'powershell -NoProfile -Command "Start-Sleep -Seconds 30"'
+    : 'sleep 30'
+  const started = Date.now()
+  setTimeout(() => controller.abort(), 300)
+  const r = await runShell(sleep, 30_000, process.cwd(), controller.signal)
+  expect(Date.now() - started).toBeLessThan(10_000)
+  expect(r.stderr).toContain('cancelled by operator')
+}, 20_000)
+
 maybe('parse.check flags a structurally broken edit', async () => {
   const { daemonParseCheck } = await import('./client.ts')
   const clean = await daemonParseCheck({ source: 'export const x = { a: 1 }\n', path: 'x.ts' })

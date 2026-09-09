@@ -56,6 +56,13 @@ export async function runShell(
     return { command, exitCode: 1, stdout: '', stderr: `working directory does not exist: ${cwd}`, elapsedMs: 0, timedOut: false }
   }
 
+  const startedAt = Date.now()
+
+  // Operator cancellation must win even before the shell is spawned.
+  if (signal?.aborted) {
+    return { command, exitCode: 1, stdout: '', stderr: 'cancelled by operator', elapsedMs: 0, timedOut: false }
+  }
+
   // When the resident daemon is enabled it runs the command in a warm shell,
   // skipping the per-command process spawn (20–80ms on Windows). Any transport
   // problem falls through to the in-process path below; `ELIA_DAEMON=require`
@@ -78,12 +85,16 @@ export async function runShell(
         timedOut: r.timed_out,
       }
     } catch (err) {
+      // An abort while the daemon was running the command surfaces here as a
+      // rejection. Don't fall through and re-run it in-process — honour the stop.
+      if (signal?.aborted) {
+        return { command, exitCode: 1, stdout: '', stderr: 'cancelled by operator', elapsedMs: Date.now() - startedAt, timedOut: false }
+      }
       if (mode === 'require' || !(err instanceof DaemonUnavailable)) throw err
       // auto: fall through to the in-process shell.
     }
   }
 
-  const startedAt = Date.now()
   const shellArgs = process.platform === 'win32' ? [windowsShell(), '/d', '/s', '/c', command] : ['sh', '-c', command]
 
   const proc = Bun.spawn(shellArgs, {

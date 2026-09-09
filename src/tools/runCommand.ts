@@ -96,7 +96,12 @@ export const runCommandTool: Tool = {
 
 Pass \`cwd\` (relative to the workspace) to run inside a sub-project you created — e.g. cwd:"my-app" so \`npm install\` and \`npm run build\` use that project's package.json, not elia's own. Commands do NOT persist a directory between calls; always pass \`cwd\` rather than \`cd\`.
 
-Do NOT run dev servers (\`npm run dev\`, \`vite\`, \`next dev\`, …) here — they never exit and will time out. Use the \`preview\` tool to serve and open a project instead. Inherits the active autonomous cancellation signal.`,
+Do NOT run dev servers (\`npm run dev\`, \`vite\`, \`next dev\`, …) here — they never exit and will time out. Use the \`preview\` tool to serve and open a project instead. Inherits the active autonomous cancellation signal.
+
+Shell: on Windows the command runs through \`cmd.exe\`; on macOS/Linux through \`sh\`. Write for that shell, not bash:
+- Probe for a tool with \`where <tool>\` on Windows / \`command -v <tool>\` on POSIX — not \`which\` (absent on Windows) and not \`bash -c …\` (bash is often just a WSL stub).
+- To run PowerShell, put the WHOLE pipeline inside one quoted argument: \`powershell -NoProfile -Command "Get-ChildItem x | Measure-Object"\`. Do not append \`| Out-String\`, \`2>&1\`, or other PowerShell/POSIX operators outside the quotes — cmd.exe can't parse them.
+- For anything with nested quotes, escapes, or a multi-statement script (Python \`-c\`, Node \`-e\`), write a real \`.py\`/\`.js\`/\`.ps1\` file with write_file and run that file. One-liners with \`'\\n'.join(...)\`-style escaping do not survive the shell layer.`,
   input_schema: {
     type: 'object',
     properties: {

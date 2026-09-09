@@ -319,12 +319,34 @@ class DaemonClient {
   }
 
   /** Public call used by feature clients. `id` is the request id used for
-   * targeted cancellation. */
-  async call(method: string, params: unknown, timeoutMs: number): Promise<{ id: number; result: unknown }> {
+   * targeted cancellation.
+   *
+   * `signal` is wired to `shell.cancel` *before* the response is awaited:
+   * `shell.exec` does not resolve until the command finishes, so a listener
+   * attached after the await would never see an abort that arrives while the
+   * command is still running. On abort the pending call is also rejected so the
+   * caller stops waiting instead of hanging until `timeoutMs`. */
+  async call(
+    method: string,
+    params: unknown,
+    timeoutMs: number,
+    signal?: AbortSignal,
+  ): Promise<{ id: number; result: unknown }> {
+    if (signal?.aborted) throw new DaemonUnavailable(`${method} aborted before start`)
     await this.ensureConnected()
     const id = this.nextId++
-    const result = await this.send(id, method, params, timeoutMs)
-    return { id, result }
+    const onAbort = (): void => {
+      this.cancel(id)
+      const waiter = this.pending.get(id)
+      if (waiter && this.pending.delete(id)) waiter.reject(new DaemonUnavailable(`${method} aborted`))
+    }
+    signal?.addEventListener('abort', onAbort, { once: true })
+    try {
+      const result = await this.send(id, method, params, timeoutMs)
+      return { id, result }
+    } finally {
+      signal?.removeEventListener('abort', onAbort)
+    }
   }
 
   cancel(target: number): void {
@@ -365,15 +387,12 @@ export interface DaemonShellRequest {
 export async function daemonShellExec(req: DaemonShellRequest): Promise<ShellExecResult> {
   if (!daemonEnabled()) throw new DaemonUnavailable('ELIA_DAEMON=off')
   const client = daemonClient()
-  const { id, result } = await client.call(
+  const { result } = await client.call(
     'shell.exec',
     { command: req.command, cwd: req.cwd, timeout_ms: req.timeoutMs },
     req.timeoutMs + 10_000,
+    req.signal,
   )
-  if (req.signal) {
-    if (req.signal.aborted) client.cancel(id)
-    else req.signal.addEventListener('abort', () => client.cancel(id), { once: true })
-  }
   return result as ShellExecResult
 }
 
