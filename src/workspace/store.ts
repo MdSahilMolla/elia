@@ -372,6 +372,17 @@ export class WorkspaceStore {
     return { tasks, agents, reservations }
   }
 
+  /**
+   * Run `fn` inside a single SQLite transaction so a caller's read-then-write
+   * sequence (reservation acquisition checks for a conflict and only then
+   * inserts) commits or rolls back as one unit and cannot be interleaved by
+   * another writer — the `append`s inside become savepoints of this outer
+   * transaction.
+   */
+  transact<T>(fn: () => T): T {
+    return this.db.transaction(fn)()
+  }
+
   /** Escape hatch for advanced queries and tests. Prefer the typed getters. */
   raw(): Database {
     return this.db

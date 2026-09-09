@@ -3,6 +3,7 @@ import { join } from 'node:path'
 import { paths } from '../statePaths.ts'
 import type { ConversationMessage } from '../agentLoop.ts'
 import { appendSecureFile, ensureSecureDirectory, hardenSecureFile, writeSecureFile } from '../securePersistence.ts'
+import { withFileLock } from '../fileLock.ts'
 
 /**
  * An append-only log of everything an autonomous run did.
@@ -61,41 +62,47 @@ export function createJournal(runId: string, goal: string): Journal {
   ensureSecureDirectory(dir)
   const logPath = join(dir, 'events.ndjson')
 
+  const lockPath = `${logPath}.lock`
   const previousEvents = readEvents(runId)
   let seq = previousEvents.reduce((highest, event) => Math.max(highest, event.seq + 1), 0)
-  const checkpointFiles = readdirSync(join(dir, 'checkpoints'), { withFileTypes: true })
-  let checkpointCount = checkpointFiles
-    .filter((entry) => entry.isFile() && entry.name.endsWith('.json'))
-    .map((entry) => Number.parseInt(entry.name, 10))
-    .filter(Number.isFinite)
-    .reduce((highest, id) => Math.max(highest, id + 1), 0)
+  let checkpointCount = highestCheckpointId(dir)
   const recorded: JournalEvent[] = [...previousEvents]
 
   const journal: Journal = {
     runId,
     dir,
     append(kind, data = {}) {
-      const event: JournalEvent = { seq: seq++, at: Date.now(), kind, data }
-      recorded.push(event)
-      try {
-        appendSecureFile(logPath, `${JSON.stringify(event)}\n`)
-      } catch {
-        // A journal write failure must never abort the work it is describing.
-      }
-      return event
+      // Re-derive `seq` from the file under a cross-process lock so two processes
+      // that opened the same run journal (a resume plus a fork, the CLI plus a
+      // daemon child) cannot write events with overlapping seq numbers.
+      return withFileLock(lockPath, () => {
+        const nextSeq = Math.max(seq, readEvents(runId).reduce((highest, event) => Math.max(highest, event.seq + 1), 0))
+        const event: JournalEvent = { seq: nextSeq, at: Date.now(), kind, data }
+        seq = nextSeq + 1
+        recorded.push(event)
+        try {
+          appendSecureFile(logPath, `${JSON.stringify(event)}\n`)
+        } catch {
+          // A journal write failure must never abort the work it is describing.
+        }
+        return event
+      }, { ttlMs: 30_000, proceedOnTimeout: true })
     },
     checkpoint(label, messages) {
-      const id = checkpointCount++
-      try {
-        writeSecureFile(
-          join(dir, 'checkpoints', `${id}.json`),
-          JSON.stringify({ id, label, at: Date.now(), messages }),
-        )
-        journal.append('checkpoint', { id, label, messageCount: messages.length })
-      } catch {
-        // Same: losing the ability to fork is not worth failing the run over.
-      }
-      return id
+      return withFileLock(lockPath, () => {
+        const id = Math.max(checkpointCount, highestCheckpointId(dir))
+        checkpointCount = id + 1
+        try {
+          writeSecureFile(
+            join(dir, 'checkpoints', `${id}.json`),
+            JSON.stringify({ id, label, at: Date.now(), messages }),
+          )
+          journal.append('checkpoint', { id, label, messageCount: messages.length })
+        } catch {
+          // Same: losing the ability to fork is not worth failing the run over.
+        }
+        return id
+      }, { ttlMs: 30_000, proceedOnTimeout: true })
     },
     events() {
       return [...recorded]
@@ -104,6 +111,19 @@ export function createJournal(runId: string, goal: string): Journal {
 
   journal.append('run-start', { runId, goal, cwd: process.cwd() })
   return journal
+}
+
+/** The next free checkpoint id, derived from the files already on disk. */
+function highestCheckpointId(dir: string): number {
+  try {
+    return readdirSync(join(dir, 'checkpoints'), { withFileTypes: true })
+      .filter((entry) => entry.isFile() && entry.name.endsWith('.json'))
+      .map((entry) => Number.parseInt(entry.name, 10))
+      .filter(Number.isFinite)
+      .reduce((highest, id) => Math.max(highest, id + 1), 0)
+  } catch {
+    return 0
+  }
 }
 
 export interface StoredCheckpoint {
