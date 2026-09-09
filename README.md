@@ -116,7 +116,7 @@ Edit `.env` to pick a provider and set its key. `ELIA_PROVIDER` defaults to `ant
 | Mistral AI | `mistral` | `MISTRAL_API_KEY` | `mistral-large-latest` |
 | Google Gemini | `google` | `GEMINI_API_KEY` | `gemini-3.7-flash` |
 | NVIDIA NIM | `nvidia` | `NVIDIA_API_KEY` | `nvidia/llama-3.3-nemotron-super-49b-v1.5` |
-| Inception (Mercury) | `mercury` | `INCEPTION_API_KEY` | `mercury-2` |
+| Inception (Mercury) | `mercury` | `INCEPTION_API_KEY` | `mercury-2.5` |
 | Any other OpenAI-compatible endpoint | `custom` | `ELIA_API_KEY` | none — set `ELIA_MODEL` |
 
 Any provider's model can be overridden with `ELIA_MODEL`. `openrouter` uses OpenRouter's OpenAI-compatible endpoint and its `openrouter/auto` router by default; set `ELIA_MODEL` to pin a specific OpenRouter model. `mistral` uses Mistral's OpenAI-compatible endpoint and `mistral-large-latest` by default; set `ELIA_MODEL` to choose another Mistral model. `google` uses Google's OpenAI-compatible Gemini endpoint and `gemini-3.7-flash` by default; set `ELIA_MODEL` to choose another compatible Gemini model. `nvidia` uses NVIDIA's hosted NIM OpenAI-compatible endpoint and `nvidia/llama-3.3-nemotron-super-49b-v1.5` by default; set `ELIA_MODEL` to choose another available NIM model. `custom` (and any provider, if you need to point at a proxy or self-hosted gateway) also honors `ELIA_BASE_URL`; configure it with `elia config set --provider custom --base-url <url> --model <model-id>`.

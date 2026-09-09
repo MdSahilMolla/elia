@@ -61,7 +61,7 @@ const PROVIDER_PRESETS: Record<string, ProviderPreset> = {
     kind: 'openai-compatible',
     apiKeyEnv: 'INCEPTION_API_KEY',
     baseURL: 'https://api.inceptionlabs.ai/v1',
-    defaultModel: 'mercury-2',
+    defaultModel: 'mercury-2.5',
   },
   custom: {
     kind: 'openai-compatible',

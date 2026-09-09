@@ -32,6 +32,7 @@ const PRICING: Record<string, Pricing> = {
   'openai/gpt-oss-120b': { inputPerM: 0.15, outputPerM: 0.6, cacheReadPerM: 0.075 },
   'openai/gpt-oss-20b': { inputPerM: 0.075, outputPerM: 0.3, cacheReadPerM: 0.0375 },
   'mercury-2': { inputPerM: 0.15, outputPerM: 0.35, cacheReadPerM: 0.025 },
+  'mercury-2.5': { inputPerM: 0.2, outputPerM: 0.75, cacheReadPerM: 0.02 },
 }
 
 /** Undefined when the model isn't in the pricing table — callers should show "unknown", never a fabricated number. */

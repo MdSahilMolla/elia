@@ -112,9 +112,10 @@ export const config = {
  * for every other OpenAI-compatible provider we generically pass through
  * whatever reasoning field the model sends, but we cannot know ahead of a real
  * call whether a given model produces one at all, so we say that plainly
- * instead of guessing. `mercury-2` (this account's default) is a diffusion
- * model with no reasoning channel, so it will report the passthrough line and
- * then simply never emit anything — that is a model limitation, not a bug.
+ * instead of guessing. Older Mercury diffusion models (e.g. `mercury-2`) have
+ * no reasoning channel at all, so they report the passthrough line and then
+ * simply never emit anything — that is a model limitation, not a bug;
+ * `mercury-2.5` (this account's default) adds tunable reasoning, so it may.
  */
 export function describeThinking(): string {
   if (config.providerName === 'anthropic') {
