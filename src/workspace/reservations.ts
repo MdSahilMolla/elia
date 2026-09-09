@@ -57,32 +57,37 @@ export function acquireForTask(
   const wanted = [...new Set(input.resources.map((resource) => (resource.startsWith('path:') || resource.startsWith('component:') || resource.startsWith('task:') ? resource : resourceFor(resource))))]
   if (wanted.length === 0) return { acquired: [] }
 
-  const live = store.reservations(true).filter((reservation) => reservation.expiresAt > now)
-  const conflicts: ReservationConflict[] = []
-  for (const resource of wanted) {
-    for (const held of live) {
-      if (held.taskId === input.taskId) continue
-      if (resourcesConflict(resource, held.resource)) {
-        conflicts.push({ resource, heldBy: held.holderId, taskId: held.taskId })
+  // The conflict check and the inserts must be one atomic unit: otherwise two
+  // overlapping dispatches can both read an empty conflict set and then both
+  // reserve the same resource, putting two agents on the same files.
+  return store.transact<{ acquired: string[] } | { conflicts: ReservationConflict[] }>(() => {
+    const live = store.reservations(true).filter((reservation) => reservation.expiresAt > now)
+    const conflicts: ReservationConflict[] = []
+    for (const resource of wanted) {
+      for (const held of live) {
+        if (held.taskId === input.taskId) continue
+        if (resourcesConflict(resource, held.resource)) {
+          conflicts.push({ resource, heldBy: held.holderId, taskId: held.taskId })
+        }
       }
     }
-  }
-  if (conflicts.length > 0) return { conflicts }
+    if (conflicts.length > 0) return { conflicts }
 
-  const acquired: string[] = []
-  for (const resource of wanted) {
-    const id = `rsv_${randomUUID().replaceAll('-', '').slice(0, 20)}`
-    store.append({
-      type: 'ReservationAcquired',
-      actorKind: input.holderKind,
-      actorId: input.holderId,
-      objectiveId: input.objectiveId,
-      taskId: input.taskId,
-      payload: { id, resource, mode: 'exclusive', holderKind: input.holderKind, holderId: input.holderId, acquiredAt: now, expiresAt: now + LEASE_TTL_MS },
-    })
-    acquired.push(id)
-  }
-  return { acquired }
+    const acquired: string[] = []
+    for (const resource of wanted) {
+      const id = `rsv_${randomUUID().replaceAll('-', '').slice(0, 20)}`
+      store.append({
+        type: 'ReservationAcquired',
+        actorKind: input.holderKind,
+        actorId: input.holderId,
+        objectiveId: input.objectiveId,
+        taskId: input.taskId,
+        payload: { id, resource, mode: 'exclusive', holderKind: input.holderKind, holderId: input.holderId, acquiredAt: now, expiresAt: now + LEASE_TTL_MS },
+      })
+      acquired.push(id)
+    }
+    return { acquired }
+  })
 }
 
 function resourcesConflict(a: string, b: string): boolean {

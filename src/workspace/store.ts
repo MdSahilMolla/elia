@@ -107,7 +107,13 @@ export class WorkspaceStore {
       return event
     })
     const event = run()
-    for (const listener of this.listeners) {
+    // Snapshot before iterating: a listener may synchronously append another
+    // event (a client disconnect handler emits `PresenceLeft`), whose fan-out
+    // runs `unsubscribe` and mutates `this.listeners` mid-loop — skipping
+    // listeners or throwing a "Set changed size during iteration" error that the
+    // catch below would then hide.
+    for (const listener of [...this.listeners]) {
+      if (!this.listeners.has(listener)) continue
       try {
         listener(event)
       } catch {
@@ -364,6 +370,17 @@ export class WorkspaceStore {
     }
 
     return { tasks, agents, reservations }
+  }
+
+  /**
+   * Run `fn` inside a single SQLite transaction so a caller's read-then-write
+   * sequence (reservation acquisition checks for a conflict and only then
+   * inserts) commits or rolls back as one unit and cannot be interleaved by
+   * another writer — the `append`s inside become savepoints of this outer
+   * transaction.
+   */
+  transact<T>(fn: () => T): T {
+    return this.db.transaction(fn)()
   }
 
   /** Escape hatch for advanced queries and tests. Prefer the typed getters. */

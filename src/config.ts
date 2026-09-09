@@ -4,6 +4,7 @@ import {
   PROVIDER_PRESET_NAMES,
   providerPresetDefaultModel,
   tryResolveProvider,
+  validateModelId,
   type ResolvedProvider,
 } from './providers/registry.ts'
 import type { ThinkingOption } from './providers/types.ts'
@@ -157,6 +158,11 @@ export function switchModel(options: { providerName?: string; model?: string } =
   if (options.providerName === 'auto') {
     config.routingMode = 'auto'
     return { ok: true, label: `auto fallback (${config.providerLabel})` }
+  }
+
+  if (options.model !== undefined) {
+    const invalidModel = validateModelId(options.model)
+    if (invalidModel) return { ok: false, error: invalidModel }
   }
 
   const providerName = options.providerName ?? config.providerName

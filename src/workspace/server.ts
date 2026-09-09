@@ -65,7 +65,9 @@ export function runWorkspaceServer(options: WorkspaceServerOptions = {}): Runnin
   // One store subscription, fanned out to every socket.
   const unsubscribe = store.subscribe((event) => {
     const frame = JSON.stringify({ type: 'event', event } satisfies WorkspaceServerMessage)
-    for (const ws of connections) {
+    // Snapshot: a failed `ws.send` can synchronously run the close handler, which
+    // appends `PresenceLeft` and re-enters this fan-out, mutating `connections`.
+    for (const ws of [...connections]) {
       try {
         ws.send(frame)
       } catch {
@@ -175,7 +177,7 @@ export function runWorkspaceServer(options: WorkspaceServerOptions = {}): Runnin
     clearInterval(reconcileTimer)
     orchestrator?.stop()
     unsubscribe()
-    for (const ws of connections) {
+    for (const ws of [...connections]) {
       try {
         ws.close(1001, 'server shutting down')
       } catch {

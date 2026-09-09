@@ -1,8 +1,9 @@
-import { existsSync, mkdirSync, readFileSync, rmSync, statSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { redactText } from '../ui/redact.ts'
 import type { AutonomyProfile, AutonomousRunResult } from './loop.ts'
 import { ensureSecureDirectory, hardenSecureFile, writeSecureFile } from '../securePersistence.ts'
+import { withFileLock } from '../fileLock.ts'
 import type { AgentMode } from './mode.ts'
 
 export const SCHEDULE_SCHEMA_VERSION = 2
@@ -246,27 +247,13 @@ export class ScheduleStore {
   }
 
   private withExclusiveLock<T>(fn: () => T): T {
-    const lockPath = `${this.path}.lock`
     ensureSecureDirectory(join(this.path, '..'))
-    try {
-      mkdirSync(lockPath, { mode: 0o700 })
-    } catch {
-      try {
-        if (statSync(lockPath).mtimeMs + STORE_LOCK_TTL_MS < Date.now()) rmSync(lockPath, { recursive: true, force: true })
-      } catch {
-        // A concurrent process may be creating or removing the lock.
-      }
-      try {
-        ensureSecureDirectory(lockPath)
-      } catch {
-        throw new Error('schedule store is busy; another daemon is claiming work')
-      }
-    }
-    try {
-      return fn()
-    } finally {
-      rmSync(lockPath, { recursive: true, force: true })
-    }
+    // A cross-process lock whose stale-reclaim is owner-aware: a lock held by a
+    // live daemon mid-`persist()` is never removed out from under it, and this
+    // lock's own release only removes a lock it still owns — the two bugs the
+    // previous mkdir + unconditional-rmSync-in-finally implementation had, which
+    // could let two daemons claim the same scheduled job.
+    return withFileLock(`${this.path}.lock`, fn, { ttlMs: STORE_LOCK_TTL_MS })
   }
 
   private persist(): void {

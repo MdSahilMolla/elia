@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { EXECUTION_LEASE_TTL_MS, GoalGraphStore, actionKey, classifyFailure, outstandingActions, type GoalGraphOptions } from './goalGraph.ts'
@@ -102,6 +102,29 @@ describe('durable goal graph', () => {
     expect(recovered.actions).toEqual([action.action.id])
     expect(graph.node('step:inspect')?.status).toBe('waiting-retry')
     expect(graph.state().actions[0]?.state).toBe('retryable')
+  })
+
+  test('does not reclaim an expired lease whose owner process is still alive until the grace elapses', () => {
+    const { graph, options } = createGraph()
+    graph.seedProposal(proposal)
+    graph.startNode('step:inspect')
+
+    // Rewrite the persisted lease to look like a *different, still-running* elia
+    // process (this test's own pid) whose lease just expired.
+    const graphPath = join(options.dir, 'goal-graph.json')
+    const snapshot = JSON.parse(readFileSync(graphPath, 'utf8'))
+    const node = snapshot.nodes.find((n: { id: string }) => n.id === 'step:inspect')
+    node.leaseOwner = `${process.pid}:foreign-worker`
+    node.leaseExpiresAt = Date.now() - 1_000
+    writeFileSync(graphPath, JSON.stringify(snapshot))
+
+    // Just past expiry: the owner is alive, so it is given a grace window.
+    expect(graph.reconcileStaleLeases(Date.now()).nodes).toEqual([])
+    expect(graph.node('step:inspect')?.status).toBe('running')
+
+    // Well past the grace: reclaimed even though the pid is alive (wedged worker).
+    expect(graph.reconcileStaleLeases(Date.now() + EXECUTION_LEASE_TTL_MS * 4).nodes).toEqual(['step:inspect'])
+    expect(graph.node('step:inspect')?.status).toBe('waiting-retry')
   })
 
   test('classifies transient, authorization, environment, and human-review failures', () => {

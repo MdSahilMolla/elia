@@ -14,6 +14,13 @@ export interface StoredSession {
   messages: ConversationMessage[]
   recording?: TranscriptSnapshot
   usage?: SessionUsageSnapshot
+  /**
+   * The provider preset and model that produced this conversation. Recorded so a
+   * resumed session can report which model authored its history — replaying a
+   * transcript on a different model than it was built on is otherwise silent.
+   */
+  providerName?: string
+  model?: string
 }
 
 export function newSessionId(): string {
@@ -25,7 +32,7 @@ export async function saveSession(
   id: string,
   messages: ConversationMessage[],
   dir: string = SESSIONS_DIR,
-  extra: Pick<StoredSession, 'recording' | 'usage'> = {},
+  extra: Pick<StoredSession, 'recording' | 'usage' | 'providerName' | 'model'> = {},
 ): Promise<void> {
   const session: StoredSession = { id, updatedAt: Date.now(), messages, ...extra }
   if (!isSafeSessionId(id)) {
@@ -83,6 +90,8 @@ function isStoredSession(value: unknown): value is StoredSession {
     && Array.isArray(candidate.messages)
     && (candidate.recording === undefined || isTranscriptSnapshot(candidate.recording))
     && (candidate.usage === undefined || isSessionUsage(candidate.usage))
+    && (candidate.providerName === undefined || typeof candidate.providerName === 'string')
+    && (candidate.model === undefined || typeof candidate.model === 'string')
     && candidate.messages.every((message) => {
       if (!message || typeof message !== 'object') return false
       const item = message as Record<string, unknown>

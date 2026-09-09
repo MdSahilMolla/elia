@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, expect, test } from 'bun:test'
+import { tmpdir } from 'node:os'
 import { withAgentIdentity } from '../autonomy/context.ts'
 import { environmentTool } from './environment.ts'
 import { setExecForTests } from '../github/exec.ts'
@@ -54,8 +55,11 @@ test('environment discovery reports project, git, runtimes, and redacted capabil
 })
 
 test('environment discovery does not require a configured browser or provider', async () => {
-  const result = JSON.parse(await withAgentIdentity({ name: 'test', role: 'lead', cwd: '/tmp' }, () => environmentTool.execute({}))) as { browser: { configured: boolean }; capabilityReadiness: { browser: { status: string; missing?: string[] } }; project: { root: string } }
-  expect(result.project.root).toBe('/tmp')
+  // A real directory that exists on every platform — a Unix-only `/tmp` made
+  // `runShell` fail with a misleading ENOENT and broke this suite on Windows.
+  const scratchDir = tmpdir()
+  const result = JSON.parse(await withAgentIdentity({ name: 'test', role: 'lead', cwd: scratchDir }, () => environmentTool.execute({}))) as { browser: { configured: boolean }; capabilityReadiness: { browser: { status: string; missing?: string[] } }; project: { root: string } }
+  expect(result.project.root).toBe(scratchDir)
   expect(result.browser.configured).toBe(Boolean(process.env.ELIA_BROWSER_MCP_SERVER || process.env.ELIA_BROWSER_BRIDGE_COMMAND || process.env.ELIA_BROWSER_CDP_URL))
   expect(result.capabilityReadiness.browser.status).toBe(result.browser.configured ? 'ready' : 'missing-config')
 })
