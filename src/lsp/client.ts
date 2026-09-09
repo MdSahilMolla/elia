@@ -163,7 +163,14 @@ export class LspClient {
     const body = JSON.stringify(message)
     const header = `Content-Length: ${Buffer.byteLength(body, 'utf8')}\r\n\r\n`
     this.proc.stdin.write(header + body)
-    this.proc.stdin.flush()
+    // flush() can reject asynchronously when the child's stdin is already gone
+    // (e.g. a request fired in the same tick as close()). Swallow it here — the
+    // pending request is rejected by close()/pump() anyway, and an unhandled
+    // rejection would otherwise surface as a spurious failure.
+    const flushed = this.proc.stdin.flush() as unknown
+    if (flushed && typeof (flushed as PromiseLike<unknown>).then === 'function') {
+      void (flushed as Promise<unknown>).catch(() => {})
+    }
   }
 
   private async pump(): Promise<void> {
