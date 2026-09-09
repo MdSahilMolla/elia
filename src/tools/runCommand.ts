@@ -29,6 +29,43 @@ const LONG_RUNNING_COMMAND = /\b(?:npm|pnpm|yarn|bun)\s+(?:install|i|ci|add|upda
  * `node_modules` present — `npx prisma …`, `npm run build`, a bare local bin. */
 const NEEDS_NODE_MODULES = /^\s*(?:npx|pnpm\s+dlx|yarn\s+dlx|bunx)\s+\S|\b(?:npm|pnpm|yarn|bun)\s+(?:run|exec)\b/i
 
+/**
+ * A few shell mismatches, caught *before* spawning so a bad one-liner becomes an
+ * immediate corrective instead of a runtime failure and a wasted repair turn.
+ * These are the exact shapes seen in the wild on Windows, where the shell is
+ * `cmd.exe` but the model reaches for POSIX/PowerShell idioms.
+ */
+function shellMismatch(raw: string): string | null {
+  const command = raw.trim()
+  const win = process.platform === 'win32'
+
+  if (win && /^bash\s+-c\b/i.test(command)) {
+    return 'This shell is cmd.exe, and `bash` on Windows is usually just the WSL launcher stub (fails with "no installed distributions"). Run the command directly for cmd.exe, or write a .ps1/.py file with write_file and run that.'
+  }
+  if (win && /^which(?:\s|$)/i.test(command)) {
+    return 'Use `where <tool>` — `which` is not a command on Windows (cmd.exe).'
+  }
+
+  // Strip quoted spans so a pipe *inside* `powershell -Command "..."` doesn't
+  // count, then look for a PowerShell Verb-Noun cmdlet piped by the parent shell
+  // (`powershell -c "..." | Out-String`) — cmd.exe treats it as a missing exe.
+  const bare = command.replace(/"[^"]*"/g, '""').replace(/'[^']*'/g, "''")
+  if (/\|\s*[A-Z][a-z]{2,}-[A-Z][a-z]{2,}/.test(bare)) {
+    return 'A PowerShell cmdlet (Verb-Noun) is being piped at the shell level, where it is not an executable — this is what makes cmd.exe say "\'Out-String\' is not recognized". Put the whole pipeline inside one quoted argument: powershell -NoProfile -Command "… | Out-String".'
+  }
+
+  // An inline -c/-e one-liner whose payload carries backslash escapes: cmd.exe
+  // quoting mangles `\n` / `\"` and Python gets a truncated argument.
+  if (win) {
+    const inline = /(?:^|\s)(?:python3?|node|deno)\s+-(?:c|e)\s+(["']).*?\1/s.exec(command)
+    if (inline && /\\[nrtu"'\\]/.test(inline[0])) {
+      return 'An inline -c/-e one-liner with backslash escapes will not survive cmd.exe quoting (you get a SyntaxError from a truncated argument). Write a real .py/.js file with write_file and run that.'
+    }
+  }
+
+  return null
+}
+
 /** `node_modules` exists and holds more than a stray `.package-lock.json`. */
 function nodeModulesPopulated(cwd: string): boolean {
   try {
@@ -121,6 +158,8 @@ Shell: on Windows the command runs through \`cmd.exe\`; on macOS/Linux through \
         `"${input.command.trim().split(/\s+/).slice(0, 3).join(' ')}" starts a server that never exits — running it here just times out. Use the preview tool to serve and open the project (it stays live-reloaded), or start it yourself outside elia.`,
       )
     }
+    const mismatch = shellMismatch(input.command)
+    if (mismatch) throw new Error(mismatch)
     const timeoutMs = typeof input.timeoutMs === 'number' ? input.timeoutMs : defaultTimeoutForCommand(input.command)
     const cwd = resolveRunCwd(typeof input.cwd === 'string' ? input.cwd.trim() : '')
     const signal = currentAgent().signal

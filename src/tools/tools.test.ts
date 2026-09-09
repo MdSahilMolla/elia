@@ -230,6 +230,21 @@ test('run_command rejects malformed and oversized command inputs', async () => {
   await expect(executeTool('run_command', { command: 'x'.repeat(100_001) })).rejects.toThrow('exceeds 100000 characters')
 })
 
+test('run_command rejects a PowerShell cmdlet piped at the shell level, before spawning', async () => {
+  await expect(executeTool('run_command', { command: 'powershell -c "(Get-ChildItem x | Measure-Object).Count" 2>&1 | Out-String' }))
+    .rejects.toThrow(/not an executable|Out-String/)
+  // The same pipeline kept inside -Command is fine — no pipe outside the quotes.
+  await expect(executeTool('run_command', { command: 'powershell -NoProfile -Command "Get-ChildItem x | Select-Object Name"' }))
+    .resolves.toBeDefined()
+})
+
+test.if(process.platform === 'win32')('run_command steers away from cmd.exe-hostile one-liners on Windows', async () => {
+  await expect(executeTool('run_command', { command: 'which python3' })).rejects.toThrow(/where <tool>/)
+  await expect(executeTool('run_command', { command: 'bash -c "ls"' })).rejects.toThrow(/WSL launcher stub|cmd\.exe/)
+  await expect(executeTool('run_command', { command: `python -c "import os; print('\\n'.join(os.listdir('.')))"` }))
+    .rejects.toThrow(/backslash escapes|write a real/)
+})
+
 test('content tools deny protected files before bytes reach the model', async () => {
   const envPath = join(testDir, '.env')
   writeFileSync(envPath, 'ELIA_TEST_SECRET=do-not-return')
