@@ -22,6 +22,12 @@ tsconfig.tsbuildinfo
 
 # --- elia's own runtime state ---
 .elia/
+# Runtime SQLite databases belong under .elia/; never commit one at the repo root.
+*.db
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.sqlite3
 # Sandboxes, backups, and the ledger from `elia evolve` — elia's own working area.
 .evolution/
 

@@ -48,6 +48,14 @@ export async function runShell(
    */
   env?: Record<string, string>,
 ): Promise<ShellResult> {
+  // A missing working directory makes `Bun.spawn` fail with `ENOENT` blamed on
+  // the shell executable itself (`cmd.exe` / `sh`), which sends anyone debugging
+  // it chasing a broken PATH instead of the real cause. Check it up front and
+  // return a result that names what is actually wrong.
+  if (cwd !== undefined && !existsSync(cwd)) {
+    return { command, exitCode: 1, stdout: '', stderr: `working directory does not exist: ${cwd}`, elapsedMs: 0, timedOut: false }
+  }
+
   // When the resident daemon is enabled it runs the command in a warm shell,
   // skipping the per-command process spawn (20–80ms on Windows). Any transport
   // problem falls through to the in-process path below; `ELIA_DAEMON=require`

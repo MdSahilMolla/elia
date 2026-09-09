@@ -1676,6 +1676,12 @@ async function runInteractive(): Promise<void> {
       if (!loaded.recording) sessionTranscript.notice('Legacy session: only previously retained messages are available; earlier discarded activity cannot be recovered.')
       if (loaded.usage) priorUsage = loaded.usage
       writeNotice(`Resumed session ${sessionId} (${messages.length} messages)`)
+      if (loaded.providerName && (loaded.providerName !== config.providerName || loaded.model !== config.model)) {
+        writeNotice(
+          `This session was created on ${loaded.providerName} (${loaded.model ?? 'unknown model'}); ` +
+            `it is now resuming on ${config.providerLabel}.`,
+        )
+      }
     } else {
       writeNotice(
         resumeId ? `No session found with id "${resumeId}" — starting fresh.` : 'No previous session found — starting fresh.',
@@ -1722,7 +1728,12 @@ async function runInteractive(): Promise<void> {
   }
 
   async function persistInteractiveSession(): Promise<void> {
-    await saveSession(sessionId, messages, undefined, { recording: sessionTranscript.snapshot(), usage: cumulativeSessionUsage() })
+    await saveSession(sessionId, messages, undefined, {
+      recording: sessionTranscript.snapshot(),
+      usage: cumulativeSessionUsage(),
+      providerName: config.providerName,
+      model: config.model,
+    })
   }
 
   function currentEliaBookSession() {
@@ -2181,6 +2192,20 @@ async function runInteractive(): Promise<void> {
     if (!result.ok) writeError(result.error)
     else {
       setCurrentUsageModel(config.model)
+      if (providerName !== 'auto') {
+        // Persist the switch so it survives a restart, mirroring the codex
+        // subscription path and `elia config set --provider`. Without this a
+        // `/model` change silently reverted to the .env / config-file value on
+        // the next launch.
+        writeUserConfig({
+          ELIA_PROVIDER: config.providerName,
+          ELIA_MODEL: config.model,
+          ELIA_BASE_URL: config.providerName === 'custom' ? process.env.ELIA_BASE_URL : undefined,
+        })
+        process.env.ELIA_PROVIDER = config.providerName
+        process.env.ELIA_MODEL = config.model
+        if (config.providerName !== 'custom') delete process.env.ELIA_BASE_URL
+      }
       writeNotice(`Model switched: ${result.label}`)
       // The newly resolved provider is a cold client — warm it before the next turn.
       prewarmActiveProvider()

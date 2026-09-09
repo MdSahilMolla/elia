@@ -107,7 +107,13 @@ export class WorkspaceStore {
       return event
     })
     const event = run()
-    for (const listener of this.listeners) {
+    // Snapshot before iterating: a listener may synchronously append another
+    // event (a client disconnect handler emits `PresenceLeft`), whose fan-out
+    // runs `unsubscribe` and mutates `this.listeners` mid-loop — skipping
+    // listeners or throwing a "Set changed size during iteration" error that the
+    // catch below would then hide.
+    for (const listener of [...this.listeners]) {
+      if (!this.listeners.has(listener)) continue
       try {
         listener(event)
       } catch {

@@ -12,6 +12,7 @@ import { taskSessions } from './taskSessions.ts'
 import { listSkillBundles } from './skills/bundles.ts'
 import { listSkillFiles, listLoadedSkills, loadSkills } from './skills/loader.ts'
 import { newSessionId, loadSession, saveSession } from './session.ts'
+import { config } from './config.ts'
 import { deploymentTool } from './tools/deployment.ts'
 import { runShell, clampOutput } from './shell.ts'
 import { environmentTool } from './tools/environment.ts'
@@ -135,7 +136,7 @@ export function createBridgeSession(options: BridgeSessionOptions): BridgeSessio
     if (!messages.some((message) => message.role === 'assistant' && message.content.some((block) => block.type === 'text' && block.text === text))) {
       messages.push({ role: 'assistant', content: [{ type: 'text', text }] })
     }
-    await saveSession(sessionId, messages)
+    await saveSession(sessionId, messages, undefined, { providerName: config.providerName, model: config.model })
     const output = { sessionId, text, usage: result.usage, steps: result.steps, stopReason: result.stopReason }
     event('chat_finished', { requestId: request.id, ...output })
     return output

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test'
-import { isProviderPresetConfigured, listProviderModels, providerPresetDefaultModel, PROVIDER_PRESET_NAMES, tryResolveProvider } from './registry.ts'
+import { isProviderPresetConfigured, listProviderModels, providerPresetDefaultModel, PROVIDER_PRESET_NAMES, tryResolveProvider, validateModelId } from './registry.ts'
 
 const originalProvider = process.env.ELIA_PROVIDER
 const originalModel = process.env.ELIA_MODEL
@@ -140,4 +140,47 @@ test('model discovery reports an actionable result when a provider has no key', 
   const result = await listProviderModels('mistral')
   expect(result.models).toEqual([])
   expect(result.error).toContain('No API key set')
+})
+
+test('the generic ELIA_API_KEY only configures the custom provider, not every preset', () => {
+  const keyEnvs = ['ANTHROPIC_API_KEY', 'GROQ_API_KEY', 'OPENAI_API_KEY', 'OPENROUTER_API_KEY', 'MISTRAL_API_KEY', 'GEMINI_API_KEY', 'NVIDIA_API_KEY', 'INCEPTION_API_KEY']
+  const saved = Object.fromEntries(keyEnvs.map((name) => [name, process.env[name]]))
+  for (const name of keyEnvs) delete process.env[name]
+  process.env.ELIA_API_KEY = 'generic-key'
+  try {
+    for (const name of ['anthropic', 'groq', 'openai', 'openrouter', 'mistral', 'google', 'nvidia', 'mercury']) {
+      expect(isProviderPresetConfigured(name)).toBe(false)
+    }
+    expect(isProviderPresetConfigured('custom')).toBe(true)
+    const resolved = tryResolveProvider({ providerName: 'anthropic' })
+    expect('error' in resolved).toBe(true)
+  } finally {
+    for (const name of keyEnvs) restore(name, saved[name])
+  }
+})
+
+test('an unknown or misspelled provider name is reported, not silently treated as custom', () => {
+  const misspelled = tryResolveProvider({ providerName: 'antrhopic' })
+  expect('error' in misspelled).toBe(true)
+  if ('error' in misspelled) {
+    expect(misspelled.error).toContain('Unknown provider')
+    expect(misspelled.error).toContain('anthropic') // did-you-mean
+  }
+})
+
+test('provider names are matched case-insensitively', () => {
+  process.env.OPENROUTER_API_KEY = 'test-openrouter-key'
+  const resolved = tryResolveProvider({ providerName: 'OpenRouter' })
+  expect('error' in resolved).toBe(false)
+  if (!('error' in resolved)) expect(resolved.providerName).toBe('openrouter')
+})
+
+test('validateModelId rejects empty, whitespace, sentinel, and overlong ids', () => {
+  expect(validateModelId('')).toBeTruthy()
+  expect(validateModelId('   ')).toBeTruthy()
+  expect(validateModelId('gpt 4')).toBeTruthy()
+  expect(validateModelId('null')).toBeTruthy()
+  expect(validateModelId('x'.repeat(300))).toBeTruthy()
+  expect(validateModelId('claude-sonnet-5')).toBeUndefined()
+  expect(validateModelId('openrouter/auto')).toBeUndefined()
 })
