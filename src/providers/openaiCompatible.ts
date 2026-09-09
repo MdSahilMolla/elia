@@ -7,6 +7,13 @@ export interface OpenAICompatibleProviderOptions {
   thinking?: ThinkingOption
 }
 
+// A generous ceiling on a single response (billed by actual usage, not the cap)
+// so a runaway generation can't rack up unbounded cost or block the turn
+// indefinitely. Mirrors the Anthropic provider's MAX_TOKENS. `max_tokens` is the
+// field every OpenAI-compatible endpoint in scope here (Groq, DeepSeek, …)
+// understands; the newer `max_completion_tokens` is not universally supported.
+const MAX_TOKENS = 32_000
+
 export function createOpenAICompatibleProvider(
   apiKey: string,
   model: string,
@@ -38,6 +45,7 @@ export function createOpenAICompatibleProvider(
       const runner = client.chat.completions
         .stream({
           model,
+          max_tokens: MAX_TOKENS,
           messages: toOpenAIMessages(fullSystem, messages),
           tools: openAITools,
           // Let the model emit several tool calls in one response so elia can run
@@ -89,6 +97,7 @@ export function createOpenAICompatibleProvider(
         if (!isStreamingUnsupported(err)) throw err
         const completion = await client.chat.completions.create({
           model,
+          max_tokens: MAX_TOKENS,
           messages: toOpenAIMessages(fullSystem, messages),
           tools: openAITools,
           ...(openAITools.length > 0 ? { parallel_tool_calls: true } : {}),
