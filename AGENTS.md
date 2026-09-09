@@ -4,7 +4,7 @@ This file is a map for agents working in this repository. It is project guidance
 
 ## Source of truth
 
-Read `README.md` for setup and CLI behavior. Read `docs/agent-capability-audit.md` for honest capability boundaries, `docs/general-agent-evaluation.md` for evaluation expectations, and `docs/production-readiness-audit.md` before making claims about delivery or deployment. Read the relevant source and tests before editing; do not infer behavior from documentation alone.
+Read `README.md` for setup and CLI behavior. The `docs/` directory holds deeper notes — a capability audit, evaluation expectations, and a production-readiness audit worth consulting before making delivery or deployment claims — but it is git-ignored local-only material, so it may be absent in a fresh clone; do not treat it as a required dependency. Read the relevant source and tests before editing; do not infer behavior from documentation alone.
 
 ## Engineering workflow
 
