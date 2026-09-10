@@ -10,6 +10,15 @@ const TODO_MARK: Record<TodoItem['status'], string> = {
   completed: '✓',
 }
 
+/** `m:ss` since a worker started — the panel re-renders on every task update, so this ticks forward on its own. */
+function elapsed(agent: TaskSession): string {
+  const from = agent.startedAt ?? agent.createdAt
+  if (!from) return ''
+  const secs = Math.max(0, Math.round((Date.now() - from) / 1000))
+  if (secs < 1) return ''
+  return secs < 60 ? `${secs}s` : `${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, '0')}`
+}
+
 /** Genuinely-active states — the only ones that stay in the live panel across refreshes. */
 const LIVE_STATUS = new Set<TaskSession['status']>(['running', 'pending'])
 
@@ -59,6 +68,7 @@ export function WorkspacePanel({
   }
   const workers = stepOrder.map((key) => latestByStep.get(key)!)
   const live = workers.filter((a) => LIVE_STATUS.has(a.status))
+  const liveWaves = [...new Set(live.map((a) => a.wave).filter((w): w is number => typeof w === 'number'))].sort((a, b) => a - b)
   const finished = workers.filter((a) => !LIVE_STATUS.has(a.status))
   const doneCount = finished.filter((a) => a.status === 'done').length
   const reviewCount = finished.filter((a) => a.status === 'needs-review').length
@@ -113,7 +123,10 @@ export function WorkspacePanel({
 
       {live.length > 0 && (
         <Box flexDirection="column" marginTop={plan.length > 0 ? 1 : 0}>
-          <Text color={palette.muted}>SUBAGENTS · {live.length} active</Text>
+          <Text color={palette.muted}>
+            SUBAGENTS · {live.length} active
+            {liveWaves.length > 0 ? ` · wave ${liveWaves.join(', ')}` : ''}
+          </Text>
           {live.slice(0, 6).map((agent) => (
             <Box key={agent.id}>
               <Text color={palette.toolName}>
@@ -128,9 +141,9 @@ export function WorkspacePanel({
                     · {agent.providerName}/{agent.model}
                   </Text>
                 )}
-                {agent.wave && <Text color={palette.muted}> · wave {agent.wave}</Text>}
                 {agent.attempts > 1 && <Text color={palette.muted}> · try {agent.attempts}</Text>}
                 <Text color={palette.muted}> · {agent.action || agent.title}</Text>
+                {elapsed(agent) ? <Text color={palette.muted}> · {elapsed(agent)}</Text> : null}
               </Text>
             </Box>
           ))}
