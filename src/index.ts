@@ -2270,6 +2270,14 @@ async function runInteractive(): Promise<void> {
           repairAttempts,
           aborted: stopRequested || controller.signal.aborted,
         })
+        const cleanTurn = toolErrorCount === 0 && editRetryCount === 0 && (verifyResult === 'pass' || verifyResult === 'none' || verifyResult === 'skipped') && !(stopRequested || controller.signal.aborted)
+        try {
+          const { recordLessonExposure } = await import('./autonomy/lessonEfficacy.ts')
+          const { consumeInjectedLessonKeys } = await import('./autonomy/lessons.ts')
+          recordLessonExposure(task.id, consumeInjectedLessonKeys(), { verify: verifyResult, clean: cleanTurn })
+        } catch {
+          // best-effort
+        }
         try {
           const { recordTrajectory, deriveReward, refSystemPrompt } = await import('./trajectory/record.ts')
           const { ELIA_ROOT } = await import('./config.ts')

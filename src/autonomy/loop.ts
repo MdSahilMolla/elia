@@ -34,7 +34,8 @@ import { commitAll, scaffoldProject } from './scaffold.ts'
 import { publishProject } from './publish.ts'
 import { emitEvent, machineReadable } from '../ui/runtime.ts'
 import { redactText } from '../ui/redact.ts'
-import { appendLessons, createLessonsTool, renderLessons } from './lessons.ts'
+import { appendLessons, consumeInjectedLessonKeys, createLessonsTool, renderLessons } from './lessons.ts'
+import { recordLessonExposure } from './lessonEfficacy.ts'
 import {
   createVerdictTool,
   describeIssues,
@@ -435,6 +436,11 @@ async function runAutonomousTaskInternal(options: AutonomousRunOptions): Promise
     }
     recordCompletion(runId, completion, completionFacts)
     const contradictions = detectContradictions(completion.state, completion.confidence, completionFacts)
+    recordLessonExposure(runId, consumeInjectedLessonKeys(), {
+      verify: verificationPassed ? 'pass' : 'fail',
+      regime: verificationRegime,
+      clean: verificationPassed && contradictions.length === 0,
+    })
     if (contradictions.length > 0) {
       journal.append('phase', { phase: 'learn', note: `completion contradiction: ${contradictions.join('; ')}` })
       writeSubStep(`⚠ completion verdict "${completion.state}/${completion.confidence}" doesn't match the facts: ${contradictions.join('; ')}`)
