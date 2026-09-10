@@ -123,6 +123,24 @@ test('pre-existing uncommitted work is protected — committed on disk, not swep
   expect((await git('status', '--porcelain')).stdout).toContain('existing.ts')
 })
 
+test('a scoped commit never sweeps concurrent changes outside the worker-owned files', async () => {
+  await ensureRepository(dir)
+  writeFileSync(join(dir, 'owned.ts'), 'export const owned = 0')
+  writeFileSync(join(dir, 'other.ts'), 'export const other = 0')
+  await commitAll(dir, 'seed')
+
+  writeFileSync(join(dir, 'owned.ts'), 'export const owned = 1')
+  writeFileSync(join(dir, 'other.ts'), 'export const other = 1')
+  const result = await commitAll(dir, 'worker change', undefined, [], ['owned.ts'])
+
+  expect(result.committed).toBe(true)
+  expect(result.warning).toContain('other.ts')
+  const committed = (await git('diff-tree', '--no-commit-id', '--name-only', '-r', 'HEAD')).stdout
+  expect(committed).toContain('owned.ts')
+  expect(committed).not.toContain('other.ts')
+  expect((await git('status', '--porcelain')).stdout).toContain('other.ts')
+})
+
 test('scaffoldProject in a dirty repo leaves the operator’s changes alone', async () => {
   await ensureRepository(dir)
   writeFileSync(join(dir, 'seed.ts'), 'export const seed = 1')

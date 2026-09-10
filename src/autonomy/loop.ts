@@ -49,7 +49,7 @@ import { applyPlanRevisions, createPlanRevisionTool, MAX_PLAN_REVISIONS } from '
 import { assumptionOutcome, auditPlanFeasibility, createAssumptionTool } from './assumptions.ts'
 import { isSensitivePath } from './sensitivePaths.ts'
 import { classifyStuck, type StuckRecovery } from './stuck.ts'
-import { detectChecks } from './detectChecks.ts'
+import { checkRoot, detectChecks } from './detectChecks.ts'
 import { detectContradictions, recordCompletion } from './calibration.ts'
 import { reliabilitySignal } from './reliability.ts'
 import type { CriticVerdict, Proposal } from './types.ts'
@@ -739,7 +739,6 @@ Finding that an assumption is FALSE is worth more than a confident guess on ever
       // work correctly, was marked failed twice by a premature `bun test`, and
       // took the other three steps down with it. The verify phase owns this gate,
       // where it runs against a finished project and has repair attached.
-      const finalWave = index === waves.length - 1
       const fleet = await runFleet({
         assignments: runnable.map((step) => ({
           id: step.id,
@@ -747,7 +746,6 @@ Finding that an assumption is FALSE is worth more than a confident guess on ever
           role: step.role,
           instructions: step.instructions,
           acceptanceCriteria: plan.acceptanceCriteria,
-          ...(finalWave ? { verificationCommands: plan.verification } : {}),
           sideEffects: plan.sideEffects,
         })),
         extraTools: [planRevisions.tool],
@@ -825,7 +823,6 @@ ${clampOutput(report, 2000)}
 
 Do not repeat whatever failed. If a file is protected, a path is refused, or a command is blocked, route around it: use a different path, a different mechanism, or leave that one piece out and finish everything else in the assignment. Coming back with the rest of the work done beats coming back with nothing.`,
             acceptanceCriteria: plan.acceptanceCriteria,
-            ...(finalWave ? { verificationCommands: plan.verification } : {}),
             sideEffects: plan.sideEffects,
           })),
           extraTools: [planRevisions.tool],
@@ -873,9 +870,11 @@ Do not repeat whatever failed. If a file is protected, a path is refused, or a c
           `Wave ${index + 1}: ${landed.length === 1 ? landed[0] : `${landed.length} steps`}\n\n${landed.map((entry) => `- ${entry}`).join('\n')}`,
           runSignal,
           protectedPaths,
+          wave.flatMap((step) => step.files),
         )
         if (commit.committed) writeSubStep(`committed wave ${index + 1} (${landed.length} step(s))`)
         if (commit.excluded.length > 0) writeSubStep(`⚠ kept out of the commit because they hold secrets: ${commit.excluded.join(', ')}`)
+        if (commit.warning) writeSubStep(`⚠ ${commit.warning}`)
       }
 
       // Amend the plan before scheduling anything else, so a missing step is
@@ -985,6 +984,7 @@ Read the changed files in full context. Improve only concrete issues directly re
   const escalationsUsed = new Set<StuckRecovery>()
   let lastRepairReport = ''
   let pendingApproachChange: string | undefined
+  const verificationRoot = checkRoot(proposal.steps.flatMap((step) => step.files), process.cwd())
   // Baseline: the post-execute state. Each passing verification refreshes this
   // to the current state; a wrong-approach stall rewinds the working tree here.
   greenSnapshot = await captureTreeSnapshot(process.cwd(), runDir(runId))
@@ -996,7 +996,7 @@ Read the changed files in full context. Improve only concrete issues directly re
     writePhase('verify', proposal.verification.length > 0 ? proposal.verification.join(' · ') : 'review only')
     journal.append('phase', { phase: 'verify', attempt })
 
-    const verification = await runVerification(proposal.verification, undefined, runSignal, governor)
+    const verification = await runVerification(proposal.verification, verificationRoot, runSignal, governor)
     for (const result of verification.results) {
       const label = `$ ${result.command}`
       if (result.exitCode === 0 && !result.timedOut) writePass(label)

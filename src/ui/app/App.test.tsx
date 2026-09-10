@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test'
 import { render } from 'ink-testing-library'
-import { App, providerPlanItems } from './App.tsx'
+import { App, providerPlanItems, shouldPersistActivity } from './App.tsx'
 import { REPL_COMMANDS_FOR_TEST, waitForFrame } from './testFixtures.ts'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
@@ -179,4 +179,11 @@ test('maps structured provider plan activity into workspace todo state', () => {
     { content: 'implement', status: 'in_progress' },
     { content: 'verify', status: 'pending' },
   ])
+})
+
+test('keeps transient progress out of scrollback and preserves outcomes', () => {
+  expect(shouldPersistActivity({ kind: 'status', status: 'updated', title: 'Repairing' })).toBe(false)
+  expect(shouldPersistActivity({ kind: 'plan', status: 'updated', title: 'Plan updated' })).toBe(false)
+  expect(shouldPersistActivity({ kind: 'command', status: 'completed', title: 'Build passed' })).toBe(true)
+  expect(shouldPersistActivity({ kind: 'warning', status: 'warning', title: 'Build failed' })).toBe(true)
 })

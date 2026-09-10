@@ -133,9 +133,6 @@ export function App(props: AppProps) {
   const [planReady, setPlanReady] = useState(false)
   const [busy, setBusy] = useState(false)
   const busyRef = useRef(false)
-  useEffect(() => {
-    busyRef.current = busy
-  }, [busy])
   const [confirm, setConfirm] = useState<ConfirmRequest | null>(null)
   const [approval, setApproval] = useState<ApprovalRequest | null>(null)
   const [picker, setPicker] = useState<PickerRequest | null>(null)
@@ -289,6 +286,7 @@ export function App(props: AppProps) {
 
   const runOne = useCallback(
     async (text: string, opts?: { echo?: boolean }) => {
+      busyRef.current = true
       setBusy(true)
       setStatus('')
       abortedRef.current = false
@@ -365,6 +363,7 @@ export function App(props: AppProps) {
           if (line) store.notice(`⏺ ${line}`)
         }
         store.commit()
+        busyRef.current = false
         setBusy(false)
         setStatus('')
         // A plan-mode turn just proposed — offer to run it.

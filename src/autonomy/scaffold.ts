@@ -110,12 +110,14 @@ export async function ensureRepository(cwd: string, signal?: AbortSignal): Promi
  * `protect` is a set of repo-relative paths that were already dirty or untracked
  * before the run started and that the run did not touch — a run inside a repo
  * with unrelated uncommitted work must never sweep it into its own commit.
+ * `include`, when supplied, is the worker-owned allowlist for this commit.
  */
 export async function commitAll(
   cwd: string,
   message: string,
   signal?: AbortSignal,
   protect: readonly string[] = [],
+  include?: readonly string[],
 ): Promise<CommitResult> {
   const add = await execCapture('git', ['add', '-A'], cwd, signal)
   if (!add.ok) return { committed: false, excluded: [], warning: `git add failed: ${add.stderr || add.stdout}` }
@@ -123,6 +125,9 @@ export async function commitAll(
   const staged = await execCapture('git', ['diff', '--cached', '--name-only'], cwd, signal)
   const paths = staged.stdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean)
   const protectedSet = new Set(protect.map((p) => p.replace(/\\/g, '/')))
+  const included = include
+    ?.map((path) => path.replace(/\\/g, '/').replace(/^\.\//, '').replace(/\/$/, ''))
+    .filter((path) => path && path !== '.')
 
   // Second line of defence behind .gitignore. A commit is one `git push` away
   // from being public and permanent, so a secret must never reach one. Same
@@ -130,9 +135,11 @@ export async function commitAll(
   const excluded: string[] = []
   const preserved: string[] = []
   for (const path of paths) {
+    const normalized = path.replace(/\\/g, '/')
     const isSecret = isSensitivePath(path)
-    const isPreExisting = protectedSet.has(path.replace(/\\/g, '/'))
-    if (!isSecret && !isPreExisting) continue
+    const isPreExisting = protectedSet.has(normalized)
+    const isOutsideScope = included !== undefined && !included.some((owned) => normalized === owned || normalized.startsWith(`${owned}/`))
+    if (!isSecret && !isPreExisting && !isOutsideScope) continue
     await execCapture('git', ['reset', '--quiet', '--', path], cwd, signal)
     if (isSecret) excluded.push(path)
     else preserved.push(path)
@@ -140,7 +147,7 @@ export async function commitAll(
   if (paths.length === excluded.length + preserved.length) {
     const why = [
       excluded.length > 0 ? `hold secrets (${excluded.join(', ')})` : '',
-      preserved.length > 0 ? `was already modified before this run (${preserved.join(', ')})` : '',
+      preserved.length > 0 ? `was outside this commit's owned files (${preserved.join(', ')})` : '',
     ].filter(Boolean).join('; ')
     return { committed: false, excluded, ...(why ? { warning: `nothing to commit: every changed file ${why}` } : {}) }
   }
@@ -151,7 +158,9 @@ export async function commitAll(
   return {
     committed: true,
     excluded,
-    ...(preserved.length > 0 ? { warning: `left your pre-existing uncommitted changes out of the commit: ${preserved.join(', ')}` } : {}),
+    ...(preserved.length > 0
+      ? { warning: `left changes outside this commit's owned files uncommitted: ${preserved.join(', ')}` }
+      : {}),
   }
 }
 

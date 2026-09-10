@@ -59,6 +59,16 @@ test('a plan with nothing to verify against is rejected', () => {
   expect(expectError({ ...minimal, verification: undefined })).toContain('at least one shell command')
 })
 
+test('environment and directory probes are not accepted as proof of a build', () => {
+  const error = expectError({ ...minimal, verification: ['bun --version', 'ls workspace/my-app'] })
+  expect(error).toContain('only contains environment or directory-listing probes')
+})
+
+test('a real project check may be accompanied by an environment probe', () => {
+  const proposal = expectOk({ ...minimal, verification: ['bun --version', 'bun run build'] })
+  expect(proposal.verification).toEqual(['bun --version', 'bun run build'])
+})
+
 test('a step without instructions is rejected, naming its index', () => {
   const error = expectError({ ...minimal, steps: [{ title: 'no body' }] })
 
