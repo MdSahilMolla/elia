@@ -53,6 +53,10 @@ export const paths = {
   runs: join(stateDir, 'runs'),
   evolution: join(stateDir, 'evolution'),
   lessons: join(stateDir, 'lessons.md'),
+  /** Per-turn/run `(context, action, outcome, reward)` rows — the dataset for eventual distillation. */
+  trajectories: join(stateDir, 'trajectories'),
+  /** Per-lesson exposure ledger: which lessons a run saw, and how that run went. */
+  lessonsEfficacy: join(stateDir, 'lessons-efficacy.jsonl'),
   /** Newline-delimited prompt history for the interactive REPL, newest last. */
   promptHistory: join(stateDir, 'prompt-history'),
   workspace: workspaceDir,

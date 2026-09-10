@@ -53,9 +53,11 @@ import { isSensitivePath } from './sensitivePaths.ts'
 import { classifyStuck, type StuckRecovery } from './stuck.ts'
 import { checkRoot, classifyRegime, detectChecks, type VerificationRegime } from './detectChecks.ts'
 import { detectContradictions, recordCompletion } from './calibration.ts'
+import { deriveReward, recordTrajectory, refSystemPrompt } from '../trajectory/record.ts'
+import { ELIA_ROOT } from '../statePaths.ts'
 import { reliabilitySignal } from './reliability.ts'
 import type { CriticVerdict, Proposal } from './types.ts'
-import { appendActionAudit, writeRunReceipt } from './audit.ts'
+import { appendActionAudit, readActionLedger, writeRunReceipt } from './audit.ts'
 import { buildReviewDiffSection } from './reviewContext.ts'
 import { blockedInUnattendedMode, createActionGovernor, withActionGovernor, type ActionApproval, type ActionGovernor, type ActionGovernorStats, type GovernanceMode } from './governor.ts'
 import { GoalGraphStore, withGoalGraph, type GoalGraphStore as GoalGraphStoreType } from './goalGraph.ts'
@@ -436,6 +438,36 @@ async function runAutonomousTaskInternal(options: AutonomousRunOptions): Promise
     if (contradictions.length > 0) {
       journal.append('phase', { phase: 'learn', note: `completion contradiction: ${contradictions.join('; ')}` })
       writeSubStep(`⚠ completion verdict "${completion.state}/${completion.confidence}" doesn't match the facts: ${contradictions.join('; ')}`)
+    }
+    try {
+      // One trajectory row per run: the per-wave commits already hold the diff,
+      // so this row carries the goal, the tool sequence, and the graded outcome
+      // — the training signal a git checkout alone doesn't.
+      const ledger = readActionLedger(runId)
+      recordTrajectory({
+        corr: runId,
+        kind: 'autonomous',
+        prompt: goal,
+        systemPromptRef: refSystemPrompt('auto'),
+        tools: ledger.map((record) => ({ name: record.tool, ok: !record.isError })),
+        touched: [],
+        verify: verificationPassed ? 'pass' : 'fail',
+        regime: verificationRegime,
+        contradictions,
+        cwdIsEliaRoot: process.cwd() === ELIA_ROOT,
+        reward: deriveReward({
+          toolErrors: ledger.filter((record) => record.isError).length,
+          editRetries: 0,
+          verify: verificationPassed ? 'pass' : 'fail',
+          repairAttempts: 0,
+          aborted: finalOutcome === 'aborted',
+          completionState: completion.state,
+          regime: verificationRegime,
+          contradictions: contradictions.length,
+        }),
+      })
+    } catch {
+      // best-effort; recordTrajectory guards itself too
     }
     if (greenSnapshot) void discardTreeSnapshot(greenSnapshot)
     emitEvent('run_finished', { runId, goal: redactText(goal, 2000), outcome: finalOutcome, taskSessionId: parentTask.id, completion, elapsedMs: Date.now() - startedAt, usage, graph: graph.state() })

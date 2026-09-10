@@ -2023,6 +2023,8 @@ async function runInteractive(): Promise<void> {
     // Signals for the per-turn outcome record (competence map + regret nudge).
     let toolErrorCount = 0
     let editRetryCount = 0
+    // Ordered tool calls for this turn's trajectory row (the training dataset).
+    const toolTrace: { name: string; ok: boolean }[] = []
     let verifyResult: import('./autonomy/outcomes.ts').VerifyResult = 'none'
     let repairAttempts = 0
     const unregisterControls = taskSessions.registerControls(task.id, {
@@ -2069,6 +2071,7 @@ async function runInteractive(): Promise<void> {
         },
         onTool: (event) => {
           const action = event.isError ? `Retrying after ${event.name}` : event.name
+          toolTrace.push({ name: event.name, ok: !event.isError })
           if (event.name === 'preview' && !event.isError) previewedThisTurn = true
           if (event.isError) {
             toolErrorCount += 1
@@ -2267,6 +2270,38 @@ async function runInteractive(): Promise<void> {
           repairAttempts,
           aborted: stopRequested || controller.signal.aborted,
         })
+        try {
+          const { recordTrajectory, deriveReward, refSystemPrompt } = await import('./trajectory/record.ts')
+          const { ELIA_ROOT } = await import('./config.ts')
+          const snap = tracker.snapshot()
+          const touched = await Promise.all(
+            Object.entries(snap).map(async ([p, before]) => {
+              const file = Bun.file(p)
+              const after = (await file.exists()) ? await file.text() : null
+              return { path: p, before, after }
+            }),
+          )
+          recordTrajectory({
+            corr: task.id,
+            kind: 'interactive',
+            prompt: userText,
+            // Grouping key only — the base interactive prompt varies by mode, not per turn.
+            systemPromptRef: refSystemPrompt(mode),
+            tools: toolTrace,
+            touched,
+            verify: verifyResult,
+            cwdIsEliaRoot: process.cwd() === ELIA_ROOT,
+            reward: deriveReward({
+              toolErrors: toolErrorCount,
+              editRetries: editRetryCount,
+              verify: verifyResult,
+              repairAttempts,
+              aborted: stopRequested || controller.signal.aborted,
+            }),
+          })
+        } catch {
+          // Trajectory capture is best-effort; recordTrajectory also guards itself.
+        }
       }
     }
     checkpoints.push({
