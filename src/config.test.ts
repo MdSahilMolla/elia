@@ -1,6 +1,6 @@
 import { afterEach, expect, test } from 'bun:test'
 
-const { resolveThinking, describeThinking, config, getThinking, switchModel, switchThinking, turnContextPrompt } = await import('./config.ts')
+const { resolveThinking, describeThinking, describeReviewers, resolveReviewerRoute, config, getThinking, switchModel, switchThinking, turnContextPrompt } = await import('./config.ts')
 
 afterEach(() => {
   delete process.env.ELIA_THINKING
@@ -42,6 +42,26 @@ test('ELIA_THINKING_BUDGET overrides the default when valid', () => {
 test('an invalid or below-minimum ELIA_THINKING_BUDGET falls back to the default', () => {
   process.env.ELIA_THINKING_BUDGET = '100'
   expect(resolveThinking()).toEqual({ enabled: true, budgetTokens: 4096 })
+})
+
+test('reviewer route: default (ELIA_INDEPENDENT_CRITICS unset) keeps critics on the deep tier', () => {
+  delete process.env.ELIA_INDEPENDENT_CRITICS
+  delete process.env.ELIA_REVIEWER_PROVIDER
+  delete process.env.ELIA_REVIEWER_MODEL
+  const tier = { provider: config.provider, providerName: config.providerName, model: config.model, label: config.providerLabel }
+  expect(resolveReviewerRoute(tier, tier)).toBeUndefined()
+})
+
+test('reviewer route: ELIA_INDEPENDENT_CRITICS=off is explicit no', () => {
+  process.env.ELIA_INDEPENDENT_CRITICS = 'off'
+  const tier = { provider: config.provider, providerName: config.providerName, model: config.model, label: config.providerLabel }
+  expect(resolveReviewerRoute(tier, tier)).toBeUndefined()
+  delete process.env.ELIA_INDEPENDENT_CRITICS
+})
+
+test('describeReviewers reports whether review is model-independent', () => {
+  expect(describeReviewers()).toContain('review:')
+  expect(typeof config.independentReviewers).toBe('boolean')
 })
 
 test('describeThinking reports the capability honestly rather than staying silent', () => {

@@ -1618,7 +1618,7 @@ async function runInteractive(): Promise<void> {
   // can finish connecting in the background instead of gating the prompt.
   await loadRuntimeSkills({ deferMcp: interactiveTerminal })
   const { runTurn } = await import('./agent.ts')
-  const { config, describeThinking, getThinking, switchModel, switchThinking, THINKING_EFFORT_BUDGETS, DEFAULT_THINKING_BUDGET } =
+  const { config, describeThinking, describeReviewers, getThinking, switchModel, switchThinking, THINKING_EFFORT_BUDGETS, DEFAULT_THINKING_BUDGET } =
     await import('./config.ts')
   setCurrentUsageModel(config.model)
   const { PROVIDER_PRESET_NAMES, isProviderPresetConfigured, providerPresetDefaultModel, listProviderModels } = await import('./providers/registry.ts')
@@ -1644,6 +1644,7 @@ async function runInteractive(): Promise<void> {
       `fast          ${config.tiers.fast.providerName}/${config.tiers.fast.model}${config.cascadeEnabled ? '' : ' (same as deep)'}`,
       ...(roles.length > 0 ? ['', 'role routes', ...roles] : ['', 'role routes   none configured; roles use their fast/deep tier']),
       '',
+      describeReviewers(),
       'Independent dependency-wave workers run concurrently; shared-provider capacity is bounded and file collisions are serialized.',
     ].join('\n')
   }
