@@ -2,6 +2,7 @@ import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { classifyRegime, type VerificationRegime } from '../autonomy/detectChecks.ts'
 import type { RoleName } from '../autonomy/types.ts'
+import { readTrajectories } from '../trajectory/record.ts'
 
 /**
  * The raw material for Loop 2: autonomous runs that genuinely succeeded.
@@ -11,7 +12,15 @@ import type { RoleName } from '../autonomy/types.ts'
  * the verification was mechanical or empirical — never `judgment`. Distilling a
  * habit from a run that only self-critique blessed is how a system trains itself
  * to repeat its own untested guesses.
+ *
+ * The run receipt gives the structure (which role did what); the trajectory row
+ * (joined on `corr`) gives the graded outcome. A run that reached "verified" but
+ * only after several repair passes is not a clean pattern to hold up as an
+ * example, so its reward is low and it is filtered out.
  */
+
+/** Trajectory reward below this is not a clean example, even if the run verified. */
+const MIN_REWARD = 0.7
 
 export interface DistillableTrace {
   runId: string
@@ -23,6 +32,8 @@ export interface DistillableTrace {
   lessons: string[]
   failedActions: number
   at: number
+  /** Graded outcome from the trajectory log, when a matching row exists (0..1). */
+  reward?: number
 }
 
 interface RawReceipt {
@@ -41,6 +52,14 @@ interface RawReceipt {
 export function collectDistillableTraces(cwd = process.cwd()): DistillableTrace[] {
   const runsDir = join(cwd, '.elia', 'runs')
   if (!existsSync(runsDir)) return []
+
+  // corr -> reward scalar, from the trajectory log (best-effort; empty on older projects).
+  const rewardByCorr = new Map<string, number>()
+  try {
+    for (const row of readTrajectories('autonomous')) rewardByCorr.set(row.corr, row.reward.scalar)
+  } catch {
+    // no trajectory data yet
+  }
 
   const traces: DistillableTrace[] = []
   for (const entry of readdirSync(runsDir, { withFileTypes: true })) {
@@ -71,8 +90,15 @@ export function collectDistillableTraces(cwd = process.cwd()): DistillableTrace[
     const regime = classifyRegime(steps.flatMap((s) => s.files), verification, cwd)
     if (regime === 'judgment') continue
 
+    const runId = receipt.runId ?? entry.name
+    const reward = rewardByCorr.get(runId)
+    // A graded run that scored poorly is not a clean example — skip it. A run
+    // with no trajectory row (predates the feature) is kept on the receipt
+    // evidence alone.
+    if (reward !== undefined && reward < MIN_REWARD) continue
+
     traces.push({
-      runId: receipt.runId ?? entry.name,
+      runId,
       goal: receipt.goal ?? '(unknown goal)',
       regime,
       steps,
@@ -80,6 +106,7 @@ export function collectDistillableTraces(cwd = process.cwd()): DistillableTrace[
       lessons: Array.isArray(receipt.lessons) ? receipt.lessons.filter((l): l is string => typeof l === 'string') : [],
       failedActions: receipt.actions?.failed ?? 0,
       at: receipt.completedAt ?? 0,
+      reward,
     })
   }
 
