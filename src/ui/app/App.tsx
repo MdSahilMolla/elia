@@ -16,6 +16,7 @@ import { TextPrompt, type TextPromptRequest } from './components/TextPrompt.tsx'
 import { WorkingIndicator } from './components/WorkingIndicator.tsx'
 import { WorkspacePanel } from './components/WorkspacePanel.tsx'
 import { HelpOverlay } from './components/HelpOverlay.tsx'
+import { ErrorBoundary } from './components/ErrorBoundary.tsx'
 import { activeTodoList, type TodoItem } from '../../autonomy/todoList.ts'
 import { loadLessons } from '../../autonomy/lessons.ts'
 import { taskSessions, type TaskSession } from '../../taskSessions.ts'
@@ -568,9 +569,18 @@ export function App(props: AppProps) {
   // decision is about. The transcript (append-only) and the menu itself stay.
   const modalOpen = confirm !== null || approval !== null || picker !== null || textPrompt !== null
 
+  // A render throw anywhere below used to kill the whole Ink tree and drop the
+  // user to a bare shell mid-turn (Devin audit #1). Boundaries keep the rest of
+  // the frame — crucially the input — alive, and log what broke to scrollback.
+  const boundaryError = useCallback((error: Error, area: string) => {
+    store.error(`UI: the ${area} failed to render — ${error.message}`)
+  }, [store])
+
   return (
     <Box flexDirection="column">
-      <Transcript committed={snap.committed} live={snap.live} expandedAll={expandedAll} />
+      <ErrorBoundary area="transcript" onError={boundaryError}>
+        <Transcript committed={snap.committed} live={snap.live} expandedAll={expandedAll} />
+      </ErrorBoundary>
 
       {snap.committed.length === 0 && snap.live.length === 0 && (
         <Box flexDirection="column" marginTop={1}>
@@ -586,7 +596,11 @@ export function App(props: AppProps) {
         </Box>
       )}
 
-      {!modalOpen && <WorkspacePanel plan={visiblePlan} agents={agents} since={sessionStartedAt} sessionId={props.sessionId} />}
+      {!modalOpen && (
+        <ErrorBoundary area="workspace panel" onError={boundaryError}>
+          <WorkspacePanel plan={visiblePlan} agents={agents} since={sessionStartedAt} sessionId={props.sessionId} />
+        </ErrorBoundary>
+      )}
       {previewUrl && !modalOpen && (
         <Box marginTop={1}>
           <Text color={palette.toolName}>▸ Preview </Text>
@@ -614,6 +628,7 @@ export function App(props: AppProps) {
       )}
 
       <Box marginTop={1} flexDirection="column">
+        <ErrorBoundary area="input box" onError={boundaryError}>
         <InputBox
           commands={props.commands}
           mode={mode}
@@ -634,20 +649,23 @@ export function App(props: AppProps) {
           }}
           onEof={() => exit()}
         />
-        <StatusBar
-          model={env.model}
-          mode={mode}
-          contextTokens={contextTokens}
-          contextLimit={contextLimit}
-          sessionInput={usage.usage.inputTokens + usage.usage.cacheReadTokens}
-          sessionOutput={usage.usage.outputTokens}
-          costUsd={estimateCostUsd(env.model, usage.usage)}
-          providerName={env.providerName}
-          busy={busy}
-          queued={queue.length}
-          steering={steeringCount}
-          repo={repo}
-        />
+        </ErrorBoundary>
+        <ErrorBoundary area="status bar" onError={boundaryError}>
+          <StatusBar
+            model={env.model}
+            mode={mode}
+            contextTokens={contextTokens}
+            contextLimit={contextLimit}
+            sessionInput={usage.usage.inputTokens + usage.usage.cacheReadTokens}
+            sessionOutput={usage.usage.outputTokens}
+            costUsd={estimateCostUsd(env.model, usage.usage)}
+            providerName={env.providerName}
+            busy={busy}
+            queued={queue.length}
+            steering={steeringCount}
+            repo={repo}
+          />
+        </ErrorBoundary>
       </Box>
     </Box>
   )
