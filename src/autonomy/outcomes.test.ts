@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { appendFileSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { classifyDomain, competenceReport, domainsInPlay, domainsOf, recordOutcome, regretNudge, renderCompetence, touchedWeakDomain, weakDomainCaution } from './outcomes.ts'
+import { classifyDomain, competenceReport, domainsInPlay, domainsOf, loadOutcomes, recordOutcome, regretNudge, renderCompetence, touchedWeakDomain, weakDomainCaution } from './outcomes.ts'
 import type { TurnOutcome } from './outcomes.ts'
 
 let path: string
@@ -66,6 +66,18 @@ test('regretNudge fires only after a rough turn', () => {
   const nudge = regretNudge(path)
   expect(nudge).toContain('friction')
   expect(nudge).toContain('note_lesson')
+})
+
+test('recordOutcome round-trips the corr field', () => {
+  recordOutcome(turn({ corr: 'run-abc123' }), path)
+  expect(loadOutcomes(path).at(-1)?.corr).toBe('run-abc123')
+})
+
+test('loadOutcomes tolerates a legacy line with no corr', () => {
+  appendFileSync(path, `${JSON.stringify({ at: Date.now(), prompt: 'x', filesChanged: 1, domains: ['code'], editRetries: 0, toolErrors: 0, verify: 'pass', repairAttempts: 0, aborted: false })}\n`)
+  const last = loadOutcomes(path).at(-1)
+  expect(last).toBeDefined()
+  expect(last?.corr).toBeUndefined()
 })
 
 test('domainsInPlay reads the prompt and the paths', () => {

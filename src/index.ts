@@ -119,7 +119,7 @@ function requestedAgentMode(): AgentMode {
   return 'dev'
 }
 
-const SUBCOMMANDS = ['auto', 'agent', 'evolve', 'gap', 'values', 'bench', 'bench-latency', 'skills', 'runs', 'fork', 'resume', 'schedule', 'daemon', 'doctor', 'config', 'codex-login', 'control', 'bridge', 'workspace'] as const
+const SUBCOMMANDS = ['auto', 'agent', 'evolve', 'gap', 'values', 'distill', 'bench', 'bench-latency', 'skills', 'runs', 'fork', 'resume', 'schedule', 'daemon', 'doctor', 'config', 'codex-login', 'control', 'bridge', 'workspace'] as const
 type Subcommand = (typeof SUBCOMMANDS)[number]
 
 function printHelp(): void {
@@ -2251,6 +2251,7 @@ async function runInteractive(): Promise<void> {
         const { recordOutcome, domainsOf } = await import('./autonomy/outcomes.ts')
         const changedPaths = Object.keys(tracker.snapshot())
         recordOutcome({
+          corr: task.id,
           prompt: redactText(userText, 120),
           filesChanged: changedPaths.length,
           domains: domainsOf(changedPaths),
