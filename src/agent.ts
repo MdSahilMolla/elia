@@ -1,4 +1,5 @@
 import { config, systemPromptForMode, turnContextPrompt } from './config.ts'
+import { valueCoreSection } from './values/core.ts'
 import { runAgentLoop, type ConversationMessage, type RunAgentLoopResult, type ToolEvent } from './agentLoop.ts'
 import { setParentSteering } from './autonomy/steering.ts'
 import type { Provider, ProviderActivity } from './providers/types.ts'
@@ -151,9 +152,12 @@ async function runScopedTurn(
   // memory + the static plan-mode instructions), while the query-ranked project
   // memory — which changes with every user message — rides in a separate
   // `systemDynamicPrompt` block that never invalidates the cached stable prefix.
-  const systemPrompt = options.planMode
+  // The Value Core rides in the stable prefix (authoritative, cache-friendly).
+  // While it is still a draft this returns '' — safe to wire in ahead of review.
+  const valueCore = valueCoreSection()
+  const systemPrompt = (options.planMode
     ? `${baseSystemPrompt}\n\n# PLAN MODE\nYou are planning, not doing. Use only the read-only tools to investigate. Do NOT write files, run commands, or make any change. When you have enough understanding, stop and present a concrete plan: a short numbered list of the exact steps you would take (files to touch, what changes, how you would verify). Keep it tight. The user will approve, edit, or reject it before anything runs.`
-    : baseSystemPrompt
+    : baseSystemPrompt) + valueCore
   // The wall-clock date leads the dynamic block in every mode: it must reflect
   // real time, and it must not bake into the cached stable prefix (a daemon can
   // stay up across midnight, or for days).

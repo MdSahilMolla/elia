@@ -34,7 +34,8 @@ import { commitAll, scaffoldProject } from './scaffold.ts'
 import { publishProject } from './publish.ts'
 import { emitEvent, machineReadable } from '../ui/runtime.ts'
 import { redactText } from '../ui/redact.ts'
-import { appendLessons, createLessonsTool, renderLessons } from './lessons.ts'
+import { appendLessons, consumeInjectedLessonKeys, createLessonsTool, renderLessons } from './lessons.ts'
+import { recordLessonExposure } from './lessonEfficacy.ts'
 import {
   createVerdictTool,
   describeIssues,
@@ -51,11 +52,13 @@ import { applyPlanRevisions, createPlanRevisionTool, MAX_PLAN_REVISIONS } from '
 import { assumptionOutcome, auditPlanFeasibility, createAssumptionTool } from './assumptions.ts'
 import { isSensitivePath } from './sensitivePaths.ts'
 import { classifyStuck, type StuckRecovery } from './stuck.ts'
-import { checkRoot, detectChecks } from './detectChecks.ts'
+import { checkRoot, classifyRegime, detectChecks, type VerificationRegime } from './detectChecks.ts'
 import { detectContradictions, recordCompletion } from './calibration.ts'
+import { deriveReward, recordTrajectory, refSystemPrompt } from '../trajectory/record.ts'
+import { ELIA_ROOT } from '../statePaths.ts'
 import { reliabilitySignal } from './reliability.ts'
 import type { CriticVerdict, Proposal } from './types.ts'
-import { appendActionAudit, writeRunReceipt } from './audit.ts'
+import { appendActionAudit, readActionLedger, writeRunReceipt } from './audit.ts'
 import { buildReviewDiffSection } from './reviewContext.ts'
 import { blockedInUnattendedMode, createActionGovernor, withActionGovernor, type ActionApproval, type ActionGovernor, type ActionGovernorStats, type GovernanceMode } from './governor.ts'
 import { GoalGraphStore, withGoalGraph, type GoalGraphStore as GoalGraphStoreType } from './goalGraph.ts'
@@ -334,6 +337,10 @@ async function runAutonomousTaskInternal(options: AutonomousRunOptions): Promise
   let planApproved = false
   let verificationPassed = false
   let reviewPassed = false
+  // How much this run's verification is worth (mechanical > empirical > judgment).
+  // Defaults to the safe floor so an early abort never claims more; the verify
+  // phase sets the real value once the changed files are known.
+  let verificationRegime: VerificationRegime = 'judgment'
   // The last verified-good tree state, for a wrong-approach rewind. Assigned once
   // the verify phase begins; declared here so `done()` can always clean it up.
   let greenSnapshot: TreeSnapshot | undefined
@@ -425,12 +432,48 @@ async function runAutonomousTaskInternal(options: AutonomousRunOptions): Promise
       unresolvedActions: graph.state().actions.filter((action) => action.state !== 'completed').length,
       pendingApprovals: completion.pendingApprovals,
       blockedByBudget: actionBudget.blockedByBudget,
+      regime: verificationRegime,
     }
     recordCompletion(runId, completion, completionFacts)
     const contradictions = detectContradictions(completion.state, completion.confidence, completionFacts)
+    recordLessonExposure(runId, consumeInjectedLessonKeys(), {
+      verify: verificationPassed ? 'pass' : 'fail',
+      regime: verificationRegime,
+      clean: verificationPassed && contradictions.length === 0,
+    })
     if (contradictions.length > 0) {
       journal.append('phase', { phase: 'learn', note: `completion contradiction: ${contradictions.join('; ')}` })
       writeSubStep(`⚠ completion verdict "${completion.state}/${completion.confidence}" doesn't match the facts: ${contradictions.join('; ')}`)
+    }
+    try {
+      // One trajectory row per run: the per-wave commits already hold the diff,
+      // so this row carries the goal, the tool sequence, and the graded outcome
+      // — the training signal a git checkout alone doesn't.
+      const ledger = readActionLedger(runId)
+      recordTrajectory({
+        corr: runId,
+        kind: 'autonomous',
+        prompt: goal,
+        systemPromptRef: refSystemPrompt(activeMode()),
+        tools: ledger.map((record) => ({ name: record.tool, ok: !record.isError })),
+        touched: [],
+        verify: verificationPassed ? 'pass' : 'fail',
+        regime: verificationRegime,
+        contradictions,
+        cwdIsEliaRoot: process.cwd() === ELIA_ROOT,
+        reward: deriveReward({
+          toolErrors: ledger.filter((record) => record.isError).length,
+          editRetries: 0,
+          verify: verificationPassed ? 'pass' : 'fail',
+          repairAttempts: 0,
+          aborted: finalOutcome === 'aborted',
+          completionState: completion.state,
+          regime: verificationRegime,
+          contradictions: contradictions.length,
+        }),
+      })
+    } catch {
+      // best-effort; recordTrajectory guards itself too
     }
     if (greenSnapshot) void discardTreeSnapshot(greenSnapshot)
     emitEvent('run_finished', { runId, goal: redactText(goal, 2000), outcome: finalOutcome, taskSessionId: parentTask.id, completion, elapsedMs: Date.now() - startedAt, usage, graph: graph.state() })
@@ -1065,6 +1108,14 @@ Read the changed files in full context. Improve only concrete issues directly re
   let lastRepairReport = ''
   let pendingApproachChange: string | undefined
   const verificationRoot = checkRoot(proposal.steps.flatMap((step) => step.files), process.cwd())
+  // How much a "looks fine" verdict on this run is actually worth. A
+  // `judgment`-regime run has nothing but self-critique behind it, so its
+  // conclusions stay in this session and never become durable lessons.
+  verificationRegime = classifyRegime(
+    proposal.steps.flatMap((step) => step.files),
+    proposal.verification,
+    process.cwd(),
+  )
   // Baseline: the post-execute state. Each passing verification refreshes this
   // to the current state; a wrong-approach stall rewinds the working tree here.
   greenSnapshot = await captureTreeSnapshot(process.cwd(), runDir(runId))
@@ -1319,7 +1370,7 @@ Judge what is there, not what the code looks like it would probably do. A criter
         if (stuck.question) writeBlock('Needs a decision from you', stuck.question)
         journal.append('phase', { phase: 'reflect', attempt, note: `stopped (${progress.trend} / ${stuck.category}): ${stuck.reason}${stuck.question ? ` Question: ${stuck.question}` : ''}` })
         const auto = repeatedFailureLesson({ goal, gate, repeated: progress.repeated, attempts: attempt })
-        const lessons = await captureLessons(goal, proposal, 'unresolved', journal, track, governor, graph, runSignal, auto ? [auto] : [])
+        const lessons = await captureLessons(goal, proposal, 'unresolved', journal, track, governor, graph, verificationRegime, runSignal, auto ? [auto] : [])
         return done('needs-attention', { proposal, verdict, lessons })
       }
     }
@@ -1332,7 +1383,7 @@ Judge what is there, not what the code looks like it would probably do. A criter
       // approach to warn a future run about.
       const recurred = progress.trend === 'stalled' || progress.trend === 'diverging' ? progress.repeated : []
       const auto = repeatedFailureLesson({ goal, gate, repeated: recurred, attempts: attempt })
-      const lessons = await captureLessons(goal, proposal, 'unresolved', journal, track, governor, graph, runSignal, auto ? [auto] : [])
+      const lessons = await captureLessons(goal, proposal, 'unresolved', journal, track, governor, graph, verificationRegime, runSignal, auto ? [auto] : [])
       return done('needs-attention', { proposal, verdict, lessons })
     }
 
@@ -1412,7 +1463,7 @@ Judge what is there, not what the code looks like it would probably do. A criter
   // --- Learn ---------------------------------------------------------------
 
   taskSessions.update(parentTask.id, { status: 'running', action: 'Learning', detail: 'Capturing durable lessons for future runs' })
-  const lessons = captureLearning ? await captureLessons(goal, proposal, 'succeeded', journal, track, governor, graph, runSignal) : []
+  const lessons = captureLearning ? await captureLessons(goal, proposal, 'succeeded', journal, track, governor, graph, verificationRegime, runSignal) : []
 
   writeSummary('Run complete', [
     ['run', runId],
@@ -1443,12 +1494,24 @@ async function captureLessons(
   track: (usage: Usage) => void,
   governor: ActionGovernor,
   graph: GoalGraphStoreType,
+  /** How much this run's verification was actually worth — `judgment` runs record nothing durable. */
+  regime: VerificationRegime,
   signal?: AbortSignal,
   /** Deterministic lessons the loop already knows to record (e.g. a repeated repair failure). */
   deterministic: string[] = [],
 ): Promise<string[]> {
   writePhase('learn')
-  journal.append('phase', { phase: 'learn' })
+  journal.append('phase', { phase: 'learn', regime })
+
+  // Nothing outside elia's own opinion checked this run. A "lesson" drawn from a
+  // review-only pass is exactly the closed-loop signal that lets a reasoner
+  // entrench its own mistakes across runs, so it is kept out of the durable
+  // store — the run's findings still live in this session's transcript.
+  if (regime === 'judgment') {
+    writeSubStep('verification was judgement-only (no mechanical or empirical check) — not recording cross-run lessons from this run')
+    journal.append('lesson', { lessons: [], source: 'skipped:judgment-regime' })
+    return []
+  }
 
   // Recorded first and unconditionally: the model-driven pass below can decide
   // there is "nothing durable", but a repair loop that gave up against the same

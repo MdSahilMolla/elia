@@ -2,7 +2,7 @@ import { afterEach, beforeEach, expect, test } from 'bun:test'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { changedCodeFiles, changedStaticPages, checkRoot, detectChecks } from './detectChecks.ts'
+import { changedCodeFiles, changedStaticPages, checkRoot, classifyRegime, detectChecks, weakestRegime } from './detectChecks.ts'
 
 let dir: string
 beforeEach(() => {
@@ -149,4 +149,45 @@ test('checkRoot still prefers a scaffolded sub-project that has its own manifest
 
 test('changedStaticPages picks out the HTML a turn wrote', () => {
   expect(changedStaticPages(['a/index.html', 'b/style.css', 'c/app.ts', 'd/page.HTM'])).toEqual(['a/index.html', 'd/page.HTM'])
+})
+
+test('classifyRegime: a project with typecheck + tests is mechanical', () => {
+  writeFileSync(join(dir, 'package.json'), JSON.stringify({ scripts: { typecheck: 'tsc --noEmit', test: 'bun test' } }))
+  writeFileSync(join(dir, 'bun.lock'), '')
+  const file = join(dir, 'src', 'a.ts')
+  mkdirSync(join(dir, 'src'), { recursive: true })
+  writeFileSync(file, 'export const a = 1')
+  expect(classifyRegime([file], [], dir)).toBe('mechanical')
+})
+
+test('classifyRegime: explicit test command wins even without an inferable project', () => {
+  const file = join(dir, 'thing.ts')
+  writeFileSync(file, 'export const a = 1')
+  expect(classifyRegime([file], ['bun test src/'], dir)).toBe('mechanical')
+})
+
+test('classifyRegime: a lone static page is empirical', () => {
+  const page = join(dir, 'index.html')
+  writeFileSync(page, '<h1>hi</h1>')
+  expect(classifyRegime([page], [], dir)).toBe('empirical')
+})
+
+test('classifyRegime: no project, no static page, no command is judgment', () => {
+  const file = join(dir, 'notes', 'thing.ts')
+  mkdirSync(join(dir, 'notes'), { recursive: true })
+  writeFileSync(file, 'export const a = 1')
+  expect(classifyRegime([file], [], dir)).toBe('judgment')
+})
+
+test('classifyRegime: a non-mechanical declared command does not lift the regime', () => {
+  const file = join(dir, 'notes', 'thing.ts')
+  mkdirSync(join(dir, 'notes'), { recursive: true })
+  writeFileSync(file, 'export const a = 1')
+  expect(classifyRegime([file], ['echo done', 'node scripts/deploy.js'], dir)).toBe('judgment')
+})
+
+test('weakestRegime returns the floor', () => {
+  expect(weakestRegime(['mechanical', 'judgment', 'empirical'])).toBe('judgment')
+  expect(weakestRegime(['mechanical', 'empirical'])).toBe('empirical')
+  expect(weakestRegime(['mechanical'])).toBe('mechanical')
 })

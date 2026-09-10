@@ -1,4 +1,4 @@
-import { appendFileSync, chmodSync, lstatSync, mkdirSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { appendFileSync, chmodSync, lstatSync, mkdirSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 
 const PRIVATE_DIRECTORY_MODE = 0o700
@@ -69,6 +69,35 @@ export function appendSecureFile(path: string, content: string): void {
   ensureSecureDirectory(dirname(path))
   appendFileSync(path, content, { mode: PRIVATE_FILE_MODE })
   chmodSync(path, PRIVATE_FILE_MODE)
+}
+
+/**
+ * Size-cap an append-only log: when `path` exceeds `maxBytes`, shift it to
+ * `path.1`, `path.1` to `path.2`, and so on, dropping anything past `keep`
+ * generations. A trajectory log that grew without bound would fill the disk on
+ * a long-lived project; rotation keeps a bounded recent window while the older
+ * generations stay available for a training export until they age out.
+ * Best-effort — a rotation that fails leaves the current file in place.
+ */
+export function rotateSecureFile(path: string, maxBytes: number, keep = 3): void {
+  try {
+    if (statSync(path).size < maxBytes) return
+  } catch {
+    return // no file yet, or unreadable — nothing to rotate
+  }
+  try {
+    rmSync(`${path}.${keep}`, { force: true })
+    for (let n = keep - 1; n >= 1; n -= 1) {
+      try {
+        renameSyncWithRetry(`${path}.${n}`, `${path}.${n + 1}`)
+      } catch {
+        // that generation doesn't exist — skip it
+      }
+    }
+    renameSyncWithRetry(path, `${path}.1`)
+  } catch {
+    // Leave the current file as-is; the next append still lands.
+  }
 }
 
 /** Asynchronously write an owner-readable file using Bun’s byte/text writer. */

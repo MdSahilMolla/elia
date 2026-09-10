@@ -2,7 +2,8 @@ import { existsSync, readFileSync } from 'node:fs'
 import { writeSecureFile } from '../securePersistence.ts'
 import { paths, tierConfig } from '../config.ts'
 import type { ContentBlock } from '../providers/types.ts'
-import { loadLessons, rewriteLessons, type Lesson } from '../autonomy/lessons.ts'
+import { loadLessons, retireLessons, rewriteLessons, type Lesson } from '../autonomy/lessons.ts'
+import { competenceReport } from '../autonomy/outcomes.ts'
 import { loadNotes, rewriteNotes } from './notes.ts'
 
 /**
@@ -30,6 +31,8 @@ export interface ConsolidationResult {
   lessonsBefore: number
   lessonsAfter: number
   notesRemoved: number
+  /** Lessons dropped by the deterministic efficacy pass (no measurable lift). */
+  lessonsRetired?: string[]
 }
 
 const SYSTEM_PROMPT = `You tidy an engineering agent's long-term memory for one project. You are given its LESSONS (durable "know this before you start" facts) and its NOTES (durable facts about how the project and its dependencies behave).
@@ -123,10 +126,6 @@ export async function consolidateBrain(options: ConsolidateOptions = {}): Promis
   const notesRemoved = notes.length - keptNotes.length
 
   const lessonsChanged = !sameList(lessons.map((l) => l.text), parsed.lessons)
-  if (!lessonsChanged && notesRemoved === 0) {
-    markConsolidated(consolidatedAtPath)
-    return { changed: false, reason: 'already tidy', lessonsBefore: lessons.length, lessonsAfter: lessons.length, notesRemoved: 0 }
-  }
 
   if (lessonsChanged) {
     const now = Date.now()
@@ -139,13 +138,22 @@ export async function consolidateBrain(options: ConsolidateOptions = {}): Promis
   }
   if (notesRemoved > 0) rewriteNotes(keptNotes, notesPath)
 
+  // Deterministic second pass, always run: drop lessons that have ridden along
+  // in enough runs to judge and moved nothing. The model pass above only
+  // merges/de-dupes on wording; this is the one that acts on measured effect.
+  const retired = retireLessons(competenceReport().cleanRate, { lessonsPath })
+
   markConsolidated(consolidatedAtPath)
+
+  const lessonsAfterModel = lessonsChanged ? parsed.lessons.length : lessons.length
+  const changed = lessonsChanged || notesRemoved > 0 || retired.retired.length > 0
   return {
-    changed: true,
-    reason: 'consolidated',
+    changed,
+    reason: changed ? 'consolidated' : 'already tidy',
     lessonsBefore: lessons.length,
-    lessonsAfter: lessonsChanged ? parsed.lessons.length : lessons.length,
+    lessonsAfter: lessonsAfterModel - retired.retired.length,
     notesRemoved,
+    lessonsRetired: retired.retired.length > 0 ? retired.retired : undefined,
   }
 }
 

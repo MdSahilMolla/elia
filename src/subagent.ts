@@ -3,7 +3,7 @@ import { runAgentLoop, lastAssistantText, type ConversationMessage, type ToolEve
 import type { Usage } from './providers/types.ts'
 import type { Tool } from './tools/types.ts'
 import { battmannTools, businessTools } from './tools/registry.ts'
-import { toolsForRole, role as roleDefinition } from './autonomy/roles.ts'
+import { toolsForRole, role as roleDefinition, promptForRole } from './autonomy/roles.ts'
 import { currentAgent, withAgentIdentity } from './autonomy/context.ts'
 import { drainParentSteering } from './autonomy/steering.ts'
 import { activeBlackboard } from './autonomy/blackboard.ts'
@@ -163,7 +163,7 @@ export async function runSubAgent(request: SubAgentRequest): Promise<SubAgentRes
     withTodoList(createTodoList(), () =>
     withActionGovernor(governor, () => withGoalGraphIfAvailable(graph, () => withGoalNode(nodeId, () => runAgentLoop({
       messages,
-      systemPrompt: `${basePrompt}\n\n${turnContextPrompt()}\n\n## Your role\n${definition.prompt}`,
+      systemPrompt: `${basePrompt}\n\n${turnContextPrompt()}\n\n## Your role\n${promptForRole(request.role)}`,
       tools,
       provider: tier.provider,
       providerName: tier.providerName,

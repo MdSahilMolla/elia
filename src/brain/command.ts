@@ -16,7 +16,10 @@ export async function runBrainCommand(arg: string): Promise<string> {
   if (query === 'consolidate') {
     const result = await consolidateBrain({ force: true })
     if (!result.changed) return `Brain consolidation: ${result.reason}.`
-    return `Brain consolidated: lessons ${result.lessonsBefore} → ${result.lessonsAfter}, ${result.notesRemoved} redundant note(s) dropped.`
+    const retired = result.lessonsRetired?.length
+      ? `, ${result.lessonsRetired.length} retired for no measurable lift`
+      : ''
+    return `Brain consolidated: lessons ${result.lessonsBefore} → ${result.lessonsAfter}, ${result.notesRemoved} redundant note(s) dropped${retired}.`
   }
 
   const items = await loadBrainItems({ currentSessionId: getActiveLedgerSession()?.id })

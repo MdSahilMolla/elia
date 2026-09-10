@@ -21,6 +21,13 @@ export type VerifyResult = 'pass' | 'fail' | 'skipped' | 'none'
 
 export interface TurnOutcome {
   at: number
+  /**
+   * Correlation id that joins this record to the trajectory log and the
+   * lesson-efficacy log for the same unit of work. `runId` for an autonomous
+   * run, the interactive task-session id for an interactive turn. Optional —
+   * lines written before this field existed have none.
+   */
+  corr?: string
   /** Short redacted prompt, for context when reading the log. */
   prompt: string
   filesChanged: number

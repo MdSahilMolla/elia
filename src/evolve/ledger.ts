@@ -122,9 +122,115 @@ export function renderLedgerForPrompt(path = LEDGER_PATH): string {
       : '### Tried and rejected\n(nothing yet)',
   )
 
+  const learning = learningRate(records)
+  if (learning.generations >= 2) {
+    const pct = (n: number) => `${(n * 100).toFixed(1)}%`
+    const lines = [
+      `### Learning trajectory`,
+      `Over the last ${learning.window} generation(s): ${pct(learning.deltaPassRatePerGen)} realized pass rate per generation, ${learning.promotionsPerWindow} promoted, ${pct(learning.fitnessPerKTokens)} gain per 1k candidate-eval tokens.`,
+      learning.trend === 'stalled'
+        ? `Trend: STALLED — recent generations banked no gain. The benchmark is likely saturated for the levers tried so far; propose a structurally different change (a new tool, a different role split, a planning-loop rewrite), not another prompt tweak.`
+        : `Trend: ${learning.trend}.`,
+    ]
+    sections.push(lines.join('\n'))
+  }
+
   return sections.join('\n\n')
 }
 
 function formatRate(rate: number | undefined): string {
   return rate === undefined ? '?' : `${Math.round(rate * 100)}%`
+}
+
+/**
+ * Is the self-improvement loop actually compounding, or just spinning?
+ *
+ * A fixed benchmark saturates: once candidates all score near the ceiling,
+ * `compareScorecards` rejects every tie and the loop hill-climbs a flat plane
+ * forever, burning a full benchmark run per generation for no gain. That failure
+ * is invisible in the per-generation verdict ("rejected: no measurable
+ * improvement") — it only shows up as a *trend* across generations. This is that
+ * trend, derived from the ledger with no new stored fields: realized pass-rate
+ * gain per generation, per 1k candidate-eval tokens, and per wall-clock hour,
+ * plus a coarse accelerating/steady/decelerating/stalled call so the
+ * hypothesiser knows when to stop tweaking and try a structurally different
+ * lever.
+ */
+export interface LearningSignal {
+  generations: number
+  promotions: number
+  /** Promotions within the last `window` generations. */
+  promotionsPerWindow: number
+  window: number
+  /** Mean realized Δ passRate per generation over the window (0 for a rejected generation). */
+  deltaPassRatePerGen: number
+  /** Realized Δ passRate in the window per 1,000 tokens spent measuring candidates. */
+  fitnessPerKTokens: number
+  /** Realized Δ passRate in the window per hour of candidate-measurement wall-clock. */
+  fitnessPerWallClockHour: number
+  trend: 'accelerating' | 'steady' | 'decelerating' | 'stalled' | 'unknown'
+}
+
+const LEARNING_WINDOW = 5
+
+/** Realized pass-rate gain a generation actually banked: the promotion delta, or 0. */
+function realizedGain(record: GenerationRecord): number {
+  if (record.verdict !== 'promoted') return 0
+  const before = record.baseline?.passRate
+  const after = record.candidate?.passRate
+  if (before === undefined || after === undefined) return 0
+  return Math.max(0, after - before)
+}
+
+export function learningRate(records: GenerationRecord[], window = LEARNING_WINDOW): LearningSignal {
+  const ordered = [...records].sort((a, b) => a.generation - b.generation)
+  const promotions = ordered.filter((r) => r.verdict === 'promoted').length
+  const recent = ordered.slice(-window)
+  const prior = ordered.slice(-window * 2, -window)
+
+  const gainOf = (rows: GenerationRecord[]) => rows.reduce((sum, r) => sum + realizedGain(r), 0)
+  const recentGain = gainOf(recent)
+  const priorGain = gainOf(prior)
+
+  const tokens = recent.reduce((sum, r) => sum + (r.candidate?.totalTokens ?? 0), 0)
+  const wallMs = recent.reduce((sum, r) => sum + (r.candidate?.wallClockMs ?? r.candidate?.totalElapsedMs ?? 0), 0)
+
+  const recentMean = recent.length > 0 ? recentGain / recent.length : 0
+  const priorMean = prior.length > 0 ? priorGain / prior.length : 0
+  const promotionsPerWindow = recent.filter((r) => r.verdict === 'promoted').length
+
+  let trend: LearningSignal['trend']
+  if (ordered.length < 2) {
+    trend = 'unknown'
+  } else if (recentMean < 1e-4 && promotionsPerWindow === 0) {
+    trend = 'stalled'
+  } else if (prior.length === 0) {
+    trend = promotionsPerWindow > 0 ? 'accelerating' : 'steady'
+  } else if (recentMean > priorMean * 1.1 + 1e-4) {
+    trend = 'accelerating'
+  } else if (recentMean < priorMean * 0.9 - 1e-4) {
+    trend = 'decelerating'
+  } else {
+    trend = 'steady'
+  }
+
+  return {
+    generations: ordered.length,
+    promotions,
+    promotionsPerWindow,
+    window: recent.length,
+    deltaPassRatePerGen: recentMean,
+    fitnessPerKTokens: tokens > 0 ? recentGain / (tokens / 1000) : 0,
+    fitnessPerWallClockHour: wallMs > 0 ? recentGain / (wallMs / 3_600_000) : 0,
+    trend,
+  }
+}
+
+/** One-line learning-trajectory readout for `elia evolve` / `elia bench`. */
+export function renderLearningLine(path = LEDGER_PATH): string {
+  const records = readLedger(path)
+  if (records.length === 0) return 'Learning trajectory: no generations recorded yet.'
+  const s = learningRate(records)
+  const pct = (n: number) => `${(n * 100).toFixed(1)}%`
+  return `Learning trajectory: ${s.trend} — last ${s.window} generation(s) ${pct(s.deltaPassRatePerGen)} pass rate/gen, ${s.promotionsPerWindow} promoted (${s.promotions}/${s.generations} all-time)`
 }

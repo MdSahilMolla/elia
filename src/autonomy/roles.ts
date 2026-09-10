@@ -2,6 +2,7 @@ import type { Tier } from '../config.ts'
 import type { Tool } from '../tools/types.ts'
 import { allWorkerTools, getSynthesizedTools } from '../tools/registry.ts'
 import type { RoleName } from './types.ts'
+import { learnedSuffixFor } from '../distill/fragments.ts'
 
 /**
  * The kinds of worker elia can put on a job.
@@ -249,6 +250,15 @@ Report which documents you updated and what changed.`,
 
 export function role(name: RoleName): Role {
   return ROLES[name]
+}
+
+/**
+ * A role's system prompt plus anything Loop 2 distillation has since made a
+ * standing instruction for that role (see src/distill/fragments.ts). Sub-agents
+ * use this instead of `role(name).prompt` directly.
+ */
+export function promptForRole(name: RoleName): string {
+  return `${ROLES[name].prompt}${learnedSuffixFor(name)}`
 }
 
 /** Resolves a role's allowlist against the live tool set, including synthesized skills. */

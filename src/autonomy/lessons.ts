@@ -3,6 +3,7 @@ import { dirname } from 'node:path'
 import { appendSecureFile, ensureSecureDirectory, hardenSecureFile, writeSecureFile } from '../securePersistence.ts'
 import { paths } from '../config.ts'
 import type { Tool } from '../tools/types.ts'
+import { loadEfficacy, lessonLift } from './lessonEfficacy.ts'
 
 /**
  * What elia learned the hard way, carried across runs.
@@ -22,9 +23,38 @@ export interface Lesson {
   source?: string
   /** 0–1 confidence; omitted means unknown / legacy. */
   confidence?: number
+  /**
+   * Content-addressed identity, derived on read (not stored in the file). Joins
+   * a lesson to its rows in `.elia/lessons-efficacy.jsonl` so we can tell whether
+   * carrying it actually helps. Same formula as `brain/store.ts` `keyHash`.
+   */
+  key?: string
+}
+
+/** Stable identity for a lesson from its text alone. */
+export function lessonKey(text: string): string {
+  return Bun.hash(text.replace(/\s+/g, ' ').trim().toLowerCase()).toString(36)
 }
 
 const MAX_INJECTED_LESSONS = 25
+
+/**
+ * The keys of the lessons injected into the most recent briefing.
+ *
+ * Threading these out through every call frame between `renderLessons` (deep in
+ * prompt assembly) and the outcome record (the turn's `finally` block) would
+ * touch a dozen signatures. elia runs one turn at a time in one process, so a
+ * module-local set that the injector fills and the recorder drains is enough —
+ * and it is the same shape the autonomous loop passes explicitly through run
+ * scope.
+ */
+let lastInjectedLessonKeys: string[] = []
+
+export function consumeInjectedLessonKeys(): string[] {
+  const keys = lastInjectedLessonKeys
+  lastInjectedLessonKeys = []
+  return keys
+}
 
 export interface LessonWrite {
   text: string
@@ -96,11 +126,13 @@ export function loadLessons(path = paths.lessons): Lesson[] {
             if (Number.isFinite(value)) confidence = Math.min(1, Math.max(0, value))
           }
         }
+        const text = line.replace(/<!--.*?-->/g, '').replace(/^\s*-\s*/, '').trim()
         return {
           at: Number.isNaN(at) ? 0 : at,
-          text: line.replace(/<!--.*?-->/g, '').replace(/^\s*-\s*/, '').trim(),
+          text,
           source,
           confidence,
+          key: lessonKey(text),
         }
       })
       .filter((lesson) => lesson.text.length > 0)
@@ -133,11 +165,17 @@ export function rewriteLessons(lessons: Lesson[], path = paths.lessons): void {
   }
 }
 
-/** The most recent lessons, formatted for injection into a planner's briefing. */
-export function renderLessons(path = paths.lessons): string {
+/**
+ * The most recent lessons, formatted for injection into a planner's briefing,
+ * together with their keys — so the caller can record which lessons a run saw.
+ * Also stashes the keys module-locally for the interactive path (see
+ * `consumeInjectedLessonKeys`).
+ */
+export function renderLessonsWithKeys(path = paths.lessons): { text: string; keys: string[] } {
   const lessons = loadLessons(path).slice(-MAX_INJECTED_LESSONS)
-  if (lessons.length === 0) return ''
-  return `\n\n## What earlier runs learned about this project\n${lessons
+  lastInjectedLessonKeys = lessons.map((lesson) => lesson.key ?? lessonKey(lesson.text))
+  if (lessons.length === 0) return { text: '', keys: [] }
+  const text = `\n\n## What earlier runs learned about this project\n${lessons
     .map((lesson) => {
       const bits = [lesson.text]
       if (lesson.source) bits.push(`(source: ${lesson.source})`)
@@ -145,6 +183,58 @@ export function renderLessons(path = paths.lessons): string {
       return `- ${bits.join(' ')}`
     })
     .join('\n')}`
+  return { text, keys: lastInjectedLessonKeys }
+}
+
+/** The most recent lessons, formatted for injection into a planner's briefing. */
+export function renderLessons(path = paths.lessons): string {
+  return renderLessonsWithKeys(path).text
+}
+
+/** Ceiling on how much of the file one retirement pass may remove — a runaway signal, not a cleanup. */
+const RETIRE_MAX_SHRINK = 0.6
+
+export interface RetireResult {
+  retired: string[]
+  kept: number
+  skippedReason?: string
+}
+
+/**
+ * Drop lessons that have been carried into enough runs to judge and have not
+ * measurably helped.
+ *
+ * A lesson is injected into every briefing whether or not it earns its tokens.
+ * `lessonLift` compares how runs went with a lesson present against the project
+ * baseline; a lesson with `MIN_EXPOSURES`+ exposures and non-positive lift is
+ * dead weight. Deterministic — no model call — and it refuses to remove more
+ * than `RETIRE_MAX_SHRINK` of the file at once.
+ */
+export function retireLessons(
+  baselineCleanRate: number,
+  options: { lessonsPath?: string; efficacyPath?: string } = {},
+): RetireResult {
+  const lessonsPath = options.lessonsPath ?? paths.lessons
+  const lessons = loadLessons(lessonsPath)
+  if (lessons.length === 0) return { retired: [], kept: 0 }
+
+  const counts = loadEfficacy(options.efficacyPath)
+
+  const dead = new Set<string>()
+  for (const lesson of lessons) {
+    const key = lesson.key ?? lessonKey(lesson.text)
+    const lift = lessonLift(key, counts, baselineCleanRate)
+    if (lift !== undefined && lift <= 0) dead.add(key)
+  }
+  if (dead.size === 0) return { retired: [], kept: lessons.length }
+  if (dead.size / lessons.length > RETIRE_MAX_SHRINK) {
+    return { retired: [], kept: lessons.length, skippedReason: `would remove ${dead.size}/${lessons.length} lessons — over the ${Math.round(RETIRE_MAX_SHRINK * 100)}% ceiling` }
+  }
+
+  const kept = lessons.filter((lesson) => !dead.has(lesson.key ?? lessonKey(lesson.text)))
+  const retired = lessons.filter((lesson) => dead.has(lesson.key ?? lessonKey(lesson.text))).map((lesson) => lesson.text)
+  rewriteLessons(kept, lessonsPath)
+  return { retired, kept: kept.length }
 }
 
 function relativeAge(at: number): string {

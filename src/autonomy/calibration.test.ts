@@ -44,6 +44,14 @@ test('high confidence on a non-verified state is a contradiction', () => {
   expect(detectContradictions('partial', 'high', clean)).toContain('high confidence on a non-verified state (partial)')
 })
 
+test('verified/high on judgement-only verification is flagged', () => {
+  expect(detectContradictions('verified', 'high', { ...clean, regime: 'judgment' }))
+    .toContain('reported verified with high confidence but no mechanical or empirical check ran (judgement only)')
+  // A mechanical or empirical regime, or a lower confidence, is fine.
+  expect(detectContradictions('verified', 'high', { ...clean, regime: 'mechanical' })).toEqual([])
+  expect(detectContradictions('verified', 'medium', { ...clean, regime: 'judgment' })).toEqual([])
+})
+
 test('recordCompletion appends one JSON line per run and readCalibrationLog reads them back', () => {
   recordCompletion('run-a', completion('verified', 'high'), clean, dir)
   recordCompletion('run-b', completion('partial', 'medium'), { ...clean, completedSteps: 1, verificationPassed: false }, dir)
