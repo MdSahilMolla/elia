@@ -115,6 +115,11 @@ export function providerPlanItems(detail?: string): TodoItem[] {
   })
 }
 
+/** Progress belongs in the single live status line; only durable outcomes enter scrollback. */
+export function shouldPersistActivity(activity: import('../../providers/types.ts').ProviderActivity): boolean {
+  return activity.status === 'completed' || activity.status === 'failed' || activity.status === 'warning' || activity.kind === 'warning'
+}
+
 export function App(props: AppProps) {
   const { exit } = useApp()
   const store = useRef(createTranscriptStore()).current
@@ -127,6 +132,10 @@ export function App(props: AppProps) {
   }, [mode])
   const [planReady, setPlanReady] = useState(false)
   const [busy, setBusy] = useState(false)
+  const busyRef = useRef(false)
+  useEffect(() => {
+    busyRef.current = busy
+  }, [busy])
   const [confirm, setConfirm] = useState<ConfirmRequest | null>(null)
   const [approval, setApproval] = useState<ApprovalRequest | null>(null)
   const [picker, setPicker] = useState<PickerRequest | null>(null)
@@ -184,6 +193,7 @@ export function App(props: AppProps) {
   useEffect(() => {
     setInkSink((kind, text) => {
       if (kind === 'error') store.error(text)
+      else if (busyRef.current) setStatus(text.split('\n', 1)[0] ?? '')
       else store.notice(text)
     })
     return () => setInkSink(undefined)
@@ -312,7 +322,7 @@ export function App(props: AppProps) {
             setPreviewUrl(a.detail)
             return
           }
-          store.activity(a)
+          if (shouldPersistActivity(a)) store.activity(a)
         },
         onTool: (e) => {
           if (e.name === 'todo_write' && !e.isError) {

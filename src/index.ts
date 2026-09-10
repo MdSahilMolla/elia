@@ -1785,8 +1785,8 @@ async function runInteractive(): Promise<void> {
     const { renderProposal } = await import('./autonomy/proposal.ts')
     const stripAnsi = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, '')
 
-    const note = (title: string, detail?: string) => {
-      if (uiHooks?.onActivity) uiHooks.onActivity({ kind: 'status', status: 'updated', title, detail })
+    const note = (title: string, detail?: string, status: 'updated' | 'completed' = 'updated') => {
+      if (uiHooks?.onActivity) uiHooks.onActivity({ kind: 'status', status, title, detail })
       else writeNotice(detail ? `${title}\n${detail}` : title)
     }
     note(`This looks like a full build (${reason}) — planning it properly.`)
@@ -1834,7 +1834,7 @@ async function runInteractive(): Promise<void> {
         + (result.lessons.length > 0 ? `\nLessons captured: ${result.lessons.join('; ')}` : '')
       messages.push({ role: 'assistant', content: [{ type: 'text', text: summary }] })
       sessionTranscript.notice(summary)
-      note(summary)
+      note(summary, undefined, 'completed')
     } finally {
       setReportSink(undefined)
       approvalRl?.close()

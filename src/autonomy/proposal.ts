@@ -84,6 +84,12 @@ export function parseProposal(raw: unknown): { proposal: Proposal } | { error: s
         'proposal.verification needs at least one shell command that will actually fail if the work is wrong. Look one up in this project (package.json scripts, its README, its CI config). If it genuinely has no test or build command, give the most specific check you can run instead',
     }
   }
+  if (verification.every(isEnvironmentProbe)) {
+    return {
+      error:
+        'proposal.verification only contains environment or directory-listing probes. Add a project check such as its build, test, typecheck, or a focused executable assertion; listing files or printing a tool version does not prove the work is correct',
+    }
+  }
 
   return {
     proposal: {
@@ -99,6 +105,13 @@ export function parseProposal(raw: unknown): { proposal: Proposal } | { error: s
       recovery: asStringArray(input.recovery),
     },
   }
+}
+
+function isEnvironmentProbe(command: string): boolean {
+  const normalized = command.trim()
+  return /^(?:ls|dir|where|which)(?:\s|$)/i.test(normalized)
+    || /^command\s+-v(?:\s|$)/i.test(normalized)
+    || /^\S+(?:\s+--?version|\s+-v)$/i.test(normalized)
 }
 
 export interface ProposalCapture {
