@@ -1,0 +1,13 @@
+# Keep LF in the working tree on every OS for tooling that is line-ending strict.
+# Without this, a Windows checkout (core.autocrlf=true) rewrites these to CRLF and
+# `gofmt -l` / `cargo fmt --check` flag every file — which is what turned the Go
+# sidecar's Windows CI lane red.
+*.go    text eol=lf
+*.rs    text eol=lf
+*.java  text eol=lf
+*.c     text eol=lf
+*.cc    text eol=lf
+*.cpp   text eol=lf
+*.h     text eol=lf
+*.hpp   text eol=lf
+*.sh    text eol=lf
