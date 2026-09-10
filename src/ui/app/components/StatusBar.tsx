@@ -18,8 +18,7 @@ function meter(pct: number): string {
 /** Keep the repo label from wrapping the HUD on a long branch name. */
 function shortRepo(repo: string, max = 28): string {
   if (repo.length <= max) return repo
-  const cut = repo.slice(-(max - 1))
-  return `…${cut}`
+  return `…${repo.slice(-(max - 1))}`
 }
 
 export interface StatusBarProps {
@@ -44,25 +43,18 @@ export interface StatusBarProps {
   steering?: number
   /** "elia ⎇ production" — cwd + branch. */
   repo?: string
-  /** Uncommitted files in the working tree — surfaced on the alert line past a threshold. */
-  dirtyFiles?: number
 }
 
 /**
- * A conditional row above the stats line — renders only when something needs the
- * operator's attention. Compaction approaching, steering piling up, a large
- * uncommitted diff. Silent otherwise, so the HUD stays one line in the common case.
+ * A conditional row above the stats line — renders only when a compaction pass
+ * is close enough that the operator should know. Silent otherwise, so the HUD
+ * stays a single line in the common case.
  */
-function AlertLine(props: { pct: number; steering: number; queued: number; dirtyFiles: number }) {
-  const alerts: string[] = []
-  if (props.pct >= 80) alerts.push(`compaction near — ${props.pct}% of context used`)
-  if (props.steering > 0) alerts.push(`${props.steering} steering queued`)
-  if (props.queued > 0) alerts.push(`${props.queued} message${props.queued === 1 ? '' : 's'} queued`)
-  if (props.dirtyFiles >= 20) alerts.push(`${props.dirtyFiles} files uncommitted`)
-  if (alerts.length === 0) return null
+function AlertLine({ pct }: { pct: number }) {
+  if (pct < 80) return null
   return (
     <Text color={palette.warning} wrap="truncate-end">
-      ⚠ {alerts.join(' · ')}
+      ⚠ context {pct}% full — a compaction pass is near
     </Text>
   )
 }
@@ -74,13 +66,15 @@ export function StatusBar(props: StatusBarProps) {
   const cost = props.providerName === 'codex' ? 'ChatGPT plan' : formatCostUsd(props.costUsd)
   return (
     <Box flexDirection="column" marginTop={1}>
-      <AlertLine pct={pct} steering={props.steering ?? 0} queued={props.queued} dirtyFiles={props.dirtyFiles ?? 0} />
+      <AlertLine pct={pct} />
       <Box justifyContent="space-between">
-        {/* model · mode first and truncate-end, so the tested `<model> · <mode>`
-            fragment is never split by a long repo label wrapping the line. */}
+        {/* model · mode lead the line and truncate-end, so a long repo label can
+            never wrap the line and split the `<model> · <mode>` fragment. */}
         <Text color={palette.muted} wrap="truncate-end">
           <Text color={palette.accent}>{props.busy ? '● ' : '  '}</Text>
           {props.model} · {MODE_LABEL[props.mode]}
+          {props.steering ? <Text color={palette.accent}> · {props.steering} steering</Text> : null}
+          {props.queued > 0 ? ` · ${props.queued} queued` : ''}
           {props.repo ? <Text color={palette.toolName}> · {shortRepo(props.repo)}</Text> : null}
         </Text>
         <Text color={palette.muted} wrap="truncate-end">

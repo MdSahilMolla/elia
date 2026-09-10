@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Box, Text, useInput, type Key } from 'ink'
 import { palette, glyphs } from '../theme.ts'
 import {
@@ -11,6 +11,7 @@ import {
 } from '../../slashPrompt.ts'
 import { appendHistory, loadHistory, searchHistory } from '../history.ts'
 import { activeMention, completeFile, fileIndexReady, primeFileIndex } from '../fileComplete.ts'
+// fileIndexReady seeds the initial state; primeFileIndex + the poll drive the rest.
 import type { ReplMode } from './StatusBar.tsx'
 
 /** Ink's key object → the small structural KeyEvent slashPrompt's pure reducer expects. */
@@ -101,15 +102,27 @@ export function InputBox(props: InputBoxProps) {
   const pastes = useRef(new Map<string, string>()).current
 
   const mention = activeMention(state.buffer, state.cursor)
-  const fileMatches = useMemo(
-    () => (mention ? completeFile(mention.query) : []),
-    // completeFile reads a module-level cache; re-run whenever the query changes.
-    [mention?.query],
-  )
   const [mentionSel, setMentionSel] = useState(0)
   const [mentionDismissed, setMentionDismissed] = useState('')
   const mentionOpen = mention !== null && mentionDismissed !== mention.query
-  if (mention) primeFileIndex()
+  // Build the repo file index the first time an @-mention appears, and re-render
+  // once it lands so the "indexing…" hint gives way to real matches.
+  const [indexReady, setIndexReady] = useState(fileIndexReady())
+  useEffect(() => {
+    if (!mention || indexReady) return
+    primeFileIndex()
+    const timer = setInterval(() => {
+      if (fileIndexReady()) {
+        setIndexReady(true)
+        clearInterval(timer)
+      }
+    }, 60)
+    return () => clearInterval(timer)
+  }, [mention !== null, indexReady])
+  const fileMatches = useMemo(
+    () => (mentionOpen ? completeFile(mention!.query) : []),
+    [mentionOpen, mention?.query, indexReady],
+  )
 
   const searchResults = search ? searchHistory(search.query, state.history) : []
 
@@ -286,7 +299,7 @@ export function InputBox(props: InputBoxProps) {
 
       {mentionOpen && !search && (
         <Box flexDirection="column" marginLeft={2}>
-          {!fileIndexReady() ? (
+          {!indexReady ? (
             <Text color={palette.muted}>indexing files…</Text>
           ) : fileMatches.length === 0 ? (
             <Text color={palette.muted}>no files match “{mention!.query}”</Text>

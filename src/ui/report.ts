@@ -104,7 +104,8 @@ export function writeBlock(title: string, body: string): void {
     .map((line) => (line ? `  ${line}` : ''))
     .join('\n')
   if (guardedToInk(`${title}\n${indented}`)) return
-  process.stdout.write(`\n${bold(title)}\n${dim(indented)}\n`)
+  // Body may carry the caller's own colour (describeIssues, etc.) — don't dim it.
+  process.stdout.write(`\n${bold(title)}\n${indented}\n`)
 }
 
 export function writeSummary(title: string, rows: [string, string][]): void {
