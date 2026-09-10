@@ -225,6 +225,17 @@ export function assessAction(request: ActionRequest, cwd = currentAgent().cwd ??
     return assessment('safe', 'allow', 'causal_debug performs read-only git history analysis to trace causal chains', 'causal_debug', resources, true)
   }
 
+  if (name === 'causal_fix') {
+    const apply = typeof input.apply === 'boolean' ? input.apply : false
+    return apply
+      ? assessment('review', 'approve', 'causal_fix with apply=true writes a patch to the workspace', 'causal_fix.apply', resources, true)
+      : assessment('safe', 'allow', 'causal_fix without apply is read-only analysis and plan generation', 'causal_fix', resources, true)
+  }
+
+  if (name === 'causal_verify') {
+    return assessment('safe', 'allow', 'causal_verify runs read-only verification checks (typecheck, lint, tests)', 'causal_verify', resources, true)
+  }
+
   if (name === 'arch_drift') {
     return assessment('safe', 'allow', 'arch_drift performs read-only structural analysis to detect architectural violations', 'arch_drift', resources, true)
   }

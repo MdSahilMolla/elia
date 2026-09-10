@@ -33,7 +33,7 @@ import { githubTool } from './github.ts'
 import { todoWriteTool } from './todo.ts'
 import { battmannTool } from './battmann.ts'
 import { visualizeTool } from './visualize.ts'
-import { causalDebugTool } from './causalDebug.ts'
+import { causalDebugTool, causalFixTool, causalVerifyTool } from './causal/index.ts'
 import { archDriftTool } from './archDrift.ts'
 import { adversarialVerifyTool } from './adversarialVerify.ts'
 import { codebaseMemoryTool } from './codebaseMemory.ts'
@@ -75,6 +75,8 @@ export const tools: Tool[] = [
   provisionEnvironmentTool,
   githubTool,
   causalDebugTool,
+  causalFixTool,
+  causalVerifyTool,
   archDriftTool,
   adversarialVerifyTool,
   codebaseMemoryTool,

@@ -32,6 +32,6 @@ describe('causalDebugTool', () => {
   it('execute returns a string', async () => {
     const result = await causalDebugTool.execute({ file: 'package.json' })
     expect(typeof result).toBe('string')
-    expect(result).toContain('Causal Debug Report')
+    expect(result).toContain('CAUSAL DEBUG & REPAIR ENGINE')
   })
 })
