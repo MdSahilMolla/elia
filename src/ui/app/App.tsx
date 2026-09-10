@@ -158,6 +158,11 @@ export function App(props: AppProps) {
   // not to auto-send steering that was captured before the stop.
   const abortedRef = useRef(false)
   const lastUserText = useRef('')
+  // Claimed synchronously the instant a turn begins, before the first `await`
+  // (the risk-check round-trip). `busy` is React state and lags a render behind
+  // Ink's throttled reconciler, so without this a fast double-Enter — or an
+  // Enter during the risk check — slips through and starts an overlapping run.
+  const turnStartingRef = useRef(false)
 
   const MAX_QUEUE = 5
   const pushQueue = (text: string) => {
@@ -383,7 +388,7 @@ export function App(props: AppProps) {
         exit()
         return
       }
-      if (busy) {
+      if (busy || busyRef.current || turnStartingRef.current) {
         // Slash commands and shell escapes can't be applied to a turn already in
         // flight — those still wait. Plain text becomes live steering: it's
         // spliced into the running turn at the next step boundary.
@@ -477,51 +482,58 @@ export function App(props: AppProps) {
           setConfirm({ title, lines: lines.filter(Boolean), resolve: (v) => { setConfirm(null); resolve(v) } }),
         )
 
-      // Echo the message immediately — before the risk check — so pressing
-      // Enter always feels instant, not gated on a fast-tier round-trip.
-      store.appendUser(trimmed)
-      lastUserText.current = trimmed
+      // Claim the turn synchronously — everything below has an `await` a second
+      // Enter could race through before `busy` state propagates.
+      turnStartingRef.current = true
+      try {
+        // Echo the message immediately — before the risk check — so pressing
+        // Enter always feels instant, not gated on a fast-tier round-trip.
+        store.appendUser(trimmed)
+        lastUserText.current = trimmed
 
-      // When the ChatGPT subscription is the selected model, running Codex in
-      // the workspace is the whole point of that choice — it is confirmed once
-      // per session by the agent loop's own governor prompt, not re-approved on
-      // every message, and it skips the risky-prompt classifier (its prompts
-      // expose no Elia tools for the classifier to reason about).
-      const live = props.getEnv()
-      if (live.providerName !== 'codex' && mode === 'manual') {
-        setBusy(true)
-        setTurnStartedAt(Date.now())
-        setStatus('Checking whether this needs confirmation…')
-        const { risky, reason } = await props.classifyRisk(trimmed).catch(() => ({ risky: true, reason: 'risk check failed — asking to be safe' }))
-        if (risky) {
-          setBusy(false)
-          setStatus('')
-          const ok = await ask('This looks risky', [reason ?? '', `About to: ${trimmed}`])
-          if (!ok) {
-            store.notice('Skipped.')
-            store.commit()
-            return
+        // When the ChatGPT subscription is the selected model, running Codex in
+        // the workspace is the whole point of that choice — it is confirmed once
+        // per session by the agent loop's own governor prompt, not re-approved on
+        // every message, and it skips the risky-prompt classifier (its prompts
+        // expose no Elia tools for the classifier to reason about).
+        const live = props.getEnv()
+        if (live.providerName !== 'codex' && mode === 'manual') {
+          setBusy(true)
+          setTurnStartedAt(Date.now())
+          setStatus('Checking whether this needs confirmation…')
+          const { risky, reason } = await props.classifyRisk(trimmed).catch(() => ({ risky: true, reason: 'risk check failed — asking to be safe' }))
+          if (risky) {
+            setBusy(false)
+            setStatus('')
+            const ok = await ask('This looks risky', [reason ?? '', `About to: ${trimmed}`])
+            if (!ok) {
+              store.notice('Skipped.')
+              store.commit()
+              return
+            }
           }
         }
-      }
 
-      await runOne(trimmed, { echo: false })
+        await runOne(trimmed, { echo: false })
 
-      // Drain anything queued while that turn ran.
-      for (let next = shiftQueue(); next !== undefined; next = shiftQueue()) {
-        await runOne(next)
-      }
+        // Drain anything queued while that turn ran.
+        for (let next = shiftQueue(); next !== undefined; next = shiftQueue()) {
+          await runOne(next)
+        }
 
-      // Steering that landed in the gap after the loop's last fold-in check —
-      // it was never applied. Send it as its own turn rather than silently
-      // prepending it to whatever the user types next. Not after an Esc/Ctrl+C
-      // stop: there the user chose to halt, so an auto follow-up isn't wanted.
-      while (steeringRef.current.length > 0 && !abortedRef.current) {
-        const pending = steeringRef.current.join('\n')
-        steeringRef.current = []
-        setSteeringCount(0)
-        store.notice('↳ sending steering that arrived as the turn ended')
-        await runOne(pending)
+        // Steering that landed in the gap after the loop's last fold-in check —
+        // it was never applied. Send it as its own turn rather than silently
+        // prepending it to whatever the user types next. Not after an Esc/Ctrl+C
+        // stop: there the user chose to halt, so an auto follow-up isn't wanted.
+        while (steeringRef.current.length > 0 && !abortedRef.current) {
+          const pending = steeringRef.current.join('\n')
+          steeringRef.current = []
+          setSteeringCount(0)
+          store.notice('↳ sending steering that arrived as the turn ended')
+          await runOne(pending)
+        }
+      } finally {
+        turnStartingRef.current = false
       }
     },
     [busy, mode, props, store, runOne, exit],

@@ -7,6 +7,8 @@ const escalates = [
   'implement a REST API service for a todo app with a Postgres database and JWT auth',
   'scaffold a Next.js dashboard from scratch with charts and an admin panel',
   'I want a marketplace platform where sellers list items and buyers check out with Stripe',
+  // "site" words don't get a free pass once there's a real feature set behind them.
+  'build a portfolio website from scratch with a CMS backend, auth, and a contact-form API',
 ]
 
 const stays = [
@@ -18,6 +20,11 @@ const stays = [
   'update the README install section',
   'can you build this?',
   'the scaffold is broken',
+  // A static one-pager is a fast-path job, not a plan→scaffold→verify run.
+  'create a static website for nikhil sharma a guy who is studying datascience and run it',
+  'build me a portfolio site to show my projects',
+  'make a personal landing page with my bio and links',
+  'create a simple resume page for a frontend developer',
 ]
 
 test('large project builds escalate', () => {

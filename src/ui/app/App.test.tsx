@@ -48,6 +48,29 @@ test('App streams a turn: user line, tool card, assistant text', async () => {
   expect(frame).toContain('Read x') // compact "verb target" tool line
 })
 
+test('a fast double-submit starts exactly one turn and echoes the prompt once', async () => {
+  let turns = 0
+  const props = {
+    ...baseProps(),
+    // Hold the turn open so the second Enter lands mid-run.
+    submitTurn: async (_t: string, _hooks: import('./App.tsx').TurnHooks) => {
+      turns += 1
+      await new Promise((resolve) => setTimeout(resolve, 120))
+    },
+  }
+  const { stdin, lastFrame } = render(<App {...props} />)
+  await waitForFrame(lastFrame, 'mercury-2 · manual')
+  await settle()
+  stdin.write('build the thing')
+  await waitForFrame(lastFrame, 'build the thing')
+  stdin.write('\r')
+  stdin.write('\r') // second Enter, before `busy` state has propagated
+  await new Promise((resolve) => setTimeout(resolve, 200))
+  expect(turns).toBe(1)
+  const echoes = (lastFrame() ?? '').split('build the thing').length - 1
+  expect(echoes).toBe(1)
+})
+
 test('Shift+Tab into plan mode makes the turn read-only and offers to execute', async () => {
   let sawPlanMode: boolean | undefined
   const props = {

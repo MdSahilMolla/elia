@@ -38,6 +38,16 @@ const FILE_REFERENCE = /(?:^|\s)[\w./-]+\.(?:ts|tsx|js|jsx|py|go|rs|java|c|cc|cp
 /** "with X, Y, and Z" — a feature list attached to a build ask. */
 const FEATURE_LIST = /\b(with|including|plus|and)\b[^.]*\b(auth|authentication|login|database|db|payments?|stripe|dashboard|admin|api|crud|search|notifications?|roles?|rbac|uploads?|charts?|reports?)\b/i
 
+/**
+ * A single-page static deliverable — a personal site, portfolio, landing page,
+ * résumé/CV page. Even though it says "website", it's a handful of files the fast
+ * path writes in one turn; routing it through plan→scaffold→verify→polish just
+ * runs the host repo's toolchain against it (see the 2026-09-10 report). Only
+ * bypasses escalation when there's no backend/feature signal.
+ */
+const SMALL_STATIC_SITE =
+  /\b(static\s+(?:web)?site|portfolio|landing\s+page|personal\s+(?:web)?site|r[eé]sum[eé]|\bcv\b|one[-\s]?pager|single[-\s]?page)\b/i
+
 export function classifyEscalation(rawText: string): EscalationDecision {
   const text = rawText.trim()
   const firstLine = text.split(/\r?\n/, 1)[0] ?? text
@@ -47,6 +57,10 @@ export function classifyEscalation(rawText: string): EscalationDecision {
   if (text.length < 25) return no('too short to be a project')
   if (QUESTION.test(firstLine)) return no('a question, not a build task')
   if (SMALL_TASK_OPENER.test(firstLine)) return no('reads as a targeted change')
+  // A static one-pager, unless it also asks for a backend / feature set.
+  if (SMALL_STATIC_SITE.test(text) && !FEATURE_LIST.test(text) && !WHOLE_PROJECT.test(text)) {
+    return no('a single static page — the fast path handles this in one turn')
+  }
   // A concrete file target usually means "change this file", unless the request
   // is unmistakably a whole project that happens to mention a config file.
   if (FILE_REFERENCE.test(text) && !WHOLE_PROJECT.test(text)) return no('targets a specific file')
