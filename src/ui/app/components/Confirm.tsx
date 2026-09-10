@@ -1,5 +1,6 @@
 import { Box, Text, useInput } from 'ink'
 import { palette } from '../theme.ts'
+import { Panel } from './Panel.tsx'
 
 export interface ConfirmRequest {
   title: string
@@ -20,10 +21,7 @@ export function Confirm({ request }: { request: ConfirmRequest }) {
   })
 
   return (
-    <Box flexDirection="column" borderStyle="round" borderColor={palette.accent} paddingX={1} marginTop={1}>
-      <Text bold color={palette.accent}>
-        {request.title}
-      </Text>
+    <Panel title={request.title}>
       {request.lines.map((line, i) => (
         <Text key={i} color={palette.muted}>
           {line}
@@ -47,6 +45,6 @@ export function Confirm({ request }: { request: ConfirmRequest }) {
       <Text>
         Approve? <Text color={palette.success}>y</Text> / <Text color={palette.failure}>n</Text>
       </Text>
-    </Box>
+    </Panel>
   )
 }

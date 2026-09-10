@@ -1,6 +1,7 @@
 import { useState } from 'react'
-import { Box, Text, useInput } from 'ink'
+import { Text, useInput } from 'ink'
 import { palette } from '../theme.ts'
+import { Panel } from './Panel.tsx'
 import { applySearchKey, type PickerOption } from '../../picker.ts'
 
 export interface PickerRequest {
@@ -72,10 +73,8 @@ export function Picker({ request }: { request: PickerRequest }) {
   const visible = filtered.slice(start, start + PAGE)
 
   return (
-    <Box flexDirection="column" borderStyle="round" borderColor={palette.accent} paddingX={1} marginTop={1}>
-      <Text bold>
-        {request.title} <Text color={palette.muted}>(↑↓ · type to filter · enter · esc)</Text>
-      </Text>
+    <Panel title={request.title}>
+      <Text color={palette.muted}>↑↓ · type to filter · enter · esc</Text>
       {request.searchable && (
         <Text color={palette.muted}>
           search: {query}
@@ -93,6 +92,6 @@ export function Picker({ request }: { request: PickerRequest }) {
         )
       })}
       {filtered.length === 0 && <Text color={palette.muted}>no matches</Text>}
-    </Box>
+    </Panel>
   )
 }

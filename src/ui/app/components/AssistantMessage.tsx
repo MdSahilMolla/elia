@@ -97,14 +97,24 @@ function BlockBody({ block, cursor }: { block: MarkdownBlock; cursor: boolean })
         </Box>
       )
     case 'code':
+      // Boxless: a dim left rail per line + a language label, instead of a
+      // drawn border that wraps badly and can flatten into `| |` soup.
       return (
-        <Box flexDirection="column" width="100%" borderStyle="round" borderColor={palette.muted} paddingX={1}>
-          {block.language ? <Text bold color={palette.toolName}>{block.language}{!block.complete ? ' …' : ''}</Text> : null}
-          {(block.lines.length > 0 ? block.lines : ['']).map((line, index) => (
-            <Text key={index} wrap="wrap">
-              {line}
-              {cursor && index === Math.max(0, block.lines.length - 1) ? <Cursor /> : null}
+        <Box flexDirection="column" width="100%">
+          {block.language ? (
+            <Text bold color={palette.muted}>
+              {block.language}
+              {!block.complete ? ' …' : ''}
             </Text>
+          ) : null}
+          {(block.lines.length > 0 ? block.lines : ['']).map((line, index) => (
+            <Box key={index}>
+              <Text color={palette.muted}>│ </Text>
+              <Text wrap="wrap">
+                {line}
+                {cursor && index === Math.max(0, block.lines.length - 1) ? <Cursor /> : null}
+              </Text>
+            </Box>
           ))}
         </Box>
       )

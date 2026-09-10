@@ -575,10 +575,10 @@ export function App(props: AppProps) {
       {picker && <Picker request={picker} />}
       {textPrompt && <TextPrompt request={textPrompt} />}
       {planReady && !busy && (
-        <Box borderStyle="round" borderColor={palette.success} paddingX={1} marginTop={1}>
+        <Box marginTop={1}>
           <Text>
             <Text color={palette.success} bold>
-              Plan ready.
+              ✓ Plan ready.
             </Text>{' '}
             <Text color={palette.success}>Enter</Text> to execute · <Text color={palette.muted}>Esc / k to keep planning</Text>
           </Text>

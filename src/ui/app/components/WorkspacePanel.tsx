@@ -72,6 +72,14 @@ export function WorkspacePanel({
   const start = Math.max(0, Math.min(current - 1, plan.length - 6))
   const shown = plan.slice(start, start + 6)
   const planDone = plan.filter((item) => item.status === 'completed').length
+  // A boxless progress bar — the panel has no border to read fullness from, so
+  // the fraction gets a visual.
+  const progressBar = (() => {
+    if (plan.length < 2) return ''
+    const width = 10
+    const filled = Math.round((planDone / plan.length) * width)
+    return `${'▓'.repeat(filled)}${'░'.repeat(width - filled)}`
+  })()
 
   const receipt = [
     doneCount > 0 ? `${doneCount} done` : '',
@@ -82,10 +90,12 @@ export function WorkspacePanel({
     .join(' · ')
 
   return (
-    <Box flexDirection="column" width="100%" marginTop={1} borderStyle="round" borderColor={palette.muted} paddingX={1}>
+    <Box flexDirection="column" width="100%" marginTop={1}>
       {plan.length > 0 && (
         <Box flexDirection="column">
-          <Text color={palette.muted}>PLAN {plan.length > 1 ? `· ${planDone}/${plan.length}` : ''}</Text>
+          <Text color={palette.muted}>
+            PLAN {plan.length > 1 ? `${progressBar}  ${planDone}/${plan.length}` : ''}
+          </Text>
           {start > 0 && <Text color={palette.muted}>  … {start} done</Text>}
           {shown.map((item, i) => (
             <Text

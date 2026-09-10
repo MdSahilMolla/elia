@@ -13,6 +13,8 @@ export const palette = {
   toolName: ASH,
   success: 'green',
   failure: 'red',
+  /** Reserved for the conditional HUD alert line and non-fatal warnings — the one hue between success and failure. */
+  warning: 'yellow',
   muted: 'gray',
   user: ASH,
   text: undefined as string | undefined,
@@ -29,6 +31,10 @@ export const glyphs = {
   running: '◐',
   branch: '⎿',
   skill: '✦',
+  /** Everything elia commits to durable memory — a lesson, a verified workflow, a rationale. */
+  learn: '✦',
+  /** A left rail for error bodies — a boxless alternative to a red-bordered card. */
+  errorRail: '┃',
 } as const
 
 /** Spinner frames shared with src/ui/stream.ts's tool spinner. */

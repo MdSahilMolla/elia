@@ -2,7 +2,7 @@ import type { Tool } from '../tools/types.ts'
 import { isRoleName, ROLE_NAMES, type Proposal, type ProposalStep } from './types.ts'
 import { fileCollisions, planWaves } from './fleet.ts'
 import { bold, dim, cyan, red, gold } from '../ui/theme.ts'
-import { box, wrapText } from '../ui/layout.ts'
+import { wrapText } from '../ui/layout.ts'
 
 const MAX_PROPOSAL_STEPS = 32
 const MAX_VERIFICATION_COMMANDS = 16
@@ -291,7 +291,10 @@ export function renderProposal(proposal: Proposal): string {
     for (const item of proposal.outOfScope) lines.push(`  ${dim('·')} ${item}`)
   }
 
-  return `\n${box(lines, { title: 'Proposal', borderColor: gold })}\n`
+  // Boxless: a gold heading, then the detail lines as-is. The border-drawn frame
+  // this replaced wrapped badly in a narrow terminal and could flatten into
+  // `| | |` soup when a concurrent write landed mid-frame (observed 2026-09-10).
+  return `\n${bold(gold('Proposal'))}\n${lines.join('\n')}\n`
 }
 
 export type PlanApprovalState = 'draft' | 'approved' | 'amended' | 'rejected'

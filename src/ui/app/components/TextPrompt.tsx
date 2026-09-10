@@ -1,6 +1,7 @@
 import { useState } from 'react'
-import { Box, Text, useInput } from 'ink'
+import { Text, useInput } from 'ink'
 import { palette } from '../theme.ts'
+import { Panel } from './Panel.tsx'
 
 export interface TextPromptRequest {
   label: string
@@ -18,10 +19,12 @@ export function TextPrompt({ request }: { request: TextPromptRequest }) {
     if (input && !key.ctrl && !key.meta) setValue((v) => v + input)
   })
   return (
-    <Box borderStyle="round" borderColor={palette.accent} paddingX={1} marginTop={1}>
-      <Text>{request.label} </Text>
-      <Text>{value || <Text color={palette.muted}>{request.placeholder ?? ''}</Text>}</Text>
-      <Text color={palette.muted}>▏</Text>
-    </Box>
+    <Panel>
+      <Text>
+        <Text color={palette.accent}>{request.label} </Text>
+        {value || <Text color={palette.muted}>{request.placeholder ?? ''}</Text>}
+        <Text color={palette.muted}>▏</Text>
+      </Text>
+    </Panel>
   )
 }

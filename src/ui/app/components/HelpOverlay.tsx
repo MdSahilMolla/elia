@@ -1,5 +1,6 @@
-import { Box, Text, useInput } from 'ink'
+import { Text, useInput } from 'ink'
 import { palette } from '../theme.ts'
+import { Panel } from './Panel.tsx'
 
 const KEYS: [string, string][] = [
   ['Enter', 'send · run the highlighted / command'],
@@ -19,8 +20,7 @@ export function HelpOverlay({ onClose }: { onClose(): void }) {
   useInput(() => onClose())
   const width = Math.max(...KEYS.map(([k]) => k.length))
   return (
-    <Box flexDirection="column" borderStyle="round" borderColor={palette.accent} paddingX={1} marginTop={1}>
-      <Text bold color={palette.accent}>Keys</Text>
+    <Panel title="Keys">
       {KEYS.map(([key, desc]) => (
         <Text key={key}>
           <Text color={palette.toolName}>{key.padEnd(width)}</Text>
@@ -28,6 +28,6 @@ export function HelpOverlay({ onClose }: { onClose(): void }) {
         </Text>
       ))}
       <Text color={palette.muted}>press any key to close</Text>
-    </Box>
+    </Panel>
   )
 }

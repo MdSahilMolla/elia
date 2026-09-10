@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { Box, Text, useInput } from 'ink'
 import { palette } from '../theme.ts'
+import { Panel } from './Panel.tsx'
 import type { ApprovalResult } from '../../../autonomy/governor.ts'
 
 export interface ApprovalRequest {
@@ -113,10 +114,7 @@ export function ApprovalMenu({ request }: { request: ApprovalRequest }) {
   })
 
   return (
-    <Box flexDirection="column" borderStyle="round" borderColor={palette.accent} paddingX={1} marginTop={1}>
-      <Text bold color={palette.accent}>
-        {request.title}
-      </Text>
+    <Panel title={request.title}>
       {request.lines.map((line, i) => (
         <Text key={i} color={palette.muted}>
           {line}
@@ -166,6 +164,6 @@ export function ApprovalMenu({ request }: { request: ApprovalRequest }) {
           ))}
         </Box>
       )}
-    </Box>
+    </Panel>
   )
 }

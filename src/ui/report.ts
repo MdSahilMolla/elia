@@ -1,7 +1,7 @@
-import { box } from './layout.ts'
-import { bold, boldCyan, dim, gold, green, red } from './theme.ts'
+import { bold, dim, gold, green, red } from './theme.ts'
 import { emitEvent, machineReadable, quietOutput } from './runtime.ts'
 import { redactText } from './redact.ts'
+import { inkOwnsScreen, writeNotice } from './stream.ts'
 
 // The autonomous pipeline reports its phases straight to stdout, which is right
 // for `elia auto` but corrupts the Ink REPL's frame when a turn escalates into
@@ -26,6 +26,19 @@ const PHASE_LABELS: Record<string, string> = {
   learn: 'Learning',
 }
 
+/**
+ * The last line of defence against corrupting the Ink frame. If a caller reaches
+ * one of these `write*` helpers while the Ink REPL owns the screen but no report
+ * sink was installed (an escalation path that forgot to wire one), a raw
+ * `process.stdout.write` would tear the live frame. Route it to the transcript
+ * as a plain notice instead. Returns true when it handled the write.
+ */
+function guardedToInk(plain: string): boolean {
+  if (sink || !inkOwnsScreen()) return false
+  writeNotice(plain)
+  return true
+}
+
 export function writePhase(phase: string, detail?: string): void {
   const label = PHASE_LABELS[phase] ?? phase
   if (machineReadable) {
@@ -34,6 +47,7 @@ export function writePhase(phase: string, detail?: string): void {
   }
   if (sink) return sink('phase', `◆ ${label}${detail ? ` — ${detail}` : ''}`)
   if (quietOutput) return
+  if (guardedToInk(`◆ ${label}${detail ? ` — ${detail}` : ''}`)) return
   process.stdout.write(`\n${bold(gold(`◆ ${label}`))}${detail ? ` ${dim(detail)}` : ''}\n`)
 }
 
@@ -44,6 +58,7 @@ export function writeSubStep(text: string): void {
   }
   if (sink) return sink('substep', text)
   if (quietOutput) return
+  if (guardedToInk(text)) return
   process.stdout.write(`  ${dim(text)}\n`)
 }
 
@@ -54,6 +69,7 @@ export function writePass(text: string): void {
   }
   if (sink) return sink('pass', `✓ ${text}`)
   if (quietOutput) return
+  if (guardedToInk(`✓ ${text}`)) return
   process.stdout.write(`  ${green('✓')} ${text}\n`)
 }
 
@@ -63,9 +79,16 @@ export function writeFail(text: string): void {
     return
   }
   if (sink) return sink('fail', `✗ ${text}`)
+  if (guardedToInk(`✗ ${text}`)) return
   process.stdout.write(`  ${red('✗')} ${text}\n`)
 }
 
+/**
+ * A titled block of detail. Boxless: a bold heading, then the body indented two
+ * spaces. `box()` (border-drawn) was pulled out — it wraps badly in a narrow
+ * terminal and, worst case, its border characters flatten into `| | |` garbage
+ * when a concurrent write lands mid-frame. See docs/terminal-ui-redesign-plan.md.
+ */
 export function writeBlock(title: string, body: string): void {
   if (machineReadable) {
     emitEvent('report_block', { title: redactText(title, 200), body: redactText(body, 10000) })
@@ -76,7 +99,12 @@ export function writeBlock(title: string, body: string): void {
     process.stdout.write(`${body}\n`)
     return
   }
-  process.stdout.write(`\n${box(body.split('\n'), { title })}\n`)
+  const indented = body
+    .split('\n')
+    .map((line) => (line ? `  ${line}` : ''))
+    .join('\n')
+  if (guardedToInk(`${title}\n${indented}`)) return
+  process.stdout.write(`\n${bold(title)}\n${dim(indented)}\n`)
 }
 
 export function writeSummary(title: string, rows: [string, string][]): void {
@@ -90,6 +118,7 @@ export function writeSummary(title: string, rows: [string, string][]): void {
     return
   }
   const width = Math.max(...rows.map(([label]) => label.length), 0)
-  const lines = rows.map(([label, value]) => `${dim(label.padEnd(width))}  ${value}`)
-  process.stdout.write(`\n${box(lines, { title, borderColor: boldCyan })}\n`)
+  const lines = rows.map(([label, value]) => `  ${label.padEnd(width)}  ${value}`)
+  if (guardedToInk(`${title}\n${lines.join('\n')}`)) return
+  process.stdout.write(`\n${bold(title)}\n${rows.map(([label, value]) => `  ${dim(label.padEnd(width))}  ${value}`).join('\n')}\n`)
 }
