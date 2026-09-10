@@ -454,7 +454,7 @@ async function runAutonomousTaskInternal(options: AutonomousRunOptions): Promise
         corr: runId,
         kind: 'autonomous',
         prompt: goal,
-        systemPromptRef: refSystemPrompt('auto'),
+        systemPromptRef: refSystemPrompt(activeMode()),
         tools: ledger.map((record) => ({ name: record.tool, ok: !record.isError })),
         touched: [],
         verify: verificationPassed ? 'pass' : 'fail',

@@ -1,8 +1,11 @@
 import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { paths } from '../statePaths.ts'
+import { systemPromptForMode } from '../config.ts'
+import { valueCoreSection } from '../values/core.ts'
 import { appendSecureFile, hardenSecureFile, rotateSecureFile } from '../securePersistence.ts'
 import { redactSecrets, redactText, relativizeProjectPaths } from '../ui/redact.ts'
+import type { AgentMode } from '../autonomy/mode.ts'
 import type { VerifyResult } from '../autonomy/outcomes.ts'
 
 /**
@@ -50,7 +53,7 @@ export interface TrajectoryRow {
   corr: string
   kind: 'interactive' | 'autonomous'
   promptRedacted: string
-  /** Content hash of the assembled system prompt, so identical setups group without storing the prompt. */
+  /** Hash of the stable system prefix (base prompt + value core) for this row's mode — see refSystemPrompt(). */
   systemPromptRef: string
   /** Ordered as the model issued them. */
   tools: TrajectoryToolCall[]
@@ -136,8 +139,17 @@ function hash(text: string): string {
   return Bun.hash(text).toString(36)
 }
 
-export function refSystemPrompt(systemPrompt: string): string {
-  return hash(systemPrompt)
+/**
+ * A stable grouping key for "was this row generated under the same instructions".
+ *
+ * Hashes the *stable* system prefix for a mode — the base prompt plus the Value
+ * Core section (empty until the core is activated) — so rows regroup when either
+ * changes and a training export can tell an old prompt regime from a new one.
+ * The per-turn dynamic block (date, query-ranked memory) is deliberately not
+ * included: it varies every message and is not what "same setup" means.
+ */
+export function refSystemPrompt(mode: AgentMode): string {
+  return hash(`${systemPromptForMode(mode)}${valueCoreSection()}`)
 }
 
 function fileFor(kind: TrajectoryRow['kind'], baseDir = paths.trajectories): string {

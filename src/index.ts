@@ -818,6 +818,60 @@ async function runValues(): Promise<void> {
   process.exitCode = 1
 }
 
+async function runDistill(): Promise<void> {
+  const { collectDistillableTraces } = await import('./distill/corpus.ts')
+  const { fragmentCount } = await import('./distill/fragments.ts')
+  const action = positionals()[0] ?? 'run'
+  const traces = collectDistillableTraces()
+
+  if (action === 'traces') {
+    if (traces.length === 0) {
+      writeNotice('No distillable traces yet — need autonomous runs that reached verified completion with mechanical/empirical verification.')
+      return
+    }
+    writeNotice(`${traces.length} distillable trace(s):`)
+    for (const t of traces) {
+      writeUsageLine(`  ${t.runId}  ${t.regime.padEnd(10)} reward ${t.reward === undefined ? '—' : t.reward.toFixed(2)}  ${t.goal.slice(0, 80)}`)
+    }
+    return
+  }
+
+  if (action !== 'run') {
+    writeError(`Unknown: elia distill ${action}. Use "run" (add --promote to apply) or "traces".`)
+    process.exitCode = 1
+    return
+  }
+
+  if (traces.length < 3) {
+    writeNotice(`Only ${traces.length} distillable trace(s) — need at least 3 of the same role's work before a pattern is worth distilling. Nothing to do.`)
+    return
+  }
+
+  if (!(await ensureFirstRunProviderSetup())) return
+  await loadRuntimeSkills()
+  const { proposeDistillations } = await import('./distill/mine.ts')
+  const { evaluateCandidate } = await import('./distill/gate.ts')
+
+  const promote = hasFlag('--promote')
+  writeNotice(`Mining ${traces.length} verified trace(s) for standing role guidance…`)
+  const candidates = await proposeDistillations(traces)
+  if (candidates.length === 0) {
+    writeNotice('No candidate fragments — the successful runs show no repeated pattern the role instructions are missing.')
+    return
+  }
+
+  for (const candidate of candidates) {
+    writeUsageLine('')
+    writeNotice(`Candidate for ${candidate.role}: "${candidate.fragment}"`)
+    writeUsageLine(`  rationale: ${candidate.rationale}`)
+    const result = await evaluateCandidate(candidate, { dryRun: !promote, onStage: (s) => writeUsageLine(`  … ${s}`) })
+    const mark = result.verdict === 'rejected' ? '✗' : '✓'
+    writeUsageLine(`  ${mark} ${result.verdict}: ${result.reason}`)
+  }
+  if (!promote) writeNotice('Dry run — nothing was applied. Re-run with --promote to keep the fragments that passed every gate.')
+  writeNotice(`${fragmentCount()} distilled fragment(s) currently active.`)
+}
+
 async function runGap(): Promise<void> {
   const { computeGapVector } = await import('./gap/scoreboard.ts')
   const { checkGapNotRegressed } = await import('./gap/guard.ts')
@@ -3878,6 +3932,8 @@ async function main() {
       return runGap()
     case 'values':
       return runValues()
+    case 'distill':
+      return runDistill()
     case 'bench':
       return runBench()
     case 'bench-latency':
