@@ -15,6 +15,13 @@ function meter(pct: number): string {
   return '▓'.repeat(filled) + '░'.repeat(10 - filled)
 }
 
+/** Keep the repo label from wrapping the HUD on a long branch name. */
+function shortRepo(repo: string, max = 28): string {
+  if (repo.length <= max) return repo
+  const cut = repo.slice(-(max - 1))
+  return `…${cut}`
+}
+
 export interface StatusBarProps {
   model: string
   mode: ReplMode
@@ -37,6 +44,27 @@ export interface StatusBarProps {
   steering?: number
   /** "elia ⎇ production" — cwd + branch. */
   repo?: string
+  /** Uncommitted files in the working tree — surfaced on the alert line past a threshold. */
+  dirtyFiles?: number
+}
+
+/**
+ * A conditional row above the stats line — renders only when something needs the
+ * operator's attention. Compaction approaching, steering piling up, a large
+ * uncommitted diff. Silent otherwise, so the HUD stays one line in the common case.
+ */
+function AlertLine(props: { pct: number; steering: number; queued: number; dirtyFiles: number }) {
+  const alerts: string[] = []
+  if (props.pct >= 80) alerts.push(`compaction near — ${props.pct}% of context used`)
+  if (props.steering > 0) alerts.push(`${props.steering} steering queued`)
+  if (props.queued > 0) alerts.push(`${props.queued} message${props.queued === 1 ? '' : 's'} queued`)
+  if (props.dirtyFiles >= 20) alerts.push(`${props.dirtyFiles} files uncommitted`)
+  if (alerts.length === 0) return null
+  return (
+    <Text color={palette.warning} wrap="truncate-end">
+      ⚠ {alerts.join(' · ')}
+    </Text>
+  )
 }
 
 export function StatusBar(props: StatusBarProps) {
@@ -45,19 +73,21 @@ export function StatusBar(props: StatusBarProps) {
   const meterColor = pct >= 85 ? palette.failure : pct >= 60 ? palette.accent : palette.success
   const cost = props.providerName === 'codex' ? 'ChatGPT plan' : formatCostUsd(props.costUsd)
   return (
-    <Box marginTop={1} justifyContent="space-between">
-      <Text color={palette.muted}>
-        <Text color={palette.accent}>{props.busy ? '● ' : '  '}</Text>
-        {props.repo ? <Text color={palette.toolName}>{props.repo}</Text> : null}
-        {props.repo ? ' · ' : null}
-        {props.model} · {MODE_LABEL[props.mode]}
-        {props.steering ? <Text color={palette.accent}> · {props.steering} steering</Text> : ''}
-        {props.queued > 0 ? ` · ${props.queued} queued` : ''}
-      </Text>
-      <Text color={palette.muted}>
-        <Text color={meterColor}>{meter(pct)}</Text> {pct}% ctx · {formatTokenCount(props.sessionInput)} in ·{' '}
-        {formatTokenCount(props.sessionOutput)} out · {cost}
-      </Text>
+    <Box flexDirection="column" marginTop={1}>
+      <AlertLine pct={pct} steering={props.steering ?? 0} queued={props.queued} dirtyFiles={props.dirtyFiles ?? 0} />
+      <Box justifyContent="space-between">
+        {/* model · mode first and truncate-end, so the tested `<model> · <mode>`
+            fragment is never split by a long repo label wrapping the line. */}
+        <Text color={palette.muted} wrap="truncate-end">
+          <Text color={palette.accent}>{props.busy ? '● ' : '  '}</Text>
+          {props.model} · {MODE_LABEL[props.mode]}
+          {props.repo ? <Text color={palette.toolName}> · {shortRepo(props.repo)}</Text> : null}
+        </Text>
+        <Text color={palette.muted} wrap="truncate-end">
+          <Text color={meterColor}>{meter(pct)}</Text> {pct}% ctx · {formatTokenCount(props.sessionInput)} in ·{' '}
+          {formatTokenCount(props.sessionOutput)} out · {cost}
+        </Text>
+      </Box>
     </Box>
   )
 }
