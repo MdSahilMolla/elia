@@ -125,20 +125,41 @@ bracket/quote/comment balance for Generic/JsTs/Python/Rust/Go lexers); there is
   protocol, FFI cdylib, daemon lifecycle with soft fallback. Next: provider-connection
   pool, MCP supervisor, file watcher/indexer, lease/receipt store helpers. Keep the
   TS-fallback contract — a missing/stale binary must never be fatal.
-- **C++ — keep narrow (scan kernel only).** `validator.cpp` is exactly the right shape:
-  dependency-free, linear, sub-millisecond, FFI-callable. Future C++ work should stay
-  inside that kernel (more lexers, optional SIMD row-scan, fuzz tests) — not grow into
-  services, which belong in Rust where Cargo manages the build.
-- **Go — do not add.** A fourth toolchain (Bun + Cargo + C++ + Go, plus JVM bridge)
-  buys build matrix pain, installer weight, and ABI surface for no identified hot path.
-  The governor already allowlists `go build/test/vet` for *target* projects — that is
-  toolchain *support*, not a reason to write Elia itself in Go. Revisit only if a
-  must-have dependency exists solely in Go.
+- **C++ — keep narrow (scan kernel only), but invest heavily inside it.**
+  `validator.cpp` is exactly the right shape: dependency-free, linear,
+  sub-millisecond, FFI-callable. "Heavy C++ use" should mean depth in this
+  kernel, not breadth into services (services belong in Rust where Cargo manages
+  the build). Approved growth areas: more lexers, optional SIMD row-scan, a fuzz
+  corpus, and at most one additional kernel of the same shape (e.g. fast
+  diff/matcher) — each callable through the existing `elia-native` cdylib and
+  covered by `src/native/ffi.test.ts`.
+- **Go — additive pilot, no rewrite, gated on metrics.** Reconsidered: Go earns a
+  place for sidecar services, not hot paths (the sub-millisecond in-process check
+  stays Rust via `bun:ffi` — Go's cgo shared-library story is strictly worse there —
+  and replacing `eliad` would be the rewrite we ruled out). Where Go genuinely wins:
+  filesystem-heavy services (workspace index/search, file watcher), concurrent
+  fan-out helpers, HTTP/proxy utilities, and command-style stdio MCP servers, which
+  `src/mcp/registry.ts` + `daemonBridge.ts` already support with zero harness changes.
+  Bonus: Go's Windows toolchain is trivial — no LLVM-MinGW dance like
+  `.cargo/config.toml` demands. The seam already exists: copy the
+  `src/daemon/types.ts` ↔ `crates/eliad/src/protocol.rs` contract (NDJSON-RPC, mirrored
+  types, protocol-version check, soft fallback to the pure-TS path), add one
+  `ELIA_GO_*` env gate defaulting to off, and a `build-go` recipe in the `justfile`.
+  Cost is real — a fifth toolchain (Bun + Cargo + C++ + javac + Go), more CI minutes,
+  per-platform binaries, another wire protocol to version — so the pilot is one
+  service (`index.query` sidecar), and it expands only if it moves numbers (p50/p95
+  search latency, cold-start ms, binary MB, CI minutes) without regressing
+  tokens-per-verified-task or repair-loop count.
 - **Performance honesty:** agent wall-clock is dominated by model RTT and verification
   loops, not local compute. Native code wins by avoiding round trips (FFI vs daemon hop,
   warm pools vs cold handshakes) and by shrinking token spend (index/prefetch/compaction).
   Instrument first: cold-start ms, FFI hit rate, tokens/verified-task, repair loops,
   $/verified-task — then let `elia evolve` promote only measured wins.
+- **Language assignment (final):** TypeScript stays the conductor; Rust owns resident
+  services and in-process hot paths; C++ owns scan kernels with heavy investment
+  inside that boundary; Go owns opt-in sidecar services behind env gates and TS
+  fallbacks. No language replaces another — each new binary must justify itself with
+  metrics or stay local-build only.
 
 ## 7. Proposed next actions
 
@@ -147,7 +168,13 @@ bracket/quote/comment balance for Generic/JsTs/Python/Rust/Go lexers); there is
 2. Audit FFI hit rate across edits; fix stale-ABI fallbacks; metric: % edits checked
    in-process.
 3. Add provider health/cooldown telemetry; metric: degraded-provider wasted latency.
-4. Prototype workspace index (Rust, daemon-resident) behind the TS fallback; metric:
-   grep/glob latency on large repos.
-5. Keep C++ to the validator kernel + fuzz corpus; no new C++ services.
-6. No Go introduction; document the decision in the toolchain ADR.
+4. Run the Go pilot: scaffold `go/` with the single `index.query` sidecar service,
+   `ELIA_GO_INDEX` gate defaulting to off, TS client with fallback, `build-go` recipe,
+   dedicated CI lane (ubuntu + windows); metric: p95 search latency vs ripgrep and
+   pure-TS baselines on a large-repo fixture. Expand only on a ≥2× win with no
+   token-cost or suite regressions.
+5. Deepen the C++ kernel: more lexers, SIMD row-scan prototype, fuzz corpus, plus at
+   most one additional same-shape kernel (fast diff/matcher) through `elia-native`;
+   no C++ services.
+6. Document the toolchain decision (five toolchains, promotion gate) in the toolchain ADR
+   so "add a language" stays a measured proposal, not precedent for sprawl.
