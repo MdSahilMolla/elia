@@ -40,6 +40,14 @@ export interface TaskSession {
   model?: string
   /** One-based dependency wave this worker belongs to. */
   wave?: number
+  /** The interactive/autonomous session that spawned this task. Set once at
+   * creation and never rewritten, so a `tasks.json` reloaded on the next
+   * startup carries the *old* id — that is how the live panel tells a worker
+   * from this run apart from history. */
+  sessionId?: string
+  /** Stable plan-step identity. Retried attempts of the same step share this,
+   * so the live panel collapses "builder / builder" into one row + attempt. */
+  stepId?: string
 }
 
 export type TaskSessionPatch = Partial<Pick<TaskSession, 'status' | 'action' | 'detail' | 'stepsCompleted' | 'stepsTotal' | 'progress' | 'attempts' | 'lastHeartbeatAt' | 'nextAction' | 'blockedReason' | 'acceptanceCriteria' | 'verificationCommands' | 'error'>>
@@ -50,6 +58,7 @@ export interface TaskSessionMeta {
   providerName?: string
   model?: string
   wave?: number
+  stepId?: string
   acceptanceCriteria?: string[]
   verificationCommands?: string[]
 }
@@ -63,7 +72,7 @@ export interface TaskControls {
 export type TaskSessionListener = (sessions: TaskSession[]) => void
 
 const TASKS_FILE = join(process.cwd(), '.elia', 'tasks.json')
-const TASKS_SCHEMA_VERSION = 4
+const TASKS_SCHEMA_VERSION = 5
 const STALE_TASK_HEARTBEAT_MS = 5 * 60_000
 
 export class TaskSessionStore {
@@ -72,6 +81,17 @@ export class TaskSessionStore {
   private readonly controls = new Map<string, TaskControls>()
   private writeQueued = false
   private persistencePath = TASKS_FILE
+  private activeSessionId: string | undefined
+
+  /** Stamps every task created from here on with the current session's id.
+   * Called once, after the interactive/autonomous session id is resolved. */
+  setActiveSession(id: string): void {
+    this.activeSessionId = id
+  }
+
+  getActiveSession(): string | undefined {
+    return this.activeSessionId
+  }
 
   async load(filePath = TASKS_FILE): Promise<void> {
     this.persistencePath = filePath
@@ -118,6 +138,8 @@ export class TaskSessionStore {
           providerName: typeof item.providerName === 'string' ? redactText(item.providerName, 80) : undefined,
           model: typeof item.model === 'string' ? redactText(item.model, 160) : undefined,
           wave: typeof item.wave === 'number' && Number.isFinite(item.wave) ? Math.max(1, Math.floor(item.wave)) : undefined,
+          sessionId: typeof item.sessionId === 'string' ? item.sessionId : undefined,
+          stepId: typeof item.stepId === 'string' ? item.stepId : undefined,
         })
       }
       // Loading is intentionally silent. Subscribers receive the complete loaded
@@ -148,6 +170,8 @@ export class TaskSessionStore {
       providerName: meta.providerName ? redactText(meta.providerName, 80) : undefined,
       model: meta.model ? redactText(meta.model, 160) : undefined,
       wave: typeof meta.wave === 'number' && Number.isFinite(meta.wave) ? Math.max(1, Math.floor(meta.wave)) : undefined,
+      sessionId: this.activeSessionId,
+      stepId: typeof meta.stepId === 'string' ? meta.stepId : undefined,
       acceptanceCriteria: meta.acceptanceCriteria?.slice(0, 20),
       verificationCommands: meta.verificationCommands?.slice(0, 20),
     }

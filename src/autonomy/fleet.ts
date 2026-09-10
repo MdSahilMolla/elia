@@ -2,6 +2,8 @@ import { runSubAgent, type SubAgentResult } from '../subagent.ts'
 import { runWithConcurrencyLimit } from '../agentLoop.ts'
 import { posix } from 'node:path'
 import { createFleetBoard } from '../ui/fleetBoard.ts'
+import { inkOwnsScreen } from '../ui/stream.ts'
+import { reportSinkActive } from '../ui/report.ts'
 import { ZERO_USAGE, addUsage } from '../usage.ts'
 import { roleConfig } from '../config.ts'
 import { role as roleDefinition, toolsForRole } from './roles.ts'
@@ -121,7 +123,13 @@ export function buildWorkerContract(
 
 export async function runFleet(options: FleetRunOptions): Promise<FleetResult> {
   const { assignments, briefing, journal, signal, cwd, stripBoardTools } = options
-  const showBoard = options.showBoard ?? true
+  // The gold fleet board writes straight to stdout with its own cursor math. That
+  // is right for `elia auto` in a bare terminal, but when the Ink REPL frame (or
+  // the autonomous report sink feeding it) owns the screen it fights the frame
+  // and leaves duplicated panels in scrollback. In that mode the workers are
+  // already visible through the Ink WorkspacePanel's SUBAGENTS section, driven by
+  // the same taskSessions updates — so the stdout board must stay silent.
+  const showBoard = options.showBoard ?? !(inkOwnsScreen() || reportSinkActive())
   const startedAt = Date.now()
 
   const named = assignments.map((assignment, index) => {
@@ -151,6 +159,7 @@ export async function runFleet(options: FleetRunOptions): Promise<FleetResult> {
       parentId: options.parentNodeId,
       depth: options.delegationDepth ?? 0,
       role: item.role,
+      stepId: item.id,
       providerName: item.providerName,
       model: item.model,
       wave: options.wave ?? 1,

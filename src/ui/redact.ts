@@ -1,13 +1,44 @@
 const SECRET_KEY = /(api[_-]?key|token|secret|password|passwd|authorization|cookie|session|private[_-]?key|access[_-]?key|client[_-]?secret|webhook)/i
-const SECRET_VALUE = /((?:sk|pk|rk|xox[baprs]-|gh[pousr]_|AIza|AKIA)[A-Za-z0-9_\-/]{8,}|Bearer\s+[A-Za-z0-9._\-/+=]{8,}|\b[A-Za-z0-9+/]{32,}={0,2}\b)/g
+// Value arms, most specific first:
+//  1. prefixed API keys — the prefix must be followed by its own separator
+//     (`sk-`, `sk_`, `rk_`, `re_`). The old arm matched a bare `sk`/`pk`/`rk`
+//     and up to 8 following path chars, so `wo|rk|space/edcdemo/src/...`
+//     redacted to `wo[REDACTED]` — a repo path, not a secret.
+//  2. vendor-prefixed tokens (`ghp_…`, `xoxb-…`, `AKIA…`, `AIza…`)
+//  3. a `Bearer <token>` header
+//  4. a base64 blob that ends in `=`/`==` padding — a filesystem path does not
+//  5. a long unbroken base62 run (hex / base62 API tokens), no `/` or `.`
+const SECRET_VALUE = /((?:sk|pk|rk|re|ey)[-_][A-Za-z0-9._\-]{8,}|(?:xox[baprs]-|gh[pousr]_|AIza|AKIA|ASIA)[A-Za-z0-9_\-/]{8,}|Bearer\s+[A-Za-z0-9._\-/+=]{8,}|\b[A-Za-z0-9+/]{16,}={1,2}|\b[A-Za-z0-9]{40,}\b)/g
 
 /** Redacts credential-like values without flattening or truncating the surrounding evidence. */
 export function redactSecrets(text: string): string {
   return text.replace(SECRET_VALUE, '[REDACTED]')
 }
 
+/**
+ * Rewrites an absolute path that sits inside the current project to its
+ * repo-relative form, so `C:\…\elia\workspace\edcdemo` (or the POSIX
+ * equivalent) reads as `workspace/edcdemo` instead of being partly redacted or
+ * truncated into noise. A home directory or any path *outside* the project is
+ * left alone for the secret/redaction rules to handle.
+ */
+export function relativizeProjectPaths(text: string, cwd = process.cwd()): string {
+  if (!cwd) return text
+  let out = text
+  for (const root of new Set([cwd, cwd.replace(/\\/g, '/')])) {
+    if (!root) continue
+    const escaped = root.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    // `<root>/rest` -> `rest`; a bare `<root>` -> `.`
+    out = out
+      .replace(new RegExp(`${escaped}[\\\\/]`, 'g'), '')
+      .replace(new RegExp(`${escaped}(?![\\w./\\\\-])`, 'g'), '.')
+  }
+  return out
+}
+
 export function redactText(text: string, maxLength = 300): string {
-  const redacted = redactSecrets(text)
+  const localized = relativizeProjectPaths(text)
+  const redacted = redactSecrets(localized)
   const flattened = redacted.replace(/\s+/g, ' ').trim()
   return flattened.length > maxLength ? `${flattened.slice(0, maxLength - 1)}…` : flattened
 }

@@ -294,12 +294,44 @@ export function renderProposal(proposal: Proposal): string {
   return `\n${box(lines, { title: 'Proposal', borderColor: gold })}\n`
 }
 
+export type PlanApprovalState = 'draft' | 'approved' | 'amended' | 'rejected'
+
+/**
+ * A compact, plain-text plan summary for the terminal and the approval gate —
+ * Goal, the ordered steps, the verification commands, and where the full
+ * proposal lives. `renderProposal` (the box-drawn version) wraps badly in a
+ * narrow terminal and buries the decision; this is what the user actually needs
+ * to say yes/no, with the detail one file away.
+ */
+export function renderProposalSummary(proposal: Proposal, artifactPath = '.elia/artifacts/plan.md'): string[] {
+  const lines: string[] = []
+  lines.push('Goal')
+  for (const line of wrapText(proposal.goal, 72)) lines.push(`  ${line}`)
+
+  lines.push('', 'Steps')
+  proposal.steps.forEach((step, i) => {
+    lines.push(`  ${i + 1}. ${step.title}`)
+  })
+
+  lines.push('', 'Verification')
+  if (proposal.verification.length > 0) for (const command of proposal.verification) lines.push(`  ${command}`)
+  else lines.push('  (review only — no commands given)')
+
+  lines.push('', `Full proposal: ${artifactPath}`)
+  return lines
+}
+
 /** Renders a proposal as plain Markdown, for the on-disk artifact — `renderProposal` above owns the terminal (ANSI, box-drawn) format; this is the un-styled equivalent for a file that outlives the session. */
-export function renderProposalMarkdown(proposal: Proposal): string {
+export function renderProposalMarkdown(proposal: Proposal, approval?: { state: PlanApprovalState; runId?: string; at?: number }): string {
   const lines: string[] = []
   const { waves } = planWaves(proposal.steps)
 
   lines.push(`# Execution Plan: ${proposal.goal}`)
+
+  if (approval) {
+    const when = new Date(approval.at ?? Date.now()).toISOString()
+    lines.push('', `**Approval state:** ${approval.state}${approval.runId ? ` · run \`${approval.runId}\`` : ''} · ${when}`)
+  }
 
   if (proposal.understanding) {
     lines.push('', '## Understanding', proposal.understanding)

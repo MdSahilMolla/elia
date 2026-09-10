@@ -1,14 +1,14 @@
-import { existsSync, readFileSync, statSync } from 'node:fs'
-import { basename, dirname, join, relative } from 'node:path'
+import { existsSync, statSync } from 'node:fs'
+import { basename, dirname, relative } from 'node:path'
 import type { Tool } from './types.ts'
 import { ensurePreviewServer } from '../preview/server.ts'
 import { launchInBrowser } from '../preview/launchChrome.ts'
+import { findProject, pickBuildOutput } from '../preview/project.ts'
 import { resolveWorkspacePath } from '../autonomy/context.ts'
 import { paths } from '../config.ts'
 import { runShell } from '../shell.ts'
 import { activeActionGovernor } from '../autonomy/governor.ts'
 
-const BUNDLER = /\b(vite|webpack|parcel|rollup|esbuild|@vitejs|next|@remix-run|astro|@sveltejs)\b/
 const BUILD_TIMEOUT_MS = 240_000
 
 export const previewTool: Tool = {
@@ -78,44 +78,4 @@ export const previewTool: Tool = {
     const target = `${server.baseUrl}/${servePath.replace(/^\/+/, '').split('/').map(encodeURIComponent).join('/')}`
     return `${(await launchInBrowser(target)).message}${note}`
   },
-}
-
-interface ProjectInfo {
-  dir: string
-  runner: 'bun' | 'npm' | 'pnpm' | 'yarn'
-  hasBuildScript: boolean
-  usesBundler: boolean
-}
-
-function findProject(fileOrDir: string): ProjectInfo | undefined {
-  let dir = existsSync(fileOrDir) && !fileOrDir.match(/\.[a-z]+$/i) ? fileOrDir : dirname(fileOrDir)
-  for (let i = 0; i < 6; i += 1) {
-    const pkgPath = join(dir, 'package.json')
-    if (existsSync(pkgPath)) {
-      try {
-        const pkg = JSON.parse(readFileSync(pkgPath, 'utf8')) as { scripts?: Record<string, string>; dependencies?: Record<string, string>; devDependencies?: Record<string, string> }
-        const deps = JSON.stringify({ ...pkg.dependencies, ...pkg.devDependencies, ...pkg.scripts })
-        return {
-          dir,
-          runner: existsSync(join(dir, 'bun.lock')) || existsSync(join(dir, 'bun.lockb')) ? 'bun' : existsSync(join(dir, 'pnpm-lock.yaml')) ? 'pnpm' : existsSync(join(dir, 'yarn.lock')) ? 'yarn' : 'npm',
-          hasBuildScript: Boolean(pkg.scripts?.build),
-          usesBundler: BUNDLER.test(deps),
-        }
-      } catch {
-        return undefined
-      }
-    }
-    const parent = dirname(dir)
-    if (parent === dir) return undefined
-    dir = parent
-  }
-  return undefined
-}
-
-function pickBuildOutput(projectDir: string): string | undefined {
-  for (const name of ['dist', 'build', 'out', '.output/public']) {
-    const candidate = join(projectDir, name)
-    if (existsSync(join(candidate, 'index.html'))) return candidate
-  }
-  return undefined
 }

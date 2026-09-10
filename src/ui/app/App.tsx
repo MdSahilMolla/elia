@@ -540,6 +540,10 @@ export function App(props: AppProps) {
     [isCodex, env.model],
   )
   const visiblePlan = plan.length > 0 ? plan : providerPlan
+  // An approval / confirm is a modal state: freeze the live panels behind it so
+  // a background repaint can't corrupt the menu and the user sees only what the
+  // decision is about. The transcript (append-only) and the menu itself stay.
+  const modalOpen = confirm !== null || approval !== null || picker !== null || textPrompt !== null
 
   return (
     <Box flexDirection="column">
@@ -554,8 +558,8 @@ export function App(props: AppProps) {
         </Box>
       )}
 
-      <WorkspacePanel plan={visiblePlan} agents={agents} since={sessionStartedAt} />
-      {previewUrl && (
+      {!modalOpen && <WorkspacePanel plan={visiblePlan} agents={agents} since={sessionStartedAt} sessionId={props.sessionId} />}
+      {previewUrl && !modalOpen && (
         <Box marginTop={1}>
           <Text color={palette.toolName}>▸ Preview </Text>
           <Text underline color={palette.accent}>
@@ -564,7 +568,7 @@ export function App(props: AppProps) {
           <Text color={palette.muted}> · live-reloading as files change</Text>
         </Box>
       )}
-      {busy && !confirm && !approval && <WorkingIndicator startedAt={turnStartedAt} status={status} steeringPending={steeringCount} />}
+      {busy && !modalOpen && <WorkingIndicator startedAt={turnStartedAt} status={status} steeringPending={steeringCount} />}
       {showHelp && <HelpOverlay onClose={() => setShowHelp(false)} />}
       {confirm && <Confirm request={confirm} />}
       {approval && <ApprovalMenu request={approval} />}

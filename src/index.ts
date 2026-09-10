@@ -1691,6 +1691,11 @@ async function runInteractive(): Promise<void> {
 
   const checkpoints = await loadCheckpoints(sessionId)
   const sessionStartedAt = Date.now()
+  // From here on, every task session (interactive turns, escalated autonomous
+  // workers, `task`-tool sub-agents) is stamped with this id. The live fleet
+  // panel shows only workers carrying it — tasks reloaded from a previous
+  // process keep their old id and stay in history where they belong.
+  taskSessions.setActiveSession(sessionId)
 
   // Opportunistically tidy the cross-session brain: merge duplicate lessons and
   // drop stale ones so every future prompt isn't paying to carry them. Fire and
@@ -1782,8 +1787,7 @@ async function runInteractive(): Promise<void> {
   ): Promise<void> {
     const { runAutonomousTask, autoApprove } = await import('./autonomy/loop.ts')
     const { setReportSink } = await import('./ui/report.ts')
-    const { renderProposal } = await import('./autonomy/proposal.ts')
-    const stripAnsi = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, '')
+    const { renderProposalSummary } = await import('./autonomy/proposal.ts')
 
     const note = (title: string, detail?: string, status: 'updated' | 'completed' = 'updated') => {
       if (uiHooks?.onActivity) uiHooks.onActivity({ kind: 'status', status, title, detail })
@@ -1806,8 +1810,8 @@ async function runInteractive(): Promise<void> {
     const approvalRl = ttyApprover ? createSlashPrompt([]) : undefined
     const approve: import('./autonomy/loop.ts').Approver = uiHooks?.approve
       ? async (proposal) => {
-          const preview = stripAnsi(renderProposal(proposal)).split('\n').slice(0, 60)
-          const res = await uiHooks.approve!({ title: 'Approve this plan?', lines: [redactText(proposal.goal, 200)], preview, ruleLabel: 'run this plan' })
+          const preview = renderProposalSummary(proposal)
+          const res = await uiHooks.approve!({ title: 'PLAN · awaiting approval', lines: [], preview, ruleLabel: 'run this plan' })
           const outcome = typeof res === 'boolean' ? { approved: res, feedback: undefined } : res
           if (outcome.approved) return { action: 'approve' }
           if ('feedback' in outcome && outcome.feedback) return { action: 'amend', feedback: outcome.feedback }
@@ -2054,11 +2058,31 @@ async function runInteractive(): Promise<void> {
           const { findFreshPreviewTarget } = await import('./preview/autoPreview.ts')
           const target = findFreshPreviewTarget(turnStartedAt - 3_000)
           if (target) {
-            const { ensurePreviewServer } = await import('./preview/server.ts')
-            const server = ensurePreviewServer(pathModule.dirname(target))
-            const url = `${server.baseUrl}/${encodeURIComponent(pathModule.basename(target))}`
-            if (uiHooks) uiHooks.onActivity?.({ kind: 'status', status: 'completed', title: 'Preview ready', detail: url })
-            else writeNotice(`▸ Preview ready — ${url} · live-reloading as files change`)
+            const { prepareAutoPreview } = await import('./preview/prepare.ts')
+            const { waitForHttp, checkRendered } = await import('./preview/readiness.ts')
+            const prep = prepareAutoPreview(target)
+            if (prep.kind === 'skip') {
+              const line = `Preview skipped — ${prep.reason}`
+              if (uiHooks) uiHooks.onActivity?.({ kind: 'status', status: 'warning', title: line })
+              else writeNotice(`▸ ${line}`)
+            } else {
+              const { ensurePreviewServer } = await import('./preview/server.ts')
+              const server = ensurePreviewServer(prep.serveRoot)
+              const url = `${server.baseUrl}/${prep.servePath.split('/').map(encodeURIComponent).join('/')}`
+              // Don't announce "ready" until the server actually answers and the
+              // root paints something — a blank page is worse than no preview.
+              const up = await waitForHttp(url, 8_000, controller.signal)
+              const rendered = up.ok ? await checkRendered(url, controller.signal) : up
+              if (rendered.ok) {
+                const detail = url
+                if (uiHooks) uiHooks.onActivity?.({ kind: 'status', status: 'completed', title: 'Preview ready', detail })
+                else writeNotice(`▸ Preview ready — ${url}${prep.note ? ` (${prep.note})` : ''} · live-reloading as files change`)
+              } else {
+                const line = `Preview not ready — ${rendered.reason ?? 'the page did not render'}`
+                if (uiHooks) uiHooks.onActivity?.({ kind: 'status', status: 'warning', title: line })
+                else writeNotice(`▸ ${line}`)
+              }
+            }
           }
         } catch {
           // Preview is a convenience; never fail a completed turn over it.

@@ -201,8 +201,21 @@ export function createTranscriptStore(): TranscriptStore {
     },
 
     activity(activity) {
-      const text = activity.detail ? `${activity.title}\n${activity.detail}` : activity.title
-      live = [...live, { id: nextId(), kind: 'notice', text: redactText(text, 2_000) }]
+      const text = redactText(activity.detail ? `${activity.title}\n${activity.detail}` : activity.title, 2_000)
+      // A repair loop emits the same warning on each attempt. Collapse an
+      // immediately-repeated activity into one line with a ×N counter rather
+      // than stacking identical rows in scrollback.
+      const last = lastLive()
+      if (last?.kind === 'notice') {
+        const base = /^(.*?)(?:  ×\d+)?$/s.exec(last.text)?.[1]
+        if (base === text) {
+          const n = Number(/  ×(\d+)$/.exec(last.text)?.[1] ?? '1') + 1
+          live = live.map((item) => (item === last ? { ...last, text: `${text}  ×${n}` } : item))
+          changed()
+          return
+        }
+      }
+      live = [...live, { id: nextId(), kind: 'notice', text }]
       changed()
     },
 

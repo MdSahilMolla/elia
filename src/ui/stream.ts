@@ -17,6 +17,12 @@ let inkSink: ((kind: 'notice' | 'usage' | 'error', text: string) => void) | unde
 export function setInkSink(sink: typeof inkSink): void {
   inkSink = sink
 }
+/** True while the Ink REPL frame owns the screen — any subsystem that would
+ * otherwise write straight to stdout (the fleet board, a raw spinner) must go
+ * quiet and feed structured state instead, or it corrupts the frame. */
+export function inkOwnsScreen(): boolean {
+  return inkSink !== undefined
+}
 
 let inThinkingBlock = false
 let replyStarted = false

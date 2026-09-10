@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { redactRecord, redactText } from './redact.ts'
+import { redactRecord, redactText, relativizeProjectPaths } from './redact.ts'
 
 test('redacts credential-shaped keys recursively', () => {
   expect(redactRecord({ apiKey: 'sk-test-secret', nested: { authorization: 'Bearer abcdefghijklmnop' } })).toEqual({
@@ -12,4 +12,26 @@ test('redacts common secret-shaped values in free text and bounds previews', () 
   const syntheticToken = ['ghp_', '1234567890abcdefghij'].join('')
   expect(redactText(`token=${syntheticToken}`)).toContain('[REDACTED]')
   expect(redactText('a '.repeat(200), 30).length).toBe(30)
+})
+
+test('still redacts a padded base64 secret blob', () => {
+  const blob = 'aGVsbG8gd29ybGQgdGhpcyBpcyBhIHNlY3JldA=='
+  expect(redactText(`SECRET=${blob}`)).toContain('[REDACTED]')
+})
+
+test('still redacts a long unbroken token', () => {
+  const token = 'a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4'
+  expect(redactText(token)).toBe('[REDACTED]')
+})
+
+test('does not redact a deep repo-relative path', () => {
+  const path = 'workspace/edcdemo/src/components/DemoPanel.tsx'
+  expect(redactText(`edited ${path}`)).toBe(`edited ${path}`)
+})
+
+test('rewrites an absolute project path to its repo-relative form', () => {
+  const cwd = process.cwd().replace(/\\/g, '/')
+  const abs = `${cwd}/workspace/edcdemo`
+  expect(relativizeProjectPaths(`built ${abs} ok`, process.cwd())).toBe('built workspace/edcdemo ok')
+  expect(redactText(`ls ${abs}`)).toBe('ls workspace/edcdemo')
 })

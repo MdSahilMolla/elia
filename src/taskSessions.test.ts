@@ -44,6 +44,30 @@ test('tracks pending, running, and completed task state', () => {
   expect(finished?.progress).toBe(1)
 })
 
+test('stamps tasks with the active session and keeps a reloaded record on its old id', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'elia-task-session-scope-'))
+  const file = join(dir, 'tasks.json')
+  try {
+    const store = new TaskSessionStore()
+    store.setActiveSession('run-1')
+    const worker = store.create('code', 'Build feature', 'Queued', { role: 'builder', stepId: 's2' })
+    expect(worker.sessionId).toBe('run-1')
+    expect(worker.stepId).toBe('s2')
+    store.update(worker.id, { status: 'needs-review', action: 'Verification needs review' })
+    await Bun.write(file, JSON.stringify([...store.list()]))
+
+    const next = new TaskSessionStore()
+    next.setActiveSession('run-2')
+    await next.load(file)
+    // The reloaded worker keeps run-1; a task created now belongs to run-2.
+    expect(next.get(worker.id)?.sessionId).toBe('run-1')
+    const fresh = next.create('code', 'New work', 'Queued', { role: 'builder' })
+    expect(fresh.sessionId).toBe('run-2')
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
 test('persists explicit waiting metadata without exposing unbounded text', () => {
   const store = new TaskSessionStore()
   const session = store.create('production', 'Deploy service', 'Queued', { acceptanceCriteria: ['health check passes'], verificationCommands: ['bun test'] })

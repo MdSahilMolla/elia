@@ -26,7 +26,7 @@ import { createJournal, newRunId, runDir, type Journal } from './journal.ts'
 import { captureTreeSnapshot, discardTreeSnapshot, dirtyPaths, restoreTreeSnapshot, type TreeSnapshot } from './treeSnapshot.ts'
 import { planWaves, runFleet } from './fleet.ts'
 import { runVariants } from './variants.ts'
-import { createProposalTool, renderProposal } from './proposal.ts'
+import { createProposalTool, renderProposal, renderProposalSummary } from './proposal.ts'
 import { savePlanArtifact } from './artifacts.ts'
 import { commitAll, scaffoldProject } from './scaffold.ts'
 import { publishProject } from './publish.ts'
@@ -460,8 +460,17 @@ async function runAutonomousTaskInternal(options: AutonomousRunOptions): Promise
     }
 
     journal.append('proposal', { proposal })
+    // The full proposal is durable output: write it as an artifact the moment
+    // it is valid — before the approval gate — so a rejected or amended plan
+    // still leaves a record. It is re-written with the outcome once decided.
+    const planArtifactPath = runId ? `.elia/runs/${runId}/plan.md` : '.elia/artifacts/plan.md'
+    try {
+      savePlanArtifact(proposal, runId, process.cwd(), 'draft')
+    } catch {
+      // Non-fatal — the plan still streams to the terminal and the journal.
+    }
     if (machineReadable) emitEvent('proposal_ready', { proposal })
-    else if (reportSinkActive()) writeBlock('Plan', renderProposal(proposal).replace(/\x1b\[[0-9;]*m/g, '').trim())
+    else if (reportSinkActive()) writeBlock('Plan · awaiting approval', renderProposalSummary(proposal, planArtifactPath).join('\n'))
     else process.stdout.write(renderProposal(proposal))
     journal.checkpoint('after-propose', messages)
 
@@ -475,11 +484,13 @@ async function runAutonomousTaskInternal(options: AutonomousRunOptions): Promise
 
     if (decision.action === 'approve') break
     if (decision.action === 'reject') {
-      writeSubStep('Plan rejected — nothing was changed.')
+      try { savePlanArtifact(proposal, runId, process.cwd(), 'rejected') } catch { /* non-fatal */ }
+      writeSubStep(`Plan rejected — nothing was changed. Full proposal kept at ${planArtifactPath}`)
       return done('rejected', { proposal })
     }
 
     if (amendments >= maxAmendments) {
+      try { savePlanArtifact(proposal, runId, process.cwd(), 'amended') } catch { /* non-fatal */ }
       writeSubStep(`Reached the ${maxAmendments}-revision limit — stopping without making changes.`)
       return done('rejected', { proposal })
     }
@@ -552,7 +563,9 @@ async function runAutonomousTaskInternal(options: AutonomousRunOptions): Promise
 
   if (planApproved && proposal) {
     try {
-      savePlanArtifact(proposal, runId, process.cwd())
+      // Re-write the draft artifact with the final (possibly verification-
+      // rewritten) proposal, now marked approved.
+      savePlanArtifact(proposal, runId, process.cwd(), 'approved')
     } catch {
       // The plan already streamed to the terminal and the journal; a failure to
       // also mirror it to .elia/artifacts must not block an approved run.
