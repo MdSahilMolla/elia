@@ -26,6 +26,12 @@ def pixels_to_ascii(image):
 
 
 def image_to_ascii(image_path, output_width=160):
+    """Converts an image into a grayscale ASCII-art string.
+    Parameters:
+        - image_path (str): Path to the input image file.
+        - output_width (int): Width of the generated ASCII-art output in characters.
+    Returns:
+        - str or None: The formatted ASCII-art string, or None if the image cannot be opened."""
     try:
         image = Image.open(image_path)
     except Exception as e:
