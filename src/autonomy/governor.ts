@@ -221,6 +221,70 @@ export function assessAction(request: ActionRequest, cwd = currentAgent().cwd ??
     return assessment('safe', 'allow', 'visualize creates deterministic, workspace-scoped SVG and Markdown artifacts from bounded structured data', 'visualize', artifactPaths, true)
   }
 
+  if (name === 'causal_debug') {
+    return assessment('safe', 'allow', 'causal_debug performs read-only git history analysis to trace causal chains', 'causal_debug', resources, true)
+  }
+
+  if (name === 'arch_drift') {
+    return assessment('safe', 'allow', 'arch_drift performs read-only structural analysis to detect architectural violations', 'arch_drift', resources, true)
+  }
+
+  if (name === 'adversarial_verify') {
+    return assessment('review', 'approve', 'adversarial_verify generates edge cases and tests against code changes to find vulnerabilities', 'adversarial_verify', resources, true)
+  }
+
+  if (name === 'codebase_memory') {
+    const action = typeof input.action === 'string' ? input.action : 'query'
+    if (action === 'record' || action === 'update') {
+      return assessment('review', 'approve', 'codebase_memory write operations persist semantic recall entries to the local store', 'codebase_memory.write', resources, true)
+    }
+    return assessment('safe', 'allow', 'codebase_memory query is read-only semantic recall from the local store', 'codebase_memory.query', resources, true)
+  }
+
+  if (name === 'predictive_impact') {
+    return assessment('safe', 'allow', 'predictive_impact performs read-only diff analysis and dependency tracing to forecast change impact', 'predictive_impact', resources, true)
+  }
+
+  if (name === 'cross_project_learn') {
+    const action = typeof input.action === 'string' ? input.action : 'query'
+    if (action === 'sync' || action === 'record') {
+      return assessment('review', 'approve', 'cross_project_learn sync/record writes anonymized patterns to the shared store', 'cross_project_learn.write', resources, true)
+    }
+    return assessment('safe', 'allow', 'cross_project_learn query retrieves patterns from other projects without exposing source code', 'cross_project_learn.query', resources, true)
+  }
+
+  if (name === 'dependency_audit') {
+    return assessment('safe', 'allow', 'dependency_audit inspects local package manifests and lock files without modifying them', 'dependency_audit', resources, true)
+  }
+
+  if (name === 'multi_modal_review') {
+    return assessment('safe', 'allow', 'multi_modal_review performs read-only code and diff analysis for comprehensive review', 'multi_modal_review', resources, true)
+  }
+
+  if (name === 'self_healing_monitor') {
+    const action = typeof input.action === 'string' ? input.action : 'status'
+    if (action === 'deploy_monitor' || action === 'auto_fix') {
+      return assessment('critical', 'approve', 'self_healing_monitor deploy_monitor/auto_fix can modify running systems', 'self_healing_monitor.write', resources, false)
+    }
+    return assessment('safe', 'allow', 'self_healing_monitor status/analyze are read-only observability operations', 'self_healing_monitor.read', resources, true)
+  }
+
+  if (name === 'federated_collab') {
+    const action = typeof input.action === 'string' ? input.action : 'query'
+    if (action === 'share' || action === 'broadcast') {
+      return assessment('review', 'approve', 'federated_collab share/broadcast publishes anonymized patterns to the federation', 'federated_collab.write', resources, true)
+    }
+    return assessment('safe', 'allow', 'federated_collab query retrieves shared patterns from the federation', 'federated_collab.query', resources, true)
+  }
+
+  if (name === 'spec_verify') {
+    return assessment('safe', 'allow', 'spec_verify analyzes code against specifications and generates verification reports', 'spec_verify', resources, true)
+  }
+
+  if (name === 'temporal_analysis') {
+    return assessment('safe', 'allow', 'temporal_analysis performs read-only historical trend analysis of code metrics', 'temporal_analysis', resources, true)
+  }
+
   if (name === 'battmann') {
     const action = typeof input.action === 'string' ? input.action : ''
     if (action === 'report' || action === 'report_from_store' || action === 'dashboard') {
