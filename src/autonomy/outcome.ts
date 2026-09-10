@@ -49,6 +49,8 @@ export function assessCompletion(input: CompletionInput): CompletionAssessment {
 
   let state: CompletionState
   let confidence: CompletionConfidence
+  /** Set when the generic per-state summary would understate what the run actually achieved. */
+  let summaryOverride: string | undefined
   if (input.outcome === 'aborted') {
     state = 'aborted'
     confidence = 'low'
@@ -61,6 +63,17 @@ export function assessCompletion(input: CompletionInput): CompletionAssessment {
     state = 'verified'
     confidence = 'high'
     nextActions.push('Review the receipt and accept the verified result, or provide a new goal for follow-up work.')
+  } else if (completedSteps === steps.length && steps.length > 0 && input.verificationPassed) {
+    // Every planned step completed and the project's own checks passed. Review
+    // may still be outstanding and actions may be unresolved — both are already
+    // recorded as blockers — but reporting this as "failed" contradicts the
+    // run's own evidence. Run 2026-09-10-754n-8z17 was reported failed with
+    // 4 of 4 steps done and verification green, purely because the structured
+    // review had not finished.
+    state = 'partial'
+    confidence = 'medium'
+    summaryOverride = 'The planned work completed and verification passed; the review did not finish.'
+    nextActions.push('Finish the outstanding review or resolve the listed actions to reach a verified result.')
   } else if (completedSteps > 0 || input.verificationPassed || input.reviewPassed || (input.actionBudget?.blockedByBudget ?? 0) > 0) {
     state = input.outcome === 'needs-attention' ? 'failed' : 'partial'
     confidence = 'medium'
@@ -74,7 +87,7 @@ export function assessCompletion(input: CompletionInput): CompletionAssessment {
   return {
     state,
     confidence,
-    summary: state === 'verified'
+    summary: summaryOverride ?? (state === 'verified'
       ? 'The goal has evidence-backed completion.'
       : state === 'blocked'
         ? 'The goal is blocked by approval or authorization state.'
@@ -82,7 +95,7 @@ export function assessCompletion(input: CompletionInput): CompletionAssessment {
           ? 'The goal stopped before completion and can be resumed from durable state.'
           : state === 'partial'
             ? 'The goal has partial progress but completion is not proven.'
-            : 'The goal did not complete successfully.',
+            : 'The goal did not complete successfully.'),
     evidence,
     blockers,
     nextActions,

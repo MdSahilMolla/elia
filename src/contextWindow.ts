@@ -66,6 +66,14 @@ const KNOWN_WINDOWS: { pattern: RegExp; window: number }[] = [
   { pattern: /^llama-3|^llama3|nemotron/, window: 128_000 },
   { pattern: /^deepseek/, window: 128_000 },
   { pattern: /^qwen/, window: 128_000 },
+  // Inception's diffusion models, from their own /v1/models (verified
+  // 2026-09-10): mercury-2 reports context_length 128000, mercury-2.5 260000.
+  // The 2.5 pattern has to come first — the table returns the first match, and
+  // /^mercury/ would otherwise claim it. Neither matched anything before, so
+  // both fell to DEFAULT_CONTEXT_WINDOW and compacted at 30k — a quarter of the
+  // smaller model's real window, mid-build.
+  { pattern: /^mercury-2\.5/, window: 260_000 },
+  { pattern: /^mercury/, window: 128_000 },
 ]
 
 /**

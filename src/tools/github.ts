@@ -20,7 +20,8 @@ import { detectGitHubContext, renderGitHubBanner } from '../github/context.ts'
 
 type Action =
   | 'status' | 'branch' | 'commit' | 'push'
-  | 'pr_create' | 'pr_view' | 'pr_checks' | 'pr_comment' | 'pr_merge'
+  | 'pr_create' | 'pr_view' | 'pr_list' | 'pr_checks' | 'pr_reviews' | 'pr_comment' | 'pr_merge'
+  | 'issue_list' | 'issue_view' | 'issue_create'
 
 function fail(result: ExecResult): string {
   if (result.missing) return `${result.stderr}. Install and authenticate the GitHub CLI (\`gh auth login\`) to use this action.`
@@ -41,24 +42,38 @@ Actions:
 - push: push the current branch to origin. { force? } — force needs approval.
 - pr_create: open a pull request for the current branch (pushes it first if needed). { title, body?, base?, draft? }
 - pr_view: show a PR (defaults to the current branch's). { number? }
+- pr_list: list open pull requests. { limit? }
 - pr_checks: CI / status-check results for a PR. { number? }
+- pr_reviews: review comments and discussion on a PR (for addressing feedback). { number? }
 - pr_comment: add a comment to a PR. { number, body } — needs approval.
-- pr_merge: merge a PR. { number, method? one of merge|squash|rebase } — needs approval.`,
+- pr_merge: merge a PR. { number, method? one of merge|squash|rebase } — needs approval.
+- issue_list: list open issues (intake for autonomous work). { limit?, label? }
+- issue_view: show one issue. { number }
+- issue_create: open an issue. { title, body? } — needs review approval.`,
   input_schema: {
     type: 'object',
     properties: {
-      action: { type: 'string', enum: ['status', 'branch', 'commit', 'push', 'pr_create', 'pr_view', 'pr_checks', 'pr_comment', 'pr_merge'] },
+      action: {
+        type: 'string',
+        enum: [
+          'status', 'branch', 'commit', 'push',
+          'pr_create', 'pr_view', 'pr_list', 'pr_checks', 'pr_reviews', 'pr_comment', 'pr_merge',
+          'issue_list', 'issue_view', 'issue_create',
+        ],
+      },
       name: { type: 'string', description: 'branch: the new branch name' },
       from: { type: 'string', description: 'branch: base ref to branch from (default: current HEAD)' },
       message: { type: 'string', description: 'commit: the commit message' },
       all: { type: 'boolean', description: 'commit: stage all changes, including untracked files' },
       force: { type: 'boolean', description: 'push: force-push (requires approval)' },
-      title: { type: 'string', description: 'pr_create: PR title' },
-      body: { type: 'string', description: 'pr_create / pr_comment: PR body or comment text' },
+      title: { type: 'string', description: 'pr_create / issue_create: title' },
+      body: { type: 'string', description: 'pr_create / pr_comment / issue_create: body text' },
       base: { type: 'string', description: 'pr_create: base branch (default: the repo default branch)' },
       draft: { type: 'boolean', description: 'pr_create: open as a draft' },
-      number: { type: 'number', description: 'pr_view / pr_checks / pr_comment / pr_merge: the PR number' },
+      number: { type: 'number', description: 'pr_* / issue_view: the PR or issue number' },
       method: { type: 'string', enum: ['merge', 'squash', 'rebase'], description: 'pr_merge: merge strategy (default: merge)' },
+      limit: { type: 'number', description: 'pr_list / issue_list: max items (default 20, max 50)' },
+      label: { type: 'string', description: 'issue_list: filter by label' },
     },
     required: ['action'],
   },
@@ -134,6 +149,29 @@ Actions:
       return result.ok ? result.stdout : fail(result)
     }
 
+    if (action === 'pr_list') {
+      const limit = typeof input.limit === 'number' && input.limit > 0 ? Math.min(50, Math.floor(input.limit)) : 20
+      const result = await gh([
+        'pr', 'list', '--limit', String(limit),
+        '--json', 'number,title,isDraft,headRefName,author,url,updatedAt',
+        '--jq', '.[] | "#\\(.number) \\(if .isDraft then "[draft] " else "" end)\\(.title)\\n  \\(.headRefName) · @\\(.author.login) · \\(.url)"',
+      ])
+      if (!result.ok) return fail(result)
+      return result.stdout.trim() || 'No open pull requests.'
+    }
+
+    if (action === 'pr_reviews') {
+      const args = ['pr', 'view']
+      if (typeof input.number === 'number') args.push(String(input.number))
+      args.push(
+        '--json', 'number,title,url,reviews,comments,reviewDecision',
+        '--jq',
+        '"#\\(.number) \\(.title)\\nreview: \\(.reviewDecision // "none")\\n\\(.url)\\n\\n## Reviews\\n\\(.reviews // [] | map("- \\(.author.login): \\(.state)\\n  \\(.body // "")") | join("\\n"))\\n\\n## Comments\\n\\(.comments // [] | map("- \\(.author.login): \\(.body)") | join("\\n"))"',
+      )
+      const result = await gh(args)
+      return result.ok ? result.stdout : fail(result)
+    }
+
     if (action === 'pr_checks') {
       const args = ['pr', 'checks']
       if (typeof input.number === 'number') args.push(String(input.number))
@@ -155,6 +193,39 @@ Actions:
       const method = input.method === 'squash' || input.method === 'rebase' ? input.method : 'merge'
       const result = await gh(['pr', 'merge', String(input.number), `--${method}`])
       return result.ok ? `Merged PR #${input.number} (${method}).\n${result.stdout}` : fail(result)
+    }
+
+    if (action === 'issue_list') {
+      const limit = typeof input.limit === 'number' && input.limit > 0 ? Math.min(50, Math.floor(input.limit)) : 20
+      const args = [
+        'issue', 'list', '--limit', String(limit),
+        '--json', 'number,title,labels,author,url,updatedAt',
+        '--jq', '.[] | "#\\(.number) \\(.title)\\n  labels: \\([.labels[].name] | join(", ")) · @\\(.author.login) · \\(.url)"',
+      ]
+      if (str('label')) args.splice(3, 0, '--label', str('label'))
+      const result = await gh(args)
+      if (!result.ok) return fail(result)
+      return result.stdout.trim() || 'No open issues.'
+    }
+
+    if (action === 'issue_view') {
+      if (typeof input.number !== 'number') return 'issue_view needs "number".'
+      const result = await gh([
+        'issue', 'view', String(input.number),
+        '--json', 'number,title,state,author,labels,body,url,comments',
+        '--jq',
+        '"#\\(.number) \\(.title)\\nstate: \\(.state) · @\\(.author.login)\\nlabels: \\([.labels[].name] | join(", "))\\n\\(.url)\\n\\n\\(.body // "")\\n\\n## Comments\\n\\(.comments // [] | map("- \\(.author.login): \\(.body)") | join("\\n"))"',
+      ])
+      return result.ok ? result.stdout : fail(result)
+    }
+
+    if (action === 'issue_create') {
+      const title = str('title')
+      if (!title) return 'issue_create needs "title".'
+      const args = ['issue', 'create', '--title', title]
+      if (str('body')) args.push('--body', str('body'))
+      const result = await gh(args)
+      return result.ok ? `Opened issue: ${result.stdout}` : fail(result)
     }
 
     return `Unknown github action "${String(action)}".`

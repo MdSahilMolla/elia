@@ -44,3 +44,39 @@ test('targeted changes and questions stay on the fast path', () => {
 test('short input never escalates', () => {
   expect(classifyEscalation('build an app').escalate).toBe(false)
 })
+
+// Regression: this exact paste — a chat log copied in for context — was
+// classified as "building a new project" because the words "build" and "bot"
+// appear somewhere in its prose. It became an approved multi-wave run that
+// completed zero of its one planned node (2026-09-10-6sl5-x7m6).
+const PASTED_CHAT_LOG = "AI Mode conversation: can we scrape digicampus calander class mappingYou said: can we scrape digicampus calendar class mappingcan we scrape digicampus calendar class mappingYes, you can scrape the Digiicampus calendar class mapping, but because the platform is an authenticated, dynamic, single-page application (SPA), a standard HTTP request library like requests won't work on its own. [1] (https://digiicampus.com/academics/), [2] (https://digiicampus.com/learning-management-system/)To bypass their authentication and handle their JavaScript-heavy layout, you have two main approaches:Method 1: The DevTools Network Approach (Easiest & Cleanest)Instead of parsing the visual HTML frontend, you can capture the exact JSON payload the Digiicampus platform requests from its internal API when loading your calendar. [1] (https://digiicampus.com/learning-management-system/)Log in to your Digiicampus portal using Google Chrome or Firefox.Open the Developer Tools (Press F12) and navigate to the Network tab.Filter the network traffic by selecting Fetch/XHR.Refresh the page or click on your Calendar / Timetable view.Look for API requests named something like getCalendarEvents, timetable, class-mapping, or schedule.Right-click the request, select Copy -> Copy as cURL.Paste that cURL command into an online tool like curlconverter to instantly generate a working Python script (using requests) that includes all necessary authorization headers, cookies, and tokens.Method 2: Browser Automation (For Recurring Schedules)If you need to build a bot that runs on a schedule (e.g., pulling a new calendar mapping every Monday), you will need to automate the login session using Selenium or Playwright. [1] (https://www.firecrawl.dev/blog/automated-web-scraping-free-2025), [2] (https://www.scrapinglab."
+
+test('a pasted chat log is context, not a build order', () => {
+  const decision = classifyEscalation(PASTED_CHAT_LOG)
+  expect(decision.escalate).toBe(false)
+  expect(decision.reason).toBe('pasted context, not an instruction')
+})
+
+test('a long message that does open with an instruction still escalates', () => {
+  const long = `build me an end-to-end inventory system with auth and a dashboard
+
+${'reference material that goes on and on. '.repeat(80)}`
+  expect(long.length).toBeGreaterThan(1500)
+  expect(classifyEscalation(long).escalate).toBe(true)
+})
+
+test('build verbs buried in pasted prose do not escalate', () => {
+  const pasted = `${'Here is some documentation about scraping. '.repeat(40)}You could build a bot that runs on a schedule. ${'More prose follows. '.repeat(40)}`
+  expect(pasted.length).toBeGreaterThan(1500)
+  expect(classifyEscalation(pasted).escalate).toBe(false)
+})
+
+test('an interrogative opener without a question mark is still a question', () => {
+  expect(classifyEscalation('can you make a website for my portfolio and run it').escalate).toBe(false)
+  expect(classifyEscalation('is this repo able to build an end to end system').escalate).toBe(false)
+})
+
+test('a normal typed build request is unaffected by the paste guard', () => {
+  const decision = classifyEscalation('build me a full-stack app for tracking gym memberships with auth and payments')
+  expect(decision.escalate).toBe(true)
+})

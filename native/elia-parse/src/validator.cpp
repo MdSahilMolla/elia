@@ -102,7 +102,19 @@ class Scanner {
 
   // Returns when it consumes the interpolation-closing `}` (in_template_interp),
   // or at EOF.
+  //
+  // The interpolation's closing `}` is the one that arrives with nothing still
+  // open *inside* the interpolation, so the only reliable test is the bracket
+  // depth on entry. Asking whether the top of the shared stack is a `{` — which
+  // is what this used to do — misreads every template literal written inside a
+  // function body, object literal, class or `if` block: there the top of the
+  // stack is the *enclosing* brace, the guard fails, the interpolation's `}` is
+  // consumed as that enclosing brace, and the rest of the template is lexed as
+  // code until its closing backtick opens a template that never ends. That
+  // reported "unterminated template literal" on ordinary valid code and, because
+  // this check gates every write, refused the edit outright.
   void scan_code(bool in_template_interp) {
+    const size_t interp_depth = stack_.size();
     while (!eof()) {
       char c = cur();
 
@@ -165,8 +177,7 @@ class Scanner {
         continue;
       }
       if (c == ')' || c == ']' || c == '}') {
-        if (c == '}' && in_template_interp &&
-            (stack_.empty() || stack_.back().ch != '{')) {
+        if (c == '}' && in_template_interp && stack_.size() == interp_depth) {
           adv();  // closes ${ ... }
           return;
         }

@@ -94,3 +94,12 @@ test('rendering produces a prompt section only when there is something to say', 
   expect(rendered).toContain('What earlier runs learned')
   expect(rendered).toContain('the build needs --target=node')
 })
+
+test('lessons keep optional source and confidence provenance', () => {
+  appendLessons([{ text: 'use bun test', source: 'repair', confidence: 0.9 }], path)
+  const lesson = loadLessons(path)[0]!
+  expect(lesson.text).toBe('use bun test')
+  expect(lesson.source).toBe('repair')
+  expect(lesson.confidence).toBeCloseTo(0.9)
+  expect(renderLessons(path)).toContain('source: repair')
+})

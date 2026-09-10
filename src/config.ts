@@ -440,7 +440,12 @@ function resolveFastTier(deepTier: TierConfig): TierConfig {
     providerName: providerName ?? deepTier.providerName,
     model,
     baseURL: process.env.ELIA_FAST_BASE_URL,
-    apiKeyEnv: 'ELIA_FAST_API_KEY',
+    // Only override the key source when a dedicated key is actually present.
+    // Naming ELIA_FAST_API_KEY unconditionally *replaces* the preset's own key
+    // env, so `ELIA_FAST_PROVIDER=groq` with a perfectly good GROQ_API_KEY in
+    // .env resolved to "No API key found for provider groq" and silently fell
+    // back to the deep tier — the fast tier looked configured and wasn't.
+    apiKeyEnv: process.env.ELIA_FAST_API_KEY ? 'ELIA_FAST_API_KEY' : undefined,
     ignoreAmbient: true,
   })
   if ('error' in resolved) return deepTier
@@ -488,7 +493,8 @@ function resolveRoleOverrides(deepTier: TierConfig): Partial<Record<RoleName, Ti
       providerName: providerName ?? deepTier.providerName,
       model,
       baseURL: process.env[`ELIA_${envKey}_BASE_URL`],
-      apiKeyEnv: `ELIA_${envKey}_API_KEY`,
+      // Same rule as the fast tier: a dedicated key overrides, its absence does not.
+      apiKeyEnv: process.env[`ELIA_${envKey}_API_KEY`] ? `ELIA_${envKey}_API_KEY` : undefined,
       ignoreAmbient: true,
     })
     if (!('error' in resolved)) overrides[roleName] = toTierConfig(resolved)

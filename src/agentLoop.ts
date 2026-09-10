@@ -881,9 +881,19 @@ export function resetProviderHealthForTests(): void {
   providerHealth.clear()
 }
 
+/**
+ * Whether an error is worth retrying, or routing to another provider.
+ *
+ * Two families were missing and both end a turn outright when they hit:
+ * overload (`529` / `overloaded_error`), which is the single most common
+ * transient failure under load and is precisely what a fallback route exists
+ * for; and context overflow (`prompt is too long`,
+ * `context_length_exceeded`), which another route with a larger window can
+ * actually serve. Neither is a bug in the request, so neither should be fatal.
+ */
 function isFallbackableProviderError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error)
-  return /connection|fetch failed|network|timeout|timed out|rate limit|model (?:not found|unavailable)|not found|404|429|500|502|503|504|server had an error/i.test(
+  return /connection|fetch failed|network|timeout|timed out|rate limit|overloaded|model (?:not found|unavailable)|not found|404|429|500|502|503|504|529|server had an error|prompt is too long|context[_ ]length[_ ]exceeded|too many tokens/i.test(
     message,
   )
 }

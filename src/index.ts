@@ -30,6 +30,8 @@ interface TurnUiHooks {
 import { playIntro } from './ui/character.ts'
 import { ZERO_USAGE, addUsage, getSessionSummaryLine, recordTopLevelTurn, formatUsageLine, formatElapsed, sessionUsageSnapshot, setCurrentUsageModel, type SessionUsageSnapshot } from './usage.ts'
 import { createSlashPrompt, type SlashCommand } from './ui/slashPrompt.ts'
+import { customCommandsAsSlashEntries, loadCustomCommands, resolveCustomCommand } from './commands/loader.ts'
+import { collectPromptInjects, fireLifecycleEvent } from './autonomy/lifecycleHooks.ts'
 import { confirmOnce } from './ui/confirm.ts'
 import { gold, dim } from './ui/theme.ts'
 import { box, table } from './ui/layout.ts'
@@ -80,6 +82,11 @@ const REPL_COMMANDS: SlashCommand[] = [
   { name: '/capabilities', description: 'specialist capabilities & risk classes' },
   { name: '@skills', description: 'choose active skill tools for the next turn' },
 ]
+
+/** Built-ins plus project/user `.elia/commands/*.md` prompt macros. */
+function allSlashCommands(): SlashCommand[] {
+  return [...REPL_COMMANDS, ...customCommandsAsSlashEntries(loadCustomCommands())]
+}
 
 const rawArgs = process.argv.slice(2)
 
@@ -1897,7 +1904,9 @@ async function runInteractive(): Promise<void> {
     if (attachments.length > 0) {
       writeNotice(`📎 ${attachments.length} image${attachments.length === 1 ? '' : 's'} attached to this message: ${attachments.map((a) => a.alt).join(', ')}`)
     }
-    const userText = resolved.text || (attachments.length > 0 ? `[image attached: ${attachments.map((a) => a.alt).join(', ')}]` : submittedText)
+    let userText = resolved.text || (attachments.length > 0 ? `[image attached: ${attachments.map((a) => a.alt).join(', ')}]` : submittedText)
+    const inject = collectPromptInjects()
+    if (inject) userText = `<operator-context>\n${inject}\n</operator-context>\n\n${userText}`
 
     const tracker = createFileTracker()
     const turnStartedAt = Date.now()
@@ -2023,8 +2032,26 @@ async function runInteractive(): Promise<void> {
         const { runVerification, describeVerification } = await import('./autonomy/verify.ts')
         const changedAll = Object.keys(tracker.snapshot())
         const changed = changedCodeFiles(changedAll)
-        const root = checkRoot(changedAll, process.cwd())
-        const checks = changed.length > 0 ? detectChecks(root) : []
+        // `checkRoot` returns undefined when no project owns the change — a
+        // freshly scaffolded folder with no manifest yet. Passing that straight
+        // into `detectChecks` would silently fall back to `process.cwd()` and
+        // run *elia's own* typecheck and test suite against the new project, so
+        // the undefined case has to be handled here rather than defaulted away.
+        const root = changed.length > 0 ? checkRoot(changedAll, process.cwd()) : undefined
+        const checks = root ? detectChecks(root) : []
+        if (checks.length === 0 && changed.length > 0) {
+          // Code changed and nothing could check it. Say so — "none" used to
+          // mean both "nothing to check" and "we never looked", and a turn that
+          // reported success having verified nothing is the failure mode this
+          // whole gate exists to prevent.
+          verifyResult = 'skipped'
+          const why = root
+            ? `no typecheck or test command could be inferred in ${root}`
+            : 'the changed files are not inside a project (no package.json, Cargo.toml, go.mod, …)'
+          const line = `Not verified — ${why}`
+          uiHooks?.onActivity?.({ kind: 'status', status: 'warning', title: line })
+          if (!uiHooks) writeNotice(`▸ ${line}`)
+        }
         if (checks.length > 0) {
           const where = root === process.cwd() ? '' : ` in ${root}`
           taskSessions.update(task.id, { status: 'running', action: 'Verifying', detail: `${checks.join(' && ')}${where}` })
@@ -2079,6 +2106,14 @@ async function runInteractive(): Promise<void> {
               // root paints something — a blank page is worse than no preview.
               const up = await waitForHttp(url, 8_000, controller.signal)
               const rendered = up.ok ? await checkRendered(url, controller.signal) : up
+              // For a static page, *this* is the verification: it serves and it
+              // paints. `detectChecks` only ever looked for typecheck/test
+              // commands, and its CODE_EXT filter excludes .html/.css entirely,
+              // so every static site elia built was reported done with nothing
+              // having checked it. Don't overwrite a real command result.
+              if (verifyResult === 'none' || verifyResult === 'skipped') {
+                verifyResult = rendered.ok ? 'pass' : 'fail'
+              }
               if (rendered.ok) {
                 const detail = url
                 if (uiHooks) uiHooks.onActivity?.({ kind: 'status', status: 'completed', title: 'Preview ready', detail })
@@ -2415,7 +2450,7 @@ async function runInteractive(): Promise<void> {
     applyThinkingChoice(arg)
   }
 
-  const prompt = createSlashPrompt(REPL_COMMANDS)
+  const prompt = createSlashPrompt(allSlashCommands())
 
   async function handleSkillsPicker(): Promise<void> {
     const { listLoadedSkills } = await import('./skills/loader.ts')
@@ -2875,7 +2910,7 @@ async function runInteractive(): Promise<void> {
     // --- text-only commands ---
 
     if (trimmed === '/help' || trimmed === '/?') {
-      return { handled: true, text: REPL_COMMANDS.map((c) => `${c.name}  —  ${c.description}`).join('\n') }
+      return { handled: true, text: allSlashCommands().map((c) => `${c.name}  —  ${c.description}`).join('\n') }
     }
     if (trimmed === '/status') {
       return { handled: true, text: renderWorkspacePanel({ sessionId, mode, providerLabel: config.providerLabel, model: config.model }) }
@@ -3130,6 +3165,9 @@ async function runInteractive(): Promise<void> {
       )
     }
 
+    const custom = resolveCustomCommand(trimmed)
+    if (custom) return { handled: true, submitText: custom.expanded }
+
     return done(`Unknown command: ${trimmed.split(/\s+/)[0]}. Type /help for the list.`)
   }
 
@@ -3147,7 +3185,7 @@ async function runInteractive(): Promise<void> {
       sessionId,
       version: cliVersion,
       getEnv: () => ({ model: config.model, providerLabel: config.providerLabel, providerName: config.providerName }),
-      commands: REPL_COMMANDS,
+      commands: allSlashCommands(),
       initialReplMode: replMode,
       messages,
       greeting,
@@ -3611,7 +3649,17 @@ async function runInteractive(): Promise<void> {
       continue
     }
 
-    let commandToRun = eliaBookRunPrompt ?? trimmed
+    const customClassic = resolveCustomCommand(trimmed)
+    let commandToRun = eliaBookRunPrompt ?? customClassic?.expanded ?? trimmed
+    if (customClassic) writeNotice(`Expanded ${customClassic.command.name} → prompt`)
+    if (!eliaBookRunPrompt && !customClassic && trimmed.startsWith('/') && !trimmed.startsWith('/attach')) {
+      // Unknown built-in-looking slash: prefer an explicit error over sending "/foo" to the model.
+      const known = allSlashCommands().some((c) => trimmed === c.name || trimmed.startsWith(`${c.name} `))
+      if (!known && /^\/[a-z]/.test(trimmed)) {
+        writeNotice(`Unknown command: ${trimmed.split(/\s+/)[0]}. Type /help for the list.`)
+        continue
+      }
+    }
     if (replMode === 'manual') {
       const { risky, reason } = await classifyCommandRisk(commandToRun)
       if (risky) {
@@ -3646,6 +3694,11 @@ async function runInteractive(): Promise<void> {
   }
 
   prompt.close()
+  try {
+    await fireLifecycleEvent('SessionEnd', { SESSION: sessionId })
+  } catch {
+    // Session-end hooks are best-effort.
+  }
   // The registerShutdownCleanup callback registered above already writes the
   // "ended" heartbeat for this and every other exit path — no separate call
   // needed here.
@@ -3727,6 +3780,18 @@ async function main() {
 // Load ~/.elia/config.env before any command imports provider configuration. Explicit
 // project/process environment values already present in process.env take precedence.
 loadUserConfig()
+
+// Sweep temp files orphaned by earlier crashed writes. Only temps whose owning
+// process is gone are removed, so a concurrently running elia is never touched.
+// Without this they accumulate silently and are never cleaned up by anything.
+try {
+  const { sweepStaleTemporaries } = await import('./securePersistence.ts')
+  const { isProcessAlive } = await import('./fileLock.ts')
+  const { paths: statePaths } = await import('./config.ts')
+  sweepStaleTemporaries(statePaths.state, isProcessAlive)
+} catch {
+  // Housekeeping is never a reason to fail a command.
+}
 
 // Signal handlers are installed by installShutdownHandlers() so every terminal
 // component follows one cleanup path and returns a conventional interrupt code.

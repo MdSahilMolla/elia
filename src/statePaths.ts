@@ -1,14 +1,39 @@
+import { realpathSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 /** Where elia's own source lives, independent of the caller's working directory. */
 export const ELIA_ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
 
+/**
+ * `process.cwd()` with the casing the filesystem actually uses.
+ *
+ * Windows preserves whatever casing the shell was started with, so launching
+ * from `D:\ELIA` makes every derived absolute path read `D:\ELIA\...` while the
+ * directory on disk is `D:\elia`. The paths still resolve — Windows is
+ * case-insensitive — but they get compared as strings: the preview server's
+ * containment check and several path-prefix guards do case-sensitive
+ * `startsWith`, and the mismatch shows up in every message shown to the
+ * operator. `realpathSync.native` returns the on-disk casing; the plain
+ * fallback covers platforms without the native variant, and the catch covers a
+ * cwd deleted out from under the process.
+ */
+export function canonicalCwd(): string {
+  const cwd = process.cwd()
+  try {
+    return (realpathSync.native ?? realpathSync)(cwd)
+  } catch {
+    return cwd
+  }
+}
+
+const projectRoot = canonicalCwd()
+
 /** Per-project state directory (runs, evolution ledger, synthesized skills). */
-export const stateDir = join(process.cwd(), '.elia')
+export const stateDir = join(projectRoot, '.elia')
 
 /** Visible home for real work product, distinct from internal `.elia/` state. */
-const workspaceDir = join(process.cwd(), 'workspace')
+const workspaceDir = join(projectRoot, 'workspace')
 
 export const paths = {
   state: stateDir,

@@ -47,6 +47,9 @@ go/bin/
 jvm/**/build/
 *.class
 
+# --- Codebase-analysis tool artifacts (`ua` / understand) ---
+.ua/
+
 # --- Language/tooling caches ---
 __pycache__/
 *.py[cod]

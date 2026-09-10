@@ -48,3 +48,37 @@ test('isUnbuiltModuleEntry distinguishes source entries from bundled output', ()
   writeFileSync(plain, '<!doctype html><h1>static</h1>')
   expect(isUnbuiltModuleEntry(plain)).toBe(false)
 })
+
+// Regression: findProject walks *up* to the nearest package.json, so a page
+// written anywhere inside the elia checkout resolved to elia's own manifest -
+// whose `dev` is `bun run bin/elia.ts` and whose `test` is `bun test src/`.
+// Previewing a static page then ran elia's own test suite against it.
+test('findProject refuses elia own manifest as the previewed project', () => {
+  const root = scratch()
+  writeFileSync(
+    join(root, 'package.json'),
+    JSON.stringify({ name: 'elia-ai', bin: { elia: 'bin/elia.ts' }, scripts: { dev: 'bun run bin/elia.ts', test: 'bun test src/' } }),
+  )
+  const site = join(root, 'portfolio-demo')
+  mkdirSync(site)
+  const page = join(site, 'index.html')
+  writeFileSync(page, '<h1>portfolio</h1>')
+  // No project - the caller then serves the page's own directory statically.
+  expect(findProject(page)).toBeUndefined()
+})
+
+test('a host manifest recognised by bin alone is also refused', () => {
+  const root = scratch()
+  writeFileSync(join(root, 'package.json'), JSON.stringify({ name: 'something-else', bin: { elia: 'bin/elia.ts' } }))
+  writeFileSync(join(root, 'index.html'), '<h1>x</h1>')
+  expect(findProject(join(root, 'index.html'))).toBeUndefined()
+})
+
+test('an ordinary project is still detected', () => {
+  const root = scratch()
+  writeFileSync(join(root, 'package.json'), JSON.stringify({ name: 'my-site', scripts: { dev: 'vite', build: 'vite build' }, devDependencies: { vite: '^5' } }))
+  writeFileSync(join(root, 'index.html'), '<h1>x</h1>')
+  const project = findProject(join(root, 'index.html'))
+  expect(project?.dir).toBe(root)
+  expect(project?.usesBundler).toBe(true)
+})

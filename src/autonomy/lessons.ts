@@ -18,20 +18,53 @@ import type { Tool } from '../tools/types.ts'
 export interface Lesson {
   at: number
   text: string
+  /** Where the lesson came from — run id, interactive, auto-repair, etc. */
+  source?: string
+  /** 0–1 confidence; omitted means unknown / legacy. */
+  confidence?: number
 }
 
 const MAX_INJECTED_LESSONS = 25
 
-export function appendLessons(texts: string[], path = paths.lessons): void {
-  const cleaned = texts.map((text) => text.replace(/\s+/g, ' ').trim()).filter((text) => text.length > 0)
+export interface LessonWrite {
+  text: string
+  source?: string
+  confidence?: number
+}
+
+function normalizeLessonInput(texts: Array<string | LessonWrite>): LessonWrite[] {
+  return texts
+    .map((entry) => {
+      if (typeof entry === 'string') return { text: entry.replace(/\s+/g, ' ').trim() }
+      return {
+        text: entry.text.replace(/\s+/g, ' ').trim(),
+        source: entry.source?.replace(/\s+/g, ' ').trim() || undefined,
+        confidence:
+          typeof entry.confidence === 'number' && Number.isFinite(entry.confidence)
+            ? Math.min(1, Math.max(0, entry.confidence))
+            : undefined,
+      }
+    })
+    .filter((entry) => entry.text.length > 0)
+}
+
+function formatLessonLine(lesson: LessonWrite, stamp: string): string {
+  const meta = [`${stamp}`]
+  if (lesson.source) meta.push(`source=${lesson.source}`)
+  if (typeof lesson.confidence === 'number') meta.push(`confidence=${lesson.confidence.toFixed(2)}`)
+  return `- ${lesson.text} <!-- ${meta.join(' ')} -->`
+}
+
+export function appendLessons(texts: Array<string | LessonWrite>, path = paths.lessons): void {
+  const cleaned = normalizeLessonInput(texts)
   if (cleaned.length === 0) return
 
   const existing = new Set(loadLessons(path).map((lesson) => lesson.text.toLowerCase()))
-  const fresh = cleaned.filter((text) => !existing.has(text.toLowerCase()))
+  const fresh = cleaned.filter((lesson) => !existing.has(lesson.text.toLowerCase()))
   if (fresh.length === 0) return
 
   const stamp = new Date().toISOString()
-  const block = fresh.map((text) => `- ${text} <!-- ${stamp} -->`).join('\n')
+  const block = fresh.map((lesson) => formatLessonLine(lesson, stamp)).join('\n')
 
   try {
     ensureSecureDirectory(dirname(path))
@@ -50,11 +83,24 @@ export function loadLessons(path = paths.lessons): Lesson[] {
       .split('\n')
       .filter((line) => line.trimStart().startsWith('- '))
       .map((line) => {
-        const stampMatch = line.match(/<!--\s*(\S+)\s*-->/)
-        const at = stampMatch?.[1] ? Date.parse(stampMatch[1]) : Number.NaN
+        const stampMatch = line.match(/<!--\s*([^>]+?)\s*-->/)
+        const meta = stampMatch?.[1] ?? ''
+        const parts = meta.split(/\s+/).filter(Boolean)
+        const at = parts[0] ? Date.parse(parts[0]) : Number.NaN
+        let source: string | undefined
+        let confidence: number | undefined
+        for (const part of parts.slice(1)) {
+          if (part.startsWith('source=')) source = part.slice('source='.length) || undefined
+          if (part.startsWith('confidence=')) {
+            const value = Number.parseFloat(part.slice('confidence='.length))
+            if (Number.isFinite(value)) confidence = Math.min(1, Math.max(0, value))
+          }
+        }
         return {
           at: Number.isNaN(at) ? 0 : at,
           text: line.replace(/<!--.*?-->/g, '').replace(/^\s*-\s*/, '').trim(),
+          source,
+          confidence,
         }
       })
       .filter((lesson) => lesson.text.length > 0)
@@ -74,7 +120,12 @@ const LESSONS_HEADER = '# Lessons\n\nThings elia learned about this project, car
 export function rewriteLessons(lessons: Lesson[], path = paths.lessons): void {
   try {
     const body = lessons
-      .map((lesson) => `- ${lesson.text.replace(/\s+/g, ' ').trim()} <!-- ${new Date(lesson.at || Date.now()).toISOString()} -->`)
+      .map((lesson) =>
+        formatLessonLine(
+          { text: lesson.text.replace(/\s+/g, ' ').trim(), source: lesson.source, confidence: lesson.confidence },
+          new Date(lesson.at || Date.now()).toISOString(),
+        ),
+      )
       .join('\n')
     writeSecureFile(path, body ? `${LESSONS_HEADER}${body}\n` : LESSONS_HEADER)
   } catch {
@@ -86,7 +137,14 @@ export function rewriteLessons(lessons: Lesson[], path = paths.lessons): void {
 export function renderLessons(path = paths.lessons): string {
   const lessons = loadLessons(path).slice(-MAX_INJECTED_LESSONS)
   if (lessons.length === 0) return ''
-  return `\n\n## What earlier runs learned about this project\n${lessons.map((lesson) => `- ${lesson.text}`).join('\n')}`
+  return `\n\n## What earlier runs learned about this project\n${lessons
+    .map((lesson) => {
+      const bits = [lesson.text]
+      if (lesson.source) bits.push(`(source: ${lesson.source})`)
+      if (typeof lesson.confidence === 'number') bits.push(`(confidence: ${lesson.confidence.toFixed(2)})`)
+      return `- ${bits.join(' ')}`
+    })
+    .join('\n')}`
 }
 
 function relativeAge(at: number): string {
@@ -185,11 +243,32 @@ export function createDirectLessonsTool(): Tool {
   return {
     ...tool,
     name: 'note_lesson',
+    input_schema: {
+      type: 'object',
+      properties: {
+        lessons: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'One sentence each, written as an instruction to a future run',
+        },
+        source: {
+          type: 'string',
+          description: 'Optional provenance label (e.g. interactive, repair, user)',
+        },
+        confidence: {
+          type: 'number',
+          description: 'Optional 0–1 confidence that the lesson will stay true',
+        },
+      },
+      required: ['lessons'],
+    },
     async execute(input) {
       const lessons = Array.isArray(input.lessons)
         ? input.lessons.filter((lesson): lesson is string => typeof lesson === 'string')
         : []
-      appendLessons(lessons)
+      const source = typeof input.source === 'string' ? input.source : 'interactive'
+      const confidence = typeof input.confidence === 'number' ? input.confidence : undefined
+      appendLessons(lessons.map((text) => ({ text, source, confidence })))
       return `Recorded ${lessons.length} lesson(s) for future sessions in this project.`
     },
   }

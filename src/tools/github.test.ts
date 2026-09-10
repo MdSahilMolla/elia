@@ -83,6 +83,30 @@ test('pr_comment and pr_merge validate their number', async () => {
   expect(await githubTool.execute({ action: 'pr_merge' })).toContain('needs "number"')
 })
 
+test('pr_list and issue_list are read-only and format results', async () => {
+  route({
+    'gh pr list': ok('#7 Fix auth\n  feature/auth · @alice · https://example/pull/7'),
+    'gh issue list': ok('#3 Flaky test\n  labels: bug · @bob · https://example/issues/3'),
+  })
+  expect(await githubTool.execute({ action: 'pr_list' })).toContain('#7 Fix auth')
+  expect(await githubTool.execute({ action: 'issue_list' })).toContain('#3 Flaky test')
+  expect(assessAction({ name: 'github', input: { action: 'pr_list' } }).decision).toBe('allow')
+  expect(assessAction({ name: 'github', input: { action: 'pr_reviews' } }).decision).toBe('allow')
+  expect(assessAction({ name: 'github', input: { action: 'issue_list' } }).decision).toBe('allow')
+  expect(assessAction({ name: 'github', input: { action: 'issue_view' } }).decision).toBe('allow')
+  expect(assessAction({ name: 'github', input: { action: 'issue_create' } }).risk).toBe('review')
+})
+
+test('pr_reviews and issue_view need readable payloads', async () => {
+  route({
+    'gh pr view': ok('#7 reviews'),
+    'gh issue view': ok('#3 body'),
+  })
+  expect(await githubTool.execute({ action: 'pr_reviews', number: 7 })).toContain('#7')
+  expect(await githubTool.execute({ action: 'issue_view' })).toContain('needs "number"')
+  expect(await githubTool.execute({ action: 'issue_view', number: 3 })).toContain('#3')
+})
+
 // --- governor contract ---
 
 test('governor: read-only github actions are allowed, writes are governed', () => {

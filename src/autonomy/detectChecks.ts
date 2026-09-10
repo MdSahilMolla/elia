@@ -1,15 +1,27 @@
 import { existsSync, readFileSync } from 'node:fs'
-import { dirname, isAbsolute, join, resolve } from 'node:path'
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 
 const PROJECT_MARKERS = ['package.json', 'Cargo.toml', 'go.mod', 'pyproject.toml', 'pytest.ini', 'pom.xml', 'build.gradle', 'build.gradle.kts', 'CMakeLists.txt', 'Makefile']
 
 /**
- * Where to run the checks. The agent's changes may be entirely inside a
- * sub-project it scaffolded (workspace/my-app) — running elia's own `bun test`
- * there would verify the wrong thing. This walks up from the changed files to
- * the nearest directory with a project marker, falling back to the repo root.
+ * Where to run the checks, or `undefined` when nothing owns these changes.
+ *
+ * The agent's changes may be entirely inside a sub-project it scaffolded
+ * (workspace/my-app) — running elia's own `bun test` there would verify the
+ * wrong thing. This walks up from the changed files to the nearest directory
+ * with a project marker.
+ *
+ * It used to fall back to the repo root when no marker was found at all. That
+ * is the freshly-scaffolded case — a folder with an index.html and no manifest
+ * yet — and the fallback handed back the *host* repo, so `detectChecks` then
+ * returned elia's own `bun run typecheck && bun test src/` and ran it against a
+ * three-file static page. Returning `undefined` says the honest thing instead:
+ * no project owns this change, so there is no check to run and the caller must
+ * not claim the work was verified. Changes inside a real project (including the
+ * host repo's own source) still resolve to that project's root, because a
+ * marker *is* found there.
  */
-export function checkRoot(changedPaths: string[], repoRoot = process.cwd()): string {
+export function checkRoot(changedPaths: string[], repoRoot = process.cwd()): string | undefined {
   const dirs = new Set<string>()
   for (const path of changedPaths) {
     let dir = dirname(isAbsolute(path) ? path : resolve(repoRoot, path))
@@ -24,10 +36,72 @@ export function checkRoot(changedPaths: string[], repoRoot = process.cwd()): str
       dir = parent
     }
   }
-  // If every change sits under one sub-project, check there; otherwise the repo root.
+  // No project marker above any changed file — nothing here is a project.
+  if (dirs.size === 0) return undefined
+  // If every change sits under one sub-project, check there.
   const nonRoot = [...dirs].filter((dir) => resolve(dir) !== resolve(repoRoot))
   if (nonRoot.length === 1 && dirs.size === 1) return nonRoot[0]!
-  return repoRoot
+  // Otherwise the repo root — but only if its checks actually reach these files.
+  return repoRootCovers(repoRoot, changedPaths) ? repoRoot : undefined
+}
+
+/**
+ * Whether the repo root's own checks would actually exercise `changedPaths`.
+ *
+ * Falling back to the repo root unconditionally is what made elia run its own
+ * `bun run typecheck && bun test src/` against a three-file static page: the
+ * upward walk from `<repo>/portfolio-demo/index.html` finds the *host*
+ * `package.json`, because every path inside the checkout is under it. Those
+ * commands never touch `portfolio-demo/`, so "they passed" said nothing about
+ * the change — and when they failed, they failed for reasons the change had
+ * nothing to do with.
+ *
+ * The distinguishing fact is coverage, not location: a project's checks name
+ * the directories they cover, in the check scripts themselves (`bun test src/`)
+ * and in `tsconfig.json`'s `include`. A change under a top-level directory that
+ * no check mentions is a separate deliverable that happens to live inside the
+ * checkout. Changes to the project's own source still resolve normally, which
+ * is what keeps elia able to verify work on itself.
+ *
+ * Conservative by construction: when a project declares no paths at all, its
+ * checks are assumed to cover the whole tree, which is the old behaviour.
+ */
+function repoRootCovers(repoRoot: string, changedPaths: string[]): boolean {
+  const declared = declaredPaths(repoRoot)
+  if (declared.size === 0) return true
+  return changedPaths.some((path) => {
+    const rel = relative(repoRoot, isAbsolute(path) ? path : resolve(repoRoot, path))
+    if (!rel || rel.startsWith('..')) return false
+    const top = rel.split(sep)[0]
+    return top !== undefined && declared.has(top.toLowerCase())
+  })
+}
+
+/** Top-level directory names the root project's checks and tsconfig say they cover. */
+function declaredPaths(repoRoot: string): Set<string> {
+  const names = new Set<string>()
+  const add = (text: string): void => {
+    for (const match of text.matchAll(/(?:^|[\s"'([])\.?\/?([A-Za-z0-9_.-]+)\//g)) {
+      const name = match[1]
+      if (name && name !== '.' && name !== '..') names.add(name.toLowerCase())
+    }
+  }
+
+  const pkg = readPackageJson(repoRoot)
+  for (const script of Object.values(pkg?.scripts ?? {})) add(script)
+
+  try {
+    const tsconfig = readFileSync(join(repoRoot, 'tsconfig.json'), 'utf8')
+    for (const match of tsconfig.matchAll(/"(?:include|files)"\s*:\s*\[([^\]]*)\]/g)) add(match[1] ?? '')
+  } catch {
+    // No tsconfig, or unreadable — the scripts alone decide.
+  }
+  return names
+}
+
+/** The HTML pages among `paths` — a static deliverable verifies by rendering, not by a test command. */
+export function changedStaticPages(paths: string[]): string[] {
+  return paths.filter((path) => /\.html?$/i.test(path))
 }
 
 /**

@@ -2,7 +2,7 @@ import { expect, test } from 'bun:test'
 import { chmodSync, existsSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { appendSecureFile, ensureSecureDirectory, hardenSecureFile, writeSecureBunFile, writeSecureFile } from './securePersistence.ts'
+import { appendSecureFile, ensureSecureDirectory, hardenSecureFile, sweepStaleTemporaries, writeSecureBunFile, writeSecureFile } from './securePersistence.ts'
 
 // Windows has no POSIX permission bits: chmod is a no-op there and stat always
 // reports 0o666/0o444, so asserting 0o700/0o600 can never pass. The hardening
@@ -53,4 +53,25 @@ test('hardenSecureFile repairs an older permissive regular file', () => {
   } finally {
     rmSync(root, { recursive: true, force: true })
   }
+})
+
+test('sweepStaleTemporaries removes only temps whose owner is gone', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'elia-sweep-'))
+  const dead = join(dir, 'tasks.json.tmp-999999-123-abc')
+  const live = join(dir, 'tasks.json.tmp-4242-456-def')
+  const mine = join(dir, `tasks.json.tmp-${process.pid}-789-ghi`)
+  const real = join(dir, 'tasks.json')
+  for (const f of [dead, live, mine, real]) writeFileSync(f, 'x')
+
+  const removed = sweepStaleTemporaries(dir, (pid) => pid === 4242)
+  expect(removed).toBe(1)
+  expect(existsSync(dead)).toBe(false)
+  // A live owner's temp, this process's own temp, and the real file all survive.
+  expect(existsSync(live)).toBe(true)
+  expect(existsSync(mine)).toBe(true)
+  expect(existsSync(real)).toBe(true)
+})
+
+test('sweepStaleTemporaries tolerates a missing directory', () => {
+  expect(sweepStaleTemporaries(join(tmpdir(), 'elia-sweep-does-not-exist'), () => false)).toBe(0)
 })
