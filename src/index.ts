@@ -119,7 +119,7 @@ function requestedAgentMode(): AgentMode {
   return 'dev'
 }
 
-const SUBCOMMANDS = ['auto', 'agent', 'evolve', 'bench', 'bench-latency', 'skills', 'runs', 'fork', 'resume', 'schedule', 'daemon', 'doctor', 'config', 'codex-login', 'control', 'bridge', 'workspace'] as const
+const SUBCOMMANDS = ['auto', 'agent', 'evolve', 'gap', 'bench', 'bench-latency', 'skills', 'runs', 'fork', 'resume', 'schedule', 'daemon', 'doctor', 'config', 'codex-login', 'control', 'bridge', 'workspace'] as const
 type Subcommand = (typeof SUBCOMMANDS)[number]
 
 function printHelp(): void {
@@ -766,6 +766,59 @@ async function runEvolve(): Promise<void> {
   )
   for (const record of result.generations) {
     writeUsageLine(`  gen ${record.generation}: ${record.verdict} — ${record.hypothesis || record.reason}`)
+  }
+}
+
+async function runGap(): Promise<void> {
+  const { computeGapVector } = await import('./gap/scoreboard.ts')
+  const { checkGapNotRegressed } = await import('./gap/guard.ts')
+  const { recordGapVector, readGapHistory, readLatestGapVector, renderGapVector } = await import('./gap/report.ts')
+
+  const action = positionals()[0]
+  if (action === 'history') {
+    const history = readGapHistory()
+    if (history.length === 0) {
+      writeNotice('No generator–verifier gap history yet. Run "elia gap" to measure it.')
+      return
+    }
+    for (const vector of history) {
+      writeUsageLine(
+        `  ${vector.at.slice(0, 19).replace('T', ' ')} · ${vector.ref.padEnd(12)} catch ${Math.round(vector.mechanicalCatchRate * 100)}% · fp ${Math.round(vector.falsePositiveRate * 100)}% · escapees ${vector.escapees.length}`,
+      )
+    }
+    return
+  }
+
+  const previous = readLatestGapVector()
+  writeNotice('Measuring the verification ladder against the planted-defect corpus…')
+  const vector = await computeGapVector({
+    onDefect: (result) => {
+      const mark = result.regime === 'judgment' ? (result.caught ? '✓(bonus)' : '·') : result.caught ? '✓' : '✗'
+      writeUsageLine(`  ${mark} ${result.defectId}${result.caught ? ` — caught by ${result.caughtBy.join(', ')}` : ''}${result.skipped.length ? ` [skipped: ${result.skipped.join(', ')}]` : ''}`)
+    },
+  })
+
+  writeUsageLine('')
+  for (const line of renderGapVector(vector, previous).split('\n')) writeUsageLine(line)
+  writeUsageLine('')
+
+  if (!hasFlag('--no-record')) {
+    recordGapVector(vector)
+    writeNotice('Recorded to .elia/gap/history.ndjson')
+  }
+
+  if (hasFlag('--check')) {
+    if (!previous) {
+      writeNotice('No prior vector to check against — recorded this one as the baseline.')
+      return
+    }
+    const guard = checkGapNotRegressed(previous, vector)
+    if (!guard.ok) {
+      writeError(`Gap regressed vs ${previous.ref}:\n${guard.regressions.map((r) => `  - ${r}`).join('\n')}`)
+      process.exitCode = 1
+      return
+    }
+    writeNotice(`Gap held or improved vs ${previous.ref}.`)
   }
 }
 
@@ -3728,6 +3781,8 @@ async function main() {
       return runAgentCommand()
     case 'evolve':
       return runEvolve()
+    case 'gap':
+      return runGap()
     case 'bench':
       return runBench()
     case 'bench-latency':
