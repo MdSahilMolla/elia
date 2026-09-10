@@ -119,7 +119,7 @@ function requestedAgentMode(): AgentMode {
   return 'dev'
 }
 
-const SUBCOMMANDS = ['auto', 'agent', 'evolve', 'gap', 'bench', 'bench-latency', 'skills', 'runs', 'fork', 'resume', 'schedule', 'daemon', 'doctor', 'config', 'codex-login', 'control', 'bridge', 'workspace'] as const
+const SUBCOMMANDS = ['auto', 'agent', 'evolve', 'gap', 'values', 'bench', 'bench-latency', 'skills', 'runs', 'fork', 'resume', 'schedule', 'daemon', 'doctor', 'config', 'codex-login', 'control', 'bridge', 'workspace'] as const
 type Subcommand = (typeof SUBCOMMANDS)[number]
 
 function printHelp(): void {
@@ -767,6 +767,49 @@ async function runEvolve(): Promise<void> {
   for (const record of result.generations) {
     writeUsageLine(`  gen ${record.generation}: ${record.verdict} — ${record.hypothesis || record.reason}`)
   }
+}
+
+async function runValues(): Promise<void> {
+  const { loadValueCore, describeValueCore } = await import('./values/core.ts')
+  const action = positionals()[0] ?? 'show'
+
+  if (action === 'show') {
+    const core = loadValueCore()
+    writeNotice(describeValueCore())
+    if (core.path) writeNotice(core.path)
+    writeUsageLine('')
+    for (const line of core.text.split('\n')) writeUsageLine(`  ${line}`)
+    return
+  }
+
+  if (action === 'probe' || action === 'probes') {
+    if (!(await ensureFirstRunProviderSetup())) return
+    await loadRuntimeSkills()
+    const { runValueProbes } = await import('./values/probes.ts')
+    const { recordProbeRun, readLatestProbeRun, checkValueDrift } = await import('./values/drift.ts')
+    const previous = readLatestProbeRun()
+    writeNotice('Running value probes (subject + independent judge per probe)…')
+    const run = await runValueProbes({
+      forceCoreActive: hasFlag('--force-core'),
+      onResult: (result) => writeUsageLine(`  ${result.passed ? '✓' : '✗'} ${result.id} — ${result.reason}`),
+    })
+    writeUsageLine('')
+    writeNotice(`Value-probe pass rate: ${Math.round(run.passRate * 100)}% (${run.results.filter((r) => r.passed).length}/${run.results.length})`)
+    if (!hasFlag('--no-record')) recordProbeRun(run, hasFlag('--force-core') ? 'draft-review' : 'baseline')
+    if (previous && hasFlag('--check')) {
+      const drift = checkValueDrift(previous, run)
+      if (!drift.ok) {
+        writeError(`Value drift:\n${drift.regressions.map((r) => `  - ${r}`).join('\n')}`)
+        process.exitCode = 1
+      } else {
+        writeNotice('No value drift vs the previous run.')
+      }
+    }
+    return
+  }
+
+  writeError(`Unknown: elia values ${action}. Use "show" or "probe".`)
+  process.exitCode = 1
 }
 
 async function runGap(): Promise<void> {
@@ -3783,6 +3826,8 @@ async function main() {
       return runEvolve()
     case 'gap':
       return runGap()
+    case 'values':
+      return runValues()
     case 'bench':
       return runBench()
     case 'bench-latency':

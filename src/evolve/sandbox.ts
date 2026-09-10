@@ -44,7 +44,25 @@ export const IMMUTABLE_FILES = [
   'package.json',
   'tsconfig.json',
   'src/**/*.test.ts',
+  // The Value Core and its checks. A self-improvement loop may rewrite how elia
+  // works but never what it is for — a change here needs a human commit.
+  'values/**',
+  'src/values/**',
+  'src/gap/**',
 ]
+
+/** Directory prefixes (repo-relative) that a candidate may not touch. */
+const IMMUTABLE_PREFIXES = ['values/', 'src/values/', 'src/gap/']
+
+/** Whether a single repo-relative path is off-limits to an evolve candidate. */
+export function isImmutablePath(file: string): boolean {
+  const normalized = file.replace(/\\/g, '/')
+  return (
+    IMMUTABLE_FILES.includes(normalized) ||
+    (normalized.startsWith('src/') && normalized.endsWith('.test.ts')) ||
+    IMMUTABLE_PREFIXES.some((prefix) => normalized.startsWith(prefix))
+  )
+}
 
 export interface Sandbox {
   generation: number
@@ -101,7 +119,10 @@ export function changedFiles(sandbox: Sandbox, liveRoot = ELIA_ROOT): string[] {
 /** Which of the changed files the candidate was forbidden from touching. */
 export function violatedImmutables(changed: string[]): string[] {
   return changed.filter(
-    (file) => IMMUTABLE_FILES.includes(file) || (file.startsWith('src/') && file.endsWith('.test.ts')),
+    (file) =>
+      IMMUTABLE_FILES.includes(file) ||
+      (file.startsWith('src/') && file.endsWith('.test.ts')) ||
+      IMMUTABLE_PREFIXES.some((prefix) => file.startsWith(prefix)),
   )
 }
 
