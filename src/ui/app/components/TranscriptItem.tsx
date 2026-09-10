@@ -1,6 +1,6 @@
 import { Box, Text } from 'ink'
 import type { Item } from '../store.ts'
-import { palette } from '../theme.ts'
+import { palette, glyphs } from '../theme.ts'
 import { AssistantMessage } from './AssistantMessage.tsx'
 import { Thinking } from './Thinking.tsx'
 import { ToolCard } from './ToolCard.tsx'
@@ -49,8 +49,19 @@ export function TranscriptItemView({ item, expanded }: { item: Item; expanded: b
       return <Text color={isLearning ? palette.accent : palette.muted}>{item.text}</Text>
     }
     case 'error':
+      // A red left rail rather than a bare red line — scannable in scrollback,
+      // and no box to wrap. Multi-line errors keep the rail on every row.
       return (
-        <Text color={palette.failure}>{item.text}</Text>
+        <Box flexDirection="column" marginTop={1}>
+          {item.text.split('\n').map((line, i) => (
+            <Box key={i}>
+              <Text color={palette.failure}>{glyphs.errorRail} </Text>
+              <Text color={palette.failure} wrap="wrap">
+                {line || ' '}
+              </Text>
+            </Box>
+          ))}
+        </Box>
       )
   }
 }

@@ -133,14 +133,16 @@ export function InputBox(props: InputBoxProps) {
 
   return (
     <Box flexDirection="column">
+      {/* One dim rule above the prompt — the single structural line in the whole
+          UI. Was a top+bottom border box; a lone rule reads lighter and can't
+          mis-wrap. */}
       <Box
         borderStyle="single"
         borderColor={props.disabled ? palette.muted : palette.accent}
         borderTop
-        borderBottom
+        borderBottom={false}
         borderLeft={false}
         borderRight={false}
-        paddingX={1}
       >
         <Text color={palette.accent}>{glyphs.user} </Text>
         <BufferView buffer={state.buffer} cursor={state.cursor} placeholder={props.placeholder} showCursor={!props.disabled} />
