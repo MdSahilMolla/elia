@@ -2,6 +2,22 @@ import { Fragment, type ReactNode } from 'react'
 import { Box, Text } from 'ink'
 import { parseMarkdownBlocks, type InlineRun, type MarkdownBlock } from '../../markdownBlocks.ts'
 import { palette } from '../theme.ts'
+import { highlightLine, normalizeLanguage } from '../highlight.ts'
+
+/** One code line, syntax-highlighted into coloured Text runs. */
+function CodeLine({ line, language, trailingCursor }: { line: string; language?: string; trailingCursor?: boolean }) {
+  const segs = highlightLine(line, language)
+  return (
+    <Text wrap="wrap">
+      {segs.map((seg, i) => (
+        <Text key={i} color={seg.color} bold={seg.bold}>
+          {seg.text}
+        </Text>
+      ))}
+      {trailingCursor ? <Cursor /> : null}
+    </Text>
+  )
+}
 
 function InlineText({ runs }: { runs: InlineRun[] }) {
   return (
@@ -96,9 +112,11 @@ function BlockBody({ block, cursor }: { block: MarkdownBlock; cursor: boolean })
           ))}
         </Box>
       )
-    case 'code':
+    case 'code': {
       // Boxless: a dim left rail per line + a language label, instead of a
       // drawn border that wraps badly and can flatten into `| |` soup.
+      // Lines are syntax-highlighted (see ../highlight.ts).
+      const lang = normalizeLanguage(block.language)
       return (
         <Box flexDirection="column" width="100%">
           {block.language ? (
@@ -110,14 +128,16 @@ function BlockBody({ block, cursor }: { block: MarkdownBlock; cursor: boolean })
           {(block.lines.length > 0 ? block.lines : ['']).map((line, index) => (
             <Box key={index}>
               <Text color={palette.muted}>│ </Text>
-              <Text wrap="wrap">
-                {line}
-                {cursor && index === Math.max(0, block.lines.length - 1) ? <Cursor /> : null}
-              </Text>
+              <CodeLine
+                line={line}
+                language={lang}
+                trailingCursor={cursor && index === Math.max(0, block.lines.length - 1)}
+              />
             </Box>
           ))}
         </Box>
       )
+    }
     case 'rule':
       return <Text color={palette.muted}>────────────────{cursor ? <Cursor /> : null}</Text>
     case 'table': {

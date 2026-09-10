@@ -8,6 +8,7 @@ import { foldText } from '../../render.ts'
 import { redactText } from '../../redact.ts'
 import { visualizationTerminalPreview } from '../../../tools/visualize.ts'
 import { listLoadedSkills } from '../../../skills/loader.ts'
+import { highlightLine, normalizeLanguage } from '../highlight.ts'
 
 /** Tools whose result is worth a one-line `⎿` summary under the header, always — the way Devin shows "⎿ 50 lines". */
 const SUMMARY_LINE_TOOLS = new Set(['read_file', 'grep', 'list_files', 'web_search', 'web_fetch', 'todo_write'])
@@ -54,18 +55,33 @@ function parseDiff(result: string): DiffRow[] {
 
 const gutter = (n: number | undefined): string => (n === undefined ? '' : String(n)).padStart(4, ' ')
 
-function DiffBody({ rows, limit }: { rows: DiffRow[]; limit: number }) {
+/** Extension → highlight language for a diff/edit target. */
+function languageForTarget(target?: string): string | undefined {
+  const ext = /\.([a-z0-9]+)$/i.exec(target ?? '')?.[1]
+  return normalizeLanguage(ext)
+}
+
+function DiffBody({ rows, limit, language }: { rows: DiffRow[]; limit: number; language?: string }) {
   const shown = rows.slice(0, limit)
   return (
     <Box flexDirection="column" marginLeft={4}>
       {shown.map((row, i) => {
         if (row.kind === 'hunk' || row.kind === 'meta') return <Text key={i} color={palette.muted}>{row.kind === 'hunk' ? row.text : `     ${row.text}`}</Text>
         const sign = row.kind === 'add' ? '+' : row.kind === 'del' ? '-' : ' '
-        const color = row.kind === 'add' ? palette.success : row.kind === 'del' ? palette.failure : palette.muted
+        // Added / removed lines keep their green / red so the change reads at a
+        // glance; context lines get syntax highlighting instead of flat grey.
+        const lineColor = row.kind === 'add' ? palette.success : row.kind === 'del' ? palette.failure : undefined
         return (
-          <Text key={i} color={color} wrap="truncate-end">
+          <Text key={i} color={lineColor} wrap="truncate-end">
             <Text color={palette.muted}>{gutter(row.num)} </Text>
-            {sign} {row.text || ' '}
+            {sign}{' '}
+            {row.kind === 'ctx'
+              ? highlightLine(row.text || ' ', language).map((seg, j) => (
+                  <Text key={j} color={seg.color} bold={seg.bold}>
+                    {seg.text}
+                  </Text>
+                ))
+              : row.text || ' '}
           </Text>
         )
       })}
@@ -172,7 +188,7 @@ function renderBody(tool: ToolItem, s: ReturnType<typeof summarizeTool>, expande
   }
   if ((tool.name === 'edit_file' || tool.name === 'write_file') && tool.status !== 'error') {
     const rows = parseDiff(tool.result ?? '')
-    if (rows.length > 0) return <DiffBody rows={rows} limit={expanded ? 600 : 24} />
+    if (rows.length > 0) return <DiffBody rows={rows} limit={expanded ? 600 : 24} language={languageForTarget(s.target)} />
   }
   if (tool.status === 'error') {
     return (
