@@ -1,7 +1,12 @@
 import { expect, test } from 'bun:test'
 import { render } from 'ink-testing-library'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { InputBox } from './InputBox.tsx'
 import { waitForFrame } from '../testFixtures.ts'
+import { loadHistory } from '../history.ts'
+import { paths } from '../../../statePaths.ts'
 import type { SlashCommand } from '../../slashPrompt.ts'
 
 const noop = () => {}
@@ -87,4 +92,59 @@ test('backspace deletes at the caret, not the end', async () => {
   const frame = await waitForFrame(lastFrame, /❯ abc\b/)
   expect(frame).toContain('abc')
   expect(frame).not.toContain('axbc')
+})
+
+test('a [mode] chip renders left of the prompt when a mode is given', async () => {
+  const { lastFrame } = render(
+    <InputBox commands={[]} disabled={false} placeholder="x" mode="plan" onSubmit={noop} onInterrupt={noop} onEof={noop} onTabEmpty={noop} />,
+  )
+  const frame = await waitForFrame(lastFrame, '[plan]')
+  expect(frame).toContain('[plan] ❯')
+})
+
+test('Ctrl+R opens the reverse-search overlay', async () => {
+  const { stdin, lastFrame } = mount([])
+  stdin.write('\x12') // Ctrl+R
+  const frame = await waitForFrame(lastFrame, /reverse-search|⌕/)
+  expect(frame).toMatch(/⌕|reverse-search/)
+})
+
+test('a large multi-line paste collapses to a token but submits the full text', async () => {
+  let submitted = ''
+  const { stdin } = render(
+    <InputBox
+      commands={[]}
+      disabled={false}
+      placeholder="x"
+      onSubmit={(line) => {
+        submitted = line
+      }}
+      onInterrupt={noop}
+      onEof={noop}
+      onTabEmpty={noop}
+    />,
+  )
+  const pasted = ['line one', 'line two', 'line three', 'line four'].join('\n')
+  stdin.write(pasted)
+  await tick()
+  stdin.write('\r')
+  await tick()
+  expect(submitted).toBe(pasted)
+})
+
+test('submitting a prompt appends it to persistent history', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'elia-ib-'))
+  const original = paths.promptHistory
+  ;(paths as { promptHistory: string }).promptHistory = join(dir, 'prompt-history')
+  try {
+    const { stdin } = mount([])
+    stdin.write('remember me')
+    await tick()
+    stdin.write('\r')
+    await tick()
+    expect(loadHistory(paths.promptHistory)).toEqual(['remember me'])
+  } finally {
+    ;(paths as { promptHistory: string }).promptHistory = original
+    rmSync(dir, { recursive: true, force: true })
+  }
 })

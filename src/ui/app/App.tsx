@@ -604,6 +604,7 @@ export function App(props: AppProps) {
       <Box marginTop={1} flexDirection="column">
         <InputBox
           commands={props.commands}
+          mode={mode}
           onTabEmpty={() => setMode((m) => (m === 'plan' ? 'manual' : 'plan'))}
           onHelp={() => setShowHelp(true)}
           disabled={confirm !== null || approval !== null || picker !== null || textPrompt !== null || planReady || showHelp}

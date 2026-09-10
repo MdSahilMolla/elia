@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useMemo, useRef, useState } from 'react'
 import { Box, Text, useInput, type Key } from 'ink'
 import { palette, glyphs } from '../theme.ts'
 import {
@@ -9,6 +9,9 @@ import {
   type SlashCommand,
   type KeyEvent,
 } from '../../slashPrompt.ts'
+import { appendHistory, loadHistory, searchHistory } from '../history.ts'
+import { activeMention, completeFile, fileIndexReady, primeFileIndex } from '../fileComplete.ts'
+import type { ReplMode } from './StatusBar.tsx'
 
 /** Ink's key object → the small structural KeyEvent slashPrompt's pure reducer expects. */
 function toKeyEvent(input: string, key: Key): { str: string | undefined; event: KeyEvent } {
@@ -38,10 +41,14 @@ function toKeyEvent(input: string, key: Key): { str: string | undefined; event: 
   return { str: name ? undefined : input, event: { name, ctrl: key.ctrl, meta: key.meta } }
 }
 
+const MODE_CHIP: Record<ReplMode, string> = { manual: 'manual', auto: 'auto', plan: 'plan' }
+
 export interface InputBoxProps {
   commands: SlashCommand[]
   disabled: boolean
   placeholder: string
+  /** Drawn as a coloured `[mode]` chip left of the prompt glyph. */
+  mode?: ReplMode
   onSubmit(line: string): void
   onInterrupt(): void
   onEof(): void
@@ -83,7 +90,52 @@ function BufferView(props: { buffer: string; cursor: number; placeholder: string
 }
 
 export function InputBox(props: InputBoxProps) {
-  const [state, setState] = useState<PromptState>(initialState)
+  const [state, setState] = useState<PromptState>(() => {
+    const history = loadHistory()
+    return { ...initialState(), history, historyIndex: history.length }
+  })
+  // Ctrl+R reverse-search overlay — its own query, independent of the buffer.
+  const [search, setSearch] = useState<{ query: string; index: number } | null>(null)
+  // A large multi-line paste is collapsed to a token in the buffer; the real
+  // text is kept here and spliced back in at submit time.
+  const pastes = useRef(new Map<string, string>()).current
+
+  const mention = activeMention(state.buffer, state.cursor)
+  const fileMatches = useMemo(
+    () => (mention ? completeFile(mention.query) : []),
+    // completeFile reads a module-level cache; re-run whenever the query changes.
+    [mention?.query],
+  )
+  const [mentionSel, setMentionSel] = useState(0)
+  const [mentionDismissed, setMentionDismissed] = useState('')
+  const mentionOpen = mention !== null && mentionDismissed !== mention.query
+  if (mention) primeFileIndex()
+
+  const searchResults = search ? searchHistory(search.query, state.history) : []
+
+  const expandPastes = (line: string): string => {
+    let out = line
+    for (const [token, text] of pastes) if (out.includes(token)) out = out.replace(token, text)
+    return out
+  }
+
+  const submit = (line: string) => {
+    const full = expandPastes(line).trim()
+    if (!full) return
+    appendHistory(full)
+    props.onSubmit(full)
+  }
+
+  const acceptFile = (path: string) => {
+    if (!mention) return
+    const before = state.buffer.slice(0, mention.start)
+    const after = state.buffer.slice(state.cursor)
+    const insert = `@${path} `
+    const buffer = before + insert + after
+    setState({ ...state, buffer, cursor: (before + insert).length, selectedIndex: 0 })
+    setMentionSel(0)
+    setMentionDismissed(mention.query)
+  }
 
   useInput((input, key) => {
     if (props.disabled) return
@@ -91,6 +143,51 @@ export function InputBox(props: InputBoxProps) {
       props.onInterrupt()
       return
     }
+
+    // --- Reverse-search overlay owns all keys while open ---
+    if (search) {
+      if (key.escape) return setSearch(null)
+      if (key.return) {
+        const pick = searchResults[search.index] ?? searchResults[0]
+        setSearch(null)
+        if (pick) setState({ ...state, buffer: pick, cursor: pick.length, selectedIndex: 0 })
+        return
+      }
+      if (key.ctrl && input === 'r') {
+        setSearch((s) => (s ? { ...s, index: Math.min(s.index + 1, Math.max(0, searchResults.length - 1)) } : s))
+        return
+      }
+      if (key.upArrow) return setSearch((s) => (s ? { ...s, index: Math.max(0, s.index - 1) } : s))
+      if (key.downArrow) return setSearch((s) => (s ? { ...s, index: Math.min(s.index + 1, Math.max(0, searchResults.length - 1)) } : s))
+      if (key.backspace || key.delete) return setSearch((s) => (s ? { query: s.query.slice(0, -1), index: 0 } : s))
+      if (input && !key.ctrl && !key.meta) return setSearch((s) => (s ? { query: s.query + input, index: 0 } : s))
+      return
+    }
+    if (key.ctrl && input === 'r') {
+      setSearch({ query: '', index: 0 })
+      return
+    }
+
+    // --- @-mention file menu intercepts navigation/accept ---
+    if (mentionOpen && fileMatches.length > 0) {
+      if (key.tab || key.return) {
+        acceptFile(fileMatches[Math.min(mentionSel, fileMatches.length - 1)]!)
+        return
+      }
+      if (key.upArrow) {
+        setMentionSel((i) => (i - 1 + fileMatches.length) % fileMatches.length)
+        return
+      }
+      if (key.downArrow) {
+        setMentionSel((i) => (i + 1) % fileMatches.length)
+        return
+      }
+      if (key.escape) {
+        setMentionDismissed(mention!.query)
+        return
+      }
+    }
+
     if (key.tab && !key.shift && state.buffer.length === 0 && filteredCommands(state.buffer, props.commands).length === 0) {
       props.onTabEmpty()
       return
@@ -99,6 +196,17 @@ export function InputBox(props: InputBoxProps) {
       props.onHelp?.()
       return
     }
+
+    // --- Bracketed paste: a chunk with newlines arrives as one `input` ---
+    if (input.length > 12 && /\r?\n/.test(input)) {
+      const lineCount = input.split(/\r?\n/).length
+      const token = `⟦pasted ${lineCount} lines⟧`
+      pastes.set(token, input)
+      const buffer = state.buffer.slice(0, state.cursor) + token + state.buffer.slice(state.cursor)
+      setState({ ...state, buffer, cursor: state.cursor + token.length, selectedIndex: 0 })
+      return
+    }
+
     const { str, event } = toKeyEvent(input, key)
     const result = applyKey(state, str, event, props.commands)
     if (result.type === 'eof') {
@@ -111,13 +219,14 @@ export function InputBox(props: InputBoxProps) {
     }
     if (result.type === 'submit') {
       setState(result.state)
-      if (result.line.trim()) props.onSubmit(result.line)
+      submit(result.line)
       return
     }
+    if (mentionDismissed && result.state.buffer !== state.buffer) setMentionDismissed('')
     setState(result.state)
   })
 
-  const menu = filteredCommands(state.buffer, props.commands)
+  const menu = mentionOpen ? [] : filteredCommands(state.buffer, props.commands)
   const selected = Math.min(state.selectedIndex, Math.max(0, menu.length - 1))
 
   // The menu can be longer than we want to draw. Scroll a fixed window so the
@@ -144,10 +253,54 @@ export function InputBox(props: InputBoxProps) {
         borderLeft={false}
         borderRight={false}
       >
+        {props.mode ? (
+          <Text color={props.mode === 'plan' ? palette.warning : props.mode === 'auto' ? palette.success : palette.muted}>
+            [{MODE_CHIP[props.mode]}]{' '}
+          </Text>
+        ) : null}
         <Text color={palette.accent}>{glyphs.user} </Text>
-        <BufferView buffer={state.buffer} cursor={state.cursor} placeholder={props.placeholder} showCursor={!props.disabled} />
+        {search ? (
+          <Text>
+            <Text color={palette.muted}>⌕ </Text>
+            {search.query}
+            <Text inverse> </Text>
+          </Text>
+        ) : (
+          <BufferView buffer={state.buffer} cursor={state.cursor} placeholder={props.placeholder} showCursor={!props.disabled} />
+        )}
       </Box>
-      {menu.length > 0 && (
+
+      {search && (
+        <Box flexDirection="column" marginLeft={2}>
+          {searchResults.length === 0 ? (
+            <Text color={palette.muted}>{search.query ? 'no matching history' : 'reverse-search history — type to search'}</Text>
+          ) : (
+            searchResults.map((entry, i) => (
+              <Text key={entry} inverse={i === search.index} wrap="truncate-end">
+                {entry}
+              </Text>
+            ))
+          )}
+        </Box>
+      )}
+
+      {mentionOpen && !search && (
+        <Box flexDirection="column" marginLeft={2}>
+          {!fileIndexReady() ? (
+            <Text color={palette.muted}>indexing files…</Text>
+          ) : fileMatches.length === 0 ? (
+            <Text color={palette.muted}>no files match “{mention!.query}”</Text>
+          ) : (
+            fileMatches.map((path, i) => (
+              <Text key={path} inverse={i === Math.min(mentionSel, fileMatches.length - 1)} wrap="truncate-end">
+                {path}
+              </Text>
+            ))
+          )}
+        </Box>
+      )}
+
+      {menu.length > 0 && !search && (
         <Box flexDirection="column" marginLeft={2}>
           {hiddenAbove > 0 && <Text color={palette.muted}>↑ {hiddenAbove} more</Text>}
           {visible.map((cmd) => (

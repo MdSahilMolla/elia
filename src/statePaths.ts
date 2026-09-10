@@ -28,6 +28,8 @@ export const paths = {
   runs: join(stateDir, 'runs'),
   evolution: join(stateDir, 'evolution'),
   lessons: join(stateDir, 'lessons.md'),
+  /** Newline-delimited prompt history for the interactive REPL, newest last. */
+  promptHistory: join(stateDir, 'prompt-history'),
   workspace: workspaceDir,
   // Collaborative multi-user workspace: the SQLite event store, its per-objective
   // scratch (blackboards, worktree metadata), and the running-server pointer.
