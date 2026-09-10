@@ -89,6 +89,40 @@ export function renderLessons(path = paths.lessons): string {
   return `\n\n## What earlier runs learned about this project\n${lessons.map((lesson) => `- ${lesson.text}`).join('\n')}`
 }
 
+function relativeAge(at: number): string {
+  if (!at) return ''
+  const secs = Math.max(0, Math.round((Date.now() - at) / 1000))
+  if (secs < 90) return 'just now'
+  const mins = Math.round(secs / 60)
+  if (mins < 90) return `${mins}m ago`
+  const hours = Math.round(mins / 60)
+  if (hours < 36) return `${hours}h ago`
+  return `${Math.round(hours / 24)}d ago`
+}
+
+/**
+ * A boxless listing for `/lessons` — a `✦`-bulleted list newest-first with a
+ * relative age, plus a one-line footer explaining what the store is for. The
+ * markdown `renderLessons` above is for prompt injection, not the terminal.
+ */
+export function renderLessonsListing(path = paths.lessons): string {
+  const lessons = loadLessons(path)
+  if (lessons.length === 0) return 'No lessons recorded for this project yet.'
+  const rows = [...lessons]
+    .reverse()
+    .map((lesson) => {
+      const age = relativeAge(lesson.at)
+      return `  ✦ ${lesson.text}${age ? `  (${age})` : ''}`
+    })
+  return [
+    `LESSONS · this project · ${lessons.length} kept`,
+    '',
+    ...rows,
+    '',
+    '  injected into every planning briefing · consolidated periodically · edit .elia/lessons.md',
+  ].join('\n')
+}
+
 export interface LessonsCapture {
   tool: Tool
   taken(): string[]

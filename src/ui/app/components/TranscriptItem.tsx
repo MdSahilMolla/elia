@@ -42,10 +42,12 @@ export function TranscriptItemView({ item, expanded }: { item: Item; expanded: b
           ))}
         </Box>
       )
-    case 'notice':
-      return (
-        <Text color={palette.muted}>{item.text}</Text>
-      )
+    case 'notice': {
+      // A learning receipt (✦) is elia committing something durable to memory —
+      // give it accent weight so it doesn't read as just another grey status.
+      const isLearning = item.text.startsWith('✦')
+      return <Text color={isLearning ? palette.accent : palette.muted}>{item.text}</Text>
+    }
     case 'error':
       return (
         <Text color={palette.failure}>{item.text}</Text>

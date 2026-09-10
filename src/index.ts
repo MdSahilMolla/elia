@@ -1800,6 +1800,12 @@ async function runInteractive(): Promise<void> {
         if (kind === 'block' || kind === 'summary') {
           const [title, ...body] = text.split('\n')
           uiHooks.onActivity?.({ kind: 'plan', status: 'updated', title: title ?? text, detail: body.join('\n') || undefined })
+        } else if (kind === 'substep' && /^learned:\s*/i.test(text)) {
+          // Learning is elia's strongest "getting smarter" signal — give it the
+          // ✦ mark and make it durable in scrollback, not an ephemeral status.
+          uiHooks.onActivity?.({ kind: 'status', status: 'completed', title: `✦ ${text.replace(/^learned:\s*/i, '')}` })
+        } else if (kind === 'pass') {
+          uiHooks.onActivity?.({ kind: 'status', status: 'completed', title: text })
         } else {
           uiHooks.onActivity?.({ kind: 'status', status: kind === 'fail' ? 'warning' : 'updated', title: text })
         }
@@ -3035,9 +3041,8 @@ async function runInteractive(): Promise<void> {
       return done(whyMatch[1] ? explainRationale(whyMatch[1].trim()) : 'Usage: /why <path or topic>')
     }
     if (trimmed === '/lessons') {
-      const { renderLessons } = await import('./autonomy/lessons.ts')
-      const rendered = renderLessons()
-      return done(rendered.trim() || 'No lessons recorded for this project yet.')
+      const { renderLessonsListing } = await import('./autonomy/lessons.ts')
+      return done(renderLessonsListing())
     }
     const brainMatch = /^\/brain(?:\s+(.+))?$/.exec(trimmed)
     if (brainMatch) {
@@ -3351,8 +3356,8 @@ async function runInteractive(): Promise<void> {
       continue
     }
     if (trimmed === '/lessons') {
-      const { renderLessons } = await import('./autonomy/lessons.ts')
-      writeUsageLine(renderLessons().trim() || 'No lessons recorded for this project yet.')
+      const { renderLessonsListing } = await import('./autonomy/lessons.ts')
+      writeUsageLine(renderLessonsListing())
       continue
     }
     const brainClassic = /^\/brain(?:\s+(.+))?$/.exec(trimmed)

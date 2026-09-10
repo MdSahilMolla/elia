@@ -17,6 +17,7 @@ import { WorkingIndicator } from './components/WorkingIndicator.tsx'
 import { WorkspacePanel } from './components/WorkspacePanel.tsx'
 import { HelpOverlay } from './components/HelpOverlay.tsx'
 import { activeTodoList, type TodoItem } from '../../autonomy/todoList.ts'
+import { loadLessons } from '../../autonomy/lessons.ts'
 import { taskSessions, type TaskSession } from '../../taskSessions.ts'
 import type { PickerOption } from '../picker.ts'
 import type { ToolItem } from './store.ts'
@@ -527,6 +528,16 @@ export function App(props: AppProps) {
   )
 
   const repo = useMemo(() => repoLabel(), [])
+  // What earlier runs taught elia about this project — surfaced once, on the
+  // home screen, so the operator can see what's being carried in. See
+  // docs/terminal-ui-redesign-plan.md WS4.
+  const lessonCount = useMemo(() => {
+    try {
+      return loadLessons().length
+    } catch {
+      return 0
+    }
+  }, [])
   // In ChatGPT-subscription mode Elia's own `messages` array stays near-empty
   // (Codex keeps the real transcript in its thread), so meter against Codex's
   // reported prompt size and its model's real window instead.
@@ -555,6 +566,11 @@ export function App(props: AppProps) {
           <Box marginTop={1}>
             <Text color={palette.muted}>{props.greeting}</Text>
           </Box>
+          {lessonCount > 0 && (
+            <Text color={palette.accent}>
+              ✦ carrying {lessonCount} lesson{lessonCount === 1 ? '' : 's'} from past runs here <Text color={palette.muted}>· /lessons</Text>
+            </Text>
+          )}
         </Box>
       )}
 
