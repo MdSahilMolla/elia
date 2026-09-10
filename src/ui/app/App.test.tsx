@@ -181,6 +181,27 @@ test('maps structured provider plan activity into workspace todo state', () => {
   ])
 })
 
+test('an open approval hides the live workspace panel behind it', async () => {
+  const props = {
+    ...baseProps(),
+    submitTurn: async (_text: string, hooks: import('./App.tsx').TurnHooks) => {
+      hooks.onActivity({ kind: 'plan', status: 'updated', title: 'Plan', detail: '[active] build the thing' })
+      await hooks.approve({ title: 'Approve edit_file?', lines: ['about to write src/x.ts'], ruleLabel: 'edit_file' })
+    },
+  }
+  const { stdin, lastFrame } = render(<App {...props} />)
+  await waitForFrame(lastFrame, 'mercury-2 · manual')
+  await settle()
+  stdin.write('do the thing')
+  await waitForFrame(lastFrame, 'do the thing')
+  stdin.write('\r')
+  const frame = await waitForFrame(lastFrame, 'Approve edit_file?')
+  // The workspace panel (which would show this plan) and the working indicator
+  // are frozen out while the modal owns the screen.
+  expect(frame).not.toContain('build the thing')
+  expect(frame).not.toContain('esc to interrupt')
+})
+
 test('keeps transient progress out of scrollback and preserves outcomes', () => {
   expect(shouldPersistActivity({ kind: 'status', status: 'updated', title: 'Repairing' })).toBe(false)
   expect(shouldPersistActivity({ kind: 'plan', status: 'updated', title: 'Plan updated' })).toBe(false)
