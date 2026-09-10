@@ -202,6 +202,65 @@ export function detectChecks(cwd: string = process.cwd()): string[] {
   return []
 }
 
+/**
+ * How much a "the change is fine" verdict is actually worth.
+ *
+ * Not every domain lets a machine check the answer. Typecheck-and-test is a
+ * mechanical proof; a rendered static page is an empirical one you can eyeball;
+ * a change with no runnable check at all rests on someone's judgement. The
+ * self-improvement loops must know which of these they are standing on, because
+ * a `judgment`-regime pass is the closed loop where a reasoner talks itself into
+ * being confidently wrong — nothing outside its own opinion said otherwise. Such
+ * an outcome may inform this session but must never become durable cross-run
+ * knowledge or training signal.
+ */
+export type VerificationRegime = 'mechanical' | 'empirical' | 'judgment'
+
+/** A command that would actually exercise the code — a type/compile gate or a test run. */
+const MECHANICAL_CMD =
+  /(^|\s)(tsc|typecheck|type-check|check-types|test|tests|test:unit|pytest|mypy|jest|vitest|mocha|clippy)(\s|$|:|&|")|cargo\s+(check|test|build|clippy)|go\s+(build|test|vet)|(^|\s)mvn(\s|$)|gradlew?\b|cmake\b|(^|\s)make(\s|$)/i
+
+function anyMechanical(commands: string[]): boolean {
+  return commands.some((command) => MECHANICAL_CMD.test(command))
+}
+
+/**
+ * Classifies the strongest verification available for a set of changed files.
+ *
+ * `explicitCommands` is the proposal's own declared verification (autonomous
+ * runs have this; the interactive loop does not). When absent, the regime is
+ * inferred from the repo the same way `detectChecks` infers commands.
+ */
+export function classifyRegime(
+  changedPaths: string[],
+  explicitCommands: string[] = [],
+  repoRoot = process.cwd(),
+): VerificationRegime {
+  if (explicitCommands.length > 0 && anyMechanical(explicitCommands)) return 'mechanical'
+
+  const root = checkRoot(changedPaths, repoRoot)
+  if (root) {
+    const checks = detectChecks(root)
+    if (anyMechanical(checks)) return 'mechanical'
+    if (checks.length > 0) return 'empirical'
+  }
+
+  const staticPages = changedStaticPages(changedPaths)
+  const codeFiles = changedCodeFiles(changedPaths)
+  if (staticPages.length > 0 && codeFiles.length === 0) return 'empirical'
+
+  return 'judgment'
+}
+
+/** The weaker of two regimes — used when several signals disagree; the floor wins. */
+export function weakestRegime(regimes: VerificationRegime[]): VerificationRegime {
+  const rank: Record<VerificationRegime, number> = { judgment: 0, empirical: 1, mechanical: 2 }
+  return regimes.reduce<VerificationRegime>(
+    (weakest, regime) => (rank[regime] < rank[weakest] ? regime : weakest),
+    'mechanical',
+  )
+}
+
 function hasMypyConfig(cwd: string): boolean {
   const pyproject = join(cwd, 'pyproject.toml')
   if (!existsSync(pyproject)) return false

@@ -23,6 +23,12 @@ export interface CompletionFacts {
   unresolvedActions: number
   pendingApprovals: number
   blockedByBudget: number
+  /**
+   * How much the verification was worth: `mechanical` (typecheck/tests ran),
+   * `empirical` (a renderable artifact), or `judgment` (nothing outside the
+   * model's own opinion). Optional for backward compatibility with older logs.
+   */
+  regime?: 'mechanical' | 'empirical' | 'judgment'
 }
 
 export interface CalibrationEntry {
@@ -54,6 +60,10 @@ export function detectContradictions(state: CompletionAssessment['state'], confi
 
   if (confidence === 'high' && state !== 'verified') {
     out.push(`high confidence on a non-verified state (${state})`)
+  }
+
+  if (state === 'verified' && confidence === 'high' && facts.regime === 'judgment') {
+    out.push('reported verified with high confidence but no mechanical or empirical check ran (judgement only)')
   }
 
   if (state === 'partial' && facts.completedSteps === 0 && !facts.verificationPassed && !facts.reviewPassed) {
