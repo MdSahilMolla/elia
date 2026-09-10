@@ -60,13 +60,17 @@ test('close() rejects any still-pending call instead of hanging', async () => {
   const client = new McpClient(echoConfig())
   await client.connect()
   const pending = client.callTool('echo', { text: 'slow' })
+  // Observe the rejection synchronously, before close() triggers it. Otherwise
+  // there is a microtask window between close() rejecting the in-flight call and
+  // the `await` below attaching a handler — `bun test` (1.3.0) on Windows runs
+  // its unhandled-rejection check in that window and fails the test even though
+  // the rejection is delivered correctly.
+  const settled = pending.then(
+    () => undefined,
+    (err: unknown) => err,
+  )
   client.close()
-  let error: unknown
-  try {
-    await pending
-  } catch (err) {
-    error = err
-  }
+  const error = await settled
   expect(error).toBeInstanceOf(Error)
   await client.closeAndWait()
 })
