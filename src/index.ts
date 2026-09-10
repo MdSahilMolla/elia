@@ -674,7 +674,11 @@ async function runBench(): Promise<void> {
       writeUsageLine(`  ${outcome.passed ? '✓' : '✗'} ${outcome.taskId} — ${outcome.error ?? outcome.detail}`),
   })
   if (machineReadable) emitEvent('benchmark_scorecard', { stage: 'current', scorecard: card })
-  else process.stdout.write(renderScorecard(card, 'elia'))
+  else {
+    process.stdout.write(renderScorecard(card, 'elia'))
+    const { readLedger, renderLearningLine } = await import('./evolve/ledger.ts')
+    if (readLedger().length > 0) writeUsageLine(`  ${renderLearningLine()}`)
+  }
   if (card.passRate < 1) process.exitCode = 1
 }
 
@@ -767,6 +771,8 @@ async function runEvolve(): Promise<void> {
   for (const record of result.generations) {
     writeUsageLine(`  gen ${record.generation}: ${record.verdict} — ${record.hypothesis || record.reason}`)
   }
+  const { renderLearningLine } = await import('./evolve/ledger.ts')
+  writeUsageLine(`  ${renderLearningLine()}`)
 }
 
 async function runValues(): Promise<void> {
