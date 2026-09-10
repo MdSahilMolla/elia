@@ -7,6 +7,7 @@
 #   - crates/elia-native  Rust: cdylib the TS side dlopen's via bun:ffi
 #   - native/elia-parse   C++: the structural edit-check scanner
 #   - jvm/elia-jvm-bridge Java: JDK-compiler type-check for .java edits
+#   - go/elia-index       Go: workspace-search sidecar (pilot, opt-in)
 #
 # `just` is optional. `cargo`, `bun`, etc. work directly; this just wires the
 # cross-language steps together and pins the targets CI uses.
@@ -29,6 +30,14 @@ build-rust-release:
 # Just the in-process structural-check library (release), for `src/native/ffi.ts`.
 build-native:
     cargo build -p elia-native --release
+
+# elia-index — Go workspace-search sidecar (pilot). Local-build only; nothing
+# in the npm package depends on it. Needs a Go toolchain >= 1.23.
+build-go:
+    cd go && go build -o bin/elia-index{{ if os() == "windows" { ".exe" } else { "" } }} ./cmd/elia-index
+
+test-go:
+    cd go && go vet ./... && go test ./...
 
 # elia-jvm-bridge — plain javac + jar (no Gradle needed yet).
 build-jvm:

@@ -40,6 +40,9 @@ extensions/vscode/*.vsix
 /target/
 **/*.rs.bk
 
+# --- Go (go/elia-index sidecar, local build) ---
+go/bin/
+
 # --- JVM (jvm/elia-jvm-bridge) ---
 jvm/**/build/
 *.class

@@ -178,3 +178,27 @@ bracket/quote/comment balance for Generic/JsTs/Python/Rust/Go lexers); there is
    no C++ services.
 6. Document the toolchain decision (five toolchains, promotion gate) in the toolchain ADR
    so "add a language" stays a measured proposal, not precedent for sprawl.
+
+## 8. Go pilot result (2026-09-10, branch `opencode-optimization`)
+
+Built as specified: `go/elia-index` (stdlib-only, parallel worker pool with
+deterministic walk-order merge), `src/goindex/` TS client
+(`ELIA_GO_INDEX=off/auto/require`, soft fallback), `grep`-tool preferred tier,
+`just build-go`/`test-go`, dedicated CI lane (ubuntu + windows), and
+`scripts/bench-go-index.ts`. Parity with the pure-JS backend is proven by
+`src/goindex/client.test.ts` (same matches/lines/grouping; known separator and
+RE2-grammar divergences documented in `go/README.md`).
+
+**Gate outcome: NOT MET on latency — pilot stays local-build, no promotion.**
+
+- `src/` tree, pattern `function`: JS 11.7 ms, ripgrep 24.3 ms, go-index 23.7 ms.
+- Synthetic 3,000 files × 200 lines, early-cap pattern: JS ~6 ms, ripgrep
+  ~53–80 ms, go-index ~16–32 ms (parallel pool; race-clean).
+- Cause: per-call spawn cost (~tens of ms on this box) floors every
+  out-of-process backend above in-process JS on early-cap workloads. The
+  sidecar matches ripgrep but cannot beat JS by the required ≥2×.
+
+**Recommended follow-up, not this pilot:** resident mode — spawn once, amortize
+startup, keep a warm file index — which attacks the actual dominant cost. That
+is a separate gated proposal; until then, no second Go service and no npm
+packaging of the binary.

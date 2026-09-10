@@ -6,6 +6,7 @@ import { resolveWorkspacePath } from '../autonomy/context.ts'
 import { assertSafeFileAccess, isSensitivePath } from '../autonomy/sensitivePaths.ts'
 import { readBoundedOutput, terminateProcessGroup } from '../shell.ts'
 import { boundedMap, registerCache } from '../cacheRegistry.ts'
+import { GoIndexUnavailable, goIndexEnabled, searchWithGoIndex } from '../goindex/index.ts'
 
 // Compiled-regex cache for the pure-JS search path — recompiling the same
 // pattern for every file in a scan is pure waste. Bounded so a long session
@@ -69,6 +70,17 @@ export const grepTool: Tool = {
     // naming the *binary*, not the missing directory. That reads as "ripgrep is
     // broken" and sent a run looking in the wrong place entirely.
     if (!existsSync(dir)) throw new Error(`no such directory: ${inputDir}`)
+
+    // Preferred tier when enabled: the Go sidecar. Transport or binary
+    // problems fall through to ripgrep and then pure-JS; a rejected pattern
+    // behaves exactly like the other backends and throws.
+    if (goIndexEnabled()) {
+      try {
+        return await searchWithGoIndex(pattern, dir, inputDir, glob, context)
+      } catch (error) {
+        if (!(error instanceof GoIndexUnavailable) && !isSpawnFailure(error)) throw error
+      }
+    }
 
     const rg = Bun.which('rg')
     if (rg) {

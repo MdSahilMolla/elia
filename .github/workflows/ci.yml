@@ -104,3 +104,48 @@ jobs:
         run: |
           cargo build -p eliad
           bun test src/daemon/ --timeout=40000
+
+  # The Go sidecar pilot (go/elia-index). Kept separate so a Go toolchain
+  # problem never blocks the TS suite, and vice versa — same split as `native`.
+  go:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go/go.mod
+          # No external Go dependencies yet (stdlib only, no go.sum) — nothing to cache.
+          cache: false
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.0
+      - name: Format check
+        working-directory: go
+        shell: bash
+        run: test -z "$(gofmt -l .)"
+      - name: Vet
+        working-directory: go
+        run: go vet ./...
+      - name: Go tests
+        working-directory: go
+        run: go test ./...
+      - name: Build elia-index
+        working-directory: go
+        shell: bash
+        # -o keeps the exact name on every OS, so add .exe on Windows to match
+        # what resolveGoIndexPath() looks for.
+        run: |
+          if [ "$RUNNER_OS" = "Windows" ]; then EXT=.exe; fi
+          go build -o "bin/elia-index$EXT" ./cmd/elia-index
+      - name: Install locked dependencies
+        run: bun install --frozen-lockfile
+      - name: Go-backed TypeScript tests (sidecar + grep parity)
+        env:
+          ELIA_GO_INDEX: auto
+        run: |
+          bun test src/goindex/ --timeout=20000 --retry=2
+          bun test src/tools/tools.test.ts src/tools/ignoreDirs.test.ts --timeout=20000 --retry=2
