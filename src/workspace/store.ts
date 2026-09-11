@@ -32,6 +32,10 @@ export const DEFAULT_WORKSPACE_DB = join(process.cwd(), '.elia', 'workspace.sqli
 
 const MAX_PAYLOAD_TEXT = 20_000
 
+/** Default retention for `pruneOldEvents` — see its doc comment. */
+const DEFAULT_KEEP_EVENTS = 200_000
+const DEFAULT_EVENT_MAX_AGE_MS = 90 * 24 * 60 * 60_000
+
 export interface EventQuery {
   sinceSeq?: number
   limit?: number
@@ -159,19 +163,63 @@ export class WorkspaceStore {
     ).run(id, event.type, event.actorKind, event.actorId, target, payloadHash, prevHash, entryHash, event.at)
   }
 
-  /** Verify the audit hash chain end to end. */
+  /**
+   * Verify the audit hash chain end to end.
+   *
+   * Paginated by `seq` (keyset, not `OFFSET` — `OFFSET` would re-scan every
+   * already-verified row on each batch) so a long-lived audit log is verified a
+   * few thousand rows at a time instead of loading the whole table into one
+   * array — `bun:sqlite` calls are synchronous, so a giant `SELECT *` here would
+   * block the event loop (and the WS server) for the duration.
+   */
   auditChainIntact(): boolean {
-    const rows = this.db.query('SELECT * FROM audit_log ORDER BY seq ASC').all() as Row[]
+    const BATCH = 5_000
     let prevHash = ''
-    for (const row of rows) {
-      if (String(row.prev_hash) !== prevHash) return false
-      const recomputed = createHash('sha256')
-        .update([prevHash, row.id, row.action, row.actor_kind, row.actor_id, row.target ?? '', row.payload_hash, row.created_at].join('␟'))
-        .digest('hex')
-      if (recomputed !== String(row.entry_hash)) return false
-      prevHash = String(row.entry_hash)
+    let afterSeq = 0
+    for (;;) {
+      const rows = this.db.query('SELECT * FROM audit_log WHERE seq > ? ORDER BY seq ASC LIMIT ?').all(afterSeq, BATCH) as Row[]
+      if (rows.length === 0) break
+      for (const row of rows) {
+        if (String(row.prev_hash) !== prevHash) return false
+        const recomputed = createHash('sha256')
+          .update([prevHash, row.id, row.action, row.actor_kind, row.actor_id, row.target ?? '', row.payload_hash, row.created_at].join('␟'))
+          .digest('hex')
+        if (recomputed !== String(row.entry_hash)) return false
+        prevHash = String(row.entry_hash)
+        afterSeq = Number(row.seq)
+      }
+      if (rows.length < BATCH) break
     }
     return true
+  }
+
+  /**
+   * Delete `workspace_events` rows outside the retention window, keeping
+   * `audit_log` untouched — see the module doc: `audit_log` is the
+   * tamper-evident chain (verified by `auditChainIntact`), and pruning rows out
+   * from under it would either break the chain or require a checkpoint-anchor
+   * scheme this codebase does not have yet. `workspace_events` has no such
+   * guarantee to preserve: every projection it feeds (`tasks`, `objectives`, …)
+   * is already durably up to date, so deleting an old event only shrinks the
+   * replay/history log, not current state.
+   *
+   * Conservative by construction: a row is only pruned when it is BOTH older
+   * than `maxAgeMs` AND beyond the most recent `keepEvents` rows, so whichever
+   * limit would keep more history wins. Cheap to call repeatedly — once the
+   * table is within both limits this is a no-op single-row-range lookup, not a
+   * table scan, so it is safe to wire into an existing periodic sweep (e.g. the
+   * workspace server's lease-reconcile timer) rather than needing its own
+   * scheduler.
+   */
+  pruneOldEvents(options: { keepEvents?: number; maxAgeMs?: number; now?: number } = {}): number {
+    const keepEvents = options.keepEvents ?? DEFAULT_KEEP_EVENTS
+    const maxAgeMs = options.maxAgeMs ?? DEFAULT_EVENT_MAX_AGE_MS
+    const now = options.now ?? Date.now()
+    const cutoffAt = new Date(now - maxAgeMs).toISOString()
+    const seqFloor = Math.max(0, this.latestSeq() - keepEvents)
+    if (seqFloor <= 0) return 0
+    const result = this.db.query('DELETE FROM workspace_events WHERE seq <= ? AND at < ?').run(seqFloor, cutoffAt)
+    return Number(result.changes)
   }
 
   // --- Queries ---
@@ -272,11 +320,16 @@ export class WorkspaceStore {
     return row ? toTask(row) : undefined
   }
 
-  reservations(activeOnly = true) {
-    const sql = activeOnly
-      ? 'SELECT * FROM reservations WHERE released_at IS NULL ORDER BY acquired_at'
-      : 'SELECT * FROM reservations ORDER BY acquired_at'
-    return (this.db.query(sql).all() as Row[]).map(toReservation)
+  reservations(activeOnly = true, filter: { taskId?: string } = {}) {
+    const clauses: string[] = []
+    const values: unknown[] = []
+    if (activeOnly) clauses.push('released_at IS NULL')
+    if (filter.taskId) {
+      clauses.push('task_id = ?')
+      values.push(filter.taskId)
+    }
+    const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : ''
+    return (this.db.query(`SELECT * FROM reservations ${where} ORDER BY acquired_at`).all(...values as never[]) as Row[]).map(toReservation)
   }
 
   messages(filter: { objectiveId?: string; toId?: string; sinceSeq?: number; limit?: number } = {}) {

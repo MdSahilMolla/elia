@@ -46,6 +46,19 @@ test('competenceReport separates clean from rough turns', () => {
   expect(r.weakest).toContain('frontend')
 })
 
+test('competenceReport excludes turns whose corr is in excludeCorrs, and leaves corr-less turns alone', () => {
+  recordOutcome(turn({ corr: 'a', verify: 'fail', editRetries: 3 }), path) // rough, will be excluded
+  recordOutcome(turn({ corr: 'b' }), path) // clean, kept
+  recordOutcome(turn(), path) // no corr at all — never excludable, kept
+  const withoutExclusion = competenceReport(path)
+  expect(withoutExclusion.changingTurns).toBe(3)
+  expect(withoutExclusion.cleanRate).toBeCloseTo(2 / 3)
+
+  const excluding = competenceReport(path, { excludeCorrs: new Set(['a']) })
+  expect(excluding.changingTurns).toBe(2)
+  expect(excluding.cleanRate).toBe(1)
+})
+
 test('aborted turns are excluded', () => {
   recordOutcome(turn({ aborted: true, toolErrors: 5 }), path)
   expect(competenceReport(path).changingTurns).toBe(0)

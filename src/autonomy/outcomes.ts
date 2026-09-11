@@ -96,10 +96,22 @@ export interface CompetenceReport {
   weakest: Domain[]
 }
 
+export interface CompetenceReportOptions {
+  /**
+   * Corr ids to leave out of the report entirely — e.g. turns exposed to a
+   * lesson under evaluation, so the remainder can serve as a control-group
+   * baseline for that lesson (see `lessonEfficacy.ts` / `lessons.ts`
+   * `retireLessons`). A turn with no `corr` recorded is never excluded — there
+   * is nothing to match it against.
+   */
+  excludeCorrs?: ReadonlySet<string>
+}
+
 /** Aggregates the outcomes log into an honest competence picture. Considers only turns that changed code. */
-export function competenceReport(path = OUTCOMES_PATH): CompetenceReport {
+export function competenceReport(path = OUTCOMES_PATH, options: CompetenceReportOptions = {}): CompetenceReport {
   const outcomes = loadOutcomes(path)
-  const changing = outcomes.filter((o) => o.filesChanged > 0 && !o.aborted)
+  const excluded = options.excludeCorrs
+  const changing = outcomes.filter((o) => o.filesChanged > 0 && !o.aborted && !(excluded && o.corr !== undefined && excluded.has(o.corr)))
   const clean = (o: TurnOutcome) => o.toolErrors === 0 && o.editRetries === 0 && (o.verify === 'pass' || o.verify === 'none' || o.verify === 'skipped')
 
   const cleanTurns = changing.filter(clean).length

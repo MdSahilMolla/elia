@@ -38,31 +38,38 @@ export function createWorkspace(
   store: WorkspaceStore,
   input: { name: string; ownerName?: string; repoRoot?: string; branch?: string; projectName?: string },
 ): CreateWorkspaceResult {
-  if (store.workspace()) throw new Error('this workspace database already has a workspace; use a fresh path')
   const workspaceId = `ws_${randomUUID().replaceAll('-', '')}`
   const projectId = `prj_${randomUUID().replaceAll('-', '')}`
   const ownerMemberId = `mbr_${randomUUID().replaceAll('-', '')}`
   const repoRoot = resolve(input.repoRoot ?? process.cwd())
 
-  store.append({
-    type: 'WorkspaceCreated',
-    actorKind: 'member',
-    actorId: ownerMemberId,
-    objectiveId: undefined,
-    payload: {
-      id: workspaceId,
-      name: text(input.name, 'name'),
-      defaultProjectId: projectId,
-      projectName: input.projectName ? text(input.projectName, 'projectName') : 'default',
-      repoRoot,
-      branch: input.branch ? text(input.branch, 'branch', 200) : 'main',
-    },
-  })
-  store.append({
-    type: 'MemberAdded',
-    actorKind: 'member',
-    actorId: ownerMemberId,
-    payload: { id: ownerMemberId, name: text(input.ownerName ?? 'owner', 'ownerName'), role: 'owner' satisfies MemberRole },
+  // The emptiness check and the two appends must be one atomic unit: without a
+  // transaction, two concurrent `elia workspace init` calls against the same
+  // fresh db can both pass `store.workspace()` before either commits, and both
+  // go on to append a WorkspaceCreated event.
+  store.transact(() => {
+    if (store.workspace()) throw new Error('this workspace database already has a workspace; use a fresh path')
+
+    store.append({
+      type: 'WorkspaceCreated',
+      actorKind: 'member',
+      actorId: ownerMemberId,
+      objectiveId: undefined,
+      payload: {
+        id: workspaceId,
+        name: text(input.name, 'name'),
+        defaultProjectId: projectId,
+        projectName: input.projectName ? text(input.projectName, 'projectName') : 'default',
+        repoRoot,
+        branch: input.branch ? text(input.branch, 'branch', 200) : 'main',
+      },
+    })
+    store.append({
+      type: 'MemberAdded',
+      actorKind: 'member',
+      actorId: ownerMemberId,
+      payload: { id: ownerMemberId, name: text(input.ownerName ?? 'owner', 'ownerName'), role: 'owner' satisfies MemberRole },
+    })
   })
   const ownerToken = mintMemberToken(store, { memberId: ownerMemberId, label: 'owner', actorId: ownerMemberId })
   return { workspaceId, projectId, ownerMemberId, ownerToken }

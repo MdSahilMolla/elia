@@ -35,6 +35,15 @@ export const WORKSPACE_EVENT_TYPES = [
 
 export type WorkspaceEventType = (typeof WORKSPACE_EVENT_TYPES)[number]
 
+/**
+ * Ceiling on the projected `tasks.instructions` column, so repeated
+ * `TaskInstructionAdded` events cannot grow it forever. Mirrors `store.ts`'s
+ * `MAX_PAYLOAD_TEXT` (same order of magnitude for a long free-text field) —
+ * duplicated rather than imported because `store.ts` imports this module, and
+ * an import the other way would be circular.
+ */
+const MAX_INSTRUCTIONS_TEXT = 20_000
+
 export function isWorkspaceEventType(value: unknown): value is WorkspaceEventType {
   return typeof value === 'string' && (WORKSPACE_EVENT_TYPES as readonly string[]).includes(value)
 }
@@ -360,8 +369,16 @@ export function applyProjection(db: Database, event: PersistedEvent): void {
       return
     }
     case 'TaskInstructionAdded': {
-      db.query("UPDATE tasks SET instructions = instructions || char(10) || char(10) || '## Added instruction' || char(10) || ?, updated_at = ? WHERE id = ?")
-        .run(String(p.instruction), event.at, String(event.taskId))
+      const current = String((db.query('SELECT instructions FROM tasks WHERE id = ?').get(String(event.taskId)) as Row | null)?.instructions ?? '')
+      const combined = `${current}\n\n## Added instruction\n${String(p.instruction)}`
+      // Unbounded growth here would make every future context-pack build (and
+      // every row read) pay for the full history of amendments. Cap the total
+      // and, when over, drop from the OLDEST end — the most recent instructions
+      // are the ones still relevant to the agent working the task right now.
+      const bounded = combined.length > MAX_INSTRUCTIONS_TEXT
+        ? `[…earlier instructions truncated…]\n\n${combined.slice(combined.length - MAX_INSTRUCTIONS_TEXT)}`
+        : combined
+      db.query('UPDATE tasks SET instructions = ?, updated_at = ? WHERE id = ?').run(bounded, event.at, String(event.taskId))
       return
     }
     case 'ReviewRequested': {

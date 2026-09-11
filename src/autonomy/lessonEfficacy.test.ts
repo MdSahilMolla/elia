@@ -5,7 +5,7 @@ import { join } from 'node:path'
 
 process.env.ANTHROPIC_API_KEY ??= 'test-key-for-efficacy-test'
 
-const { recordLessonExposure, loadEfficacy, lessonLift, MIN_EXPOSURES, renderEfficacyLine } = await import('./lessonEfficacy.ts')
+const { recordLessonExposure, loadEfficacy, lessonLift, MIN_EXPOSURES, renderEfficacyLine, exposedCorrs } = await import('./lessonEfficacy.ts')
 
 let dir: string
 let path: string
@@ -55,6 +55,15 @@ test('the efficacy log tolerates a corrupt line', () => {
   appendFileSync(path, 'not json\n')
   recordLessonExposure('run-2', ['k'], { verify: 'pass', clean: true }, path)
   expect(loadEfficacy(path).get('k')?.exposures).toBe(2)
+})
+
+test('exposedCorrs returns only the corrs of runs that saw this lesson key', () => {
+  recordLessonExposure('run-1', ['k1', 'k2'], { verify: 'pass', clean: true }, path)
+  recordLessonExposure('run-2', ['k1'], { verify: 'fail', clean: false }, path)
+  recordLessonExposure('run-3', ['k2'], { verify: 'pass', clean: true }, path)
+  expect(exposedCorrs('k1', path)).toEqual(new Set(['run-1', 'run-2']))
+  expect(exposedCorrs('k2', path)).toEqual(new Set(['run-1', 'run-3']))
+  expect(exposedCorrs('unseen-key', path)).toEqual(new Set())
 })
 
 test('renderEfficacyLine summarises how many lessons show no lift', () => {

@@ -3,7 +3,6 @@ import { writeSecureFile } from '../securePersistence.ts'
 import { paths, tierConfig } from '../config.ts'
 import type { ContentBlock } from '../providers/types.ts'
 import { loadLessons, retireLessons, rewriteLessons, type Lesson } from '../autonomy/lessons.ts'
-import { competenceReport } from '../autonomy/outcomes.ts'
 import { loadNotes, rewriteNotes } from './notes.ts'
 
 /**
@@ -139,9 +138,10 @@ export async function consolidateBrain(options: ConsolidateOptions = {}): Promis
   if (notesRemoved > 0) rewriteNotes(keptNotes, notesPath)
 
   // Deterministic second pass, always run: drop lessons that have ridden along
-  // in enough runs to judge and moved nothing. The model pass above only
-  // merges/de-dupes on wording; this is the one that acts on measured effect.
-  const retired = retireLessons(competenceReport().cleanRate, { lessonsPath })
+  // in enough runs to judge and moved nothing against their own control group.
+  // The model pass above only merges/de-dupes on wording; this is the one that
+  // acts on measured effect.
+  const retired = retireLessons({ lessonsPath })
 
   markConsolidated(consolidatedAtPath)
 

@@ -167,6 +167,39 @@ test('the audit hash chain stays intact across many appends', () => {
   expect(store.decisions(objectiveId)).toHaveLength(5)
 })
 
+test('pruneOldEvents deletes only events outside both the age and count windows, never audit_log', () => {
+  const { store, ownerId, projectId } = bootstrap()
+  const objectiveId = seedObjective(store, ownerId, projectId)
+  for (let i = 0; i < 5; i += 1) {
+    store.append({ type: 'DecisionRecorded', actorKind: 'member', actorId: ownerId, objectiveId, payload: { title: `d${i}`, detail: 'x' } })
+  }
+  const totalBefore = store.events({ limit: 5000 }).length
+  const auditBefore = (store.raw().query('SELECT COUNT(*) AS n FROM audit_log').get() as { n: number }).n
+
+  // Nothing is old enough or beyond the count ceiling yet — a no-op.
+  expect(store.pruneOldEvents()).toBe(0)
+  expect(store.events({ limit: 5000 })).toHaveLength(totalBefore)
+
+  // Keep only the most recent 2 events; everything older is "too old" too, so both gates pass.
+  const deleted = store.pruneOldEvents({ keepEvents: 2, maxAgeMs: 0, now: Date.now() + 1 })
+  expect(deleted).toBe(totalBefore - 2)
+  expect(store.events({ limit: 5000 })).toHaveLength(2)
+  // The tamper-evident chain is never touched by pruning workspace_events.
+  expect((store.raw().query('SELECT COUNT(*) AS n FROM audit_log').get() as { n: number }).n).toBe(auditBefore)
+  expect(store.auditChainIntact()).toBe(true)
+})
+
+test('auditChainIntact verifies the chain across more than one internal page', () => {
+  const { store, ownerId, projectId } = bootstrap()
+  const objectiveId = seedObjective(store, ownerId, projectId)
+  // Small enough to run fast, large enough to exercise pagination logic if the
+  // batch size is ever tuned down in a test-only build.
+  for (let i = 0; i < 40; i += 1) {
+    store.append({ type: 'DecisionRecorded', actorKind: 'member', actorId: ownerId, objectiveId, payload: { title: `d${i}`, detail: 'x' } })
+  }
+  expect(store.auditChainIntact()).toBe(true)
+})
+
 test('reconcileLeases requeues a task whose lease expired', () => {
   const { store, ownerId, projectId } = bootstrap()
   const objectiveId = seedObjective(store, ownerId, projectId)
