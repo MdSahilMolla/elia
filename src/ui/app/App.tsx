@@ -233,7 +233,13 @@ export function App(props: AppProps) {
       }
       return
     }
-    if (key.ctrl && input === 'o') setExpandedAll((v) => !v)
+    // Ink dispatches every keystroke to every mounted `useInput` hook, so
+    // without this guard these two "global" shortcuts still fire underneath
+    // an open modal/overlay — e.g. Shift+Tab meant to dismiss the help
+    // overlay (HelpOverlay closes on any key) would also silently cycle the
+    // agent mode in the background.
+    const modalOrOverlayOpen = confirm !== null || approval !== null || picker !== null || textPrompt !== null || showHelp
+    if (key.ctrl && input === 'o' && !modalOrOverlayOpen) setExpandedAll((v) => !v)
     // While the approval menu owns the screen, let it handle Esc (go back / no).
     if (approval) return
     if (key.escape) {
@@ -276,7 +282,7 @@ export function App(props: AppProps) {
         }
       }
     }
-    if (key.shift && key.tab) setMode((m) => (m === 'manual' ? 'auto' : m === 'auto' ? 'plan' : 'manual'))
+    if (key.shift && key.tab && !modalOrOverlayOpen) setMode((m) => (m === 'manual' ? 'auto' : m === 'auto' ? 'plan' : 'manual'))
   })
 
   const executePlan = useRef<(() => void) | null>(null)
@@ -412,81 +418,92 @@ export function App(props: AppProps) {
         return
       }
 
-      if (trimmed.startsWith('!')) {
-        const command = trimmed.slice(1).trim()
-        if (command) {
-          const output = await props.runShellLine(command)
-          store.shell(command, output)
-          store.commit()
-        }
-        return
-      }
-
-      // A bare image path pasted or dragged into the line falls through to a
-      // normal turn (where it's read, encoded, and stripped from the text) even
-      // though a POSIX path starts with "/". "/attach" stays a real command.
-      const isAttachCommand = /^\/(?:attach|image|img)\b/.test(trimmed)
-      const routeAsImagePrompt = !isAttachCommand && looksLikeImageAttachmentLine(trimmed)
-
-      if (!routeAsImagePrompt && (trimmed.startsWith('/') || trimmed.startsWith('@'))) {
-        let outcome: SlashOutcome | string | void = await props.handleSlash(trimmed)
-        // An outcome step may chain another: a picker → another picker
-        // (/model → provider → model), a category picker → a search prompt →
-        // a results picker → a confirmed install.
-        for (let guard = 0; guard < 10; guard += 1) {
-          if (!outcome || typeof outcome === 'string' || !outcome.handled) break
-
-          if (outcome.runCommand) {
-            const { command, description }: SlashRunRequest = outcome.runCommand
-            const ok = await new Promise<boolean>((resolve) =>
-              setConfirm({ title: description, lines: [`Runs: ${command}`], resolve: (v) => { setConfirm(null); resolve(v) } }),
-            )
-            outcome = ok ? await props.runShellLine(command).then((out) => `${command}\n${out}`) : 'Cancelled.'
-            continue
-          }
-
-          if (outcome.prompt) {
-            const req: SlashPromptRequest = outcome.prompt
-            const value = await new Promise<string | null>((resolve) =>
-              setTextPrompt({ label: req.label, placeholder: req.placeholder, resolve: (v) => { setTextPrompt(null); resolve(v) } }),
-            )
-            outcome = value === null || value === '' ? undefined : await req.onSubmit(value)
-            continue
-          }
-
-          if (outcome.picker) {
-            const req: SlashPickerRequest = outcome.picker
-            const value = await new Promise<string | null>((resolve) =>
-              setPicker({
-                title: req.title,
-                options: req.options,
-                searchable: req.searchable,
-                initialIndex: req.initialIndex,
-                resolve: (v) => { setPicker(null); resolve(v) },
-              }),
-            )
-            outcome = await req.onSelect(value)
-            continue
-          }
-          break
-        }
-        const submitText = typeof outcome === 'object' && outcome ? outcome.submitText : undefined
-        const finalText = typeof outcome === 'string' ? outcome : outcome?.text
-        if (finalText) store.notice(finalText)
-        store.commit()
-        if (submitText) await runOne(submitText)
-        return
-      }
-
-      const ask = (title: string, lines: string[]) =>
-        new Promise<boolean>((resolve) =>
-          setConfirm({ title, lines: lines.filter(Boolean), resolve: (v) => { setConfirm(null); resolve(v) } }),
-        )
-
-      // Claim the turn synchronously — everything below has an `await` a second
-      // Enter could race through before `busy` state propagates.
+      // Claim the turn synchronously — covers the shell-escape and slash-
+      // command branches below too, not just the "real turn" one: without
+      // this, a second slash/shell submission fired while a slow one (e.g. a
+      // network-hitting marketplace search) is still in flight races it
+      // instead of being queued/steered by the busy-check above, and can
+      // orphan the first request's still-pending picker/prompt/confirm
+      // `resolve`. Reset in `finally` once all of the handling below —
+      // whichever branch it takes — completes.
       turnStartingRef.current = true
       try {
+        if (trimmed.startsWith('!')) {
+          const command = trimmed.slice(1).trim()
+          if (command) {
+            try {
+              const output = await props.runShellLine(command)
+              store.shell(command, output)
+              store.commit()
+            } catch (error) {
+              store.error(`Error: ${error instanceof Error ? error.message : String(error)}`)
+              store.commit()
+            }
+          }
+          return
+        }
+
+        // A bare image path pasted or dragged into the line falls through to a
+        // normal turn (where it's read, encoded, and stripped from the text) even
+        // though a POSIX path starts with "/". "/attach" stays a real command.
+        const isAttachCommand = /^\/(?:attach|image|img)\b/.test(trimmed)
+        const routeAsImagePrompt = !isAttachCommand && looksLikeImageAttachmentLine(trimmed)
+
+        if (!routeAsImagePrompt && (trimmed.startsWith('/') || trimmed.startsWith('@'))) {
+          let outcome: SlashOutcome | string | void = await props.handleSlash(trimmed)
+          // An outcome step may chain another: a picker → another picker
+          // (/model → provider → model), a category picker → a search prompt →
+          // a results picker → a confirmed install.
+          for (let guard = 0; guard < 10; guard += 1) {
+            if (!outcome || typeof outcome === 'string' || !outcome.handled) break
+
+            if (outcome.runCommand) {
+              const { command, description }: SlashRunRequest = outcome.runCommand
+              const ok = await new Promise<boolean>((resolve) =>
+                setConfirm({ title: description, lines: [`Runs: ${command}`], resolve: (v) => { setConfirm(null); resolve(v) } }),
+              )
+              outcome = ok ? await props.runShellLine(command).then((out) => `${command}\n${out}`) : 'Cancelled.'
+              continue
+            }
+
+            if (outcome.prompt) {
+              const req: SlashPromptRequest = outcome.prompt
+              const value = await new Promise<string | null>((resolve) =>
+                setTextPrompt({ label: req.label, placeholder: req.placeholder, resolve: (v) => { setTextPrompt(null); resolve(v) } }),
+              )
+              outcome = value === null || value === '' ? undefined : await req.onSubmit(value)
+              continue
+            }
+
+            if (outcome.picker) {
+              const req: SlashPickerRequest = outcome.picker
+              const value = await new Promise<string | null>((resolve) =>
+                setPicker({
+                  title: req.title,
+                  options: req.options,
+                  searchable: req.searchable,
+                  initialIndex: req.initialIndex,
+                  resolve: (v) => { setPicker(null); resolve(v) },
+                }),
+              )
+              outcome = await req.onSelect(value)
+              continue
+            }
+            break
+          }
+          const submitText = typeof outcome === 'object' && outcome ? outcome.submitText : undefined
+          const finalText = typeof outcome === 'string' ? outcome : outcome?.text
+          if (finalText) store.notice(finalText)
+          store.commit()
+          if (submitText) await runOne(submitText)
+          return
+        }
+
+        const ask = (title: string, lines: string[]) =>
+          new Promise<boolean>((resolve) =>
+            setConfirm({ title, lines: lines.filter(Boolean), resolve: (v) => { setConfirm(null); resolve(v) } }),
+          )
+
         // Echo the message immediately — before the risk check — so pressing
         // Enter always feels instant, not gated on a fast-tier round-trip.
         store.appendUser(trimmed)
@@ -502,7 +519,10 @@ export function App(props: AppProps) {
           setBusy(true)
           setTurnStartedAt(Date.now())
           setStatus('Checking whether this needs confirmation…')
-          const { risky, reason } = await props.classifyRisk(trimmed).catch(() => ({ risky: true, reason: 'risk check failed — asking to be safe' }))
+          const { risky, reason } = await props.classifyRisk(trimmed).catch((error) => {
+            store.error(`Risk check failed — asking to be safe: ${error instanceof Error ? error.message : String(error)}`)
+            return { risky: true, reason: 'risk check failed — asking to be safe' }
+          })
           if (risky) {
             setBusy(false)
             setStatus('')

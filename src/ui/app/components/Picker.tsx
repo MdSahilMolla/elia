@@ -19,13 +19,15 @@ export function Picker({ request }: { request: PickerRequest }) {
   const [selected, setSelected] = useState(request.initialIndex ?? 0)
   const [query, setQuery] = useState('')
 
-  const filtered = query.trim()
-    ? request.options.filter(
-        (o) =>
-          o.label.toLowerCase().includes(query.toLowerCase()) ||
-          (o.detail ?? '').toLowerCase().includes(query.toLowerCase()),
-      )
-    : request.options
+  // No `query.trim()` special case: an empty query naturally matches every
+  // option via `.includes('')`, and a whitespace-only query now filters for
+  // real instead of silently showing everything while the search line
+  // displays the (apparently ignored) spaces.
+  const filtered = request.options.filter(
+    (o) =>
+      o.label.toLowerCase().includes(query.toLowerCase()) ||
+      (o.detail ?? '').toLowerCase().includes(query.toLowerCase()),
+  )
 
   useInput((input, key) => {
     const event = {

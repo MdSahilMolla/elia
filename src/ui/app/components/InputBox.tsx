@@ -100,6 +100,10 @@ export function InputBox(props: InputBoxProps) {
   // A large multi-line paste is collapsed to a token in the buffer; the real
   // text is kept here and spliced back in at submit time.
   const pastes = useRef(new Map<string, string>()).current
+  // Tokens must be unique per paste, not just per line-count: two same-length
+  // pastes in one line would otherwise collide in `pastes` and, via
+  // `replaceAll`, both get overwritten with the same (most recent) text.
+  const pasteCounter = useRef(0)
 
   const mention = activeMention(state.buffer, state.cursor)
   const [mentionSel, setMentionSel] = useState(0)
@@ -138,8 +142,11 @@ export function InputBox(props: InputBoxProps) {
     return out
   }
 
-  const submit = (line: string) => {
-    const full = expandPastes(line).trim()
+  // Takes already-expanded text (paste tokens replaced) — expansion happens
+  // once, at the 'submit' result site below, so the same expanded string
+  // both gets sent and lands in history. See the comment there for why.
+  const finishSubmit = (expanded: string) => {
+    const full = expanded.trim()
     if (!full) return
     appendHistory(full)
     props.onSubmit(full)
@@ -187,6 +194,15 @@ export function InputBox(props: InputBoxProps) {
       return
     }
 
+    // Escape dismisses the mention popup whenever it's open — even with zero
+    // matches (no results yet, or the file index still building). Gating this
+    // on `fileMatches.length > 0` like the nav/accept keys below would let
+    // Escape fall through to normal buffer editing in exactly those cases.
+    if (mentionOpen && key.escape) {
+      setMentionDismissed(mention!.query)
+      return
+    }
+
     // --- @-mention file menu intercepts navigation/accept ---
     if (mentionOpen && fileMatches.length > 0) {
       if (key.tab || key.return) {
@@ -199,10 +215,6 @@ export function InputBox(props: InputBoxProps) {
       }
       if (key.downArrow) {
         setMentionSel((i) => (i + 1) % fileMatches.length)
-        return
-      }
-      if (key.escape) {
-        setMentionDismissed(mention!.query)
         return
       }
     }
@@ -219,7 +231,8 @@ export function InputBox(props: InputBoxProps) {
     // --- Bracketed paste: a chunk with newlines arrives as one `input` ---
     if (input.length > 12 && /\r?\n/.test(input)) {
       const lineCount = input.split(/\r?\n/).length
-      const token = `⟦pasted ${lineCount} lines⟧`
+      pasteCounter.current += 1
+      const token = `⟦pasted ${lineCount} lines #${pasteCounter.current}⟧`
       pastes.set(token, input)
       const buffer = state.buffer.slice(0, state.cursor) + token + state.buffer.slice(state.cursor)
       setState({ ...state, buffer, cursor: state.cursor + token.length, selectedIndex: 0 })
@@ -237,8 +250,21 @@ export function InputBox(props: InputBoxProps) {
       return
     }
     if (result.type === 'submit') {
-      setState(result.state)
-      submit(result.line)
+      // applyKey (a pure reducer with no knowledge of `pastes`) already pushed
+      // the raw submitted line — paste tokens intact — onto in-memory history.
+      // Expand it here, once, and patch that history entry to the expanded
+      // text: otherwise recalling this exact line later (Up-arrow / Ctrl+R)
+      // and resubmitting without editing would send the literal placeholder,
+      // since `expandPastes` deletes each token from `pastes` the instant it's
+      // first consumed below.
+      const expanded = expandPastes(result.line)
+      let history = result.state.history
+      const last = history.length - 1
+      if (last >= 0 && history[last] === result.line && expanded !== result.line) {
+        history = [...history.slice(0, last), expanded]
+      }
+      setState({ ...result.state, history, historyIndex: history.length })
+      finishSubmit(expanded)
       return
     }
     if (mentionDismissed && result.state.buffer !== state.buffer) setMentionDismissed('')
