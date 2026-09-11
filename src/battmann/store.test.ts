@@ -1,4 +1,5 @@
 import { expect, test } from 'bun:test'
+import { Database } from 'bun:sqlite'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -77,4 +78,29 @@ test('stage_deployment still honours a documentClassification stricter than the 
   await run({ action: 'report_from_store', reportId: 'rep1', reportStatus: 'draft', title: 'Brief', executiveSummary: 'Summary.', author: 'a', documentClassification: 'confidential', asOf: '2026-01-03', outputPath: 'reports/brief.md' })
   await run({ action: 'define_deployment_target', targetId: 't-low', name: 'Low Clearance Target', kind: 'sovereign-cloud', maxClassification: 'internal', formats: ['md', 'json'] })
   await expect(run({ action: 'stage_deployment', stageId: 's1', targetId: 't-low', reportPath: 'reports/brief.md', stagedBy: 'ops' })).rejects.toThrow('accepts at most internal')
+})
+
+// Regression coverage for a verified correctness finding: the data write and its audit-hash-chain entry run as
+// two separate transactions (see the comment above MUTATING_STORE_ACTIONS in store.ts), so a crash between them
+// leaves an undetectable gap. Since a true single-transaction fix would require threading a shared, externally
+// owned connection through every one of the ~20 self-contained mutating handlers (each opens/commits/closes its
+// own), the mitigation is a reconciliation check (`reconcileAuditGaps`) that `audit_trail` now runs on every
+// call, so the gap becomes "detected and reported" instead of "silently undetectable."
+test('audit_trail reports no gaps for a normal write, and detects one once simulated', async () => {
+  const cwd = mkdtempSync(join(tmpdir(), 'elia-battmann-audit-gap-'))
+  const run = (input: Record<string, unknown>) => withAgentIdentity({ name: 'test', role: 'lead', cwd }, () => battmannTool.execute(input))
+  await run({ action: 'create_question', questionId: 'q1', question: 'Will X happen?', resolutionCriteria: 'X occurs by the horizon.', openedAt: '2025-01-01', horizon: '2030-01-01' })
+
+  const clean = JSON.parse(await run({ action: 'audit_trail' }))
+  expect(clean.auditGaps).toEqual([])
+
+  // Simulate the crash-between-transactions failure mode directly: delete the audit_log entry for q1's write,
+  // leaving the `questions` row in place with no corresponding audit entry — exactly the gap a mid-write crash
+  // would leave, since the data-write transaction (already committed) is never rolled back for an audit failure.
+  const db = new Database(join(cwd, '.elia', 'battmann.sqlite'))
+  db.exec("DELETE FROM audit_log WHERE target = 'q1'")
+  db.close()
+
+  const gapped = JSON.parse(await run({ action: 'audit_trail' }))
+  expect(gapped.auditGaps).toEqual([{ table: 'questions', missing: 1, sampleIds: ['q1'] }])
 })

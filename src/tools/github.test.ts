@@ -27,6 +27,27 @@ test('branch creates and switches', async () => {
   expect(await githubTool.execute({ action: 'branch', name: 'feature/z' })).toContain('switched to branch "feature/z"')
 })
 
+test('branch rejects a "from" that looks like a git flag', async () => {
+  route({ 'git checkout -b feature/z': ok() })
+  await expect(githubTool.execute({ action: 'branch', name: 'feature/z', from: '--orphan' })).rejects.toThrow(/invalid from/i)
+  await expect(githubTool.execute({ action: 'branch', name: 'feature/z', from: '-x' })).rejects.toThrow(/invalid from/i)
+})
+
+test('branch rejects a "name" that looks like a git flag', async () => {
+  await expect(githubTool.execute({ action: 'branch', name: '--orphan' })).rejects.toThrow(/invalid name/i)
+})
+
+test('branch accepts a normal branch name as "from"', async () => {
+  let seen: string[] = []
+  setExecForTests(async (bin, args) => {
+    if (bin === 'git') seen = args
+    return ok()
+  })
+  const out = await githubTool.execute({ action: 'branch', name: 'feat/my-branch', from: 'main' })
+  expect(out).toContain('switched to branch "feat/my-branch"')
+  expect(seen).toEqual(['checkout', '-b', 'feat/my-branch', 'main'])
+})
+
 test('commit stages, checks for staged content, and commits', async () => {
   route({
     'git add -u': ok(),

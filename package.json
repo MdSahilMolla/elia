@@ -44,8 +44,7 @@
     "test": "bun test --timeout=20000 src/",
     "typecheck": "tsc --noEmit",
     "security:scan": "bun run scripts/security-scan.ts",
-    "prepublishOnly": "bun run typecheck && bun test && bun run security:scan",
-    "postinstall": "prisma skills sync || exit 0"
+    "prepublishOnly": "bun run typecheck && bun test && bun run security:scan"
   },
   "keywords": [
     "ai",
@@ -65,6 +64,7 @@
     "ink": "^7.1.1",
     "jszip": "^3.10.1",
     "openai": "^7.5.0",
+    "pptxgenjs": "4.0.1",
     "react": "^19.2.8"
   },
   "devDependencies": {
@@ -72,7 +72,6 @@
     "@types/cors": "^2.8.19",
     "@types/react": "^19.2.18",
     "ink-testing-library": "^4.0.0",
-    "prisma": "^8.0.0-rc.12",
     "typescript": "7"
   }
 }

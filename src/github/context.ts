@@ -39,6 +39,22 @@ export interface GitHubContext {
   ghAuthenticated: boolean
   ghUser?: string
   openPr?: OpenPullRequest
+  /**
+   * `gh auth status` produced output that matched neither the "logged in" nor
+   * the "not logged in" pattern — `ghAuthenticated` was left at its default
+   * `false` because parsing genuinely couldn't tell, not because it confirmed
+   * the user is logged out. A future `gh` wording change is the expected
+   * trigger; consumers should present this distinctly rather than as a
+   * confirmed "not authenticated".
+   */
+  ghAuthUnknown?: boolean
+  /**
+   * The upstream comparison (`git rev-list --left-right`) succeeded but its
+   * output didn't match the expected "N\tM" shape, so `ahead`/`behind` were
+   * left at 0 without that being a confirmed zero. Consumers should present
+   * this distinctly rather than as "0 ahead, 0 behind".
+   */
+  aheadBehindUnknown?: boolean
 }
 
 /** github.com/owner/repo(.git) or git@github.com:owner/repo(.git) → {owner, repo}. */
@@ -55,19 +71,35 @@ export function parseRemoteUrl(url: string): { owner: string; repo: string } | u
   return undefined
 }
 
-/** `git rev-list --count --left-right @{upstream}...HEAD` → "3\t5" means 3 behind, 5 ahead. */
-export function parseAheadBehind(output: string): { ahead: number; behind: number } {
+/**
+ * `git rev-list --count --left-right @{upstream}...HEAD` → "3\t5" means 3 behind, 5 ahead.
+ *
+ * `recognized: false` means the output didn't match the expected shape at all (e.g. a future git wording
+ * change) — distinct from a confirmed "0 ahead, 0 behind", which is `recognized: true`. Callers must not treat
+ * the two the same, or a parsing regression silently under-reports real ahead/behind state.
+ */
+export function parseAheadBehind(output: string): { ahead: number; behind: number; recognized: boolean } {
   const match = output.trim().match(/^(\d+)\s+(\d+)$/)
-  if (!match) return { ahead: 0, behind: 0 }
-  return { behind: Number(match[1]), ahead: Number(match[2]) }
+  if (!match) return { ahead: 0, behind: 0, recognized: false }
+  return { behind: Number(match[1]), ahead: Number(match[2]), recognized: true }
 }
 
-/** `gh auth status` prints "Logged in to github.com account NAME" (to stderr). */
-export function parseGhAuthStatus(text: string): { authenticated: boolean; user?: string } {
+/**
+ * `gh auth status` prints "Logged in to github.com account NAME" when authenticated, or a "not logged in"
+ * variant (e.g. "You are not logged into any GitHub hosts") when not — both recognized outcomes. Output matching
+ * neither pattern (e.g. a future `gh` wording change) returns `recognized: false` with `authenticated: false` as
+ * a safe default value, not a confirmed "logged out" — callers must not present the two identically, or a
+ * parsing regression silently under-reports real auth state.
+ */
+export function parseGhAuthStatus(text: string): { authenticated: boolean; user?: string; recognized: boolean } {
   const loggedIn = /Logged in to github\.com/i.test(text)
-  if (!loggedIn) return { authenticated: false }
-  const user = text.match(/account\s+([A-Za-z0-9-]+)/i)?.[1] ?? text.match(/as\s+([A-Za-z0-9-]+)/i)?.[1]
-  return { authenticated: true, user }
+  if (loggedIn) {
+    const user = text.match(/account\s+([A-Za-z0-9-]+)/i)?.[1] ?? text.match(/as\s+([A-Za-z0-9-]+)/i)?.[1]
+    return { authenticated: true, user, recognized: true }
+  }
+  const notLoggedIn = /not logged (?:in|into)|no github hosts|not logged in to any/i.test(text)
+  if (notLoggedIn) return { authenticated: false, recognized: true }
+  return { authenticated: false, recognized: false }
 }
 
 let cache: { cwd: string; at: number; remote: boolean; context: GitHubContext } | undefined
@@ -118,7 +150,9 @@ export async function detectGitHubContext(cwd: string, options: DetectOptions = 
 
   if (upstream.ok) {
     base.hasUpstream = true
-    Object.assign(base, parseAheadBehind(upstream.stdout))
+    const { recognized, ...counts } = parseAheadBehind(upstream.stdout)
+    Object.assign(base, counts)
+    if (!recognized) base.aheadBehindUnknown = true
   }
 
   if (originUrl.ok && originUrl.stdout.trim()) {
@@ -137,6 +171,7 @@ export async function detectGitHubContext(cwd: string, options: DetectOptions = 
     const parsedAuth = parseGhAuthStatus(`${auth.stdout}\n${auth.stderr}`)
     base.ghAuthenticated = parsedAuth.authenticated
     base.ghUser = parsedAuth.user
+    if (!parsedAuth.recognized) base.ghAuthUnknown = true
 
     if (remote && base.ghAuthenticated) {
       const [defaultBranch, pr] = await Promise.all([
@@ -164,11 +199,13 @@ export function renderGitHubBanner(context: GitHubContext): string {
   if (!context.isRepo || !context.hasRemote || !context.slug) return ''
   const parts = [`GitHub: ${context.slug}`]
   if (!context.ghInstalled) parts.push('gh CLI not installed — install it for autonomous PRs')
+  else if (context.ghAuthUnknown) parts.push('gh auth status unrecognized — run "gh auth status" to check')
   else if (!context.ghAuthenticated) parts.push('gh not authenticated — run "gh auth login"')
   else parts.push(`gh ✓${context.ghUser ? ` ${context.ghUser}` : ''}`)
   if (context.currentBranch) {
     let branchPart = `branch ${context.currentBranch}`
-    if (context.ahead || context.behind) branchPart += ` (${context.ahead}↑ ${context.behind}↓)`
+    if (context.aheadBehindUnknown) branchPart += ' (ahead/behind unknown — unrecognized git output)'
+    else if (context.ahead || context.behind) branchPart += ` (${context.ahead}↑ ${context.behind}↓)`
     parts.push(branchPart)
   }
   if (context.openPr) parts.push(`PR #${context.openPr.number} open`)

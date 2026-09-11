@@ -23,6 +23,34 @@ type Action =
   | 'pr_create' | 'pr_view' | 'pr_list' | 'pr_checks' | 'pr_reviews' | 'pr_comment' | 'pr_merge'
   | 'issue_list' | 'issue_view' | 'issue_create'
 
+// Git ref-name-safe charset (letters, digits, `.`, `_`, `/`, `-`), first
+// character alphanumeric so a leading `-` can never be read as a flag by
+// git's argv-based parser, plus a ban on `..` (git's own path-traversal /
+// range-syntax escape). Deliberately conservative vs. the full
+// `git check-ref-format` grammar — anything a real branch name needs still
+// passes; anything that looks like a flag or an escape does not.
+const REF_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._/-]*$/
+
+/**
+ * Validates a user-supplied git ref/branch name before it is placed in an
+ * argv array built for direct (non-shell) exec. `exec.ts` spawns argv
+ * directly, so this isn't shell injection — but since these actions are
+ * auto-approved by the governor with no human review, an unvalidated value
+ * like `--orphan` or `-x` would be interpreted as a git flag instead of a
+ * ref name, silently changing what the command does. Fails loud rather than
+ * silently stripping/sanitizing, so a legitimate need surfaces instead of a
+ * mutated ref being created quietly.
+ */
+function validateRefName(value: string, label: string): string {
+  if (value.startsWith('-')) {
+    throw new Error(`invalid ${label}: must not start with '-' (would be interpreted as a flag)`)
+  }
+  if (!REF_NAME_PATTERN.test(value) || value.includes('..')) {
+    throw new Error(`invalid ${label}: must not start with '-' and may only contain letters, digits, and ./_- characters (no '..')`)
+  }
+  return value
+}
+
 function fail(result: ExecResult): string {
   if (result.missing) return `${result.stderr}. Install and authenticate the GitHub CLI (\`gh auth login\`) to use this action.`
   if (/no pull requests found|no open pull requests/i.test(result.stderr)) return 'No open pull request for the current branch. Open one with action "pr_create".'
@@ -89,10 +117,11 @@ Actions:
       const context = await detectGitHubContext(dir, { signal, force: true, remote: true })
       if (!context.isRepo) return 'Not a git repository.'
       const lines = [renderGitHubBanner(context) || `local git repo${context.hasRemote ? '' : ' with no origin remote'}`]
-      lines.push(`  branch: ${context.currentBranch ?? '(detached)'}${context.hasUpstream ? ` · ${context.ahead} ahead, ${context.behind} behind upstream` : ' · no upstream set'}`)
+      const aheadBehind = context.aheadBehindUnknown ? 'ahead/behind unrecognized (unexpected git output)' : `${context.ahead} ahead, ${context.behind} behind upstream`
+      lines.push(`  branch: ${context.currentBranch ?? '(detached)'}${context.hasUpstream ? ` · ${aheadBehind}` : ' · no upstream set'}`)
       lines.push(`  working tree: ${context.dirty ? 'has uncommitted changes' : 'clean'}`)
       if (context.slug) lines.push(`  remote: ${context.slug}${context.defaultBranch ? ` (default branch ${context.defaultBranch})` : ''}`)
-      lines.push(`  gh CLI: ${!context.ghInstalled ? 'not installed' : context.ghAuthenticated ? `authenticated${context.ghUser ? ` as ${context.ghUser}` : ''}` : 'installed but not authenticated (run: gh auth login)'}`)
+      lines.push(`  gh CLI: ${!context.ghInstalled ? 'not installed' : context.ghAuthUnknown ? 'auth status unrecognized (run `gh auth status` manually)' : context.ghAuthenticated ? `authenticated${context.ghUser ? ` as ${context.ghUser}` : ''}` : 'installed but not authenticated (run: gh auth login)'}`)
       if (context.openPr) lines.push(`  open PR: #${context.openPr.number} ${context.openPr.isDraft ? '(draft) ' : ''}${context.openPr.title} — ${context.openPr.url}`)
       return lines.join('\n')
     }
@@ -100,8 +129,9 @@ Actions:
     if (action === 'branch') {
       const name = str('name')
       if (!name) return 'branch needs "name".'
+      validateRefName(name, 'name')
       const args = ['checkout', '-b', name]
-      if (str('from')) args.push(str('from'))
+      if (str('from')) args.push(validateRefName(str('from'), 'from'))
       const result = await git(args)
       return result.ok ? `Created and switched to branch "${name}".` : fail(result)
     }
@@ -134,7 +164,7 @@ Actions:
       const title = str('title')
       if (!title) return 'pr_create needs "title".'
       const args = ['pr', 'create', '--title', title, '--body', str('body') || title]
-      if (str('base')) args.push('--base', str('base'))
+      if (str('base')) args.push('--base', validateRefName(str('base'), 'base'))
       if (input.draft === true) args.push('--draft')
       const result = await gh(args)
       return result.ok ? `Opened PR: ${result.stdout}` : fail(result)

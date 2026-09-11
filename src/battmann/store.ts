@@ -1267,9 +1267,62 @@ function deploymentStatus(input: Row): Row {
   } finally { opened.db.close() }
 }
 
+/**
+ * Tables a mutating action inserts a fresh, uniquely-identified row into, whose id ends up as `audit_log.target`
+ * (see AUDIT_TARGET_KEYS above) — restricted to tables where that id is a true 1:1 artifact key. Deliberately
+ * left out: `forecast_revisions` and `ontology_objects` (their logical id repeats across revisions, so
+ * presence-only matching would hide a genuinely missing entry behind an unrelated sibling revision's audit row)
+ * and `deployment_stages` (a staged deployment is audited under its parent `targetId`, not a per-stage id — see
+ * `stageDeployment`). This backs `reconcileAuditGaps` below, a deliberately coarse mitigation for the
+ * write/audit atomicity gap documented above `MUTATING_STORE_ACTIONS`, not a full accounting.
+ */
+const AUDITED_TABLES: readonly { table: string; idColumn: string }[] = [
+  { table: 'questions', idColumn: 'id' },
+  { table: 'evidence', idColumn: 'id' },
+  { table: 'claims', idColumn: 'id' },
+  { table: 'scenarios', idColumn: 'id' },
+  { table: 'decisions', idColumn: 'id' },
+  { table: 'outcomes', idColumn: 'id' },
+  { table: 'datasets', idColumn: 'id' },
+  { table: 'geo_events', idColumn: 'id' },
+  { table: 'indicators', idColumn: 'id' },
+  { table: 'indicator_readings', idColumn: 'id' },
+  { table: 'action_types', idColumn: 'id' },
+  { table: 'action_proposals', idColumn: 'id' },
+  { table: 'benchmark_runs', idColumn: 'id' },
+  { table: 'deployment_targets', idColumn: 'id' },
+  { table: 'ontology_links', idColumn: 'id' },
+]
+
+/**
+ * Reconciliation check for the write/audit atomicity gap: a row in one of `AUDITED_TABLES` whose id never
+ * appears as an `audit_log.target` is the signature left by a crash between a data write committing and its
+ * audit entry being appended (the two run as separate transactions — see the comment above
+ * `MUTATING_STORE_ACTIONS`). Returns one entry per table with at least one such gap; an empty array means none
+ * was detected — not a guarantee none ever occurred, since a table left out of `AUDITED_TABLES`, or an action
+ * whose target key isn't unique per row, can't be checked this way.
+ */
+function reconcileAuditGaps(db: Database): { table: string; missing: number; sampleIds: string[] }[] {
+  const targets = new Set(
+    (db.query('SELECT DISTINCT target FROM audit_log WHERE target IS NOT NULL').all() as Row[]).map((row) => String(row.target)),
+  )
+  const gaps: { table: string; missing: number; sampleIds: string[] }[] = []
+  for (const { table, idColumn } of AUDITED_TABLES) {
+    let ids: string[]
+    try {
+      ids = (db.query(`SELECT ${idColumn} AS id FROM ${table}`).all() as Row[]).map((row) => String(row.id))
+    } catch {
+      continue // table not present yet on an older, not-fully-migrated store
+    }
+    const missingIds = ids.filter((id) => !targets.has(id))
+    if (missingIds.length > 0) gaps.push({ table, missing: missingIds.length, sampleIds: missingIds.slice(0, 5) })
+  }
+  return gaps
+}
+
 function auditTrail(input: Row): Row {
   const opened = openStore(input, false)
-  if (!opened) return { storePath: storePath(input), entries: [], chainValid: true }
+  if (!opened) return { storePath: storePath(input), entries: [], chainValid: true, auditGaps: [] }
   try {
     const limit = input.limit === undefined ? 200 : integer(input.limit, 'limit', 1, 10_000)
     const all = opened.db.query('SELECT * FROM audit_log ORDER BY seq').all() as Row[]
@@ -1282,7 +1335,17 @@ function auditTrail(input: Row): Row {
       prevHash = String(row.entry_hash)
     }
     const entries = all.slice(-limit).map((row) => ({ seq: row.seq, action: row.action, actor: { name: row.actor_name, role: row.actor_role }, target: row.target, payloadHash: row.payload_hash, entryHash: row.entry_hash, recordedAt: row.created_at }))
-    return { storePath: opened.path, totalEntries: all.length, chainValid, brokenAt, entries }
+    // Periodic reconciliation: every time the audit trail is inspected, also check for the atomicity gap the
+    // two-transaction design (data write, then audit append) can leave behind. Surfaced both as a loud warning
+    // (matching the failed-append case in executeBattmannStoreAction) and in the returned payload so a caller
+    // can act on it programmatically instead of only a human reading logs.
+    const auditGaps = reconcileAuditGaps(opened.db)
+    if (auditGaps.length > 0) {
+      console.warn(
+        `[battmann] audit reconciliation found row(s) with no corresponding audit_log entry (write/audit atomicity gap): ${auditGaps.map((g) => `${g.table}: ${g.missing} missing (e.g. ${g.sampleIds.join(', ')})`).join('; ')}`,
+      )
+    }
+    return { storePath: opened.path, totalEntries: all.length, chainValid, brokenAt, entries, auditGaps }
   } finally { opened.db.close() }
 }
 
@@ -1563,12 +1626,22 @@ export const BATTMANN_STORE_ACTIONS = [
  * Actions that write to the store; each success appends one entry to the audit hash chain.
  *
  * The data mutation and the audit append run as two separate transactions on two separate connections (see
- * `executeBattmannStoreAction` below). The hash chain is tamper-evident against modification of entries that were
- * recorded — `audit_trail`'s replay detects any edited `entry_hash`/`prev_hash` — but it does NOT guarantee that an
- * entry was recorded for every mutation: a crash between the two transactions leaves the data write persisted with
- * no corresponding audit row, and the chain itself has no way to detect that omission. If the audit append fails,
- * the error is logged loudly (not silently swallowed) so an operator can investigate, but the data write is not
- * rolled back — a write must not fail merely because its audit row could not be appended.
+ * `executeBattmannStoreAction` below). This is not incidental: each of the ~20 handler functions above (one per
+ * mutating action) is self-contained — it opens its own connection via `withStore`, commits its own
+ * `BEGIN IMMEDIATE`/`COMMIT` transaction, and closes — and that same `(input) => result` shape is shared with
+ * every read-only action in `handlers`. Folding the audit append into that same transaction would mean threading
+ * an externally-owned, not-yet-committed `db` handle through every one of those functions (and the dispatch
+ * table's shared signature) instead of letting each manage its own connection — a wide structural change judged
+ * out of scope for this fix. The hash chain is tamper-evident against modification of entries that were recorded
+ * — `audit_trail`'s replay detects any edited `entry_hash`/`prev_hash` — but it does NOT guarantee that an entry
+ * was recorded for every mutation: a crash between the two transactions leaves the data write persisted with no
+ * corresponding audit row, and the chain itself has no way to detect that omission from the hashes alone. If the
+ * audit append fails, the error is logged loudly (not silently swallowed) so an operator can investigate, but the
+ * data write is not rolled back — a write must not fail merely because its audit row could not be appended.
+ * Mitigation: `auditTrail`'s `audit_trail` action now also runs `reconcileAuditGaps` (below) on every call, which
+ * scans for rows with no matching audit entry and surfaces them as `auditGaps` in the result plus a console
+ * warning — turning "silently undetectable" into "detected whenever the chain is inspected," short of true
+ * atomicity.
  */
 const MUTATING_STORE_ACTIONS = new Set<string>([
   'create_question', 'register_evidence', 'register_claim', 'review_claim', 'submit_forecast', 'resolve_question',
