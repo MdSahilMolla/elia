@@ -1,18 +1,42 @@
 import type { Tool } from './types.ts'
 import { optionalString } from './args.ts'
-import { runShell } from '../shell.ts'
 import { resolveWorkspacePath } from '../autonomy/context.ts'
 
-const SHELL_TIMEOUT_MS = 30_000
 const MAX_HISTORY_DAYS = 90
 
-interface TimeSeriesPoint {
+/**
+ * Git runner in argv form — avoids cmd-shell quoting hazards on Windows.
+ * Returns stdout text for an arbitrary git invocation.
+ */
+export type GitRunner = (args: string[]) => Promise<string>
+
+export async function makeGitRunner(cwd: string): Promise<GitRunner> {
+  return async (args: string[]) => {
+    const proc = Bun.spawn(['git', ...args], { cwd, stdout: 'pipe', stderr: 'pipe' })
+    const stdout = await new Response(proc.stdout).text()
+    await proc.exited.catch(() => proc.exitCode)
+    if (proc.exitCode !== 0) throw new Error(`git ${args.join(' ')} exited with ${proc.exitCode}`)
+    return stdout
+  }
+}
+
+/** Byte length of file content — replaces `wc -c`. */
+export function byteSizeOf(content: string): number {
+  return Buffer.byteLength(content, 'utf8')
+}
+
+/** Line count of file content — replaces `wc -l`. */
+export function lineCountOf(content: string): number {
+  return content.length === 0 ? 0 : content.split('\n').length - (content.endsWith('\n') ? 1 : 0)
+}
+
+export interface TimeSeriesPoint {
   date: string
   value: number
   label?: string
 }
 
-interface TrendAnalysis {
+export interface TrendAnalysis {
   metric: string
   dataPoints: TimeSeriesPoint[]
   trend: 'increasing' | 'decreasing' | 'stable' | 'volatile'
@@ -28,7 +52,7 @@ interface TemporalReport {
   predictions: string[]
 }
 
-function linearRegression(points: Array<{ x: number; y: number }>): { slope: number; intercept: number; r2: number } {
+export function linearRegression(points: Array<{ x: number; y: number }>): { slope: number; intercept: number; r2: number } {
   const n = points.length
   if (n < 2) return { slope: 0, intercept: points[0]?.y ?? 0, r2: 0 }
 
@@ -52,7 +76,7 @@ function linearRegression(points: Array<{ x: number; y: number }>): { slope: num
   return { slope, intercept, r2: Math.max(0, Math.min(1, r2)) }
 }
 
-function classifyTrend(slope: number, r2: number, values: number[]): TrendAnalysis['trend'] {
+export function classifyTrend(slope: number, r2: number, values: number[]): TrendAnalysis['trend'] {
   const range = Math.max(...values) - Math.min(...values)
   const avg = values.reduce((s, v) => s + v, 0) / values.length
   const normalizedSlope = avg > 0 ? Math.abs(slope) / avg : 0
@@ -63,7 +87,22 @@ function classifyTrend(slope: number, r2: number, values: number[]): TrendAnalys
   return slope > 0 ? 'increasing' : 'decreasing'
 }
 
-async function getFileSizeTrend(cwd: string, file: string, days: number): Promise<TrendAnalysis> {
+async function lastCommitBefore(run: GitRunner, file: string, dateStr: string): Promise<string | undefined> {
+  try {
+    const out = await run(['log', `--before=${dateStr}`, '-1', '--format=%H', '--', file])
+    const sha = out.trim()
+    return sha.length === 40 ? sha : undefined
+  } catch {
+    return undefined
+  }
+}
+
+async function contentAt(run: GitRunner, commit: string, file: string): Promise<string> {
+  const out = await run(['show', `${commit}:${file}`])
+  return out
+}
+
+export async function getFileSizeTrend(run: GitRunner, file: string, days: number): Promise<TrendAnalysis> {
   const points: TimeSeriesPoint[] = []
   const now = new Date()
 
@@ -71,20 +110,14 @@ async function getFileSizeTrend(cwd: string, file: string, days: number): Promis
     const date = new Date(now)
     date.setDate(date.getDate() - i)
     const dateStr = date.toISOString().split('T')[0]!
-    const result = await runShell(
-      `git log --before="${dateStr}" -1 --format="%H" -- "${file}" 2>/dev/null`,
-      SHELL_TIMEOUT_MS,
-      cwd,
-    )
-    const commit = result.stdout.trim()
+    const commit = await lastCommitBefore(run, file, dateStr)
     if (commit) {
-      const sizeResult = await runShell(
-        `git show ${commit}:"${file}" 2>/dev/null | wc -c`,
-        SHELL_TIMEOUT_MS,
-        cwd,
-      )
-      const size = parseInt(sizeResult.stdout.trim(), 10) || 0
-      points.push({ date: dateStr, value: size })
+      try {
+        const content = await contentAt(run, commit, file)
+        points.push({ date: dateStr, value: byteSizeOf(content) })
+      } catch {
+        // File may not exist at that commit; skip the sample.
+      }
     }
   }
 
@@ -126,7 +159,7 @@ async function getFileSizeTrend(cwd: string, file: string, days: number): Promis
   }
 }
 
-async function getCommitFrequencyTrend(cwd: string, days: number): Promise<TrendAnalysis> {
+export async function getCommitFrequencyTrend(run: GitRunner, days: number): Promise<TrendAnalysis> {
   const points: TimeSeriesPoint[] = []
   const now = new Date()
   const bucketSize = Math.max(1, Math.floor(days / 12))
@@ -137,12 +170,13 @@ async function getCommitFrequencyTrend(cwd: string, days: number): Promise<Trend
     const startDate = new Date(endDate)
     startDate.setDate(startDate.getDate() - bucketSize)
 
-    const result = await runShell(
-      `git log --after="${startDate.toISOString().split('T')[0]}" --before="${endDate.toISOString().split('T')[0]}" --oneline 2>/dev/null | wc -l`,
-      SHELL_TIMEOUT_MS,
-      cwd,
-    )
-    const count = parseInt(result.stdout.trim(), 10) || 0
+    const out = await run([
+      'log',
+      `--after=${startDate.toISOString().split('T')[0]}`,
+      `--before=${endDate.toISOString().split('T')[0]}`,
+      '--oneline',
+    ])
+    const count = out.trim().length === 0 ? 0 : out.split('\n').length
     points.push({ date: endDate.toISOString().split('T')[0]!, value: count })
   }
 
@@ -181,7 +215,7 @@ async function getCommitFrequencyTrend(cwd: string, days: number): Promise<Trend
   }
 }
 
-async function getComplexityTrend(cwd: string, file: string, days: number): Promise<TrendAnalysis> {
+export async function getComplexityTrend(run: GitRunner, file: string, days: number): Promise<TrendAnalysis> {
   const points: TimeSeriesPoint[] = []
   const now = new Date()
 
@@ -189,20 +223,14 @@ async function getComplexityTrend(cwd: string, file: string, days: number): Prom
     const date = new Date(now)
     date.setDate(date.getDate() - i)
     const dateStr = date.toISOString().split('T')[0]!
-    const commitResult = await runShell(
-      `git log --before="${dateStr}" -1 --format="%H" -- "${file}" 2>/dev/null`,
-      SHELL_TIMEOUT_MS,
-      cwd,
-    )
-    const commit = commitResult.stdout.trim()
+    const commit = await lastCommitBefore(run, file, dateStr)
     if (commit) {
-      const codeResult = await runShell(
-        `git show ${commit}:"${file}" 2>/dev/null | wc -l`,
-        SHELL_TIMEOUT_MS,
-        cwd,
-      )
-      const lines = parseInt(codeResult.stdout.trim(), 10) || 0
-      points.push({ date: dateStr, value: lines })
+      try {
+        const content = await contentAt(run, commit, file)
+        points.push({ date: dateStr, value: lineCountOf(content) })
+      } catch {
+        // File may not exist at that commit; skip the sample.
+      }
     }
   }
 
@@ -258,18 +286,19 @@ export const temporalAnalysisTool: Tool = {
     const metric = optionalString(input.metric, 'metric') ?? 'all'
     const days = Math.min(Math.max(typeof input.days === 'number' ? input.days : 30, 1), MAX_HISTORY_DAYS)
 
+    const run = await makeGitRunner(cwd)
     const metrics: TrendAnalysis[] = []
 
     if (metric === 'all' || metric === 'commit_frequency') {
-      metrics.push(await getCommitFrequencyTrend(cwd, days))
+      metrics.push(await getCommitFrequencyTrend(run, days))
     }
 
     if (file) {
       if (metric === 'all' || metric === 'file_size') {
-        metrics.push(await getFileSizeTrend(cwd, file, days))
+        metrics.push(await getFileSizeTrend(run, file, days))
       }
       if (metric === 'all' || metric === 'complexity') {
-        metrics.push(await getComplexityTrend(cwd, file, days))
+        metrics.push(await getComplexityTrend(run, file, days))
       }
     }
 

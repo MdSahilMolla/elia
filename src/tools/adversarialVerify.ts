@@ -1,27 +1,27 @@
 import type { Tool } from './types.ts'
 import { optionalString } from './args.ts'
-import { runShell } from '../shell.ts'
 import { resolveWorkspacePath } from '../autonomy/context.ts'
 
-const SHELL_TIMEOUT_MS = 30_000
 const MAX_DIFF_LINES = 500
 
-interface EdgeCase {
+export type AdversarialSeverity = 'low' | 'medium' | 'high' | 'critical'
+
+export interface EdgeCase {
   type: 'boundary' | 'null' | 'race' | 'injection' | 'overflow' | 'encoding' | 'concurrency'
   description: string
-  severity: 'low' | 'medium' | 'high' | 'critical'
+  severity: AdversarialSeverity
   location: string
   testSuggestion: string
 }
 
-interface ExploitVector {
+export interface ExploitVector {
   type: string
   vector: string
   impact: string
   mitigation: string
 }
 
-interface AdversarialReport {
+export interface AdversarialReport {
   target: string
   diffLines: number
   edgeCases: EdgeCase[]
@@ -30,7 +30,32 @@ interface AdversarialReport {
   summary: string
 }
 
-function classifyEdgeCase(line: string, filePath: string): EdgeCase | null {
+export interface DiffFileBlock {
+  path: string
+  addedLines: string[]
+}
+
+/** Split a unified diff into per-file blocks of added lines. */
+export function parseDiff(diff: string): DiffFileBlock[] {
+  const blocks: DiffFileBlock[] = []
+  let current: DiffFileBlock | undefined
+
+  for (const line of diff.split('\n')) {
+    if (line.startsWith('diff --git')) {
+      if (current) blocks.push(current)
+      const match = line.match(/b\/(.+)$/)
+      current = { path: match?.[1] ?? 'unknown', addedLines: [] }
+    } else if (current && line.startsWith('+') && !line.startsWith('+++')) {
+      current.addedLines.push(line.slice(1))
+    }
+  }
+  if (current) blocks.push(current)
+  return blocks
+}
+
+const SEVERITY_ORDER: Record<AdversarialSeverity, number> = { low: 0, medium: 1, high: 2, critical: 3 }
+
+export function classifyEdgeCase(line: string, filePath: string): EdgeCase | null {
   const trimmed = line.trim()
 
   if (/\b(parseInt|parseFloat|Number)\b/.test(trimmed) && /\+|-\*|\/|%/.test(trimmed)) {
@@ -106,7 +131,7 @@ function classifyEdgeCase(line: string, filePath: string): EdgeCase | null {
   return null
 }
 
-function classifyExploitVector(line: string, filePath: string): ExploitVector | null {
+export function classifyExploitVector(line: string, filePath: string): ExploitVector | null {
   const trimmed = line.trim()
 
   if (/req\.params|req\.query|req\.body/.test(trimmed) && !/sanitize|validate|escape/.test(trimmed)) {
@@ -139,6 +164,72 @@ function classifyExploitVector(line: string, filePath: string): ExploitVector | 
   return null
 }
 
+/** Deterministic adversarial analysis of a unified diff's added lines. */
+export function adversarialAnalyze(diff: string, opts: { minSeverity?: AdversarialSeverity } = {}): AdversarialReport {
+  const minSeverity = opts.minSeverity ?? 'low'
+  const blocks = parseDiff(diff)
+  let addedCount = 0
+
+  const edgeCases: EdgeCase[] = []
+  const exploitVectors: ExploitVector[] = []
+
+  for (const block of blocks) {
+    for (const line of block.addedLines.slice(0, MAX_DIFF_LINES)) {
+      addedCount++
+      const edgeCase = classifyEdgeCase(line, block.path)
+      if (edgeCase && SEVERITY_ORDER[edgeCase.severity] >= SEVERITY_ORDER[minSeverity]) {
+        edgeCases.push(edgeCase)
+      }
+      const exploit = classifyExploitVector(line, block.path)
+      if (exploit) exploitVectors.push(exploit)
+    }
+  }
+
+  const seen = new Set<string>()
+  const uniqueEdgeCases = edgeCases.filter((e) => {
+    const key = `${e.type}:${e.description}`
+    if (seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
+
+  const exploitSeen = new Set<string>()
+  const uniqueExploits = exploitVectors.filter((e) => {
+    const key = `${e.type}:${e.vector}`
+    if (exploitSeen.has(key)) return false
+    exploitSeen.add(key)
+    return true
+  })
+
+  let riskScore = 0
+  for (const ec of uniqueEdgeCases) {
+    if (ec.severity === 'critical') riskScore += 30
+    else if (ec.severity === 'high') riskScore += 15
+    else if (ec.severity === 'medium') riskScore += 5
+    else riskScore += 1
+  }
+  for (const ev of uniqueExploits) riskScore += 20
+  riskScore = Math.min(100, riskScore)
+
+  const fileCount = blocks.length
+  return {
+    target: 'diff',
+    diffLines: addedCount,
+    edgeCases: uniqueEdgeCases,
+    exploitVectors: uniqueExploits,
+    riskScore,
+    summary: `Analyzed ${addedCount} added lines across ${fileCount} file(s). Found ${uniqueEdgeCases.length} edge case(s) and ${uniqueExploits.length} exploit vector(s). Risk score: ${riskScore}/100.`,
+  }
+}
+
+async function runGit(cwd: string, args: string[]): Promise<string> {
+  const proc = Bun.spawn(['git', ...args], { cwd, stdout: 'pipe', stderr: 'pipe' })
+  const stdout = await new Response(proc.stdout).text()
+  await proc.exited.catch(() => undefined)
+  if (proc.exitCode !== 0) return ''
+  return stdout
+}
+
 export const adversarialVerifyTool: Tool = {
   name: 'adversarial_verify',
   description:
@@ -157,99 +248,37 @@ export const adversarialVerifyTool: Tool = {
     const file = optionalString(input.file, 'file')
     const diffInput = optionalString(input.diff, 'diff')
     const commit = optionalString(input.commit, 'commit')
-    const minSeverity = optionalString(input.severity, 'severity') ?? 'low'
+    const minSeverity = (optionalString(input.severity, 'severity') ?? 'low') as AdversarialSeverity
 
     let diffText = ''
 
     if (diffInput) {
       diffText = diffInput
     } else if (commit) {
-      const result = await runShell(`git show ${commit} --stat --patch`, SHELL_TIMEOUT_MS, cwd)
-      diffText = result.stdout
+      diffText = await runGit(cwd, ['show', commit, '--patch'])
     } else if (file) {
-      const result = await runShell(`git diff HEAD -- "${file}"`, SHELL_TIMEOUT_MS, cwd)
-      diffText = result.stdout
+      diffText = await runGit(cwd, ['diff', 'HEAD', '--', file])
       if (!diffText.trim()) {
-        const showResult = await runShell(`git show HEAD:"${file}" 2>/dev/null | head -${MAX_DIFF_LINES}`, SHELL_TIMEOUT_MS, cwd)
-        diffText = showResult.stdout
+        diffText = await runGit(cwd, ['show', `HEAD:${file}`])
       }
     } else {
-      const result = await runShell(`git diff HEAD -- .`, SHELL_TIMEOUT_MS, cwd)
-      diffText = result.stdout
+      diffText = await runGit(cwd, ['diff', 'HEAD'])
     }
 
     if (!diffText.trim()) {
       return 'No diff content found to analyze. Ensure the file has uncommitted changes or provide a specific commit.'
     }
 
-    const addedLines = diffText
-      .split('\n')
-      .filter((l) => l.startsWith('+') && !l.startsWith('+++'))
-      .slice(0, MAX_DIFF_LINES)
-
-    const diffFiles = diffText
-      .split('\n')
-      .filter((l) => l.startsWith('diff --git'))
-      .map((l) => {
-        const match = l.match(/b\/(.+)$/)
-        return match?.[1] ?? 'unknown'
-      })
-
-    const edgeCases: EdgeCase[] = []
-    const exploitVectors: ExploitVector[] = []
-    const severityOrder = { low: 0, medium: 1, high: 2, critical: 3 }
-
-    for (const line of addedLines) {
-      for (const targetFile of diffFiles) {
-        const edgeCase = classifyEdgeCase(line, targetFile)
-        if (edgeCase && severityOrder[edgeCase.severity] >= severityOrder[minSeverity as keyof typeof severityOrder]) {
-          edgeCases.push(edgeCase)
-        }
-        const exploit = classifyExploitVector(line, targetFile)
-        if (exploit) exploitVectors.push(exploit)
-      }
-    }
-
-    const seen = new Set<string>()
-    const uniqueEdgeCases = edgeCases.filter((e) => {
-      const key = `${e.type}:${e.description}`
-      if (seen.has(key)) return false
-      seen.add(key)
-      return true
-    })
-
-    const exploitSeen = new Set<string>()
-    const uniqueExploits = exploitVectors.filter((e) => {
-      const key = `${e.type}:${e.vector}`
-      if (exploitSeen.has(key)) return false
-      exploitSeen.add(key)
-      return true
-    })
-
-    let riskScore = 0
-    for (const ec of uniqueEdgeCases) {
-      if (ec.severity === 'critical') riskScore += 30
-      else if (ec.severity === 'high') riskScore += 15
-      else if (ec.severity === 'medium') riskScore += 5
-      else riskScore += 1
-    }
-    for (const ev of uniqueExploits) riskScore += 20
-    riskScore = Math.min(100, riskScore)
-
     const report: AdversarialReport = {
+      ...adversarialAnalyze(diffText, { minSeverity }),
       target: file ?? commit ?? 'full diff',
-      diffLines: addedLines.length,
-      edgeCases: uniqueEdgeCases,
-      exploitVectors: uniqueExploits,
-      riskScore,
-      summary: `Analyzed ${addedLines.length} added lines across ${diffFiles.length} file(s). Found ${uniqueEdgeCases.length} edge case(s) and ${uniqueExploits.length} exploit vector(s). Risk score: ${riskScore}/100.`,
     }
 
     return formatReport(report)
   },
 }
 
-function formatReport(report: AdversarialReport): string {
+export function formatReport(report: AdversarialReport): string {
   const lines: string[] = []
   lines.push('=== Adversarial Pre-Ship Verification Report ===')
   lines.push(`Target: ${report.target}`)
@@ -286,7 +315,7 @@ function formatReport(report: AdversarialReport): string {
   } else if (report.riskScore < 70) {
     lines.push('Medium risk. Address exploit vectors and add boundary tests before shipping.')
   } else {
-    lines.push('HIGH RITICAL: Do not ship without addressing critical issues above.')
+    lines.push('HIGH RISK: Do not ship without addressing critical issues above.')
   }
 
   return lines.join('\n')

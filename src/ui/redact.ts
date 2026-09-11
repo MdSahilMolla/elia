@@ -10,9 +10,16 @@ const SECRET_KEY = /(api[_-]?key|token|secret|password|passwd|authorization|cook
 //  5. a long unbroken base62 run (hex / base62 API tokens), no `/` or `.`
 const SECRET_VALUE = /((?:sk|pk|rk|re|ey)[-_][A-Za-z0-9._\-]{8,}|(?:xox[baprs]-|gh[pousr]_|AIza|AKIA|ASIA)[A-Za-z0-9_\-/]{8,}|Bearer\s+[A-Za-z0-9._\-/+=]{8,}|\b[A-Za-z0-9+/]{16,}={1,2}|\b[A-Za-z0-9]{40,}\b)/g
 
+// `key=value` / `key: value` assignments where the identifier contains a
+// credential-like keyword (`SECRET_KEY`, `DATABASE_PASSWORD`, `authToken`, ...).
+const SECRET_ASSIGNMENT = new RegExp(
+  `(?:^|[^\\w])([A-Za-z0-9_-]*?(?:${SECRET_KEY.source.slice(1, -1)})[A-Za-z0-9_-]*)\\s*[:=]\\s*[^\\s,;]+`,
+  'gi',
+)
+
 /** Redacts credential-like values without flattening or truncating the surrounding evidence. */
 export function redactSecrets(text: string): string {
-  return text.replace(SECRET_VALUE, '[REDACTED]')
+  return text.replace(SECRET_VALUE, '[REDACTED]').replace(SECRET_ASSIGNMENT, '[REDACTED]')
 }
 
 /**

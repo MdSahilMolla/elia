@@ -1,11 +1,13 @@
 import type { Tool } from './types.ts'
 import { optionalString } from './args.ts'
-import { runShell } from '../shell.ts'
 import { resolveWorkspacePath } from '../autonomy/context.ts'
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
+import { join, extname } from 'node:path'
 
-const SHELL_TIMEOUT_MS = 30_000
+const SOURCE_EXTENSIONS = new Set(['.ts', '.tsx', '.mts', '.cts', '.js', '.jsx', '.mjs', '.cjs'])
+const SKIP_DIRS = new Set(['node_modules', '.git', 'dist', 'build', 'out', 'coverage', '.next', '.nuxt', '.cache', '.elia', '.turbo', '.opencode'])
 
-interface SpecSection {
+export interface SpecSection {
   id: string
   title: string
   type: 'requirement' | 'constraint' | 'behavior' | 'interface' | 'edge-case'
@@ -15,7 +17,7 @@ interface SpecSection {
   gaps: string[]
 }
 
-interface VerificationReport {
+export interface VerificationReport {
   specFile?: string
   codeFile?: string
   sections: SpecSection[]
@@ -26,13 +28,66 @@ interface VerificationReport {
   recommendations: string[]
 }
 
-function parseSpecSections(spec: string): SpecSection[] {
+/** Walk a directory and return concatenated source text (deterministic, sorted, capped). */
+export function readCodeDirectory(dir: string, maxFiles = 50, maxBytes = 2_000_000): string {
+  const parts: string[] = []
+  let count = 0
+  let bytes = 0
+
+  function walk(current: string): void {
+    if (count >= maxFiles || bytes >= maxBytes) return
+    let entries: string[]
+    try {
+      entries = readdirSync(current)
+    } catch {
+      return
+    }
+    entries.sort()
+    for (const entry of entries) {
+      if (count >= maxFiles || bytes >= maxBytes) return
+      const full = join(current, entry)
+      let stat: ReturnType<typeof statSync>
+      try {
+        stat = statSync(full)
+      } catch {
+        continue
+      }
+      if (stat.isDirectory()) {
+        if (!SKIP_DIRS.has(entry)) walk(full)
+      } else if (stat.isFile() && SOURCE_EXTENSIONS.has(extname(entry))) {
+        try {
+          const content = readFileSync(full, 'utf-8')
+          parts.push(`\n// FILE: ${entry}\n${content}`)
+          count++
+          bytes += content.length
+        } catch {
+          // skip unreadable files
+        }
+      }
+    }
+  }
+
+  walk(dir)
+  return parts.join('')
+}
+
+export function readTextFile(cwd: string, file: string): string {
+  const abs = join(cwd, file)
+  if (!existsSync(abs)) return ''
+  try {
+    return readFileSync(abs, 'utf-8')
+  } catch {
+    return ''
+  }
+}
+
+export function parseSpecSections(spec: string): SpecSection[] {
   const sections: SpecSection[] = []
   const lines = spec.split('\n')
   let currentSection: Partial<SpecSection> | null = null
 
   for (const line of lines) {
-    const headerMatch = line.match(/^#{1,3}\s+(.+)/)
+    const headerMatch = line.match(/^#{2,3}\s+(.+)/)
     if (headerMatch) {
       if (currentSection?.id) {
         sections.push(currentSection as SpecSection)
@@ -54,7 +109,7 @@ function parseSpecSections(spec: string): SpecSection[] {
   return sections
 }
 
-function inferSpecType(title: string): SpecSection['type'] {
+export function inferSpecType(title: string): SpecSection['type'] {
   const lower = title.toLowerCase()
   if (/require|must|shall|should|need/.test(lower)) return 'requirement'
   if (/constraint|limit|boundary|max|min|allow/.test(lower)) return 'constraint'
@@ -64,7 +119,7 @@ function inferSpecType(title: string): SpecSection['type'] {
   return 'requirement'
 }
 
-function verifySection(section: SpecSection, code: string): SpecSection {
+export function verifySection(section: SpecSection, code: string): SpecSection {
   const verified = { ...section }
   const codeLower = code.toLowerCase()
   const specWords = section.description
@@ -97,7 +152,7 @@ function verifySection(section: SpecSection, code: string): SpecSection {
   return verified
 }
 
-function analyzeCodePatterns(code: string): string[] {
+export function analyzeCodePatterns(code: string): string[] {
   const patterns: string[] = []
   if (/export\s+(const|function|class)/.test(code)) patterns.push('exports public API')
   if (/import\s+.*from/.test(code)) patterns.push('has dependencies')
@@ -108,6 +163,45 @@ function analyzeCodePatterns(code: string): string[] {
   if (/validate|sanitize|escape/.test(code)) patterns.push('validates input')
   if (/timeout|abort|cancel/.test(code)) patterns.push('handles timeouts')
   return patterns
+}
+
+/** Deterministic spec-to-code verification over already-loaded text. */
+export function verifySpecification(spec: string, code: string, ctx: { specFile?: string; codeFile?: string } = {}): VerificationReport {
+  const sections = parseSpecSections(spec)
+  const verifiedSections = sections.map((s) => verifySection(s, code))
+  const verifiedCount = verifiedSections.filter((s) => s.verified).length
+  const coverage = sections.length > 0 ? Math.round((verifiedCount / sections.length) * 100) : 0
+
+  const codePatterns = analyzeCodePatterns(code)
+
+  const recommendations: string[] = []
+  const unverified = verifiedSections.filter((s) => !s.verified)
+  if (unverified.length > 0) {
+    recommendations.push(`${unverified.length} requirement(s) not verified — review implementation for gaps`)
+  }
+  if (!codePatterns.includes('has tests')) {
+    recommendations.push('No tests detected — add tests to verify specification compliance')
+  }
+  if (!codePatterns.includes('handles errors')) {
+    recommendations.push('No error handling detected — add try/catch for robustness')
+  }
+  if (!codePatterns.includes('validates input')) {
+    recommendations.push('No input validation detected — add validation for specification constraints')
+  }
+  if (coverage >= 80) {
+    recommendations.push('Good coverage — ensure edge cases from the spec are also handled')
+  }
+
+  return {
+    specFile: ctx.specFile,
+    codeFile: ctx.codeFile,
+    sections: verifiedSections,
+    coverage,
+    totalRequirements: sections.length,
+    verifiedRequirements: verifiedCount,
+    summary: `Verified ${verifiedCount}/${sections.length} specification requirements (${coverage}% coverage). Code patterns: ${codePatterns.join(', ')}.`,
+    recommendations,
+  }
 }
 
 export const specVerifyTool: Tool = {
@@ -134,8 +228,7 @@ export const specVerifyTool: Tool = {
     if (specText) {
       spec = specText
     } else if (specFile) {
-      const result = await runShell(`cat "${specFile}" 2>/dev/null`, SHELL_TIMEOUT_MS, cwd)
-      spec = result.stdout
+      spec = readTextFile(cwd, specFile)
     }
 
     if (!spec.trim()) {
@@ -144,59 +237,18 @@ export const specVerifyTool: Tool = {
 
     let code = ''
     if (codeFile) {
-      const result = await runShell(`cat "${codeFile}" 2>/dev/null`, SHELL_TIMEOUT_MS, cwd)
-      code = result.stdout
+      code = readTextFile(cwd, codeFile)
     } else {
-      const result = await runShell(
-        `find "${codeDir}" -name "*.ts" -o -name "*.tsx" -o -name "*.js" | grep -v node_modules | head -50 | xargs cat 2>/dev/null`,
-        SHELL_TIMEOUT_MS,
-        cwd,
-      )
-      code = result.stdout
+      code = readCodeDirectory(join(cwd, codeDir))
     }
 
     if (!code.trim()) {
       return 'No code found to verify against. Provide a codeFile or codeDir with source files.'
     }
 
-    const sections = parseSpecSections(spec)
-    if (sections.length === 0) {
+    const report = verifySpecification(spec, code, { specFile: specFile ?? undefined, codeFile: codeFile ?? undefined })
+    if (report.totalRequirements === 0) {
       return 'No specification sections found. Ensure the spec has markdown headers (## or ###).'
-    }
-
-    const verifiedSections = sections.map((s) => verifySection(s, code))
-    const verifiedCount = verifiedSections.filter((s) => s.verified).length
-    const coverage = sections.length > 0 ? Math.round((verifiedCount / sections.length) * 100) : 0
-
-    const codePatterns = analyzeCodePatterns(code)
-
-    const recommendations: string[] = []
-    const unverified = verifiedSections.filter((s) => !s.verified)
-    if (unverified.length > 0) {
-      recommendations.push(`${unverified.length} requirement(s) not verified — review implementation for gaps`)
-    }
-    if (!codePatterns.includes('has tests')) {
-      recommendations.push('No tests detected — add tests to verify specification compliance')
-    }
-    if (!codePatterns.includes('handles errors')) {
-      recommendations.push('No error handling detected — add try/catch for robustness')
-    }
-    if (!codePatterns.includes('validates input')) {
-      recommendations.push('No input validation detected — add validation for specification constraints')
-    }
-    if (coverage >= 80) {
-      recommendations.push('Good coverage — ensure edge cases from the spec are also handled')
-    }
-
-    const report: VerificationReport = {
-      specFile: specFile ?? undefined,
-      codeFile: codeFile ?? undefined,
-      sections: verifiedSections,
-      coverage,
-      totalRequirements: sections.length,
-      verifiedRequirements: verifiedCount,
-      summary: `Verified ${verifiedCount}/${sections.length} specification requirements (${coverage}% coverage). Code patterns: ${codePatterns.join(', ')}.`,
-      recommendations,
     }
 
     return formatReport(report)

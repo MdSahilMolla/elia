@@ -1,12 +1,10 @@
 import type { Tool } from './types.ts'
 import { optionalString } from './args.ts'
-import { runShell } from '../shell.ts'
 import { resolveWorkspacePath } from '../autonomy/context.ts'
+import { riskLevelFor, type RiskLevel } from './intel/risk.ts'
+import { readTextFile } from './specVerify.ts'
 
-const SHELL_TIMEOUT_MS = 30_000
-const MAX_DIFF_LINES = 300
-
-interface ReviewDimension {
+export interface ReviewDimension {
   name: string
   score: number
   maxScore: number
@@ -14,15 +12,16 @@ interface ReviewDimension {
   suggestions: string[]
 }
 
-interface ReviewReport {
+export interface ReviewReport {
   file?: string
   commit?: string
   dimensions: ReviewDimension[]
   overallScore: number
+  riskLevel: RiskLevel
   summary: string
 }
 
-function analyzeCodeComplexity(code: string): ReviewDimension {
+export function analyzeCodeComplexity(code: string): ReviewDimension {
   const lines = code.split('\n')
   const findings: string[] = []
   const suggestions: string[] = []
@@ -70,7 +69,7 @@ function analyzeCodeComplexity(code: string): ReviewDimension {
   return { name: 'Complexity', score: Math.max(0, score), maxScore: 10, findings, suggestions }
 }
 
-function analyzeSecurity(code: string): ReviewDimension {
+export function analyzeSecurity(code: string): ReviewDimension {
   const findings: string[] = []
   const suggestions: string[] = []
   let score = 10
@@ -80,8 +79,8 @@ function analyzeSecurity(code: string): ReviewDimension {
     { pattern: /innerHTML\s*=/, issue: 'innerHTML assignment — potential XSS', severity: 3 },
     { pattern: /dangerouslySetInnerHTML/, issue: 'dangerouslySetInnerHTML — potential XSS', severity: 2 },
     { pattern: /exec\s*\(/, issue: 'exec() usage — potential command injection', severity: 3 },
-    { pattern: /\bpassword\b.*=\s*['"]/, issue: 'Hardcoded password detected', severity: 3 },
-    { pattern: /\bapi[_-]?key\b.*=\s*['"]/, issue: 'Hardcoded API key detected', severity: 3 },
+    { pattern: /\bpassword\b.*=\s*['"]/i, issue: 'Hardcoded password detected', severity: 3 },
+    { pattern: /\bapi[_-]?key\b.*=\s*['"]/i, issue: 'Hardcoded API key detected', severity: 3 },
     { pattern: /new\s+Function\s*\(/, issue: 'Dynamic function creation — potential injection', severity: 2 },
     { pattern: /\bMath\.random\b/, issue: 'Math.random() — not cryptographically secure', severity: 1 },
   ]
@@ -102,7 +101,7 @@ function analyzeSecurity(code: string): ReviewDimension {
   return { name: 'Security', score: Math.max(0, score), maxScore: 10, findings, suggestions }
 }
 
-function analyzePerformance(code: string): ReviewDimension {
+export function analyzePerformance(code: string): ReviewDimension {
   const findings: string[] = []
   const suggestions: string[] = []
   let score = 10
@@ -138,7 +137,7 @@ function analyzePerformance(code: string): ReviewDimension {
   return { name: 'Performance', score: Math.max(0, score), maxScore: 10, findings, suggestions }
 }
 
-function analyzeTesting(code: string): ReviewDimension {
+export function analyzeTesting(code: string): ReviewDimension {
   const findings: string[] = []
   const suggestions: string[] = []
   let score = 10
@@ -161,7 +160,7 @@ function analyzeTesting(code: string): ReviewDimension {
   return { name: 'Testing', score: Math.max(0, score), maxScore: 10, findings, suggestions }
 }
 
-function analyzeDocumentation(code: string): ReviewDimension {
+export function analyzeDocumentation(code: string): ReviewDimension {
   const findings: string[] = []
   const suggestions: string[] = []
   let score = 10
@@ -187,7 +186,7 @@ function analyzeDocumentation(code: string): ReviewDimension {
   return { name: 'Documentation', score: Math.max(0, score), maxScore: 10, findings, suggestions }
 }
 
-function analyzeMaintainability(code: string): ReviewDimension {
+export function analyzeMaintainability(code: string): ReviewDimension {
   const findings: string[] = []
   const suggestions: string[] = []
   let score = 10
@@ -215,6 +214,44 @@ function analyzeMaintainability(code: string): ReviewDimension {
   return { name: 'Maintainability', score: Math.max(0, score), maxScore: 10, findings, suggestions }
 }
 
+/** Run every configured dimension analyzer over `code` and produce a scored report. */
+export function reviewCode(code: string, opts: { dimensions?: string[]; file?: string; commit?: string } = {}): ReviewReport {
+  const allDimensions: ReviewDimension[] = [
+    analyzeCodeComplexity(code),
+    analyzeSecurity(code),
+    analyzePerformance(code),
+    analyzeTesting(code),
+    analyzeDocumentation(code),
+    analyzeMaintainability(code),
+  ]
+
+  const filter = (opts.dimensions ?? []).map((d) => d.trim().toLowerCase()).filter(Boolean)
+  const dimensions = filter.length > 0 ? allDimensions.filter((d) => filter.includes(d.name.toLowerCase())) : allDimensions
+
+  const totalScore = dimensions.reduce((sum, d) => sum + d.score, 0)
+  const totalMax = dimensions.reduce((sum, d) => sum + d.maxScore, 0)
+  const overallScore = totalMax > 0 ? Math.round((totalScore / totalMax) * 100) : 100
+  const riskLevel = riskLevelFor(100 - overallScore)
+
+  const source = opts.file ?? opts.commit ?? 'diff'
+  return {
+    file: opts.file,
+    commit: opts.commit,
+    dimensions,
+    overallScore,
+    riskLevel,
+    summary: `Reviewed ${source} across ${dimensions.length} dimensions. Overall score: ${overallScore}/100. Risk: ${riskLevel.toUpperCase()}.`,
+  }
+}
+
+async function runGit(cwd: string, args: string[]): Promise<string> {
+  const proc = Bun.spawn(['git', ...args], { cwd, stdout: 'pipe', stderr: 'pipe' })
+  const stdout = await new Response(proc.stdout).text()
+  await proc.exited.catch(() => undefined)
+  if (proc.exitCode !== 0) return ''
+  return stdout
+}
+
 export const multiModalReviewTool: Tool = {
   name: 'multi_modal_review',
   description:
@@ -233,7 +270,6 @@ export const multiModalReviewTool: Tool = {
     const file = optionalString(input.file, 'file')
     const commit = optionalString(input.commit, 'commit')
     const codeInput = optionalString(input.code, 'code')
-    const dimensionsFilter = optionalString(input.dimensions, 'dimensions')?.split(',').map((d) => d.trim()) ?? []
 
     let code = ''
     let source = ''
@@ -242,16 +278,13 @@ export const multiModalReviewTool: Tool = {
       code = codeInput
       source = 'provided code'
     } else if (commit) {
-      const result = await runShell(`git show ${commit} -- patch`, SHELL_TIMEOUT_MS, cwd)
-      code = result.stdout
+      code = await runGit(cwd, ['show', commit, '--patch'])
       source = `commit ${commit}`
     } else if (file) {
-      const result = await runShell(`cat "${file}" 2>/dev/null`, SHELL_TIMEOUT_MS, cwd)
-      code = result.stdout
+      code = readTextFile(cwd, file)
       source = file
     } else {
-      const result = await runShell(`git diff HEAD -- .`, SHELL_TIMEOUT_MS, cwd)
-      code = result.stdout
+      code = await runGit(cwd, ['diff', 'HEAD'])
       source = 'working tree diff'
     }
 
@@ -259,41 +292,22 @@ export const multiModalReviewTool: Tool = {
       return `No code found to review for: ${source}`
     }
 
-    const allDimensions: ReviewDimension[] = [
-      analyzeCodeComplexity(code),
-      analyzeSecurity(code),
-      analyzePerformance(code),
-      analyzeTesting(code),
-      analyzeDocumentation(code),
-      analyzeMaintainability(code),
-    ]
-
-    const dimensions = dimensionsFilter.length > 0
-      ? allDimensions.filter((d) => dimensionsFilter.includes(d.name.toLowerCase()))
-      : allDimensions
-
-    const totalScore = dimensions.reduce((sum, d) => sum + d.score, 0)
-    const totalMax = dimensions.reduce((sum, d) => sum + d.maxScore, 0)
-    const overallScore = totalMax > 0 ? Math.round((totalScore / totalMax) * 100) : 100
-
-    const report: ReviewReport = {
+    const report = reviewCode(code, {
+      dimensions: optionalString(input.dimensions, 'dimensions')?.split(',').map((d) => d.trim()) ?? [],
       file: file ?? undefined,
       commit: commit ?? undefined,
-      dimensions,
-      overallScore,
-      summary: `Reviewed ${source} across ${dimensions.length} dimensions. Overall score: ${overallScore}/100.`,
-    }
+    })
 
     return formatReport(report)
   },
 }
 
-function formatReport(report: ReviewReport): string {
+export function formatReport(report: ReviewReport): string {
   const lines: string[] = []
   lines.push('=== Multi-Modal Code Review Report ===')
   if (report.file) lines.push(`File: ${report.file}`)
   if (report.commit) lines.push(`Commit: ${report.commit}`)
-  lines.push(`Overall score: ${report.overallScore}/100`)
+  lines.push(`Overall score: ${report.overallScore}/100 (risk: ${report.riskLevel.toUpperCase()})`)
   lines.push('')
   lines.push(report.summary)
 
