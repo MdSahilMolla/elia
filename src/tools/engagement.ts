@@ -9,8 +9,13 @@ function slugify(name: string): string {
 }
 
 /** Where an engagement's scope, findings, and recon output live — shared with run_security_tool. */
-export function engagementDir(slug: string): string {
-  return join(paths.workspace, 'engagements', slugify(slug))
+export function engagementDir(slug: string, root = paths.workspace): string {
+  return join(root, 'engagements', slugify(slug))
+}
+
+/** Directory that holds `<slug>/` folders under the workspace. */
+export function engagementRootDir(): string {
+  return join(paths.workspace, 'engagements')
 }
 
 export const newEngagementTool: Tool = {

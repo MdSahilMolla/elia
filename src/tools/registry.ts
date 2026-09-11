@@ -33,6 +33,18 @@ import { githubTool } from './github.ts'
 import { todoWriteTool } from './todo.ts'
 import { battmannTool } from './battmann.ts'
 import { visualizeTool } from './visualize.ts'
+import { causalDebugTool, causalFixTool, causalVerifyTool } from './causal/index.ts'
+import { archDriftTool } from './archDrift.ts'
+import { adversarialVerifyTool } from './adversarialVerify.ts'
+import { codebaseMemoryTool } from './codebaseMemory.ts'
+import { predictiveImpactTool } from './predictiveImpact.ts'
+import { crossProjectLearnTool } from './crossProjectLearn.ts'
+import { dependencyAuditTool } from './dependencyAudit.ts'
+import { multiModalReviewTool } from './multiModalReview.ts'
+import { selfHealingMonitorTool } from './selfHealingMonitor.ts'
+import { federatedCollabTool } from './federatedCollab.ts'
+import { specVerifyTool } from './specVerify.ts'
+import { temporalAnalysisTool } from './temporalAnalysis.ts'
 import type { Tool } from './types.ts'
 
 /** The built-in file and shell tools. */
@@ -62,6 +74,20 @@ export const tools: Tool[] = [
   environmentTool,
   provisionEnvironmentTool,
   githubTool,
+  causalDebugTool,
+  causalFixTool,
+  causalVerifyTool,
+  archDriftTool,
+  adversarialVerifyTool,
+  codebaseMemoryTool,
+  predictiveImpactTool,
+  crossProjectLearnTool,
+  dependencyAuditTool,
+  multiModalReviewTool,
+  selfHealingMonitorTool,
+  federatedCollabTool,
+  specVerifyTool,
+  temporalAnalysisTool,
 ]
 
 /** Tools that let a fleet of sub-agents coordinate instead of working blind. */

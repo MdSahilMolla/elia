@@ -24,6 +24,14 @@ test('still redacts a long unbroken token', () => {
   expect(redactText(token)).toBe('[REDACTED]')
 })
 
+test('redacts credential key/value assignments in free text regardless of case', () => {
+  const masked = redactText('export SECRET_KEY=do-not-leak now')
+  expect(masked).toContain('[REDACTED]')
+  expect(masked).not.toContain('do-not-leak')
+  expect(redactText('authorization: Bearer deadbeef')).not.toContain('Bearer')
+  expect(redactText('remember the password=guest for the lab')).not.toContain('password=guest')
+})
+
 test('does not redact a deep repo-relative path', () => {
   const path = 'workspace/edcdemo/src/components/DemoPanel.tsx'
   expect(redactText(`edited ${path}`)).toBe(`edited ${path}`)

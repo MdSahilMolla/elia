@@ -23,9 +23,16 @@ const SECRET_KEY = /(api[_-]?key|token|secret|password|passwd|authorization|cook
 const SECRET_VALUE =
   /(\beyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\b|(?:sk|pk|rk|re|ey)[-_][A-Za-z0-9._\-]{8,}|(?:xox[baprs]-|gh[pousr]_|AIza|AKIA|ASIA)[A-Za-z0-9_\-/]{8,}|\b[a-z]{2,10}_[A-Za-z0-9]{16,}\b|Bearer\s+[A-Za-z0-9._\-/+=]{8,}|(?<![A-Za-z0-9+/])[A-Za-z0-9+/]{40}={0,2}(?![A-Za-z0-9+/])|\b[A-Za-z0-9+/]{16,}={1,2}|\b[A-Za-z0-9]{40,}\b)/g
 
+// `key=value` / `key: value` assignments where the identifier contains a
+// credential-like keyword (`SECRET_KEY`, `DATABASE_PASSWORD`, `authToken`, ...).
+const SECRET_ASSIGNMENT = new RegExp(
+  `(?:^|[^\\w])([A-Za-z0-9_-]*?(?:${SECRET_KEY.source.slice(1, -1)})[A-Za-z0-9_-]*)\\s*[:=]\\s*[^\\s,;]+`,
+  'gi',
+)
+
 /** Redacts credential-like values without flattening or truncating the surrounding evidence. */
 export function redactSecrets(text: string): string {
-  return text.replace(SECRET_VALUE, '[REDACTED]')
+  return text.replace(SECRET_VALUE, '[REDACTED]').replace(SECRET_ASSIGNMENT, '[REDACTED]')
 }
 
 /**
