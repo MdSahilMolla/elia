@@ -97,20 +97,27 @@ impl Proc {
         let id = self.next_id;
         self.next_id += 1;
         let line = serde_json::to_string(&json!({ "id": id, "method": method, "params": params }))?;
-        self.stdin
-            .write_all(line.as_bytes())
-            .await
-            .context("write to jvm bridge")?;
-        self.stdin.write_all(b"\n").await?;
-        self.stdin.flush().await?;
+
+        let deadline = std::time::Duration::from_secs(30);
+        // A stalled bridge (full stdin pipe buffer) must not hang this write
+        // forever — that would hold the outer `proc` lock and block every
+        // subsequent `jvm.*` call. Same timeout budget as the read side below.
+        let stdin = &mut self.stdin;
+        tokio::time::timeout(deadline, async {
+            stdin.write_all(line.as_bytes()).await?;
+            stdin.write_all(b"\n").await?;
+            stdin.flush().await
+        })
+        .await
+        .context("jvm bridge timed out writing request")?
+        .context("write to jvm bridge")?;
 
         // The bridge answers one request at a time and echoes our id.
         loop {
-            let next =
-                tokio::time::timeout(std::time::Duration::from_secs(30), self.stdout.next_line())
-                    .await
-                    .context("jvm bridge timed out")?
-                    .context("jvm bridge stdout error")?;
+            let next = tokio::time::timeout(deadline, self.stdout.next_line())
+                .await
+                .context("jvm bridge timed out")?
+                .context("jvm bridge stdout error")?;
             let Some(text) = next else {
                 return Err(anyhow!("jvm bridge closed its output"));
             };

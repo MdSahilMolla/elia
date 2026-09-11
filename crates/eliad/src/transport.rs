@@ -44,11 +44,24 @@ mod win {
 
         /// Accept one client and immediately open the next pipe instance so a
         /// client that connects a microsecond later is never refused.
+        ///
+        /// `self.next` is replaced with a fresh instance on BOTH the success and
+        /// error path of `connect()` — a failed/attempted pipe instance cannot be
+        /// reused, so leaving it in place on error would wedge every subsequent
+        /// `accept()` (and the caller's retry loop) on the same dead instance.
         pub async fn accept(&mut self) -> io::Result<Conn> {
-            self.next.connect().await?;
-            let connected =
-                std::mem::replace(&mut self.next, ServerOptions::new().create(&self.path)?);
-            Ok(connected)
+            match self.next.connect().await {
+                Ok(()) => {
+                    let fresh = ServerOptions::new().create(&self.path)?;
+                    Ok(std::mem::replace(&mut self.next, fresh))
+                }
+                Err(err) => {
+                    if let Ok(fresh) = ServerOptions::new().create(&self.path) {
+                        self.next = fresh;
+                    }
+                    Err(err)
+                }
+            }
         }
     }
 

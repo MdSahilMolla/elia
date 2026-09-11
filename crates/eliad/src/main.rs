@@ -20,7 +20,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-use crate::server::{idle_watchdog, serve_connection, AppState};
+use crate::server::{idle_watchdog, serve_connection, shell_reap_loop, AppState};
 
 const DEFAULT_IDLE_SECS: u64 = 900;
 
@@ -80,6 +80,7 @@ async fn run(idle_secs: u64) -> Result<()> {
     );
 
     let watchdog = tokio::spawn(idle_watchdog(state.clone(), idle_secs));
+    let shell_reaper = tokio::spawn(shell_reap_loop(state.clone()));
     let accept_state = state.clone();
     let acceptor = tokio::spawn(async move {
         loop {
@@ -110,6 +111,7 @@ async fn run(idle_secs: u64) -> Result<()> {
 
     acceptor.abort();
     watchdog.abort();
+    shell_reaper.abort();
     transport::cleanup(&addr);
     Ok(())
 }

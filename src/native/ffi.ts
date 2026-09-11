@@ -240,10 +240,40 @@ export function nativeParseCheck(
     const bytes = new TextEncoder().encode(source)
     const parsed = JSON.parse(state.lib.take(state.lib.check(bytes, bytes.byteLength, tag))) as ParseCheckResult
     if (typeof parsed?.ok !== 'boolean' || !Array.isArray(parsed?.errors)) return undefined
-    return parsed
+    return remapColumnsToUtf16(source, parsed)
   } catch {
     return undefined
   }
+}
+
+/**
+ * The C++ validator (`native/elia-parse/src/validator.cpp`, `Pos::col`) counts
+ * `column` in UTF-8 bytes, but every caller here works with JS's UTF-16
+ * string — for any line with a multi-byte UTF-8 character before the error
+ * column, the raw value is wrong against the JS string. Remap each error's
+ * `column` by re-encoding just its line and measuring how many UTF-16 code
+ * units the byte-prefix up to the reported column decodes back to. `line` is
+ * left untouched: it is not byte-based.
+ */
+function remapColumnsToUtf16(source: string, result: ParseCheckResult): ParseCheckResult {
+  if (result.errors.length === 0) return result
+  const lines = source.split('\n')
+  const encoder = new TextEncoder()
+  const decoder = new TextDecoder()
+  const errors = result.errors.map((e) => {
+    const lineText = lines[e.line - 1]
+    if (lineText === undefined) return e
+    try {
+      const lineBytes = encoder.encode(lineText)
+      const byteCol = Math.max(1, e.column)
+      const prefixLen = Math.min(byteCol - 1, lineBytes.byteLength)
+      const prefix = decoder.decode(lineBytes.subarray(0, prefixLen))
+      return { ...e, column: prefix.length + 1 }
+    } catch {
+      return e
+    }
+  })
+  return { ...result, errors }
 }
 
 /** Test seam: forget the cached load so the next call re-resolves. */

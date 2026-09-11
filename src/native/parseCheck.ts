@@ -112,7 +112,11 @@ export async function preflightStructuralCheck(
   before: string | undefined,
   after: string,
 ): Promise<string | undefined> {
-  if (after.length > MAX_CHECK_BYTES) return skip(`file over ${MAX_CHECK_BYTES} bytes`)
+  // `after.length` is UTF-16 code units, but what actually crosses the FFI/daemon
+  // boundary is UTF-8-encoded bytes (up to ~3x larger for non-ASCII-heavy
+  // content) — gate on the real byte length or this can under-count by a large
+  // multiplier.
+  if (Buffer.byteLength(after, 'utf8') > MAX_CHECK_BYTES) return skip(`file over ${MAX_CHECK_BYTES} bytes`)
   const ext = extensionOf(path)
 
   try {
