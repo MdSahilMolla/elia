@@ -67,6 +67,12 @@ export interface ActionGovernor {
 const CRITICAL_COMMAND = /\b(rm\s+-rf|rm\s+--no-preserve-root|mkfs|dd\s+if=|shutdown|reboot|poweroff|drop\s+(database|table)|truncate\s+table|git\s+(push|reset\s+--hard|clean\s+-fd)|force[- ]push|sudo\b|chmod\s+777|chown\s+-R|kill\s+-9|kubectl\s+(apply|delete|rollout|scale)|helm\s+(install|upgrade|uninstall)|docker\s+(push|rm|system\s+prune)|terraform\s+(apply|destroy)|prisma\s+migrate\s+(deploy|reset)|alembic\s+upgrade|drizzle-kit\s+push|npm\s+publish|pnpm\s+publish|bun\s+publish|vercel\s+.*--prod|fly\s+deploy|railway\s+up|gcloud\s+.*\bdeploy\b|aws\s+(cloudformation|ecs|rds|lambda)|curl[^\n|]*\|\s*(sh|bash)|wget[^\n|]*\|\s*(sh|bash)|deploy\s+(to\s+)?prod(uction)?|send\s+.*(email|message)|publish\b|tweet\b|buy\b|purchase\b|checkout\b|transfer\b|wire\b)\b/i
 const REVIEW_COMMAND = /\b(git\s+commit|npm\s+install|pnpm\s+install|yarn\s+add|bun\s+(add|install)|pip\s+install|docker\s+build|docker\s+run|curl\b|wget\b|ssh\b|scp\b|gh\s+pr|deploy\b)\b/i
 const READ_ONLY_COMMAND = /^(?:command\s+)?(?:pwd|ls|find|grep|rg|git\s+(?:status|diff|log|show|branch)|(?:bun|npm|pnpm|yarn)\s+(?:test|run\s+(?:test|typecheck|type-check|tsc|check-types|lint|format\s+--check|check))|npx\s+(?:--no-install\s+)?tsc\s+--noEmit|cargo\s+(?:check|test|clippy)|go\s+(?:build|test|vet)\b[^\n]*|mvn\s+(?:-[^\s]+\s+)*(?:compile|test-compile|test)\b[^\n]*|(?:\.\/)?gradlew(?:\.bat)?\s+(?:build|test|check|compileJava|compileTestJava)\b[^\n]*|gradle\s+(?:build|test|check|compileJava|compileTestJava)\b[^\n]*|ctest\b[^\n]*|pytest\b[^\n]*|mypy\b[^\n]*|node\s+--version|bun\s+--version|npm\s+--version|printf|echo|cat|head|tail|sed|awk)\b/i
+// `sed`/`awk` are allowed above only for their plain print-to-stdout form.
+// Both also support in-place file rewriting (`sed -i`, `sed --in-place`,
+// `awk -i inplace`) which overwrites the target file — a write, not a read.
+// Matched separately so assessCommand can exclude it from the read-only
+// allowance the same way it already excludes mv/cp/chmod etc. below.
+const SED_AWK_INPLACE_EDIT = /\b(?:sed|gsed|awk|gawk)\b[\s\S]*?(?:(?:^|\s)-i(?:[^\s]*)?(?:\s|$)|--in-place\b)/i
 // `git branch` is read-only-by-default (no args, or a listing flag), but the
 // same subcommand also deletes (-d/-D/--delete), force-renames (-M), or
 // otherwise mutates a branch — none of which READ_ONLY_COMMAND's word-level
@@ -612,7 +618,7 @@ function assessCommand(command: string, cwd: string): ActionAssessment {
   if (/^(?:command\s+)?git\s+branch\b/i.test(command) && !GIT_BRANCH_LIST_ONLY.test(command)) {
     return assessment('critical', 'approve', 'git branch command may create, delete, rename, or force-move a branch and is not a safe read-only operation', 'shell.unknown', [], false)
   }
-  if (READ_ONLY_COMMAND.test(command) && !/\b(?:rm|mv|cp|mkdir|touch|chmod|chown|kill|shutdown|reboot|publish|push|apply|delete|destroy|install|add|upgrade|send|curl|wget|ssh|scp)\b/i.test(command)) {
+  if (READ_ONLY_COMMAND.test(command) && !SED_AWK_INPLACE_EDIT.test(command) && !/\b(?:rm|mv|cp|mkdir|touch|chmod|chown|kill|shutdown|reboot|publish|push|apply|delete|destroy|install|add|upgrade|send|curl|wget|ssh|scp)\b/i.test(command)) {
     return assessment('safe', 'allow', 'shell command matches the restricted read-only command policy', 'shell.read-only', [], true)
   }
   return assessment('critical', 'approve', 'shell command is not in the restricted read-only policy and may cause an unreviewed side effect', 'shell.unknown', [], false)

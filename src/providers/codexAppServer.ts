@@ -1,5 +1,5 @@
 import type { PipedSubprocess } from 'bun'
-import { readBoundedOutput } from '../shell.ts'
+import { readBoundedOutput, terminateProcessGroup } from '../shell.ts'
 import type { ProviderActivity, Usage } from './types.ts'
 
 const CONNECT_TIMEOUT_MS = 10_000
@@ -30,6 +30,17 @@ type Listener = (message: Message) => void
 interface Pending {
   resolve(value: unknown): void
   reject(error: Error): void
+}
+
+// Bun's FileSink write()/flush()/end() return `number | Promise<number>`. On the
+// happy path it's a number; when the peer process has been killed the write can
+// fail asynchronously with EPIPE. Nobody awaits these, so an unhandled rejection
+// would escape and (under `bun test`) get pinned on whatever test is running.
+// Mirrors src/mcp/client.ts's swallow() helper.
+function swallow(result: unknown): void {
+  if (result && typeof (result as PromiseLike<unknown>).then === 'function') {
+    void Promise.resolve(result).catch(() => {})
+  }
 }
 
 export interface CodexTurnOptions {
@@ -283,8 +294,20 @@ export class CodexAppServerClient {
     for (const pending of this.pending.values()) pending.reject(new Error('Codex app server closed'))
     this.pending.clear()
     this.listeners.clear()
+    // Release our end of the stdin pipe first. A hard tree-kill (taskkill /F on
+    // Windows) yanks the process out from under Bun's still-open FileSink, and
+    // Bun then surfaces the dangling write handle as an uncaught EPIPE when it
+    // finalizes. Ending the sink ourselves closes that window — but end() can
+    // itself reject asynchronously if the pipe is already broken, so swallow
+    // both the sync throw and the async rejection.
     try {
-      this.proc?.kill()
+      swallow(this.proc?.stdin.end())
+    } catch {
+      // already gone
+    }
+    try {
+      if (process.platform === 'win32' && this.proc) terminateProcessGroup(this.proc)
+      else this.proc?.kill()
     } catch {
       // Best effort: the child may already have exited.
     }
@@ -307,8 +330,13 @@ export class CodexAppServerClient {
 
   private send(message: Message): void {
     if (this.closed || !this.proc) throw new Error('Codex app server is not connected')
-    this.proc.stdin.write(`${JSON.stringify(message)}\n`)
-    this.proc.stdin.flush()
+    // write()/flush() can reject asynchronously when the child's stdin is
+    // already gone (e.g. a request fired in the same tick as close()).
+    // Swallow both — the pending request is rejected by close()/pumpStdout()
+    // anyway, and an unhandled rejection would otherwise surface as a
+    // spurious failure.
+    swallow(this.proc.stdin.write(`${JSON.stringify(message)}\n`))
+    swallow(this.proc.stdin.flush())
   }
 
   private onMessage(listener: Listener): () => void {

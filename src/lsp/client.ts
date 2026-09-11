@@ -1,6 +1,7 @@
 import type { PipedSubprocess } from 'bun'
 import { pathToFileURL } from 'node:url'
 import { LSP_CLIENT_INFO, type Diagnostic, type PublishDiagnosticsParams } from './protocol.ts'
+import { terminateProcessGroup } from '../shell.ts'
 
 const CONNECT_TIMEOUT_MS = 20_000
 const REQUEST_TIMEOUT_MS = 15_000
@@ -8,6 +9,17 @@ const REQUEST_TIMEOUT_MS = 15_000
 interface Pending {
   resolve(result: unknown): void
   reject(error: Error): void
+}
+
+// Bun's FileSink write()/flush()/end() return `number | Promise<number>`. On the
+// happy path it's a number; when the peer process has been killed the write can
+// fail asynchronously with EPIPE. Nobody awaits these, so an unhandled rejection
+// would escape and (under `bun test`) get pinned on whatever test is running.
+// Mirrors src/mcp/client.ts's swallow() helper.
+function swallow(result: unknown): void {
+  if (result && typeof (result as PromiseLike<unknown>).then === 'function') {
+    void Promise.resolve(result).catch(() => {})
+  }
 }
 
 export function fileUri(path: string): string {
@@ -91,10 +103,22 @@ export class LspClient {
     this.closed = true
     for (const pending of this.pending.values()) pending.reject(new Error(`LSP server "${this.languageId}" closed`))
     this.pending.clear()
+    // Release our end of the stdin pipe first. A hard tree-kill (taskkill /F on
+    // Windows) yanks the process out from under Bun's still-open FileSink, and
+    // Bun then surfaces the dangling write handle as an uncaught EPIPE when it
+    // finalizes. Ending the sink ourselves closes that window — but end() can
+    // itself reject asynchronously if the pipe is already broken, so swallow
+    // both the sync throw and the async rejection.
     try {
-      this.proc?.kill()
+      swallow(this.proc?.stdin.end())
     } catch {
-      // Best-effort.
+      // already gone
+    }
+    try {
+      if (process.platform === 'win32' && this.proc) terminateProcessGroup(this.proc)
+      else this.proc?.kill()
+    } catch {
+      // Best-effort — process may already be gone.
     }
   }
 
@@ -170,15 +194,13 @@ export class LspClient {
     if (!this.proc) return
     const body = JSON.stringify(message)
     const header = `Content-Length: ${Buffer.byteLength(body, 'utf8')}\r\n\r\n`
-    this.proc.stdin.write(header + body)
-    // flush() can reject asynchronously when the child's stdin is already gone
-    // (e.g. a request fired in the same tick as close()). Swallow it here — the
-    // pending request is rejected by close()/pump() anyway, and an unhandled
-    // rejection would otherwise surface as a spurious failure.
-    const flushed = this.proc.stdin.flush() as unknown
-    if (flushed && typeof (flushed as PromiseLike<unknown>).then === 'function') {
-      void (flushed as Promise<unknown>).catch(() => {})
-    }
+    // write()/flush() can reject asynchronously when the child's stdin is
+    // already gone (e.g. a request fired in the same tick as close()).
+    // Swallow both here — the pending request is rejected by close()/pump()
+    // anyway, and an unhandled rejection would otherwise surface as a
+    // spurious failure.
+    swallow(this.proc.stdin.write(header + body))
+    swallow(this.proc.stdin.flush())
   }
 
   private async pump(): Promise<void> {

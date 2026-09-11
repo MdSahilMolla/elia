@@ -197,6 +197,11 @@ export class McpClient implements McpTransport {
         }
       }
     } finally {
+      // The server can end its own stdout without close() ever being called
+      // (the process died on its own). Mark this client closed here too, so
+      // subsequent request()/notify() calls fail fast on the "closed" check
+      // instead of attempting a doomed write against a dead process.
+      this.closed = true
       const stillPending = [...this.pending.values()]
       this.pending.clear()
       for (const pending of stillPending) pending.reject(new Error(`MCP server "${this.name}" closed its stdout`))
