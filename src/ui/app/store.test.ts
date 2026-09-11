@@ -116,3 +116,25 @@ test('redacts secrets in tool input', () => {
   s.toolStart({ id: 't1', name: 'run', input: { token: 'ghp_0123456789abcdef0123' } }) // pragma: allowlist secret
   expect(JSON.stringify(s.lastTool()?.input)).not.toContain('ghp_0123456789abcdef0123') // pragma: allowlist secret
 })
+
+test('redacts secrets in a tool result at ingestion, so every render path (expanded, diff, shell) is already safe', () => {
+  const s = createTranscriptStore()
+  const secret = 'ghp_0123456789abcdefghij' // pragma: allowlist secret
+  s.toolStart({ id: 't1', name: 'run_command', input: { command: 'echo secret' } })
+  s.toolEnd(evt({ id: 't1', name: 'run_command', result: `exit code: 0\nstdout:\ntoken=${secret}\nstderr:\n` }))
+  const result = s.lastTool()?.result ?? ''
+  expect(result).not.toContain(secret)
+  expect(result).toContain('[REDACTED]')
+  // Multiline structure is preserved (not flattened/truncated the way redactText would).
+  expect(result.split('\n').length).toBeGreaterThan(1)
+})
+
+test('redacts secrets in shell-escape (!command) output', () => {
+  const s = createTranscriptStore()
+  const secret = 'AKIAABCDEFGHIJKLMNOP' // pragma: allowlist secret
+  s.shell('printenv', `AWS_ACCESS_KEY_ID=${secret}`)
+  const { live } = s.getSnapshot()
+  const shellItem = live.find((i) => i.kind === 'shell') as { text: string } | undefined
+  expect(shellItem?.text).not.toContain(secret)
+  expect(shellItem?.text).toContain('[REDACTED]')
+})

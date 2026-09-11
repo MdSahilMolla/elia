@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { WorkspaceStore } from './store.ts'
 import { createWorkspace } from './admin.ts'
+import { applyProjection, type PersistedEvent } from './events.ts'
 
 const dirs: string[] = []
 const stores: WorkspaceStore[] = []
@@ -215,6 +216,114 @@ test('the hot read paths are index-backed, not full scans', () => {
   // tasks({ objectiveId, status }) — the board view / orchestrator readiness query.
   const tasksPlan = plan("SELECT * FROM tasks WHERE objective_id = ? AND status IN ('ready') ORDER BY created_at", objectiveId)
   expect(tasksPlan).toContain('idx_tasks_objective_status')
+})
+
+test('redactPayload scrubs secrets nested inside arrays, not just top-level free-text strings', () => {
+  const { store, ownerId, projectId } = bootstrap()
+  const objectiveId = seedObjective(store, ownerId, projectId)
+  const secret = 'sk-abcdefghijklmnopqrstuvwxyz012345'
+  store.append({
+    type: 'TaskCreated', actorKind: 'member', actorId: ownerId, objectiveId,
+    payload: {
+      id: 't_sec', objectiveId, projectId, title: 'Secret task', role: 'backend', dependsOn: [], files: [],
+      acceptanceCriteria: [`token is ${secret}`],
+      verificationCommands: [`curl -H "Authorization: ${secret}" https://api`],
+    },
+  })
+  const event = store.events({ types: ['TaskCreated'] })[0]!
+  const serialized = JSON.stringify(event.payload)
+  expect(serialized).not.toContain(secret)
+  expect(serialized).toContain('[REDACTED]')
+})
+
+test('redactPayload recurses into a plain-object field (refs) but preserves an id-shaped key used for equality matching', () => {
+  const { store, ownerId, projectId } = bootstrap()
+  const objectiveId = seedObjective(store, ownerId, projectId)
+  const secret = 'sk-abcdefghijklmnopqrstuvwxyz012345'
+  store.append({ type: 'TaskCreated', actorKind: 'member', actorId: ownerId, objectiveId, payload: { id: 't_ref', objectiveId, projectId, title: 'Ref task', role: 'backend', dependsOn: [], files: [] } })
+  store.append({
+    type: 'AgentMessageCreated', actorKind: 'agent', actorId: 'a1', objectiveId, taskId: 't_ref',
+    payload: { topic: 'auth', kind: 'info', body: 'note', refs: { taskId: 't_ref', note: `carries ${secret}` } },
+  })
+  const event = store.events({ types: ['AgentMessageCreated'] })[0]!
+  const refs = event.payload.refs as Record<string, unknown>
+  // rpcOrchestration.ts filters messages with `m.refs?.taskId === task.id` — an
+  // id-shaped nested field must survive redaction untouched, or that lookup breaks.
+  expect(refs.taskId).toBe('t_ref')
+  // A free-text-keyed nested field is still scrubbed.
+  expect(String(refs.note)).toContain('[REDACTED]')
+  expect(String(refs.note)).not.toContain(secret)
+})
+
+test('redactPayload does not crash on a deeply nested / adversarial refs object', () => {
+  const { store, ownerId, projectId } = bootstrap()
+  const objectiveId = seedObjective(store, ownerId, projectId)
+  let deep: Record<string, unknown> = { leaf: 'x' }
+  for (let i = 0; i < 50; i += 1) deep = { nested: deep }
+  expect(() => store.append({
+    type: 'AgentMessageCreated', actorKind: 'agent', actorId: 'a1', objectiveId,
+    payload: { topic: 'auth', kind: 'info', body: 'note', refs: deep },
+  })).not.toThrow()
+})
+
+test('applyProjection derives updated_at from the event\'s own timestamp, not wall-clock time', async () => {
+  const { store, ownerId, projectId } = bootstrap()
+  const objectiveId = seedObjective(store, ownerId, projectId)
+  store.append({ type: 'TaskCreated', actorKind: 'member', actorId: ownerId, objectiveId, payload: { id: 't1', objectiveId, projectId, title: 'One', role: 'builder', dependsOn: [], files: [] } })
+  store.append({ type: 'TaskCreated', actorKind: 'member', actorId: ownerId, objectiveId, payload: { id: 't2', objectiveId, projectId, title: 'Two', role: 'builder', dependsOn: [], files: [] } })
+
+  // A fixed, arbitrary `at` — replaying the log must reproduce this exactly,
+  // no matter when (real wall-clock time) the replay happens.
+  const fixedAt = new Date('2020-01-01T00:00:00.000Z').toISOString()
+  const eventFor = (taskId: string, seq: number): PersistedEvent => ({
+    seq, id: `evt_test_${seq}`, type: 'TaskStatusChanged', actorKind: 'member', actorId: ownerId,
+    objectiveId, taskId, payload: { status: 'blocked' }, at: fixedAt,
+  })
+
+  applyProjection(store.raw(), eventFor('t1', 9001))
+  await Bun.sleep(20) // let real wall-clock time move between the two applications
+  applyProjection(store.raw(), eventFor('t2', 9002))
+
+  // Both rows get the event's own `at`, not two different `Date.now()` stamps —
+  // that byte-identical result is exactly what `eventMs`'s doc comment promises.
+  expect(store.task('t1')!.updatedAt).toBe(fixedAt)
+  expect(store.task('t2')!.updatedAt).toBe(fixedAt)
+})
+
+test('listeners are not notified for appends inside a transact() that later rolls back', () => {
+  const { store, ownerId, projectId } = bootstrap()
+  const objectiveId = seedObjective(store, ownerId, projectId)
+  store.append({ type: 'TaskCreated', actorKind: 'member', actorId: ownerId, objectiveId, payload: { id: 't1', objectiveId, projectId, title: 'One', role: 'builder', dependsOn: [], files: [] } })
+
+  const seen: string[] = []
+  store.subscribe((event) => seen.push(event.type))
+
+  expect(() => store.transact(() => {
+    // Succeeds inside the outer transaction — as a savepoint, not yet committed.
+    store.append({ type: 'DecisionRecorded', actorKind: 'member', actorId: ownerId, objectiveId, payload: { title: 'd1', detail: 'x' } })
+    // Illegal transition (ready -> done skips in-progress) — throws, rolling
+    // back the whole `transact()` call, including the DecisionRecorded above.
+    store.append({ type: 'TaskCompleted', actorKind: 'agent', actorId: 'a1', objectiveId, taskId: 't1', payload: {} })
+  })).toThrow()
+
+  expect(store.decisions(objectiveId)).toHaveLength(0)
+  // No listener was ever told about the DecisionRecorded that got rolled back.
+  expect(seen).toEqual([])
+})
+
+test('transact() flushes every buffered notification, in order, once it actually commits', () => {
+  const { store, ownerId, projectId } = bootstrap()
+  const objectiveId = seedObjective(store, ownerId, projectId)
+  const seen: string[] = []
+  store.subscribe((event) => seen.push(event.type))
+
+  store.transact(() => {
+    store.append({ type: 'DecisionRecorded', actorKind: 'member', actorId: ownerId, objectiveId, payload: { title: 'd1', detail: 'x' } })
+    store.append({ type: 'DecisionRecorded', actorKind: 'member', actorId: ownerId, objectiveId, payload: { title: 'd2', detail: 'y' } })
+  })
+
+  expect(seen).toEqual(['DecisionRecorded', 'DecisionRecorded'])
+  expect(store.decisions(objectiveId)).toHaveLength(2)
 })
 
 test('projections survive a reopen — SQLite is the source of truth', () => {

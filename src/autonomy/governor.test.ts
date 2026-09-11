@@ -53,6 +53,29 @@ describe('autonomy governor', () => {
     expect(externalWrite.risk).toBe('critical')
   })
 
+  test('git show/log/diff reading a sensitive path are not classified safe just because the subcommand is normally read-only', () => {
+    for (const command of ['git show HEAD:.env', 'git log -p -- .env', 'git diff HEAD~5 -- .env']) {
+      const result = assessAction({ name: 'run_command', input: { command } }, '/repo')
+      expect(result.risk).toBe('critical')
+    }
+    // The same subcommands stay safe when nothing sensitive is named.
+    for (const command of ['git show --stat', 'git log -1', 'git diff HEAD']) {
+      const result = assessAction({ name: 'run_command', input: { command } }, '/repo')
+      expect(result.risk).toBe('safe')
+    }
+  })
+
+  test('git branch deletion and force-rename are not classified safe, but listing still is', () => {
+    for (const command of ['git branch -D feature-x', 'git branch -M main', 'git branch --delete feature-x', 'git branch new-branch']) {
+      const result = assessAction({ name: 'run_command', input: { command } }, '/repo')
+      expect(result.risk).toBe('critical')
+    }
+    for (const command of ['git branch', 'git branch -a', 'git branch --show-current']) {
+      const result = assessAction({ name: 'run_command', input: { command } }, '/repo')
+      expect(result.risk).toBe('safe')
+    }
+  })
+
   test('allows review work in unattended mode but blocks critical work without approval', async () => {
     const governor = createActionGovernor({ mode: 'unattended' })
     expect((await governor.check({ name: 'run_command', input: { command: 'bun install' } })).allowed).toBe(true)

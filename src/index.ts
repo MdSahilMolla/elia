@@ -192,6 +192,9 @@ Learned tools:
   elia skills bundles         List declarative groups of loaded skills
   elia skills candidates      Show repeated work that could become a new tool
   elia skills synth           Write a tool for the strongest candidate
+  elia skills trust           Trust this project's .elia/skills so they load on startup
+  elia skills untrust         Revoke a prior trust decision for this project
+  elia skills status          Show whether this project's local skills are trusted
 
 Time travel:
   elia runs                   List autonomous runs
@@ -1005,7 +1008,32 @@ async function runSkills(): Promise<void> {
     return
   }
 
-  writeError(`Unknown skills action "${action}". Use: list, bundles, path, candidates, or synth.`)
+  if (action === 'trust' || action === 'untrust') {
+    const { trustProjectSkills, untrustProjectSkills } = await import('./skills/trust.ts')
+    if (action === 'trust') {
+      trustProjectSkills(PROJECT_SKILLS_DIR)
+      writeNotice(`✓ Project skills in ${PROJECT_SKILLS_DIR} are now trusted and will be loaded on the next start.`)
+    } else {
+      untrustProjectSkills(PROJECT_SKILLS_DIR)
+      writeNotice(`✓ Project skills in ${PROJECT_SKILLS_DIR} are no longer trusted.`)
+    }
+    return
+  }
+
+  if (action === 'status') {
+    const { isProjectSkillsTrusted } = await import('./skills/trust.ts')
+    const trusted = isProjectSkillsTrusted(PROJECT_SKILLS_DIR)
+    const files = listSkillFiles().filter((f) => f.source === 'project')
+    writeNotice(`Project skills directory: ${PROJECT_SKILLS_DIR}`)
+    writeNotice(`Trusted: ${trusted ? 'yes' : 'no'}`)
+    writeNotice(`Files found: ${files.length}`)
+    if (!trusted && files.length > 0) {
+      writeNotice('These files were found but are not loaded. Inspect them, then run `elia skills trust` to enable them.')
+    }
+    return
+  }
+
+  writeError(`Unknown skills action "${action}". Use: list, bundles, path, candidates, synth, trust, untrust, or status.`)
   process.exitCode = 1
 }
 
@@ -2145,7 +2173,12 @@ async function runInteractive(): Promise<void> {
     try {
       if (persona) {
         const { runPersonaTurn } = await import('./agents/orchestrator.ts')
-        await runPersonaTurn(messages, persona, skillNames, controller.signal)
+        // Forward the same Ink `uiHooks` a normal turn gets (see `runModelTurn`
+        // above) so a persona turn renders into the live Ink store instead of
+        // writing raw ANSI to stdout while Ink's reconciler independently
+        // repaints the frame — the raw writes and Ink's own repaint race and
+        // corrupt the terminal.
+        await runPersonaTurn(messages, persona, skillNames, controller.signal, uiHooks)
       } else if (autoEscalate && mode === 'dev' && !uiHooks?.planMode && escalation.escalate) {
         escalated = true
         await runEscalatedTurn(userText, escalation.reason, approveAction, controller.signal, uiHooks)

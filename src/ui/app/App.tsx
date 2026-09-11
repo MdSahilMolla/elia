@@ -517,8 +517,16 @@ export function App(props: AppProps) {
 
         await runOne(trimmed, { echo: false })
 
-        // Drain anything queued while that turn ran.
-        for (let next = shiftQueue(); next !== undefined; next = shiftQueue()) {
+        // Drain anything queued while that turn ran — but not after an Esc/
+        // Ctrl+C stop: the UI just told the user queued items are kept and
+        // need an explicit send ("Send anything to apply, or Esc again to
+        // drop them"), so auto-running them here would contradict that. The
+        // abort check runs *before* each shift (like the steering drain
+        // below) so a stop doesn't silently pop-and-drop an item that was
+        // never run.
+        while (queueRef.current.length > 0 && !abortedRef.current) {
+          const next = shiftQueue()
+          if (next === undefined) break
           await runOne(next)
         }
 

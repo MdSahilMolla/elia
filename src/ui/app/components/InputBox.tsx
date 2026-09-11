@@ -128,7 +128,13 @@ export function InputBox(props: InputBoxProps) {
 
   const expandPastes = (line: string): string => {
     let out = line
-    for (const [token, text] of pastes) if (out.includes(token)) out = out.replace(token, text)
+    for (const [token, text] of pastes) {
+      if (!out.includes(token)) continue
+      out = out.replaceAll(token, text)
+      // Consumed into this submitted line — drop it so the map doesn't grow
+      // unbounded for the life of the session.
+      pastes.delete(token)
+    }
     return out
   }
 

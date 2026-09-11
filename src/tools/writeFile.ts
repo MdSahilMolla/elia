@@ -57,6 +57,19 @@ export const writeFileTool: Tool = {
       )
     }
 
+    // Re-read immediately before writing and compare to what this write was
+    // computed from — the same guard edit_file uses. A sub-agent dispatched in
+    // parallel in the same turn (via the task/delegate tooling) can target the
+    // same file; without this, the second writer's atomicWrite silently wins
+    // and the first writer's change just disappears. Narrow, not perfect:
+    // still a real race between this check and the write below, but it closes
+    // the actually-observed window rather than the theoretical one.
+    const currentFile = Bun.file(path)
+    const currentText = (await currentFile.exists()) ? await currentFile.text() : undefined
+    if (currentText !== priorText) {
+      throw new Error(`${input.path} changed on disk since it was read — read it again before writing.`)
+    }
+
     if (currentAgent().signal?.aborted) {
       throw new Error('Write cancelled before writing — the run was aborted.')
     }

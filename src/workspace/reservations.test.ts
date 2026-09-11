@@ -75,6 +75,21 @@ test('an expired reservation is reclaimed and does not block', () => {
   expect('acquired' in acquireForTask(store, { taskId: 't2', objectiveId, holderKind: 'agent', holderId: 'a2', resources: ['api/login.ts'] })).toBe(true)
 })
 
+test('acquireForTask notifies listeners for every reservation it acquires (buffered fan-out still fires on a normal commit)', () => {
+  const { store, objectiveId } = bootstrap()
+  const seen: string[] = []
+  store.subscribe((event) => seen.push(event.type))
+
+  const result = acquireForTask(store, { taskId: 't1', objectiveId, holderKind: 'agent', holderId: 'a1', resources: ['api/login.ts', 'api/logout.ts'] })
+  expect('acquired' in result).toBe(true)
+
+  // `acquireForTask` wraps its whole loop in `store.transact()`, so each
+  // `ReservationAcquired` append is only a savepoint until that transaction
+  // commits. Notification must still reach listeners once it does — the fix for
+  // deferred-until-commit fan-out must not turn into "never fan out".
+  expect(seen).toEqual(['ReservationAcquired', 'ReservationAcquired'])
+})
+
 test('renewForTask pushes the lease out — on the event spine, not a raw write', () => {
   const { store, objectiveId } = bootstrap()
   acquireForTask(store, { taskId: 't1', objectiveId, holderKind: 'agent', holderId: 'a1', resources: ['api/login.ts'] })

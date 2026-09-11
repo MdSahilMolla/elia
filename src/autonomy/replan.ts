@@ -109,13 +109,18 @@ export function createPlanRevisionTool(): RevisionCapture {
  * immutable: a revision cannot drop them, and cannot add a dependency to them,
  * because a step that is already done cannot be made to wait for anything.
  */
-export function applyPlanRevisions(proposal: Proposal, revisions: PlanRevision[], completed: ReadonlySet<string>): AppliedRevisions {
+export function applyPlanRevisions(
+  proposal: Proposal,
+  revisions: PlanRevision[],
+  completed: ReadonlySet<string>,
+  maxRevisions: number = MAX_PLAN_REVISIONS,
+): AppliedRevisions {
   const steps = proposal.steps.map((step) => ({ ...step, files: [...step.files], dependsOn: [...step.dependsOn] }))
   const applied: string[] = []
   const rejected: string[] = []
   const byId = () => new Map(steps.map((step) => [step.id, step]))
 
-  for (const revision of revisions.slice(0, MAX_PLAN_REVISIONS)) {
+  for (const revision of revisions.slice(0, Math.max(0, maxRevisions))) {
     const index = byId()
 
     if (revision.kind === 'add-step') {
@@ -181,8 +186,8 @@ export function applyPlanRevisions(proposal: Proposal, revisions: PlanRevision[]
     applied.push(`dropped step "${doomed.id}" (${doomed.title}) — ${revision.reason}`)
   }
 
-  if (revisions.length > MAX_PLAN_REVISIONS) {
-    rejected.push(`${revisions.length - MAX_PLAN_REVISIONS} further revision(s) ignored: a plan may be amended at most ${MAX_PLAN_REVISIONS} times in one run`)
+  if (revisions.length > maxRevisions) {
+    rejected.push(`${revisions.length - Math.max(0, maxRevisions)} further revision(s) ignored: a plan may be amended at most ${MAX_PLAN_REVISIONS} times in one run`)
   }
 
   return { proposal: applied.length > 0 ? { ...proposal, steps } : proposal, applied, rejected }

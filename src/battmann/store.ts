@@ -132,7 +132,12 @@ function securityClassification(input: Row): Classification {
   return oneOf(input.securityClassification ?? 'internal', 'securityClassification', CLASSIFICATION_LEVELS)
 }
 
-/** Append one entry to the tamper-evident audit chain: each entry_hash covers the previous one. */
+/**
+ * Append one entry to the audit hash chain: each entry_hash covers the previous one. Tamper-evident against
+ * modification of entries that were recorded; does not by itself guarantee an entry was recorded for every
+ * mutation (see the caveat on `MUTATING_STORE_ACTIONS` above — this runs in a transaction separate from the
+ * data mutation it documents).
+ */
 function appendAudit(db: Database, action: string, target: string | null, payload: Row): void {
   const agent = currentAgent()
   const createdAt = new Date().toISOString()
@@ -809,7 +814,7 @@ function objectDetail(input: Row): Row {
     const revisions = db.query('SELECT * FROM ontology_objects WHERE id = ? ORDER BY revision').all(objectId) as Row[]
     if (!revisions.length) throw new Error(`unknown ontology object: ${objectId}`)
     const current = objectRevisionAt(revisions, asOf)
-    if (!current) throw new Error(`ontology object ${objectId} has no revision valid at ${asOf}`)
+    if (!current || !activeAt(current, asOf)) throw new Error(`ontology object ${objectId} has no revision valid at ${asOf}`)
     const rank = clearanceRank(input)
     if (!withinClearance(current, rank)) throw new Error(`ontology object ${objectId} is classified above the supplied clearance`)
     const nameOf = (id: string) => { const row = currentObject(db, id); return row ? String(row.name) : null }
@@ -1206,8 +1211,15 @@ function stageDeployment(input: Row): Row {
     const sidecarPath = reportPath.slice(0, -3) + '.json'
     const htmlPath = reportPath.slice(0, -3) + '.html'
     if (!existsSync(sidecarPath)) throw new Error('the report JSON sidecar is missing; regenerate the report with report_from_store')
-    const bundle = JSON.parse(readFileSync(sidecarPath, 'utf8')) as { documentClassification?: string; reportId?: string; reportVersion?: string; reportStatus?: string; title?: string }
-    const reportClassification = bundle.documentClassification ?? 'internal'
+    const bundle = JSON.parse(readFileSync(sidecarPath, 'utf8')) as { documentClassification?: string; contentClassification?: string; reportId?: string; reportVersion?: string; reportStatus?: string; title?: string }
+    // documentClassification is a self-reported label the report author supplies (see battmann.ts) — it is metadata,
+    // not access control, and must never be trusted as a ceiling. contentClassification is computed by
+    // loadBattmannReportData from the actual classification of the evidence/claims embedded in the report. The gate
+    // uses the stricter of the two: the computed value as the real bound, the self-reported label only as a floor
+    // in case it claims a higher sensitivity than what was computed (e.g. an older sidecar without the field).
+    const contentClassification = bundle.contentClassification ?? 'internal'
+    const documentClassification = bundle.documentClassification ?? 'internal'
+    const reportClassification = classificationRank(documentClassification) > classificationRank(contentClassification) ? documentClassification : contentClassification
     if (classificationRank(reportClassification) > classificationRank(target.max_classification)) throw new Error(`report is classified ${reportClassification}; target ${targetId} accepts at most ${target.max_classification}`)
     const formats: string[] = parseJson(target.formats_json, [])
     const fileFor: Record<string, string> = { md: reportPath, json: sidecarPath, html: htmlPath }
@@ -1458,6 +1470,9 @@ export function loadBattmannReportData(input: Row): Row {
     const objectCount = Number((db.query('SELECT COUNT(DISTINCT id) AS count FROM ontology_objects WHERE valid_from <= ? AND (valid_to IS NULL OR valid_to > ?)').get(asOf, asOf) as Row).count)
     const linkCount = Number((db.query('SELECT COUNT(*) AS count FROM ontology_links WHERE valid_from <= ? AND (valid_to IS NULL OR valid_to > ?)').get(asOf, asOf) as Row).count)
     const score = scoreRows(resolvedLatestForecasts(db).filter((row) => row.resolvedAt <= asOf))
+    // The true classification of what this report embeds — used to gate deployment staging, since a report's
+    // self-reported documentClassification is author-supplied metadata and must never be trusted as a ceiling.
+    const contentClassificationRank = Math.max(0, ...claimRows.map((row) => classificationRank(row.security_classification)), ...evidence.map((row) => classificationRank(row.security_classification)))
     return {
       storePath: path,
       schemaVersion: Number((db.query('PRAGMA user_version').get() as Row).user_version),
@@ -1470,6 +1485,7 @@ export function loadBattmannReportData(input: Row): Row {
       outcomes,
       ontology: { activeObjects: objectCount, activeLinks: linkCount },
       scorecard: score,
+      contentClassification: CLASSIFICATION_LEVELS[contentClassificationRank],
     }
   })
 }
@@ -1543,7 +1559,17 @@ export const BATTMANN_STORE_ACTIONS = [
   'define_indicator', 'record_indicator_reading', 'list_indicators', 'indicator_series',
 ] as const
 
-/** Actions that write to the store; each success appends one entry to the audit hash chain. */
+/**
+ * Actions that write to the store; each success appends one entry to the audit hash chain.
+ *
+ * The data mutation and the audit append run as two separate transactions on two separate connections (see
+ * `executeBattmannStoreAction` below). The hash chain is tamper-evident against modification of entries that were
+ * recorded — `audit_trail`'s replay detects any edited `entry_hash`/`prev_hash` — but it does NOT guarantee that an
+ * entry was recorded for every mutation: a crash between the two transactions leaves the data write persisted with
+ * no corresponding audit row, and the chain itself has no way to detect that omission. If the audit append fails,
+ * the error is logged loudly (not silently swallowed) so an operator can investigate, but the data write is not
+ * rolled back — a write must not fail merely because its audit row could not be appended.
+ */
 const MUTATING_STORE_ACTIONS = new Set<string>([
   'create_question', 'register_evidence', 'register_claim', 'review_claim', 'submit_forecast', 'resolve_question',
   'run_benchmark', 'upsert_object', 'link_objects', 'create_scenario', 'record_decision', 'record_outcome',
@@ -1608,7 +1634,12 @@ export function executeBattmannStoreAction(input: Row): string {
           transaction(opened.db, () => appendAudit(opened.db, action, target ?? null, input))
         } finally { opened.db.close() }
       }
-    } catch { /* the audit chain is best-effort; a write must not fail because its audit row could not be appended */ }
+    } catch (error) {
+      // The data mutation above already committed; a write must not fail because its audit row could not be
+      // appended. But silently swallowing this would leave the tamper-evident chain with an undetectable gap and
+      // no one the wiser, so it is surfaced loudly for an operator to notice and investigate.
+      console.error(`[battmann] failed to append audit entry for action "${action}" (data mutation already committed and is NOT rolled back):`, error)
+    }
   }
   return JSON.stringify({ action, ...result }, null, 2)
 }

@@ -8,6 +8,7 @@ import { mintAgentToken } from './identity.ts'
 import { runWorkspaceServer, type RunningWorkspaceServer } from './server.ts'
 import { WorkspaceClient } from './client.ts'
 import { runAgentRuntime, type AgentExecutor } from './agentRuntime.ts'
+import { agentInstanceId } from './rpcAgents.ts'
 import type { Proposal } from '../autonomy/types.ts'
 
 const TIMEOUT = 20_000
@@ -128,6 +129,53 @@ test('a failing task is retried, then escalated to a human approval', async () =
   await poll(() => attempts >= 2)
   await poll(() => store.approvals('pending').some((a) => a.kind === 'review'))
   expect(store.approvals('pending').find((a) => a.kind === 'review')!.reason).toMatch(/needs a human/i)
+}, TIMEOUT)
+
+test('once mode never claims a second task after a TaskAssigned races the first claim (regression)', async () => {
+  const { store, server, owner, created } = await fixture()
+  const planned = await owner.call<{ objectiveId: string }>('objective.add', { goal: 'auth' })
+  await owner.call('objective.approve', { objectiveId: planned.objectiveId })
+  await poll(() => store.tasks({ objectiveId: planned.objectiveId }).length === 3)
+  const tasks = store.tasks({ objectiveId: planned.objectiveId })
+  const apiTask = tasks.find((t) => t.title === 'Auth API')!
+  const loginTask = tasks.find((t) => t.title === 'Login form')!
+
+  let executorCalls = 0
+  let releaseGate: (() => void) | undefined
+  const gate = new Promise<void>((resolve) => { releaseGate = resolve })
+  const executor: AgentExecutor = async (job) => {
+    executorCalls += 1
+    if (job.task.id === apiTask.id) await gate
+    return { ok: true, report: `done ${job.task.title}`, filesChanged: job.task.files }
+  }
+
+  const identity = store.agentIdentity('be')!
+  const agentId = agentInstanceId(identity.id)
+  const token = mintAgentToken(store, { identityId: identity.id, label: 'test:be-once', actorId: created.ownerMemberId }).plaintext
+  const controller = new AbortController()
+  const done = runAgentRuntime({ serverUrl: server.url, token, executor, signal: controller.signal, once: true })
+  runtimeProcs.push({ controller, done })
+
+  // Wait for the runtime to actually start executing the first (gated) task.
+  await poll(() => executorCalls >= 1)
+
+  // Simulate the race the bug depends on: a `TaskAssigned` event for this same
+  // agent fires while it is still busy on the first task — this is what sets
+  // `pendingClaim` inside `runAgentRuntime`'s `onEvent` handler.
+  await owner.call('task.assign', { taskId: loginTask.id, agent: 'be' })
+  await poll(() => store.task(loginTask.id)!.status === 'assigned')
+  expect(store.task(loginTask.id)!.assigneeId).toBe(agentId)
+
+  // Let the first task finish, then let the runtime close (once mode).
+  releaseGate?.()
+  await done
+
+  // The fix: `once` mode must not re-invoke `claimNext` for the deferred claim,
+  // so the raced second task is never touched by this (closing) runtime — it
+  // stays `assigned`, never started, and the executor ran exactly once.
+  expect(executorCalls).toBe(1)
+  expect(store.task(loginTask.id)!.status).toBe('assigned')
+  expect(['done', 'in-review']).toContain(store.task(apiTask.id)!.status)
 }, TIMEOUT)
 
 test('an out-of-scope task is never assigned to an agent that cannot touch its files', async () => {

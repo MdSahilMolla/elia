@@ -51,8 +51,9 @@ export class LspClient {
       // rejects on its own.
     })
 
-    await this.withTimeout(
-      this.request('initialize', {
+    await this.request(
+      'initialize',
+      {
         processId: process.pid,
         clientInfo: LSP_CLIENT_INFO,
         rootUri: fileUri(this.rootPath),
@@ -62,7 +63,7 @@ export class LspClient {
             synchronization: { didSave: false, willSave: false },
           },
         },
-      }),
+      },
       CONNECT_TIMEOUT_MS,
       `LSP server "${this.languageId}" did not respond to initialize within ${CONNECT_TIMEOUT_MS}ms`,
     )
@@ -122,10 +123,16 @@ export class LspClient {
     })
   }
 
-  private async withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
+  /** `onTimeout`, when given, runs right before the timeout rejects — used to
+   * drop the now-abandoned entry from `this.pending` so a request whose id the
+   * server never answers doesn't stay allocated forever. */
+  private async withTimeout<T>(promise: Promise<T>, ms: number, message: string, onTimeout?: () => void): Promise<T> {
     let timer: ReturnType<typeof setTimeout>
     const timeout = new Promise<never>((_, reject) => {
-      timer = setTimeout(() => reject(new Error(message)), ms)
+      timer = setTimeout(() => {
+        onTimeout?.()
+        reject(new Error(message))
+      }, ms)
     })
     try {
       return await Promise.race([promise, timeout])
@@ -134,7 +141,7 @@ export class LspClient {
     }
   }
 
-  private request(method: string, params: unknown): Promise<unknown> {
+  private request(method: string, params: unknown, timeoutMs?: number, timeoutMessage?: string): Promise<unknown> {
     if (this.closed || !this.proc) return Promise.reject(new Error(`LSP server "${this.languageId}" is not connected`))
     const id = this.nextId++
     const promise = new Promise<unknown>((resolve, reject) => {
@@ -146,7 +153,8 @@ export class LspClient {
       this.pending.delete(id)
       return Promise.reject(err instanceof Error ? err : new Error(String(err)))
     }
-    return promise
+    if (timeoutMs === undefined) return promise
+    return this.withTimeout(promise, timeoutMs, timeoutMessage ?? `LSP server "${this.languageId}" timed out waiting for a response`, () => this.pending.delete(id))
   }
 
   private notify(method: string, params: unknown): void {

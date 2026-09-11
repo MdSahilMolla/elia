@@ -82,6 +82,7 @@ export async function runHttpBridge(options: HttpBridgeOptions) {
         void session.handleRequest(parsed as BridgeRequest)
       },
       close(ws) {
+        sessions.get(ws)?.cancelPendingApprovals('Bridge connection closed')
         sessions.delete(ws)
       },
     },

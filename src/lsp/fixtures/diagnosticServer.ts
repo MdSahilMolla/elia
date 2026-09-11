@@ -29,6 +29,10 @@ function handle(message: { id?: number; method?: string; params?: Record<string,
     return
   }
   if (message.method === 'initialized') return
+  // Intentionally never responds — used by client.test.ts to exercise the
+  // request-timeout pending-map cleanup path (the client's own timeout has to
+  // fire since the server deliberately never will).
+  if (message.method === 'test/hang') return
   if (message.method === 'textDocument/didOpen') {
     const doc = message.params?.textDocument as { uri: string; text: string }
     publishFor(doc.uri, doc.text)

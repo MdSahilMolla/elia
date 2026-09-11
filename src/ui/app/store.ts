@@ -11,7 +11,7 @@
 // live region empties.
 import type { ToolEvent } from '../../agentLoop.ts'
 import type { ProviderActivity } from '../../providers/types.ts'
-import { redactRecord, redactText } from '../redact.ts'
+import { redactRecord, redactSecrets, redactText } from '../redact.ts'
 
 export interface UserItem {
   id: string
@@ -175,13 +175,20 @@ export function createTranscriptStore(): TranscriptStore {
 
     toolEnd(event) {
       const status: ToolItem['status'] = event.isError ? 'error' : event.cached ? 'cached' : 'ok'
+      // Redact once here, at ingestion — the same place `input` already gets
+      // `redactRecord`'d — rather than in every render path that reads
+      // `tool.result` (ShellBody, DiffBody, the expanded generic-result
+      // branch…). `redactSecrets` (not `redactText`) so multiline diffs/shell
+      // output keep their formatting and full length; only credential-shaped
+      // substrings get replaced.
+      const safeResult = redactSecrets(event.result)
       let matched = false
       live = live.map((item) => {
         if (matched || item.kind !== 'tool') return item
         const isMatch = event.id ? item.id === event.id : item.name === event.name && item.status === 'running'
         if (!isMatch) return item
         matched = true
-        return { ...item, status, result: event.result, durationMs: event.durationMs }
+        return { ...item, status, result: safeResult, durationMs: event.durationMs }
       })
       if (!matched) {
         live = [
@@ -192,7 +199,7 @@ export function createTranscriptStore(): TranscriptStore {
             name: event.name,
             input: redactRecord(event.input),
             status,
-            result: event.result,
+            result: safeResult,
             durationMs: event.durationMs,
           },
         ]
@@ -241,7 +248,10 @@ export function createTranscriptStore(): TranscriptStore {
       changed()
     },
     shell(command, output) {
-      live = [...live, { id: nextId(), kind: 'shell', text: `$ ${command}\n${output}` }]
+      // `!<command>` shell-escape output — redact at ingestion, same as tool
+      // results above, so the transcript item is already safe wherever it's
+      // rendered (TranscriptItem's `case 'shell'`, `/export`'s toMarkdown()).
+      live = [...live, { id: nextId(), kind: 'shell', text: redactSecrets(`$ ${command}\n${output}`) }]
       changed()
     },
 

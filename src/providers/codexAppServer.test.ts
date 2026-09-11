@@ -61,6 +61,31 @@ test('Codex app-server reuses one connection and streams consecutive turns', asy
   }
 })
 
+test('a request that times out is removed from the pending map instead of leaking forever', async () => {
+  const fixture = fileURLToPath(new URL('./fixtures/codexAppServer.ts', import.meta.url))
+  const client = new CodexAppServerClient([process.execPath, fixture])
+  try {
+    await client.connect()
+    const pending = (client as unknown as { pending: Map<string, unknown> }).pending
+    const baseline = pending.size
+    let error: unknown
+    try {
+      // The fixture deliberately never answers this method — see fixtures/codexAppServer.ts.
+      await client.request('test/hang', {}, 25)
+    } catch (err) {
+      error = err
+    }
+    expect(error).toBeInstanceOf(Error)
+    expect((error as Error).message).toBe('Codex app server timed out handling test/hang')
+    // If the timeout path didn't clean up `pending`, this entry would still be
+    // sitting there — the correlation map would have grown by one and stayed
+    // that way for the life of the client.
+    expect(pending.size).toBe(baseline)
+  } finally {
+    await client.closeAndWait()
+  }
+})
+
 test('consecutive agent messages in one turn are separated by a blank line', async () => {
   const fixture = fileURLToPath(new URL('./fixtures/codexAppServer.ts', import.meta.url))
   const client = new CodexAppServerClient([process.execPath, fixture])

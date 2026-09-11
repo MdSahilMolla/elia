@@ -29,6 +29,28 @@ test('does not redact a deep repo-relative path', () => {
   expect(redactText(`edited ${path}`)).toBe(`edited ${path}`)
 })
 
+test('redacts a full real-world JWT as one token, not just its payload segment', () => {
+  const jwt =
+    'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c' // pragma: allowlist secret
+  const redacted = redactText(`Authorization: Bearer ${jwt}`)
+  expect(redacted).not.toContain('eyJhbGci')
+  expect(redacted).not.toContain('SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c')
+  // The whole token collapses to a single marker, not one per segment.
+  expect(redacted.match(/\[REDACTED\]/g)?.length).toBe(1)
+})
+
+test('redacts a classic AWS secret access key (40 chars, contains "/", no padding)', () => {
+  const awsSecret = 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY' // pragma: allowlist secret
+  expect(redactText(`AWS_SECRET_ACCESS_KEY=${awsSecret}`)).not.toContain(awsSecret)
+  expect(redactText(`AWS_SECRET_ACCESS_KEY=${awsSecret}`)).toContain('[REDACTED]')
+})
+
+test('redacts a vendor-prefixed secret outside the hardcoded prefix list (Stripe whsec_)', () => {
+  const whsec = 'whsec_1234567890abcdefghijklmnop' // pragma: allowlist secret
+  expect(redactText(`webhook signing secret: ${whsec}`)).not.toContain(whsec)
+  expect(redactText(`webhook signing secret: ${whsec}`)).toContain('[REDACTED]')
+})
+
 test('rewrites an absolute project path to its repo-relative form', () => {
   const cwd = process.cwd().replace(/\\/g, '/')
   const abs = `${cwd}/workspace/edcdemo`

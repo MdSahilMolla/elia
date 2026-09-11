@@ -25,11 +25,15 @@ const MAX_PROMPT_LENGTH = 50_000
 const MAX_GOAL_LENGTH = 10_000
 const MAX_SESSIONS = 32
 const MAX_RUNS = 16
+/** How long a supervised action waits for a human decision before the promise is rejected instead of hanging forever. */
+const APPROVAL_TIMEOUT_MS = 15 * 60_000
 
 interface PendingApproval {
   resolve: (decision: boolean) => void
+  reject: (error: Error) => void
   requestId: string
   createdAt: number
+  timer: ReturnType<typeof setTimeout>
 }
 
 interface ActiveProcess {
@@ -40,6 +44,8 @@ interface ActiveProcess {
 export interface BridgeSession {
   handleRequest(request: BridgeRequest): Promise<void>
   isShuttingDown(): boolean
+  /** Rejects every still-pending approval (e.g. its transport connection closed, or the session is shutting down) instead of leaving it hanging forever. */
+  cancelPendingApprovals(reason: string): void
 }
 
 export interface BridgeSessionOptions {
@@ -83,9 +89,22 @@ export function createBridgeSession(options: BridgeSessionOptions): BridgeSessio
   const waitForApproval = (requestId: string, kind: string, payload: Record<string, unknown>): Promise<boolean> => {
     const approvalKey = `${requestId}:${Date.now().toString(36)}:${Math.random().toString(36).slice(2, 8)}`
     event('approval_required', { approvalKey, requestId, kind, payload })
-    return new Promise<boolean>((resolve) => {
-      pendingApprovals.set(approvalKey, { resolve, requestId, createdAt: Date.now() })
+    return new Promise<boolean>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        pendingApprovals.delete(approvalKey)
+        reject(new Error(`Approval request ${approvalKey} timed out after ${APPROVAL_TIMEOUT_MS}ms waiting for a decision`))
+      }, APPROVAL_TIMEOUT_MS)
+      timer.unref?.()
+      pendingApprovals.set(approvalKey, { resolve, reject, requestId, createdAt: Date.now(), timer })
     })
+  }
+
+  const cancelPendingApprovals = (reason: string): void => {
+    for (const [approvalKey, pending] of pendingApprovals) {
+      clearTimeout(pending.timer)
+      pendingApprovals.delete(approvalKey)
+      pending.reject(new Error(reason))
+    }
   }
 
   const handleChat = async (request: BridgeRequest, params: Record<string, unknown>): Promise<unknown> => {
@@ -230,6 +249,7 @@ export function createBridgeSession(options: BridgeSessionOptions): BridgeSessio
           const pendingApproval = pendingApprovals.get(key)
           if (!pendingApproval) throw new Error('Approval request is unknown, expired, or already resolved')
           pendingApprovals.delete(key)
+          clearTimeout(pendingApproval.timer)
           pendingApproval.resolve(params.decision === 'approve' || params.approved === true)
           response(request.id, { approved: params.decision === 'approve' || params.approved === true })
           return
@@ -280,6 +300,7 @@ export function createBridgeSession(options: BridgeSessionOptions): BridgeSessio
           response(request.id, { status: 'stopping' })
           shutdownRequested = true
           for (const active of activeProcesses.values()) active.process.kill()
+          cancelPendingApprovals('Bridge session is shutting down')
           return
         default:
           throw new Error(`Unknown bridge method: ${request.method}`)
@@ -295,6 +316,7 @@ export function createBridgeSession(options: BridgeSessionOptions): BridgeSessio
   return {
     handleRequest,
     isShuttingDown: () => shutdownRequested,
+    cancelPendingApprovals,
   }
 }
 

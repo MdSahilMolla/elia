@@ -90,7 +90,6 @@ export const events = {
 
 // --- Projection reducer ---
 
-const nowIso = (): string => new Date().toISOString()
 const jstr = (value: unknown): string => JSON.stringify(Array.isArray(value) ? value : value ?? [])
 
 /** Epoch ms for an event's own timestamp — used wherever a projection needs a
@@ -116,13 +115,13 @@ function requireAgentRow(db: Database, agentId: string): Row {
   return row
 }
 
-function setObjectiveStatus(db: Database, objectiveId: string, next: ObjectiveStatus, extra: Row = {}): void {
+function setObjectiveStatus(db: Database, objectiveId: string, next: ObjectiveStatus, at: string, extra: Row = {}): void {
   const row = db.query('SELECT * FROM objectives WHERE id = ?').get(objectiveId) as Row | null
   if (!row) throw new Error(`unknown objective ${objectiveId}`)
   const current = toObjective(row).status
   if (!objectiveCanTransition(current, next)) throw new Error(`objective ${objectiveId}: illegal transition ${current} -> ${next}`)
   const columns = ['status = ?', 'updated_at = ?']
-  const values: unknown[] = [next, nowIso()]
+  const values: unknown[] = [next, at]
   for (const [key, value] of Object.entries(extra)) {
     columns.push(`${key} = ?`)
     values.push(value)
@@ -131,12 +130,12 @@ function setObjectiveStatus(db: Database, objectiveId: string, next: ObjectiveSt
   db.query(`UPDATE objectives SET ${columns.join(', ')} WHERE id = ?`).run(...values as never[])
 }
 
-function setTaskStatus(db: Database, taskId: string, next: TaskStatus, extra: Row = {}): void {
+function setTaskStatus(db: Database, taskId: string, next: TaskStatus, at: string, extra: Row = {}): void {
   const row = requireTaskRow(db, taskId)
   const current = toTask(row).status
   if (!taskCanTransition(current, next)) throw new Error(`task ${taskId}: illegal transition ${current} -> ${next}`)
   const columns = ['status = ?', 'updated_at = ?']
-  const values: unknown[] = [next, nowIso()]
+  const values: unknown[] = [next, at]
   for (const [key, value] of Object.entries(extra)) {
     columns.push(`${key} = ?`)
     values.push(value)
@@ -145,12 +144,12 @@ function setTaskStatus(db: Database, taskId: string, next: TaskStatus, extra: Ro
   db.query(`UPDATE tasks SET ${columns.join(', ')} WHERE id = ?`).run(...values as never[])
 }
 
-function setAgentStatus(db: Database, agentId: string, next: AgentStatus, extra: Row = {}): void {
+function setAgentStatus(db: Database, agentId: string, next: AgentStatus, at: string, extra: Row = {}): void {
   const row = requireAgentRow(db, agentId)
   const current = toAgent(row).status
   if (!agentCanTransition(current, next)) throw new Error(`agent ${agentId}: illegal transition ${current} -> ${next}`)
   const columns = ['status = ?', 'last_heartbeat_at = ?']
-  const values: unknown[] = [next, nowIso()]
+  const values: unknown[] = [next, at]
   for (const [key, value] of Object.entries(extra)) {
     columns.push(`${key} = ?`)
     values.push(value)
@@ -159,8 +158,13 @@ function setAgentStatus(db: Database, agentId: string, next: AgentStatus, extra:
   db.query(`UPDATE agents SET ${columns.join(', ')} WHERE id = ?`).run(...values as never[])
 }
 
-/** Recompute pending<->ready for every open task in an objective from its dependencies' statuses. */
-export function refreshTaskReadiness(db: Database, objectiveId: string): string[] {
+/**
+ * Recompute pending<->ready for every open task in an objective from its
+ * dependencies' statuses. `at` is the triggering event's own timestamp, not
+ * wall-clock — see `eventMs`'s doc: replaying the same log twice must produce
+ * byte-identical projections, which a `new Date().toISOString()` here would break.
+ */
+export function refreshTaskReadiness(db: Database, objectiveId: string, at: string): string[] {
   const rows = db.query('SELECT * FROM tasks WHERE objective_id = ?').all(objectiveId) as Row[]
   const byId = new Map(rows.map((row) => [String(row.id), toTask(row)]))
   const changed: string[] = []
@@ -175,7 +179,7 @@ export function refreshTaskReadiness(db: Database, objectiveId: string): string[
     })
     const next: TaskStatus = depsDone ? 'ready' : 'pending'
     if (next !== task.status) {
-      db.query('UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?').run(next, nowIso(), task.id)
+      db.query('UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?').run(next, at, task.id)
       changed.push(task.id)
     }
   }
@@ -239,7 +243,7 @@ export function applyProjection(db: Database, event: PersistedEvent): void {
       return
     }
     case 'AgentStateChanged': {
-      setAgentStatus(db, String(p.id), String(p.status) as AgentStatus, {
+      setAgentStatus(db, String(p.id), String(p.status) as AgentStatus, event.at, {
         ...(p.currentTaskId !== undefined ? { current_task_id: p.currentTaskId == null ? null : String(p.currentTaskId) } : {}),
         ...(p.lastError !== undefined ? { last_error: p.lastError == null ? null : String(p.lastError) } : {}),
       })
@@ -263,7 +267,7 @@ export function applyProjection(db: Database, event: PersistedEvent): void {
       return
     }
     case 'ObjectivePlanned': {
-      setObjectiveStatus(db, String(event.objectiveId), 'awaiting-approval')
+      setObjectiveStatus(db, String(event.objectiveId), 'awaiting-approval', event.at)
       return
     }
     case 'ObjectiveStatusChanged': {
@@ -273,8 +277,8 @@ export function applyProjection(db: Database, event: PersistedEvent): void {
         extra.approved_by = String(p.approvedBy)
         extra.approved_at = event.at
       }
-      setObjectiveStatus(db, String(event.objectiveId), next, extra)
-      if (next === 'active') refreshTaskReadiness(db, String(event.objectiveId))
+      setObjectiveStatus(db, String(event.objectiveId), next, event.at, extra)
+      if (next === 'active') refreshTaskReadiness(db, String(event.objectiveId), event.at)
       return
     }
     case 'TaskCreated': {
@@ -290,11 +294,11 @@ export function applyProjection(db: Database, event: PersistedEvent): void {
       return
     }
     case 'TaskStatusChanged': {
-      setTaskStatus(db, String(event.taskId), String(p.status) as TaskStatus)
+      setTaskStatus(db, String(event.taskId), String(p.status) as TaskStatus, event.at)
       return
     }
     case 'TaskAssigned': {
-      setTaskStatus(db, String(event.taskId), 'assigned', {
+      setTaskStatus(db, String(event.taskId), 'assigned', event.at, {
         assignee_kind: String(p.assigneeKind), assignee_id: String(p.assigneeId),
         wave: p.wave == null ? null : Number(p.wave),
         worktree_ref: p.worktreeRef == null ? null : String(p.worktreeRef),
@@ -306,11 +310,11 @@ export function applyProjection(db: Database, event: PersistedEvent): void {
       const status = toTask(row).status
       db.query('UPDATE tasks SET assignee_kind = ?, assignee_id = ?, lease_owner = NULL, lease_expires_at = NULL, updated_at = ? WHERE id = ?')
         .run(String(p.assigneeKind), String(p.assigneeId), event.at, String(event.taskId))
-      if (status === 'assigned' || status === 'in-progress') setTaskStatus(db, String(event.taskId), 'ready')
+      if (status === 'assigned' || status === 'in-progress') setTaskStatus(db, String(event.taskId), 'ready', event.at)
       return
     }
     case 'TaskStarted': {
-      setTaskStatus(db, String(event.taskId), 'in-progress', {
+      setTaskStatus(db, String(event.taskId), 'in-progress', event.at, {
         started_at: event.at,
         lease_owner: p.leaseOwner == null ? null : String(p.leaseOwner),
         lease_expires_at: Number(p.leaseExpiresAt ?? eventMs(event) + 120_000),
@@ -324,21 +328,21 @@ export function applyProjection(db: Database, event: PersistedEvent): void {
       return
     }
     case 'TaskCompleted': {
-      setTaskStatus(db, String(event.taskId), 'done', {
+      setTaskStatus(db, String(event.taskId), 'done', event.at, {
         finished_at: event.at, lease_owner: null, lease_expires_at: null, last_error: null, review_notes: null,
         ...(p.report !== undefined ? { result_report: String(p.report) } : {}),
       })
       const task = toTask(requireTaskRow(db, String(event.taskId)))
-      refreshTaskReadiness(db, task.objectiveId)
-      maybeCompleteObjective(db, task.objectiveId)
+      refreshTaskReadiness(db, task.objectiveId, event.at)
+      maybeCompleteObjective(db, task.objectiveId, event.at)
       return
     }
     case 'TaskFailed': {
-      setTaskStatus(db, String(event.taskId), 'failed', { lease_owner: null, lease_expires_at: null, last_error: String(p.error ?? 'task failed') })
+      setTaskStatus(db, String(event.taskId), 'failed', event.at, { lease_owner: null, lease_expires_at: null, last_error: String(p.error ?? 'task failed') })
       return
     }
     case 'TaskBlocked': {
-      setTaskStatus(db, String(event.taskId), 'blocked', { last_error: String(p.reason ?? 'blocked') })
+      setTaskStatus(db, String(event.taskId), 'blocked', event.at, { last_error: String(p.reason ?? 'blocked') })
       return
     }
     case 'TaskUnblocked': {
@@ -347,12 +351,12 @@ export function applyProjection(db: Database, event: PersistedEvent): void {
       // dependencies are in fact complete. Deciding readiness inline here — and
       // only for zero-dependency tasks — stranded any task with a *satisfied*
       // ordering edge in `pending` forever, because nothing re-derives it.
-      setTaskStatus(db, String(event.taskId), 'pending', { last_error: null })
-      refreshTaskReadiness(db, task.objectiveId)
+      setTaskStatus(db, String(event.taskId), 'pending', event.at, { last_error: null })
+      refreshTaskReadiness(db, task.objectiveId, event.at)
       return
     }
     case 'TaskCancelled': {
-      setTaskStatus(db, String(event.taskId), 'cancelled', { lease_owner: null, lease_expires_at: null })
+      setTaskStatus(db, String(event.taskId), 'cancelled', event.at, { lease_owner: null, lease_expires_at: null })
       return
     }
     case 'TaskInstructionAdded': {
@@ -361,22 +365,22 @@ export function applyProjection(db: Database, event: PersistedEvent): void {
       return
     }
     case 'ReviewRequested': {
-      setTaskStatus(db, String(event.taskId), 'in-review', p.report !== undefined ? { result_report: String(p.report) } : {})
+      setTaskStatus(db, String(event.taskId), 'in-review', event.at, p.report !== undefined ? { result_report: String(p.report) } : {})
       return
     }
     case 'ReviewCompleted': {
       if (p.passed) {
-        setTaskStatus(db, String(event.taskId), 'done', { finished_at: event.at, lease_owner: null, lease_expires_at: null })
+        setTaskStatus(db, String(event.taskId), 'done', event.at, { finished_at: event.at, lease_owner: null, lease_expires_at: null })
         const task = toTask(requireTaskRow(db, String(event.taskId)))
-        refreshTaskReadiness(db, task.objectiveId)
-        maybeCompleteObjective(db, task.objectiveId)
+        refreshTaskReadiness(db, task.objectiveId, event.at)
+        maybeCompleteObjective(db, task.objectiveId, event.at)
       } else {
-        setTaskStatus(db, String(event.taskId), 'changes-requested', { review_notes: String(p.notes ?? 'changes requested') })
+        setTaskStatus(db, String(event.taskId), 'changes-requested', event.at, { review_notes: String(p.notes ?? 'changes requested') })
       }
       return
     }
     case 'ChangesRequested': {
-      setTaskStatus(db, String(event.taskId), 'changes-requested', { review_notes: String(p.notes ?? 'changes requested') })
+      setTaskStatus(db, String(event.taskId), 'changes-requested', event.at, { review_notes: String(p.notes ?? 'changes requested') })
       return
     }
     case 'FileChanged': {
@@ -462,8 +466,12 @@ export function applyProjection(db: Database, event: PersistedEvent): void {
   }
 }
 
-/** An objective goes `completed` once every one of its tasks is `done` or `cancelled`. */
-function maybeCompleteObjective(db: Database, objectiveId: string): void {
+/**
+ * An objective goes `completed` once every one of its tasks is `done` or `cancelled`.
+ * `at` is the triggering event's own timestamp — see `refreshTaskReadiness`'s doc;
+ * the same replay-determinism guarantee applies here.
+ */
+function maybeCompleteObjective(db: Database, objectiveId: string, at: string): void {
   const open = db.query(
     "SELECT COUNT(*) AS n FROM tasks WHERE objective_id = ? AND status NOT IN ('done','cancelled')",
   ).get(objectiveId) as Row
@@ -471,7 +479,7 @@ function maybeCompleteObjective(db: Database, objectiveId: string): void {
   if (Number(total.n) > 0 && Number(open.n) === 0) {
     const row = db.query('SELECT status FROM objectives WHERE id = ?').get(objectiveId) as Row | null
     if (row && objectiveCanTransition(String(row.status) as ObjectiveStatus, 'completed')) {
-      db.query('UPDATE objectives SET status = ?, updated_at = ? WHERE id = ?').run('completed', nowIso(), objectiveId)
+      db.query('UPDATE objectives SET status = ?, updated_at = ? WHERE id = ?').run('completed', at, objectiveId)
     }
   }
 }

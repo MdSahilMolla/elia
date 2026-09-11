@@ -2,7 +2,7 @@ import { expect, test, afterEach } from 'bun:test'
 import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { beginMcpLoad, loadMcpTools, mcpStatusReport, reloadMcpTools, resetMcpLoadStateForTests } from './registry.ts'
+import { beginMcpLoad, loadMcpTools, mcpShutdownStateForTests, mcpStatusReport, reloadMcpTools, resetMcpLoadStateForTests } from './registry.ts'
 import { findTool, getMcpTools } from '../tools/registry.ts'
 
 const FIXTURE = join(import.meta.dir, 'fixtures', 'echoServer.ts')
@@ -162,6 +162,35 @@ test('a hung server does not block loadMcpTools past the soft deadline; healthy 
     // The healthy server still connected and registered its tools.
     expect(report.servers).toContain('echo')
     expect(findTool('mcp_echo_echo')).toBeDefined()
+  } finally {
+    delete process.env.ELIA_MCP_CONNECT_DEADLINE_MS
+  }
+})
+
+test('shutdown cleanup is registered even when nothing had connected by the soft deadline', async () => {
+  // Regression test: the cleanup registration used to be gated on
+  // `liveClients.length > 0` measured at the exact instant the soft deadline
+  // won the race. A server that was still mid-connect at that instant (a
+  // realistic case — the deadline is ~2.5s by default, a cold `npx -y` server
+  // can take 10-30s) would then never get closed by a signal-interrupted exit,
+  // because the registration never happened at all.
+  const cwd = mkdtempSync(join(tmpdir(), 'elia-mcp-registry-'))
+  mkdirSync(join(cwd, '.elia'), { recursive: true })
+  const slow = join(import.meta.dir, 'fixtures', 'slowServer.ts')
+  writeFileSync(
+    join(cwd, '.elia', 'mcp.json'),
+    JSON.stringify({ mcpServers: { hung: { command: process.execPath, args: [slow] } } }),
+    'utf8',
+  )
+  process.env.ELIA_MCP_CONNECT_DEADLINE_MS = '50'
+  try {
+    const report = await loadMcpTools(cwd)
+    // Nothing connected within the deadline — exactly the scenario the bug hit.
+    expect(report.servers).toEqual([])
+    expect(mcpShutdownStateForTests().liveClientCount).toBe(0)
+    // The cleanup must still be registered so a later-connecting straggler
+    // (or one still mid-handshake when a signal arrives) gets closed.
+    expect(mcpShutdownStateForTests().shutdownRegistered).toBe(true)
   } finally {
     delete process.env.ELIA_MCP_CONNECT_DEADLINE_MS
   }

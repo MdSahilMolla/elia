@@ -43,6 +43,12 @@ export type EventListener = (event: PersistedEvent) => void
 
 export class WorkspaceStore {
   private readonly listeners = new Set<EventListener>()
+  // Depth of nested `transact()` calls currently on the stack. `append` checks
+  // this to decide whether to notify immediately (depth 0 — the normal,
+  // non-nested case) or buffer until the outermost `transact()` actually
+  // commits (depth > 0) — see `append` and `transact` below.
+  private transactDepth = 0
+  private pendingNotifications: PersistedEvent[] = []
 
   private constructor(
     readonly path: string,
@@ -107,6 +113,22 @@ export class WorkspaceStore {
       return event
     })
     const event = run()
+    // Inside a `transact()` call (e.g. `acquireForTask`'s whole reserve loop),
+    // this insert is only a savepoint of the outer transaction — it can still be
+    // rolled back by a later `append` in the same `transact` callback throwing.
+    // Notifying now would tell listeners (the Orchestrator, WebSocket clients)
+    // about a row that may never actually persist. Buffer instead; `transact`
+    // flushes this queue once the outermost transaction actually commits, and
+    // discards it on rollback.
+    if (this.transactDepth > 0) {
+      this.pendingNotifications.push(event)
+    } else {
+      this.notify(event)
+    }
+    return event
+  }
+
+  private notify(event: PersistedEvent): void {
     // Snapshot before iterating: a listener may synchronously append another
     // event (a client disconnect handler emits `PresenceLeft`), whose fan-out
     // runs `unsubscribe` and mutates `this.listeners` mid-loop — skipping
@@ -120,7 +142,6 @@ export class WorkspaceStore {
         // A subscriber (e.g. a dropped WebSocket) must not break the writer.
       }
     }
-    return event
   }
 
   private appendAudit(event: PersistedEvent): void {
@@ -378,9 +399,32 @@ export class WorkspaceStore {
    * inserts) commits or rolls back as one unit and cannot be interleaved by
    * another writer — the `append`s inside become savepoints of this outer
    * transaction.
+   *
+   * Listener notification for those inner `append`s is deferred (see `append`)
+   * until this — the outermost — call actually commits, and discarded if it
+   * rolls back, so a subscriber is never told about a row that a later `append`
+   * in the same `fn` caused to be rolled back.
    */
   transact<T>(fn: () => T): T {
-    return this.db.transaction(fn)()
+    const isOutermost = this.transactDepth === 0
+    this.transactDepth += 1
+    try {
+      const result = this.db.transaction(fn)()
+      if (isOutermost) this.flushPendingNotifications()
+      return result
+    } catch (err) {
+      if (isOutermost) this.pendingNotifications = []
+      throw err
+    } finally {
+      this.transactDepth -= 1
+    }
+  }
+
+  private flushPendingNotifications(): void {
+    if (this.pendingNotifications.length === 0) return
+    const pending = this.pendingNotifications
+    this.pendingNotifications = []
+    for (const event of pending) this.notify(event)
   }
 
   /** Escape hatch for advanced queries and tests. Prefer the typed getters. */
@@ -423,11 +467,50 @@ function rowToEvent(row: Row): PersistedEvent {
 const FREE_TEXT_KEYS = new Set([
   'goal', 'instructions', 'instruction', 'body', 'detail', 'error', 'reason',
   'notes', 'note', 'title', 'focus', 'report', 'blockedReason', 'summary',
+  'acceptanceCriteria', 'verificationCommands',
 ])
 const LONG_TEXT_KEYS = new Set(['goal', 'instructions', 'instruction', 'body', 'detail', 'report'])
 
+const MAX_ARRAY_ITEMS = 500
+const MAX_NESTED_TEXT = 4_000
+// `refs` and similar fields are declared shallow (see WorkspaceStore callers —
+// e.g. `{ taskId, filePath, eventSeq }`) and reach here as parsed JSON from an
+// RPC caller with zero shape validation, so this only needs to stop a
+// pathological/adversarial depth from blowing the stack, not support real nesting.
+const MAX_REDACT_DEPTH = 6
+
 function boundText(value: string, max: number): string {
   return value.length > max ? `${value.slice(0, max - 1)}…` : value
+}
+
+/** A string's own key decides whether it is secret-scrubbed — see the module doc above `redactPayload`. */
+function redactString(key: string, value: string, max: number): string {
+  return FREE_TEXT_KEYS.has(key) ? boundText(redactSecrets(value), max) : boundText(value, max)
+}
+
+/**
+ * Recurse into an array or plain-object field the same opt-in-by-key way the
+ * top-level string case works. This must NOT run every string through
+ * `redactSecrets` unconditionally: an ID-shaped value like `refs.taskId` (compared
+ * with `===` elsewhere — see rpcOrchestration.ts) or a `dependsOn`/`files` entry
+ * can incidentally match the secret patterns (e.g. `tsk_...` contains `sk_...`)
+ * and get corrupted, exactly the failure the module doc warns about for the
+ * string case. So a child value's redaction is still gated by its own key name;
+ * only the bound (length/count) applies unconditionally.
+ */
+function redactNested(value: unknown, depth: number): unknown {
+  if (depth > MAX_REDACT_DEPTH) return '[too-deep]'
+  if (Array.isArray(value)) {
+    return value.slice(0, MAX_ARRAY_ITEMS).map((item) => (typeof item === 'string' ? boundText(item, MAX_NESTED_TEXT) : redactNested(item, depth + 1)))
+  }
+  if (value && typeof value === 'object') {
+    const out: Record<string, unknown> = {}
+    for (const [key, child] of Object.entries(value as Record<string, unknown>).slice(0, MAX_ARRAY_ITEMS)) {
+      out[key] = typeof child === 'string' ? redactString(key, child, MAX_NESTED_TEXT) : redactNested(child, depth + 1)
+    }
+    return out
+  }
+  return value
 }
 
 function redactPayload(payload: Record<string, unknown>): Record<string, unknown> {
@@ -435,9 +518,11 @@ function redactPayload(payload: Record<string, unknown>): Record<string, unknown
   for (const [key, value] of Object.entries(payload)) {
     if (typeof value === 'string') {
       const max = LONG_TEXT_KEYS.has(key) ? MAX_PAYLOAD_TEXT : 4_000
-      out[key] = FREE_TEXT_KEYS.has(key) ? boundText(redactSecrets(value), max) : boundText(value, max)
+      out[key] = redactString(key, value, max)
     } else if (Array.isArray(value)) {
-      out[key] = value.slice(0, 500).map((item) => (typeof item === 'string' ? boundText(item, 4_000) : item))
+      out[key] = value.slice(0, MAX_ARRAY_ITEMS).map((item) => (typeof item === 'string' ? redactString(key, item, MAX_NESTED_TEXT) : redactNested(item, 1)))
+    } else if (value && typeof value === 'object') {
+      out[key] = redactNested(value, 1)
     } else {
       out[key] = value
     }

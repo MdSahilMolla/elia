@@ -330,10 +330,10 @@ Observed model steps: ${baseline.steps ? Object.entries(baseline.steps).map(([id
 Cost of one full run: ${baseline.totalTokens} tokens, ${Math.round(baseline.totalElapsedMs / 1000)}s of agent time.
 
 ## What you may not change
-These files define how you are judged, and editing them is an automatic rejection:
+These files define how you are judged or enforce deterministic safety boundaries, and editing them is an automatic rejection:
 ${IMMUTABLE_FILES.map((file) => `- ${file}`).join('\n')}
 
-Improving your score by changing the benchmark is not improvement. Do not attempt it.
+Improving your score by changing the benchmark or weakening a safety boundary is not improvement. Do not attempt it.
 
 ## What has already been tried
 ${renderLedgerForPrompt()}
@@ -359,7 +359,7 @@ ${hypothesis.targetFiles.map((file) => `- ${file}`).join('\n') || '(the plan doe
 ## Rules
 - Work ONLY inside ${sandbox.root}. Never touch ${ELIA_ROOT} — that is the live installation.
 - Implement exactly this change. Nothing else. Unrelated edits will cause the whole generation to be rejected even if your change was good.
-- Do NOT modify any of these, at all: ${IMMUTABLE_FILES.join(', ')}. They define how the change is judged.
+- Do NOT modify any of these, at all: ${IMMUTABLE_FILES.join(', ')}. They define how the change is judged or enforce a deterministic safety boundary.
 - Do not run git commands.
 - The change must typecheck (\`bun run typecheck\`) and keep the existing tests passing (\`bun test\`). Run both yourself before you finish, from inside ${sandbox.root}.
 
@@ -409,7 +409,7 @@ function createHypothesisTool(): HypothesisCapture {
       const forbidden = targetFiles.filter((file) => isImmutablePath(file))
       if (forbidden.length > 0) {
         throw new Error(
-          `${forbidden.join(', ')} define how you are judged, or what elia is for, and cannot be changed. Propose a different hypothesis that improves the agent instead of the benchmark or the value core.`,
+          `${forbidden.join(', ')} define evaluation, safety boundaries, or what elia is for, and cannot be changed. Propose a different hypothesis that improves the agent without changing the benchmark, safety controls, or value core.`,
         )
       }
 

@@ -489,6 +489,8 @@ interface StoredReportData {
   scenarios: Array<{ id: string; title: string; probability: number; horizon: string; status: string; assumptions: string[]; indicators: string[] }>
   decisions: Array<{ id: string; title: string; chosenOption?: string; rationale: string; status: string; approvedBy?: string; decidedAt: string }>
   outcomes: Array<{ id: string; decisionId: string; observedAt: string; summary: string; metrics: Record<string, unknown>; evidenceIds: string[] }>
+  /** The true security classification ('public'|'internal'|'confidential'|'restricted') of the evidence/claims actually embedded in this report, computed by loadBattmannReportData — not the self-reported documentClassification below. */
+  contentClassification: string
 }
 
 async function createStoreReport(input: Record<string, unknown>): Promise<string> {

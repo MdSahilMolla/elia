@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { browserNameForPath, findChromePath } from './launchChrome.ts'
+import { browserNameForPath, defaultBrowserCommand, findChromePath } from './launchChrome.ts'
 
 test('findChromePath returns undefined when none of the candidate paths exist', () => {
   expect(findChromePath(() => false)).toBeUndefined()
@@ -26,6 +26,22 @@ test('falls back to Edge when Chrome is not installed', () => {
   const found = findChromePath((path) => /msedge|Microsoft Edge|microsoft-edge/.test(path))
   expect(found).toBeDefined()
   expect(browserNameForPath(found!)).toBe('Edge')
+})
+
+test('the default-browser fallback command never shells out through cmd.exe', () => {
+  // cmd.exe /c re-parses its trailing argument string for shell metacharacters
+  // (&, |, ^, …) independent of argv quoting — the same vulnerability class as
+  // Node's CVE-2024-27980. The url passed here can come straight from the
+  // model (src/tools/preview.ts validates only the http(s) scheme), so a
+  // crafted url containing metacharacters must not reach `cmd /c start`.
+  const command = defaultBrowserCommand('https://example.com/?a=1&calc.exe')
+  expect(command).not.toContain('cmd')
+  expect(command.some((part) => part.toLowerCase() === 'start')).toBe(false)
+})
+
+test.if(process.platform === 'win32')('on Windows the fallback opens the URL via rundll32, not cmd /c start', () => {
+  const url = 'https://example.com/?a=1&calc.exe'
+  expect(defaultBrowserCommand(url)).toEqual(['rundll32', 'url.dll,FileProtocolHandler', url])
 })
 
 test('browserNameForPath names each Chromium family member', () => {

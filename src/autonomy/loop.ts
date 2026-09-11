@@ -690,6 +690,17 @@ async function runAutonomousTaskInternal(options: AutonomousRunOptions): Promise
   // an .env full of live keys), and the project's own documents. Runs used to
   // produce a folder of files with no history and no way back — the tree-rewind
   // recovery silently did nothing in a non-git directory, because it needs git.
+  //
+  // Publishing itself does NOT happen here. It used to — right after this
+  // block, before a single wave had run — so the pushed repository only ever
+  // held `.gitignore` and the generated docs: every real implementation commit
+  // (one per wave, via `commitAll` in Execute below) landed locally afterwards
+  // and was never pushed, while the run still reported "created and pushed"
+  // and could finish `verified`. The repository and its initial commit are
+  // still created here (a rollback point has to exist before workers start),
+  // but the actual `publishProject` push now runs after Execute, once the
+  // wave commits that carry the delivered work actually exist — see below.
+  let hasLocalHistory = false
   if (planApproved) {
     writePhase('scaffold', 'repository, ignore rules, and project documents')
     const scaffold = await scaffoldProject({ cwd: process.cwd(), goal, proposal, signal: runSignal, protect: protectedPaths })
@@ -698,20 +709,7 @@ async function runAutonomousTaskInternal(options: AutonomousRunOptions): Promise
     for (const commit of scaffold.commits) writeSubStep(`committed: ${commit}`)
     for (const warning of scaffold.warnings) writeSubStep(`⚠ ${warning}`)
     journal.append('phase', { phase: 'scaffold', initialized: scaffold.initialized, documents: scaffold.documents, commits: scaffold.commits.length, warnings: scaffold.warnings })
-
-    // Publishing is the one outward-facing act in the whole run, so it goes
-    // through the governor: one question, once, and never a guess. Everything
-    // above already happened locally, so a run that cannot or may not publish
-    // still has its full history and documents.
-    if (scaffold.commits.length > 0) {
-      const published = await publishProject({ cwd: process.cwd(), proposal, governor, signal: runSignal })
-      if (published.status === 'created') writeSubStep(`created and pushed ${published.url ?? 'the GitHub repository'}`)
-      else if (published.status === 'pushed') writeSubStep(`pushed to ${published.url ?? 'origin'}`)
-      else if (published.reason) writeSubStep(`not published — ${published.reason}`)
-      if (published.issues > 0) writeSubStep(`tracked the plan as ${published.issues} issue(s) across ${published.milestones} milestone(s)`)
-      for (const warning of published.warnings) writeSubStep(`⚠ ${warning}`)
-      journal.append('phase', { phase: 'scaffold', published: published.status, url: published.url, issues: published.issues, milestones: published.milestones, reason: published.reason })
-    }
+    hasLocalHistory = scaffold.commits.length > 0
   }
 
   // --- Execute --------------------------------------------------------------
@@ -890,7 +888,12 @@ Finding that an assumption is FALSE is worth more than a confident guess on ever
         graph.finishNode(`step:${result.id}`, {
           ok: result.ok,
           report: result.report,
-          error: result.ok ? undefined : result.report,
+          // The worker's own prose report, not a thrown exception or a
+          // mechanical exit code — leave `error` unset so finishNode falls
+          // back to its lenient `source: 'report'` classification instead of
+          // reading verdict weight into words like "manual" or "unauthorized"
+          // that a free-text report happens to use.
+          error: undefined,
           evidence: [{
             id: `evidence:step:${result.id}:${graph.node(`step:${result.id}`)?.attemptCount ?? 0}`,
             nodeId: `step:${result.id}`,
@@ -965,7 +968,10 @@ Do not repeat whatever failed. If a file is protected, a path is refused, or a c
           graph.finishNode(`step:${result.id}`, {
             ok: result.ok,
             report: result.report,
-            error: result.ok ? undefined : result.report,
+            // Same reasoning as the first-attempt wave above: a worker's own
+            // prose report is not a machine-verdict error, so leave `error`
+            // unset and let finishNode classify it leniently via `report`.
+            error: undefined,
             evidence: [{
               id: `evidence:step:${result.id}:${graph.node(`step:${result.id}`)?.attemptCount ?? 0}`,
               nodeId: `step:${result.id}`,
@@ -998,6 +1004,7 @@ Do not repeat whatever failed. If a file is protected, a path is refused, or a c
         if (commit.committed) writeSubStep(`committed wave ${index + 1} (${landed.length} step(s))`)
         if (commit.excluded.length > 0) writeSubStep(`⚠ kept out of the commit because they hold secrets: ${commit.excluded.join(', ')}`)
         if (commit.warning) writeSubStep(`⚠ ${commit.warning}`)
+        if (commit.committed) hasLocalHistory = true
       }
 
       // Amend the plan before scheduling anything else, so a missing step is
@@ -1007,7 +1014,7 @@ Do not repeat whatever failed. If a file is protected, a path is refused, or a c
         const completedIds = new Set(
           graph.state().nodes.filter((node) => node.kind === 'step' && node.status === 'completed').map((node) => node.id.replace(/^step:/, '')),
         )
-        const revision = applyPlanRevisions(plan, requested, completedIds)
+        const revision = applyPlanRevisions(plan, requested, completedIds, MAX_PLAN_REVISIONS - revisionsApplied)
         for (const change of revision.applied) writeSubStep(`plan revised — ${change}`)
         for (const refusal of revision.rejected) writeSubStep(`⚠ plan revision refused — ${refusal}`)
         journal.append('phase', { phase: 'execute', note: 'plan revised', applied: revision.applied, rejected: revision.rejected })
@@ -1034,6 +1041,26 @@ Do not repeat whatever failed. If a file is protected, a path is refused, or a c
         progress: plan.steps.length > 0 ? completedSteps / plan.steps.length : 0,
       })
     }
+  }
+
+  // --- Publish ----------------------------------------------------------
+
+  // The one outward-facing act in the whole run, so it goes through the
+  // governor: one question, once, and never a guess. This runs after Execute,
+  // not right after Scaffold, so the repository that gets created/pushed
+  // actually contains the wave commits that carry the delivered work — not
+  // just the initial commit of `.gitignore` and generated docs. Everything
+  // above already happened locally, so a run that cannot or may not publish
+  // still has its full history and documents.
+  if (planApproved && hasLocalHistory) {
+    writePhase('publish', 'pushing the completed work to GitHub')
+    const published = await publishProject({ cwd: process.cwd(), proposal, governor, signal: runSignal })
+    if (published.status === 'created') writeSubStep(`created and pushed ${published.url ?? 'the GitHub repository'}`)
+    else if (published.status === 'pushed') writeSubStep(`pushed to ${published.url ?? 'origin'}`)
+    else if (published.reason) writeSubStep(`not published — ${published.reason}`)
+    if (published.issues > 0) writeSubStep(`tracked the plan as ${published.issues} issue(s) across ${published.milestones} milestone(s)`)
+    for (const warning of published.warnings) writeSubStep(`⚠ ${warning}`)
+    journal.append('phase', { phase: 'publish', published: published.status, url: published.url, issues: published.issues, milestones: published.milestones, reason: published.reason })
   }
 
   // --- Polish ---------------------------------------------------------------

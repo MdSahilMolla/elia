@@ -123,7 +123,16 @@ export function registerAgentIdentity(store: WorkspaceStore, input: RegisterAgen
   const identityId = existing?.id ?? `aid_${randomUUID().replaceAll('-', '')}`
   const pathScopes = (input.pathScopes ?? []).map((glob) => text(glob, 'pathScopes[]', 400)).slice(0, 50)
   const allowedTools = (input.allowedTools ?? []).map((tool) => text(tool, 'allowedTools[]', 80)).slice(0, 100)
-  const maxConcurrentTasks = Math.min(Math.max(Math.floor(input.maxConcurrentTasks ?? 1), 1), 8)
+  // `agentInstanceId` (rpcAgents.ts) derives exactly one runtime row per identity, and the
+  // orchestrator's dispatch loop (orchestrator.ts) only ever assigns a task to an `idle`
+  // runtime — there is no per-runtime task count anywhere. A value above 1 would silently
+  // do nothing, so reject it here rather than accept and ignore it.
+  if (input.maxConcurrentTasks !== undefined && input.maxConcurrentTasks > 1) {
+    throw new Error(
+      'maxConcurrentTasks > 1 is not supported yet — each agent identity runs a single runtime that processes one task at a time (see agentInstanceId in rpcAgents.ts). Omit maxConcurrentTasks or set it to 1.',
+    )
+  }
+  const maxConcurrentTasks = 1
 
   store.append({
     type: 'AgentIdentityRegistered',

@@ -102,7 +102,7 @@ export class CodexAppServerClient {
         reject(error instanceof Error ? error : new Error(String(error)))
       }
     })
-    return this.withTimeout(promise, timeoutMs, `Codex app server timed out handling ${method}`)
+    return this.withTimeout(promise, timeoutMs, `Codex app server timed out handling ${method}`, () => this.pending.delete(String(id)))
   }
 
   async runTurn(options: CodexTurnOptions): Promise<CodexTurnResult> {
@@ -376,13 +376,19 @@ export class CodexAppServerClient {
     this.send({ id, error: { code: -32601, message: `Elia does not expose ${method} through the subscription adapter` } })
   }
 
-  private async withTimeout<T>(promise: Promise<T>, milliseconds: number, message: string): Promise<T> {
+  /** `onTimeout`, when given, runs right before the timeout rejects — used by
+   * `request()` to drop the now-abandoned entry from `this.pending` so a
+   * request whose id the server never answers doesn't stay allocated forever. */
+  private async withTimeout<T>(promise: Promise<T>, milliseconds: number, message: string, onTimeout?: () => void): Promise<T> {
     let timer: ReturnType<typeof setTimeout> | undefined
     try {
       return await Promise.race([
         promise,
         new Promise<never>((_, reject) => {
-          timer = setTimeout(() => reject(new Error(message)), milliseconds)
+          timer = setTimeout(() => {
+            onTimeout?.()
+            reject(new Error(message))
+          }, milliseconds)
         }),
       ])
     } finally {

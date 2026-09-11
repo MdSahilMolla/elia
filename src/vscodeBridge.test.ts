@@ -55,3 +55,49 @@ test('after shutdown, isShuttingDown reports true so a transport can stop accept
   await session.handleRequest({ id: 'r1', method: 'shutdown' } as BridgeRequest)
   expect(session.isShuttingDown()).toBe(true)
 })
+
+test('shutdown rejects a still-pending approval instead of leaving the request hanging forever', async () => {
+  const { session, messages } = collectingSession()
+
+  // A supervised 'deployment.run' with a review-risk action reaches the
+  // approval gate and stalls there until autonomous.approve resolves it.
+  const pending = session.handleRequest({
+    id: 'dep1',
+    method: 'deployment.run',
+    params: { action: 'plan', provider: 'vercel', target: 'preview' },
+  } as unknown as BridgeRequest)
+
+  // Give the request enough turns of the microtask queue to reach the gate.
+  for (let i = 0; i < 20 && !messages.some((m) => m.type === 'event' && m.event === 'approval_required'); i += 1) {
+    await Bun.sleep(5)
+  }
+  expect(messages.some((m) => m.type === 'event' && m.event === 'approval_required')).toBe(true)
+  expect(messages.some((m) => m.type === 'response' && m.id === 'dep1')).toBe(false)
+
+  await session.handleRequest({ id: 'shutdown1', method: 'shutdown' } as BridgeRequest)
+  await pending
+
+  const depResponse = messages.find((m) => m.type === 'response' && m.id === 'dep1')
+  expect(depResponse).toMatchObject({ type: 'response', id: 'dep1', ok: false })
+})
+
+test('cancelPendingApprovals rejects outstanding approvals tied to a closed connection', async () => {
+  const { session, messages } = collectingSession()
+
+  const pending = session.handleRequest({
+    id: 'dep2',
+    method: 'deployment.run',
+    params: { action: 'plan', provider: 'vercel', target: 'preview' },
+  } as unknown as BridgeRequest)
+
+  for (let i = 0; i < 20 && !messages.some((m) => m.type === 'event' && m.event === 'approval_required'); i += 1) {
+    await Bun.sleep(5)
+  }
+  expect(messages.some((m) => m.type === 'event' && m.event === 'approval_required')).toBe(true)
+
+  session.cancelPendingApprovals('Bridge connection closed')
+  await pending
+
+  const depResponse = messages.find((m) => m.type === 'response' && m.id === 'dep2')
+  expect(depResponse).toMatchObject({ type: 'response', id: 'dep2', ok: false })
+})

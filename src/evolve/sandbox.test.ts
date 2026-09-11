@@ -62,6 +62,39 @@ test('the value core and the gap scoreboard are immutable to a candidate', () =>
   ])
 })
 
+test('the deterministic safety boundary is immutable to a candidate', () => {
+  expect(violatedImmutables([
+    'src/autonomy/governor.ts',
+    'src/autonomy/actionContract.ts',
+    'src/autonomy/context.ts',
+    'src/autonomy/policy.ts',
+    'src/autonomy/sensitivePaths.ts',
+    'src/securePersistence.ts',
+    'src/ui/redact.ts',
+    'src/tools/browser.ts',
+    'src/tools/communication.ts',
+    'src/tools/codex.ts',
+    'src/tools/deployment.ts',
+    'src/tools/github.ts',
+    'src/tools/runCommand.ts',
+    'src/agent.ts',
+  ])).toEqual([
+    'src/autonomy/governor.ts',
+    'src/autonomy/actionContract.ts',
+    'src/autonomy/context.ts',
+    'src/autonomy/policy.ts',
+    'src/autonomy/sensitivePaths.ts',
+    'src/securePersistence.ts',
+    'src/ui/redact.ts',
+    'src/tools/browser.ts',
+    'src/tools/communication.ts',
+    'src/tools/codex.ts',
+    'src/tools/deployment.ts',
+    'src/tools/github.ts',
+    'src/tools/runCommand.ts',
+  ])
+})
+
 test('root gate configuration changes are included in candidate change detection', () => {
   const temp = mkdtempSync(join(tmpdir(), 'elia-config-'))
   const live = join(temp, 'live')

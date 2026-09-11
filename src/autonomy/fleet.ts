@@ -261,7 +261,15 @@ export async function runFleet(options: FleetRunOptions): Promise<FleetResult> {
       options.graph.finishNode(childNodeId, {
         ok: result.ok,
         report: result.report,
-        error: result.ok ? undefined : needsReview ? `retryable verification failure: ${verificationReport ?? result.report}` : result.report,
+        // A verification failure is a mechanical, exit-code-based fact — real
+        // enough to classify strictly. Anything else here is the worker's own
+        // prose (its final report, or "Failed: <message>" from an uncaught
+        // exception) and carries no verdict in its wording; leaving `error`
+        // unset routes it through finishNode's lenient `source: 'report'`
+        // classification instead of the strict one, so words like "manual" or
+        // "unauthorized" in a worker's own account of what happened don't get
+        // misread as an authorization failure and permanently block the node.
+        error: result.ok ? undefined : needsReview ? `retryable verification failure: ${verificationReport ?? result.report}` : undefined,
         evidence: [{
           id: `evidence:worker:${childNodeId}:${options.graph.node(childNodeId)?.attemptCount ?? 0}`,
           nodeId: childNodeId,

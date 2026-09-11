@@ -125,9 +125,16 @@ export async function commitAll(
   const staged = await execCapture('git', ['diff', '--cached', '--name-only'], cwd, signal)
   const paths = staged.stdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean)
   const protectedSet = new Set(protect.map((p) => p.replace(/\\/g, '/')))
-  const included = include
+  const includedRaw = include
     ?.map((path) => path.replace(/\\/g, '/').replace(/^\.\//, '').replace(/\/$/, ''))
     .filter((path) => path && path !== '.')
+  // An `include` list with zero entries is not a caller asking to commit
+  // nothing — it means no step in this wave declared specific files (a real,
+  // supported case: `wave.flatMap((step) => step.files)` is `[]` whenever
+  // every step's `files` is unspecified). Scope restriction only makes sense
+  // when there is an actual allowlist to restrict to, so an empty computed
+  // list behaves like `include === undefined`: commit everything staged.
+  const included = includedRaw && includedRaw.length > 0 ? includedRaw : undefined
 
   // Second line of defence behind .gitignore. A commit is one `git push` away
   // from being public and permanent, so a secret must never reach one. Same
