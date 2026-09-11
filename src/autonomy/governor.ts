@@ -116,7 +116,7 @@ export function assessAction(request: ActionRequest, cwd = currentAgent().cwd ??
 
   if (name === 'github') {
     const action = typeof input.action === 'string' ? input.action : 'unknown'
-    if (action === 'status' || action === 'pr_view' || action === 'pr_checks') {
+    if (action === 'status' || action === 'pr_view' || action === 'pr_list' || action === 'pr_checks' || action === 'pr_reviews' || action === 'issue_list' || action === 'issue_view') {
       return assessment('safe', 'allow', `github ${action} only reads local git and GitHub state`, `github.${action}`, resources, true)
     }
     if (action === 'branch' || action === 'commit') {

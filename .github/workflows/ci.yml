@@ -24,7 +24,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: 1.3.0
+          bun-version: 1.3.14
       - name: Install locked dependencies
         run: bun install --frozen-lockfile
       - name: Typecheck
@@ -57,8 +57,19 @@ jobs:
   # The native systems layer (crates/): the `eliad` daemon and `elia-native`, the
   # in-process structural-check library the TS side dlopen's via bun:ffi. Kept
   # separate so a Rust toolchain problem never blocks the TS suite, and vice versa.
+  #
+  # Runs on Windows too, same as `go` and `verify`. It used to be ubuntu-only,
+  # and that is exactly how the template-literal bug in elia-parse's C++ lexer
+  # shipped: `src/native/ffi.ts` only loads the cdylib when one has been built
+  # locally, so a developer machine that ran `cargo build` had the checker live
+  # and blocking writes while CI never loaded it at all. The lexer is
+  # platform-independent, but the thing that decides whether it *runs* is not.
   native:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -73,14 +84,18 @@ jobs:
           java-version: "21"
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: 1.3.0
+          bun-version: 1.3.14
+      # Lint is platform-independent - run it once, on Linux.
       - name: Format
+        if: matrix.os == 'ubuntu-latest'
         run: cargo fmt --all -- --check
       - name: Clippy
+        if: matrix.os == 'ubuntu-latest'
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Rust tests (compiles the elia-parse C++; MCP test needs bun on PATH)
         run: cargo test --workspace
       - name: Build elia-jvm-bridge
+        shell: bash
         run: |
           cd jvm/elia-jvm-bridge
           mkdir -p build/classes
@@ -90,13 +105,21 @@ jobs:
       - name: Install locked dependencies
         run: bun install --frozen-lockfile
       - name: In-process native check (bun:ffi → elia-native cdylib)
+        shell: bash
         # Builds the cdylib so `src/native/ffi.ts` finds it in target/release and
         # the `withNative` tests run instead of skipping. Daemon left off — this
         # path is meant to work without it.
         run: |
           cargo build -p elia-native --release
           bun test src/native/ --timeout=20000
+      # The structural check gates every write, so a false rejection blocks the
+      # agent outright rather than merely reporting something. With the cdylib
+      # built above, run the write-path tests against it on both platforms.
+      - name: Write path with the structural check live
+        shell: bash
+        run: bun test src/tools/editFile.test.ts src/tools/editMatch.test.ts src/tools/atomicWrite.test.ts --timeout=20000
       - name: Daemon-backed TypeScript tests (shell + C++ parse + JVM check + MCP)
+        shell: bash
         env:
           ELIA_DAEMON: auto
         # Build the daemon first so `resolveEliadPath()` finds it and the
@@ -122,7 +145,7 @@ jobs:
           cache: false
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: 1.3.0
+          bun-version: 1.3.14
       - name: Format check
         working-directory: go
         shell: bash

@@ -19,6 +19,20 @@ export interface ProjectInfo {
   usesBundler: boolean
 }
 
+/**
+ * Whether a parsed `package.json` is elia's own.
+ *
+ * `findProject` walks *up* to the nearest `package.json`, so a page written
+ * anywhere inside the elia checkout resolves to elia's own manifest — whose
+ * `dev` script is `bun run bin/elia.ts` and whose `test` script is
+ * `bun test src/`. Previewing a three-file static page then ran elia's own test
+ * suite against it. A host manifest is never the project being previewed, so
+ * treat it as "no project" and let the caller serve the page's own directory.
+ */
+function isHostManifest(pkg: { name?: string; bin?: Record<string, string> | string }): boolean {
+  return pkg.name === 'elia-ai' || (typeof pkg.bin === 'object' && pkg.bin !== null && 'elia' in pkg.bin)
+}
+
 /** Walks up from a file (or directory) looking for the nearest `package.json`. */
 export function findProject(fileOrDir: string): ProjectInfo | undefined {
   let dir = existsSync(fileOrDir) && !/\.[a-z0-9]+$/i.test(fileOrDir) ? fileOrDir : dirname(fileOrDir)
@@ -27,10 +41,13 @@ export function findProject(fileOrDir: string): ProjectInfo | undefined {
     if (existsSync(pkgPath)) {
       try {
         const pkg = JSON.parse(readFileSync(pkgPath, 'utf8')) as {
+          name?: string
+          bin?: Record<string, string> | string
           scripts?: Record<string, string>
           dependencies?: Record<string, string>
           devDependencies?: Record<string, string>
         }
+        if (isHostManifest(pkg)) return undefined
         const deps = JSON.stringify({ ...pkg.dependencies, ...pkg.devDependencies, ...pkg.scripts })
         return {
           dir,

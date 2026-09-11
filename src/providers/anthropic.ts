@@ -16,6 +16,54 @@ const EPHEMERAL_CACHE_1H: Anthropic.CacheControlEphemeral = { type: 'ephemeral',
 // (billed by actual usage, not the cap) so large refactors don't get truncated.
 const MAX_TOKENS = 32_000
 
+/**
+ * Models that take *adaptive* thinking rather than a fixed token budget.
+ *
+ * `thinking: { type: 'enabled', budget_tokens: N }` is rejected with a 400 on
+ * Claude 5 and the Opus 4.7/4.8 family, and deprecated on 4.6 — which means the
+ * shape elia used to send unconditionally failed every single turn on
+ * `claude-sonnet-5`, its own default Anthropic model. Depth is expressed with
+ * `output_config.effort` there instead. Older models (Haiku 4.5, Sonnet 4.5 and
+ * earlier) still require the budget form, so both shapes have to be supported.
+ */
+const ADAPTIVE_THINKING = /^claude-(?:fable-5|mythos-5|opus-5|opus-4-[678]|sonnet-5|sonnet-4-6)/
+
+/** elia's token budget mapped onto the effort levels adaptive thinking uses. */
+function effortForBudget(budget: number): NonNullable<NonNullable<Anthropic.MessageStreamParams['output_config']>['effort']> {
+  if (budget <= 2048) return 'low'
+  if (budget <= 8192) return 'medium'
+  if (budget <= 24_576) return 'high'
+  return 'xhigh'
+}
+
+/**
+ * The `thinking`/`output_config`/`max_tokens` fields for one model.
+ *
+ * Exported so the request shape can be asserted per model without a live client
+ * — the 400 this prevents is invisible until a real call is made.
+ */
+export function thinkingParamsFor(
+  model: string,
+  thinkingBudget: number | undefined,
+): Pick<Anthropic.MessageStreamParams, 'thinking' | 'max_tokens' | 'output_config'> {
+  if (!thinkingBudget) return { max_tokens: MAX_TOKENS }
+  if (ADAPTIVE_THINKING.test(model.trim().toLowerCase())) {
+    return {
+      max_tokens: MAX_TOKENS,
+      // `display` defaults to "omitted" on these models, which streams thinking
+      // blocks with empty text — elia shows reasoning, so ask for the summary.
+      thinking: { type: 'adaptive', display: 'summarized' } as Anthropic.ThinkingConfigParam,
+      output_config: { effort: effortForBudget(thinkingBudget) },
+    }
+  }
+  return {
+    // Extended thinking's budget counts toward max_tokens, so the ceiling has
+    // to clear the budget with real room left for the answer itself.
+    max_tokens: Math.max(MAX_TOKENS, thinkingBudget + 8_000),
+    thinking: { type: 'enabled', budget_tokens: thinkingBudget },
+  }
+}
+
 export interface AnthropicProviderOptions {
   thinking?: ThinkingOption
 }
@@ -25,7 +73,11 @@ export function createAnthropicProvider(
   model: string,
   options: AnthropicProviderOptions = {},
 ): Provider {
-  const client = new Anthropic({ apiKey, timeout: 180_000, maxRetries: 0 })
+  // The agent loop has its own 3-attempt retry with provider fallback, but it
+  // gives up the moment any token has streamed (see agentLoop's `emittedOutput`
+  // guard) — so a 429 or 529 mid-stream was simply fatal. One SDK-level retry
+  // covers the pre-stream case cheaply without fighting the loop's own logic.
+  const client = new Anthropic({ apiKey, timeout: 180_000, maxRetries: 1 })
   // undefined = thinking disabled entirely (no request param, no extra max_tokens headroom).
   const thinkingBudget = options.thinking?.enabled ? options.thinking.budgetTokens : undefined
 
@@ -118,10 +170,7 @@ export function buildAnthropicRequest(parts: AnthropicRequestParts): Anthropic.M
 
   return {
     model,
-    // Extended thinking's budget counts toward max_tokens, so the ceiling has
-    // to clear the budget with real room left for the answer itself.
-    max_tokens: thinkingBudget ? Math.max(MAX_TOKENS, thinkingBudget + 8_000) : MAX_TOKENS,
-    ...(thinkingBudget ? { thinking: { type: 'enabled' as const, budget_tokens: thinkingBudget } } : {}),
+    ...thinkingParamsFor(model, thinkingBudget),
     system: systemBlocks,
     messages: withCacheControlOnTail(messages.map(toAnthropicMessage)),
     tools: withCacheControlOnLastTool(

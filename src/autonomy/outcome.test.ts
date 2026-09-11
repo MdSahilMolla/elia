@@ -107,3 +107,46 @@ test('completion does not verify after a blocked action-budget request', () => {
   expect(result.state).toBe('partial')
   expect(result.blockers).toContain('The autonomous action budget was exhausted after 1 governed request(s).')
 })
+
+// Regression: run 2026-09-10-754n-8z17 had 4 of 4 steps completed and
+// verification passing, and was still reported "failed" — purely because the
+// structured review had not finished. Reporting completed, verified work as a
+// failure is the mirror image of claiming unverified work succeeded.
+test('completed and verified work is not reported as failed when review is outstanding', () => {
+  const assessment = assessCompletion({
+    graph: graph(['completed', 'completed', 'completed', 'completed']),
+    outcome: 'needs-attention',
+    planApproved: true,
+    verificationPassed: true,
+    reviewPassed: false,
+  })
+  expect(assessment.state).not.toBe('failed')
+  expect(assessment.state).toBe('partial')
+  expect(assessment.completedSteps).toBe(4)
+  expect(assessment.totalSteps).toBe(4)
+  expect(assessment.summary).toContain('verification passed')
+  // The review is still reported as an outstanding blocker, not hidden.
+  expect(assessment.blockers.join(' ')).toContain('review')
+})
+
+test('work that did not complete is still a failure', () => {
+  const assessment = assessCompletion({
+    graph: graph(['completed', 'ready']),
+    outcome: 'needs-attention',
+    planApproved: true,
+    verificationPassed: false,
+    reviewPassed: false,
+  })
+  expect(assessment.state).toBe('failed')
+})
+
+test('everything green is still verified, not merely partial', () => {
+  const assessment = assessCompletion({
+    graph: graph(['completed', 'completed']),
+    outcome: 'completed',
+    planApproved: true,
+    verificationPassed: true,
+    reviewPassed: true,
+  })
+  expect(assessment.state).toBe('verified')
+})

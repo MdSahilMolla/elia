@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { buildAnthropicRequest, toAnthropicMessage } from './anthropic.ts'
+import { buildAnthropicRequest, thinkingParamsFor, toAnthropicMessage } from './anthropic.ts'
 import type { ChatMessage, ToolDefinition } from './types.ts'
 
 const tool: ToolDefinition = {
@@ -115,4 +115,40 @@ test('text and tool_result blocks still convert as before, unaffected by thinkin
     role: 'user',
     content: [{ type: 'tool_result', tool_use_id: 't1', content: 'ok', is_error: false }],
   })
+})
+
+// Regression: elia sent `thinking: { type: "enabled", budget_tokens: N }` to
+// every Anthropic model. That shape is rejected with a 400 on Claude 5 and the
+// Opus 4.7/4.8 family - including `claude-sonnet-5`, the provider's own default
+// model - so every turn failed before the request was even processed.
+test('Claude 5 models get adaptive thinking and an effort level, never budget_tokens', () => {
+  for (const model of ['claude-sonnet-5', 'claude-opus-5', 'claude-opus-4-8', 'claude-fable-5-1']) {
+    const params = thinkingParamsFor(model, 4096)
+    expect(params.thinking).toEqual({ type: 'adaptive', display: 'summarized' })
+    expect(params.output_config?.effort).toBe('medium')
+    expect(JSON.stringify(params)).not.toContain('budget_tokens')
+  }
+})
+
+test('older models keep the token-budget shape and the extra max_tokens headroom', () => {
+  const params = thinkingParamsFor('claude-haiku-4-5', 24_576)
+  expect(params.thinking).toEqual({ type: 'enabled', budget_tokens: 24_576 })
+  expect(params.max_tokens).toBe(24_576 + 8_000)
+  expect(params.output_config).toBeUndefined()
+})
+
+test('thinking off sends no thinking parameter at all', () => {
+  for (const model of ['claude-sonnet-5', 'claude-haiku-4-5']) {
+    const params = thinkingParamsFor(model, undefined)
+    expect(params.thinking).toBeUndefined()
+    expect(params.output_config).toBeUndefined()
+  }
+})
+
+test('the budget presets map onto the effort ladder', () => {
+  const effort = (budget: number) => thinkingParamsFor('claude-sonnet-5', budget).output_config?.effort
+  expect(effort(2048)).toBe('low')
+  expect(effort(8192)).toBe('medium')
+  expect(effort(24_576)).toBe('high')
+  expect(effort(64_000)).toBe('xhigh')
 })

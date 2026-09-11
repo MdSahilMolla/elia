@@ -236,7 +236,7 @@ test('run_command rejects a PowerShell cmdlet piped at the shell level, before s
   // The same pipeline kept inside -Command is fine — no pipe outside the quotes.
   await expect(executeTool('run_command', { command: 'powershell -NoProfile -Command "Get-ChildItem x | Select-Object Name"' }))
     .resolves.toBeDefined()
-})
+}, 60_000) // the second assertion really spawns PowerShell; cold startup on a loaded 2-core Windows runner can blow past the 20s suite default
 
 test.if(process.platform === 'win32')('run_command steers away from cmd.exe-hostile one-liners on Windows', async () => {
   await expect(executeTool('run_command', { command: 'which python3' })).rejects.toThrow(/where <tool>/)

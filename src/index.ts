@@ -30,6 +30,8 @@ interface TurnUiHooks {
 import { playIntro } from './ui/character.ts'
 import { ZERO_USAGE, addUsage, getSessionSummaryLine, recordTopLevelTurn, formatUsageLine, formatElapsed, sessionUsageSnapshot, setCurrentUsageModel, type SessionUsageSnapshot } from './usage.ts'
 import { createSlashPrompt, type SlashCommand } from './ui/slashPrompt.ts'
+import { customCommandsAsSlashEntries, loadCustomCommands, resolveCustomCommand } from './commands/loader.ts'
+import { collectPromptInjects, fireLifecycleEvent } from './autonomy/lifecycleHooks.ts'
 import { confirmOnce } from './ui/confirm.ts'
 import { gold, dim } from './ui/theme.ts'
 import { box, table } from './ui/layout.ts'
@@ -81,6 +83,11 @@ const REPL_COMMANDS: SlashCommand[] = [
   { name: '@skills', description: 'choose active skill tools for the next turn' },
 ]
 
+/** Built-ins plus project/user `.elia/commands/*.md` prompt macros. */
+function allSlashCommands(): SlashCommand[] {
+  return [...REPL_COMMANDS, ...customCommandsAsSlashEntries(loadCustomCommands())]
+}
+
 const rawArgs = process.argv.slice(2)
 
 /** Beta (experimental) modes — reached via `--beta <name>` on the CLI and `/betamode` in a session. */
@@ -112,7 +119,7 @@ function requestedAgentMode(): AgentMode {
   return 'dev'
 }
 
-const SUBCOMMANDS = ['auto', 'agent', 'evolve', 'bench', 'bench-latency', 'skills', 'runs', 'fork', 'resume', 'schedule', 'daemon', 'doctor', 'config', 'codex-login', 'control', 'bridge', 'workspace'] as const
+const SUBCOMMANDS = ['auto', 'agent', 'evolve', 'gap', 'values', 'distill', 'bench', 'bench-latency', 'skills', 'runs', 'fork', 'resume', 'schedule', 'daemon', 'doctor', 'config', 'codex-login', 'control', 'bridge', 'workspace'] as const
 type Subcommand = (typeof SUBCOMMANDS)[number]
 
 function printHelp(): void {
@@ -667,7 +674,11 @@ async function runBench(): Promise<void> {
       writeUsageLine(`  ${outcome.passed ? '✓' : '✗'} ${outcome.taskId} — ${outcome.error ?? outcome.detail}`),
   })
   if (machineReadable) emitEvent('benchmark_scorecard', { stage: 'current', scorecard: card })
-  else process.stdout.write(renderScorecard(card, 'elia'))
+  else {
+    process.stdout.write(renderScorecard(card, 'elia'))
+    const { readLedger, renderLearningLine } = await import('./evolve/ledger.ts')
+    if (readLedger().length > 0) writeUsageLine(`  ${renderLearningLine()}`)
+  }
   if (card.passRate < 1) process.exitCode = 1
 }
 
@@ -759,6 +770,158 @@ async function runEvolve(): Promise<void> {
   )
   for (const record of result.generations) {
     writeUsageLine(`  gen ${record.generation}: ${record.verdict} — ${record.hypothesis || record.reason}`)
+  }
+  const { renderLearningLine } = await import('./evolve/ledger.ts')
+  writeUsageLine(`  ${renderLearningLine()}`)
+}
+
+async function runValues(): Promise<void> {
+  const { loadValueCore, describeValueCore } = await import('./values/core.ts')
+  const action = positionals()[0] ?? 'show'
+
+  if (action === 'show') {
+    const core = loadValueCore()
+    writeNotice(describeValueCore())
+    if (core.path) writeNotice(core.path)
+    writeUsageLine('')
+    for (const line of core.text.split('\n')) writeUsageLine(`  ${line}`)
+    return
+  }
+
+  if (action === 'probe' || action === 'probes') {
+    if (!(await ensureFirstRunProviderSetup())) return
+    await loadRuntimeSkills()
+    const { runValueProbes } = await import('./values/probes.ts')
+    const { recordProbeRun, readLatestProbeRun, checkValueDrift } = await import('./values/drift.ts')
+    const previous = readLatestProbeRun()
+    writeNotice('Running value probes (subject + independent judge per probe)…')
+    const run = await runValueProbes({
+      forceCoreActive: hasFlag('--force-core'),
+      onResult: (result) => writeUsageLine(`  ${result.passed ? '✓' : '✗'} ${result.id} — ${result.reason}`),
+    })
+    writeUsageLine('')
+    writeNotice(`Value-probe pass rate: ${Math.round(run.passRate * 100)}% (${run.results.filter((r) => r.passed).length}/${run.results.length})`)
+    if (!hasFlag('--no-record')) recordProbeRun(run, hasFlag('--force-core') ? 'draft-review' : 'baseline')
+    if (previous && hasFlag('--check')) {
+      const drift = checkValueDrift(previous, run)
+      if (!drift.ok) {
+        writeError(`Value drift:\n${drift.regressions.map((r) => `  - ${r}`).join('\n')}`)
+        process.exitCode = 1
+      } else {
+        writeNotice('No value drift vs the previous run.')
+      }
+    }
+    return
+  }
+
+  writeError(`Unknown: elia values ${action}. Use "show" or "probe".`)
+  process.exitCode = 1
+}
+
+async function runDistill(): Promise<void> {
+  const { collectDistillableTraces } = await import('./distill/corpus.ts')
+  const { fragmentCount } = await import('./distill/fragments.ts')
+  const action = positionals()[0] ?? 'run'
+  const traces = collectDistillableTraces()
+
+  if (action === 'traces') {
+    if (traces.length === 0) {
+      writeNotice('No distillable traces yet — need autonomous runs that reached verified completion with mechanical/empirical verification.')
+      return
+    }
+    writeNotice(`${traces.length} distillable trace(s):`)
+    for (const t of traces) {
+      writeUsageLine(`  ${t.runId}  ${t.regime.padEnd(10)} reward ${t.reward === undefined ? '—' : t.reward.toFixed(2)}  ${t.goal.slice(0, 80)}`)
+    }
+    return
+  }
+
+  if (action !== 'run') {
+    writeError(`Unknown: elia distill ${action}. Use "run" (add --promote to apply) or "traces".`)
+    process.exitCode = 1
+    return
+  }
+
+  if (traces.length < 3) {
+    writeNotice(`Only ${traces.length} distillable trace(s) — need at least 3 of the same role's work before a pattern is worth distilling. Nothing to do.`)
+    return
+  }
+
+  if (!(await ensureFirstRunProviderSetup())) return
+  await loadRuntimeSkills()
+  const { proposeDistillations } = await import('./distill/mine.ts')
+  const { evaluateCandidate } = await import('./distill/gate.ts')
+
+  const promote = hasFlag('--promote')
+  writeNotice(`Mining ${traces.length} verified trace(s) for standing role guidance…`)
+  const candidates = await proposeDistillations(traces)
+  if (candidates.length === 0) {
+    writeNotice('No candidate fragments — the successful runs show no repeated pattern the role instructions are missing.')
+    return
+  }
+
+  for (const candidate of candidates) {
+    writeUsageLine('')
+    writeNotice(`Candidate for ${candidate.role}: "${candidate.fragment}"`)
+    writeUsageLine(`  rationale: ${candidate.rationale}`)
+    const result = await evaluateCandidate(candidate, { dryRun: !promote, onStage: (s) => writeUsageLine(`  … ${s}`) })
+    const mark = result.verdict === 'rejected' ? '✗' : '✓'
+    writeUsageLine(`  ${mark} ${result.verdict}: ${result.reason}`)
+  }
+  if (!promote) writeNotice('Dry run — nothing was applied. Re-run with --promote to keep the fragments that passed every gate.')
+  writeNotice(`${fragmentCount()} distilled fragment(s) currently active.`)
+}
+
+async function runGap(): Promise<void> {
+  const { computeGapVector } = await import('./gap/scoreboard.ts')
+  const { checkGapNotRegressed } = await import('./gap/guard.ts')
+  const { recordGapVector, readGapHistory, readLatestGapVector, renderGapVector } = await import('./gap/report.ts')
+
+  const action = positionals()[0]
+  if (action === 'history') {
+    const history = readGapHistory()
+    if (history.length === 0) {
+      writeNotice('No generator–verifier gap history yet. Run "elia gap" to measure it.')
+      return
+    }
+    for (const vector of history) {
+      writeUsageLine(
+        `  ${vector.at.slice(0, 19).replace('T', ' ')} · ${vector.ref.padEnd(12)} catch ${Math.round(vector.mechanicalCatchRate * 100)}% · fp ${Math.round(vector.falsePositiveRate * 100)}% · escapees ${vector.escapees.length}`,
+      )
+    }
+    return
+  }
+
+  const previous = readLatestGapVector()
+  writeNotice('Measuring the verification ladder against the planted-defect corpus…')
+  const vector = await computeGapVector({
+    onDefect: (result) => {
+      const mark = result.regime === 'judgment' ? (result.caught ? '✓(bonus)' : '·') : result.caught ? '✓' : '✗'
+      writeUsageLine(`  ${mark} ${result.defectId}${result.caught ? ` — caught by ${result.caughtBy.join(', ')}` : ''}${result.skipped.length ? ` [skipped: ${result.skipped.join(', ')}]` : ''}`)
+    },
+  })
+
+  writeUsageLine('')
+  for (const line of renderGapVector(vector, previous).split('\n')) writeUsageLine(line)
+  writeUsageLine('')
+
+  if (!hasFlag('--no-record')) {
+    recordGapVector(vector)
+    writeNotice('Recorded to .elia/gap/history.ndjson')
+  }
+
+  if (hasFlag('--check')) {
+    if (!previous) {
+      writeNotice('No prior vector to check against — recorded this one as the baseline.')
+      return
+    }
+    const guard = checkGapNotRegressed(previous, vector)
+    if (!guard.ok) {
+      writeError(`Gap regressed vs ${previous.ref}:\n${guard.regressions.map((r) => `  - ${r}`).join('\n')}`)
+      process.exitCode = 1
+      return
+    }
+    writeNotice(`Gap held or improved vs ${previous.ref}.`)
   }
 }
 
@@ -1611,7 +1774,7 @@ async function runInteractive(): Promise<void> {
   // can finish connecting in the background instead of gating the prompt.
   await loadRuntimeSkills({ deferMcp: interactiveTerminal })
   const { runTurn } = await import('./agent.ts')
-  const { config, describeThinking, getThinking, switchModel, switchThinking, THINKING_EFFORT_BUDGETS, DEFAULT_THINKING_BUDGET } =
+  const { config, describeThinking, describeReviewers, getThinking, switchModel, switchThinking, THINKING_EFFORT_BUDGETS, DEFAULT_THINKING_BUDGET } =
     await import('./config.ts')
   setCurrentUsageModel(config.model)
   const { PROVIDER_PRESET_NAMES, isProviderPresetConfigured, providerPresetDefaultModel, listProviderModels } = await import('./providers/registry.ts')
@@ -1637,6 +1800,7 @@ async function runInteractive(): Promise<void> {
       `fast          ${config.tiers.fast.providerName}/${config.tiers.fast.model}${config.cascadeEnabled ? '' : ' (same as deep)'}`,
       ...(roles.length > 0 ? ['', 'role routes', ...roles] : ['', 'role routes   none configured; roles use their fast/deep tier']),
       '',
+      describeReviewers(),
       'Independent dependency-wave workers run concurrently; shared-provider capacity is bounded and file collisions are serialized.',
     ].join('\n')
   }
@@ -1897,7 +2061,9 @@ async function runInteractive(): Promise<void> {
     if (attachments.length > 0) {
       writeNotice(`📎 ${attachments.length} image${attachments.length === 1 ? '' : 's'} attached to this message: ${attachments.map((a) => a.alt).join(', ')}`)
     }
-    const userText = resolved.text || (attachments.length > 0 ? `[image attached: ${attachments.map((a) => a.alt).join(', ')}]` : submittedText)
+    let userText = resolved.text || (attachments.length > 0 ? `[image attached: ${attachments.map((a) => a.alt).join(', ')}]` : submittedText)
+    const inject = collectPromptInjects()
+    if (inject) userText = `<operator-context>\n${inject}\n</operator-context>\n\n${userText}`
 
     const tracker = createFileTracker()
     const turnStartedAt = Date.now()
@@ -1911,6 +2077,8 @@ async function runInteractive(): Promise<void> {
     // Signals for the per-turn outcome record (competence map + regret nudge).
     let toolErrorCount = 0
     let editRetryCount = 0
+    // Ordered tool calls for this turn's trajectory row (the training dataset).
+    const toolTrace: { name: string; ok: boolean }[] = []
     let verifyResult: import('./autonomy/outcomes.ts').VerifyResult = 'none'
     let repairAttempts = 0
     const unregisterControls = taskSessions.registerControls(task.id, {
@@ -1957,6 +2125,7 @@ async function runInteractive(): Promise<void> {
         },
         onTool: (event) => {
           const action = event.isError ? `Retrying after ${event.name}` : event.name
+          toolTrace.push({ name: event.name, ok: !event.isError })
           if (event.name === 'preview' && !event.isError) previewedThisTurn = true
           if (event.isError) {
             toolErrorCount += 1
@@ -2023,8 +2192,26 @@ async function runInteractive(): Promise<void> {
         const { runVerification, describeVerification } = await import('./autonomy/verify.ts')
         const changedAll = Object.keys(tracker.snapshot())
         const changed = changedCodeFiles(changedAll)
-        const root = checkRoot(changedAll, process.cwd())
-        const checks = changed.length > 0 ? detectChecks(root) : []
+        // `checkRoot` returns undefined when no project owns the change — a
+        // freshly scaffolded folder with no manifest yet. Passing that straight
+        // into `detectChecks` would silently fall back to `process.cwd()` and
+        // run *elia's own* typecheck and test suite against the new project, so
+        // the undefined case has to be handled here rather than defaulted away.
+        const root = changed.length > 0 ? checkRoot(changedAll, process.cwd()) : undefined
+        const checks = root ? detectChecks(root) : []
+        if (checks.length === 0 && changed.length > 0) {
+          // Code changed and nothing could check it. Say so — "none" used to
+          // mean both "nothing to check" and "we never looked", and a turn that
+          // reported success having verified nothing is the failure mode this
+          // whole gate exists to prevent.
+          verifyResult = 'skipped'
+          const why = root
+            ? `no typecheck or test command could be inferred in ${root}`
+            : 'the changed files are not inside a project (no package.json, Cargo.toml, go.mod, …)'
+          const line = `Not verified — ${why}`
+          uiHooks?.onActivity?.({ kind: 'status', status: 'warning', title: line })
+          if (!uiHooks) writeNotice(`▸ ${line}`)
+        }
         if (checks.length > 0) {
           const where = root === process.cwd() ? '' : ` in ${root}`
           taskSessions.update(task.id, { status: 'running', action: 'Verifying', detail: `${checks.join(' && ')}${where}` })
@@ -2079,6 +2266,14 @@ async function runInteractive(): Promise<void> {
               // root paints something — a blank page is worse than no preview.
               const up = await waitForHttp(url, 8_000, controller.signal)
               const rendered = up.ok ? await checkRendered(url, controller.signal) : up
+              // For a static page, *this* is the verification: it serves and it
+              // paints. `detectChecks` only ever looked for typecheck/test
+              // commands, and its CODE_EXT filter excludes .html/.css entirely,
+              // so every static site elia built was reported done with nothing
+              // having checked it. Don't overwrite a real command result.
+              if (verifyResult === 'none' || verifyResult === 'skipped') {
+                verifyResult = rendered.ok ? 'pass' : 'fail'
+              }
               if (rendered.ok) {
                 const detail = url
                 if (uiHooks) uiHooks.onActivity?.({ kind: 'status', status: 'completed', title: 'Preview ready', detail })
@@ -2119,6 +2314,7 @@ async function runInteractive(): Promise<void> {
         const { recordOutcome, domainsOf } = await import('./autonomy/outcomes.ts')
         const changedPaths = Object.keys(tracker.snapshot())
         recordOutcome({
+          corr: task.id,
           prompt: redactText(userText, 120),
           filesChanged: changedPaths.length,
           domains: domainsOf(changedPaths),
@@ -2128,6 +2324,46 @@ async function runInteractive(): Promise<void> {
           repairAttempts,
           aborted: stopRequested || controller.signal.aborted,
         })
+        const cleanTurn = toolErrorCount === 0 && editRetryCount === 0 && (verifyResult === 'pass' || verifyResult === 'none' || verifyResult === 'skipped') && !(stopRequested || controller.signal.aborted)
+        try {
+          const { recordLessonExposure } = await import('./autonomy/lessonEfficacy.ts')
+          const { consumeInjectedLessonKeys } = await import('./autonomy/lessons.ts')
+          recordLessonExposure(task.id, consumeInjectedLessonKeys(), { verify: verifyResult, clean: cleanTurn })
+        } catch {
+          // best-effort
+        }
+        try {
+          const { recordTrajectory, deriveReward, refSystemPrompt } = await import('./trajectory/record.ts')
+          const { ELIA_ROOT } = await import('./config.ts')
+          const snap = tracker.snapshot()
+          const touched = await Promise.all(
+            Object.entries(snap).map(async ([p, before]) => {
+              const file = Bun.file(p)
+              const after = (await file.exists()) ? await file.text() : null
+              return { path: p, before, after }
+            }),
+          )
+          recordTrajectory({
+            corr: task.id,
+            kind: 'interactive',
+            prompt: userText,
+            // Grouping key only — the base interactive prompt varies by mode, not per turn.
+            systemPromptRef: refSystemPrompt(mode),
+            tools: toolTrace,
+            touched,
+            verify: verifyResult,
+            cwdIsEliaRoot: process.cwd() === ELIA_ROOT,
+            reward: deriveReward({
+              toolErrors: toolErrorCount,
+              editRetries: editRetryCount,
+              verify: verifyResult,
+              repairAttempts,
+              aborted: stopRequested || controller.signal.aborted,
+            }),
+          })
+        } catch {
+          // Trajectory capture is best-effort; recordTrajectory also guards itself.
+        }
       }
     }
     checkpoints.push({
@@ -2415,7 +2651,7 @@ async function runInteractive(): Promise<void> {
     applyThinkingChoice(arg)
   }
 
-  const prompt = createSlashPrompt(REPL_COMMANDS)
+  const prompt = createSlashPrompt(allSlashCommands())
 
   async function handleSkillsPicker(): Promise<void> {
     const { listLoadedSkills } = await import('./skills/loader.ts')
@@ -2875,7 +3111,7 @@ async function runInteractive(): Promise<void> {
     // --- text-only commands ---
 
     if (trimmed === '/help' || trimmed === '/?') {
-      return { handled: true, text: REPL_COMMANDS.map((c) => `${c.name}  —  ${c.description}`).join('\n') }
+      return { handled: true, text: allSlashCommands().map((c) => `${c.name}  —  ${c.description}`).join('\n') }
     }
     if (trimmed === '/status') {
       return { handled: true, text: renderWorkspacePanel({ sessionId, mode, providerLabel: config.providerLabel, model: config.model }) }
@@ -3130,6 +3366,9 @@ async function runInteractive(): Promise<void> {
       )
     }
 
+    const custom = resolveCustomCommand(trimmed)
+    if (custom) return { handled: true, submitText: custom.expanded }
+
     return done(`Unknown command: ${trimmed.split(/\s+/)[0]}. Type /help for the list.`)
   }
 
@@ -3147,7 +3386,7 @@ async function runInteractive(): Promise<void> {
       sessionId,
       version: cliVersion,
       getEnv: () => ({ model: config.model, providerLabel: config.providerLabel, providerName: config.providerName }),
-      commands: REPL_COMMANDS,
+      commands: allSlashCommands(),
       initialReplMode: replMode,
       messages,
       greeting,
@@ -3611,7 +3850,17 @@ async function runInteractive(): Promise<void> {
       continue
     }
 
-    let commandToRun = eliaBookRunPrompt ?? trimmed
+    const customClassic = resolveCustomCommand(trimmed)
+    let commandToRun = eliaBookRunPrompt ?? customClassic?.expanded ?? trimmed
+    if (customClassic) writeNotice(`Expanded ${customClassic.command.name} → prompt`)
+    if (!eliaBookRunPrompt && !customClassic && trimmed.startsWith('/') && !trimmed.startsWith('/attach')) {
+      // Unknown built-in-looking slash: prefer an explicit error over sending "/foo" to the model.
+      const known = allSlashCommands().some((c) => trimmed === c.name || trimmed.startsWith(`${c.name} `))
+      if (!known && /^\/[a-z]/.test(trimmed)) {
+        writeNotice(`Unknown command: ${trimmed.split(/\s+/)[0]}. Type /help for the list.`)
+        continue
+      }
+    }
     if (replMode === 'manual') {
       const { risky, reason } = await classifyCommandRisk(commandToRun)
       if (risky) {
@@ -3646,6 +3895,11 @@ async function runInteractive(): Promise<void> {
   }
 
   prompt.close()
+  try {
+    await fireLifecycleEvent('SessionEnd', { SESSION: sessionId })
+  } catch {
+    // Session-end hooks are best-effort.
+  }
   // The registerShutdownCleanup callback registered above already writes the
   // "ended" heartbeat for this and every other exit path — no separate call
   // needed here.
@@ -3674,6 +3928,12 @@ async function main() {
       return runAgentCommand()
     case 'evolve':
       return runEvolve()
+    case 'gap':
+      return runGap()
+    case 'values':
+      return runValues()
+    case 'distill':
+      return runDistill()
     case 'bench':
       return runBench()
     case 'bench-latency':
@@ -3727,6 +3987,18 @@ async function main() {
 // Load ~/.elia/config.env before any command imports provider configuration. Explicit
 // project/process environment values already present in process.env take precedence.
 loadUserConfig()
+
+// Sweep temp files orphaned by earlier crashed writes. Only temps whose owning
+// process is gone are removed, so a concurrently running elia is never touched.
+// Without this they accumulate silently and are never cleaned up by anything.
+try {
+  const { sweepStaleTemporaries } = await import('./securePersistence.ts')
+  const { isProcessAlive } = await import('./fileLock.ts')
+  const { paths: statePaths } = await import('./config.ts')
+  sweepStaleTemporaries(statePaths.state, isProcessAlive)
+} catch {
+  // Housekeeping is never a reason to fail a command.
+}
 
 // Signal handlers are installed by installShutdownHandlers() so every terminal
 // component follows one cleanup path and returns a conventional interrupt code.

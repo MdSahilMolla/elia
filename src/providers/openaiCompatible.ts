@@ -24,7 +24,7 @@ export function createOpenAICompatibleProvider(
   const validatedBaseURL = baseURL
     ? validateNetworkUrl(baseURL, { allowExplicitLocal, requireHttps: true }).toString()
     : baseURL
-  const client = new OpenAI({ apiKey, baseURL: validatedBaseURL, timeout: 180_000, maxRetries: 0 })
+  const client = new OpenAI({ apiKey, baseURL: validatedBaseURL, timeout: 180_000, maxRetries: 1 })
   // Reasoning-capable OpenAI-compatible models (Groq's gpt-oss, DeepSeek's API,
   // others) emit reasoning as a non-standard `reasoning`/`reasoning_content`
   // field with no enable/disable request param — there is nothing to toggle in

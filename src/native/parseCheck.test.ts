@@ -95,3 +95,31 @@ test('Java pre-flight is skipped when the daemon is off', async () => {
   const after = 'public class C { int x = ; }'
   expect(await preflightStructuralCheck('C.java', 'public class C {}', after)).toBeUndefined()
 })
+
+// Regression: the C++ lexer's interpolation guard tested the top of the shared
+// bracket stack instead of the depth on entry, so every template literal written
+// inside a function body, object literal, class or `if` block was reported as an
+// unterminated template - and, because this check gates writes, the edit was
+// refused outright. These are the shapes that were rejected in the wild; they
+// only run when the cdylib is actually built, which is what CI now does on both
+// platforms rather than Linux alone.
+const withNativeLib = nativeAvailable() ? test : test.skip
+
+withNativeLib('accepts template literals nested inside an enclosing scope', async () => {
+  const cases: [string, string][] = [
+    ['fetchData.ts', 'async function apiGet(path: string) {\n  const url = `${BASE_URL}${path}`;\n  throw new Error(`Request to ${path} failed: ${resp.status}`);\n}\n'],
+    ['headers.ts', 'const headers = {\n  Authorization: `Bearer ${token}`,\n};\n'],
+    ['guard.ts', 'if (a) {\n  throw new Error(`bad ${a}`);\n}\n'],
+    ['Card.tsx', 'export function Card({ n }: { n: number }) {\n  return <div className={`card ${n}`} />;\n}\n'],
+    ['nested.ts', 'function f() {\n  return `a ${obj.get({ k: 1 })} b`;\n}\n'],
+  ]
+  for (const [path, after] of cases) {
+    expect(await preflightStructuralCheck(path, undefined, after)).toBeUndefined()
+  }
+})
+
+withNativeLib('still refuses a genuinely unterminated template literal', async () => {
+  const message = await preflightStructuralCheck('broken.ts', undefined, 'function f() {\n  const s = `oops ${x};\n}\n')
+  expect(message).toContain('broken')
+  expect(message).toContain('unterminated template literal')
+})

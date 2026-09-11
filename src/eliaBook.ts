@@ -5,6 +5,7 @@ import { ensureSecureDirectory, hardenSecureFile, writeSecureFile } from './secu
 import { redactArchiveValue, redactSecrets } from './ui/redact.ts'
 import { createTranscript, type TranscriptSnapshot } from './ui/transcript.ts'
 import { resolveWorkspacePath } from './autonomy/context.ts'
+import { classifyRegime } from './autonomy/detectChecks.ts'
 import type { SlashOutcome } from './ui/app/App.tsx'
 
 const BOOK_SCHEMA_VERSION = 1
@@ -521,6 +522,19 @@ export function improveEliaBook(id: string, runId: string, cwd = process.cwd()):
   if (book.versions.some((version) => version.evidence.sourceRunId === runId)) throw new Error(`Run ${runId} is already recorded in Elia Book "${id}".`)
   const candidate = runEvidence(cwd, runId)
   if (!candidate.evidence.verified) throw new Error(`Run ${runId} is not evidence-backed verified completion, so it cannot improve this Book.`)
+
+  // A "verified" completion whose verification was judgement-only (no runnable
+  // check, no empirical artifact) is not a strong enough signal to promote a
+  // reusable procedure on — that is how a Book slowly drifts toward whatever the
+  // model finds easy to claim.
+  const regime = classifyRegime(
+    candidate.procedure.steps.flatMap((step) => step.files),
+    candidate.procedure.verification,
+    cwd,
+  )
+  if (regime === 'judgment') {
+    throw new Error(`Run ${runId} passed on judgement alone (no mechanical or empirical verification), so it cannot improve this Book.`)
+  }
 
   const previous = activeVersion(book).evidence
   if (candidate.evidence.failedActions > previous.failedActions || candidate.evidence.blockedActions > previous.blockedActions) {

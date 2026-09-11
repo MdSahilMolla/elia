@@ -23,6 +23,7 @@ import {
   changedFiles,
   createSandbox,
   describeChanges,
+  isImmutablePath,
   promote,
   violatedImmutables,
   type Sandbox,
@@ -405,10 +406,10 @@ function createHypothesisTool(): HypothesisCapture {
         ? input.targetFiles.filter((file): file is string => typeof file === 'string')
         : []
 
-      const forbidden = targetFiles.filter((file) => IMMUTABLE_FILES.includes(file.replace(/\\/g, '/')))
+      const forbidden = targetFiles.filter((file) => isImmutablePath(file))
       if (forbidden.length > 0) {
         throw new Error(
-          `${forbidden.join(', ')} define how you are judged and cannot be changed. Propose a different hypothesis that improves the agent instead of the benchmark.`,
+          `${forbidden.join(', ')} define how you are judged, or what elia is for, and cannot be changed. Propose a different hypothesis that improves the agent instead of the benchmark or the value core.`,
         )
       }
 

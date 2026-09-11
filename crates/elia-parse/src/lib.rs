@@ -171,6 +171,54 @@ mod tests {
         assert!(!bad.ok);
     }
 
+    /// Regression: the interpolation guard used to ask whether the top of the
+    /// shared bracket stack was a `{`, which is only true at file scope. Inside
+    /// any enclosing brace the top is the *enclosing* brace, so the guard failed
+    /// and every one of these valid snippets was reported as an unterminated
+    /// template literal — and, since this check gates writes, refused outright.
+    #[test]
+    fn template_literal_inside_an_enclosing_scope() {
+        let cases = [
+            // function body — the shape that was actually rejected in the wild
+            "async function apiGet(path: string) {\n  const url = `${BASE_URL}${path}`;\n}",
+            // object literal
+            "const headers = {\n  Authorization: `Bearer ${token}`,\n};",
+            // if block
+            "if (a) {\n  throw new Error(`bad ${a}`);\n}",
+            // class body
+            "class A {\n  url() {\n    return `${this.base}/x`;\n  }\n}",
+            // nested braces inside the interpolation, inside a function
+            "function f() {\n  return `a ${ obj.get({ k: 1 }) } b`;\n}",
+            // arrow body, two interpolations back to back
+            "const f = () => {\n  return `${a}${b}`;\n};",
+        ];
+        for src in cases {
+            let r = check(src, Language::JsTs);
+            assert!(r.ok, "expected ok for {src:?}, got {:?}", r.errors);
+        }
+    }
+
+    /// TSX: an interpolation inside a JSX attribute expression sits two braces
+    /// deep — the component body and the `{...}` attribute.
+    #[test]
+    fn template_literal_inside_jsx_attribute() {
+        let src = "export function Card({ n }: { n: number }) {\n  return <div className={`card ${n}`} />;\n}";
+        let r = check(src, Language::JsTs);
+        assert!(r.ok, "expected ok, got {:?}", r.errors);
+    }
+
+    /// The fix must not blunt the check: a genuinely unterminated template
+    /// inside a function is still an error.
+    #[test]
+    fn unterminated_template_inside_a_function_is_still_reported() {
+        let r = check("function f() {\n  const s = `oops ${x};\n}", Language::JsTs);
+        assert!(!r.ok);
+        assert!(r
+            .errors
+            .iter()
+            .any(|e| e.message.contains("unterminated template literal")));
+    }
+
     #[test]
     fn rust_nested_block_comment() {
         assert!(

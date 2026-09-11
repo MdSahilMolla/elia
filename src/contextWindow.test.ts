@@ -65,3 +65,16 @@ test('every known window is at least the default, so no match ever loses room', 
     expect(compactionThresholdFor(model)).toBeLessThanOrEqual(MAX_COMPACTION_THRESHOLD)
   }
 })
+
+// Regression: `mercury-2` / `mercury-2.5` matched no pattern, so both fell back
+// to DEFAULT_CONTEXT_WINDOW (50k) and compacted at 30k - against real windows of
+// 128k and 260k. Long builds were summarized away a quarter of the way in.
+test('Mercury models get their real windows, not the unknown-model default', () => {
+  expect(contextWindowFor('mercury-2')).toBe(128_000)
+  expect(contextWindowFor('mercury-2.5')).toBe(260_000)
+  // Order matters: /^mercury/ must not claim 2.5 first.
+  expect(contextWindowFor('mercury-2.5')).not.toBe(128_000)
+  // Vendor-prefixed ids (OpenRouter serves inception/mercury-2.5) normalize too.
+  expect(contextWindowFor('inception/mercury-2.5')).toBe(260_000)
+  expect(contextWindowFor('mercury-99-unreleased')).toBe(128_000)
+})

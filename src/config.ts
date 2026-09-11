@@ -82,9 +82,17 @@ function unconfiguredTier(error: string): TierConfig {
 // reassign this rather than only setting env vars, so a switch takes effect for
 // the rest of the session without a restart. See switchModel/switchThinking below.
 let currentThinking = resolveThinking()
+
+/**
+ * The adversarial reviewers. A change is only as trustworthy as the harshest
+ * independent look it survived — and a reviewer running the same model as the
+ * builder shares the builder's blind spots, so it is not really independent.
+ */
+export const REVIEWER_ROLE_NAMES: RoleName[] = ['critic', 'security', 'bughunter']
+
 const deep = resolveDeepTier(currentThinking)
 const fast = resolveFastTier(deep)
-const roleOverrides = resolveRoleOverrides(deep)
+const roleOverrides = resolveRoleOverrides(deep, fast)
 const autoFallbacks = resolveAutoFallbacks(deep, fast)
 
 export const config = {
@@ -103,6 +111,23 @@ export const config = {
   cascadeEnabled: fast.label !== deep.label,
   /** Roles with their own dedicated provider, distinct from their tier's. */
   roleOverrides,
+  /**
+   * True when the adversarial reviewers (critic/security/bughunter) run on a
+   * provider distinct from the deep tier — i.e. review is genuinely independent
+   * of the builder, not just a second prompt on the same model.
+   */
+  independentReviewers: REVIEWER_ROLE_NAMES.every(
+    (roleName) => roleOverrides[roleName] && roleOverrides[roleName]!.label !== deep.label,
+  ),
+}
+
+/** One line on whether adversarial review is model-independent, for the startup banner / `/models`. */
+export function describeReviewers(): string {
+  if (config.independentReviewers) {
+    const route = config.roleOverrides.critic?.label ?? 'a distinct provider'
+    return `review: adversarial critics run independently on ${route}`
+  }
+  return 'review: critics share the deep-tier model (set ELIA_REVIEWER_PROVIDER for independence)'
 }
 
 /**
@@ -440,7 +465,12 @@ function resolveFastTier(deepTier: TierConfig): TierConfig {
     providerName: providerName ?? deepTier.providerName,
     model,
     baseURL: process.env.ELIA_FAST_BASE_URL,
-    apiKeyEnv: 'ELIA_FAST_API_KEY',
+    // Only override the key source when a dedicated key is actually present.
+    // Naming ELIA_FAST_API_KEY unconditionally *replaces* the preset's own key
+    // env, so `ELIA_FAST_PROVIDER=groq` with a perfectly good GROQ_API_KEY in
+    // .env resolved to "No API key found for provider groq" and silently fell
+    // back to the deep tier — the fast tier looked configured and wasn't.
+    apiKeyEnv: process.env.ELIA_FAST_API_KEY ? 'ELIA_FAST_API_KEY' : undefined,
     ignoreAmbient: true,
   })
   if ('error' in resolved) return deepTier
@@ -475,7 +505,39 @@ function resolveAutoFallbacks(deepTier: TierConfig, fastTier: TierConfig): TierC
   return routes
 }
 
-function resolveRoleOverrides(deepTier: TierConfig): Partial<Record<RoleName, TierConfig>> {
+/**
+ * Where the adversarial reviewers run, when it should differ from the builder.
+ *
+ * `ELIA_REVIEWER_PROVIDER`/`_MODEL` names one route for all three review roles
+ * at once (a per-role `ELIA_CRITIC_PROVIDER` etc. still wins). With neither set,
+ * `ELIA_INDEPENDENT_CRITICS=auto` routes them to the first distinct provider
+ * that resolves; `off` (the default for now — the flip waits on the G1
+ * generator/verifier scoreboard that can catch a regression) keeps them on the
+ * deep tier. Any failure to resolve falls back silently to the tier, never an
+ * error: losing independence must not stop a review from running.
+ */
+export function resolveReviewerRoute(deepTier: TierConfig, fastTier: TierConfig): TierConfig | undefined {
+  const explicit = process.env.ELIA_REVIEWER_PROVIDER || process.env.ELIA_REVIEWER_MODEL
+  if (explicit) {
+    const resolved = tryResolveProvider({
+      providerName: process.env.ELIA_REVIEWER_PROVIDER ?? deepTier.providerName,
+      model: process.env.ELIA_REVIEWER_MODEL,
+      baseURL: process.env.ELIA_REVIEWER_BASE_URL,
+      apiKeyEnv: process.env.ELIA_REVIEWER_API_KEY ? 'ELIA_REVIEWER_API_KEY' : undefined,
+      ignoreAmbient: true,
+    })
+    return 'error' in resolved ? undefined : toTierConfig(resolved)
+  }
+
+  const mode = (process.env.ELIA_INDEPENDENT_CRITICS ?? 'off').toLowerCase()
+  if (mode === 'off' || mode === '0' || mode === 'false' || mode === 'no') return undefined
+
+  // `auto` / `on`: the first distinct provider we can stand up. resolveAutoFallbacks
+  // already excludes the deep provider and anything unresolvable.
+  return resolveAutoFallbacks(deepTier, fastTier)[0]
+}
+
+function resolveRoleOverrides(deepTier: TierConfig, fastTier: TierConfig): Partial<Record<RoleName, TierConfig>> {
   const overrides: Partial<Record<RoleName, TierConfig>> = {}
 
   for (const roleName of ROLE_NAMES) {
@@ -488,10 +550,18 @@ function resolveRoleOverrides(deepTier: TierConfig): Partial<Record<RoleName, Ti
       providerName: providerName ?? deepTier.providerName,
       model,
       baseURL: process.env[`ELIA_${envKey}_BASE_URL`],
-      apiKeyEnv: `ELIA_${envKey}_API_KEY`,
+      // Same rule as the fast tier: a dedicated key overrides, its absence does not.
+      apiKeyEnv: process.env[`ELIA_${envKey}_API_KEY`] ? `ELIA_${envKey}_API_KEY` : undefined,
       ignoreAmbient: true,
     })
     if (!('error' in resolved)) overrides[roleName] = toTierConfig(resolved)
+  }
+
+  // Reviewers get an independent route only where the operator has not already
+  // pinned that specific role.
+  const reviewerRoute = resolveReviewerRoute(deepTier, fastTier)
+  if (reviewerRoute && reviewerRoute.label !== deepTier.label) {
+    for (const roleName of REVIEWER_ROLE_NAMES) overrides[roleName] ??= reviewerRoute
   }
 
   return overrides

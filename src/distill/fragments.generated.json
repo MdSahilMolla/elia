@@ -1,0 +1,4 @@
+{
+  "_comment": "Written only by the distillation gate (src/distill/gate.ts) after a candidate fragment passed the evolve benchmark, the generator-verifier gap check, and the value probes. Each entry is a short instruction distilled from repeated verified-successful runs — what took deliberation, made into a default. Edit by hand only to remove one.",
+  "fragments": {}
+}

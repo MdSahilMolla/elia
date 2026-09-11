@@ -54,6 +54,14 @@ test('gate configuration and tests are detected and immutable', () => {
   ])
 })
 
+test('the value core and the gap scoreboard are immutable to a candidate', () => {
+  expect(violatedImmutables(['values/value-core.md', 'src/values/core.ts', 'src/gap/corpus.ts', 'src/agent.ts'])).toEqual([
+    'values/value-core.md',
+    'src/values/core.ts',
+    'src/gap/corpus.ts',
+  ])
+})
+
 test('root gate configuration changes are included in candidate change detection', () => {
   const temp = mkdtempSync(join(tmpdir(), 'elia-config-'))
   const live = join(temp, 'live')

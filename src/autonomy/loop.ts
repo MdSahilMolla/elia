@@ -1,4 +1,6 @@
-import { config, systemPromptForMode, tierConfig, turnContextPrompt } from '../config.ts'
+import { join } from 'node:path'
+import { config, paths, systemPromptForMode, tierConfig, turnContextPrompt } from '../config.ts'
+import { withFileLockAsync } from '../fileLock.ts'
 import { lastAssistantText, runAgentLoop, type ConversationMessage } from '../agentLoop.ts'
 import { taskTool } from '../tools/task.ts'
 import { allWorkerTools } from '../tools/registry.ts'
@@ -32,7 +34,8 @@ import { commitAll, scaffoldProject } from './scaffold.ts'
 import { publishProject } from './publish.ts'
 import { emitEvent, machineReadable } from '../ui/runtime.ts'
 import { redactText } from '../ui/redact.ts'
-import { appendLessons, createLessonsTool, renderLessons } from './lessons.ts'
+import { appendLessons, consumeInjectedLessonKeys, createLessonsTool, renderLessons } from './lessons.ts'
+import { recordLessonExposure } from './lessonEfficacy.ts'
 import {
   createVerdictTool,
   describeIssues,
@@ -49,11 +52,13 @@ import { applyPlanRevisions, createPlanRevisionTool, MAX_PLAN_REVISIONS } from '
 import { assumptionOutcome, auditPlanFeasibility, createAssumptionTool } from './assumptions.ts'
 import { isSensitivePath } from './sensitivePaths.ts'
 import { classifyStuck, type StuckRecovery } from './stuck.ts'
-import { checkRoot, detectChecks } from './detectChecks.ts'
+import { checkRoot, classifyRegime, detectChecks, type VerificationRegime } from './detectChecks.ts'
 import { detectContradictions, recordCompletion } from './calibration.ts'
+import { deriveReward, recordTrajectory, refSystemPrompt } from '../trajectory/record.ts'
+import { ELIA_ROOT } from '../statePaths.ts'
 import { reliabilitySignal } from './reliability.ts'
 import type { CriticVerdict, Proposal } from './types.ts'
-import { appendActionAudit, writeRunReceipt } from './audit.ts'
+import { appendActionAudit, readActionLedger, writeRunReceipt } from './audit.ts'
 import { buildReviewDiffSection } from './reviewContext.ts'
 import { blockedInUnattendedMode, createActionGovernor, withActionGovernor, type ActionApproval, type ActionGovernor, type ActionGovernorStats, type GovernanceMode } from './governor.ts'
 import { GoalGraphStore, withGoalGraph, type GoalGraphStore as GoalGraphStoreType } from './goalGraph.ts'
@@ -207,10 +212,52 @@ Fix everything listed. When you are done, re-run the verification commands yours
  * commit; and each boundary writes a checkpoint, so any of them can be re-entered
  * later with a different decision.
  */
+/**
+ * Autonomous runs are exclusive, and the guard lives here rather than in the UI.
+ *
+ * One prompt once started three runs in sixty seconds: the first got as far as
+ * its first step and was killed, and the next two aborted at "propose" with "the
+ * execution plan does not have an approved durable approval record"
+ * (2026-09-10 runs 67gt-raec, 719a-wty5, 7fsb-rta8). Overlapping runs share
+ * `.elia/runs/`, the goal graph, and the journal, so the second one corrupts the
+ * first's durable state rather than merely wasting tokens.
+ *
+ * The REPL's own re-entrancy guard is the fast path, but it only covers one
+ * process and one front-end. This covers a second `elia auto`, a second
+ * terminal, and any future caller.
+ */
+let runningInThisProcess = false
+
+/** A long-running plan must not have its lock stolen; a crashed one must not hold it. */
+const RUN_LOCK_TTL_MS = 6 * 60 * 60 * 1000
+
 export function runAutonomousTask(options: AutonomousRunOptions): Promise<AutonomousRunResult> {
   const mode = options.mode ?? activeMode()
   const hooks = mode === 'dev' ? loadDevelopmentToolHooks() : []
-  return withActiveMode(mode, () => withToolHooks(hooks, () => runAutonomousTaskInternal(options)))
+  return withActiveMode(mode, () => withToolHooks(hooks, () => withRunLock(() => runAutonomousTaskInternal(options))))
+}
+
+async function withRunLock<T>(fn: () => Promise<T>): Promise<T> {
+  if (runningInThisProcess) {
+    throw new Error('An autonomous run is already in progress in this session. Wait for it to finish, or stop it first.')
+  }
+  runningInThisProcess = true
+  try {
+    return await withFileLockAsync(join(paths.runs, '.run.lock'), fn, {
+      ttlMs: RUN_LOCK_TTL_MS,
+      // Refuse immediately rather than queueing behind a run that may take an
+      // hour — the operator needs to know now, not after a silent wait.
+      timeoutMs: 0,
+    })
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    if (/is busy; another elia process is holding it/.test(message)) {
+      throw new Error('Another elia autonomous run is already using this project. Wait for it to finish, or stop it first.')
+    }
+    throw error
+  } finally {
+    runningInThisProcess = false
+  }
 }
 
 async function runAutonomousTaskInternal(options: AutonomousRunOptions): Promise<AutonomousRunResult> {
@@ -290,12 +337,39 @@ async function runAutonomousTaskInternal(options: AutonomousRunOptions): Promise
   let planApproved = false
   let verificationPassed = false
   let reviewPassed = false
+  // How much this run's verification is worth (mechanical > empirical > judgment).
+  // Defaults to the safe floor so an early abort never claims more; the verify
+  // phase sets the real value once the changed files are known.
+  let verificationRegime: VerificationRegime = 'judgment'
   // The last verified-good tree state, for a wrong-approach rewind. Assigned once
   // the verify phase begins; declared here so `done()` can always clean it up.
   let greenSnapshot: TreeSnapshot | undefined
   let rewoundOnce = false
   const track = (delta: Usage) => {
     usage = addUsage(usage, delta)
+  }
+
+  /**
+   * Ends the run as aborted, recording *where* it stopped and *why*.
+   *
+   * A bare `done('aborted')` produced a receipt that said only "0 of 1 planned
+   * work node(s) completed" — true, but it never named the cause, so every
+   * aborted run in completion-calibration.ndjson carries `confidence: "low"`
+   * and an empty `contradictions` array. Run 2026-09-10-6sl5-x7m6 journalled
+   * `phase: execute` and `run-end: aborted` 23ms apart with nothing in between
+   * to explain it.
+   */
+  const abortedAt = (phase: string, extra: Partial<AutonomousRunResult> = {}): AutonomousRunResult => {
+    journal.append('phase', {
+      phase: 'aborted',
+      during: phase,
+      reason: deadlineTriggered
+        ? `wall-clock budget of ${maxWallClockMs}ms exhausted`
+        : signal?.aborted
+          ? 'stopped by the operator'
+          : 'the run signal was aborted by its caller',
+    })
+    return done('aborted', extra)
   }
 
   const done = (
@@ -358,12 +432,48 @@ async function runAutonomousTaskInternal(options: AutonomousRunOptions): Promise
       unresolvedActions: graph.state().actions.filter((action) => action.state !== 'completed').length,
       pendingApprovals: completion.pendingApprovals,
       blockedByBudget: actionBudget.blockedByBudget,
+      regime: verificationRegime,
     }
     recordCompletion(runId, completion, completionFacts)
     const contradictions = detectContradictions(completion.state, completion.confidence, completionFacts)
+    recordLessonExposure(runId, consumeInjectedLessonKeys(), {
+      verify: verificationPassed ? 'pass' : 'fail',
+      regime: verificationRegime,
+      clean: verificationPassed && contradictions.length === 0,
+    })
     if (contradictions.length > 0) {
       journal.append('phase', { phase: 'learn', note: `completion contradiction: ${contradictions.join('; ')}` })
       writeSubStep(`⚠ completion verdict "${completion.state}/${completion.confidence}" doesn't match the facts: ${contradictions.join('; ')}`)
+    }
+    try {
+      // One trajectory row per run: the per-wave commits already hold the diff,
+      // so this row carries the goal, the tool sequence, and the graded outcome
+      // — the training signal a git checkout alone doesn't.
+      const ledger = readActionLedger(runId)
+      recordTrajectory({
+        corr: runId,
+        kind: 'autonomous',
+        prompt: goal,
+        systemPromptRef: refSystemPrompt(activeMode()),
+        tools: ledger.map((record) => ({ name: record.tool, ok: !record.isError })),
+        touched: [],
+        verify: verificationPassed ? 'pass' : 'fail',
+        regime: verificationRegime,
+        contradictions,
+        cwdIsEliaRoot: process.cwd() === ELIA_ROOT,
+        reward: deriveReward({
+          toolErrors: ledger.filter((record) => record.isError).length,
+          editRetries: 0,
+          verify: verificationPassed ? 'pass' : 'fail',
+          repairAttempts: 0,
+          aborted: finalOutcome === 'aborted',
+          completionState: completion.state,
+          regime: verificationRegime,
+          contradictions: contradictions.length,
+        }),
+      })
+    } catch {
+      // best-effort; recordTrajectory guards itself too
     }
     if (greenSnapshot) void discardTreeSnapshot(greenSnapshot)
     emitEvent('run_finished', { runId, goal: redactText(goal, 2000), outcome: finalOutcome, taskSessionId: parentTask.id, completion, elapsedMs: Date.now() - startedAt, usage, graph: graph.state() })
@@ -416,7 +526,7 @@ async function runAutonomousTaskInternal(options: AutonomousRunOptions): Promise
   if (proposal) {
     writeSubStep(`resuming durable goal graph ${runId} from persisted node state`)
   } else while (true) {
-    if (runSignal?.aborted) return done('aborted')
+    if (runSignal?.aborted) return abortedAt('orient')
 
     journal.append('phase', { phase: 'propose', attempt: amendments })
     // Orienting is almost entirely read_file/grep/list_files, and those reads
@@ -668,7 +778,7 @@ Finding that an assumption is FALSE is worth more than a confident guess on ever
     writePhase('execute', `${variantCount} parallel implementation attempts`)
     journal.append('phase', { phase: 'execute', variants: variantCount })
 
-    if (runSignal?.aborted) return done('aborted', { proposal })
+    if (runSignal?.aborted) return abortedAt('execute (variants)', { proposal })
     const result = await runVariants({ proposal, briefing, count: variantCount, runId, journal, governor, signal: runSignal })
     track(result.usage)
     for (const step of proposal.steps) {
@@ -710,7 +820,7 @@ Finding that an assumption is FALSE is worth more than a confident guess on ever
       const index = waveCursor
       const wave = waves[index]!
       waveCursor += 1
-      if (runSignal?.aborted) return done('aborted', { proposal })
+      if (runSignal?.aborted) return abortedAt('execute (waves)', { proposal })
       if (waves.length > 1) writeSubStep(`wave ${index + 1} of ${waves.length}`)
       taskSessions.update(parentTask.id, {
         status: 'running',
@@ -936,7 +1046,7 @@ Do not repeat whatever failed. If a file is protected, a path is refused, or a c
     taskSessions.update(parentTask.id, { status: 'running', action: 'Polishing', detail: 'Running the bounded final quality pass before verification' })
     writePhase('polish', `${maxPolishPasses} bounded final quality pass${maxPolishPasses === 1 ? '' : 'es'}`)
     for (let polishAttempt = 1; polishAttempt <= maxPolishPasses; polishAttempt++) {
-      if (runSignal?.aborted) return done('aborted', { proposal })
+      if (runSignal?.aborted) return abortedAt('polish', { proposal })
       journal.append('phase', { phase: 'polish', attempt: polishAttempt })
 
       const diff = await runShell('git diff HEAD', 30_000, undefined, runSignal)
@@ -998,12 +1108,20 @@ Read the changed files in full context. Improve only concrete issues directly re
   let lastRepairReport = ''
   let pendingApproachChange: string | undefined
   const verificationRoot = checkRoot(proposal.steps.flatMap((step) => step.files), process.cwd())
+  // How much a "looks fine" verdict on this run is actually worth. A
+  // `judgment`-regime run has nothing but self-critique behind it, so its
+  // conclusions stay in this session and never become durable lessons.
+  verificationRegime = classifyRegime(
+    proposal.steps.flatMap((step) => step.files),
+    proposal.verification,
+    process.cwd(),
+  )
   // Baseline: the post-execute state. Each passing verification refreshes this
   // to the current state; a wrong-approach stall rewinds the working tree here.
   greenSnapshot = await captureTreeSnapshot(process.cwd(), runDir(runId))
 
   while (true) {
-    if (runSignal?.aborted) return done('aborted', { proposal, verdict })
+    if (runSignal?.aborted) return abortedAt('verify', { proposal, verdict })
 
     taskSessions.update(parentTask.id, { status: 'running', action: 'Verifying', detail: proposal.verification.length > 0 ? `Running ${proposal.verification.length} verification command(s)` : 'Running structured review without declared commands' })
     writePhase('verify', proposal.verification.length > 0 ? proposal.verification.join(' · ') : 'review only')
@@ -1252,7 +1370,7 @@ Judge what is there, not what the code looks like it would probably do. A criter
         if (stuck.question) writeBlock('Needs a decision from you', stuck.question)
         journal.append('phase', { phase: 'reflect', attempt, note: `stopped (${progress.trend} / ${stuck.category}): ${stuck.reason}${stuck.question ? ` Question: ${stuck.question}` : ''}` })
         const auto = repeatedFailureLesson({ goal, gate, repeated: progress.repeated, attempts: attempt })
-        const lessons = await captureLessons(goal, proposal, 'unresolved', journal, track, governor, graph, runSignal, auto ? [auto] : [])
+        const lessons = await captureLessons(goal, proposal, 'unresolved', journal, track, governor, graph, verificationRegime, runSignal, auto ? [auto] : [])
         return done('needs-attention', { proposal, verdict, lessons })
       }
     }
@@ -1265,7 +1383,7 @@ Judge what is there, not what the code looks like it would probably do. A criter
       // approach to warn a future run about.
       const recurred = progress.trend === 'stalled' || progress.trend === 'diverging' ? progress.repeated : []
       const auto = repeatedFailureLesson({ goal, gate, repeated: recurred, attempts: attempt })
-      const lessons = await captureLessons(goal, proposal, 'unresolved', journal, track, governor, graph, runSignal, auto ? [auto] : [])
+      const lessons = await captureLessons(goal, proposal, 'unresolved', journal, track, governor, graph, verificationRegime, runSignal, auto ? [auto] : [])
       return done('needs-attention', { proposal, verdict, lessons })
     }
 
@@ -1345,7 +1463,7 @@ Judge what is there, not what the code looks like it would probably do. A criter
   // --- Learn ---------------------------------------------------------------
 
   taskSessions.update(parentTask.id, { status: 'running', action: 'Learning', detail: 'Capturing durable lessons for future runs' })
-  const lessons = captureLearning ? await captureLessons(goal, proposal, 'succeeded', journal, track, governor, graph, runSignal) : []
+  const lessons = captureLearning ? await captureLessons(goal, proposal, 'succeeded', journal, track, governor, graph, verificationRegime, runSignal) : []
 
   writeSummary('Run complete', [
     ['run', runId],
@@ -1376,18 +1494,30 @@ async function captureLessons(
   track: (usage: Usage) => void,
   governor: ActionGovernor,
   graph: GoalGraphStoreType,
+  /** How much this run's verification was actually worth — `judgment` runs record nothing durable. */
+  regime: VerificationRegime,
   signal?: AbortSignal,
   /** Deterministic lessons the loop already knows to record (e.g. a repeated repair failure). */
   deterministic: string[] = [],
 ): Promise<string[]> {
   writePhase('learn')
-  journal.append('phase', { phase: 'learn' })
+  journal.append('phase', { phase: 'learn', regime })
+
+  // Nothing outside elia's own opinion checked this run. A "lesson" drawn from a
+  // review-only pass is exactly the closed-loop signal that lets a reasoner
+  // entrench its own mistakes across runs, so it is kept out of the durable
+  // store — the run's findings still live in this session's transcript.
+  if (regime === 'judgment') {
+    writeSubStep('verification was judgement-only (no mechanical or empirical check) — not recording cross-run lessons from this run')
+    journal.append('lesson', { lessons: [], source: 'skipped:judgment-regime' })
+    return []
+  }
 
   // Recorded first and unconditionally: the model-driven pass below can decide
   // there is "nothing durable", but a repair loop that gave up against the same
   // failure twice has already produced a fact worth carrying forward.
   if (deterministic.length > 0) {
-    appendLessons(deterministic)
+    appendLessons(deterministic.map((text) => ({ text, source: 'auto-deterministic', confidence: 0.95 })))
     journal.append('lesson', { lessons: deterministic, source: 'deterministic' })
     for (const lesson of deterministic) writeSubStep(`learned: ${lesson}`)
   }

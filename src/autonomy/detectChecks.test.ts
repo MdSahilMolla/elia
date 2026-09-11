@@ -2,7 +2,7 @@ import { afterEach, beforeEach, expect, test } from 'bun:test'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { changedCodeFiles, checkRoot, detectChecks } from './detectChecks.ts'
+import { changedCodeFiles, changedStaticPages, checkRoot, classifyRegime, detectChecks, weakestRegime } from './detectChecks.ts'
 
 let dir: string
 beforeEach(() => {
@@ -99,4 +99,95 @@ test('checkRoot falls back to the repo root when changes span projects', () => {
   mkdirSync(app, { recursive: true })
   writeFileSync(join(app, 'package.json'), '{}')
   expect(checkRoot([join(app, 'a.ts'), join(dir, 'src', 'b.ts')], dir)).toBe(dir)
+})
+
+// Regression: checkRoot fell back to the repo root when no project marker was
+// found above any changed file. That is the freshly-scaffolded case, and the
+// fallback handed back the *host* repo — so detectChecks returned elia's own
+// `bun run typecheck` / `bun test src/` and ran them against a static page.
+test('checkRoot refuses the host repo for a deliverable its checks never touch', () => {
+  const root = mkdtempSync(join(tmpdir(), 'elia-checkroot-'))
+  writeFileSync(join(root, 'package.json'), JSON.stringify({ name: 'host', scripts: { typecheck: 'tsc --noEmit', test: 'bun test src/' } }))
+  const site = join(root, 'portfolio-demo')
+  mkdirSync(site, { recursive: true })
+  const page = join(site, 'index.html')
+  writeFileSync(page, '<h1>hi</h1>')
+  // `bun test src/` does not reach portfolio-demo/ — running it would prove nothing.
+  expect(checkRoot([page], root)).toBeUndefined()
+})
+
+test('a project that declares no paths still covers its whole tree', () => {
+  const root = mkdtempSync(join(tmpdir(), 'elia-checkroot-'))
+  writeFileSync(join(root, 'package.json'), JSON.stringify({ name: 'host', scripts: { test: 'jest' } }))
+  const nested = join(root, 'anything')
+  mkdirSync(nested, { recursive: true })
+  const file = join(nested, 'a.ts')
+  writeFileSync(file, 'export const a = 1')
+  expect(checkRoot([file], root)).toBe(root)
+})
+
+test('checkRoot still finds the host project for changes to its own source', () => {
+  const root = mkdtempSync(join(tmpdir(), 'elia-checkroot-'))
+  writeFileSync(join(root, 'package.json'), JSON.stringify({ name: 'host', scripts: { test: 'bun test' } }))
+  const src = join(root, 'src')
+  mkdirSync(src, { recursive: true })
+  const file = join(src, 'a.ts')
+  writeFileSync(file, 'export const a = 1')
+  expect(checkRoot([file], root)).toBe(root)
+})
+
+test('checkRoot still prefers a scaffolded sub-project that has its own manifest', () => {
+  const root = mkdtempSync(join(tmpdir(), 'elia-checkroot-'))
+  writeFileSync(join(root, 'package.json'), JSON.stringify({ name: 'host' }))
+  const app = join(root, 'workspace', 'my-app')
+  mkdirSync(app, { recursive: true })
+  writeFileSync(join(app, 'package.json'), JSON.stringify({ name: 'my-app', scripts: { test: 'vitest run' } }))
+  const file = join(app, 'index.ts')
+  writeFileSync(file, 'export const a = 1')
+  expect(checkRoot([file], root)).toBe(app)
+})
+
+test('changedStaticPages picks out the HTML a turn wrote', () => {
+  expect(changedStaticPages(['a/index.html', 'b/style.css', 'c/app.ts', 'd/page.HTM'])).toEqual(['a/index.html', 'd/page.HTM'])
+})
+
+test('classifyRegime: a project with typecheck + tests is mechanical', () => {
+  writeFileSync(join(dir, 'package.json'), JSON.stringify({ scripts: { typecheck: 'tsc --noEmit', test: 'bun test' } }))
+  writeFileSync(join(dir, 'bun.lock'), '')
+  const file = join(dir, 'src', 'a.ts')
+  mkdirSync(join(dir, 'src'), { recursive: true })
+  writeFileSync(file, 'export const a = 1')
+  expect(classifyRegime([file], [], dir)).toBe('mechanical')
+})
+
+test('classifyRegime: explicit test command wins even without an inferable project', () => {
+  const file = join(dir, 'thing.ts')
+  writeFileSync(file, 'export const a = 1')
+  expect(classifyRegime([file], ['bun test src/'], dir)).toBe('mechanical')
+})
+
+test('classifyRegime: a lone static page is empirical', () => {
+  const page = join(dir, 'index.html')
+  writeFileSync(page, '<h1>hi</h1>')
+  expect(classifyRegime([page], [], dir)).toBe('empirical')
+})
+
+test('classifyRegime: no project, no static page, no command is judgment', () => {
+  const file = join(dir, 'notes', 'thing.ts')
+  mkdirSync(join(dir, 'notes'), { recursive: true })
+  writeFileSync(file, 'export const a = 1')
+  expect(classifyRegime([file], [], dir)).toBe('judgment')
+})
+
+test('classifyRegime: a non-mechanical declared command does not lift the regime', () => {
+  const file = join(dir, 'notes', 'thing.ts')
+  mkdirSync(join(dir, 'notes'), { recursive: true })
+  writeFileSync(file, 'export const a = 1')
+  expect(classifyRegime([file], ['echo done', 'node scripts/deploy.js'], dir)).toBe('judgment')
+})
+
+test('weakestRegime returns the floor', () => {
+  expect(weakestRegime(['mechanical', 'judgment', 'empirical'])).toBe('judgment')
+  expect(weakestRegime(['mechanical', 'empirical'])).toBe('empirical')
+  expect(weakestRegime(['mechanical'])).toBe('mechanical')
 })

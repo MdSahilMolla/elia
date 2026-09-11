@@ -29,8 +29,44 @@ const WHOLE_PROJECT = /\b(end[-\s]?to[-\s]?end|from\s+scratch|full[-\s]?stack|gr
 const SMALL_TASK_OPENER =
   /^\s*(?:please\s+)?(?:fix|add\s+(?:a|an|the)\b|update|tweak|adjust|rename|remove|delete|refactor|revert|bump|patch|why|what|what's|whats|how|where|when|explain|describe|show|list|find|search|look|check|investigate|debug|diagnose|review|audit|summar|document|comment|test\s+the|run\s+the|make\s+the\s+\S+\s+(?:pass|green))\b/i
 
-/** A question, not a work order. */
-const QUESTION = /^\s*(?:can|could|does|do|is|are|should|would|will|has|have|which|who)\b.*\?\s*$/i
+/**
+ * A question, not a work order.
+ *
+ * The trailing `?` used to be required, so an interrogative opener in a message
+ * that ran on — or that someone pasted without punctuation — sailed past this
+ * guard and was matched against the build patterns instead.
+ */
+const QUESTION = /^\s*(?:can|could|does|do|is|are|should|would|will|has|have|which|who|what|why|where|when|how)\b/i
+
+/**
+ * How much of a message is treated as the instruction.
+ *
+ * The classifier used to scan the entire payload. A ~4,000-character chat log
+ * pasted in for context contained the words "build" and "bot" somewhere in its
+ * prose, which is all BUILD_VERB + PROJECT_NOUN needs — so the paste was
+ * classified as "building a new project" and routed into the full
+ * plan-and-approve pipeline (run 2026-09-10-6sl5-x7m6: 42s, zero nodes
+ * completed, nothing built). Instructions live at the top of a message;
+ * reference material pasted underneath is not a work order.
+ */
+const INSTRUCTION_CHARS = 400
+const INSTRUCTION_LINES = 4
+
+/**
+ * Length past which a message is more likely pasted material than typed intent.
+ * Below it, scanning the whole text is harmless and catches multi-line asks.
+ */
+const PASTE_CHARS = 1_500
+
+/** Reads like an instruction being given, rather than prose that mentions building. */
+const IMPERATIVE_OPENER =
+  /^\s*(?:please\s+)?(?:build|create|make|write|implement|add|fix|update|scaffold|generate|set[-\s]?up|stand[-\s]?up|develop|design|refactor|rename|remove|delete|run|test|deploy|i\s+(?:want|need|would\s+like)|let'?s|can\s+you|could\s+you|help\s+me)\b/i
+
+/** The part of a message that carries the instruction. */
+function instructionOf(text: string): string {
+  const lines = text.split(/\r?\n/).filter((line) => line.trim())
+  return lines.slice(0, INSTRUCTION_LINES).join('\n').slice(0, INSTRUCTION_CHARS)
+}
 
 /** Named an existing file/path — a targeted change, not a new project. */
 const FILE_REFERENCE = /(?:^|\s)[\w./-]+\.(?:ts|tsx|js|jsx|py|go|rs|java|c|cc|cpp|h|hpp|rb|php|css|scss|html|json|ya?ml|toml|md|sql)(?:\b|$)/i
@@ -49,12 +85,25 @@ const SMALL_STATIC_SITE =
   /\b(static\s+(?:web)?site|portfolio|landing\s+page|personal\s+(?:web)?site|r[eé]sum[eé]|\bcv\b|one[-\s]?pager|single[-\s]?page)\b/i
 
 export function classifyEscalation(rawText: string): EscalationDecision {
-  const text = rawText.trim()
-  const firstLine = text.split(/\r?\n/, 1)[0] ?? text
+  const raw = rawText.trim()
   const no = (reason: string): EscalationDecision => ({ escalate: false, reason })
   const yes = (reason: string): EscalationDecision => ({ escalate: true, reason })
 
-  if (text.length < 25) return no('too short to be a project')
+  if (raw.length < 25) return no('too short to be a project')
+
+  // A long message that does not open with an instruction is pasted reference
+  // material — an article, a chat log, an error dump — not a work order, no
+  // matter what verbs appear further down it.
+  const instruction = instructionOf(raw)
+  if (raw.length > PASTE_CHARS && !IMPERATIVE_OPENER.test(instruction)) {
+    return no('pasted context, not an instruction')
+  }
+
+  // Match against the instruction rather than the whole payload once the
+  // message is long enough for the two to differ.
+  const text = raw.length > PASTE_CHARS ? instruction : raw
+  const firstLine = text.split(/\r?\n/, 1)[0] ?? text
+
   if (QUESTION.test(firstLine)) return no('a question, not a build task')
   if (SMALL_TASK_OPENER.test(firstLine)) return no('reads as a targeted change')
   // A static one-pager, unless it also asks for a backend / feature set.
