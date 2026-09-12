@@ -2,6 +2,7 @@ import type { Tool } from './types.ts'
 import { currentAgent } from '../autonomy/context.ts'
 import { execCapture, type ExecResult } from '../github/exec.ts'
 import { detectGitHubContext, renderGitHubBanner } from '../github/context.ts'
+import { clampOutput } from '../shell.ts'
 
 /**
  * elia's hands on GitHub: branch, commit, push, open and inspect pull
@@ -20,7 +21,7 @@ import { detectGitHubContext, renderGitHubBanner } from '../github/context.ts'
 
 type Action =
   | 'status' | 'branch' | 'commit' | 'push'
-  | 'pr_create' | 'pr_view' | 'pr_list' | 'pr_checks' | 'pr_reviews' | 'pr_comment' | 'pr_merge'
+  | 'pr_create' | 'pr_view' | 'pr_list' | 'pr_checks' | 'pr_checks_log' | 'pr_reviews' | 'pr_unresolved_reviews' | 'pr_comment' | 'pr_merge'
   | 'issue_list' | 'issue_view' | 'issue_create'
 
 // Git ref-name-safe charset (letters, digits, `.`, `_`, `/`, `-`), first
@@ -72,7 +73,9 @@ Actions:
 - pr_view: show a PR (defaults to the current branch's). { number? }
 - pr_list: list open pull requests. { limit? }
 - pr_checks: CI / status-check results for a PR. { number? }
+- pr_checks_log: like pr_checks, but for any check that is currently failing, also fetches that run's actual failing-step log — use this instead of pr_checks when a check has failed and you need to see why, not just that it did. { number? }
 - pr_reviews: review comments and discussion on a PR (for addressing feedback). { number? }
+- pr_unresolved_reviews: only the review-comment threads that are still unresolved — use this instead of pr_reviews when the goal is to work through outstanding feedback one thread at a time. { number? }
 - pr_comment: add a comment to a PR. { number, body } — needs approval.
 - pr_merge: merge a PR. { number, method? one of merge|squash|rebase } — needs approval.
 - issue_list: list open issues (intake for autonomous work). { limit?, label? }
@@ -85,7 +88,7 @@ Actions:
         type: 'string',
         enum: [
           'status', 'branch', 'commit', 'push',
-          'pr_create', 'pr_view', 'pr_list', 'pr_checks', 'pr_reviews', 'pr_comment', 'pr_merge',
+          'pr_create', 'pr_view', 'pr_list', 'pr_checks', 'pr_checks_log', 'pr_reviews', 'pr_unresolved_reviews', 'pr_comment', 'pr_merge',
           'issue_list', 'issue_view', 'issue_create',
         ],
       },
@@ -202,12 +205,97 @@ Actions:
       return result.ok ? result.stdout : fail(result)
     }
 
+    if (action === 'pr_unresolved_reviews') {
+      const context = await detectGitHubContext(dir, { signal, force: true, remote: true })
+      if (!context.slug) return 'Could not determine the GitHub owner/repo for this checkout (no origin remote?).'
+      const [owner, repo] = context.slug.split('/')
+
+      let number = typeof input.number === 'number' ? input.number : undefined
+      if (number === undefined) {
+        const current = await gh(['pr', 'view', '--json', 'number', '--jq', '.number'])
+        if (!current.ok) return fail(current)
+        const parsed = Number.parseInt(current.stdout.trim(), 10)
+        if (!Number.isFinite(parsed)) return "Could not determine the current branch's PR number."
+        number = parsed
+      }
+
+      // Resolved/unresolved is per review *thread*, not per comment, and is
+      // only exposed over the GraphQL API — `gh pr view --json` has no field
+      // for it (confirmed against `gh pr view --help`'s JSON FIELDS list).
+      const query =
+        'query($owner:String!,$repo:String!,$number:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$number){reviewThreads(first:50){nodes{isResolved isOutdated path line comments(first:10){nodes{author{login} body}}}}}}}'
+      const result = await gh(['api', 'graphql', '-f', `query=${query}`, '-F', `owner=${owner}`, '-F', `repo=${repo}`, '-F', `number=${number}`])
+      if (!result.ok) return fail(result)
+
+      interface ThreadNode {
+        isResolved: boolean
+        isOutdated: boolean
+        path: string | null
+        line: number | null
+        comments: { nodes: { author: { login: string } | null; body: string }[] }
+      }
+      let parsed: { data?: { repository?: { pullRequest?: { reviewThreads?: { nodes?: ThreadNode[] } } } } }
+      try {
+        parsed = JSON.parse(result.stdout)
+      } catch {
+        return `Could not parse GitHub's response.\n${clampOutput(result.stdout || result.stderr, 2_000)}`
+      }
+      const threads = parsed.data?.repository?.pullRequest?.reviewThreads?.nodes ?? []
+      if (threads.length === 0) return 'No review comment threads on this PR.'
+      const unresolved = threads.filter((t) => !t.isResolved)
+      if (unresolved.length === 0) return `All ${threads.length} review comment thread(s) are resolved — nothing outstanding.`
+
+      const lines = unresolved.map((thread, index) => {
+        const location = thread.path ? `${thread.path}${thread.line ? `:${thread.line}` : ''}` : '(no file location)'
+        const comments = thread.comments.nodes.map((c) => `  - ${c.author?.login ?? 'unknown'}: ${c.body}`).join('\n')
+        return `${index + 1}. ${location}${thread.isOutdated ? ' (diff position outdated by later commits)' : ''}\n${comments}`
+      })
+      return `${unresolved.length} of ${threads.length} review comment thread(s) still unresolved:\n\n${clampOutput(lines.join('\n\n'), 8_000)}`
+    }
+
     if (action === 'pr_checks') {
       const args = ['pr', 'checks']
       if (typeof input.number === 'number') args.push(String(input.number))
       const result = await gh(args)
       // `gh pr checks` exits non-zero when checks are failing or pending — that is data, not an error.
       return result.stdout || result.stderr || (result.ok ? 'All checks passed.' : fail(result))
+    }
+
+    if (action === 'pr_checks_log') {
+      const jsonArgs = ['pr', 'checks']
+      if (typeof input.number === 'number') jsonArgs.push(String(input.number))
+      jsonArgs.push('--json', 'name,state,bucket,link')
+      const jsonResult = await gh(jsonArgs)
+      // Same as pr_checks: a non-zero exit here means "failing or pending", not
+      // a transport failure — the --json payload still lands on stdout either way.
+      let checks: { name: string; state: string; bucket: string; link: string }[]
+      try {
+        checks = JSON.parse(jsonResult.stdout) as typeof checks
+      } catch {
+        return jsonResult.ok ? jsonResult.stdout || 'No checks configured for this PR yet.' : fail(jsonResult)
+      }
+      if (checks.length === 0) return 'No checks configured for this PR yet.'
+
+      const summary = checks.map((c) => `${c.bucket === 'pass' ? '✓' : c.bucket === 'fail' ? '✗' : c.bucket === 'pending' ? '…' : c.bucket} ${c.name} (${c.state})`).join('\n')
+      const failing = checks.filter((c) => c.bucket === 'fail')
+      if (failing.length === 0) return `${summary}\n\nNo failing checks (some may still be pending).`
+
+      // A GitHub Actions check's link is .../actions/runs/<runId>/job/<jobId> —
+      // several failing check names can point at jobs within the same run, so
+      // fetch each distinct run's failed-step log only once.
+      const runIds = [...new Set(failing.map((c) => c.link.match(/\/actions\/runs\/(\d+)/)?.[1]).filter((id): id is string => Boolean(id)))].slice(0, 3)
+      if (runIds.length === 0) {
+        return `${summary}\n\n${failing.length} check(s) failing, but no GitHub Actions run could be identified from their links (an external/third-party status check does not have a fetchable log here — open its link directly).`
+      }
+
+      const logs = await Promise.all(
+        runIds.map(async (runId) => {
+          const logResult = await gh(['run', 'view', runId, '--log-failed'])
+          const body = logResult.stdout.trim() || logResult.stderr.trim() || '(no failed-step output captured)'
+          return `--- run ${runId} failed steps ---\n${clampOutput(body, 6_000)}`
+        }),
+      )
+      return `${summary}\n\n${logs.join('\n\n')}`
     }
 
     if (action === 'pr_comment') {
