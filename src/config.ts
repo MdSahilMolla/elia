@@ -257,6 +257,42 @@ export function roleConfig(roleName: RoleName, tier: Tier): TierConfig {
   return config.roleOverrides[roleName] ?? tierConfig(tier)
 }
 
+/**
+ * A weak, deliberately conservative signal that an assignment is not routine
+ * legwork: language that names the kind of work where a cheaper model's
+ * mistakes are expensive to have missed (concurrency, security, migrations,
+ * breaking changes), or a brief long enough that it is very unlikely to be a
+ * one-line fix. False positives just cost a bit more; false negatives are the
+ * failure mode this exists to reduce, so the pattern errs toward matching.
+ */
+const HIGH_DIFFICULTY_PATTERN =
+  /\b(migrat(e|ion|ing)|re-?architect|refactor|concurren(t|cy)|race condition|deadlock|thread.?safe|distributed|consensus|transactional|security|vulnerab(le|ility)|authenticat(e|ion)|authoriz(e|ation)|cryptograph|backward.?compat|breaking change|data loss|encrypt|credential)/i
+
+export function looksHighDifficulty(assignmentText: string): boolean {
+  if (HIGH_DIFFICULTY_PATTERN.test(assignmentText)) return true
+  return assignmentText.trim().split(/\s+/).filter(Boolean).length > 250
+}
+
+/**
+ * Per-task difficulty routing, layered on top of the existing per-role tier
+ * and per-role provider override — the "cost/difficulty model router" the
+ * static role→tier mapping alone does not provide. A role's *default* tier
+ * (fast for a scout, deep for a builder) is a property of the role, decided
+ * once in roles.ts; this instead looks at what one specific assignment
+ * actually asks for and, only when that role currently runs on the fast
+ * tier and the assignment looks non-routine, escalates that one dispatch to
+ * deep. It never does the reverse (deep to fast) — a role given the strong
+ * model by design is not something a text heuristic should second-guess —
+ * and it never overrides an operator's explicit `ELIA_<ROLE>_PROVIDER`/
+ * `_MODEL` pin, which is a deliberate choice this heuristic does not get to
+ * relitigate.
+ */
+export function routeForAssignment(roleName: RoleName, baseTier: Tier, assignmentText: string): TierConfig {
+  if (config.roleOverrides[roleName]) return roleConfig(roleName, baseTier)
+  if (baseTier === 'deep' || !looksHighDifficulty(assignmentText)) return roleConfig(roleName, baseTier)
+  return tierConfig('deep')
+}
+
 
 export const memorySections = buildMemorySections()
 
