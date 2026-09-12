@@ -83,6 +83,31 @@ test('a request that times out is removed from the pending map instead of leakin
   }
 })
 
+test('a server that crashes rejects pending calls immediately (not after the full timeout) with its stderr', async () => {
+  const client = new McpClient(echoConfig())
+  try {
+    await client.connect()
+    const internals = client as unknown as {
+      request(method: string, params: unknown, timeoutMs?: number, timeoutMessage?: string): Promise<unknown>
+    }
+    const startedAt = Date.now()
+    let error: unknown
+    try {
+      // The fixture writes to stderr then exits without answering — a real
+      // request timeout here would be CALL_TIMEOUT_MS (120s); draining stderr
+      // and reacting to the dead process should fail this in well under a second.
+      await internals.request('test/crash', {}, 60_000, 'should not reach the timeout')
+    } catch (err) {
+      error = err
+    }
+    expect(Date.now() - startedAt).toBeLessThan(5_000)
+    expect(error).toBeInstanceOf(Error)
+    expect((error as Error).message).toContain('simulated fatal error')
+  } finally {
+    await client.closeAndWait()
+  }
+})
+
 test('close() rejects any still-pending call instead of hanging', async () => {
   const client = new McpClient(echoConfig())
   await client.connect()

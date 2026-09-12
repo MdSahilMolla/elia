@@ -42,7 +42,11 @@ interface AllowFile {
 const MAX_RULES = 500
 
 export function allowPath(scope: AllowScope, cwd = process.cwd()): string {
-  return scope === 'project' ? join(cwd, '.elia', 'allow.json') : join(homedir(), '.elia', 'allow.json')
+  if (scope === 'project') return join(cwd, '.elia', 'allow.json')
+  // Tests need to isolate the global scope from the real machine's actual
+  // ~/.elia/allow.json — and on win32, os.homedir() reads %USERPROFILE%, not
+  // $HOME, so the usual "just set $HOME" trick silently does nothing there.
+  return process.env.ELIA_ALLOW_GLOBAL_PATH || join(homedir(), '.elia', 'allow.json')
 }
 
 interface Cached {

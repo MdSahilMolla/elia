@@ -32,6 +32,12 @@ function handle(line: string): void {
   // request-timeout pending-map cleanup path (the client's own timeout has to
   // fire since the server deliberately never will).
   if (message.method === 'test/hang') return
+  // Used by client.test.ts to exercise the drain-stderr-and-fail-fast path: writes
+  // to stderr, then exits without ever answering this request.
+  if (message.method === 'test/crash') {
+    process.stderr.write('fixture crash: simulated fatal error\n')
+    process.exit(1)
+  }
   if (message.method === 'tools/list') {
     send({
       jsonrpc: '2.0',

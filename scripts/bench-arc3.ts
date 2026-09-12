@@ -1,7 +1,7 @@
 /** Public-development ARC-AGI-3 evaluation using Elia's real runAgentLoop. */
 import { spawn } from 'node:child_process'
 import { createInterface } from 'node:readline'
-import { mkdirSync, appendFileSync, writeFileSync } from 'node:fs'
+import { mkdirSync, appendFileSync, writeFileSync, existsSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { resolve, join } from 'node:path'
 import { parseArgs } from 'node:util'
@@ -45,7 +45,18 @@ const eventFile = join(runDir, 'events.jsonl')
 function record(kind: string, data: unknown) {
   appendFileSync(eventFile, JSON.stringify({ at: new Date().toISOString(), kind, data }) + '\n')
 }
-const child = spawn(join(dataRoot, '.venv', 'Scripts', 'python.exe'),
+function venvPython(venvRoot: string): string {
+  // `uv venv` (see ARC3-BENCHMARK.md) lays out the interpreter differently per
+  // platform: Scripts/python.exe on Windows, bin/python3 everywhere else.
+  const candidate = process.platform === 'win32'
+    ? join(venvRoot, '.venv', 'Scripts', 'python.exe')
+    : join(venvRoot, '.venv', 'bin', 'python3')
+  if (existsSync(candidate)) return candidate
+  const onPath = Bun.which('python3') ?? Bun.which('python')
+  if (onPath) return onPath
+  throw new Error(`No Python interpreter found: expected ${candidate}, or python3/python on PATH. See scripts/ARC3-BENCHMARK.md.`)
+}
+const child = spawn(venvPython(dataRoot),
   [join(root, 'scripts', 'arc3_bridge.py'), '--root', dataRoot],
   { cwd: dataRoot, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'], env: {
     PATH: process.env.PATH, SYSTEMROOT: process.env.SYSTEMROOT, TEMP: process.env.TEMP,
