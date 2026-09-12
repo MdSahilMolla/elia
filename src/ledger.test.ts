@@ -21,6 +21,7 @@ const {
   noteToolUse,
   resetPendingRecalls,
   flushPendingConfirmations,
+  pendingWriteCount,
   archiveEpisode,
 } = await import('./ledger.ts')
 
@@ -163,4 +164,19 @@ test('markRecalled + noteToolUse marks a confirmed use when a recalled file is t
 
 test('noteToolUse is a no-op with nothing pending', () => {
   expect(() => noteToolUse({ path: 'whatever.ts' })).not.toThrow()
+})
+
+test('pendingWrites drains back to 0 once a confirmation write settles, instead of growing forever', async () => {
+  stubProvider('{"summary":"touched thing.ts","decisions":[],"filesTouched":["src/thing.ts"],"symbols":[],"openThreads":[]}')
+  setActiveLedgerSession({ id: 'sess-7', turn: 0, dir: testDir })
+  await archiveEpisode([userText('hi')], testDir)
+  const [episode] = await loadLedger('sess-7', testDir)
+  expect(episode).toBeDefined()
+
+  expect(pendingWriteCount()).toBe(0)
+  markRecalled([episode!])
+  noteToolUse({ path: 'src/thing.ts' })
+  expect(pendingWriteCount()).toBe(1)
+  await flushPendingConfirmations()
+  expect(pendingWriteCount()).toBe(0)
 })
