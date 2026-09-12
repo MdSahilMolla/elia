@@ -10,6 +10,19 @@
 /** Bumped on any breaking change to a method's params or result shape. */
 export const PROTOCOL_VERSION = 1
 
+/**
+ * Thrown for any transport/daemon problem, including a response that fails
+ * validate.ts's shape check — callers already treat this uniformly as "fall
+ * back to the in-process path". Defined here (not client.ts) so validate.ts
+ * can import it without a circular dependency on client.ts.
+ */
+export class DaemonUnavailable extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'DaemonUnavailable'
+  }
+}
+
 export interface RpcRequest {
   id: number
   method: string

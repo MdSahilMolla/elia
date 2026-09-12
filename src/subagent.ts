@@ -163,7 +163,7 @@ export async function runSubAgent(request: SubAgentRequest): Promise<SubAgentRes
     withTodoList(createTodoList(), () =>
     withActionGovernor(governor, () => withGoalGraphIfAvailable(graph, () => withGoalNode(nodeId, () => runAgentLoop({
       messages,
-      systemPrompt: `${basePrompt}\n\n${turnContextPrompt()}\n\n## Your role\n${promptForRole(request.role)}`,
+      systemPrompt: `${basePrompt}\n\n${turnContextPrompt(new Date(), cwd)}\n\n## Your role\n${promptForRole(request.role)}`,
       tools,
       provider: tier.provider,
       providerName: tier.providerName,

@@ -3,7 +3,8 @@ import { dirname } from 'node:path'
 import { appendSecureFile, ensureSecureDirectory, hardenSecureFile, writeSecureFile } from '../securePersistence.ts'
 import { paths } from '../config.ts'
 import type { Tool } from '../tools/types.ts'
-import { loadEfficacy, lessonLift } from './lessonEfficacy.ts'
+import { exposedCorrs, loadEfficacy, MIN_EXPOSURES } from './lessonEfficacy.ts'
+import { competenceReport } from './outcomes.ts'
 
 /**
  * What elia learned the hard way, carried across runs.
@@ -201,18 +202,37 @@ export interface RetireResult {
 }
 
 /**
+ * A lesson needs at least this many *unexposed* turns to build a control-group
+ * baseline before its lift is trusted — below this, "the baseline" is itself
+ * too noisy a number to compare against, whatever the lift looks like.
+ */
+const MIN_CONTROL_SAMPLE = 10
+
+/**
+ * One-tailed ~95% z-score: the negative lift must exceed this many standard
+ * errors of the (with-lesson rate vs. control rate) difference before a lesson
+ * is judged dead weight, rather than merely being non-positive. At small
+ * sample sizes a lift of, say, -0.05 is well within noise.
+ */
+const RETIRE_CONFIDENCE_Z = 1.645
+
+/**
  * Drop lessons that have been carried into enough runs to judge and have not
  * measurably helped.
  *
- * A lesson is injected into every briefing whether or not it earns its tokens.
- * `lessonLift` compares how runs went with a lesson present against the project
- * baseline; a lesson with `MIN_EXPOSURES`+ exposures and non-positive lift is
- * dead weight. Deterministic — no model call — and it refuses to remove more
- * than `RETIRE_MAX_SHRINK` of the file at once.
+ * A lesson is injected into every briefing whether or not it earns its tokens,
+ * which makes "the project baseline" a contaminated comparison — it mostly
+ * measures runs that also had the lesson. So for each lesson this builds a
+ * true control-group baseline: the clean rate of runs that were NOT exposed to
+ * it (`exposedCorrs` joins back to `outcomes.jsonl` by the same `corr` both
+ * logs already record), and only calls a lesson dead weight when its lift
+ * below that baseline clears a confidence margin — not merely `<= 0`, which at
+ * `MIN_EXPOSURES` runs is well within sampling noise. Deterministic — no model
+ * call — and it refuses to remove more than `RETIRE_MAX_SHRINK` of the file at
+ * once.
  */
 export function retireLessons(
-  baselineCleanRate: number,
-  options: { lessonsPath?: string; efficacyPath?: string } = {},
+  options: { lessonsPath?: string; efficacyPath?: string; outcomesPath?: string } = {},
 ): RetireResult {
   const lessonsPath = options.lessonsPath ?? paths.lessons
   const lessons = loadLessons(lessonsPath)
@@ -223,8 +243,20 @@ export function retireLessons(
   const dead = new Set<string>()
   for (const lesson of lessons) {
     const key = lesson.key ?? lessonKey(lesson.text)
-    const lift = lessonLift(key, counts, baselineCleanRate)
-    if (lift !== undefined && lift <= 0) dead.add(key)
+    const entry = counts.get(key)
+    if (!entry || entry.exposures < MIN_EXPOSURES) continue
+
+    const excluded = exposedCorrs(key, options.efficacyPath)
+    const control = competenceReport(options.outcomesPath, { excludeCorrs: excluded })
+    if (control.changingTurns < MIN_CONTROL_SAMPLE) continue // not enough of a control group to trust yet
+
+    const withLessonRate = entry.cleanRuns / entry.exposures
+    const lift = withLessonRate - control.cleanRate
+    const se = Math.sqrt(
+      (withLessonRate * (1 - withLessonRate)) / entry.exposures +
+        (control.cleanRate * (1 - control.cleanRate)) / control.changingTurns,
+    )
+    if (lift < -RETIRE_CONFIDENCE_Z * se) dead.add(key)
   }
   if (dead.size === 0) return { retired: [], kept: lessons.length }
   if (dead.size / lessons.length > RETIRE_MAX_SHRINK) {

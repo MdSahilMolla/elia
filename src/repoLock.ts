@@ -15,8 +15,9 @@
 
 import { join } from 'node:path'
 import { withFileLockAsync } from './fileLock.ts'
+import { logSwallowedError } from './diagnostics.ts'
 
-const MUTATING_TOOLS = new Set(['edit_file', 'write_file', 'visualize'])
+const MUTATING_TOOLS = new Set(['edit_file', 'write_file', 'visualize', 'lsp_refactor'])
 
 let tail: Promise<unknown> = Promise.resolve()
 
@@ -30,9 +31,18 @@ function repoLockPath(): string {
 
 /** Runs `fn` once every earlier repo-lock holder (this process) has finished, and no other elia process holds the cross-process lock. FIFO. */
 export function withRepoLock<T>(fn: () => Promise<T>): Promise<T> {
+  const lockOptions = {
+    ttlMs: 120_000,
+    timeoutMs: 30_000,
+    proceedOnTimeout: true,
+    // Proceeding unlocked is the deliberate tradeoff (see module doc), but it
+    // was previously silent — this is the only trace that the window
+    // happened at all, which matters for diagnosing a rare interleaved write.
+    onProceedWithoutLock: () => logSwallowedError('repoLock.proceedWithoutLock', new Error('repo lock timed out; proceeding without it'), { cwd: process.cwd() }),
+  } as const
   const run = tail.then(
-    () => withFileLockAsync(repoLockPath(), fn, { ttlMs: 120_000, timeoutMs: 30_000, proceedOnTimeout: true }),
-    () => withFileLockAsync(repoLockPath(), fn, { ttlMs: 120_000, timeoutMs: 30_000, proceedOnTimeout: true }),
+    () => withFileLockAsync(repoLockPath(), fn, lockOptions),
+    () => withFileLockAsync(repoLockPath(), fn, lockOptions),
   )
   tail = run.then(
     () => undefined,

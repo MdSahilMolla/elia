@@ -81,6 +81,11 @@ export function runWorkspaceServer(options: WorkspaceServerOptions = {}): Runnin
   const reconcileTimer = setInterval(() => {
     try {
       store.reconcileLeases()
+      // Piggybacks on the same sweep rather than its own timer: with the
+      // conservative defaults (90 days / 200k events) this is a cheap no-op on
+      // almost every tick once the table is within the window, so there is no
+      // need for a separate, slower-cadence scheduler just for this.
+      store.pruneOldEvents()
     } catch {
       // A transient lock; the next tick retries.
     }

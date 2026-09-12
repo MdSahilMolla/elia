@@ -19,6 +19,10 @@ function handle(line: string): void {
     initialized = true
     return
   }
+  // Intentionally never responds — used by codexAppServer.test.ts to exercise
+  // the request-timeout pending-map cleanup path (the client's own timeout has
+  // to fire since the server deliberately never will).
+  if (message.method === 'test/hang') return
   if (!initialized) {
     send({ id: message.id, error: { code: -32002, message: 'not initialized' } })
     return

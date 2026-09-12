@@ -130,7 +130,13 @@ export async function loadMcpTools(cwd = process.cwd()): Promise<McpLoadReport> 
   // rejection from the abandoned wait can't surface as an unhandled rejection.
   void allConnected.catch(() => {})
 
-  if (liveClients.length > 0 && !shutdownRegistered) {
+  // Register unconditionally, once — not gated on how many clients had
+  // connected by this instant. A cold `npx -y` server can still be mid-connect
+  // past the soft deadline above; if a signal arrives before it finishes, the
+  // cleanup below must still close it. Reading `liveClients` here (not a
+  // snapshot) means it closes whatever has connected by the time it actually
+  // runs, stragglers included.
+  if (!shutdownRegistered) {
     shutdownRegistered = true
     registerShutdownCleanup(() => {
       for (const client of liveClients) client.close()
@@ -292,6 +298,13 @@ function flattenContent(content: { type: string; text?: string }[] | undefined):
     .join('\n')
 }
 
+/** Test-only: exposes the module-level state the shutdown-cleanup registration
+ * depends on, so a test can assert the cleanup got registered without waiting
+ * on a real process signal. */
+export function mcpShutdownStateForTests(): { shutdownRegistered: boolean; liveClientCount: number } {
+  return { shutdownRegistered, liveClientCount: liveClients.length }
+}
+
 /** Test-only: resets the load-once guard so a fresh loadMcpTools() call reconnects. */
 export async function resetMcpLoadStateForTests(): Promise<void> {
   loadedOnce = false
@@ -303,4 +316,8 @@ export async function resetMcpLoadStateForTests(): Promise<void> {
   await Promise.all(liveClients.splice(0).map((client) => client.closeAndWait()))
   clearMcpTools()
   clearBrowserMcpToolsForTests()
+  // Every live client was just closed above, so it's safe (and needed for test
+  // isolation) to let the next loadMcpTools() register a fresh shutdown cleanup
+  // instead of finding one already flagged as registered from an earlier test.
+  shutdownRegistered = false
 }

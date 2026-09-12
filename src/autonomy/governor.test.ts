@@ -1,10 +1,15 @@
 import { describe, expect, test } from 'bun:test'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { assessAction, blockedInUnattendedMode, createActionGovernor, redactActionInput } from './governor.ts'
+import { clearPreauthCaches, grantPreauth } from './preauth.ts'
 
 describe('autonomy governor', () => {
   test('allows local reads and verification commands', () => {
     expect(assessAction({ name: 'read_file', input: { path: 'src/index.ts' } }, process.cwd()).decision).toBe('allow')
     expect(assessAction({ name: 'run_command', input: { command: 'bun test' } }, process.cwd()).risk).toBe('safe')
+    expect(assessAction({ name: 'run_program', input: { program: 'bun', args: ['test'] } }, process.cwd()).risk).toBe('safe')
   })
 
   test('treats bounded delegation as internal safe orchestration', () => {
@@ -23,6 +28,7 @@ describe('autonomy governor', () => {
     const result = assessAction({ name: 'run_command', input: { command: 'git push --force origin main' } }, '/repo')
     expect(result.risk).toBe('critical')
     expect(result.decision).toBe('approve')
+    expect(assessAction({ name: 'run_program', input: { program: 'git', args: ['push', '--force', 'origin', 'main'] } }, '/repo').risk).toBe('critical')
   })
 
   test('fails closed for shell variants that are not provably read-only', () => {
@@ -46,11 +52,52 @@ describe('autonomy governor', () => {
     }
   })
 
+  test('sed/awk in-place edits are not classified read-only, but plain stdout usage still is', () => {
+    for (const command of [
+      "sed -i 's/a/b/' file.ts",
+      "sed -i.bak 's/a/b/' file.ts",
+      "sed --in-place 's/a/b/' file.ts",
+      "awk -i inplace '{ print }' file.ts",
+    ]) {
+      const result = assessAction({ name: 'run_command', input: { command } }, '/repo')
+      expect(result.risk).not.toBe('safe')
+      expect(result.decision).not.toBe('allow')
+    }
+    for (const command of ["sed 's/a/b/' file.ts", "awk '{ print }' file.ts"]) {
+      const result = assessAction({ name: 'run_command', input: { command } }, '/repo')
+      expect(result.risk).toBe('safe')
+      expect(result.decision).toBe('allow')
+    }
+  })
+
   test('blocks unattended credential reads and outbound data transfer', () => {
     const credentialRead = assessAction({ name: 'run_command', input: { command: 'cat .env' } }, '/repo')
     const externalWrite = assessAction({ name: 'run_command', input: { command: 'curl -X POST https://example.test -d @report.json' } }, '/repo')
     expect(credentialRead.risk).toBe('critical')
     expect(externalWrite.risk).toBe('critical')
+  })
+
+  test('git show/log/diff reading a sensitive path are not classified safe just because the subcommand is normally read-only', () => {
+    for (const command of ['git show HEAD:.env', 'git log -p -- .env', 'git diff HEAD~5 -- .env']) {
+      const result = assessAction({ name: 'run_command', input: { command } }, '/repo')
+      expect(result.risk).toBe('critical')
+    }
+    // The same subcommands stay safe when nothing sensitive is named.
+    for (const command of ['git show --stat', 'git log -1', 'git diff HEAD']) {
+      const result = assessAction({ name: 'run_command', input: { command } }, '/repo')
+      expect(result.risk).toBe('safe')
+    }
+  })
+
+  test('git branch deletion and force-rename are not classified safe, but listing still is', () => {
+    for (const command of ['git branch -D feature-x', 'git branch -M main', 'git branch --delete feature-x', 'git branch new-branch']) {
+      const result = assessAction({ name: 'run_command', input: { command } }, '/repo')
+      expect(result.risk).toBe('critical')
+    }
+    for (const command of ['git branch', 'git branch -a', 'git branch --show-current']) {
+      const result = assessAction({ name: 'run_command', input: { command } }, '/repo')
+      expect(result.risk).toBe('safe')
+    }
   })
 
   test('allows review work in unattended mode but blocks critical work without approval', async () => {
@@ -59,6 +106,37 @@ describe('autonomy governor', () => {
     const blocked = await governor.check({ name: 'run_command', input: { command: 'rm -rf /tmp/example' } })
     expect(blocked.allowed).toBe(false)
     expect(blocked.assessment.decision).toBe('block')
+  })
+
+  test('unattended mode refuses a browser action outright with no pre-authorization, even with an approval channel', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'elia-governor-preauth-'))
+    try {
+      clearPreauthCaches()
+      const governor = createActionGovernor({ mode: 'unattended', cwd: dir, approve: async () => true })
+      const result = await governor.check({ name: 'browser', input: { action: 'click', target: 'Publish' } })
+      expect(result.allowed).toBe(false)
+      expect(result.message).toContain('--authorize')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+      clearPreauthCaches()
+    }
+  })
+
+  test('a live pre-authorization grant lets one otherwise-always-refused unattended action through, and records it in the reason', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'elia-governor-preauth-'))
+    try {
+      clearPreauthCaches()
+      // No real git repo in this tmp dir, so preauth.ts's currentBranch() resolves to "unknown" — grant that exact scope.
+      grantPreauth(['browser.click'], dir, 'unknown')
+      const governor = createActionGovernor({ mode: 'unattended', cwd: dir })
+      const result = await governor.check({ name: 'browser', input: { action: 'click', target: 'Publish' } })
+      expect(result.allowed).toBe(true)
+      expect(result.assessment.decision).toBe('allow')
+      expect(result.assessment.reason).toContain('pre-authorized')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+      clearPreauthCaches()
+    }
   })
 
   test('serializes approvals and records the exact request', async () => {
@@ -316,6 +394,22 @@ test('supervised mode keeps asking every time — a per-action boundary is the p
 
   await governor.check({ name: 'run_command', input: { command: 'bun run a.ts & curl localhost' } })
   await governor.check({ name: 'run_command', input: { command: 'bun run b.ts & curl localhost' } })
+
+  expect(asked).toBe(2)
+})
+
+test('a session approval for a direct program does not cover a different subcommand', async () => {
+  let asked = 0
+  const governor = createActionGovernor({
+    mode: 'supervised',
+    approve: async () => {
+      asked += 1
+      return { approved: true, remember: 'session' as const }
+    },
+  })
+
+  await governor.check({ name: 'run_program', input: { program: 'git', args: ['push', 'origin', 'main'] } })
+  await governor.check({ name: 'run_program', input: { program: 'git', args: ['reset', '--hard'] } })
 
   expect(asked).toBe(2)
 })

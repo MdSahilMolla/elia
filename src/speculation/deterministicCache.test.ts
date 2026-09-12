@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { withAgentIdentity } from '../autonomy/context.ts'
@@ -90,6 +90,42 @@ test('ELIA_NO_READ_MEMO=1 turns the cache into a no-op', async () => {
     cache.put({ path: 'a.ts' }, 'cached')
     expect(cache.get({ path: 'a.ts' })).toBeUndefined()
   })
+})
+
+test('two working directories with the same relative path and a coinciding mtime:size stamp never share a cache slot', async () => {
+  const cache = createDeterministicReadCacheForTests()
+  const dirA = mkdtempSync(join(tmpdir(), 'elia-detcache-worktree-a-'))
+  const dirB = mkdtempSync(join(tmpdir(), 'elia-detcache-worktree-b-'))
+  try {
+    const fileA = join(dirA, 'a.ts')
+    const fileB = join(dirB, 'a.ts')
+    writeFileSync(fileA, 'export const n = 1\n') // identical byte length in both worktrees
+    writeFileSync(fileB, 'export const n = 2\n')
+
+    // Force the two files' mtime:size staleness stamps to coincide, simulating
+    // a fresh `git worktree add` from the same commit at the same instant.
+    const sharedMtime = statSync(fileA).mtime
+    utimesSync(fileB, sharedMtime, sharedMtime)
+    expect(statSync(fileA).size).toBe(statSync(fileB).size)
+
+    await withAgentIdentity({ name: 'test', role: 'lead', cwd: dirA }, async () => {
+      cache.put({ path: 'a.ts' }, 'RENDERED A')
+    })
+
+    // Worktree B never wrote this entry — despite the coinciding stamp, it must
+    // be a miss, not a stale read of worktree A's cached result.
+    await withAgentIdentity({ name: 'test', role: 'lead', cwd: dirB }, async () => {
+      expect(cache.get({ path: 'a.ts' })).toBeUndefined()
+    })
+
+    // Worktree A's own entry is unaffected.
+    await withAgentIdentity({ name: 'test', role: 'lead', cwd: dirA }, async () => {
+      expect(cache.get({ path: 'a.ts' })).toBe('RENDERED A')
+    })
+  } finally {
+    rmSync(dirA, { recursive: true, force: true })
+    rmSync(dirB, { recursive: true, force: true })
+  }
 })
 
 test('a file that does not exist is never cached', async () => {

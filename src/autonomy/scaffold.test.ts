@@ -141,6 +141,26 @@ test('a scoped commit never sweeps concurrent changes outside the worker-owned f
   expect((await git('status', '--porcelain')).stdout).toContain('other.ts')
 })
 
+test('an empty include list means no scope restriction, not "commit nothing" — the real case when no step in a wave declared files', async () => {
+  await ensureRepository(dir)
+  writeFileSync(join(dir, 'seed.ts'), 'export const seed = 0')
+  await commitAll(dir, 'seed')
+
+  writeFileSync(join(dir, 'a.ts'), 'export const a = 0')
+  writeFileSync(join(dir, 'b.ts'), 'export const b = 0')
+
+  // `wave.flatMap((step) => step.files)` is exactly `[]` when every step in
+  // the wave left `files` unspecified — a real, supported case, not a caller
+  // asking to scope the commit down to zero files.
+  const result = await commitAll(dir, 'wave commit', undefined, [], [])
+
+  expect(result.committed).toBe(true)
+  expect(result.warning).toBeUndefined()
+  const committed = (await git('diff-tree', '--no-commit-id', '--name-only', '-r', 'HEAD')).stdout
+  expect(committed).toContain('a.ts')
+  expect(committed).toContain('b.ts')
+})
+
 test('scaffoldProject in a dirty repo leaves the operator’s changes alone', async () => {
   await ensureRepository(dir)
   writeFileSync(join(dir, 'seed.ts'), 'export const seed = 1')

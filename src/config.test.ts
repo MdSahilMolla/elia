@@ -1,6 +1,6 @@
 import { afterEach, expect, test } from 'bun:test'
 
-const { resolveThinking, describeThinking, describeReviewers, resolveReviewerRoute, config, getThinking, switchModel, switchThinking, turnContextPrompt } = await import('./config.ts')
+const { resolveThinking, describeThinking, describeReviewers, resolveReviewerRoute, config, getThinking, switchModel, switchThinking, turnContextPrompt, looksHighDifficulty, routeForAssignment, tierConfig } = await import('./config.ts')
 
 afterEach(() => {
   delete process.env.ELIA_THINKING
@@ -23,6 +23,23 @@ test('turnContextPrompt states the given wall-clock date as authoritative over t
   const prompt = turnContextPrompt(new Date('2026-09-04T12:00:00Z'))
   expect(prompt).toContain("Today's date is 2026-09-04")
   expect(prompt.toLowerCase()).toContain('never from your training data')
+})
+
+// Seen live: a worker told (via the cached, load-time-frozen system prompt)
+// that its cwd was elia's own root, while `withAgentIdentity` had actually
+// bound it to an isolated per-run workspace, wrote its deliverable one
+// directory level too deep looking for a `workspace/` subfolder that didn't
+// need to exist. Passing the real cwd here corrects that per turn.
+test('turnContextPrompt names the real per-agent cwd as authoritative when given one', () => {
+  const prompt = turnContextPrompt(new Date('2026-09-04T12:00:00Z'), 'D:\\elia\\workspace\\run-1-mountain-car')
+  expect(prompt).toContain('D:\\elia\\workspace\\run-1-mountain-car')
+  expect(prompt).toContain('authoritative')
+  expect(prompt.toLowerCase()).toContain('nesting another')
+})
+
+test('turnContextPrompt omits the cwd correction when no cwd is given', () => {
+  const prompt = turnContextPrompt(new Date('2026-09-04T12:00:00Z'))
+  expect(prompt).not.toContain('working directory')
 })
 
 test('resolveThinking defaults to enabled with the default budget', () => {
@@ -126,4 +143,42 @@ test('switchThinking on with an explicit budget is reflected in getThinking', ()
   const result = switchThinking({ enabled: true, budgetTokens: 16000 })
   expect(result.ok).toBe(true)
   expect(getThinking()).toEqual({ enabled: true, budgetTokens: 16000 })
+})
+
+test('looksHighDifficulty matches on non-routine keywords but not on ordinary work', () => {
+  expect(looksHighDifficulty('Fix the race condition in the connection pool')).toBe(true)
+  expect(looksHighDifficulty('Migrate the auth tokens to the new encryption scheme')).toBe(true)
+  expect(looksHighDifficulty('Rename the getUser function to fetchUser')).toBe(false)
+  expect(looksHighDifficulty('Fix the typo in the README')).toBe(false)
+})
+
+test('looksHighDifficulty treats a very long brief as a weak difficulty signal on its own', () => {
+  expect(looksHighDifficulty('word '.repeat(300))).toBe(true)
+  expect(looksHighDifficulty('word '.repeat(50))).toBe(false)
+})
+
+test('routeForAssignment escalates a fast-tier role to deep only when the assignment looks hard', () => {
+  expect(config.roleOverrides.scout).toBeUndefined() // test env has no ELIA_SCOUT_PROVIDER/_MODEL set
+  const routine = routeForAssignment('scout', 'fast', 'List every file under src/ui')
+  expect(routine.label).toBe(tierConfig('fast').label)
+
+  const hard = routeForAssignment('scout', 'fast', 'Investigate the race condition causing intermittent data loss')
+  expect(hard.label).toBe(tierConfig('deep').label)
+})
+
+test('routeForAssignment never downgrades a deep-tier role, even for a trivial-looking assignment', () => {
+  const route = routeForAssignment('builder', 'deep', 'fix a typo')
+  expect(route.label).toBe(tierConfig('deep').label)
+})
+
+test('routeForAssignment defers entirely to an explicit per-role override, never second-guessing it with difficulty', () => {
+  const pinned = tierConfig('deep')
+  const previous = config.roleOverrides.scout
+  config.roleOverrides.scout = pinned
+  try {
+    const hard = routeForAssignment('scout', 'fast', 'Fix the race condition causing data loss')
+    expect(hard).toBe(pinned) // the exact pinned route, not a re-derived "deep" tierConfig
+  } finally {
+    config.roleOverrides.scout = previous
+  }
 })

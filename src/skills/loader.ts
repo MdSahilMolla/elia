@@ -3,6 +3,7 @@ import { dirname, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import type { Tool } from '../tools/types.ts'
 import { externalSkillDirs, PROJECT_SKILLS_DIR, QUARANTINE_DIR, SKILL_SUFFIX, USER_SKILLS_DIR, skillsEnabled, type SkillSource } from './paths.ts'
+import { isProjectSkillsTrusted } from './trust.ts'
 
 /**
  * Loads the tools elia has written for itself.
@@ -13,6 +14,17 @@ import { externalSkillDirs, PROJECT_SKILLS_DIR, QUARANTINE_DIR, SKILL_SUFFIX, US
  * break every subsequent session; so a module that throws or exports the wrong
  * shape is moved to a quarantine directory instead of loaded, and elia carries on
  * with one fewer tool rather than not starting.
+ *
+ * Project-local skills (`PROJECT_SKILLS_DIR`, i.e. `.elia/skills` inside the
+ * project being opened) are the one source here that isn't user-owned — they
+ * live inside whatever repo the user just cloned. Importing one runs its
+ * top-level code immediately, before the validation below ever gets a look, so
+ * "checked-in tool the user wrote" and "checked-in tool an attacker wrote" are
+ * indistinguishable until it's too late. They are therefore only imported once
+ * the project has been explicitly trusted (`elia skills trust`, persisted per
+ * project — see `./trust.ts`); until then they are skipped with a warning, in
+ * every context including non-interactive ones (bridge/VS Code/headless run),
+ * which never auto-trust on their own.
  */
 
 export interface LoadedSkill {
@@ -24,19 +36,31 @@ export interface LoadedSkill {
 export interface SkillLoadReport {
   loaded: LoadedSkill[]
   quarantined: { file: string; reason: string }[]
+  /** Project skill files found but not imported because the project isn't trusted yet. */
+  untrustedProject: string[]
 }
 
 let loadedSkillCatalog: LoadedSkill[] = []
 
-export async function loadSkills(environment: NodeJS.ProcessEnv = process.env): Promise<SkillLoadReport> {
-  const report: SkillLoadReport = { loaded: [], quarantined: [] }
+export async function loadSkills(
+  environment: NodeJS.ProcessEnv = process.env,
+  projectSkillsDir: string = PROJECT_SKILLS_DIR,
+): Promise<SkillLoadReport> {
+  const report: SkillLoadReport = { loaded: [], quarantined: [], untrustedProject: [] }
   loadedSkillCatalog = []
   if (!skillsEnabled()) return report
+
+  const projectTrusted = isProjectSkillsTrusted(projectSkillsDir, environment)
+  const projectFiles = skillFilesIn(projectSkillsDir)
+  if (projectFiles.length > 0 && !projectTrusted) {
+    report.untrustedProject = projectFiles
+    warnUntrustedProjectSkills(projectSkillsDir, projectFiles.length)
+  }
 
   const filesBySource: [string, SkillSource][] = [
     ...externalSkillDirs(environment).map((dir) => [dir, 'external'] as [string, SkillSource]),
     [USER_SKILLS_DIR, 'user'],
-    [PROJECT_SKILLS_DIR, 'project'],
+    ...(projectTrusted ? ([[projectSkillsDir, 'project']] as [string, SkillSource][]) : []),
   ]
   const availableFiles = filesBySource.flatMap(([dir]) => skillFilesIn(dir))
   if (availableFiles.length === 0) return report
@@ -57,6 +81,14 @@ export async function loadSkills(environment: NodeJS.ProcessEnv = process.env): 
 
   loadedSkillCatalog = [...report.loaded]
   return report
+}
+
+/** Fail-closed, loud, and identical whether the caller is an interactive terminal or a headless bridge — no context gets to silently skip straight past this to auto-execute. */
+function warnUntrustedProjectSkills(projectSkillsDir: string, count: number): void {
+  process.stderr.write(
+    `elia: ${count} project skill file(s) in ${projectSkillsDir} were not loaded — this project has not been trusted.\n` +
+      `elia: inspect them, then run \`elia skills trust\` to enable them (or set ELIA_SKILLS=off to disable skills entirely).\n`,
+  )
 }
 
 function skillFilesIn(dir: string): string[] {

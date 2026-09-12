@@ -29,7 +29,7 @@ export function hardenSecureFile(path: string): void {
  * rename left its temp file behind permanently. That is where the 52 stale
  * `.elia/tasks.json.tmp-*` files came from, the oldest dating to 2026-08-24.
  */
-function renameSyncWithRetry(from: string, to: string): void {
+export function renameSyncWithRetry(from: string, to: string): void {
   const transient = new Set(['EPERM', 'EACCES', 'EBUSY'])
   const delaysMs = [10, 25, 50, 100, 200]
   for (let attempt = 0; ; attempt += 1) {

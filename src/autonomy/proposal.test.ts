@@ -69,6 +69,36 @@ test('a real project check may be accompanied by an environment probe', () => {
   expect(proposal.verification).toEqual(['bun --version', 'bun run build'])
 })
 
+// A shell has no command named "Open" — this exact string, verbatim from a
+// real run (2026-09-11-5q7z-abo2), failed every repair attempt with "'Open'
+// is not recognized" and ended the run `needs-attention` even though the
+// built game worked.
+test('manual-testing prose passed as a verification command is rejected', () => {
+  const error = expectError({
+    ...minimal,
+    verification: ['Open D:\\elia\\workspace\\car-game\\index.html in browser, verify arrow keys control car, obstacles spawn and increase score, game ends on collision with restart option'],
+  })
+  expect(error).toContain('not a command a shell can run')
+})
+
+test('a real command is not mistaken for prose just because it mentions a browser-ish word', () => {
+  const proposal = expectOk({ ...minimal, verification: ['bun test src/browser.test.ts'] })
+  expect(proposal.verification).toEqual(['bun test src/browser.test.ts'])
+})
+
+test('echo with verification text does not trigger prose rejection', () => {
+  const proposal = expectOk({ ...minimal, verification: ['echo "Check status" && exit 0'] })
+  expect(proposal.verification).toEqual(['echo "Check status" && exit 0'])
+})
+
+test('one prose entry among otherwise-real commands still gets rejected', () => {
+  const error = expectError({
+    ...minimal,
+    verification: ['bun run build', 'Visit the app and confirm it looks right'],
+  })
+  expect(error).toContain('not a command a shell can run')
+})
+
 test('a step without instructions is rejected, naming its index', () => {
   const error = expectError({ ...minimal, steps: [{ title: 'no body' }] })
 

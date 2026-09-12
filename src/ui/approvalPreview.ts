@@ -35,5 +35,12 @@ export function approvalPreviewLines(name: string, input: Record<string, unknown
     return [`  $ ${command}`, ...(str(input.cwd) ? [`  in ${str(input.cwd)}`] : [])]
   }
 
+  if (name === 'run_program') {
+    const program = str(input.program).trim()
+    const args = Array.isArray(input.args) ? input.args.filter((arg): arg is string => typeof arg === 'string') : []
+    if (!program) return undefined
+    return [`  $ ${[program, ...args.map((arg) => JSON.stringify(arg))].join(' ')}`, ...(str(input.cwd) ? [`  in ${str(input.cwd)}`] : [])]
+  }
+
   return undefined
 }

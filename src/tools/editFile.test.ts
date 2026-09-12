@@ -106,3 +106,47 @@ test('identical old_string and new_string is rejected before any file work', asy
   writeFileSync(path, 'same\n')
   await expect(edit({ path, old_string: 'same', new_string: 'same' })).rejects.toThrow(/identical/)
 })
+
+// --- Sensitive paths ---
+
+test('refuses to edit a protected path', async () => {
+  const path = join(dir, '.env')
+  writeFileSync(path, 'SECRET=1\n')
+  await expect(edit({ path, old_string: 'SECRET=1', new_string: 'SECRET=2' })).rejects.toThrow(/protected path/)
+  expect(readFileSync(path, 'utf8')).toBe('SECRET=1\n')
+})
+
+test('refuses to edit an ssh private key regardless of extension', async () => {
+  const path = join(dir, 'id_rsa')
+  writeFileSync(path, '-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n-----END OPENSSH PRIVATE KEY-----\n')
+  await expect(edit({ path, old_string: 'abc', new_string: 'xyz' })).rejects.toThrow(/protected path/)
+})
+
+// --- Mixed line endings (finding #4) ---
+
+test('a file with genuinely mixed line endings matches and edits the LF region correctly', async () => {
+  const path = join(dir, 'mixed.ts')
+  // First two lines are CRLF (as if opened once in a Windows editor), the rest
+  // is bare LF (as if pasted in afterward) — a single global "the file is CRLF"
+  // guess would convert old_string's \n to \r\n and fail to find this region.
+  const original = 'crlf line one\r\ncrlf line two\r\nlf line three\nlf line four\n'
+  writeFileSync(path, original)
+  await edit({ path, old_string: 'lf line three\nlf line four', new_string: 'LF LINE THREE\nLF LINE FOUR' })
+  expect(readFileSync(path, 'utf8')).toBe('crlf line one\r\ncrlf line two\r\nLF LINE THREE\nLF LINE FOUR\n')
+})
+
+test('a mixed-ending file: editing the CRLF region keeps its CRLF and leaves the LF region untouched', async () => {
+  const path = join(dir, 'mixed2.ts')
+  const original = 'crlf line one\r\ncrlf line two\r\nlf line three\nlf line four\n'
+  writeFileSync(path, original)
+  await edit({ path, old_string: 'crlf line one\ncrlf line two', new_string: 'CRLF LINE ONE\nCRLF LINE TWO' })
+  expect(readFileSync(path, 'utf8')).toBe('CRLF LINE ONE\r\nCRLF LINE TWO\r\nlf line three\nlf line four\n')
+})
+
+test('replace_all finds and replaces every occurrence across a mixed CRLF/LF file', async () => {
+  const path = join(dir, 'mixed3.ts')
+  const original = 'const target = 1\r\nconsole.log(target)\r\n---\nconst other = 2\nconsole.log(target)\n'
+  writeFileSync(path, original)
+  await edit({ path, old_string: 'target', new_string: 'renamed', replace_all: true })
+  expect(readFileSync(path, 'utf8')).toBe('const renamed = 1\r\nconsole.log(renamed)\r\n---\nconst other = 2\nconsole.log(renamed)\n')
+})

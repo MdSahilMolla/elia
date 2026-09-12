@@ -40,6 +40,12 @@ pub enum ExecStop {
 
 const MAX_CAPTURE_BYTES: usize = 2_000_000;
 
+/// How long a per-cwd shell worker may sit idle before the periodic reaper in
+/// `server.rs` kills it. Distinct from the whole-daemon idle watchdog in
+/// `main.rs` — a single cwd that saw one command an hour ago must not keep its
+/// worker processes alive just because some other directory is still busy.
+pub const SHELL_IDLE_SECS: u64 = 300;
+
 /// One directory's shells. A small fixed set of slots so a burst of parallel
 /// `run_command`s in the same directory actually runs in parallel (the old
 /// path spawned a fresh `cmd.exe` per call, so serialising here would be a
@@ -78,6 +84,38 @@ impl ShellPool {
             }
         }
         live
+    }
+
+    /// Kill and drop any worker that has been idle past `idle_after`, freeing
+    /// its slot, and drop a cwd's entry from `by_cwd` once every slot in it is
+    /// empty. Meant to be called periodically (see `server::shell_reap_loop`)
+    /// so a directory that goes quiet is reaped on its own schedule instead of
+    /// waiting for the whole daemon to idle out. Uses `try_lock` so a slot
+    /// that's mid-command is left alone rather than blocked on.
+    pub async fn reap_idle(&self, idle_after: Duration) {
+        let mut map = self.by_cwd.lock().await;
+        map.retain(|_key, slots| {
+            let mut any_left = false;
+            for slot in slots.iter() {
+                match slot.try_lock() {
+                    Ok(mut guard) => {
+                        if let Some(worker) = guard.as_ref() {
+                            if worker.last_used.elapsed() >= idle_after {
+                                guard.take(); // Drop kills the process (see ShellWorker's Drop).
+                            }
+                        }
+                        if guard.is_some() {
+                            any_left = true;
+                        }
+                    }
+                    Err(_) => {
+                        // In use right now — keep the cwd entry around.
+                        any_left = true;
+                    }
+                }
+            }
+            any_left
+        });
     }
 
     /// Runs `command` in `cwd`. Commands to the same directory share a small
@@ -130,6 +168,7 @@ impl ShellPool {
             result = run => Some(result),
             _ = cancel => None,
         };
+        worker.last_used = Instant::now();
 
         match selected {
             Some(Ok(framed)) => {
@@ -173,6 +212,8 @@ struct ShellWorker {
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
     stderr: BufReader<ChildStderr>,
+    /// Updated after every command; read by `ShellPool::reap_idle`.
+    last_used: Instant,
 }
 
 impl Drop for ShellWorker {
@@ -201,6 +242,7 @@ impl ShellWorker {
             stdin,
             stdout,
             stderr,
+            last_used: Instant::now(),
         };
 
         // Neutralise the shell's own preamble (cmd banner, any prompt) before the
@@ -359,16 +401,28 @@ fn base_command() -> Command {
 #[cfg(windows)]
 fn frame_script(begin: &str, end: &str, command: &str, cwd: &str) -> String {
     // `cd /d` resets the directory every command so a `cd` inside one command
-    // cannot leak into the next. The markers are echoed to both streams.
+    // cannot leak into the next. The markers are echoed to both streams. Windows
+    // paths cannot contain '"', so `cwd` needs no escaping here — but a `cd`
+    // failure (directory deleted after the TS-side check, permissions, ...) must
+    // not be swallowed: check `errorlevel` and, on failure, skip the command
+    // entirely and report a distinct "cwd unreachable" outcome instead of
+    // silently running it in whatever directory the shell was previously in.
     format!(
-        "@echo off\r\ncd /d \"{cwd}\" >nul 2>nul\r\necho {begin}& echo {begin} 1>&2\r\n{command}\r\necho {end} !ERRORLEVEL!& echo {end} 1>&2\r\n"
+        "@echo off\r\ncd /d \"{cwd}\" >nul\r\nif errorlevel 1 goto :elia_cwd_err\r\necho {begin}& echo {begin} 1>&2\r\n{command}\r\necho {end} !ERRORLEVEL!& echo {end} 1>&2\r\ngoto :eof\r\n:elia_cwd_err\r\necho {begin}& echo {begin} 1>&2\r\necho elia: cd failed - cwd unreachable 1>&2\r\necho {end} 127& echo {end} 1>&2\r\n"
     )
 }
 
 #[cfg(not(windows))]
 fn frame_script(begin: &str, end: &str, command: &str, cwd: &str) -> String {
+    // `cwd` is interpolated into a single-quoted shell string, so a literal `'`
+    // in it must be escaped (POSIX idiom: close the quote, emit an escaped `'`,
+    // reopen the quote) or a directory name containing one could break out and
+    // inject shell commands. A `cd` failure must also not be swallowed — as on
+    // the Windows side above, skip the command and report a distinct "cwd
+    // unreachable" outcome instead of silently running it in the old directory.
+    let escaped_cwd = cwd.replace('\'', r"'\''");
     format!(
-        "cd '{cwd}' 2>/dev/null\nprintf '%s\\n' '{begin}'; printf '%s\\n' '{begin}' >&2\n{command}\n__elia_rc=$?; printf '%s %d\\n' '{end}' \"$__elia_rc\"; printf '%s\\n' '{end}' >&2\n"
+        "if cd '{escaped_cwd}'; then printf '%s\\n' '{begin}'; printf '%s\\n' '{begin}' >&2\n{command}\n__elia_rc=$?; printf '%s %d\\n' '{end}' \"$__elia_rc\"; printf '%s\\n' '{end}' >&2\nelse printf '%s\\n' '{begin}'; printf '%s\\n' '{begin}' >&2; printf 'elia: cd failed: cwd unreachable\\n' >&2; printf '%s %d\\n' '{end}' 127; printf '%s\\n' '{end}' >&2\nfi\n"
     )
 }
 

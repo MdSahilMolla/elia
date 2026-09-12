@@ -158,6 +158,12 @@ Autonomous work:
   elia auto "<goal>" --thorough      Extra bounded review and repair depth for high-risk changes
   elia auto "<goal>" --max-run-ms N  Abort the run after N milliseconds (also ELIA_MAX_RUN_MS)
   elia auto "<goal>" --max-actions N  Bound governed tool requests for this run
+  elia auto "<goal>" --unattended --authorize <intent>[,<intent>...]
+                                     Pre-authorize specific critical intents (e.g.
+                                     deployment.production, github.pr_merge) for this run only, on
+                                     this branch, for a few hours — the one way past the "browser/
+                                     comms/deploy/PR-merge/codex_delegate always refuses unattended"
+                                     wall, without weakening it for anything not named
   elia auto "<goal>" --variants N   Run N independent implementation attempts in parallel,
                                      each in its own isolated git worktree, and keep only
                                      the one that verification — not an LLM's opinion — likes
@@ -180,6 +186,12 @@ Self-improvement:
   elia bench --history        Score it on tasks taken from this repository's own git history
   elia bench --all            Score it on both suites
   elia bench --harvest        Rebuild the history task set from git (no model calls)
+  elia bench swe --file <tasks.json> [--sample N] [--out results.json]
+                              Run a SWE-bench-Verified-shaped task file (see src/bench/swe/types.ts) —
+                              real checkout, real agent run, real test execution, scored resolved/
+                              unresolved. elia does not fetch or bundle the real dataset itself; point
+                              --file at a real export. Each instance is a real, billed agent run, so
+                              --sample (default 3) caps how many run, not the whole file.
   elia bench-latency          Measure elia's own loop/startup/speculation overhead (deterministic,
                               no API key); --update-baseline to record, --strict to fail on wall drift
   elia evolve                 Improve elia's own source: hypothesise one change, build it
@@ -192,6 +204,9 @@ Learned tools:
   elia skills bundles         List declarative groups of loaded skills
   elia skills candidates      Show repeated work that could become a new tool
   elia skills synth           Write a tool for the strongest candidate
+  elia skills trust           Trust this project's .elia/skills so they load on startup
+  elia skills untrust         Revoke a prior trust decision for this project
+  elia skills status          Show whether this project's local skills are trusted
 
 Time travel:
   elia runs                   List autonomous runs
@@ -283,6 +298,9 @@ Inside an interactive session:
   ELIA_MAX_RUN_MS             Default wall-clock budget for autonomous runs; --max-run-ms overrides it
   --max-actions <n>            Bound governed tool requests for one autonomous run
   ELIA_TOOL_CONCURRENCY       Read-only tool batches can use up to 8; mutating batches stay capped at 4
+  ELIA_OTEL_ENDPOINT           OTLP/HTTP+JSON collector base URL — mirrors autonomous-run journal events
+                              to it as OTel logs (POST <endpoint>/v1/logs), purely additive; unset (the
+                              default) sends nothing
   elia --help                 Show this help
   elia --version              Print the version
 
@@ -493,7 +511,7 @@ async function runAgentCommand(): Promise<void> {
 }
 
 async function runAuto(): Promise<void> {
-  const goal = positionals(['--variants', '--run-id', '--max-run-ms', '--max-actions', '--beta']).join(' ').trim()
+  const goal = positionals(['--variants', '--run-id', '--max-run-ms', '--max-actions', '--beta', '--authorize']).join(' ').trim()
   if (!goal) {
     writeError('Give elia a goal: elia auto "add rate limiting to the API client"')
     process.exitCode = 1
@@ -563,6 +581,33 @@ async function runAuto(): Promise<void> {
         : 'supervised (approval required for review and critical actions)'
     }`,
   )
+  const authorizeRaw = flagValue('--authorize')
+  if (authorizeRaw !== undefined && !yolo) {
+    writeError('--authorize only applies to an unattended run (--unattended/--yolo) — supervised mode already asks per action.')
+    process.exitCode = 1
+    return
+  }
+  if (authorizeRaw) {
+    const intents = [...new Set(authorizeRaw.split(',').map((s) => s.trim()).filter(Boolean))]
+    if (intents.length === 0) {
+      writeError('--authorize needs at least one intent, e.g. --authorize deployment.production,github.pr_merge')
+      process.exitCode = 1
+      return
+    }
+    const { currentBranch, grantPreauth } = await import('./autonomy/preauth.ts')
+    const branch = await currentBranch(process.cwd())
+    const granted = grantPreauth(intents, process.cwd(), branch)
+    if (granted.length > 0) {
+      writeNotice(
+        `pre-authorized for this run only, on branch "${branch}": ${granted.map((g) => g.intent).join(', ')} — expires ${new Date(granted[0]!.expiresAt).toLocaleTimeString()}`,
+      )
+    }
+    const rejected = intents.filter((intent) => !granted.some((g) => g.intent === intent))
+    if (rejected.length > 0) {
+      writeError(`--authorize ignored invalid intent(s) (expected lowercase dotted names like "deployment.production"): ${rejected.join(', ')}`)
+    }
+  }
+
   let approveAction: ActionApproval | undefined
   if (!yolo && !process.stdin.isTTY) {
     writeError('elia auto needs a terminal to approve the plan. Re-run with --unattended to skip routine approval.')
@@ -644,7 +689,79 @@ async function runBenchHarvest(): Promise<void> {
   )
 }
 
+/**
+ * `elia bench swe --file <tasks.json> [--sample N] [--out <results.json>]`
+ *
+ * Runs a SWE-bench-Verified-shaped task file end to end (checkout, patch,
+ * real agent run, real test execution, score) — see bench/swe/harness.ts.
+ * elia does not fetch or bundle the real SWE-bench dataset itself (its size
+ * and distribution terms are the operator's call); point --file at a real
+ * export to run it for real. Each instance runs a real, billed agent loop,
+ * so --sample defaults to a small number rather than the whole file.
+ */
+async function runBenchSwe(): Promise<void> {
+  const filePath = flagValue('--file')
+  if (!filePath) {
+    writeError('elia bench swe --file <tasks.json> — a SWE-bench-Verified-shaped task file (see src/bench/swe/types.ts for the schema)')
+    process.exitCode = 1
+    return
+  }
+  const { readFileSync, existsSync, mkdirSync } = await import('node:fs')
+  const { dirname } = await import('node:path')
+  if (!existsSync(filePath)) {
+    writeError(`No such file: ${filePath}`)
+    process.exitCode = 1
+    return
+  }
+  let instances: import('./bench/swe/types.ts').SweBenchInstance[]
+  try {
+    instances = JSON.parse(readFileSync(filePath, 'utf8'))
+    if (!Array.isArray(instances)) throw new Error('expected a JSON array of instances')
+  } catch (err) {
+    writeError(`Could not read ${filePath} as a SWE-bench task list: ${err instanceof Error ? err.message : String(err)}`)
+    process.exitCode = 1
+    return
+  }
+
+  const sampleRaw = flagValue('--sample')
+  const sample = sampleRaw === undefined ? 3 : strictInteger(sampleRaw)
+  if (sample === undefined || sample < 1) {
+    writeError(`--sample must be a positive integer, got "${sampleRaw}"`)
+    process.exitCode = 1
+    return
+  }
+  const selected = instances.slice(0, sample)
+  if (selected.length === 0) {
+    writeNotice(`${filePath} has no task instances.`)
+    return
+  }
+
+  if (!(await ensureFirstRunProviderSetup())) return
+  await loadRuntimeSkills()
+  writeNotice(
+    `Running ${selected.length} of ${instances.length} SWE-bench instance(s) from ${filePath} — each runs a real, billed agent loop against a real checkout. This is a sample run, not a full published score.`,
+  )
+
+  const { runSweBenchSuite } = await import('./bench/swe/harness.ts')
+  const summary = await runSweBenchSuite(selected, {
+    onInstanceDone: (result) => {
+      writeUsageLine(`  ${result.resolved ? '✓' : '✗'} ${result.instance_id}${result.agentError ? ` — ${result.agentError}` : ''}${result.keptDir ? ` (kept: ${result.keptDir})` : ''}`)
+    },
+  })
+
+  writeNotice(`Resolved ${summary.resolved}/${summary.total}.`)
+  const outPath = flagValue('--out')
+  if (outPath) {
+    mkdirSync(dirname(outPath), { recursive: true })
+    const { writeFileSync } = await import('node:fs')
+    writeFileSync(outPath, `${JSON.stringify(summary, null, 2)}\n`)
+    writeNotice(`Wrote results to ${outPath}`)
+  }
+  if (summary.resolved < summary.total) process.exitCode = 1
+}
+
 async function runBench(): Promise<void> {
+  if (positionals(['--file', '--sample', '--out'])[0] === 'swe') return runBenchSwe()
   if (hasFlag('--harvest')) return runBenchHarvest()
 
   const { BENCH_TASKS, allBenchTasks } = await import('./evolve/suite.ts')
@@ -1005,7 +1122,32 @@ async function runSkills(): Promise<void> {
     return
   }
 
-  writeError(`Unknown skills action "${action}". Use: list, bundles, path, candidates, or synth.`)
+  if (action === 'trust' || action === 'untrust') {
+    const { trustProjectSkills, untrustProjectSkills } = await import('./skills/trust.ts')
+    if (action === 'trust') {
+      trustProjectSkills(PROJECT_SKILLS_DIR)
+      writeNotice(`✓ Project skills in ${PROJECT_SKILLS_DIR} are now trusted and will be loaded on the next start.`)
+    } else {
+      untrustProjectSkills(PROJECT_SKILLS_DIR)
+      writeNotice(`✓ Project skills in ${PROJECT_SKILLS_DIR} are no longer trusted.`)
+    }
+    return
+  }
+
+  if (action === 'status') {
+    const { isProjectSkillsTrusted } = await import('./skills/trust.ts')
+    const trusted = isProjectSkillsTrusted(PROJECT_SKILLS_DIR)
+    const files = listSkillFiles().filter((f) => f.source === 'project')
+    writeNotice(`Project skills directory: ${PROJECT_SKILLS_DIR}`)
+    writeNotice(`Trusted: ${trusted ? 'yes' : 'no'}`)
+    writeNotice(`Files found: ${files.length}`)
+    if (!trusted && files.length > 0) {
+      writeNotice('These files were found but are not loaded. Inspect them, then run `elia skills trust` to enable them.')
+    }
+    return
+  }
+
+  writeError(`Unknown skills action "${action}". Use: list, bundles, path, candidates, synth, trust, untrust, or status.`)
   process.exitCode = 1
 }
 
@@ -2002,10 +2144,8 @@ async function runInteractive(): Promise<void> {
         signal,
         polish: true,
       })
-      const summary =
-        `[autonomous run: ${result.outcome}] ${redactText(result.proposal?.goal ?? goal, 200)} · `
-        + `${result.actionBudget?.consumed ?? 0} actions · ${formatElapsed(result.elapsedMs)}`
-        + (result.lessons.length > 0 ? `\nLessons captured: ${result.lessons.join('; ')}` : '')
+      const { formatAutonomousRunSummary } = await import('./autonomy/runSummary.ts')
+      const summary = formatAutonomousRunSummary(goal, result)
       messages.push({ role: 'assistant', content: [{ type: 'text', text: summary }] })
       sessionTranscript.notice(summary)
       note(summary, undefined, 'completed')
@@ -2145,7 +2285,12 @@ async function runInteractive(): Promise<void> {
     try {
       if (persona) {
         const { runPersonaTurn } = await import('./agents/orchestrator.ts')
-        await runPersonaTurn(messages, persona, skillNames, controller.signal)
+        // Forward the same Ink `uiHooks` a normal turn gets (see `runModelTurn`
+        // above) so a persona turn renders into the live Ink store instead of
+        // writing raw ANSI to stdout while Ink's reconciler independently
+        // repaints the frame — the raw writes and Ink's own repaint race and
+        // corrupt the terminal.
+        await runPersonaTurn(messages, persona, skillNames, controller.signal, uiHooks)
       } else if (autoEscalate && mode === 'dev' && !uiHooks?.planMode && escalation.escalate) {
         escalated = true
         await runEscalatedTurn(userText, escalation.reason, approveAction, controller.signal, uiHooks)
@@ -3419,6 +3564,8 @@ async function runInteractive(): Promise<void> {
               command:
                 request.name === 'run_command' && typeof request.input.command === 'string'
                   ? request.input.command
+                  : request.name === 'run_program' && typeof request.input.program === 'string'
+                    ? [request.input.program, ...(Array.isArray(request.input.args) ? request.input.args.filter((arg): arg is string => typeof arg === 'string').map((arg) => JSON.stringify(arg)) : [])].join(' ')
                   : undefined,
             }),
           undefined,

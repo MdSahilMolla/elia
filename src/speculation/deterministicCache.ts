@@ -47,11 +47,17 @@ function stampOf(resolvedPath: string): string | undefined {
   }
 }
 
-function keyOf(input: Record<string, unknown>): string {
-  return Object.keys(input)
+function keyOf(input: Record<string, unknown>, resolvedPath: string): string {
+  // Scope the key by the resolved absolute path (not just the raw relative
+  // `path` field) so two concurrent sub-agents in different working
+  // directories — e.g. separate git worktrees — can never collide on the same
+  // cache slot even if their mtime:size stamps happen to coincide.
+  const rest = Object.keys(input)
+    .filter((k) => k !== 'path')
     .sort()
     .map((k) => `${k}=${JSON.stringify(input[k])}`)
     .join('&')
+  return `${resolvedPath}::${rest}`
 }
 
 export interface DeterministicReadCache {
@@ -88,14 +94,15 @@ function create(): DeterministicReadCache {
       if (disabled()) return undefined
       const resolved = resolvedPathOf(input)
       if (!resolved) return undefined
-      const entry = entries.get(keyOf(input))
+      const key = keyOf(input, resolved)
+      const entry = entries.get(key)
       if (!entry) {
         misses += 1
         return undefined
       }
       if (entry.stamp !== stampOf(resolved)) {
         // The file moved under us. Drop the stale entry and read fresh.
-        entries.delete(keyOf(input))
+        entries.delete(key)
         misses += 1
         return undefined
       }
@@ -109,7 +116,7 @@ function create(): DeterministicReadCache {
       if (!resolved) return
       const stamp = stampOf(resolved)
       if (!stamp) return
-      const key = keyOf(input)
+      const key = keyOf(input, resolved)
       entries.set(key, { result, stamp })
       let bucket = keysByPath.get(resolved)
       if (!bucket) {

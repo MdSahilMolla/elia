@@ -1,5 +1,5 @@
 import { dim, gold, green, red, cyan } from './theme.ts'
-import { frame, terminalWidth } from './layout.ts'
+import { frame, terminalWidth, type Frame } from './layout.ts'
 import { interactiveTerminal } from './runtime.ts'
 import { registerShutdownCleanup } from './shutdown.ts'
 
@@ -53,10 +53,16 @@ export function createFleetBoard(workers: FleetWorkerSpec[]): FleetBoard {
 
   if (!interactiveTerminal) return createPlainBoard(rows)
 
-  const panel = frame(Math.max(40, Math.min(INNER_WIDTH, terminalWidth(96) - 4)), {
-    title: `Fleet — ${rows.length} worker${rows.length === 1 ? '' : 's'}`,
-    borderColor: gold,
-  })
+  // Computed as a function, not a one-off const, so `onResize` below can
+  // recompute border width/layout from a fresh `terminalWidth()` reading
+  // instead of reusing the dimensions captured when the board was created.
+  function computePanel(): Frame {
+    return frame(Math.max(40, Math.min(INNER_WIDTH, terminalWidth(96) - 4)), {
+      title: `Fleet — ${rows.length} worker${rows.length === 1 ? '' : 's'}`,
+      borderColor: gold,
+    })
+  }
+  let panel = computePanel()
 
   let frameIndex = 0
   let rendered = 0
@@ -94,7 +100,10 @@ export function createFleetBoard(workers: FleetWorkerSpec[]): FleetBoard {
     frameIndex += 1
     render()
   }, TICK_MS)
-  const onResize = () => render()
+  const onResize = () => {
+    panel = computePanel()
+    render()
+  }
   process.stdout.on('resize', onResize)
   const unregisterShutdown = registerShutdownCleanup(() => {
     clearInterval(timer)

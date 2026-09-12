@@ -63,9 +63,11 @@ export function contractForAction(request: ActionRequest, cwd: string, idempoten
     }
   }
 
-  if (request.name === 'run_command') {
-    const command = typeof request.input.command === 'string' ? request.input.command.trim() : ''
-    const executable = SHELL_COMMAND.exec(command)?.[1]
+  if (request.name === 'run_command' || request.name === 'run_program') {
+    const program = typeof request.input.program === 'string' ? request.input.program.trim() : ''
+    const args = Array.isArray(request.input.args) ? request.input.args.filter((arg): arg is string => typeof arg === 'string') : []
+    const command = request.name === 'run_program' ? [program, ...args].join(' ') : (typeof request.input.command === 'string' ? request.input.command.trim() : '')
+    const executable = request.name === 'run_program' ? program : SHELL_COMMAND.exec(command)?.[1]
     // Shell builtins have no PATH entry, so a "is it in PATH" check always fails
     // for them. This covers both sh builtins and — critically on Windows, where
     // they are cmd.exe builtins rather than real executables — mkdir, copy, del,

@@ -40,6 +40,8 @@ export interface ToolDefinition {
 }
 
 export interface StreamTurnParams {
+  /** Bound task workspace. Providers must use this rather than process.cwd(). */
+  cwd: string
   /**
    * The stable system prompt — fixed for the whole session. Providers that
    * support prompt caching pin this to their longest cache TTL so a slow tool

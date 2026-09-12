@@ -30,6 +30,11 @@ test('run_command preview shows the exact command and cwd', () => {
   expect(approvalPreviewLines('run_command', { command: 'ls' })).toEqual(['  $ ls'])
 })
 
+test('run_program preview preserves each literal argument', () => {
+  expect(approvalPreviewLines('run_program', { program: 'bun', args: ['install', 'folder with spaces'], cwd: 'app' }))
+    .toEqual(['  $ bun "install" "folder with spaces"', '  in app'])
+})
+
 test('tools without a meaningful preview return undefined', () => {
   expect(approvalPreviewLines('browser', { action: 'navigate' })).toBeUndefined()
   expect(approvalPreviewLines('edit_file', {})).toBeUndefined()

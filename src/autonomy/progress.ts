@@ -185,9 +185,13 @@ export function assessProgress(history: AttemptSnapshot[]): ProgressAssessment {
   // Three-plus attempts and a hard core of the same failures has survived every
   // one of them.
   if (history.length >= 3) {
-    const survivedAll = history.every((h) => h === latest || latest.failures.some((f) => h.failures.includes(f)))
+    // `persistent` (a failure present in every attempt before this one) already
+    // implies the old `survivedAll` check: if some failure `f` is in every prior
+    // attempt's set, then for every `h` in history, `latest.failures.some(...)`
+    // is trivially satisfied by that same `f`. `survivedAll` was removed as a
+    // no-op condition on `persistent.length > 0`.
     const persistent = latest.failures.filter((f) => history.slice(0, -1).every((h) => h.failures.includes(f)))
-    if (survivedAll && persistent.length > 0) {
+    if (persistent.length > 0) {
       return {
         trend: 'stalled',
         recommendation: 'stop',

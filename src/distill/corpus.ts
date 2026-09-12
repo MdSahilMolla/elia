@@ -49,17 +49,39 @@ interface RawReceipt {
   verification?: unknown[]
 }
 
+/**
+ * Above this miss rate (with enough samples to trust the ratio), a run of join
+ * misses stops looking like the ordinary "predates this feature" case and
+ * starts looking like `runId`/`corr` actually diverging somewhere — see the
+ * module doc above. Deliberately coarse: this is a smoke alarm, not a metric.
+ */
+const JOIN_MISS_WARN_RATE = 0.3
+const JOIN_MISS_MIN_SAMPLE = 5
+
 export function collectDistillableTraces(cwd = process.cwd()): DistillableTrace[] {
   const runsDir = join(cwd, '.elia', 'runs')
   if (!existsSync(runsDir)) return []
 
   // corr -> reward scalar, from the trajectory log (best-effort; empty on older projects).
   const rewardByCorr = new Map<string, number>()
+  let hasTrajectoryData = false
   try {
     for (const row of readTrajectories('autonomous')) rewardByCorr.set(row.corr, row.reward.scalar)
+    hasTrajectoryData = rewardByCorr.size > 0
   } catch {
     // no trajectory data yet
   }
+
+  // Visibility into the runId/corr join below: `receipt.runId ?? entry.name` is
+  // only correct today by convention (nothing enforces `runId` and the
+  // trajectory log's `corr` share an id space). A miss is silently treated as
+  // "predates this feature" and kept — reasonable as a default, but if misses
+  // are actually a broken join rather than old data, that should be visible
+  // instead of invisible. Counted only when trajectory data exists at all;
+  // with none, every lookup "misses" for the ordinary predates-the-feature
+  // reason and counting would just be noise.
+  let joinAttempts = 0
+  let joinMisses = 0
 
   const traces: DistillableTrace[] = []
   for (const entry of readdirSync(runsDir, { withFileTypes: true })) {
@@ -92,6 +114,10 @@ export function collectDistillableTraces(cwd = process.cwd()): DistillableTrace[
 
     const runId = receipt.runId ?? entry.name
     const reward = rewardByCorr.get(runId)
+    if (hasTrajectoryData) {
+      joinAttempts += 1
+      if (reward === undefined) joinMisses += 1
+    }
     // A graded run that scored poorly is not a clean example — skip it. A run
     // with no trajectory row (predates the feature) is kept on the receipt
     // evidence alone.
@@ -108,6 +134,16 @@ export function collectDistillableTraces(cwd = process.cwd()): DistillableTrace[
       at: receipt.completedAt ?? 0,
       reward,
     })
+  }
+
+  if (joinAttempts >= JOIN_MISS_MIN_SAMPLE) {
+    const missRate = joinMisses / joinAttempts
+    if (missRate > JOIN_MISS_WARN_RATE) {
+      console.warn(
+        `[distill/corpus] ${joinMisses}/${joinAttempts} run receipts (${Math.round(missRate * 100)}%) had no matching trajectory row for their runId. ` +
+          `Trajectory data exists for this project, so this is likely a broken runId/corr join (see the module doc in src/distill/corpus.ts) rather than runs that predate the trajectory feature — check that src/autonomy/loop.ts and the interactive path record trajectories under the same id as the run receipt's runId.`,
+      )
+    }
   }
 
   return traces.sort((a, b) => b.at - a.at)

@@ -257,14 +257,21 @@ impl McpProc {
         let line = serde_json::to_string(&json!({
             "jsonrpc": "2.0", "id": id, "method": method, "params": params
         }))?;
-        self.stdin
-            .write_all(line.as_bytes())
-            .await
-            .context("write to mcp server")?;
-        self.stdin.write_all(b"\n").await?;
-        self.stdin.flush().await?;
 
         let deadline = std::time::Duration::from_secs(timeout_secs);
+        // A stalled child (full stdin pipe buffer) must not hang this write
+        // forever — that would hold `handle.proc`'s lock and block every other
+        // call to this server. Same timeout budget as the read side below.
+        let stdin = &mut self.stdin;
+        tokio::time::timeout(deadline, async {
+            stdin.write_all(line.as_bytes()).await?;
+            stdin.write_all(b"\n").await?;
+            stdin.flush().await
+        })
+        .await
+        .with_context(|| format!("mcp server timed out on write for {method}"))?
+        .context("write to mcp server")?;
+
         loop {
             let next = tokio::time::timeout(deadline, self.stdout.next_line())
                 .await

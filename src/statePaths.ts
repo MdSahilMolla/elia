@@ -65,4 +65,6 @@ export const paths = {
   workspaceDb: join(stateDir, 'workspace.sqlite'),
   workspaceState: join(stateDir, 'workspace'),
   workspaceServerInfo: join(stateDir, 'workspace', 'server.json'),
+  /** Redacted NDJSON log of errors that are handled by degrading rather than throwing — see diagnostics.ts. */
+  diagnostics: join(stateDir, 'diagnostics.ndjson'),
 }

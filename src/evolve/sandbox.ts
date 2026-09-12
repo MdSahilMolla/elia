@@ -44,6 +44,22 @@ export const IMMUTABLE_FILES = [
   'package.json',
   'tsconfig.json',
   'src/**/*.test.ts',
+  // These files are the deterministic safety boundary. Candidates may improve
+  // planning and execution, but may not weaken authorization, containment,
+  // policy, redaction, or high-impact tool enforcement to manufacture a win.
+  'src/autonomy/governor.ts',
+  'src/autonomy/actionContract.ts',
+  'src/autonomy/context.ts',
+  'src/autonomy/policy.ts',
+  'src/autonomy/sensitivePaths.ts',
+  'src/securePersistence.ts',
+  'src/ui/redact.ts',
+  'src/tools/browser.ts',
+  'src/tools/communication.ts',
+  'src/tools/codex.ts',
+  'src/tools/deployment.ts',
+  'src/tools/github.ts',
+  'src/tools/runCommand.ts',
   // The Value Core and its checks. A self-improvement loop may rewrite how elia
   // works but never what it is for — a change here needs a human commit.
   'values/**',

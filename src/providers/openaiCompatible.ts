@@ -42,6 +42,12 @@ export function createOpenAICompatibleProvider(
       // suffix follows it.
       const fullSystem = systemDynamic && systemDynamic.trim() ? `${system}\n\n${systemDynamic}` : system
       const openAITools = toOpenAITools(tools)
+      // Tracks whether the caller's callbacks have already surfaced any part of
+      // this response before a streaming failure. Only a completely silent
+      // stream (nothing emitted yet) is safe to silently retry non-streaming and
+      // replay below — replaying after real content already reached the caller
+      // would double-send it. See the catch block below.
+      let emittedContent = false
       const runner = client.chat.completions
         .stream({
           model,
@@ -56,7 +62,10 @@ export function createOpenAICompatibleProvider(
           // Without this the final streamed response has no usage data at all.
           stream_options: { include_usage: true },
         }, signal ? { signal } : undefined)
-        .on('content', (delta) => onText(delta))
+        .on('content', (delta) => {
+          if (delta) emittedContent = true
+          onText(delta)
+        })
 
       if (onToolBlock) {
         // A tool call has finished streaming its arguments while the rest of the
@@ -69,6 +78,7 @@ export function createOpenAICompatibleProvider(
             return
           }
           if (input && typeof input === 'object') {
+            emittedContent = true
             onToolBlock({ type: 'tool_use', id: `stream_${event.index}`, name: event.name, input })
           }
         })
@@ -82,7 +92,10 @@ export function createOpenAICompatibleProvider(
             | { reasoning?: string | null; reasoning_content?: string | null }
             | undefined
           const reasoning = readReasoning(delta)
-          if (reasoning) onThinking?.(reasoning)
+          if (reasoning) {
+            emittedContent = true
+            onThinking?.(reasoning)
+          }
         })
       }
 
@@ -94,7 +107,14 @@ export function createOpenAICompatibleProvider(
         }
         return { content: toContentBlocks(message, passthroughReasoning), usage: usageFrom(completion.usage) }
       } catch (err) {
-        if (!isStreamingUnsupported(err)) throw err
+        // The non-streaming fallback below re-issues the whole request and
+        // replays the full response through onText/onThinking — safe only when
+        // the failed stream emitted nothing yet. If it already emitted partial
+        // content, silently retrying here would double-send that content (and
+        // could execute a second, different set of tool calls); propagate the
+        // original error instead so the caller's own retry/dedup logic (the
+        // `emittedOutput` guard in agentLoop.ts) handles it at the right layer.
+        if (!isStreamingUnsupported(err) || emittedContent) throw err
         const completion = await client.chat.completions.create({
           model,
           max_tokens: MAX_TOKENS,

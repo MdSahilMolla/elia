@@ -38,31 +38,38 @@ export function createWorkspace(
   store: WorkspaceStore,
   input: { name: string; ownerName?: string; repoRoot?: string; branch?: string; projectName?: string },
 ): CreateWorkspaceResult {
-  if (store.workspace()) throw new Error('this workspace database already has a workspace; use a fresh path')
   const workspaceId = `ws_${randomUUID().replaceAll('-', '')}`
   const projectId = `prj_${randomUUID().replaceAll('-', '')}`
   const ownerMemberId = `mbr_${randomUUID().replaceAll('-', '')}`
   const repoRoot = resolve(input.repoRoot ?? process.cwd())
 
-  store.append({
-    type: 'WorkspaceCreated',
-    actorKind: 'member',
-    actorId: ownerMemberId,
-    objectiveId: undefined,
-    payload: {
-      id: workspaceId,
-      name: text(input.name, 'name'),
-      defaultProjectId: projectId,
-      projectName: input.projectName ? text(input.projectName, 'projectName') : 'default',
-      repoRoot,
-      branch: input.branch ? text(input.branch, 'branch', 200) : 'main',
-    },
-  })
-  store.append({
-    type: 'MemberAdded',
-    actorKind: 'member',
-    actorId: ownerMemberId,
-    payload: { id: ownerMemberId, name: text(input.ownerName ?? 'owner', 'ownerName'), role: 'owner' satisfies MemberRole },
+  // The emptiness check and the two appends must be one atomic unit: without a
+  // transaction, two concurrent `elia workspace init` calls against the same
+  // fresh db can both pass `store.workspace()` before either commits, and both
+  // go on to append a WorkspaceCreated event.
+  store.transact(() => {
+    if (store.workspace()) throw new Error('this workspace database already has a workspace; use a fresh path')
+
+    store.append({
+      type: 'WorkspaceCreated',
+      actorKind: 'member',
+      actorId: ownerMemberId,
+      objectiveId: undefined,
+      payload: {
+        id: workspaceId,
+        name: text(input.name, 'name'),
+        defaultProjectId: projectId,
+        projectName: input.projectName ? text(input.projectName, 'projectName') : 'default',
+        repoRoot,
+        branch: input.branch ? text(input.branch, 'branch', 200) : 'main',
+      },
+    })
+    store.append({
+      type: 'MemberAdded',
+      actorKind: 'member',
+      actorId: ownerMemberId,
+      payload: { id: ownerMemberId, name: text(input.ownerName ?? 'owner', 'ownerName'), role: 'owner' satisfies MemberRole },
+    })
   })
   const ownerToken = mintMemberToken(store, { memberId: ownerMemberId, label: 'owner', actorId: ownerMemberId })
   return { workspaceId, projectId, ownerMemberId, ownerToken }
@@ -123,7 +130,16 @@ export function registerAgentIdentity(store: WorkspaceStore, input: RegisterAgen
   const identityId = existing?.id ?? `aid_${randomUUID().replaceAll('-', '')}`
   const pathScopes = (input.pathScopes ?? []).map((glob) => text(glob, 'pathScopes[]', 400)).slice(0, 50)
   const allowedTools = (input.allowedTools ?? []).map((tool) => text(tool, 'allowedTools[]', 80)).slice(0, 100)
-  const maxConcurrentTasks = Math.min(Math.max(Math.floor(input.maxConcurrentTasks ?? 1), 1), 8)
+  // `agentInstanceId` (rpcAgents.ts) derives exactly one runtime row per identity, and the
+  // orchestrator's dispatch loop (orchestrator.ts) only ever assigns a task to an `idle`
+  // runtime — there is no per-runtime task count anywhere. A value above 1 would silently
+  // do nothing, so reject it here rather than accept and ignore it.
+  if (input.maxConcurrentTasks !== undefined && input.maxConcurrentTasks > 1) {
+    throw new Error(
+      'maxConcurrentTasks > 1 is not supported yet — each agent identity runs a single runtime that processes one task at a time (see agentInstanceId in rpcAgents.ts). Omit maxConcurrentTasks or set it to 1.',
+    )
+  }
+  const maxConcurrentTasks = 1
 
   store.append({
     type: 'AgentIdentityRegistered',

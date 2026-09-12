@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { appendFileSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -7,7 +7,26 @@ import { join } from 'node:path'
 process.env.ANTHROPIC_API_KEY ??= 'test-key-for-lessons-test'
 
 const { appendLessons, consumeInjectedLessonKeys, loadLessons, renderLessons, renderLessonsWithKeys, retireLessons } = await import('./lessons.ts')
-const { recordLessonExposure } = await import('./lessonEfficacy.ts')
+const { recordLessonExposure, MIN_EXPOSURES } = await import('./lessonEfficacy.ts')
+
+/** A minimal TurnOutcome line, written directly so outcomes.jsonl doesn't need a live recordOutcome import. */
+function appendTurn(outcomesPath: string, corr: string, clean: boolean): void {
+  appendFileSync(
+    outcomesPath,
+    `${JSON.stringify({
+      at: Date.now(),
+      corr,
+      prompt: 'x',
+      filesChanged: 1,
+      domains: ['code'],
+      editRetries: clean ? 0 : 1,
+      toolErrors: 0,
+      verify: clean ? 'pass' : 'fail',
+      repairAttempts: 0,
+      aborted: false,
+    })}\n`,
+  )
+}
 
 let dir: string
 let path: string
@@ -50,37 +69,88 @@ test('renderLessonsWithKeys exposes the injected keys and stashes them for the r
   expect(consumeInjectedLessonKeys()).toEqual([])
 })
 
-test('retireLessons drops a lesson with enough exposures and no lift, keeps one with lift', () => {
+test('retireLessons drops a lesson with enough exposures and a confidently negative lift, keeps one with lift', () => {
   appendLessons(['helpful lesson', 'dead weight lesson'], path)
   const efficacyPath = join(dir, 'efficacy.jsonl')
+  const outcomesPath = join(dir, 'outcomes.jsonl')
   const [helpful, dead] = loadLessons(path).map((l) => l.key!)
-  // baseline clean rate 0.5; "helpful" runs clean every time, "dead" never does.
-  for (let i = 0; i < 6; i += 1) {
-    recordLessonExposure(`run-h-${i}`, [helpful!], { verify: 'pass', clean: true }, efficacyPath)
-    recordLessonExposure(`run-d-${i}`, [dead!], { verify: 'pass', clean: false }, efficacyPath)
-  }
-  const result = retireLessons(0.5, { lessonsPath: path, efficacyPath })
+
+  // Control group: turns that never saw either lesson, overwhelmingly clean —
+  // this is the baseline both lessons are judged against.
+  for (let i = 0; i < 20; i += 1) appendTurn(outcomesPath, `ctrl-${i}`, true)
+
+  // "helpful" runs clean every time (matches the control rate — no negative lift).
+  for (let i = 0; i < MIN_EXPOSURES; i += 1) recordLessonExposure(`run-h-${i}`, [helpful!], { verify: 'pass', clean: true }, efficacyPath)
+  // "dead" never runs clean (confidently below the control rate).
+  for (let i = 0; i < MIN_EXPOSURES; i += 1) recordLessonExposure(`run-d-${i}`, [dead!], { verify: 'pass', clean: false }, efficacyPath)
+
+  const result = retireLessons({ lessonsPath: path, efficacyPath, outcomesPath })
   expect(result.retired).toEqual(['dead weight lesson'])
   expect(loadLessons(path).map((l) => l.text)).toEqual(['helpful lesson'])
+})
+
+test('retireLessons excludes turns exposed to the lesson from the baseline instead of contaminating it', () => {
+  // Regression test for the biased-baseline bug: a lesson injected into nearly
+  // every briefing used to be judged against a project-wide clean rate that
+  // was itself mostly made of runs that HAD the lesson, biasing lift toward
+  // zero and hiding a genuinely bad lesson. Here the exposed turns are also
+  // recorded (under the same corr) in outcomes.jsonl — if the baseline were
+  // still contaminated by them, the project-wide rate would be dragged down
+  // close to the lesson's own poor rate and this lesson would survive.
+  // Two never-evaluated filler lessons keep "bad lesson" under the retirement
+  // ceiling (`retireLessons` refuses to remove more than 60% of the file at
+  // once — retiring 1-of-1 would hit that guard regardless of the math below).
+  appendLessons(['filler one', 'filler two', 'bad lesson'], path)
+  const efficacyPath = join(dir, 'efficacy.jsonl')
+  const outcomesPath = join(dir, 'outcomes.jsonl')
+  const key = loadLessons(path).find((l) => l.text === 'bad lesson')!.key!
+
+  for (let i = 0; i < 20; i += 1) appendTurn(outcomesPath, `ctrl-${i}`, true) // true, unexposed control group
+
+  for (let i = 0; i < MIN_EXPOSURES; i += 1) {
+    const corr = `exp-${i}`
+    const clean = i < 2 // mostly unclean while exposed
+    recordLessonExposure(corr, [key], { verify: clean ? 'pass' : 'fail', clean }, efficacyPath)
+    appendTurn(outcomesPath, corr, clean)
+  }
+
+  const result = retireLessons({ lessonsPath: path, efficacyPath, outcomesPath })
+  expect(result.retired).toEqual(['bad lesson'])
 })
 
 test('retireLessons is a no-op below the minimum exposure count', () => {
   appendLessons(['unproven lesson'], path)
   const efficacyPath = join(dir, 'efficacy.jsonl')
+  const outcomesPath = join(dir, 'outcomes.jsonl')
   const key = loadLessons(path)[0]!.key!
   recordLessonExposure('run-1', [key], { verify: 'fail', clean: false }, efficacyPath)
-  expect(retireLessons(0.9, { lessonsPath: path, efficacyPath }).retired).toEqual([])
+  expect(retireLessons({ lessonsPath: path, efficacyPath, outcomesPath }).retired).toEqual([])
+  expect(loadLessons(path)).toHaveLength(1)
+})
+
+test('retireLessons is a no-op when there is not yet enough of a control group to trust', () => {
+  appendLessons(['unproven lesson'], path)
+  const efficacyPath = join(dir, 'efficacy.jsonl')
+  const outcomesPath = join(dir, 'outcomes.jsonl')
+  const key = loadLessons(path)[0]!.key!
+  for (let i = 0; i < MIN_EXPOSURES; i += 1) recordLessonExposure(`run-${i}`, [key], { verify: 'fail', clean: false }, efficacyPath)
+  // Only a couple of unexposed turns recorded — nowhere near MIN_CONTROL_SAMPLE.
+  appendTurn(outcomesPath, 'ctrl-0', true)
+  appendTurn(outcomesPath, 'ctrl-1', true)
+  expect(retireLessons({ lessonsPath: path, efficacyPath, outcomesPath }).retired).toEqual([])
   expect(loadLessons(path)).toHaveLength(1)
 })
 
 test('retireLessons never removes more than the shrink ceiling in one pass', () => {
   appendLessons(['l1', 'l2', 'l3'], path)
   const efficacyPath = join(dir, 'efficacy.jsonl')
+  const outcomesPath = join(dir, 'outcomes.jsonl')
+  for (let i = 0; i < 20; i += 1) appendTurn(outcomesPath, `ctrl-${i}`, true)
   for (const lesson of loadLessons(path)) {
-    for (let i = 0; i < 6; i += 1) recordLessonExposure(`r-${lesson.key}-${i}`, [lesson.key!], { verify: 'fail', clean: false }, efficacyPath)
+    for (let i = 0; i < MIN_EXPOSURES; i += 1) recordLessonExposure(`r-${lesson.key}-${i}`, [lesson.key!], { verify: 'fail', clean: false }, efficacyPath)
   }
   // all three are dead weight, but that is 100% of the file — refuse.
-  const result = retireLessons(0.9, { lessonsPath: path, efficacyPath })
+  const result = retireLessons({ lessonsPath: path, efficacyPath, outcomesPath })
   expect(result.retired).toEqual([])
   expect(result.skippedReason).toContain('ceiling')
   expect(loadLessons(path)).toHaveLength(3)

@@ -5,6 +5,7 @@ import { commandMayReadSensitiveData } from './sensitivePaths.ts'
 import { pauseToolSpinner, resumeToolSpinner } from '../ui/stream.ts'
 import { applyPolicy } from './policy.ts'
 import { addAllowRule, isAllowlisted, ruleFor, type AllowScope } from './allowStore.ts'
+import { consumePreauth, currentBranch, isPreauthorized } from './preauth.ts'
 
 export type ActionRisk = 'safe' | 'review' | 'critical'
 export type ActionDecision = 'allow' | 'approve' | 'block'
@@ -67,6 +68,18 @@ export interface ActionGovernor {
 const CRITICAL_COMMAND = /\b(rm\s+-rf|rm\s+--no-preserve-root|mkfs|dd\s+if=|shutdown|reboot|poweroff|drop\s+(database|table)|truncate\s+table|git\s+(push|reset\s+--hard|clean\s+-fd)|force[- ]push|sudo\b|chmod\s+777|chown\s+-R|kill\s+-9|kubectl\s+(apply|delete|rollout|scale)|helm\s+(install|upgrade|uninstall)|docker\s+(push|rm|system\s+prune)|terraform\s+(apply|destroy)|prisma\s+migrate\s+(deploy|reset)|alembic\s+upgrade|drizzle-kit\s+push|npm\s+publish|pnpm\s+publish|bun\s+publish|vercel\s+.*--prod|fly\s+deploy|railway\s+up|gcloud\s+.*\bdeploy\b|aws\s+(cloudformation|ecs|rds|lambda)|curl[^\n|]*\|\s*(sh|bash)|wget[^\n|]*\|\s*(sh|bash)|deploy\s+(to\s+)?prod(uction)?|send\s+.*(email|message)|publish\b|tweet\b|buy\b|purchase\b|checkout\b|transfer\b|wire\b)\b/i
 const REVIEW_COMMAND = /\b(git\s+commit|npm\s+install|pnpm\s+install|yarn\s+add|bun\s+(add|install)|pip\s+install|docker\s+build|docker\s+run|curl\b|wget\b|ssh\b|scp\b|gh\s+pr|deploy\b)\b/i
 const READ_ONLY_COMMAND = /^(?:command\s+)?(?:pwd|ls|find|grep|rg|git\s+(?:status|diff|log|show|branch)|(?:bun|npm|pnpm|yarn)\s+(?:test|run\s+(?:test|typecheck|type-check|tsc|check-types|lint|format\s+--check|check))|npx\s+(?:--no-install\s+)?tsc\s+--noEmit|cargo\s+(?:check|test|clippy)|go\s+(?:build|test|vet)\b[^\n]*|mvn\s+(?:-[^\s]+\s+)*(?:compile|test-compile|test)\b[^\n]*|(?:\.\/)?gradlew(?:\.bat)?\s+(?:build|test|check|compileJava|compileTestJava)\b[^\n]*|gradle\s+(?:build|test|check|compileJava|compileTestJava)\b[^\n]*|ctest\b[^\n]*|pytest\b[^\n]*|mypy\b[^\n]*|node\s+--version|bun\s+--version|npm\s+--version|printf|echo|cat|head|tail|sed|awk)\b/i
+// `sed`/`awk` are allowed above only for their plain print-to-stdout form.
+// Both also support in-place file rewriting (`sed -i`, `sed --in-place`,
+// `awk -i inplace`) which overwrites the target file — a write, not a read.
+// Matched separately so assessCommand can exclude it from the read-only
+// allowance the same way it already excludes mv/cp/chmod etc. below.
+const SED_AWK_INPLACE_EDIT = /\b(?:sed|gsed|awk|gawk)\b[\s\S]*?(?:(?:^|\s)-i(?:[^\s]*)?(?:\s|$)|--in-place\b)/i
+// `git branch` is read-only-by-default (no args, or a listing flag), but the
+// same subcommand also deletes (-d/-D/--delete), force-renames (-M), or
+// otherwise mutates a branch — none of which READ_ONLY_COMMAND's word-level
+// match can tell apart from a plain listing. Allow-list the genuinely
+// read-only invocations instead of trying to deny-list every destructive flag.
+const GIT_BRANCH_LIST_ONLY = /^(?:command\s+)?git\s+branch(?:\s+(?:-a|-r|-v|-vv|--list|--all|--remotes|--verbose|--show-current|--sort=\S+|--contains(?:=\S+|\s+\S+)?|--merged(?:=\S+|\s+\S+)?|--no-merged(?:=\S+|\s+\S+)?))*\s*$/i
 const SHELL_CONTROL_SYNTAX = /[;&|<>`$]|\$\(|\b(?:eval|exec|source)\b/i
 const SECRET_KEY = /(password|passwd|token|secret|api[-_]?key|authorization|cookie|credential)/i
 const EXTERNAL_WRITE_COMMAND = /\b(curl|wget)\b[^\n]*(--data(?:-raw)?|\s-d\s|\s-X\s*(POST|PUT|PATCH|DELETE)|--upload-file|--form)\b/i
@@ -90,6 +103,11 @@ export function assessAction(request: ActionRequest, cwd = currentAgent().cwd ??
   const resources = values.filter((value) => /[\\/]|https?:\/\//i.test(value)).slice(0, 4)
 
   if (name === 'run_command') return assessCommand(joined, cwd)
+  if (name === 'run_program') {
+    const program = typeof input.program === 'string' ? input.program : ''
+    const args = Array.isArray(input.args) ? input.args.filter((arg): arg is string => typeof arg === 'string') : []
+    return assessCommand([program, ...args].join(' '), cwd)
+  }
 
   if (name === 'presentation') {
     return assessment('review', 'approve', 'presentation generation creates a derived document artifact', 'presentation.from_workbook', resources, true)
@@ -125,7 +143,7 @@ export function assessAction(request: ActionRequest, cwd = currentAgent().cwd ??
 
   if (name === 'github') {
     const action = typeof input.action === 'string' ? input.action : 'unknown'
-    if (action === 'status' || action === 'pr_view' || action === 'pr_list' || action === 'pr_checks' || action === 'pr_reviews' || action === 'issue_list' || action === 'issue_view') {
+    if (action === 'status' || action === 'pr_view' || action === 'pr_list' || action === 'pr_checks' || action === 'pr_checks_log' || action === 'pr_reviews' || action === 'pr_unresolved_reviews' || action === 'issue_list' || action === 'issue_view') {
       return assessment('safe', 'allow', `github ${action} only reads local git and GitHub state`, `github.${action}`, resources, true)
     }
     if (action === 'branch' || action === 'commit') {
@@ -194,7 +212,7 @@ export function assessAction(request: ActionRequest, cwd = currentAgent().cwd ??
     return assessment('critical', 'approve', `browser ${action} changes page state and needs an authorization record`, `browser.${action}`, resources, false)
   }
 
-  if (name === 'write_file' || name === 'edit_file') {
+  if (name === 'write_file' || name === 'edit_file' || name === 'lsp_refactor') {
     const path = typeof input.path === 'string' ? input.path : ''
     const outside = path.length === 0 || !isPathWithinWorkspace(path, cwd)
     return outside
@@ -202,7 +220,7 @@ export function assessAction(request: ActionRequest, cwd = currentAgent().cwd ??
       : assessment('safe', 'allow', `${name} is workspace-scoped and checkpointable`, name, path ? [path] : [], true)
   }
 
-  if (name === 'read_file' || name === 'list_files' || name === 'grep' || name === 'recall' || name === 'brain' || name === 'board_read' || name === 'board_post' || name === 'todo_write' || name === 'why' || name === 'record_rationale' || name === 'note_lesson') {
+  if (name === 'read_file' || name === 'list_files' || name === 'grep' || name === 'find_symbol' || name === 'recall' || name === 'brain' || name === 'board_read' || name === 'board_post' || name === 'todo_write' || name === 'why' || name === 'record_rationale' || name === 'note_lesson') {
     const path = typeof input.path === 'string' ? input.path : ''
     return path && !isPathWithinWorkspace(path, cwd)
       ? assessment('critical', 'approve', `${name} may access data outside the active workspace or through an invalid path`, name, [path], false)
@@ -443,6 +461,16 @@ const SETTLEABLE_ONCE = new Set(['shell', 'shell.composed', 'shell.unknown', 'gi
 
 export function createActionGovernor(options: { mode?: GovernanceMode; approve?: ActionApproval; cwd?: string; maxActions?: number } = {}): ActionGovernor {
   const mode = options.mode ?? 'unattended'
+  const cwd = options.cwd ?? process.cwd()
+  // Resolved at most once per governor, and only the first time a
+  // pre-authorization check actually needs it — most governors (most tests,
+  // supervised mode, unattended runs that never hit an excluded-critical
+  // intent) never need a branch at all, so eagerly shelling out to git on
+  // every governor construction would be pure waste. A branch switch mid-run
+  // just means the branch resolved here no longer matches the grant, which
+  // fails isPreauthorized closed (falls through to the normal refusal), never open.
+  let branchPromise: Promise<string> | undefined
+  const resolvedBranch = (): Promise<string> => (branchPromise ??= currentBranch(cwd))
   const requestedMaxActions = options.maxActions ?? 0
   const maxActions = Number.isFinite(requestedMaxActions) && requestedMaxActions > 0
     ? Math.max(1, Math.min(Math.floor(requestedMaxActions), MAX_GOVERNED_ACTIONS))
@@ -456,7 +484,9 @@ export function createActionGovernor(options: { mode?: GovernanceMode; approve?:
   const sessionAllow = new Set<string>()
   const sessionKey = (request: ActionRequest, assessment: ActionAssessment): string =>
     request.name === 'run_command'
-      ? `run_command:${String((request.input.command ?? '')).trim().split(/[\s;|&]+/, 1)[0] ?? ''}`
+      ? `run_command:${String(request.input.command ?? '').trim().split(/[\s;|&]+/, 1)[0] ?? ''}`
+      : request.name === 'run_program'
+        ? `run_program:${String(request.input.program ?? '').trim()}:${Array.isArray(request.input.args) && typeof request.input.args[0] === 'string' ? request.input.args[0].trim() : ''}:${assessment.intent}`
       : `${request.name}:${assessment.intent}`
 
   return {
@@ -502,11 +532,24 @@ export function createActionGovernor(options: { mode?: GovernanceMode; approve?:
       // rather than one per call. With no approval channel at all (a scheduled
       // run, CI, nobody at the terminal) it still refuses, because a question
       // nobody will hear is not consent.
+      //
+      // The one other way past this wall: a human explicitly pre-authorized
+      // this exact intent, for this exact project + branch, before the run
+      // started (`elia auto --authorize`, preauth.ts) — a real advance "yes"
+      // recorded by a person, never something the model can grant itself.
       if (mode === 'unattended' && assessment.risk === 'critical' && !SETTLEABLE_ONCE.has(assessment.intent)) {
+        const branch = await resolvedBranch()
+        if (isPreauthorized(assessment.intent, cwd, branch)) {
+          const grant = consumePreauth(assessment.intent, cwd, branch)
+          return {
+            allowed: true,
+            assessment: { ...assessment, decision: 'allow', reason: `${assessment.reason} (pre-authorized: .elia/preauth.json grant for "${assessment.intent}", use #${grant?.usedCount ?? '?'})` },
+          }
+        }
         return {
           allowed: false,
           assessment: { ...assessment, decision: 'block' },
-          message: `Action blocked by Elia’s unattended policy: ${assessment.reason}. This kind of action reaches outside the project, so one approval can never stand for the next — resume in supervised mode for an exact per-action boundary.`,
+          message: `Action blocked by Elia’s unattended policy: ${assessment.reason}. This kind of action reaches outside the project, so one approval can never stand for the next — resume in supervised mode for an exact per-action boundary, or start this run with "elia auto --authorize ${assessment.intent}" to pre-authorize it.`,
         }
       }
       if (mode === 'unattended' && assessment.risk === 'critical' && !options.approve) {
@@ -636,7 +679,10 @@ function assessCommand(command: string, cwd: string): ActionAssessment {
   if (REVIEW_COMMAND.test(command)) {
     return assessment('review', 'approve', 'shell command changes dependencies, reaches a remote system, or creates a durable artifact', 'shell', [], true)
   }
-  if (READ_ONLY_COMMAND.test(command) && !/\b(?:rm|mv|cp|mkdir|touch|chmod|chown|kill|shutdown|reboot|publish|push|apply|delete|destroy|install|add|upgrade|send|curl|wget|ssh|scp)\b/i.test(command)) {
+  if (/^(?:command\s+)?git\s+branch\b/i.test(command) && !GIT_BRANCH_LIST_ONLY.test(command)) {
+    return assessment('critical', 'approve', 'git branch command may create, delete, rename, or force-move a branch and is not a safe read-only operation', 'shell.unknown', [], false)
+  }
+  if (READ_ONLY_COMMAND.test(command) && !SED_AWK_INPLACE_EDIT.test(command) && !/\b(?:rm|mv|cp|mkdir|touch|chmod|chown|kill|shutdown|reboot|publish|push|apply|delete|destroy|install|add|upgrade|send|curl|wget|ssh|scp)\b/i.test(command)) {
     return assessment('safe', 'allow', 'shell command matches the restricted read-only command policy', 'shell.read-only', [], true)
   }
   return assessment('critical', 'approve', 'shell command is not in the restricted read-only policy and may cause an unreviewed side effect', 'shell.unknown', [], false)

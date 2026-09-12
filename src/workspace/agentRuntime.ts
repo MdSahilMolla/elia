@@ -135,7 +135,12 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<voi
       busy = false
       if (pendingClaim && !stopped) {
         pendingClaim = false
-        void claimNext()
+        // In `once` mode the caller (below) closes the client right after the
+        // first `claimNext()` resolves. Re-invoking here would start a second
+        // claim against a closing/closed client whose heartbeat is never
+        // tracked and whose outcome is never observed — an orphaned task. Drop
+        // the deferred claim instead; the runtime is about to exit anyway.
+        if (!options.once) void claimNext()
       }
     }
   }

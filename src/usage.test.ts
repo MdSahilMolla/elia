@@ -1,6 +1,10 @@
 import { expect, test } from 'bun:test'
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import {
   addUsage,
+  clearCustomPricingCache,
   estimateCostUsd,
   formatCostUsd,
   formatElapsed,
@@ -49,6 +53,48 @@ test('estimateCostUsd applies the discounted cache-read rate, not the base input
 test('estimateCostUsd applies the premium cache-write rate for Anthropic', () => {
   const usage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 1_000_000 }
   expect(estimateCostUsd('claude-sonnet-5', usage)).toBeCloseTo(2.5, 6)
+})
+
+test('estimateCostUsd reads .elia/pricing.json for a model not in the built-in table, and lets it override a built-in rate too', () => {
+  clearCustomPricingCache()
+  const cwd = mkdtempSync(join(tmpdir(), 'elia-pricing-'))
+  mkdirSync(join(cwd, '.elia'), { recursive: true })
+  writeFileSync(
+    join(cwd, '.elia', 'pricing.json'),
+    JSON.stringify({
+      'my-custom-model': { inputPerM: 1, outputPerM: 3 },
+      'gpt-4.1': { inputPerM: 100, outputPerM: 100 }, // deliberately absurd, to prove it overrides the built-in rate
+    }),
+  )
+  const usage = { inputTokens: 1_000_000, outputTokens: 500_000, cacheReadTokens: 0, cacheWriteTokens: 0 }
+  expect(estimateCostUsd('my-custom-model', usage, cwd)).toBeCloseTo(1 + 1.5, 6)
+  expect(estimateCostUsd('gpt-4.1', usage, cwd)).toBeCloseTo(100 + 50, 6)
+  // A completely different cwd with no pricing.json still falls back to "unknown"/built-in normally.
+  clearCustomPricingCache()
+  expect(estimateCostUsd('my-custom-model', usage, mkdtempSync(join(tmpdir(), 'elia-pricing-empty-')))).toBeUndefined()
+})
+
+test('a malformed .elia/pricing.json is ignored, not thrown', () => {
+  clearCustomPricingCache()
+  const cwd = mkdtempSync(join(tmpdir(), 'elia-pricing-bad-'))
+  mkdirSync(join(cwd, '.elia'), { recursive: true })
+  writeFileSync(join(cwd, '.elia', 'pricing.json'), 'not json at all')
+  expect(() => estimateCostUsd('gpt-4.1', ZERO_USAGE, cwd)).not.toThrow()
+  expect(estimateCostUsd('gpt-4.1', ZERO_USAGE, cwd)).toBe(0)
+  clearCustomPricingCache()
+})
+
+test('estimateCostUsd treats a NaN or negative token count as 0 instead of propagating it', () => {
+  const nanUsage = { inputTokens: Number.NaN, outputTokens: 500_000, cacheReadTokens: 0, cacheWriteTokens: 0 }
+  expect(estimateCostUsd('gpt-4.1', nanUsage)).toBeCloseTo(4, 6) // just the output half; NaN input contributes 0, not NaN
+
+  const negativeUsage = { inputTokens: -1_000_000, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 }
+  const result = estimateCostUsd('gpt-4.1', negativeUsage)
+  expect(result).toBe(0) // never a negative cost
+  expect(result).not.toBeLessThan(0)
+
+  const infiniteUsage = { inputTokens: Number.POSITIVE_INFINITY, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 }
+  expect(estimateCostUsd('gpt-4.1', infiniteUsage)).toBe(0)
 })
 
 test('formatCostUsd shows unknown cost distinctly from a real number', () => {

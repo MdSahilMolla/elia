@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -14,7 +14,7 @@ use crate::protocol::{
     codes, DaemonInfo, McpCallParams, McpEnsureParams, ParseCheckParams, Request, Response,
     ShellCancelParams, ShellExecParams, ShellExecResult, PROTOCOL_VERSION,
 };
-use crate::shell::{ExecStop, ShellPool};
+use crate::shell::{ExecStop, ShellPool, SHELL_IDLE_SECS};
 
 pub struct AppState {
     pub started: Instant,
@@ -260,6 +260,19 @@ pub async fn idle_watchdog(state: Arc<AppState>, idle_secs: u64) {
             state.shutdown.notify_waiters();
             return;
         }
+    }
+}
+
+/// Ticks every 60s; evicts shell workers that have been idle past
+/// `SHELL_IDLE_SECS`, independent of `idle_watchdog` above — a directory that
+/// goes quiet must not keep its worker processes alive just because the
+/// daemon as a whole is still busy with other directories.
+pub async fn shell_reap_loop(state: Arc<AppState>) {
+    let mut ticker = tokio::time::interval(Duration::from_secs(60));
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        ticker.tick().await;
+        state.shell.reap_idle(Duration::from_secs(SHELL_IDLE_SECS)).await;
     }
 }
 

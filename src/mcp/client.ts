@@ -3,6 +3,7 @@ import type { McpServerConfig } from './config.ts'
 import type { McpTransport } from './transport.ts'
 import { isJsonRpcResponse, MCP_CLIENT_INFO, MCP_PROTOCOL_VERSION, type JsonRpcResponse, type McpToolCallResult, type McpToolsListResult } from './protocol.ts'
 import { terminateProcessGroup } from '../shell.ts'
+import { logSwallowedError } from '../diagnostics.ts'
 
 // npx-backed browser servers can cold-start slowly on Windows while the package
 // runner validates its cache. Keep the boundary finite, but allow one full
@@ -19,9 +20,9 @@ interface Pending {
 // happy path it's a number; when the peer process has been killed the write can
 // fail asynchronously with EPIPE. Nobody awaits these, so an unhandled rejection
 // would escape and (under `bun test`) get pinned on whatever test is running.
-function swallow(result: unknown): void {
+function swallow(result: unknown, scope: string, context?: Record<string, unknown>): void {
   if (result && typeof (result as PromiseLike<unknown>).then === 'function') {
-    void Promise.resolve(result).catch(() => {})
+    void Promise.resolve(result).catch((err) => logSwallowedError(scope, err, context))
   }
 }
 
@@ -55,12 +56,13 @@ export class McpClient implements McpTransport {
       // rejects on its own — nothing else to do here.
     })
 
-    await this.withTimeout(
-      this.request('initialize', {
+    await this.request(
+      'initialize',
+      {
         protocolVersion: MCP_PROTOCOL_VERSION,
         capabilities: {},
         clientInfo: MCP_CLIENT_INFO,
-      }),
+      },
       CONNECT_TIMEOUT_MS,
       `MCP server "${this.name}" did not respond to initialize within ${CONNECT_TIMEOUT_MS}ms`,
     )
@@ -68,13 +70,14 @@ export class McpClient implements McpTransport {
   }
 
   async listTools(): Promise<McpToolsListResult> {
-    const result = await this.withTimeout(this.request('tools/list', {}), CONNECT_TIMEOUT_MS, `MCP server "${this.name}" did not respond to tools/list`)
+    const result = await this.request('tools/list', {}, CONNECT_TIMEOUT_MS, `MCP server "${this.name}" did not respond to tools/list`)
     return result as McpToolsListResult
   }
 
   async callTool(name: string, args: Record<string, unknown>): Promise<McpToolCallResult> {
-    const result = await this.withTimeout(
-      this.request('tools/call', { name, arguments: args }),
+    const result = await this.request(
+      'tools/call',
+      { name, arguments: args },
       CALL_TIMEOUT_MS,
       `MCP server "${this.name}" timed out calling tool "${name}"`,
     )
@@ -93,7 +96,7 @@ export class McpClient implements McpTransport {
     // itself reject asynchronously if the pipe is already broken, so swallow
     // both the sync throw and the async rejection.
     try {
-      swallow(this.proc?.stdin.end())
+      swallow(this.proc?.stdin.end(), 'mcp.client.close.stdinEnd', { server: this.name })
     } catch {
       // already gone
     }
@@ -119,10 +122,16 @@ export class McpClient implements McpTransport {
     if (proc) await Promise.race([proc.exited, new Promise((resolve) => setTimeout(resolve, 2000))])
   }
 
-  private async withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
+  /** `onTimeout`, when given, runs right before the timeout rejects — used to
+   * drop the now-abandoned entry from `this.pending` so a request whose id the
+   * server never answers doesn't stay allocated forever. */
+  private async withTimeout<T>(promise: Promise<T>, ms: number, message: string, onTimeout?: () => void): Promise<T> {
     let timer: ReturnType<typeof setTimeout>
     const timeout = new Promise<never>((_, reject) => {
-      timer = setTimeout(() => reject(new Error(message)), ms)
+      timer = setTimeout(() => {
+        onTimeout?.()
+        reject(new Error(message))
+      }, ms)
     })
     try {
       return await Promise.race([promise, timeout])
@@ -131,7 +140,10 @@ export class McpClient implements McpTransport {
     }
   }
 
-  private request(method: string, params: unknown): Promise<unknown> {
+  /** `timeoutMs`/`timeoutMessage` are optional so internal fire-and-forget
+   * notifications-adjacent calls can skip the timeout race entirely; every
+   * real caller below passes both. */
+  private request(method: string, params: unknown, timeoutMs?: number, timeoutMessage?: string): Promise<unknown> {
     if (this.closed || !this.proc) return Promise.reject(new Error(`MCP server "${this.name}" is not connected`))
     const id = this.nextId++
     const line = `${JSON.stringify({ jsonrpc: '2.0', id, method, params })}\n`
@@ -145,8 +157,8 @@ export class McpClient implements McpTransport {
       })
     })
     try {
-      swallow(this.proc.stdin.write(line))
-      swallow(this.proc.stdin.flush())
+      swallow(this.proc.stdin.write(line), 'mcp.client.request.write', { server: this.name, method })
+      swallow(this.proc.stdin.flush(), 'mcp.client.request.flush', { server: this.name, method })
     } catch (err) {
       // The server's stdin pipe can already be gone (crashed, or died right
       // after spawn) — reject this call instead of letting a raw EPIPE escape
@@ -154,17 +166,20 @@ export class McpClient implements McpTransport {
       this.pending.delete(id)
       return Promise.reject(err instanceof Error ? err : new Error(String(err)))
     }
-    return promise
+    if (timeoutMs === undefined) return promise
+    return this.withTimeout(promise, timeoutMs, timeoutMessage ?? `MCP server "${this.name}" timed out waiting for a response`, () => this.pending.delete(id))
   }
 
   private notify(method: string, params?: unknown): void {
     if (this.closed || !this.proc) return
     const line = `${JSON.stringify({ jsonrpc: '2.0', method, params })}\n`
     try {
-      swallow(this.proc.stdin.write(line))
-      swallow(this.proc.stdin.flush())
-    } catch {
-      // Best-effort notification — nothing to reject, no reply is ever expected.
+      swallow(this.proc.stdin.write(line), 'mcp.client.notify.write', { server: this.name, method })
+      swallow(this.proc.stdin.flush(), 'mcp.client.notify.flush', { server: this.name, method })
+    } catch (err) {
+      // Best-effort notification — nothing to reject, no reply is ever expected —
+      // but still worth a record if the pipe is repeatedly gone.
+      logSwallowedError('mcp.client.notify', err, { server: this.name, method })
     }
   }
 
@@ -185,6 +200,11 @@ export class McpClient implements McpTransport {
         }
       }
     } finally {
+      // The server can end its own stdout without close() ever being called
+      // (the process died on its own). Mark this client closed here too, so
+      // subsequent request()/notify() calls fail fast on the "closed" check
+      // instead of attempting a doomed write against a dead process.
+      this.closed = true
       const stillPending = [...this.pending.values()]
       this.pending.clear()
       for (const pending of stillPending) pending.reject(new Error(`MCP server "${this.name}" closed its stdout`))

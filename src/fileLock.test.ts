@@ -45,6 +45,38 @@ describe('fileLock', () => {
     expect(readFileSync(lock, 'utf8')).toBe(foreign)
   })
 
+  test('calls onProceedWithoutLock exactly when it proceeds unlocked, and not on the normal path', () => {
+    const held = join(lockDir(), 'g.lock')
+    writeFileSync(held, JSON.stringify({ pid: process.pid, token: 'someone-else', at: Date.now(), host: hostname() }))
+
+    let notified = 0
+    withFileLock(held, () => 'ran', { timeoutMs: 60, retryDelayMs: 10, proceedOnTimeout: true, onProceedWithoutLock: () => { notified += 1 } })
+    expect(notified).toBe(1)
+
+    const free = join(lockDir(), 'h.lock')
+    let notifiedOnSuccess = 0
+    withFileLock(free, () => 'ran', { proceedOnTimeout: true, onProceedWithoutLock: () => { notifiedOnSuccess += 1 } })
+    expect(notifiedOnSuccess).toBe(0)
+  })
+
+  test('gives a cross-host lock a grace period before reclaiming it, but reclaims it once that grace elapses', () => {
+    const lock = join(lockDir(), 'f.lock')
+    const ttlMs = 50
+    const foreignHost = `${hostname()}-remote`
+    const writeForeignOwner = (ageMs: number) =>
+      writeFileSync(lock, JSON.stringify({ pid: process.pid, token: 'remote-owner', at: Date.now() - ageMs, host: foreignHost }))
+
+    // Just past the base TTL but still within the cross-host grace: not yet stealable.
+    writeForeignOwner(ttlMs + 5)
+    expect(() => withFileLock(lock, () => 'nope', { ttlMs, timeoutMs: 30, retryDelayMs: 10 })).toThrow('is busy')
+
+    // Well past the cross-host grace: stealable.
+    writeForeignOwner(ttlMs * 3)
+    let ran = false
+    withFileLock(lock, () => { ran = true }, { ttlMs, timeoutMs: 500, retryDelayMs: 10 })
+    expect(ran).toBe(true)
+  })
+
   test('async variant holds across awaits', async () => {
     const lock = join(lockDir(), 'e.lock')
     const order: string[] = []

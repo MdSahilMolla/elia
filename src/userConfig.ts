@@ -1,6 +1,7 @@
-import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
+import { renameSyncWithRetry } from './securePersistence.ts'
 
 /**
  * User-level configuration is intentionally separate from the project `.env`.
@@ -84,7 +85,20 @@ export function writeUserConfig(values: Record<string, string | undefined>, file
   mkdirSync(dirname(filePath), { recursive: true, mode: 0o700 })
   const temporary = `${filePath}.tmp-${process.pid}`
   writeFileSync(temporary, content, { mode: 0o600 })
-  renameSync(temporary, filePath)
+  try {
+    // `renameSync` transiently fails on Windows (EPERM/EACCES/EBUSY) when AV/an
+    // indexer/another process briefly holds the destination open — retry it the
+    // same way securePersistence.ts's writers do.
+    renameSyncWithRetry(temporary, filePath)
+  } catch (error) {
+    // Never leave a temp file holding a just-entered API key sitting on disk.
+    try {
+      rmSync(temporary, { force: true })
+    } catch {
+      // Already gone, or held open — nothing more we can do here.
+    }
+    throw error
+  }
   try {
     // Tighten an existing file too; chmod is best-effort on filesystems without Unix modes.
     chmodSync(filePath, 0o600)

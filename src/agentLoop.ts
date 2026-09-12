@@ -713,7 +713,8 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
       // critical, approval-gated action rather than silently bypassing Elia's
       // safety boundary. Normal API providers still return Elia tool calls.
       const delegated = route.providerName === 'codex'
-      const request = { name: 'codex_delegate', input: { model: route.model, path: process.cwd() } }
+      const workspaceRoot = currentAgent().cwd ?? process.cwd()
+      const request = { name: 'codex_delegate', input: { model: route.model, path: workspaceRoot } }
       const DELEGATED_ID = 'codex-subscription-run'
       const startedAt = Date.now()
       let assessment: ActionAssessment | undefined
@@ -746,7 +747,8 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
       }
       transcript?.notice(`Model: ${route.providerName}/${route.model} · agent: ${actor}`)
       try {
-        const result = await route.provider.streamTurn({
+          const result = await route.provider.streamTurn({
+            cwd: workspaceRoot,
             system: systemPrompt,
             systemDynamic: systemDynamicPrompt,
             messages,
@@ -795,11 +797,10 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
               emittedOutput = true
               noteFirstOutput()
               stopAnimation()
-              // For the ChatGPT subscription, collapse Codex's internal activity
-              // stream: only warnings (usage limits, safety) and model reroutes
-              // reach the transcript — everything else is covered by the single
-              // hand-off line and the final result.
-              if (delegated && activity.kind !== 'warning' && activity.kind !== 'model') return
+              // Providers may execute tools internally, but their plan and
+              // evidence still belong to Elia's run. Forward the normalized
+              // activity stream so terminal and UI clients can show a durable
+              // plan instead of an opaque single-line hand-off.
               cursor?.beforeText()
               onActivity?.(activity)
               cursor?.afterText()

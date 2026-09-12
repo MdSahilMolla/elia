@@ -66,12 +66,22 @@ test('registerAgentIdentity validates the role and stores the scope', () => {
   expect(() => registerAgentIdentity(store, { name: 'bad', role: 'nonsense', actorId: created.ownerMemberId })).toThrow()
 
   const { identityId } = registerAgentIdentity(store, {
-    name: 'be', role: 'backend', pathScopes: ['api/**'], maxConcurrentTasks: 3, actorId: created.ownerMemberId,
+    name: 'be', role: 'backend', pathScopes: ['api/**'], maxConcurrentTasks: 1, actorId: created.ownerMemberId,
   })
   const identity = store.agentIdentity(identityId)!
   expect(identity.role).toBe('backend')
   expect(identity.pathScopes).toEqual(['api/**'])
-  expect(identity.maxConcurrentTasks).toBe(3)
+  expect(identity.maxConcurrentTasks).toBe(1)
+})
+
+test('registerAgentIdentity rejects maxConcurrentTasks > 1 — dispatch has no multi-task-per-runtime support', () => {
+  const store = open()
+  const created = createWorkspace(store, { name: 'demo' })
+  expect(() => registerAgentIdentity(store, {
+    name: 'be', role: 'backend', maxConcurrentTasks: 3, actorId: created.ownerMemberId,
+  })).toThrow(/maxConcurrentTasks/)
+  // The rejected registration must not have partially applied.
+  expect(store.agentIdentity('be')).toBeUndefined()
 })
 
 test('re-registering an agent updates it in place and keeps the existing token', () => {

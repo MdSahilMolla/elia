@@ -32,6 +32,10 @@ export const DEFAULT_WORKSPACE_DB = join(process.cwd(), '.elia', 'workspace.sqli
 
 const MAX_PAYLOAD_TEXT = 20_000
 
+/** Default retention for `pruneOldEvents` — see its doc comment. */
+const DEFAULT_KEEP_EVENTS = 200_000
+const DEFAULT_EVENT_MAX_AGE_MS = 90 * 24 * 60 * 60_000
+
 export interface EventQuery {
   sinceSeq?: number
   limit?: number
@@ -43,6 +47,12 @@ export type EventListener = (event: PersistedEvent) => void
 
 export class WorkspaceStore {
   private readonly listeners = new Set<EventListener>()
+  // Depth of nested `transact()` calls currently on the stack. `append` checks
+  // this to decide whether to notify immediately (depth 0 — the normal,
+  // non-nested case) or buffer until the outermost `transact()` actually
+  // commits (depth > 0) — see `append` and `transact` below.
+  private transactDepth = 0
+  private pendingNotifications: PersistedEvent[] = []
 
   private constructor(
     readonly path: string,
@@ -76,7 +86,10 @@ export class WorkspaceStore {
       // holding a lock (matters on Windows, where a stale handle blocks unlink).
       this.db.exec('PRAGMA wal_checkpoint(TRUNCATE);')
     } catch {
-      // A read-only or already-detached handle cannot checkpoint; closing still frees it.
+      // A read-only or already-detached handle cannot checkpoint; closing still
+      // frees it either way. Deliberately not logged to diagnostics.ts: this is
+      // the expected, frequent outcome for every read-only store instance, not
+      // a failure worth a persistent record.
     }
     try {
       this.db.close()
@@ -107,6 +120,22 @@ export class WorkspaceStore {
       return event
     })
     const event = run()
+    // Inside a `transact()` call (e.g. `acquireForTask`'s whole reserve loop),
+    // this insert is only a savepoint of the outer transaction — it can still be
+    // rolled back by a later `append` in the same `transact` callback throwing.
+    // Notifying now would tell listeners (the Orchestrator, WebSocket clients)
+    // about a row that may never actually persist. Buffer instead; `transact`
+    // flushes this queue once the outermost transaction actually commits, and
+    // discards it on rollback.
+    if (this.transactDepth > 0) {
+      this.pendingNotifications.push(event)
+    } else {
+      this.notify(event)
+    }
+    return event
+  }
+
+  private notify(event: PersistedEvent): void {
     // Snapshot before iterating: a listener may synchronously append another
     // event (a client disconnect handler emits `PresenceLeft`), whose fan-out
     // runs `unsubscribe` and mutates `this.listeners` mid-loop — skipping
@@ -120,7 +149,6 @@ export class WorkspaceStore {
         // A subscriber (e.g. a dropped WebSocket) must not break the writer.
       }
     }
-    return event
   }
 
   private appendAudit(event: PersistedEvent): void {
@@ -138,19 +166,63 @@ export class WorkspaceStore {
     ).run(id, event.type, event.actorKind, event.actorId, target, payloadHash, prevHash, entryHash, event.at)
   }
 
-  /** Verify the audit hash chain end to end. */
+  /**
+   * Verify the audit hash chain end to end.
+   *
+   * Paginated by `seq` (keyset, not `OFFSET` — `OFFSET` would re-scan every
+   * already-verified row on each batch) so a long-lived audit log is verified a
+   * few thousand rows at a time instead of loading the whole table into one
+   * array — `bun:sqlite` calls are synchronous, so a giant `SELECT *` here would
+   * block the event loop (and the WS server) for the duration.
+   */
   auditChainIntact(): boolean {
-    const rows = this.db.query('SELECT * FROM audit_log ORDER BY seq ASC').all() as Row[]
+    const BATCH = 5_000
     let prevHash = ''
-    for (const row of rows) {
-      if (String(row.prev_hash) !== prevHash) return false
-      const recomputed = createHash('sha256')
-        .update([prevHash, row.id, row.action, row.actor_kind, row.actor_id, row.target ?? '', row.payload_hash, row.created_at].join('␟'))
-        .digest('hex')
-      if (recomputed !== String(row.entry_hash)) return false
-      prevHash = String(row.entry_hash)
+    let afterSeq = 0
+    for (;;) {
+      const rows = this.db.query('SELECT * FROM audit_log WHERE seq > ? ORDER BY seq ASC LIMIT ?').all(afterSeq, BATCH) as Row[]
+      if (rows.length === 0) break
+      for (const row of rows) {
+        if (String(row.prev_hash) !== prevHash) return false
+        const recomputed = createHash('sha256')
+          .update([prevHash, row.id, row.action, row.actor_kind, row.actor_id, row.target ?? '', row.payload_hash, row.created_at].join('␟'))
+          .digest('hex')
+        if (recomputed !== String(row.entry_hash)) return false
+        prevHash = String(row.entry_hash)
+        afterSeq = Number(row.seq)
+      }
+      if (rows.length < BATCH) break
     }
     return true
+  }
+
+  /**
+   * Delete `workspace_events` rows outside the retention window, keeping
+   * `audit_log` untouched — see the module doc: `audit_log` is the
+   * tamper-evident chain (verified by `auditChainIntact`), and pruning rows out
+   * from under it would either break the chain or require a checkpoint-anchor
+   * scheme this codebase does not have yet. `workspace_events` has no such
+   * guarantee to preserve: every projection it feeds (`tasks`, `objectives`, …)
+   * is already durably up to date, so deleting an old event only shrinks the
+   * replay/history log, not current state.
+   *
+   * Conservative by construction: a row is only pruned when it is BOTH older
+   * than `maxAgeMs` AND beyond the most recent `keepEvents` rows, so whichever
+   * limit would keep more history wins. Cheap to call repeatedly — once the
+   * table is within both limits this is a no-op single-row-range lookup, not a
+   * table scan, so it is safe to wire into an existing periodic sweep (e.g. the
+   * workspace server's lease-reconcile timer) rather than needing its own
+   * scheduler.
+   */
+  pruneOldEvents(options: { keepEvents?: number; maxAgeMs?: number; now?: number } = {}): number {
+    const keepEvents = options.keepEvents ?? DEFAULT_KEEP_EVENTS
+    const maxAgeMs = options.maxAgeMs ?? DEFAULT_EVENT_MAX_AGE_MS
+    const now = options.now ?? Date.now()
+    const cutoffAt = new Date(now - maxAgeMs).toISOString()
+    const seqFloor = Math.max(0, this.latestSeq() - keepEvents)
+    if (seqFloor <= 0) return 0
+    const result = this.db.query('DELETE FROM workspace_events WHERE seq <= ? AND at < ?').run(seqFloor, cutoffAt)
+    return Number(result.changes)
   }
 
   // --- Queries ---
@@ -251,11 +323,16 @@ export class WorkspaceStore {
     return row ? toTask(row) : undefined
   }
 
-  reservations(activeOnly = true) {
-    const sql = activeOnly
-      ? 'SELECT * FROM reservations WHERE released_at IS NULL ORDER BY acquired_at'
-      : 'SELECT * FROM reservations ORDER BY acquired_at'
-    return (this.db.query(sql).all() as Row[]).map(toReservation)
+  reservations(activeOnly = true, filter: { taskId?: string } = {}) {
+    const clauses: string[] = []
+    const values: unknown[] = []
+    if (activeOnly) clauses.push('released_at IS NULL')
+    if (filter.taskId) {
+      clauses.push('task_id = ?')
+      values.push(filter.taskId)
+    }
+    const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : ''
+    return (this.db.query(`SELECT * FROM reservations ${where} ORDER BY acquired_at`).all(...values as never[]) as Row[]).map(toReservation)
   }
 
   messages(filter: { objectiveId?: string; toId?: string; sinceSeq?: number; limit?: number } = {}) {
@@ -378,9 +455,32 @@ export class WorkspaceStore {
    * inserts) commits or rolls back as one unit and cannot be interleaved by
    * another writer — the `append`s inside become savepoints of this outer
    * transaction.
+   *
+   * Listener notification for those inner `append`s is deferred (see `append`)
+   * until this — the outermost — call actually commits, and discarded if it
+   * rolls back, so a subscriber is never told about a row that a later `append`
+   * in the same `fn` caused to be rolled back.
    */
   transact<T>(fn: () => T): T {
-    return this.db.transaction(fn)()
+    const isOutermost = this.transactDepth === 0
+    this.transactDepth += 1
+    try {
+      const result = this.db.transaction(fn)()
+      if (isOutermost) this.flushPendingNotifications()
+      return result
+    } catch (err) {
+      if (isOutermost) this.pendingNotifications = []
+      throw err
+    } finally {
+      this.transactDepth -= 1
+    }
+  }
+
+  private flushPendingNotifications(): void {
+    if (this.pendingNotifications.length === 0) return
+    const pending = this.pendingNotifications
+    this.pendingNotifications = []
+    for (const event of pending) this.notify(event)
   }
 
   /** Escape hatch for advanced queries and tests. Prefer the typed getters. */
@@ -423,11 +523,50 @@ function rowToEvent(row: Row): PersistedEvent {
 const FREE_TEXT_KEYS = new Set([
   'goal', 'instructions', 'instruction', 'body', 'detail', 'error', 'reason',
   'notes', 'note', 'title', 'focus', 'report', 'blockedReason', 'summary',
+  'acceptanceCriteria', 'verificationCommands',
 ])
 const LONG_TEXT_KEYS = new Set(['goal', 'instructions', 'instruction', 'body', 'detail', 'report'])
 
+const MAX_ARRAY_ITEMS = 500
+const MAX_NESTED_TEXT = 4_000
+// `refs` and similar fields are declared shallow (see WorkspaceStore callers —
+// e.g. `{ taskId, filePath, eventSeq }`) and reach here as parsed JSON from an
+// RPC caller with zero shape validation, so this only needs to stop a
+// pathological/adversarial depth from blowing the stack, not support real nesting.
+const MAX_REDACT_DEPTH = 6
+
 function boundText(value: string, max: number): string {
   return value.length > max ? `${value.slice(0, max - 1)}…` : value
+}
+
+/** A string's own key decides whether it is secret-scrubbed — see the module doc above `redactPayload`. */
+function redactString(key: string, value: string, max: number): string {
+  return FREE_TEXT_KEYS.has(key) ? boundText(redactSecrets(value), max) : boundText(value, max)
+}
+
+/**
+ * Recurse into an array or plain-object field the same opt-in-by-key way the
+ * top-level string case works. This must NOT run every string through
+ * `redactSecrets` unconditionally: an ID-shaped value like `refs.taskId` (compared
+ * with `===` elsewhere — see rpcOrchestration.ts) or a `dependsOn`/`files` entry
+ * can incidentally match the secret patterns (e.g. `tsk_...` contains `sk_...`)
+ * and get corrupted, exactly the failure the module doc warns about for the
+ * string case. So a child value's redaction is still gated by its own key name;
+ * only the bound (length/count) applies unconditionally.
+ */
+function redactNested(value: unknown, depth: number): unknown {
+  if (depth > MAX_REDACT_DEPTH) return '[too-deep]'
+  if (Array.isArray(value)) {
+    return value.slice(0, MAX_ARRAY_ITEMS).map((item) => (typeof item === 'string' ? boundText(item, MAX_NESTED_TEXT) : redactNested(item, depth + 1)))
+  }
+  if (value && typeof value === 'object') {
+    const out: Record<string, unknown> = {}
+    for (const [key, child] of Object.entries(value as Record<string, unknown>).slice(0, MAX_ARRAY_ITEMS)) {
+      out[key] = typeof child === 'string' ? redactString(key, child, MAX_NESTED_TEXT) : redactNested(child, depth + 1)
+    }
+    return out
+  }
+  return value
 }
 
 function redactPayload(payload: Record<string, unknown>): Record<string, unknown> {
@@ -435,9 +574,11 @@ function redactPayload(payload: Record<string, unknown>): Record<string, unknown
   for (const [key, value] of Object.entries(payload)) {
     if (typeof value === 'string') {
       const max = LONG_TEXT_KEYS.has(key) ? MAX_PAYLOAD_TEXT : 4_000
-      out[key] = FREE_TEXT_KEYS.has(key) ? boundText(redactSecrets(value), max) : boundText(value, max)
+      out[key] = redactString(key, value, max)
     } else if (Array.isArray(value)) {
-      out[key] = value.slice(0, 500).map((item) => (typeof item === 'string' ? boundText(item, 4_000) : item))
+      out[key] = value.slice(0, MAX_ARRAY_ITEMS).map((item) => (typeof item === 'string' ? redactString(key, item, MAX_NESTED_TEXT) : redactNested(item, 1)))
+    } else if (value && typeof value === 'object') {
+      out[key] = redactNested(value, 1)
     } else {
       out[key] = value
     }

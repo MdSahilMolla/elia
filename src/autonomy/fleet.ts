@@ -5,7 +5,7 @@ import { createFleetBoard } from '../ui/fleetBoard.ts'
 import { inkOwnsScreen } from '../ui/stream.ts'
 import { reportSinkActive } from '../ui/report.ts'
 import { ZERO_USAGE, addUsage } from '../usage.ts'
-import { roleConfig } from '../config.ts'
+import { routeForAssignment } from '../config.ts'
 import { role as roleDefinition, toolsForRole } from './roles.ts'
 import type { Usage } from '../providers/types.ts'
 import type { Journal } from './journal.ts'
@@ -133,7 +133,7 @@ export async function runFleet(options: FleetRunOptions): Promise<FleetResult> {
   const startedAt = Date.now()
 
   const named = assignments.map((assignment, index) => {
-    const route = roleConfig(assignment.role, roleDefinition(assignment.role).tier)
+    const route = routeForAssignment(assignment.role, roleDefinition(assignment.role).tier, `${assignment.title}\n${assignment.instructions}`)
     return {
       ...assignment,
       // Worker names are what show up in blackboard attribution, so they need to be
@@ -261,7 +261,15 @@ export async function runFleet(options: FleetRunOptions): Promise<FleetResult> {
       options.graph.finishNode(childNodeId, {
         ok: result.ok,
         report: result.report,
-        error: result.ok ? undefined : needsReview ? `retryable verification failure: ${verificationReport ?? result.report}` : result.report,
+        // A verification failure is a mechanical, exit-code-based fact — real
+        // enough to classify strictly. Anything else here is the worker's own
+        // prose (its final report, or "Failed: <message>" from an uncaught
+        // exception) and carries no verdict in its wording; leaving `error`
+        // unset routes it through finishNode's lenient `source: 'report'`
+        // classification instead of the strict one, so words like "manual" or
+        // "unauthorized" in a worker's own account of what happened don't get
+        // misread as an authorization failure and permanently block the node.
+        error: result.ok ? undefined : needsReview ? `retryable verification failure: ${verificationReport ?? result.report}` : undefined,
         evidence: [{
           id: `evidence:worker:${childNodeId}:${options.graph.node(childNodeId)?.attemptCount ?? 0}`,
           nodeId: childNodeId,

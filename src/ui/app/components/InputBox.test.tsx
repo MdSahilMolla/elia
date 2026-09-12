@@ -132,6 +132,35 @@ test('a large multi-line paste collapses to a token but submits the full text', 
   expect(submitted).toBe(pasted)
 })
 
+test('a paste token that appears twice in the submitted line expands at every occurrence', async () => {
+  let submitted = ''
+  const { stdin } = render(
+    <InputBox
+      commands={[]}
+      disabled={false}
+      placeholder="x"
+      onSubmit={(line) => {
+        submitted = line
+      }}
+      onInterrupt={noop}
+      onEof={noop}
+      onTabEmpty={noop}
+    />,
+  )
+  const pasted = ['line one', 'line two', 'line three', 'line four'].join('\n')
+  // Paste the same multi-line block twice back to back — both collapse to the
+  // same `⟦pasted N lines⟧` token (keyed by line count), so the buffer ends up
+  // with that token appearing twice in a row.
+  stdin.write(pasted)
+  await tick()
+  stdin.write(pasted)
+  await tick()
+  stdin.write('\r')
+  await tick()
+  const occurrences = submitted.split(pasted).length - 1
+  expect(occurrences).toBe(2)
+})
+
 test('submitting a prompt appends it to persistent history', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'elia-ib-'))
   const original = paths.promptHistory

@@ -61,8 +61,18 @@ export function browserNameForPath(path: string): string {
   return 'Chrome'
 }
 
-function defaultBrowserCommand(url: string): string[] {
-  if (process.platform === 'win32') return ['cmd', '/c', 'start', '""', url]
+/** Exported so tests can assert the Windows fallback never shells out through cmd.exe. */
+export function defaultBrowserCommand(url: string): string[] {
+  // Windows: deliberately NOT `cmd /c start <url>`. `cmd.exe /c` re-parses its
+  // trailing argument string for shell metacharacters (&, |, ^, …) independent
+  // of how the argv array was quoted — the same vulnerability class as Node's
+  // CVE-2024-27980. `url` here can come from the model (src/tools/preview.ts
+  // validates only the http(s) scheme, not host/path/query/fragment), so a
+  // crafted URL reaching `cmd /c start` could execute an attacker-chosen
+  // command. `rundll32 url.dll,FileProtocolHandler` opens a URL in the default
+  // browser the same way `start` does, but never invokes cmd.exe, so there is
+  // no shell re-parsing step for metacharacters to exploit.
+  if (process.platform === 'win32') return ['rundll32', 'url.dll,FileProtocolHandler', url]
   if (process.platform === 'darwin') return ['open', url]
   return ['xdg-open', url]
 }

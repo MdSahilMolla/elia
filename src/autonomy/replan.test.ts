@@ -102,6 +102,34 @@ test('a run may not rewrite its plan without limit', () => {
   expect(result.rejected.at(-1)).toContain('at most')
 })
 
+test('the revision cap is a run-wide budget, not a fresh allowance per batch', () => {
+  // MAX_PLAN_REVISIONS bounds the whole run, not each call: a caller that
+  // already applied some revisions in an earlier wave must pass the
+  // *remaining* budget, or a run could apply more than MAX_PLAN_REVISIONS
+  // revisions in total across several batches.
+  const alreadyApplied = MAX_PLAN_REVISIONS - 1
+  const batch: PlanRevision[] = Array.from({ length: 6 }, (_, index) => ({
+    kind: 'add-step' as const,
+    reason: 'more',
+    step: step(`later${index}`),
+  }))
+
+  const result = applyPlanRevisions(proposal, batch, none, MAX_PLAN_REVISIONS - alreadyApplied)
+  expect(result.applied).toHaveLength(1)
+  expect(result.rejected.at(-1)).toContain('at most')
+})
+
+test('omitting the cap defaults to the full run-wide budget, as before', () => {
+  const many: PlanRevision[] = Array.from({ length: MAX_PLAN_REVISIONS + 2 }, (_, index) => ({
+    kind: 'add-step' as const,
+    reason: 'more',
+    step: step(`omit${index}`),
+  }))
+
+  const result = applyPlanRevisions(proposal, many, none)
+  expect(result.applied).toHaveLength(MAX_PLAN_REVISIONS)
+})
+
 test('nothing changes when every revision is refused', () => {
   const result = applyPlanRevisions(proposal, [{ kind: 'drop-step', reason: 'x', stepId: 'ghost' }], none)
   expect(result.proposal).toBe(proposal)

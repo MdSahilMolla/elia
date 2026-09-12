@@ -54,6 +54,31 @@ test('a second diagnosticsFor call (didChange) reflects the new content, not the
   }
 })
 
+test('a request that times out is removed from the pending map instead of leaking forever', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'elia-lsp-client-'))
+  const client = newClient(root)
+  try {
+    await client.connect()
+    const internals = client as unknown as {
+      pending: Map<number, unknown>
+      request(method: string, params: unknown, timeoutMs?: number, timeoutMessage?: string): Promise<unknown>
+    }
+    const baseline = internals.pending.size
+    let error: unknown
+    try {
+      // The fixture deliberately never answers this method — see diagnosticServer.ts.
+      await internals.request('test/hang', {}, 25, 'timed out waiting for test/hang')
+    } catch (err) {
+      error = err
+    }
+    expect(error).toBeInstanceOf(Error)
+    expect((error as Error).message).toBe('timed out waiting for test/hang')
+    expect(internals.pending.size).toBe(baseline)
+  } finally {
+    await client.closeAndWait()
+  }
+})
+
 test('close() rejects any still-pending request instead of hanging', async () => {
   const root = mkdtempSync(join(tmpdir(), 'elia-lsp-client-'))
   const client = newClient(root)

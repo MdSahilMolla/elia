@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { chmodSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { loadUserConfig, writeUserConfig } from './userConfig.ts'
@@ -53,3 +53,17 @@ test('writes user config atomically, preserves unrelated lines, and restricts pe
     expect(statSync(path).mode & 0o077).toBe(0)
   }
 })
+
+test('a rename failure cleans up the temp file instead of leaving a just-written secret on disk', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'elia-user-config-'))
+  const path = join(dir, 'config.env')
+  // Occupy the destination with a directory so the rename can never succeed —
+  // exercises the same failure path a transient Windows EPERM/EACCES/EBUSY
+  // would, after renameSyncWithRetry exhausts its retries.
+  mkdirSync(path)
+
+  expect(() => writeUserConfig({ SECRET_KEY: 'super-secret-value' }, path)).toThrow()
+
+  const leftoverTemps = readdirSync(dir).filter((name) => name.includes('.tmp-'))
+  expect(leftoverTemps).toEqual([])
+}, 10_000)

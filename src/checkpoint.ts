@@ -1,10 +1,11 @@
 import { existsSync } from 'node:fs'
-import { unlink } from 'node:fs/promises'
-import { join } from 'node:path'
+import { rename, unlink, writeFile, rm } from 'node:fs/promises'
+import { dirname, join } from 'node:path'
 import type { ConversationMessage } from './agentLoop.ts'
 import { SESSIONS_DIR } from './session.ts'
 import { ensureSecureDirectory, hardenSecureFile, writeSecureBunFile } from './securePersistence.ts'
 import { clearAllCaches } from './cacheRegistry.ts'
+import { withFileLockAsync } from './fileLock.ts'
 
 /**
  * Per-turn checkpoints for the interactive session: enough to put both the
@@ -98,25 +99,62 @@ export interface RestoreResult {
   deleted: number
 }
 
-/** Writes every file in the checkpoint's snapshot back to its state from before that turn ran. */
+function restoreLockPath(): string {
+  return join(process.cwd(), '.elia', 'checkpoint-restore.lock')
+}
+
+function restoreTempPath(path: string): string {
+  return join(dirname(path), `.${path.split(/[\\/]/).pop() || 'file'}.elia-restore-${process.pid}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}.tmp`)
+}
+
+/**
+ * Writes every file in the checkpoint's snapshot back to its state from
+ * before that turn ran. Staged in two phases so an interruption never leaves
+ * a half-restored tree: first every file to restore is written to a sibling
+ * temp file (the real tree is untouched, so a failure here changes nothing);
+ * only once every write has succeeded does the commit phase apply them —
+ * `rename` each temp file over its target (atomic per file) and delete each
+ * file the checkpoint says didn't exist yet. A crash during commit can still
+ * leave the batch partially applied (there is no cross-file filesystem
+ * transaction), but that window is now just fast renames/unlinks, not slow
+ * content writes, and any file it does touch is never torn.
+ */
 export async function restoreCheckpoint(checkpoint: Checkpoint): Promise<RestoreResult> {
-  let restored = 0
-  let deleted = 0
-  for (const [path, content] of Object.entries(checkpoint.files)) {
-    if (content === null) {
-      if (existsSync(path)) {
-        await unlink(path)
-        deleted += 1
+  return withFileLockAsync(restoreLockPath(), async () => {
+    const toRestore = Object.entries(checkpoint.files).filter((entry): entry is [string, string] => entry[1] !== null)
+    const deletions = Object.entries(checkpoint.files)
+      .filter(([, content]) => content === null)
+      .map(([path]) => path)
+      .filter((path) => existsSync(path))
+
+    const staged: { tmp: string; target: string }[] = []
+    try {
+      for (const [path, content] of toRestore) {
+        const tmp = restoreTempPath(path)
+        await writeFile(tmp, content)
+        staged.push({ tmp, target: path })
       }
-      continue
+    } catch (err) {
+      await Promise.all(staged.map((s) => rm(s.tmp, { force: true })))
+      throw err
     }
-    await Bun.write(path, content)
-    restored += 1
-  }
-  // Every in-process cache — speculated reads, compiled greps, the brain
-  // fingerprint — now describes a workspace that no longer exists on disk.
-  clearAllCaches()
-  return { restored, deleted }
+
+    let restored = 0
+    let deleted = 0
+    for (const { tmp, target } of staged) {
+      await rename(tmp, target)
+      restored += 1
+    }
+    for (const path of deletions) {
+      await unlink(path)
+      deleted += 1
+    }
+
+    // Every in-process cache — speculated reads, compiled greps, the brain
+    // fingerprint — now describes a workspace that no longer exists on disk.
+    clearAllCaches()
+    return { restored, deleted }
+  })
 }
 
 /**

@@ -39,6 +39,10 @@ function shellMismatch(raw: string): string | null {
   const command = raw.trim()
   const win = process.platform === 'win32'
 
+  if (/^(?:cd|chdir|pushd|popd)\b/i.test(command)) {
+    return 'Do not use cd, chdir, pushd, or popd in run_command. Pass cwd as a separate field and use run_program for the executable and its literal arguments.'
+  }
+
   if (win && /^bash\s+-c\b/i.test(command)) {
     return 'This shell is cmd.exe, and `bash` on Windows is usually just the WSL launcher stub (fails with "no installed distributions"). Run the command directly for cmd.exe, or write a .ps1/.py file with write_file and run that.'
   }

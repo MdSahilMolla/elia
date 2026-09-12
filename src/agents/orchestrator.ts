@@ -1,6 +1,6 @@
 import { ZERO_USAGE, addUsage, recordUsage } from '../usage.ts'
-import type { Usage } from '../providers/types.ts'
-import { runAgentLoop, lastAssistantText, type ConversationMessage } from '../agentLoop.ts'
+import type { ProviderActivity, Usage } from '../providers/types.ts'
+import { runAgentLoop, lastAssistantText, type ConversationMessage, type ToolEvent } from '../agentLoop.ts'
 import { allWorkerTools, getSynthesizedTools } from '../tools/registry.ts'
 import { taskTool } from '../tools/task.ts'
 import { autoFallbacksFor, tierConfig } from '../config.ts'
@@ -237,6 +237,23 @@ export async function runAgentRequest(request: string, opts: { signal?: AbortSig
 }
 
 /**
+ * Ink UI hooks for a persona turn — the same shape index.ts's `TurnUiHooks`
+ * gives normal turns. Passing these through (instead of hardcoding `writeText`
+ * / raw-stdout writers) lets a persona turn render into the live Ink store,
+ * the same way a normal turn does, rather than writing raw ANSI to stdout
+ * while Ink's reconciler is independently repainting the frame — which
+ * corrupts the terminal. `undefined` (the legacy/headless call shape) keeps
+ * the original raw-stdout, animated behavior unchanged.
+ */
+export interface PersonaTurnUiHooks {
+  onText?: (delta: string) => void
+  onThinking?: (delta: string) => void
+  onActivity?: (activity: ProviderActivity) => void
+  onTool?: (event: ToolEvent) => void
+  onToolStart?: (call: { id: string; name: string; input: Record<string, unknown> }) => void
+}
+
+/**
  * Forces a single persona for one turn of an ongoing conversation (REPL
  * persona commands, mutating `messages` in place like agent.ts's
  * runTurn — used when the user has explicitly picked a persona for the rest
@@ -247,10 +264,26 @@ export async function runPersonaTurn(
   persona: AgentPersona,
   selectedSkillNames?: string[],
   signal?: AbortSignal,
+  uiHooks?: PersonaTurnUiHooks,
 ): Promise<Usage> {
   if (persona === 'tech') {
     const { runTurn } = await import('../agent.ts')
-    const result = await runTurn(messages, { mode: 'dev', skillNames: selectedSkillNames, signal, skipStats: true })
+    const result = await runTurn(messages, {
+      mode: 'dev',
+      skillNames: selectedSkillNames,
+      signal,
+      skipStats: true,
+      // `silent` (like normal Ink turns) suppresses runTurn's own raw-stdout
+      // writes; the hooks below route text/tools/activity into the Ink store
+      // instead, exactly as `runCheckpointedTurn` wires `uiHooks` for a
+      // normal turn.
+      silent: Boolean(uiHooks),
+      onText: uiHooks?.onText,
+      onThinking: uiHooks?.onThinking,
+      onActivity: uiHooks?.onActivity,
+      onTool: uiHooks?.onTool,
+      onToolStart: uiHooks?.onToolStart,
+    })
     recordUsage(result.usage)
     return result.usage
   }
@@ -259,9 +292,17 @@ export async function runPersonaTurn(
     messages,
     systemPrompt: personaPrompt(persona),
     tools: toolsForPersona(persona, selectedSkillNames),
-    onText: writeText,
-    useAnimation: true,
-    verbose: true,
+    // Ink owns the screen whenever `uiHooks` is passed — route text through
+    // the store instead of the raw-stdout `writeText`, and turn off the
+    // animation/verbose raw writers (thinking cursor, writeToolCall,
+    // writeToolResult, writeNotice) the same way a `silent` normal turn does.
+    onText: uiHooks?.onText ?? writeText,
+    onThinking: uiHooks?.onThinking,
+    onActivity: uiHooks?.onActivity,
+    onTool: uiHooks?.onTool,
+    onToolStart: uiHooks?.onToolStart,
+    useAnimation: !uiHooks,
+    verbose: !uiHooks,
     maxSteps: maxStepsForPersona(persona),
     signal,
   })

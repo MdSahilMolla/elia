@@ -16,7 +16,9 @@ import net from 'node:net'
 import { existsSync, readdirSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { ELIA_ROOT } from '../statePaths.ts'
+import { logSwallowedError } from '../diagnostics.ts'
 import {
+  DaemonUnavailable,
   PROTOCOL_VERSION,
   type DaemonInfo,
   type JvmCheckParams,
@@ -26,13 +28,9 @@ import {
   type RpcResponse,
   type ShellExecResult,
 } from './types.ts'
+import { validateDaemonInfo, validateJvmCheckResult, validateParseCheckResult, validateShellExecResult } from './validate.ts'
 
-export class DaemonUnavailable extends Error {
-  constructor(message: string) {
-    super(message)
-    this.name = 'DaemonUnavailable'
-  }
-}
+export { DaemonUnavailable }
 
 /** `off` (default) — never touch the daemon. `auto` — use it, fall back on any
  * failure. `require` — use it and surface failures (for benchmarking the
@@ -269,7 +267,8 @@ class DaemonClient {
       let msg: RpcResponse
       try {
         msg = JSON.parse(line)
-      } catch {
+      } catch (err) {
+        logSwallowedError('daemon.client.onData', err, { lineLength: line.length })
         continue
       }
       const waiter = this.pending.get(msg.id)
@@ -356,7 +355,7 @@ class DaemonClient {
 
   async info(): Promise<DaemonInfo> {
     await this.ensureConnected()
-    return (await this.rawCall('daemon.info', {}, 5_000)) as DaemonInfo
+    return validateDaemonInfo(await this.rawCall('daemon.info', {}, 5_000))
   }
 }
 
@@ -393,7 +392,7 @@ export async function daemonShellExec(req: DaemonShellRequest): Promise<ShellExe
     req.timeoutMs + 10_000,
     req.signal,
   )
-  return result as ShellExecResult
+  return validateShellExecResult(result)
 }
 
 /**
@@ -405,7 +404,7 @@ export async function daemonShellExec(req: DaemonShellRequest): Promise<ShellExe
 export async function daemonParseCheck(params: ParseCheckParams): Promise<ParseCheckResult> {
   if (!daemonEnabled()) throw new DaemonUnavailable('ELIA_DAEMON=off')
   const { result } = await daemonClient().call('parse.check', params, 5_000)
-  return result as ParseCheckResult
+  return validateParseCheckResult(result)
 }
 
 /**
@@ -417,7 +416,7 @@ export async function daemonParseCheck(params: ParseCheckParams): Promise<ParseC
 export async function daemonJvmCheck(params: JvmCheckParams): Promise<JvmCheckResult> {
   if (!daemonEnabled()) throw new DaemonUnavailable('ELIA_DAEMON=off')
   const { result } = await daemonClient().call('jvm.check', params, 35_000)
-  return result as JvmCheckResult
+  return validateJvmCheckResult(result)
 }
 
 function sleep(ms: number): Promise<void> {

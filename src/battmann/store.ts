@@ -132,7 +132,12 @@ function securityClassification(input: Row): Classification {
   return oneOf(input.securityClassification ?? 'internal', 'securityClassification', CLASSIFICATION_LEVELS)
 }
 
-/** Append one entry to the tamper-evident audit chain: each entry_hash covers the previous one. */
+/**
+ * Append one entry to the audit hash chain: each entry_hash covers the previous one. Tamper-evident against
+ * modification of entries that were recorded; does not by itself guarantee an entry was recorded for every
+ * mutation (see the caveat on `MUTATING_STORE_ACTIONS` above — this runs in a transaction separate from the
+ * data mutation it documents).
+ */
 function appendAudit(db: Database, action: string, target: string | null, payload: Row): void {
   const agent = currentAgent()
   const createdAt = new Date().toISOString()
@@ -809,7 +814,7 @@ function objectDetail(input: Row): Row {
     const revisions = db.query('SELECT * FROM ontology_objects WHERE id = ? ORDER BY revision').all(objectId) as Row[]
     if (!revisions.length) throw new Error(`unknown ontology object: ${objectId}`)
     const current = objectRevisionAt(revisions, asOf)
-    if (!current) throw new Error(`ontology object ${objectId} has no revision valid at ${asOf}`)
+    if (!current || !activeAt(current, asOf)) throw new Error(`ontology object ${objectId} has no revision valid at ${asOf}`)
     const rank = clearanceRank(input)
     if (!withinClearance(current, rank)) throw new Error(`ontology object ${objectId} is classified above the supplied clearance`)
     const nameOf = (id: string) => { const row = currentObject(db, id); return row ? String(row.name) : null }
@@ -1206,8 +1211,15 @@ function stageDeployment(input: Row): Row {
     const sidecarPath = reportPath.slice(0, -3) + '.json'
     const htmlPath = reportPath.slice(0, -3) + '.html'
     if (!existsSync(sidecarPath)) throw new Error('the report JSON sidecar is missing; regenerate the report with report_from_store')
-    const bundle = JSON.parse(readFileSync(sidecarPath, 'utf8')) as { documentClassification?: string; reportId?: string; reportVersion?: string; reportStatus?: string; title?: string }
-    const reportClassification = bundle.documentClassification ?? 'internal'
+    const bundle = JSON.parse(readFileSync(sidecarPath, 'utf8')) as { documentClassification?: string; contentClassification?: string; reportId?: string; reportVersion?: string; reportStatus?: string; title?: string }
+    // documentClassification is a self-reported label the report author supplies (see battmann.ts) — it is metadata,
+    // not access control, and must never be trusted as a ceiling. contentClassification is computed by
+    // loadBattmannReportData from the actual classification of the evidence/claims embedded in the report. The gate
+    // uses the stricter of the two: the computed value as the real bound, the self-reported label only as a floor
+    // in case it claims a higher sensitivity than what was computed (e.g. an older sidecar without the field).
+    const contentClassification = bundle.contentClassification ?? 'internal'
+    const documentClassification = bundle.documentClassification ?? 'internal'
+    const reportClassification = classificationRank(documentClassification) > classificationRank(contentClassification) ? documentClassification : contentClassification
     if (classificationRank(reportClassification) > classificationRank(target.max_classification)) throw new Error(`report is classified ${reportClassification}; target ${targetId} accepts at most ${target.max_classification}`)
     const formats: string[] = parseJson(target.formats_json, [])
     const fileFor: Record<string, string> = { md: reportPath, json: sidecarPath, html: htmlPath }
@@ -1255,9 +1267,62 @@ function deploymentStatus(input: Row): Row {
   } finally { opened.db.close() }
 }
 
+/**
+ * Tables a mutating action inserts a fresh, uniquely-identified row into, whose id ends up as `audit_log.target`
+ * (see AUDIT_TARGET_KEYS above) — restricted to tables where that id is a true 1:1 artifact key. Deliberately
+ * left out: `forecast_revisions` and `ontology_objects` (their logical id repeats across revisions, so
+ * presence-only matching would hide a genuinely missing entry behind an unrelated sibling revision's audit row)
+ * and `deployment_stages` (a staged deployment is audited under its parent `targetId`, not a per-stage id — see
+ * `stageDeployment`). This backs `reconcileAuditGaps` below, a deliberately coarse mitigation for the
+ * write/audit atomicity gap documented above `MUTATING_STORE_ACTIONS`, not a full accounting.
+ */
+const AUDITED_TABLES: readonly { table: string; idColumn: string }[] = [
+  { table: 'questions', idColumn: 'id' },
+  { table: 'evidence', idColumn: 'id' },
+  { table: 'claims', idColumn: 'id' },
+  { table: 'scenarios', idColumn: 'id' },
+  { table: 'decisions', idColumn: 'id' },
+  { table: 'outcomes', idColumn: 'id' },
+  { table: 'datasets', idColumn: 'id' },
+  { table: 'geo_events', idColumn: 'id' },
+  { table: 'indicators', idColumn: 'id' },
+  { table: 'indicator_readings', idColumn: 'id' },
+  { table: 'action_types', idColumn: 'id' },
+  { table: 'action_proposals', idColumn: 'id' },
+  { table: 'benchmark_runs', idColumn: 'id' },
+  { table: 'deployment_targets', idColumn: 'id' },
+  { table: 'ontology_links', idColumn: 'id' },
+]
+
+/**
+ * Reconciliation check for the write/audit atomicity gap: a row in one of `AUDITED_TABLES` whose id never
+ * appears as an `audit_log.target` is the signature left by a crash between a data write committing and its
+ * audit entry being appended (the two run as separate transactions — see the comment above
+ * `MUTATING_STORE_ACTIONS`). Returns one entry per table with at least one such gap; an empty array means none
+ * was detected — not a guarantee none ever occurred, since a table left out of `AUDITED_TABLES`, or an action
+ * whose target key isn't unique per row, can't be checked this way.
+ */
+function reconcileAuditGaps(db: Database): { table: string; missing: number; sampleIds: string[] }[] {
+  const targets = new Set(
+    (db.query('SELECT DISTINCT target FROM audit_log WHERE target IS NOT NULL').all() as Row[]).map((row) => String(row.target)),
+  )
+  const gaps: { table: string; missing: number; sampleIds: string[] }[] = []
+  for (const { table, idColumn } of AUDITED_TABLES) {
+    let ids: string[]
+    try {
+      ids = (db.query(`SELECT ${idColumn} AS id FROM ${table}`).all() as Row[]).map((row) => String(row.id))
+    } catch {
+      continue // table not present yet on an older, not-fully-migrated store
+    }
+    const missingIds = ids.filter((id) => !targets.has(id))
+    if (missingIds.length > 0) gaps.push({ table, missing: missingIds.length, sampleIds: missingIds.slice(0, 5) })
+  }
+  return gaps
+}
+
 function auditTrail(input: Row): Row {
   const opened = openStore(input, false)
-  if (!opened) return { storePath: storePath(input), entries: [], chainValid: true }
+  if (!opened) return { storePath: storePath(input), entries: [], chainValid: true, auditGaps: [] }
   try {
     const limit = input.limit === undefined ? 200 : integer(input.limit, 'limit', 1, 10_000)
     const all = opened.db.query('SELECT * FROM audit_log ORDER BY seq').all() as Row[]
@@ -1270,7 +1335,17 @@ function auditTrail(input: Row): Row {
       prevHash = String(row.entry_hash)
     }
     const entries = all.slice(-limit).map((row) => ({ seq: row.seq, action: row.action, actor: { name: row.actor_name, role: row.actor_role }, target: row.target, payloadHash: row.payload_hash, entryHash: row.entry_hash, recordedAt: row.created_at }))
-    return { storePath: opened.path, totalEntries: all.length, chainValid, brokenAt, entries }
+    // Periodic reconciliation: every time the audit trail is inspected, also check for the atomicity gap the
+    // two-transaction design (data write, then audit append) can leave behind. Surfaced both as a loud warning
+    // (matching the failed-append case in executeBattmannStoreAction) and in the returned payload so a caller
+    // can act on it programmatically instead of only a human reading logs.
+    const auditGaps = reconcileAuditGaps(opened.db)
+    if (auditGaps.length > 0) {
+      console.warn(
+        `[battmann] audit reconciliation found row(s) with no corresponding audit_log entry (write/audit atomicity gap): ${auditGaps.map((g) => `${g.table}: ${g.missing} missing (e.g. ${g.sampleIds.join(', ')})`).join('; ')}`,
+      )
+    }
+    return { storePath: opened.path, totalEntries: all.length, chainValid, brokenAt, entries, auditGaps }
   } finally { opened.db.close() }
 }
 
@@ -1458,6 +1533,9 @@ export function loadBattmannReportData(input: Row): Row {
     const objectCount = Number((db.query('SELECT COUNT(DISTINCT id) AS count FROM ontology_objects WHERE valid_from <= ? AND (valid_to IS NULL OR valid_to > ?)').get(asOf, asOf) as Row).count)
     const linkCount = Number((db.query('SELECT COUNT(*) AS count FROM ontology_links WHERE valid_from <= ? AND (valid_to IS NULL OR valid_to > ?)').get(asOf, asOf) as Row).count)
     const score = scoreRows(resolvedLatestForecasts(db).filter((row) => row.resolvedAt <= asOf))
+    // The true classification of what this report embeds — used to gate deployment staging, since a report's
+    // self-reported documentClassification is author-supplied metadata and must never be trusted as a ceiling.
+    const contentClassificationRank = Math.max(0, ...claimRows.map((row) => classificationRank(row.security_classification)), ...evidence.map((row) => classificationRank(row.security_classification)))
     return {
       storePath: path,
       schemaVersion: Number((db.query('PRAGMA user_version').get() as Row).user_version),
@@ -1470,6 +1548,7 @@ export function loadBattmannReportData(input: Row): Row {
       outcomes,
       ontology: { activeObjects: objectCount, activeLinks: linkCount },
       scorecard: score,
+      contentClassification: CLASSIFICATION_LEVELS[contentClassificationRank],
     }
   })
 }
@@ -1543,7 +1622,27 @@ export const BATTMANN_STORE_ACTIONS = [
   'define_indicator', 'record_indicator_reading', 'list_indicators', 'indicator_series',
 ] as const
 
-/** Actions that write to the store; each success appends one entry to the audit hash chain. */
+/**
+ * Actions that write to the store; each success appends one entry to the audit hash chain.
+ *
+ * The data mutation and the audit append run as two separate transactions on two separate connections (see
+ * `executeBattmannStoreAction` below). This is not incidental: each of the ~20 handler functions above (one per
+ * mutating action) is self-contained — it opens its own connection via `withStore`, commits its own
+ * `BEGIN IMMEDIATE`/`COMMIT` transaction, and closes — and that same `(input) => result` shape is shared with
+ * every read-only action in `handlers`. Folding the audit append into that same transaction would mean threading
+ * an externally-owned, not-yet-committed `db` handle through every one of those functions (and the dispatch
+ * table's shared signature) instead of letting each manage its own connection — a wide structural change judged
+ * out of scope for this fix. The hash chain is tamper-evident against modification of entries that were recorded
+ * — `audit_trail`'s replay detects any edited `entry_hash`/`prev_hash` — but it does NOT guarantee that an entry
+ * was recorded for every mutation: a crash between the two transactions leaves the data write persisted with no
+ * corresponding audit row, and the chain itself has no way to detect that omission from the hashes alone. If the
+ * audit append fails, the error is logged loudly (not silently swallowed) so an operator can investigate, but the
+ * data write is not rolled back — a write must not fail merely because its audit row could not be appended.
+ * Mitigation: `auditTrail`'s `audit_trail` action now also runs `reconcileAuditGaps` (below) on every call, which
+ * scans for rows with no matching audit entry and surfaces them as `auditGaps` in the result plus a console
+ * warning — turning "silently undetectable" into "detected whenever the chain is inspected," short of true
+ * atomicity.
+ */
 const MUTATING_STORE_ACTIONS = new Set<string>([
   'create_question', 'register_evidence', 'register_claim', 'review_claim', 'submit_forecast', 'resolve_question',
   'run_benchmark', 'upsert_object', 'link_objects', 'create_scenario', 'record_decision', 'record_outcome',
@@ -1608,7 +1707,12 @@ export function executeBattmannStoreAction(input: Row): string {
           transaction(opened.db, () => appendAudit(opened.db, action, target ?? null, input))
         } finally { opened.db.close() }
       }
-    } catch { /* the audit chain is best-effort; a write must not fail because its audit row could not be appended */ }
+    } catch (error) {
+      // The data mutation above already committed; a write must not fail because its audit row could not be
+      // appended. But silently swallowing this would leave the tamper-evident chain with an undetectable gap and
+      // no one the wiser, so it is surfaced loudly for an operator to notice and investigate.
+      console.error(`[battmann] failed to append audit entry for action "${action}" (data mutation already committed and is NOT rolled back):`, error)
+    }
   }
   return JSON.stringify({ action, ...result }, null, 2)
 }

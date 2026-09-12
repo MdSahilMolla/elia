@@ -225,6 +225,47 @@ test('an open approval hides the live workspace panel behind it', async () => {
   expect(frame).not.toContain('esc to interrupt')
 })
 
+test('a queued command does not auto-run after the turn is aborted with Esc', async () => {
+  let shellRuns = 0
+  const props = {
+    ...baseProps(),
+    runShellLine: async (c: string) => {
+      shellRuns += 1
+      return `ran ${c}`
+    },
+    // Holds the turn open until its AbortSignal fires — simulates a long-
+    // running turn the user interrupts with Esc.
+    submitTurn: async (_t: string, hooks: import('./App.tsx').TurnHooks) =>
+      new Promise<void>((resolve) => {
+        if (hooks.signal.aborted) return resolve()
+        hooks.signal.addEventListener('abort', () => resolve(), { once: true })
+      }),
+  }
+  const { stdin, lastFrame } = render(<App {...props} />)
+  await waitForFrame(lastFrame, 'mercury-2 · manual')
+  await settle()
+  stdin.write('long running task')
+  await waitForFrame(lastFrame, 'long running task')
+  stdin.write('\r')
+  await waitForFrame(lastFrame, 'esc to interrupt') // turn is now busy
+
+  // Queue a shell escape while the turn is still running.
+  stdin.write('!echo hi')
+  await waitForFrame(lastFrame, '!echo hi')
+  stdin.write('\r')
+  await waitForFrame(lastFrame, '1 queued')
+
+  // Stop the turn — the UI promises queued items are kept, not auto-run.
+  stdin.write('\x1B') // Esc
+  await waitForFrame(lastFrame, 'Stopping the turn')
+
+  // Let the aborted turn's `runOne` resolve and the post-turn drain loop run.
+  await new Promise((resolve) => setTimeout(resolve, 150))
+  expect(shellRuns).toBe(0)
+  // The queued item is still there, waiting for an explicit send.
+  expect(lastFrame()).toContain('1 queued')
+})
+
 test('keeps transient progress out of scrollback and preserves outcomes', () => {
   expect(shouldPersistActivity({ kind: 'status', status: 'updated', title: 'Repairing' })).toBe(false)
   expect(shouldPersistActivity({ kind: 'plan', status: 'updated', title: 'Plan updated' })).toBe(false)

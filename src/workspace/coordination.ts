@@ -47,7 +47,7 @@ export function buildContextPack(store: WorkspaceStore, taskId: string, agentId?
     .map((dep) => ({ taskId: dep.id, title: dep.title, report: dep.resultReport!.slice(0, 4_000) }))
 
   const decisions: DecisionRecord[] = store.decisions(task.objectiveId)
-  const reservations = store.reservations(true).filter((r) => r.taskId === taskId).map((r) => r.resource)
+  const reservations = store.reservations(true, { taskId }).map((r) => r.resource)
 
   const relevant = (message: AgentMessageRecord): boolean => {
     if (message.fromId === agentId) return false

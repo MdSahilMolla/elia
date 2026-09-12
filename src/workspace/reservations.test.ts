@@ -44,6 +44,23 @@ test('globsOverlap catches directory-glob and prefix collisions', () => {
   expect(globsOverlap('api/login.ts', 'api/logout.ts')).toBe(false)
 })
 
+test('globsOverlap catches a "?" single-char wildcard collision', () => {
+  expect(globsOverlap('src/a?.ts', 'src/ab.ts')).toBe(true)
+  expect(globsOverlap('src/a?.ts', 'src/az.ts')).toBe(true)
+})
+
+test('globsOverlap expands "{a,b}" brace alternation instead of treating it as a literal', () => {
+  expect(globsOverlap('src/{a,b}.ts', 'src/a.ts')).toBe(true)
+  expect(globsOverlap('src/{a,b}.ts', 'src/b.ts')).toBe(true)
+  expect(globsOverlap('src/{a,b}.ts', 'src/c.ts')).toBe(false)
+  // Both sides braced, disjoint option sets on both.
+  expect(globsOverlap('src/{a,b}.ts', 'src/{c,d}.ts')).toBe(false)
+  expect(globsOverlap('src/{a,b}.ts', 'src/{b,c}.ts')).toBe(true)
+  // Multiple brace groups in one pattern.
+  expect(globsOverlap('src/{a,b}/{x,y}.ts', 'src/b/y.ts')).toBe(true)
+  expect(globsOverlap('src/{a,b}/{x,y}.ts', 'src/c/y.ts')).toBe(false)
+})
+
 test('a second task cannot reserve a file the first still holds', () => {
   const { store, objectiveId } = bootstrap()
   const first = acquireForTask(store, { taskId: 't1', objectiveId, holderKind: 'agent', holderId: 'a1', resources: ['api/login.ts'] })
@@ -73,6 +90,21 @@ test('an expired reservation is reclaimed and does not block', () => {
   acquireForTask(store, { taskId: 't1', objectiveId, holderKind: 'agent', holderId: 'a1', resources: ['api/login.ts'], now: past })
   expect(reconcileReservations(store)).toHaveLength(1)
   expect('acquired' in acquireForTask(store, { taskId: 't2', objectiveId, holderKind: 'agent', holderId: 'a2', resources: ['api/login.ts'] })).toBe(true)
+})
+
+test('acquireForTask notifies listeners for every reservation it acquires (buffered fan-out still fires on a normal commit)', () => {
+  const { store, objectiveId } = bootstrap()
+  const seen: string[] = []
+  store.subscribe((event) => seen.push(event.type))
+
+  const result = acquireForTask(store, { taskId: 't1', objectiveId, holderKind: 'agent', holderId: 'a1', resources: ['api/login.ts', 'api/logout.ts'] })
+  expect('acquired' in result).toBe(true)
+
+  // `acquireForTask` wraps its whole loop in `store.transact()`, so each
+  // `ReservationAcquired` append is only a savepoint until that transaction
+  // commits. Notification must still reach listeners once it does — the fix for
+  // deferred-until-commit fan-out must not turn into "never fan out".
+  expect(seen).toEqual(['ReservationAcquired', 'ReservationAcquired'])
 })
 
 test('renewForTask pushes the lease out — on the event spine, not a raw write', () => {

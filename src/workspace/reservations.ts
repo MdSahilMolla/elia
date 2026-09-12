@@ -21,15 +21,57 @@ function normalize(pathOrGlob: string): string {
   return posix.normalize(pathOrGlob.replace(/\\/g, '/')).replace(/^\.\//, '').replace(/\/+$/, '')
 }
 
+const MAX_BRACE_EXPANSIONS = 64
+
+/**
+ * Expands every `{a,b,c}` alternation group in a glob into the cartesian
+ * product of its literal forms — `src/{a,b}.ts` -> [`src/a.ts`, `src/b.ts`].
+ * Without this, `{`/`}`/`,` were treated as ordinary literal characters, so
+ * two globs naming the same file through a brace group (one written with it,
+ * one without) silently failed to overlap. Conservative on overflow: past
+ * the expansion cap, the remaining brace is treated as a wildcard boundary
+ * (like `*`) rather than skipped — that can only widen the match, never miss
+ * a real collision.
+ */
+function expandBraces(pattern: string): string[] {
+  const match = pattern.match(/\{([^{}]*)\}/)
+  if (!match || match.index === undefined || match[1] === undefined) return [pattern]
+  const whole = match[0]
+  const inner = match[1]
+  const start = match.index
+  const options = inner.split(',')
+  const candidates = options.map((option) => pattern.slice(0, start) + option + pattern.slice(start + whole.length))
+  if (candidates.length > MAX_BRACE_EXPANSIONS) return [pattern.replace(/\{.*$/, '*')]
+
+  const expanded: string[] = []
+  for (const candidate of candidates) {
+    expanded.push(...expandBraces(candidate))
+    if (expanded.length > MAX_BRACE_EXPANSIONS) return [pattern.replace(/\{.*$/, '*')]
+  }
+  return expanded
+}
+
 /** A conservative "could these two path patterns ever name the same file?" test. */
 export function globsOverlap(a: string, b: string): boolean {
-  const na = normalize(a)
-  const nb = normalize(b)
+  const expandedA = expandBraces(normalize(a))
+  const expandedB = expandBraces(normalize(b))
+  for (const na of expandedA) {
+    for (const nb of expandedB) {
+      if (singleGlobOverlap(na, nb)) return true
+    }
+  }
+  return false
+}
+
+function singleGlobOverlap(na: string, nb: string): boolean {
   if (na === nb) return true
   const [shorter, longer] = na.length <= nb.length ? [na, nb] : [nb, na]
-  const prefix = shorter.replace(/\*+.*$/, '').replace(/\/[^/]*$/, '')
+  // `*` and `?` both mark the point past which the pattern no longer pins
+  // down a literal path, so both end the guaranteed-literal prefix.
+  const prefix = shorter.replace(/[*?].*$/, '').replace(/\/[^/]*$/, '')
+  const hasWildcard = /[*?]/.test(shorter) || /[*?]/.test(longer)
   // A directory glob (`src/ui/**`) collides with anything beneath that directory.
-  if ((shorter.includes('*') || longer.includes('*')) && prefix && longer.startsWith(prefix)) return true
+  if (hasWildcard && prefix && longer.startsWith(prefix)) return true
   // A bare directory reservation collides with files inside it.
   return longer.startsWith(`${shorter}/`) || shorter.startsWith(`${longer}/`)
 }

@@ -155,6 +155,8 @@ export function migrate(db: Database): void {
       released_at INTEGER
     );
     CREATE INDEX IF NOT EXISTS idx_reservations_active ON reservations(released_at);
+    -- reservations(true, { taskId }) -- buildContextPack's per-task lookup -- filters both columns together.
+    CREATE INDEX IF NOT EXISTS idx_reservations_task_active ON reservations(task_id, released_at);
 
     CREATE TABLE IF NOT EXISTS agent_messages (
       id           TEXT PRIMARY KEY,

@@ -60,7 +60,7 @@ function AlertLine({ pct }: { pct: number }) {
 }
 
 export function StatusBar(props: StatusBarProps) {
-  const pct = Math.min(100, Math.round((props.contextTokens / props.contextLimit) * 100))
+  const pct = props.contextLimit > 0 ? Math.min(100, Math.round((props.contextTokens / props.contextLimit) * 100)) : 0
   // The context meter earns attention as it fills — a compaction pass is coming.
   const meterColor = pct >= 85 ? palette.failure : pct >= 60 ? palette.accent : palette.success
   const cost = props.providerName === 'codex' ? 'ChatGPT plan' : formatCostUsd(props.costUsd)

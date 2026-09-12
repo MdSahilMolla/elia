@@ -1,5 +1,5 @@
-import { existsSync, readFileSync } from 'node:fs'
-import { appendSecureFile, hardenSecureFile } from '../securePersistence.ts'
+import { existsSync, readFileSync, statSync } from 'node:fs'
+import { appendSecureFile, hardenSecureFile, writeSecureFile } from '../securePersistence.ts'
 import { paths } from '../config.ts'
 
 /**
@@ -18,6 +18,8 @@ interface RelevanceLine {
   /** 'recalled' = matched a brain query; 'confirmed' = a tool call right after touched its file. */
   kind: 'recalled' | 'confirmed'
   at: number
+  /** Folded hit count for this (key, kind) pair — omitted (= 1) for a raw per-hit line; set by `compactRelevance`. */
+  count?: number
 }
 
 export interface RelevanceCount {
@@ -39,9 +41,10 @@ export function loadRelevance(path = paths.brainRelevance): Map<string, Relevanc
         continue
       }
       if (typeof parsed.key !== 'string') continue
+      const hits = typeof parsed.count === 'number' && Number.isFinite(parsed.count) && parsed.count > 0 ? parsed.count : 1
       const current = counts.get(parsed.key) ?? { recalled: 0, confirmed: 0 }
-      if (parsed.kind === 'recalled') current.recalled += 1
-      else if (parsed.kind === 'confirmed') current.confirmed += 1
+      if (parsed.kind === 'recalled') current.recalled += hits
+      else if (parsed.kind === 'confirmed') current.confirmed += hits
       counts.set(parsed.key, current)
     }
   } catch {
@@ -50,14 +53,92 @@ export function loadRelevance(path = paths.brainRelevance): Map<string, Relevanc
   return counts
 }
 
+// Above this file size, `append` folds the file down to one row per (key,
+// kind) before writing the new line — see `compactRelevance` below. A cheap
+// `statSync` check (metadata only, no read) so the common case of appending
+// under the threshold costs nothing extra.
+const COMPACT_AT_BYTES = 512 * 1024
+
 function append(kind: RelevanceLine['kind'], keys: string[], path: string): void {
   const at = Date.now()
   try {
+    maybeCompact(path)
     const body = keys.filter(Boolean).map((key) => `${JSON.stringify({ key, kind, at })}\n`).join('')
     if (body) appendSecureFile(path, body)
   } catch {
     // Losing a relevance signal costs ranking quality, never correctness.
   }
+}
+
+function maybeCompact(path: string): void {
+  try {
+    if (statSync(path).size > COMPACT_AT_BYTES) compactRelevance(path)
+  } catch {
+    // Missing file (nothing to compact yet) or a transient stat failure —
+    // either way the append below still succeeds on its own.
+  }
+}
+
+export interface RelevanceCompactResult {
+  linesBefore: number
+  rowsAfter: number
+}
+
+/**
+ * Fold every (key, kind) pair's scattered per-hit lines into a single row
+ * carrying the summed count and latest timestamp — the same "keep the signal,
+ * shrink the file" shape as lessons.ts's `retireLessons` / notes.ts's
+ * `rewriteNotes` for the brain's sibling stores. Unlike those, nothing here is
+ * ever dropped: the whole point of this file is "did this prove useful across
+ * every session ever", so a hit is only ever consolidated, never deleted —
+ * folding preserves the exact count while bounding the file to one line per
+ * (key, kind) pair instead of one line per hit. Safe to call unconditionally;
+ * a missing or unreadable file is a no-op.
+ */
+export function compactRelevance(path = paths.brainRelevance): RelevanceCompactResult {
+  if (!existsSync(path)) return { linesBefore: 0, rowsAfter: 0 }
+  hardenSecureFile(path)
+
+  const folded = new Map<string, { recalled: number; recalledAt: number; confirmed: number; confirmedAt: number }>()
+  let linesBefore = 0
+  try {
+    for (const line of readFileSync(path, 'utf8').split('\n')) {
+      if (!line.trim()) continue
+      linesBefore += 1
+      let parsed: RelevanceLine
+      try {
+        parsed = JSON.parse(line) as RelevanceLine
+      } catch {
+        continue
+      }
+      if (typeof parsed.key !== 'string') continue
+      const hits = typeof parsed.count === 'number' && Number.isFinite(parsed.count) && parsed.count > 0 ? parsed.count : 1
+      const entry = folded.get(parsed.key) ?? { recalled: 0, recalledAt: 0, confirmed: 0, confirmedAt: 0 }
+      if (parsed.kind === 'recalled') {
+        entry.recalled += hits
+        entry.recalledAt = Math.max(entry.recalledAt, parsed.at || 0)
+      } else if (parsed.kind === 'confirmed') {
+        entry.confirmed += hits
+        entry.confirmedAt = Math.max(entry.confirmedAt, parsed.at || 0)
+      }
+      folded.set(parsed.key, entry)
+    }
+  } catch {
+    return { linesBefore, rowsAfter: linesBefore }
+  }
+
+  const rows: string[] = []
+  for (const [key, entry] of folded) {
+    if (entry.recalled > 0) rows.push(JSON.stringify({ key, kind: 'recalled', at: entry.recalledAt, count: entry.recalled }))
+    if (entry.confirmed > 0) rows.push(JSON.stringify({ key, kind: 'confirmed', at: entry.confirmedAt, count: entry.confirmed }))
+  }
+  try {
+    writeSecureFile(path, rows.length ? `${rows.join('\n')}\n` : '')
+  } catch {
+    // Compaction is best-effort; leaving the pre-fold file in place is safe.
+    return { linesBefore, rowsAfter: linesBefore }
+  }
+  return { linesBefore, rowsAfter: rows.length }
 }
 
 export function bumpBrainRecalled(keys: string[], path = paths.brainRelevance): void {

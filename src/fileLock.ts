@@ -35,6 +35,14 @@ export interface FileLockOptions {
    * than a brief unsynchronized window. Default false.
    */
   proceedOnTimeout?: boolean
+  /**
+   * Called (synchronously, before `fn` runs) when `proceedOnTimeout` caused
+   * `fn` to run without ever holding the lock — otherwise this degraded path
+   * is silent. Callers that care about the resulting unsynchronized window
+   * (as opposed to ones for which a miss is routine and expected) should log
+   * it here.
+   */
+  onProceedWithoutLock?: () => void
 }
 
 interface LockOwner {
@@ -80,8 +88,13 @@ function isStale(owner: LockOwner | undefined, ttlMs: number, now: number): bool
   const sameHost = owner.host === hostname()
   if (sameHost && !isProcessAlive(owner.pid)) return true
   // A lock held past a generous grace even by a live process is treated as stale
-  // — the holder may be wedged. The grace is 4× TTL past expiry.
-  if (expired && (!sameHost || now - owner.at > ttlMs * 5)) return true
+  // — the holder may be wedged. Same-host gets the full 5× TTL grace since we
+  // can also fall back to pid liveness. A cross-host lock can't be liveness-
+  // checked at all, so a live-but-slow remote holder looks identical to a dead
+  // one from here; a smaller 2× grace balances reclaiming genuinely-dead
+  // cross-host locks against not stealing from a holder that is simply slow.
+  const graceMultiplier = sameHost ? 5 : 2
+  if (expired && now - owner.at > ttlMs * graceMultiplier) return true
   return false
 }
 
@@ -142,7 +155,10 @@ export function withFileLock<T>(lockPath: string, fn: () => T, options: FileLock
         continue
       }
       if (now >= deadline) {
-        if (options.proceedOnTimeout) break
+        if (options.proceedOnTimeout) {
+          options.onProceedWithoutLock?.()
+          break
+        }
         throw new Error(`${lockPath} is busy; another elia process is holding it`)
       }
       Bun.sleepSync(retryDelayMs)
@@ -205,7 +221,10 @@ export async function withFileLockAsync<T>(lockPath: string, fn: () => Promise<T
         continue
       }
       if (now >= deadline) {
-        if (options.proceedOnTimeout) break
+        if (options.proceedOnTimeout) {
+          options.onProceedWithoutLock?.()
+          break
+        }
         throw new Error(`${lockPath} is busy; another elia process is holding it`)
       }
       await Bun.sleep(retryDelayMs)
