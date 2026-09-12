@@ -4,6 +4,7 @@ import { editFileTool } from './editFile.ts'
 import { lspRefactorTool } from './lspRefactor.ts'
 import { listFilesTool } from './listFiles.ts'
 import { grepTool } from './grep.ts'
+import { findSymbolTool } from './findSymbol.ts'
 import { runCommandTool } from './runCommand.ts'
 import { runProgramTool } from './runProgram.ts'
 import { boardPostTool, boardReadTool } from './blackboard.ts'
@@ -58,6 +59,7 @@ export const tools: Tool[] = [
   lspRefactorTool,
   listFilesTool,
   grepTool,
+  findSymbolTool,
   runCommandTool,
   runProgramTool,
   webSearchTool,
