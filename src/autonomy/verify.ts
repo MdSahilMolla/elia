@@ -1,8 +1,12 @@
+import { basename, relative, resolve, sep } from 'node:path'
 import type { Tool } from '../tools/types.ts'
 import { clampOutput, runShell, type ShellResult } from '../shell.ts'
 import type { CriticIssue, CriticVerdict } from './types.ts'
 import { currentAgent } from './context.ts'
 import { activeActionGovernor, type ActionGovernor } from './governor.ts'
+import { changedStaticPages } from './detectChecks.ts'
+import { ensurePreviewServer } from '../preview/server.ts'
+import { checkRendered, waitForHttp } from '../preview/readiness.ts'
 
 /** Verification commands are usually a test suite, which needs far longer than an ordinary tool call. */
 const VERIFY_TIMEOUT_MS = 300_000
@@ -37,6 +41,62 @@ export async function runVerification(commands: string[], cwd?: string, signal?:
   }
 
   return { results, passed: true }
+}
+
+/**
+ * A shell rejected `result.command` outright — it never ran the intended
+ * check, so the failure proves nothing about the work itself. `proposal.ts`
+ * now rejects prose verification commands at approval time, but a run resumed
+ * from before that fix (or any other unrunnable command) can still reach here.
+ */
+const SHELL_REJECTED_COMMAND = /is not recognized as an internal or external command|:\s*command not found|No such file or directory/i
+
+export function isUnrunnableCommandFailure(result: ShellResult): boolean {
+  return !result.timedOut && result.exitCode !== 0 && SHELL_REJECTED_COMMAND.test(result.stderr)
+}
+
+/**
+ * Falls back to a headless render check for a static HTML/CSS/JS deliverable
+ * when every declared verification command turned out to be unrunnable
+ * (`isUnrunnableCommandFailure`) — reusing the same mechanism the interactive
+ * loop already relies on (`detectChecks.changedStaticPages`,
+ * `preview/readiness.ts`) instead of leaving the autonomous path with no
+ * check at all. Returns `undefined` when none of `changedPaths` is a page
+ * this can check, so the caller can fall through to the original failure.
+ */
+export async function fallbackStaticPageVerification(
+  changedPaths: string[],
+  root: string,
+  signal?: AbortSignal,
+): Promise<VerificationOutcome | undefined> {
+  const pages = changedStaticPages(changedPaths)
+  if (pages.length === 0) return undefined
+
+  const server = ensurePreviewServer(root)
+  const page = pages.find((candidate) => /^index\.html?$/i.test(basename(candidate))) ?? pages[0]!
+  const relativePath = relative(server.root, resolve(root, page)).split(sep).join('/')
+  const url = `${server.baseUrl}/${relativePath}`
+  const command = `[static-page render check] ${url}`
+
+  const ready = await waitForHttp(url, 10_000, signal)
+  if (!ready.ok) {
+    return {
+      passed: false,
+      results: [{ command, exitCode: 1, stdout: '', stderr: ready.reason ?? 'server did not respond', elapsedMs: 0, timedOut: false }],
+    }
+  }
+  const rendered = await checkRendered(url, signal)
+  return {
+    passed: rendered.ok,
+    results: [{
+      command,
+      exitCode: rendered.ok ? 0 : 1,
+      stdout: '',
+      stderr: rendered.ok ? '' : (rendered.reason ?? 'page did not render'),
+      elapsedMs: 0,
+      timedOut: false,
+    }],
+  }
 }
 
 /** Renders verification output for a model that has to fix what failed. */

@@ -2,7 +2,7 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { expect, test } from 'bun:test'
-import { inferTaskKind, TaskSessionStore } from './taskSessions.ts'
+import { inferTaskKind, taskFingerprint, TaskSessionStore } from './taskSessions.ts'
 
 test('infers browser work separately from coding work', () => {
   expect(inferTaskKind('Open the website', 'navigate Chrome to the login page')).toBe('browser')
@@ -42,6 +42,15 @@ test('tracks pending, running, and completed task state', () => {
   expect(finished?.finishedAt).toBeDefined()
   expect(finished?.stepsCompleted).toBe(1)
   expect(finished?.progress).toBe(1)
+})
+
+test('finds an equivalent active task but not a completed one', () => {
+  const store = new TaskSessionStore()
+  const fingerprint = taskFingerprint('Build game', 'Create a car game in HTML', 'builder')
+  const task = store.create('code', 'Build game', 'Queued', { fingerprint })
+  expect(store.findActiveByFingerprint(fingerprint)?.id).toBe(task.id)
+  store.update(task.id, { status: 'done', action: 'Finished', detail: 'verified' })
+  expect(store.findActiveByFingerprint(fingerprint)).toBeUndefined()
 })
 
 test('stamps tasks with the active session and keeps a reloaded record on its old id', async () => {

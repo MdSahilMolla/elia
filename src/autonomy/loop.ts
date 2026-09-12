@@ -40,7 +40,9 @@ import {
   createVerdictTool,
   describeIssues,
   describeVerification,
+  fallbackStaticPageVerification,
   hasBlockingIssues,
+  isUnrunnableCommandFailure,
   mergeVerdicts,
   requireCriticVerdict,
   runVerification,
@@ -65,6 +67,7 @@ import { GoalGraphStore, withGoalGraph, type GoalGraphStore as GoalGraphStoreTyp
 import { assessCompletion, type CompletionAssessment } from './outcome.ts'
 import { inferTaskKind, taskSessions } from '../taskSessions.ts'
 import { clearRunControl, readRunControl, type SupervisorControlRequest } from './control.ts'
+import { provisionTaskWorkspace, taskWorkspaceLabel, type TaskWorkspace } from './taskWorkspace.ts'
 
 export type ApprovalDecision =
   | { action: 'approve' }
@@ -78,6 +81,8 @@ export const autoApprove: Approver = async () => ({ action: 'approve' })
 export interface AutonomousRunOptions {
   goal: string
   approve: Approver
+  /** Explicit task root. Required to modify Elia itself; otherwise a new build launched from Elia gets an isolated workspace. */
+  workspaceRoot?: string
   /** Operating mode inherited by planning, workers, repair, and reports. */
   mode?: AgentMode
   /** How many repair cycles to attempt when verification or review fails (default 2). */
@@ -147,6 +152,7 @@ export type RunOutcome = 'completed' | 'needs-attention' | 'rejected' | 'no-prop
 
 export interface AutonomousRunResult {
   runId: string
+  workspace: TaskWorkspace
   outcome: RunOutcome
   proposal?: Proposal
   verdict?: CriticVerdict
@@ -278,15 +284,17 @@ async function runAutonomousTaskInternal(options: AutonomousRunOptions): Promise
     runController.abort()
   }, maxWallClockMs) : undefined
   const defaults = autonomyProfileDefaults(profile)
+  const runId = options.runId ?? newRunId()
+  const workspace = provisionTaskWorkspace({ runId, goal, workspaceRoot: options.workspaceRoot })
+  const workspaceRoot = workspace.root
   // Past runs in this project that claimed more than they delivered → extra
   // adversarial review this run (reliability.ts, fed by the calibration ledger).
-  const reliability = reliabilitySignal(process.cwd())
+  const reliability = reliabilitySignal(workspaceRoot)
   const maxRepairAttempts = options.maxRepairAttempts ?? defaults.maxRepairAttempts
   const maxAmendments = options.maxAmendments ?? defaults.maxAmendments
   const runPolish = options.polish ?? defaults.polish
   const maxPolishPasses = Math.max(0, Math.min(options.maxPolishPasses ?? defaults.maxPolishPasses, 3))
   const captureLearning = options.learn ?? defaults.learn
-  const runId = options.runId ?? newRunId()
   clearRunControl(runId)
   const startedAt = Date.now()
   // Whatever was already uncommitted in this repo before the run — the scaffold
@@ -294,10 +302,10 @@ async function runAutonomousTaskInternal(options: AutonomousRunOptions): Promise
   // elia's history. Captured once, here, before anything is written.
   const protectedPaths = [...new Set([
     ...(options.protectedPaths ?? []),
-    ...(await dirtyPaths(process.cwd()).catch(() => [])),
+    ...(await dirtyPaths(workspaceRoot).catch(() => [])),
   ])]
   const parentTask = taskSessions.create(inferTaskKind(goal, goal), `Autonomous: ${goal}`, 'Queued autonomous execution', { role: 'lead' })
-  taskSessions.update(parentTask.id, { status: 'running', action: 'Orienting', detail: 'Inspecting the environment and preparing a durable plan' })
+  taskSessions.update(parentTask.id, { status: 'running', action: 'Orienting', detail: `${taskWorkspaceLabel(workspace)}; inspecting the environment and preparing a durable plan` })
   const unregisterParentControls = taskSessions.registerControls(parentTask.id, {
     cancel: () => {
       taskSessions.update(parentTask.id, { status: 'paused', action: 'Stopping', detail: 'Cancellation requested by operator', nextAction: 'Resume the durable run after reviewing its receipt.' })
@@ -460,7 +468,7 @@ async function runAutonomousTaskInternal(options: AutonomousRunOptions): Promise
         verify: verificationPassed ? 'pass' : 'fail',
         regime: verificationRegime,
         contradictions,
-        cwdIsEliaRoot: process.cwd() === ELIA_ROOT,
+        cwdIsEliaRoot: workspaceRoot === ELIA_ROOT,
         reward: deriveReward({
           toolErrors: ledger.filter((record) => record.isError).length,
           editRetries: 0,
@@ -479,6 +487,7 @@ async function runAutonomousTaskInternal(options: AutonomousRunOptions): Promise
     emitEvent('run_finished', { runId, goal: redactText(goal, 2000), outcome: finalOutcome, taskSessionId: parentTask.id, completion, elapsedMs: Date.now() - startedAt, usage, graph: graph.state() })
     return {
       runId,
+      workspace,
       outcome: finalOutcome,
       usage,
       elapsedMs: Date.now() - startedAt,
@@ -493,7 +502,7 @@ async function runAutonomousTaskInternal(options: AutonomousRunOptions): Promise
   // --- Orient & propose -----------------------------------------------------
 
   writePhase('orient', `run ${runId}`)
-  const snapshot = options.resumeGraph ? '(resuming from the durable goal graph; inspect only files needed for unfinished nodes)' : await projectSnapshot(runId, runSignal)
+  const snapshot = options.resumeGraph ? '(resuming from the durable goal graph; inspect only files needed for unfinished nodes)' : await projectSnapshot(runId, workspaceRoot, runSignal)
 
   const proposalCapture = createProposalTool()
   const basePlannerPrompt = plannerPromptForMode(activeMode())
@@ -535,7 +544,7 @@ async function runAutonomousTaskInternal(options: AutonomousRunOptions): Promise
     // cache and heuristic prefetch every sub-agent already gets, so the reads
     // run while the model is still generating instead of after it.
     const planningCache = createToolResultCache()
-    const planning = await withAgentIdentity({ name: 'lead', role: 'lead', runId, cwd: process.cwd(), signal: runSignal }, () => withActionGovernor(governor, () => withGoalGraph(graph, () => runAgentLoop({
+    const planning = await withAgentIdentity({ name: 'lead', role: 'lead', runId, cwd: workspaceRoot, signal: runSignal }, () => withActionGovernor(governor, () => withGoalGraph(graph, () => runAgentLoop({
       messages,
       systemPrompt: plannerPrompt,
       tools: planningTools,
@@ -575,7 +584,7 @@ async function runAutonomousTaskInternal(options: AutonomousRunOptions): Promise
     // still leaves a record. It is re-written with the outcome once decided.
     const planArtifactPath = runId ? `.elia/runs/${runId}/plan.md` : '.elia/artifacts/plan.md'
     try {
-      savePlanArtifact(proposal, runId, process.cwd(), 'draft')
+      savePlanArtifact(proposal, runId, workspaceRoot, 'draft')
     } catch {
       // Non-fatal — the plan still streams to the terminal and the journal.
     }
@@ -594,13 +603,13 @@ async function runAutonomousTaskInternal(options: AutonomousRunOptions): Promise
 
     if (decision.action === 'approve') break
     if (decision.action === 'reject') {
-      try { savePlanArtifact(proposal, runId, process.cwd(), 'rejected') } catch { /* non-fatal */ }
+      try { savePlanArtifact(proposal, runId, workspaceRoot, 'rejected') } catch { /* non-fatal */ }
       writeSubStep(`Plan rejected — nothing was changed. Full proposal kept at ${planArtifactPath}`)
       return done('rejected', { proposal })
     }
 
     if (amendments >= maxAmendments) {
-      try { savePlanArtifact(proposal, runId, process.cwd(), 'amended') } catch { /* non-fatal */ }
+      try { savePlanArtifact(proposal, runId, workspaceRoot, 'amended') } catch { /* non-fatal */ }
       writeSubStep(`Reached the ${maxAmendments}-revision limit — stopping without making changes.`)
       return done('rejected', { proposal })
     }
@@ -644,7 +653,7 @@ async function runAutonomousTaskInternal(options: AutonomousRunOptions): Promise
   // that assumption, planned around it, and then spent its budget discovering
   // the wall it had described in advance.
   if (planApproved) {
-    const infeasible = auditPlanFeasibility(proposal, process.cwd())
+    const infeasible = auditPlanFeasibility(proposal, workspaceRoot)
     for (const issue of infeasible) writeSubStep(`⚠ plan cannot work as written — ${issue.detail}`)
     if (infeasible.length > 0) {
       journal.append('phase', { phase: 'propose', note: 'plan feasibility', issues: infeasible })
@@ -661,7 +670,7 @@ async function runAutonomousTaskInternal(options: AutonomousRunOptions): Promise
     const refused = proposal.verification.filter((command) => blockedInUnattendedMode(command))
     if (refused.length > 0) {
       const usable = proposal.verification.filter((command) => !refused.includes(command))
-      const replacement = usable.length > 0 ? usable : detectChecks(process.cwd())
+      const replacement = usable.length > 0 ? usable : detectChecks(workspaceRoot)
       proposal = { ...proposal, verification: replacement }
       writeSubStep(
         `${refused.length} planned verification command(s) can never run unattended (${refused.map((command) => command.slice(0, 60)).join('; ')}) — ` +
@@ -675,7 +684,7 @@ async function runAutonomousTaskInternal(options: AutonomousRunOptions): Promise
     try {
       // Re-write the draft artifact with the final (possibly verification-
       // rewritten) proposal, now marked approved.
-      savePlanArtifact(proposal, runId, process.cwd(), 'approved')
+      savePlanArtifact(proposal, runId, workspaceRoot, 'approved')
     } catch {
       // The plan already streamed to the terminal and the journal; a failure to
       // also mirror it to .elia/artifacts must not block an approved run.
@@ -703,7 +712,7 @@ async function runAutonomousTaskInternal(options: AutonomousRunOptions): Promise
   let hasLocalHistory = false
   if (planApproved) {
     writePhase('scaffold', 'repository, ignore rules, and project documents')
-    const scaffold = await scaffoldProject({ cwd: process.cwd(), goal, proposal, signal: runSignal, protect: protectedPaths })
+    const scaffold = await scaffoldProject({ cwd: workspaceRoot, goal, proposal, signal: runSignal, protect: protectedPaths })
     if (scaffold.initialized) writeSubStep('initialised a git repository for this project')
     if (scaffold.documents.length > 0) writeSubStep(`wrote ${scaffold.documents.join(', ')}`)
     for (const commit of scaffold.commits) writeSubStep(`committed: ${commit}`)
@@ -740,6 +749,7 @@ async function runAutonomousTaskInternal(options: AutonomousRunOptions): Promise
       governor,
       graph,
       nodeId: 'check:assumptions',
+      cwd: workspaceRoot,
       tools: [...allWorkerTools().filter((tool) => ASSUMPTION_TOOL_NAMES.has(tool.name)), capture.tool],
       signal: runSignal,
       prompt: `The plan for this run rests on assumptions nobody has verified:
@@ -770,7 +780,10 @@ Finding that an assumption is FALSE is worth more than a confident guess on ever
 
   const briefing = `## The goal of this run\n${proposal.goal}\n\n## What we established while planning\n${proposal.understanding}${assumptionBriefing ? `\n\n${assumptionBriefing}` : ''}`
   let totalSavedMs = 0
-  const variantCount = options.variants ?? 1
+  // Variant worktrees currently require a repository root. A freshly allocated
+  // isolated workspace starts empty, so keep its first run single-variant
+  // rather than accidentally creating worktrees from Elia's own checkout.
+  const variantCount = workspace.kind === 'isolated' ? 1 : options.variants ?? 1
 
   if (variantCount > 1) {
     writePhase('execute', `${variantCount} parallel implementation attempts`)
@@ -875,6 +888,7 @@ Finding that an assumption is FALSE is worth more than a confident guess on ever
         runId,
         governor,
         graph,
+        cwd: workspaceRoot,
         signal: runSignal,
         wave: index + 1,
       })
@@ -947,7 +961,7 @@ Finding that an assumption is FALSE is worth more than a confident guess on ever
 ## This assignment already failed once
 ${clampOutput(report, 2000)}
 
-Do not repeat whatever failed. If a file is protected, a path is refused, or a command is blocked, route around it: use a different path, a different mechanism, or leave that one piece out and finish everything else in the assignment. Coming back with the rest of the work done beats coming back with nothing.`,
+Do not repeat whatever failed. ${retryGuidanceFor(report)}`,
             acceptanceCriteria: plan.acceptanceCriteria,
             sideEffects: plan.sideEffects,
           })),
@@ -957,6 +971,7 @@ Do not repeat whatever failed. If a file is protected, a path is refused, or a c
           runId,
           governor,
           graph,
+          cwd: workspaceRoot,
           signal: runSignal,
           wave: index + 1,
         })
@@ -995,7 +1010,7 @@ Do not repeat whatever failed. If a file is protected, a path is refused, or a c
         .map((step) => `${step.id}: ${step.title}`)
       if (landed.length > 0) {
         const commit = await commitAll(
-          process.cwd(),
+          workspaceRoot,
           `Wave ${index + 1}: ${landed.length === 1 ? landed[0] : `${landed.length} steps`}\n\n${landed.map((entry) => `- ${entry}`).join('\n')}`,
           runSignal,
           protectedPaths,
@@ -1054,7 +1069,7 @@ Do not repeat whatever failed. If a file is protected, a path is refused, or a c
   // still has its full history and documents.
   if (planApproved && hasLocalHistory) {
     writePhase('publish', 'pushing the completed work to GitHub')
-    const published = await publishProject({ cwd: process.cwd(), proposal, governor, signal: runSignal })
+    const published = await publishProject({ cwd: workspaceRoot, proposal, governor, signal: runSignal })
     if (published.status === 'created') writeSubStep(`created and pushed ${published.url ?? 'the GitHub repository'}`)
     else if (published.status === 'pushed') writeSubStep(`pushed to ${published.url ?? 'origin'}`)
     else if (published.reason) writeSubStep(`not published — ${published.reason}`)
@@ -1076,7 +1091,7 @@ Do not repeat whatever failed. If a file is protected, a path is refused, or a c
       if (runSignal?.aborted) return abortedAt('polish', { proposal })
       journal.append('phase', { phase: 'polish', attempt: polishAttempt })
 
-      const diff = await runShell('git diff HEAD', 30_000, undefined, runSignal)
+      const diff = await runShell('git diff HEAD', 30_000, workspaceRoot, runSignal)
       const diffText = diff.stdout.trim() ? clampOutput(diff.stdout.trim(), 8000) : '(no diff yet — inspect the completed work and the goal)'
       const polish = await runSubAgent({
         role: 'polisher',
@@ -1084,6 +1099,7 @@ Do not repeat whatever failed. If a file is protected, a path is refused, or a c
         runId,
         governor,
         briefing,
+        cwd: workspaceRoot,
         signal: runSignal,
         prompt: `The implementation phase is complete. Perform one final, conservative quality pass before the verification gate.
 
@@ -1101,7 +1117,7 @@ Read the changed files in full context. Improve only concrete issues directly re
 
       // A second pass is useful only when the first pass actually changed the
       // tree; otherwise stop early rather than rewarding autonomous churn.
-      const after = await runShell('git diff HEAD', 30_000, undefined, runSignal)
+      const after = await runShell('git diff HEAD', 30_000, workspaceRoot, runSignal)
       if (after.stdout === diff.stdout) break
     }
   }
@@ -1134,18 +1150,18 @@ Read the changed files in full context. Improve only concrete issues directly re
   const escalationsUsed = new Set<StuckRecovery>()
   let lastRepairReport = ''
   let pendingApproachChange: string | undefined
-  const verificationRoot = checkRoot(proposal.steps.flatMap((step) => step.files), process.cwd())
+  const verificationRoot = checkRoot(proposal.steps.flatMap((step) => step.files), workspaceRoot) ?? workspaceRoot
   // How much a "looks fine" verdict on this run is actually worth. A
   // `judgment`-regime run has nothing but self-critique behind it, so its
   // conclusions stay in this session and never become durable lessons.
   verificationRegime = classifyRegime(
     proposal.steps.flatMap((step) => step.files),
     proposal.verification,
-    process.cwd(),
+    workspaceRoot,
   )
   // Baseline: the post-execute state. Each passing verification refreshes this
   // to the current state; a wrong-approach stall rewinds the working tree here.
-  greenSnapshot = await captureTreeSnapshot(process.cwd(), runDir(runId))
+  greenSnapshot = await captureTreeSnapshot(workspaceRoot, runDir(runId))
 
   while (true) {
     if (runSignal?.aborted) return abortedAt('verify', { proposal, verdict })
@@ -1155,6 +1171,26 @@ Read the changed files in full context. Improve only concrete issues directly re
     journal.append('phase', { phase: 'verify', attempt })
 
     const verification = await runVerification(proposal.verification, verificationRoot, runSignal, governor)
+    if (!verification.passed && verification.results.length > 0 && verification.results.every(isUnrunnableCommandFailure)) {
+      // Every declared check was rejected by the shell outright (e.g. "'Open'
+      // is not recognized") — the command was prose, not a real check, so its
+      // failure says nothing about the work. Falling straight into repair here
+      // means every attempt rewrites application code that was never broken,
+      // burns the whole budget, and still ends `needs-attention`. Seen live:
+      // run 2026-09-11-5q7z-abo2, where the built game worked (confirmed by
+      // playing it) but the plan's only "verification" was manual-testing
+      // prose. Substitute the interactive loop's own static-page render check.
+      const fallback = await fallbackStaticPageVerification(
+        proposal.steps.flatMap((step) => step.files),
+        verificationRoot,
+        runSignal,
+      )
+      if (fallback) {
+        writeSubStep('declared verification command(s) were not runnable shell commands — falling back to a static-page render check')
+        verification.passed = fallback.passed
+        verification.results = fallback.results
+      }
+    }
     for (const result of verification.results) {
       const label = `$ ${result.command}`
       if (result.exitCode === 0 && !result.timedOut) writePass(label)
@@ -1164,7 +1200,7 @@ Read the changed files in full context. Improve only concrete issues directly re
     // A fresh green: this is now the state a "wrong approach" rewind returns to.
     // captureTreeSnapshot overwrites the single per-run snapshot slot.
     if (verification.passed && !rewoundOnce) {
-      greenSnapshot = (await captureTreeSnapshot(process.cwd(), runDir(runId))) ?? greenSnapshot
+      greenSnapshot = (await captureTreeSnapshot(workspaceRoot, runDir(runId))) ?? greenSnapshot
     }
     const verificationData = {
       passed: verification.passed,
@@ -1188,11 +1224,11 @@ Read the changed files in full context. Improve only concrete issues directly re
       // tool_result, all billed) to ask git the same question. Three reviewers
       // asking separately used to cost 3x this round-trip for identical output.
       const [diff, numstat, status] = await Promise.all([
-        runShell('git diff HEAD', 30_000, undefined, runSignal),
+        runShell('git diff HEAD', 30_000, workspaceRoot, runSignal),
         // The file inventory comes from --numstat rather than from the clamped
         // diff text, so it stays complete even when the diff itself is cut.
-        runShell('git diff --numstat HEAD', 30_000, undefined, runSignal),
-        runShell('git status --porcelain=v1', 30_000, undefined, runSignal),
+        runShell('git diff --numstat HEAD', 30_000, workspaceRoot, runSignal),
+        runShell('git status --porcelain=v1', 30_000, workspaceRoot, runSignal),
       ])
       const diffSection = buildReviewDiffSection({ diff: diff.stdout, numstat: numstat.stdout })
       const changedFiles = diffSection.files.map((file) => file.path)
@@ -1258,6 +1294,7 @@ Read the changed files in full for context beyond the diff above — a diff hide
             graph,
             nodeId: `review:${reviewer.name}`,
             briefing,
+            cwd: workspaceRoot,
             tools: [...reviewerTools, verdictCapture.tool],
             signal: runSignal,
 
@@ -1296,6 +1333,7 @@ This reviewer session is intentionally read-only. The current diff, status, and 
           graph,
           nodeId: 'review:acceptance',
           briefing,
+          cwd: workspaceRoot,
           tools: [...allWorkerTools().filter((tool) => REVIEWER_TOOL_NAMES.has(tool.name)), acceptanceCapture.tool],
           signal: runSignal,
           prompt: `${reviewContext}
@@ -1322,7 +1360,7 @@ Judge what is there, not what the code looks like it would probably do. A criter
       // is broken for everyone else) and scratch files left in the deliverable —
       // and it votes through the same merge, so the repair loop treats its
       // findings exactly like a critic's.
-      const hygiene = hygieneVerdict(deliverableFiles(status.stdout, changedFiles, startedAt))
+      const hygiene = hygieneVerdict(deliverableFiles(status.stdout, changedFiles, startedAt, workspaceRoot))
       verdict = mergeVerdicts([
         ...reviewResults.map(({ reviewer, verdict }) => ({ reviewer, verdict })),
         { reviewer: 'acceptance', verdict: acceptance },
@@ -1451,13 +1489,15 @@ Judge what is there, not what the code looks like it would probably do. A criter
     // ordinary "fix what went wrong" framing for this one attempt.
     const directive = pendingApproachChange ? `\n\n## Change of tack\n${pendingApproachChange}` : ''
 
+    const fileContext = repairFileContext(proposal)
+
     const repairMessages: ConversationMessage[] = [
       {
         role: 'user',
         content: [
           {
             type: 'text',
-            text: `${briefing}\n\n## What went wrong\n${problem}${planGap}${persisted}${directive}\n\nFix all of it, then re-run: ${proposal.verification.join(' && ') || '(no verification commands were defined)'}`,
+            text: `${briefing}\n\n## What went wrong\n${problem}${planGap}${persisted}${directive}${fileContext}\n\nFix all of it, then re-run: ${proposal.verification.join(' && ') || '(no verification commands were defined)'}`,
           },
         ],
       },
@@ -1466,7 +1506,7 @@ Judge what is there, not what the code looks like it would probably do. A criter
 
     const cache = createToolResultCache()
     const repairTools = [...allWorkerTools(), taskTool]
-    const repair = await withAgentIdentity({ name: 'lead', role: 'lead', runId, cwd: process.cwd(), signal: runSignal }, () => withActionGovernor(governor, () => withGoalGraph(graph, () => runAgentLoop({
+    const repair = await withAgentIdentity({ name: 'lead', role: 'lead', runId, cwd: workspaceRoot, signal: runSignal }, () => withActionGovernor(governor, () => withGoalGraph(graph, () => runAgentLoop({
       messages: repairMessages,
       systemPrompt: repairPromptForMode(activeMode()),
       tools: repairTools,
@@ -1591,6 +1631,40 @@ Read the shared blackboard with \`board_read\` to see what the workers actually 
  * first three tool calls asking what kind of project this is.
  */
 /** A wait that a cancelled run does not have to sit through. */
+// Matches an actual access/refusal failure — a write blocked by policy, a
+// protected path, a governor denial. "route around it" is the right advice
+// there. For everything else (an edit whose target text has moved, a failed
+// prose verification command, a flaky command) it is actively harmful advice:
+// it reads as "if anything goes wrong, build a fresh copy somewhere else",
+// which is how the same deliverable ends up at two different paths in one run
+// (seen live: `workspace/car-game/` from the plan, `workspace/car-game.html`
+// from a retry/repair that took "route around it" literally).
+const ACCESS_BLOCKED_FAILURE = /\b(?:refused|blocked|protected|not allowed|permission denied|EACCES|EPERM|governor)\b/i
+
+/**
+ * The repair lead agent otherwise sees only `briefing` (goal + understanding)
+ * and the failure text — nothing naming where the deliverable actually lives.
+ * With no file list and no requirement to look before writing, "fix it" reads
+ * as license to start over: seen live (run 2026-09-11-5q7z-abo2) as a repair
+ * that scaffolded a fresh `workspace/car-game.html` next to the plan's own
+ * `workspace/car-game/index.html` instead of patching it. Naming the known
+ * files, and requiring they be read first, keeps a repair a repair. Exported
+ * for tests.
+ */
+export function repairFileContext(proposal: Pick<Proposal, 'steps'>): string {
+  const knownFiles = [...new Set(proposal.steps.flatMap((step) => step.files))]
+  if (knownFiles.length === 0) return ''
+  return `\n\n## Files this plan already created or intends to touch\n${knownFiles.map((file) => `- ${file}`).join('\n')}\n\nInspect these with list_files/read_file before writing anything — they already exist (or are meant to). Fix the existing implementation in place. Do not scaffold a fresh copy of the deliverable at a different path; that leaves two competing copies of the same thing on disk.`
+}
+
+/** The retry-specific line appended to a failed step's re-issued instructions. Exported for tests. */
+export function retryGuidanceFor(report: string): string {
+  if (ACCESS_BLOCKED_FAILURE.test(report)) {
+    return 'If a file is protected, a path is refused, or a command is blocked, route around it: use a different path, a different mechanism, or leave that one piece out and finish everything else in the assignment. Coming back with the rest of the work done beats coming back with nothing.'
+  }
+  return "Fix the assignment's existing target file(s) in place — do not create the deliverable at a new path or start over from scratch. If an edit failed because the target text had already changed, re-read the file first and adjust to what is actually there now."
+}
+
 function delay(ms: number, signal?: AbortSignal): Promise<void> {
   if (signal?.aborted) return Promise.resolve()
   return new Promise<void>((resolve) => {
@@ -1611,8 +1685,7 @@ function delay(ms: number, signal?: AbortSignal): Promise<void> {
  * run created — which is exactly the case the audit exists for, so falling back
  * to a tree scan keeps it covered instead of silently checking nothing.
  */
-function deliverableFiles(statusOutput: string, diffChanged: string[], runStartedAt: number): HygieneInput {
-  const cwd = process.cwd()
+function deliverableFiles(statusOutput: string, diffChanged: string[], runStartedAt: number, cwd: string): HygieneInput {
   const fromGit = filesFromGitStatus(statusOutput)
   const changedFiles = [...new Set([...fromGit.changed, ...diffChanged])].filter(Boolean)
   if (changedFiles.length > 0) return { cwd, addedFiles: fromGit.added, changedFiles }
@@ -1622,12 +1695,12 @@ function deliverableFiles(statusOutput: string, diffChanged: string[], runStarte
   return { cwd, addedFiles: scanProjectFiles(cwd, { modifiedSince: runStartedAt }), changedFiles: scanProjectFiles(cwd) }
 }
 
-async function projectSnapshot(runId: string, signal?: AbortSignal): Promise<string> {
-  const environment = await withAgentIdentity({ name: 'lead', role: 'lead', runId, cwd: process.cwd(), signal }, () => environmentTool.execute({}))
+async function projectSnapshot(runId: string, cwd: string, signal?: AbortSignal): Promise<string> {
+  const environment = await withAgentIdentity({ name: 'lead', role: 'lead', runId, cwd, signal }, () => environmentTool.execute({}))
   const [tree, status, branch] = await Promise.all([
-    runShell(process.platform === 'win32' ? 'dir /b' : 'ls -1', 10_000, process.cwd(), signal),
-    runShell('git status --porcelain=v1 --branch', 10_000, process.cwd(), signal),
-    runShell('git log --oneline -5', 10_000, process.cwd(), signal),
+    runShell(process.platform === 'win32' ? 'dir /b' : 'ls -1', 10_000, cwd, signal),
+    runShell('git status --porcelain=v1 --branch', 10_000, cwd, signal),
+    runShell('git log --oneline -5', 10_000, cwd, signal),
   ])
 
   const sections = [

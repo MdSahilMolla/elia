@@ -13,6 +13,7 @@ test('the scripted provider serves turns in order, streams text, and fires onToo
   const streamed: string[] = []
   const toolBlocks: string[] = []
   const first = await provider.streamTurn({
+    cwd: process.cwd(),
     system: '',
     messages: [],
     tools: [],
@@ -25,12 +26,12 @@ test('the scripted provider serves turns in order, streams text, and fires onToo
   expect(toolBlocks).toEqual(['read_file'])
   expect(first.content.some((block) => block.type === 'tool_use')).toBe(true)
 
-  const second = await provider.streamTurn({ system: '', messages: [], tools: [], onText: () => {} })
+  const second = await provider.streamTurn({ cwd: process.cwd(), system: '', messages: [], tools: [], onText: () => {} })
   expect(second.content).toEqual([{ type: 'text', text: 'second' }])
   expect(provider.calls).toBe(2)
 
   // Exhausted script degrades to a bare done. turn rather than hanging.
-  const third = await provider.streamTurn({ system: '', messages: [], tools: [], onText: () => {} })
+  const third = await provider.streamTurn({ cwd: process.cwd(), system: '', messages: [], tools: [], onText: () => {} })
   expect(third.content).toEqual([{ type: 'text', text: 'done.' }])
 })
 

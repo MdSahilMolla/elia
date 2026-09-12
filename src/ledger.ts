@@ -275,6 +275,7 @@ export async function archiveEpisode(messages: ChatMessage[], dir: string = SESS
     const fast = tierConfig('fast')
     let text = ''
     await fast.provider.streamTurn({
+      cwd: process.cwd(),
       system: ARCHIVE_SYSTEM_PROMPT,
       messages: [{ role: 'user', content: [{ type: 'text', text: rendered.slice(0, 60_000) } as ContentBlock] }],
       tools: [],

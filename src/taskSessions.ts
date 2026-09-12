@@ -1,4 +1,5 @@
 import { ensureSecureDirectory, hardenSecureFile, writeSecureBunFile } from './securePersistence.ts'
+import { createHash } from 'node:crypto'
 import { join } from 'node:path'
 import { emitEvent, machineReadable } from './ui/runtime.ts'
 import { redactText } from './ui/redact.ts'
@@ -48,6 +49,8 @@ export interface TaskSession {
   /** Stable plan-step identity. Retried attempts of the same step share this,
    * so the live panel collapses "builder / builder" into one row + attempt. */
   stepId?: string
+  /** Stable identity used to suppress an equivalent active worker request. */
+  fingerprint?: string
 }
 
 export type TaskSessionPatch = Partial<Pick<TaskSession, 'status' | 'action' | 'detail' | 'stepsCompleted' | 'stepsTotal' | 'progress' | 'attempts' | 'lastHeartbeatAt' | 'nextAction' | 'blockedReason' | 'acceptanceCriteria' | 'verificationCommands' | 'error'>>
@@ -61,6 +64,7 @@ export interface TaskSessionMeta {
   stepId?: string
   acceptanceCriteria?: string[]
   verificationCommands?: string[]
+  fingerprint?: string
 }
 export type TaskControlAction = 'pause' | 'resume' | 'cancel' | 'retry'
 export interface TaskControls {
@@ -74,6 +78,12 @@ export type TaskSessionListener = (sessions: TaskSession[]) => void
 const TASKS_FILE = join(process.cwd(), '.elia', 'tasks.json')
 const TASKS_SCHEMA_VERSION = 5
 const STALE_TASK_HEARTBEAT_MS = 5 * 60_000
+const ACTIVE_TASK_STATUSES = new Set<TaskStatus>(['pending', 'running', 'paused', 'waiting-input', 'waiting-approval', 'needs-review'])
+
+export function taskFingerprint(title: string, prompt: string, role: string): string {
+  const canonical = `${role}\n${title}\n${prompt}`.trim().toLowerCase().replace(/\s+/g, ' ')
+  return createHash('sha256').update(canonical).digest('hex')
+}
 
 export class TaskSessionStore {
   private readonly records = new Map<string, TaskSession>()
@@ -140,6 +150,7 @@ export class TaskSessionStore {
           wave: typeof item.wave === 'number' && Number.isFinite(item.wave) ? Math.max(1, Math.floor(item.wave)) : undefined,
           sessionId: typeof item.sessionId === 'string' ? item.sessionId : undefined,
           stepId: typeof item.stepId === 'string' ? item.stepId : undefined,
+          fingerprint: typeof item.fingerprint === 'string' && /^[a-f0-9]{64}$/i.test(item.fingerprint) ? item.fingerprint : undefined,
         })
       }
       // Loading is intentionally silent. Subscribers receive the complete loaded
@@ -174,6 +185,7 @@ export class TaskSessionStore {
       stepId: typeof meta.stepId === 'string' ? meta.stepId : undefined,
       acceptanceCriteria: meta.acceptanceCriteria?.slice(0, 20),
       verificationCommands: meta.verificationCommands?.slice(0, 20),
+      fingerprint: meta.fingerprint,
     }
     this.records.set(record.id, record)
     this.emit(record)
@@ -206,6 +218,11 @@ export class TaskSessionStore {
   get(id: string): TaskSession | undefined {
     const record = this.records.get(id)
     return record ? { ...record } : undefined
+  }
+
+  /** An equivalent active task should be resumed, not run concurrently. */
+  findActiveByFingerprint(fingerprint: string): TaskSession | undefined {
+    return this.list().find((record) => record.fingerprint === fingerprint && ACTIVE_TASK_STATUSES.has(record.status))
   }
 
   registerControls(id: string, controls: TaskControls): () => void {

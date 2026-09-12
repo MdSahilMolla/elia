@@ -194,7 +194,7 @@ test('a streaming failure after partial content propagates instead of silently r
   const texts: string[] = []
   let error: unknown
   try {
-    await provider.streamTurn({ system: 'sys', messages: USER_MESSAGES, tools: [], onText: (delta) => texts.push(delta) })
+    await provider.streamTurn({ cwd: process.cwd(), system: 'sys', messages: USER_MESSAGES, tools: [], onText: (delta) => texts.push(delta) })
   } catch (err) {
     error = err
   }
@@ -235,7 +235,7 @@ test('a streaming failure with no content emitted yet safely falls back to a non
   const provider = createOpenAICompatibleProvider('key', 'model', `http://127.0.0.1:${server.port}`)
 
   const texts: string[] = []
-  const result = await provider.streamTurn({ system: 'sys', messages: USER_MESSAGES, tools: [], onText: (delta) => texts.push(delta) })
+  const result = await provider.streamTurn({ cwd: process.cwd(), system: 'sys', messages: USER_MESSAGES, tools: [], onText: (delta) => texts.push(delta) })
 
   expect(texts).toEqual(['fallback answer'])
   expect(result.content).toEqual([{ type: 'text', text: 'fallback answer' }])

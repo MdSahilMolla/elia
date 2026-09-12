@@ -2030,10 +2030,8 @@ async function runInteractive(): Promise<void> {
         signal,
         polish: true,
       })
-      const summary =
-        `[autonomous run: ${result.outcome}] ${redactText(result.proposal?.goal ?? goal, 200)} · `
-        + `${result.actionBudget?.consumed ?? 0} actions · ${formatElapsed(result.elapsedMs)}`
-        + (result.lessons.length > 0 ? `\nLessons captured: ${result.lessons.join('; ')}` : '')
+      const { formatAutonomousRunSummary } = await import('./autonomy/runSummary.ts')
+      const summary = formatAutonomousRunSummary(goal, result)
       messages.push({ role: 'assistant', content: [{ type: 'text', text: summary }] })
       sessionTranscript.notice(summary)
       note(summary, undefined, 'completed')
@@ -3452,6 +3450,8 @@ async function runInteractive(): Promise<void> {
               command:
                 request.name === 'run_command' && typeof request.input.command === 'string'
                   ? request.input.command
+                  : request.name === 'run_program' && typeof request.input.program === 'string'
+                    ? [request.input.program, ...(Array.isArray(request.input.args) ? request.input.args.filter((arg): arg is string => typeof arg === 'string').map((arg) => JSON.stringify(arg)) : [])].join(' ')
                   : undefined,
             }),
           undefined,

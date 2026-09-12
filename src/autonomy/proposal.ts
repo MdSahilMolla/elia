@@ -91,6 +91,25 @@ export function parseProposal(raw: unknown): { proposal: Proposal } | { error: s
     }
   }
 
+  // A shell runs `verification` entries literally — it has no command named
+  // "Open" or "Verify". A planner that writes manual-testing prose here (`Open
+  // X in browser, verify arrow keys control car, obstacles spawn...`) produces
+  // a gate that fails on every single attempt with "'Open' is not recognized",
+  // burns the whole repair budget rewriting application code that was never
+  // broken, and ends the run `needs-attention` even when the build is correct.
+  // Seen live: run 2026-09-11-5q7z-abo2 — the game worked (confirmed by
+  // playing it), only this check didn't. Reject before approval, not after
+  // three failed repair attempts.
+  const proseEntries = verification.filter(looksLikeProseInstruction)
+  if (proseEntries.length > 0) {
+    return {
+      error:
+        `proposal.verification contains text written as instructions for a human, not a command a shell can run: ${proseEntries.map((entry) => `"${entry}"`).join(', ')}. ` +
+        'A verification command is executed literally (like typing it at a terminal) — "Open X in browser, verify Y" is not a real command and will fail every time with something like `\'Open\' is not recognized`. ' +
+        "Use the project's actual build/test/typecheck command if one exists. For a standalone static HTML/CSS/JS deliverable with no test tooling, do not describe manual browser steps here — leave that to acceptanceCriteria instead, and give a real command that at least proves the file is well-formed (e.g. a linter, or `node -e \"...\"` asserting on the file contents), or state in `understanding` that no automated check exists; elia verifies static pages by rendering them itself.",
+    }
+  }
+
   return {
     proposal: {
       goal,
@@ -112,6 +131,30 @@ function isEnvironmentProbe(command: string): boolean {
   return /^(?:ls|dir|where|which)(?:\s|$)/i.test(normalized)
     || /^command\s+-v(?:\s|$)/i.test(normalized)
     || /^\S+(?:\s+--?version|\s+-v)$/i.test(normalized)
+}
+
+/**
+ * A cheap, low-false-positive heuristic for "this is prose describing manual
+ * steps, not a command a shell can execute" — not a full parser, just enough
+ * to catch the shape that keeps showing up: an imperative English sentence,
+ * often with an embedded "verify"/"check" clause, that no shell has a command
+ * for. Exported for tests.
+ */
+export function looksLikeProseInstruction(command: string): boolean {
+  const normalized = command.trim()
+  // A comma followed by a verification verb ("..., verify X and Y") is nearly
+  // unique to human instructions — real commands don't narrate their own
+  // assertions after a comma.
+  if (/,\s*(?:verify|check|confirm|ensure|make sure)\b/i.test(normalized)) return true
+  // "in (the) browser" only appears in someone telling a person where to look;
+  // an actual browser-driving command names a binary or a tool, not the word
+  // "browser" in prose.
+  if (/\bin (?:a |the )?browser\b/i.test(normalized)) return true
+  // An imperative opener ("Open X in Y", "Visit X and Z") aimed at a human
+  // reader — distinct from a real `open`/`start` invocation, which is a single
+  // short token followed by a bare path, not a multi-clause sentence.
+  if (/^(?:open|visit|navigate to|launch|go to)\s+\S.*\s+(?:and|,)\s+\S/i.test(normalized)) return true
+  return false
 }
 
 export interface ProposalCapture {
@@ -177,7 +220,8 @@ Break the work into the smallest number of steps that are genuinely separable, a
         verification: {
           type: 'array',
           items: { type: 'string' },
-          description: 'Shell commands that must all pass for this to count as done, e.g. "bun test"',
+          description:
+            'Literal shell commands that must all pass for this to count as done, e.g. "bun test" — each one is executed exactly as written, not interpreted. Never describe manual steps here ("Open X in browser, verify Y") — there is no shell command for that and it will fail every time. For a static HTML/CSS/JS deliverable with no build tooling, put visual/manual checks in acceptanceCriteria instead; elia verifies those by rendering the page itself.',
         },
         outOfScope: {
           type: 'array',

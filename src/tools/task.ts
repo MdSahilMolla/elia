@@ -3,7 +3,7 @@ import { optionalString } from './args.ts'
 import { runSubAgent } from '../subagent.ts'
 import { roleMenu } from '../autonomy/roles.ts'
 import { isRoleName, ROLE_NAMES } from '../autonomy/types.ts'
-import { inferTaskKind, taskSessions } from '../taskSessions.ts'
+import { inferTaskKind, taskFingerprint, taskSessions } from '../taskSessions.ts'
 import { currentAgent } from '../autonomy/context.ts'
 import { activeActionGovernor } from '../autonomy/governor.ts'
 import { runVerification } from '../autonomy/verify.ts'
@@ -14,7 +14,7 @@ let dispatched = 0
 
 export const taskTool: Tool = {
   name: 'task',
-  description: `Launch an autonomous sub-agent to complete one independent, self-contained task. The sub-agent has its own context and cannot ask for clarification, so give it a fully self-contained prompt with all the context it needs. Call this tool multiple times in the same turn to run several sub-agents in parallel when the tasks are genuinely independent — that is the main way to make a big job finish quickly.
+  description: `Launch an autonomous sub-agent to complete one independent, self-contained task. The sub-agent has its own context and cannot ask for clarification, so give it a fully self-contained prompt with all the context it needs. Every write-capable task MUST include acceptanceCriteria and verificationCommands; it will otherwise be refused rather than allowed to claim completion without evidence. An equivalent active task is returned for resume instead of duplicated. Call this tool multiple times in the same turn only when the tasks are genuinely independent — that is the main way to make a big job finish quickly.
 
 Pick the role that matches the work:
 ${roleMenu()}
@@ -47,10 +47,18 @@ Scouts run on a faster, cheaper model and cannot modify anything, so prefer a ha
     const descriptionArgument = optionalString(input.description, 'description')
     const prompt = input.prompt
     const role = isRoleName(input.role) ? input.role : 'builder'
-    dispatched += 1
     const description = descriptionArgument?.trim().slice(0, 160) ?? `${role} task`
     const acceptanceCriteria = Array.isArray(input.acceptanceCriteria) ? input.acceptanceCriteria.filter((value): value is string => typeof value === 'string' && value.trim().length > 0).map((value) => value.trim().slice(0, 4_000)).slice(0, 20) : undefined
     const verificationCommands = Array.isArray(input.verificationCommands) ? input.verificationCommands.filter((value): value is string => typeof value === 'string' && value.trim().length > 0).map((value) => value.trim().slice(0, 4_000)).slice(0, 20) : undefined
+    if (roleDefinition(role).canWrite && (!acceptanceCriteria?.length || !verificationCommands?.length)) {
+      throw new Error('A write-capable task requires explicit acceptanceCriteria and verificationCommands. Do not launch a worker that can only report progress; define how completion will be proven.')
+    }
+    const fingerprint = taskFingerprint(description, prompt, role)
+    const existing = taskSessions.findActiveByFingerprint(fingerprint)
+    if (existing) {
+      return `[${existing.role ?? role} task already active: ${existing.title}]\nTask session: ${existing.id}\nStatus: ${existing.status}. Resume or steer this task instead of starting a duplicate worker.`
+    }
+    dispatched += 1
     const route = roleConfig(role, roleDefinition(role).tier)
     const session = taskSessions.create(inferTaskKind(description, prompt), description, 'Waiting for a worker', {
       role,
@@ -60,6 +68,7 @@ Scouts run on a faster, cheaper model and cannot modify anything, so prefer a ha
       wave: 1,
       acceptanceCriteria,
       verificationCommands,
+      fingerprint,
     })
     taskSessions.update(session.id, { status: 'running', action: 'Starting worker', detail: `Role: ${role}`, nextAction: 'Worker is orienting and will report evidence' })
 

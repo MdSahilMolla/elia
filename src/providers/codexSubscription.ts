@@ -142,7 +142,7 @@ function messageToText(message: ChatMessage): string {
     .join('\n')
 }
 
-export function buildCodexSubscriptionPrompt(messages: ChatMessage[], model = 'default'): string {
+export function buildCodexSubscriptionPrompt(messages: ChatMessage[], model = 'default', cwd = process.cwd()): string {
   const rendered = messages
     .map((message) => {
       const text = messageToText(message)
@@ -166,7 +166,7 @@ export function buildCodexSubscriptionPrompt(messages: ChatMessage[], model = 'd
     ...kept,
   ].filter(Boolean).join('\n\n')
 
-  const env = `Working directory: ${process.cwd()}\nPlatform: ${process.platform}\nNetwork: disabled inside this sandbox`
+  const env = `Working directory: ${cwd}\nPlatform: ${process.platform}\nNetwork: disabled inside this sandbox`
   return `Selected Codex model: ${model}\n\n${env}\n\nConversation:\n${transcript}\n\nWork on the latest user request now and report changes and verification honestly.`
 }
 
@@ -243,6 +243,7 @@ export function createCodexSubscriptionProvider(model = 'default'): Provider {
   let lastDynamic: string | undefined
   let completedTurns = 0
   let threadStartInFlight: Promise<void> | undefined
+  let threadCwd: string | undefined
 
   const buildInstructions = (system: string) => `${SUBSCRIPTION_INSTRUCTIONS}\n\n## Elia session instructions\n${system}`
 
@@ -251,15 +252,15 @@ export function createCodexSubscriptionProvider(model = 'default'): Provider {
   // developerInstructions would tear the thread down and rebuild it each turn.
   // The changed dynamic block rides in the turn input instead, so one thread
   // serves the whole session — and it can be started ahead of the first turn.
-  const ensureThread = async (system: string, onActivity?: (activity: import('./types.ts').ProviderActivity) => void): Promise<void> => {
+  const ensureThread = async (system: string, cwd: string, onActivity?: (activity: import('./types.ts').ProviderActivity) => void): Promise<void> => {
     const instructions = buildInstructions(system)
-    if (threadId && threadInstructions === instructions) return
+    if (threadId && threadInstructions === instructions && threadCwd === cwd) return
     if (threadStartInFlight) return threadStartInFlight
     threadStartInFlight = (async () => {
       const client = await codexClient()
       onActivity?.({ kind: 'status', title: 'Starting Codex workspace thread', status: 'started' })
       const started = await client.request('thread/start', {
-        cwd: process.cwd(),
+        cwd,
         approvalPolicy: 'never',
         sandbox: 'workspace-write',
         developerInstructions: instructions,
@@ -272,6 +273,7 @@ export function createCodexSubscriptionProvider(model = 'default'): Provider {
       }
       threadId = started.thread.id
       threadInstructions = instructions
+      threadCwd = cwd
       lastDynamic = undefined
       completedTurns = 0
     })().finally(() => { threadStartInFlight = undefined })
@@ -287,30 +289,30 @@ export function createCodexSubscriptionProvider(model = 'default'): Provider {
     prewarm(hint) {
       void primeCodexSubscriptionLogin().then((ok) => {
         if (!ok) return
-        if (hint?.system) return ensureThread(hint.system).catch(() => {})
+        if (hint?.system) return ensureThread(hint.system, process.cwd()).catch(() => {})
         return codexClient().then(() => {}).catch(() => {})
       })
     },
 
-    async streamTurn({ system, systemDynamic, messages, onText, onThinking, onActivity, signal }) {
+    async streamTurn({ cwd, system, systemDynamic, messages, onText, onThinking, onActivity, signal }) {
       if (!codexSubscriptionConfigured()) {
         throw new Error('Codex is not signed in. Select Settings > Provider connections > ChatGPT subscription (Codex) and complete sign-in first.')
       }
 
       onActivity?.({ kind: 'status', title: 'Connecting to Codex', status: 'started' })
       try {
-        await ensureThread(system, onActivity)
+        await ensureThread(system, cwd, onActivity)
         const activeThreadId = threadId
         if (!activeThreadId) throw new Error('Codex app server returned no thread id')
         const client = await codexClient()
 
         const dynamic = systemDynamic?.trim() || undefined
         const preamble = dynamic && dynamic !== lastDynamic ? `## Updated context for this turn\n${dynamic}\n\n` : ''
-        const body = completedTurns === 0 ? buildCodexSubscriptionPrompt(messages, model) : latestUserText(messages)
+        const body = completedTurns === 0 ? buildCodexSubscriptionPrompt(messages, model, cwd) : latestUserText(messages)
         const result = await client.runTurn({
           threadId: activeThreadId,
           text: `${preamble}${body}`,
-          cwd: process.cwd(),
+          cwd,
           model,
           onText,
           onThinking,

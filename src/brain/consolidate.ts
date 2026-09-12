@@ -101,6 +101,7 @@ export async function consolidateBrain(options: ConsolidateOptions = {}): Promis
       `\nNOTES:\n${notes.map((n) => `- ${n.text}`).join('\n') || '(none)'}`,
     ].join('\n')
     await fast.provider.streamTurn({
+      cwd: process.cwd(),
       system: SYSTEM_PROMPT,
       messages: [{ role: 'user', content: [{ type: 'text', text: payload.slice(0, 40_000) } as ContentBlock] }],
       tools: [],
