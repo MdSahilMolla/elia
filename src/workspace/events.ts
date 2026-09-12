@@ -300,6 +300,13 @@ export function applyProjection(db: Database, event: PersistedEvent): void {
           String(p.role), depsMet ? 'ready' : 'pending', jstr(p.dependsOn), jstr(p.files),
           p.wave == null ? null : Number(p.wave), jstr(p.acceptanceCriteria), jstr(p.verificationCommands),
           Number(p.maxAttempts ?? 2), p.goalNodeId == null ? null : String(p.goalNodeId), String(event.actorId), event.at, event.at)
+      // A task added to an objective that's already running (a re-plan, a dynamically
+      // discovered follow-up) may list dependencies that are already terminal — only
+      // the ObjectiveStatusChanged->active transition otherwise triggers this pass, so
+      // a task created after that point would sit in `pending` with no other event to
+      // ever re-derive it.
+      const objective = db.query('SELECT status FROM objectives WHERE id = ?').get(String(p.objectiveId)) as Row | null
+      if (objective?.status === 'active') refreshTaskReadiness(db, String(p.objectiveId), event.at)
       return
     }
     case 'TaskStatusChanged': {
@@ -348,6 +355,8 @@ export function applyProjection(db: Database, event: PersistedEvent): void {
     }
     case 'TaskFailed': {
       setTaskStatus(db, String(event.taskId), 'failed', event.at, { lease_owner: null, lease_expires_at: null, last_error: String(p.error ?? 'task failed') })
+      const task = toTask(requireTaskRow(db, String(event.taskId)))
+      refreshTaskReadiness(db, task.objectiveId, event.at)
       return
     }
     case 'TaskBlocked': {
@@ -366,6 +375,10 @@ export function applyProjection(db: Database, event: PersistedEvent): void {
     }
     case 'TaskCancelled': {
       setTaskStatus(db, String(event.taskId), 'cancelled', event.at, { lease_owner: null, lease_expires_at: null })
+      // 'cancelled' is a TERMINAL_DEP_STATUS (a cancelled prerequisite shouldn't
+      // strand its dependents forever) — without this, nothing ever re-derives them.
+      const task = toTask(requireTaskRow(db, String(event.taskId)))
+      refreshTaskReadiness(db, task.objectiveId, event.at)
       return
     }
     case 'TaskInstructionAdded': {

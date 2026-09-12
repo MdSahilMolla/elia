@@ -79,6 +79,15 @@ export async function dispatchAgentRpc(
     case 'agent.progress': {
       const agent = requireAgent(caller)
       const id = agentInstanceId(agent.id)
+      const instance = store.agent(id)
+      // agent.control pause/stop returns the task to the pool without clearing the
+      // task's assigneeId (task.assign_id changes only on an actual reassignment),
+      // so a zombie heartbeat from a runtime that has since been paused/stopped
+      // would otherwise still pass the assignee check below and keep renewing a
+      // lease on a task it no longer owns.
+      if (instance && (instance.status === 'paused' || instance.status === 'cancelled')) {
+        throw new RpcError(`agent ${id} is ${instance.status}; no longer accepting task progress`)
+      }
       const taskId = reqStr(params, 'taskId', 100)
       const task = store.task(taskId)
       if (!task || task.assigneeId !== id) throw new RpcError('that task is not assigned to you')

@@ -27,6 +27,25 @@ describe('deployment tool', () => {
     await expect(deploymentTool.execute({ action: 'verify', provider: 'netlify', url: 'https://example.com' })).rejects.toThrow('provider’s default')
   })
 
+  test('verify never follows a redirect off the validated host, and reports it as unverified', async () => {
+    const originalFetch = globalThis.fetch
+    let capturedRedirectMode: string | undefined
+    globalThis.fetch = (async (_url: unknown, init?: RequestInit) => {
+      capturedRedirectMode = init?.redirect
+      return new Response(null, { status: 302, headers: { Location: 'http://169.254.169.254/latest/meta-data' } })
+    }) as typeof fetch
+    try {
+      const raw = await deploymentTool.execute({ action: 'verify', provider: 'vercel', url: 'https://my-app.vercel.app/' })
+      const result = JSON.parse(raw) as { status: string; httpStatus: number; error: string }
+      expect(capturedRedirectMode).toBe('manual')
+      expect(result.status).toBe('failed')
+      expect(result.httpStatus).toBe(302)
+      expect(result.error).toContain('redirect')
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
   describe('docker provider', () => {
     function withRegistry<T>(value: string | undefined, fn: () => T): T {
       const previous = process.env.ELIA_DOCKER_REGISTRY

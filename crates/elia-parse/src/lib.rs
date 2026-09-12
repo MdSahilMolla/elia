@@ -219,6 +219,29 @@ mod tests {
             .any(|e| e.message.contains("unterminated template literal")));
     }
 
+    /// Regression for a stack-overflow DoS: scan_template()/scan_code(true) recurse
+    /// into each other once per nested `${` template interpolation, with no other
+    /// bound (unlike brackets, which use an explicit stack, not the call stack).
+    /// Adversarial input could nest deep enough to crash the process; it must
+    /// instead be reported as an ordinary structural error.
+    #[test]
+    fn deeply_nested_template_interpolation_does_not_crash() {
+        let depth = 5_000;
+        let mut src = String::from("const x = ");
+        for _ in 0..depth {
+            src.push_str("`${");
+        }
+        src.push('1');
+        for _ in 0..depth {
+            src.push_str("}`");
+        }
+        src.push(';');
+        // No assertion on ok/errors beyond "it returned" — surviving without a
+        // crash is the point. A bound this deep is expected to report an error.
+        let r = check(&src, Language::JsTs);
+        let _ = r;
+    }
+
     #[test]
     fn rust_nested_block_comment() {
         assert!(

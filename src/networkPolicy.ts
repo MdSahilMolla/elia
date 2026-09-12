@@ -111,10 +111,37 @@ function isUnsafeIpv6(address: string): boolean {
   if (mapped?.[1]) return isUnsafeIpv4(mapped[1])
   const value = ipv6ToBigInt(normalized)
   if (value === undefined) return true
+  if (value === 0n || value === 1n) return true
   if ((value >> 32n) === 0xffffn) {
     const mappedValue = Number(value & 0xffffffffn)
     const mappedAddress = [mappedValue >>> 24, (mappedValue >>> 16) & 255, (mappedValue >>> 8) & 255, mappedValue & 255].join('.')
     return isUnsafeIpv4(mappedAddress)
+  }
+  // 6to4 (2002::/16) and Teredo (2001:0::/32) embed a v4 address that must be checked too.
+  const sixToFour = (value >> 112n) === 0x2002n
+  const teredo = (value >> 96n) === 0x20010000n
+  if (sixToFour || teredo) {
+    const embeddedValue = teredo ? (value ^ 0xffffffffn) & 0xffffffffn : (value >> 80n) & 0xffffffffn
+    const embeddedAddress = [
+      Number((embeddedValue >> 24n) & 0xffn),
+      Number((embeddedValue >> 16n) & 0xffn),
+      Number((embeddedValue >> 8n) & 0xffn),
+      Number(embeddedValue & 0xffn),
+    ].join('.')
+    if (isUnsafeIpv4(embeddedAddress)) return true
+  }
+  // ISATAP embeds a v4 address in the low 32 bits when the interface identifier is 0000:5efe:a.b.c.d or 0200:5efe:a.b.c.d
+  const isatapIdHigh = (value >> 48n) & 0xffffn
+  const isatapIdLow = (value >> 32n) & 0xffffn
+  if (isatapIdLow === 0x5efen && (isatapIdHigh === 0n || isatapIdHigh === 0x0200n)) {
+    const embeddedValue = value & 0xffffffffn
+    const embeddedAddress = [
+      Number((embeddedValue >> 24n) & 0xffn),
+      Number((embeddedValue >> 16n) & 0xffn),
+      Number((embeddedValue >> 8n) & 0xffn),
+      Number(embeddedValue & 0xffn),
+    ].join('.')
+    if (isUnsafeIpv4(embeddedAddress)) return true
   }
   const fc00 = BigInt('0xfc000000000000000000000000000000')
   const fe80 = BigInt('0xfe800000000000000000000000000000')
