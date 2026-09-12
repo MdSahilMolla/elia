@@ -3,6 +3,7 @@
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { DaemonUnavailable, daemonMode, daemonShellExec } from './daemon/index.ts'
+import { ContainerUnavailable, containerSandboxRequested, noteContainerFallback, runShellInContainer } from './sandbox/container.ts'
 
 /**
  * The Windows command interpreter, resolved to an absolute path.
@@ -71,6 +72,26 @@ export async function runShell(
   // Operator cancellation must win even before the shell is spawned.
   if (signal?.aborted) {
     return { command, exitCode: 1, stdout: '', stderr: 'cancelled by operator', elapsedMs: 0, timedOut: false }
+  }
+
+  // Container sandboxing (ELIA_SANDBOX=container) takes precedence over the
+  // daemon's warm-shell path below: it's an explicit isolation request, not
+  // a performance optimization, so it should never be silently skipped by
+  // one. Only a docker-itself transport failure (missing binary, daemon
+  // unreachable) falls through to host execution — anything else the
+  // sandboxed command produced, including its own failure, is returned as-is
+  // rather than silently re-run outside the isolation the caller asked for.
+  if (containerSandboxRequested() && !env) {
+    try {
+      return await runShellInContainer(command, timeoutMs, cwd, signal)
+    } catch (err) {
+      if (signal?.aborted) {
+        return { command, exitCode: 1, stdout: '', stderr: 'cancelled by operator', elapsedMs: Date.now() - startedAt, timedOut: false }
+      }
+      if (!(err instanceof ContainerUnavailable)) throw err
+      noteContainerFallback(err.message)
+      // fall through to the daemon/in-process shell below.
+    }
   }
 
   // When the resident daemon is enabled it runs the command in a warm shell,
