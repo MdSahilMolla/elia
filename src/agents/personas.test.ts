@@ -8,7 +8,9 @@ test('every registered specialist has a non-empty prompt', () => {
 
 test('data and AI specialists can run reproducible computation', () => {
   expect(personaTools('data').map((tool) => tool.name)).toContain('run_command')
+  expect(personaTools('data').map((tool) => tool.name)).toContain('run_program')
   expect(personaTools('ai').map((tool) => tool.name)).toContain('run_command')
+  expect(personaTools('ai').map((tool) => tool.name)).toContain('run_program')
   expect(personaTools('data').map((tool) => tool.name)).toContain('read_spreadsheet')
 })
 

@@ -8,6 +8,7 @@ import { grepTool, searchWithJs } from './grep.ts'
 import { listFilesTool } from './listFiles.ts'
 import { readFileTool } from './readFile.ts'
 import { defaultTimeoutForCommand, runCommandTool, workspaceScopedEnv } from './runCommand.ts'
+import { runProgramTool } from './runProgram.ts'
 import { paths } from '../config.ts'
 import { writeFileTool } from './writeFile.ts'
 import { dataScienceTool } from './dataScience.ts'
@@ -20,6 +21,7 @@ const toolsByName = {
   list_files: listFilesTool,
   read_file: readFileTool,
   run_command: runCommandTool,
+  run_program: runProgramTool,
   write_file: writeFileTool,
 }
 
@@ -224,10 +226,29 @@ test('run_command captures stdout and exit code', async () => {
   expect(result).toContain('test123')
 })
 
+test('run_program passes a literal argument directly instead of reparsing shell syntax', async () => {
+  const literal = 'elia direct & whoami'
+  const result = await executeTool('run_program', {
+    program: process.execPath,
+    args: ['-e', 'console.log(process.argv.at(-1))', '--', literal],
+  })
+  expect(result).toContain('exit code: 0')
+  expect(result).toContain(literal)
+})
+
+test('run_program preserves the protected-path boundary', async () => {
+  await expect(executeTool('run_program', { program: 'cat', args: ['.env'] })).rejects.toThrow('protected sensitive path')
+})
+
 test('run_command rejects malformed and oversized command inputs', async () => {
   await expect(executeTool('run_command', {})).rejects.toThrow('non-empty string')
   await expect(executeTool('run_command', { command: 42 })).rejects.toThrow('non-empty string')
   await expect(executeTool('run_command', { command: 'x'.repeat(100_001) })).rejects.toThrow('exceeds 100000 characters')
+})
+
+test('run_command rejects transient-directory shell composition', async () => {
+  await expect(executeTool('run_command', { command: 'cd workspace/app && bun install' }))
+    .rejects.toThrow(/Pass cwd as a separate field/)
 })
 
 test('run_command rejects a PowerShell cmdlet piped at the shell level, before spawning', async () => {

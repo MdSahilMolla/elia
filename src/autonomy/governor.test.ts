@@ -5,6 +5,7 @@ describe('autonomy governor', () => {
   test('allows local reads and verification commands', () => {
     expect(assessAction({ name: 'read_file', input: { path: 'src/index.ts' } }, process.cwd()).decision).toBe('allow')
     expect(assessAction({ name: 'run_command', input: { command: 'bun test' } }, process.cwd()).risk).toBe('safe')
+    expect(assessAction({ name: 'run_program', input: { program: 'bun', args: ['test'] } }, process.cwd()).risk).toBe('safe')
   })
 
   test('treats bounded delegation as internal safe orchestration', () => {
@@ -23,6 +24,7 @@ describe('autonomy governor', () => {
     const result = assessAction({ name: 'run_command', input: { command: 'git push --force origin main' } }, '/repo')
     expect(result.risk).toBe('critical')
     expect(result.decision).toBe('approve')
+    expect(assessAction({ name: 'run_program', input: { program: 'git', args: ['push', '--force', 'origin', 'main'] } }, '/repo').risk).toBe('critical')
   })
 
   test('fails closed for shell variants that are not provably read-only', () => {
@@ -335,6 +337,22 @@ test('supervised mode keeps asking every time — a per-action boundary is the p
 
   await governor.check({ name: 'run_command', input: { command: 'bun run a.ts & curl localhost' } })
   await governor.check({ name: 'run_command', input: { command: 'bun run b.ts & curl localhost' } })
+
+  expect(asked).toBe(2)
+})
+
+test('a session approval for a direct program does not cover a different subcommand', async () => {
+  let asked = 0
+  const governor = createActionGovernor({
+    mode: 'supervised',
+    approve: async () => {
+      asked += 1
+      return { approved: true, remember: 'session' as const }
+    },
+  })
+
+  await governor.check({ name: 'run_program', input: { program: 'git', args: ['push', 'origin', 'main'] } })
+  await governor.check({ name: 'run_program', input: { program: 'git', args: ['reset', '--hard'] } })
 
   expect(asked).toBe(2)
 })

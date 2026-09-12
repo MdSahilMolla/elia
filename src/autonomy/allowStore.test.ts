@@ -47,6 +47,19 @@ test('a persisted project rule permits that command prefix and nothing else', ()
   expect(saved.rules[0].commandPrefix).toBe('git')
 })
 
+test('a direct-program rule is scoped to its executable and assessed intent', () => {
+  const dir = project()
+  const push = { name: 'run_program', input: { program: 'git', args: ['push', 'origin', 'main'] } }
+  const status = { name: 'run_program', input: { program: 'git', args: ['status'] } }
+
+  addAllowRule(ruleFor(push, assessAction(push, dir)), 'project', dir)
+
+  expect(isAllowlisted(push, assessAction(push, dir), dir)).toBe(true)
+  expect(isAllowlisted(status, assessAction(status, dir), dir)).toBe(false)
+  const saved = JSON.parse(readFileSync(join(dir, '.elia', 'allow.json'), 'utf8'))
+  expect(saved.rules[0].commandPrefix).toBe('git push')
+})
+
 test('a non-command rule is scoped to the tool + intent', () => {
   const dir = project()
   const req = { name: 'codex_delegate', input: { task: 'do a thing' } }

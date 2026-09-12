@@ -93,6 +93,11 @@ export function assessAction(request: ActionRequest, cwd = currentAgent().cwd ??
   const resources = values.filter((value) => /[\\/]|https?:\/\//i.test(value)).slice(0, 4)
 
   if (name === 'run_command') return assessCommand(joined, cwd)
+  if (name === 'run_program') {
+    const program = typeof input.program === 'string' ? input.program : ''
+    const args = Array.isArray(input.args) ? input.args.filter((arg): arg is string => typeof arg === 'string') : []
+    return assessCommand([program, ...args].join(' '), cwd)
+  }
 
   if (name === 'presentation') {
     return assessment('review', 'approve', 'presentation generation creates a derived document artifact', 'presentation.from_workbook', resources, true)
@@ -435,7 +440,9 @@ export function createActionGovernor(options: { mode?: GovernanceMode; approve?:
   const sessionAllow = new Set<string>()
   const sessionKey = (request: ActionRequest, assessment: ActionAssessment): string =>
     request.name === 'run_command'
-      ? `run_command:${String((request.input.command ?? '')).trim().split(/[\s;|&]+/, 1)[0] ?? ''}`
+      ? `run_command:${String(request.input.command ?? '').trim().split(/[\s;|&]+/, 1)[0] ?? ''}`
+      : request.name === 'run_program'
+        ? `run_program:${String(request.input.program ?? '').trim()}:${Array.isArray(request.input.args) && typeof request.input.args[0] === 'string' ? request.input.args[0].trim() : ''}:${assessment.intent}`
       : `${request.name}:${assessment.intent}`
 
   return {

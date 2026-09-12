@@ -14,6 +14,12 @@ describe('action contracts', () => {
     expect(evaluatePostconditions(contract, 'exit code: 0\nstdout:\nbuilt', process.cwd())).toMatchObject({ ok: true, phase: 'postcondition' })
   })
 
+  test('creates the same executable and exit-code contract for a direct program', async () => {
+    const contract = contractForAction({ name: 'run_program', input: { program: 'bun', args: ['test'] } }, process.cwd(), 'run:program:1')
+    expect(contract.preconditions[0]).toMatchObject({ kind: 'command-available', value: 'bun' })
+    expect(contract.postconditions).toEqual([{ kind: 'shell-exit-zero', description: 'the command must return exit code 0 and not time out' }])
+  })
+
   test('a capability probe gets neither the availability precondition nor the exit-zero postcondition', () => {
     // "is X installed?" cannot be gated on X already being on PATH, and a probe
     // that answers "no" via a non-zero exit is not a failure to repair.

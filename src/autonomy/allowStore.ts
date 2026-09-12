@@ -23,7 +23,7 @@ import type { ActionAssessment, ActionRequest } from './governor.ts'
 export interface AllowRule {
   /** Tool name: `run_command`, `edit_file`, `github`, … */
   tool: string
-  /** For `run_command`: the leading command token this rule covers. */
+  /** For command tools: the leading executable token this rule covers. */
   commandPrefix?: string
   /** Governor intent (`edit_file.write`, `github.push`) — narrows non-command tools. */
   intent?: string
@@ -91,11 +91,23 @@ export function commandPrefix(command: string): string {
   return first.replace(/\\/g, '/').split('/').filter(Boolean).pop() ?? first
 }
 
+/** A direct program's executable plus its first operation-defining argument. */
+function directProgramPrefix(input: Record<string, unknown>): string {
+  const program = typeof input.program === 'string' ? commandPrefix(input.program) : ''
+  const firstArg = Array.isArray(input.args) && typeof input.args[0] === 'string' ? input.args[0].trim() : ''
+  return [program, firstArg].filter(Boolean).join(' ')
+}
+
 function matches(rule: AllowRule, request: ActionRequest, assessment: ActionAssessment): boolean {
   if (rule.tool !== request.name) return false
-  if (request.name === 'run_command') {
-    const cmd = typeof request.input.command === 'string' ? request.input.command : ''
-    return Boolean(rule.commandPrefix) && commandPrefix(cmd) === rule.commandPrefix
+  if (request.name === 'run_command' || request.name === 'run_program') {
+    const prefix = request.name === 'run_command'
+      ? commandPrefix(typeof request.input.command === 'string' ? request.input.command : '')
+      : directProgramPrefix(request.input)
+    const prefixMatches = Boolean(rule.commandPrefix) && prefix === rule.commandPrefix
+    return request.name === 'run_program'
+      ? prefixMatches && (!rule.intent || rule.intent === assessment.intent)
+      : prefixMatches
   }
   return !rule.intent || rule.intent === assessment.intent
 }
@@ -109,9 +121,13 @@ export function isAllowlisted(request: ActionRequest, assessment: ActionAssessme
 /** Builds the rule an approval prompt would persist for this request. */
 export function ruleFor(request: ActionRequest, assessment: ActionAssessment): AllowRule {
   const base: AllowRule = { tool: request.name, addedAt: new Date().toISOString(), note: assessment.reason }
-  if (request.name === 'run_command') {
-    const cmd = typeof request.input.command === 'string' ? request.input.command : ''
-    return { ...base, commandPrefix: commandPrefix(cmd) }
+  if (request.name === 'run_command' || request.name === 'run_program') {
+    const prefix = request.name === 'run_command'
+      ? commandPrefix(typeof request.input.command === 'string' ? request.input.command : '')
+      : directProgramPrefix(request.input)
+    return request.name === 'run_program'
+      ? { ...base, commandPrefix: prefix, intent: assessment.intent }
+      : { ...base, commandPrefix: prefix }
   }
   return { ...base, intent: assessment.intent }
 }

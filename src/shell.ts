@@ -30,6 +30,16 @@ export interface ShellResult {
   timedOut: boolean
 }
 
+/** A direct process invocation. Arguments are never reparsed by cmd.exe or sh. */
+export interface ProcessPlan {
+  executable: string
+  args?: string[]
+  timeoutMs?: number
+  cwd?: string
+  signal?: AbortSignal
+  env?: Record<string, string>
+}
+
 export const DEFAULT_SHELL_TIMEOUT_MS = 60_000
 export const MAX_SHELL_OUTPUT_LENGTH = 200_000
 
@@ -96,8 +106,40 @@ export async function runShell(
   }
 
   const shellArgs = process.platform === 'win32' ? [windowsShell(), '/d', '/s', '/c', command] : ['sh', '-c', command]
+  return runSpawned(command, shellArgs, timeoutMs, cwd, signal, env)
+}
 
-  const proc = Bun.spawn(shellArgs, {
+/**
+ * Runs an executable directly. Use this for structured operations whose
+ * executable and arguments are already known; reserve runShell for genuine
+ * shell syntax such as pipelines and builtins.
+ */
+export async function runProcess(plan: ProcessPlan): Promise<ShellResult> {
+  const executable = plan.executable.trim()
+  const args = plan.args ?? []
+  const command = [executable, ...args.map((arg) => JSON.stringify(arg))].join(' ')
+  if (!executable) return { command, exitCode: 1, stdout: '', stderr: 'program executable is required', elapsedMs: 0, timedOut: false }
+  return runSpawned(command, [executable, ...args], plan.timeoutMs ?? DEFAULT_SHELL_TIMEOUT_MS, plan.cwd, plan.signal, plan.env)
+}
+
+async function runSpawned(
+  command: string,
+  spawnArgs: string[],
+  timeoutMs: number,
+  cwd?: string,
+  signal?: AbortSignal,
+  env?: Record<string, string>,
+): Promise<ShellResult> {
+  if (cwd !== undefined && !existsSync(cwd)) {
+    return { command, exitCode: 1, stdout: '', stderr: `working directory does not exist: ${cwd}`, elapsedMs: 0, timedOut: false }
+  }
+
+  const startedAt = Date.now()
+  if (signal?.aborted) {
+    return { command, exitCode: 1, stdout: '', stderr: 'cancelled by operator', elapsedMs: 0, timedOut: false }
+  }
+
+  const proc = Bun.spawn(spawnArgs, {
     stdout: 'pipe',
     stderr: 'pipe',
     ...(cwd ? { cwd } : {}),

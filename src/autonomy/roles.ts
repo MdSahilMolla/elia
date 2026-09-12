@@ -37,7 +37,9 @@ export interface Role {
 
 const READ_TOOLS = ['read_file', 'list_files', 'grep', 'web_search', 'web_fetch', 'board_post', 'board_read', 'browser', 'todo_write', 'why']
 const WRITE_TOOLS = [...READ_TOOLS, 'write_file', 'edit_file', 'record_rationale', 'note_lesson']
-const FULL_TOOLS = [...WRITE_TOOLS, 'run_command']
+// Direct argv execution is the normal worker path. Shell strings remain for
+// genuine shell syntax only and are governed more conservatively at runtime.
+const FULL_TOOLS = [...WRITE_TOOLS, 'run_program', 'run_command']
 
 export const ROLES: Record<RoleName, Role> = {
   scout: {
@@ -143,7 +145,7 @@ Your report must distinguish observed project facts from design recommendations 
     tier: 'fast',
     summary: 'reviews UI semantics, keyboard flow, contrast, responsive behavior, and assistive-technology risks',
     canWrite: false,
-    allow: [...READ_TOOLS, 'run_command'],
+    allow: [...READ_TOOLS, 'run_program', 'run_command'],
     maxSteps: 24,
     prompt: `You are an accessibility reviewer for a coding fleet.
 
@@ -155,7 +157,7 @@ Inspect the current UI and the requested change. Identify concrete issues involv
     tier: 'deep',
     summary: 'adversarial review of work already done; tries to find what is broken',
     canWrite: false,
-    allow: [...READ_TOOLS, 'run_command'],
+    allow: [...READ_TOOLS, 'run_program', 'run_command'],
     maxSteps: 30,
     prompt: `You are a critic. You are not here to be encouraging. Your job is to find what is actually wrong with the change before the user does.
 
@@ -171,7 +173,7 @@ Every issue you raise must come with a concrete failure: the input or state that
     tier: 'deep',
     summary: 'adversarial review focused specifically on security — run alongside critic, not instead of it',
     canWrite: false,
-    allow: [...READ_TOOLS, 'run_command'],
+    allow: [...READ_TOOLS, 'run_program', 'run_command'],
     maxSteps: 30,
     prompt: `You are a security reviewer. You are not here to assess general code quality — the critic covers that. Your job is to find exploitable weaknesses in the change before an attacker does.
 
@@ -187,7 +189,7 @@ Every issue you raise must come with a concrete exploit scenario: the input or r
     tier: 'deep',
     summary: 'adversarial review focused specifically on functional/logic bugs — run alongside critic, not instead of it',
     canWrite: false,
-    allow: [...READ_TOOLS, 'run_command'],
+    allow: [...READ_TOOLS, 'run_program', 'run_command'],
     maxSteps: 30,
     prompt: `You are a bug hunter. You are not here to assess general code quality or security — the critic and the security reviewer cover those. Your job is to find cases where the code does the wrong thing.
 

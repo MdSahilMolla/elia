@@ -4,6 +4,7 @@ import { editFileTool } from './editFile.ts'
 import { listFilesTool } from './listFiles.ts'
 import { grepTool } from './grep.ts'
 import { runCommandTool } from './runCommand.ts'
+import { runProgramTool } from './runProgram.ts'
 import { boardPostTool, boardReadTool } from './blackboard.ts'
 import { newEngagementTool } from './engagement.ts'
 import { runSecurityToolTool } from './securityScan.ts'
@@ -46,6 +47,7 @@ import { federatedCollabTool } from './federatedCollab.ts'
 import { specVerifyTool } from './specVerify.ts'
 import { temporalAnalysisTool } from './temporalAnalysis.ts'
 import type { Tool } from './types.ts'
+import { missingCapabilityContracts } from '../autonomy/capabilityContract.ts'
 
 /** The built-in file and shell tools. */
 export const tools: Tool[] = [
@@ -55,6 +57,7 @@ export const tools: Tool[] = [
   listFilesTool,
   grepTool,
   runCommandTool,
+  runProgramTool,
   webSearchTool,
   webFetchTool,
   visualizeTool,
@@ -105,6 +108,23 @@ export const cyberTools: Tool[] = [newEngagementTool, runSecurityToolTool, httpP
 /** Real external data for the Marketing/Finance personas — see src/agents/personas.ts. Tech's toolset is unchanged. */
 export const businessTools: Tool[] = [readSpreadsheetTool, spreadsheetTool, presentationTool]
 export const battmannTools: Tool[] = [battmannTool]
+
+/**
+ * The complete static registry. Dynamic skills and MCP tools are intentionally
+ * excluded: they must declare their own capability contract before autonomous
+ * exposure rather than receiving a permissive built-in default.
+ */
+export function allBuiltinTools(): Tool[] {
+  return [...tools, ...collaborationTools, ...browserTools, ...communicationTools, ...cyberTools, ...businessTools, ...battmannTools]
+}
+
+/** Fail closed when a newly registered built-in lacks a capability contract. */
+export function assertBuiltinCapabilityContracts(): void {
+  const missing = missingCapabilityContracts(allBuiltinTools())
+  if (missing.length > 0) throw new Error(`Built-in tools missing capability contracts: ${missing.join(', ')}`)
+}
+
+assertBuiltinCapabilityContracts()
 
 export const toolsByName: Record<string, Tool> = Object.fromEntries(
   tools.map((tool) => [tool.name, tool]),
