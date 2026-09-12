@@ -4,9 +4,15 @@ import { currentAgent } from '../autonomy/context.ts'
 import { clampOutput, runShell } from '../shell.ts'
 import type { Tool } from './types.ts'
 
-type DeploymentProvider = 'vercel' | 'netlify'
+type DeploymentProvider = 'vercel' | 'netlify' | 'docker'
 type DeploymentAction = 'plan' | 'build' | 'deploy' | 'verify'
 type DeploymentTarget = 'preview' | 'production'
+
+// A loose but real image-reference shape: optional registry host (with a dot
+// or port, the way `docker` itself tells a registry apart from a Docker Hub
+// user/org), then path segments. Rejects anything with shell/argv-hostile
+// characters before it ever reaches a spawned docker command.
+const IMAGE_REF_PATTERN = /^[a-z0-9]([a-z0-9._-]*[a-z0-9])?(:[0-9]+)?(\/[a-z0-9]([a-z0-9._-]*[a-z0-9])?)*$/
 
 const DEPLOYMENT_TIMEOUT_MS = 10 * 60_000
 const VERIFY_TIMEOUT_MS = 20_000
@@ -31,14 +37,14 @@ interface DeploymentReceipt {
 export const deploymentTool: Tool = {
   name: 'deployment',
   description:
-    'Plan, build, deploy, and verify a web project through an explicitly linked Vercel or Netlify project. Preview deploys may proceed under the normal review policy; production deploys are critical external side effects and require Elia’s exact approval boundary. This tool never creates or links a new project, changes environment variables, manages domains, exposes credentials, or deploys without a provider project link.',
+    'Plan, build, deploy, and verify a web project through an explicitly linked Vercel/Netlify project, or a container image through an explicitly configured Docker registry (ELIA_DOCKER_REGISTRY). Preview deploys may proceed under the normal review policy; production deploys are critical external side effects and require Elia’s exact approval boundary. This tool never creates or links a new project/registry, changes environment variables, manages domains, exposes credentials, or deploys without an explicit link.',
   input_schema: {
     type: 'object',
     properties: {
       action: { type: 'string', enum: ['plan', 'build', 'deploy', 'verify'], description: 'Deployment lifecycle action' },
-      provider: { type: 'string', enum: ['vercel', 'netlify'], description: 'Deployment provider' },
-      target: { type: 'string', enum: ['preview', 'production'], description: 'Deployment environment; required for deploy and optional for plan/build' },
-      url: { type: 'string', description: 'The exact deployment URL to verify; required for verify' },
+      provider: { type: 'string', enum: ['vercel', 'netlify', 'docker'], description: 'Deployment provider' },
+      target: { type: 'string', enum: ['preview', 'production'], description: 'Deployment environment; required for deploy and optional for plan/build. For docker: preview builds/pushes the "preview" tag, production the "latest" tag.' },
+      url: { type: 'string', description: 'The exact deployment URL to verify; required for verify on vercel/netlify (docker verify instead checks the pushed image exists in the registry — no url needed)' },
     },
     required: ['action', 'provider'],
   },
@@ -55,6 +61,12 @@ export const deploymentTool: Tool = {
     }
 
     if (action === 'verify') {
+      if (provider === 'docker') {
+        if (!target) throw new Error('target is required for docker deployment verify (which tag to check)')
+        const result = await verifyDockerImage(target, cwd, currentAgent().signal)
+        recordReceipt({ ...result, action, provider, target, cwd })
+        return JSON.stringify(result, null, 2)
+      }
       if (typeof input.url !== 'string' || input.url.trim().length === 0) throw new Error('url is required for deployment verify')
       const result = await verifyDeployment(input.url, provider, cwd)
       recordReceipt({ ...result, action, provider, target, cwd })
@@ -109,8 +121,8 @@ function parseAction(value: unknown): DeploymentAction {
 }
 
 function parseProvider(value: unknown): DeploymentProvider {
-  if (value === 'vercel' || value === 'netlify') return value
-  throw new Error('provider must be one of: vercel, netlify')
+  if (value === 'vercel' || value === 'netlify' || value === 'docker') return value
+  throw new Error('provider must be one of: vercel, netlify, docker')
 }
 
 function parseTarget(value: unknown): DeploymentTarget {
@@ -119,16 +131,24 @@ function parseTarget(value: unknown): DeploymentTarget {
 }
 
 function planDeployment(provider: DeploymentProvider, cwd: string, target?: DeploymentTarget): DeploymentReceipt & { available: boolean; linked: boolean; buildCommand?: string; notes: string[] } {
-  const cli = Bun.which(provider)
-  const linked = provider === 'vercel' ? vercelLinked(cwd) : netlifyLinked(cwd)
+  const cli = Bun.which(provider === 'docker' ? 'docker' : provider)
+  const linked = provider === 'vercel' ? vercelLinked(cwd) : provider === 'netlify' ? netlifyLinked(cwd) : dockerLinked()
   const packageInfo = readPackage(cwd)
-  const build = packageInfo?.scripts?.build ? packageManager(cwd) : undefined
+  const build = provider === 'docker' ? (dockerfileExists(cwd) ? dockerBuildCommand(target) : undefined) : packageInfo?.scripts?.build ? packageManager(cwd) : undefined
   const notes: string[] = []
-  if (!cli) notes.push(`${provider} CLI is not installed or not on PATH`)
-  if (!linked) notes.push(`No explicitly linked ${provider} project was found; Elia will not create or guess a destination`)
-  if (!build) notes.push('No package.json build script was found; deploy may still use provider configuration, but local build action is unavailable')
+  if (!cli) notes.push(`${provider === 'docker' ? 'docker' : provider} CLI is not installed or not on PATH`)
+  if (!linked) {
+    notes.push(
+      provider === 'docker'
+        ? 'ELIA_DOCKER_REGISTRY is not set (or is not a valid image reference); Elia will not guess a registry destination'
+        : `No explicitly linked ${provider} project was found; Elia will not create or guess a destination`,
+    )
+  }
+  if (provider === 'docker' && !dockerfileExists(cwd)) notes.push('No Dockerfile was found at the project root; build/deploy are unavailable')
+  else if (!build) notes.push('No package.json build script was found; deploy may still use provider configuration, but local build action is unavailable')
   if (provider === 'vercel' && process.env.VERCEL_TOKEN) notes.push('VERCEL_TOKEN is present without exposing its value; authorization and project access remain unverified')
   if (provider === 'netlify' && process.env.NETLIFY_AUTH_TOKEN) notes.push('NETLIFY_AUTH_TOKEN is present without exposing its value; authorization and site access remain unverified')
+  if (provider === 'docker' && linked) notes.push(`Registry auth (docker login) is assumed already configured outside Elia; pushing to ${dockerImageRef()} remains unverified until deploy actually runs`)
 
   return {
     at: new Date().toISOString(),
@@ -145,19 +165,46 @@ function planDeployment(provider: DeploymentProvider, cwd: string, target?: Depl
   }
 }
 
-function buildCommand(provider: DeploymentProvider, plan: ReturnType<typeof planDeployment>, _cwd: string): string | undefined {
+function buildCommand(provider: DeploymentProvider, plan: ReturnType<typeof planDeployment>, cwd: string): string | undefined {
   if (plan.buildCommand) return plan.buildCommand
   if (!plan.available) return undefined
+  if (provider === 'docker') return dockerfileExists(cwd) ? dockerBuildCommand(plan.target) : undefined
   return provider === 'vercel' ? 'vercel build' : 'netlify build'
 }
 
 function deployCommand(provider: DeploymentProvider, target: DeploymentTarget, plan: ReturnType<typeof planDeployment>, cwd: string): string | undefined {
   if (!plan.available || !plan.linked) return undefined
+  if (provider === 'docker') return dockerfileExists(cwd) ? `docker push ${dockerImageRef()}:${dockerTagFor(target)}` : undefined
   if (provider === 'vercel') return target === 'production' ? 'CI=1 vercel deploy --prod --yes' : 'CI=1 vercel deploy --yes'
 
   const siteId = netlifySiteId(cwd)
   const siteFlag = siteId ? ` --site ${siteId}` : ''
   return target === 'production' ? `CI=1 netlify deploy --prod --json${siteFlag}` : `CI=1 netlify deploy --json${siteFlag}`
+}
+
+/** The registry+image the operator explicitly configured — the docker equivalent of a linked Vercel/Netlify project. Never guessed. */
+function dockerImageRef(): string | undefined {
+  const value = process.env.ELIA_DOCKER_REGISTRY?.trim()
+  return value && IMAGE_REF_PATTERN.test(value) ? value : undefined
+}
+
+function dockerLinked(): boolean {
+  return dockerImageRef() !== undefined
+}
+
+function dockerfileExists(cwd: string): boolean {
+  return existsSync(join(cwd, 'Dockerfile'))
+}
+
+/** No git-sha versioning here (unlike a real CI pipeline) — deliberately simple and predictable, matching how Vercel/Netlify's own tagging is opaque to this tool too. The receipt always records the exact tag used. */
+function dockerTagFor(target?: DeploymentTarget): string {
+  return target === 'production' ? 'latest' : 'preview'
+}
+
+/** Tags with the configured registry reference when one is set (so a later `deploy` pushes exactly what this built); otherwise builds untagged — a build validates the Dockerfile and doesn't itself need a destination, matching how `vercel build`/`netlify build` don't require a linked project either. */
+function dockerBuildCommand(target?: DeploymentTarget): string {
+  const ref = dockerImageRef()
+  return ref ? `docker build -t ${ref}:${dockerTagFor(target)} .` : 'docker build .'
 }
 
 function packageManager(cwd: string): string {
@@ -175,6 +222,34 @@ function readPackage(cwd: string): { scripts?: Record<string, unknown> } | undef
     return { scripts: typeof scripts === 'object' && scripts !== null && !Array.isArray(scripts) ? scripts as Record<string, unknown> : undefined }
   } catch {
     return undefined
+  }
+}
+
+/**
+ * Docker's postcondition check, parallel to verifyDeployment's HTTP fetch —
+ * there is no default deployed URL to hit, so "verified" instead means the
+ * registry actually has the image `deploy` was supposed to push, confirmed
+ * against the registry itself rather than trusting the push command's own
+ * exit code.
+ */
+async function verifyDockerImage(target: DeploymentTarget, cwd: string, signal: AbortSignal | undefined): Promise<DeploymentReceipt> {
+  const ref = dockerImageRef()
+  if (!ref) {
+    return { at: new Date().toISOString(), action: 'verify', provider: 'docker', target, cwd, status: 'failed', error: 'ELIA_DOCKER_REGISTRY is not set (or is not a valid image reference).' }
+  }
+  const image = `${ref}:${dockerTagFor(target)}`
+  const result = await runShell(`docker manifest inspect ${image}`, VERIFY_TIMEOUT_MS, cwd, signal)
+  const successful = result.exitCode === 0 && !result.timedOut
+  return {
+    at: new Date().toISOString(),
+    action: 'verify',
+    provider: 'docker',
+    target,
+    cwd,
+    status: successful ? 'verified' : 'failed',
+    url: image,
+    output: clampOutput([result.stdout, result.stderr].filter(Boolean).join('\n'), MAX_VERIFY_BODY),
+    ...(successful ? {} : { error: result.timedOut ? `manifest inspect timed out after ${VERIFY_TIMEOUT_MS}ms` : `${image} was not found in the registry (exit ${result.exitCode})` }),
   }
 }
 
