@@ -44,6 +44,23 @@ test('globsOverlap catches directory-glob and prefix collisions', () => {
   expect(globsOverlap('api/login.ts', 'api/logout.ts')).toBe(false)
 })
 
+test('globsOverlap catches a "?" single-char wildcard collision', () => {
+  expect(globsOverlap('src/a?.ts', 'src/ab.ts')).toBe(true)
+  expect(globsOverlap('src/a?.ts', 'src/az.ts')).toBe(true)
+})
+
+test('globsOverlap expands "{a,b}" brace alternation instead of treating it as a literal', () => {
+  expect(globsOverlap('src/{a,b}.ts', 'src/a.ts')).toBe(true)
+  expect(globsOverlap('src/{a,b}.ts', 'src/b.ts')).toBe(true)
+  expect(globsOverlap('src/{a,b}.ts', 'src/c.ts')).toBe(false)
+  // Both sides braced, disjoint option sets on both.
+  expect(globsOverlap('src/{a,b}.ts', 'src/{c,d}.ts')).toBe(false)
+  expect(globsOverlap('src/{a,b}.ts', 'src/{b,c}.ts')).toBe(true)
+  // Multiple brace groups in one pattern.
+  expect(globsOverlap('src/{a,b}/{x,y}.ts', 'src/b/y.ts')).toBe(true)
+  expect(globsOverlap('src/{a,b}/{x,y}.ts', 'src/c/y.ts')).toBe(false)
+})
+
 test('a second task cannot reserve a file the first still holds', () => {
   const { store, objectiveId } = bootstrap()
   const first = acquireForTask(store, { taskId: 't1', objectiveId, holderKind: 'agent', holderId: 'a1', resources: ['api/login.ts'] })
