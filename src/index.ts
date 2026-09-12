@@ -292,6 +292,9 @@ Inside an interactive session:
   ELIA_MAX_RUN_MS             Default wall-clock budget for autonomous runs; --max-run-ms overrides it
   --max-actions <n>            Bound governed tool requests for one autonomous run
   ELIA_TOOL_CONCURRENCY       Read-only tool batches can use up to 8; mutating batches stay capped at 4
+  ELIA_OTEL_ENDPOINT           OTLP/HTTP+JSON collector base URL — mirrors autonomous-run journal events
+                              to it as OTel logs (POST <endpoint>/v1/logs), purely additive; unset (the
+                              default) sends nothing
   elia --help                 Show this help
   elia --version              Print the version
 

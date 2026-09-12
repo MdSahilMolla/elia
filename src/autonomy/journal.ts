@@ -4,6 +4,7 @@ import { paths } from '../statePaths.ts'
 import type { ConversationMessage } from '../agentLoop.ts'
 import { appendSecureFile, ensureSecureDirectory, hardenSecureFile, writeSecureFile } from '../securePersistence.ts'
 import { withFileLock } from '../fileLock.ts'
+import { otelExportEvent, otelFlush } from './otel.ts'
 
 /**
  * An append-only log of everything an autonomous run did.
@@ -85,6 +86,11 @@ export function createJournal(runId: string, goal: string): Journal {
         } catch {
           // A journal write failure must never abort the work it is describing.
         }
+        // Purely additive: local events.ndjson (above) is what a run can
+        // actually be rewound from and stays the source of truth regardless
+        // of whether this export ever lands anywhere.
+        otelExportEvent(runId, event)
+        if (kind === 'run-end') otelFlush()
         return event
       }, { ttlMs: 30_000, proceedOnTimeout: true })
     },
