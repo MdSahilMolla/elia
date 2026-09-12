@@ -186,6 +186,12 @@ Self-improvement:
   elia bench --history        Score it on tasks taken from this repository's own git history
   elia bench --all            Score it on both suites
   elia bench --harvest        Rebuild the history task set from git (no model calls)
+  elia bench swe --file <tasks.json> [--sample N] [--out results.json]
+                              Run a SWE-bench-Verified-shaped task file (see src/bench/swe/types.ts) —
+                              real checkout, real agent run, real test execution, scored resolved/
+                              unresolved. elia does not fetch or bundle the real dataset itself; point
+                              --file at a real export. Each instance is a real, billed agent run, so
+                              --sample (default 3) caps how many run, not the whole file.
   elia bench-latency          Measure elia's own loop/startup/speculation overhead (deterministic,
                               no API key); --update-baseline to record, --strict to fail on wall drift
   elia evolve                 Improve elia's own source: hypothesise one change, build it
@@ -683,7 +689,79 @@ async function runBenchHarvest(): Promise<void> {
   )
 }
 
+/**
+ * `elia bench swe --file <tasks.json> [--sample N] [--out <results.json>]`
+ *
+ * Runs a SWE-bench-Verified-shaped task file end to end (checkout, patch,
+ * real agent run, real test execution, score) — see bench/swe/harness.ts.
+ * elia does not fetch or bundle the real SWE-bench dataset itself (its size
+ * and distribution terms are the operator's call); point --file at a real
+ * export to run it for real. Each instance runs a real, billed agent loop,
+ * so --sample defaults to a small number rather than the whole file.
+ */
+async function runBenchSwe(): Promise<void> {
+  const filePath = flagValue('--file')
+  if (!filePath) {
+    writeError('elia bench swe --file <tasks.json> — a SWE-bench-Verified-shaped task file (see src/bench/swe/types.ts for the schema)')
+    process.exitCode = 1
+    return
+  }
+  const { readFileSync, existsSync, mkdirSync } = await import('node:fs')
+  const { dirname } = await import('node:path')
+  if (!existsSync(filePath)) {
+    writeError(`No such file: ${filePath}`)
+    process.exitCode = 1
+    return
+  }
+  let instances: import('./bench/swe/types.ts').SweBenchInstance[]
+  try {
+    instances = JSON.parse(readFileSync(filePath, 'utf8'))
+    if (!Array.isArray(instances)) throw new Error('expected a JSON array of instances')
+  } catch (err) {
+    writeError(`Could not read ${filePath} as a SWE-bench task list: ${err instanceof Error ? err.message : String(err)}`)
+    process.exitCode = 1
+    return
+  }
+
+  const sampleRaw = flagValue('--sample')
+  const sample = sampleRaw === undefined ? 3 : strictInteger(sampleRaw)
+  if (sample === undefined || sample < 1) {
+    writeError(`--sample must be a positive integer, got "${sampleRaw}"`)
+    process.exitCode = 1
+    return
+  }
+  const selected = instances.slice(0, sample)
+  if (selected.length === 0) {
+    writeNotice(`${filePath} has no task instances.`)
+    return
+  }
+
+  if (!(await ensureFirstRunProviderSetup())) return
+  await loadRuntimeSkills()
+  writeNotice(
+    `Running ${selected.length} of ${instances.length} SWE-bench instance(s) from ${filePath} — each runs a real, billed agent loop against a real checkout. This is a sample run, not a full published score.`,
+  )
+
+  const { runSweBenchSuite } = await import('./bench/swe/harness.ts')
+  const summary = await runSweBenchSuite(selected, {
+    onInstanceDone: (result) => {
+      writeUsageLine(`  ${result.resolved ? '✓' : '✗'} ${result.instance_id}${result.agentError ? ` — ${result.agentError}` : ''}${result.keptDir ? ` (kept: ${result.keptDir})` : ''}`)
+    },
+  })
+
+  writeNotice(`Resolved ${summary.resolved}/${summary.total}.`)
+  const outPath = flagValue('--out')
+  if (outPath) {
+    mkdirSync(dirname(outPath), { recursive: true })
+    const { writeFileSync } = await import('node:fs')
+    writeFileSync(outPath, `${JSON.stringify(summary, null, 2)}\n`)
+    writeNotice(`Wrote results to ${outPath}`)
+  }
+  if (summary.resolved < summary.total) process.exitCode = 1
+}
+
 async function runBench(): Promise<void> {
+  if (positionals(['--file', '--sample', '--out'])[0] === 'swe') return runBenchSwe()
   if (hasFlag('--harvest')) return runBenchHarvest()
 
   const { BENCH_TASKS, allBenchTasks } = await import('./evolve/suite.ts')
