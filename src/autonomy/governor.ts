@@ -70,6 +70,15 @@ const READ_ONLY_COMMAND = /^(?:command\s+)?(?:pwd|ls|find|grep|rg|git\s+(?:statu
 const SHELL_CONTROL_SYNTAX = /[;&|<>`$]|\$\(|\b(?:eval|exec|source)\b/i
 const SECRET_KEY = /(password|passwd|token|secret|api[-_]?key|authorization|cookie|credential)/i
 const EXTERNAL_WRITE_COMMAND = /\b(curl|wget)\b[^\n]*(--data(?:-raw)?|\s-d\s|\s-X\s*(POST|PUT|PATCH|DELETE)|--upload-file|--form)\b/i
+// Values that a tool interpolates, unquoted, into a shell command line. Unlike
+// run_command (whose whole command is assessed), causal_debug's `file` and
+// causal_verify's `test_file`/`test_pattern` become tokens inside strings the
+// tool builds, so any of these characters can escape the intended command. The
+// governor rejects them at the boundary rather than trusting shell quoting.
+const SHELL_TOKEN_BREAK = /[;&|<>`$'"\\\r\n]/
+// A newline in a whole reproduction command silently splits it into a second
+// command line in both `sh -c` and `cmd /c`.
+const COMMAND_NEWLINE = /[\r\n]/
 const INTERNAL_SAFE_TOOLS = new Set(['flag_risk', 'submit_route', 'submit_proposal', 'submit_verdict', 'submit_acceptance', 'revise_plan', 'submit_assumptions', 'submit_lessons', 'delegate_tasks'])
 export const MAX_GOVERNED_ACTIONS = 10_000
 
@@ -222,6 +231,10 @@ export function assessAction(request: ActionRequest, cwd = currentAgent().cwd ??
   }
 
   if (name === 'causal_debug') {
+    const file = typeof input.file === 'string' ? input.file : ''
+    if (file && SHELL_TOKEN_BREAK.test(file)) {
+      return assessment('critical', 'approve', 'causal_debug file path contains shell metacharacters that would be interpolated unsafely', 'causal_debug', [file], false)
+    }
     return assessment('safe', 'allow', 'causal_debug performs read-only git history analysis to trace causal chains', 'causal_debug', resources, true)
   }
 
@@ -233,7 +246,27 @@ export function assessAction(request: ActionRequest, cwd = currentAgent().cwd ??
   }
 
   if (name === 'causal_verify') {
-    return assessment('safe', 'allow', 'causal_verify runs read-only verification checks (typecheck, lint, tests)', 'causal_verify', resources, true)
+    const reproduction = typeof input.reproduction_command === 'string' ? input.reproduction_command : ''
+    const testFile = typeof input.test_file === 'string' ? input.test_file : ''
+    const testPattern = typeof input.test_pattern === 'string' ? input.test_pattern : ''
+    // The tool turns these three inputs into shell commands (verify.ts), so the
+    // "read-only" claim only holds for inputs that cannot escape the commands it
+    // builds. Reject quote/control breakouts at the boundary, then assess the
+    // exact command each input becomes with the same shell risk model run_command
+    // uses — a reproduction_command may never smuggle an unassessed shell through.
+    if (COMMAND_NEWLINE.test(reproduction) || SHELL_TOKEN_BREAK.test(testFile) || SHELL_TOKEN_BREAK.test(testPattern)) {
+      return assessment('critical', 'approve', 'causal_verify input contains characters that break out of the commands it runs', 'causal_verify', resources, false)
+    }
+    if (!reproduction.trim() && !testFile.trim() && !testPattern.trim()) {
+      return assessment('safe', 'allow', 'causal_verify with no test or reproduction inputs runs only built-in typecheck and lint checks', 'causal_verify', resources, true)
+    }
+    const commands: string[] = []
+    if (reproduction.trim()) commands.push(reproduction)
+    if (testFile.trim()) commands.push(`bun test --timeout=10000 "${testFile}"`)
+    if (testPattern.trim()) commands.push(`bun test --timeout=20000 ${testPattern}`)
+    const results = commands.map((command) => assessCommand(command, cwd))
+    const worst = results.find((result) => result.risk === 'critical') ?? results.find((result) => result.risk === 'review') ?? results[0]!
+    return { ...worst, resources }
   }
 
   if (name === 'arch_drift') {
