@@ -1,6 +1,7 @@
 import { readFileTool } from './readFile.ts'
 import { writeFileTool } from './writeFile.ts'
 import { editFileTool } from './editFile.ts'
+import { lspRefactorTool } from './lspRefactor.ts'
 import { listFilesTool } from './listFiles.ts'
 import { grepTool } from './grep.ts'
 import { runCommandTool } from './runCommand.ts'
@@ -54,6 +55,7 @@ export const tools: Tool[] = [
   readFileTool,
   writeFileTool,
   editFileTool,
+  lspRefactorTool,
   listFilesTool,
   grepTool,
   runCommandTool,

@@ -203,7 +203,7 @@ export function assessAction(request: ActionRequest, cwd = currentAgent().cwd ??
     return assessment('critical', 'approve', `browser ${action} changes page state and needs an authorization record`, `browser.${action}`, resources, false)
   }
 
-  if (name === 'write_file' || name === 'edit_file') {
+  if (name === 'write_file' || name === 'edit_file' || name === 'lsp_refactor') {
     const path = typeof input.path === 'string' ? input.path : ''
     const outside = path.length === 0 || !isPathWithinWorkspace(path, cwd)
     return outside

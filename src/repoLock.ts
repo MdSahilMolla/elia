@@ -17,7 +17,7 @@ import { join } from 'node:path'
 import { withFileLockAsync } from './fileLock.ts'
 import { logSwallowedError } from './diagnostics.ts'
 
-const MUTATING_TOOLS = new Set(['edit_file', 'write_file', 'visualize'])
+const MUTATING_TOOLS = new Set(['edit_file', 'write_file', 'visualize', 'lsp_refactor'])
 
 let tail: Promise<unknown> = Promise.resolve()
 
