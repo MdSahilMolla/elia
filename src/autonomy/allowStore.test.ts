@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from 'bun:test'
+import { afterEach, beforeEach, expect, test } from 'bun:test'
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -13,8 +13,20 @@ import {
 import { assessAction, createActionGovernor } from './governor.ts'
 
 const dirs: string[] = []
-afterEach(() => {
+let globalAllowDir: string
+beforeEach(() => {
+  // isAllowlisted() also reads the *global* scope (~/.elia/allow.json, real
+  // homedir, not cwd-relative) even though every test here only sets up a
+  // project-scope tmpdir — without this override these tests are exposed to
+  // whatever the machine actually running them has globally allowed.
+  globalAllowDir = mkdtempSync(join(tmpdir(), 'elia-allow-global-'))
+  process.env.ELIA_ALLOW_GLOBAL_PATH = join(globalAllowDir, 'allow.json')
   clearAllowCache()
+})
+afterEach(() => {
+  delete process.env.ELIA_ALLOW_GLOBAL_PATH
+  clearAllowCache()
+  rmSync(globalAllowDir, { recursive: true, force: true })
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true })
 })
 

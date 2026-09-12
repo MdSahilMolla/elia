@@ -1,11 +1,31 @@
-import { describe, expect, test } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { assessAction, blockedInUnattendedMode, createActionGovernor, redactActionInput } from './governor.ts'
 import { clearPreauthCaches, grantPreauth } from './preauth.ts'
+import { clearAllowCache } from './allowStore.ts'
 
 describe('autonomy governor', () => {
+  // isAllowlisted() (via governor.check) reads the *global* allow scope from
+  // whatever machine runs the suite (~/.elia/allow.json — real homedir, not
+  // cwd-relative like the project scope) unless overridden. Without this, a
+  // developer's or CI runner's own real allow rules leak into supervised-mode
+  // tests that assert the governor asks every time, making them non-hermetic:
+  // green on one machine, silently skipping the approval prompt on another
+  // where "git" (say) was already always-allowed for real.
+  let globalAllowDir: string
+  beforeEach(() => {
+    globalAllowDir = mkdtempSync(join(tmpdir(), 'elia-governor-allow-'))
+    process.env.ELIA_ALLOW_GLOBAL_PATH = join(globalAllowDir, 'allow.json')
+    clearAllowCache()
+  })
+  afterEach(() => {
+    delete process.env.ELIA_ALLOW_GLOBAL_PATH
+    clearAllowCache()
+    rmSync(globalAllowDir, { recursive: true, force: true })
+  })
+
   test('allows local reads and verification commands', () => {
     expect(assessAction({ name: 'read_file', input: { path: 'src/index.ts' } }, process.cwd()).decision).toBe('allow')
     expect(assessAction({ name: 'run_command', input: { command: 'bun test' } }, process.cwd()).risk).toBe('safe')

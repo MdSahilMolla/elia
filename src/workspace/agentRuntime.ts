@@ -99,12 +99,29 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<voi
   let stopped = false
   let pendingClaim = false
   let agentId = ''
+  // The AbortController for whichever job is currently running, so a server-side
+  // pause/stop (agent.control) can interrupt in-flight work specifically — instead
+  // of the executor running to completion regardless and only then discovering,
+  // at agent.complete, that the task was already handed back to the pool.
+  let currentJobAbort: AbortController | undefined
 
   const client = await WorkspaceClient.connect({
     url: options.serverUrl,
     token: options.token,
     onEvent: (event: PersistedEvent) => {
       if (event.type === 'TaskAssigned' && agentId && event.payload.assigneeId === agentId) void claimNext()
+      if (!agentId) return
+      const isThisAgent = event.payload.id === agentId
+      if (event.type === 'AgentStopped' && isThisAgent) {
+        currentJobAbort?.abort()
+        stopped = true
+        controller.abort()
+      } else if (event.type === 'AgentStateChanged' && isThisAgent && (event.payload.status === 'paused' || event.payload.status === 'cancelled')) {
+        // Pause interrupts the current job but leaves the runtime connected —
+        // agent.claim already refuses to hand out work while paused, and a
+        // later 'resume' should find this runtime idle and ready, not exited.
+        currentJobAbort?.abort()
+      }
     },
     onClose: () => {
       stopped = true
@@ -146,6 +163,11 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<voi
   }
 
   async function runOne(task: TaskRecord, pack: ContextPack, repoRoot: string): Promise<void> {
+    const jobController = new AbortController()
+    if (controller.signal.aborted) jobController.abort()
+    const onOuterAbort = () => jobController.abort()
+    controller.signal.addEventListener('abort', onOuterAbort, { once: true })
+    currentJobAbort = jobController
     const heartbeat = setInterval(() => {
       void client.call('agent.progress', { taskId: task.id }).catch(() => {})
     }, HEARTBEAT_INTERVAL_MS)
@@ -155,7 +177,7 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<voi
         pack,
         repoRoot,
         role: task.role,
-        signal: controller.signal,
+        signal: jobController.signal,
         progress: async (note) => {
           await client.call('agent.progress', { taskId: task.id, note }).catch(() => {})
         },
@@ -174,6 +196,8 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<voi
       }).catch(() => {})
     } finally {
       clearInterval(heartbeat)
+      controller.signal.removeEventListener('abort', onOuterAbort)
+      if (currentJobAbort === jobController) currentJobAbort = undefined
     }
   }
 

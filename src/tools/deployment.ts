@@ -288,9 +288,11 @@ async function verifyDeployment(urlInput: string, provider: DeploymentProvider, 
   const onAbort = () => controller.abort()
   signal?.addEventListener('abort', onAbort, { once: true })
   try {
-    const response = await fetch(url, { method: 'GET', redirect: 'follow', signal: controller.signal })
-    const body = await readBoundedBody(response, MAX_VERIFY_BODY)
-    const successful = response.status >= 200 && response.status < 400
+    // 'manual' so a redirect to an unvalidated (potentially private/internal) host is never followed and never counted as verified.
+    const response = await fetch(url, { method: 'GET', redirect: 'manual', signal: controller.signal })
+    const isRedirect = response.status >= 300 && response.status < 400
+    const body = isRedirect ? '' : await readBoundedBody(response, MAX_VERIFY_BODY)
+    const successful = !isRedirect && response.status >= 200 && response.status < 300
     return {
       at: new Date().toISOString(),
       action: 'verify',
@@ -300,7 +302,9 @@ async function verifyDeployment(urlInput: string, provider: DeploymentProvider, 
       url,
       httpStatus: response.status,
       output: body,
-      ...(successful ? {} : { error: `deployment responded with HTTP ${response.status}` }),
+      ...(successful
+        ? {}
+        : { error: isRedirect ? `deployment responded with an unfollowed redirect (HTTP ${response.status})` : `deployment responded with HTTP ${response.status}` }),
     }
   } catch (error) {
     return {

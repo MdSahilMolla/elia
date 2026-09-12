@@ -10,6 +10,7 @@ import { logSwallowedError } from '../diagnostics.ts'
 // startup/list-tools window before declaring an otherwise healthy MCP missing.
 const CONNECT_TIMEOUT_MS = 30_000
 const CALL_TIMEOUT_MS = 120_000
+const MAX_STDERR_TAIL = 4_000
 
 interface Pending {
   resolve(response: JsonRpcResponse): void
@@ -38,6 +39,8 @@ export class McpClient implements McpTransport {
   private buffer = ''
   private closed = false
   private readLoop: Promise<void> | undefined
+  private stderrLoop: Promise<void> | undefined
+  private stderrTail = ''
 
   constructor(private readonly config: McpServerConfig) {
     this.name = config.name
@@ -55,6 +58,11 @@ export class McpClient implements McpTransport {
       // A dead read loop just means every pending/future call now times out and
       // rejects on its own — nothing else to do here.
     })
+    // stdout/stderr are the same OS pipe capacity class: if stderr is never read, a
+    // chatty server that fills its stderr buffer blocks on write() and the whole
+    // connection wedges. Draining it also lets a crash surface immediately instead
+    // of every in-flight call burning its full timeout waiting on a dead process.
+    this.stderrLoop = this.pumpStderr().catch(() => {})
 
     await this.request(
       'initialize',
@@ -200,15 +208,40 @@ export class McpClient implements McpTransport {
         }
       }
     } finally {
-      // The server can end its own stdout without close() ever being called
-      // (the process died on its own). Mark this client closed here too, so
-      // subsequent request()/notify() calls fail fast on the "closed" check
-      // instead of attempting a doomed write against a dead process.
-      this.closed = true
-      const stillPending = [...this.pending.values()]
-      this.pending.clear()
-      for (const pending of stillPending) pending.reject(new Error(`MCP server "${this.name}" closed its stdout`))
+      this.onTransportEnded(`MCP server "${this.name}" closed its stdout`)
     }
+  }
+
+  private async pumpStderr(): Promise<void> {
+    if (!this.proc) return
+    const reader = this.proc.stderr.getReader()
+    const decoder = new TextDecoder()
+    try {
+      while (true) {
+        const { value, done } = await reader.read()
+        if (done) break
+        this.stderrTail = (this.stderrTail + decoder.decode(value, { stream: true })).slice(-MAX_STDERR_TAIL)
+      }
+    } finally {
+      // A server that dies before ever writing to stdout (crash on startup, missing
+      // binary once spawned via a shell, etc.) may close stderr well before stdout
+      // does — or not close stdout cleanly at all. Either loop ending is proof the
+      // process is gone, so either one is enough to stop burning full call timeouts.
+      this.onTransportEnded(`MCP server "${this.name}" exited unexpectedly${this.stderrTail ? `: ${this.stderrTail.trim()}` : ''}`)
+    }
+  }
+
+  /** Idempotent: the first of pumpStdout/pumpStderr to end the connection wins; the second is a no-op. */
+  private onTransportEnded(reason: string): void {
+    if (this.closed) return
+    // The server can end on its own without close() ever being called (the process
+    // died on its own). Mark this client closed here too, so subsequent
+    // request()/notify() calls fail fast on the "closed" check instead of attempting
+    // a doomed write against a dead process.
+    this.closed = true
+    const stillPending = [...this.pending.values()]
+    this.pending.clear()
+    for (const pending of stillPending) pending.reject(new Error(reason))
   }
 
   private handleLine(line: string): void {

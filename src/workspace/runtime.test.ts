@@ -8,7 +8,8 @@ import { mintAgentToken } from './identity.ts'
 import { runWorkspaceServer, type RunningWorkspaceServer } from './server.ts'
 import { WorkspaceClient } from './client.ts'
 import { runAgentRuntime, type AgentExecutor } from './agentRuntime.ts'
-import { agentInstanceId } from './rpcAgents.ts'
+import { agentInstanceId, dispatchAgentRpc } from './rpcAgents.ts'
+import { resolveCaller } from './identity.ts'
 import type { Proposal } from '../autonomy/types.ts'
 
 const TIMEOUT = 20_000
@@ -176,6 +177,56 @@ test('once mode never claims a second task after a TaskAssigned races the first 
   expect(executorCalls).toBe(1)
   expect(store.task(loginTask.id)!.status).toBe('assigned')
   expect(['done', 'in-review']).toContain(store.task(apiTask.id)!.status)
+}, TIMEOUT)
+
+test('agent.control stop aborts the in-flight job and rejects a zombie heartbeat (regression)', async () => {
+  const { store, owner, created, server, startRuntime } = await fixture()
+  let sawAbort = false
+  const executor: AgentExecutor = async (job) => {
+    await job.progress('working')
+    await new Promise<void>((resolve) => {
+      if (job.signal.aborted) {
+        sawAbort = true
+        resolve()
+        return
+      }
+      job.signal.addEventListener('abort', () => {
+        sawAbort = true
+        resolve()
+      }, { once: true })
+    })
+    return { ok: false, report: 'aborted' }
+  }
+  startRuntime('be', executor)
+  await Bun.sleep(150)
+
+  const planned = await owner.call<{ objectiveId: string }>('objective.add', { goal: 'auth' })
+  await owner.call('objective.approve', { objectiveId: planned.objectiveId })
+  await poll(() => store.tasks({ objectiveId: planned.objectiveId }).some((t) => t.title === 'Auth API' && t.status === 'in-progress'))
+  const apiTask = store.tasks({ objectiveId: planned.objectiveId }).find((t) => t.title === 'Auth API')!
+
+  await owner.call('agent.control', { agent: 'be', action: 'stop' })
+
+  // The executor's own AbortSignal must fire — the whole point is not to let it
+  // keep working on a task that has already been handed back to the pool.
+  await poll(() => sawAbort)
+  await poll(() => store.task(apiTask.id)!.status === 'ready')
+
+  // A second caller authenticated as the same (now-stopped) agent identity —
+  // standing in for a zombie runtime that never got the memo — must be refused
+  // when it tries to heartbeat a task that is no longer its own. Dispatched
+  // directly (bypassing the WebSocket round trip) to isolate the RPC-layer
+  // guard from transport-level timing.
+  const identity = store.agentIdentity('be')!
+  const zombieToken = mintAgentToken(store, { identityId: identity.id, label: 'zombie', actorId: created.ownerMemberId }).plaintext
+  const zombieCaller = resolveCaller(store, zombieToken)!
+  await expect(
+    dispatchAgentRpc(
+      { store, caller: zombieCaller, connectionId: 'test-zombie', requestShutdown: () => {} },
+      'agent.progress',
+      { taskId: apiTask.id },
+    ),
+  ).rejects.toThrow(/cancelled|no longer accepting/i)
 }, TIMEOUT)
 
 test('an out-of-scope task is never assigned to an agent that cannot touch its files', async () => {

@@ -16,6 +16,20 @@ test('network URL validation rejects unsafe schemes, credentials, and literal in
   }
 })
 
+test('network URL validation rejects IPv6 loopback and address-embedding bypass forms', () => {
+  for (const url of [
+    'http://[0:0:0:0:0:0:0:1]/', // long-form loopback, not the compressed ::1
+    'http://[0000:0000:0000:0000:0000:0000:0000:0001]/',
+    'http://[::]/', // unspecified address, long form
+    'http://[0:0:0:0:0:0:0:0]/',
+    'http://[2002:7f00:0001::]/', // 6to4 embedding 127.0.0.1
+    'http://[2001:0000:4136:e378:8000:63bf:3fff:fdd2]/', // Teredo embedding a loopback client IP
+    'http://[0:0:0:0:0000:5efe:127.0.0.1]/', // ISATAP embedding 127.0.0.1
+  ]) {
+    expect(() => validateNetworkUrl(url)).toThrow()
+  }
+})
+
 test('network URL validation accepts public HTTPS syntax and requires TLS for providers', async () => {
   expect(validateNetworkUrl('https://api.example.com/v1').origin).toBe('https://api.example.com')
   await expect(assertPublicNetworkUrl('https://203.0.113.8')).rejects.toThrow('private or local')

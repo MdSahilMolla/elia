@@ -104,6 +104,45 @@ test('unblocking a task with satisfied dependencies makes it ready, not stranded
   expect(store.task('t_tests')!.status).toBe('ready')
 })
 
+test('cancelling a dependency unblocks its dependent instead of stranding it in pending forever', () => {
+  const { store, ownerId, projectId } = bootstrap()
+  const objectiveId = seedObjective(store, ownerId, projectId)
+  store.append({ type: 'TaskCreated', actorKind: 'member', actorId: ownerId, objectiveId, payload: { id: 't_api', objectiveId, projectId, title: 'API', role: 'backend', dependsOn: [], files: [] } })
+  store.append({ type: 'TaskCreated', actorKind: 'member', actorId: ownerId, objectiveId, payload: { id: 't_tests', objectiveId, projectId, title: 'Tests', role: 'tester', dependsOn: ['t_api'], files: [] } })
+  store.append({ type: 'ObjectiveStatusChanged', actorKind: 'member', actorId: ownerId, objectiveId, payload: { status: 'awaiting-approval' } })
+  store.append({ type: 'ObjectiveStatusChanged', actorKind: 'member', actorId: ownerId, objectiveId, payload: { status: 'active', approvedBy: ownerId } })
+  expect(store.task('t_tests')!.status).toBe('pending')
+
+  // 'cancelled' is a terminal dependency status — the dependent must be re-derived
+  // right away, not left waiting for some unrelated event to happen to touch it.
+  store.append({ type: 'TaskCancelled', actorKind: 'member', actorId: ownerId, objectiveId, taskId: 't_api', payload: {} })
+  expect(store.task('t_api')!.status).toBe('cancelled')
+  expect(store.task('t_tests')!.status).toBe('ready')
+})
+
+test('a task created after its objective is already active still gets its readiness derived', () => {
+  const { store, ownerId, projectId } = bootstrap()
+  const objectiveId = seedObjective(store, ownerId, projectId)
+  store.append({ type: 'TaskCreated', actorKind: 'member', actorId: ownerId, objectiveId, payload: { id: 't_api', objectiveId, projectId, title: 'API', role: 'backend', dependsOn: [], files: [] } })
+  // A second, still-open task keeps the objective 'active' (not auto-completed)
+  // once t_api finishes, so this exercises TaskCreated arriving mid-run rather
+  // than after the objective has already wrapped up.
+  store.append({ type: 'TaskCreated', actorKind: 'member', actorId: ownerId, objectiveId, payload: { id: 't_other', objectiveId, projectId, title: 'Other', role: 'backend', dependsOn: [], files: [] } })
+  store.append({ type: 'ObjectiveStatusChanged', actorKind: 'member', actorId: ownerId, objectiveId, payload: { status: 'awaiting-approval' } })
+  store.append({ type: 'ObjectiveStatusChanged', actorKind: 'member', actorId: ownerId, objectiveId, payload: { status: 'active', approvedBy: ownerId } })
+  store.append({ type: 'TaskAssigned', actorKind: 'system', actorId: 'orch', objectiveId, taskId: 't_api', payload: { assigneeKind: 'agent', assigneeId: 'a1' } })
+  store.append({ type: 'TaskStarted', actorKind: 'agent', actorId: 'a1', objectiveId, taskId: 't_api', payload: {} })
+  store.append({ type: 'TaskCompleted', actorKind: 'agent', actorId: 'a1', objectiveId, taskId: 't_api', payload: {} })
+  expect(store.objective(objectiveId)!.status).toBe('active')
+
+  // A follow-up task discovered mid-run, added after the objective went active,
+  // depending on a task that's already done. Only ObjectiveStatusChanged->active
+  // otherwise triggers the readiness pass, so without re-deriving here this would
+  // sit in `pending` forever — nothing else would ever touch it.
+  store.append({ type: 'TaskCreated', actorKind: 'member', actorId: ownerId, objectiveId, payload: { id: 't_followup', objectiveId, projectId, title: 'Follow-up', role: 'backend', dependsOn: ['t_api'], files: [] } })
+  expect(store.task('t_followup')!.status).toBe('ready')
+})
+
 test('blocking then unblocking the last open task still lets the objective complete', () => {
   const { store, ownerId, projectId } = bootstrap()
   const objectiveId = seedObjective(store, ownerId, projectId)
