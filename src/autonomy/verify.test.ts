@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, expect, test } from 'bun:test'
@@ -100,6 +100,22 @@ test('fallbackStaticPageVerification fails when the declared page is not actuall
   try {
     const outcome = await fallbackStaticPageVerification(['missing.html'], dir)
     expect(outcome?.passed).toBe(false)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+// Seen live: run 2026-09-12-3nhx-e790. The plan declared `index.html`, but a
+// worker confused about its own already-isolated cwd wrote the file one level
+// deeper at `workspace/index.html`. The literal declared-path check 404'd
+// even though a real, working deliverable existed on disk.
+test('fallbackStaticPageVerification finds a uniquely-named page that landed at a different path than declared', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'elia-verify-static-nested-'))
+  try {
+    mkdirSync(join(dir, 'workspace'), { recursive: true })
+    writeFileSync(join(dir, 'workspace', 'index.html'), '<!DOCTYPE html><html><body><h1>Mountain Car</h1></body></html>')
+    const outcome = await fallbackStaticPageVerification(['index.html'], dir)
+    expect(outcome?.passed).toBe(true)
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }

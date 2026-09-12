@@ -25,6 +25,23 @@ test('turnContextPrompt states the given wall-clock date as authoritative over t
   expect(prompt.toLowerCase()).toContain('never from your training data')
 })
 
+// Seen live: a worker told (via the cached, load-time-frozen system prompt)
+// that its cwd was elia's own root, while `withAgentIdentity` had actually
+// bound it to an isolated per-run workspace, wrote its deliverable one
+// directory level too deep looking for a `workspace/` subfolder that didn't
+// need to exist. Passing the real cwd here corrects that per turn.
+test('turnContextPrompt names the real per-agent cwd as authoritative when given one', () => {
+  const prompt = turnContextPrompt(new Date('2026-09-04T12:00:00Z'), 'D:\\elia\\workspace\\run-1-mountain-car')
+  expect(prompt).toContain('D:\\elia\\workspace\\run-1-mountain-car')
+  expect(prompt).toContain('authoritative')
+  expect(prompt.toLowerCase()).toContain('nesting another')
+})
+
+test('turnContextPrompt omits the cwd correction when no cwd is given', () => {
+  const prompt = turnContextPrompt(new Date('2026-09-04T12:00:00Z'))
+  expect(prompt).not.toContain('working directory')
+})
+
 test('resolveThinking defaults to enabled with the default budget', () => {
   expect(resolveThinking()).toEqual({ enabled: true, budgetTokens: 4096 })
 })

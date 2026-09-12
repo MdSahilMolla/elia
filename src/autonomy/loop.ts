@@ -164,9 +164,9 @@ export interface AutonomousRunResult {
   actionBudget: ActionGovernorStats
 }
 
-const plannerPromptForMode = (mode: AgentMode) => `${systemPromptForMode(mode)}
+const plannerPromptForMode = (mode: AgentMode, cwd: string) => `${systemPromptForMode(mode)}
 
-${turnContextPrompt()}
+${turnContextPrompt(new Date(), cwd)}
 
 ## Right now you are planning, not building
 
@@ -197,9 +197,9 @@ const ASSUMPTION_TOOL_NAMES = new Set(['read_file', 'list_files', 'grep', 'run_c
 
 const REVIEWER_TOOL_NAMES = new Set(['read_file', 'list_files', 'grep', 'board_read', 'recall', 'environment'])
 
-const repairPromptForMode = (mode: AgentMode) => `${systemPromptForMode(mode)}
+const repairPromptForMode = (mode: AgentMode, cwd: string) => `${systemPromptForMode(mode)}
 
-${turnContextPrompt()}
+${turnContextPrompt(new Date(), cwd)}
 
 ## Right now you are fixing your own work
 
@@ -505,7 +505,7 @@ async function runAutonomousTaskInternal(options: AutonomousRunOptions): Promise
   const snapshot = options.resumeGraph ? '(resuming from the durable goal graph; inspect only files needed for unfinished nodes)' : await projectSnapshot(runId, workspaceRoot, runSignal)
 
   const proposalCapture = createProposalTool()
-  const basePlannerPrompt = plannerPromptForMode(activeMode())
+  const basePlannerPrompt = plannerPromptForMode(activeMode(), workspaceRoot)
   const plannerPrompt = profile === 'fast'
     ? `${basePlannerPrompt}\n\n## Fast bounded mode\nThis is a time-sensitive task. Prefer 3–6 high-value steps, combine edits that share a coherent UI or subsystem, and keep independent steps in the same wave. Do not create separate steps for trivial assets, documentation, or cosmetic micro-edits. The goal is a complete verified result, not an exhaustive project plan.`
     : basePlannerPrompt
@@ -1508,7 +1508,7 @@ Judge what is there, not what the code looks like it would probably do. A criter
     const repairTools = [...allWorkerTools(), taskTool]
     const repair = await withAgentIdentity({ name: 'lead', role: 'lead', runId, cwd: workspaceRoot, signal: runSignal }, () => withActionGovernor(governor, () => withGoalGraph(graph, () => runAgentLoop({
       messages: repairMessages,
-      systemPrompt: repairPromptForMode(activeMode()),
+      systemPrompt: repairPromptForMode(activeMode(), workspaceRoot),
       tools: repairTools,
       onText: streamOnText(),
       useAnimation: true,

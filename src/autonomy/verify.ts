@@ -1,3 +1,4 @@
+import { existsSync } from 'node:fs'
 import { basename, relative, resolve, sep } from 'node:path'
 import type { Tool } from '../tools/types.ts'
 import { clampOutput, runShell, type ShellResult } from '../shell.ts'
@@ -5,6 +6,7 @@ import type { CriticIssue, CriticVerdict } from './types.ts'
 import { currentAgent } from './context.ts'
 import { activeActionGovernor, type ActionGovernor } from './governor.ts'
 import { changedStaticPages } from './detectChecks.ts'
+import { scanProjectFiles } from './hygiene.ts'
 import { ensurePreviewServer } from '../preview/server.ts'
 import { checkRendered, waitForHttp } from '../preview/readiness.ts'
 
@@ -56,6 +58,22 @@ export function isUnrunnableCommandFailure(result: ShellResult): boolean {
 }
 
 /**
+ * A plan's declared file path and where the file actually landed can diverge
+ * (a worker misreads its own working directory and nests the deliverable one
+ * level deeper than the plan says). Rather than trust the declared path
+ * blindly and 404, fall back to a same-basename search under `root` — the
+ * same tree `hygiene.ts` already scans for undeclared files — and use it when
+ * exactly one candidate matches. An ambiguous or absent match falls through
+ * to the declared path so the caller's existing 404 handling still applies.
+ */
+function locateStaticPage(root: string, declaredPage: string): string {
+  if (existsSync(resolve(root, declaredPage))) return declaredPage
+  const target = basename(declaredPage).toLowerCase()
+  const candidates = scanProjectFiles(root).filter((file) => basename(file).toLowerCase() === target)
+  return candidates.length === 1 ? candidates[0]! : declaredPage
+}
+
+/**
  * Falls back to a headless render check for a static HTML/CSS/JS deliverable
  * when every declared verification command turned out to be unrunnable
  * (`isUnrunnableCommandFailure`) — reusing the same mechanism the interactive
@@ -73,7 +91,8 @@ export async function fallbackStaticPageVerification(
   if (pages.length === 0) return undefined
 
   const server = ensurePreviewServer(root)
-  const page = pages.find((candidate) => /^index\.html?$/i.test(basename(candidate))) ?? pages[0]!
+  const declaredPage = pages.find((candidate) => /^index\.html?$/i.test(basename(candidate))) ?? pages[0]!
+  const page = locateStaticPage(root, declaredPage)
   const relativePath = relative(server.root, resolve(root, page)).split(sep).join('/')
   const url = `${server.baseUrl}/${relativePath}`
   const command = `[static-page render check] ${url}`
