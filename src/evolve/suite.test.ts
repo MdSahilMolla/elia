@@ -2,7 +2,9 @@ import { afterEach, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { taskById } from './suite.ts'
+import { allBenchTasks, BENCH_TASKS, taskById } from './suite.ts'
+import { resetTaskSpecCache } from './history/suite.ts'
+import type { HistoryTaskSpec } from './history/types.ts'
 
 /**
  * A benchmark task whose own `check()` is wrong is worse than no benchmark at
@@ -23,6 +25,35 @@ function tempDir(prefix: string): string {
 afterEach(() => {
   for (const dir of dirs) rmSync(dir, { recursive: true, force: true })
   dirs = []
+  resetTaskSpecCache()
+})
+
+const HISTORY_SPEC: HistoryTaskSpec = {
+  id: 'hist-abc1234',
+  sha: 'abc1234000000000000000000000000000000000',
+  parent: 'def5678000000000000000000000000000000000',
+  subject: 'A harvested fix',
+  testFiles: ['src/example.test.ts'],
+  sourceFiles: ['src/example.ts'],
+  verifyCommand: 'bun test src/example.test.ts',
+  evidence: { failingBefore: 1, passingAfter: 1 },
+  weight: 2,
+}
+
+test('allBenchTasks grows the benchmark with whatever elia bench --harvest has validated, instead of staying fixed', () => {
+  resetTaskSpecCache()
+  const withNoHistory = tempDir('no-history')
+  const emptyFile = join(withNoHistory, 'tasks.json')
+  writeFileSync(emptyFile, '[]')
+  expect(allBenchTasks(emptyFile)).toHaveLength(BENCH_TASKS.length)
+
+  resetTaskSpecCache()
+  const withHistory = tempDir('with-history')
+  const historyFile = join(withHistory, 'tasks.json')
+  writeFileSync(historyFile, JSON.stringify([HISTORY_SPEC]))
+  const grown = allBenchTasks(historyFile)
+  expect(grown).toHaveLength(BENCH_TASKS.length + 1)
+  expect(grown.map((t) => t.id)).toContain('hist-abc1234')
 })
 
 test('multi-bug-hunt: fails on the unsolved state', async () => {
