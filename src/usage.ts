@@ -1,4 +1,5 @@
 import type { Usage } from './providers/types.ts'
+import { logSwallowedError } from './diagnostics.ts'
 
 export const ZERO_USAGE: Usage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 }
 
@@ -35,16 +36,35 @@ const PRICING: Record<string, Pricing> = {
   'mercury-2.5': { inputPerM: 0.2, outputPerM: 0.75, cacheReadPerM: 0.02 },
 }
 
+/**
+ * A provider-reported token count should always be a finite, non-negative
+ * integer, but nothing upstream enforces that — a malformed API response or
+ * a bad manual Usage value would otherwise propagate straight into a dollar
+ * figure (including, for a negative count, a negative cost). Treat anything
+ * else as 0 and record it once via diagnostics rather than silently
+ * fabricating a number or throwing.
+ */
+function sanitizeTokenCount(field: keyof Usage, value: number): number {
+  if (Number.isFinite(value) && value >= 0) return value
+  logSwallowedError('usage.estimateCostUsd.badTokenCount', new Error(`non-finite or negative ${field}`), { field, value })
+  return 0
+}
+
 /** Undefined when the model isn't in the pricing table — callers should show "unknown", never a fabricated number. */
 export function estimateCostUsd(model: string, usage: Usage): number | undefined {
   const pricing = PRICING[model]
   if (!pricing) return undefined
 
+  const inputTokens = sanitizeTokenCount('inputTokens', usage.inputTokens)
+  const outputTokens = sanitizeTokenCount('outputTokens', usage.outputTokens)
+  const cacheReadTokens = sanitizeTokenCount('cacheReadTokens', usage.cacheReadTokens)
+  const cacheWriteTokens = sanitizeTokenCount('cacheWriteTokens', usage.cacheWriteTokens)
+
   return (
-    (usage.inputTokens / 1_000_000) * pricing.inputPerM +
-    (usage.outputTokens / 1_000_000) * pricing.outputPerM +
-    (usage.cacheReadTokens / 1_000_000) * (pricing.cacheReadPerM ?? pricing.inputPerM) +
-    (usage.cacheWriteTokens / 1_000_000) * (pricing.cacheWritePerM ?? pricing.inputPerM)
+    (inputTokens / 1_000_000) * pricing.inputPerM +
+    (outputTokens / 1_000_000) * pricing.outputPerM +
+    (cacheReadTokens / 1_000_000) * (pricing.cacheReadPerM ?? pricing.inputPerM) +
+    (cacheWriteTokens / 1_000_000) * (pricing.cacheWritePerM ?? pricing.inputPerM)
   )
 }
 

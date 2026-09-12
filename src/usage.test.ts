@@ -51,6 +51,19 @@ test('estimateCostUsd applies the premium cache-write rate for Anthropic', () =>
   expect(estimateCostUsd('claude-sonnet-5', usage)).toBeCloseTo(2.5, 6)
 })
 
+test('estimateCostUsd treats a NaN or negative token count as 0 instead of propagating it', () => {
+  const nanUsage = { inputTokens: Number.NaN, outputTokens: 500_000, cacheReadTokens: 0, cacheWriteTokens: 0 }
+  expect(estimateCostUsd('gpt-4.1', nanUsage)).toBeCloseTo(4, 6) // just the output half; NaN input contributes 0, not NaN
+
+  const negativeUsage = { inputTokens: -1_000_000, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 }
+  const result = estimateCostUsd('gpt-4.1', negativeUsage)
+  expect(result).toBe(0) // never a negative cost
+  expect(result).not.toBeLessThan(0)
+
+  const infiniteUsage = { inputTokens: Number.POSITIVE_INFINITY, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 }
+  expect(estimateCostUsd('gpt-4.1', infiniteUsage)).toBe(0)
+})
+
 test('formatCostUsd shows unknown cost distinctly from a real number', () => {
   expect(formatCostUsd(undefined)).toBe('cost unknown')
 })
