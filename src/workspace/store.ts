@@ -86,7 +86,10 @@ export class WorkspaceStore {
       // holding a lock (matters on Windows, where a stale handle blocks unlink).
       this.db.exec('PRAGMA wal_checkpoint(TRUNCATE);')
     } catch {
-      // A read-only or already-detached handle cannot checkpoint; closing still frees it.
+      // A read-only or already-detached handle cannot checkpoint; closing still
+      // frees it either way. Deliberately not logged to diagnostics.ts: this is
+      // the expected, frequent outcome for every read-only store instance, not
+      // a failure worth a persistent record.
     }
     try {
       this.db.close()

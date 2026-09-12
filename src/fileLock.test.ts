@@ -45,6 +45,20 @@ describe('fileLock', () => {
     expect(readFileSync(lock, 'utf8')).toBe(foreign)
   })
 
+  test('calls onProceedWithoutLock exactly when it proceeds unlocked, and not on the normal path', () => {
+    const held = join(lockDir(), 'g.lock')
+    writeFileSync(held, JSON.stringify({ pid: process.pid, token: 'someone-else', at: Date.now(), host: hostname() }))
+
+    let notified = 0
+    withFileLock(held, () => 'ran', { timeoutMs: 60, retryDelayMs: 10, proceedOnTimeout: true, onProceedWithoutLock: () => { notified += 1 } })
+    expect(notified).toBe(1)
+
+    const free = join(lockDir(), 'h.lock')
+    let notifiedOnSuccess = 0
+    withFileLock(free, () => 'ran', { proceedOnTimeout: true, onProceedWithoutLock: () => { notifiedOnSuccess += 1 } })
+    expect(notifiedOnSuccess).toBe(0)
+  })
+
   test('gives a cross-host lock a grace period before reclaiming it, but reclaims it once that grace elapses', () => {
     const lock = join(lockDir(), 'f.lock')
     const ttlMs = 50

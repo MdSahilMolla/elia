@@ -16,6 +16,7 @@ import net from 'node:net'
 import { existsSync, readdirSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { ELIA_ROOT } from '../statePaths.ts'
+import { logSwallowedError } from '../diagnostics.ts'
 import {
   PROTOCOL_VERSION,
   type DaemonInfo,
@@ -269,7 +270,8 @@ class DaemonClient {
       let msg: RpcResponse
       try {
         msg = JSON.parse(line)
-      } catch {
+      } catch (err) {
+        logSwallowedError('daemon.client.onData', err, { lineLength: line.length })
         continue
       }
       const waiter = this.pending.get(msg.id)

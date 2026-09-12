@@ -3,6 +3,7 @@ import type { McpServerConfig } from './config.ts'
 import type { McpTransport } from './transport.ts'
 import { isJsonRpcResponse, MCP_CLIENT_INFO, MCP_PROTOCOL_VERSION, type JsonRpcResponse, type McpToolCallResult, type McpToolsListResult } from './protocol.ts'
 import { terminateProcessGroup } from '../shell.ts'
+import { logSwallowedError } from '../diagnostics.ts'
 
 // npx-backed browser servers can cold-start slowly on Windows while the package
 // runner validates its cache. Keep the boundary finite, but allow one full
@@ -19,9 +20,9 @@ interface Pending {
 // happy path it's a number; when the peer process has been killed the write can
 // fail asynchronously with EPIPE. Nobody awaits these, so an unhandled rejection
 // would escape and (under `bun test`) get pinned on whatever test is running.
-function swallow(result: unknown): void {
+function swallow(result: unknown, scope: string, context?: Record<string, unknown>): void {
   if (result && typeof (result as PromiseLike<unknown>).then === 'function') {
-    void Promise.resolve(result).catch(() => {})
+    void Promise.resolve(result).catch((err) => logSwallowedError(scope, err, context))
   }
 }
 
@@ -95,7 +96,7 @@ export class McpClient implements McpTransport {
     // itself reject asynchronously if the pipe is already broken, so swallow
     // both the sync throw and the async rejection.
     try {
-      swallow(this.proc?.stdin.end())
+      swallow(this.proc?.stdin.end(), 'mcp.client.close.stdinEnd', { server: this.name })
     } catch {
       // already gone
     }
@@ -156,8 +157,8 @@ export class McpClient implements McpTransport {
       })
     })
     try {
-      swallow(this.proc.stdin.write(line))
-      swallow(this.proc.stdin.flush())
+      swallow(this.proc.stdin.write(line), 'mcp.client.request.write', { server: this.name, method })
+      swallow(this.proc.stdin.flush(), 'mcp.client.request.flush', { server: this.name, method })
     } catch (err) {
       // The server's stdin pipe can already be gone (crashed, or died right
       // after spawn) — reject this call instead of letting a raw EPIPE escape
@@ -173,10 +174,12 @@ export class McpClient implements McpTransport {
     if (this.closed || !this.proc) return
     const line = `${JSON.stringify({ jsonrpc: '2.0', method, params })}\n`
     try {
-      swallow(this.proc.stdin.write(line))
-      swallow(this.proc.stdin.flush())
-    } catch {
-      // Best-effort notification — nothing to reject, no reply is ever expected.
+      swallow(this.proc.stdin.write(line), 'mcp.client.notify.write', { server: this.name, method })
+      swallow(this.proc.stdin.flush(), 'mcp.client.notify.flush', { server: this.name, method })
+    } catch (err) {
+      // Best-effort notification — nothing to reject, no reply is ever expected —
+      // but still worth a record if the pipe is repeatedly gone.
+      logSwallowedError('mcp.client.notify', err, { server: this.name, method })
     }
   }
 

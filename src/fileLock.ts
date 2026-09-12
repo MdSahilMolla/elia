@@ -35,6 +35,14 @@ export interface FileLockOptions {
    * than a brief unsynchronized window. Default false.
    */
   proceedOnTimeout?: boolean
+  /**
+   * Called (synchronously, before `fn` runs) when `proceedOnTimeout` caused
+   * `fn` to run without ever holding the lock — otherwise this degraded path
+   * is silent. Callers that care about the resulting unsynchronized window
+   * (as opposed to ones for which a miss is routine and expected) should log
+   * it here.
+   */
+  onProceedWithoutLock?: () => void
 }
 
 interface LockOwner {
@@ -147,7 +155,10 @@ export function withFileLock<T>(lockPath: string, fn: () => T, options: FileLock
         continue
       }
       if (now >= deadline) {
-        if (options.proceedOnTimeout) break
+        if (options.proceedOnTimeout) {
+          options.onProceedWithoutLock?.()
+          break
+        }
         throw new Error(`${lockPath} is busy; another elia process is holding it`)
       }
       Bun.sleepSync(retryDelayMs)
@@ -210,7 +221,10 @@ export async function withFileLockAsync<T>(lockPath: string, fn: () => Promise<T
         continue
       }
       if (now >= deadline) {
-        if (options.proceedOnTimeout) break
+        if (options.proceedOnTimeout) {
+          options.onProceedWithoutLock?.()
+          break
+        }
         throw new Error(`${lockPath} is busy; another elia process is holding it`)
       }
       await Bun.sleep(retryDelayMs)
