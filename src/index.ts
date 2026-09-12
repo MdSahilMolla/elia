@@ -158,6 +158,12 @@ Autonomous work:
   elia auto "<goal>" --thorough      Extra bounded review and repair depth for high-risk changes
   elia auto "<goal>" --max-run-ms N  Abort the run after N milliseconds (also ELIA_MAX_RUN_MS)
   elia auto "<goal>" --max-actions N  Bound governed tool requests for this run
+  elia auto "<goal>" --unattended --authorize <intent>[,<intent>...]
+                                     Pre-authorize specific critical intents (e.g.
+                                     deployment.production, github.pr_merge) for this run only, on
+                                     this branch, for a few hours — the one way past the "browser/
+                                     comms/deploy/PR-merge/codex_delegate always refuses unattended"
+                                     wall, without weakening it for anything not named
   elia auto "<goal>" --variants N   Run N independent implementation attempts in parallel,
                                      each in its own isolated git worktree, and keep only
                                      the one that verification — not an LLM's opinion — likes
@@ -496,7 +502,7 @@ async function runAgentCommand(): Promise<void> {
 }
 
 async function runAuto(): Promise<void> {
-  const goal = positionals(['--variants', '--run-id', '--max-run-ms', '--max-actions', '--beta']).join(' ').trim()
+  const goal = positionals(['--variants', '--run-id', '--max-run-ms', '--max-actions', '--beta', '--authorize']).join(' ').trim()
   if (!goal) {
     writeError('Give elia a goal: elia auto "add rate limiting to the API client"')
     process.exitCode = 1
@@ -566,6 +572,33 @@ async function runAuto(): Promise<void> {
         : 'supervised (approval required for review and critical actions)'
     }`,
   )
+  const authorizeRaw = flagValue('--authorize')
+  if (authorizeRaw !== undefined && !yolo) {
+    writeError('--authorize only applies to an unattended run (--unattended/--yolo) — supervised mode already asks per action.')
+    process.exitCode = 1
+    return
+  }
+  if (authorizeRaw) {
+    const intents = [...new Set(authorizeRaw.split(',').map((s) => s.trim()).filter(Boolean))]
+    if (intents.length === 0) {
+      writeError('--authorize needs at least one intent, e.g. --authorize deployment.production,github.pr_merge')
+      process.exitCode = 1
+      return
+    }
+    const { currentBranch, grantPreauth } = await import('./autonomy/preauth.ts')
+    const branch = await currentBranch(process.cwd())
+    const granted = grantPreauth(intents, process.cwd(), branch)
+    if (granted.length > 0) {
+      writeNotice(
+        `pre-authorized for this run only, on branch "${branch}": ${granted.map((g) => g.intent).join(', ')} — expires ${new Date(granted[0]!.expiresAt).toLocaleTimeString()}`,
+      )
+    }
+    const rejected = intents.filter((intent) => !granted.some((g) => g.intent === intent))
+    if (rejected.length > 0) {
+      writeError(`--authorize ignored invalid intent(s) (expected lowercase dotted names like "deployment.production"): ${rejected.join(', ')}`)
+    }
+  }
+
   let approveAction: ActionApproval | undefined
   if (!yolo && !process.stdin.isTTY) {
     writeError('elia auto needs a terminal to approve the plan. Re-run with --unattended to skip routine approval.')

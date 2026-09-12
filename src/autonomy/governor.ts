@@ -5,6 +5,7 @@ import { commandMayReadSensitiveData } from './sensitivePaths.ts'
 import { pauseToolSpinner, resumeToolSpinner } from '../ui/stream.ts'
 import { applyPolicy } from './policy.ts'
 import { addAllowRule, isAllowlisted, ruleFor, type AllowScope } from './allowStore.ts'
+import { consumePreauth, currentBranch, isPreauthorized } from './preauth.ts'
 
 export type ActionRisk = 'safe' | 'review' | 'critical'
 export type ActionDecision = 'allow' | 'approve' | 'block'
@@ -427,6 +428,16 @@ const SETTLEABLE_ONCE = new Set(['shell', 'shell.composed', 'shell.unknown', 'gi
 
 export function createActionGovernor(options: { mode?: GovernanceMode; approve?: ActionApproval; cwd?: string; maxActions?: number } = {}): ActionGovernor {
   const mode = options.mode ?? 'unattended'
+  const cwd = options.cwd ?? process.cwd()
+  // Resolved at most once per governor, and only the first time a
+  // pre-authorization check actually needs it — most governors (most tests,
+  // supervised mode, unattended runs that never hit an excluded-critical
+  // intent) never need a branch at all, so eagerly shelling out to git on
+  // every governor construction would be pure waste. A branch switch mid-run
+  // just means the branch resolved here no longer matches the grant, which
+  // fails isPreauthorized closed (falls through to the normal refusal), never open.
+  let branchPromise: Promise<string> | undefined
+  const resolvedBranch = (): Promise<string> => (branchPromise ??= currentBranch(cwd))
   const requestedMaxActions = options.maxActions ?? 0
   const maxActions = Number.isFinite(requestedMaxActions) && requestedMaxActions > 0
     ? Math.max(1, Math.min(Math.floor(requestedMaxActions), MAX_GOVERNED_ACTIONS))
@@ -488,11 +499,24 @@ export function createActionGovernor(options: { mode?: GovernanceMode; approve?:
       // rather than one per call. With no approval channel at all (a scheduled
       // run, CI, nobody at the terminal) it still refuses, because a question
       // nobody will hear is not consent.
+      //
+      // The one other way past this wall: a human explicitly pre-authorized
+      // this exact intent, for this exact project + branch, before the run
+      // started (`elia auto --authorize`, preauth.ts) — a real advance "yes"
+      // recorded by a person, never something the model can grant itself.
       if (mode === 'unattended' && assessment.risk === 'critical' && !SETTLEABLE_ONCE.has(assessment.intent)) {
+        const branch = await resolvedBranch()
+        if (isPreauthorized(assessment.intent, cwd, branch)) {
+          const grant = consumePreauth(assessment.intent, cwd, branch)
+          return {
+            allowed: true,
+            assessment: { ...assessment, decision: 'allow', reason: `${assessment.reason} (pre-authorized: .elia/preauth.json grant for "${assessment.intent}", use #${grant?.usedCount ?? '?'})` },
+          }
+        }
         return {
           allowed: false,
           assessment: { ...assessment, decision: 'block' },
-          message: `Action blocked by Elia’s unattended policy: ${assessment.reason}. This kind of action reaches outside the project, so one approval can never stand for the next — resume in supervised mode for an exact per-action boundary.`,
+          message: `Action blocked by Elia’s unattended policy: ${assessment.reason}. This kind of action reaches outside the project, so one approval can never stand for the next — resume in supervised mode for an exact per-action boundary, or start this run with "elia auto --authorize ${assessment.intent}" to pre-authorize it.`,
         }
       }
       if (mode === 'unattended' && assessment.risk === 'critical' && !options.approve) {

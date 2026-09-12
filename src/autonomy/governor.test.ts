@@ -1,5 +1,9 @@
 import { describe, expect, test } from 'bun:test'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { assessAction, blockedInUnattendedMode, createActionGovernor, redactActionInput } from './governor.ts'
+import { clearPreauthCaches, grantPreauth } from './preauth.ts'
 
 describe('autonomy governor', () => {
   test('allows local reads and verification commands', () => {
@@ -102,6 +106,37 @@ describe('autonomy governor', () => {
     const blocked = await governor.check({ name: 'run_command', input: { command: 'rm -rf /tmp/example' } })
     expect(blocked.allowed).toBe(false)
     expect(blocked.assessment.decision).toBe('block')
+  })
+
+  test('unattended mode refuses a browser action outright with no pre-authorization, even with an approval channel', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'elia-governor-preauth-'))
+    try {
+      clearPreauthCaches()
+      const governor = createActionGovernor({ mode: 'unattended', cwd: dir, approve: async () => true })
+      const result = await governor.check({ name: 'browser', input: { action: 'click', target: 'Publish' } })
+      expect(result.allowed).toBe(false)
+      expect(result.message).toContain('--authorize')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+      clearPreauthCaches()
+    }
+  })
+
+  test('a live pre-authorization grant lets one otherwise-always-refused unattended action through, and records it in the reason', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'elia-governor-preauth-'))
+    try {
+      clearPreauthCaches()
+      // No real git repo in this tmp dir, so preauth.ts's currentBranch() resolves to "unknown" — grant that exact scope.
+      grantPreauth(['browser.click'], dir, 'unknown')
+      const governor = createActionGovernor({ mode: 'unattended', cwd: dir })
+      const result = await governor.check({ name: 'browser', input: { action: 'click', target: 'Publish' } })
+      expect(result.allowed).toBe(true)
+      expect(result.assessment.decision).toBe('allow')
+      expect(result.assessment.reason).toContain('pre-authorized')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+      clearPreauthCaches()
+    }
   })
 
   test('serializes approvals and records the exact request', async () => {
