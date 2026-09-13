@@ -80,9 +80,15 @@ const SED_AWK_INPLACE_EDIT = /\b(?:sed|gsed|awk|gawk)\b[\s\S]*?(?:(?:^|\s)-i(?:[
 // match can tell apart from a plain listing. Allow-list the genuinely
 // read-only invocations instead of trying to deny-list every destructive flag.
 const GIT_BRANCH_LIST_ONLY = /^(?:command\s+)?git\s+branch(?:\s+(?:-a|-r|-v|-vv|--list|--all|--remotes|--verbose|--show-current|--sort=\S+|--contains(?:=\S+|\s+\S+)?|--merged(?:=\S+|\s+\S+)?|--no-merged(?:=\S+|\s+\S+)?))*\s*$/i
-const SHELL_CONTROL_SYNTAX = /[;&|<>`$]|\$\(|\b(?:eval|exec|source)\b/i
+// CR/LF anywhere means a chain or a pasted script, not one verified
+// invocation. Rejecting it syntactically here (up front in assessCommand,
+// before any other gate) means a harmless first line can never carry a
+// harmful tail past the start-anchored read-only allowance.
+const SHELL_CONTROL_SYNTAX = /[;&|<>`$]|[\r\n]|\$\(|\b(?:eval|exec|source)\b/i
 const SECRET_KEY = /(password|passwd|token|secret|api[-_]?key|authorization|cookie|credential)/i
 const EXTERNAL_WRITE_COMMAND = /\b(curl|wget)\b[^\n]*(--data(?:-raw)?|\s-d\s|\s-X\s*(POST|PUT|PATCH|DELETE)|--upload-file|--form)\b/i
+const DESTRUCTIVE_SHELL_VERBS = /\b(?:rm|mv|cp|mkdir|touch|chmod|chown|kill|shutdown|reboot|publish|push|apply|delete|destroy|install|add|upgrade|send|curl|wget|ssh|scp)\b/i
+const SHELL_SIDE_EFFECT = /[<>]/i
 const INTERNAL_SAFE_TOOLS = new Set(['flag_risk', 'submit_route', 'submit_proposal', 'submit_verdict', 'submit_acceptance', 'revise_plan', 'submit_assumptions', 'submit_lessons', 'delegate_tasks'])
 export const MAX_GOVERNED_ACTIONS = 10_000
 
@@ -631,6 +637,10 @@ export function blockedInUnattendedMode(command: string, cwd = process.cwd()): b
 
 function assessCommand(command: string, cwd: string): ActionAssessment {
   if (!command.trim()) return assessment('critical', 'approve', 'shell command is empty or invalid', 'shell', [], false)
+  // CR/LF anywhere means a chain or a pasted script, not one verified
+  // invocation, and is rejected before any other gate can run. A harmless
+  // lead-in ("echo ok\nbash /tmp/p.sh") must never ride a start-anchored
+  // read-only match past the rest of this classifier.
   if (SHELL_CONTROL_SYNTAX.test(command)) {
     return assessment('critical', 'approve', 'shell control syntax or interpreter evaluation requires an exact approval boundary', 'shell.composed', [], false)
   }
@@ -649,8 +659,8 @@ function assessCommand(command: string, cwd: string): ActionAssessment {
   if (/^(?:command\s+)?git\s+branch\b/i.test(command) && !GIT_BRANCH_LIST_ONLY.test(command)) {
     return assessment('critical', 'approve', 'git branch command may create, delete, rename, or force-move a branch and is not a safe read-only operation', 'shell.unknown', [], false)
   }
-  if (READ_ONLY_COMMAND.test(command) && !SED_AWK_INPLACE_EDIT.test(command) && !/\b(?:rm|mv|cp|mkdir|touch|chmod|chown|kill|shutdown|reboot|publish|push|apply|delete|destroy|install|add|upgrade|send|curl|wget|ssh|scp)\b/i.test(command)) {
-    return assessment('safe', 'allow', 'shell command matches the restricted read-only command policy', 'shell.read-only', [], true)
+  if (READ_ONLY_COMMAND.test(command) && !SED_AWK_INPLACE_EDIT.test(command) && !DESTRUCTIVE_SHELL_VERBS.test(command)) {
+    return assessment('safe', 'allow', 'shell command matches the restricted read-only command policy', 'shell.read-only', [], !SHELL_SIDE_EFFECT.test(command))
   }
   return assessment('critical', 'approve', 'shell command is not in the restricted read-only policy and may cause an unreviewed side effect', 'shell.unknown', [], false)
 }

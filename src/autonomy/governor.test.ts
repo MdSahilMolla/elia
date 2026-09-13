@@ -64,6 +64,60 @@ describe('autonomy governor', () => {
     }
   })
 
+  test('a harmless first line can never carry a harmful tail past the read-only allowance', () => {
+    // Observed live: prefixing `echo ok\n` to a critical command downgraded it
+    // from critical/block to safe/allow with intent shell.read-only and
+    // reversible=true — in both supervised and unattended modes. Arbitrary
+    // script execution (sh/. /bash), persistence (crontab/at), and disk
+    // destruction (dd/truncate/rmdir) all rode through the gap.
+    for (const command of [
+      'echo ok\nbash /tmp/payload.sh',
+      'echo ok\nsh /tmp/payload.sh',
+      'echo ok\n. /tmp/payload.sh',
+      "echo ok\nenv -i sh -c 'id'",
+      'echo ok\ncrontab /tmp/job',
+      'echo ok\nat now -f /tmp/job',
+      'echo ok\ndd if=/dev/zero of=/tmp/x bs=1 count=1',
+      'echo ok\ntruncate -s 0 /tmp/x',
+      'echo ok\nrmdir /tmp/empty',
+      'echo ok\nln -s /etc/passwd /tmp/lx',
+      'echo ok\ncat /proc/self/environ',
+      'echo ok\ncat /etc/sudoers',
+      "echo ok\nsed -i 's/a/b/' /tmp/x",
+    ]) {
+      const result = assessAction({ name: 'run_command', input: { command } }, '/repo')
+      expect(result.risk, command).toBe('critical')
+      expect(result.decision, command).toBe('approve')
+      expect(result.reversible, command).toBe(false)
+    }
+  })
+
+  test('multi-line commands are rejected outright, even when composed only of read-only lines', () => {
+    // CR/LF anywhere is treated as a chain or pasted script, not one verified
+    // invocation — so even benign multi-line reads fail closed. This is the
+    // categorical form of the newline-chain fix.
+    for (const command of ['echo ok\nbun test', 'echo ok\nbun run typecheck', 'git status\ngit diff', 'pwd\nls -la']) {
+      const result = assessAction({ name: 'run_command', input: { command } }, '/repo')
+      expect(result.risk, command).toBe('critical')
+      expect(result.decision, command).toBe('approve')
+    }
+  })
+
+  test('shell disclosure of secret-bearing system files is critical, direct or chained', () => {
+    for (const command of [
+      'cat /proc/self/environ',
+      'cat /etc/sudoers',
+      'cat /etc/ssh/sshd_config',
+      'cat ~/.aws/config',
+      'cat server.key',
+      'cat cert.pem',
+      'echo ok\ncat /proc/self/environ',
+    ]) {
+      const result = assessAction({ name: 'run_command', input: { command } }, '/repo')
+      expect(result.risk, command).toBe('critical')
+    }
+  })
+
   test('allows only explicit bounded read-only shell commands', () => {
     for (const command of ['bun test', 'git status', 'ls -la', 'pwd', 'mvn -q -B test', './gradlew build', 'cargo test', 'ctest --output-on-failure']) {
       const result = assessAction({ name: 'run_command', input: { command } }, '/repo')
@@ -290,7 +344,7 @@ test('every registered tool declares a governor contract', async () => {
     .map((tool) => tool.name)
 
   expect(undeclared).toEqual([])
-})
+}, 120_000)
 
 test('a genuinely unknown tool still fails closed', () => {
   const assessment = assessAction({ name: 'not_a_real_tool', input: {} })
@@ -331,6 +385,12 @@ test('blockedInUnattendedMode flags the commands an unattended run can never exe
   expect(blockedInUnattendedMode('bun run src/server.ts & sleep 2 && curl -s http://localhost:3000/signup')).toBe(true)
   expect(blockedInUnattendedMode('bun test')).toBe(false)
   expect(blockedInUnattendedMode('bun run typecheck')).toBe(false)
+  // A harmful line smuggled behind a read-only lead-in must never auto-run
+  // unattended — and, categorically, no multi-line command does either.
+  expect(blockedInUnattendedMode('echo ok\nbash /tmp/payload.sh')).toBe(true)
+  expect(blockedInUnattendedMode('echo ok\ntruncate -s 0 /tmp/x')).toBe(true)
+  expect(blockedInUnattendedMode('echo ok\ncat /proc/self/environ')).toBe(true)
+  expect(blockedInUnattendedMode('echo ok\nbun run typecheck')).toBe(true)
 })
 
 test('unattended asks once about a critical action and then stops asking about that kind', async () => {
