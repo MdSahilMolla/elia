@@ -149,6 +149,21 @@ export function getSynthesizedTools(): Tool[] {
   return [...synthesizedTools]
 }
 
+/**
+ * Drops every synthesized tool. `loadSkills()` registers into a module-level
+ * list, so a test that loads a skill leaves it visible to `allWorkerTools()`
+ * for the rest of the process — `bun test` shares one module registry across
+ * every file. Linux `readdir` is not sorted, so the leaked tool reached
+ * governor.test.ts's "every registered tool declares a contract" assertion
+ * there and not on Windows: a CI-only failure with no CI-only cause.
+ * `loadSkills()` now calls this on entry so the registry can't accumulate
+ * across reloads; call it directly only when a test needs isolation without
+ * going through `loadSkills()`.
+ */
+export function clearSynthesizedTools(): void {
+  synthesizedTools.length = 0
+}
+
 // Tools proxied from connected MCP servers (see src/mcp/registry.ts), populated
 // once at startup. Kept mutable for the same reason as synthesizedTools above —
 // discovery happens after this module is first imported.

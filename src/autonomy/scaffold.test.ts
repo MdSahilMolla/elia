@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { execCapture } from '../github/exec.ts'
-import { commitAll, ensureRepository, renderProjectDocs, scaffoldProject } from './scaffold.ts'
+import { commitAll, ensureRepository, renderProjectDocs, scaffoldProject, stageUntrackedForReview } from './scaffold.ts'
 import type { Proposal } from './types.ts'
 
 let dir: string
@@ -121,6 +121,42 @@ test('pre-existing uncommitted work is protected — committed on disk, not swep
   // The protected file is untouched on disk and still visible as a change.
   expect(readFileSync(join(dir, 'existing.ts'), 'utf8')).toBe('export const wip = true')
   expect((await git('status', '--porcelain')).stdout).toContain('existing.ts')
+})
+
+// --- review staging ---
+
+test('stageUntrackedForReview makes a new file visible to `git diff HEAD` without staging it for commit', async () => {
+  await ensureRepository(dir)
+  writeFileSync(join(dir, 'README.md'), '# seed')
+  await commitAll(dir, 'seed')
+
+  writeFileSync(join(dir, 'index.html'), '<html></html>')
+  expect((await git('diff', 'HEAD', '--', 'index.html')).stdout.trim()).toBe('')
+
+  await stageUntrackedForReview(dir)
+
+  const diff = await git('diff', 'HEAD', '--', 'index.html')
+  expect(diff.stdout).toContain('index.html')
+  expect(diff.stdout).toContain('new file mode')
+  // Visible to a diff, but not actually staged for a real commit.
+  expect((await git('diff', '--cached', '--name-only')).stdout.trim()).toBe('')
+})
+
+test('stageUntrackedForReview never surfaces a protected pre-existing file or a secret-looking one', async () => {
+  await ensureRepository(dir)
+  writeFileSync(join(dir, 'README.md'), '# seed')
+  await commitAll(dir, 'seed')
+
+  writeFileSync(join(dir, 'existing-untracked.ts'), 'export const wip = true')
+  writeFileSync(join(dir, '.env'), 'SECRET=1')
+  writeFileSync(join(dir, 'index.html'), '<html></html>')
+
+  await stageUntrackedForReview(dir, undefined, ['existing-untracked.ts'])
+
+  const diff = (await git('diff', 'HEAD', '--numstat')).stdout
+  expect(diff).toContain('index.html')
+  expect(diff).not.toContain('existing-untracked.ts')
+  expect(diff).not.toContain('.env')
 })
 
 test('a scoped commit never sweeps concurrent changes outside the worker-owned files', async () => {

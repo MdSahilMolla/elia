@@ -357,7 +357,7 @@ test('the hot read paths are index-backed, not full scans', () => {
 test('redactPayload scrubs secrets nested inside arrays, not just top-level free-text strings', () => {
   const { store, ownerId, projectId } = bootstrap()
   const objectiveId = seedObjective(store, ownerId, projectId)
-  const secret = 'sk-abcdefghijklmnopqrstuvwxyz012345'
+  const secret = 'sk-abcdefghijklmnopqrstuvwxyz012345' // pragma: allowlist secret
   store.append({
     type: 'TaskCreated', actorKind: 'member', actorId: ownerId, objectiveId,
     payload: {
@@ -375,7 +375,7 @@ test('redactPayload scrubs secrets nested inside arrays, not just top-level free
 test('redactPayload recurses into a plain-object field (refs) but preserves an id-shaped key used for equality matching', () => {
   const { store, ownerId, projectId } = bootstrap()
   const objectiveId = seedObjective(store, ownerId, projectId)
-  const secret = 'sk-abcdefghijklmnopqrstuvwxyz012345'
+  const secret = 'sk-abcdefghijklmnopqrstuvwxyz012345' // pragma: allowlist secret
   store.append({ type: 'TaskCreated', actorKind: 'member', actorId: ownerId, objectiveId, payload: { id: 't_ref', objectiveId, projectId, title: 'Ref task', role: 'backend', dependsOn: [], files: [] } })
   store.append({
     type: 'AgentMessageCreated', actorKind: 'agent', actorId: 'a1', objectiveId, taskId: 't_ref',
