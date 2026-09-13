@@ -3,7 +3,8 @@
  * workspace server. One request/response envelope plus a server-pushed event
  * stream, mirroring `src/vscodeBridgeProtocol.ts`.
  *
- * The connection carries a bearer token (Authorization header or `?token=`).
+ * The connection carries a bearer token in the `Authorization: Bearer` header
+ * (a `?token=` query string is refused — it leaks into access logs).
  * Every method is authorized against the caller that token resolves to.
  */
 

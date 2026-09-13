@@ -105,7 +105,14 @@ export function runWorkspaceServer(options: WorkspaceServerOptions = {}): Runnin
       if (url.pathname !== '/workspace') {
         return new Response('elia workspace server: connect over WebSocket at /workspace', { status: 404 })
       }
-      const token = request.headers.get('authorization')?.replace(/^Bearer\s+/i, '') ?? url.searchParams.get('token') ?? undefined
+      // Bearer header only. A token in the query string lands in proxy/access
+      // logs, shell history and process listings, and outlives its revocation
+      // there — refuse it loudly rather than accept it, so a client doing it
+      // gets fixed instead of silently working.
+      if (url.searchParams.has('token')) {
+        return new Response('Bad Request: send the workspace token in an "Authorization: Bearer" header, not the ?token= query string', { status: 400 })
+      }
+      const token = request.headers.get('authorization')?.replace(/^Bearer\s+/i, '') || undefined
       const caller = resolveCaller(store, token)
       if (!caller) return new Response('Unauthorized: a valid workspace bearer token is required', { status: 401 })
       const connectionId = `conn_${randomUUID().replaceAll('-', '')}`

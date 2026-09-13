@@ -67,6 +67,17 @@ test('a connection without a valid token is rejected', async () => {
   expect(await rejection(WorkspaceClient.connect({ url: server.url, token: 'wst_bogus' }, 2_000))).toMatch(/unauthor|closed|reach/i)
 })
 
+test('a token in the ?token= query string is refused, even a valid one', async () => {
+  const { server, owner } = await fixture()
+  const http = server.url.replace(/^ws/, 'http')
+  const viaQuery = await fetch(`${http}?token=${encodeURIComponent(owner)}`, { headers: { Upgrade: 'websocket', Connection: 'Upgrade', 'Sec-WebSocket-Version': '13', 'Sec-WebSocket-Key': 'dGhlIHNhbXBsZSBub25jZQ==' } })
+  expect(viaQuery.status).toBe(400)
+  expect(await viaQuery.text()).toContain('Authorization: Bearer')
+  // ...while the same token in the header (what WorkspaceClient sends) connects.
+  const client = await connect(server, owner)
+  expect(client.hello?.caller.role).toBe('owner')
+})
+
 test('a valid token connects and receives a hello with its resolved identity', async () => {
   const { server, owner } = await fixture()
   const client = await connect(server, owner)

@@ -63,17 +63,63 @@ export function globsOverlap(a: string, b: string): boolean {
   return false
 }
 
+const WILDCARD = /[*?]/
+
+/** `path` is `dir` itself or somewhere beneath it (segment-aligned; '' is the root). */
+function within(path: string, dir: string): boolean {
+  return dir === '' || path === dir || path.startsWith(`${dir}/`)
+}
+
+/**
+ * The directory a glob's matches are all guaranteed to live under: everything
+ * before the first wildcard, cut back to a whole segment. `src/ui/*.tsx` ->
+ * `src/ui`, `**\/*.ts` -> `` (anywhere).
+ */
+function literalDirPrefix(glob: string): string {
+  const beforeWildcard = glob.slice(0, glob.search(WILDCARD))
+  const slash = beforeWildcard.lastIndexOf('/')
+  return slash === -1 ? '' : beforeWildcard.slice(0, slash)
+}
+
+function globToRegExp(glob: string): RegExp {
+  let source = ''
+  for (let i = 0; i < glob.length; i += 1) {
+    const char = glob[i]!
+    if (char === '*' && glob[i + 1] === '*') {
+      // `**/` matches zero or more whole directories; a trailing `**` anything.
+      if (glob[i + 2] === '/') {
+        source += '(?:.*/)?'
+        i += 2
+      } else {
+        source += '.*'
+        i += 1
+      }
+    } else if (char === '*') source += '[^/]*'
+    else if (char === '?') source += '[^/]'
+    else source += char.replace(/[.+^${}()|[\]\\]/g, '\\$&')
+  }
+  return new RegExp(`^${source}$`)
+}
+
 function singleGlobOverlap(na: string, nb: string): boolean {
   if (na === nb) return true
-  const [shorter, longer] = na.length <= nb.length ? [na, nb] : [nb, na]
-  // `*` and `?` both mark the point past which the pattern no longer pins
-  // down a literal path, so both end the guaranteed-literal prefix.
-  const prefix = shorter.replace(/[*?].*$/, '').replace(/\/[^/]*$/, '')
-  const hasWildcard = /[*?]/.test(shorter) || /[*?]/.test(longer)
-  // A directory glob (`src/ui/**`) collides with anything beneath that directory.
-  if (hasWildcard && prefix && longer.startsWith(prefix)) return true
-  // A bare directory reservation collides with files inside it.
-  return longer.startsWith(`${shorter}/`) || shorter.startsWith(`${longer}/`)
+  const aWild = WILDCARD.test(na)
+  const bWild = WILDCARD.test(nb)
+  // Two literal paths: the same file, or one is a bare directory reservation
+  // holding the other. A bare path may be a directory (`src/ui`, or a dotted
+  // one like `lib.d`), so `a.b` vs `a.b/x` stays a collision by design.
+  if (!aWild && !bWild) return within(na, nb) || within(nb, na)
+  // A literal against a glob can be answered exactly: the glob matches the
+  // path, or the literal is a directory the glob's matches live under.
+  if (!aWild || !bWild) {
+    const [literal, glob] = aWild ? [nb, na] : [na, nb]
+    return globToRegExp(glob).test(literal) || within(literalDirPrefix(glob), literal)
+  }
+  // Two globs: conservative — they can only meet if one's guaranteed
+  // directory contains the other's.
+  const pa = literalDirPrefix(na)
+  const pb = literalDirPrefix(nb)
+  return within(pa, pb) || within(pb, pa)
 }
 
 export function resourceFor(fileOrGlob: string): string {

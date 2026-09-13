@@ -44,6 +44,34 @@ test('globsOverlap catches directory-glob and prefix collisions', () => {
   expect(globsOverlap('api/login.ts', 'api/logout.ts')).toBe(false)
 })
 
+test('globsOverlap stays segment-aligned: siblings and name-prefixes are not collisions', () => {
+  // Used to collide: the literal side was cut back to its parent (`src`), and
+  // any glob anywhere under `src/` "overlapped" it.
+  expect(globsOverlap('src/ui', 'src/other/**')).toBe(false)
+  expect(globsOverlap('src/ui/App.tsx', 'src/api/*.ts')).toBe(false)
+  // A shared character prefix is not a shared directory.
+  expect(globsOverlap('a.b', 'a.bc/**')).toBe(false)
+  expect(globsOverlap('src/ui', 'src/uix/**')).toBe(false)
+  // A bare path may be a directory (dots and all), so these stay collisions.
+  expect(globsOverlap('a.b', 'a.b/**')).toBe(true)
+  expect(globsOverlap('lib.d', 'lib.d/types.ts')).toBe(true)
+})
+
+test('globsOverlap matches a literal path against a glob exactly', () => {
+  // Used to be missed: a pattern with no literal directory prefix was ignored.
+  expect(globsOverlap('**/*.ts', 'src/a.ts')).toBe(true)
+  expect(globsOverlap('src/**/*.test.ts', 'src/deep/x.test.ts')).toBe(true)
+  expect(globsOverlap('src/**/*.test.ts', 'src/x.test.ts')).toBe(true)
+  expect(globsOverlap('src/**/*.test.ts', 'src/deep/x.ts')).toBe(false)
+  // `*` does not cross a directory boundary.
+  expect(globsOverlap('src/*.ts', 'src/ui/a.ts')).toBe(false)
+  // A literal directory that a glob's matches live under collides with it.
+  expect(globsOverlap('src', 'src/ui/*.tsx')).toBe(true)
+  // Regex metacharacters in a path are literal.
+  expect(globsOverlap('src/a+b.ts', 'src/*.ts')).toBe(true)
+  expect(globsOverlap('src/a+b.ts', 'src/aab.ts')).toBe(false)
+})
+
 test('globsOverlap catches a "?" single-char wildcard collision', () => {
   expect(globsOverlap('src/a?.ts', 'src/ab.ts')).toBe(true)
   expect(globsOverlap('src/a?.ts', 'src/az.ts')).toBe(true)

@@ -20,7 +20,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { dirname, join } from 'node:path'
 import { ensureSecureDirectory, hardenSecureFile } from '../securePersistence.ts'
 import { redactSecrets } from '../ui/redact.ts'
-import { applyProjection, isWorkspaceEventType, type PersistedEvent, type WorkspaceEventInput } from './events.ts'
+import { applyProjection, derivedEvents, isWorkspaceEventType, type PersistedEvent, type WorkspaceEventInput } from './events.ts'
 import { migrate } from './schema.ts'
 import {
   toAgent, toAgentIdentity, toAgentMessage, toApproval, toDecision, toMember, toObjective,
@@ -102,24 +102,16 @@ export class WorkspaceStore {
   append(input: WorkspaceEventInput): PersistedEvent {
     if (!isWorkspaceEventType(input.type)) throw new Error(`unknown workspace event type: ${String(input.type)}`)
     const at = new Date().toISOString()
-    const id = `evt_${randomUUID().replaceAll('-', '')}`
-    const payload = redactPayload(input.payload ?? {})
 
+    // The event plus anything it implies (see `derivedEvents`) commit together,
+    // so a replica never sees the task finish without the objective finishing.
     const run = this.db.transaction(() => {
-      const info = this.db.query(
-        `INSERT INTO workspace_events (id, type, objective_id, task_id, actor_kind, actor_id, payload_json, at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      ).run(id, input.type, input.objectiveId ?? null, input.taskId ?? null, input.actorKind, input.actorId, JSON.stringify(payload), at)
-      const seq = Number(info.lastInsertRowid)
-      const event: PersistedEvent = {
-        seq, id, type: input.type, actorKind: input.actorKind, actorId: input.actorId,
-        objectiveId: input.objectiveId, taskId: input.taskId, payload, at,
-      }
-      applyProjection(this.db, event)
-      this.appendAudit(event)
-      return event
+      const event = this.insertEvent(input, at)
+      const committed = [event]
+      for (const derived of derivedEvents(this.db, event)) committed.push(this.insertEvent(derived, at))
+      return committed
     })
-    const event = run()
+    const committed = run()
     // Inside a `transact()` call (e.g. `acquireForTask`'s whole reserve loop),
     // this insert is only a savepoint of the outer transaction — it can still be
     // rolled back by a later `append` in the same `transact` callback throwing.
@@ -127,11 +119,28 @@ export class WorkspaceStore {
     // about a row that may never actually persist. Buffer instead; `transact`
     // flushes this queue once the outermost transaction actually commits, and
     // discards it on rollback.
-    if (this.transactDepth > 0) {
-      this.pendingNotifications.push(event)
-    } else {
-      this.notify(event)
+    for (const event of committed) {
+      if (this.transactDepth > 0) this.pendingNotifications.push(event)
+      else this.notify(event)
     }
+    return committed[0]!
+  }
+
+  /** Insert one event row, project it, and chain it into the audit log. Caller owns the transaction. */
+  private insertEvent(input: WorkspaceEventInput, at: string): PersistedEvent {
+    const id = `evt_${randomUUID().replaceAll('-', '')}`
+    const payload = redactPayload(input.payload ?? {})
+    const info = this.db.query(
+      `INSERT INTO workspace_events (id, type, objective_id, task_id, actor_kind, actor_id, payload_json, at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(id, input.type, input.objectiveId ?? null, input.taskId ?? null, input.actorKind, input.actorId, JSON.stringify(payload), at)
+    const seq = Number(info.lastInsertRowid)
+    const event: PersistedEvent = {
+      seq, id, type: input.type, actorKind: input.actorKind, actorId: input.actorId,
+      objectiveId: input.objectiveId, taskId: input.taskId, payload, at,
+    }
+    applyProjection(this.db, event)
+    this.appendAudit(event)
     return event
   }
 
