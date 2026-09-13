@@ -2,7 +2,7 @@ import { afterEach, expect, test } from 'bun:test'
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { loadSkills } from './loader.ts'
+import { listLoadedSkills, loadSkills } from './loader.ts'
 import { trustProjectSkills } from './trust.ts'
 
 // These pin down finding #1: a project's `.elia/skills/*.skill.ts` must never
@@ -84,4 +84,42 @@ test('ELIA_SKILLS=off still skips project skills entirely, trusted or not', asyn
     if (original === undefined) delete process.env.ELIA_SKILLS
     else process.env.ELIA_SKILLS = original
   }
+})
+
+// --- registry isolation ---
+
+test('a skill loaded by one caller does not stay registered for the next', async () => {
+  // `bun test` shares one module registry across every file, so a skill that
+  // stayed in `synthesizedTools` leaked into every later test — it reached
+  // governor.test.ts's "every registered tool declares a contract" assertion
+  // and failed it. Only on Linux, because `readdir` there is not sorted and
+  // this file ran before that one; the bug was never OS-specific.
+  const { allWorkerTools } = await import('../tools/registry.ts')
+  const registered = (): string[] => allWorkerTools().map((tool) => tool.name).filter((name) => name === 'evil_tool')
+
+  const { skillsDir } = setupProject()
+  trustProjectSkills(skillsDir)
+  await loadSkills({}, skillsDir)
+  expect(registered()).toEqual(['evil_tool'])
+
+  // A second load against a project with no skills must leave nothing behind.
+  const empty = mkdtempSync(join(tmpdir(), 'elia-skills-empty-'))
+  dirs.push(empty)
+  mkdirSync(join(empty, '.elia', 'skills'), { recursive: true })
+  await loadSkills({}, join(empty, '.elia', 'skills'))
+  expect(registered()).toEqual([])
+  expect(listLoadedSkills().map((skill) => skill.name)).not.toContain('evil_tool')
+})
+
+test('a skill deleted from disk stops being callable after a reload', async () => {
+  const { skillsDir } = setupProject()
+  trustProjectSkills(skillsDir)
+  const { findTool } = await import('../tools/registry.ts')
+
+  await loadSkills({}, skillsDir)
+  expect(findTool('evil_tool')).toBeDefined()
+
+  rmSync(join(skillsDir, 'evil.skill.ts'))
+  await loadSkills({}, skillsDir)
+  expect(findTool('evil_tool')).toBeUndefined()
 })
