@@ -32,6 +32,8 @@ export interface ExploitVector {
 export interface AdversarialReport {
   target: string
   diffLines: number
+  /** Added lines past the per-file MAX_DIFF_LINES window that were never analyzed. */
+  skippedLines: number
   edgeCases: EdgeCase[]
   exploitVectors: ExploitVector[]
   riskScore: number
@@ -181,7 +183,9 @@ export function adversarialAnalyze(diff: string, opts: { minSeverity?: Adversari
   const edgeCases: EdgeCase[] = []
   const exploitVectors: ExploitVector[] = []
 
+  let skippedLines = 0
   for (const block of blocks) {
+    skippedLines += Math.max(0, block.addedLines.length - MAX_DIFF_LINES)
     for (const line of block.addedLines.slice(0, MAX_DIFF_LINES)) {
       addedCount++
       const edgeCase = classifyEdgeCase(line, block.path)
@@ -220,13 +224,17 @@ export function adversarialAnalyze(diff: string, opts: { minSeverity?: Adversari
   riskScore = Math.min(100, riskScore)
 
   const fileCount = blocks.length
+  const truncation = skippedLines > 0
+    ? ` ${skippedLines} further added line(s) exceeded the ${MAX_DIFF_LINES}-lines-per-file window and were NOT analyzed.`
+    : ''
   return {
     target: 'diff',
     diffLines: addedCount,
+    skippedLines,
     edgeCases: uniqueEdgeCases,
     exploitVectors: uniqueExploits,
     riskScore,
-    summary: `Analyzed ${addedCount} added lines across ${fileCount} file(s). Found ${uniqueEdgeCases.length} edge case(s) and ${uniqueExploits.length} exploit vector(s). Risk score: ${riskScore}/100.`,
+    summary: `Analyzed ${addedCount} added lines across ${fileCount} file(s). Found ${uniqueEdgeCases.length} edge case(s) and ${uniqueExploits.length} exploit vector(s). Risk score: ${riskScore}/100.${truncation}`,
   }
 }
 
@@ -318,7 +326,10 @@ export function formatReport(report: AdversarialReport): string {
     }
   }
 
-  if (report.riskScore === 0) {
+  if (report.riskScore === 0 && report.skippedLines > 0) {
+    // A clean result over a truncated diff is not a clean diff.
+    lines.push(`No adversarial issues detected in the analyzed window, but ${report.skippedLines} added line(s) were not analyzed — narrow the target (file or commit) to cover them.`)
+  } else if (report.riskScore === 0) {
     lines.push('No adversarial issues detected. Code appears safe for shipping.')
   } else if (report.riskScore < 30) {
     lines.push('Low risk. Consider adding targeted tests for identified edge cases.')

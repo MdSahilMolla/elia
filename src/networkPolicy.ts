@@ -1,5 +1,7 @@
 import { lookup } from 'node:dns/promises'
-import { isIP } from 'node:net'
+import http from 'node:http'
+import https from 'node:https'
+import { isIP, type LookupFunction } from 'node:net'
 
 export interface NetworkUrlOptions {
   allowExplicitLocal?: boolean
@@ -50,6 +52,104 @@ export async function assertPublicNetworkUrl(raw: string | URL, options: Network
     throw new Error(`Refusing network host that resolves to a private or local address: ${url.hostname}`)
   }
   return url
+}
+
+type LookupAnswer = { address: string; family: number }
+type Resolver = (hostname: string) => Promise<LookupAnswer[]>
+
+const systemResolver: Resolver = (hostname) => lookup(hostname, { all: true, verbatim: true })
+
+/**
+ * A `net` lookup that validates the very answers the socket will connect to.
+ *
+ * `assertPublicNetworkUrl` alone is a check-then-use: it resolves, approves,
+ * and then `fetch(url)` resolves the name again at connect time, so a DNS
+ * server that answers "public" to the first query and "169.254.169.254" to
+ * the second walks straight past it (DNS rebinding). Doing the resolution and
+ * the validation inside the connection's own lookup closes that window — there
+ * is no second resolution for an attacker to answer differently.
+ */
+export function publicAddressLookup(options: NetworkUrlOptions = {}, resolve: Resolver = systemResolver): LookupFunction {
+  return ((hostname: string, lookupOptions: { family?: number | string; all?: boolean }, callback: (...args: unknown[]) => void) => {
+    const allowLocal = options.allowExplicitLocal === true && isExplicitLocalHost(hostname)
+    resolve(hostname)
+      .then((answers: LookupAnswer[]) => {
+        const family = lookupOptions?.family === 'IPv4' ? 4 : lookupOptions?.family === 'IPv6' ? 6 : Number(lookupOptions?.family) || 0
+        const usable = family ? answers.filter((answer) => answer.family === family) : answers
+        if (usable.length === 0 || (!allowLocal && usable.some((answer) => isUnsafeAddress(answer.address)))) {
+          throw new Error(`Refusing network host that resolves to a private or local address: ${hostname}`)
+        }
+        if (lookupOptions?.all) callback(null, usable)
+        else callback(null, usable[0]!.address, usable[0]!.family)
+      })
+      .catch((error: unknown) => callback(error instanceof Error ? error : new Error(String(error))))
+  }) as unknown as LookupFunction
+}
+
+export interface PublicFetchInit {
+  method?: string
+  headers?: Record<string, string>
+  body?: string
+  signal?: AbortSignal
+  policy?: NetworkUrlOptions
+}
+
+const NULL_BODY_STATUSES = new Set([101, 103, 204, 205, 304])
+
+/**
+ * Test seam: when set, `publicFetch` hands the (already policy-checked) request
+ * here instead of opening a socket, so tool tests can stub responses the way
+ * they used to stub `globalThis.fetch`. Never set outside tests.
+ */
+export const publicFetchTestHooks: { transport?: (url: URL, init: PublicFetchInit) => Promise<Response> } = {}
+
+/**
+ * `fetch` for a URL an untrusted party chose, with the DNS answer pinned to
+ * the one that passed the public-address policy (see `publicAddressLookup`).
+ *
+ * Built on node:http(s) because `fetch` has no per-request DNS hook; the
+ * request still goes to the original hostname, so Host, SNI and certificate
+ * verification are all unchanged. Redirects are never followed — a 3xx comes
+ * back as-is for the caller to refuse or re-validate.
+ */
+export async function publicFetch(raw: string | URL, init: PublicFetchInit = {}): Promise<Response> {
+  const url = await assertPublicNetworkUrl(raw, init.policy)
+  if (publicFetchTestHooks.transport) return publicFetchTestHooks.transport(url, init)
+  const transport = url.protocol === 'https:' ? https : http
+  return new Promise<Response>((resolve, reject) => {
+    const req = transport.request(url, {
+      method: init.method ?? 'GET',
+      headers: init.headers,
+      lookup: publicAddressLookup(init.policy),
+      signal: init.signal,
+    }, (res) => {
+      const headers = new Headers()
+      for (const [name, value] of Object.entries(res.headers)) {
+        if (Array.isArray(value)) for (const item of value) headers.append(name, item)
+        else if (value !== undefined) headers.set(name, value)
+      }
+      const status = res.statusCode ?? 502
+      if (NULL_BODY_STATUSES.has(status)) {
+        res.resume()
+        resolve(new Response(null, { status, statusText: res.statusMessage, headers }))
+        return
+      }
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          res.on('data', (chunk: Buffer) => controller.enqueue(new Uint8Array(chunk)))
+          res.on('end', () => controller.close())
+          res.on('error', (error) => controller.error(error))
+        },
+        cancel() {
+          res.destroy()
+        },
+      })
+      resolve(new Response(body, { status, statusText: res.statusMessage, headers }))
+    })
+    req.on('error', reject)
+    if (init.body !== undefined) req.write(init.body)
+    req.end()
+  })
 }
 
 /** Custom provider endpoints must use TLS; only an explicitly enabled localhost endpoint may use HTTP. */

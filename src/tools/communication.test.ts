@@ -1,8 +1,22 @@
-import { rmSync, readFileSync, writeFileSync } from 'node:fs'
+import { mkdirSync, rmSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { expect, test } from 'bun:test'
+import { afterAll, expect, test } from 'bun:test'
 import { communicationTool } from './communication.ts'
 import { redactActionInput } from '../autonomy/governor.ts'
+
+// Adapters are small script files run as `bun <relative path>`: an inline
+// `bun -e "..."` survives neither cmd.exe's quoting nor its stdin piping, and a
+// relative path keeps a space-containing temp dir out of the command line.
+const ADAPTER_DIR = join('.elia', 'test-communication-adapters')
+mkdirSync(join(process.cwd(), ADAPTER_DIR), { recursive: true })
+afterAll(() => rmSync(join(process.cwd(), ADAPTER_DIR), { recursive: true, force: true }))
+
+function adapter(name: string, source: string): string {
+  writeFileSync(join(process.cwd(), ADAPTER_DIR, `${name}.ts`), source)
+  return `bun ${ADAPTER_DIR.replaceAll('\\', '/')}/${name}.ts`
+}
+
+const ECHO_ADAPTER = adapter('echo', 'process.stdout.write(await Bun.stdin.text())\n')
 
 function draftIdFrom(result: string): string {
   const id = result.match(/comm_[a-z0-9]+/)?.[0]
@@ -26,7 +40,7 @@ test('communication drafts persist and remain unsent until explicitly approved',
 
 test('send runs directly and records a connector receipt — approval is the action governor\'s job, not this tool\'s', async () => {
   const previous = process.env.ELIA_COMMUNICATION_BRIDGE_COMMAND
-  process.env.ELIA_COMMUNICATION_BRIDGE_COMMAND = 'bun -e "process.stdin.pipe(process.stdout)"'
+  process.env.ELIA_COMMUNICATION_BRIDGE_COMMAND = ECHO_ADAPTER
   const created = await communicationTool.execute({ action: 'draft', channel: 'message', recipient: '@cofounder', body: 'Please review the release.' })
   const draftId = draftIdFrom(created)
   try {
@@ -45,7 +59,7 @@ test('send runs directly and records a connector receipt — approval is the act
 
 test('verify rescues an in-flight draft stuck as sending through the connector', async () => {
   const previous = process.env.ELIA_COMMUNICATION_BRIDGE_COMMAND
-  process.env.ELIA_COMMUNICATION_BRIDGE_COMMAND = 'bun -e "process.stdin.pipe(process.stdout)"'
+  process.env.ELIA_COMMUNICATION_BRIDGE_COMMAND = ECHO_ADAPTER
   const created = await communicationTool.execute({ action: 'draft', channel: 'message', recipient: '@ops', body: 'Check the release gate.' })
   const draftId = draftIdFrom(created)
   try {
@@ -62,6 +76,43 @@ test('verify rescues an in-flight draft stuck as sending through the connector',
     else process.env.ELIA_COMMUNICATION_BRIDGE_COMMAND = previous
     rmSync(`${process.cwd()}/.elia/communications/${draftId}.json`, { force: true })
   }
+})
+
+async function sendWithAdapter(command: string): Promise<{ sent: string; stored: { status: string; error?: string } }> {
+  const previous = process.env.ELIA_COMMUNICATION_BRIDGE_COMMAND
+  process.env.ELIA_COMMUNICATION_BRIDGE_COMMAND = command
+  const created = await communicationTool.execute({ action: 'draft', channel: 'message', recipient: '@ops', body: 'hello' })
+  const draftId = draftIdFrom(created)
+  const draftPath = join(process.cwd(), '.elia', 'communications', `${draftId}.json`)
+  try {
+    const sent = await communicationTool.execute({ action: 'send', draftId })
+    return { sent, stored: JSON.parse(readFileSync(draftPath, 'utf8')) as { status: string; error?: string } }
+  } finally {
+    if (previous === undefined) delete process.env.ELIA_COMMUNICATION_BRIDGE_COMMAND
+    else process.env.ELIA_COMMUNICATION_BRIDGE_COMMAND = previous
+    rmSync(draftPath, { force: true })
+  }
+}
+
+test('an adapter that exits 0 without a JSON receipt is not recorded as a delivery', async () => {
+  for (const command of [
+    adapter('plain-text', "await Bun.stdin.text(); console.log('queued maybe')\n"),
+    adapter('silent', 'await Bun.stdin.text()\n'),
+    adapter('json-array', "await Bun.stdin.text(); console.log('[1,2]')\n"),
+  ]) {
+    const { sent, stored } = await sendWithAdapter(command)
+    expect(sent).toContain('was not confirmed as sent')
+    expect(stored.status).toBe('send_failed')
+  }
+})
+
+test('adapter stderr is redacted before it is persisted or returned', async () => {
+  const secret = 'sk-live-0123456789abcdefghijklmnopqrstuvwx'
+  const { sent, stored } = await sendWithAdapter(adapter('leaky', `await Bun.stdin.text(); console.error('auth failed: Authorization: Bearer ${secret}'); process.exit(3)\n`))
+  expect(sent).toContain('exited with code 3')
+  expect(sent).not.toContain(secret)
+  expect(stored.error ?? '').not.toContain(secret)
+  expect(stored.error ?? '').toContain('[REDACTED]')
 })
 
 test('communication audit input redacts message contents and recipients', () => {

@@ -8,6 +8,14 @@ import { isSensitivePath } from '../autonomy/sensitivePaths.ts'
 import { atomicWrite } from './atomicWrite.ts'
 import { preflightStructuralCheck } from '../native/parseCheck.ts'
 
+/**
+ * Same ceiling as read_file: content the agent could never read back whole
+ * is not content it should be writing in one shot. A model emitting runaway
+ * output (a repeated block, an inlined binary) otherwise lands it on disk,
+ * then pays for it again in the diff and the diagnostics pass below.
+ */
+export const MAX_WRITE_BYTES = 5_000_000
+
 export const writeFileTool: Tool = {
   name: 'write_file',
   description:
@@ -26,6 +34,10 @@ export const writeFileTool: Tool = {
     }
     if (typeof input.content !== 'string') {
       throw new Error('write_file requires a "content" string argument (use an empty string for an empty file).')
+    }
+    const contentBytes = Buffer.byteLength(input.content, 'utf8')
+    if (contentBytes > MAX_WRITE_BYTES) {
+      throw new Error(`write_file content is ${contentBytes} bytes, over the ${MAX_WRITE_BYTES}-byte limit. Generate a file this large with a script (run_command), or split it into smaller files.`)
     }
     const path = resolveWorkspacePath(input.path)
     const content = input.content

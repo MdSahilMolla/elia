@@ -1,7 +1,7 @@
 import { createAnthropicProvider } from './anthropic.ts'
 import { codexSubscriptionConfigured, createCodexSubscriptionProvider, listCodexSubscriptionModels } from './codexSubscription.ts'
 import { createOpenAICompatibleProvider } from './openaiCompatible.ts'
-import { assertProviderEndpoint, assertPublicNetworkUrl, validateNetworkUrl } from '../networkPolicy.ts'
+import { assertProviderEndpoint, publicFetch, validateNetworkUrl } from '../networkPolicy.ts'
 import type { Provider, ThinkingOption } from './types.ts'
 
 interface ProviderPreset {
@@ -205,8 +205,8 @@ export async function listProviderModels(providerNameInput: string): Promise<Mod
 
   try {
     if (providerName === 'custom') await assertProviderEndpoint(baseURL)
-    await assertPublicNetworkUrl(endpoint, { allowExplicitLocal })
-    const response = await fetch(endpoint, { redirect: 'manual', headers, signal: AbortSignal.timeout(15_000) })
+    // Pinned: the DNS answer that passes the policy is the one connected to.
+    const response = await publicFetch(endpoint, { headers, signal: AbortSignal.timeout(15_000), policy: { allowExplicitLocal } })
     if (!response.ok) return { providerName, models: [], error: `Model discovery returned HTTP ${response.status}` }
     const payload = (await response.json()) as { data?: unknown[]; models?: unknown[] }
     const rows = Array.isArray(payload.data) ? payload.data : Array.isArray(payload.models) ? payload.models : []

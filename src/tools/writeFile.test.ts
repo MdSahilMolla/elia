@@ -1,11 +1,11 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { withAgentIdentity } from '../autonomy/context.ts'
 import { resetFileAccess } from './fileAccess.ts'
 import { readFileTool } from './readFile.ts'
-import { writeFileTool } from './writeFile.ts'
+import { MAX_WRITE_BYTES, writeFileTool } from './writeFile.ts'
 
 let dir: string
 
@@ -30,6 +30,24 @@ test('creating a brand-new file works with no prior read', async () => {
   const path = join(dir, 'new.txt')
   await write({ path, content: 'hello\n' })
   expect(readFileSync(path, 'utf8')).toBe('hello\n')
+})
+
+test('content over the size cap is refused before anything touches disk', async () => {
+  const path = join(dir, 'huge.txt')
+  await expect(write({ path, content: 'x'.repeat(MAX_WRITE_BYTES + 1) })).rejects.toThrow('byte limit')
+  expect(existsSync(path)).toBe(false)
+  // The cap counts bytes, not UTF-16 code units: multi-byte text is measured as written.
+  await expect(write({ path, content: 'é'.repeat(MAX_WRITE_BYTES / 2 + 1) })).rejects.toThrow('byte limit')
+})
+
+test('a file whose name really starts with a space stays addressable', async () => {
+  writeFileSync(join(dir, ' spaced.txt'), 'old\n')
+  await markRead(' spaced.txt')
+  await write({ path: ' spaced.txt', content: 'new\n' })
+  expect(readFileSync(join(dir, ' spaced.txt'), 'utf8')).toBe('new\n')
+  // ...while stray whitespace around an ordinary path is still forgiven.
+  await write({ path: '  plain.txt\n', content: 'p\n' })
+  expect(readFileSync(join(dir, 'plain.txt'), 'utf8')).toBe('p\n')
 })
 
 // --- Lost-update / concurrent-modification protection (mirrors edit_file's guard) ---
