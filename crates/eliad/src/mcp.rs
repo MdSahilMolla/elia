@@ -411,17 +411,20 @@ mod tests {
             .contains("hello-from-rust"));
     }
 
-    /// A process that prints one non-JSON line and exits: not an MCP server.
+    /// A process that prints one non-JSON line, reads one request, and exits:
+    /// not an MCP server. It must read before exiting — one that exits first
+    /// fails the `initialize` write with EPIPE (seen on Linux CI) before its
+    /// stdout is ever read.
     fn noisy_non_server() -> McpServerConfig {
         let (command, args) = if cfg!(windows) {
             (
                 "cmd",
-                vec!["/c".to_string(), "echo not-json-rpc".to_string()],
+                vec!["/c".to_string(), "echo not-json-rpc& set /p x=".to_string()],
             )
         } else {
             (
                 "sh",
-                vec!["-c".to_string(), "echo not-json-rpc".to_string()],
+                vec!["-c".to_string(), "echo not-json-rpc; read x".to_string()],
             )
         };
         McpServerConfig {
