@@ -133,13 +133,16 @@ function securityClassification(input: Row): Classification {
 }
 
 /**
- * Append one entry to the audit hash chain: each entry_hash covers the previous one. Tamper-evident against
- * modification of entries that were recorded; does not by itself guarantee an entry was recorded for every
- * mutation (see the caveat on `MUTATING_STORE_ACTIONS` above — this runs in a transaction separate from the
- * data mutation it documents).
+ * Append one entry to the audit hash chain: each entry_hash covers the previous one. Runs inside the data
+ * mutation's own transaction (see `transaction` and `pendingAudit`), so a write and its audit entry commit or
+ * roll back together.
  */
 function appendAudit(db: Database, action: string, target: string | null, payload: Row): void {
   const agent = currentAgent()
+  // One value for both the hash input and the stored column. They used to disagree (`?? ''` hashed,
+  // `?? 'lead'` stored), so a role-less identity would have written an entry that `auditTrail` — which
+  // re-hashes the stored column — reports as a broken chain.
+  const role = agent.role ?? 'lead'
   const createdAt = new Date().toISOString()
   const payloadCopy = { ...payload }
   delete payloadCopy.storePath
@@ -147,11 +150,28 @@ function appendAudit(db: Database, action: string, target: string | null, payloa
   const previous = db.query('SELECT entry_hash FROM audit_log ORDER BY seq DESC LIMIT 1').get() as Row | null
   const prevHash = previous ? String(previous.entry_hash) : ''
   const id = randomUUID()
-  const entryHash = createHash('sha256').update([prevHash, id, action, agent.name, agent.role ?? '', target ?? '', payloadHash, createdAt].join('␟')).digest('hex')
+  const entryHash = auditEntryHash(prevHash, id, action, agent.name, role, target ?? '', payloadHash, createdAt)
   db.query('INSERT INTO audit_log (id, action, actor_name, actor_role, target, payload_hash, prev_hash, entry_hash, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)').run(
-    id, action, agent.name, agent.role ?? 'lead', target, payloadHash, prevHash, entryHash, createdAt,
+    id, action, agent.name, role, target, payloadHash, prevHash, entryHash, createdAt,
   )
 }
+
+function auditEntryHash(...parts: string[]): string {
+  return createHash('sha256').update(parts.join('␟')).digest('hex')
+}
+
+function auditTargetOf(result: unknown): string | null {
+  if (!result || typeof result !== 'object') return null
+  const row = result as Row
+  return (AUDIT_TARGET_KEYS.map((key) => row[key]).find((value) => typeof value === 'string') as string | undefined) ?? null
+}
+
+/**
+ * The audit entry owed by the mutating action currently running, if any. `executeBattmannStoreAction` sets it
+ * around a mutating handler; `transaction` appends it inside the handler's own transaction, just before COMMIT.
+ * Every call here is synchronous, so no other action can interleave while it is set.
+ */
+let pendingAudit: { action: string; input: Row; recorded: boolean } | undefined
 
 function storePath(input: Row): string {
   return resolveWorkspacePath(optionalText(input.storePath, 'storePath', 1_000) ?? DEFAULT_STORE_PATH)
@@ -453,6 +473,11 @@ function transaction<T>(db: Database, operation: () => T): T {
   db.exec('BEGIN IMMEDIATE')
   try {
     const result = operation()
+    if (pendingAudit && !pendingAudit.recorded) {
+      // Same transaction as the write it documents: either both commit or neither does.
+      appendAudit(db, pendingAudit.action, auditTargetOf(result), pendingAudit.input)
+      pendingAudit.recorded = true
+    }
     db.exec('COMMIT')
     return result
   } catch (error) {
@@ -1324,33 +1349,87 @@ function reconcileAuditGaps(db: Database): { table: string; missing: number; sam
   return gaps
 }
 
+/**
+ * How far the chain has been verified: the last entry that re-hashed correctly, and the hash it had then.
+ * Kept in the store so `audit_trail` can resume from it instead of re-reading the whole chain every call.
+ */
+const AUDIT_VERIFICATION_TABLE = `CREATE TABLE IF NOT EXISTS audit_verification (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  seq INTEGER NOT NULL,
+  entry_hash TEXT NOT NULL,
+  verified_at TEXT NOT NULL
+)`
+
+/**
+ * Read and verify the audit chain.
+ *
+ * It used to `SELECT *` the entire table and re-hash every entry on every call — O(total) time and memory, so
+ * the check got slower forever as the chain grew. Now it streams rows and, by default, verifies only the entries
+ * appended since the last successful verification. The resume point is trusted only if the entry it names still
+ * carries the hash it was verified with; otherwise (or with `fullVerify: true`) the whole chain is re-verified
+ * from the start, which is also when the legacy write/audit gap reconciliation runs.
+ */
 function auditTrail(input: Row): Row {
   const opened = openStore(input, false)
   if (!opened) return { storePath: storePath(input), entries: [], chainValid: true, auditGaps: [] }
+  const db = opened.db
   try {
     const limit = input.limit === undefined ? 200 : integer(input.limit, 'limit', 1, 10_000)
-    const all = opened.db.query('SELECT * FROM audit_log ORDER BY seq').all() as Row[]
+    db.exec(AUDIT_VERIFICATION_TABLE)
+
+    let fromSeq = 0
     let prevHash = ''
+    if (input.fullVerify !== true) {
+      const mark = db.query('SELECT seq, entry_hash FROM audit_verification WHERE id = 1').get() as Row | null
+      const anchor = mark ? (db.query('SELECT entry_hash FROM audit_log WHERE seq = ?').get(Number(mark.seq)) as Row | null) : null
+      if (mark && anchor && String(anchor.entry_hash) === String(mark.entry_hash)) {
+        fromSeq = Number(mark.seq)
+        prevHash = String(mark.entry_hash)
+      }
+    }
+    const mode = fromSeq > 0 ? 'incremental' : 'full'
+
     let chainValid = true
     let brokenAt: number | null = null
-    for (const row of all) {
-      const expected = createHash('sha256').update([prevHash, row.id, row.action, row.actor_name, row.actor_role ?? '', row.target ?? '', row.payload_hash, row.created_at].join('␟')).digest('hex')
-      if (expected !== String(row.entry_hash) || String(row.prev_hash) !== prevHash) { chainValid = false; brokenAt = brokenAt ?? Number(row.seq) }
+    let checked = 0
+    let verifiedSeq = fromSeq
+    let verifiedHash = prevHash
+    const rows = db.query('SELECT seq, id, action, actor_name, actor_role, target, payload_hash, prev_hash, entry_hash, created_at FROM audit_log WHERE seq > ? ORDER BY seq')
+    for (const row of rows.iterate(fromSeq) as IterableIterator<Row>) {
+      checked += 1
+      const expected = auditEntryHash(prevHash, String(row.id), String(row.action), String(row.actor_name), String(row.actor_role ?? ''), String(row.target ?? ''), String(row.payload_hash), String(row.created_at))
+      if (expected !== String(row.entry_hash) || String(row.prev_hash) !== prevHash) {
+        chainValid = false
+        brokenAt = brokenAt ?? Number(row.seq)
+      }
       prevHash = String(row.entry_hash)
+      if (chainValid) {
+        verifiedSeq = Number(row.seq)
+        verifiedHash = prevHash
+      }
     }
-    const entries = all.slice(-limit).map((row) => ({ seq: row.seq, action: row.action, actor: { name: row.actor_name, role: row.actor_role }, target: row.target, payloadHash: row.payload_hash, entryHash: row.entry_hash, recordedAt: row.created_at }))
-    // Periodic reconciliation: every time the audit trail is inspected, also check for the atomicity gap the
-    // two-transaction design (data write, then audit append) can leave behind. Surfaced both as a loud warning
-    // (matching the failed-append case in executeBattmannStoreAction) and in the returned payload so a caller
-    // can act on it programmatically instead of only a human reading logs.
-    const auditGaps = reconcileAuditGaps(opened.db)
+    // Only ever advance over entries that verified; a break stays in view on every later call.
+    if (verifiedSeq > fromSeq) {
+      db.query(`INSERT INTO audit_verification (id, seq, entry_hash, verified_at) VALUES (1, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET seq = excluded.seq, entry_hash = excluded.entry_hash, verified_at = excluded.verified_at`)
+        .run(verifiedSeq, verifiedHash, new Date().toISOString())
+    }
+
+    const totalEntries = Number((db.query('SELECT COUNT(*) AS n FROM audit_log').get() as Row).n)
+    const entries = (db.query('SELECT seq, action, actor_name, actor_role, target, payload_hash, entry_hash, created_at FROM audit_log ORDER BY seq DESC LIMIT ?').all(limit) as Row[])
+      .reverse()
+      .map((row) => ({ seq: row.seq, action: row.action, actor: { name: row.actor_name, role: row.actor_role }, target: row.target, payloadHash: row.payload_hash, entryHash: row.entry_hash, recordedAt: row.created_at }))
+
+    // Rows with no audit entry can only come from stores written before audit appends became atomic with the
+    // write, so this scan runs with full verification rather than on every call.
+    const auditGaps = mode === 'full' ? reconcileAuditGaps(db) : []
     if (auditGaps.length > 0) {
       console.warn(
         `[battmann] audit reconciliation found row(s) with no corresponding audit_log entry (write/audit atomicity gap): ${auditGaps.map((g) => `${g.table}: ${g.missing} missing (e.g. ${g.sampleIds.join(', ')})`).join('; ')}`,
       )
     }
-    return { storePath: opened.path, totalEntries: all.length, chainValid, brokenAt, entries, auditGaps }
-  } finally { opened.db.close() }
+    return { storePath: opened.path, totalEntries, chainValid, brokenAt, entries, auditGaps, verification: { mode, fromSeq, checked } }
+  } finally { db.close() }
 }
 
 // ---------------------------------------------------------------------------
@@ -1629,23 +1708,14 @@ export const BATTMANN_STORE_ACTIONS = [
 /**
  * Actions that write to the store; each success appends one entry to the audit hash chain.
  *
- * The data mutation and the audit append run as two separate transactions on two separate connections (see
- * `executeBattmannStoreAction` below). This is not incidental: each of the ~20 handler functions above (one per
- * mutating action) is self-contained — it opens its own connection via `withStore`, commits its own
- * `BEGIN IMMEDIATE`/`COMMIT` transaction, and closes — and that same `(input) => result` shape is shared with
- * every read-only action in `handlers`. Folding the audit append into that same transaction would mean threading
- * an externally-owned, not-yet-committed `db` handle through every one of those functions (and the dispatch
- * table's shared signature) instead of letting each manage its own connection — a wide structural change judged
- * out of scope for this fix. The hash chain is tamper-evident against modification of entries that were recorded
- * — `audit_trail`'s replay detects any edited `entry_hash`/`prev_hash` — but it does NOT guarantee that an entry
- * was recorded for every mutation: a crash between the two transactions leaves the data write persisted with no
- * corresponding audit row, and the chain itself has no way to detect that omission from the hashes alone. If the
- * audit append fails, the error is logged loudly (not silently swallowed) so an operator can investigate, but the
- * data write is not rolled back — a write must not fail merely because its audit row could not be appended.
- * Mitigation: `auditTrail`'s `audit_trail` action now also runs `reconcileAuditGaps` (below) on every call, which
- * scans for rows with no matching audit entry and surfaces them as `auditGaps` in the result plus a console
- * warning — turning "silently undetectable" into "detected whenever the chain is inspected," short of true
- * atomicity.
+ * The audit append is atomic with the write. Every mutating handler has the same shape —
+ * `withStore(input, true, (db) => transaction(db, () => { …write…; return result }))` — so
+ * `executeBattmannStoreAction` marks the entry as owed (`pendingAudit`) and `transaction` appends it on the
+ * handler's own connection just before COMMIT. A crash can no longer leave a committed write with no chain
+ * entry, and a failed append rolls the write back rather than leaving it unchained.
+ *
+ * (It used to be a second transaction on a second connection after the write had committed, which is why
+ * `reconcileAuditGaps` exists; that check is kept for stores written before this change.)
  */
 const MUTATING_STORE_ACTIONS = new Set<string>([
   'create_question', 'register_evidence', 'register_claim', 'review_claim', 'submit_forecast', 'resolve_question',
@@ -1701,22 +1771,18 @@ export function executeBattmannStoreAction(input: Row): string {
   }
   const handler = handlers[action]
   if (!handler) throw new Error(`unsupported Battmann store action: ${action}`)
-  const result = handler(input)
-  if (MUTATING_STORE_ACTIONS.has(action)) {
-    try {
-      const opened = openStore(input, false)
-      if (opened) {
-        try {
-          const target = AUDIT_TARGET_KEYS.map((key) => result[key]).find((value) => typeof value === 'string') as string | undefined
-          transaction(opened.db, () => appendAudit(opened.db, action, target ?? null, input))
-        } finally { opened.db.close() }
-      }
-    } catch (error) {
-      // The data mutation above already committed; a write must not fail because its audit row could not be
-      // appended. But silently swallowing this would leave the tamper-evident chain with an undetectable gap and
-      // no one the wiser, so it is surfaced loudly for an operator to notice and investigate.
-      console.error(`[battmann] failed to append audit entry for action "${action}" (data mutation already committed and is NOT rolled back):`, error)
-    }
+  if (!MUTATING_STORE_ACTIONS.has(action)) return JSON.stringify({ action, ...handler(input) }, null, 2)
+
+  // A mutating handler's audit entry is appended by `transaction` inside the handler's own transaction, so
+  // the write and its chain entry are atomic: a failed audit append rolls the write back with it.
+  const audit = { action, input, recorded: false }
+  pendingAudit = audit
+  try {
+    const result = handler(input)
+    // Every mutating handler runs through `transaction` today; this is the loud tripwire if one ever stops.
+    if (!audit.recorded) console.error(`[battmann] mutating action "${action}" did not run inside transaction(); no audit entry was recorded for it`)
+    return JSON.stringify({ action, ...result }, null, 2)
+  } finally {
+    pendingAudit = undefined
   }
-  return JSON.stringify({ action, ...result }, null, 2)
 }
