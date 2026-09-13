@@ -23,8 +23,8 @@ const MAX_COMMANDS = 64
 const MAX_BODY_CHARS = 20_000
 const MAX_NAME_LENGTH = 40
 
-function commandsDir(kind: 'project' | 'user', cwd = process.cwd()): string {
-  return kind === 'project' ? join(cwd, '.elia', 'commands') : join(homedir(), '.elia', 'commands')
+function commandsDir(kind: 'project' | 'user', cwd = process.cwd(), userHome = homedir()): string {
+  return kind === 'project' ? join(cwd, '.elia', 'commands') : join(userHome, '.elia', 'commands')
 }
 
 function parseFrontmatter(raw: string): { meta: Record<string, string>; body: string } {
@@ -87,10 +87,10 @@ function loadDir(dir: string, source: 'project' | 'user'): CustomCommand[] {
  * merged map in insertion order — every user command first — so with 64+ user
  * commands a project's own commands were the ones silently cut.
  */
-export function loadCustomCommands(cwd = process.cwd()): CustomCommand[] {
+export function loadCustomCommands(cwd = process.cwd(), userHome = homedir()): CustomCommand[] {
   const byName = new Map<string, CustomCommand>()
   for (const cmd of loadDir(commandsDir('project', cwd), 'project')) byName.set(cmd.name, cmd)
-  for (const cmd of loadDir(commandsDir('user', cwd), 'user')) if (!byName.has(cmd.name)) byName.set(cmd.name, cmd)
+  for (const cmd of loadDir(commandsDir('user', cwd, userHome), 'user')) if (!byName.has(cmd.name)) byName.set(cmd.name, cmd)
   return [...byName.values()].slice(0, MAX_COMMANDS).sort((a, b) => a.name.localeCompare(b.name))
 }
 

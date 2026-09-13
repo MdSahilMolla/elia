@@ -58,23 +58,17 @@ test('$10 and beyond expand to their own token, and argument text is never re-ex
 test('project commands win the command cap over a large user command set', () => {
   const cwd = scratch()
   const home = scratch()
-  const saved = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE }
-  try {
-    process.env.HOME = home
-    process.env.USERPROFILE = home
-    for (let i = 0; i < 70; i++) writeFileSync(join(home, '.elia', 'commands', `u${String(i).padStart(2, '0')}.md`), `user ${i}`)
-    writeFileSync(join(cwd, '.elia', 'commands', 'zz-project.md'), 'project only')
-    writeFileSync(join(cwd, '.elia', 'commands', 'u05.md'), 'project override')
-    const cmds = loadCustomCommands(cwd)
-    expect(cmds).toHaveLength(64)
-    expect(cmds.find((c) => c.name === '/zz-project')?.source).toBe('project')
-    expect(cmds.find((c) => c.name === '/u05')?.body).toBe('project override')
-  } finally {
-    for (const [key, value] of Object.entries(saved)) {
-      if (value === undefined) delete process.env[key]
-      else process.env[key] = value
-    }
-  }
+  // The home directory is passed in rather than faked through `process.env.HOME`:
+  // the loader resolves it with `os.homedir()`, which does not re-read `$HOME`
+  // per call on Linux, so the env-var version of this test found zero user
+  // commands there and passed only on Windows.
+  for (let i = 0; i < 70; i++) writeFileSync(join(home, '.elia', 'commands', `u${String(i).padStart(2, '0')}.md`), `user ${i}`)
+  writeFileSync(join(cwd, '.elia', 'commands', 'zz-project.md'), 'project only')
+  writeFileSync(join(cwd, '.elia', 'commands', 'u05.md'), 'project override')
+  const cmds = loadCustomCommands(cwd, home)
+  expect(cmds).toHaveLength(64)
+  expect(cmds.find((c) => c.name === '/zz-project')?.source).toBe('project')
+  expect(cmds.find((c) => c.name === '/u05')?.body).toBe('project override')
 })
 
 test('invalid filenames are skipped', () => {
