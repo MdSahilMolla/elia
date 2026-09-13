@@ -21,10 +21,10 @@ func TestMatchGlob(t *testing.T) {
 		{"sub/*.ts", "sub/a.ts", "a.ts", true},
 		{"sub/*.ts", "a.ts", "a.ts", false},
 		// Hostile / malformed patterns: must return false, never panic.
-		{"[", "a.ts", "a.ts", false},        // unclosed bracket
-		{"{", "a.ts", "a.ts", false},        // unclosed brace
-		{"{a,b", "a.ts", "a.ts", false},     // unclosed brace alternation
-		{"**/", "a.ts", "a.ts", false},      // empty suffix after globstar
+		{"[", "a.ts", "a.ts", false},           // unclosed bracket
+		{"{", "a.ts", "a.ts", false},           // unclosed brace
+		{"{a,b", "a.ts", "a.ts", false},        // unclosed brace alternation
+		{"**/", "a.ts", "a.ts", false},         // empty suffix after globstar
 		{"**/**/x", "a/b/c.ts", "c.ts", false}, // double globstar, no match
 	}
 	for _, c := range cases {
