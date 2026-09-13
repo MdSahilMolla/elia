@@ -3,6 +3,7 @@ import { isIP } from 'node:net'
 import { join } from 'node:path'
 import type { Tool } from './types.ts'
 import { captureBeforeWrite } from '../checkpoint.ts'
+import { appendSecureFile } from '../securePersistence.ts'
 import { redactSecrets } from '../ui/redact.ts'
 import { currentAgent } from '../autonomy/context.ts'
 import { engagementDir } from './engagement.ts'
@@ -70,6 +71,36 @@ export function hostInScope(hostname: string, scopeHosts: string[]): boolean {
   return false
 }
 
+/**
+ * Reads a response body down to a snippet cap and reports whether it was cut
+ * short. Reading the whole body (`response.text()`) for a recon capture made a
+ * 2 GB download allocate in memory before a single line was returned; this
+ * stops after the first chunk that crosses the cap and cancels the stream.
+ */
+async function readBodySnippet(stream: ReadableStream<Uint8Array> | null, limit: number): Promise<{ text: string; truncated: boolean }> {
+  if (!stream) return { text: '', truncated: false }
+  const reader = stream.getReader()
+  const decoder = new TextDecoder()
+  let output = ''
+  let totalLength = 0
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      const chunk = decoder.decode(value, { stream: true })
+      totalLength += chunk.length
+      if (output.length < limit) output += chunk.slice(0, limit - output.length)
+      if (totalLength > limit) {
+        await reader.cancel().catch(() => undefined)
+        break
+      }
+    }
+  } finally {
+    reader.releaseLock()
+  }
+  return { text: output, truncated: totalLength > limit }
+}
+
 export const httpProbeTool: Tool = {
   name: 'http_probe',
   description:
@@ -134,6 +165,7 @@ export const httpProbeTool: Tool = {
     let status: number
     let responseHeaders: Record<string, string> = {}
     let responseSnippet = ''
+    let truncated = false
     let error: string | undefined
     try {
       const response = await fetch(url, {
@@ -145,8 +177,9 @@ export const httpProbeTool: Tool = {
       })
       status = response.status
       responseHeaders = Object.fromEntries(response.headers.entries())
-      const text = await response.text()
-      responseSnippet = text.slice(0, MAX_RESPONSE_SNIPPET)
+      const snippet = await readBodySnippet(response.body, MAX_RESPONSE_SNIPPET)
+      responseSnippet = snippet.text
+      truncated = snippet.truncated || responseSnippet.length >= MAX_RESPONSE_SNIPPET
     } catch (caught) {
       status = 0
       error = caught instanceof Error ? caught.message : String(caught)
@@ -162,14 +195,17 @@ export const httpProbeTool: Tool = {
       status,
       responseHeaders,
       responseBodySnippet: responseSnippet,
-      truncated: responseSnippet.length >= MAX_RESPONSE_SNIPPET,
+      truncated,
       elapsedMs,
       ...(error ? { error } : {}),
     }
     const trafficPath = join(dir, 'recon', 'traffic.jsonl')
     await captureBeforeWrite(trafficPath)
-    const existing = existsSync(trafficPath) ? await Bun.file(trafficPath).text() : ''
-    await Bun.write(trafficPath, `${existing}${redactSecrets(JSON.stringify(record))}\n`)
+    // Append-only on an O_APPEND handle rather than read-modify-rewrite: two
+    // probes in flight used to race on the read/`Bun.write` pair and the loser
+    // silently dropped the other's entry (last writer wins). `appendFileSync`
+    // keeps every concurrent record.
+    appendSecureFile(trafficPath, `${redactSecrets(JSON.stringify(record))}\n`)
 
     if (error) return `Request failed after ${elapsedMs}ms: ${error}\nLogged to recon/traffic.jsonl`
     return redactSecrets(

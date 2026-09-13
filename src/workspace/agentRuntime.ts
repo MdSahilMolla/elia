@@ -97,6 +97,7 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<voi
 
   let busy = false
   let stopped = false
+  let stopping = false
   let pendingClaim = false
   let agentId = ''
   // The AbortController for whichever job is currently running, so a server-side
@@ -115,6 +116,7 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<voi
       if (event.type === 'AgentStopped' && isThisAgent) {
         currentJobAbort?.abort()
         stopped = true
+        stopping = true
         controller.abort()
       } else if (event.type === 'AgentStateChanged' && isThisAgent && (event.payload.status === 'paused' || event.payload.status === 'cancelled')) {
         // Pause interrupts the current job but leaves the runtime connected —
@@ -125,6 +127,7 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<voi
     },
     onClose: () => {
       stopped = true
+      stopping = true
       controller.abort()
     },
   })
@@ -134,13 +137,14 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<voi
   writeNotice(`agent ${client.hello?.caller.name} runtime attached as ${agentId}`)
 
   async function claimNext(): Promise<void> {
-    if (busy || stopped) {
+    if (stopping || busy || stopped) {
       pendingClaim = true
       return
     }
     busy = true
     try {
       const claim = await client.call<{ task: TaskRecord | null; pack: ContextPack; repoRoot: string }>('agent.claim', {})
+      if (stopping) return
       if (!claim.task) {
         options.onIdle?.()
         return
@@ -150,7 +154,7 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<voi
       writeNotice(`agent claim failed: ${error instanceof Error ? error.message : String(error)}`)
     } finally {
       busy = false
-      if (pendingClaim && !stopped) {
+      if (pendingClaim && !stopping && !stopped) {
         pendingClaim = false
         // In `once` mode the caller (below) closes the client right after the
         // first `claimNext()` resolves. Re-invoking here would start a second
@@ -206,6 +210,10 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<voi
 
   await claimNext()
   if (options.once) {
+    // No re-entry after this point: `stopping` makes any claim-in-progress
+    // give up immediately and blocks the event/poll re-entry path from
+    // starting a second task against a closing client.
+    stopping = true
     clearInterval(poll)
     client.close()
     return
@@ -213,6 +221,7 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<voi
 
   await new Promise<void>((resolve) => {
     const finish = () => {
+      stopping = true
       clearInterval(poll)
       client.close()
       resolve()

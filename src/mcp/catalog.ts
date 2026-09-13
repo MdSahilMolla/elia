@@ -198,8 +198,7 @@ const CONNECTORS: CatalogEntry[] = [
     name: 'Linear',
     description: 'Issues, projects, and cycles in Linear.',
     kind: 'connector',
-    url: 'https://mcp.linear.app/sse',
-    transport: 'sse',
+    url: 'https://mcp.linear.app',
     headers: [{ key: 'Authorization', description: 'a Linear API key', example: 'Bearer lin_api_xxx' }],
     homepage: 'https://linear.app/docs/mcp',
   },
@@ -291,7 +290,10 @@ export async function searchOfficialRegistry(query: string, limit = 20): Promise
     const data = (await response.json()) as { servers?: RegistryServer[] }
     const out: CatalogEntry[] = []
     for (const server of data.servers ?? []) {
-      const remote = server.remotes?.find((r) => r.url)
+      // Only Streamable-HTTP remotes are connectable — the client refuses the
+      // legacy SSE transport (see McpHttpClient) and stdio, so advertising those
+      // just hands the user a connector that fails at construct.
+      const remote = server.remotes?.find((r) => r.url && r.transport_type !== 'sse' && r.transport_type !== 'stdio')
       const pkg = server.packages?.find((p) => p.name)
       const shortName = server.name.split('/').pop() ?? server.name
       const id = `reg-${shortName.replace(/[^a-z0-9_-]/gi, '-').toLowerCase()}`.slice(0, 48)
@@ -302,7 +304,7 @@ export async function searchOfficialRegistry(query: string, limit = 20): Promise
           description: server.description ?? 'from the official MCP registry',
           kind: 'connector',
           url: remote.url,
-          transport: remote.transport_type === 'sse' ? 'sse' : 'http',
+          transport: 'http',
           homepage: server.repository?.url,
         })
       } else if (pkg?.name && (pkg.registry_name === 'npm' || pkg.runtime_hint === 'npx' || !pkg.registry_name)) {

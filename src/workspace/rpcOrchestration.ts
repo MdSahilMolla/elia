@@ -139,7 +139,18 @@ export async function dispatchOrchestrationRpc(
       const role = reqStr(params, 'role', 40)
       if (!isRoleName(role)) throw new RpcError('role must be a valid worker role')
       const dependsOn = Array.isArray(params.dependsOn) ? params.dependsOn.map(String) : []
-      for (const dep of dependsOn) if (!store.task(dep)) throw new RpcError(`dependsOn references unknown task ${dep}`)
+      for (const dep of dependsOn) {
+        const depTask = store.task(dep)
+        if (!depTask) throw new RpcError(`dependsOn references unknown task ${dep}`)
+        // A task may only block on work inside the same objective. A
+        // cross-objective dependency makes the dependent permanently
+        // `pending`: the orchestrator only releases tasks within one
+        // objective's wave, so the foreign dependency is never observed as
+        // done. Reject it explicitly rather than letting it strand forever.
+        if (depTask.objectiveId !== objectiveId) {
+          throw new RpcError(`dependsOn must reference a task in the same objective (${dep} belongs to ${depTask.objectiveId})`)
+        }
+      }
       const id = `tsk_${randomUUID().replaceAll('-', '').slice(0, 20)}`
       store.append({
         type: 'TaskCreated',

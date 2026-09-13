@@ -171,9 +171,28 @@ function verifyBrowserResult(result: BrowserResult | string, request: BrowserReq
   if (request.expectText && !text.toLowerCase().includes(request.expectText.toLowerCase())) throw new Error(`post-action verification failed: expected text not found: ${request.expectText}`)
   if (request.expectUrl) {
     const url = extractUrl(result)
-    if (!url || !(url === request.expectUrl || url.startsWith(request.expectUrl))) throw new Error(`post-action verification failed: expected URL ${request.expectUrl}, observed ${url ?? '(none)'}`)
+    if (!url || !expectUrlMatches(url, request.expectUrl)) throw new Error(`post-action verification failed: expected URL ${request.expectUrl}, observed ${url ?? '(none)'}`)
   }
   return result
+}
+
+/**
+ * A plain `observed.startsWith(expected)` passes a hostile look-alike host:
+ * `https://example.com.evil.net/x` starts with `https://example.com`, so a
+ * verification against the real site would silently accept the look-alike.
+ * Parse both and require equal origin, then a same-origin prefix — the shape
+ * an expected URL constrains ("the page under this path").
+ */
+function expectUrlMatches(observed: string, expected: string): boolean {
+  let observedUrl: URL
+  let expectedUrl: URL
+  try {
+    observedUrl = new URL(observed)
+    expectedUrl = new URL(expected)
+  } catch {
+    return observed === expected || observed.startsWith(expected)
+  }
+  return observedUrl.origin === expectedUrl.origin && observedUrl.href.startsWith(expectedUrl.href)
 }
 
 function extractUrl(result: BrowserResult | string): string | undefined {
@@ -301,7 +320,7 @@ async function callCdp(endpoint: string, request: BrowserRequest): Promise<Brows
           })
           if (keyUp.error) throw new Error(keyUp.error ?? 'browser key-up failed')
         }
-        resolve({ ok: true, result: final.result ?? {} })
+        resolve({ ok: true, result: unwrapCdpEvaluateValue(final) })
       } catch (error) {
         reject(error instanceof Error ? error : new Error(String(error)))
       } finally {
@@ -362,6 +381,23 @@ function cdpRequest(
       reject(error instanceof Error ? error : new Error(String(error)))
     }
   })
+}
+
+/**
+ * A CDP `Runtime.evaluate` reply wraps the value the page script returned
+ * inside a RemoteObject: `final.result.result.value`. Returning the whole cage
+ * meant `extractUrl`/`verifyBrowserResult`/`formatBrowserResult` never saw the
+ * `url`, `title`, or `text` they were promised — every `status`/`snapshot`
+ * observation came back empty. Unwrap the value when present and leave the
+ * shape alone for commands whose result carries no RemoteObject.
+ */
+function unwrapCdpEvaluateValue(final: BrowserResult): unknown {
+  const raw = final.result as Record<string, unknown> | undefined
+  if (raw && typeof raw === 'object' && 'result' in raw) {
+    const remote = raw.result as Record<string, unknown> | undefined
+    if (remote && typeof remote === 'object' && 'value' in remote) return remote.value
+  }
+  return final.result ?? {}
 }
 
 async function cdpCommandFor(request: BrowserRequest): Promise<{ method: string; params: Record<string, unknown> }> {

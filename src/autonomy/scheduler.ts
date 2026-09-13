@@ -35,6 +35,8 @@ export interface ScheduleRecord {
   lastOutcome?: AutonomousRunResult['outcome']
   lastError?: string
   leaseExpiresAt?: number
+  /** PID of the process that claimed the lease, for the liveness probe before reclaim. */
+  leaseOwnerPid?: number
 }
 
 interface ScheduleSnapshot {
@@ -97,6 +99,7 @@ export class ScheduleStore {
           lastOutcome: typeof raw.lastOutcome === 'string' ? raw.lastOutcome as AutonomousRunResult['outcome'] : undefined,
           lastError: typeof raw.lastError === 'string' ? redactText(raw.lastError, 2000) : undefined,
           leaseExpiresAt: Number.isFinite(raw.leaseExpiresAt) ? raw.leaseExpiresAt : undefined,
+          leaseOwnerPid: Number.isFinite(raw.leaseOwnerPid) ? raw.leaseOwnerPid : undefined,
         })
       }
     } catch {
@@ -149,6 +152,7 @@ export class ScheduleStore {
       const record = this.require(id)
       record.status = 'paused'
       record.leaseExpiresAt = undefined
+      record.leaseOwnerPid = undefined
       record.updatedAt = Date.now()
       this.persist()
       return structuredClone(record)
@@ -162,6 +166,7 @@ export class ScheduleStore {
       record.status = 'active'
       record.nextRunAt = Math.min(record.nextRunAt, now)
       record.leaseExpiresAt = undefined
+      record.leaseOwnerPid = undefined
       record.updatedAt = now
       this.persist()
       return structuredClone(record)
@@ -190,6 +195,7 @@ export class ScheduleStore {
       if (record.status !== 'active' || record.nextRunAt > now) throw new Error(`schedule ${id} is not due`)
       record.status = 'running'
       record.leaseExpiresAt = now + (record.maxRunMs ?? 30 * 60_000) + LEASE_BUFFER_MS
+      record.leaseOwnerPid = process.pid
       record.updatedAt = now
       this.persist()
       return structuredClone(record)
@@ -209,9 +215,30 @@ export class ScheduleStore {
       record.lastError = result.error ? redactText(result.error, 2000) : undefined
       record.failureCount += result.outcome === 'completed' ? 0 : 1
       record.leaseExpiresAt = undefined
+      record.leaseOwnerPid = undefined
       this.persist()
       return structuredClone(record)
     })
+  }
+
+  /**
+   * Whether a process (the lease owner recorded at claim time) is still alive.
+   * `process.kill(pid, 0)` is the portable existence probe: it signals nothing
+   * and only checks that a process with that id exists. `ESRCH` means it is
+   * gone; `EPERM` means it exists but belongs to another user (still alive).
+   * An unknown owner (a schedule claimed by an older version, or parsed from a
+   * file written before the probe existed) is treated as alive so reclaim never
+   * races a live run we simply cannot identify.
+   */
+  private ownerAlive(record: ScheduleRecord): boolean {
+    const pid = record.leaseOwnerPid
+    if (pid === undefined || !Number.isInteger(pid) || pid <= 0) return true
+    try {
+      process.kill(pid, 0)
+      return true
+    } catch (error) {
+      return (error as NodeJS.ErrnoException).code === 'EPERM'
+    }
   }
 
   recoverExpired(now = Date.now()): ScheduleRecord[] {
@@ -219,13 +246,14 @@ export class ScheduleStore {
       this.reloadFromDisk()
       const recovered: ScheduleRecord[] = []
       for (const record of this.records.values()) {
-        if (record.status === 'running' && record.leaseExpiresAt !== undefined && record.leaseExpiresAt <= now) {
+        if (record.status === 'running' && record.leaseExpiresAt !== undefined && record.leaseExpiresAt <= now && !this.ownerAlive(record)) {
           record.status = 'active'
           record.nextRunAt = now
           record.updatedAt = now
           record.failureCount += 1
           record.lastError = 'scheduler lease expired; the previous run may have been interrupted'
           record.leaseExpiresAt = undefined
+          record.leaseOwnerPid = undefined
           recovered.push(structuredClone(record))
         }
       }

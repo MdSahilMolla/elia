@@ -145,8 +145,8 @@ try {
       throw error
     }
     const usage = response.usage
-    if (![usage.inputTokens, usage.outputTokens, usage.cacheReadTokens, usage.cacheWriteTokens].every(n => Number.isFinite(n) && n >= 0)
-      || usage.inputTokens + usage.outputTokens + usage.cacheReadTokens === 0) throw new Error('Missing usable provider usage; budget cannot be tracked')
+    if (![usage.inputTokens, usage.outputTokens, usage.cacheReadTokens ?? 0, usage.cacheWriteTokens ?? 0].every(n => Number.isFinite(n) && n >= 0)
+      || usage.inputTokens + usage.outputTokens + (usage.cacheReadTokens ?? 0) === 0) throw new Error('Missing usable provider usage; budget cannot be tracked')
     chargedUpperEstimate += cost(usage) - requestReserve
     modelCalls++
     record('model_call', { model, usage, elapsedMs: performance.now() - started, chargedUpperEstimate })

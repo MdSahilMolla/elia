@@ -208,7 +208,19 @@ export class McpClient implements McpTransport {
         }
       }
     } finally {
-      this.onTransportEnded(`MCP server "${this.name}" closed its stdout`)
+      // A crash is diagnosed from its stderr tail. When the server dies its
+      // pipes close together, and stdout's EOF can land before the stderr loop
+      // finishes draining — if we report "closed its stdout" at that instant,
+      // the diagnosis is lost and pending calls reject with the unhelpful EOF
+      // reason. Give the stderr loop a bounded instant to finish (it ends at
+      // the same process death) so its richer reason wins when there is one.
+      const stderrSettle = Promise.race([this.stderrLoop, new Promise((resolve) => setTimeout(resolve, 100))])
+      await stderrSettle.catch(() => {})
+      this.onTransportEnded(
+        this.stderrTail
+          ? `MCP server "${this.name}" exited unexpectedly: ${this.stderrTail.trim()}`
+          : `MCP server "${this.name}" closed its stdout`,
+      )
     }
   }
 

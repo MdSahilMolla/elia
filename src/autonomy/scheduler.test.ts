@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { mkdtempSync } from 'node:fs'
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { formatScheduleInterval, MIN_SCHEDULE_INTERVAL_MS, parseScheduleInterval, ScheduleStore } from './scheduler.ts'
@@ -26,16 +26,28 @@ describe('durable scheduler', () => {
     expect(ScheduleStore.open(path).list()[0]).toMatchObject({ runCount: 1, lastRunId: 'run-1', lastOutcome: 'completed' })
   })
 
-  test('recovers an expired lease as due work instead of duplicating a running action', () => {
+  test('recovers an expired lease only when its owning process is gone, so a live overrun is never re-run', () => {
     const path = join(mkdtempSync(join(tmpdir(), 'elia-schedule-')), 'schedules.json')
     const store = ScheduleStore.open(path)
     const created = store.create({ title: 'Recover me', goal: 'Read the local report', intervalMs: MIN_SCHEDULE_INTERVAL_MS, maxRunMs: 1, now: 1_000 })
     store.claim(created.id, created.nextRunAt)
     expect(store.due(62_000)).toHaveLength(0)
-    const recovered = store.recoverExpired(200_000)
+
+    // The lease is expired, but the owning process (this test) is still running:
+    // reclaiming now would duplicate a run that is genuinely still in flight.
+    expect(store.recoverExpired(200_000)).toHaveLength(0)
+    expect(store.list()[0]?.status).toBe('running')
+
+    // Once the owner is gone (simulate a dead pid in the persisted lease),
+    // the expired lease comes back as due work instead of lingering forever.
+    const raw = JSON.parse(readFileSync(path, 'utf8')) as { schedules: { leaseOwnerPid?: number }[] }
+    raw.schedules[0]!.leaseOwnerPid = 2_147_483_647
+    writeFileSync(path, JSON.stringify(raw))
+    const reloaded = ScheduleStore.open(path, false)
+    const recovered = reloaded.recoverExpired(200_000)
     expect(recovered).toHaveLength(1)
     expect(recovered[0]).toMatchObject({ status: 'active', nextRunAt: 200_000, failureCount: 1 })
-    expect(store.due(200_000)).toHaveLength(1)
+    expect(reloaded.due(200_000)).toHaveLength(1)
   })
 
   test('pause and resume provide an explicit operator control plane', () => {

@@ -1218,8 +1218,11 @@ function stageDeployment(input: Row): Row {
     // loadBattmannReportData from the actual classification of the evidence/claims embedded in the report. The gate
     // uses the stricter of the two: the computed value as the real bound, the self-reported label only as a floor
     // in case it claims a higher sensitivity than what was computed (e.g. an older sidecar without the field).
-    const contentClassification = bundle.contentClassification ?? 'internal'
-    const documentClassification = bundle.documentClassification ?? 'internal'
+    // Both are validated against the known levels *before* ranking — classificationRank coerces an unrecognized
+    // string to 0 ('public'), so an unvalidated garbage label would silently under-gate and pass a report the
+    // real level should have stopped.
+    const contentClassification = oneOf(bundle.contentClassification ?? 'internal', 'contentClassification', CLASSIFICATION_LEVELS)
+    const documentClassification = oneOf(bundle.documentClassification ?? 'internal', 'documentClassification', CLASSIFICATION_LEVELS)
     const reportClassification = classificationRank(documentClassification) > classificationRank(contentClassification) ? documentClassification : contentClassification
     if (classificationRank(reportClassification) > classificationRank(target.max_classification)) throw new Error(`report is classified ${reportClassification}; target ${targetId} accepts at most ${target.max_classification}`)
     const formats: string[] = parseJson(target.formats_json, [])

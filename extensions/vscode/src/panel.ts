@@ -123,6 +123,7 @@ export class EliaPanel {
     const configuredProvider = this.configuredProvider()
     const vercelSelected = configuredProvider === 'netlify' ? '' : ' selected'
     const netlifySelected = configuredProvider === 'netlify' ? ' selected' : ''
+    const showThinking = vscode.workspace.getConfiguration('elia').get<boolean>('showThinking', true)
     return `<!doctype html>
 <html lang="en">
 <head>
@@ -195,7 +196,7 @@ window.addEventListener('message', ({ data }) => {
     if (event === 'bridge_started') { status.textContent = 'Connected'; return; }
     if (event === 'bridge_exit' || event === 'bridge_error') { status.textContent = 'Disconnected'; add('error', 'Bridge', safeText(payload.message)); return; }
     if (event === 'assistant_delta') { if (!assistantNode) assistantNode = add('assistant', 'Elia', ''); assistantNode.textContent += safeText(payload.text); messages.scrollTop = messages.scrollHeight; return; }
-    if (event === 'thinking_delta') { if (!${JSON.stringify(false)}) return; add('tool', 'Reasoning', safeText(payload.text)); return; }
+    if (event === 'thinking_delta') { if (!${showThinking}) return; add('tool', 'Reasoning', safeText(payload.text)); return; }
     if (event === 'chat_started') { status.textContent = 'Working…'; return; }
     if (event === 'chat_finished') { status.textContent = 'Ready'; assistantNode = null; return; }
     if (event === 'tool_finished') { add(payload.isError ? 'error' : 'tool', 'Tool · ' + safeText(payload.name), safeText(payload.result)); return; }

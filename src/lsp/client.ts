@@ -1,7 +1,7 @@
 import type { PipedSubprocess } from 'bun'
 import { pathToFileURL } from 'node:url'
 import { LSP_CLIENT_INFO, type CodeAction, type CodeActionContext, type Command, type Diagnostic, type PublishDiagnosticsParams, type Range, type WorkspaceEdit } from './protocol.ts'
-import { terminateProcessGroup } from '../shell.ts'
+import { terminateProcessGroup, readBoundedOutput } from '../shell.ts'
 
 const CONNECT_TIMEOUT_MS = 20_000
 const REQUEST_TIMEOUT_MS = 15_000
@@ -61,6 +61,10 @@ export class LspClient {
     this.pump().catch(() => {
       // A dead read loop just means every pending/future call now times out and
       // rejects on its own.
+    })
+    this.drainStderr().catch(() => {
+      // Stderr is best-effort; a language server that fills the pipe would
+      // block on its next write, so it is drained regardless of content.
     })
 
     await this.request(
@@ -263,6 +267,20 @@ export class LspClient {
       const stillPending = [...this.pending.values()]
       this.pending.clear()
       for (const pending of stillPending) pending.reject(new Error(`LSP server "${this.languageId}" closed its stdout`))
+    }
+  }
+
+  /**
+   * Consumes stderr (bounded) so a chatty server can't fill the OS pipe and
+   * block on its own writes while the client waits for a response on stdout —
+   * the two sides starve each other. Content is never surfaced; it's log strays.
+   */
+  private async drainStderr(): Promise<void> {
+    if (!this.proc) return
+    try {
+      await readBoundedOutput(this.proc.stderr, 64 * 1024)
+    } catch {
+      // The pipe closed or read failed — nothing further to do.
     }
   }
 

@@ -39,6 +39,11 @@ pub enum ExecStop {
 }
 
 const MAX_CAPTURE_BYTES: usize = 2_000_000;
+/// Memory bound on a single physical line: `minified.js`, `git diff` of a big
+/// file, or `type` of a huge one-line dump are each read whole by
+/// `read_line`; without a cap a single over-large line outgrows every
+/// accumulated-payload budget.
+const MAX_LINE_BYTES: usize = 1_000_000;
 
 /// How long a per-cwd shell worker may sit idle before the periodic reaper in
 /// `server.rs` kills it. Distinct from the whole-daemon idle watchdog in
@@ -128,6 +133,15 @@ impl ShellPool {
         timeout_ms: u64,
         cancel: oneshot::Receiver<()>,
     ) -> Result<std::result::Result<ExecOutcome, ExecStop>> {
+        // `cwd` is interpolated into the framing script verbatim (quoted on both
+        // platforms, but a closing quote still ends the framing prematurely and
+        // lets later path text become commands — not a privilege escalation, the
+        // caller already controls `command`, but a framing corruption that must
+        // not reach the shell). Reject the breaking characters up front and tell
+        // the caller instead of corrupting the frame.
+        if cwd.contains('"') || cwd.contains('\'') || cwd.contains('\n') || cwd.contains('\r') {
+            return Err(anyhow!("cwd contains characters unsafe to frame into the shell script"));
+        }
         let key = canonical_key(cwd);
         let slots = {
             let mut map = self.by_cwd.lock().await;
@@ -341,20 +355,18 @@ where
     let mut seen_begin = false;
     let mut payload = String::new();
     let mut exit_code = 0i32;
-    let mut line = String::new();
     loop {
-        line.clear();
-        let n = reader
-            .read_line(&mut line)
-            .await
-            .context("reading shell output")?;
-        if n == 0 {
-            return Ok(MarkerRead {
-                payload,
-                exit_code,
-                hit_eof: true,
-            });
-        }
+        let line = match read_bounded_line(reader).await {
+            Ok(Some(line)) => line,
+            Ok(None) => {
+                return Ok(MarkerRead {
+                    payload,
+                    exit_code,
+                    hit_eof: true,
+                })
+            }
+            Err(err) => return Err(err),
+        };
         let trimmed = line.trim_end_matches(['\r', '\n']);
         if !seen_begin {
             if trimmed.contains(begin) {
@@ -379,6 +391,68 @@ where
         }
         if payload.len() < MAX_CAPTURE_BYTES {
             payload.push_str(&line);
+        }
+    }
+}
+
+/// Read one line, bounded: at most `MAX_LINE_BYTES` bytes are accumulated; once
+/// that cap is hit the rest of the physical line is drained and discarded so the
+/// next read starts at the following `\n`. Without this, `read_line` allocates a
+/// whole huge line (`type` of a one-line dump, minified JS) with no ceiling.
+/// Returns `Ok(None)` at EOF.
+async fn read_bounded_line<R>(reader: &mut R) -> Result<Option<String>>
+where
+    R: AsyncBufReadExt + Unpin,
+{
+    let mut line = Vec::new();
+    loop {
+        let chunk = reader.fill_buf().await.context("reading shell output")?;
+        if chunk.is_empty() {
+            return Ok(if line.is_empty() { None } else { Some(String::from_utf8_lossy(&line).into_owned()) });
+        }
+        match chunk.iter().position(|&b| b == b'\n') {
+            Some(nl) => {
+                line.extend_from_slice(&chunk[..nl]);
+                reader.consume(nl + 1);
+                return Ok(Some(String::from_utf8_lossy(&line).into_owned()));
+            }
+            None => {
+                let take = chunk.len();
+                let room = MAX_LINE_BYTES.saturating_sub(line.len());
+                let to_keep = take.min(room);
+                line.extend_from_slice(&chunk[..to_keep]);
+                reader.consume(take);
+                if line.len() >= MAX_LINE_BYTES {
+                    // Physical line exceeds the cap: drain to its end without
+                    // keeping any more bytes, so framing stays intact.
+                    drain_to_newline(reader).await?;
+                    return Ok(Some(String::from_utf8_lossy(&line).into_owned()));
+                }
+            }
+        }
+    }
+}
+
+/// Discard bytes up to (and including) the next `\n`, so the caller next reads
+/// from the start of a fresh physical line.
+async fn drain_to_newline<R>(reader: &mut R) -> Result<()>
+where
+    R: AsyncBufReadExt + Unpin,
+{
+    loop {
+        let chunk = reader.fill_buf().await.context("reading shell output")?;
+        if chunk.is_empty() {
+            return Ok(());
+        }
+        match chunk.iter().position(|&b| b == b'\n') {
+            Some(nl) => {
+                reader.consume(nl + 1);
+                return Ok(());
+            }
+            None => {
+                let n = chunk.len();
+                reader.consume(n);
+            }
         }
     }
 }
@@ -501,6 +575,25 @@ mod tests {
         run(&pool, "echo one").await;
         run(&pool, "echo two").await;
         assert_eq!(pool.worker_count().await, 1);
+    }
+
+    #[tokio::test]
+    async fn rejects_cwd_that_cannot_be_framed_safely() {
+        let pool = ShellPool::new();
+        for bad in ["a\"b", "a'b", "a\nb", "a\rb"] {
+            let (_tx, rx) = oneshot::channel();
+            let res = pool.exec("echo hi", bad, 20_000, rx).await;
+            let err = match res {
+                Err(e) => e,
+                _ => panic!("bad cwd {:?} must be rejected before spawn", bad),
+            };
+            assert!(
+                err.to_string().contains("unsafe to frame"),
+                "unexpected error for cwd {:?}: {err}",
+                bad
+            );
+        }
+        assert_eq!(pool.worker_count().await, 0, "no worker should spawn");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

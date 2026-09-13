@@ -71,7 +71,7 @@ test('an unattended run with nobody to ask keeps the project local instead of pu
   expect(calls.some((call) => call.startsWith('gh repo create'))).toBe(false)
 })
 
-test('one approval creates a private repository, pushes it, and files the plan as issues under milestones', async () => {
+test('an authorized run creates a private repository, pushes it, and files the plan as issues under milestones', async () => {
   const calls = stubExec([
     { match: /^git remote get-url/, result: fail('no such remote') },
     { match: /^gh repo view/, result: ok('https://github.com/someone/project') },
@@ -87,7 +87,9 @@ test('one approval creates a private repository, pushes it, and files the plan a
 
   const result = await publishProject({ cwd: '/tmp/project', proposal, governor })
 
-  expect(asked).toBe(1)
+  // Each outbound intent kind is asked once: repo_create, milestone_create,
+  // issue_create — a silent auto-allow was the M-2 finding, not the intent.
+  expect(asked).toBe(3)
   expect(result.status).toBe('created')
   expect(result.url).toBe('https://github.com/someone/project')
   // Two stages: s1, then s2 and s3 together.
@@ -109,7 +111,10 @@ test('an existing remote is pushed to rather than a second repository being crea
     { match: /^gh repo view/, result: ok('https://github.com/someone/project') },
   ])
 
-  const result = await publishProject({ cwd: '/tmp/project', proposal, governor: createActionGovernor({ mode: 'unattended' }) })
+  // Pushing to an existing remote is an outbound intent: with an approval
+  // channel it is asked once and proceeds, rather than riding in on the
+  // unattended review-band auto-allow (M-2).
+  const result = await publishProject({ cwd: '/tmp/project', proposal, governor: createActionGovernor({ mode: 'unattended', approve: async () => true }) })
 
   expect(result.status).toBe('pushed')
   expect(calls.some((call) => call.startsWith('gh repo create'))).toBe(false)
@@ -122,7 +127,7 @@ test('a failed push is reported rather than being reported as a successful publi
     { match: /^git push/, result: fail('rejected: non-fast-forward') },
   ])
 
-  const result = await publishProject({ cwd: '/tmp/project', proposal, governor: createActionGovernor({ mode: 'unattended' }) })
+  const result = await publishProject({ cwd: '/tmp/project', proposal, governor: createActionGovernor({ mode: 'unattended', approve: async () => true }) })
 
   expect(result.status).toBe('skipped')
   expect(result.warnings.join(' ')).toContain('non-fast-forward')
@@ -134,7 +139,7 @@ test('a milestone that already exists is reused instead of being reported as a f
     { match: /milestones/, result: fail('HTTP 422: Validation Failed (already_exists)') },
   ])
 
-  const result = await publishProject({ cwd: '/tmp/project', proposal, governor: createActionGovernor({ mode: 'unattended' }) })
+  const result = await publishProject({ cwd: '/tmp/project', proposal, governor: createActionGovernor({ mode: 'unattended', approve: async () => true }) })
 
   expect(result.milestones).toBe(0)
   expect(result.issues).toBe(3)

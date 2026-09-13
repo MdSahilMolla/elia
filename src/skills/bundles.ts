@@ -86,6 +86,25 @@ export function expandSkillSelection(selected: readonly string[] | undefined, pa
   return expanded
 }
 
+export interface SkillBundleListResult {
+  bundles: SkillBundle[]
+  error?: string
+}
+
+/**
+ * Safe boundary variant of {@link listSkillBundles} for surfaces that must not
+ * crash on a user's malformed bundles file — the VS Code bridge reply and the
+ * `elia skills bundles` CLI. Degrades to "no bundles" and surfaces the reason
+ * as a warning instead of throwing into the caller's error path.
+ */
+export function tryListSkillBundles(path = SKILL_BUNDLES_FILE): SkillBundleListResult {
+  try {
+    return { bundles: listSkillBundles(path) }
+  } catch (error) {
+    return { bundles: [], error: error instanceof Error ? error.message : String(error) }
+  }
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }

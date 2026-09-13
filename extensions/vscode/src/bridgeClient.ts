@@ -67,14 +67,28 @@ export class EliaBridgeClient extends EventEmitter {
         env: { ...process.env, ELIA_UI_MODE: 'json', NO_COLOR: '1' },
         stdio: ['pipe', 'pipe', 'pipe'],
         windowsHide: true,
+        ...(launch.shell ? { shell: launch.shell } : {}),
       })
       this.child = child
+      // Capture the rejection path *locally*: `this.started` is already assigned
+      // (this promise) before any child event can fire, so a handler that checks
+      // `!this.started` would never reject and `start()` would hang forever on a
+      // failed spawn (ENOENT for a missing elia, or a killed bridge).
+      let settled = false
+      const settleReject = (error: Error): void => {
+        if (settled) return
+        settled = true
+        this.started = undefined
+        reject(error)
+      }
       child.once('error', (error) => {
         this.rejectAll(error instanceof Error ? error : new Error(String(error)))
-        if (!this.started) reject(error)
+        settleReject(error instanceof Error ? error : new Error(String(error)))
         this.emitEvent('bridge_error', { message: error.message })
       })
       child.once('spawn', () => {
+        if (settled) return
+        settled = true
         resolve()
         this.emitEvent('bridge_started', { command: launch.command, args: launch.args })
       })
@@ -82,6 +96,10 @@ export class EliaBridgeClient extends EventEmitter {
         this.child = undefined
         this.stdout?.close()
         this.stdout = undefined
+        // Without reset, `request()` after an unexpected exit throws
+        // "stdin is not writable" forever and the extension needs a reload to
+        // recover. Clearing `started` lets the next `start()` relaunch.
+        this.started = undefined
         const detail = `Elia bridge exited${code === null ? ` by ${signal ?? 'signal'}` : ` with code ${code}`}`
         this.emitEvent('bridge_exit', { code, signal, message: detail })
         this.rejectAll(new Error(detail))
@@ -166,14 +184,19 @@ export class EliaBridgeClient extends EventEmitter {
     this.pending.clear()
   }
 
-  private launchCommand(): { command: string; args: string[] } {
+private launchCommand(): { command: string; args: string[]; shell: boolean } {
     const configured = this.options.cliPath.trim() || 'elia'
     const looksLikeTypeScript = configured.endsWith('.ts') || configured.endsWith('.mts')
     if (looksLikeTypeScript) {
-      if (this.options.runtime === 'node') return { command: 'node', args: [configured, 'bridge', '--json'] }
-      return { command: 'bun', args: [configured, 'bridge', '--json'] }
+      if (this.options.runtime === 'node') return { command: 'node', args: [configured, 'bridge', '--json'], shell: false }
+      return { command: 'bun', args: [configured, 'bridge', '--json'], shell: false }
     }
-    return { command: configured, args: ['bridge', '--json'] }
+    // A bare `elia` resolves on Windows only via `elia.cmd`/`elia.ps1` shims
+    // that `spawn` cannot launch without a shell. Only short-circuit through a
+    // shell here; an expanded CLI path with explicit `.exe` works natively.
+    const isWindowsBare = process.platform === 'win32' && !configured.toLowerCase().endsWith('.exe')
+    if (isWindowsBare) return { command: configured, args: ['bridge', '--json'], shell: true }
+    return { command: configured, args: ['bridge', '--json'], shell: false }
   }
 }
 

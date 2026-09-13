@@ -120,7 +120,16 @@ impl McpSupervisor {
                     map.insert(config.name.clone(), Arc::new(handle));
                 }
                 Err(err) => {
-                    map.remove(&config.name);
+                    // A reconfigured server whose new process failed its
+                    // handshake must NOT drop the previous handle: `map.remove`
+                    // here would release the last Arc and Drop would `start_kill`
+                    // a server that is still healthy and whose tools still work
+                    // through `call`. Only replacement on success lets go of the
+                    // old one. Keep it running, report the failure, and surface
+                    // the tools it still serves.
+                    if let Some(existing) = map.get(&config.name) {
+                        tools.extend(existing.tools.iter().cloned());
+                    }
                     failed.push(McpFailure {
                         server: config.name.clone(),
                         reason: err.to_string(),
@@ -376,5 +385,38 @@ mod tests {
         assert_eq!(result.tools.len(), 0);
         assert_eq!(result.failed.len(), 1);
         assert_eq!(result.failed[0].server, "nope");
+    }
+
+    #[tokio::test]
+    async fn a_failed_reconfigure_keeps_the_previous_healthy_server() {
+        let Some(config) = echo_fixture() else {
+            eprintln!("skipping: bun or the echo fixture is unavailable");
+            return;
+        };
+        let supervisor = McpSupervisor::new();
+
+        let ok = supervisor.ensure(vec![config.clone()]).await;
+        assert!(ok.failed.is_empty(), "unexpected startup failures: {}", ok.failed.len());
+
+        // Reconfigure the environment so the fingerprint changes, then point
+        // the server at an unstartable command. The handshake fails, but the
+        // previously healthy process must keep serving tools.
+        let mut broken = config.clone();
+        broken.env.insert("CHANGED".into(), "true".into());
+        broken.command = "definitely-not-a-real-binary-xyz".into();
+
+        let reconfigured = supervisor.ensure(vec![broken]).await;
+        assert_eq!(reconfigured.failed.len(), 1);
+        assert_eq!(reconfigured.failed[0].server, config.name);
+        assert_eq!(reconfigured.tools.len(), 2, "old tools still served");
+
+        let echoed = supervisor
+            .call(&config.name, "echo", json!({ "text": "still-alive" }))
+            .await
+            .expect("old process is still serving");
+        assert!(serde_json::to_string(&echoed)
+            .unwrap()
+            .contains("still-alive"));
+        assert_eq!(supervisor.server_count().await, 1);
     }
 }

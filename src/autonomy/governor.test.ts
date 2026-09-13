@@ -252,21 +252,53 @@ describe('autonomy governor', () => {
     expect(injected.decision).toBe('approve')
   })
 
-  test('deployment workflows keep preview reviewable and production critical', async () => {
-    const preview = await createActionGovernor({ mode: 'unattended' }).check({
+  test('deployment workflows keep preview approval-gated in unattended mode, and production critical', async () => {
+    const unattended = createActionGovernor({ mode: 'unattended' })
+    const preview = await unattended.check({
       name: 'deployment',
       input: { action: 'deploy', provider: 'vercel', target: 'preview' },
     })
-    expect(preview.allowed).toBe(true)
+    // A preview deployment publishes an external build artifact — with nobody
+    // to ask, it must not silently auto-pass on the review band either.
+    expect(preview.allowed).toBe(false)
     expect(preview.assessment.intent).toBe('deployment.preview')
+    expect(preview.message).toContain('No approval channel is available')
 
-    const production = await createActionGovernor({ mode: 'unattended' }).check({
+    // With an approval channel attached it is asked once, review-band style.
+    const asked: string[] = []
+    const withApprover = createActionGovernor({
+      mode: 'unattended',
+      approve: async (assessment) => {
+        asked.push(assessment.intent)
+        return true
+      },
+    })
+    const acked = await withApprover.check({
+      name: 'deployment',
+      input: { action: 'deploy', provider: 'vercel', target: 'preview' },
+    })
+    expect(acked.allowed).toBe(true)
+    expect(asked).toEqual(['deployment.preview'])
+
+    const production = await unattended.check({
       name: 'deployment',
       input: { action: 'deploy', provider: 'vercel', target: 'production' },
     })
     expect(production.allowed).toBe(false)
     expect(production.assessment.risk).toBe('critical')
     expect(production.message).toContain('unattended policy')
+  })
+
+  test('github publish intents need an approver in unattended mode even though they are review-band', async () => {
+    const governor = createActionGovernor({ mode: 'unattended' })
+    const push = await governor.check({ name: 'github', input: { action: 'push' } })
+    expect(push.allowed).toBe(false)
+    expect(push.message).toContain('No approval channel is available')
+    expect(push.assessment.intent).toBe('github.push')
+
+    const prCreate = await governor.check({ name: 'github', input: { action: 'pr_create', title: 'x' } })
+    expect(prCreate.allowed).toBe(false)
+    expect(prCreate.assessment.intent).toBe('github.pr_create')
   })
 })
 

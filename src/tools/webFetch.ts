@@ -35,6 +35,10 @@ export const webFetchTool: Tool = {
     const controller = new AbortController()
     const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS)
     try {
+      // DNS can rebind between the policy validation above and socket connect;
+      // re-resolve and re-validate at the last moment, immediately before the
+      // request, so a flourishing private-address answer cannot be reached.
+      await assertPublicNetworkUrl(url)
       const response = await fetch(url, { redirect: 'manual', signal: controller.signal, headers: { 'User-Agent': 'elia-agent/0.1' } })
       if (response.status >= 300 && response.status < 400) throw new Error(`web_fetch refused redirect response: ${response.status}`)
       if (!response.ok) throw new Error(`web_fetch failed: ${response.status} ${response.statusText}`)

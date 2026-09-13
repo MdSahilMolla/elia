@@ -40,6 +40,8 @@ export interface DependencyHints {
   isVulnerable?: boolean
   deprecated?: boolean
   deprecationMessage?: string
+  /** Where the hint actually came from (a local advisory file, an installed audit binary, the manifest) — evidence names the true provenance instead of a generic placeholder. */
+  source?: string
 }
 
 /** Version ranges considered unpinned / volatile. */
@@ -79,12 +81,12 @@ export function analyzeDependency(
   if (hints.isVulnerable) {
     dimensions.push({ name: 'severity', weight: 0.25, score: 100, description: 'Known vulnerability reported for this package.' })
     dimensions.push({ name: 'exposure', weight: 0.15, score: 90, description: 'Vulnerable dependency is reachable from the project manifest.' })
-    evidence.push(makeEvidence({ kind: 'test_result', description: 'Vulnerability flag from local audit data', location: dep.name }))
+    evidence.push(makeEvidence({ kind: 'test_result', description: 'Vulnerability flag from local audit data', location: hints.source ?? dep.name }))
   }
   if (hints.deprecated) {
     dimensions.push({ name: 'severity', weight: 0.25, score: 70, description: 'Package is deprecated upstream.' })
     deprecationMessage = hints.deprecationMessage ?? 'Package is deprecated'
-    evidence.push(makeEvidence({ kind: 'source_location', description: 'Deprecation marker in manifest context', location: dep.name }))
+    evidence.push(makeEvidence({ kind: 'source_location', description: 'Deprecation marker reported by source', location: hints.source ?? dep.name }))
   }
   if (dep.range && isVolatileRange(dep.range)) {
     dimensions.push({ name: 'recurrence', weight: 0.05, score: 60, description: `Volatile range "${dep.range}" — build is not reproducible.` })
@@ -92,7 +94,7 @@ export function analyzeDependency(
   }
   if (hints.latestVersion && dep.currentVersion !== hints.latestVersion && compareVersions(dep.currentVersion, hints.latestVersion)) {
     dimensions.push({ name: 'recurrence', weight: 0.05, score: 45, description: `Declared version ${dep.currentVersion} behind latest ${hints.latestVersion}.` })
-    evidence.push(makeEvidence({ kind: 'test_result', description: 'Outdated version hint from registry data', location: dep.name }))
+    evidence.push(makeEvidence({ kind: 'test_result', description: 'Outdated version hint from source data', location: hints.source ?? dep.name }))
   }
 
   if (dimensions.length === 0) {
@@ -191,10 +193,10 @@ export interface ParsedNodeDep {
   range: string
 }
 
-export function parsePackageJson(content: string): ParsedNodeDep[] {
+export function parsePackageJson(content: string, includeDev = true): ParsedNodeDep[] {
   try {
     const pkg = JSON.parse(content)
-    const declared: Record<string, string> = { ...pkg.dependencies, ...pkg.devDependencies }
+    const declared: Record<string, string> = { ...pkg.dependencies, ...(includeDev ? pkg.devDependencies : {}) }
     return Object.entries(declared).map(([name, range]) => {
       const spec = typeof range === 'string' ? range : String(range)
       const { version } = splitSpec(spec)
@@ -237,13 +239,13 @@ export const dependencyAuditTool: Tool = {
 
     const pkgPath = join(fullCwd, 'package.json')
     if (!existsSync(pkgPath)) return 'No package.json found.'
-    const deps = parsePackageJson(readFileSync(pkgPath, 'utf-8'))
+    const deps = parsePackageJson(readFileSync(pkgPath, 'utf-8'), input.includeDev !== false)
     if (deps.length === 0) return 'No dependencies found in package.json.'
 
     const nodeModules = join(fullCwd, 'node_modules')
     const infos = deps.map((dep) => {
       const installed = existsSync(join(nodeModules, dep.name))
-      const info = analyzeDependency(dep, {})
+      const info = analyzeDependency(dep, { source: 'package.json' })
       return { ...info, isInstalled: installed } as DependencyInfo
     })
 

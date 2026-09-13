@@ -4,7 +4,7 @@ import { currentAgent, isPathWithinWorkspace } from './context.ts'
 import { commandMayReadSensitiveData } from './sensitivePaths.ts'
 import { pauseToolSpinner, resumeToolSpinner } from '../ui/stream.ts'
 import { applyPolicy } from './policy.ts'
-import { addAllowRule, isAllowlisted, ruleFor, type AllowScope } from './allowStore.ts'
+import { addAllowRule, canPersistPrefixRule, isAllowlisted, ruleFor, type AllowScope } from './allowStore.ts'
 import { consumePreauth, currentBranch, isPreauthorized } from './preauth.ts'
 
 export type ActionRisk = 'safe' | 'review' | 'critical'
@@ -459,6 +459,24 @@ export function assessAction(request: ActionRequest, cwd = currentAgent().cwd ??
  */
 const SETTLEABLE_ONCE = new Set(['shell', 'shell.composed', 'shell.unknown', 'github.repo_create'])
 
+/**
+ * Review-band intents that still publish to or mutate state beyond this project
+ * and a shared remote. Unattended mode auto-allows the whole review band by
+ * design (local, reversible work get a standing "yes"); these are the exceptions
+ * — pushing to origin, opening a PR, creating issues/milestones on the remote,
+ * or publishing a preview deployment sends something out where other people or
+ * systems see it, and no silent auto-allow is a recorded authorization for that.
+ * They fall through to the approval/refusal path: refused when no approver is
+ * attached, asked once per run (and remembered) when one is.
+ */
+const OUTBOUND_REVIEW_INTENTS = new Set([
+  'github.push',
+  'github.pr_create',
+  'github.issue_create',
+  'github.milestone_create',
+  'deployment.preview',
+])
+
 export function createActionGovernor(options: { mode?: GovernanceMode; approve?: ActionApproval; cwd?: string; maxActions?: number } = {}): ActionGovernor {
   const mode = options.mode ?? 'unattended'
   const cwd = options.cwd ?? process.cwd()
@@ -566,7 +584,7 @@ export function createActionGovernor(options: { mode?: GovernanceMode; approve?:
           message: `Action blocked by Elia’s unattended policy: ${assessment.reason}. No terminal is attached, so there is nobody to ask.`,
         }
       }
-      if (assessment.risk === 'review' && mode === 'unattended') {
+      if (assessment.risk === 'review' && mode === 'unattended' && !OUTBOUND_REVIEW_INTENTS.has(assessment.intent)) {
         actionCount += 1
         return { allowed: true, assessment: { ...assessment, decision: 'allow' } }
       }
@@ -620,12 +638,15 @@ export function createActionGovernor(options: { mode?: GovernanceMode; approve?:
         const feedback = typeof outcome === 'object' ? outcome.feedback : undefined
         if (mode === 'unattended') classDecisions.set(decisionKey, approved)
         if (approved && remember === 'session') sessionAllow.add(sessionKey(request, assessment))
-        if (approved && (remember === 'project' || remember === 'global')) {
+        if (approved && (remember === 'project' || remember === 'global') && canPersistPrefixRule(request)) {
           try {
             addAllowRule(ruleFor(request, assessment), remember, options.cwd)
           } catch {
             // A write failure (read-only fs, permissions) must not block the
             // action the user just approved — it just won't be remembered.
+            // A command chained with shell control syntax is never persisted
+            // at all (canPersistPrefixRule): a `bun` prefix must not come to
+            // stand for `bun run x & curl …`.
           }
         }
         if (approved) {

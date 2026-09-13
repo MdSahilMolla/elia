@@ -172,3 +172,41 @@ jobs:
         run: |
           bun test src/goindex/ --timeout=20000 --retry=2
           bun test src/tools/tools.test.ts src/tools/ignoreDirs.test.ts --timeout=20000 --retry=2
+
+  # The VS Code extension (`extensions/vscode`): its own tsconfig, its own
+  # dependency set (pnpm), and its own runtime contract — `bridgeClient` spawns a
+  # bridge subprocess that Windows shims only resolve through a shell. None of
+  # that is exercised by `verify`, which typechecks `src/`, so the bridge client,
+  # panel webview, and tree providers shipped unverified. This job is the
+  # guardrail for exactly those bug classes (M-35..M-38).
+  extension:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+      - name: Install extension dependencies
+        working-directory: extensions/vscode
+        run: pnpm install --frozen-lockfile
+      - name: Typecheck extension
+        working-directory: extensions/vscode
+        run: pnpm exec tsc --noEmit -p tsconfig.json
+      - name: Package extension (--ignore-scripts, no lifecycle)
+        working-directory: extensions/vscode
+        run: pnpm exec vsce package --ignore-scripts --skip-license --out /tmp/elia-vscode.vsix
+      - name: Bridge spawn contract re-derived from source
+        shell: bash
+        working-directory: extensions/vscode
+        run: |
+          bun -e "const src = await Bun.file('src/bridgeClient.ts').text(); const win = src.includes(\"shell: true\") && src.includes('process.platform === ' + String.fromCharCode(39) + 'win32' + String.fromCharCode(39)); if (!win) { console.error('expected a win32 shell:true spawn path for bare elia'); process.exit(1); } console.log('bridge spawn contract present');"
