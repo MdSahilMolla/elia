@@ -120,7 +120,12 @@ impl McpSupervisor {
                     map.insert(config.name.clone(), Arc::new(handle));
                 }
                 Err(err) => {
-                    map.remove(&config.name);
+                    // A failed reconfigure must not tear down a server that was
+                    // already running fine under its old config — leave `map`
+                    // untouched and keep reporting the still-live tools.
+                    if let Some(existing) = map.get(&config.name) {
+                        tools.extend(existing.tools.iter().cloned());
+                    }
                     failed.push(McpFailure {
                         server: config.name.clone(),
                         reason: err.to_string(),
@@ -376,5 +381,37 @@ mod tests {
         assert_eq!(result.tools.len(), 0);
         assert_eq!(result.failed.len(), 1);
         assert_eq!(result.failed[0].server, "nope");
+    }
+
+    #[tokio::test]
+    async fn a_failed_reconfigure_keeps_the_previous_server_alive() {
+        let Some(config) = echo_fixture() else {
+            eprintln!("skipping: bun or the echo fixture is unavailable");
+            return;
+        };
+        let supervisor = McpSupervisor::new();
+
+        let started = supervisor.ensure(vec![config.clone()]).await;
+        assert!(started.failed.is_empty());
+        assert_eq!(supervisor.server_count().await, 1);
+
+        // Same name, different fingerprint (bogus command), so `ensure` tries
+        // to replace the running handle and fails.
+        let mut broken = config.clone();
+        broken.command = "definitely-not-a-real-binary-xyz".into();
+        let result = supervisor.ensure(vec![broken]).await;
+
+        assert_eq!(result.failed.len(), 1, "the reconfigure should be reported as failed");
+        assert_eq!(supervisor.server_count().await, 1, "the old server must still be running");
+        assert_eq!(result.tools.len(), 2, "the still-live server's tools are still reported");
+
+        // The old process is still the one actually serving calls.
+        let echoed = supervisor
+            .call("echofix", "echo", json!({ "text": "still-alive" }))
+            .await
+            .expect("call ok");
+        assert!(serde_json::to_string(&echoed)
+            .unwrap()
+            .contains("still-alive"));
     }
 }
