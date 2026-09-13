@@ -29,7 +29,6 @@
     "netlify"
   ],
   "activationEvents": [
-    "onStartupFinished",
     "onView:elia.tasks",
     "onView:elia.skills",
     "onView:elia.runs",

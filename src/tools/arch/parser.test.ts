@@ -124,6 +124,62 @@ describe('parser', () => {
     expect(files.length).toBe(2)
   })
 })
+// Each `import()` sits under a node kind the native `forEachChild` does not
+// fully enumerate, so the walk only reaches it through KIND_CHILDREN (L-35, I-11).
+const HIDDEN_DYNAMIC_IMPORTS = `
+export const tpl = \`\${await import('./in-template')}\`
+export const tagged = tag\`\${import('./in-tagged-template')}\`
+export const cond = flag ? import('./in-conditional-true') : import('./in-conditional-false')
+export function* gen() { yield import('./in-yield') }
+export function withDefault(m = import('./in-parameter-default')) { return m }
+export class Holder { static mod = import('./in-class-field') }
+export const computed = { [String(import('./in-computed-key'))]: 1 }
+export const { destructured = import('./in-binding-default') } = {} as { destructured?: unknown }
+export let counter = 0
+export const post = (counter++, import('./in-comma'))
+label: for (const x of [import('./in-labeled')]) break label
+declare const flag: boolean
+declare function tag(s: TemplateStringsArray, ...v: unknown[]): unknown
+`
+
+describe('parser: dynamic imports in nested expression kinds', () => {
+  const root = normalizePath(mkdtempSync(join(tmpdir(), 'arch-parser-hidden')))
+  let handle: { api: API; snapshot: Snapshot; program: Program } | undefined
+
+  beforeAll(async () => {
+    createFixture(root, { 'src/hidden.ts': HIDDEN_DYNAMIC_IMPORTS })
+    handle = await openProject({ projectRoot: root, tsconfigPath: normalizePath(join(root, 'tsconfig.json')), includeTests: true, maxFiles: 50 })
+  })
+
+  afterAll(async () => {
+    try {
+      if (handle) await closeProject(handle)
+    } finally {
+      cleanupFixture(root)
+    }
+  })
+
+  it('finds every dynamic import, wherever it is nested', async () => {
+    const { files } = await parseProject(handle!.program, { projectRoot: root, tsconfigPath: normalizePath(join(root, 'tsconfig.json')), includeTests: true, maxFiles: 50 })
+    const hidden = files.find((f) => f.path.endsWith('src/hidden.ts'))
+    expect(hidden).toBeDefined()
+    const dynamic = hidden!.imports.filter((i) => i.kind === 'dynamic').map((i) => i.specifier).sort()
+    expect(dynamic).toEqual([
+      './in-binding-default',
+      './in-class-field',
+      './in-comma',
+      './in-computed-key',
+      './in-conditional-false',
+      './in-conditional-true',
+      './in-labeled',
+      './in-parameter-default',
+      './in-tagged-template',
+      './in-template',
+      './in-yield',
+    ])
+  })
+})
+
 describe('parser transport', () => {
   // The regression this file's async rewrite exists for. `typescript/unstable/sync`
   // drives the compiler through a `SyncRpcChannel`, which reads
