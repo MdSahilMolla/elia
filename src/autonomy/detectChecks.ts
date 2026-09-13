@@ -122,6 +122,22 @@ export function changedCodeFiles(paths: string[]): string[] {
   return paths.filter((path) => CODE_EXT.test(path))
 }
 
+/**
+ * The project whose checks verify a turn's code changes, or undefined when the
+ * turn changed no code or no project owns it.
+ *
+ * Only the code files decide it. A turn's other writes — a README, a review
+ * report a sub-agent dropped somewhere odd — carry no checks, yet one of them
+ * outside the project used to split `checkRoot` across two roots, and the turn
+ * was reported "not inside a project" with a package.json sitting right next
+ * to the code. Seen live: a Vite app in workspace/kolkata-nav went unverified
+ * because two review sub-agents had written `.lia/*.txt` at the repo root.
+ */
+export function verificationRoot(changedPaths: string[], repoRoot = process.cwd()): string | undefined {
+  const code = changedCodeFiles(changedPaths)
+  return code.length > 0 ? checkRoot(code, repoRoot) : undefined
+}
+
 interface PackageJson {
   scripts?: Record<string, string>
   packageManager?: string

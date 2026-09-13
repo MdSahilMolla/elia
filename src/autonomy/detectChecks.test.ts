@@ -2,7 +2,7 @@ import { afterEach, beforeEach, expect, test } from 'bun:test'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { changedCodeFiles, changedStaticPages, checkRoot, classifyRegime, detectChecks, weakestRegime } from './detectChecks.ts'
+import { changedCodeFiles, changedStaticPages, checkRoot, classifyRegime, detectChecks, verificationRoot, weakestRegime } from './detectChecks.ts'
 
 let dir: string
 beforeEach(() => {
@@ -145,6 +145,26 @@ test('checkRoot still prefers a scaffolded sub-project that has its own manifest
   const file = join(app, 'index.ts')
   writeFileSync(file, 'export const a = 1')
   expect(checkRoot([file], root)).toBe(app)
+})
+
+// Seen live: two review sub-agents wrote `.lia/*.txt` at the repo root while
+// the turn built a Vite app under workspace/, and the stray reports split the
+// root — the app went unverified as "not inside a project".
+test('verificationRoot ignores non-code writes outside the project that owns the code', () => {
+  const root = mkdtempSync(join(tmpdir(), 'elia-verifyroot-'))
+  writeFileSync(join(root, 'package.json'), JSON.stringify({ name: 'host', scripts: { test: 'bun test src/' } }))
+  const app = join(root, 'workspace', 'kolkata-nav')
+  mkdirSync(join(app, 'src'), { recursive: true })
+  writeFileSync(join(app, 'package.json'), JSON.stringify({ name: 'kolkata-nav', scripts: { build: 'tsc && vite build' } }))
+  const changed = [join(app, 'src', 'App.tsx'), join(app, 'README.md'), join(root, '.lia', 'critic-review.txt')]
+  expect(checkRoot(changed, root)).toBeUndefined()
+  expect(verificationRoot(changed, root)).toBe(app)
+})
+
+test('verificationRoot is undefined when the turn changed no code', () => {
+  const root = mkdtempSync(join(tmpdir(), 'elia-verifyroot-'))
+  writeFileSync(join(root, 'package.json'), JSON.stringify({ name: 'host' }))
+  expect(verificationRoot([join(root, 'README.md'), join(root, 'site', 'index.html')], root)).toBeUndefined()
 })
 
 test('changedStaticPages picks out the HTML a turn wrote', () => {

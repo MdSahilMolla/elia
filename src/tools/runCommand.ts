@@ -2,7 +2,7 @@ import type { Tool } from './types.ts'
 import { DEFAULT_SHELL_TIMEOUT_MS, formatShellResult, isLongRunningServerCommand, runShell, shellCommandAlternative, type ShellResult } from '../shell.ts'
 import { existsSync, readdirSync } from 'node:fs'
 import { delimiter, isAbsolute, join, relative } from 'node:path'
-import { currentAgent, resolveWorkspacePath } from '../autonomy/context.ts'
+import { currentAgent, resolveProjectPath } from '../autonomy/context.ts'
 import { paths } from '../config.ts'
 import { commandMayReadSensitiveData } from '../autonomy/sensitivePaths.ts'
 import { detectMissingPackage, installCommandFor, isInstallCommand } from '../autonomy/autoInstall.ts'
@@ -91,14 +91,12 @@ function nodeModulesPopulated(cwd: string): boolean {
  * tried first under the scratch workspace (where the model is told to build
  * standalone projects) and then under the repo root, so `run_command
  * cwd:"my-app"` lands in the project it just created rather than elia's own
- * root — the mismatch behind "npm run dev started elia again".
+ * root — the mismatch behind "npm run dev started elia again". The same rule
+ * `preview` uses, so the two tools never disagree about where "my-app" is.
  */
 export function resolveRunCwd(rawCwd: string, base = currentAgent().cwd ?? process.cwd()): string {
   if (!rawCwd) return base
-  if (isAbsolute(rawCwd)) return resolveWorkspacePath(rawCwd)
-  const underWorkspace = join(paths.workspace, rawCwd)
-  if (existsSync(underWorkspace)) return resolveWorkspacePath(underWorkspace)
-  return resolveWorkspacePath(rawCwd, base)
+  return resolveProjectPath(rawCwd, base)
 }
 
 /** Exported so the default can be unit-tested without spawning a real install. */

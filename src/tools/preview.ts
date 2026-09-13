@@ -1,10 +1,11 @@
 import { existsSync, statSync } from 'node:fs'
-import { basename, dirname, relative } from 'node:path'
+import { basename, dirname, join, relative } from 'node:path'
 import type { Tool } from './types.ts'
 import { ensurePreviewServer } from '../preview/server.ts'
 import { launchInBrowser } from '../preview/launchChrome.ts'
+import { checkRendered } from '../preview/readiness.ts'
 import { findProject, pickBuildOutput } from '../preview/project.ts'
-import { resolveWorkspacePath } from '../autonomy/context.ts'
+import { resolveProjectPath } from '../autonomy/context.ts'
 import { paths } from '../config.ts'
 import { runShell } from '../shell.ts'
 import { activeActionGovernor } from '../autonomy/governor.ts'
@@ -14,11 +15,11 @@ const BUILD_TIMEOUT_MS = 240_000
 export const previewTool: Tool = {
   name: 'preview',
   description:
-    'Open something visually in a real Chrome window. Pass `path` for a file under the workspace (served locally with push-based live-reload). If the file belongs to a project that needs a build (Vite, Next, etc.), preview runs its `build` script first and serves the output — so you never have to start a dev server. Pass `url` instead for an already-running server, opened directly.',
+    'Open something visually in a real Chrome window. Pass `path` for a file under the workspace (served locally with push-based live-reload). If the file belongs to a project that needs a build (Vite, Next, etc.), preview runs its `build` script first and serves the output — so you never have to start a dev server. Pass `url` instead for an already-running server, opened directly. For a `path`, preview fetches the page before opening it and fails with the reason if it would not render (missing file, HTTP error, blank or unbuilt page), so a successful result means the page really loads.',
   input_schema: {
     type: 'object',
     properties: {
-      path: { type: 'string', description: 'Path relative to the workspace, e.g. "airbnb-mvp/index.html"' },
+      path: { type: 'string', description: 'Path relative to the workspace, e.g. "airbnb-mvp/index.html", or the absolute path write_file reported' },
       url: { type: 'string', description: 'An already-running URL to open directly, e.g. "http://localhost:3000"' },
       build: { type: 'boolean', description: 'Force (true) or skip (false) the build step. Default: auto — build when the project has a bundler and a build script.' },
     },
@@ -47,8 +48,14 @@ export const previewTool: Tool = {
     // (e.g. a bare directory path) fell back to workspace/index.html — a
     // different project's leftover page — which is exactly the "preview shows
     // the wrong thing" bug. Each preview now sees only its own files.
-    const resolvedTarget = resolveWorkspacePath(path!)
-    const targetIsDir = existsSync(resolvedTarget) && statSync(resolvedTarget).isDirectory()
+    const resolvedTarget = resolveProjectPath(path!)
+    // Serving a path that does not exist used to create it (the server mkdirs
+    // its root), answer every request with 404, and still report "Opened … in
+    // Chrome" — the model then told the user the page was up.
+    if (!existsSync(resolvedTarget)) {
+      throw new Error(`Nothing to preview: ${path} does not exist (looked for ${resolvedTarget}). Nothing was opened. Pass the exact path write_file reported, or create the file first.`)
+    }
+    const targetIsDir = statSync(resolvedTarget).isDirectory()
     let serveRoot = targetIsDir ? resolvedTarget : dirname(resolvedTarget)
     let servePath = targetIsDir ? 'index.html' : basename(resolvedTarget)
     let note = ''
@@ -74,8 +81,19 @@ export const previewTool: Tool = {
       }
     }
 
+    const servedFile = join(serveRoot, servePath)
+    if (!existsSync(servedFile)) {
+      throw new Error(`Nothing to preview: ${servedFile} does not exist${targetIsDir ? ` — ${path} is a folder with no index.html; pass the HTML file to open` : ''}. Nothing was opened.`)
+    }
+
     const server = ensurePreviewServer(serveRoot)
     const target = `${server.baseUrl}/${servePath.replace(/^\/+/, '').split('/').map(encodeURIComponent).join('/')}`
-    return `${(await launchInBrowser(target)).message}${note}`
+    // Load the page before claiming it is up: "Opened … in Chrome" must mean the
+    // user is looking at the page, not at a 404 or a blank screen.
+    const rendered = await checkRendered(target)
+    if (!rendered.ok) {
+      throw new Error(`Preview would not render ${servedFile}: ${rendered.reason} (at ${target}). Nothing was opened — fix the page, then preview again.`)
+    }
+    return `${(await launchInBrowser(target)).message}${note}\nServing ${servedFile}`
   },
 }

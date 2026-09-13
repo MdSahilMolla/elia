@@ -2223,6 +2223,8 @@ async function runInteractive(): Promise<void> {
     let stopRequested = false
     // Skip the post-turn auto-preview when the model already opened one itself.
     let previewedThisTurn = false
+    // …but keep the page it opened, so the render check still verifies the turn.
+    let previewedUrl: string | undefined
     // Signals for the per-turn outcome record (competence map + regret nudge).
     let toolErrorCount = 0
     let editRetryCount = 0
@@ -2282,7 +2284,10 @@ async function runInteractive(): Promise<void> {
         onTool: (event) => {
           const action = event.isError ? `Retrying after ${event.name}` : event.name
           toolTrace.push({ name: event.name, ok: !event.isError })
-          if (event.name === 'preview' && !event.isError) previewedThisTurn = true
+          if (event.name === 'preview' && !event.isError) {
+            previewedThisTurn = true
+            previewedUrl = /\bhttps?:\/\/\S+/.exec(event.result)?.[0] ?? previewedUrl
+          }
           if (event.isError) {
             toolErrorCount += 1
             if (event.name === 'edit_file' || event.name === 'write_file') editRetryCount += 1
@@ -2353,16 +2358,16 @@ async function runInteractive(): Promise<void> {
       // back for a bounded repair — the "done!" that isn't is the single most
       // common way an autonomous agent wastes your time.
       if (!persona && !escalated && autoVerify && !uiHooks?.planMode) {
-        const { changedCodeFiles, checkRoot, detectChecks } = await import('./autonomy/detectChecks.ts')
+        const { changedCodeFiles, detectChecks, verificationRoot } = await import('./autonomy/detectChecks.ts')
         const { runVerification, describeVerification } = await import('./autonomy/verify.ts')
         const changedAll = Object.keys(tracker.snapshot())
         const changed = changedCodeFiles(changedAll)
-        // `checkRoot` returns undefined when no project owns the change — a
-        // freshly scaffolded folder with no manifest yet. Passing that straight
+        // `verificationRoot` returns undefined when no project owns the changed
+        // code — a freshly scaffolded folder with no manifest yet. Passing that straight
         // into `detectChecks` would silently fall back to `process.cwd()` and
         // run *elia's own* typecheck and test suite against the new project, so
         // the undefined case has to be handled here rather than defaulted away.
-        const root = changed.length > 0 ? checkRoot(changedAll, process.cwd()) : undefined
+        const root = verificationRoot(changedAll, process.cwd())
         const checks = root ? detectChecks(root) : []
         if (checks.length === 0 && changed.length > 0) {
           // Code changed and nothing could check it. Say so — "none" used to
@@ -2481,6 +2486,24 @@ async function runInteractive(): Promise<void> {
                 else writeNotice(`▸ ${line}`)
               }
             }
+          }
+        } catch {
+          // Preview is a convenience; never fail a completed turn over it.
+        }
+      } else if (previewedUrl && !persona && !escalated && !uiHooks?.planMode && !controller.signal.aborted && (verifyResult === 'none' || verifyResult === 'skipped')) {
+        // The model opened the page itself, so the auto-preview above stood
+        // down — but that render check is the only verification a static page
+        // has, and a page the model previewed used to leave the turn recorded
+        // "verification: none". Check the page as the turn left it: preview
+        // checked it when it opened it, and a later edit can still break it.
+        try {
+          const { checkRendered } = await import('./preview/readiness.ts')
+          const rendered = await checkRendered(previewedUrl, AbortSignal.any([controller.signal, AbortSignal.timeout(5_000)]))
+          verifyResult = rendered.ok ? 'pass' : 'fail'
+          if (!rendered.ok && !machineReadable) {
+            const line = `Page no longer renders — ${rendered.reason ?? 'it painted nothing'}`
+            if (uiHooks) uiHooks.onActivity?.({ kind: 'status', status: 'warning', title: line })
+            else writeNotice(`▸ ${line}`)
           }
         } catch {
           // Preview is a convenience; never fail a completed turn over it.

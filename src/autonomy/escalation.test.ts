@@ -9,6 +9,11 @@ const escalates = [
   'I want a marketplace platform where sellers list items and buyers check out with Stripe',
   // "site" words don't get a free pass once there's a real feature set behind them.
   'build a portfolio website from scratch with a CMS backend, auth, and a contact-form API',
+  'build an e-commerce website for handmade jewelry',
+  'create a website where guitar sellers log in and take payments',
+  // "site" mentioned in passing does not make the project a website.
+  'build a system to monitor site uptime and alert on-call',
+  'create a site reliability dashboard for our kubernetes clusters',
 ]
 
 const stays = [
@@ -25,6 +30,12 @@ const stays = [
   'build me a portfolio site to show my projects',
   'make a personal landing page with my bio and links',
   'create a simple resume page for a frontend developer',
+  // A site with nothing server-side behind it, static or "dynamic" (client-side
+  // JS). Run 2026-09-13-gcsd-km67 escalated the first of these, scouted for 90s,
+  // wrote nothing, and was stopped by the operator.
+  'create a dynamic website for navigating kolkata',
+  'create a website for nepal mountain treaking make sure the website describe the cost, the places and also a map of where they will travel',
+  'make an interactive web page showing the kolkata metro lines',
 ]
 
 test('large project builds escalate', () => {

@@ -1,4 +1,7 @@
 import { afterEach, expect, test } from 'bun:test'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { isLongRunningServerCommand, runProcess, runShell, shellCommandAlternative } from './shell.ts'
 import { resetContainerSandboxWarningForTests } from './sandbox/container.ts'
 
@@ -21,6 +24,45 @@ test.if(process.platform === 'win32')('a cmd.exe builtin like mkdir runs even wh
   } finally {
     process.env.PATH = original
   }
+})
+
+// Session mu0a7she-x8eipw: every command with a double quote reached cmd.exe
+// with each `"` turned into `\"`. `echo "Testing file path"` printed the
+// backslashes, `dir "D:\…\"` failed with "The filename, directory name, or
+// volume label syntax is incorrect", and `powershell -Command "…"` echoed its
+// own script instead of running it.
+test('double quotes reach the shell untouched', async () => {
+  const result = await runShell('echo "two words"', 10_000)
+  expect(result.exitCode).toBe(0)
+  expect(result.stdout.trim()).toBe(process.platform === 'win32' ? '"two words"' : 'two words')
+})
+
+test('a quoted path with spaces and a trailing backslash can be read', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'elia shell quoting '))
+  try {
+    await writeFile(join(dir, 'page.html'), '<h1>ok</h1>')
+    const listing = process.platform === 'win32' ? `dir "${dir}\\"` : `ls "${dir}/"`
+    const listed = await runShell(listing, 10_000)
+    expect(listed.exitCode).toBe(0)
+    expect(listed.stdout).toContain('page.html')
+    const read = await runShell(`${process.platform === 'win32' ? 'type' : 'cat'} "${join(dir, 'page.html')}"`, 10_000)
+    expect(read.exitCode).toBe(0)
+    expect(read.stdout).toContain('<h1>ok</h1>')
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test.if(process.platform === 'win32')('powershell -Command "…" runs the script instead of echoing it', async () => {
+  const result = await runShell(`powershell -NoProfile -Command "Write-Output ('ok' + 'ay')"`, 30_000)
+  expect(result.exitCode).toBe(0)
+  expect(result.stdout.trim()).toBe('okay')
+}, 40_000)
+
+test.if(process.platform === 'win32')('a nested cmd /c "…" is recognised as a command', async () => {
+  const result = await runShell('cmd /c "echo nested"', 10_000)
+  expect(result.exitCode).toBe(0)
+  expect(result.stdout.trim()).toBe('nested')
 })
 
 test('ELIA_SANDBOX=container falls back to host execution when the sandbox is unconfigured (docker unavailable and/or no image set) — runShell still completes', async () => {

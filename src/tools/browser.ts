@@ -1,6 +1,6 @@
 import type { Tool } from './types.ts'
 import { taskSessions } from '../taskSessions.ts'
-import { readBoundedOutput, terminateProcessGroup } from '../shell.ts'
+import { readBoundedOutput, shellInvocation, terminateProcessGroup } from '../shell.ts'
 import { browserMcpReadiness, findBrowserMcpTool } from '../mcp/browserRegistry.ts'
 import { ownedBrowserEndpoint, ownedBrowserRequested } from './browserOwned.ts'
 
@@ -268,8 +268,8 @@ async function callMcpTool(server: string, request: BrowserRequest): Promise<Bro
 }
 
 async function callBridge(command: string, request: BrowserRequest): Promise<BrowserResult | string> {
-  const shellArgs = process.platform === 'win32' ? ['cmd', '/c', command] : ['sh', '-c', command]
-  const proc = Bun.spawn(shellArgs, { stdin: 'pipe', stdout: 'pipe', stderr: 'pipe', ...(process.platform === 'win32' ? {} : { detached: true }) })
+  const shell = shellInvocation(command)
+  const proc = Bun.spawn(shell.argv, { stdin: 'pipe', stdout: 'pipe', stderr: 'pipe', ...(shell.verbatim ? { windowsVerbatimArguments: true } : {}), ...(process.platform === 'win32' ? {} : { detached: true }) })
   proc.stdin.write(`${JSON.stringify(request)}\n`)
   proc.stdin.end()
 

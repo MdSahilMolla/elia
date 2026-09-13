@@ -1,7 +1,8 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
-import { lstatSync, realpathSync } from 'node:fs'
+import { existsSync, lstatSync, realpathSync } from 'node:fs'
 import type { RoleName } from './types.ts'
+import { paths } from '../statePaths.ts'
 
 /**
  * Who is currently running.
@@ -80,6 +81,32 @@ export function resolveWorkspacePath(inputPath: string, cwd = currentAgent().cwd
   const canonicalTarget = canonicalPathWithExistingParent(target)
   if (!isWithin(root, canonicalTarget)) throw new Error(`Path escapes the active workspace: ${raw}`)
   return canonicalTarget
+}
+
+/**
+ * Resolves a path naming a project the model built, the way the model means it.
+ *
+ * The system prompt sends standalone deliverables to `workspace/<name>/`, and
+ * the model then refers to the project by its short name — `preview
+ * path:"nepal-trekking/index.html"`, `run_command cwd:"my-app"` — which,
+ * resolved against the root the tools run from, names nothing. So a relative
+ * path that exists under the scratch workspace resolves there; anything else
+ * resolves against the active root as usual. The scratch workspace is only
+ * consulted when it lies inside the active root: an isolated task workspace is
+ * its own root, and reaching up into the shared scratch folder would escape it.
+ *
+ * Seen live, session mu0a7she-x8eipw: write_file created
+ * `workspace/nepal-trekking/index.html`, preview was handed
+ * `nepal-trekking/index.html`, served an empty directory at the repo root, and
+ * reported the resulting 404 page as opened.
+ */
+export function resolveProjectPath(inputPath: string, base = currentAgent().cwd ?? process.cwd(), workspace = paths.workspace): string {
+  const raw = toolPathInput(inputPath, base)
+  if (!isAbsolute(raw)) {
+    const underWorkspace = resolve(workspace, raw)
+    if (isWithin(resolve(base), underWorkspace) && existsSync(underWorkspace)) return resolveWorkspacePath(underWorkspace, base)
+  }
+  return resolveWorkspacePath(raw, base)
 }
 
 /** Resolve a path inside the active workspace or one of explicitly designated safe roots. */

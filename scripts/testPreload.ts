@@ -1,3 +1,8 @@
+import { mkdtempSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { paths } from '../src/statePaths.ts'
+
 /**
  * Preloaded before every `bun test` module (see bunfig.toml).
  *
@@ -25,3 +30,17 @@
  */
 process.env.COLUMNS ??= '100'
 process.env.LINES ??= '24'
+
+/**
+ * Tests run from the repo root, so `paths` points at the developer's own
+ * `.elia/` state. The Ink tests submit prompts through the real InputBox, which
+ * appends each one to `paths.promptHistory` — "do the thing", "long running
+ * task" and "line one…" were landing in the operator's ↑-history on every test
+ * run — and every error a test provokes on purpose (an unreachable OTel
+ * collector, an MCP echo server that exits early) was appended to the real
+ * `.elia/diagnostics.ndjson`, burying the entries worth reading. Point both at
+ * a throwaway directory for the whole test process.
+ */
+const testState = mkdtempSync(join(tmpdir(), 'elia-test-state-'))
+;(paths as { promptHistory: string }).promptHistory = join(testState, 'prompt-history')
+;(paths as { diagnostics: string }).diagnostics = join(testState, 'diagnostics.ndjson')

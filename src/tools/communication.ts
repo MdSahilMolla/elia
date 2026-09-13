@@ -4,7 +4,7 @@ import { hardenSecureFile, writeSecureFile, ensureSecureDirectory } from '../sec
 import { join } from 'node:path'
 import { paths } from '../config.ts'
 import type { Tool } from './types.ts'
-import { readBoundedOutput, terminateProcessGroup } from '../shell.ts'
+import { readBoundedOutput, shellInvocation, terminateProcessGroup } from '../shell.ts'
 import { redactSecrets } from '../ui/redact.ts'
 
 export type CommunicationChannel = 'email' | 'message' | 'calendar' | 'slack' | 'sms' | 'custom'
@@ -296,8 +296,8 @@ async function callMcpAdapter(server: string, toolName: string, payload: unknown
 }
 
 async function callProcessAdapter(command: string, payload: unknown): Promise<CommunicationResult> {
-  const shellArgs = process.platform === 'win32' ? ['cmd', '/c', command] : ['sh', '-c', command]
-  const proc = Bun.spawn(shellArgs, { stdin: 'pipe', stdout: 'pipe', stderr: 'pipe', ...(process.platform === 'win32' ? {} : { detached: true }) })
+  const shell = shellInvocation(command)
+  const proc = Bun.spawn(shell.argv, { stdin: 'pipe', stdout: 'pipe', stderr: 'pipe', ...(shell.verbatim ? { windowsVerbatimArguments: true } : {}), ...(process.platform === 'win32' ? {} : { detached: true }) })
   proc.stdin.write(`${JSON.stringify(payload)}\n`)
   proc.stdin.end()
   return collectAdapterProcess(proc)

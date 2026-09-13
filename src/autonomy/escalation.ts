@@ -84,6 +84,22 @@ const FEATURE_LIST = /\b(with|including|plus|and)\b[^.]*\b(auth|authentication|l
 const SMALL_STATIC_SITE =
   /\b(static\s+(?:web)?site|portfolio|landing\s+page|personal\s+(?:web)?site|r[eé]sum[eé]|\bcv\b|one[-\s]?pager|single[-\s]?page)\b/i
 
+/**
+ * Any website someone wants to look at — a trekking guide, a city map, a news
+ * page — with nothing behind it that needs a server, data, or accounts.
+ * "Dynamic" and "interactive" in these requests almost always mean client-side
+ * JavaScript (a map, a filter), which is still a handful of files the fast path
+ * writes and previews in one turn. Escalating one meant plan → approve → scouts
+ * → workers before a single file existed: run 2026-09-13-gcsd-km67 ("create a
+ * dynamic website for navigating kolkata") spent 90 seconds with a scout reading
+ * map-tile usage policies, wrote nothing, and was stopped by the operator.
+ */
+const SMALL_SITE = /\b(?:web[-\s]?site|web[-\s]?page|html\s+page|site)\b/i
+
+/** What turns "a website" into an application: a server, stored data, accounts, or money. */
+const APP_SIGNAL =
+  /\b(?:marketplace|e-?commerce|saas|platform|portal|back[-\s]?end|server[-\s]?side|database|db|api|cms|auth|authentication|log[-\s]?in|sign[-\s]?up|accounts?|payments?|checkout)\b/i
+
 export function classifyEscalation(rawText: string): EscalationDecision {
   const raw = rawText.trim()
   const no = (reason: string): EscalationDecision => ({ escalate: false, reason })
@@ -109,6 +125,12 @@ export function classifyEscalation(rawText: string): EscalationDecision {
   // A static one-pager, unless it also asks for a backend / feature set.
   if (SMALL_STATIC_SITE.test(text) && !FEATURE_LIST.test(text) && !WHOLE_PROJECT.test(text)) {
     return no('a single static page — the fast path handles this in one turn')
+  }
+  // Only when the site is the thing being built: "a system to monitor site
+  // uptime" or "a site reliability dashboard" still names another project.
+  const namesAnotherProject = PROJECT_NOUN.test(text.replace(new RegExp(SMALL_SITE.source, 'gi'), ' '))
+  if (SMALL_SITE.test(text) && !namesAnotherProject && !APP_SIGNAL.test(text) && !FEATURE_LIST.test(text) && !WHOLE_PROJECT.test(text)) {
+    return no('a website with no server, data, or feature set — the fast path builds and previews it in one turn')
   }
   // A concrete file target usually means "change this file", unless the request
   // is unmistakably a whole project that happens to mention a config file.

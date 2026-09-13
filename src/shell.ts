@@ -126,8 +126,32 @@ export async function runShell(
     }
   }
 
-  const shellArgs = process.platform === 'win32' ? [windowsShell(), '/d', '/s', '/c', command] : ['sh', '-c', command]
-  return runSpawned(command, shellArgs, timeoutMs, cwd, signal, env)
+  const shell = shellInvocation(command)
+  return runSpawned(command, shell.argv, timeoutMs, cwd, signal, env, shell.verbatim)
+}
+
+/**
+ * The argv (and whether it must be passed verbatim) that runs `command` through
+ * the platform shell exactly as written.
+ *
+ * On Windows the command used to go to `Bun.spawn` as one ordinary argv element,
+ * which the spawner quotes by the MSVCRT rules — every `"` inside it became
+ * `\"`. cmd.exe has no backslash escapes, so it ran those backslashes literally,
+ * and every command containing a double quote broke: `dir "C:\a b\"` failed with
+ * "The filename, directory name, or volume label syntax is incorrect",
+ * `powershell -NoProfile -Command "…"` printed its own script back instead of
+ * running it, and `cmd /c "…"` was "not recognized". That includes the
+ * PowerShell form this codebase's own run_command guidance recommends. Seen
+ * live, session mu0a7she-x8eipw: a "the preview isn't showing" turn spent
+ * eleven run_command calls fighting exactly this before giving up.
+ *
+ * The fix is what Node does for `shell: true`: `/d /s /c "<command>"` with
+ * verbatim arguments. `/s` makes cmd.exe strip exactly that outer pair of quotes
+ * and run everything between them untouched.
+ */
+export function shellInvocation(command: string): { argv: string[]; verbatim: boolean } {
+  if (process.platform === 'win32') return { argv: [windowsShell(), '/d', '/s', '/c', `"${command}"`], verbatim: true }
+  return { argv: ['sh', '-c', command], verbatim: false }
 }
 
 /**
@@ -150,6 +174,8 @@ async function runSpawned(
   cwd?: string,
   signal?: AbortSignal,
   env?: Record<string, string>,
+  /** Pass `spawnArgs` to Windows untouched — only for a `shellInvocation` argv that is already quoted for cmd.exe. */
+  verbatim = false,
 ): Promise<ShellResult> {
   if (cwd !== undefined && !existsSync(cwd)) {
     return { command, exitCode: 1, stdout: '', stderr: `working directory does not exist: ${cwd}`, elapsedMs: 0, timedOut: false }
@@ -165,6 +191,7 @@ async function runSpawned(
     stderr: 'pipe',
     ...(cwd ? { cwd } : {}),
     ...(env ? { env } : {}),
+    ...(verbatim ? { windowsVerbatimArguments: true } : {}),
     ...(process.platform === 'win32' ? {} : { detached: true }),
   })
 
