@@ -128,6 +128,48 @@ jobs:
           cargo build -p eliad
           bun test src/daemon/ --timeout=40000
 
+  # The VS Code extension (extensions/vscode): its own package.json/tsconfig,
+  # pnpm-managed, never previously built, typechecked, or tested in CI — see
+  # M-40. That gap is exactly how the bridgeClient bugs it fixed alongside
+  # (M-36..38: no win32 shell for the default PATH-resolved cliPath, a dead
+  # spawn-error guard that hung start() forever, no reconnect after an
+  # unexpected bridge exit) shipped unverified. Matrixed the same as the
+  # other jobs since M-36 is win32-only behavior.
+  vscode-extension:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: extensions/vscode
+    steps:
+      - uses: actions/checkout@v7
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 12.3.4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: extensions/vscode/pnpm-lock.yaml
+      - name: Install locked dependencies
+        # --ignore-scripts: @vscode/vsce's optional signing/keychain deps
+        # (vsce-sign, keytar) aren't needed for typecheck/test/compile, only
+        # for `vsce package`/publish, and pnpm otherwise hard-fails asking a
+        # human to interactively approve their postinstall scripts.
+        run: pnpm install --frozen-lockfile --ignore-scripts
+      - name: Typecheck
+        run: npx tsc -p ./tsconfig.json --noEmit
+      - name: Test
+        run: bun test src
+      - name: Compile
+        run: npx tsc -p ./tsconfig.json
+
   # The Go sidecar pilot (go/elia-index). Kept separate so a Go toolchain
   # problem never blocks the TS suite, and vice versa — same split as `native`.
   go:
