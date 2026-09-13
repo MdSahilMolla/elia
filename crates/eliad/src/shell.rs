@@ -140,7 +140,9 @@ impl ShellPool {
         // not reach the shell). Reject the breaking characters up front and tell
         // the caller instead of corrupting the frame.
         if cwd.contains('"') || cwd.contains('\'') || cwd.contains('\n') || cwd.contains('\r') {
-            return Err(anyhow!("cwd contains characters unsafe to frame into the shell script"));
+            return Err(anyhow!(
+                "cwd contains characters unsafe to frame into the shell script"
+            ));
         }
         let key = canonical_key(cwd);
         let slots = {
@@ -408,7 +410,11 @@ where
     loop {
         let chunk = reader.fill_buf().await.context("reading shell output")?;
         if chunk.is_empty() {
-            return Ok(if line.is_empty() { None } else { Some(String::from_utf8_lossy(&line).into_owned()) });
+            return Ok(if line.is_empty() {
+                None
+            } else {
+                Some(String::from_utf8_lossy(&line).into_owned())
+            });
         }
         match chunk.iter().position(|&b| b == b'\n') {
             Some(nl) => {
