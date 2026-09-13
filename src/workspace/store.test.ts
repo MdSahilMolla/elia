@@ -185,6 +185,51 @@ test('an objective completes once all its tasks are done', () => {
   expect(store.objective(objectiveId)!.status).toBe('completed')
 })
 
+test('objective completion is its own ObjectiveStatusChanged event on the spine, streamed right after the task event', () => {
+  const { store, ownerId, projectId } = bootstrap()
+  const objectiveId = seedObjective(store, ownerId, projectId)
+  store.append({ type: 'TaskCreated', actorKind: 'member', actorId: ownerId, objectiveId, payload: { id: 't1', objectiveId, projectId, title: 'One', role: 'builder', dependsOn: [], files: [] } })
+  store.append({ type: 'ObjectiveStatusChanged', actorKind: 'member', actorId: ownerId, objectiveId, payload: { status: 'awaiting-approval' } })
+  store.append({ type: 'ObjectiveStatusChanged', actorKind: 'member', actorId: ownerId, objectiveId, payload: { status: 'active', approvedBy: ownerId } })
+  store.append({ type: 'TaskAssigned', actorKind: 'system', actorId: 'orch', objectiveId, taskId: 't1', payload: { assigneeKind: 'agent', assigneeId: 'a1' } })
+  store.append({ type: 'TaskStarted', actorKind: 'agent', actorId: 'a1', objectiveId, taskId: 't1', payload: {} })
+
+  const streamed: Array<{ type: string; status?: unknown }> = []
+  store.subscribe((event) => streamed.push({ type: event.type, status: event.payload.status }))
+  const completed = store.append({ type: 'TaskCompleted', actorKind: 'agent', actorId: 'a1', objectiveId, taskId: 't1', payload: {} })
+
+  // append still returns the caller's own event...
+  expect(completed.type).toBe('TaskCompleted')
+  // ...and a subscriber learns the objective finished from the stream alone.
+  expect(streamed).toEqual([{ type: 'TaskCompleted', status: undefined }, { type: 'ObjectiveStatusChanged', status: 'completed' }])
+  const last = store.events({ limit: 5000 }).at(-1)!
+  expect(last.type).toBe('ObjectiveStatusChanged')
+  expect(last.seq).toBe(completed.seq + 1)
+  expect(last.payload.causedBy).toBe(completed.id)
+  expect(store.auditChainIntact()).toBe(true)
+
+  // Replaying the whole spine into a fresh store's projection reproduces the
+  // completed objective — it no longer depends on a side effect hidden inside
+  // the TaskCompleted reducer.
+  const replica = open()
+  for (const event of store.events({ limit: 5000 })) applyProjection(replica.raw(), event)
+  expect(replica.objective(objectiveId)!.status).toBe('completed')
+})
+
+test('a second completion signal does not emit a duplicate objective-completed event', () => {
+  const { store, ownerId, projectId } = bootstrap()
+  const objectiveId = seedObjective(store, ownerId, projectId)
+  store.append({ type: 'TaskCreated', actorKind: 'member', actorId: ownerId, objectiveId, payload: { id: 't1', objectiveId, projectId, title: 'One', role: 'builder', dependsOn: [], files: [] } })
+  store.append({ type: 'ObjectiveStatusChanged', actorKind: 'member', actorId: ownerId, objectiveId, payload: { status: 'awaiting-approval' } })
+  store.append({ type: 'ObjectiveStatusChanged', actorKind: 'member', actorId: ownerId, objectiveId, payload: { status: 'active', approvedBy: ownerId } })
+  store.append({ type: 'TaskAssigned', actorKind: 'system', actorId: 'orch', objectiveId, taskId: 't1', payload: { assigneeKind: 'agent', assigneeId: 'a1' } })
+  store.append({ type: 'TaskStarted', actorKind: 'agent', actorId: 'a1', objectiveId, taskId: 't1', payload: {} })
+  store.append({ type: 'TaskCompleted', actorKind: 'agent', actorId: 'a1', objectiveId, taskId: 't1', payload: {} })
+  store.append({ type: 'TaskCompleted', actorKind: 'agent', actorId: 'a1', objectiveId, taskId: 't1', payload: {} })
+  const completions = store.events({ limit: 5000 }).filter((event) => event.type === 'ObjectiveStatusChanged' && event.payload.status === 'completed')
+  expect(completions).toHaveLength(1)
+})
+
 test('illegal state transitions are rejected and roll back the whole append', () => {
   const { store, ownerId, projectId } = bootstrap()
   const objectiveId = seedObjective(store, ownerId, projectId)

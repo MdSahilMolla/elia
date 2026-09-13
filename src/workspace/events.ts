@@ -351,7 +351,8 @@ export function applyProjection(db: Database, event: PersistedEvent): void {
       })
       const task = toTask(requireTaskRow(db, String(event.taskId)))
       refreshTaskReadiness(db, task.objectiveId, event.at)
-      maybeCompleteObjective(db, task.objectiveId, event.at)
+      // Objective completion, if this was the last open task, is a separate
+      // ObjectiveStatusChanged event — see `derivedEvents`.
       return
     }
     case 'TaskFailed': {
@@ -404,7 +405,6 @@ export function applyProjection(db: Database, event: PersistedEvent): void {
         setTaskStatus(db, String(event.taskId), 'done', event.at, { finished_at: event.at, lease_owner: null, lease_expires_at: null })
         const task = toTask(requireTaskRow(db, String(event.taskId)))
         refreshTaskReadiness(db, task.objectiveId, event.at)
-        maybeCompleteObjective(db, task.objectiveId, event.at)
       } else {
         setTaskStatus(db, String(event.taskId), 'changes-requested', event.at, { review_notes: String(p.notes ?? 'changes requested') })
       }
@@ -498,19 +498,38 @@ export function applyProjection(db: Database, event: PersistedEvent): void {
 }
 
 /**
- * An objective goes `completed` once every one of its tasks is `done` or `cancelled`.
- * `at` is the triggering event's own timestamp — see `refreshTaskReadiness`'s doc;
- * the same replay-determinism guarantee applies here.
+ * Whether an objective should now go `completed`: it has tasks, every one of
+ * them is `done` or `cancelled`, and it isn't already there.
  */
-function maybeCompleteObjective(db: Database, objectiveId: string, at: string): void {
+function objectiveReadyToComplete(db: Database, objectiveId: string): boolean {
   const open = db.query(
     "SELECT COUNT(*) AS n FROM tasks WHERE objective_id = ? AND status NOT IN ('done','cancelled')",
   ).get(objectiveId) as Row
   const total = db.query('SELECT COUNT(*) AS n FROM tasks WHERE objective_id = ?').get(objectiveId) as Row
-  if (Number(total.n) > 0 && Number(open.n) === 0) {
-    const row = db.query('SELECT status FROM objectives WHERE id = ?').get(objectiveId) as Row | null
-    if (row && objectiveCanTransition(String(row.status) as ObjectiveStatus, 'completed')) {
-      db.query('UPDATE objectives SET status = ?, updated_at = ? WHERE id = ?').run('completed', at, objectiveId)
-    }
-  }
+  if (Number(total.n) === 0 || Number(open.n) !== 0) return false
+  const row = db.query('SELECT status FROM objectives WHERE id = ?').get(objectiveId) as Row | null
+  const status = row ? (String(row.status) as ObjectiveStatus) : undefined
+  return status !== undefined && status !== 'completed' && objectiveCanTransition(status, 'completed')
+}
+
+/**
+ * Events that a just-projected event implies, for `WorkspaceStore.append` to
+ * add to the spine inside the same transaction.
+ *
+ * Objective completion used to be a raw `UPDATE objectives` buried in the
+ * TaskCompleted / ReviewCompleted projection — a status change with no event.
+ * Anything that learns state from the stream (WebSocket clients, the
+ * orchestrator's listeners, a replica) never saw the objective finish. Emitting
+ * it as a real `ObjectiveStatusChanged` keeps "every mutation is an event" true.
+ */
+export function derivedEvents(db: Database, event: PersistedEvent): WorkspaceEventInput[] {
+  const completesTask = event.type === 'TaskCompleted' || (event.type === 'ReviewCompleted' && Boolean(event.payload.passed))
+  if (!completesTask || !event.taskId) return []
+  const task = db.query('SELECT objective_id FROM tasks WHERE id = ?').get(event.taskId) as Row | null
+  const objectiveId = task ? String(task.objective_id) : undefined
+  if (!objectiveId || !objectiveReadyToComplete(db, objectiveId)) return []
+  return [{
+    type: 'ObjectiveStatusChanged', actorKind: 'system', actorId: 'workspace', objectiveId,
+    payload: { status: 'completed', reason: 'every task is done or cancelled', causedBy: event.id },
+  }]
 }

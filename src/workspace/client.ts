@@ -50,10 +50,9 @@ export class WorkspaceClient {
   }
 
   private open(timeoutMs: number): Promise<WorkspaceHelloInfo> {
-    const url = new URL(this.options.url)
-    // Bun's WebSocket honours a `headers` init; keep the query token as a fallback.
-    url.searchParams.set('token', this.options.token)
-    const ws = new WebSocket(url.toString(), { headers: { Authorization: `Bearer ${this.options.token}` } } as never)
+    // Header only (Bun's WebSocket honours a `headers` init) — the server
+    // refuses a ?token= query string, which would leak into logs.
+    const ws = new WebSocket(this.options.url, { headers: { Authorization: `Bearer ${this.options.token}` } } as never)
     this.ws = ws
 
     return new Promise<WorkspaceHelloInfo>((resolve, reject) => {
