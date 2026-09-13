@@ -48,6 +48,13 @@ export async function loadSkills(
 ): Promise<SkillLoadReport> {
   const report: SkillLoadReport = { loaded: [], quarantined: [], untrustedProject: [] }
   loadedSkillCatalog = []
+  // The catalog is replaced on every load, so the tool registry has to be too —
+  // otherwise the two disagree about what is loaded. Without this, synthesized
+  // tools only ever accumulate: a skill deleted from disk stays callable for the
+  // rest of the process, and in `bun test` (one module registry for every file)
+  // a skill loaded by one test file stays visible to every file after it.
+  const { clearSynthesizedTools, registerSynthesizedTool } = await import('../tools/registry.ts')
+  clearSynthesizedTools()
   if (!skillsEnabled()) return report
 
   const projectTrusted = isProjectSkillsTrusted(projectSkillsDir, environment)
@@ -64,7 +71,6 @@ export async function loadSkills(
   ]
   const availableFiles = filesBySource.flatMap(([dir]) => skillFilesIn(dir))
   if (availableFiles.length === 0) return report
-  const { registerSynthesizedTool } = await import('../tools/registry.ts')
 
   for (const [dir, source] of filesBySource) {
     for (const file of skillFilesIn(dir)) {
