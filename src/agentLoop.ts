@@ -139,6 +139,14 @@ export interface RunAgentLoopOptions {
    * and clear its own buffer.
    */
   drainSteering?: () => string[]
+  /**
+   * Course-corrections elia generates for itself mid-turn (an exhausted
+   * investigation budget, say). Same splice point as `drainSteering`, but
+   * labelled as elia rather than as the operator — a directive recorded as a
+   * user turn reads back as something the operator typed and never did. Must
+   * return and clear its own buffer.
+   */
+  drainDirectives?: () => string[]
 }
 
 export type StopReason = 'complete' | 'step-budget' | 'aborted' | 'no-progress'
@@ -185,6 +193,7 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
     prefetcher,
     signal,
     drainSteering,
+    drainDirectives,
   } = opts
 
   const transcript = activeSessionTranscript()
@@ -208,19 +217,41 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
    * merged by every provider, so this is safe to call right after a tool-result
    * user message.
    */
-  const injectSteering = (): boolean => {
-    const pending = drainSteering?.() ?? []
+  const injectPending = (pending: string[], framing: string, notice: string, fromOperator: boolean): boolean => {
     if (pending.length === 0) return false
     const text = pending.join('\n').trim()
     if (!text) return false
-    transcript?.appendUser(text)
-    messages.push({
-      role: 'user',
-      content: [{ type: 'text', text: `[Operator steering — the user sent this while you were working. Take it as a direct instruction and adjust course now.]\n${text}` }],
-    })
-    if (verbose) writeNotice('elia: operator steering applied')
+    // Only real operator input belongs in the transcript as a user turn — an
+    // elia-generated directive recorded there reads back as something the user
+    // typed and never did.
+    if (fromOperator) transcript?.appendUser(text)
+    else transcript?.notice(text)
+    messages.push({ role: 'user', content: [{ type: 'text', text: `${framing}\n${text}` }] })
+    if (verbose) writeNotice(notice)
     return true
   }
+
+  const injectSteering = (): boolean =>
+    injectPending(
+      drainSteering?.() ?? [],
+      '[Operator steering — the user sent this while you were working. Take it as a direct instruction and adjust course now.]',
+      'elia: operator steering applied',
+      true,
+    )
+
+  /**
+   * Course-corrections elia generates for itself — a spent investigation
+   * budget, say. Framed as what they are rather than reusing the operator
+   * wrapper, which would tell the model (and the transcript) that the user said
+   * something they never said.
+   */
+  const injectDirectives = (): boolean =>
+    injectPending(
+      drainDirectives?.() ?? [],
+      '[Run directive from elia — a budget or policy for this run, not a message from the user. Follow it now.]',
+      'elia: run directive applied',
+      false,
+    )
 
   const toolDefinitions = tools.map((tool) => ({
     name: tool.name,
@@ -282,6 +313,7 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
     // Fold in any guidance the operator typed during the previous model call or
     // tool batch, before the next model call sees the conversation.
     injectSteering()
+    injectDirectives()
 
     // A growing history costs more to attend to every turn even with prompt
     // caching (which makes it cheap to *re-send*, not smaller), and is eventually
@@ -339,7 +371,7 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
     if (toolUseBlocks.length === 0) {
       // The model is ready to stop — but if the operator sent steering during
       // this last response, don't end the turn: fold it in and keep going.
-      if (injectSteering()) continue
+      if (injectSteering() || injectDirectives()) continue
       return finishAndFlush('complete')
     }
 

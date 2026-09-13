@@ -54,3 +54,36 @@ test('repairFileContext is empty when no step declared any files', () => {
   const context = repairFileContext({ steps: [{ id: 's1', title: 'a', role: 'builder', instructions: '', files: [], dependsOn: [] }] })
   expect(context).toBe('')
 })
+
+// Run 2026-09-13-gcsd-km67 ("create a dynamic website for navigating kolkata"):
+// the workspace was empty, so three list_files returned "No files matched" and
+// the scout went to the web instead — ten searches and eight fetches about
+// Leaflet, then it hit its own step limit and reported back "stopped early —
+// treat this report as incomplete". Ninety seconds, twenty-five actions, no
+// plan, and the operator killed it. Step budgets alone never bounded this.
+const { autonomyProfileDefaults, orientBudgetMsFor } = await import('./loop.ts')
+
+test('every profile bounds how long orienting may run', () => {
+  for (const profile of ['fast', 'balanced', 'thorough'] as const) {
+    const budget = autonomyProfileDefaults(profile).orientBudgetMs
+    expect(budget).toBeGreaterThan(0)
+    expect(budget).toBeLessThanOrEqual(180_000)
+  }
+})
+
+test('a faster profile does not orient for longer than a slower one', () => {
+  const fast = autonomyProfileDefaults('fast').orientBudgetMs
+  const balanced = autonomyProfileDefaults('balanced').orientBudgetMs
+  const thorough = autonomyProfileDefaults('thorough').orientBudgetMs
+  expect(fast).toBeLessThanOrEqual(balanced)
+  expect(balanced).toBeLessThanOrEqual(thorough)
+})
+
+test('an operator can override the orient budget', () => {
+  expect(orientBudgetMsFor(90_000, { ELIA_ORIENT_BUDGET_S: '20' })).toBe(20_000)
+  expect(orientBudgetMsFor(90_000, {})).toBe(90_000)
+  // Nonsense falls back rather than producing a zero budget that proposes instantly.
+  for (const raw of ['0', '-5', 'soon', '']) {
+    expect(orientBudgetMsFor(90_000, { ELIA_ORIENT_BUDGET_S: raw })).toBe(90_000)
+  }
+})

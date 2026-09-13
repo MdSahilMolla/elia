@@ -103,7 +103,7 @@ export function createTranscriptStore(): TranscriptStore {
   // messages that keep alternating — a verdict and a check-result line, say —
   // each get their own count instead of resetting each other.
   const RECENT_ACTIVITY_CAP = 8
-  const recentActivityCounts = new Map<string, number>()
+  const recentActivityCounts = new Map<string, { count: number; pointerId?: string }>()
   let idSeq = 0
   let snapshot: Snapshot = { committed, live, turn, version }
   const listeners = new Set<() => void>()
@@ -230,24 +230,54 @@ export function createTranscriptStore(): TranscriptStore {
         if (base === text) {
           const n = Number(/  ×(\d+)$/.exec(last.text)?.[1] ?? '1') + 1
           live = live.map((item) => (item === last ? { ...last, text: `${text}  ×${n}` } : item))
-          recentActivityCounts.set(text, n)
+          // `last` is the line being counted, so it is also the one a later
+          // out-of-order repeat should rewrite rather than duplicate.
+          recentActivityCounts.set(text, { count: n, pointerId: last.id })
           changed()
           return
         }
       }
       // Not back-to-back, but still the same activity repeating (see comment
-      // on `recentActivityCounts` above) — print a short pointer instead of
-      // the full block again.
+      // on `recentActivityCounts` above) — point at the earlier occurrence
+      // instead of printing the full block again.
+      //
+      // The pointer has to be written *once* and then kept quiet. Appending a
+      // fresh one per repeat is what turned a repeating phase into pages of
+      // near-identical scrollback: the back-to-back check above compares
+      // against the raw `text`, but a pointer line carries a
+      // "  (same as before · ×N)" suffix, so it never matches its own output
+      // and every repeat appended another line. Two alternating statuses
+      // produced twelve lines where two were meant.
       const seen = recentActivityCounts.get(text)
       if (seen !== undefined) {
-        const n = seen + 1
-        recentActivityCounts.set(text, n)
+        const n = seen.count + 1
         const firstLine = text.split('\n')[0]!
-        live = [...live, { id: nextId(), kind: 'notice', text: `${firstLine}  (same as before · ×${n})` }]
+        const pointerText = `${firstLine}  (same as before · ×${n})`
+        // Still on screen: rewrite it in place so the count stays truthful.
+        const pointer = seen.pointerId === undefined
+          ? undefined
+          : live.find((item) => item.id === seen.pointerId && item.kind === 'notice')
+        if (pointer) {
+          recentActivityCounts.set(text, { ...seen, count: n })
+          live = live.map((item) => (item === pointer ? { ...item, text: pointerText } : item))
+          changed()
+          return
+        }
+        // Already flushed into <Static>, which never re-renders — so it cannot
+        // be corrected, and printing another copy only repeats what the
+        // operator has already read. Keep counting silently; the live status
+        // line is what shows that the phase is still going.
+        if (seen.pointerId !== undefined) {
+          recentActivityCounts.set(text, { ...seen, count: n })
+          return
+        }
+        const id = nextId()
+        recentActivityCounts.set(text, { count: n, pointerId: id })
+        live = [...live, { id, kind: 'notice', text: pointerText }]
         changed()
         return
       }
-      recentActivityCounts.set(text, 1)
+      recentActivityCounts.set(text, { count: 1 })
       if (recentActivityCounts.size > RECENT_ACTIVITY_CAP) {
         const oldest = recentActivityCounts.keys().next().value
         if (oldest !== undefined) recentActivityCounts.delete(oldest)

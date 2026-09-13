@@ -113,13 +113,44 @@ test('a repair loop\'s repeated verdict collapses to a short pointer even with a
 
   const isNotice = (i: { kind: string }): i is { kind: 'notice'; id: string; text: string } => i.kind === 'notice'
   const notices = [...s.getSnapshot().committed, ...s.getSnapshot().live].filter(isNotice)
-  expect(notices).toHaveLength(4)
+  // One pointer, rewritten in place as the count climbs — not one new pointer
+  // per repeat. This assertion used to expect a line per repeat ("×2" *and*
+  // "×3" as separate rows), which is the behaviour it was named for collapsing:
+  // the back-to-back matcher compares against the raw text, and a pointer line
+  // carries a "(same as before · ×N)" suffix, so it never matched its own
+  // output and appended forever. Two alternating statuses produced twelve rows.
+  expect(notices).toHaveLength(3)
   expect(notices[0]!.text).toBe(verdict)
   expect(notices[1]!.text).toBe('✓ $ type index.html')
-  expect(notices[2]!.text).toContain('same as before · ×2')
-  expect(notices[3]!.text).toContain('same as before · ×3')
+  expect(notices[2]!.text).toContain('same as before · ×3')
   // The full verdict text is never printed a second time.
   expect(notices.filter((n) => n.text === verdict)).toHaveLength(1)
+})
+
+// The property that actually matters to an operator watching a long run: a
+// phase that keeps reporting itself must not grow scrollback without bound.
+test('a repeating activity costs a bounded number of rows however often it repeats', () => {
+  const rows = (repeats: number): number => {
+    const s = createTranscriptStore()
+    s.appendUser('build it')
+    for (let i = 0; i < repeats; i += 1) {
+      s.activity({ kind: 'status', title: 'Orienting' })
+      s.activity({ kind: 'status', title: 'scout starting' })
+    }
+    return [...s.getSnapshot().committed, ...s.getSnapshot().live].length
+  }
+
+  expect(rows(10)).toBe(rows(200))
+  expect(rows(200)).toBeLessThanOrEqual(6)
+})
+
+// Bounding repeats must not silence genuinely different messages.
+test('distinct activities each still print', () => {
+  const s = createTranscriptStore()
+  for (const title of ['alpha', 'beta', 'gamma', 'delta']) s.activity({ kind: 'status', title })
+  const texts = [...s.getSnapshot().committed, ...s.getSnapshot().live]
+    .flatMap((item) => (item.kind === 'notice' ? [item.text] : []))
+  expect(texts).toEqual(['alpha', 'beta', 'gamma', 'delta'])
 })
 
 test('toMarkdown renders committed and live turns', () => {

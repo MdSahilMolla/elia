@@ -138,14 +138,35 @@ export function autonomyProfileDefaults(profile: AutonomyProfile): {
   learn: boolean
   plannerSteps: number
   maxActions: number
+  /**
+   * Wall-clock the orient phase may spend investigating before it is told to
+   * propose with what it has.
+   *
+   * Step budgets alone do not bound this. Orienting an *empty* workspace has no
+   * local code to read, so a scout reaches for the web instead and a handful of
+   * steps become a minute-plus of searches and fetches with nothing shown for
+   * it. Seen live, run 2026-09-13-gcsd-km67 ("create a dynamic website for
+   * navigating kolkata"): three `list_files` returned "No files matched", then
+   * ten web searches and eight fetches about Leaflet, then the scout hit its
+   * own step limit and reported back "stopped early — treat this report as
+   * incomplete". Ninety seconds, twenty-five actions, no plan, and the operator
+   * killed it. A plan built from partial research beats no plan at all.
+   */
+  orientBudgetMs: number
 } {
   if (profile === 'fast') {
-    return { maxRepairAttempts: 1, maxAmendments: 1, polish: false, maxPolishPasses: 0, reviewerCount: 1, learn: false, plannerSteps: 24, maxActions: 120 }
+    return { maxRepairAttempts: 1, maxAmendments: 1, polish: false, maxPolishPasses: 0, reviewerCount: 1, learn: false, plannerSteps: 24, maxActions: 120, orientBudgetMs: 45_000 }
   }
   if (profile === 'thorough') {
-    return { maxRepairAttempts: 3, maxAmendments: 4, polish: true, maxPolishPasses: 2, reviewerCount: 3, learn: true, plannerSteps: 50, maxActions: 600 }
+    return { maxRepairAttempts: 3, maxAmendments: 4, polish: true, maxPolishPasses: 2, reviewerCount: 3, learn: true, plannerSteps: 50, maxActions: 600, orientBudgetMs: 180_000 }
   }
-  return { maxRepairAttempts: 2, maxAmendments: 3, polish: true, maxPolishPasses: 1, reviewerCount: 3, learn: true, plannerSteps: 40, maxActions: 300 }
+  return { maxRepairAttempts: 2, maxAmendments: 3, polish: true, maxPolishPasses: 1, reviewerCount: 3, learn: true, plannerSteps: 40, maxActions: 300, orientBudgetMs: 90_000 }
+}
+
+/** Operator override for the orient wall-clock budget, in seconds. */
+export function orientBudgetMsFor(profileDefault: number, env: NodeJS.ProcessEnv = process.env): number {
+  const raw = Number.parseInt(env.ELIA_ORIENT_BUDGET_S ?? '', 10)
+  return Number.isFinite(raw) && raw > 0 ? raw * 1_000 : profileDefault
 }
 
 export type RunOutcome = 'completed' | 'needs-attention' | 'rejected' | 'no-proposal' | 'aborted'
@@ -544,6 +565,23 @@ async function runAutonomousTaskInternal(options: AutonomousRunOptions): Promise
     // cache and heuristic prefetch every sub-agent already gets, so the reads
     // run while the model is still generating instead of after it.
     const planningCache = createToolResultCache()
+    // Stop investigating once the orient budget is gone and propose with what
+    // is in hand. Delivered through the loop's existing steering channel, so it
+    // arrives as an operator message at a step boundary rather than cancelling
+    // the turn — a partial plan the user can amend is worth far more than a run
+    // that spent ninety seconds reading documentation and produced nothing.
+    const orientDeadline = Date.now() + orientBudgetMsFor(defaults.orientBudgetMs)
+    let orientNudged = false
+    const drainOrientDeadline = (): string[] => {
+      if (orientNudged || Date.now() < orientDeadline) return []
+      orientNudged = true
+      writeSubStep('orient budget spent — proposing with what has been gathered so far')
+      return [
+        'You have used the whole investigation budget for this run. Stop researching now — no further scouts, searches, or fetches — and call submit_proposal immediately with what you already know. '
+        + 'Record anything you did not get to confirm in `assumptions` so the user can correct it; an incomplete plan they can amend is far more useful than no plan.',
+      ]
+    }
+
     const planning = await withAgentIdentity({ name: 'lead', role: 'lead', runId, cwd: workspaceRoot, signal: runSignal }, () => withActionGovernor(governor, () => withGoalGraph(graph, () => runAgentLoop({
       messages,
       systemPrompt: plannerPrompt,
@@ -555,6 +593,7 @@ async function runAutonomousTaskInternal(options: AutonomousRunOptions): Promise
       cache: planningCache,
       prefetcher: createPrefetcher({ tools: planningTools, cache: planningCache }),
       signal: runSignal,
+      drainDirectives: drainOrientDeadline,
       onTool: (event) => appendActionAudit(event, runId),
     }))))
     track(planning.usage)
@@ -1574,23 +1613,32 @@ async function captureLessons(
   writePhase('learn')
   journal.append('phase', { phase: 'learn', regime })
 
+  // Recorded first and unconditionally: the model-driven pass below can decide
+  // there is "nothing durable", but a repair loop that gave up against the same
+  // failure twice has already produced a fact worth carrying forward.
+  //
+  // "Unconditionally" is why this now sits *above* the judgment-regime gate
+  // rather than below it. It used to be unreachable for a judgment-regime run,
+  // which silently threw away the one kind of lesson that gate was never
+  // arguing against: these are mechanical observations the loop made about its
+  // own behaviour — it attempted the same gate N times and stopped — not a
+  // model's opinion about the deliverable. And judgment is the regime a
+  // deliverable with no test suite always lands in, so the runs that learned
+  // nothing were exactly the ones that had failed hardest.
+  if (deterministic.length > 0) {
+    appendLessons(deterministic.map((text) => ({ text, source: 'auto-deterministic', confidence: 0.95 })))
+    journal.append('lesson', { lessons: deterministic, source: 'deterministic' })
+    for (const lesson of deterministic) writeSubStep(`learned: ${lesson}`)
+  }
+
   // Nothing outside elia's own opinion checked this run. A "lesson" drawn from a
   // review-only pass is exactly the closed-loop signal that lets a reasoner
   // entrench its own mistakes across runs, so it is kept out of the durable
   // store — the run's findings still live in this session's transcript.
   if (regime === 'judgment') {
-    writeSubStep('verification was judgement-only (no mechanical or empirical check) — not recording cross-run lessons from this run')
-    journal.append('lesson', { lessons: [], source: 'skipped:judgment-regime' })
-    return []
-  }
-
-  // Recorded first and unconditionally: the model-driven pass below can decide
-  // there is "nothing durable", but a repair loop that gave up against the same
-  // failure twice has already produced a fact worth carrying forward.
-  if (deterministic.length > 0) {
-    appendLessons(deterministic.map((text) => ({ text, source: 'auto-deterministic', confidence: 0.95 })))
-    journal.append('lesson', { lessons: deterministic, source: 'deterministic' })
-    for (const lesson of deterministic) writeSubStep(`learned: ${lesson}`)
+    writeSubStep('verification was judgement-only (no mechanical or empirical check) — not recording model-authored lessons from this run')
+    journal.append('lesson', { lessons: deterministic, source: 'skipped:judgment-regime' })
+    return deterministic
   }
 
   const capture = createLessonsTool()
