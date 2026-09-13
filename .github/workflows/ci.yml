@@ -244,11 +244,14 @@ jobs:
       - name: Typecheck extension
         working-directory: extensions/vscode
         run: pnpm exec tsc --noEmit -p tsconfig.json
-      - name: Package extension (--ignore-scripts, no lifecycle)
+      - name: Compile extension
         working-directory: extensions/vscode
-        run: pnpm exec vsce package --ignore-scripts --skip-license --out /tmp/elia-vscode.vsix
+        run: pnpm exec tsc -p tsconfig.json
+      - name: Package extension (vsce has no --ignore-scripts; --no-dependencies skips its own npm/yarn re-install instead)
+        working-directory: extensions/vscode
+        run: pnpm exec vsce package --no-dependencies --skip-license
       - name: Bridge spawn contract re-derived from source
         shell: bash
         working-directory: extensions/vscode
         run: |
-          bun -e "const src = await Bun.file('src/bridgeClient.ts').text(); const win = src.includes(\"shell: true\") && src.includes('process.platform === ' + String.fromCharCode(39) + 'win32' + String.fromCharCode(39)); if (!win) { console.error('expected a win32 shell:true spawn path for bare elia'); process.exit(1); } console.log('bridge spawn contract present');"
+          bun -e "const src = await Bun.file('src/bridgeClient.ts').text(); const win = src.includes('shell:') && src.includes('process.platform === ' + String.fromCharCode(39) + 'win32' + String.fromCharCode(39)) && src.includes('isExplicitPath'); if (!win) { console.error('expected a win32-gated shell spawn path keyed on isExplicitPath for a bare elia command'); process.exit(1); } console.log('bridge spawn contract present');"

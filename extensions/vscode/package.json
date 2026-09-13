@@ -275,6 +275,7 @@
     "package": "pnpm run compile && vsce package --no-dependencies"
   },
   "devDependencies": {
+    "@types/bun": "^1.3.14",
     "@types/node": "^22.10.0",
     "@types/vscode": "^1.95.0",
     "@vscode/vsce": "^3.9.2",
