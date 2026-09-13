@@ -405,9 +405,21 @@ mod tests {
         broken.command = "definitely-not-a-real-binary-xyz".into();
         let result = supervisor.ensure(vec![broken]).await;
 
-        assert_eq!(result.failed.len(), 1, "the reconfigure should be reported as failed");
-        assert_eq!(supervisor.server_count().await, 1, "the old server must still be running");
-        assert_eq!(result.tools.len(), 2, "the still-live server's tools are still reported");
+        assert_eq!(
+            result.failed.len(),
+            1,
+            "the reconfigure should be reported as failed"
+        );
+        assert_eq!(
+            supervisor.server_count().await,
+            1,
+            "the old server must still be running"
+        );
+        assert_eq!(
+            result.tools.len(),
+            2,
+            "the still-live server's tools are still reported"
+        );
 
         // The old process is still the one actually serving calls.
         let echoed = supervisor
