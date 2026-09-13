@@ -82,7 +82,14 @@ export async function runTests(dir: string, testIds: string[], instance: SweBenc
     result = await runShellInContainer(pytestShellCommand(testIds, instance.testCommand), TEST_TIMEOUT_MS, dir)
   } else {
     const { executable, args } = pytestInvocation(testIds, instance.testCommand)
-    result = await runProcess({ executable, args, timeoutMs: TEST_TIMEOUT_MS, cwd: dir })
+    // PYTHONDONTWRITEBYTECODE: runTests is called twice against the same
+    // checkout across an agent fix (before/after) — without this, a stale
+    // __pycache__/*.pyc from the pre-fix run can be reused if the source
+    // file's mtime doesn't visibly advance between the two runs.
+    const env: Record<string, string> = {}
+    for (const [key, value] of Object.entries(process.env)) if (value !== undefined) env[key] = value
+    env.PYTHONDONTWRITEBYTECODE = '1'
+    result = await runProcess({ executable, args, timeoutMs: TEST_TIMEOUT_MS, cwd: dir, env })
   }
   return parseTestOutcomes(`${result.stdout}\n${result.stderr}`)
 }

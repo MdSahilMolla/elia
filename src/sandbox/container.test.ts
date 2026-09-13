@@ -12,15 +12,14 @@ import type { ShellResult } from '../shell.ts'
 
 const originalMode = process.env.ELIA_SANDBOX
 const originalImage = process.env.ELIA_SANDBOX_IMAGE
-const originalPath = process.env.PATH
+const originalWhich = Bun.which
 
 afterEach(() => {
   if (originalMode === undefined) delete process.env.ELIA_SANDBOX
   else process.env.ELIA_SANDBOX = originalMode
   if (originalImage === undefined) delete process.env.ELIA_SANDBOX_IMAGE
   else process.env.ELIA_SANDBOX_IMAGE = originalImage
-  if (originalPath === undefined) delete process.env.PATH
-  else process.env.PATH = originalPath
+  Bun.which = originalWhich
   resetContainerSandboxWarningForTests()
 })
 
@@ -60,10 +59,13 @@ test('runShellInContainer refuses to guess an image, before ever checking for do
 
 test('runShellInContainer reports docker missing distinctly, once an image is configured', async () => {
   // GitHub-hosted runners ship docker preinstalled and on PATH, so this can't
-  // rely on the actual host lacking it — force Bun.which('docker') to miss by
-  // clearing PATH instead, deterministic on every machine either way.
+  // rely on the actual host lacking it. Mutating process.env.PATH doesn't
+  // work either — Bun.which() resolves against a PATH snapshot taken at
+  // startup, not process.env.PATH read fresh per call (verified: even
+  // clearing/deleting/corrupting process.env.PATH at runtime, Bun.which still
+  // finds an already-resolved binary). Stub Bun.which itself instead.
   process.env.ELIA_SANDBOX_IMAGE = 'node:20-slim'
-  process.env.PATH = ''
+  Bun.which = () => null
   await expect(runShellInContainer('echo hi', 5000)).rejects.toThrow(/docker is not installed/)
 })
 
