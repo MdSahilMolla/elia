@@ -23,6 +23,7 @@ function entry(contradictions: string[]): CalibrationEntry {
 
 const clean = () => entry([])
 const bad = () => entry(['reported verified but verification did not pass'])
+const honestFailure = (): CalibrationEntry => ({ ...entry([]), reportedState: 'failed', confidence: 'low' })
 
 test('too little history says so and changes nothing', () => {
   const s = signalFromEntries([clean(), bad()])
@@ -59,4 +60,24 @@ test('only the most recent runs count — old failures age out', () => {
   const s = signalFromEntries([...old, ...recent])
   expect(s.sampled).toBe(15)
   expect(s.tier).toBe('clean')
+})
+
+test('honestly-reported failures still move the project off "clean" when few runs actually verify', () => {
+  // Regression: a project whose runs mostly fail but never over-claim used to
+  // read as tier "clean" ("track record is sound") with zero extra scrutiny,
+  // because contradictionRate alone was 0. 7 of 8 honest failures, 1 verified
+  // — 12.5% of these 8 runs verified, well under LOW_SUCCESS_THRESHOLD.
+  const s = signalFromEntries([...Array.from({ length: 7 }, honestFailure), clean()])
+  expect(s.contradictionRate).toBe(0)
+  expect(s.successRate).toBeCloseTo(0.125, 3)
+  expect(s.tier).not.toBe('clean')
+  expect(s.tier).toBe('watch')
+  expect(s.extraReviewers).toBeGreaterThan(0)
+  expect(s.note).toContain('honest')
+})
+
+test('successRate is exposed even on an otherwise-clean record', () => {
+  const s = signalFromEntries(Array.from({ length: 10 }, clean))
+  expect(s.successRate).toBe(1)
+  expect(s.note).toContain('10/10')
 })

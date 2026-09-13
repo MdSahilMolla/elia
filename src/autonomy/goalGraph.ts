@@ -8,6 +8,7 @@ import type { ActionContract, ContractEvaluation } from './actionContract.ts'
 import { canonicalizeCommandForIdentity } from './commandIdentity.ts'
 import { ensureSecureDirectory, hardenSecureFile, writeSecureFile } from '../securePersistence.ts'
 import { isProcessAlive, withFileLock } from '../fileLock.ts'
+import { logSwallowedError } from '../diagnostics.ts'
 
 export const GOAL_GRAPH_VERSION = 2
 export const EXECUTION_LEASE_TTL_MS = 120_000
@@ -135,7 +136,12 @@ export function readGoalGraphSnapshot(dir: string): GoalGraphSnapshot | undefine
   if (!existsSync(path)) return undefined
   try {
     return JSON.parse(readFileSync(path, 'utf8')) as GoalGraphSnapshot
-  } catch {
+  } catch (error) {
+    // A corrupt file reads identically to "no goal graph was ever recorded"
+    // to every caller (`elia runs <id>` printed the same "No durable goal
+    // graph recorded" message either way) — hiding exactly the failure
+    // whoever is reading this output is most likely trying to diagnose.
+    logSwallowedError('goalGraph.readSnapshot', error, { path })
     return undefined
   }
 }
@@ -198,8 +204,14 @@ export class GoalGraphStore {
           store.lastLeaseRecovery = { nodes: recovery.nodes.length, actions: recovery.actions.length }
           return store
         }
-      } catch {
-        // A torn graph is replaced by a fresh, valid snapshot. The journal remains authoritative.
+      } catch (error) {
+        // A torn graph is replaced by a fresh, valid snapshot — but that means
+        // every completed step/action recorded in the corrupt file is silently
+        // discarded and `elia resume` restarts from a bare root node with no
+        // indication anything went wrong. Log it: this is real state loss on
+        // the resume path, not a benign concurrent-write race (that case is
+        // `reloadFromDisk`, which correctly keeps the in-memory snapshot).
+        logSwallowedError('goalGraph.open.tornSnapshot', error, { path, runId: options.runId })
       }
     }
 
