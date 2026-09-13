@@ -5,6 +5,8 @@ import type { SlashCommand } from '../slashPrompt.ts'
 import { createTranscriptStore } from './store.ts'
 import { useTranscript } from './useSyncStore.ts'
 import { Transcript } from './components/Transcript.tsx'
+import { useTerminalSize } from './useTerminalSize.ts'
+import { clampLive, liveBudgetRows, liveCapEnabled } from './liveRegion.ts'
 import { StatusBar, type ReplMode } from './components/StatusBar.tsx'
 import { Banner } from './components/Banner.tsx'
 import { InputBox } from './components/InputBox.tsx'
@@ -141,6 +143,23 @@ export function App(props: AppProps) {
   const [textPrompt, setTextPrompt] = useState<TextPromptRequest | null>(null)
   const [expandedAll, setExpandedAll] = useState(false)
   const [showHelp, setShowHelp] = useState(false)
+
+  // WS0.7/0.8 — terminal geometry, and the live region trimmed to fit it.
+  // Read once per mount: flipping the flag mid-session would change how the
+  // frame is measured underneath a repaint that is already in flight.
+  const termSize = useTerminalSize()
+  const liveCapOn = useRef(liveCapEnabled()).current
+  const clampedLive = useMemo(
+    () =>
+      liveCapOn
+        ? clampLive(snap.live, {
+            columns: termSize.columns,
+            budgetRows: liveBudgetRows(termSize.rows),
+            expanded: expandedAll,
+          })
+        : null,
+    [liveCapOn, snap.live, termSize.columns, termSize.rows, expandedAll],
+  )
   const [steeringCount, setSteeringCount] = useState(0)
   const [queue, setQueue] = useState<string[]>([])
   const [status, setStatus] = useState('')
@@ -607,7 +626,12 @@ export function App(props: AppProps) {
   return (
     <Box flexDirection="column">
       <ErrorBoundary area="transcript" onError={boundaryError}>
-        <Transcript committed={snap.committed} live={snap.live} expandedAll={expandedAll} />
+        <Transcript
+          committed={snap.committed}
+          live={clampedLive?.items ?? snap.live}
+          hiddenRows={clampedLive?.hiddenRows ?? 0}
+          expandedAll={expandedAll}
+        />
       </ErrorBoundary>
 
       {snap.committed.length === 0 && snap.live.length === 0 && (
@@ -692,6 +716,7 @@ export function App(props: AppProps) {
             queued={queue.length}
             steering={steeringCount}
             repo={repo}
+            narrow={termSize.narrow}
           />
         </ErrorBoundary>
       </Box>

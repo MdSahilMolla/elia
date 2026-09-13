@@ -43,6 +43,12 @@ export interface StatusBarProps {
   steering?: number
   /** "elia ⎇ production" — cwd + branch. */
   repo?: string
+  /**
+   * WS0.8 — under 80 columns the two halves of the line collide and
+   * `space-between` squashes both. Drop what is recoverable elsewhere (the repo
+   * label, the session token counts) and keep model · mode · context · cost.
+   */
+  narrow?: boolean
 }
 
 /**
@@ -75,11 +81,12 @@ export function StatusBar(props: StatusBarProps) {
           {props.model} · {MODE_LABEL[props.mode]}
           {props.steering ? <Text color={palette.accent}> · {props.steering} steering</Text> : null}
           {props.queued > 0 ? ` · ${props.queued} queued` : ''}
-          {props.repo ? <Text color={palette.toolName}> · {shortRepo(props.repo)}</Text> : null}
+          {props.repo && !props.narrow ? <Text color={palette.toolName}> · {shortRepo(props.repo)}</Text> : null}
         </Text>
         <Text color={palette.muted} wrap="truncate-end">
-          <Text color={meterColor}>{meter(pct)}</Text> {pct}% ctx · {formatTokenCount(props.sessionInput)} in ·{' '}
-          {formatTokenCount(props.sessionOutput)} out · {cost}
+          <Text color={meterColor}>{meter(pct)}</Text> {pct}% ctx
+          {props.narrow ? '' : ` · ${formatTokenCount(props.sessionInput)} in · ${formatTokenCount(props.sessionOutput)} out`} ·{' '}
+          {cost}
         </Text>
       </Box>
     </Box>
