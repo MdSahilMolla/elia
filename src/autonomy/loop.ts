@@ -30,7 +30,7 @@ import { planWaves, runFleet } from './fleet.ts'
 import { runVariants } from './variants.ts'
 import { createProposalTool, renderProposal, renderProposalSummary } from './proposal.ts'
 import { savePlanArtifact } from './artifacts.ts'
-import { commitAll, scaffoldProject } from './scaffold.ts'
+import { commitAll, scaffoldProject, stageUntrackedForReview } from './scaffold.ts'
 import { publishProject } from './publish.ts'
 import { emitEvent, machineReadable } from '../ui/runtime.ts'
 import { redactText } from '../ui/redact.ts'
@@ -1219,6 +1219,10 @@ Read the changed files in full context. Improve only concrete issues directly re
     // Only spend a critic on a change that already builds. Reviewing code that
     // doesn't compile just rediscovers the compiler's own error, slowly.
     if (verification.passed) {
+      // Make new-but-uncommitted deliverables visible to `git diff` before the
+      // reviewers read it — see `stageUntrackedForReview`'s doc comment.
+      await stageUntrackedForReview(workspaceRoot, runSignal, protectedPaths)
+
       // Fetched once and handed to every reviewer directly, instead of each of
       // them independently spending a tool round-trip (reasoning + tool_use +
       // tool_result, all billed) to ask git the same question. Three reviewers

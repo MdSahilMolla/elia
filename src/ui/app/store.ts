@@ -92,6 +92,18 @@ export function createTranscriptStore(): TranscriptStore {
   let turnBase = 0
   let turn = 0
   let version = 0
+  // `activity()`'s own repeat tracker, independent of `lastLive()`. A repair
+  // loop interleaves a verification pass/fail line between review attempts,
+  // so by the time the same verdict repeats, the earlier occurrence is almost
+  // always no longer the live tail — flushSettled already swept it into
+  // `committed`, which <Static> never re-renders. `lastLive()`-based
+  // coalescing (below) only catches truly back-to-back repeats; this catches
+  // the rest by printing a short pointer instead of the full block again.
+  // Keyed by exact text (not just "the previous activity") so two different
+  // messages that keep alternating — a verdict and a check-result line, say —
+  // each get their own count instead of resetting each other.
+  const RECENT_ACTIVITY_CAP = 8
+  const recentActivityCounts = new Map<string, number>()
   let idSeq = 0
   let snapshot: Snapshot = { committed, live, turn, version }
   const listeners = new Set<() => void>()
@@ -218,9 +230,27 @@ export function createTranscriptStore(): TranscriptStore {
         if (base === text) {
           const n = Number(/  ×(\d+)$/.exec(last.text)?.[1] ?? '1') + 1
           live = live.map((item) => (item === last ? { ...last, text: `${text}  ×${n}` } : item))
+          recentActivityCounts.set(text, n)
           changed()
           return
         }
+      }
+      // Not back-to-back, but still the same activity repeating (see comment
+      // on `recentActivityCounts` above) — print a short pointer instead of
+      // the full block again.
+      const seen = recentActivityCounts.get(text)
+      if (seen !== undefined) {
+        const n = seen + 1
+        recentActivityCounts.set(text, n)
+        const firstLine = text.split('\n')[0]!
+        live = [...live, { id: nextId(), kind: 'notice', text: `${firstLine}  (same as before · ×${n})` }]
+        changed()
+        return
+      }
+      recentActivityCounts.set(text, 1)
+      if (recentActivityCounts.size > RECENT_ACTIVITY_CAP) {
+        const oldest = recentActivityCounts.keys().next().value
+        if (oldest !== undefined) recentActivityCounts.delete(oldest)
       }
       live = [...live, { id: nextId(), kind: 'notice', text }]
       changed()
@@ -263,6 +293,7 @@ export function createTranscriptStore(): TranscriptStore {
       committed = [...committed, ...frozen]
       live = []
       turn += 1
+      recentActivityCounts.clear()
       changed()
     },
 
@@ -316,6 +347,7 @@ export function createTranscriptStore(): TranscriptStore {
       turnBase = 0
       turn = 0
       idSeq = 0
+      recentActivityCounts.clear()
       changed()
     },
   }
