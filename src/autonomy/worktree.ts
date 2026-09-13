@@ -63,8 +63,17 @@ export async function runGit(args: string[], cwd?: string, env?: Record<string, 
   return { exitCode, stdout, stderr }
 }
 
+/** Decodes git's C-style escapes inside a quoted porcelain path (`"a\tb"` → `a<TAB>b`). */
+function cUnescape(value: string): string {
+  const singles: Record<string, string> = { a: '\x07', b: '\b', t: '\t', n: '\n', v: '\v', f: '\f', r: '\r', '"': '"', '\\': '\\' }
+  return value.replace(/\\([abtnvfr"\\]|[0-7]{3})/g, (_, raw: string) =>
+    raw.length === 1 ? singles[raw]! : String.fromCharCode(Number.parseInt(raw, 8)),
+  )
+}
+
 /** Parses `git status --porcelain=v1` output into the files a copy-based sync needs to touch. */
-function parseStatus(porcelain: string): StatusChange[] {
+/** Exported for tests that feed it porcelain directly — its syncs run against a real git repo, but the parser itself is content-only. */
+export function parseStatus(porcelain: string): StatusChange[] {
   const changes: StatusChange[] = []
   for (const line of porcelain.split('\n')) {
     if (line.length < 4) continue
@@ -73,7 +82,14 @@ function parseStatus(porcelain: string): StatusChange[] {
     // A rename ("R  old -> new") only needs the destination copied — the
     // source's absence is already implied by it not existing at the new path.
     if (rawPath.includes(' -> ')) rawPath = rawPath.split(' -> ')[1] ?? rawPath
-    const path = rawPath.trim().replace(/^"|"$/g, '')
+    let path: string
+    if (rawPath.startsWith('"')) {
+      path = cUnescape(rawPath.slice(1, rawPath.length - 1))
+    } else {
+      // A raw backslash names a real path on Windows (C:\dir\file.txt) and is
+      // not an escape sequence — only quoted paths get C-unescaped.
+      path = rawPath.trim()
+    }
     if (!path) continue
     changes.push({ path, deleted: code.includes('D') })
   }

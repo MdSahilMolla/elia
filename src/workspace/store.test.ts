@@ -196,6 +196,25 @@ test('illegal state transitions are rejected and roll back the whole append', ()
   expect(store.task('t1')!.status).toBe('ready')
 })
 
+test('a pool reassign (empty-string assigneeId) stores unassigned, never a literal "" row', () => {
+  const { store, ownerId, projectId } = bootstrap()
+  const objectiveId = seedObjective(store, ownerId, projectId)
+  store.append({ type: 'TaskCreated', actorKind: 'member', actorId: ownerId, objectiveId, payload: { id: 't1', objectiveId, projectId, title: 'One', role: 'builder', dependsOn: [], files: [] } })
+  store.append({ type: 'ObjectiveStatusChanged', actorKind: 'member', actorId: ownerId, objectiveId, payload: { status: 'awaiting-approval' } })
+  store.append({ type: 'ObjectiveStatusChanged', actorKind: 'member', actorId: ownerId, objectiveId, payload: { status: 'active', approvedBy: ownerId } })
+  store.append({ type: 'TaskAssigned', actorKind: 'system', actorId: 'orch', objectiveId, taskId: 't1', payload: { assigneeKind: 'agent', assigneeId: 'a1' } })
+  expect(store.task('t1')!.assigneeId).toBe('a1')
+
+  // task.reassign to the pool appends TaskReassigned with assigneeId ''. The projection
+  // must normalize that to NULL, so no phantom '' assignee is ever stored or served.
+  store.append({ type: 'TaskReassigned', actorKind: 'member', actorId: ownerId, objectiveId, taskId: 't1', payload: { assigneeKind: 'agent', assigneeId: '' } })
+  store.append({ type: 'TaskStatusChanged', actorKind: 'member', actorId: ownerId, objectiveId, taskId: 't1', payload: { status: 'ready' } })
+  expect(store.task('t1')!.assigneeId).toBeUndefined()
+  expect(store.task('t1')!.status).toBe('ready')
+  const raw = store.raw().query('SELECT assignee_id FROM tasks WHERE id = ?').get('t1') as { assignee_id: unknown }
+  expect(raw.assignee_id).toBeNull()
+})
+
 test('the audit hash chain stays intact across many appends', () => {
   const { store, ownerId, projectId } = bootstrap()
   const objectiveId = seedObjective(store, ownerId, projectId)

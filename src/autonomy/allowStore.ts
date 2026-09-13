@@ -90,7 +90,7 @@ function load(path: string): AllowFile {
 /** The leading token of a shell command — `git push --force` → `git`. */
 export function commandPrefix(command: string): string {
   const trimmed = command.trim().replace(/^[(!{]\s*/, '')
-  const first = trimmed.split(/[\s;|&]+/, 1)[0] ?? ''
+  const first = trimmed.split(/[\s;|&]+/, 1)[0]!
   // Keep a path-qualified binary readable: ./gradlew → gradlew, C:\x\node.exe → node.exe
   return first.replace(/\\/g, '/').split('/').filter(Boolean).pop() ?? first
 }

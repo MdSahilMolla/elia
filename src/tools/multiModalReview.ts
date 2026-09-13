@@ -3,6 +3,7 @@ import { optionalString } from './args.ts'
 import { resolveWorkspacePath } from '../autonomy/context.ts'
 import { riskLevelFor, type RiskLevel } from './intel/risk.ts'
 import { readTextFile } from './specVerify.ts'
+import { clampOutput, MAX_SHELL_OUTPUT_LENGTH } from '../shell.ts'
 
 export interface ReviewDimension {
   name: string
@@ -244,12 +245,14 @@ export function reviewCode(code: string, opts: { dimensions?: string[]; file?: s
   }
 }
 
-async function runGit(cwd: string, args: string[]): Promise<string> {
+export async function runGit(cwd: string, args: string[]): Promise<string> {
   const proc = Bun.spawn(['git', ...args], { cwd, stdout: 'pipe', stderr: 'pipe' })
   const stdout = await new Response(proc.stdout).text()
   await proc.exited.catch(() => undefined)
   if (proc.exitCode !== 0) return ''
-  return stdout
+  // A `git show --patch` of a large commit can run to megabytes; the review
+  // only needs a representative head/tail window (the same clamp sibling tools use).
+  return clampOutput(stdout, MAX_SHELL_OUTPUT_LENGTH)
 }
 
 export const multiModalReviewTool: Tool = {

@@ -49,7 +49,10 @@ export function isSensitivePath(inputPath: string): boolean {
   const fileName = lowerSegments.at(-1) ?? ''
 
   if (lowerSegments.some((segment) => SENSITIVE_DIRECTORY_NAMES.has(segment))) return true
-  if (lowerPath.includes('.config/gcloud/')) return true
+  // The bare `.config/gcloud` target — without a trailing component — used to
+  // slip past both the segment set (it contains a slash, so a single segment
+  // can never match) and the `includes('.config/gcloud/')` check below it.
+  if (lowerPath === '.config/gcloud' || lowerPath.startsWith('.config/gcloud/')) return true
   if (SENSITIVE_FILE_NAMES.has(fileName)) return true
   return SENSITIVE_FILE_PATTERNS.some((pattern) => pattern.test(fileName))
 }

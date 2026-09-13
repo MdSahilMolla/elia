@@ -15,7 +15,7 @@
 // model to notice.
 import { existsSync, readFileSync, readdirSync, statSync, type Dirent } from 'node:fs'
 import { builtinModules } from 'node:module'
-import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
+import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { packageRoot } from './autoInstall.ts'
 import type { CriticIssue, CriticVerdict } from './types.ts'
 
@@ -321,6 +321,14 @@ export function hygieneVerdict(input: HygieneInput): CriticVerdict {
   }
 }
 
+/** Decodes git's C-style escapes inside a quoted porcelain path (`"a\tb"` → `a<TAB>b`). */
+function cUnescape(value: string): string {
+  const singles: Record<string, string> = { a: '\x07', b: '\b', t: '\t', n: '\n', v: '\v', f: '\f', r: '\r', '"': '"', '\\': '\\' }
+  return value.replace(/\\([abtnvfr"\\]|[0-7]{3})/g, (_, raw: string) =>
+    raw.length === 1 ? singles[raw]! : String.fromCharCode(Number.parseInt(raw, 8)),
+  )
+}
+
 /**
  * Added and changed file lists from `git status --porcelain=v1`. Rename targets
  * count as added, since the file at that path is new.
@@ -331,9 +339,12 @@ export function filesFromGitStatus(porcelain: string): { added: string[]; change
   for (const line of porcelain.split(/\r?\n/)) {
     if (line.length < 4) continue
     const code = line.slice(0, 2)
-    let path = line.slice(3).trim()
-    if (path.includes(' -> ')) path = path.split(' -> ')[1] ?? path
-    path = path.replace(/^"|"$/g, '')
+    let rawPath = line.slice(3).trim()
+    if (rawPath.includes(' -> ')) rawPath = rawPath.split(' -> ')[1] ?? rawPath
+    // A quoted porcelain path carries git's C-escapes (`"a\tb"`) and must be
+    // decoded, not just stripped of its quotes; a raw backslash on unquoted
+    // Windows paths is a real path and is left alone.
+    let path = rawPath.startsWith('"') ? cUnescape(rawPath.slice(1, rawPath.length - 1)) : rawPath
     if (!path || path.endsWith('/')) continue
     if (code.includes('D')) continue
     if (code === '??' || code.includes('A') || code.includes('R')) added.push(path)
@@ -403,6 +414,12 @@ function manifestDependencies(path: string): string[] {
   }
 }
 
+/** Separator-aware containment: `C:\a` is not "within" `C:\a`, but `C:\a\b` is. */
+function isWithin(root: string, target: string): boolean {
+  const rel = relative(root, target)
+  return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel))
+}
+
 /**
  * What counts as declared for one file: the deliverable's own manifests plus the
  * nearest package.json above the file, so a workspace package that declares its
@@ -411,7 +428,7 @@ function manifestDependencies(path: string): string[] {
 function declaredFor(file: string, root: string, base: Set<string>, cache: Map<string, Set<string> | undefined>): Set<string> | undefined {
   let dir = dirname(file)
   const seen: string[] = []
-  while (dir.startsWith(root)) {
+  while (isWithin(root, dir)) {
     if (cache.has(dir)) {
       const cached = cache.get(dir)
       for (const entry of seen) cache.set(entry, cached)
@@ -562,5 +579,5 @@ function toAbsolute(file: string, cwd: string): string {
 function relativeTo(file: string, cwd: string): string {
   const root = resolve(cwd)
   const absolute = resolve(file)
-  return absolute.startsWith(root) ? absolute.slice(root.length).replace(/^[\\/]+/, '').replace(/\\/g, '/') : absolute
+  return isWithin(root, absolute) ? absolute.slice(root.length).replace(/^[\\/]+/, '').replace(/\\/g, '/') : absolute
 }

@@ -6,7 +6,7 @@ import { join } from 'node:path'
 // worktree.ts pulls `paths` from config.ts, which resolves a provider on import.
 process.env.ANTHROPIC_API_KEY ??= 'test-key-for-worktree-test'
 
-const { createWorktree, mergeWorktreeIntoCwd, removeWorktree } = await import('./worktree.ts')
+const { createWorktree, mergeWorktreeIntoCwd, removeWorktree, parseStatus } = await import('./worktree.ts')
 
 async function git(args: string[], cwd: string): Promise<{ exitCode: number; stdout: string; stderr: string }> {
   const proc = Bun.spawn(['git', ...args], { stdout: 'pipe', stderr: 'pipe', cwd })
@@ -109,6 +109,15 @@ test('mergeWorktreeIntoCwd deletes files the variant deleted', async () => {
     rmSync(targetDir, { recursive: true, force: true })
     await removeWorktree(worktree, repoDir)
   }
+})
+
+test('parseStatus C-unescapes quoted porcelain paths and leaves raw Windows backslashes alone', () => {
+  // git quotes and C-escapes paths that contain characters porcelain can't
+  // print raw (`"`, control characters); stripping just the quote marks used to
+  // keep the escapes, mangling the filename. Unquoted paths carry raw
+  // backslashes on Windows and must be left untouched.
+  const changes = parseStatus('?? "maybe \\"quoted\\"\t.txt"\n M src\\win\\path.ts\n')
+  expect(changes.map((change) => change.path)).toEqual(['maybe "quoted"\t.txt', 'src\\win\\path.ts'])
 })
 
 test('removeWorktree tears down both the worktree and its branch', async () => {

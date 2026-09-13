@@ -240,7 +240,7 @@ export function runFederatedCollab(input: Record<string, unknown>, cwd: string):
       const description = optionalString(input.description, 'description') ?? ''
       const solution = optionalString(input.solution, 'solution') ?? ''
       const category = (optionalString(input.category, 'category') as FederatedPattern['category']) ?? 'tooling'
-      const keywords = optionalString(input.keywords, 'keywords')?.split(',').map((k) => k.trim()) ?? []
+      const keywords = (optionalString(input.keywords, 'keywords')?.split(',').map((k) => k.trim().slice(0, MAX_KEYWORD_LENGTH)).filter((k) => k.length > 0).slice(0, MAX_KEYWORDS) ?? [])
       const anonymize = input.anonymize !== false
 
       let pattern: FederatedPattern = {

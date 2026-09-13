@@ -1,4 +1,5 @@
-import { rmSync } from 'node:fs'
+import { rmSync, readFileSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { expect, test } from 'bun:test'
 import { communicationTool } from './communication.ts'
 import { redactActionInput } from '../autonomy/governor.ts'
@@ -35,6 +36,27 @@ test('send runs directly and records a connector receipt — approval is the act
     expect(verified).toContain('Delivery verification succeeded')
     const repeated = await communicationTool.execute({ action: 'send', draftId })
     expect(repeated).toContain('already sent')
+  } finally {
+    if (previous === undefined) delete process.env.ELIA_COMMUNICATION_BRIDGE_COMMAND
+    else process.env.ELIA_COMMUNICATION_BRIDGE_COMMAND = previous
+    rmSync(`${process.cwd()}/.elia/communications/${draftId}.json`, { force: true })
+  }
+})
+
+test('verify rescues an in-flight draft stuck as sending through the connector', async () => {
+  const previous = process.env.ELIA_COMMUNICATION_BRIDGE_COMMAND
+  process.env.ELIA_COMMUNICATION_BRIDGE_COMMAND = 'bun -e "process.stdin.pipe(process.stdout)"'
+  const created = await communicationTool.execute({ action: 'draft', channel: 'message', recipient: '@ops', body: 'Check the release gate.' })
+  const draftId = draftIdFrom(created)
+  try {
+    const draftPath = join(process.cwd(), '.elia', 'communications', `${draftId}.json`)
+    const stored = JSON.parse(readFileSync(draftPath, 'utf8')) as { status: string }
+    expect(stored.status).toBe('draft')
+    writeFileSync(draftPath, JSON.stringify({ ...JSON.parse(readFileSync(draftPath, 'utf8')), status: 'sending' }))
+    const verified = await communicationTool.execute({ action: 'verify', draftId })
+    expect(verified).toContain('Delivery verification succeeded')
+    const updated = JSON.parse(readFileSync(draftPath, 'utf8')) as { status: string }
+    expect(updated.status).toBe('verified')
   } finally {
     if (previous === undefined) delete process.env.ELIA_COMMUNICATION_BRIDGE_COMMAND
     else process.env.ELIA_COMMUNICATION_BRIDGE_COMMAND = previous

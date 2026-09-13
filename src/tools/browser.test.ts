@@ -15,6 +15,11 @@ test('validateRequest rejects non-http navigation targets', () => {
   expect(() => validateRequest({ action: 'navigate', url: 'javascript:alert(1)' })).toThrow('absolute http(s) url')
 })
 
+test('validateRequest rejects navigation URLs with embedded credentials', () => {
+  expect(() => validateRequest({ action: 'navigate', url: 'https://user:secret@example.com/' })).toThrow('must not contain embedded credentials')
+  expect(validateRequest({ action: 'navigate', url: 'https://example.com/' })).toEqual({ action: 'navigate', url: 'https://example.com/' })
+})
+
 test('click actions run directly — approval for state-changing actions is the action governor\'s job, not this tool\'s', async () => {
   const previousBridge = process.env.ELIA_BROWSER_BRIDGE_COMMAND
   process.env.ELIA_BROWSER_BRIDGE_COMMAND = 'bun -e "process.stdin.pipe(process.stdout)"'

@@ -91,6 +91,13 @@ export function validateRequest(input: Record<string, unknown>): BrowserRequest 
   if (action === 'navigate') {
     const url = input.url
     if (typeof url !== 'string' || !/^https?:\/\//i.test(url)) throw new Error('navigate requires an absolute http(s) url')
+    let parsed: URL
+    try {
+      parsed = new URL(url)
+    } catch {
+      throw new Error('navigate requires an absolute http(s) url')
+    }
+    if (parsed.username || parsed.password) throw new Error('navigate url must not contain embedded credentials')
     request.url = url
   }
   if (action === 'click') {

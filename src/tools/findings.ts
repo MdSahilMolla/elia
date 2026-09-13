@@ -1,4 +1,5 @@
 import { existsSync } from 'node:fs'
+import { createHash } from 'node:crypto'
 import { isAbsolute, join, relative, resolve } from 'node:path'
 import type { Tool } from './types.ts'
 import { captureBeforeWrite } from '../checkpoint.ts'
@@ -26,6 +27,11 @@ function text(input: unknown, name: string, max = MAX_FIELD): string {
   if (typeof input !== 'string' || input.trim().length === 0) throw new Error(`${name} must be a non-empty string`)
   if (input.length > max) throw new Error(`${name} exceeds ${max} characters`)
   return input.trim()
+}
+
+/** Stable, content-based id so re-recording the same issue never increments a sequence number. */
+export function findingId(title: string, description: string): string {
+  return `F-${createHash('sha256').update(`${title}\n${description}`).digest('hex').slice(0, 6)}`
 }
 
 function requireScaffolded(slug: string): string {
@@ -127,7 +133,7 @@ export const logFindingTool: Tool = {
     }
 
     const existing = await readFindings(dir)
-    const id = `F-${String(existing.length + 1).padStart(3, '0')}`
+    const id = findingId(title, description)
     const finding: Finding = { id, title, severity, description, remediation, evidence, recordedAt: new Date().toISOString() }
 
     const jsonlPath = join(dir, 'findings.jsonl')

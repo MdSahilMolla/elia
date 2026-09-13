@@ -134,4 +134,21 @@ describe('runFederatedCollab + local-only receive', () => {
     expect(() => runFederatedCollab({ action: 'nope' }, cwd)).toThrow(/Unknown action/)
     expect(() => runFederatedCollab({ action: 'share' }, cwd)).toThrow(/title is required/)
   })
+
+  it('caps keyword count and length on share', () => {
+    runFederatedCollab(
+      {
+        action: 'share',
+        title: 'Keyword capped',
+        solution: 's',
+        anonymize: false,
+        keywords: `${'x'.repeat(200)},${Array.from({ length: 20 }, (_, i) => `kw${i}`).join(',')}`,
+      },
+      cwd,
+    )
+    const pattern = loadStore(cwd).patterns.find((p) => p.title === 'Keyword capped')
+    expect(pattern).toBeDefined()
+    expect(pattern!.keywords.length).toBeLessThanOrEqual(8)
+    for (const keyword of pattern!.keywords) expect(keyword.length).toBeLessThanOrEqual(64)
+  })
 })

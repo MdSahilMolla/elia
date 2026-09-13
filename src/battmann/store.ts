@@ -1211,7 +1211,8 @@ function stageDeployment(input: Row): Row {
     const sidecarPath = reportPath.slice(0, -3) + '.json'
     const htmlPath = reportPath.slice(0, -3) + '.html'
     if (!existsSync(sidecarPath)) throw new Error('the report JSON sidecar is missing; regenerate the report with report_from_store')
-    const bundle = JSON.parse(readFileSync(sidecarPath, 'utf8')) as { documentClassification?: string; contentClassification?: string; reportId?: string; reportVersion?: string; reportStatus?: string; title?: string }
+    const bundle = parseJson<{ documentClassification?: string; contentClassification?: string; reportId?: string; reportVersion?: string; reportStatus?: string; title?: string }>(readFileSync(sidecarPath, 'utf8'), {})
+    if (typeof bundle !== 'object' || bundle === null) throw new Error('the report JSON sidecar is corrupt; regenerate the report with report_from_store')
     // documentClassification is a self-reported label the report author supplies (see battmann.ts) — it is metadata,
     // not access control, and must never be trusted as a ceiling. contentClassification is computed by
     // loadBattmannReportData from the actual classification of the evidence/claims embedded in the report. The gate

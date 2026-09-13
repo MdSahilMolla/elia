@@ -6,26 +6,26 @@ import { assessAction, blockedInUnattendedMode, createActionGovernor, redactActi
 import { clearPreauthCaches, grantPreauth } from './preauth.ts'
 import { clearAllowCache } from './allowStore.ts'
 
-describe('autonomy governor', () => {
-  // isAllowlisted() (via governor.check) reads the *global* allow scope from
-  // whatever machine runs the suite (~/.elia/allow.json — real homedir, not
-  // cwd-relative like the project scope) unless overridden. Without this, a
-  // developer's or CI runner's own real allow rules leak into supervised-mode
-  // tests that assert the governor asks every time, making them non-hermetic:
-  // green on one machine, silently skipping the approval prompt on another
-  // where "git" (say) was already always-allowed for real.
-  let globalAllowDir: string
-  beforeEach(() => {
-    globalAllowDir = mkdtempSync(join(tmpdir(), 'elia-governor-allow-'))
-    process.env.ELIA_ALLOW_GLOBAL_PATH = join(globalAllowDir, 'allow.json')
-    clearAllowCache()
-  })
-  afterEach(() => {
-    delete process.env.ELIA_ALLOW_GLOBAL_PATH
-    clearAllowCache()
-    rmSync(globalAllowDir, { recursive: true, force: true })
-  })
+// isAllowlisted() (via governor.check) reads the *global* allow scope from
+// whatever machine runs the suite (~/.elia/allow.json — real homedir, not
+// cwd-relative like the project scope) unless overridden. Without this, a
+// developer's or CI runner's own real allow rules leak into supervised-mode
+// tests that assert the governor asks every time, making them non-hermetic:
+// green on one machine, silently skipping the approval prompt on another
+// where "git" (say) was already always-allowed for real.
+let globalAllowDir: string
+beforeEach(() => {
+  globalAllowDir = mkdtempSync(join(tmpdir(), 'elia-governor-allow-'))
+  process.env.ELIA_ALLOW_GLOBAL_PATH = join(globalAllowDir, 'allow.json')
+  clearAllowCache()
+})
+afterEach(() => {
+  delete process.env.ELIA_ALLOW_GLOBAL_PATH
+  clearAllowCache()
+  rmSync(globalAllowDir, { recursive: true, force: true })
+})
 
+describe('autonomy governor', () => {
   test('allows local reads and verification commands', () => {
     expect(assessAction({ name: 'read_file', input: { path: 'src/index.ts' } }, process.cwd()).decision).toBe('allow')
     expect(assessAction({ name: 'run_command', input: { command: 'bun test' } }, process.cwd()).risk).toBe('safe')
@@ -294,6 +294,19 @@ test('bounded action budget stops runaway unattended tool use', async () => {
   expect(exhausted.assessment.decision).toBe('block')
   expect(exhausted.message).toContain('Action budget exhausted')
   expect(governor.stats()).toEqual({ maxActions: 2, consumed: 2, exhausted: true, blockedByBudget: 1 })
+})
+
+test('a denied action does not consume the budget — only an action that actually happens does', async () => {
+  const governor = createActionGovernor({ mode: 'supervised', maxActions: 1, approve: async () => false })
+  // Critical command in supervised mode with a declining approver: denied.
+  const denied = await governor.check({ name: 'run_command', input: { command: 'git push --force origin main' } })
+  expect(denied.allowed).toBe(false)
+  expect(denied.message).toContain('denied by the user')
+  expect(governor.stats().consumed).toBe(0)
+  // With the denial no longer burning budget, the single real action is allowed.
+  const allowed = await governor.check({ name: 'read_file', input: { path: 'src/index.ts' } })
+  expect(allowed.allowed).toBe(true)
+  expect(governor.stats()).toEqual({ maxActions: 1, consumed: 1, exhausted: true, blockedByBudget: 0 })
 })
 
 test('every registered tool declares a governor contract', async () => {

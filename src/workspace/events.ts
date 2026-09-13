@@ -315,7 +315,8 @@ export function applyProjection(db: Database, event: PersistedEvent): void {
     }
     case 'TaskAssigned': {
       setTaskStatus(db, String(event.taskId), 'assigned', event.at, {
-        assignee_kind: String(p.assigneeKind), assignee_id: String(p.assigneeId),
+        // '' is the pool-reassign sentinel — store it as unassigned (NULL), never a real id.
+        assignee_kind: String(p.assigneeKind), assignee_id: p.assigneeId == null || p.assigneeId === '' ? null : String(p.assigneeId),
         wave: p.wave == null ? null : Number(p.wave),
         worktree_ref: p.worktreeRef == null ? null : String(p.worktreeRef),
       })
@@ -325,7 +326,7 @@ export function applyProjection(db: Database, event: PersistedEvent): void {
       const row = requireTaskRow(db, String(event.taskId))
       const status = toTask(row).status
       db.query('UPDATE tasks SET assignee_kind = ?, assignee_id = ?, lease_owner = NULL, lease_expires_at = NULL, updated_at = ? WHERE id = ?')
-        .run(String(p.assigneeKind), String(p.assigneeId), event.at, String(event.taskId))
+        .run(String(p.assigneeKind), p.assigneeId == null || p.assigneeId === '' ? null : String(p.assigneeId), event.at, String(event.taskId))
       if (status === 'assigned' || status === 'in-progress') setTaskStatus(db, String(event.taskId), 'ready', event.at)
       return
     }

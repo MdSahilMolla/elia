@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test'
-import { analyzeDependency, buildDependencyReport, compareVersions, detectPackageManager, isVolatileRange, parsePackageJson } from './dependencyAudit.ts'
+import { analyzeDependency, buildDependencyReport, compareVersions, detectPackageManager, isVolatileRange, parsePackageJson, suggestedFixCommand } from './dependencyAudit.ts'
 import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -11,6 +11,23 @@ describe('compareVersions', () => {
     expect(compareVersions('2.0.0', '1.9.9')).toBe(false)
     expect(compareVersions('1.0.0', '1.0.0')).toBe(false)
     expect(compareVersions('0.5', '0.5.1')).toBe(true)
+  })
+
+  it('treats non-numeric parts as zero instead of NaN', () => {
+    expect(compareVersions('1.0.0-beta', '1.0.5')).toBe(true)
+    expect(compareVersions('1.0.5', '1.0.0-beta')).toBe(false)
+    expect(compareVersions('1.0.0-beta', '1.0.0')).toBe(false)
+    expect(compareVersions('2.0.0', '1.x')).toBe(false)
+  })
+})
+
+describe('suggestedFixCommand', () => {
+  it('uses the detected package manager verb', () => {
+    expect(suggestedFixCommand('bun', 'pkg')).toBe('bun add pkg@latest')
+    expect(suggestedFixCommand('pnpm', 'pkg')).toBe('pnpm add pkg@latest')
+    expect(suggestedFixCommand('yarn', 'pkg')).toBe('yarn add pkg@latest')
+    expect(suggestedFixCommand('npm', 'pkg')).toBe('npm install pkg@latest')
+    expect(suggestedFixCommand('unknown', 'pkg')).toBe('bun add pkg@latest')
   })
 })
 

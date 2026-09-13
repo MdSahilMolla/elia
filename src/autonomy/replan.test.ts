@@ -135,6 +135,26 @@ test('nothing changes when every revision is refused', () => {
   expect(result.proposal).toBe(proposal)
 })
 
+test('the same revisions in a scrambled order come out identical (deterministic by content)', () => {
+  // Two workers, one adding a step and one adding a dependency on it, hand
+  // over the same batch in opposite order. Arrival-order application would
+  // reject the add-dependency when it lands first (its target step doesn't
+  // exist yet); content ordering must apply add-step first either way.
+  const revisions: PlanRevision[] = [
+    { kind: 'add-step', reason: 'missing migration', step: step('s5', ['s1']) },
+    { kind: 'add-dependency', reason: 's2 needs the migration first', stepId: 's2', dependsOn: 's5' },
+  ]
+
+  const forward = applyPlanRevisions(proposal, revisions, none)
+  const backward = applyPlanRevisions(proposal, [...revisions].reverse(), none)
+
+  expect(backward.applied).toEqual(forward.applied)
+  expect(backward.rejected).toEqual(forward.rejected)
+  expect(backward.applied).toHaveLength(2)
+  expect(backward.proposal.steps.find((entry) => entry.id === 's2')?.dependsOn).toContain('s5')
+  expect(forward.applied[0]).toContain('added step "s5"')
+})
+
 // --- the tool ---
 
 test('the tool collects revisions and hands them over once', async () => {

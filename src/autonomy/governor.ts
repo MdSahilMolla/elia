@@ -509,8 +509,13 @@ export function createActionGovernor(options: { mode?: GovernanceMode; approve?:
           message: `Action budget exhausted after ${maxActions} tool requests. Resume with a larger bounded budget or split the goal into smaller tasks.`,
         }
       }
-      actionCount += 1
-      if (assessment.decision === 'allow') return { allowed: true, assessment }
+      // Only an action that actually happened counts against the budget — a
+      // blocked or denied request consumes nothing, otherwise every command a
+      // policy blocks would silently burn the run's maxActions.
+      if (assessment.decision === 'allow') {
+        actionCount += 1
+        return { allowed: true, assessment }
+      }
 
       // A standing "always allow" — persisted (.elia/allow.json or ~/.elia/allow.json)
       // or chosen for this session at the approval menu — clears the prompt.
@@ -521,6 +526,7 @@ export function createActionGovernor(options: { mode?: GovernanceMode; approve?:
         mode === 'supervised' &&
         (sessionAllow.has(sessionKey(request, assessment)) || isAllowlisted(request, assessment, options.cwd))
       ) {
+        actionCount += 1
         return { allowed: true, assessment: { ...assessment, decision: 'allow' } }
       }
 
@@ -541,6 +547,7 @@ export function createActionGovernor(options: { mode?: GovernanceMode; approve?:
         const branch = await resolvedBranch()
         if (isPreauthorized(assessment.intent, cwd, branch)) {
           const grant = consumePreauth(assessment.intent, cwd, branch)
+          actionCount += 1
           return {
             allowed: true,
             assessment: { ...assessment, decision: 'allow', reason: `${assessment.reason} (pre-authorized: .elia/preauth.json grant for "${assessment.intent}", use #${grant?.usedCount ?? '?'})` },
@@ -560,6 +567,7 @@ export function createActionGovernor(options: { mode?: GovernanceMode; approve?:
         }
       }
       if (assessment.risk === 'review' && mode === 'unattended') {
+        actionCount += 1
         return { allowed: true, assessment: { ...assessment, decision: 'allow' } }
       }
 
@@ -570,7 +578,10 @@ export function createActionGovernor(options: { mode?: GovernanceMode; approve?:
       const decisionKey = `${assessment.risk}:${assessment.intent}`
       if (mode === 'unattended') {
         const remembered = classDecisions.get(decisionKey)
-        if (remembered === true) return { allowed: true, assessment: { ...assessment, decision: 'allow' } }
+        if (remembered === true) {
+          actionCount += 1
+          return { allowed: true, assessment: { ...assessment, decision: 'allow' } }
+        }
         if (remembered === false) {
           return {
             allowed: false,
@@ -617,7 +628,10 @@ export function createActionGovernor(options: { mode?: GovernanceMode; approve?:
             // action the user just approved — it just won't be remembered.
           }
         }
-        if (approved) return { allowed: true, assessment: { ...assessment, decision: 'allow' } }
+        if (approved) {
+          actionCount += 1
+          return { allowed: true, assessment: { ...assessment, decision: 'allow' } }
+        }
         return {
           allowed: false,
           assessment: { ...assessment, decision: 'block' },

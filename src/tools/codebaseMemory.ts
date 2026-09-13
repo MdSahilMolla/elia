@@ -6,10 +6,18 @@ import { join } from 'node:path'
 
 const MAX_RESULTS = 50
 
+export type MemoryCategory = 'decision' | 'bugfix' | 'pattern' | 'architecture' | 'lesson'
+const MEMORY_CATEGORIES: MemoryCategory[] = ['decision', 'bugfix', 'pattern', 'architecture', 'lesson']
+
+export function validateMemoryCategory(value: string): MemoryCategory {
+  if (MEMORY_CATEGORIES.includes(value as MemoryCategory)) return value as MemoryCategory
+  throw new Error(`category must be one of: ${MEMORY_CATEGORIES.join(', ')} (got "${value}")`)
+}
+
 export interface MemoryEntry {
   id: string
   timestamp: string
-  category: 'decision' | 'bugfix' | 'pattern' | 'architecture' | 'lesson'
+  category: MemoryCategory
   file?: string
   title: string
   description: string
@@ -144,7 +152,7 @@ export function runCodebaseMemory(input: Record<string, unknown>, cwd: string): 
       const title = optionalString(input.title, 'title')
       if (!title) throw new Error('title is required for record action')
       const description = optionalString(input.description, 'description') ?? ''
-      const category = (optionalString(input.category, 'category') as MemoryEntry['category']) ?? 'pattern'
+      const category = optionalString(input.category, 'category') ? validateMemoryCategory(optionalString(input.category, 'category')!) : 'pattern'
       const file = optionalString(input.file, 'file')
       const tags = optionalString(input.tags, 'tags')?.split(',').map((t) => t.trim()) ?? []
 
@@ -173,7 +181,7 @@ export function runCodebaseMemory(input: Record<string, unknown>, cwd: string): 
       if (title) entry.title = title
       const description = optionalString(input.description, 'description')
       if (description) entry.description = description
-      const category = optionalString(input.category, 'category') as MemoryEntry['category'] | undefined
+      const category = optionalString(input.category, 'category') ? validateMemoryCategory(optionalString(input.category, 'category')!) : undefined
       if (category) entry.category = category
       const file = optionalString(input.file, 'file')
       if (file) entry.file = file

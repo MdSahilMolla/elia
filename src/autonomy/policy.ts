@@ -41,6 +41,18 @@ const RISK_ORDER: Record<ActionRisk, number> = { safe: 0, review: 1, critical: 2
 const MAX_LIST = 200
 const MAX_PATTERN_LENGTH = 500
 
+// Deny-pattern checks run on every governed action; memoising the compiled
+// regex avoids rebuilding one per check. Bounded so a session that swaps in
+// hundreds of policies can't grow it without limit.
+const compiledPatternCache = new Map<string, RegExp>()
+function compiledPattern(pattern: string): RegExp {
+  const cached = compiledPatternCache.get(pattern)
+  if (cached) return cached
+  const regex = new RegExp(pattern, 'i')
+  if (compiledPatternCache.size < 200) compiledPatternCache.set(pattern, regex)
+  return regex
+}
+
 export function policyPath(cwd = process.cwd()): string {
   return join(cwd, '.elia', 'policy.json')
 }
@@ -64,7 +76,16 @@ export function loadPolicy(cwd = process.cwd()): EliaPolicy | null {
     cache.delete(path)
     return null
   }
-  const mtimeMs = statSync(path).mtimeMs
+  let mtimeMs: number
+  try {
+    mtimeMs = statSync(path).mtimeMs
+  } catch {
+    // The file vanished between the existsSync above and the stat — treat it
+    // as absent rather than letting the race surface as an uncaught throw on
+    // every governed action.
+    cache.delete(path)
+    return null
+  }
   const cached = cache.get(path)
   if (cached && cached.mtimeMs === mtimeMs) return cached.policy
 
@@ -140,7 +161,7 @@ export function applyPolicy(assessment: ActionAssessment, request: ActionRequest
     const command = request.name === 'run_command'
       ? (typeof request.input.command === 'string' ? request.input.command : '')
       : [typeof request.input.program === 'string' ? request.input.program : '', ...(Array.isArray(request.input.args) ? request.input.args.filter((arg): arg is string => typeof arg === 'string') : [])].join(' ')
-    const hit = policy.denyCommandPatterns.find((pattern) => new RegExp(pattern, 'i').test(command))
+    const hit = policy.denyCommandPatterns.find((pattern) => compiledPattern(pattern).test(command))
     if (hit) {
       return { assessment: { ...assessment, decision: 'block' }, blocked: true, message: `Blocked by .elia/policy.json: command matches forbidden pattern /${hit}/i.` }
     }

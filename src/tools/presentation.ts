@@ -3,6 +3,7 @@ import JSZip from 'jszip'
 import { existsSync, mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { basename, dirname, extname, join, resolve } from 'node:path'
 import { paths } from '../config.ts'
+import { captureBeforeWrite } from '../checkpoint.ts'
 import { analyzeWorkbook, auditWorkbook, readWorkbook, safeOutputPath } from './spreadsheet.ts'
 import type { Tool } from './types.ts'
 import { MAX_SHELL_OUTPUT_LENGTH, readBoundedOutput } from '../shell.ts'
@@ -253,11 +254,13 @@ export const presentationTool: Tool = {
     const audit = JSON.parse(auditWorkbook(workbook, request.sheet, request.keyColumn)) as AuditResult
     const defaultName = `${basename(request.path, extname(request.path))}-management-review.pptx`
     const outputPath = safeOutputPath(request.outputPath, join(paths.workspace, defaultName))
+    const analysisPath = `${outputPath}.analysis.json`
     ensureParent(outputPath)
+    await captureBeforeWrite(outputPath)
+    await captureBeforeWrite(analysisPath)
     await makeDeck(analysis, audit, request, outputPath)
     const packageVerification = JSON.parse(await verifyPresentation(outputPath, false)) as { validPackage: boolean; slides: number }
     if (!packageVerification.validPackage) throw new Error(`generated presentation failed package verification: ${outputPath}`)
-    const analysisPath = `${outputPath}.analysis.json`
     atomicText(analysisPath, JSON.stringify({ source: request.path, analysis, audit, packageVerification }, null, 2))
     return JSON.stringify({ action: request.action, outputPath, analysisPath, slides: packageVerification.slides, verified: true, sourceSheet: analysis.sheets[0]?.sheet, status: 'created' }, null, 2)
   },

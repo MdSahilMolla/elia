@@ -1,4 +1,5 @@
 import type { Tool } from './types.ts'
+import { existsSync } from 'node:fs'
 import { optionalString } from './args.ts'
 import { isIgnored } from './ignoreDirs.ts'
 import { resolveWorkspacePath } from '../autonomy/context.ts'
@@ -24,6 +25,7 @@ export const listFilesTool: Tool = {
     const pattern = input.pattern
     const cwd = resolveWorkspacePath(cwdArgument ?? '.')
     assertSafeFileAccess(cwd)
+    if (!existsSync(cwd)) throw new Error(`no such directory: ${cwdArgument ?? '.'}`)
     const glob = new Bun.Glob(pattern)
     const results: string[] = []
     for await (const path of glob.scan({ cwd, dot: false })) {

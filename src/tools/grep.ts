@@ -186,6 +186,8 @@ export async function searchWithJs(pattern: string, dir: string, inputDir: strin
   const scan = new Bun.Glob('**/*')
   const fileFilter = globPattern ? new Bun.Glob(globPattern) : undefined
   const matches: string[] = []
+  let matchCount = 0
+  let truncated = false
   let skippedLargeFiles = 0
 
   for await (const relPath of scan.scan({ cwd: dir, dot: false })) {
@@ -215,9 +217,12 @@ export async function searchWithJs(pattern: string, dir: string, inputDir: strin
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i]!
       if (!regex.test(line)) continue
-      
-      if (matches.length >= MAX_MATCHES) break
-      
+
+      if (matchCount >= MAX_MATCHES) {
+        truncated = true
+        break
+      }
+
       if (span > 0) {
         // ripgrep-style: `path-line-content` for context, `path:line:content`
         // for the match, `--` between non-adjacent groups.
@@ -232,11 +237,16 @@ export async function searchWithJs(pattern: string, dir: string, inputDir: strin
       } else {
         matches.push(`${fullPath}:${i + 1}:${line}`)
       }
+      matchCount += 1
     }
-    if (matches.length >= MAX_MATCHES) break
+    if (matchCount >= MAX_MATCHES) {
+      truncated = true
+      break
+    }
   }
 
+  const truncatedNote = truncated ? `\n\n[stopped after ${MAX_MATCHES} matches]` : ''
   const suffix = skippedLargeFiles > 0 ? `\n\n[skipped ${skippedLargeFiles} file(s) over ${MAX_SEARCH_FILE_BYTES} bytes]` : ''
   if (matches.length === 0) return `No matches found.${suffix}`
-  return `${matches.join('\n')}${suffix}`
+  return `${matches.join('\n')}${truncatedNote}${suffix}`
 }

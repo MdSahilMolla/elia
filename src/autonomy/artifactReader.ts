@@ -1,5 +1,5 @@
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
-import { isAbsolute, join, relative, resolve } from 'node:path'
+import { isAbsolute, join, relative, resolve, sep } from 'node:path'
 
 export interface ArtifactInfo {
   name: string
@@ -12,6 +12,23 @@ const TEXT_ARTIFACT_EXTENSIONS = ['.md', '.html', '.json'] as const
 
 function isTextArtifact(path: string): boolean {
   return TEXT_ARTIFACT_EXTENSIONS.some((extension) => path.toLowerCase().endsWith(extension))
+}
+
+/**
+ * The only directories a read_artifact-style request may reach inside `.elia`:
+ * the artifacts the run's own plan/receipt walk produced (`.elia/artifacts/**`)
+ * and a run's plan/receipt documents (`.elia/runs/<run>/plan.md|receipt.md`).
+ * Anything else — allow.json, policy.json, checkpoints, the goal graph — is
+ * governor state, not something the model should be asked to review, and is
+ * not readable through this entry point.
+ */
+function withinArtifactScope(stateDir: string, candidate: string): boolean {
+  const rel = relative(stateDir, candidate)
+  if (rel === '' || rel.startsWith('..') || isAbsolute(rel)) return false
+  const parts = rel.split(sep)
+  if (parts[0] === 'artifacts') return true
+  if (parts[0] === 'runs' && parts.length === 3 && (parts[2] === 'plan.md' || parts[2] === 'receipt.md')) return true
+  return false
 }
 
 export function getArtifactsDir(cwd = process.cwd()): string {
@@ -66,8 +83,7 @@ export function readArtifact(target?: string, cwd = process.cwd()): { path: stri
     const artifactName = isTextArtifact(target) ? target : `${target}.md`
     const direct = isAbsolute(target) ? resolve(target) : resolve(cwd, target)
     for (const candidate of [direct, resolve(artifactsDir, artifactName), resolve(stateDir, target)]) {
-      const fromState = relative(stateDir, candidate)
-      if (fromState.startsWith('..') || isAbsolute(fromState) || !isTextArtifact(candidate)) continue
+      if (!withinArtifactScope(stateDir, candidate) || !isTextArtifact(candidate)) continue
       if (existsSync(candidate) && statSync(candidate).isFile()) return { path: candidate, content: readFileSync(candidate, 'utf8') }
     }
     return null

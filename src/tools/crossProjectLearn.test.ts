@@ -1,5 +1,5 @@
 import { describe, expect, it, beforeAll, afterAll } from 'bun:test'
-import { runCrossProjectLearn, hashCode, getProjectFingerprint, loadStore, saveStore, scoreRelevance, type Pattern } from './crossProjectLearn.ts'
+import { runCrossProjectLearn, hashCode, getProjectFingerprint, loadStore, saveStore, scoreRelevance, validatePatternCategory, type Pattern } from './crossProjectLearn.ts'
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -33,6 +33,14 @@ describe('hashCode / getProjectFingerprint', () => {
     writeFileSync(join(dir, 'package.json'), '{"name":"x"}\n')
     expect(getProjectFingerprint(dir)).toBe(getProjectFingerprint(dir))
     rmSync(dir, { recursive: true, force: true })
+  })
+})
+
+describe('validatePatternCategory', () => {
+  it('accepts known categories and rejects unknown ones', () => {
+    expect(validatePatternCategory('optimization')).toBe('optimization')
+    expect(validatePatternCategory('error-pattern')).toBe('error-pattern')
+    expect(() => validatePatternCategory('refactor')).toThrow(/category must be one of: error-pattern, optimization, architecture, testing, security/)
   })
 })
 
@@ -97,5 +105,9 @@ describe('runCrossProjectLearn', () => {
   it('throws on missing title and unknown action', () => {
     expect(() => runCrossProjectLearn({ action: 'record' }, cwd)).toThrow(/title is required/)
     expect(() => runCrossProjectLearn({ action: 'nope' }, cwd)).toThrow(/Unknown action/)
+  })
+
+  it('rejects an invalid category when recording a pattern', () => {
+    expect(() => runCrossProjectLearn({ action: 'record', title: 't', category: 'refactor' }, cwd)).toThrow(/category must be one of/)
   })
 })

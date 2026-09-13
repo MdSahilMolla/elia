@@ -140,6 +140,19 @@ function inspectWorkbook(workbook: ExcelJS.Workbook, requestedSheet?: string): s
   }, null, 2)
 }
 
+/** Loop-based min/max so one huge sheet column never overflows the spread operator's argument limit. */
+export function minOf(values: number[]): number {
+  let min = Infinity
+  for (const value of values) if (value < min) min = value
+  return min
+}
+
+export function maxOf(values: number[]): number {
+  let max = -Infinity
+  for (const value of values) if (value > max) max = value
+  return max
+}
+
 function analyzeWorkbook(workbook: ExcelJS.Workbook, requestedSheet?: string, requestedGroupBy?: string, requestedMeasure?: string): string {
   const sheets = sheetData(workbook, requestedSheet)
   const analyses = sheets.map((sheet) => {
@@ -153,8 +166,8 @@ function analyzeWorkbook(workbook: ExcelJS.Workbook, requestedSheet?: string, re
         count: values.length,
         sum: values.reduce((total, value) => total + value, 0),
         average: values.length ? values.reduce((a, b) => a + b, 0) / values.length : 0,
-        min: values.length ? Math.min(...values) : undefined,
-        max: values.length ? Math.max(...values) : undefined,
+        min: values.length ? minOf(values) : undefined,
+        max: values.length ? maxOf(values) : undefined,
       }
     })() : undefined
     const groups = measure && groupBy ? Object.entries(sheet.rows.reduce<Record<string, { count: number; sum: number }>>((acc, row) => {

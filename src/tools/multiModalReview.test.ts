@@ -1,5 +1,9 @@
-import { describe, expect, it } from 'bun:test'
-import { analyzeSecurity, analyzePerformance, analyzeTesting, analyzeDocumentation, analyzeMaintainability, reviewCode, formatReport } from './multiModalReview.ts'
+import { describe, expect, it, beforeAll, afterAll } from 'bun:test'
+import { analyzeSecurity, analyzePerformance, analyzeTesting, analyzeDocumentation, analyzeMaintainability, reviewCode, formatReport, runGit } from './multiModalReview.ts'
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { MAX_SHELL_OUTPUT_LENGTH } from '../shell.ts'
 
 const CLEAN = `export function hello(name: string): string {
   return "Hello " + sanitize(name)
@@ -115,5 +119,32 @@ describe('formatReport', () => {
     expect(text).toContain('Overall score')
     expect(text).toContain('Security')
     expect(text).toContain('No issues found')
+  })
+})
+
+describe('runGit', () => {
+  let dir: string
+  let commit: string
+
+  beforeAll(() => {
+    dir = mkdtempSync(join(tmpdir(), 'mmreview-git-'))
+    writeFileSync(join(dir, 'big.ts'), '# big file so the diff dwarfs the cap\n'.repeat(15_000))
+    const git = (args: string[]) => Bun.spawnSync(['git', ...args], { cwd: dir, stdout: 'pipe', stderr: 'pipe' })
+    git(['init', '-q'])
+    git(['-c', 'user.email=t@t.c', '-c', 'user.name=t', 'add', '-A'])
+    git(['-c', 'user.email=t@t.c', '-c', 'user.name=t', 'commit', '-q', '-m', 'init'])
+    const rev = git(['rev-parse', 'HEAD'])
+    commit = new TextDecoder().decode(rev.stdout).trim()
+  })
+
+  afterAll(() => {
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('caps git show --patch output to the shell output bound', async () => {
+    const patch = await runGit(dir, ['show', commit, '--patch'])
+    expect(patch.length).toBeLessThan(MAX_SHELL_OUTPUT_LENGTH + 200)
+    expect(patch).toContain('characters omitted')
+    expect(() => reviewCode(patch)).not.toThrow()
   })
 })

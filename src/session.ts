@@ -71,10 +71,20 @@ export async function loadLatestSession(dir: string = SESSIONS_DIR): Promise<Sto
   const files = readdirSync(dir).filter((name) => name.endsWith('.json') && isSafeSessionId(name.slice(0, -5)))
   if (files.length === 0) return undefined
 
+  // A session file can be rotated/removed by a concurrent elia process between
+  // readdirSync and statSync — skip a file that vanished instead of crashing.
   const newest = files
-    .map((name) => ({ name, mtime: statSync(join(dir, name)).mtimeMs }))
-    .sort((a, b) => b.mtime - a.mtime)[0]!
+    .map((name) => {
+      try {
+        return { name, mtime: statSync(join(dir, name)).mtimeMs }
+      } catch {
+        return undefined
+      }
+    })
+    .filter((entry): entry is { name: string; mtime: number } => entry !== undefined)
+    .sort((a, b) => b.mtime - a.mtime)[0]
 
+  if (!newest) return undefined
   return loadSession(newest.name.replace(/\.json$/, ''), dir)
 }
 

@@ -156,12 +156,22 @@ export function compareVersions(current: string, latest: string): boolean {
   const c = current.split('.').map(Number)
   const l = latest.split('.').map(Number)
   for (let i = 0; i < Math.max(c.length, l.length); i++) {
-    const cv = c[i] ?? 0
-    const lv = l[i] ?? 0
+    const cv = Number.isFinite(c[i]) ? c[i]! : 0
+    const lv = Number.isFinite(l[i]) ? l[i]! : 0
     if (lv > cv) return true
     if (lv < cv) return false
   }
   return false
+}
+
+/** Upgrade command for the detected package manager; npm uses install, the rest use add. */
+export function suggestedFixCommand(packageManager: string, depName: string): string {
+  switch (packageManager) {
+    case 'pnpm': return `pnpm add ${depName}@latest`
+    case 'yarn': return `yarn add ${depName}@latest`
+    case 'npm': return `npm install ${depName}@latest`
+    default: return `bun add ${depName}@latest`
+  }
 }
 
 export function detectPackageManager(cwd: string): string {
@@ -277,7 +287,7 @@ function formatReport(report: AuditReport, packageManager: string, showFixes: bo
     lines.push('')
     lines.push('--- Suggested Fix Commands ---')
     for (const dep of report.dependencies.filter((d) => d.isVulnerable || d.deprecated)) {
-      lines.push(`  bun add ${dep.name}@latest`)
+      lines.push(`  ${suggestedFixCommand(packageManager, dep.name)}`)
     }
   }
 

@@ -185,6 +185,20 @@ test('git status porcelain splits into added and changed, ignoring deletions', (
   expect(changed).toEqual(['src/new.ts', 'src/old.ts', 'src/staged.ts', 'b.ts'])
 })
 
+test('a quoted porcelain path is C-unescaped, not merely stripped of its quotes', () => {
+  // git quotes paths that contain quotes/control characters and escapes them
+  // inside the quotes; a naive `replace(/^"|"$/g, "")` keeps the escapes, so a
+  // file named `say "hi".txt` used to emerge as `say \"hi\".txt`.
+  const { added, changed } = filesFromGitStatus('?? "say \\"hi\\".txt"')
+  expect(added).toEqual(['say "hi".txt'])
+  expect(changed).toEqual(['say "hi".txt'])
+})
+
+test('a raw backslash in an unquoted porcelain path is a real Windows path, not an escape', () => {
+  const { changed } = filesFromGitStatus(' M src/win\\path\\file.ts')
+  expect(changed).toEqual(['src/win\\path\\file.ts'])
+})
+
 test('scanning a non-git project finds its sources and skips dependency and tooling directories', () => {
   write('src/index.ts', 'export const x = 1')
   write('node_modules/pkg/index.js', 'module.exports = {}')
@@ -294,6 +308,24 @@ test('a hardcoded secret blocks the run and says the credential must be rotated'
   expect(verdict.verdict).toBe('revise')
   expect(verdict.issues[0]!.severity).toBe('blocker')
   expect(verdict.issues[0]!.detail).toContain('rotated')
+})
+
+test('a sibling directory whose name merely shares the deliverable prefix is not treated as inside it', async () => {
+  // Path-prefix containment (`dir.startsWith(root)`) sees `…\proj-abc\…` as
+  // inside `…\proj-a\…`, clipping the reported file to `bc\src\auth.ts`. Real
+  // path containment resolves the relative path, so the sibling is reported
+  // under its own name.
+  const root = join(dir, 'proj-a')
+  mkdirSync(root, { recursive: true })
+  writeFileSync(join(join(dir, 'proj-a'), 'package.json'), JSON.stringify({ name: 'a' }))
+  const sibling = join(dir, 'proj-abc', 'src')
+  mkdirSync(sibling, { recursive: true })
+  const absoluteFile = join(sibling, 'auth.ts')
+  writeFileSync(absoluteFile, 'const JWT_SECRET = process.env.JWT_SECRET || "supersecret"')
+
+  const found = await hardcodedSecrets({ cwd: root, addedFiles: [], changedFiles: [absoluteFile] })
+  expect(found).toHaveLength(1)
+  expect(found[0]!.file).toBe(absoluteFile)
 })
 
 test('a name that merely contains a secret word is not a credential', () => {

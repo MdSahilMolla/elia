@@ -12,12 +12,22 @@ const REQUEST_TIMEOUT_MS = 30_000
 const MAX_BODY_BYTES = 64 * 1024
 const MAX_RESPONSE_SNIPPET = 4_000
 
+/**
+ * Strip a trailing IPv6 zone identifier (`%eth0` or the URL-encoded `%25eth0`)
+ * from a host token so `fe80::1%eth0` matches a plain `fe80::1` scope entry.
+ * Only applied to tokens containing `:` so hostnames with literal `%` are untouched.
+ */
+export function stripZoneId(token: string): string {
+  if (!token.includes(':')) return token
+  return token.replace(/%(?:25)?[0-9a-z._-]+$/i, '')
+}
+
 /** Pull every host/IP/CIDR token out of a SCOPE.md so a request target can be checked against it. */
 export function parseScopeHosts(scopeText: string): string[] {
   const tokens = new Set<string>()
   const pattern = /\b((?:\*\.)?(?:[a-z0-9-]+\.)+[a-z]{2,}|(?:\d{1,3}\.){3}\d{1,3}(?:\/\d{1,2})?|localhost|\[?[0-9a-f:]+\]?(?:\/\d{1,3})?)\b/gi
   for (const match of scopeText.matchAll(pattern)) {
-    const token = match[1]!.toLowerCase().replace(/^\[|\]$/g, '')
+    const token = stripZoneId(match[1]!.toLowerCase().replace(/^\[|\]$/g, ''))
     // Skip bare version-like or date-like dotted numbers that are not addresses.
     if (/^(?:\d{1,3}\.){3}\d{1,3}(?:\/\d{1,2})?$/.test(token)) {
       const [ip, bits] = token.split('/')
@@ -48,7 +58,7 @@ function ipv4InCidr(ip: string, cidr: string): boolean {
 
 /** Whether a request hostname is covered by an engagement's authorized scope tokens. */
 export function hostInScope(hostname: string, scopeHosts: string[]): boolean {
-  const host = hostname.toLowerCase().replace(/^\[|\]$/g, '').replace(/\.$/, '')
+  const host = stripZoneId(hostname.toLowerCase().replace(/^\[|\]$/g, '').replace(/\.$/, ''))
   const hostIsIpv4 = isIP(host) === 4
   for (const token of scopeHosts) {
     if (token === host) return true
