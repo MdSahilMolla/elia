@@ -2,13 +2,13 @@ import { describe, expect, it, beforeAll, afterAll } from 'bun:test'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { mkdtempSync, writeFileSync } from 'node:fs'
-import { openProject, parseProject, normalizePath } from './parser.ts'
+import { openProject, parseProject, normalizePath, closeProject } from './parser.ts'
 import { createFixture, cleanupFixture, type Fixture } from './testFixtures.ts'
 import { buildGraph, type DepGraph } from './graph.ts'
 import { detectViolations, type DetectionResult } from './violations.ts'
 import { loadArchitectureConfig, type ArchitectureConfig } from './config.ts'
-import type { Program } from 'typescript/unstable/sync'
-import type { Snapshot } from 'typescript/unstable/sync'
+import type { Program } from 'typescript/unstable/async'
+import type { API, Snapshot } from 'typescript/unstable/async'
 
 const RULES = {
   architecture: {
@@ -51,32 +51,31 @@ const RULE_FILES: Record<string, string> = {
 
 describe('violations (configured architecture)', () => {
   let fixture: Fixture
-  let apiDispose: { api: unknown; snapshot: Snapshot }
+  let apiDispose: { api: API; snapshot: Snapshot }
   let program: Program
   const root = normalizePath(mkdtempSync(join(tmpdir(), 'arch-viol-rules')))
 
   const opts = () => ({ projectRoot: root, tsconfigPath: normalizePath(join(root, 'tsconfig.json')), includeTests: true, maxFiles: 100 })
 
-  function graph(): DepGraph {
-    const { files } = parseProject(program, opts())
+  async function graph(): Promise<DepGraph> {
+    const { files } = await parseProject(program, opts())
     return buildGraph(files, opts())
   }
 
-  function detect(config: ArchitectureConfig): DetectionResult {
-    return detectViolations(graph(), config)
+  async function detect(config: ArchitectureConfig): Promise<DetectionResult> {
+    return detectViolations(await graph(), config)
   }
 
-  beforeAll(() => {
+  beforeAll(async () => {
     fixture = createFixture(root, RULE_FILES, { includeBase: false })
     writeFileSync(join(root, 'arch.json'), JSON.stringify(RULES))
-    const { api, snapshot, program: p } = openProject(opts())
+    const { api, snapshot, program: p } = await openProject(opts())
     apiDispose = { api, snapshot }
     program = p
   })
 
-  afterAll(() => {
-    apiDispose.snapshot.dispose()
-    ;(apiDispose.api as { close: () => void }).close()
+  afterAll(async () => {
+    await closeProject(apiDispose)
     cleanupFixture(root)
   })
 
@@ -86,57 +85,57 @@ describe('violations (configured architecture)', () => {
     expect(loaded.config.layers?.length).toBe(2)
   })
 
-  it('detects upward layer imports (model → web)', () => {
-    const { violations } = detect(loadArchitectureConfig(root).config)
+  it('detects upward layer imports (model → web)', async () => {
+    const { violations } = await detect(loadArchitectureConfig(root).config)
     const up = violations.filter((v) => v.type === 'import_direction' && v.source.endsWith('model/upward.ts'))
     expect(up.length).toBeGreaterThanOrEqual(1)
     expect(up[0]!.target.endsWith('web/shared.ts')).toBe(true)
   })
 
-  it('detects the legacy lib → app rule', () => {
-    const { violations } = detect(loadArchitectureConfig(root).config)
+  it('detects the legacy lib → app rule', async () => {
+    const { violations } = await detect(loadArchitectureConfig(root).config)
     const legacy = violations.some((v) => v.type === 'import_direction' && v.source.endsWith('lib/helper.ts'))
     expect(legacy).toBe(true)
   })
 
-  it('detects abstraction leakage into non-public layer paths', () => {
-    const { violations } = detect(loadArchitectureConfig(root).config)
+  it('detects abstraction leakage into non-public layer paths', async () => {
+    const { violations } = await detect(loadArchitectureConfig(root).config)
     const leak = violations.filter((v) => v.type === 'abstraction_leakage' && v.source.endsWith('web/page.ts'))
     expect(leak.length).toBeGreaterThanOrEqual(1)
     expect(leak[0]!.target.endsWith('model/internal.ts')).toBe(true)
   })
 
-  it('detects forbidden imports from configured rules', () => {
-    const { violations } = detect(loadArchitectureConfig(root).config)
+  it('detects forbidden imports from configured rules', async () => {
+    const { violations } = await detect(loadArchitectureConfig(root).config)
     const forbidden = violations.find((v) => v.type === 'forbidden_import' && v.source.endsWith('forbidden/consumer.ts'))
     expect(forbidden).toBeDefined()
     expect(forbidden!.target.endsWith('target.ts')).toBe(true)
   })
 
-  it('detects package boundary violations (non-public path)', () => {
-    const { violations } = detect(loadArchitectureConfig(root).config)
+  it('detects package boundary violations (non-public path)', async () => {
+    const { violations } = await detect(loadArchitectureConfig(root).config)
     const pkg = violations.find((v) => v.type === 'package_boundary_violation' && v.source.endsWith('pkgB/index.ts'))
     expect(pkg).toBeDefined()
     expect(pkg!.target.endsWith('pkgA/internal.ts')).toBe(true)
   })
 
-  it('detects dependency inversion (concrete instead of interface)', () => {
-    const { violations } = detect(loadArchitectureConfig(root).config)
+  it('detects dependency inversion (concrete instead of interface)', async () => {
+    const { violations } = await detect(loadArchitectureConfig(root).config)
     const inv = violations.find((v) => v.type === 'dependency_inversion' && v.source.endsWith('uses.ts'))
     expect(inv).toBeDefined()
     expect(inv!.target.endsWith('impl.ts')).toBe(true)
   })
 
-  it('detects unresolved imports and honors exempt paths', () => {
-    const { violations } = detect(loadArchitectureConfig(root).config)
+  it('detects unresolved imports and honors exempt paths', async () => {
+    const { violations } = await detect(loadArchitectureConfig(root).config)
     const broken = violations.find((v) => v.type === 'unresolved_import' && v.source.endsWith('broken.ts'))
     expect(broken).toBeDefined()
     const entry = violations.find((v) => v.type === 'unresolved_import' && v.source.endsWith('entry.ts'))
     expect(entry).toBeUndefined()
   })
 
-  it('does not fabricate cycles in this acyclic fixture', () => {
-    const { violations } = detect({})
+  it('does not fabricate cycles in this acyclic fixture', async () => {
+    const { violations } = await detect({})
     expect(violations.filter((v) => v.type === 'circular_dependency').length).toBe(0)
   })
 })

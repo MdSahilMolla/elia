@@ -2,7 +2,7 @@ import { describe, expect, it, beforeAll, afterAll } from 'bun:test'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { mkdtempSync, readFileSync } from 'node:fs'
-import { openProject, parseProject, normalizePath } from './parser.ts'
+import { openProject, parseProject, normalizePath, closeProject } from './parser.ts'
 import { createFixture, cleanupFixture } from './testFixtures.ts'
 import { buildGraph, type DepGraph } from './graph.ts'
 import { detectViolations } from './violations.ts'
@@ -14,8 +14,8 @@ import {
   replaceSpecifierInLine,
 } from './repair.ts'
 import type { ArchitectureConfig } from './config.ts'
-import type { Program } from 'typescript/unstable/sync'
-import type { Snapshot } from 'typescript/unstable/sync'
+import type { Program } from 'typescript/unstable/async'
+import type { API, Snapshot } from 'typescript/unstable/async'
 
 const CONFIG: ArchitectureConfig = {
   packages: [
@@ -36,24 +36,23 @@ const FILES: Record<string, string> = {
 }
 
 describe('repair planning', () => {
-  let apiDispose: { api: unknown; snapshot: Snapshot }
+  let apiDispose: { api: API; snapshot: Snapshot }
   let program: Program
   let graph: DepGraph
   const root = normalizePath(mkdtempSync(join(tmpdir(), 'arch-repair')))
   const opts = () => ({ projectRoot: root, tsconfigPath: normalizePath(join(root, 'tsconfig.json')), includeTests: true, maxFiles: 200 })
 
-  beforeAll(() => {
+  beforeAll(async () => {
     createFixture(root, FILES, { includeBase: false })
-    const { api, snapshot, program: p } = openProject(opts())
+    const { api, snapshot, program: p } = await openProject(opts())
     apiDispose = { api, snapshot }
     program = p
-    const { files } = parseProject(program, opts())
+    const { files } = await parseProject(program, opts())
     graph = buildGraph(files, opts())
   })
 
-  afterAll(() => {
-    apiDispose.snapshot.dispose()
-    ;(apiDispose.api as { close: () => void }).close()
+  afterAll(async () => {
+    await closeProject(apiDispose)
     cleanupFixture(root)
     void program
   })

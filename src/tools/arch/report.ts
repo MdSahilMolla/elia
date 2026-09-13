@@ -6,7 +6,7 @@
 // Nothing in this module writes to disk or mutates source — repair *plans* are
 // produced (for the human and the explicit patch path) but never applied here.
 
-import { joinPath, normalizePath, openProject, parseProject } from './parser.ts'
+import { closeProject, joinPath, normalizePath, openProject, parseProject } from './parser.ts'
 import type { ParserOptions, Violation } from './types.ts'
 import { buildGraph, graphStats, type DepGraph } from './graph.ts'
 import { loadArchitectureConfig, type ArchitectureConfig, type LoadedConfig } from './config.ts'
@@ -94,9 +94,9 @@ export async function buildReport(options: ArchReportOptions): Promise<ArchRepor
   const maxFiles = options.maxFiles && options.maxFiles > 0 ? Math.min(options.maxFiles, 5000) : 200
 
   const parserOptions: ParserOptions = { projectRoot, tsconfigPath, includeTests, maxFiles }
-  const { api, snapshot, program } = openProject(parserOptions)
+  const { api, snapshot, program } = await openProject(parserOptions)
   try {
-    const { files, truncated } = parseProject(program, parserOptions)
+    const { files, truncated } = await parseProject(program, parserOptions)
     const graph = buildGraph(files, parserOptions)
     const loaded: LoadedConfig = loadArchitectureConfig(projectRoot, options.configPath)
     const config = loaded.config
@@ -164,8 +164,7 @@ export async function buildReport(options: ArchReportOptions): Promise<ArchRepor
       summary: summaryParts.join(' · '),
     }
   } finally {
-    snapshot.dispose()
-    api.close()
+    await closeProject({ api, snapshot })
   }
 }
 

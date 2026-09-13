@@ -2,7 +2,7 @@ import { describe, expect, it, beforeAll, afterAll } from 'bun:test'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { mkdtempSync } from 'node:fs'
-import { openProject, parseProject, normalizePath } from './parser.ts'
+import { openProject, parseProject, normalizePath, closeProject } from './parser.ts'
 import { createFixture, cleanupFixture } from './testFixtures.ts'
 import { buildGraph, type DepGraph } from './graph.ts'
 import { detectViolations } from './violations.ts'
@@ -14,29 +14,28 @@ import {
   hotspots,
   healthSummary,
 } from './analysis.ts'
-import type { Program } from 'typescript/unstable/sync'
-import type { Snapshot } from 'typescript/unstable/sync'
+import type { Program } from 'typescript/unstable/async'
+import type { API, Snapshot } from 'typescript/unstable/async'
 
 describe('analysis.impact', () => {
-  let apiDispose: { api: unknown; snapshot: Snapshot }
+  let apiDispose: { api: API; snapshot: Snapshot }
   let program: Program
   let graph: DepGraph
   const root = normalizePath(mkdtempSync(join(tmpdir(), 'arch-analysis')))
   const opts = () => ({ projectRoot: root, tsconfigPath: normalizePath(join(root, 'tsconfig.json')), includeTests: true, maxFiles: 200 })
 
-  beforeAll(() => {
+  beforeAll(async () => {
     const fixture = createFixture(root)
-    const { api, snapshot, program: p } = openProject(opts())
+    const { api, snapshot, program: p } = await openProject(opts())
     apiDispose = { api, snapshot }
     program = p
-    const { files } = parseProject(program, opts())
+    const { files } = await parseProject(program, opts())
     graph = buildGraph(files, opts())
     void fixture
   })
 
-  afterAll(() => {
-    apiDispose.snapshot.dispose()
-    ;(apiDispose.api as { close: () => void }).close()
+  afterAll(async () => {
+    await closeProject(apiDispose)
     cleanupFixture(root)
   })
 
@@ -47,20 +46,20 @@ describe('analysis.impact', () => {
     expect(imp.risk).toBe('medium')
   })
 
-  it('reports the dependents of a hub module', () => {
+  it('reports the dependents of a hub module', async () => {
     const imp = impactOf(graph, 'src/app.ts')
     expect(imp.directDependents).toContain('src/app.spec.ts')
     expect(imp.totalImpact).toBeGreaterThanOrEqual(1)
   })
 
-  it('reports unknown modules without fabrication', () => {
+  it('reports unknown modules without fabrication', async () => {
     const imp = impactOf(graph, 'src/does-not-exist.ts')
     expect(imp.totalImpact).toBe(0)
     expect(imp.directDependents).toEqual([])
     expect(imp.risk).toBe('low')
   })
 
-  it('combines several files into one change impact', () => {
+  it('combines several files into one change impact', async () => {
     const change = impactOfMany(graph, ['src/core/types.ts', 'src/core/util.ts'])
     expect(change.unionDependents).toContain('src/app.ts')
     expect(change.unionDependents).toContain('src/dyn.ts')
@@ -69,27 +68,26 @@ describe('analysis.impact', () => {
 })
 
 describe('analysis.health', () => {
-  let apiDispose: { api: unknown; snapshot: Snapshot }
+  let apiDispose: { api: API; snapshot: Snapshot }
   let program: Program
   let graph: DepGraph
   const root = normalizePath(mkdtempSync(join(tmpdir(), 'arch-health')))
   const opts = () => ({ projectRoot: root, tsconfigPath: normalizePath(join(root, 'tsconfig.json')), includeTests: true, maxFiles: 200 })
 
-  beforeAll(() => {
+  beforeAll(async () => {
     createFixture(root, {
       'src/pkga/one.ts': `import { two } from '../pkgb/two'\nexport const one = two\n`,
       'src/pkgb/two.ts': `import { one } from '../pkga/one'\nimport { missing } from './no'\nexport const two = one ?? missing\n`,
     })
-    const { api, snapshot, program: p } = openProject(opts())
+    const { api, snapshot, program: p } = await openProject(opts())
     apiDispose = { api, snapshot }
     program = p
-    const { files } = parseProject(program, opts())
+    const { files } = await parseProject(program, opts())
     graph = buildGraph(files, opts())
   })
 
-  afterAll(() => {
-    apiDispose.snapshot.dispose()
-    ;(apiDispose.api as { close: () => void }).close()
+  afterAll(async () => {
+    await closeProject(apiDispose)
     cleanupFixture(root)
   })
 

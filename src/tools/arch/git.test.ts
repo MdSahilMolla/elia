@@ -3,7 +3,7 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { mkdtempSync, writeFileSync } from 'node:fs'
 import { runGit } from '../../autonomy/worktree.ts'
-import { openProject, parseProject, normalizePath } from './parser.ts'
+import { openProject, parseProject, normalizePath, closeProject } from './parser.ts'
 import { createFixture, cleanupFixture } from './testFixtures.ts'
 import { buildGraph, type DepGraph } from './graph.ts'
 import {
@@ -18,8 +18,8 @@ import {
   resolveRev,
 } from './git.ts'
 import type { Violation } from './types.ts'
-import type { Program } from 'typescript/unstable/sync'
-import type { Snapshot } from 'typescript/unstable/sync'
+import type { Program } from 'typescript/unstable/async'
+import type { API, Snapshot } from 'typescript/unstable/async'
 
 async function git(cwd: string, args: string[]): Promise<{ exitCode: number; stdout: string }> {
   const r = await runGit(args, cwd)
@@ -27,7 +27,7 @@ async function git(cwd: string, args: string[]): Promise<{ exitCode: number; std
 }
 
 describe('git history and drift', () => {
-  let apiDispose: { api: unknown; snapshot: Snapshot }
+  let apiDispose: { api: API; snapshot: Snapshot }
   let program: Program
   let graph: DepGraph
   const root = normalizePath(mkdtempSync(join(tmpdir(), 'arch-git')))
@@ -48,16 +48,15 @@ describe('git history and drift', () => {
     await git(root, ['add', '.'])
     await git(root, ['commit', '-q', '-m', 'change a'])
 
-    const { api, snapshot, program: p } = openProject(opts())
+    const { api, snapshot, program: p } = await openProject(opts())
     apiDispose = { api, snapshot }
     program = p
-    const { files } = parseProject(program, opts())
+    const { files } = await parseProject(program, opts())
     graph = buildGraph(files, opts())
   })
 
-  afterAll(() => {
-    apiDispose.snapshot.dispose()
-    ;(apiDispose.api as { close: () => void }).close()
+  afterAll(async () => {
+    await closeProject(apiDispose)
     cleanupFixture(root)
     void program
   })

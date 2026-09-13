@@ -116,10 +116,15 @@ export interface Violation {
   why: string
 }
 
-/** Handle to an opened native TypeScript project; must be closed by the caller. */
+/**
+ * Handle to an opened native TypeScript project; must be closed by the caller.
+ *
+ * The *async* client, deliberately — see `parser.ts`. The sync one cannot run
+ * under Bun at all on Linux.
+ */
 export interface OpenProjectResult {
-  api: import('typescript/unstable/sync').API
-  snapshot: import('typescript/unstable/sync').Snapshot
-  project: import('typescript/unstable/sync').Project
-  program: import('typescript/unstable/sync').Program
+  api: import('typescript/unstable/async').API
+  snapshot: import('typescript/unstable/async').Snapshot
+  project: import('typescript/unstable/async').Project
+  program: import('typescript/unstable/async').Program
 }
