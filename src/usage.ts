@@ -1,4 +1,7 @@
+import { existsSync, readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import type { Usage } from './providers/types.ts'
+import { logSwallowedError } from './diagnostics.ts'
 
 export const ZERO_USAGE: Usage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 }
 
@@ -35,16 +38,84 @@ const PRICING: Record<string, Pricing> = {
   'mercury-2.5': { inputPerM: 0.2, outputPerM: 0.75, cacheReadPerM: 0.02 },
 }
 
+/**
+ * A model not in the hardcoded table above (a newer release, a provider this
+ * table has no verified rate for) shows "cost unknown" rather than a guessed
+ * number — fabricating a price would be worse than not showing one. This is
+ * the honest alternative: let the operator supply their own verified rate in
+ * `.elia/pricing.json` (shaped `{ "<model>": { "inputPerM": n, "outputPerM": n,
+ * "cacheReadPerM"?: n, "cacheWritePerM"?: n } }`), which is consulted first —
+ * an entry here can also override a built-in rate that has drifted.
+ */
+let customPricingCache: { path: string; pricing: Record<string, Pricing> } | undefined
+
+function loadCustomPricing(cwd = process.cwd()): Record<string, Pricing> {
+  const path = join(cwd, '.elia', 'pricing.json')
+  if (customPricingCache?.path === path) return customPricingCache.pricing
+  if (!existsSync(path)) {
+    customPricingCache = { path, pricing: {} }
+    return customPricingCache.pricing
+  }
+  let pricing: Record<string, Pricing> = {}
+  try {
+    const parsed = JSON.parse(readFileSync(path, 'utf8')) as unknown
+    if (parsed && typeof parsed === 'object') {
+      for (const [model, rate] of Object.entries(parsed as Record<string, unknown>)) {
+        if (isValidPricing(rate)) pricing[model] = rate
+      }
+    }
+  } catch (err) {
+    logSwallowedError('usage.loadCustomPricing', err, { path })
+    pricing = {}
+  }
+  customPricingCache = { path, pricing }
+  return pricing
+}
+
+function isValidPricing(value: unknown): value is Pricing {
+  if (!value || typeof value !== 'object') return false
+  const rate = value as Record<string, unknown>
+  const numeric = (v: unknown) => typeof v === 'number' && Number.isFinite(v) && v >= 0
+  if (!numeric(rate.inputPerM) || !numeric(rate.outputPerM)) return false
+  if (rate.cacheReadPerM !== undefined && !numeric(rate.cacheReadPerM)) return false
+  if (rate.cacheWritePerM !== undefined && !numeric(rate.cacheWritePerM)) return false
+  return true
+}
+
+/** Test seam. */
+export function clearCustomPricingCache(): void {
+  customPricingCache = undefined
+}
+
+/**
+ * A provider-reported token count should always be a finite, non-negative
+ * integer, but nothing upstream enforces that — a malformed API response or
+ * a bad manual Usage value would otherwise propagate straight into a dollar
+ * figure (including, for a negative count, a negative cost). Treat anything
+ * else as 0 and record it once via diagnostics rather than silently
+ * fabricating a number or throwing.
+ */
+function sanitizeTokenCount(field: keyof Usage, value: number): number {
+  if (Number.isFinite(value) && value >= 0) return value
+  logSwallowedError('usage.estimateCostUsd.badTokenCount', new Error(`non-finite or negative ${field}`), { field, value })
+  return 0
+}
+
 /** Undefined when the model isn't in the pricing table — callers should show "unknown", never a fabricated number. */
-export function estimateCostUsd(model: string, usage: Usage): number | undefined {
-  const pricing = PRICING[model]
+export function estimateCostUsd(model: string, usage: Usage, cwd = process.cwd()): number | undefined {
+  const pricing = loadCustomPricing(cwd)[model] ?? PRICING[model]
   if (!pricing) return undefined
 
+  const inputTokens = sanitizeTokenCount('inputTokens', usage.inputTokens)
+  const outputTokens = sanitizeTokenCount('outputTokens', usage.outputTokens)
+  const cacheReadTokens = sanitizeTokenCount('cacheReadTokens', usage.cacheReadTokens)
+  const cacheWriteTokens = sanitizeTokenCount('cacheWriteTokens', usage.cacheWriteTokens)
+
   return (
-    (usage.inputTokens / 1_000_000) * pricing.inputPerM +
-    (usage.outputTokens / 1_000_000) * pricing.outputPerM +
-    (usage.cacheReadTokens / 1_000_000) * (pricing.cacheReadPerM ?? pricing.inputPerM) +
-    (usage.cacheWriteTokens / 1_000_000) * (pricing.cacheWritePerM ?? pricing.inputPerM)
+    (inputTokens / 1_000_000) * pricing.inputPerM +
+    (outputTokens / 1_000_000) * pricing.outputPerM +
+    (cacheReadTokens / 1_000_000) * (pricing.cacheReadPerM ?? pricing.inputPerM) +
+    (cacheWriteTokens / 1_000_000) * (pricing.cacheWritePerM ?? pricing.inputPerM)
   )
 }
 

@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from 'bun:test'
+import { afterEach, beforeEach, expect, test } from 'bun:test'
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -13,8 +13,20 @@ import {
 import { assessAction, createActionGovernor } from './governor.ts'
 
 const dirs: string[] = []
-afterEach(() => {
+let globalAllowDir: string
+beforeEach(() => {
+  // isAllowlisted() also reads the *global* scope (~/.elia/allow.json, real
+  // homedir, not cwd-relative) even though every test here only sets up a
+  // project-scope tmpdir — without this override these tests are exposed to
+  // whatever the machine actually running them has globally allowed.
+  globalAllowDir = mkdtempSync(join(tmpdir(), 'elia-allow-global-'))
+  process.env.ELIA_ALLOW_GLOBAL_PATH = join(globalAllowDir, 'allow.json')
   clearAllowCache()
+})
+afterEach(() => {
+  delete process.env.ELIA_ALLOW_GLOBAL_PATH
+  clearAllowCache()
+  rmSync(globalAllowDir, { recursive: true, force: true })
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true })
 })
 
@@ -45,6 +57,19 @@ test('a persisted project rule permits that command prefix and nothing else', ()
 
   const saved = JSON.parse(readFileSync(join(dir, '.elia', 'allow.json'), 'utf8'))
   expect(saved.rules[0].commandPrefix).toBe('git')
+})
+
+test('a direct-program rule is scoped to its executable and assessed intent', () => {
+  const dir = project()
+  const push = { name: 'run_program', input: { program: 'git', args: ['push', 'origin', 'main'] } }
+  const status = { name: 'run_program', input: { program: 'git', args: ['status'] } }
+
+  addAllowRule(ruleFor(push, assessAction(push, dir)), 'project', dir)
+
+  expect(isAllowlisted(push, assessAction(push, dir), dir)).toBe(true)
+  expect(isAllowlisted(status, assessAction(status, dir), dir)).toBe(false)
+  const saved = JSON.parse(readFileSync(join(dir, '.elia', 'allow.json'), 'utf8'))
+  expect(saved.rules[0].commandPrefix).toBe('git push')
 })
 
 test('a non-command rule is scoped to the tool + intent', () => {

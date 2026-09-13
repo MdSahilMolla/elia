@@ -1,13 +1,35 @@
-import { beforeEach, describe, expect, test } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { assessAction, blockedInUnattendedMode, createActionGovernor, redactActionInput } from './governor.ts'
+import { clearPreauthCaches, grantPreauth } from './preauth.ts'
 import { clearAllowCache } from './allowStore.ts'
 
-beforeEach(() => clearAllowCache())
-
 describe('autonomy governor', () => {
+  // isAllowlisted() (via governor.check) reads the *global* allow scope from
+  // whatever machine runs the suite (~/.elia/allow.json — real homedir, not
+  // cwd-relative like the project scope) unless overridden. Without this, a
+  // developer's or CI runner's own real allow rules leak into supervised-mode
+  // tests that assert the governor asks every time, making them non-hermetic:
+  // green on one machine, silently skipping the approval prompt on another
+  // where "git" (say) was already always-allowed for real.
+  let globalAllowDir: string
+  beforeEach(() => {
+    globalAllowDir = mkdtempSync(join(tmpdir(), 'elia-governor-allow-'))
+    process.env.ELIA_ALLOW_GLOBAL_PATH = join(globalAllowDir, 'allow.json')
+    clearAllowCache()
+  })
+  afterEach(() => {
+    delete process.env.ELIA_ALLOW_GLOBAL_PATH
+    clearAllowCache()
+    rmSync(globalAllowDir, { recursive: true, force: true })
+  })
+
   test('allows local reads and verification commands', () => {
     expect(assessAction({ name: 'read_file', input: { path: 'src/index.ts' } }, process.cwd()).decision).toBe('allow')
     expect(assessAction({ name: 'run_command', input: { command: 'bun test' } }, process.cwd()).risk).toBe('safe')
+    expect(assessAction({ name: 'run_program', input: { program: 'bun', args: ['test'] } }, process.cwd()).risk).toBe('safe')
   })
 
   test('treats bounded delegation as internal safe orchestration', () => {
@@ -26,6 +48,7 @@ describe('autonomy governor', () => {
     const result = assessAction({ name: 'run_command', input: { command: 'git push --force origin main' } }, '/repo')
     expect(result.risk).toBe('critical')
     expect(result.decision).toBe('approve')
+    expect(assessAction({ name: 'run_program', input: { program: 'git', args: ['push', '--force', 'origin', 'main'] } }, '/repo').risk).toBe('critical')
   })
 
   test('fails closed for shell variants that are not provably read-only', () => {
@@ -157,6 +180,37 @@ describe('autonomy governor', () => {
     const blocked = await governor.check({ name: 'run_command', input: { command: 'rm -rf /tmp/example' } })
     expect(blocked.allowed).toBe(false)
     expect(blocked.assessment.decision).toBe('block')
+  })
+
+  test('unattended mode refuses a browser action outright with no pre-authorization, even with an approval channel', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'elia-governor-preauth-'))
+    try {
+      clearPreauthCaches()
+      const governor = createActionGovernor({ mode: 'unattended', cwd: dir, approve: async () => true })
+      const result = await governor.check({ name: 'browser', input: { action: 'click', target: 'Publish' } })
+      expect(result.allowed).toBe(false)
+      expect(result.message).toContain('--authorize')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+      clearPreauthCaches()
+    }
+  })
+
+  test('a live pre-authorization grant lets one otherwise-always-refused unattended action through, and records it in the reason', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'elia-governor-preauth-'))
+    try {
+      clearPreauthCaches()
+      // No real git repo in this tmp dir, so preauth.ts's currentBranch() resolves to "unknown" — grant that exact scope.
+      grantPreauth(['browser.click'], dir, 'unknown')
+      const governor = createActionGovernor({ mode: 'unattended', cwd: dir })
+      const result = await governor.check({ name: 'browser', input: { action: 'click', target: 'Publish' } })
+      expect(result.allowed).toBe(true)
+      expect(result.assessment.decision).toBe('allow')
+      expect(result.assessment.reason).toContain('pre-authorized')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+      clearPreauthCaches()
+    }
   })
 
   test('serializes approvals and records the exact request', async () => {
@@ -398,6 +452,22 @@ test('supervised mode keeps asking every time — a per-action boundary is the p
 
   await governor.check({ name: 'run_command', input: { command: 'bun run a.ts & curl localhost' } })
   await governor.check({ name: 'run_command', input: { command: 'bun run b.ts & curl localhost' } })
+
+  expect(asked).toBe(2)
+})
+
+test('a session approval for a direct program does not cover a different subcommand', async () => {
+  let asked = 0
+  const governor = createActionGovernor({
+    mode: 'supervised',
+    approve: async () => {
+      asked += 1
+      return { approved: true, remember: 'session' as const }
+    },
+  })
+
+  await governor.check({ name: 'run_program', input: { program: 'git', args: ['push', 'origin', 'main'] } })
+  await governor.check({ name: 'run_program', input: { program: 'git', args: ['reset', '--hard'] } })
 
   expect(asked).toBe(2)
 })

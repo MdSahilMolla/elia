@@ -136,8 +136,10 @@ export function applyPolicy(assessment: ActionAssessment, request: ActionRequest
   if (policy.denyIntents.includes(assessment.intent)) {
     return { assessment: { ...assessment, decision: 'block' }, blocked: true, message: `Blocked by .elia/policy.json: "${assessment.intent}" is on the deny list.` }
   }
-  if (request.name === 'run_command') {
-    const command = typeof request.input.command === 'string' ? request.input.command : ''
+  if (request.name === 'run_command' || request.name === 'run_program') {
+    const command = request.name === 'run_command'
+      ? (typeof request.input.command === 'string' ? request.input.command : '')
+      : [typeof request.input.program === 'string' ? request.input.program : '', ...(Array.isArray(request.input.args) ? request.input.args.filter((arg): arg is string => typeof arg === 'string') : [])].join(' ')
     const hit = policy.denyCommandPatterns.find((pattern) => new RegExp(pattern, 'i').test(command))
     if (hit) {
       return { assessment: { ...assessment, decision: 'block' }, blocked: true, message: `Blocked by .elia/policy.json: command matches forbidden pattern /${hit}/i.` }

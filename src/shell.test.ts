@@ -1,5 +1,12 @@
-import { expect, test } from 'bun:test'
-import { runShell } from './shell.ts'
+import { afterEach, expect, test } from 'bun:test'
+import { runProcess, runShell } from './shell.ts'
+import { resetContainerSandboxWarningForTests } from './sandbox/container.ts'
+
+afterEach(() => {
+  delete process.env.ELIA_SANDBOX
+  delete process.env.ELIA_SANDBOX_IMAGE
+  resetContainerSandboxWarningForTests()
+})
 
 test.if(process.platform === 'win32')('a cmd.exe builtin like mkdir runs even when PATH is broken', async () => {
   // The failure this guards: `Bun.spawn(['cmd', ...])` -> ENOENT when System32
@@ -16,6 +23,14 @@ test.if(process.platform === 'win32')('a cmd.exe builtin like mkdir runs even wh
   }
 })
 
+test('ELIA_SANDBOX=container falls back to host execution when the sandbox is unconfigured (docker unavailable and/or no image set) — runShell still completes', async () => {
+  process.env.ELIA_SANDBOX = 'container'
+  delete process.env.ELIA_SANDBOX_IMAGE // never guesses an image, so this alone forces a fallback
+  const result = await runShell('echo elia-shell-ok', 10_000)
+  expect(result.exitCode).toBe(0)
+  expect(result.stdout).toContain('elia-shell-ok')
+})
+
 test('echo through the shell returns its output', async () => {
   const result = await runShell('echo elia-shell-ok', 10_000)
   expect(result.exitCode).toBe(0)
@@ -28,6 +43,17 @@ test('terminates timed-out shell work and returns timeout evidence', async () =>
   // Windows taskkill /T closes the complete process tree but can take slightly
   // over two seconds on a loaded runner. Keep the bound strict and platform-realistic.
   expect(result.elapsedMs).toBeLessThan(process.platform === 'win32' ? 3_000 : 2_000)
+})
+
+test('direct process arguments are not interpreted as shell syntax', async () => {
+  const literal = 'elia literal & whoami'
+  const result = await runProcess({
+    executable: process.execPath,
+    args: ['-e', 'console.log(process.argv.at(-1))', '--', literal],
+    timeoutMs: 10_000,
+  })
+  expect(result.exitCode).toBe(0)
+  expect(result.stdout).toContain(literal)
 })
 
 test('cancels shell work cooperatively', async () => {

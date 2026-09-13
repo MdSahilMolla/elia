@@ -31,4 +31,51 @@ export interface Location {
   range: Range
 }
 
+export interface TextEdit {
+  range: Range
+  newText: string
+}
+
+/**
+ * Only the `changes` form (uri -> flat TextEdit[]), not the newer
+ * `documentChanges` variant (which can also create/rename/delete files) — the
+ * servers elia talks to for a same-file rename/quick-fix send `changes`, and
+ * this client only ever applies edits, never file-system operations a server
+ * might otherwise request.
+ */
+export interface WorkspaceEdit {
+  changes?: Record<string, TextEdit[]>
+}
+
+export interface RenameParams {
+  textDocument: { uri: string }
+  position: Position
+  newName: string
+}
+
+export interface CodeActionContext {
+  diagnostics: Diagnostic[]
+}
+
+export interface CodeActionParams {
+  textDocument: { uri: string }
+  range: Range
+  context: CodeActionContext
+}
+
+export interface Command {
+  title: string
+  command: string
+  arguments?: unknown[]
+}
+
+export interface CodeAction {
+  title: string
+  kind?: string
+  diagnostics?: Diagnostic[]
+  isPreferred?: boolean
+  edit?: WorkspaceEdit
+  command?: Command
+}
+
 export const LSP_CLIENT_INFO = { name: 'elia', version: '0.1.2' }

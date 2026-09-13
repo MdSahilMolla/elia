@@ -3,6 +3,7 @@
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { DaemonUnavailable, daemonMode, daemonShellExec } from './daemon/index.ts'
+import { ContainerUnavailable, containerSandboxRequested, noteContainerFallback, runShellInContainer } from './sandbox/container.ts'
 
 /**
  * The Windows command interpreter, resolved to an absolute path.
@@ -28,6 +29,16 @@ export interface ShellResult {
   stderr: string
   elapsedMs: number
   timedOut: boolean
+}
+
+/** A direct process invocation. Arguments are never reparsed by cmd.exe or sh. */
+export interface ProcessPlan {
+  executable: string
+  args?: string[]
+  timeoutMs?: number
+  cwd?: string
+  signal?: AbortSignal
+  env?: Record<string, string>
 }
 
 export const DEFAULT_SHELL_TIMEOUT_MS = 60_000
@@ -63,6 +74,26 @@ export async function runShell(
     return { command, exitCode: 1, stdout: '', stderr: 'cancelled by operator', elapsedMs: 0, timedOut: false }
   }
 
+  // Container sandboxing (ELIA_SANDBOX=container) takes precedence over the
+  // daemon's warm-shell path below: it's an explicit isolation request, not
+  // a performance optimization, so it should never be silently skipped by
+  // one. Only a docker-itself transport failure (missing binary, daemon
+  // unreachable) falls through to host execution — anything else the
+  // sandboxed command produced, including its own failure, is returned as-is
+  // rather than silently re-run outside the isolation the caller asked for.
+  if (containerSandboxRequested() && !env) {
+    try {
+      return await runShellInContainer(command, timeoutMs, cwd, signal)
+    } catch (err) {
+      if (signal?.aborted) {
+        return { command, exitCode: 1, stdout: '', stderr: 'cancelled by operator', elapsedMs: Date.now() - startedAt, timedOut: false }
+      }
+      if (!(err instanceof ContainerUnavailable)) throw err
+      noteContainerFallback(err.message)
+      // fall through to the daemon/in-process shell below.
+    }
+  }
+
   // When the resident daemon is enabled it runs the command in a warm shell,
   // skipping the per-command process spawn (20–80ms on Windows). Any transport
   // problem falls through to the in-process path below; `ELIA_DAEMON=require`
@@ -96,8 +127,40 @@ export async function runShell(
   }
 
   const shellArgs = process.platform === 'win32' ? [windowsShell(), '/d', '/s', '/c', command] : ['sh', '-c', command]
+  return runSpawned(command, shellArgs, timeoutMs, cwd, signal, env)
+}
 
-  const proc = Bun.spawn(shellArgs, {
+/**
+ * Runs an executable directly. Use this for structured operations whose
+ * executable and arguments are already known; reserve runShell for genuine
+ * shell syntax such as pipelines and builtins.
+ */
+export async function runProcess(plan: ProcessPlan): Promise<ShellResult> {
+  const executable = plan.executable.trim()
+  const args = plan.args ?? []
+  const command = [executable, ...args.map((arg) => JSON.stringify(arg))].join(' ')
+  if (!executable) return { command, exitCode: 1, stdout: '', stderr: 'program executable is required', elapsedMs: 0, timedOut: false }
+  return runSpawned(command, [executable, ...args], plan.timeoutMs ?? DEFAULT_SHELL_TIMEOUT_MS, plan.cwd, plan.signal, plan.env)
+}
+
+async function runSpawned(
+  command: string,
+  spawnArgs: string[],
+  timeoutMs: number,
+  cwd?: string,
+  signal?: AbortSignal,
+  env?: Record<string, string>,
+): Promise<ShellResult> {
+  if (cwd !== undefined && !existsSync(cwd)) {
+    return { command, exitCode: 1, stdout: '', stderr: `working directory does not exist: ${cwd}`, elapsedMs: 0, timedOut: false }
+  }
+
+  const startedAt = Date.now()
+  if (signal?.aborted) {
+    return { command, exitCode: 1, stdout: '', stderr: 'cancelled by operator', elapsedMs: 0, timedOut: false }
+  }
+
+  const proc = Bun.spawn(spawnArgs, {
     stdout: 'pipe',
     stderr: 'pipe',
     ...(cwd ? { cwd } : {}),

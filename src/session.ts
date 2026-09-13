@@ -1,6 +1,7 @@
 import { existsSync, readdirSync, statSync } from 'node:fs'
 import { ensureSecureDirectory, hardenSecureFile, writeSecureBunFile } from './securePersistence.ts'
 import { join } from 'node:path'
+import { logSwallowedError } from './diagnostics.ts'
 import type { ConversationMessage } from './agentLoop.ts'
 import { writeError } from './ui/stream.ts'
 import { isTranscriptSnapshot, type TranscriptSnapshot } from './ui/transcript.ts'
@@ -57,7 +58,8 @@ export async function loadSession(id: string, dir: string = SESSIONS_DIR): Promi
   try {
     const parsed: unknown = await file.json()
     return isStoredSession(parsed) ? parsed : undefined
-  } catch {
+  } catch (err) {
+    logSwallowedError('session.loadSession', err, { id })
     return undefined
   }
 }

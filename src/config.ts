@@ -257,12 +257,50 @@ export function roleConfig(roleName: RoleName, tier: Tier): TierConfig {
   return config.roleOverrides[roleName] ?? tierConfig(tier)
 }
 
+/**
+ * A weak, deliberately conservative signal that an assignment is not routine
+ * legwork: language that names the kind of work where a cheaper model's
+ * mistakes are expensive to have missed (concurrency, security, migrations,
+ * breaking changes), or a brief long enough that it is very unlikely to be a
+ * one-line fix. False positives just cost a bit more; false negatives are the
+ * failure mode this exists to reduce, so the pattern errs toward matching.
+ */
+const HIGH_DIFFICULTY_PATTERN =
+  /\b(migrat(e|ion|ing)|re-?architect|refactor|concurren(t|cy)|race condition|deadlock|thread.?safe|distributed|consensus|transactional|security|vulnerab(le|ility)|authenticat(e|ion)|authoriz(e|ation)|cryptograph|backward.?compat|breaking change|data loss|encrypt|credential)/i
+
+export function looksHighDifficulty(assignmentText: string): boolean {
+  if (HIGH_DIFFICULTY_PATTERN.test(assignmentText)) return true
+  return assignmentText.trim().split(/\s+/).filter(Boolean).length > 250
+}
+
+/**
+ * Per-task difficulty routing, layered on top of the existing per-role tier
+ * and per-role provider override — the "cost/difficulty model router" the
+ * static role→tier mapping alone does not provide. A role's *default* tier
+ * (fast for a scout, deep for a builder) is a property of the role, decided
+ * once in roles.ts; this instead looks at what one specific assignment
+ * actually asks for and, only when that role currently runs on the fast
+ * tier and the assignment looks non-routine, escalates that one dispatch to
+ * deep. It never does the reverse (deep to fast) — a role given the strong
+ * model by design is not something a text heuristic should second-guess —
+ * and it never overrides an operator's explicit `ELIA_<ROLE>_PROVIDER`/
+ * `_MODEL` pin, which is a deliberate choice this heuristic does not get to
+ * relitigate.
+ */
+export function routeForAssignment(roleName: RoleName, baseTier: Tier, assignmentText: string): TierConfig {
+  if (config.roleOverrides[roleName]) return roleConfig(roleName, baseTier)
+  if (baseTier === 'deep' || !looksHighDifficulty(assignmentText)) return roleConfig(roleName, baseTier)
+  return tierConfig('deep')
+}
+
 
 export const memorySections = buildMemorySections()
 
 export const SHARED_CONTEXT = `You operate in the current working directory: ${process.cwd()}
 Workspace: ${paths.workspace}
-Platform: ${process.platform}.`
+Platform: ${process.platform}.
+
+"Elia" names this open-source agent codebase, not the underlying model — the user owns this repository, can read every line of it, and built parts of it with you in past sessions. Questions about elia's own design, architecture, source code, or features (its tool set, its autonomy loop, its memory/lessons system, its recursive self-improvement work, ADRs, etc.) are ordinary questions about the user's own project — answer them from the repository and its docs like any other codebase question. This is unrelated to, and does not authorize, disclosing the underlying foundation model's own training process, weights, or proprietary internals — decline only that, specifically, and say so rather than refusing the elia question it was not asked.`
 
 /**
  * Wall-clock context injected fresh on every turn. It rides in the dynamic
@@ -270,9 +308,25 @@ Platform: ${process.platform}.`
  * days still reports the real date, and so the model anchors "today", "now",
  * "latest", "next", and "recent" to the clock rather than to its training
  * cutoff — the failure that shipped a two-year-stale Battmann brief.
+ *
+ * `cwd`, when given, corrects the same staleness for the working directory:
+ * `SHARED_CONTEXT`'s "You operate in the current working directory: …" line
+ * is baked into the cached stable prefix at module load, so it always names
+ * wherever elia's process happened to start — never the isolated per-run
+ * workspace an autonomous run or sub-agent actually gets bound to via
+ * `withAgentIdentity({ cwd })`. Seen live: a builder and polisher both told
+ * (via the stale line) that the workspace lived at elia's own root wrote and
+ * then went looking for their single-file deliverable under a `workspace/`
+ * subfolder *inside* their own already-isolated task workspace, producing
+ * `<task-workspace>/workspace/index.html` instead of the plan's own
+ * `index.html` — which then made every verification and render check 404
+ * against the path the plan actually declared.
  */
-export function turnContextPrompt(now: Date = new Date()): string {
-  return `Today's date is ${now.toISOString().slice(0, 10)} (UTC). This is authoritative: derive "today", "now", "current", "latest", "next", and "recent" from it, never from your training data, which is older. When an answer turns on the present state of the world, confirm it with evidence dated on or before today and close to it, and say as of when your picture holds.`
+export function turnContextPrompt(now: Date = new Date(), cwd?: string): string {
+  const dateLine = `Today's date is ${now.toISOString().slice(0, 10)} (UTC). This is authoritative: derive "today", "now", "current", "latest", "next", and "recent" from it, never from your training data, which is older. When an answer turns on the present state of the world, confirm it with evidence dated on or before today and close to it, and say as of when your picture holds.`
+  if (!cwd) return dateLine
+  const cwdLine = `Your actual working directory for this task is exactly: ${cwd}. This is authoritative over any different directory named earlier in this prompt. Every relative path in a file or shell tool resolves against this directory, and it is already the dedicated root for this task — create deliverables directly here (e.g. \`index.html\`, not \`workspace/index.html\`) rather than nesting another \`workspace/\` or project-name subfolder inside it, unless the plan explicitly calls for a subfolder.`
+  return `${dateLine}\n\n${cwdLine}`
 }
 
 export const DEV_SYSTEM_PROMPT = `You are elia in dev mode, an autonomous coding agent running in a CLI, in the user's terminal.
@@ -304,7 +358,7 @@ This is how you work a real coding task on your own initiative, not just somethi
 - If the task spans both UI and server/data work, split it into a \`frontend\` step and a \`backend\` step and dispatch both as parallel \`task\` calls instead of doing both serially yourself.
 - Once you've made a real logic/code change (not a one-line trivial edit, and not a docs/comment-only change — those have no exploit surface or logic to break), before telling the user you're done, run \`git diff\` yourself once and pass its actual content into each sub-agent's prompt rather than telling three of them to each go run \`git diff\` themselves — that only triples the same tool round-trip for identical output. Then fan out \`critic\`, \`security\`, and \`bughunter\` as parallel \`task\` calls against that diff text. Three specialists looking from different angles at once catch more than one generalist pass, and it costs no extra wall-clock time since they run together. Fix anything blocking they raise before reporting done.
 
-When you produce standalone output — a prototype, a generated page, scratch work that isn't an edit to the user's existing project — put it in its own folder under \`${paths.workspace}\` (e.g. \`${paths.workspace}/airbnb-mvp/\`), not scattered through the user's cwd.
+When you produce standalone output — a prototype, a generated page, scratch work that isn't an edit to the user's existing project — put it in its own folder under \`${paths.workspace}\` (e.g. \`${paths.workspace}/airbnb-mvp/\`), not scattered through the user's cwd. This does not apply if your per-turn context states your working directory is already a dedicated task workspace: that directory already is the project's own folder, so write deliverables with plain relative paths directly inside it (e.g. \`index.html\`) instead of creating another \`workspace/\` or project-name subfolder inside an already-isolated one.
 
 Working inside that sub-project: shell commands run from elia's own root by default and do NOT keep a directory between calls, so for every \`run_command\` that touches the sub-project pass \`cwd\` (e.g. \`cwd: "airbnb-mvp"\`) — otherwise \`npm install\`, \`npm run build\`, and the type-check all run against elia's own package.json instead of the project's. Never use \`cd\` for this. To show the result, use the \`preview\` tool (it serves the folder and opens Chrome, live-reloaded) — never start a dev server with \`run_command\`, it will only time out.${memorySections}`
 

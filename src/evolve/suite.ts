@@ -645,8 +645,8 @@ export const BENCH_TASKS: BenchTask[] = [...SYNTHETIC_BENCH_TASKS, ...HARD_BENCH
  * Kept as one lookup because the child process in benchTask.ts only ever gets a
  * task id, and should not have to know which suite it came from.
  */
-export function allBenchTasks(): BenchTask[] {
-  return [...BENCH_TASKS, ...historyTasks()]
+export function allBenchTasks(historyFile?: string): BenchTask[] {
+  return [...BENCH_TASKS, ...historyTasks(historyFile)]
 }
 
 export function taskById(id: string): BenchTask | undefined {

@@ -95,6 +95,30 @@ test('restoreCheckpoint is idempotent when a "created" file is already gone', as
   expect(result).toEqual({ restored: 0, deleted: 0 })
 })
 
+test('restoreCheckpoint leaves every file untouched if staging any one of them fails', async () => {
+  const good = join(testDir, 'stage-good.txt')
+  // A path whose parent directory doesn't exist: writeFile can't create it,
+  // so staging this entry's temp sibling fails and the whole restore must
+  // roll back to touching nothing at all — including the good file.
+  const bad = join(testDir, 'no-such-parent-dir', 'file.txt')
+  await Bun.write(good, 'edited')
+
+  const checkpoint: Checkpoint = {
+    turn: 0,
+    at: Date.now(),
+    label: 'test',
+    messagesBefore: [],
+    files: { [good]: 'original', [bad]: 'this write must fail' },
+  }
+
+  await expect(restoreCheckpoint(checkpoint)).rejects.toThrow()
+  // The good file's edit is still there — nothing was partially applied.
+  expect(await Bun.file(good).text()).toBe('edited')
+  // No leftover temp files anywhere under testDir.
+  const { readdirSync } = await import('node:fs')
+  expect(readdirSync(testDir).some((name) => name.endsWith('.tmp'))).toBe(false)
+})
+
 test('saveCheckpoints then loadCheckpoints round-trips checkpoints', async () => {
   const checkpoints: Checkpoint[] = [
     { turn: 0, at: 1, label: 'first', messagesBefore: sampleMessages, files: { 'x.txt': 'content' } },

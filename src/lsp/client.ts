@@ -1,6 +1,6 @@
 import type { PipedSubprocess } from 'bun'
 import { pathToFileURL } from 'node:url'
-import { LSP_CLIENT_INFO, type Diagnostic, type PublishDiagnosticsParams } from './protocol.ts'
+import { LSP_CLIENT_INFO, type CodeAction, type CodeActionContext, type Command, type Diagnostic, type PublishDiagnosticsParams, type Range, type WorkspaceEdit } from './protocol.ts'
 import { terminateProcessGroup } from '../shell.ts'
 
 const CONNECT_TIMEOUT_MS = 20_000
@@ -73,6 +73,8 @@ export class LspClient {
           textDocument: {
             publishDiagnostics: { relatedInformation: false },
             synchronization: { didSave: false, willSave: false },
+            rename: { dynamicRegistration: false },
+            codeAction: { dynamicRegistration: false, codeActionLiteralSupport: { codeActionKind: { valueSet: ['quickfix', 'refactor', 'refactor.extract', 'refactor.inline', 'refactor.rewrite', 'source.fixAll'] } } },
           },
         },
       },
@@ -85,17 +87,61 @@ export class LspClient {
   /** Opens (or, if already open, replaces the content of) a document and returns its current diagnostics after a bounded wait for the server to (re)publish them. */
   async diagnosticsFor(path: string, text: string, waitMs = 4000): Promise<Diagnostic[]> {
     const uri = fileUri(path)
+    const waiter = this.waitForNextPublish(uri, waitMs)
+    this.syncDocument(path, text)
+    await waiter
+    return this.diagnostics.get(uri) ?? []
+  }
+
+  /**
+   * Renames the symbol at `position` (in `path`, whose content the server
+   * needs synced first via `text`) and returns the server's proposed edit
+   * across every file it touches, or null if it declined — nothing at that
+   * position, or a symbol the server considers unsafe to rename. Callers
+   * apply the result with {@link applyWorkspaceEdit}; this method never
+   * writes to disk itself.
+   */
+  async rename(path: string, text: string, position: { line: number; character: number }, newName: string): Promise<WorkspaceEdit | null> {
+    const uri = this.syncDocument(path, text)
+    const result = await this.request(
+      'textDocument/rename',
+      { textDocument: { uri }, position, newName },
+      REQUEST_TIMEOUT_MS,
+      `LSP server "${this.languageId}" timed out on rename`,
+    )
+    return (result as WorkspaceEdit | null) ?? null
+  }
+
+  /**
+   * Lists the code actions (quick fixes, refactors) a server offers covering
+   * `range` in `path`. Each action either carries its own `edit` (apply with
+   * {@link applyWorkspaceEdit}) or a server-specific `command` this client
+   * does not execute — callers should only act on actions with a concrete
+   * `edit`, and surface the rest by title for a human/model to pick from.
+   */
+  async codeActions(path: string, text: string, range: Range, diagnostics: Diagnostic[] = []): Promise<(CodeAction | Command)[]> {
+    const uri = this.syncDocument(path, text)
+    const context: CodeActionContext = { diagnostics }
+    const result = await this.request(
+      'textDocument/codeAction',
+      { textDocument: { uri }, range, context },
+      REQUEST_TIMEOUT_MS,
+      `LSP server "${this.languageId}" timed out on codeAction`,
+    )
+    return Array.isArray(result) ? (result as (CodeAction | Command)[]) : []
+  }
+
+  /** Opens (or, if already open, replaces the content of) a document, without waiting for diagnostics. Returns its uri. */
+  private syncDocument(path: string, text: string): string {
+    const uri = fileUri(path)
     const version = (this.openDocs.get(uri) ?? 0) + 1
     this.openDocs.set(uri, version)
-
-    const waiter = this.waitForNextPublish(uri, waitMs)
     if (version === 1) {
       this.notify('textDocument/didOpen', { textDocument: { uri, languageId: this.languageId, version, text } })
     } else {
       this.notify('textDocument/didChange', { textDocument: { uri, version }, contentChanges: [{ text }] })
     }
-    await waiter
-    return this.diagnostics.get(uri) ?? []
+    return uri
   }
 
   close(): void {

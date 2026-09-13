@@ -96,8 +96,8 @@ test('ChatGPT subscription execution requires one explicit delegated-agent appro
   const codexProvider = {
     async streamTurn(params: { onActivity?: (activity: ProviderActivity) => void }) {
       calls += 1
-      // Codex's internal command/plan/diff stream is suppressed for the
-      // subscription; only warnings and model reroutes reach the transcript.
+      // Codex's internal activity stream is forwarded in full — its plan and
+      // evidence belong to Elia's run, not just its warnings and reroutes.
       params.onActivity?.({ kind: 'command', title: 'Running command', status: 'started' })
       params.onActivity?.({ kind: 'warning', title: 'Codex warning', status: 'warning' })
       return { content: [{ type: 'text', text: 'completed' }] as ContentBlock[], usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 } }
@@ -126,7 +126,7 @@ test('ChatGPT subscription execution requires one explicit delegated-agent appro
   }))
   expect(calls).toBe(1)
   expect(events).toEqual(['codex_delegate'])
-  expect(activities).toEqual(['Codex warning'])
+  expect(activities).toEqual(['Running command', 'Codex warning'])
 
   // Second turn in the same session: approved once already, so no approval
   // callback is consulted and the turn just runs.

@@ -29,6 +29,7 @@ import {
   type Sandbox,
 } from './sandbox.ts'
 import { candidateTools } from './candidateTools.ts'
+import { allBenchTasks, type BenchTask } from './suite.ts'
 
 /**
  * Elia improving elia.
@@ -80,9 +81,21 @@ export async function evolve(options: EvolveOptions = {}): Promise<EvolveResult>
   const generations = options.generations ?? 1
   const records: GenerationRecord[] = []
 
-  writePhase('orient', `measuring the current elia against ${ELIA_ROOT}`)
+  // The full grown set (the fixed synthetic+hard suite plus whatever
+  // `elia bench --harvest` has mined from this repo's own git history) —
+  // not the fixed BENCH_TASKS the CLI's plain `elia bench` still defaults to
+  // for speed. Without this, the harvester's output was already written to
+  // disk but never reached the loop that actually decides what "better"
+  // means, so the benchmark ceiling never grew even as the corpus did.
+  // Resolved once per evolve() call, not per generation, so every baseline
+  // and candidate measurement in this run is scored on the identical set —
+  // required for compareScorecards' pass/fail comparison to mean anything.
+  const tasks = allBenchTasks()
+
+  writePhase('orient', `measuring the current elia against ${ELIA_ROOT} (${tasks.length} tasks)`)
   const baselineCard = await measureFitness({
     sourceRoot: ELIA_ROOT,
+    tasks,
     onTaskDone: (outcome) =>
       outcome.passed ? writePass(`${outcome.taskId} — ${outcome.detail}`) : writeFail(`${outcome.taskId} — ${outcome.error ?? outcome.detail}`),
   })
@@ -96,7 +109,7 @@ export async function evolve(options: EvolveOptions = {}): Promise<EvolveResult>
     if (options.signal?.aborted) break
 
     const generation = nextGenerationNumber()
-    const record = await runGeneration(generation, baseline, options)
+    const record = await runGeneration(generation, baseline, options, tasks)
     records.push(record)
     appendGeneration(record)
 
@@ -114,6 +127,7 @@ async function runGeneration(
   generation: number,
   baseline: Metrics,
   options: EvolveOptions,
+  tasks: BenchTask[],
 ): Promise<GenerationRecord> {
   const startedAt = Date.now()
   const base: GenerationRecord = {
@@ -239,6 +253,7 @@ async function runGeneration(
   try {
     candidateCard = await measureFitness({
       sourceRoot: sandbox.root,
+      tasks,
       onTaskDone: (outcome) =>
         outcome.passed ? writePass(`${outcome.taskId} — ${outcome.detail}`) : writeFail(`${outcome.taskId} — ${outcome.error ?? outcome.detail}`),
     })
@@ -263,8 +278,8 @@ async function runGeneration(
   // winner must reproduce its result independently before it can touch live code.
   // Reverse the order on confirmation to avoid consistently favoring the second run.
   writeSubStep('provisional win — running an independent confirmation pair')
-  const confirmationCandidateCard = await measureFitness({ sourceRoot: sandbox.root })
-  const confirmationBaselineCard = await measureFitness({ sourceRoot: ELIA_ROOT })
+  const confirmationCandidateCard = await measureFitness({ sourceRoot: sandbox.root, tasks })
+  const confirmationBaselineCard = await measureFitness({ sourceRoot: ELIA_ROOT, tasks })
   const confirmationBaseline = toMetrics(confirmationBaselineCard)
   const confirmationCandidate = toMetrics(confirmationCandidateCard)
   const confirmation = compareScorecards(confirmationBaseline, confirmationCandidate)

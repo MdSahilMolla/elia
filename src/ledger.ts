@@ -178,12 +178,27 @@ export function noteToolUse(input: Record<string, unknown>): void {
   for (const [file, pending] of pendingByFile) {
     if (path && file === path) {
       pendingByFile.delete(file)
-      if (session) pendingWrites.push(bumpConfirmed(session.id, pending.id, session.dir))
+      if (session) trackPendingWrite(bumpConfirmed(session.id, pending.id, session.dir))
       continue
     }
     pending.remainingSteps -= 1
     if (pending.remainingSteps <= 0) pendingByFile.delete(file)
   }
+}
+
+/**
+ * Tracks a fire-and-forget confirmation write just long enough for
+ * flushPendingConfirmations to await it, then drops it from `pendingWrites`.
+ * Without this, a long-lived interactive session that confirms many recalls
+ * over its lifetime accumulates one settled promise per confirmation forever
+ * — small individually, unbounded in aggregate.
+ */
+function trackPendingWrite(promise: Promise<void>): void {
+  pendingWrites.push(promise)
+  promise.finally(() => {
+    const index = pendingWrites.indexOf(promise)
+    if (index !== -1) pendingWrites.splice(index, 1)
+  }).catch(() => {})
 }
 
 /** Test-only: clears the confirmation window state between runs. */
@@ -195,6 +210,11 @@ export function resetPendingRecalls(): void {
 /** Test-only: waits for any fire-and-forget confirmation writes noteToolUse kicked off. */
 export async function flushPendingConfirmations(): Promise<void> {
   await Promise.all(pendingWrites)
+}
+
+/** Test-only: how many confirmation writes are still in flight — should drain to 0 once each settles. */
+export function pendingWriteCount(): number {
+  return pendingWrites.length
 }
 
 const ARCHIVE_SYSTEM_PROMPT = `You compress an agent's conversation history into a structured episodic record for its long-term memory.
@@ -275,6 +295,7 @@ export async function archiveEpisode(messages: ChatMessage[], dir: string = SESS
     const fast = tierConfig('fast')
     let text = ''
     await fast.provider.streamTurn({
+      cwd: process.cwd(),
       system: ARCHIVE_SYSTEM_PROMPT,
       messages: [{ role: 'user', content: [{ type: 'text', text: rendered.slice(0, 60_000) } as ContentBlock] }],
       tools: [],

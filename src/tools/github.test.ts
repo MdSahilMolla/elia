@@ -128,11 +128,155 @@ test('pr_reviews and issue_view need readable payloads', async () => {
   expect(await githubTool.execute({ action: 'issue_view', number: 3 })).toContain('#3')
 })
 
+test('pr_checks_log reports a clean summary with no log fetch when every check passes', async () => {
+  route({
+    'gh pr checks --json name,state,bucket,link': ok(
+      JSON.stringify([{ name: 'build', state: 'SUCCESS', bucket: 'pass', link: 'https://github.com/acme/widgets/actions/runs/1/job/2' }]),
+    ),
+  })
+  const out = await githubTool.execute({ action: 'pr_checks_log' })
+  expect(out).toContain('✓ build')
+  expect(out).toContain('No failing checks')
+  expect(out).not.toContain('failed steps')
+})
+
+test('pr_checks_log fetches the failed-step log for a failing Actions check, deduped by run id', async () => {
+  let runViewCalls = 0
+  setExecForTests(async (bin, args) => {
+    const key = `${bin} ${args.join(' ')}`
+    if (key === 'gh pr checks --json name,state,bucket,link') {
+      return ok(
+        JSON.stringify([
+          { name: 'unit-tests', state: 'FAILURE', bucket: 'fail', link: 'https://github.com/acme/widgets/actions/runs/555/job/1' },
+          { name: 'lint', state: 'FAILURE', bucket: 'fail', link: 'https://github.com/acme/widgets/actions/runs/555/job/2' },
+        ]),
+      )
+    }
+    if (key === 'gh run view 555 --log-failed') {
+      runViewCalls += 1
+      return ok('unit-tests\tFAIL\tTypeError: x is not a function')
+    }
+    return err('no stub')
+  })
+  const out = await githubTool.execute({ action: 'pr_checks_log' })
+  expect(out).toContain('✗ unit-tests')
+  expect(out).toContain('✗ lint')
+  expect(out).toContain('run 555 failed steps')
+  expect(out).toContain('TypeError: x is not a function')
+  expect(runViewCalls).toBe(1)
+})
+
+test('pr_checks_log reports failing external checks with no fetchable Actions run instead of silently omitting them', async () => {
+  route({
+    'gh pr checks --json name,state,bucket,link': ok(
+      JSON.stringify([{ name: 'vendor-scan', state: 'FAILURE', bucket: 'fail', link: 'https://vendor.example.com/scans/abc' }]),
+    ),
+  })
+  const out = await githubTool.execute({ action: 'pr_checks_log' })
+  expect(out).toContain('vendor-scan')
+  expect(out).toContain('no GitHub Actions run could be identified')
+})
+
+test('pr_checks_log falls back gracefully when gh does not return parsable JSON', async () => {
+  route({ 'gh pr checks --json name,state,bucket,link': err('no pull requests found') })
+  const out = await githubTool.execute({ action: 'pr_checks_log' })
+  expect(out).toContain('No open pull request')
+})
+
+// --- pr_unresolved_reviews ---
+
+const CONTEXT_ROUTES: Record<string, ExecResult> = {
+  'git rev-parse --is-inside-work-tree': ok('true'),
+  'git remote get-url origin': ok('git@github.com:acme/widgets.git'),
+  'git rev-parse --abbrev-ref HEAD': ok('feature/x'),
+  'git status --porcelain': ok(''),
+  'git rev-list --count --left-right': ok('0\t0'),
+  'gh auth status': ok('Logged in to github.com account sahil'),
+  'gh repo view': ok('main'),
+}
+
+function exactRoute(routes: Record<string, ExecResult>, fallback: ExecResult = err('no stub')): void {
+  setExecForTests(async (bin, args) => routes[`${bin} ${args.join(' ')}`] ?? fallback)
+}
+
+test('pr_unresolved_reviews lists only unresolved threads, with location and comments', async () => {
+  const graphql = {
+    data: {
+      repository: {
+        pullRequest: {
+          reviewThreads: {
+            nodes: [
+              { isResolved: false, isOutdated: false, path: 'src/a.ts', line: 12, comments: { nodes: [{ author: { login: 'reviewer1' }, body: 'This looks wrong' }] } },
+              { isResolved: true, isOutdated: false, path: 'src/b.ts', line: 4, comments: { nodes: [{ author: { login: 'reviewer1' }, body: 'Fixed, thanks' }] } },
+            ],
+          },
+        },
+      },
+    },
+  }
+  exactRoute({
+    ...CONTEXT_ROUTES,
+    'gh pr view --json number --jq .number': ok('42'),
+    [`gh api graphql -f query=query($owner:String!,$repo:String!,$number:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$number){reviewThreads(first:50){nodes{isResolved isOutdated path line comments(first:10){nodes{author{login} body}}}}}}} -F owner=acme -F repo=widgets -F number=42`]: ok(
+      JSON.stringify(graphql),
+    ),
+  })
+  const out = await githubTool.execute({ action: 'pr_unresolved_reviews' })
+  expect(out).toContain('1 of 2 review comment thread(s) still unresolved')
+  expect(out).toContain('src/a.ts:12')
+  expect(out).toContain('reviewer1: This looks wrong')
+  expect(out).not.toContain('Fixed, thanks')
+})
+
+test('pr_unresolved_reviews reports everything resolved distinctly from nothing to review at all', async () => {
+  const allResolved = { data: { repository: { pullRequest: { reviewThreads: { nodes: [{ isResolved: true, isOutdated: false, path: 'x.ts', line: 1, comments: { nodes: [] } }] } } } } }
+  exactRoute({
+    ...CONTEXT_ROUTES,
+    'gh pr view --json number --jq .number': ok('7'),
+    [`gh api graphql -f query=query($owner:String!,$repo:String!,$number:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$number){reviewThreads(first:50){nodes{isResolved isOutdated path line comments(first:10){nodes{author{login} body}}}}}}} -F owner=acme -F repo=widgets -F number=7`]: ok(
+      JSON.stringify(allResolved),
+    ),
+  })
+  expect(await githubTool.execute({ action: 'pr_unresolved_reviews' })).toContain('All 1 review comment thread(s) are resolved')
+
+  const none = { data: { repository: { pullRequest: { reviewThreads: { nodes: [] } } } } }
+  exactRoute({
+    ...CONTEXT_ROUTES,
+    'gh pr view --json number --jq .number': ok('7'),
+    [`gh api graphql -f query=query($owner:String!,$repo:String!,$number:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$number){reviewThreads(first:50){nodes{isResolved isOutdated path line comments(first:10){nodes{author{login} body}}}}}}} -F owner=acme -F repo=widgets -F number=7`]: ok(
+      JSON.stringify(none),
+    ),
+  })
+  expect(await githubTool.execute({ action: 'pr_unresolved_reviews' })).toBe('No review comment threads on this PR.')
+})
+
+test('pr_unresolved_reviews fails clearly with no origin remote, and uses the explicit "number" without a pr view lookup', async () => {
+  exactRoute({ 'git rev-parse --is-inside-work-tree': ok('true'), 'git remote get-url origin': err('no such remote') })
+  expect(await githubTool.execute({ action: 'pr_unresolved_reviews' })).toContain('Could not determine the GitHub owner/repo')
+
+  // An explicit "number" must skip the "current PR" lookup entirely.
+  let sawPrViewLookup = false
+  setExecForTests(async (bin, args) => {
+    const key = `${bin} ${args.join(' ')}`
+    if (key === 'gh pr view --json number --jq .number') {
+      sawPrViewLookup = true
+      return ok('999')
+    }
+    if (key.startsWith('git ') || key.startsWith('gh auth') || key.startsWith('gh repo view')) return CONTEXT_ROUTES[key] ?? err('no stub')
+    if (key.startsWith('gh api graphql')) return ok(JSON.stringify({ data: { repository: { pullRequest: { reviewThreads: { nodes: [] } } } } }))
+    return err('no stub')
+  })
+  await githubTool.execute({ action: 'pr_unresolved_reviews', number: 42 })
+  expect(sawPrViewLookup).toBe(false)
+})
+
 // --- governor contract ---
 
 test('governor: read-only github actions are allowed, writes are governed', () => {
   expect(assessAction({ name: 'github', input: { action: 'status' } }).decision).toBe('allow')
   expect(assessAction({ name: 'github', input: { action: 'pr_checks' } }).decision).toBe('allow')
+  expect(assessAction({ name: 'github', input: { action: 'pr_checks_log' } }).decision).toBe('allow')
+  expect(assessAction({ name: 'github', input: { action: 'pr_unresolved_reviews' } }).decision).toBe('allow')
   expect(assessAction({ name: 'github', input: { action: 'branch' } }).decision).toBe('allow')
   expect(assessAction({ name: 'github', input: { action: 'commit' } }).decision).toBe('allow')
 

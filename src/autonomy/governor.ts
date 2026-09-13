@@ -5,6 +5,7 @@ import { commandMayReadSensitiveData } from './sensitivePaths.ts'
 import { pauseToolSpinner, resumeToolSpinner } from '../ui/stream.ts'
 import { applyPolicy } from './policy.ts'
 import { addAllowRule, isAllowlisted, ruleFor, type AllowScope } from './allowStore.ts'
+import { consumePreauth, currentBranch, isPreauthorized } from './preauth.ts'
 
 export type ActionRisk = 'safe' | 'review' | 'critical'
 export type ActionDecision = 'allow' | 'approve' | 'block'
@@ -99,6 +100,11 @@ export function assessAction(request: ActionRequest, cwd = currentAgent().cwd ??
   const resources = values.filter((value) => /[\\/]|https?:\/\//i.test(value)).slice(0, 4)
 
   if (name === 'run_command') return assessCommand(joined, cwd)
+  if (name === 'run_program') {
+    const program = typeof input.program === 'string' ? input.program : ''
+    const args = Array.isArray(input.args) ? input.args.filter((arg): arg is string => typeof arg === 'string') : []
+    return assessCommand([program, ...args].join(' '), cwd)
+  }
 
   if (name === 'presentation') {
     return assessment('review', 'approve', 'presentation generation creates a derived document artifact', 'presentation.from_workbook', resources, true)
@@ -134,7 +140,7 @@ export function assessAction(request: ActionRequest, cwd = currentAgent().cwd ??
 
   if (name === 'github') {
     const action = typeof input.action === 'string' ? input.action : 'unknown'
-    if (action === 'status' || action === 'pr_view' || action === 'pr_list' || action === 'pr_checks' || action === 'pr_reviews' || action === 'issue_list' || action === 'issue_view') {
+    if (action === 'status' || action === 'pr_view' || action === 'pr_list' || action === 'pr_checks' || action === 'pr_checks_log' || action === 'pr_reviews' || action === 'pr_unresolved_reviews' || action === 'issue_list' || action === 'issue_view') {
       return assessment('safe', 'allow', `github ${action} only reads local git and GitHub state`, `github.${action}`, resources, true)
     }
     if (action === 'branch' || action === 'commit') {
@@ -203,7 +209,7 @@ export function assessAction(request: ActionRequest, cwd = currentAgent().cwd ??
     return assessment('critical', 'approve', `browser ${action} changes page state and needs an authorization record`, `browser.${action}`, resources, false)
   }
 
-  if (name === 'write_file' || name === 'edit_file') {
+  if (name === 'write_file' || name === 'edit_file' || name === 'lsp_refactor') {
     const path = typeof input.path === 'string' ? input.path : ''
     const outside = path.length === 0 || !isPathWithinWorkspace(path, cwd)
     return outside
@@ -211,7 +217,7 @@ export function assessAction(request: ActionRequest, cwd = currentAgent().cwd ??
       : assessment('safe', 'allow', `${name} is workspace-scoped and checkpointable`, name, path ? [path] : [], true)
   }
 
-  if (name === 'read_file' || name === 'list_files' || name === 'grep' || name === 'recall' || name === 'brain' || name === 'board_read' || name === 'board_post' || name === 'todo_write' || name === 'why' || name === 'record_rationale' || name === 'note_lesson') {
+  if (name === 'read_file' || name === 'list_files' || name === 'grep' || name === 'find_symbol' || name === 'recall' || name === 'brain' || name === 'board_read' || name === 'board_post' || name === 'todo_write' || name === 'why' || name === 'record_rationale' || name === 'note_lesson') {
     const path = typeof input.path === 'string' ? input.path : ''
     return path && !isPathWithinWorkspace(path, cwd)
       ? assessment('critical', 'approve', `${name} may access data outside the active workspace or through an invalid path`, name, [path], false)
@@ -428,6 +434,16 @@ const SETTLEABLE_ONCE = new Set(['shell', 'shell.composed', 'shell.unknown', 'gi
 
 export function createActionGovernor(options: { mode?: GovernanceMode; approve?: ActionApproval; cwd?: string; maxActions?: number } = {}): ActionGovernor {
   const mode = options.mode ?? 'unattended'
+  const cwd = options.cwd ?? process.cwd()
+  // Resolved at most once per governor, and only the first time a
+  // pre-authorization check actually needs it — most governors (most tests,
+  // supervised mode, unattended runs that never hit an excluded-critical
+  // intent) never need a branch at all, so eagerly shelling out to git on
+  // every governor construction would be pure waste. A branch switch mid-run
+  // just means the branch resolved here no longer matches the grant, which
+  // fails isPreauthorized closed (falls through to the normal refusal), never open.
+  let branchPromise: Promise<string> | undefined
+  const resolvedBranch = (): Promise<string> => (branchPromise ??= currentBranch(cwd))
   const requestedMaxActions = options.maxActions ?? 0
   const maxActions = Number.isFinite(requestedMaxActions) && requestedMaxActions > 0
     ? Math.max(1, Math.min(Math.floor(requestedMaxActions), MAX_GOVERNED_ACTIONS))
@@ -441,7 +457,9 @@ export function createActionGovernor(options: { mode?: GovernanceMode; approve?:
   const sessionAllow = new Set<string>()
   const sessionKey = (request: ActionRequest, assessment: ActionAssessment): string =>
     request.name === 'run_command'
-      ? `run_command:${String((request.input.command ?? '')).trim().split(/[\s;|&]+/, 1)[0] ?? ''}`
+      ? `run_command:${String(request.input.command ?? '').trim().split(/[\s;|&]+/, 1)[0] ?? ''}`
+      : request.name === 'run_program'
+        ? `run_program:${String(request.input.program ?? '').trim()}:${Array.isArray(request.input.args) && typeof request.input.args[0] === 'string' ? request.input.args[0].trim() : ''}:${assessment.intent}`
       : `${request.name}:${assessment.intent}`
 
   return {
@@ -487,11 +505,24 @@ export function createActionGovernor(options: { mode?: GovernanceMode; approve?:
       // rather than one per call. With no approval channel at all (a scheduled
       // run, CI, nobody at the terminal) it still refuses, because a question
       // nobody will hear is not consent.
+      //
+      // The one other way past this wall: a human explicitly pre-authorized
+      // this exact intent, for this exact project + branch, before the run
+      // started (`elia auto --authorize`, preauth.ts) — a real advance "yes"
+      // recorded by a person, never something the model can grant itself.
       if (mode === 'unattended' && assessment.risk === 'critical' && !SETTLEABLE_ONCE.has(assessment.intent)) {
+        const branch = await resolvedBranch()
+        if (isPreauthorized(assessment.intent, cwd, branch)) {
+          const grant = consumePreauth(assessment.intent, cwd, branch)
+          return {
+            allowed: true,
+            assessment: { ...assessment, decision: 'allow', reason: `${assessment.reason} (pre-authorized: .elia/preauth.json grant for "${assessment.intent}", use #${grant?.usedCount ?? '?'})` },
+          }
+        }
         return {
           allowed: false,
           assessment: { ...assessment, decision: 'block' },
-          message: `Action blocked by Elia’s unattended policy: ${assessment.reason}. This kind of action reaches outside the project, so one approval can never stand for the next — resume in supervised mode for an exact per-action boundary.`,
+          message: `Action blocked by Elia’s unattended policy: ${assessment.reason}. This kind of action reaches outside the project, so one approval can never stand for the next — resume in supervised mode for an exact per-action boundary, or start this run with "elia auto --authorize ${assessment.intent}" to pre-authorize it.`,
         }
       }
       if (mode === 'unattended' && assessment.risk === 'critical' && !options.approve) {

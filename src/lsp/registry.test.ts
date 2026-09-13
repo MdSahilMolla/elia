@@ -2,7 +2,7 @@ import { expect, test } from 'bun:test'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { formatDiagnostics, diagnosticsForFile, resetLspStateForTests } from './registry.ts'
+import { formatDiagnostics, diagnosticsForFile, resetLspStateForTests, resolveSpawnCommand } from './registry.ts'
 import type { Diagnostic } from './protocol.ts'
 
 test('formatDiagnostics returns an empty string for a clean file', () => {
@@ -39,6 +39,43 @@ test('a recognized extension with no server binary installed fails soft instead 
   const root = mkdtempSync(join(tmpdir(), 'elia-lsp-registry-'))
   try {
     const result = await diagnosticsForFile(join(root, 'main.go'), 'package main', root)
+    expect(result).toBeUndefined()
+  } finally {
+    resetLspStateForTests()
+  }
+})
+
+test('resolveSpawnCommand prefers the direct binary when it is on PATH, ignoring any npx fallback', () => {
+  // "node" ships with every environment this runs in; picking a real,
+  // reliably-present binary avoids the flakiness of asserting on a
+  // language-server binary that may or may not be installed.
+  const resolved = resolveSpawnCommand({ languageId: 'x', command: 'node', args: ['--version'], npxArgs: ['-y', 'some-package', '--stdio'] }, true)
+  expect(resolved).toEqual({ command: 'node', args: ['--version'] })
+})
+
+test('resolveSpawnCommand falls back to npx only when explicitly allowed, and the direct binary is missing, and an npx fallback is configured', () => {
+  const spec = { languageId: 'x', command: 'elia-definitely-not-a-real-lsp-binary-xyz', args: ['--stdio'], npxArgs: ['-y', 'some-package', '--stdio'] }
+  // npx itself is expected to be present in this environment (it ships with npm).
+  expect(resolveSpawnCommand(spec, true)).toEqual({ command: 'npx', args: ['-y', 'some-package', '--stdio'] })
+  // Not allowed (diagnosticsForFile's hot path): falls straight through to the original, missing command.
+  expect(resolveSpawnCommand(spec, false)).toEqual({ command: 'elia-definitely-not-a-real-lsp-binary-xyz', args: ['--stdio'] })
+})
+
+test('resolveSpawnCommand keeps the original command when the binary is missing and there is no npx fallback configured', () => {
+  const resolved = resolveSpawnCommand({ languageId: 'x', command: 'elia-definitely-not-a-real-lsp-binary-xyz', args: ['--stdio'] }, true)
+  expect(resolved).toEqual({ command: 'elia-definitely-not-a-real-lsp-binary-xyz', args: ['--stdio'] })
+})
+
+test('diagnosticsForFile fails soft and fast for a .ts file with no typescript-language-server installed, even though npx is available and configured as a fallback for rename/code-action use', async () => {
+  // typescript-language-server is not installed in this environment (verified
+  // before writing this test), and npx IS installed — the exact conditions
+  // that once made every .ts/.js edit attempt a slow npx cold-start of
+  // typescript-language-server via the shared getClient cache. Regression
+  // test for that: this must stay on the default bun:test timeout, not hang
+  // on a real network fetch.
+  const root = mkdtempSync(join(tmpdir(), 'elia-lsp-registry-ts-'))
+  try {
+    const result = await diagnosticsForFile(join(root, 'main.ts'), 'const x = 1', root)
     expect(result).toBeUndefined()
   } finally {
     resetLspStateForTests()

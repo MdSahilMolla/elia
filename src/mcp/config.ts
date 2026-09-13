@@ -1,6 +1,7 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
-import { dirname } from 'node:path'
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 import { projectMcpConfigPath, userMcpConfigPath } from './paths.ts'
+import { withFileLock } from '../fileLock.ts'
 
 /**
  * One configured MCP server. Two shapes:
@@ -162,9 +163,25 @@ function readConfigObject(path: string): { mcpServers: Record<string, Record<str
   return { mcpServers: {} }
 }
 
+// Sibling temp file + rename, same integrity guarantee as tools/atomicWrite.ts:
+// a reader (or a crash) only ever sees the complete old file or the complete
+// new one, never a truncated one. Kept synchronous (a plain rename) since
+// this module's public API is sync and its config files are tiny.
 function writeConfigObject(path: string, data: unknown): void {
   mkdirSync(dirname(path), { recursive: true })
-  writeFileSync(path, `${JSON.stringify(data, null, 2)}\n`, 'utf8')
+  const tmp = join(dirname(path), `.mcp-${process.pid}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}.json.tmp`)
+  writeFileSync(tmp, `${JSON.stringify(data, null, 2)}\n`, 'utf8')
+  try {
+    renameSync(tmp, path)
+  } catch (err) {
+    rmSync(tmp, { force: true })
+    throw err
+  }
+}
+
+/** Cross-process lock guarding a single config file's read-modify-write cycle. */
+function withConfigLock<T>(path: string, fn: () => T): T {
+  return withFileLock(`${path}.lock`, fn, { ttlMs: 10_000, timeoutMs: 3_000 })
 }
 
 /** Turns a McpServerConfig into the minimal on-disk entry (no `name`, no empty maps). */
@@ -187,31 +204,37 @@ export function serverConfigToEntry(server: Omit<McpServerConfig, 'name'>): Reco
 export function upsertMcpServer(scope: McpConfigScope, server: McpServerConfig, cwd = process.cwd()): string {
   if (!isValidMcpServerName(server.name)) throw new Error(`invalid server name "${server.name}" — use letters, digits, "_" or "-"`)
   const path = scopePath(scope, cwd)
-  const data = readConfigObject(path)
-  const { name, ...rest } = server
-  data.mcpServers[name] = serverConfigToEntry(rest)
-  writeConfigObject(path, data)
-  return path
+  return withConfigLock(path, () => {
+    const data = readConfigObject(path)
+    const { name, ...rest } = server
+    data.mcpServers[name] = serverConfigToEntry(rest)
+    writeConfigObject(path, data)
+    return path
+  })
 }
 
 /** Removes one server from the given layer. Returns whether it was there. */
 export function removeMcpServer(scope: McpConfigScope, name: string, cwd = process.cwd()): { path: string; removed: boolean } {
   const path = scopePath(scope, cwd)
-  const data = readConfigObject(path)
-  const removed = name in data.mcpServers
-  delete data.mcpServers[name]
-  if (removed) writeConfigObject(path, data)
-  return { path, removed }
+  return withConfigLock(path, () => {
+    const data = readConfigObject(path)
+    const removed = name in data.mcpServers
+    delete data.mcpServers[name]
+    if (removed) writeConfigObject(path, data)
+    return { path, removed }
+  })
 }
 
 /** Flips `disabled` on one server in the given layer. Returns the new state, or null if the server isn't in that layer. */
 export function setMcpServerDisabled(scope: McpConfigScope, name: string, disabled: boolean, cwd = process.cwd()): { path: string; disabled: boolean } | null {
   const path = scopePath(scope, cwd)
-  const data = readConfigObject(path)
-  const entry = data.mcpServers[name]
-  if (!entry) return null
-  if (disabled) entry.disabled = true
-  else delete entry.disabled
-  writeConfigObject(path, data)
-  return { path, disabled }
+  return withConfigLock(path, () => {
+    const data = readConfigObject(path)
+    const entry = data.mcpServers[name]
+    if (!entry) return null
+    if (disabled) entry.disabled = true
+    else delete entry.disabled
+    writeConfigObject(path, data)
+    return { path, disabled }
+  })
 }

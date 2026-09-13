@@ -17,6 +17,14 @@ namespace {
 
 constexpr const char *kVersion = "0.1.0";
 
+// scan_template() and scan_code(in_template_interp=true) recurse into each other
+// once per nested `${ ... }` inside a template literal. Untrusted or adversarial
+// input (e.g. `${`${`${...`) can nest this arbitrarily deep with no other bound
+// (brackets use an explicit stack_, not the call stack, so they're safe; this pair
+// is the only real mutual recursion in the scanner) and overflow the call stack.
+// 256 levels is far past any real-world template nesting.
+constexpr size_t kMaxTemplateDepth = 256;
+
 enum class Lang { Generic, JsTs, Python, Rust, Go };
 
 Lang to_lang(int v) {
@@ -74,6 +82,7 @@ class Scanner {
   Lang lang_;
   std::vector<Open> stack_;
   std::vector<Error> errors_;
+  size_t template_depth_ = 0;
 
   char cur() const { return i_ < n_ ? s_[i_] : '\0'; }
   char at(size_t k) const { return (i_ + k) < n_ ? s_[i_ + k] : '\0'; }
@@ -267,6 +276,13 @@ class Scanner {
   void scan_template() {
     Pos start = pos_;
     adv();  // opening backtick
+    if (template_depth_ >= kMaxTemplateDepth) {
+      // Bail out before recursing any further via scan_code(true) — report it the
+      // same way genuinely unterminated input is reported, rather than crashing.
+      errors_.push_back({start, "unterminated template literal"});
+      return;
+    }
+    ++template_depth_;
     while (!eof()) {
       char c = cur();
       if (c == '\\') {
@@ -275,6 +291,7 @@ class Scanner {
       }
       if (c == '`') {
         adv();
+        --template_depth_;
         return;
       }
       if (c == '$' && at(1) == '{') {
@@ -284,6 +301,7 @@ class Scanner {
       }
       adv();
     }
+    --template_depth_;
     errors_.push_back({start, "unterminated template literal"});
   }
 

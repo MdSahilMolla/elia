@@ -132,13 +132,13 @@ const PERSONA_TOOL_NAMES: Record<AgentPersona, string[]> = {
   fitness: ['read_file', 'list_files', 'grep', 'write_file', 'edit_file', 'web_search', 'web_fetch', 'read_spreadsheet', 'data_science'],
   finance: ['read_file', 'list_files', 'grep', 'write_file', 'edit_file', 'web_search', 'web_fetch', 'read_spreadsheet', 'spreadsheet', 'presentation', 'finance', 'visualize'],
   business: ['read_file', 'list_files', 'grep', 'write_file', 'edit_file', 'web_search', 'web_fetch', 'read_spreadsheet', 'spreadsheet', 'presentation', 'visualize'],
-  data: ['read_file', 'list_files', 'grep', 'write_file', 'edit_file', 'run_command', 'web_search', 'web_fetch', 'read_spreadsheet', 'spreadsheet', 'presentation', 'data_science', 'visualize'],
+  data: ['read_file', 'list_files', 'grep', 'write_file', 'edit_file', 'run_program', 'run_command', 'web_search', 'web_fetch', 'read_spreadsheet', 'spreadsheet', 'presentation', 'data_science', 'visualize'],
   research: ['read_file', 'list_files', 'grep', 'write_file', 'edit_file', 'web_search', 'web_fetch', 'browser', 'communication', 'spreadsheet', 'presentation'],
-  cyber: ['read_file', 'list_files', 'grep', 'run_command', 'write_file', 'edit_file', 'web_search', 'web_fetch', 'browser', 'new_engagement', 'run_security_tool'],
-  automation: ['read_file', 'list_files', 'grep', 'run_command', 'write_file', 'edit_file', 'web_search', 'web_fetch', 'browser', 'communication', 'spreadsheet', 'presentation', 'deployment'],
+  cyber: ['read_file', 'list_files', 'grep', 'run_program', 'run_command', 'write_file', 'edit_file', 'web_search', 'web_fetch', 'browser', 'new_engagement', 'run_security_tool'],
+  automation: ['read_file', 'list_files', 'grep', 'run_program', 'run_command', 'write_file', 'edit_file', 'web_search', 'web_fetch', 'browser', 'communication', 'spreadsheet', 'presentation', 'deployment'],
   communications: ['read_file', 'list_files', 'grep', 'write_file', 'edit_file', 'web_search', 'web_fetch', 'browser', 'communication'],
-  ai: ['read_file', 'list_files', 'grep', 'run_command', 'write_file', 'edit_file', 'web_search', 'web_fetch', 'read_spreadsheet', 'browser'],
-  production: ['read_file', 'list_files', 'grep', 'run_command', 'write_file', 'edit_file', 'project_profile', 'production_readiness', 'deployment', 'task'],
+  ai: ['read_file', 'list_files', 'grep', 'run_program', 'run_command', 'write_file', 'edit_file', 'web_search', 'web_fetch', 'read_spreadsheet', 'browser'],
+  production: ['read_file', 'list_files', 'grep', 'run_program', 'run_command', 'write_file', 'edit_file', 'project_profile', 'production_readiness', 'deployment', 'task'],
   tech: [],
 }
 

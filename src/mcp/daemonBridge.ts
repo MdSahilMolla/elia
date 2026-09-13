@@ -11,6 +11,7 @@
  */
 
 import { daemonClient, daemonEnabled, DaemonUnavailable } from '../daemon/index.ts'
+import { validateDaemonMcpCallResult, validateDaemonMcpEnsureResult } from '../daemon/validate.ts'
 import type { McpServerConfig } from './config.ts'
 
 export interface DaemonMcpToolDescriptor {
@@ -42,7 +43,7 @@ export async function daemonEnsureMcp(servers: McpServerConfig[]): Promise<Daemo
     .filter((s) => typeof s.command === 'string' && s.command.length > 0)
     .map((s) => ({ name: s.name, command: s.command as string, args: s.args ?? [], env: s.env ?? {} }))
   const { result } = await daemonClient().call('mcp.ensure', { servers: payload }, 45_000)
-  return result as DaemonMcpEnsureResult
+  return validateDaemonMcpEnsureResult(result)
 }
 
 /** Proxy one `tools/call` through the daemon to a resident server. */
@@ -57,5 +58,5 @@ export async function daemonCallMcp(
     { server, tool, arguments: args ?? {} },
     130_000,
   )
-  return result as DaemonMcpCallResult
+  return validateDaemonMcpCallResult(result)
 }

@@ -5,7 +5,7 @@ import { createFleetBoard } from '../ui/fleetBoard.ts'
 import { inkOwnsScreen } from '../ui/stream.ts'
 import { reportSinkActive } from '../ui/report.ts'
 import { ZERO_USAGE, addUsage } from '../usage.ts'
-import { roleConfig } from '../config.ts'
+import { routeForAssignment } from '../config.ts'
 import { role as roleDefinition, toolsForRole } from './roles.ts'
 import type { Usage } from '../providers/types.ts'
 import type { Journal } from './journal.ts'
@@ -133,7 +133,7 @@ export async function runFleet(options: FleetRunOptions): Promise<FleetResult> {
   const startedAt = Date.now()
 
   const named = assignments.map((assignment, index) => {
-    const route = roleConfig(assignment.role, roleDefinition(assignment.role).tier)
+    const route = routeForAssignment(assignment.role, roleDefinition(assignment.role).tier, `${assignment.title}\n${assignment.instructions}`)
     return {
       ...assignment,
       // Worker names are what show up in blackboard attribution, so they need to be

@@ -150,3 +150,25 @@ test('findMcpServerScope reports which layer a server lives in', () => {
   expect(findMcpServerScope('nope', cwd, userPath)).toBeNull()
   expect(existsSync(userPath)).toBe(true)
 })
+
+test('upsertMcpServer waits out, then refuses to race, a lock actively held by another live elia process', () => {
+  const cwd = mkdtempSync(join(tmpdir(), 'elia-mcp-config-'))
+  const configPath = join(cwd, '.elia', 'mcp.json')
+  mkdirSync(join(cwd, '.elia'), { recursive: true })
+  // Simulate another process's live hold on the same config file's lock —
+  // same host, our own (therefore "alive") pid, just written. This must
+  // neither be silently reclaimed nor raced past; the write must refuse.
+  writeFileSync(`${configPath}.lock`, JSON.stringify({ pid: process.pid, token: 'other-holder', at: Date.now(), host: require('node:os').hostname() }), { flag: 'wx' })
+  expect(() => upsertMcpServer('project', { name: 'a', command: 'node' }, cwd)).toThrow(/busy/)
+  // The config file itself was never touched by the refused write.
+  expect(existsSync(configPath)).toBe(false)
+})
+
+test('a write never leaves a partial temp file behind on success', () => {
+  const cwd = mkdtempSync(join(tmpdir(), 'elia-mcp-config-'))
+  upsertMcpServer('project', { name: 'a', command: 'node' }, cwd)
+  const { readdirSync } = require('node:fs') as typeof import('node:fs')
+  const entries = readdirSync(join(cwd, '.elia'))
+  expect(entries.filter((f: string) => f.endsWith('.tmp'))).toEqual([])
+  expect(entries).toContain('mcp.json')
+})

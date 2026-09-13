@@ -69,6 +69,12 @@ test('applyPolicy blocks a run_command matching a forbidden pattern', () => {
   expect(outcome.message).toContain('forbidden pattern')
 })
 
+test('applyPolicy applies command patterns to direct program arguments too', () => {
+  const req = { name: 'run_program', input: { program: 'npx', args: ['playwright', 'install'] } }
+  const outcome = applyPolicy(assessAction(req, '/repo'), req, '/repo', { ...base, denyCommandPatterns: ['playwright\\s+install'] })
+  expect(outcome.blocked).toBe(true)
+})
+
 test('applyPolicy raises a safe allow to approve when the risk bar is lowered', () => {
   const safe = { name: 'web_search', input: { query: 'tls best practice' } }
   const assessment = assessAction(safe, process.cwd())
