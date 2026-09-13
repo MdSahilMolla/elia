@@ -6,10 +6,12 @@ import {
   captureBeforeWrite,
   createFileTracker,
   loadCheckpoints,
+  messagesForRestore,
   peekCheckpointFile,
   restoreCheckpoint,
   saveCheckpoints,
   setActiveTracker,
+  snapshotMessages,
   type Checkpoint,
 } from './checkpoint.ts'
 import type { ConversationMessage } from './agentLoop.ts'
@@ -29,6 +31,46 @@ afterEach(() => {
 })
 
 const sampleMessages: ConversationMessage[] = [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }]
+
+test('per-turn snapshots share one copy of each earlier message instead of re-cloning the history', () => {
+  const live: ConversationMessage[] = []
+  const snapshots: ConversationMessage[][] = []
+  for (let turn = 0; turn < 5; turn++) {
+    snapshots.push(snapshotMessages(live))
+    live.push({ role: 'user', content: [{ type: 'text', text: `turn ${turn}` }] })
+    live.push({ role: 'assistant', content: [{ type: 'text', text: `reply ${turn}` }] })
+  }
+  // The first message appears in four later snapshots — as the very same object.
+  expect(snapshots[1]![0]).toBe(snapshots[4]![0])
+  // ...and that shared object is a private copy, not the live message.
+  expect(snapshots[4]![0]).not.toBe(live[0])
+  expect(snapshots[4]![0]).toEqual(live[0]!)
+  // A snapshot is still exactly the history at that point.
+  expect(snapshots[2]!.map((m) => (m.content[0] as { text: string }).text)).toEqual(['turn 0', 'reply 0', 'turn 1', 'reply 1'])
+})
+
+test('restoring hands back a fresh history that does not alias the shared checkpoint copies', () => {
+  const snapshot = snapshotMessages(sampleMessages)
+  const checkpoint: Checkpoint = { turn: 0, at: 0, label: 'x', messagesBefore: snapshot, files: {} }
+  const restored = messagesForRestore(checkpoint)
+  expect(restored).toEqual(snapshot)
+  expect(restored[0]).not.toBe(snapshot[0])
+})
+
+test('loaded checkpoints re-share repeated messages', async () => {
+  const shared: ConversationMessage = { role: 'user', content: [{ type: 'text', text: 'first' }] }
+  const later: ConversationMessage = { role: 'assistant', content: [{ type: 'text', text: 'second' }] }
+  const sessionId = `share-${Date.now().toString(36)}`
+  await saveCheckpoints(sessionId, [
+    { turn: 0, at: 1, label: 'a', messagesBefore: [], files: {} },
+    { turn: 1, at: 2, label: 'b', messagesBefore: [shared, later], files: {} },
+    { turn: 2, at: 3, label: 'c', messagesBefore: [shared, later, shared], files: {} },
+  ], testDir)
+  const loaded = await loadCheckpoints(sessionId, testDir)
+  expect(loaded[1]!.messagesBefore[0]).toBe(loaded[2]!.messagesBefore[0])
+  expect(loaded[1]!.messagesBefore[1]).toBe(loaded[2]!.messagesBefore[1])
+  expect(loaded[2]!.messagesBefore).toEqual([shared, later, shared])
+})
 
 test('FileTracker captures a file only on its first touch', async () => {
   const path = join(testDir, 'a.txt')

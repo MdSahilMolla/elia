@@ -49,6 +49,16 @@ test('lessons round-trip through the file', () => {
   ])
 })
 
+test('a lesson whose text mentions an HTML comment keeps its text and its timestamp', () => {
+  const before = Date.now()
+  appendLessons([{ text: 'strip <!-- generated --> banners before diffing; a lone <!-- also appears in templates', source: 'critic', confidence: 0.8 }], path)
+  const [lesson] = loadLessons(path)
+  expect(lesson?.text).toBe('strip <!-- generated --> banners before diffing; a lone <!-- also appears in templates')
+  expect(lesson?.at).toBeGreaterThanOrEqual(before - 1000)
+  expect(lesson?.source).toBe('critic')
+  expect(lesson?.confidence).toBe(0.8)
+})
+
 test('loadLessons attaches a stable key derived from the text', () => {
   appendLessons(['tests need bun, not node'], path)
   const key1 = loadLessons(path)[0]?.key

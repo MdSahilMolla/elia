@@ -1,7 +1,8 @@
 import { describe, expect, test } from 'bun:test'
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, utimesSync, writeFileSync } from 'node:fs'
 import { hostname, tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { isProcessAlive, withFileLock, withFileLockAsync } from './fileLock.ts'
 
 function lockDir(): string {
@@ -44,6 +45,44 @@ describe('fileLock', () => {
     // The foreign lock is still intact — we proceeded without acquiring it.
     expect(readFileSync(lock, 'utf8')).toBe(foreign)
   })
+
+  test('a just-created lock whose owner record is not written yet is held, not reclaimed as stale', () => {
+    // `wx` creates the file an instant before its JSON lands; a contender that
+    // read it in that window used to call it stale and delete a live lock.
+    const lock = join(lockDir(), 'empty.lock')
+    writeFileSync(lock, '')
+    expect(() => withFileLock(lock, () => 'nope', { timeoutMs: 60, retryDelayMs: 10 })).toThrow('is busy')
+    expect(existsSync(lock)).toBe(true)
+  })
+
+  test('an unreadable lock that has sat untouched past the TTL is reclaimed', () => {
+    const lock = join(lockDir(), 'old-empty.lock')
+    writeFileSync(lock, '')
+    const old = new Date(Date.now() - 120_000)
+    utimesSync(lock, old, old)
+    let ran = false
+    withFileLock(lock, () => { ran = true }, { ttlMs: 60_000, timeoutMs: 500 })
+    expect(ran).toBe(true)
+  })
+
+  test('parallel processes contending for one lock all get in, one at a time', async () => {
+    const dir = lockDir()
+    const lock = join(dir, 'shared.lock')
+    const counter = join(dir, 'counter.txt')
+    writeFileSync(counter, '0')
+    const script = join(dir, 'worker.ts')
+    const lockModule = pathToFileURL(join(import.meta.dir, 'fileLock.ts')).href
+    // A read-modify-write that loses increments unless the lock truly excludes.
+    writeFileSync(script, [
+      `import { readFileSync, writeFileSync } from 'node:fs'`,
+      `const { withFileLock } = await import(${JSON.stringify(lockModule)})`,
+      `for (let i = 0; i < 25; i++) withFileLock(${JSON.stringify(lock)}, () => writeFileSync(${JSON.stringify(counter)}, String(Number(readFileSync(${JSON.stringify(counter)}, 'utf8')) + 1)), { timeoutMs: 20_000 })`,
+    ].join('\n'))
+    const workers = [1, 2, 3, 4].map(() => Bun.spawn([process.execPath, script], { stdout: 'ignore', stderr: 'pipe' }))
+    const exits = await Promise.all(workers.map((worker) => worker.exited))
+    expect(exits).toEqual([0, 0, 0, 0])
+    expect(readFileSync(counter, 'utf8')).toBe('100')
+  }, 60_000)
 
   test('calls onProceedWithoutLock exactly when it proceeds unlocked, and not on the normal path', () => {
     const held = join(lockDir(), 'g.lock')

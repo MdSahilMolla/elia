@@ -1,12 +1,14 @@
+import { KNOWN_KEY_FORMATS } from '../src/secretFormats.ts'
+
 const tracked = Bun.spawnSync(['git', 'ls-files', '-z'], { stdout: 'pipe', stderr: 'pipe' })
 if (tracked.exitCode !== 0) throw new Error(new TextDecoder().decode(tracked.stderr))
 
-const suspicious = [
-  /-----BEGIN (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----/i,
-  /\bAKIA[0-9A-Z]{16}\b/,
-  /\b(?:ghp|github_pat|xox[baprs])_[A-Za-z0-9_\-]{20,}\b/,
-  /\bsk-[A-Za-z0-9]{24,}\b/,
-  /\bBearer\s+[A-Za-z0-9._\-]{24,}\b/,
+// The issuer key formats are shared with src/autonomy/hygiene.ts, so the CI
+// scan and the deliverable check can't drift apart again. A literal bearer
+// token is scan-only: generated app code legitimately builds `Bearer ${token}`.
+const suspicious: { name: string; pattern: RegExp }[] = [
+  ...KNOWN_KEY_FORMATS,
+  { name: 'a literal bearer token', pattern: /\bBearer\s+[A-Za-z0-9._\-]{24,}\b/ },
 ]
 // A line carrying this marker is a deliberate fake — a redaction test fixture,
 // a docs example — and is exempt. Same convention as detect-secrets.
@@ -23,8 +25,8 @@ for (const file of decoder.decode(tracked.stdout).split('\0').filter(Boolean)) {
   }
   text.split(/\r?\n/).forEach((line, index) => {
     if (line.includes(ALLOWLIST_MARKER)) return
-    for (const pattern of suspicious) {
-      if (pattern.test(line)) failures.push(`${file}:${index + 1}: matched ${pattern}`)
+    for (const { name, pattern } of suspicious) {
+      if (pattern.test(line)) failures.push(`${file}:${index + 1}: ${name} (${pattern})`)
     }
   })
 }

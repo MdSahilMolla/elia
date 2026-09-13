@@ -1,5 +1,4 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
-import type { ToolEvent } from '../agentLoop.ts'
 import { currentAgent, isPathWithinWorkspace } from './context.ts'
 import { commandMayReadSensitiveData } from './sensitivePaths.ts'
 import { pauseToolSpinner, resumeToolSpinner } from '../ui/stream.ts'
@@ -683,13 +682,6 @@ export function withActionGovernor<T>(governor: ActionGovernor, fn: () => Promis
 
 export function activeActionGovernor(): ActionGovernor {
   return governorStorage.getStore() ?? defaultGovernor
-}
-
-export function auditActionEvent(event: ToolEvent, governor?: ActionAssessment): void {
-  // Kept as a small adapter so callers can use the same event shape for live UI,
-  // the append-only action ledger, and autonomous run journals.
-  void governor
-  void event
 }
 
 /**

@@ -81,11 +81,16 @@ function loadDir(dir: string, source: 'project' | 'user'): CustomCommand[] {
   return out
 }
 
-/** Project commands override user commands with the same name. */
+/**
+ * Project commands override user commands with the same name, and project
+ * commands also win the MAX_COMMANDS budget. The cap used to be applied to the
+ * merged map in insertion order — every user command first — so with 64+ user
+ * commands a project's own commands were the ones silently cut.
+ */
 export function loadCustomCommands(cwd = process.cwd()): CustomCommand[] {
   const byName = new Map<string, CustomCommand>()
-  for (const cmd of loadDir(commandsDir('user', cwd), 'user')) byName.set(cmd.name, cmd)
   for (const cmd of loadDir(commandsDir('project', cwd), 'project')) byName.set(cmd.name, cmd)
+  for (const cmd of loadDir(commandsDir('user', cwd), 'user')) if (!byName.has(cmd.name)) byName.set(cmd.name, cmd)
   return [...byName.values()].slice(0, MAX_COMMANDS).sort((a, b) => a.name.localeCompare(b.name))
 }
 
@@ -94,20 +99,25 @@ export function customCommandsAsSlashEntries(commands: CustomCommand[] = loadCus
 }
 
 /**
- * Expand `$ARGUMENTS`, `$0`..`$9`, and `$@` in a command body.
- * `$ARGUMENTS` / `$@` = full trailing args; `$1`..`$9` = whitespace-split tokens; `$0` = command name without slash.
+ * Expand `$ARGUMENTS`, `$@`, `$0`, and `$1`, `$2`, … in a command body.
+ * `$ARGUMENTS` / `$@` = full trailing args; `$N` = the Nth whitespace-split token
+ * (any N); `$0` = command name without slash.
+ *
+ * One left-to-right pass over the body. It used to be a replaceAll per
+ * placeholder, `$1` before `$10`, so `$10` became "<token1>0" — and an
+ * argument that itself contained `$2` got expanded again by the next pass.
  */
 export function expandCustomCommand(body: string, commandName: string, argsText: string): string {
-  const tokens = argsText.trim() ? argsText.trim().split(/\s+/) : []
+  const all = argsText.trim()
+  const tokens = all ? all.split(/\s+/) : []
   const bare = commandName.replace(/^\//, '')
-  let out = body
-  out = out.replaceAll('$ARGUMENTS', argsText.trim())
-  out = out.replaceAll('$@', argsText.trim())
-  out = out.replaceAll('$0', bare)
-  for (let i = 1; i <= 9; i += 1) {
-    out = out.replaceAll(`$${i}`, tokens[i - 1] ?? '')
-  }
-  return out.trim()
+  return body
+    .replace(/\$(ARGUMENTS|@|\d+)/g, (_match, key: string) => {
+      if (key === 'ARGUMENTS' || key === '@') return all
+      const index = Number(key)
+      return index === 0 ? bare : tokens[index - 1] ?? ''
+    })
+    .trim()
 }
 
 export function resolveCustomCommand(

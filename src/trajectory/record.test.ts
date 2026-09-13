@@ -71,7 +71,7 @@ test('recordTrajectory writes one interactive row per turn with the correlation 
 test('recordTrajectory redacts the prompt and bounds oversized file bodies', () => {
   recordTrajectory(
     input({
-      prompt: 'my key is sk-ant-api03-SECRETSECRETSECRET please use it',
+      prompt: 'my key is sk-ant-api03-SECRETSECRETSECRET please use it', // pragma: allowlist secret
       touched: [{ path: '/proj/big.ts', before: null, after: 'const value = computeThing();\n'.repeat(2_000) }],
     }),
     dir,

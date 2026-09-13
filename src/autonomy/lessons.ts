@@ -81,7 +81,8 @@ function normalizeLessonInput(texts: Array<string | LessonWrite>): LessonWrite[]
 
 function formatLessonLine(lesson: LessonWrite, stamp: string): string {
   const meta = [`${stamp}`]
-  if (lesson.source) meta.push(`source=${lesson.source}`)
+  // The source lives inside the metadata comment, so it must not be able to close it.
+  if (lesson.source) meta.push(`source=${lesson.source.replace(/<!--|-->/g, '').replace(/\s+/g, '-')}`)
   if (typeof lesson.confidence === 'number') meta.push(`confidence=${lesson.confidence.toFixed(2)}`)
   return `- ${lesson.text} <!-- ${meta.join(' ')} -->`
 }
@@ -106,6 +107,14 @@ export function appendLessons(texts: Array<string | LessonWrite>, path = paths.l
   }
 }
 
+/** Split `- <text> <!-- <meta> -->` into its text and trailing metadata. */
+function splitLessonLine(line: string): { text: string; meta: string } {
+  const body = line.replace(/^\s*-\s*/, '').trimEnd()
+  const open = body.lastIndexOf('<!--')
+  if (!body.endsWith('-->') || open === -1 || open + 4 > body.length - 3) return { text: body.trim(), meta: '' }
+  return { text: body.slice(0, open).trim(), meta: body.slice(open + 4, -3).trim() }
+}
+
 export function loadLessons(path = paths.lessons): Lesson[] {
   if (!existsSync(path)) return []
   hardenSecureFile(path)
@@ -114,8 +123,11 @@ export function loadLessons(path = paths.lessons): Lesson[] {
       .split('\n')
       .filter((line) => line.trimStart().startsWith('- '))
       .map((line) => {
-        const stampMatch = line.match(/<!--\s*([^>]+?)\s*-->/)
-        const meta = stampMatch?.[1] ?? ''
+        // The metadata comment is the one formatLessonLine appends at the very
+        // end. Parse only that — the first `<!--` on the line used to be taken
+        // for it, so a lesson whose own text mentioned an HTML comment lost its
+        // timestamp (`at` fell to 0) and had part of its text cut out.
+        const { text, meta } = splitLessonLine(line)
         const parts = meta.split(/\s+/).filter(Boolean)
         const at = parts[0] ? Date.parse(parts[0]) : Number.NaN
         let source: string | undefined
@@ -127,7 +139,6 @@ export function loadLessons(path = paths.lessons): Lesson[] {
             if (Number.isFinite(value)) confidence = Math.min(1, Math.max(0, value))
           }
         }
-        const text = line.replace(/<!--.*?-->/g, '').replace(/^\s*-\s*/, '').trim()
         return {
           at: Number.isNaN(at) ? 0 : at,
           text,

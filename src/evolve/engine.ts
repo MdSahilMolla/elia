@@ -25,6 +25,7 @@ import {
   describeChanges,
   isImmutablePath,
   promote,
+  removeSandbox,
   violatedImmutables,
   type Sandbox,
 } from './sandbox.ts'
@@ -302,6 +303,9 @@ async function runGeneration(
   }
 
   const backupDir = promote(sandbox, changed)
+  // The live tree now has the change and the backup holds what it replaced;
+  // the full source copy has nothing left to offer, so don't keep it around.
+  removeSandbox(sandbox)
   writePass(`promoted: ${confirmedReason}`)
   writeSummary(`Generation ${generation} promoted`, [
     ['change', hypothesis.title],

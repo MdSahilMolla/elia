@@ -246,7 +246,10 @@ export async function runFleet(options: FleetRunOptions): Promise<FleetResult> {
       result = { ...result, ok: verification.passed, report: `${result.report}\n\n${verificationReport}` }
     }
     const needsReview = !result.ok && verificationPassed === false
-    board?.update(item.workerName, result.ok ? 'done' : needsReview ? 'failed' : 'failed', `${result.steps} steps`)
+    // The board has no separate review state, so a worker whose own run went
+    // fine but whose verification failed shows as failed with that reason,
+    // rather than an indistinguishable plain "failed".
+    board?.update(item.workerName, result.ok ? 'done' : 'failed', needsReview ? `verification failed · ${result.steps} steps` : `${result.steps} steps`)
     taskSessions.update(task.id, {
       status: result.ok ? 'done' : needsReview ? 'needs-review' : 'failed',
       action: result.ok ? 'Finished and verified' : needsReview ? 'Verification needs review' : 'Stopped early',

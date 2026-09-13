@@ -9,6 +9,7 @@ import type { GoalGraphSnapshot } from './goalGraph.ts'
 import type { Usage } from '../providers/types.ts'
 import type { CompletionAssessment } from './outcome.ts'
 import { appendSecureFile, ensureSecureDirectory, writeSecureFile } from '../securePersistence.ts'
+import { withFileLock } from '../fileLock.ts'
 
 export interface ActionLedgerRecord {
   at: number
@@ -79,7 +80,17 @@ export function appendActionAudit(event: ToolEvent, runIdOverride?: string): voi
   const runId = runIdOverride ?? identity.runId
   const filePath = runId ? join(process.cwd(), '.elia', 'runs', runId, 'actions.ndjson') : join(process.cwd(), '.elia', 'action-ledger.ndjson')
   try {
-    appendSecureFile(filePath, `${JSON.stringify(record)}\n`)
+    // Parallel fleet workers — and a second elia process on the same project —
+    // append here concurrently. A large record is not guaranteed to land as one
+    // atomic write, so two could interleave into a torn line. Serialize the
+    // append under the same advisory lock the run journal uses; if the lock
+    // can't be had quickly, append anyway (readActionLedger skips a torn line)
+    // rather than stall the tool call being audited.
+    withFileLock(`${filePath}.lock`, () => appendSecureFile(filePath, `${JSON.stringify(record)}\n`), {
+      ttlMs: 10_000,
+      timeoutMs: 2_000,
+      proceedOnTimeout: true,
+    })
   } catch {
     // Auditing is best effort and must never take down the task it describes.
   }

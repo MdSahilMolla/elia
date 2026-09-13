@@ -12,6 +12,14 @@ test('ENOENT / cannot find module is an environment problem', () => {
   expect(classifyStuck({ failureText: 'ENOENT: no such file or directory, open config.json', trend: 'diverging' }).category).toBe('environment')
 })
 
+test('ETIMEDOUT is an environment problem wherever it appears, not only after a space', () => {
+  // The alternative used to be written ` ETIMEDOUT`, so it only matched after
+  // a word character and a space; at line start or after punctuation it missed.
+  for (const failureText of ['ETIMEDOUT', 'Error:ETIMEDOUT', 'request failed (ETIMEDOUT)', 'x\nETIMEDOUT at connect', 'connect ETIMEDOUT 10.0.0.1:443']) {
+    expect(classifyStuck({ failureText, trend: 'stalled' }).category).toBe('environment')
+  }
+})
+
 test('a governor block or a credential/rate-limit failure is an external blocker', () => {
   expect(classifyStuck({ failureText: 'Action blocked by Elia’s autonomy governor: irreversible', trend: 'stalled' }).recovery).toBe('resolve-approval')
   expect(classifyStuck({ failureText: 'HTTP 429 Too Many Requests', trend: 'stalled' }).category).toBe('external-blocker')
