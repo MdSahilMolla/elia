@@ -172,6 +172,35 @@ export async function commitAll(
 }
 
 /**
+ * `git diff`/`git diff --numstat` never show a file that was never `git add`ed
+ * — an untracked file has no index entry to diff against, so a freshly
+ * created deliverable reads to a diff-based reviewer as if it doesn't exist,
+ * even though `git status` and the filesystem both show it (seen live: a
+ * critic rejecting a run for "the deliverable is missing from the git diff"
+ * while the file sits right there on disk, because nothing stages/commits
+ * between repair attempts — only `commitAll`, once per execute wave). Marks
+ * new files intent-to-add (`git add -N`): an index entry with no content
+ * staged, which is enough for `git diff HEAD` to render them as additions,
+ * without staging anything `commitAll` will later decide to exclude. Skips
+ * `protect`ed pre-existing paths and anything that looks like it holds
+ * secrets — the same two exclusions `commitAll` applies at actual commit
+ * time — so this never changes what the reviewer wasn't already allowed to see.
+ */
+export async function stageUntrackedForReview(cwd: string, signal?: AbortSignal, protect: readonly string[] = []): Promise<void> {
+  const untracked = await execCapture('git', ['ls-files', '--others', '--exclude-standard'], cwd, signal)
+  if (!untracked.ok) return
+  const protectedSet = new Set(protect.map((p) => p.replace(/\\/g, '/')))
+  const paths = untracked.stdout
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .filter((path) => !protectedSet.has(path.replace(/\\/g, '/')))
+    .filter((path) => !isSensitivePath(path))
+  if (paths.length === 0) return
+  await execCapture('git', ['add', '-N', '--', ...paths], cwd, signal)
+}
+
+/**
  * `-c user.*` arguments, supplied only when the machine has no git identity —
  * a fresh container or a new user account, where a commit would otherwise fail
  * with "please tell me who you are" and take the run's whole history with it.

@@ -99,6 +99,29 @@ test('an immediately-repeated notice collapses to one line with a ×N counter', 
   expect(after).toHaveLength(3)
 })
 
+test('a repair loop\'s repeated verdict collapses to a short pointer even with a check-result line in between', () => {
+  const s = createTranscriptStore()
+  const verdict = '✗ critic#1: the deliverable is missing from the git diff.'
+  s.activity({ kind: 'status', title: verdict })
+  // A verification pass/fail line — a different activity — lands in between,
+  // exactly like the interleaved `✓ $ type index.html` line from a real repair
+  // loop. Before this fix each identical verdict after it stacked as its own
+  // full-text duplicate row instead of collapsing (see store.ts `activity()`).
+  s.activity({ kind: 'status', title: '✓ $ type index.html' })
+  s.activity({ kind: 'status', title: verdict })
+  s.activity({ kind: 'status', title: verdict })
+
+  const isNotice = (i: { kind: string }): i is { kind: 'notice'; id: string; text: string } => i.kind === 'notice'
+  const notices = [...s.getSnapshot().committed, ...s.getSnapshot().live].filter(isNotice)
+  expect(notices).toHaveLength(4)
+  expect(notices[0]!.text).toBe(verdict)
+  expect(notices[1]!.text).toBe('✓ $ type index.html')
+  expect(notices[2]!.text).toContain('same as before · ×2')
+  expect(notices[3]!.text).toContain('same as before · ×3')
+  // The full verdict text is never printed a second time.
+  expect(notices.filter((n) => n.text === verdict)).toHaveLength(1)
+})
+
 test('toMarkdown renders committed and live turns', () => {
   const s = createTranscriptStore()
   s.appendUser('build it')
