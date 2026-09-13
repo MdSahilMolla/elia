@@ -7,7 +7,7 @@ import type { ChatMessage, ContentBlock } from './providers/types.ts'
 process.env.ANTHROPIC_API_KEY ??= 'test-key-for-compaction-test'
 
 const { config } = await import('./config.ts')
-const { beginCompaction, estimateTokens, findSafeCutIndex, maybeCompact, renderContextStatus, COMPACTION_TOKEN_THRESHOLD } = await import(
+const { beginCompaction, estimateTokens, findSafeCutIndex, maybeCompact, renderContextStatus, shrinkForOversizedRequest, COMPACTION_TOKEN_THRESHOLD } = await import(
   './compaction.ts'
 )
 
@@ -264,4 +264,68 @@ test('maybeCompact leaves messages untouched if the summarizer fails', async () 
 
   expect(fired).toBe(false)
   expect(JSON.stringify(messages)).toBe(before)
+})
+
+/** A history whose bulk is old tool output — the shape every real coding turn takes. */
+function historyWithLargeToolResults(count = 20): ChatMessage[] {
+  const messages: ChatMessage[] = []
+  for (let i = 0; i < count; i++) {
+    messages.push({ role: 'user', content: [{ type: 'text', text: `ask ${i}` }] })
+    messages.push({
+      role: 'assistant',
+      content: [{ type: 'tool_use', id: `t${i}`, name: 'read_file', input: { path: `src/f${i}.ts` } }],
+    })
+    messages.push({
+      role: 'user',
+      content: [{ type: 'tool_result', tool_use_id: `t${i}`, content: 'x'.repeat(8_000), is_error: false }],
+    })
+  }
+  return messages
+}
+
+// Run 2026-09-13-l0av-rnq0: a step failed at 42,323 tokens against an 8,000
+// TPM cap, and its single retry re-sent 41,888 tokens — the same request. The
+// ordinary compaction path cannot help here: it needs a model call, and the
+// provider is refusing calls.
+test('an oversized request is shrunk without a model call', () => {
+  const messages = historyWithLargeToolResults()
+  const before = estimateTokens(messages)
+  expect(shrinkForOversizedRequest(messages)).toBe(true)
+  expect(estimateTokens(messages)).toBeLessThan(before / 2)
+})
+
+test('the most recent turns survive the shrink intact', () => {
+  const messages = historyWithLargeToolResults()
+  const tail = messages.slice(-12).map((message) => JSON.stringify(message))
+  shrinkForOversizedRequest(messages)
+  expect(messages.slice(-12).map((message) => JSON.stringify(message))).toEqual(tail)
+})
+
+// The caller uses the return value to decide between "retry smaller" and
+// "there is nothing left to cut" — a wrong answer either loops or gives up early.
+test('shrinking reports false once there is nothing left to cut', () => {
+  const messages = historyWithLargeToolResults()
+  expect(shrinkForOversizedRequest(messages)).toBe(true)
+  expect(shrinkForOversizedRequest(messages)).toBe(false)
+})
+
+test('a short history has nothing to shrink', () => {
+  const messages: ChatMessage[] = [
+    { role: 'user', content: [{ type: 'text', text: 'hello' }] },
+    { role: 'assistant', content: [{ type: 'text', text: 'hi' }] },
+  ]
+  expect(shrinkForOversizedRequest(messages)).toBe(false)
+})
+
+// Truncation has to leave the model able to tell what it lost, or it will
+// silently reason from a half-read file.
+test('a truncated result says it was truncated and why', () => {
+  const messages = historyWithLargeToolResults()
+  shrinkForOversizedRequest(messages)
+  const truncated = messages[2]!.content[0]!
+  expect(truncated.type).toBe('tool_result')
+  if (truncated.type === 'tool_result') {
+    expect(truncated.content).toContain('characters dropped')
+    expect(truncated.content).toContain('too large')
+  }
 })

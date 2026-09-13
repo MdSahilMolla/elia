@@ -1,7 +1,8 @@
 import { availableParallelism, cpus } from 'node:os'
 import { autoFallbacksFor, config } from './config.ts'
-import { beginCompaction, type PendingCompaction } from './compaction.ts'
+import { beginCompaction, shrinkForOversizedRequest, type PendingCompaction } from './compaction.ts'
 import { compactionThresholdFor } from './contextWindow.ts'
+import { isCapacityError, isRequestTooLargeError } from './providerErrors.ts'
 import { createPlanlessWorkTracker, createRedundantReadTracker, isLoneBatchableRead, serialReadNudge } from './autonomy/toolBatchingNudge.ts'
 import { createReadAhead } from './autonomy/readAhead.ts'
 import type { ChatMessage, ContentBlock, Provider, ProviderActivity, Usage } from './providers/types.ts'
@@ -15,7 +16,7 @@ import { SPECULABLE_TOOLS, type CacheStats, type ToolResultCache } from './specu
 import { readMemo } from './speculation/deterministicCache.ts'
 import type { Prefetcher } from './speculation/prefetch.ts'
 import { activeActionGovernor, assessAction, redactActionInput, type ActionAssessment } from './autonomy/governor.ts'
-import { activeGoalGraph, activeGoalNode, type ActionReservation, classifyFailure } from './autonomy/goalGraph.ts'
+import { activeGoalGraph, activeGoalNode, type ActionReservation, classifyFailure, isReportingTool } from './autonomy/goalGraph.ts'
 import { contractForAction, evaluatePostconditions, evaluatePreconditions, type ActionContract, type ContractEvaluation } from './autonomy/actionContract.ts'
 import { currentAgent, resolveWorkspacePath } from './autonomy/context.ts'
 import { activeMode } from './autonomy/mode.ts'
@@ -404,7 +405,10 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
       const cwd = currentAgent().cwd ?? process.cwd()
       const request = { name: block.name, input: block.input }
       try {
-        reservation = graph?.reserveAction(request, activeGoalNode())
+        // A reporting tool's whole effect is the structured value it captures in
+        // this process; replaying its recorded result string would return
+        // "Verdict recorded." while capturing nothing. See REPORTING_TOOLS.
+        reservation = isReportingTool(block.name) ? undefined : graph?.reserveAction(request, activeGoalNode())
         if (reservation?.decision === 'replay') {
           replayed = true
           cached = true
@@ -685,6 +689,21 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
             if (emittedOutput || !isFallbackableProviderError(error)) throw error
             if (signal?.aborted) throw error
 
+            // The request was rejected for its *size*. Neither routing nor
+            // waiting addresses that — only sending less does, and the retry
+            // used to re-send byte-for-byte what had just been refused. Shrink
+            // first, and retry this same route while there is still something
+            // to cut; a 42k-token request against an 8k cap is not a failure
+            // the next provider will answer either.
+            if (
+              attempt < MAX_PROVIDER_ATTEMPTS
+              && isRequestTooLargeError(error instanceof Error ? error.message : String(error))
+              && shrinkForOversizedRequest(messages)
+            ) {
+              if (verbose) writeNotice('request was over the provider limit; dropped older tool output and retrying smaller')
+              continue
+            }
+
             const nextRoute = activeRoutes[routeIndex + 1]
             if (nextRoute) {
               if (verbose) {
@@ -891,10 +910,17 @@ export function resetProviderHealthForTests(): void {
  * for; and context overflow (`prompt is too long`,
  * `context_length_exceeded`), which another route with a larger window can
  * actually serve. Neither is a bug in the request, so neither should be fatal.
+ *
+ * The context-overflow half was only half-covered: it listed the two Anthropic
+ * spellings and missed the OpenAI-compatible ones entirely (`413`, "Request
+ * too large", a per-minute token cap), so a live run lost two steps to an
+ * error this function called fatal. `isCapacityError` is now the single
+ * spelling of that family, shared with `classifyFailure`.
  */
 function isFallbackableProviderError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error)
-  return /connection|fetch failed|network|timeout|timed out|rate limit|overloaded|model (?:not found|unavailable)|not found|404|429|500|502|503|504|529|server had an error|prompt is too long|context[_ ]length[_ ]exceeded|too many tokens/i.test(
+  if (isCapacityError(message)) return true
+  return /connection|fetch failed|network|timeout|timed out|overloaded|model (?:not found|unavailable)|not found|404|500|502|503|504|529|server had an error/i.test(
     message,
   )
 }

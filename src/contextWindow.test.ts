@@ -44,8 +44,33 @@ test('a nonsense override is ignored rather than trusted', () => {
   for (const value of ['0', '-5', 'lots', '']) {
     expect(contextWindowOverride({ ELIA_CONTEXT_WINDOW: value })).toBeUndefined()
   }
-  // And a tiny one still cannot push a model below the historical floor.
-  expect(compactionThresholdFor('claude-sonnet-5', { ELIA_CONTEXT_WINDOW: '1000' })).toBe(30_000)
+})
+
+// The 30,000 floor used to apply to an explicit override too, which made the
+// downward half of this escape hatch unusable: the smallest budget an operator
+// could actually ask for was 30,000. A provider tier capped at 8,000 tokens
+// per minute is therefore inexpressible, and a live run (2026-09-13-l0av-rnq0)
+// built 42,000-token requests against exactly such a cap and lost two steps to
+// repeated 413s. The floor protects a window elia *inferred*; it has no
+// business overriding one the operator stated.
+test('an explicit override below the inferred floor is honoured', () => {
+  expect(compactionThresholdFor('openai/gpt-oss-120b', { ELIA_CONTEXT_WINDOW: '8000' })).toBe(4_800)
+  expect(compactionThresholdFor('claude-sonnet-5', { ELIA_CONTEXT_WINDOW: '12000' })).toBe(7_200)
+})
+
+// Never hand back more room than the operator said exists — that would
+// recreate the overflow the override is set to prevent.
+test('an override never yields a budget larger than itself', () => {
+  for (const window of ['1000', '2000', '3000', '8000']) {
+    const value = Number.parseInt(window, 10)
+    expect(compactionThresholdFor('claude-sonnet-5', { ELIA_CONTEXT_WINDOW: window })).toBeLessThanOrEqual(value)
+  }
+})
+
+// An unrecognised model still keeps the historical budget: the floor exists
+// for windows elia guessed at, and that is unchanged.
+test('an inferred window still cannot fall below the historical floor', () => {
+  expect(compactionThresholdFor('some-model-nobody-has-heard-of', {})).toBe(30_000)
 })
 
 test('every known window is at least the default, so no match ever loses room', () => {

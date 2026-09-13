@@ -301,3 +301,94 @@ export function clampOutput(text: string, maxLength = 4000): string {
   const omitted = text.length - maxLength
   return `${text.slice(0, half)}\n… [${omitted} characters omitted] …\n${text.slice(-half)}`
 }
+
+/**
+ * Commands that start a server and then stay up on purpose.
+ *
+ * Three copies of this idea existed, each with a slightly different list, and
+ * the one place it mattered most had none: `run_command` refused these, the
+ * action contract skipped its exit-zero postcondition for them, and the
+ * verification runner executed them anyway. So a plan could name `bun run dev`
+ * as a verification command and elia would dutifully run it, block for the full
+ * verification timeout, kill it, read the non-zero exit as "the work is broken",
+ * and spend the run's repair budget rewriting code that was never at fault.
+ *
+ * Seen live, run 2026-09-13-l0av-rnq0: `bun run dev` ran for 236 seconds and
+ * exited 58 after being killed. It was the second of three verification
+ * commands, so the gate could never pass no matter what the workers built, and
+ * the run ended `needs-attention` with a working Vite build on disk.
+ *
+ * One list, exported, so the three call sites cannot drift apart again.
+ */
+export function isLongRunningServerCommand(command: string): boolean {
+  return LONG_RUNNING_SERVER.test(command.trim())
+}
+
+const LONG_RUNNING_SERVER =
+  /\b(?:(?:npm|pnpm|yarn|bun|deno)\s+(?:run\s+)?(?:dev|start|serve|preview|watch)|vite(?:\s|$)|next\s+(?:dev|start)|nuxt\s+(?:dev|start)|astro\s+dev|remix\s+dev|nodemon|ts-node-dev|concurrently|http-server|live-server|serve(?:\s|$)|flask\s+run|uvicorn|gunicorn|daphne|rails\s+s(?:erver)?|php\s+artisan\s+serve|python\s+-m\s+http\.server|jekyll\s+serve|hugo\s+server|webpack(?:-dev)?-server|ng\s+serve|expo\s+start|docker\s+compose\s+up(?!\s+-d\b)|tail\s+-f|watchexec)\b/i
+
+/**
+ * Guidance for a command name that does not exist in *this* platform's shell
+ * but is second nature in another one.
+ *
+ * On Windows elia runs through cmd.exe, where `ls`, `pwd`, `cat`, `rm` and the
+ * PowerShell `Verb-Noun` cmdlets are simply not commands. The action contract
+ * checked availability with a PATH lookup, correctly found nothing, and then
+ * reported "`ls` is not available in PATH — fix the missing environment or ask
+ * the user to take over". That is true and useless: the environment is fine,
+ * the agent just used another shell's vocabulary. Worse, `classifyStuck` reads
+ * that shape as a broken environment, so a run could decide its machine was
+ * misconfigured because a worker typed `ls`.
+ *
+ * Seen live, run 2026-09-13-l0av-rnq0: `ls`, `pwd`, `rm`, `Get-Location`,
+ * `Get-ChildItem` and `Get-Content` each failed this way, eight times in one
+ * run, every one of them burning an action from the budget.
+ *
+ * Returns `undefined` for a name that is genuinely just missing (a tool that
+ * really does need installing), so the original "not available" message still
+ * stands where it is the right answer.
+ */
+export function shellCommandAlternative(executable: string, platform: NodeJS.Platform = process.platform): string | undefined {
+  if (platform !== 'win32') return undefined
+  const name = executable.trim().toLowerCase()
+
+  const replacement = POSIX_ON_WINDOWS.get(name)
+  if (replacement) {
+    return `\`${executable}\` is a POSIX command and this shell is cmd.exe, so it does not exist here — this is not a broken environment. ${replacement}`
+  }
+
+  // A PowerShell cmdlet invoked directly: cmd.exe has no such executable.
+  // PascalCase Verb-Noun specifically, the same shape the pipe-level check in
+  // runCommand.ts looks for — a case-insensitive match would also claim
+  // ordinary hyphenated binaries like `tree-sitter` or `docker-compose`.
+  if (/^[A-Z][a-z]{1,}-[A-Z][A-Za-z]{1,}$/.test(executable.trim())) {
+    return `\`${executable}\` is a PowerShell cmdlet, not an executable cmd.exe can run — this is not a broken environment. Put the whole pipeline inside one quoted argument: powershell -NoProfile -Command "${executable} …".`
+  }
+
+  return undefined
+}
+
+/**
+ * Deliberately points at elia's own tools where one exists: they work the same
+ * on every platform, and they are cheaper and more reliable than shelling out.
+ */
+const POSIX_ON_WINDOWS = new Map<string, string>([
+  ['ls', 'Use the `list_files` tool instead of shelling out.'],
+  ['pwd', 'Use the `list_files` tool, and pass `cwd` explicitly to run_command rather than asking where you are.'],
+  ['cat', 'Use the `read_file` tool instead of shelling out.'],
+  ['head', 'Use the `read_file` tool, which takes a line range.'],
+  ['tail', 'Use the `read_file` tool, which takes a line range.'],
+  ['grep', 'Use the `grep` tool instead of shelling out.'],
+  ['find', 'Use the `list_files` tool with a glob pattern.'],
+  ['rm', 'Use `del <file>` or `rmdir /s /q <dir>` in cmd.exe.'],
+  ['cp', 'Use `copy <src> <dest>` in cmd.exe.'],
+  ['mv', 'Use `move <src> <dest>` in cmd.exe.'],
+  ['touch', 'Use the `write_file` tool to create a file.'],
+  ['which', 'Use `where <tool>` in cmd.exe.'],
+  ['sed', 'Use the `edit_file` tool to change file contents.'],
+  ['awk', 'Use the `read_file` and `grep` tools, or write a real .js/.py script with write_file and run that.'],
+  ['export', 'cmd.exe uses `set NAME=value`, and it does not persist between run_command calls.'],
+  ['chmod', 'File modes are not a Windows concept; no equivalent is needed.'],
+  ['uname', 'Use `ver` in cmd.exe.'],
+  ['clear', 'Use `cls` in cmd.exe.'],
+])

@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from 'bun:test'
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { EXECUTION_LEASE_TTL_MS, GoalGraphStore, actionKey, classifyFailure, outstandingActions, readGoalGraphSnapshot, type GoalGraphOptions } from './goalGraph.ts'
+import { EXECUTION_LEASE_TTL_MS, GoalGraphStore, actionKey, classifyFailure, isReportingTool, outstandingActions, readGoalGraphSnapshot, type GoalGraphOptions } from './goalGraph.ts'
 import type { Proposal } from './types.ts'
 
 const temporaryDirectories: string[] = []
@@ -328,4 +328,102 @@ describe('corrupt durable state does not crash and is not confused with "no stat
     expect(graph!.state().runId).toBe('test-run')
     expect(graph!.state().nodes).toHaveLength(1)
   })
+})
+
+// Run 2026-09-13-l0av-rnq0 lost steps s2 and s3 to this exact message. It
+// matched none of the classifier's spellings, so `retryAfter` stayed unset,
+// the wave executor computed `backoffMs: 0`, and the single retry each step
+// gets was spent re-sending a request of almost identical size — which failed
+// identically. Both the class and the delay matter here.
+const LIVE_413_TPM =
+  '413 Request too large for model `openai/gpt-oss-120b` in organization `org_01jjz` service tier `on_demand` on tokens per minute (TPM): Limit 8000, Requested 42323, please reduce your message size and try again.'
+
+test('a 413 token-per-minute failure in a worker report is retryable with a real delay', () => {
+  const record = classifyFailure(LIVE_413_TPM, { source: 'report' })
+  expect(record.class).toBe('retryable')
+  expect(record.retryAfter).toBe(60_000)
+})
+
+test('a 413 token-per-minute failure as a thrown error is retryable, not fatal', () => {
+  const record = classifyFailure(new Error(LIVE_413_TPM))
+  expect(record.class).toBe('retryable')
+  expect(record.retryAfter).toBe(60_000)
+})
+
+test('rate_limit_exceeded is retryable rather than fatal', () => {
+  expect(classifyFailure(new Error('rate_limit_exceeded')).class).toBe('retryable')
+})
+
+// A capacity failure must not be read as a broken environment: "fix the
+// environment or hand off" is the one recovery that cannot help here.
+test('a context overflow is retryable, not an environment failure', () => {
+  expect(classifyFailure(new Error('context_length_exceeded')).class).toBe('retryable')
+})
+
+// A reporting tool's whole effect is the value it captures in this process.
+// Replaying its recorded result string returns "Verdict recorded." while
+// capturing nothing, so `requireCriticVerdict` fails closed with "submit_verdict
+// was never called" — on every review round after the first. Reproduced end to
+// end: round 1 replayed=false, rounds 2 and 3 replayed=true with all three
+// reviewers reported as silent, and the run exhausted its repair budget.
+test('reporting tools are excluded from durable-action replay', () => {
+  for (const name of ['submit_verdict', 'submit_acceptance', 'submit_proposal', 'submit_lessons', 'revise_plan']) {
+    expect(isReportingTool(name)).toBe(true)
+  }
+})
+
+// Tools that touch the world keep replay — that is what it is for.
+test('world-touching tools still replay', () => {
+  for (const name of ['write_file', 'edit_file', 'run_command', 'github', 'deployment', 'browser']) {
+    expect(isReportingTool(name)).toBe(false)
+  }
+})
+
+// The underlying behaviour the exclusion protects: an identical repeated call
+// is otherwise served from the ledger without executing.
+test('an identical completed action is otherwise replayed rather than re-executed', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'elia-replay-'))
+  try {
+    const graph = GoalGraphStore.open({ runId: 'replay-run', goal: 'g', dir })
+    const request = { name: 'submit_verdict', input: { verdict: 'approve', summary: 'Looks correct.' } }
+    const first = graph.reserveAction(request, 'goal:root')
+    expect(first.decision).toBe('execute')
+    graph.startAction(first.action.id)
+    graph.finishAction(first.action.id, { ok: true, result: 'Verdict recorded.' })
+    expect(graph.reserveAction(request, 'goal:root').decision).toBe('replay')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+// A governor refusal or a failed precondition that the worker then routed
+// around is not outstanding work — its step completed. Counting it made the
+// receipt list blockers no one could act on ("20 durable action(s) remain
+// unresolved") and pushed finished runs to `needs-attention`. Five of the
+// twenty in run 2026-09-13-l0av-rnq0 were exactly this shape.
+test('a blocked action whose step completed is not outstanding', () => {
+  const snapshot = {
+    version: 2, runId: 'r', goal: 'g', rootId: 'goal:root', verificationCommands: [],
+    nodes: [
+      { id: 'goal:root', status: 'completed' },
+      { id: 'step:s1', status: 'completed' },
+      { id: 'step:s2', status: 'failed' },
+    ],
+    actions: [
+      { id: 'a1', nodeId: 'step:s1', state: 'blocked' },
+      { id: 'a2', nodeId: 'step:s2', state: 'blocked' },
+      { id: 'a3', nodeId: 'step:s1', state: 'human-review' },
+      { id: 'a4', nodeId: 'step:s1', state: 'planned' },
+    ],
+    evidence: [], approvals: [], updatedAt: 0,
+  } as never
+
+  const outstanding = outstandingActions(snapshot).map((action) => action.id)
+  expect(outstanding).not.toContain('a1')
+  // Its step failed, so it is still real outstanding work.
+  expect(outstanding).toContain('a2')
+  // A person was asked to decide; the step finishing around them is not an answer.
+  expect(outstanding).toContain('a3')
+  // Never started: genuinely unfinished.
+  expect(outstanding).toContain('a4')
 })

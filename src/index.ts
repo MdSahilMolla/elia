@@ -2430,13 +2430,45 @@ async function runInteractive(): Promise<void> {
               // Don't announce "ready" until the server actually answers and the
               // root paints something — a blank page is worse than no preview.
               const up = await waitForHttp(url, 8_000, controller.signal)
-              const rendered = up.ok ? await checkRendered(url, controller.signal) : up
+              let rendered = up.ok ? await checkRendered(url, controller.signal) : up
               // For a static page, *this* is the verification: it serves and it
               // paints. `detectChecks` only ever looked for typecheck/test
               // commands, and its CODE_EXT filter excludes .html/.css entirely,
               // so every static site elia built was reported done with nothing
               // having checked it. Don't overwrite a real command result.
-              if (verifyResult === 'none' || verifyResult === 'skipped') {
+              const ownsVerification = verifyResult === 'none' || verifyResult === 'skipped'
+
+              // A page that does not paint is a broken deliverable, and for a
+              // static site this render check is the *only* gate there is. The
+              // command path has repaired its own failures for a long time;
+              // this path only ever reported them, so a broken page was handed
+              // over as "done" with a warning line and nothing else. The whole
+              // recorded history shows it: every turn that ended verify:"fail"
+              // had repairAttempts 0, because not one of them failed on a
+              // command — they all failed here, where nothing repaired.
+              if (!rendered.ok && ownsVerification && !persona && !escalated && autoVerify) {
+                for (let attempt = 1; !rendered.ok && attempt <= 2 && !controller.signal.aborted; attempt += 1) {
+                  repairAttempts = attempt
+                  const summary = `Page did not render (repair ${attempt}/2)`
+                  uiHooks?.onActivity?.({ kind: 'status', status: 'warning', title: summary })
+                  if (!uiHooks) writeNotice(`${summary} — ${rendered.reason ?? 'the page did not paint'}`)
+                  messages.push(
+                    userMessage(
+                      `The page you just built does not render — the task is not done.\n\nServed from: ${url}\nFailure: ${rendered.reason ?? 'the page loaded but painted nothing'}\n\nThis is the only check this deliverable has, so treat it as a failing test. Open the files you wrote and find the actual cause — a script error, a bad path to a stylesheet or module, markup that closes wrong, or a root element the script never fills. Fix it in the files that already exist; do not rebuild the page somewhere else.`,
+                    ),
+                  )
+                  await runModelTurn()
+                  const retry = await waitForHttp(url, 8_000, controller.signal)
+                  rendered = retry.ok ? await checkRendered(url, controller.signal) : retry
+                }
+                const verdict = rendered.ok
+                  ? '✓ page renders after repair'
+                  : `⚠ page still not rendering after 2 repair attempts — ${rendered.reason ?? 'it painted nothing'}`
+                uiHooks?.onActivity?.({ kind: 'status', status: rendered.ok ? 'completed' : 'warning', title: verdict })
+                if (!uiHooks) writeNotice(verdict)
+              }
+
+              if (ownsVerification) {
                 verifyResult = rendered.ok ? 'pass' : 'fail'
               }
               if (rendered.ok) {
