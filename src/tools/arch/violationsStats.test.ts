@@ -2,12 +2,12 @@ import { describe, expect, it, beforeAll, afterAll } from 'bun:test'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { mkdtempSync } from 'node:fs'
-import { openProject, parseProject, normalizePath } from './parser.ts'
+import { openProject, parseProject, normalizePath, closeProject } from './parser.ts'
 import { createFixture, cleanupFixture, type Fixture } from './testFixtures.ts'
 import { buildGraph, type DepGraph } from './graph.ts'
 import { detectViolations } from './violations.ts'
-import type { Program } from 'typescript/unstable/sync'
-import type { Snapshot } from 'typescript/unstable/sync'
+import type { Program } from 'typescript/unstable/async'
+import type { API, Snapshot } from 'typescript/unstable/async'
 
 const FILES: Record<string, string> = {}
 
@@ -33,44 +33,46 @@ FILES['lonely.ts'] = `export const lonely = 1\n`
 
 describe('violations (inferred statistics)', () => {
   let fixture: Fixture
-  let apiDispose: { api: unknown; snapshot: Snapshot }
+  let apiDispose: { api: API; snapshot: Snapshot } | undefined
   let program: Program
   const root = normalizePath(mkdtempSync(join(tmpdir(), 'arch-viol-stats')))
   const opts = () => ({ projectRoot: root, tsconfigPath: normalizePath(join(root, 'tsconfig.json')), includeTests: true, maxFiles: 200 })
 
-  function graph(): DepGraph {
-    const { files } = parseProject(program, opts())
+  async function graph(): Promise<DepGraph> {
+    const { files } = await parseProject(program, opts())
     return buildGraph(files, opts())
   }
 
-  beforeAll(() => {
+  beforeAll(async () => {
     fixture = createFixture(root, FILES, { includeBase: false, include: ['**/*.ts'] })
-    const { api, snapshot, program: p } = openProject(opts())
+    const { api, snapshot, program: p } = await openProject(opts())
     apiDispose = { api, snapshot }
     program = p
   })
 
-  afterAll(() => {
-    apiDispose.snapshot.dispose()
-    ;(apiDispose.api as { close: () => void }).close()
-    cleanupFixture(root)
+  afterAll(async () => {
+    try {
+      if (apiDispose) await closeProject(apiDispose)
+    } finally {
+      cleanupFixture(root)
+    }
   })
 
-  it('flags a god module as a statistical outlier on fan-out', () => {
-    const { violations } = detectViolations(graph(), {})
+  it('flags a god module as a statistical outlier on fan-out', async () => {
+    const { violations } = detectViolations(await graph(), {})
     const god = violations.find((v) => v.type === 'god_module' && v.source === 'hub.ts')
     expect(god).toBeDefined()
     expect(god!.severity).toBe('warning')
   })
 
-  it('flags excessive coupling across multiple inferred layers', () => {
-    const { violations } = detectViolations(graph(), {})
+  it('flags excessive coupling across multiple inferred layers', async () => {
+    const { violations } = detectViolations(await graph(), {})
     const coupling = violations.find((v) => v.type === 'excessive_coupling' && v.source === 'types.ts')
     expect(coupling).toBeDefined()
   })
 
-  it('flags truly isolated (orphan) modules but not entry-like files', () => {
-    const { violations } = detectViolations(graph(), {})
+  it('flags truly isolated (orphan) modules but not entry-like files', async () => {
+    const { violations } = detectViolations(await graph(), {})
     const orphan = violations.find((v) => v.type === 'orphan_module' && v.source === 'lonely.ts')
     expect(orphan).toBeDefined()
     expect(orphan!.severity).toBe('info')
@@ -78,16 +80,16 @@ describe('violations (inferred statistics)', () => {
     expect(leafOrphans.length).toBe(0)
   })
 
-  it('flags deep dependency chains beyond the configured limit', () => {
-    const { violations } = detectViolations(graph(), {})
+  it('flags deep dependency chains beyond the configured limit', async () => {
+    const { violations } = detectViolations(await graph(), {})
     const deep = violations.find((v) => v.type === 'deep_dependency_chain' && v.source === 'chain/c1.ts')
     expect(deep).toBeDefined()
     const mid = violations.find((v) => v.type === 'deep_dependency_chain' && v.source === 'chain/c14.ts')
     expect(mid).toBeUndefined()
   })
 
-  it('respects an explicit maxChainDepth', () => {
-    const { violations } = detectViolations(graph(), { maxChainDepth: 5 })
+  it('respects an explicit maxChainDepth', async () => {
+    const { violations } = detectViolations(await graph(), { maxChainDepth: 5 })
     expect(violations.some((v) => v.type === 'deep_dependency_chain')).toBe(true)
   })
 })
