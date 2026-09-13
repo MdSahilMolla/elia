@@ -56,9 +56,12 @@ describe('git history and drift', () => {
   })
 
   afterAll(async () => {
-    if (apiDispose) await closeProject(apiDispose)
-    cleanupFixture(root)
-    void program
+    try {
+      if (apiDispose) await closeProject(apiDispose)
+    } finally {
+      cleanupFixture(root)
+      void program
+    }
   })
 
   it('detects the repository and its HEAD', async () => {

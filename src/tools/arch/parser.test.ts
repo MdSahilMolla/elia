@@ -2,7 +2,7 @@ import { describe, expect, it, beforeAll, afterAll } from 'bun:test'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { mkdtempSync, readFileSync } from 'node:fs'
-import { openProject, parseProject, normalizePath, closeProject } from './parser.ts'
+import { openProject, parseProject, normalizePath, closeProject, closeProjectQuietly } from './parser.ts'
 import { createFixture, cleanupFixture, type Fixture } from './testFixtures.ts'
 import type { Program } from 'typescript/unstable/async'
 import type { API, Snapshot } from 'typescript/unstable/async'
@@ -24,8 +24,11 @@ describe('parser', () => {
   })
 
   afterAll(async () => {
-    if (apiDispose) await closeProject(apiDispose)
-    cleanupFixture(fixture.root)
+    try {
+      if (apiDispose) await closeProject(apiDispose)
+    } finally {
+      cleanupFixture(fixture.root)
+    }
   })
 
   it('opens the project and finds the fixture source files', async () => {
@@ -143,8 +146,13 @@ describe('parser transport', () => {
     const rejections: unknown[] = []
     const onRejection = (reason: unknown): void => void rejections.push(reason)
     process.on('unhandledRejection', onRejection)
+    // Held outside the try so an early failure — a rejected parse, or the
+    // assertion below — still closes the compiler process rather than leaving
+    // it to hold up test shutdown. Cleared once closed, so the happy path does
+    // not close it twice.
+    let handle: Awaited<ReturnType<typeof openProject>> | undefined
     try {
-      const handle = await openProject({
+      handle = await openProject({
         projectRoot: local.rootNorm,
         tsconfigPath: local.tsconfig,
         includeTests: true,
@@ -158,10 +166,12 @@ describe('parser transport', () => {
       })
       expect(files.length).toBeGreaterThan(0)
       await closeProject(handle)
+      handle = undefined
       // Give any stray rejection a turn to surface before asserting none did.
       await new Promise((resolve) => setTimeout(resolve, 50))
       expect(rejections).toEqual([])
     } finally {
+      if (handle) await closeProjectQuietly(handle)
       process.off('unhandledRejection', onRejection)
       cleanupFixture(local.root)
     }

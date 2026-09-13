@@ -27,8 +27,11 @@ describe('graph', () => {
   })
 
   afterAll(async () => {
-    if (apiDispose) await closeProject(apiDispose)
-    cleanupFixture(root)
+    try {
+      if (apiDispose) await closeProject(apiDispose)
+    } finally {
+      cleanupFixture(root)
+    }
   })
 
   it('builds a graph with the expected node count', async () => {

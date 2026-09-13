@@ -75,8 +75,11 @@ describe('violations (configured architecture)', () => {
   })
 
   afterAll(async () => {
-    if (apiDispose) await closeProject(apiDispose)
-    cleanupFixture(root)
+    try {
+      if (apiDispose) await closeProject(apiDispose)
+    } finally {
+      cleanupFixture(root)
+    }
   })
 
   it('loads the architecture config written to arch.json', () => {

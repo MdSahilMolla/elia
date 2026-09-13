@@ -52,9 +52,12 @@ describe('repair planning', () => {
   })
 
   afterAll(async () => {
-    if (apiDispose) await closeProject(apiDispose)
-    cleanupFixture(root)
-    void program
+    try {
+      if (apiDispose) await closeProject(apiDispose)
+    } finally {
+      cleanupFixture(root)
+      void program
+    }
   })
 
   it('produces a verified, resolvable plan for dependency inversion', () => {

@@ -51,8 +51,11 @@ describe('violations (inferred statistics)', () => {
   })
 
   afterAll(async () => {
-    if (apiDispose) await closeProject(apiDispose)
-    cleanupFixture(root)
+    try {
+      if (apiDispose) await closeProject(apiDispose)
+    } finally {
+      cleanupFixture(root)
+    }
   })
 
   it('flags a god module as a statistical outlier on fan-out', async () => {

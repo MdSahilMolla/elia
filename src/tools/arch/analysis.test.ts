@@ -35,8 +35,11 @@ describe('analysis.impact', () => {
   })
 
   afterAll(async () => {
-    if (apiDispose) await closeProject(apiDispose)
-    cleanupFixture(root)
+    try {
+      if (apiDispose) await closeProject(apiDispose)
+    } finally {
+      cleanupFixture(root)
+    }
   })
 
   it('computes direct dependents of a leaf module', () => {
@@ -87,8 +90,11 @@ describe('analysis.health', () => {
   })
 
   afterAll(async () => {
-    if (apiDispose) await closeProject(apiDispose)
-    cleanupFixture(root)
+    try {
+      if (apiDispose) await closeProject(apiDispose)
+    } finally {
+      cleanupFixture(root)
+    }
   })
 
   it('scores a module in a cycle as fair with the cycle factor zeroed', () => {

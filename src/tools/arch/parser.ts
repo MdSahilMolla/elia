@@ -57,7 +57,9 @@ export async function openProject(options: ParserOptions): Promise<OpenProjectRe
   }
   const project = snapshot.getProjects()[0]
   if (!project) {
-    await closeProject({ api, snapshot })
+    // Quietly: "No TypeScript project found" is the diagnostic the caller needs,
+    // and a dispose/close failure during cleanup must not replace it.
+    await closeProjectQuietly({ api, snapshot })
     throw new Error(`No TypeScript project found at ${options.tsconfigPath}`)
   }
   return { api, snapshot, project, program: project.program }
