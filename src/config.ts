@@ -93,13 +93,26 @@ export const REVIEWER_ROLE_NAMES: RoleName[] = ['critic', 'security', 'bughunter
 const deep = resolveDeepTier(currentThinking)
 const fast = resolveFastTier(deep)
 const roleOverrides = resolveRoleOverrides(deep, fast)
-const autoFallbacks = resolveAutoFallbacks(deep, fast)
+
+/**
+ * The auto-routing fallback list, built on first use. Resolving it means
+ * constructing a provider for every other preset that has a key — it used to
+ * happen unconditionally at module load (and again on every model switch),
+ * though only `routingMode: 'auto'` ever reads it. `undefined` = not built yet.
+ */
+let fallbackRoutes: TierConfig[] | undefined
 
 export const config = {
   // The selected provider/model always remains the primary route; auto mode only
   // adds transparent fallbacks and never mutates this selection on failure.
   routingMode: (process.env.ELIA_ROUTING_MODE === 'auto' ? 'auto' : 'selected') as RoutingMode,
-  fallbacks: autoFallbacks,
+  get fallbacks(): TierConfig[] {
+    fallbackRoutes ??= resolveAutoFallbacks(config.tiers.deep, config.tiers.fast)
+    return fallbackRoutes
+  },
+  set fallbacks(routes: TierConfig[]) {
+    fallbackRoutes = routes
+  },
 
   // Kept as the primary/default provider so every existing call site is unchanged.
   provider: deep.provider,
@@ -238,7 +251,9 @@ function applyDeepTier(next: TierConfig): void {
   config.providerName = config.tiers.deep.providerName
   config.model = config.tiers.deep.model
   config.providerLabel = config.tiers.deep.label
-  config.fallbacks = resolveAutoFallbacks(config.tiers.deep, config.tiers.fast)
+  // The fallback list excludes the deep provider and carries the thinking
+  // setting, so it is stale now; rebuild it lazily on next use.
+  fallbackRoutes = undefined
   config.cascadeEnabled = config.tiers.fast.label !== config.tiers.deep.label
 }
 

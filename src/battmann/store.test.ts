@@ -80,12 +80,9 @@ test('stage_deployment still honours a documentClassification stricter than the 
   await expect(run({ action: 'stage_deployment', stageId: 's1', targetId: 't-low', reportPath: 'reports/brief.md', stagedBy: 'ops' })).rejects.toThrow('accepts at most internal')
 })
 
-// Regression coverage for a verified correctness finding: the data write and its audit-hash-chain entry run as
-// two separate transactions (see the comment above MUTATING_STORE_ACTIONS in store.ts), so a crash between them
-// leaves an undetectable gap. Since a true single-transaction fix would require threading a shared, externally
-// owned connection through every one of the ~20 self-contained mutating handlers (each opens/commits/closes its
-// own), the mitigation is a reconciliation check (`reconcileAuditGaps`) that `audit_trail` now runs on every
-// call, so the gap becomes "detected and reported" instead of "silently undetectable."
+// The data write and its audit entry used to run as two transactions, so a crash between them left a write with
+// no chain entry. The append now rides in the write's own transaction; `reconcileAuditGaps` remains for stores
+// written before that, and still detects a gap if one is forced.
 test('audit_trail reports no gaps for a normal write, and detects one once simulated', async () => {
   const cwd = mkdtempSync(join(tmpdir(), 'elia-battmann-audit-gap-'))
   const run = (input: Record<string, unknown>) => withAgentIdentity({ name: 'test', role: 'lead', cwd }, () => battmannTool.execute(input))
@@ -103,6 +100,63 @@ test('audit_trail reports no gaps for a normal write, and detects one once simul
 
   const gapped = JSON.parse(await run({ action: 'audit_trail' }))
   expect(gapped.auditGaps).toEqual([{ table: 'questions', missing: 1, sampleIds: ['q1'] }])
+})
+
+test('a write whose audit append fails is rolled back with it — no unchained write survives', async () => {
+  const cwd = mkdtempSync(join(tmpdir(), 'elia-battmann-audit-atomic-'))
+  const run = (input: Record<string, unknown>) => withAgentIdentity({ name: 'test', role: 'lead', cwd }, () => battmannTool.execute(input))
+  await run({ action: 'create_question', questionId: 'q1', question: 'Will X happen?', resolutionCriteria: 'X occurs by the horizon.', openedAt: '2025-01-01', horizon: '2030-01-01' })
+
+  // Make every further audit append fail inside SQLite.
+  const db = new Database(join(cwd, '.elia', 'battmann.sqlite'))
+  db.exec("CREATE TRIGGER block_audit BEFORE INSERT ON audit_log BEGIN SELECT RAISE(ABORT, 'audit append blocked'); END")
+  db.close()
+
+  await expect(run({ action: 'create_question', questionId: 'q2', question: 'Will Y happen?', resolutionCriteria: 'Y occurs.', openedAt: '2025-01-01', horizon: '2030-01-01' })).rejects.toThrow('audit append blocked')
+  const check = new Database(join(cwd, '.elia', 'battmann.sqlite'))
+  try {
+    // The question write went down with its audit entry.
+    expect(check.query("SELECT COUNT(*) AS n FROM questions WHERE id = 'q2'").get()).toEqual({ n: 0 })
+    expect(check.query("SELECT COUNT(*) AS n FROM questions WHERE id = 'q1'").get()).toEqual({ n: 1 })
+  } finally {
+    check.close()
+  }
+})
+
+test('audit_trail verifies incrementally from its last good point, and fullVerify still catches an old edit', async () => {
+  const cwd = mkdtempSync(join(tmpdir(), 'elia-battmann-audit-incremental-'))
+  const run = (input: Record<string, unknown>) => withAgentIdentity({ name: 'test', role: 'lead', cwd }, () => battmannTool.execute(input))
+  for (const id of ['q1', 'q2', 'q3']) {
+    await run({ action: 'create_question', questionId: id, question: `Will ${id} happen?`, resolutionCriteria: 'It occurs.', openedAt: '2025-01-01', horizon: '2030-01-01' })
+  }
+  const first = JSON.parse(await run({ action: 'audit_trail' }))
+  expect(first.chainValid).toBe(true)
+  expect(first.verification).toEqual({ mode: 'full', fromSeq: 0, checked: 3 })
+
+  await run({ action: 'create_question', questionId: 'q4', question: 'Will q4 happen?', resolutionCriteria: 'It occurs.', openedAt: '2025-01-01', horizon: '2030-01-01' })
+  const second = JSON.parse(await run({ action: 'audit_trail' }))
+  // Only the one new entry is re-hashed, not the whole chain again.
+  expect(second.verification).toEqual({ mode: 'incremental', fromSeq: 3, checked: 1 })
+  expect(second.chainValid).toBe(true)
+  expect(second.entries).toHaveLength(4)
+
+  // Tamper with an entry the watermark has already passed.
+  const db = new Database(join(cwd, '.elia', 'battmann.sqlite'))
+  db.exec("UPDATE audit_log SET action = 'forged' WHERE seq = 1")
+  db.close()
+  const full = JSON.parse(await run({ action: 'audit_trail', fullVerify: true }))
+  expect(full.verification.mode).toBe('full')
+  expect(full.chainValid).toBe(false)
+  expect(full.brokenAt).toBe(1)
+})
+
+test('a role-less identity writes a chain entry that verifies', async () => {
+  const cwd = mkdtempSync(join(tmpdir(), 'elia-battmann-roleless-'))
+  const run = (input: Record<string, unknown>) => withAgentIdentity({ name: 'test', cwd } as never, () => battmannTool.execute(input))
+  await run({ action: 'create_question', questionId: 'q1', question: 'Will X happen?', resolutionCriteria: 'X occurs.', openedAt: '2025-01-01', horizon: '2030-01-01' })
+  const audit = JSON.parse(await run({ action: 'audit_trail' }))
+  expect(audit.chainValid).toBe(true)
+  expect(audit.entries[0].actor.role).toBe('lead')
 })
 
 // Regression coverage for a hardening finding: stageDeployment read the report JSON sidecar with a raw,

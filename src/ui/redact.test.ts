@@ -24,6 +24,23 @@ test('still redacts a long unbroken token', () => {
   expect(redactText(token)).toBe('[REDACTED]')
 })
 
+test('keeps git commit SHAs and long identifiers readable', () => {
+  const commit = 'a9dcbeb4f1e2d3c4b5a69788776655443322110f'
+  const identifier = 'ThisIsAnUnusuallyLongGeneratedClassNameForTheOrmLayer'
+  const line = `HEAD is ${commit}, class ${identifier}`
+  expect(redactText(line, 1_000)).toBe(line)
+})
+
+test('a bare 64-char hex run is still redacted — it is the shape of `openssl rand -hex 32`', () => {
+  const hex = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855'
+  expect(redactText(`generated ${hex}`)).not.toContain(hex)
+})
+
+test('an opaque token that merely looks like a digest in an assignment is still redacted', () => {
+  const hex = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855'
+  expect(redactText(`API_TOKEN=${hex}`)).not.toContain(hex)
+})
+
 test('redacts credential key/value assignments in free text regardless of case', () => {
   const masked = redactText('export SECRET_KEY=do-not-leak now')
   expect(masked).toContain('[REDACTED]')

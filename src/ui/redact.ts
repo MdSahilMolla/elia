@@ -14,14 +14,34 @@ const SECRET_KEY = /(api[_-]?key|token|secret|password|passwd|authorization|cook
 //     hardcoded list above (e.g. Stripe `whsec_…`) — lowercase prefix so it
 //     doesn't start swallowing ordinary CONSTANT_CASE identifiers.
 //  5. a `Bearer <token>` header
-//  6. an AWS-style secret key: exactly 40 chars from the *full* base64url
-//     alphabet (including `/` and `+`), with or without `=` padding. Bounded
-//     by lookaround (not `\b`, since `/` and `+` aren't word characters) so a
-//     longer surrounding base64 run only matches when it is exactly 40 long.
-//  7. a base64 blob that ends in `=`/`==` padding — a filesystem path does not
-//  8. a long unbroken base62 run (hex / base62 API tokens), no `/` or `.`
+//  6. a base64 blob that ends in `=`/`==` padding — a filesystem path does not
 const SECRET_VALUE =
-  /(\beyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\b|(?:sk|pk|rk|re|ey)[-_][A-Za-z0-9._\-]{8,}|(?:xox[baprs]-|gh[pousr]_|AIza|AKIA|ASIA)[A-Za-z0-9_\-/]{8,}|\b[a-z]{2,10}_[A-Za-z0-9]{16,}\b|Bearer\s+[A-Za-z0-9._\-/+=]{8,}|(?<![A-Za-z0-9+/])[A-Za-z0-9+/]{40}={0,2}(?![A-Za-z0-9+/])|\b[A-Za-z0-9+/]{16,}={1,2}|\b[A-Za-z0-9]{40,}\b)/g
+  /(\beyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\b|(?:sk|pk|rk|re|ey)[-_][A-Za-z0-9._\-]{8,}|(?:xox[baprs]-|gh[pousr]_|AIza|AKIA|ASIA)[A-Za-z0-9_\-/]{8,}|\b[a-z]{2,10}_[A-Za-z0-9]{16,}\b|Bearer\s+[A-Za-z0-9._\-/+=]{8,}|\b[A-Za-z0-9+/]{16,}={1,2})/g
+
+// Shapeless opaque runs, checked separately because they carry no prefix to
+// vouch for them:
+//  - an AWS-style secret key: exactly 40 chars from the *full* base64url
+//    alphabet (including `/` and `+`), with or without `=` padding. Bounded by
+//    lookaround (not `\b`, since `/` and `+` aren't word characters) so a longer
+//    surrounding base64 run only matches when it is exactly 40 long.
+//  - a long unbroken base62 run (hex / base62 API tokens), no `/` or `.`
+const OPAQUE_RUN = /(?<![A-Za-z0-9+/])[A-Za-z0-9+/]{40}={0,2}(?![A-Za-z0-9+/])|\b[A-Za-z0-9]{40,}\b/g
+
+/**
+ * An opaque run that is evidence, not a credential. Every 40-char run used to
+ * be redacted, which blanked out each full git commit SHA in tool output — the
+ * very identifier a user needs to follow what happened — along with long
+ * digit-free identifiers. A random base62 token of this length contains a
+ * digit with overwhelming probability, and a secret in an assignment
+ * (`token=…`) is still caught by SECRET_ASSIGNMENT below.
+ *
+ * 64-char hex stays redacted: it is a SHA-256 digest, but it is also exactly
+ * what `openssl rand -hex 32` produces, the usual shape of a generated secret.
+ */
+function isDigestOrIdentifier(run: string): boolean {
+  if (/^[0-9a-f]{40}$/.test(run)) return true
+  return !/\d/.test(run)
+}
 
 // `key=value` / `key: value` assignments where the identifier contains a
 // credential-like keyword (`SECRET_KEY`, `DATABASE_PASSWORD`, `authToken`, ...).
@@ -32,7 +52,10 @@ const SECRET_ASSIGNMENT = new RegExp(
 
 /** Redacts credential-like values without flattening or truncating the surrounding evidence. */
 export function redactSecrets(text: string): string {
-  return text.replace(SECRET_VALUE, '[REDACTED]').replace(SECRET_ASSIGNMENT, '[REDACTED]')
+  return text
+    .replace(SECRET_VALUE, '[REDACTED]')
+    .replace(OPAQUE_RUN, (run) => (isDigestOrIdentifier(run) ? run : '[REDACTED]'))
+    .replace(SECRET_ASSIGNMENT, '[REDACTED]')
 }
 
 /**
