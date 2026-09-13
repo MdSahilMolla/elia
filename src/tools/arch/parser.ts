@@ -1,12 +1,23 @@
 // Import/export extraction using the repository's native TypeScript 7 compiler.
 //
-// Opens the project through `typescript/unstable/sync` (the Go-native compiler
+// Opens the project through `typescript/unstable/async` (the Go-native compiler
 // that ships with `typescript@7`), retrieves real AST source files, and walks
 // them for import/export constructs: static imports, `import type`, dynamic
 // `import()`, `import()` types, `import x = require()`, and every export form.
+//
+// The *async* client, not the sync one, and that is not a style preference:
+// `typescript/unstable/sync` talks to the compiler over a `SyncRpcChannel`,
+// which reaches into `child.stdout._handle.fd` — a Node internal Bun does not
+// implement on Linux. Under Bun there it throws
+// `TypeError: undefined is not an object (evaluating 'stdout._handle.fd')`
+// before a single file is read, taking down `arch_drift` for every Linux user
+// and every arch test in CI. The async client spawns the same binary and
+// speaks the same JSON-RPC over ordinary piped streams, so it works on every
+// platform Bun does. Only the two functions that cross the RPC boundary become
+// async; the AST walk below is local and untouched.
 
-import { API } from 'typescript/unstable/sync'
-import type { Program } from 'typescript/unstable/sync'
+import { API } from 'typescript/unstable/async'
+import type { Program } from 'typescript/unstable/async'
 import type { Node, SourceFile } from 'typescript/unstable/ast'
 import { ModifierFlags, SyntaxKind } from 'typescript/unstable/ast'
 import {
@@ -32,16 +43,67 @@ import type { ExportInfo, OpenProjectResult, ParsedFile, ParserOptions, RawImpor
 const TEST_FILE = /\.(test|spec|e2e)\.(ts|tsx|js|mts|cts)$/i
 
 /** Open a TypeScript project with the native compiler and load its program. */
-export function openProject(options: ParserOptions): OpenProjectResult {
+export async function openProject(options: ParserOptions): Promise<OpenProjectResult> {
   const api = new API({})
-  const snapshot = api.updateSnapshot({ openProjects: [options.tsconfigPath] })
+  // Everything past `new API({})` owns a spawned compiler process and an open
+  // connection, so no failure between here and the return may escape without
+  // closing them — a caller that never received a handle has no way to.
+  let snapshot: OpenProjectResult['snapshot']
+  try {
+    snapshot = await api.updateSnapshot({ openProjects: [options.tsconfigPath] })
+  } catch (error) {
+    await closeQuietly(api)
+    throw error
+  }
   const project = snapshot.getProjects()[0]
   if (!project) {
-    snapshot.dispose()
-    api.close()
+    // Quietly: "No TypeScript project found" is the diagnostic the caller needs,
+    // and a dispose/close failure during cleanup must not replace it.
+    await closeProjectQuietly({ api, snapshot })
     throw new Error(`No TypeScript project found at ${options.tsconfigPath}`)
   }
   return { api, snapshot, project, program: project.program }
+}
+
+/** Best-effort close for a failure path, so cleanup never masks the real error. */
+async function closeQuietly(api: OpenProjectResult['api']): Promise<void> {
+  try {
+    await api.close()
+  } catch {
+    // The connection is already going away; the caller's error is the useful one.
+  }
+}
+
+/**
+ * Release a project handle: drop the snapshot, then the connection.
+ *
+ * The order matters and so does awaiting both. `close()` disposes the JSON-RPC
+ * connection, which rejects every request still in flight with
+ * `Pending response rejected since connection got disposed` — so a
+ * fire-and-forget `dispose()` followed by `close()` reliably produces an
+ * unhandled rejection after the caller has already moved on.
+ */
+export async function closeProject(handle: Pick<OpenProjectResult, 'api' | 'snapshot'>): Promise<void> {
+  try {
+    await handle.snapshot.dispose()
+  } finally {
+    // Always close, even if disposing the snapshot threw — otherwise a failed
+    // dispose strands the compiler process for the life of the run.
+    await handle.api.close()
+  }
+}
+
+/**
+ * `closeProject` for a `finally` block: a teardown failure must never replace
+ * the error that is already on its way out, which is the one that explains what
+ * actually went wrong.
+ */
+export async function closeProjectQuietly(handle: Pick<OpenProjectResult, 'api' | 'snapshot'>): Promise<void> {
+  try {
+    await closeProject(handle)
+  } catch {
+    // Nothing useful to do; the in-flight error is the one worth surfacing.
+  }
 }
 
 // The Go-native compiler exposes full data through per-kind typed getters, but
@@ -327,10 +389,12 @@ export function parseSourceFile(sf: SourceFile, path: string, externalLibrary: b
  * Files are sorted by path and capped at `maxFiles`. The caller must dispose
  * the project handle returned by {@link openProject}.
  */
-export function parseProject(program: Program, options: ParserOptions): { files: ParsedFile[]; truncated: boolean } {
+export async function parseProject(
+  program: Program,
+  options: ParserOptions,
+): Promise<{ files: ParsedFile[]; truncated: boolean }> {
   const root = normalizePath(options.projectRoot)
-  const names = program
-    .getSourceFileNames()
+  const names = (await program.getSourceFileNames())
     .map(normalizePath)
     .filter((p) => p.startsWith(root + '/'))
     .sort()
@@ -343,18 +407,15 @@ export function parseProject(program: Program, options: ParserOptions): { files:
       break
     }
     if (TEST_FILE.test(name) && !options.includeTests) continue
-    const sf = program.getSourceFile(name)
+    const sf = await program.getSourceFile(name)
     if (!sf) continue
-    if (program.isSourceFileFromExternalLibrary(sf)) continue
+    // Asked once and reused: each of these is an RPC round-trip now, and the
+    // old sync code paid for `isSourceFileFromExternalLibrary` twice per file.
+    if (await program.isSourceFileFromExternalLibrary(sf)) continue
+    const defaultLibrary = await program.isSourceFileDefaultLibrary(sf)
     counted++
-    files.push(
-      parseSourceFile(
-        sf,
-        name,
-        program.isSourceFileFromExternalLibrary(sf),
-        program.isSourceFileDefaultLibrary(sf),
-      ),
-    )
+    // External-library files never reach here (filtered above), so this is always false.
+    files.push(parseSourceFile(sf, name, false, defaultLibrary))
   }
   return { files, truncated }
 }
