@@ -164,6 +164,52 @@ func TestQueryMatchCap(t *testing.T) {
 	}
 }
 
+// A later file finishing first must not push an earlier file's rows out of
+// the capped output: the cutoff only moves once every earlier file is done.
+func TestPrefixCapWaitsForEarlierFiles(t *testing.T) {
+	p := newPrefixCap(4)
+	p.finish(2, maxMatches) // a late file fills the cap on its own first
+	for i := 0; i < 4; i++ {
+		if !p.needed(i) {
+			t.Fatalf("file %d skipped while files before it were unfinished", i)
+		}
+	}
+	p.finish(0, 1)
+	p.finish(1, maxMatches)
+	if !p.needed(1) || p.needed(2) || p.needed(3) {
+		t.Fatalf("after files 0-1 hold the cap, only files from 2 on are unneeded (cutoff %d)", p.cutoff.Load())
+	}
+}
+
+func TestQueryCapKeepsWalkOrderAndCountsOnlyReachedFiles(t *testing.T) {
+	root := t.TempDir()
+	write := func(rel, body string) {
+		if err := os.WriteFile(filepath.Join(root, rel), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("a.ts", "needle first\n")
+	for i := 0; i < 20; i++ {
+		write("m"+itoa(i+10)+".ts", strings.Repeat("needle line\n", maxMatches))
+	}
+	// Past the cap in walk order: a serial scan never reaches it.
+	if err := os.WriteFile(filepath.Join(root, "z.ts"), make([]byte, maxSearchFileBytes+8), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for run := 0; run < 20; run++ {
+		res, err := Query("needle", root, "", 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(res.Matches) != maxMatches || res.Matches[0].Rel != "a.ts" || !res.Truncated {
+			t.Fatalf("run %d: want %d rows starting at a.ts, got %d starting at %q", run, maxMatches, len(res.Matches), res.Matches[0].Rel)
+		}
+		if res.SkippedLarge != 0 {
+			t.Fatalf("run %d: z.ts is past the cap and must not count as skipped", run)
+		}
+	}
+}
+
 func itoa(n int) string {
 	if n == 0 {
 		return "0"

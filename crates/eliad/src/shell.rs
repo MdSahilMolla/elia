@@ -38,11 +38,13 @@ pub enum ExecStop {
     Cancelled,
 }
 
+/// Hard cap on the payload kept per stream (stdout and stderr each) for one
+/// command. Output past it is read and discarded, so the framing stays in sync,
+/// and a one-line truncation note is appended instead.
 const MAX_CAPTURE_BYTES: usize = 2_000_000;
-/// Memory bound on a single physical line: `minified.js`, `git diff` of a big
-/// file, or `type` of a huge one-line dump are each read whole by
-/// `read_line`; without a cap a single over-large line outgrows every
-/// accumulated-payload budget.
+/// Memory bound on a single physical line while it is being read: `minified.js`,
+/// `git diff` of a big file, or `type` of a huge one-line dump would otherwise
+/// be buffered whole before `MAX_CAPTURE_BYTES` could apply.
 const MAX_LINE_BYTES: usize = 1_000_000;
 
 /// How long a per-cwd shell worker may sit idle before the periodic reaper in
@@ -355,14 +357,14 @@ where
     R: AsyncBufReadExt + Unpin,
 {
     let mut seen_begin = false;
-    let mut payload = String::new();
+    let mut payload = Capture::default();
     let mut exit_code = 0i32;
     loop {
         let line = match read_bounded_line(reader).await {
             Ok(Some(line)) => line,
             Ok(None) => {
                 return Ok(MarkerRead {
-                    payload,
+                    payload: payload.finish(),
                     exit_code,
                     hit_eof: true,
                 })
@@ -377,6 +379,9 @@ where
             continue;
         }
         if let Some(pos) = trimmed.find(end) {
+            // Output that did not end in a newline shares its last line with
+            // the marker (`foo<END> 0`); keep the `foo`.
+            payload.push(&trimmed[..pos]);
             if parse_code {
                 let rest = trimmed[pos + end.len()..].trim();
                 exit_code = rest
@@ -386,14 +391,52 @@ where
                     .unwrap_or(0);
             }
             return Ok(MarkerRead {
-                payload,
+                payload: payload.finish(),
                 exit_code,
                 hit_eof: false,
             });
         }
-        if payload.len() < MAX_CAPTURE_BYTES {
-            payload.push_str(&line);
+        payload.push(&line);
+    }
+}
+
+/// One stream's payload, held to exactly `MAX_CAPTURE_BYTES`. It used to take
+/// whole lines while under the cap, so it could overshoot by up to a full
+/// `MAX_LINE_BYTES` line, and a cut was silent.
+#[derive(Default)]
+struct Capture {
+    text: String,
+    truncated: bool,
+}
+
+impl Capture {
+    fn push(&mut self, piece: &str) {
+        if self.truncated {
+            return;
         }
+        let room = MAX_CAPTURE_BYTES - self.text.len();
+        if piece.len() <= room {
+            self.text.push_str(piece);
+            return;
+        }
+        let mut cut = room;
+        while !piece.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        self.text.push_str(&piece[..cut]);
+        self.truncated = true;
+    }
+
+    fn finish(mut self) -> String {
+        if self.truncated {
+            if !self.text.ends_with('\n') {
+                self.text.push('\n');
+            }
+            self.text.push_str(&format!(
+                "[eliad: output truncated at {MAX_CAPTURE_BYTES} bytes]\n"
+            ));
+        }
+        self.text
     }
 }
 
@@ -401,7 +444,10 @@ where
 /// that cap is hit the rest of the physical line is drained and discarded so the
 /// next read starts at the following `\n`. Without this, `read_line` allocates a
 /// whole huge line (`type` of a one-line dump, minified JS) with no ceiling.
-/// Returns `Ok(None)` at EOF.
+///
+/// Like `read_line`, the returned line keeps its terminating `\n` (absent only
+/// for a final unterminated line), so the payload keeps the command's line
+/// breaks. Returns `Ok(None)` at EOF.
 async fn read_bounded_line<R>(reader: &mut R) -> Result<Option<String>>
 where
     R: AsyncBufReadExt + Unpin,
@@ -417,21 +463,23 @@ where
             });
         }
         match chunk.iter().position(|&b| b == b'\n') {
-            Some(nl) => {
-                line.extend_from_slice(&chunk[..nl]);
+            Some(nl) if line.len() + nl < MAX_LINE_BYTES => {
+                line.extend_from_slice(&chunk[..=nl]);
                 reader.consume(nl + 1);
                 return Ok(Some(String::from_utf8_lossy(&line).into_owned()));
             }
-            None => {
+            _ => {
                 let take = chunk.len();
                 let room = MAX_LINE_BYTES.saturating_sub(line.len());
                 let to_keep = take.min(room);
                 line.extend_from_slice(&chunk[..to_keep]);
-                reader.consume(take);
+                reader.consume(to_keep);
                 if line.len() >= MAX_LINE_BYTES {
                     // Physical line exceeds the cap: drain to its end without
                     // keeping any more bytes, so framing stays intact.
-                    drain_to_newline(reader).await?;
+                    if drain_to_newline(reader).await? {
+                        line.push(b'\n');
+                    }
                     return Ok(Some(String::from_utf8_lossy(&line).into_owned()));
                 }
             }
@@ -440,20 +488,21 @@ where
 }
 
 /// Discard bytes up to (and including) the next `\n`, so the caller next reads
-/// from the start of a fresh physical line.
-async fn drain_to_newline<R>(reader: &mut R) -> Result<()>
+/// from the start of a fresh physical line. Returns whether a `\n` was found
+/// (false at EOF).
+async fn drain_to_newline<R>(reader: &mut R) -> Result<bool>
 where
     R: AsyncBufReadExt + Unpin,
 {
     loop {
         let chunk = reader.fill_buf().await.context("reading shell output")?;
         if chunk.is_empty() {
-            return Ok(());
+            return Ok(false);
         }
         match chunk.iter().position(|&b| b == b'\n') {
             Some(nl) => {
                 reader.consume(nl + 1);
-                return Ok(());
+                return Ok(true);
             }
             None => {
                 let n = chunk.len();
@@ -513,15 +562,24 @@ fn canonical_key(cwd: &str) -> PathBuf {
 
 static NONCE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+/// The per-command marker. Framing is only as strong as the marker's absence
+/// from the command's own output, so it must not be predictable: pid, clock and
+/// a counter alone are guessable by anything that can read the process table.
+/// The salt is a SipHash under std's randomly seeded `RandomState` key, so a
+/// command cannot know its marker in advance and forge an early END.
 fn next_nonce() -> String {
+    use std::hash::{BuildHasher, Hasher};
+
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
     let seq = NONCE_COUNTER.fetch_add(1, Ordering::Relaxed);
     let pid = std::process::id() as u64;
-    // A marker the command's own output is very unlikely to contain verbatim.
-    format!("__elia_{:x}_{:x}_{:x}__", pid, nanos as u64, seq)
+    let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+    hasher.write_u128(nanos);
+    hasher.write_u64(seq);
+    format!("__elia_{:x}_{:x}_{:016x}__", pid, seq, hasher.finish())
 }
 
 #[cfg(test)]
@@ -573,6 +631,63 @@ mod tests {
         let out = run(&pool, "exit 4").await;
         assert_eq!(out.exit_code, 4);
         assert_eq!(pool.worker_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn multi_line_output_keeps_its_line_breaks() {
+        let pool = ShellPool::new();
+        let cmd = if cfg!(windows) {
+            "echo one& echo two"
+        } else {
+            "echo one; echo two"
+        };
+        let out = run(&pool, cmd).await;
+        assert_eq!(out.stdout.replace("\r\n", "\n"), "one\ntwo\n");
+    }
+
+    #[tokio::test]
+    async fn output_without_a_trailing_newline_is_kept() {
+        let pool = ShellPool::new();
+        let cmd = if cfg!(windows) {
+            "<nul set /p =no-newline"
+        } else {
+            "printf no-newline"
+        };
+        let out = run(&pool, cmd).await;
+        // (`set /p` from nul exits 1 on Windows, so only the output is checked.)
+        assert_eq!(out.stdout, "no-newline");
+    }
+
+    #[test]
+    fn capture_is_capped_exactly_and_says_so() {
+        let mut capture = Capture::default();
+        // 3 × 700 KB: the third line crosses the 2 MB cap mid-line.
+        let line = format!("{}\n", "x".repeat(699_999));
+        for _ in 0..3 {
+            capture.push(&line);
+        }
+        let text = capture.finish();
+        let note = format!("\n[eliad: output truncated at {MAX_CAPTURE_BYTES} bytes]\n");
+        assert!(text.ends_with(&note), "missing truncation note");
+        assert_eq!(text.len(), MAX_CAPTURE_BYTES + note.len());
+    }
+
+    #[test]
+    fn capture_under_the_cap_is_untouched() {
+        let mut capture = Capture::default();
+        capture.push("a\n");
+        capture.push("b");
+        assert_eq!(capture.finish(), "a\nb");
+    }
+
+    #[test]
+    fn nonces_are_unique_and_salted() {
+        let a = next_nonce();
+        let b = next_nonce();
+        assert_ne!(a, b);
+        // pid, seq, then a 16-hex-digit salt.
+        let salt = a.trim_end_matches("__").rsplit('_').next().unwrap();
+        assert_eq!(salt.len(), 16);
     }
 
     #[tokio::test]
