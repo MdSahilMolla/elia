@@ -134,7 +134,10 @@ test('web_search tolerates malformed result entries instead of trusting the cast
   const result = await webSearchTool.execute({ query: 'shape' })
   expect(result).toContain('1. (untitled)')
   expect(result).toContain('https://ok.example')
-  expect(result).not.toContain('2.')
+  // Anchored to a result line, not a bare `2.`: every response carries a
+  // `Retrieved: <ISO timestamp>` header, and a substring check matched that
+  // whenever the seconds ended in 2 (`...:02.336Z`) — a real ~1-in-10 flake.
+  expect(result).not.toMatch(/^2\. /m)
 })
 
 test('web_search rejects a non-object or oversized provider response', async () => {
