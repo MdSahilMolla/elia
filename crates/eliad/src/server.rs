@@ -272,7 +272,10 @@ pub async fn shell_reap_loop(state: Arc<AppState>) {
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         ticker.tick().await;
-        state.shell.reap_idle(Duration::from_secs(SHELL_IDLE_SECS)).await;
+        state
+            .shell
+            .reap_idle(Duration::from_secs(SHELL_IDLE_SECS))
+            .await;
     }
 }
 
