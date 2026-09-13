@@ -129,7 +129,7 @@ test('refuses to edit a protected path', async () => {
 
 test('refuses to edit an ssh private key regardless of extension', async () => {
   const path = join(dir, 'id_rsa')
-  writeFileSync(path, '-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n-----END OPENSSH PRIVATE KEY-----\n')
+  writeFileSync(path, '-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n-----END OPENSSH PRIVATE KEY-----\n') // pragma: allowlist secret
   await expect(edit({ path, old_string: 'abc', new_string: 'xyz' })).rejects.toThrow(/protected path/)
 })
 

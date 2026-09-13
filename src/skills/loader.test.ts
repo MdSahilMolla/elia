@@ -88,6 +88,21 @@ test('ELIA_SKILLS=off still skips project skills entirely, trusted or not', asyn
 
 // --- registry isolation ---
 
+// `loadSkills` always also reads the *user* skills directory, and that path is
+// `join(homedir(), '.elia', 'skills')` — a constant, with no override. So these
+// assertions cannot be absolute: a developer with their own skills installed
+// would contribute tools to every load. Instead, load an empty project once to
+// learn what this machine contributes on its own, and assert only the delta.
+async function machineBaseline(): Promise<string[]> {
+  const empty = mkdtempSync(join(tmpdir(), 'elia-skills-empty-'))
+  dirs.push(empty)
+  const emptySkills = join(empty, '.elia', 'skills')
+  mkdirSync(emptySkills, { recursive: true })
+  const { allWorkerTools } = await import('../tools/registry.ts')
+  await loadSkills({}, emptySkills)
+  return allWorkerTools().map((tool) => tool.name).sort()
+}
+
 test('a skill loaded by one caller does not stay registered for the next', async () => {
   // `bun test` shares one module registry across every file, so a skill that
   // stayed in `synthesizedTools` leaked into every later test — it reached
@@ -95,19 +110,18 @@ test('a skill loaded by one caller does not stay registered for the next', async
   // and failed it. Only on Linux, because `readdir` there is not sorted and
   // this file ran before that one; the bug was never OS-specific.
   const { allWorkerTools } = await import('../tools/registry.ts')
-  const registered = (): string[] => allWorkerTools().map((tool) => tool.name).filter((name) => name === 'evil_tool')
+  const registered = (): string[] => allWorkerTools().map((tool) => tool.name).sort()
+  const baseline = await machineBaseline()
 
   const { skillsDir } = setupProject()
   trustProjectSkills(skillsDir)
   await loadSkills({}, skillsDir)
-  expect(registered()).toEqual(['evil_tool'])
+  const added = registered().filter((name) => !baseline.includes(name))
+  expect(added).toEqual(['evil_tool'])
 
-  // A second load against a project with no skills must leave nothing behind.
-  const empty = mkdtempSync(join(tmpdir(), 'elia-skills-empty-'))
-  dirs.push(empty)
-  mkdirSync(join(empty, '.elia', 'skills'), { recursive: true })
-  await loadSkills({}, join(empty, '.elia', 'skills'))
-  expect(registered()).toEqual([])
+  // Loading a project with no skills must put the registry back exactly where
+  // it started — nothing from the previous load may survive.
+  expect(await machineBaseline()).toEqual(baseline)
   expect(listLoadedSkills().map((skill) => skill.name)).not.toContain('evil_tool')
 })
 
@@ -115,6 +129,10 @@ test('a skill deleted from disk stops being callable after a reload', async () =
   const { skillsDir } = setupProject()
   trustProjectSkills(skillsDir)
   const { findTool } = await import('../tools/registry.ts')
+  // Only meaningful if this machine has no user skill of the same name, which
+  // would be found regardless of what the project directory holds.
+  const baseline = await machineBaseline()
+  if (baseline.includes('evil_tool')) return
 
   await loadSkills({}, skillsDir)
   expect(findTool('evil_tool')).toBeDefined()
