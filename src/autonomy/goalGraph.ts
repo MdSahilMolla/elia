@@ -9,6 +9,7 @@ import { canonicalizeCommandForIdentity } from './commandIdentity.ts'
 import { ensureSecureDirectory, hardenSecureFile, writeSecureFile } from '../securePersistence.ts'
 import { isProcessAlive, withFileLock } from '../fileLock.ts'
 import { logSwallowedError } from '../diagnostics.ts'
+import { capacityRetryDelayMs, isCapacityError } from '../providerErrors.ts'
 
 export const GOAL_GRAPH_VERSION = 2
 export const EXECUTION_LEASE_TTL_MS = 120_000
@@ -844,7 +845,17 @@ export function actionKey(runId: string, nodeId: string, request: ActionRequest)
 export function outstandingActions(snapshot: GoalGraphSnapshot): DurableActionRecord[] {
   return snapshot.actions.filter((action) => {
     if (action.state === 'completed') return false
-    if (action.state !== 'failed' && action.state !== 'retryable') return true
+    // `blocked` joins `failed` and `retryable` in the moot-if-the-step-finished
+    // rule, for the same reason: a governor refusal or a failed precondition
+    // that the worker then routed around is not outstanding work — the step it
+    // belonged to completed. Counting them made the receipt list phantom
+    // blockers ("20 durable action(s) remain unresolved") that no one could
+    // act on, and pushed runs to `needs-attention` on work that was done. In
+    // run 2026-09-13-l0av-rnq0, five of the twenty were exactly this.
+    //
+    // `human-review` is deliberately excluded: that state means a person was
+    // asked to decide, and a step completing around it does not answer them.
+    if (action.state !== 'failed' && action.state !== 'retryable' && action.state !== 'blocked') return true
     const owner = snapshot.nodes.find((node) => node.id === action.nodeId)
     if (!owner || owner.id === snapshot.rootId) return false
     return owner.status !== 'completed'
@@ -889,19 +900,21 @@ export function classifyFailure(error: unknown, opts: { source?: 'error' | 'repo
   if (fromReport) {
     let reportClass: FailureClass = 'retryable'
     if (/blocked by elia|denied by the user|action approval (?:denied|required)/.test(lower)) reportClass = 'authorization'
-    else if (/rate limit|\b429\b|quota exceeded|too many requests/.test(lower)) retryAfter = 30_000
+    else if (isCapacityError(message)) retryAfter = capacityRetryDelayMs(message)
     return { class: reportClass, message: message.slice(0, 2000), at: Date.now(), retryAfter }
   }
 
   let failureClass: FailureClass = 'fatal'
   if (/blocked by elia|denied by the user|approval|unauthori[sz]ed|forbidden|captcha|login required/.test(lower)) failureClass = 'authorization'
-  else if (/timeout|timed out|econnreset|econnrefused|network|rate limit|\b429\b|\b5\d\d\b|temporar|retryable|exit code/.test(lower)) {
+  // Checked before the generic retryable branch below, because a capacity
+  // failure has to reach `capacityRetryDelayMs` rather than the flat 1s that
+  // branch would otherwise hand a message matching `timeout` or `exit code`.
+  else if (isCapacityError(message)) {
     failureClass = 'retryable'
-    // A rate limit is the one retryable failure that retrying immediately
-    // cannot possibly fix — it is a statement about the next N seconds, not
-    // about the request. A run once burned all five of its step retries
-    // re-hitting the same 429 within milliseconds.
-    retryAfter = /rate limit|\b429\b|quota exceeded|too many requests/.test(lower) ? 30_000 : 1000
+    retryAfter = capacityRetryDelayMs(message)
+  } else if (/timeout|timed out|econnreset|econnrefused|network|\b5\d\d\b|temporar|retryable|exit code/.test(lower)) {
+    failureClass = 'retryable'
+    retryAfter = 1000
   } else if (/enoent|no such file|not found|missing|executable|provider unavailable|configuration|invalid environment/.test(lower)) failureClass = 'environment'
   else if (/conflict|ambiguous|unknown whether|partially|manual|human|irreversible/.test(lower)) failureClass = 'human-review'
   return { class: failureClass, message: message.slice(0, 2000), at: Date.now(), retryAfter }
@@ -927,4 +940,45 @@ function normalizeSnapshot(snapshot: GoalGraphSnapshot, options: GoalGraphOption
     approvals: Array.isArray(snapshot.approvals) ? snapshot.approvals : [],
     updatedAt: Number.isFinite(snapshot.updatedAt) ? snapshot.updatedAt : Date.now(),
   }
+}
+
+/**
+ * Tools whose only effect is to hand a structured report back to the running
+ * process — a review verdict, an acceptance check, a plan, a set of lessons.
+ *
+ * These must never be replayed from the durable action ledger. Replay exists to
+ * stop a resumed run from repeating something that already happened in the
+ * world (a push, a deploy, a write); it returns the recorded *result string*
+ * without running the tool. For a reporting tool the result string is the
+ * worthless half — `"Verdict recorded."` — and the half that matters is the
+ * side effect of capturing the verdict, which replay skips entirely.
+ *
+ * The consequence was severe and silent. A reviewer that approves twice with
+ * the same wording produces an identical call, so the second review round
+ * replays it: the tool body never runs, nothing is captured, and
+ * `requireCriticVerdict` correctly fails closed with "submit_verdict was never
+ * called". Every subsequent round does the same, so once a run enters its
+ * repair loop the review gate can no longer be satisfied by any reviewer, and
+ * the run exhausts its repair budget and ends `needs-attention`. Observed in
+ * the recorded history as `reviewPassed: false` on ten of eleven runs, and
+ * reproduced end to end: round 1 `replayed=false` (verdict captured), rounds 2
+ * and 3 `replayed=true` (all three reviewers reported as never having spoken).
+ *
+ * Nothing is lost by excluding them: they touch nothing outside the process, so
+ * there is no duplicate side effect for idempotency to protect against.
+ */
+export const REPORTING_TOOLS = new Set([
+  'submit_proposal',
+  'submit_verdict',
+  'submit_acceptance',
+  'submit_assumptions',
+  'submit_lessons',
+  'submit_route',
+  'submit_fragment',
+  'submit_hypothesis',
+  'revise_plan',
+])
+
+export function isReportingTool(name: string): boolean {
+  return REPORTING_TOOLS.has(name)
 }

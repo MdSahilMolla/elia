@@ -120,3 +120,43 @@ test('fallbackStaticPageVerification finds a uniquely-named page that landed at 
     rmSync(dir, { recursive: true, force: true })
   }
 })
+
+// Run 2026-09-13-l0av-rnq0: the plan's verification was
+// ["bun install", "bun run build", "bun run dev"]. The first two passed; the
+// third ran for 236 seconds, was killed, and exited 58 — so the gate could
+// never pass, and the run ended `needs-attention` with a working Vite build on
+// disk. A dev server is not a check.
+test('a dev server is dropped from the gate instead of blocking it', async () => {
+  const outcome = await runVerification(['bun run dev'], undefined, undefined, allowAllGovernor())
+  expect(outcome.passed).toBe(false)
+  // Nothing ran, so the work is unproven rather than disproven — the caller's
+  // render fallback handles this, a repair loop cannot.
+  expect(outcome.results.every(isUnrunnableCommandFailure)).toBe(true)
+})
+
+// `exit N` rather than `node -e "..."`: nested quotes do not survive cmd.exe,
+// which is the shell this runs through on Windows.
+test('a dev server alongside real checks does not fail them', async () => {
+  const outcome = await runVerification(['bun run dev', 'exit 0'], undefined, undefined, allowAllGovernor())
+  expect(outcome.passed).toBe(true)
+  expect(outcome.results.some((result) => result.command.startsWith('[skipped]'))).toBe(true)
+})
+
+test('a real failing check still fails the gate when a server is present', async () => {
+  const outcome = await runVerification(['bun run dev', 'exit 3'], undefined, undefined, allowAllGovernor())
+  expect(outcome.passed).toBe(false)
+  expect(outcome.results.some((result) => result.exitCode === 3)).toBe(true)
+})
+
+/** A governor that permits every command, so a test exercises the gate itself. */
+function allowAllGovernor() {
+  return {
+    stats: () => ({ maxActions: 0, consumed: 0, exhausted: false, blockedByBudget: 0 }),
+    async check() {
+      return {
+        allowed: true,
+        assessment: { risk: 'safe' as const, decision: 'allow' as const, reason: 'test', intent: 'run_command', resources: [], reversible: true },
+      }
+    },
+  }
+}

@@ -2,6 +2,7 @@ import { existsSync, statSync } from 'node:fs'
 import { basename } from 'node:path'
 import type { ActionRequest } from './governor.ts'
 import { isPathWithinWorkspace, resolveWorkspacePath } from './context.ts'
+import { isLongRunningServerCommand, shellCommandAlternative } from '../shell.ts'
 
 export type ContractFailureDisposition = 'retryable' | 'human-review'
 export type ContractCheckKind = 'command-available' | 'browser-transport' | 'workspace-path' | 'shell-exit-zero' | 'result-contains' | 'result-url-prefix'
@@ -31,9 +32,6 @@ export interface ContractEvaluation {
 
 const SAFE_BROWSER_ACTIONS = new Set(['status', 'navigate', 'refresh', 'back', 'forward', 'snapshot', 'extract', 'scroll', 'wait', 'wait_for', 'verify'])
 const SHELL_COMMAND = /^(?:[A-Za-z_][A-Za-z0-9_]*=[^\s]+\s+)*(?:command\s+)?([A-Za-z0-9_./-]+)(?:\s|$)/
-
-/** Commands that start a server and never return — measured on "did it come up", not "exit 0". */
-const LONG_RUNNING_SERVER = /\b(?:(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?(?:dev|start|serve|preview)|vite(?:\s|$)|next\s+(?:dev|start)|nodemon|ts-node-dev|concurrently|http-server|serve(?:\s|$)|flask\s+run|uvicorn|gunicorn|rails\s+s(?:erver)?|php\s+artisan\s+serve)\b/i
 
 export function contractForAction(request: ActionRequest, cwd: string, idempotencyKey: string): ActionContract {
   const preconditions: ContractCheck[] = []
@@ -93,7 +91,7 @@ export function contractForAction(request: ActionRequest, cwd: string, idempoten
     // exits, so "exit 0" is the wrong bar — it would always look like a failure
     // and drive a repair loop. Those are started differently (see run_command's
     // own guidance); everything else must still exit clean.
-    if (!LONG_RUNNING_SERVER.test(command) && !isProbe) {
+    if (!isLongRunningServerCommand(command) && !isProbe) {
       postconditions.push({ kind: 'shell-exit-zero', description: 'the command must return exit code 0 and not time out' })
     }
   }
@@ -148,7 +146,14 @@ export async function evaluatePreconditions(contract: ActionContract, cwd: strin
     if (check.kind === 'command-available') {
       const executable = Bun.which(check.value ?? '')
       if (executable) evidence.push(`${check.value} available at ${executable}`)
-      else failures.push(`${check.value} is not available in PATH`)
+      else {
+        // "not available in PATH" is true but misleading when the name is just
+        // another shell's vocabulary — the environment is fine, the command is
+        // wrong. Say which one to use instead of sending the run off to fix a
+        // machine that was never broken.
+        const alternative = shellCommandAlternative(check.value ?? '')
+        failures.push(alternative ?? `${check.value} is not available in PATH`)
+      }
       continue
     }
     if (check.kind === 'workspace-path') {

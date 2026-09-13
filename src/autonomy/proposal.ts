@@ -3,6 +3,7 @@ import { isRoleName, ROLE_NAMES, type Proposal, type ProposalStep } from './type
 import { fileCollisions, planWaves } from './fleet.ts'
 import { bold, dim, cyan, red, gold } from '../ui/theme.ts'
 import { wrapText } from '../ui/layout.ts'
+import { isLongRunningServerCommand } from '../shell.ts'
 
 const MAX_PROPOSAL_STEPS = 32
 const MAX_VERIFICATION_COMMANDS = 16
@@ -107,6 +108,27 @@ export function parseProposal(raw: unknown): { proposal: Proposal } | { error: s
         `proposal.verification contains text written as instructions for a human, not a command a shell can run: ${proseEntries.map((entry) => `"${entry}"`).join(', ')}. ` +
         'A verification command is executed literally (like typing it at a terminal) — "Open X in browser, verify Y" is not a real command and will fail every time with something like `\'Open\' is not recognized`. ' +
         "Use the project's actual build/test/typecheck command if one exists. For a standalone static HTML/CSS/JS deliverable with no test tooling, do not describe manual browser steps here — leave that to acceptanceCriteria instead, and give a real command that at least proves the file is well-formed (e.g. a linter, or `node -e \"...\"` asserting on the file contents), or state in `understanding` that no automated check exists; elia verifies static pages by rendering them itself.",
+    }
+  }
+
+  // A dev server is not a check — it is a process that stays up until something
+  // kills it. Run as verification it blocks for the full 300s timeout, gets
+  // killed, and reports a non-zero exit, so the gate fails on every attempt no
+  // matter how correct the work is. The repair budget then goes on rewriting
+  // application code that was never broken.
+  //
+  // Seen live: run 2026-09-13-l0av-rnq0 proposed `["bun install", "bun run
+  // build", "bun run dev"]`. The build passed; `bun run dev` ran 236 seconds
+  // and exited 58 after ^C. The run ended `needs-attention` with a working
+  // Vite build sitting on disk. `run_command` already refuses these — the
+  // verification path was the one route that did not.
+  const serverEntries = verification.filter(isLongRunningServerCommand)
+  if (serverEntries.length > 0) {
+    return {
+      error:
+        `proposal.verification contains a command that starts a server and never exits: ${serverEntries.map((entry) => `"${entry}"`).join(', ')}. ` +
+        'Verification runs to completion and is judged on its exit code, so a dev server can only ever time out and look like a failure. ' +
+        "Use a command that terminates — the project's build, test, or typecheck — and leave \"the dev server comes up\" to acceptanceCriteria; elia serves and renders the result itself.",
     }
   }
 

@@ -1,6 +1,8 @@
 /** HTTP + rendered-content checks so "Preview ready" is never announced for a
  * server that is not up yet or a page that renders blank. */
 
+import { stripReloadScript } from './reloadScript.ts'
+
 export interface RenderCheck {
   ok: boolean
   /** A short, actionable reason when `ok` is false. */
@@ -44,7 +46,13 @@ export async function checkRendered(url: string, signal?: AbortSignal): Promise<
   }
   if (res.status >= 400) return { ok: false, reason: `root returned HTTP ${res.status}`, status: res.status }
 
-  const body = await res.text().catch(() => '')
+  const served = await res.text().catch(() => '')
+  // elia's own preview server appends a live-reload script to every HTML
+  // response. At ~135 bytes it is more than three times the threshold below, so
+  // measuring the served bytes meant *every* page passed the blank check —
+  // an empty file included. Measure what the project produced, not what the
+  // server added to it.
+  const body = stripReloadScript(served)
   const bytes = Buffer.byteLength(body)
   if (bytes < 40) return { ok: false, reason: 'the page body is essentially empty', status: res.status, bodyBytes: bytes }
 

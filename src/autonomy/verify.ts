@@ -1,7 +1,7 @@
 import { existsSync } from 'node:fs'
 import { basename, relative, resolve, sep } from 'node:path'
 import type { Tool } from '../tools/types.ts'
-import { clampOutput, runShell, type ShellResult } from '../shell.ts'
+import { clampOutput, isLongRunningServerCommand, runShell, type ShellResult } from '../shell.ts'
 import type { CriticIssue, CriticVerdict } from './types.ts'
 import { currentAgent } from './context.ts'
 import { activeActionGovernor, type ActionGovernor } from './governor.ts'
@@ -30,7 +30,47 @@ export interface VerificationOutcome {
 export async function runVerification(commands: string[], cwd?: string, signal?: AbortSignal, governor?: ActionGovernor): Promise<VerificationOutcome> {
   const results: ShellResult[] = []
 
-  for (const command of commands) {
+  // `proposal.ts` rejects a dev server as a verification command at approval
+  // time, but a run resumed from a plan approved before that check — or a
+  // repair that rewrote the command list — can still arrive here. Running one
+  // costs the full VERIFY_TIMEOUT_MS and then reports the kill as a failure of
+  // the work itself, which is how a correct build ends up spending its whole
+  // repair budget (run 2026-09-13-l0av-rnq0). Drop them from the gate instead.
+  const runnable = commands.filter((command) => !isLongRunningServerCommand(command))
+  const skipped = commands.filter(isLongRunningServerCommand)
+
+  // Every declared check was a server: nothing here can prove anything, so
+  // report it the same way a shell-rejected command is reported. The caller
+  // already recognises that shape (`isUnrunnableCommandFailure`) and falls back
+  // to rendering the deliverable rather than entering a repair loop it cannot
+  // win. Reporting a pass instead would be the worse failure — "verified"
+  // having verified nothing.
+  if (runnable.length === 0 && skipped.length > 0) {
+    return {
+      passed: false,
+      results: skipped.map((command) => ({
+        command,
+        exitCode: 1,
+        stdout: '',
+        stderr: `${SKIPPED_SERVER_PREFIX}: "${command}" starts a server that never exits, so it can never be a pass/fail check.`,
+        elapsedMs: 0,
+        timedOut: false,
+      })),
+    }
+  }
+
+  for (const command of skipped) {
+    results.push({
+      command: `[skipped] ${command}`,
+      exitCode: 0,
+      stdout: '',
+      stderr: `${SKIPPED_SERVER_PREFIX}: starts a server that never exits. elia serves and renders the result itself instead.`,
+      elapsedMs: 0,
+      timedOut: false,
+    })
+  }
+
+  for (const command of runnable) {
     const gate = await (governor ?? activeActionGovernor()).check({ name: 'run_command', input: { command } })
     if (!gate.allowed) {
       const result: ShellResult = { command, exitCode: 126, stdout: '', stderr: gate.message ?? 'verification command blocked by autonomy governor', elapsedMs: 0, timedOut: false }
@@ -53,8 +93,15 @@ export async function runVerification(commands: string[], cwd?: string, signal?:
  */
 const SHELL_REJECTED_COMMAND = /is not recognized as an internal or external command|:\s*command not found|No such file or directory/i
 
+/** Marks a verification entry elia declined to run because it can never terminate. */
+export const SKIPPED_SERVER_PREFIX = 'not a runnable check'
+
 export function isUnrunnableCommandFailure(result: ShellResult): boolean {
-  return !result.timedOut && result.exitCode !== 0 && SHELL_REJECTED_COMMAND.test(result.stderr)
+  if (result.timedOut || result.exitCode === 0) return false
+  // A dev server elia refused to run never produced a verdict either, so it
+  // belongs in the same bucket as a command the shell rejected: the work is
+  // unproven, not disproven.
+  return SHELL_REJECTED_COMMAND.test(result.stderr) || result.stderr.startsWith(SKIPPED_SERVER_PREFIX)
 }
 
 /**

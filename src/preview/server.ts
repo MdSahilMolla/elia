@@ -2,8 +2,9 @@ import { mkdirSync, realpathSync, statSync, watch } from 'node:fs'
 import { join, resolve, sep } from 'node:path'
 import type { ServerWebSocket } from 'bun'
 import { paths } from '../config.ts'
+import { injectReloadScript, RELOAD_PATH } from './reloadScript.ts'
 
-const RELOAD_PATH = '/__reload'
+
 const RELOAD_DEBOUNCE_MS = 100
 
 export interface PreviewServer {
@@ -141,9 +142,6 @@ export function resolveWithinRoot(root: string, pathname: string): string | unde
   }
 }
 
-/** Exported for direct testing. */
-export function injectReloadScript(html: string): string {
-  const script = `<script>(function(){var ws=new WebSocket('ws://'+location.host+'${RELOAD_PATH}');ws.onmessage=function(){location.reload();};})();</script>`
-  if (html.includes('</body>')) return html.replace('</body>', `${script}</body>`)
-  return `${html}\n${script}`
-}
+// The live-reload script itself lives in ./reloadScript.ts, so readiness.ts can
+// subtract it without importing this module (and its config.ts dependency).
+export { injectReloadScript, stripReloadScript } from './reloadScript.ts'

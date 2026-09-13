@@ -351,12 +351,43 @@ export function planWaves(steps: ProposalStep[]): { waves: ProposalStep[][]; unr
     // Dependency-ready does not necessarily mean safe to run together. Split
     // steps that claim the same file into later sub-waves so two builders can
     // never clobber one another merely because the planner omitted dependsOn.
-    for (const safeWave of collisionFreeWaves(ready)) waves.push(safeWave)
+    //
+    // Ordered first, because `collisionFreeWaves` packs greedily in the order it
+    // is given: the separation rules below decide that a tester may not *share*
+    // a wave with the source it tests, but not which of the two comes first. So
+    // the schedule was inheriting whatever order the planner happened to list
+    // its steps in — list the tests first and they ran first, against code that
+    // did not exist yet. Not hypothetical: every plan in this project's recorded
+    // history declared `dependsOn: []` on every step, so listing order was the
+    // only thing deciding execution order.
+    for (const safeWave of collisionFreeWaves(inPrecedenceOrder(ready))) waves.push(safeWave)
     for (const step of ready) done.add(step.id)
     remaining = remaining.filter((step) => !done.has(step.id))
   }
 
   return { waves, unreachable: [] }
+}
+
+/**
+ * Orders equally-ready steps by what has to exist before what.
+ *
+ * The same three facts the separation rules already encode — a manifest comes
+ * before the code that imports its dependencies, and tests come after the code
+ * they test — but applied as an *order* rather than only as a prohibition on
+ * sharing a wave. A stable sort, so steps of equal rank keep the order the
+ * planner gave them and the schedule stays deterministic.
+ */
+function inPrecedenceOrder(steps: ProposalStep[]): ProposalStep[] {
+  return steps
+    .map((step, index) => ({ step, index, rank: precedenceRank(step) }))
+    .sort((a, b) => a.rank - b.rank || a.index - b.index)
+    .map((entry) => entry.step)
+}
+
+function precedenceRank(step: ProposalStep): number {
+  if (writesManifest(step)) return 0
+  if (step.role === 'tester') return 2
+  return 1
 }
 
 /** Greedily packs steps into the fewest deterministic waves with no shared files. */
@@ -418,11 +449,28 @@ const TEST_FILE = /(?:^|[\\/])(?:__tests__|tests?)[\\/]|[.-](?:test|spec)\.[cm]?
 
 function manifestPrecedence(wave: ProposalStep[], candidate: ProposalStep): boolean {
   const candidateManifest = writesManifest(candidate)
-  const candidateSource = candidate.files.some((file) => SOURCE_FILE.test(file))
-  return wave.some((step) => {
-    const stepManifest = writesManifest(step)
-    return (stepManifest && candidateSource) || (candidateManifest && step.files.some((file) => SOURCE_FILE.test(file)))
-  })
+  const waveManifest = wave.some(writesManifest)
+  if (!candidateManifest && !waveManifest) return false
+  // Originally this only held a manifest apart from steps whose declared files
+  // looked like *source*, which let a real collision straight through: a step
+  // owning `index.html` and `README.md` matches no SOURCE_FILE pattern, so it
+  // shared a wave with the step creating `package.json`.
+  //
+  // That is the wrong test. Writing a project manifest is not an edit to one
+  // file — it means scaffolding the project (`bun create vite`, `npm init`,
+  // `cargo new`), which lays down and overwrites an entire tree. Any other
+  // writer working in that tree at the same time is racing it, whatever its
+  // declared files happen to be named.
+  //
+  // Seen live, run 2026-09-13-l0av-rnq0: "Initialize Vite React TypeScript
+  // project" (package.json) and "Configure build and verify" (index.html,
+  // README.md) ran as one wave. Both workers scaffolded the whole site, and
+  // both reported success — two builders, one project, 240 seconds spent twice.
+  //
+  // Read-only roles are unaffected: a reviewer or scout can still run alongside.
+  return candidateManifest
+    ? wave.some((step) => WRITE_CAPABLE_ROLES.has(step.role))
+    : WRITE_CAPABLE_ROLES.has(candidate.role)
 }
 
 /** Missing file ownership is safe for read-only roles but ambiguous for writers. */

@@ -186,3 +186,56 @@ test('a worker is told to report a broken plan only when it actually has the too
   expect(withoutTool).not.toContain('revise_plan')
   expect(withoutTool).toContain('it works')
 })
+
+// Run 2026-09-13-l0av-rnq0: the planner emitted four steps with `dependsOn: []`
+// on every one of them. s1 ("Initialize Vite React TypeScript project",
+// package.json) and s4 ("Configure build and verify", index.html/README.md)
+// landed in the same wave because s4's files matched no source-file pattern.
+// Both workers then scaffolded the entire project independently — 116s and
+// 119s of duplicated work, each reporting success.
+test('a step that scaffolds the manifest never shares a wave with another writer', () => {
+  const steps: ProposalStep[] = [
+    { id: 's1', title: 'Initialize Vite React TypeScript project', role: 'builder', instructions: '', files: ['package.json', 'vite.config.ts', 'tsconfig.json'], dependsOn: [] },
+    { id: 's4', title: 'Configure build and verify', role: 'builder', instructions: '', files: ['index.html', 'README.md'], dependsOn: [] },
+  ]
+
+  const { waves } = planWaves(steps)
+  const manifestWave = waves.findIndex((wave) => wave.some((step) => step.id === 's1'))
+  const otherWave = waves.findIndex((wave) => wave.some((step) => step.id === 's4'))
+  expect(manifestWave).toBeLessThan(otherWave)
+})
+
+// The separation is about concurrent *writes* into a tree being scaffolded.
+// A read-only role has nothing to clobber, so it must not be serialised.
+test('a read-only role still runs alongside the manifest step', () => {
+  const steps: ProposalStep[] = [
+    { id: 's1', title: 'Init', role: 'builder', instructions: '', files: ['package.json'], dependsOn: [] },
+    { id: 's2', title: 'Survey the API surface', role: 'scout', instructions: '', files: [], dependsOn: [] },
+  ]
+
+  expect(planWaves(steps).waves).toHaveLength(1)
+})
+
+// The separation rules decide that a tester may not *share* a wave with the
+// source it tests, but they never decided which comes first — `collisionFreeWaves`
+// packs greedily in the order it is handed. So the schedule inherited whatever
+// order the planner listed its steps in: list the tests first and they ran
+// first, against code that did not exist yet. Every plan in this project's
+// recorded history declared `dependsOn: []` on every step, which made listing
+// order the only thing deciding execution order.
+test('the schedule does not depend on the order the planner listed steps', () => {
+  const step = (id: string, role: ProposalStep['role'], files: string[]): ProposalStep =>
+    ({ id, title: id, instructions: '', role, files, dependsOn: [] })
+
+  const ordering = (steps: ProposalStep[]) =>
+    planWaves(steps).waves.map((wave) => wave.map((entry) => entry.id).join('+')).join(' -> ')
+
+  const source = step('src', 'backend', ['src/app.ts'])
+  const tests = step('tests', 'tester', ['tests/app.test.ts'])
+  const manifest = step('pkg', 'builder', ['package.json'])
+
+  expect(ordering([source, tests])).toBe('src -> tests')
+  expect(ordering([tests, source])).toBe('src -> tests')
+  expect(ordering([tests, source, manifest])).toBe('pkg -> src -> tests')
+  expect(ordering([manifest, source, tests])).toBe('pkg -> src -> tests')
+})

@@ -182,3 +182,55 @@ export function renderContextStatus(messages: ChatMessage[], archivedEpisodes: n
   const episodeWord = archivedEpisodes === 1 ? 'episode' : 'episodes'
   return `${base} · ${archivedEpisodes} ${episodeWord} archived, recallable — effectively ${gold('∞')}`
 }
+
+/**
+ * How much of a truncated tool result to keep. Enough that the model can still
+ * tell what the call was and roughly what came back; small enough that a
+ * history full of them collapses hard.
+ */
+const EMERGENCY_TOOL_RESULT_KEEP = 400
+
+/** Tool results below this are already cheap — truncating them frees nothing worth the loss. */
+const EMERGENCY_TOOL_RESULT_FLOOR = 1_000
+
+/**
+ * Shrinks `messages` in place, without a model call, after a provider rejected
+ * the request as too large.
+ *
+ * The ordinary path for an oversized history is {@link beginCompaction}, which
+ * summarises the archived prefix with a fast-tier model call. That is exactly
+ * what is unavailable here: the provider is refusing requests, so the
+ * summarising call would be refused too. And the retry that follows a 413 used
+ * to re-send byte-for-byte what had just been rejected — seen live in run
+ * 2026-09-13-l0av-rnq0, where a step failed at 42,323 tokens against an 8,000
+ * TPM cap and its one retry failed again at 41,888. Two steps lost, no repair
+ * possible, and the run ended `needs-attention`.
+ *
+ * So this is deliberately mechanical: walk the oldest messages, truncate the
+ * biggest `tool_result` blocks (file reads and command output, which is where
+ * the bulk always is), and leave the most recent turns and all reasoning intact.
+ * It degrades the agent's memory of *what it already saw*, which is recoverable
+ * — it can read the file again — where failing the turn outright is not.
+ *
+ * Returns true if it actually freed anything, so the caller can distinguish
+ * "try again smaller" from "there is nothing left to cut".
+ */
+export function shrinkForOversizedRequest(messages: ChatMessage[]): boolean {
+  const before = estimateTokens(messages)
+  // Never touch the tail: it holds the current task, the last tool call, and
+  // whatever the model is mid-way through reasoning about.
+  const cutoff = Math.max(0, messages.length - KEEP_RECENT_MESSAGES)
+  let changed = false
+
+  for (let i = 0; i < cutoff; i++) {
+    for (const block of messages[i]!.content) {
+      if (block.type !== 'tool_result') continue
+      if (block.content.length <= EMERGENCY_TOOL_RESULT_FLOOR) continue
+      const dropped = block.content.length - EMERGENCY_TOOL_RESULT_KEEP
+      block.content = `${block.content.slice(0, EMERGENCY_TOOL_RESULT_KEEP)}\n… [${dropped} characters dropped: the provider rejected this request as too large. Re-read the file or re-run the command if you still need the rest.]`
+      changed = true
+    }
+  }
+
+  return changed && estimateTokens(messages) < before
+}

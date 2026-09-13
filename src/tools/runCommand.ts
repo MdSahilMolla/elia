@@ -1,5 +1,5 @@
 import type { Tool } from './types.ts'
-import { DEFAULT_SHELL_TIMEOUT_MS, formatShellResult, runShell, type ShellResult } from '../shell.ts'
+import { DEFAULT_SHELL_TIMEOUT_MS, formatShellResult, isLongRunningServerCommand, runShell, shellCommandAlternative, type ShellResult } from '../shell.ts'
 import { existsSync, readdirSync } from 'node:fs'
 import { delimiter, isAbsolute, join, relative } from 'node:path'
 import { currentAgent, resolveWorkspacePath } from '../autonomy/context.ts'
@@ -46,8 +46,15 @@ function shellMismatch(raw: string): string | null {
   if (win && /^bash\s+-c\b/i.test(command)) {
     return 'This shell is cmd.exe, and `bash` on Windows is usually just the WSL launcher stub (fails with "no installed distributions"). Run the command directly for cmd.exe, or write a .ps1/.py file with write_file and run that.'
   }
-  if (win && /^which(?:\s|$)/i.test(command)) {
-    return 'Use `where <tool>` — `which` is not a command on Windows (cmd.exe).'
+  // The whole POSIX/PowerShell vocabulary, not just `which`. A worker that
+  // reaches for `ls`, `pwd`, `cat`, `rm` or `Get-ChildItem` on Windows used to
+  // get "<name> is not available in PATH" from the action contract, which reads
+  // as a broken machine rather than a wrong command name — and sent at least
+  // one run down the fix-the-environment path over a typo in shell dialect.
+  if (win) {
+    const first = /^([A-Za-z][A-Za-z0-9_-]*)(?:\s|$)/.exec(command)?.[1]
+    const alternative = first ? shellCommandAlternative(first) : undefined
+    if (alternative) return alternative
   }
 
   // Strip quoted spans so a pipe *inside* `powershell -Command "..."` doesn't
@@ -78,9 +85,6 @@ function nodeModulesPopulated(cwd: string): boolean {
     return false
   }
 }
-
-/** Starts a server that never exits — the model must not block a turn on one. */
-const DEV_SERVER_COMMAND = /\b(?:(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?(?:dev|start|serve|preview)|vite(?:\s|$)|next\s+(?:dev|start)|nodemon|ts-node-dev|concurrently|http-server|flask\s+run|uvicorn|gunicorn|rails\s+s(?:erver)?)\b/i
 
 /**
  * Resolves the `cwd` input to a real directory. A bare name like "my-app" is
@@ -157,7 +161,7 @@ Shell: on Windows the command runs through \`cmd.exe\`; on macOS/Linux through \
     if (input.command.length > MAX_COMMAND_LENGTH) throw new Error(`command exceeds ${MAX_COMMAND_LENGTH} characters`)
     if (input.timeoutMs !== undefined && (typeof input.timeoutMs !== 'number' || !Number.isInteger(input.timeoutMs) || input.timeoutMs < MIN_TIMEOUT_MS || input.timeoutMs > MAX_TIMEOUT_MS)) throw new Error(`timeoutMs must be an integer between ${MIN_TIMEOUT_MS} and ${MAX_TIMEOUT_MS}`)
     if (commandMayReadSensitiveData(input.command)) throw new Error('shell command would read a protected sensitive path; that disclosure is denied')
-    if (DEV_SERVER_COMMAND.test(input.command.trim())) {
+    if (isLongRunningServerCommand(input.command)) {
       throw new Error(
         `"${input.command.trim().split(/\s+/).slice(0, 3).join(' ')}" starts a server that never exits — running it here just times out. Use the preview tool to serve and open the project (it stays live-reloaded), or start it yourself outside elia.`,
       )

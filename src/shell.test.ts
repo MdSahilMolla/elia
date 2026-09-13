@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from 'bun:test'
-import { runProcess, runShell } from './shell.ts'
+import { isLongRunningServerCommand, runProcess, runShell, shellCommandAlternative } from './shell.ts'
 import { resetContainerSandboxWarningForTests } from './sandbox/container.ts'
 
 afterEach(() => {
@@ -82,3 +82,50 @@ test('bounds large shell output', async () => {
   expect(result.stdout.length).toBeLessThanOrEqual(200_100)
   expect(result.stdout).toContain('characters omitted')
 }, 30_000)
+
+// Run 2026-09-13-l0av-rnq0 spent eight actions on `ls`, `pwd`, `rm`,
+// `Get-Location`, `Get-ChildItem` and `Get-Content`, each rejected with
+// "<name> is not available in PATH — fix the missing environment or ask the
+// user to take over". The environment was fine; the commands were from another
+// shell. Reported that way, `classifyStuck` reads it as a broken machine.
+test('a POSIX command on Windows is explained, not reported as a broken environment', () => {
+  for (const name of ['ls', 'pwd', 'cat', 'rm', 'which']) {
+    const message = shellCommandAlternative(name, 'win32')
+    expect(message).toBeDefined()
+    expect(message).toContain('not a broken environment')
+  }
+})
+
+test('a PowerShell cmdlet on Windows is explained', () => {
+  expect(shellCommandAlternative('Get-ChildItem', 'win32')).toContain('PowerShell cmdlet')
+  expect(shellCommandAlternative('Get-Location', 'win32')).toContain('PowerShell cmdlet')
+})
+
+// A genuinely missing tool must keep the original message — "install it" is
+// the right answer there, and claiming otherwise would hide a real problem.
+test('a genuinely missing tool gets no substitute advice', () => {
+  for (const name of ['cargo', 'docker', 'terraform', 'some-tool']) {
+    expect(shellCommandAlternative(name, 'win32')).toBeUndefined()
+  }
+})
+
+// An ordinary hyphenated binary is not a cmdlet.
+test('a hyphenated binary is not mistaken for a cmdlet', () => {
+  expect(shellCommandAlternative('tree-sitter', 'win32')).toBeUndefined()
+  expect(shellCommandAlternative('docker-compose', 'win32')).toBeUndefined()
+})
+
+test('POSIX platforms are untouched', () => {
+  for (const name of ['ls', 'pwd', 'Get-ChildItem']) {
+    expect(shellCommandAlternative(name, 'linux')).toBeUndefined()
+  }
+})
+
+test('a dev server is recognised but a build or test is not', () => {
+  for (const command of ['bun run dev', 'npm start', 'vite', 'next dev', 'python -m http.server', 'serve']) {
+    expect(isLongRunningServerCommand(command)).toBe(true)
+  }
+  for (const command of ['bun run build', 'npm test', 'tsc --noEmit', 'bun install', 'cargo build', 'docker compose up -d']) {
+    expect(isLongRunningServerCommand(command)).toBe(false)
+  }
+})

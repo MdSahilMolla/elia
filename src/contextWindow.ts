@@ -116,13 +116,40 @@ export function contextWindowOverride(env: NodeJS.ProcessEnv = process.env): num
 /**
  * Estimated tokens of conversation to allow before compacting, for `model`.
  *
- * Never returns less than the historical 30,000: a model elia does not
- * recognise, or a nonsense override, must not end up with a smaller working
- * memory than it had before this was model-aware.
+ * An *inferred* window never yields less than the historical 30,000: a model
+ * elia does not recognise must not end up with a smaller working memory than
+ * it had before this was model-aware.
+ *
+ * An *explicit* `ELIA_CONTEXT_WINDOW` is honoured all the way down, because
+ * the 30,000 floor used to apply to it too — which made the escape hatch this
+ * function documents ("for dialling the budget *down* on a provider that
+ * charges by the token") impossible to actually use below 30,000. That is not
+ * hypothetical: a run against a tier capped at 8,000 tokens per minute built
+ * 42,000-token requests, because the model's *context window* is 128k and
+ * nothing here knew about the much smaller per-request cap the provider
+ * actually enforces. The operator's only lever silently snapped back to
+ * 30,000 — still four times over the limit. An override is a statement about
+ * the provider, so it wins.
  */
 export function compactionThresholdFor(model: string, env: NodeJS.ProcessEnv = process.env): number {
-  const window = contextWindowOverride(env) ?? contextWindowFor(model)
-  const derived = Math.floor(window * USABLE_FRACTION)
+  const override = contextWindowOverride(env)
+  if (override !== undefined) {
+    // Bounded by `override` itself as well as by the floor: promising more
+    // working memory than the operator said exists would recreate the very
+    // overflow this override is set to prevent.
+    return Math.min(MAX_COMPACTION_THRESHOLD, override, Math.max(MIN_COMPACTION_THRESHOLD, Math.floor(override * USABLE_FRACTION)))
+  }
+  const derived = Math.floor(contextWindowFor(model) * USABLE_FRACTION)
   const floor = Math.floor(DEFAULT_CONTEXT_WINDOW * USABLE_FRACTION)
   return Math.min(MAX_COMPACTION_THRESHOLD, Math.max(floor, derived))
 }
+
+/**
+ * The smallest budget an override may produce.
+ *
+ * Not zero: below roughly this, the system prompt and tool definitions alone
+ * exceed the budget and compaction would loop without ever fitting, which is a
+ * worse failure than a request the provider rejects. Small enough that an
+ * 8,000-token-per-minute tier is expressible.
+ */
+export const MIN_COMPACTION_THRESHOLD = 2_000
