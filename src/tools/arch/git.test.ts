@@ -27,7 +27,7 @@ async function git(cwd: string, args: string[]): Promise<{ exitCode: number; std
 }
 
 describe('git history and drift', () => {
-  let apiDispose: { api: API; snapshot: Snapshot }
+  let apiDispose: { api: API; snapshot: Snapshot } | undefined
   let program: Program
   let graph: DepGraph
   const root = normalizePath(mkdtempSync(join(tmpdir(), 'arch-git')))
@@ -56,7 +56,7 @@ describe('git history and drift', () => {
   })
 
   afterAll(async () => {
-    await closeProject(apiDispose)
+    if (apiDispose) await closeProject(apiDispose)
     cleanupFixture(root)
     void program
   })

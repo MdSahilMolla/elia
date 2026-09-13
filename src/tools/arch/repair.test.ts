@@ -36,7 +36,7 @@ const FILES: Record<string, string> = {
 }
 
 describe('repair planning', () => {
-  let apiDispose: { api: API; snapshot: Snapshot }
+  let apiDispose: { api: API; snapshot: Snapshot } | undefined
   let program: Program
   let graph: DepGraph
   const root = normalizePath(mkdtempSync(join(tmpdir(), 'arch-repair')))
@@ -52,7 +52,7 @@ describe('repair planning', () => {
   })
 
   afterAll(async () => {
-    await closeProject(apiDispose)
+    if (apiDispose) await closeProject(apiDispose)
     cleanupFixture(root)
     void program
   })

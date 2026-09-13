@@ -18,7 +18,7 @@ import type { Program } from 'typescript/unstable/async'
 import type { API, Snapshot } from 'typescript/unstable/async'
 
 describe('analysis.impact', () => {
-  let apiDispose: { api: API; snapshot: Snapshot }
+  let apiDispose: { api: API; snapshot: Snapshot } | undefined
   let program: Program
   let graph: DepGraph
   const root = normalizePath(mkdtempSync(join(tmpdir(), 'arch-analysis')))
@@ -35,7 +35,7 @@ describe('analysis.impact', () => {
   })
 
   afterAll(async () => {
-    await closeProject(apiDispose)
+    if (apiDispose) await closeProject(apiDispose)
     cleanupFixture(root)
   })
 
@@ -68,7 +68,7 @@ describe('analysis.impact', () => {
 })
 
 describe('analysis.health', () => {
-  let apiDispose: { api: API; snapshot: Snapshot }
+  let apiDispose: { api: API; snapshot: Snapshot } | undefined
   let program: Program
   let graph: DepGraph
   const root = normalizePath(mkdtempSync(join(tmpdir(), 'arch-health')))
@@ -87,7 +87,7 @@ describe('analysis.health', () => {
   })
 
   afterAll(async () => {
-    await closeProject(apiDispose)
+    if (apiDispose) await closeProject(apiDispose)
     cleanupFixture(root)
   })
 

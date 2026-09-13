@@ -33,7 +33,7 @@ FILES['lonely.ts'] = `export const lonely = 1\n`
 
 describe('violations (inferred statistics)', () => {
   let fixture: Fixture
-  let apiDispose: { api: API; snapshot: Snapshot }
+  let apiDispose: { api: API; snapshot: Snapshot } | undefined
   let program: Program
   const root = normalizePath(mkdtempSync(join(tmpdir(), 'arch-viol-stats')))
   const opts = () => ({ projectRoot: root, tsconfigPath: normalizePath(join(root, 'tsconfig.json')), includeTests: true, maxFiles: 200 })
@@ -51,7 +51,7 @@ describe('violations (inferred statistics)', () => {
   })
 
   afterAll(async () => {
-    await closeProject(apiDispose)
+    if (apiDispose) await closeProject(apiDispose)
     cleanupFixture(root)
   })
 

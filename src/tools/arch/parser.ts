@@ -45,14 +45,31 @@ const TEST_FILE = /\.(test|spec|e2e)\.(ts|tsx|js|mts|cts)$/i
 /** Open a TypeScript project with the native compiler and load its program. */
 export async function openProject(options: ParserOptions): Promise<OpenProjectResult> {
   const api = new API({})
-  const snapshot = await api.updateSnapshot({ openProjects: [options.tsconfigPath] })
+  // Everything past `new API({})` owns a spawned compiler process and an open
+  // connection, so no failure between here and the return may escape without
+  // closing them — a caller that never received a handle has no way to.
+  let snapshot: OpenProjectResult['snapshot']
+  try {
+    snapshot = await api.updateSnapshot({ openProjects: [options.tsconfigPath] })
+  } catch (error) {
+    await closeQuietly(api)
+    throw error
+  }
   const project = snapshot.getProjects()[0]
   if (!project) {
-    await snapshot.dispose()
-    await api.close()
+    await closeProject({ api, snapshot })
     throw new Error(`No TypeScript project found at ${options.tsconfigPath}`)
   }
   return { api, snapshot, project, program: project.program }
+}
+
+/** Best-effort close for a failure path, so cleanup never masks the real error. */
+async function closeQuietly(api: OpenProjectResult['api']): Promise<void> {
+  try {
+    await api.close()
+  } catch {
+    // The connection is already going away; the caller's error is the useful one.
+  }
 }
 
 /**
@@ -65,8 +82,26 @@ export async function openProject(options: ParserOptions): Promise<OpenProjectRe
  * unhandled rejection after the caller has already moved on.
  */
 export async function closeProject(handle: Pick<OpenProjectResult, 'api' | 'snapshot'>): Promise<void> {
-  await handle.snapshot.dispose()
-  await handle.api.close()
+  try {
+    await handle.snapshot.dispose()
+  } finally {
+    // Always close, even if disposing the snapshot threw — otherwise a failed
+    // dispose strands the compiler process for the life of the run.
+    await handle.api.close()
+  }
+}
+
+/**
+ * `closeProject` for a `finally` block: a teardown failure must never replace
+ * the error that is already on its way out, which is the one that explains what
+ * actually went wrong.
+ */
+export async function closeProjectQuietly(handle: Pick<OpenProjectResult, 'api' | 'snapshot'>): Promise<void> {
+  try {
+    await closeProject(handle)
+  } catch {
+    // Nothing useful to do; the in-flight error is the one worth surfacing.
+  }
 }
 
 // The Go-native compiler exposes full data through per-kind typed getters, but
@@ -374,11 +409,11 @@ export async function parseProject(
     if (!sf) continue
     // Asked once and reused: each of these is an RPC round-trip now, and the
     // old sync code paid for `isSourceFileFromExternalLibrary` twice per file.
-    const externalLibrary = await program.isSourceFileFromExternalLibrary(sf)
-    if (externalLibrary) continue
+    if (await program.isSourceFileFromExternalLibrary(sf)) continue
     const defaultLibrary = await program.isSourceFileDefaultLibrary(sf)
     counted++
-    files.push(parseSourceFile(sf, name, externalLibrary, defaultLibrary))
+    // External-library files never reach here (filtered above), so this is always false.
+    files.push(parseSourceFile(sf, name, false, defaultLibrary))
   }
   return { files, truncated }
 }

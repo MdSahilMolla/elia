@@ -10,7 +10,7 @@ import type { API, Snapshot } from 'typescript/unstable/async'
 
 describe('graph', () => {
   let fixture: Fixture
-  let apiDispose: { api: API; snapshot: Snapshot }
+  let apiDispose: { api: API; snapshot: Snapshot } | undefined
   let program: Program
   const root = normalizePath(mkdtempSync(join(tmpdir(), 'arch-graph')))
 
@@ -27,7 +27,7 @@ describe('graph', () => {
   })
 
   afterAll(async () => {
-    await closeProject(apiDispose)
+    if (apiDispose) await closeProject(apiDispose)
     cleanupFixture(root)
   })
 

@@ -6,7 +6,7 @@
 // Nothing in this module writes to disk or mutates source — repair *plans* are
 // produced (for the human and the explicit patch path) but never applied here.
 
-import { closeProject, joinPath, normalizePath, openProject, parseProject } from './parser.ts'
+import { closeProjectQuietly, joinPath, normalizePath, openProject, parseProject } from './parser.ts'
 import type { ParserOptions, Violation } from './types.ts'
 import { buildGraph, graphStats, type DepGraph } from './graph.ts'
 import { loadArchitectureConfig, type ArchitectureConfig, type LoadedConfig } from './config.ts'
@@ -164,7 +164,7 @@ export async function buildReport(options: ArchReportOptions): Promise<ArchRepor
       summary: summaryParts.join(' · '),
     }
   } finally {
-    await closeProject({ api, snapshot })
+    await closeProjectQuietly({ api, snapshot })
   }
 }
 

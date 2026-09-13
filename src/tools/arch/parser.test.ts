@@ -9,7 +9,7 @@ import type { API, Snapshot } from 'typescript/unstable/async'
 
 describe('parser', () => {
   let fixture: Fixture
-  let apiDispose: { api: API; snapshot: Snapshot }
+  let apiDispose: { api: API; snapshot: Snapshot } | undefined
   let program: Program
   beforeAll(async () => {
     fixture = createFixture(mkdtempSync(join(tmpdir(), 'arch-parser')))
@@ -24,7 +24,7 @@ describe('parser', () => {
   })
 
   afterAll(async () => {
-    await closeProject(apiDispose)
+    if (apiDispose) await closeProject(apiDispose)
     cleanupFixture(fixture.root)
   })
 
@@ -165,5 +165,24 @@ describe('parser transport', () => {
       process.off('unhandledRejection', onRejection)
       cleanupFixture(local.root)
     }
+  })
+
+  it('closes the compiler connection when opening the project fails', async () => {
+    // `new API({})` already owns a spawned compiler process, so a failure after
+    // it — a tsconfig that does not exist, here — must not escape with the
+    // connection still open: the caller never received a handle to close.
+    const empty = mkdtempSync(join(tmpdir(), 'arch-parser-nocfg'))
+    const before = process.listenerCount('unhandledRejection')
+    await expect(
+      openProject({
+        projectRoot: normalizePath(empty),
+        tsconfigPath: normalizePath(join(empty, 'tsconfig.json')),
+        includeTests: true,
+        maxFiles: 10,
+      }),
+    ).rejects.toThrow()
+    // The real assertion is that the rejection is the *caller's* error, not a
+    // teardown error layered on top of it, and that nothing was left dangling.
+    expect(process.listenerCount('unhandledRejection')).toBe(before)
   })
 })
