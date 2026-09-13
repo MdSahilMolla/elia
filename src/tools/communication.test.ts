@@ -107,7 +107,7 @@ test('an adapter that exits 0 without a JSON receipt is not recorded as a delive
 })
 
 test('adapter stderr is redacted before it is persisted or returned', async () => {
-  const secret = 'sk-live-0123456789abcdefghijklmnopqrstuvwx'
+  const secret = 'sk-live-0123456789abcdefghijklmnopqrstuvwx' // pragma: allowlist secret
   const { sent, stored } = await sendWithAdapter(adapter('leaky', `await Bun.stdin.text(); console.error('auth failed: Authorization: Bearer ${secret}'); process.exit(3)\n`))
   expect(sent).toContain('exited with code 3')
   expect(sent).not.toContain(secret)
