@@ -34,6 +34,54 @@ export interface FileTracker {
   snapshot(): FileSnapshot
 }
 
+/**
+ * The copy of each conversation message that checkpoints hold, made once per
+ * message and shared by every checkpoint that includes it.
+ *
+ * Each turn used to take `structuredClone(messages)` — a deep copy of the
+ * entire history — and every checkpoint kept its own. Turn N therefore held N
+ * full copies of the early conversation: memory grew as turns × context.
+ * Messages are append-only once pushed (compaction splices the array; nothing
+ * edits a message object in place), so one private copy per message is as
+ * faithful as a fresh deep clone and makes the total O(messages).
+ */
+const checkpointCopy = new WeakMap<ConversationMessage, ConversationMessage>()
+
+export function snapshotMessages(messages: ConversationMessage[]): ConversationMessage[] {
+  return messages.map((message) => {
+    let copy = checkpointCopy.get(message)
+    if (!copy) {
+      copy = structuredClone(message)
+      checkpointCopy.set(message, copy)
+    }
+    return copy
+  })
+}
+
+/**
+ * The messages to put back into the live conversation on a rewind. A fresh
+ * clone, so the live history never aliases the copies other checkpoints share.
+ */
+export function messagesForRestore(checkpoint: Checkpoint): ConversationMessage[] {
+  return structuredClone(checkpoint.messagesBefore)
+}
+
+/** Loaded checkpoints repeat every earlier message; re-share identical ones so a resumed session isn't back to turns × context. */
+function shareRepeatedMessages(checkpoints: Checkpoint[]): Checkpoint[] {
+  const byContent = new Map<string, ConversationMessage>()
+  for (const checkpoint of checkpoints) {
+    if (!Array.isArray(checkpoint.messagesBefore)) continue
+    checkpoint.messagesBefore = checkpoint.messagesBefore.map((message) => {
+      const key = JSON.stringify(message)
+      const existing = byContent.get(key)
+      if (existing) return existing
+      byContent.set(key, message)
+      return message
+    })
+  }
+  return checkpoints
+}
+
 export function createFileTracker(): FileTracker {
   const captured: FileSnapshot = {}
   return {
@@ -77,7 +125,7 @@ export async function loadCheckpoints(sessionId: string, dir: string = SESSIONS_
   if (!(await file.exists())) return []
   hardenSecureFile(path)
   try {
-    return (await file.json()) as Checkpoint[]
+    return shareRepeatedMessages((await file.json()) as Checkpoint[])
   } catch {
     return []
   }

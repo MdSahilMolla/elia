@@ -24,7 +24,7 @@ export interface StuckDiagnosis {
   question?: string
 }
 
-const ENVIRONMENT = /\b(?:command not found|not recognized as an internal or external command|ENOENT|cannot find module|module not found|no such file or directory|permission denied|EACCES|EPERM\b|ECONNREFUSED| ETIMEDOUT|getaddrinfo|could not resolve host|connection refused|address already in use|EADDRINUSE|no matching version found|unable to resolve dependency|python: not found|command failed: (?:pip|npm|bun|cargo|go|poetry|mvn|gradle|make|cmake)\b)/i
+const ENVIRONMENT = /\b(?:command not found|not recognized as an internal or external command|ENOENT|cannot find module|module not found|no such file or directory|permission denied|EACCES|EPERM\b|ECONNREFUSED|ETIMEDOUT|getaddrinfo|could not resolve host|connection refused|address already in use|EADDRINUSE|no matching version found|unable to resolve dependency|python: not found|command failed: (?:pip|npm|bun|cargo|go|poetry|mvn|gradle|make|cmake)\b)/i
 
 /**
  * Unambiguous evidence that *elia itself* is blocked. These phrases don't occur

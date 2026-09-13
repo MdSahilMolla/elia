@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { AsyncLocalStorage } from 'node:async_hooks'
@@ -12,7 +12,7 @@ import { logSwallowedError } from '../diagnostics.ts'
 
 export const GOAL_GRAPH_VERSION = 2
 export const EXECUTION_LEASE_TTL_MS = 120_000
-const EXECUTION_OWNER = `${process.pid}:${crypto.randomUUID()}`
+const EXECUTION_OWNER = `${process.pid}:${randomUUID()}`
 
 /** Whether the process that holds a node/action lease (`<pid>:<uuid>`) is still running. */
 function leaseOwnerAlive(leaseOwner: string | undefined): boolean {

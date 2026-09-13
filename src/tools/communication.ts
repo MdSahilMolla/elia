@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { hardenSecureFile, writeSecureFile, ensureSecureDirectory } from '../securePersistence.ts'
 import { join } from 'node:path'
@@ -147,7 +148,7 @@ function communicationStatus(): string {
 function createDraft(request: CommunicationRequest): string {
   const now = new Date().toISOString()
   const draft: CommunicationDraft = {
-    id: `comm_${crypto.randomUUID().replaceAll('-', '').slice(0, 20)}`,
+    id: `comm_${randomUUID().replaceAll('-', '').slice(0, 20)}`,
     channel: request.channel!,
     recipient: request.recipient!,
     cc: request.cc ?? [],

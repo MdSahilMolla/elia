@@ -105,7 +105,7 @@ export const CORPUS: PlantedDefect[] = [
     summary: 'an API key is committed as a string literal',
     expectedCatch: 'hygiene',
     clean: { 'src/client.ts': `export const apiKey = process.env.SERVICE_API_KEY ?? ''\n` },
-    defective: { 'src/client.ts': `export const apiKey = process.env.SERVICE_API_KEY ?? 'sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOP'\n` },
+    defective: { 'src/client.ts': `export const apiKey = process.env.SERVICE_API_KEY ?? 'sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOP'\n` }, // pragma: allowlist secret
   },
   {
     id: 'hygiene-undeclared-dependency',

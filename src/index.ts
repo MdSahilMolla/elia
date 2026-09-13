@@ -643,9 +643,8 @@ async function runAuto(): Promise<void> {
       return
     }
 
-  rl = readline.createInterface({ input: process.stdin, output: process.stdout })
-    const interactiveRl = rl
-    if (!interactiveRl) throw new Error('interactive approval input was not initialized')
+    const interactiveRl = readline.createInterface({ input: process.stdin, output: process.stdout })
+    rl = interactiveRl
     approveAction = async (assessment, request) => {
       const label = actionApprovalPrompt(assessment, request)
       const result = await confirmOnce(interactiveRl, label)
@@ -1925,7 +1924,7 @@ async function runInteractive(): Promise<void> {
   setCurrentUsageModel(config.model)
   const { PROVIDER_PRESET_NAMES, isProviderPresetConfigured, providerPresetDefaultModel, listProviderModels } = await import('./providers/registry.ts')
   const { newSessionId, loadSession, loadLatestSession, saveSession } = await import('./session.ts')
-  const { createFileTracker, setActiveTracker, loadCheckpoints, saveCheckpoints, restoreCheckpoint, renderCheckpointList } =
+  const { createFileTracker, setActiveTracker, loadCheckpoints, saveCheckpoints, restoreCheckpoint, renderCheckpointList, snapshotMessages, messagesForRestore } =
     await import('./checkpoint.ts')
   const { setActiveLedgerSession, countEpisodes } = await import('./ledger.ts')
   const { renderContextStatus, estimateTokens } = await import('./compaction.ts')
@@ -2207,12 +2206,17 @@ async function runInteractive(): Promise<void> {
       writeNotice(`📎 ${attachments.length} image${attachments.length === 1 ? '' : 's'} attached to this message: ${attachments.map((a) => a.alt).join(', ')}`)
     }
     let userText = resolved.text || (attachments.length > 0 ? `[image attached: ${attachments.map((a) => a.alt).join(', ')}]` : submittedText)
+    // The request itself, before any operator-context inject is prepended.
+    const requestText = userText
     const inject = collectPromptInjects()
     if (inject) userText = `<operator-context>\n${inject}\n</operator-context>\n\n${userText}`
 
     const tracker = createFileTracker()
     const turnStartedAt = Date.now()
-    const task = taskSessions.create(inferTaskKind(userText, userText), redactText(userText, 160), 'Starting request')
+    // Classify on the request (title) and what was actually typed (prompt).
+    // Passing the inject-prefixed userText as both let operator-context text
+    // (a "deploy" note, say) decide the task kind — and titled the task with it.
+    const task = taskSessions.create(inferTaskKind(requestText, submittedText), redactText(requestText, 160), 'Starting request')
     taskSessions.update(task.id, { status: 'running', action: 'Thinking', detail: 'Planning the next action' })
     pushHeartbeat(true, redactText(userText, 160))
     const controller = new AbortController()
@@ -2249,7 +2253,8 @@ async function runInteractive(): Promise<void> {
     // Lets compaction (mid-loop, several call frames down) and the recall tool
     // find this session's ledger — see ledger.ts's setActiveLedgerSession doc.
     setActiveLedgerSession({ id: sessionId, turn: checkpoints.length })
-    const messagesBefore = structuredClone(messages)
+    // Shared per-message copies, not a deep clone of the whole history per turn — see snapshotMessages.
+    const messagesBefore = snapshotMessages(messages)
     messages.push(userMessage(userText, attachments))
     sessionTranscript.appendUser(userText)
 
@@ -3423,7 +3428,7 @@ async function runInteractive(): Promise<void> {
       if (!checkpoint) return done(`No rewind point ${n}. Type /rewind to list them.`)
       const result = await restoreCheckpoint(checkpoint)
       messages.length = 0
-      messages.push(...checkpoint.messagesBefore)
+      messages.push(...messagesForRestore(checkpoint))
       checkpoints.length = n
       await saveCheckpoints(sessionId, checkpoints)
       sessionTranscript.notice(`Rewound workspace and model context to checkpoint ${n}. Earlier activity remains in the session recording.`)
@@ -4003,7 +4008,7 @@ async function runInteractive(): Promise<void> {
       }
       const result = await restoreCheckpoint(checkpoint)
       messages.length = 0
-      messages.push(...checkpoint.messagesBefore)
+      messages.push(...messagesForRestore(checkpoint))
       checkpoints.length = n // later rewind points described a future that no longer exists
       await saveCheckpoints(sessionId, checkpoints)
       sessionTranscript.notice(`Rewound workspace and model context to checkpoint ${n}. Earlier activity remains in the session recording.`)

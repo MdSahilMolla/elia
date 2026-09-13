@@ -16,7 +16,7 @@
  * this single-threaded runtime.
  */
 
-import { readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import { hostname as osHostname } from 'node:os'
 import { dirname } from 'node:path'
@@ -81,8 +81,24 @@ function readOwner(lockPath: string): LockOwner | undefined {
   return undefined
 }
 
-function isStale(owner: LockOwner | undefined, ttlMs: number, now: number): boolean {
-  if (!owner) return true
+/**
+ * An owner record that can't be read is not proof of a dead holder: `wx`
+ * creates the file an instant before its contents are written, and on Windows
+ * a read can fail outright while the holder still has the file open. Treating
+ * that window as stale deleted *live* locks and let two processes in at once.
+ * Only an unreadable lock that has also sat untouched past the TTL is stale.
+ */
+function unreadableLockIsStale(lockPath: string, ttlMs: number, now: number): boolean {
+  try {
+    return now - statSync(lockPath).mtimeMs > ttlMs
+  } catch {
+    // Already gone — the next `wx` attempt settles who gets it.
+    return false
+  }
+}
+
+function isStale(owner: LockOwner | undefined, ttlMs: number, now: number, lockPath: string): boolean {
+  if (!owner) return unreadableLockIsStale(lockPath, ttlMs, now)
   const expired = now - owner.at > ttlMs
   // Only trust pid liveness on the same host that wrote the lock.
   const sameHost = owner.host === hostname()
@@ -142,9 +158,9 @@ export function withFileLock<T>(lockPath: string, fn: () => T, options: FileLock
       acquired = true
       break
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
+      if (!isContention(error)) throw error
       const now = Date.now()
-      if (isStale(readOwner(lockPath), ttlMs, now)) {
+      if (isStale(readOwner(lockPath), ttlMs, now, lockPath)) {
         // Two reclaimers can race here; `wx` on the next iteration ensures only
         // one wins the re-create and the other retries.
         try {
@@ -172,6 +188,19 @@ export function withFileLock<T>(lockPath: string, fn: () => T, options: FileLock
     heldDepth.set(lockPath, (heldDepth.get(lockPath) ?? 1) - 1)
     if (acquired) releaseIfOwned(lockPath, owner.token)
   }
+}
+
+/**
+ * Whether a failed `wx` create means "someone else has (or is releasing) the
+ * lock" — retry — rather than a real error. On Windows, creating a file that
+ * another process has just deleted but whose handle is still closing fails
+ * with EPERM ("delete pending"), and an open handle can give EBUSY/EACCES;
+ * throwing on those made every contended acquire a coin flip there.
+ */
+function isContention(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException).code
+  if (code === 'EEXIST') return true
+  return process.platform === 'win32' && (code === 'EPERM' || code === 'EACCES' || code === 'EBUSY')
 }
 
 function releaseIfOwned(lockPath: string, token: string): void {
@@ -210,9 +239,9 @@ export async function withFileLockAsync<T>(lockPath: string, fn: () => Promise<T
       acquired = true
       break
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
+      if (!isContention(error)) throw error
       const now = Date.now()
-      if (isStale(readOwner(lockPath), ttlMs, now)) {
+      if (isStale(readOwner(lockPath), ttlMs, now, lockPath)) {
         try {
           rmSync(lockPath, { force: true })
         } catch {

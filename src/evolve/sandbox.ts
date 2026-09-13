@@ -1,4 +1,4 @@
-import { copyFileSync, cpSync, existsSync, mkdirSync, readFileSync, rmSync, statSync } from 'node:fs'
+import { copyFileSync, cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs'
 import { join, relative } from 'node:path'
 import { ELIA_ROOT } from '../config.ts'
 import { EVOLUTION_DIR } from './ledger.ts'
@@ -67,17 +67,24 @@ export const IMMUTABLE_FILES = [
   'src/gap/**',
 ]
 
-/** Directory prefixes (repo-relative) that a candidate may not touch. */
-const IMMUTABLE_PREFIXES = ['values/', 'src/values/', 'src/gap/']
+/**
+ * IMMUTABLE_FILES compiled once: exact paths compare as strings, globs through
+ * Bun.Glob. The list used to be matched with `includes` alone, so its globs
+ * (`src/**\/*.test.ts`, `values/**`) never matched anything and were enforced
+ * only by a hand-kept duplicate of the same rules — which is how the list the
+ * candidate is *shown* and the list actually *enforced* could drift apart.
+ * Now the list is the enforcement.
+ */
+const IMMUTABLE_MATCHERS: Array<(path: string) => boolean> = IMMUTABLE_FILES.map((entry) => {
+  if (!/[*?[{]/.test(entry)) return (path: string) => path === entry
+  const glob = new Bun.Glob(entry)
+  return (path: string) => glob.match(path)
+})
 
 /** Whether a single repo-relative path is off-limits to an evolve candidate. */
 export function isImmutablePath(file: string): boolean {
-  const normalized = file.replace(/\\/g, '/')
-  return (
-    IMMUTABLE_FILES.includes(normalized) ||
-    (normalized.startsWith('src/') && normalized.endsWith('.test.ts')) ||
-    IMMUTABLE_PREFIXES.some((prefix) => normalized.startsWith(prefix))
-  )
+  const normalized = file.replace(/\\/g, '/').replace(/^\.\//, '')
+  return IMMUTABLE_MATCHERS.some((matches) => matches(normalized))
 }
 
 export interface Sandbox {
@@ -88,8 +95,44 @@ export interface Sandbox {
   backupDir: string
 }
 
+/**
+ * How many full sandbox copies (`gen-N/`) to keep around. A rejected
+ * generation's sandbox is deliberately left for inspection, but each one is a
+ * whole copy of `src/`, so without a cap `.evolution/` grew by one per
+ * generation forever. The small `gen-N-backup/` rollback directories of
+ * promoted generations are never pruned — they are how a promotion is undone.
+ */
+export const KEEP_SANDBOXES = 5
+
+/** Delete all but the `keep` most recent `gen-N/` sandbox copies. Returns what was removed. */
+export function pruneSandboxes(keep = KEEP_SANDBOXES, dir = EVOLUTION_DIR): string[] {
+  let entries: Array<{ path: string; mtimeMs: number }>
+  try {
+    entries = readdirSync(dir)
+      .filter((name) => /^gen-\d+$/.test(name))
+      .map((name) => {
+        const path = join(dir, name)
+        return { path, mtimeMs: statSync(path).mtimeMs }
+      })
+  } catch {
+    return []
+  }
+  const removed: string[] = []
+  for (const { path } of entries.sort((a, b) => b.mtimeMs - a.mtimeMs).slice(Math.max(0, keep))) {
+    try {
+      rmSync(path, { recursive: true, force: true })
+      removed.push(path)
+    } catch {
+      // In use (Windows) or already gone — the next prune gets it.
+    }
+  }
+  return removed
+}
+
 export function createSandbox(generation: number, liveRoot = ELIA_ROOT): Sandbox {
   const root = join(EVOLUTION_DIR, `gen-${generation}`)
+  // Make room first, so the new one plus the kept ones stay within the cap.
+  pruneSandboxes(KEEP_SANDBOXES - 1)
   rmSync(root, { recursive: true, force: true })
   mkdirSync(root, { recursive: true })
 
@@ -134,12 +177,7 @@ export function changedFiles(sandbox: Sandbox, liveRoot = ELIA_ROOT): string[] {
 
 /** Which of the changed files the candidate was forbidden from touching. */
 export function violatedImmutables(changed: string[]): string[] {
-  return changed.filter(
-    (file) =>
-      IMMUTABLE_FILES.includes(file) ||
-      (file.startsWith('src/') && file.endsWith('.test.ts')) ||
-      IMMUTABLE_PREFIXES.some((prefix) => file.startsWith(prefix)),
-  )
+  return changed.filter(isImmutablePath)
 }
 
 /**

@@ -1,10 +1,13 @@
 import { expect, test } from 'bun:test'
+import { mkdirSync, mkdtempSync, readdirSync, rmSync, utimesSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 // fitness.ts pulls in the agent loop, which resolves a provider at import time.
 process.env.ANTHROPIC_API_KEY ??= 'test-key-for-fitness-test'
 
 const { compareScorecards, isInfrastructureFailure } = await import('./fitness.ts')
-const { IMMUTABLE_FILES, violatedImmutables } = await import('./sandbox.ts')
+const { IMMUTABLE_FILES, pruneSandboxes, violatedImmutables } = await import('./sandbox.ts')
 
 import type { Metrics } from './ledger.ts'
 
@@ -135,4 +138,35 @@ test('the files defining the benchmark are off limits to a candidate', () => {
   expect(violatedImmutables(['src/config.ts', 'src/agentLoop.ts'])).toEqual([])
   expect(IMMUTABLE_FILES).toContain('src/evolve/fitness.ts')
   expect(IMMUTABLE_FILES).toContain('src/evolve/suite.ts')
+})
+
+test('the glob entries in IMMUTABLE_FILES are what is enforced, not decoration', () => {
+  // `src/**/*.test.ts`, `values/**`, `src/gap/**` etc. used to be matched with
+  // `includes` and never fired; a separate hand-written copy did the work.
+  expect(violatedImmutables([
+    'src/a.test.ts', 'src/deep/nested/b.test.ts', 'values/value-core.md', 'src/values/probe.ts', 'src/gap/vector.ts',
+    'src/a.ts', 'src/testing.ts', 'valuesish/x.md', 'docs/values/x.md',
+  ])).toEqual(['src/a.test.ts', 'src/deep/nested/b.test.ts', 'values/value-core.md', 'src/values/probe.ts', 'src/gap/vector.ts'])
+  // Every glob entry in the list matches at least one plausible path — none are dead text.
+  for (const entry of IMMUTABLE_FILES.filter((item) => item.includes('*'))) {
+    const example = entry.replace('**/', 'x/').replace('**', 'x.md').replace('*', 'x')
+    expect(violatedImmutables([example])).toEqual([example])
+  }
+})
+
+test('sandbox copies are pruned to the retention cap, newest kept, rollback backups untouched', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'elia-evolve-prune-'))
+  try {
+    for (let generation = 1; generation <= 8; generation++) {
+      mkdirSync(join(dir, `gen-${generation}`, 'src'), { recursive: true })
+      const at = new Date(Date.now() - (10 - generation) * 60_000)
+      utimesSync(join(dir, `gen-${generation}`), at, at)
+    }
+    mkdirSync(join(dir, 'gen-1-backup'))
+    const removed = pruneSandboxes(3, dir)
+    expect(removed).toHaveLength(5)
+    expect(readdirSync(dir).sort()).toEqual(['gen-1-backup', 'gen-6', 'gen-7', 'gen-8'])
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
 })

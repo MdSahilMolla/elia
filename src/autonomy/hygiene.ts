@@ -18,6 +18,7 @@ import { builtinModules } from 'node:module'
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { packageRoot } from './autoInstall.ts'
 import type { CriticIssue, CriticVerdict } from './types.ts'
+import { KNOWN_KEY_FORMATS } from '../secretFormats.ts'
 
 export interface HygieneInput {
   /** Root of the deliverable — where its package.json lives. */
@@ -75,21 +76,8 @@ const SCRATCH_EXT = /\.(?:log|tmp|bak|orig|rej|swp|swo)$/i
  */
 const SCRATCH_DIR = /(?:^|[\/])(?:tmp|temp|scratch|junk|playground|sandbox)[\/]/i
 
-/**
- * Credentials with a recognisable shape. A match here is a real key, not a
- * guess: these prefixes and lengths are issuer formats, so a false positive
- * would have to be a deliberately constructed lookalike.
- */
-const KNOWN_KEY_FORMATS: { name: string; pattern: RegExp }[] = [
-  { name: 'an Anthropic API key', pattern: /\bsk-ant-[A-Za-z0-9_-]{16,}/ },
-  { name: 'an OpenAI API key', pattern: /\bsk-(?:proj-)?[A-Za-z0-9]{32,}/ },
-  { name: 'a GitHub token', pattern: /\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{30,}|\bgithub_pat_[A-Za-z0-9_]{30,}/ },
-  { name: 'an AWS access key id', pattern: /\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/ },
-  { name: 'a Google API key', pattern: /\bAIza[0-9A-Za-z_-]{35}\b/ },
-  { name: 'a Slack token', pattern: /\bxox[baprs]-[A-Za-z0-9-]{10,}/ },
-  { name: 'a Stripe secret key', pattern: /\bsk_live_[A-Za-z0-9]{16,}/ },
-  { name: 'a private key block', pattern: /-----BEGIN (?:RSA |EC |OPENSSH |PGP )?PRIVATE KEY-----/ },
-]
+// KNOWN_KEY_FORMATS (issuer-shaped credentials) is shared with the repo's own
+// CI secret scan — see src/secretFormats.ts.
 
 /**
  * `const JWT_SECRET = "supersecret"` — a secret-shaped name assigned a literal.
