@@ -31,8 +31,14 @@ const GREP_OUTPUT_BYTES = 400_000
 const GREP_TIMEOUT_MS = 20_000
 
 // ripgrep prints `path:line:content` for a match and `path-line-content` for a
-// context line, with `--` between groups.
-const RG_LINE = /^(.+?)([:-])(\d+)[:-]/
+// context line, with `--` between groups. The default `:` / `-` separators
+// collide with a path or pattern that itself contains `-digit-` (e.g. a match
+// two lines into `foo-2:bar.js` parses as file `foo`, line `2`, and the model
+// is handed the wrong file), so rg runs pin distinct control-punct field
+// separators per line kind and the parser normalizes them back to `:`/`-`.
+const RG_MATCH_SEPARATOR = '\u001f'
+const RG_CONTEXT_SEPARATOR = '\u001e'
+const RG_LINE = /^(.+?)([\u001f\u001e])(\d+)[\u001f\u001e]/
 
 export const grepTool: Tool = {
   name: 'grep',
@@ -99,7 +105,7 @@ export const grepTool: Tool = {
 }
 
 async function searchWithRipgrep(rg: string, pattern: string, dir: string, inputDir: string, glob: string | undefined, context: number | undefined): Promise<string> {
-  const args = ['--line-number', '--no-heading', '--color=never', `--max-filesize=${MAX_SEARCH_FILE_BYTES}`]
+  const args = ['--line-number', '--no-heading', '--color=never', `--max-filesize=${MAX_SEARCH_FILE_BYTES}`, `--field-match-separator=${RG_MATCH_SEPARATOR}`, `--field-context-separator=${RG_CONTEXT_SEPARATOR}`]
   for (const skip of SKIP_DIRS) args.push('--glob', `!${skip}/**`)
   if (glob) args.push('--glob', glob)
   if (context) args.push('--context', String(context))
@@ -130,7 +136,8 @@ async function searchWithRipgrep(rg: string, pattern: string, dir: string, input
     if (raw.length === 0 || raw === '--') continue
     const parsed = RG_LINE.exec(raw)
     if (!parsed) continue
-    const [, rawPath, separator, lineNumber] = parsed
+    const [, rawPath, rawSeparator, lineNumber] = parsed
+    const separator = rawSeparator === RG_MATCH_SEPARATOR ? ':' : '-'
     const relPath = rawPath!.replaceAll('\\', '/').replace(/^\.\//, '')
     // ripgrep respects .gitignore but knows nothing about elia's own protected
     // paths, so secrets are filtered here before any of it reaches the model.
@@ -186,6 +193,8 @@ export async function searchWithJs(pattern: string, dir: string, inputDir: strin
   const scan = new Bun.Glob('**/*')
   const fileFilter = globPattern ? new Bun.Glob(globPattern) : undefined
   const matches: string[] = []
+  let matchCount = 0
+  let truncated = false
   let skippedLargeFiles = 0
 
   for await (const relPath of scan.scan({ cwd: dir, dot: false })) {
@@ -215,9 +224,12 @@ export async function searchWithJs(pattern: string, dir: string, inputDir: strin
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i]!
       if (!regex.test(line)) continue
-      
-      if (matches.length >= MAX_MATCHES) break
-      
+
+      if (matchCount >= MAX_MATCHES) {
+        truncated = true
+        break
+      }
+
       if (span > 0) {
         // ripgrep-style: `path-line-content` for context, `path:line:content`
         // for the match, `--` between non-adjacent groups.
@@ -232,11 +244,16 @@ export async function searchWithJs(pattern: string, dir: string, inputDir: strin
       } else {
         matches.push(`${fullPath}:${i + 1}:${line}`)
       }
+      matchCount += 1
     }
-    if (matches.length >= MAX_MATCHES) break
+    if (matchCount >= MAX_MATCHES) {
+      truncated = true
+      break
+    }
   }
 
+  const truncatedNote = truncated ? `\n\n[stopped after ${MAX_MATCHES} matches]` : ''
   const suffix = skippedLargeFiles > 0 ? `\n\n[skipped ${skippedLargeFiles} file(s) over ${MAX_SEARCH_FILE_BYTES} bytes]` : ''
   if (matches.length === 0) return `No matches found.${suffix}`
-  return `${matches.join('\n')}${suffix}`
+  return `${matches.join('\n')}${truncatedNote}${suffix}`
 }

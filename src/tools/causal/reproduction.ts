@@ -13,7 +13,7 @@ export async function reproduceWithExistingTests(
   cwd: string,
 ): Promise<ReproductionResult> {
   const result = await runShell(
-    `bun test --timeout=10000 ${testPattern} 2>&1`,
+    `bun test --timeout=10000 "${testPattern}"`,
     REPRODUCTION_TIMEOUT_MS,
     cwd,
   )

@@ -37,9 +37,24 @@ export function readGapHistory(cwd = process.cwd()): GapVector[] {
   return out
 }
 
-/** The most recent recorded vector, or undefined when nothing is logged yet. */
+/** The most recent recorded vector, or undefined when nothing valid is logged yet. */
 export function readLatestGapVector(cwd = process.cwd()): GapVector | undefined {
-  return readGapHistory(cwd).at(-1)
+  const path = historyPath(cwd)
+  if (!existsSync(path)) return undefined
+  const lines = readFileSync(path, 'utf8').split('\n')
+  // Scan from the tail: the history only ever appends, so the newest vector is
+  // the last parsable line. A torn trailing fragment from a concurrent append
+  // is skipped rather than poisoning the read.
+  for (let i = lines.length - 1; i >= 0; i -= 1) {
+    const trimmed = lines[i]!.trim()
+    if (!trimmed) continue
+    try {
+      return JSON.parse(trimmed) as GapVector
+    } catch {
+      // skip a corrupt line
+    }
+  }
+  return undefined
 }
 
 export function renderGapVector(vector: GapVector, previous?: GapVector): string {

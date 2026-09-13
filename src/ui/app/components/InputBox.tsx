@@ -165,10 +165,11 @@ export function InputBox(props: InputBoxProps) {
 
   useInput((input, key) => {
     if (props.disabled) return
-    if (key.ctrl && input === 'c') {
-      props.onInterrupt()
-      return
-    }
+
+    // Interrupt handling (Ctrl+C) is App.tsx's single source of truth — Ink
+    // dispatches every keystroke to every mounted useInput hook, so this
+    // component must not also react to it or a press would hit both handlers
+    // (double abort, and an exit while App's staged two-press quit is pending).
 
     // --- Reverse-search overlay owns all keys while open ---
     if (search) {

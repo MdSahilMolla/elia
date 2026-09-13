@@ -1,5 +1,5 @@
 import { describe, expect, it, beforeAll, afterAll } from 'bun:test'
-import { runCodebaseMemory, scoreRelevance, loadMemory, saveMemory, getMemoryStorePath, type MemoryEntry } from './codebaseMemory.ts'
+import { runCodebaseMemory, scoreRelevance, loadMemory, saveMemory, getMemoryStorePath, validateMemoryCategory, type MemoryEntry } from './codebaseMemory.ts'
 import { mkdtempSync, rmSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -16,6 +16,14 @@ function entry(partial: Partial<MemoryEntry> & { id: string; title: string }): M
     ...partial,
   }
 }
+
+describe('validateMemoryCategory', () => {
+  it('accepts known categories and rejects unknown ones', () => {
+    expect(validateMemoryCategory('decision')).toBe('decision')
+    expect(validateMemoryCategory('pattern')).toBe('pattern')
+    expect(() => validateMemoryCategory('wisdom')).toThrow(/category must be one of: decision, bugfix, pattern, architecture, lesson/)
+  })
+})
 
 describe('scoreRelevance', () => {
   const base = entry({ id: 'm1', title: 'Token leak in auth retry', category: 'bugfix', file: 'src/auth.ts', tags: ['token', 'retry'] })
@@ -102,6 +110,10 @@ describe('runCodebaseMemory', () => {
   it('throws on unknown action and missing title', () => {
     expect(() => runCodebaseMemory({ action: 'bogus' }, cwd)).toThrow()
     expect(() => runCodebaseMemory({ action: 'record' }, cwd)).toThrow(/title is required/)
+  })
+
+  it('rejects an invalid category when recording a memory', () => {
+    expect(() => runCodebaseMemory({ action: 'record', title: 't', category: 'wisdom' }, cwd)).toThrow(/category must be one of/)
   })
 
   it('persists across reload', () => {

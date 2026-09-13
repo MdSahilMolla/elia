@@ -2,6 +2,7 @@ import { rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { ELIA_ROOT } from '../config.ts'
 import { appendSecureFile, ensureSecureDirectory } from '../securePersistence.ts'
+import { readBoundedOutput, terminateProcessGroup } from '../shell.ts'
 import { createSandbox, promote } from '../evolve/sandbox.ts'
 import { compareScorecards, measureFitness, toMetrics } from '../evolve/fitness.ts'
 import { computeGapVector } from '../gap/scoreboard.ts'
@@ -110,19 +111,45 @@ interface SpawnResult {
   output: string
 }
 
+const GATE_OUTPUT_BYTES = 100_000
+
+/**
+ * Runs the sandbox command with a hard deadline. The previous version armed a
+ * timer that called only `proc.kill()` and then kept `await`ing stdout/`exited`
+ * — a child ignoring the signal, or one that spawned its own workers (a test
+ * suite runs `bun` subprocesses just fine), left the gate hung past every
+ * budget into the process group that outlived `proc.kill()`. The race rejects
+ * when the deadline hits and terminates the whole process tree.
+ */
 async function spawnIn(cwd: string, cmd: string[]): Promise<SpawnResult> {
+  const proc = Bun.spawn(cmd, {
+    cwd,
+    stdout: 'pipe',
+    stderr: 'pipe',
+    env: { ...process.env, NO_COLOR: '1' },
+    ...(process.platform === 'win32' ? {} : { detached: true }),
+  })
+  const collect: Promise<SpawnResult> = (async () => {
+    const [out, err] = await Promise.all([
+      readBoundedOutput(proc.stdout, GATE_OUTPUT_BYTES),
+      readBoundedOutput(proc.stderr, GATE_OUTPUT_BYTES),
+    ])
+    await proc.exited
+    return { exitCode: proc.exitCode ?? 1, output: `${out}\n${err}` }
+  })()
+  const deadline = new Promise<SpawnResult>((resolve) => {
+    const timer = setTimeout(() => {
+      terminateProcessGroup(proc)
+      resolve({ exitCode: 1, output: `gate command exceeded ${GATE_TIMEOUT_MS / 1000}s and was terminated` })
+    }, GATE_TIMEOUT_MS)
+    void collect.then(() => clearTimeout(timer))
+  })
   try {
-    const proc = Bun.spawn(cmd, { cwd, stdout: 'pipe', stderr: 'pipe', env: { ...process.env, NO_COLOR: '1' } })
-    const timer = setTimeout(() => proc.kill(), GATE_TIMEOUT_MS)
-    try {
-      const [out, err] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()])
-      await proc.exited
-      return { exitCode: proc.exitCode ?? 1, output: `${out}\n${err}` }
-    } finally {
-      clearTimeout(timer)
-    }
+    return await Promise.race([collect, deadline])
   } catch (err) {
     return { exitCode: 1, output: err instanceof Error ? err.message : String(err) }
+  } finally {
+    if (!proc.exited) terminateProcessGroup(proc)
   }
 }
 

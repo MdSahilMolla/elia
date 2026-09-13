@@ -52,6 +52,34 @@ export interface AppliedRevisions {
  */
 export const MAX_PLAN_REVISIONS = 6
 
+const KIND_ORDER: Record<PlanRevisionKind, number> = { 'add-step': 0, 'add-dependency': 1, 'drop-step': 2 }
+
+/**
+ * Revisions from several workers arrive in whatever order each wave emptied the
+ * queue. Applying them in arrival order is nondeterministic — the same set in a
+ * different order can give a different plan (an add-dependency that references a
+ * step another worker added to the *same* batch would be rejected when it
+ * arrives first). Sort the batch by content instead: add-steps before
+ * add-dependencies before drop-steps, tie-broken by target id and reason, so a
+ * given set of revisions always produces a given outcome and the common
+ * add-then-depend pairing works no matter who reported it first.
+ */
+function sortRevisions(revisions: PlanRevision[]): PlanRevision[] {
+  const key = (revision: PlanRevision): string => (revision.kind === 'add-step' ? (revision.step?.id ?? '') : (revision.stepId ?? ''))
+  const dependsOn = (revision: PlanRevision): string => (revision.kind === 'add-dependency' ? (revision.dependsOn ?? '') : '')
+  return [...revisions].sort((a, b) => {
+    const byKind = KIND_ORDER[a.kind] - KIND_ORDER[b.kind]
+    if (byKind !== 0) return byKind
+    const aKey = key(a)
+    const bKey = key(b)
+    if (aKey !== bKey) return aKey < bKey ? -1 : 1
+    const aDep = dependsOn(a)
+    const bDep = dependsOn(b)
+    if (aDep !== bDep) return aDep < bDep ? -1 : 1
+    return a.reason < b.reason ? -1 : a.reason > b.reason ? 1 : 0
+  })
+}
+
 export function createPlanRevisionTool(): RevisionCapture {
   const collected: PlanRevision[] = []
 
@@ -120,7 +148,7 @@ export function applyPlanRevisions(
   const rejected: string[] = []
   const byId = () => new Map(steps.map((step) => [step.id, step]))
 
-  for (const revision of revisions.slice(0, Math.max(0, maxRevisions))) {
+  for (const revision of sortRevisions(revisions).slice(0, Math.max(0, maxRevisions))) {
     const index = byId()
 
     if (revision.kind === 'add-step') {

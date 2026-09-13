@@ -114,6 +114,17 @@ test('requirements.txt with no venv suggests venv + pip install', () => {
   expect(a.setup.some((c) => c.includes('venv') && c.includes('pip install -r requirements.txt'))).toBe(true)
 })
 
+test('the suggested venv installer uses a platform-correct interpreter', () => {
+  file('requirements.txt', 'flask\n')
+  const a = assessEnvironment({ cwd: dir, has: has('python3'), versions: {} })
+  const cmd = a.setup.find((c) => c.includes('pip install -r requirements.txt'))
+  expect(cmd).toBeDefined()
+  // The venv must create its own interpreter and have it invoke pip, so the
+  // command works without the host pip/PATHEXT the OS-appropriate venv layout implies.
+  if (process.platform === 'win32') expect(cmd).toContain('.venv\\Scripts\\python.exe -m pip install -r requirements.txt')
+  else expect(cmd).toContain('.venv/bin/python -m pip install -r requirements.txt')
+})
+
 test('uv.lock picks `uv sync`', () => {
   file('pyproject.toml', '[project]\nname = "x"\n')
   file('uv.lock', '')

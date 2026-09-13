@@ -107,6 +107,13 @@ export const editFileTool: Tool = {
     const oldNormalized = input.old_string.replace(/\r\n/g, '\n')
     const newNormalized = input.new_string.replace(/\r\n/g, '\n')
 
+    // Line-ending-only rewrites are the same no-op that the raw-equality guard
+    // above catches — compared after normalization instead of against the raw
+    // strings, so 'a\r\nb' → 'a\nb' is recognised as "nothing to change".
+    if (oldNormalized === newNormalized) {
+      throw new Error('old_string and new_string are identical — nothing to change.')
+    }
+
     const replaceAll = input.replace_all === true
     const matchStarts: number[] = []
     {

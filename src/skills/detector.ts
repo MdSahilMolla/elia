@@ -1,5 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
+import { redactSecrets } from '../ui/redact.ts'
 import { USAGE_STATS_PATH } from './paths.ts'
 
 /**
@@ -101,8 +102,13 @@ export function observeToolCall(name: string, input: Record<string, unknown>): v
     if (shape) {
       const entry = current.commands[shape] ?? { count: 0, examples: [] }
       entry.count += 1
-      if (!entry.examples.includes(input.command) && entry.examples.length < MAX_EXAMPLES) {
-        entry.examples.push(input.command)
+      // Examples are persisted to the on-disk stats file and later surfaced in
+      // candidate lists. A habit that used a credential (`curl -H
+      // "Authorization: Bearer …"`, `mysql -p s3cr3t; …`) must not leak it,
+      // so examples are redacted before they are ever stored.
+      const example = redactSecrets(input.command)
+      if (!entry.examples.includes(example) && entry.examples.length < MAX_EXAMPLES) {
+        entry.examples.push(example)
       }
       current.commands[shape] = entry
     }

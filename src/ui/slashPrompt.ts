@@ -208,7 +208,8 @@ export function createSlashPrompt(commands: SlashCommand[]): SlashPromptHandle {
 
     if (result.type === 'interrupt') {
       stdout.write(`\r\x1b[0J${promptLabel}${state.buffer}\n`)
-      gracefulShutdown(130)
+      void gracefulShutdown(130)
+      return
     }
     if (result.type === 'eof') {
       finish(null)

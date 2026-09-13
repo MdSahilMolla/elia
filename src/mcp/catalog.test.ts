@@ -32,9 +32,11 @@ test('catalogEntryToConfig omits an empty env / headers map', () => {
   expect(connector).toEqual({ name: 'deepwiki', url: 'https://mcp.deepwiki.com/mcp', transport: undefined, headers: undefined })
 })
 
-test('catalogEntryToConfig carries an sse transport and a supplied auth header', () => {
+test('catalogEntryToConfig does not advertise a legacy sse transport and carries a supplied auth header', () => {
   const linear = findCatalogEntry('linear')!
   const config = catalogEntryToConfig(linear, 'linear', { Authorization: 'Bearer lin_api_x' })
-  expect(config.transport).toBe('sse')
+  // M-19: the registry is filtered to Streamable-HTTP remotes — advertising a
+  // legacy SSE transport would hand the user a connector McpHttpClient refuses.
+  expect(config.transport).toBeUndefined()
   expect(config.headers).toEqual({ Authorization: 'Bearer lin_api_x' })
 })

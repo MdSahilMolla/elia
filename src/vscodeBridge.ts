@@ -9,7 +9,7 @@ import { appendActionAudit } from './autonomy/audit.ts'
 import { assessAction, createActionGovernor, type ActionRequest, type GovernanceMode } from './autonomy/governor.ts'
 import { contractForAction, evaluatePostconditions, evaluatePreconditions } from './autonomy/actionContract.ts'
 import { taskSessions } from './taskSessions.ts'
-import { listSkillBundles } from './skills/bundles.ts'
+import { listSkillBundles, tryListSkillBundles } from './skills/bundles.ts'
 import { listSkillFiles, listLoadedSkills, loadSkills } from './skills/loader.ts'
 import { newSessionId, loadSession, saveSession } from './session.ts'
 import { config } from './config.ts'
@@ -282,9 +282,18 @@ export function createBridgeSession(options: BridgeSessionOptions): BridgeSessio
           response(request.id, { runId, events: readEvents(runId) })
           return
         }
-        case 'skills.list':
-          response(request.id, { files: listSkillFiles(), loaded: listLoadedSkills(), bundles: listSkillBundles() })
+        case 'skills.list': {
+          // A malformed bundles file must not take down the bridge reply — the
+          // extension should keep its skill list and see the reason in-band.
+          const bundles = tryListSkillBundles()
+          response(request.id, {
+            files: listSkillFiles(),
+            loaded: listLoadedSkills(),
+            bundles: bundles.bundles,
+            ...(bundles.error ? { bundlesError: bundles.error } : {}),
+          })
           return
+        }
         case 'git.diff': {
           const result = await runShell('git diff --no-ext-diff --no-color', 20_000, currentAgent().cwd ?? process.cwd(), currentAgent().signal)
           response(request.id, { status: result.exitCode === 0 && !result.timedOut ? 'ok' : 'failed', diff: clampOutput(result.stdout, 100_000), error: result.stderr ? clampOutput(result.stderr, 4_000) : undefined })
@@ -447,9 +456,9 @@ function renderEditorContext(value: unknown): string {
   if (typeof context.selection === 'string' && context.selection.length > 0 && context.selection.length <= 16_000) parts.push(`Selected code:\n${context.selection}`)
   if (Array.isArray(context.diagnostics)) {
     const diagnostics = context.diagnostics.filter((item): item is string => typeof item === 'string').slice(0, 20)
-    if (diagnostics.length > 0) parts.push(`Editor diagnostics:\n${diagnostics.join('\\n')}`)
+    if (diagnostics.length > 0) parts.push(`Editor diagnostics:\n${diagnostics.join('\n')}`)
   }
-  return parts.length > 0 ? `## VS Code editor context\\n${parts.join('\\n\\n')}` : ''
+  return parts.length > 0 ? `## VS Code editor context\n${parts.join('\n\n')}` : ''
 }
 
 function parseMode(value: unknown): AgentMode {

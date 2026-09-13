@@ -192,10 +192,20 @@ Shell: on Windows the command runs through \`cmd.exe\`; on macOS/Linux through \
       const gate = await activeActionGovernor().check({ name: 'run_command', input: { command: installCmd } })
       if (gate.allowed) {
         const pre = await runShell(installCmd, LONG_RUNNING_TIMEOUT_MS, cwd, signal, env)
-        if (pre.exitCode === 0) {
-          const done = await runShell(input.command, timeoutMs, cwd, signal, env)
-          return [`[installed sub-project dependencies first: ${installCmd}]`, formatShellResult(done)].join('\n')
+        if (pre.exitCode !== 0) {
+          // Install failed, but that is no reason to hide the command's own
+          // output — run it anyway and say plainly that the install flopped.
+          const attempted = await runShell(input.command, timeoutMs, cwd, signal, env)
+          return [
+            `[sub-project dependencies could not be auto-installed: ${installCmd}]`,
+            formatShellResult(pre),
+            '',
+            `original command output:`,
+            formatShellResult(attempted),
+          ].join('\n')
         }
+        const done = await runShell(input.command, timeoutMs, cwd, signal, env)
+        return [`[installed sub-project dependencies first: ${installCmd}]`, formatShellResult(done)].join('\n')
       }
     }
 

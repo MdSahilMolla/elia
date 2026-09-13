@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test'
 import { Database } from 'bun:sqlite'
-import { mkdtempSync } from 'node:fs'
+import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { withAgentIdentity } from '../autonomy/context.ts'
@@ -103,4 +103,28 @@ test('audit_trail reports no gaps for a normal write, and detects one once simul
 
   const gapped = JSON.parse(await run({ action: 'audit_trail' }))
   expect(gapped.auditGaps).toEqual([{ table: 'questions', missing: 1, sampleIds: ['q1'] }])
+})
+
+// Regression coverage for a hardening finding: stageDeployment read the report JSON sidecar with a raw,
+// unguarded JSON.parse, so a torn/partial sidecar (an interrupted export or concurrent append) crashed the
+// whole deploy with an opaque parse error instead of degrading gracefully.
+test('stage_deployment survives a torn JSON sidecar instead of crashing on a raw parse error', async () => {
+  const cwd = mkdtempSync(join(tmpdir(), 'elia-battmann-torn-sidecar-'))
+  const run = (input: Record<string, unknown>) => withAgentIdentity({ name: 'test', role: 'lead', cwd }, () => battmannTool.execute(input))
+  await run({ action: 'register_evidence', evidenceId: 'e1', title: 'Ordinary filing', url: 'https://reg.example/f', sourceType: 'primary', publishedAt: '2026-01-01', retrievedAt: '2026-01-01', excerpt: 'Nothing sensitive.', independenceGroup: 'reg', reliability: 0.9 })
+  await run({ action: 'register_claim', claimId: 'c1', statement: 'An ordinary fact.', classification: 'observed_fact', confidence: 'high', asOf: '2026-01-02', evidenceLinks: [{ evidenceId: 'e1', relation: 'supports', supportingExcerpt: 'Nothing sensitive.' }] })
+  const bundle = JSON.parse(await run({ action: 'report_from_store', reportId: 'rep1', reportStatus: 'draft', title: 'Brief', executiveSummary: 'Summary.', author: 'a', asOf: '2026-01-03', outputPath: 'reports/brief.md' }))
+  expect(bundle.reportStatus).toBe('draft')
+  await run({ action: 'define_deployment_target', targetId: 't-low', name: 'Low Clearance Target', kind: 'sovereign-cloud', maxClassification: 'internal', formats: ['md'] })
+
+  // Simulate a torn sidecar (interrupted export leaves a truncated JSON fragment). Before the hardening this
+  // crashed stage_deployment with a raw JSON.parse error; now it degrades to the safe default and stages.
+  writeFileSync(join(cwd, 'reports', 'brief.json'), '{"documentClassification": ')
+  const staged = JSON.parse(await run({ action: 'stage_deployment', stageId: 's1', targetId: 't-low', reportPath: 'reports/brief.md', stagedBy: 'ops' }))
+  expect(staged.status).toBe('staged')
+
+  // A sidecar that PARSES but is not an object is still rejected with a clear message — never silently treated
+  // as a valid (possibly under-classified) bundle.
+  writeFileSync(join(cwd, 'reports', 'brief.json'), '42')
+  await expect(run({ action: 'stage_deployment', stageId: 's2', targetId: 't-low', reportPath: 'reports/brief.md', stagedBy: 'ops' })).rejects.toThrow('sidecar is corrupt')
 })

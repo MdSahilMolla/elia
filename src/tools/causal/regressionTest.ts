@@ -56,19 +56,22 @@ async function detectTestConventions(cwd: string): Promise<{ describe: string; i
   return { describe: 'describe', it: 'it', expect: 'expect' }
 }
 
+export interface ExportStyle { kind: 'named' | 'default' | 'none'; moduleName: string; exportNames: string[] }
+
 /** Detect how the target file exports symbols, so the test imports it correctly. */
-function detectExportStyle(targetFile: string, cwd: string): { kind: 'named' | 'default' | 'none'; moduleName: string } {
+export function detectExportStyle(targetFile: string, cwd: string): ExportStyle {
   const moduleName = targetFile.split('/').pop()?.replace(/\.(ts|tsx|js|jsx)$/, '') ?? 'module'
   const fullPath = join(cwd, targetFile)
-  if (!existsSync(fullPath)) return { kind: 'none', moduleName }
+  if (!existsSync(fullPath)) return { kind: 'none', moduleName, exportNames: [] }
 
   try {
     const content = readFileSync(fullPath, 'utf-8')
-    if (/export\s+default/.test(content)) return { kind: 'default', moduleName }
-    if (/export\s+(const|function|class|let|async\s+function)/.test(content)) return { kind: 'named', moduleName }
-    return { kind: 'none', moduleName }
+    const exportNames = [...content.matchAll(/export\s+(?:async\s+)?(?:const|function|class|let)\s+([A-Za-z_$][A-Za-z0-9_$]*)/g)].map((match) => match[1]).filter((n): n is string => n !== undefined)
+    if (/export\s+default/.test(content)) return { kind: 'default', moduleName, exportNames }
+    if (exportNames.length > 0) return { kind: 'named', moduleName, exportNames }
+    return { kind: 'none', moduleName, exportNames }
   } catch {
-    return { kind: 'none', moduleName }
+    return { kind: 'none', moduleName, exportNames: [] }
   }
 }
 
@@ -124,13 +127,14 @@ interface TestGenOptions {
   candidate: RootCauseCandidate
   relevantDiff?: SemanticDiff
   testFileExists: boolean
-  exportStyle?: { kind: 'named' | 'default' | 'none'; moduleName: string }
+  exportStyle?: ExportStyle
 }
 
 /** Generate test code based on the framework and conventions. */
-function generateTestCode(options: TestGenOptions): string {
+export function generateTestCode(options: TestGenOptions): string {
   const { framework, conventions, targetFile, candidate, relevantDiff, exportStyle } = options
   const moduleName = targetFile.split('/').pop()?.replace(/\.(ts|tsx|js|jsx)$/, '') ?? 'module'
+  const importedName = exportStyle?.exportNames[0] ?? moduleName
   const { describe, it, expect } = conventions
   const kind = exportStyle?.kind ?? 'none'
 
@@ -138,7 +142,7 @@ function generateTestCode(options: TestGenOptions): string {
   const importLine = kind === 'default'
     ? `import ${moduleName} from './${moduleName}'`
     : kind === 'named'
-      ? `import { ${moduleName} } from './${moduleName}'`
+      ? `import { ${importedName} } from './${moduleName}'`
       : null
 
   const categories = relevantDiff?.categories ?? []
@@ -155,7 +159,7 @@ ${describe}('${moduleName} regression test', () => {
 
     // TODO: Add specific test assertions based on the failure
     // Example:
-    // const result = ${moduleName}(...)
+    // const result = ${importedName}(...)
     // ${expect}(result).toBe(expectedValue)
 
     ${expect}(true).toBe(true) // Placeholder — replace with actual test

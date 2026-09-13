@@ -112,6 +112,14 @@ test('a human "revise" verdict sends the task back to the queue with the notes a
   expect(String(back?.payload.body)).toContain('argon2')
   const verdict = store.events({ types: ['ReviewCompleted'], objectiveId: planned.objectiveId })[0]!
   expect(verdict.payload.passed).toBe(false)
+
+  // The resubmission (reviewNotes still attached) must go back through the review
+  // gate, not straight to done: a second review round opens, and the task reaches
+  // 'done' only through a ReviewCompleted verdict — never a direct TaskCompleted.
+  await poll(() => store.events({ types: ['ReviewRequested'], objectiveId: planned.objectiveId }).length >= 2)
+  await poll(() => store.events({ types: ['ReviewCompleted'], objectiveId: planned.objectiveId }).length >= 2)
+  expect(store.events({ types: ['TaskCompleted'], objectiveId: planned.objectiveId })).toHaveLength(0)
+  expect(store.task(task.id)!.status).toBe('done')
 }, TIMEOUT)
 
 test('a connected reviewer agent auto-reviews an in-review task and its verdict completes the work', async () => {

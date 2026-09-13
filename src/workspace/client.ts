@@ -38,6 +38,7 @@ export class WorkspaceClient {
   private readonly pending = new Map<string, Pending>()
   private helloResolve: ((info: WorkspaceHelloInfo) => void) | undefined
   private helloReject: ((error: Error) => void) | undefined
+  private helloTimer: ReturnType<typeof setTimeout> | undefined
   hello: WorkspaceHelloInfo | undefined
 
   private constructor(private readonly options: WorkspaceClientOptions) {}
@@ -58,21 +59,36 @@ export class WorkspaceClient {
     return new Promise<WorkspaceHelloInfo>((resolve, reject) => {
       this.helloResolve = resolve
       this.helloReject = reject
-      const timer = setTimeout(() => reject(new WorkspaceClientError('workspace server did not send hello within timeout')), timeoutMs)
+      const timer = setTimeout(() => {
+        // The open timeout is only about waiting for `hello`. Timing it out
+        // must not also strand the socket: reject the pending open and let the
+        // close handler settle the connection.
+        clearTimeout(this.helloTimer)
+        this.helloResolve = undefined
+        this.helloReject = undefined
+        try {
+          ws.close(1000, 'hello timeout')
+        } catch {
+          /* already closing */
+        }
+        reject(new WorkspaceClientError('workspace server did not send hello within timeout'))
+      }, timeoutMs)
+      this.helloTimer = timer
 
       ws.addEventListener('open', () => {
         // Wait for `hello` rather than resolving here.
       })
       ws.addEventListener('message', (event) => {
-        clearTimeout(timer)
         this.onMessage(typeof event.data === 'string' ? event.data : '')
       })
       ws.addEventListener('error', () => {
+        clearTimeout(this.helloTimer)
         const error = new WorkspaceClientError(`cannot reach workspace server at ${this.options.url}`)
         this.failAll(error)
         this.helloReject?.(error)
       })
       ws.addEventListener('close', (event) => {
+        clearTimeout(this.helloTimer)
         const error = new WorkspaceClientError(`workspace connection closed (${event.code})`)
         this.failAll(error)
         this.helloReject?.(error)
@@ -92,9 +108,14 @@ export class WorkspaceClient {
     if (message.type === 'hello') {
       this.hello = { protocol: message.protocol, caller: message.caller, latestSeq: message.latestSeq }
       if (message.protocol !== WORKSPACE_PROTOCOL_VERSION) {
-        this.helloReject?.(new WorkspaceClientError(`server protocol ${message.protocol}, client expects ${WORKSPACE_PROTOCOL_VERSION}`))
+        clearTimeout(this.helloTimer)
+        const rejectHello = this.helloReject
+        this.helloResolve = undefined
+        this.helloReject = undefined
+        rejectHello?.(new WorkspaceClientError(`server protocol ${message.protocol}, client expects ${WORKSPACE_PROTOCOL_VERSION}`))
         return
       }
+      clearTimeout(this.helloTimer)
       this.helloResolve?.(this.hello)
       return
     }

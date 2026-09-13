@@ -74,15 +74,25 @@ export class EliaBridgeClient extends EventEmitter {
         shell: process.platform === 'win32' && !launch.isExplicitPath,
       })
       this.child = child
+      // Capture the rejection path *locally*: `this.started` is already assigned
+      // (this promise) before any child event can fire, so a handler that checks
+      // `!this.started` would never reject and `start()` would hang forever on a
+      // failed spawn (ENOENT for a missing elia, or a killed bridge).
+      let settled = false
+      const settleReject = (error: Error): void => {
+        if (settled) return
+        settled = true
+        this.started = undefined
+        reject(error)
+      }
       child.once('error', (error) => {
         this.rejectAll(error instanceof Error ? error : new Error(String(error)))
-        // `this.started` is already assigned by the time this fires (it's the
-        // promise we're inside), so guarding on it here would never reject —
-        // the caller of `start()` would then hang forever on a spawn failure.
-        reject(error)
+        settleReject(error instanceof Error ? error : new Error(String(error)))
         this.emitEvent('bridge_error', { message: error.message })
       })
       child.once('spawn', () => {
+        if (settled) return
+        settled = true
         resolve()
         this.emitEvent('bridge_started', { command: launch.command, args: launch.args })
       })

@@ -17,6 +17,8 @@ import { terminateProcessGroup, clampOutput, readBoundedOutput } from '../shell.
  */
 
 const DEFAULT_TIMEOUT_MS = 10 * 60_000 // a full agentic coding session, not a quick command
+const MIN_TIMEOUT_MS = 1_000
+const MAX_TIMEOUT_MS = 30 * 60_000
 const MAX_OUTPUT_LENGTH = 100_000
 
 let cachedAvailability: boolean | undefined
@@ -46,7 +48,7 @@ export const codexTool: Tool = {
     properties: {
       prompt: { type: 'string', description: 'The task to hand to Codex' },
       path: { type: 'string', description: "Directory Codex should treat as its working root (defaults to the current workspace)" },
-      timeout_ms: { type: 'number', description: `Maximum time to wait, in milliseconds (default ${DEFAULT_TIMEOUT_MS})` },
+      timeout_ms: { type: 'number', description: `Maximum time to wait, in milliseconds, from ${MIN_TIMEOUT_MS} to ${MAX_TIMEOUT_MS} (default ${DEFAULT_TIMEOUT_MS})`, minimum: MIN_TIMEOUT_MS, maximum: MAX_TIMEOUT_MS },
     },
     required: ['prompt'],
   },
@@ -54,12 +56,30 @@ export const codexTool: Tool = {
     if (typeof input.prompt !== 'string' || input.prompt.trim().length === 0) {
       throw new Error('codex_delegate requires a non-empty "prompt" string argument.')
     }
+    if (
+      input.timeout_ms !== undefined &&
+      (typeof input.timeout_ms !== 'number' ||
+        !Number.isInteger(input.timeout_ms) ||
+        input.timeout_ms < MIN_TIMEOUT_MS ||
+        input.timeout_ms > MAX_TIMEOUT_MS)
+    ) {
+      throw new Error(`timeout_ms must be an integer between ${MIN_TIMEOUT_MS} and ${MAX_TIMEOUT_MS}`)
+    }
+
+    const signal = currentAgent().signal
+    // A signal that arrived before codex ever started must not be ignored —
+    // a cancelled run shouldn't go on to spend a whole long delegation on an
+    // answer nobody is waiting for.
+    if (signal?.aborted) {
+      return 'codex_delegate was cancelled — the run aborted before codex started.'
+    }
+
     if (!(await codexAvailable())) {
       return 'The codex CLI is not installed or not on PATH. Install it with `npm install -g @openai/codex` and sign in with `codex login` first — codex_delegate only shells out to the real binary, it does not implement Codex auth itself.'
     }
 
     const cwd = typeof input.path === 'string' && input.path.trim().length > 0 ? resolveWorkspacePath(input.path) : (currentAgent().cwd ?? process.cwd())
-    const timeoutMs = typeof input.timeout_ms === 'number' && input.timeout_ms > 0 ? input.timeout_ms : DEFAULT_TIMEOUT_MS
+    const timeoutMs = typeof input.timeout_ms === 'number' ? input.timeout_ms : DEFAULT_TIMEOUT_MS
 
     const outDir = mkdtempSync(join(tmpdir(), 'elia-codex-'))
     const outFile = join(outDir, 'last-message.txt')
@@ -80,7 +100,6 @@ export const codexTool: Tool = {
         terminateProcessGroup(proc)
       }, timeoutMs)
 
-      const signal = currentAgent().signal
       const onAbort = () => terminateProcessGroup(proc)
       signal?.addEventListener('abort', onAbort, { once: true })
 

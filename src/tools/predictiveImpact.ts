@@ -10,6 +10,16 @@ import { makeEvidence, combineEvidence, type Evidence } from './intel/evidence.t
 
 const MAX_FILES_ANALYZED = 100
 const PROJECT_INDEX_CACHE = '.elia/intel-codebase.json'
+/** The well-known empty tree object hash; used as the diff base for the initial commit. */
+const GIT_EMPTY_TREE = '4b825dc642cb6eb9a060e54bf8d69288fbee4904'
+
+/** First-parent ref of a commit, or the empty tree when it is the initial commit. */
+export async function firstParentRef(cwd: string, commit: string): Promise<string> {
+  const proc = Bun.spawn(['git', 'rev-parse', '--verify', '--quiet', `${commit}~1`], { cwd, stdout: 'pipe', stderr: 'pipe' })
+  const output = await new Response(proc.stdout).text()
+  await proc.exited.catch(() => undefined)
+  return proc.exitCode === 0 && output.trim() ? output.trim() : GIT_EMPTY_TREE
+}
 
 export interface ImpactFileResult {
   file: string
@@ -266,7 +276,7 @@ export const predictiveImpactTool: Tool = {
 
     let change: ChangeModel
     if (commit) {
-      change = await buildChangeModel({ cwd, base: `${commit}~1`, head: commit })
+      change = await buildChangeModel({ cwd, base: await firstParentRef(cwd, commit), head: commit })
     } else {
       change = await buildChangeModel({ cwd })
     }

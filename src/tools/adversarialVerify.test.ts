@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'bun:test'
-import { parseDiff, classifyEdgeCase, classifyExploitVector, adversarialAnalyze, formatReport } from './adversarialVerify.ts'
+import { parseDiff, classifyEdgeCase, classifyExploitVector, adversarialAnalyze, formatReport, assertSeverity, gitDiffForFile } from './adversarialVerify.ts'
+import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 const DIFF = `diff --git a/src/auth.ts b/src/auth.ts
 index 123..456 100644
@@ -105,5 +108,35 @@ describe('formatReport', () => {
   it('signals clean diffs', () => {
     const text = formatReport({ target: 'x', diffLines: 0, edgeCases: [], exploitVectors: [], riskScore: 0, summary: 's' })
     expect(text).toContain('No adversarial issues')
+  })
+})
+
+describe('assertSeverity', () => {
+  it('accepts the known severities', () => {
+    for (const s of ['low', 'medium', 'high', 'critical'] as const) expect(assertSeverity(s)).toBe(s)
+  })
+
+  it('rejects unknown severities instead of casting', () => {
+    expect(() => adversarialAnalyze('diff --git a/a.ts b/a.ts\n--- a/a.ts\n+++ b/a.ts\n+export const x = 1\n', { minSeverity: 'severe' as 'high' })).toThrow('severity must be one of')
+  })
+})
+
+describe('gitDiffForFile', () => {
+  it('returns uncommitted changes only, never committed file contents', async () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'adv-verify-'))
+    await Bun.$`git init -q`.cwd(cwd)
+    await Bun.$`git config user.email test@test.com`.cwd(cwd)
+    await Bun.$`git config user.name Test`.cwd(cwd)
+    writeFileSync(join(cwd, 'a.ts'), 'export const stable = true\n')
+    await Bun.$`git add a.ts`.cwd(cwd)
+    await Bun.$`git commit -q -m init`.cwd(cwd)
+    expect(await gitDiffForFile(cwd, 'a.ts')).toBe('')
+
+    writeFileSync(join(cwd, 'a.ts'), 'export const stable = false\n')
+    const diff = await gitDiffForFile(cwd, 'a.ts')
+    expect(diff).toContain('a.ts')
+    expect(diff).toContain('-export const stable = true')
+    expect(diff).toContain('+export const stable = false')
+    rmSync(cwd, { recursive: true, force: true })
   })
 })

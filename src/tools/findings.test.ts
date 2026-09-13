@@ -2,7 +2,7 @@ import { afterEach, expect, test } from 'bun:test'
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { newEngagementTool, engagementDir } from './engagement.ts'
-import { logFindingTool, engagementReportTool } from './findings.ts'
+import { logFindingTool, engagementReportTool, findingId } from './findings.ts'
 
 const slug = 'elia-test-findings-2026'
 
@@ -57,12 +57,21 @@ test('log_finding records a finding backed by real recon output', async () => {
     remediation: 'upgrade',
     evidence: ['nuclei.log', 'recon/nuclei.log'],
   })
-  expect(result).toContain('F-001')
+  expect(result).toMatch(/F-[0-9a-f]{6}/)
   const jsonl = await Bun.file(join(engagementDir(slug), 'findings.jsonl')).text()
   const finding = JSON.parse(jsonl.trim())
   expect(finding.evidence).toEqual(['nuclei.log'])
   expect(finding.severity).toBe('critical')
   expect(await Bun.file(join(engagementDir(slug), 'findings.md')).text()).toContain('Outdated component')
+})
+
+test('finding ids are content-stable rather than sequential', () => {
+  const a = findingId('SQLi in id param', 'union-based')
+  const b = findingId('SQLi in id param', 'union-based')
+  const c = findingId('SQLi in id param', 'boolean-based')
+  expect(a).toBe(b)
+  expect(a).not.toBe(c)
+  expect(a).toMatch(/^F-[0-9a-f]{6}$/)
 })
 
 test('engagement_report compiles findings by severity with embedded evidence', async () => {

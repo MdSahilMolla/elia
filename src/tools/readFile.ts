@@ -32,12 +32,17 @@ async function readLineWindow(
     lineNo += 1
     if (lineNo < offset) return true
     if (collected.length >= cappedLimit) return false
-    if (collectedBytes + line.length > WINDOW_BYTE_CEILING) {
+    const lineBytes = Buffer.byteLength(line, 'utf8')
+    if (collectedBytes + lineBytes + 1 > WINDOW_BYTE_CEILING) {
       reachedByteCeiling = true
+      // A window whose first qualifying line is itself over the ceiling used to
+      // come back empty — "offset past the readable window" for a file that
+      // plainly has content. Clamp that line to the budget instead.
+      if (collected.length === 0) collected.push(truncateToBytes(line, WINDOW_BYTE_CEILING - 1))
       return false
     }
     collected.push(line)
-    collectedBytes += line.length + 1
+    collectedBytes += lineBytes + 1
     return true
   }
 
@@ -53,6 +58,23 @@ async function readLineWindow(
   if (carry.length > 0 && collected.length < cappedLimit && !reachedByteCeiling) consider(carry)
 
   return { lines: collected, startLine: Math.max(offset, 1), reachedByteCeiling }
+}
+
+/**
+ * Cuts `text` so its UTF-8 byte length fits `budget` without splitting a
+ * surrogate pair (a half-cut emoji would render as a replacement character).
+ */
+function truncateToBytes(text: string, budget: number): string {
+  if (Buffer.byteLength(text, 'utf8') <= budget) return text
+  let low = 0
+  let high = text.length
+  while (low < high) {
+    const mid = (low + high + 1) >> 1
+    if (Buffer.byteLength(text.slice(0, mid), 'utf8') <= budget) low = mid
+    else high = mid - 1
+  }
+  if (low > 0 && low < text.length && text.charCodeAt(low) >= 0xdc00 && text.charCodeAt(low) <= 0xdfff) low -= 1
+  return text.slice(0, low)
 }
 
 export const readFileTool: Tool = {
@@ -91,8 +113,8 @@ export const readFileTool: Tool = {
         )
       }
       const { lines, startLine, reachedByteCeiling } = await readLineWindow(path, offset, limit)
-      noteFileRead(path)
       if (lines.length === 0) throw new Error(`offset ${offset} is past the readable window of this ${file.size}-byte file`)
+      noteFileRead(path)
       const body = lines.map((line, i) => `${startLine + i}\t${line}`).join('\n')
       const note = reachedByteCeiling
         ? `\n\n[window stopped at ${WINDOW_BYTE_CEILING} bytes; pass a larger offset to continue past line ${startLine + lines.length - 1}]`
@@ -101,15 +123,24 @@ export const readFileTool: Tool = {
     }
 
     const text = await file.text()
-    noteFileRead(path)
+    const endsWithNewline = text.length > 0 && text.endsWith('\n')
     const allLines = text.split('\n')
+    // `text.split('\n')` yields a phantom trailing "" for a file that ends in a
+    // newline — an empty "line 4" for a 3-line file. Drop exactly that one;
+    // a real blank line from "\n\n" has a non-empty line before it and survives.
+    // The dropped "" previously carried the file's final newline into the
+    // rendering, so re-attach it to the last emitted line instead.
+    if (allLines[allLines.length - 1] === '') allLines.pop()
     const start = offset - 1
     const window = allLines.slice(start, start + limit)
     if (start > 0 && window.length === 0) throw new Error(`offset ${offset} is past the end of the file (${allLines.length} lines)`)
+    noteFileRead(path)
 
     const rendered = window.map((line, i) => `${start + i + 1}\t${line}`).join('\n')
+    const reachesEnd = window.length > 0 && start + window.length >= allLines.length
+    const output = endsWithNewline && reachesEnd ? `${rendered}\n` : rendered
     const remaining = allLines.length - (start + window.length)
     // Tell the model how to continue rather than letting it assume it saw everything.
-    return remaining > 0 ? `${rendered}\n\n[${remaining} more line(s); pass offset ${start + window.length + 1} to continue]` : rendered
+    return remaining > 0 ? `${output}\n\n[${remaining} more line(s); pass offset ${start + window.length + 1} to continue]` : output
   },
 }

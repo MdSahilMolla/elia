@@ -123,6 +123,13 @@ describe('deploymentHealth', () => {
     writeFileSync(join(cwd, '.elia', 'deployments.json'), '{ nope')
     expect(deploymentHealth(cwd).healthy).toBe(false)
   })
+  it('flags a record with no usable timestamp instead of reporting NaN', () => {
+    writeFileSync(join(cwd, '.elia', 'deployments.json'), JSON.stringify([{ at: 'not-a-real-timestamp', ref: 'abc123' }]))
+    const result = deploymentHealth(cwd)
+    expect(result.healthy).toBe(false)
+    expect(result.report).toContain('no valid timestamp')
+    expect(result.report).not.toContain('NaN')
+  })
 })
 
 describe('runSelfHealing (injectable git)', () => {

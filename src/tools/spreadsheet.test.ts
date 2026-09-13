@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import ExcelJS from 'exceljs'
 import { withAgentIdentity } from '../autonomy/context.ts'
-import { spreadsheetTool } from './spreadsheet.ts'
+import { spreadsheetTool, minOf, maxOf } from './spreadsheet.ts'
 
 let testDir: string
 let workbookPath: string

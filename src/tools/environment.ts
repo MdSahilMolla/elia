@@ -8,8 +8,20 @@ import type { Tool } from './types.ts'
 
 const COMMANDS = ['bun', 'node', 'npm', 'pnpm', 'yarn', 'python3', 'python', 'pip3', 'pytest', 'docker', 'kubectl', 'terraform', 'vercel', 'netlify', 'git', 'gh', 'psql', 'mysql', 'curl']
 import { browserMcpReadiness } from '../mcp/browserRegistry.ts'
+// Derived rather than hardcoded so a newly added provider preset (which keeps
+// its API-key env name in PROVIDER_PRESETS) shows up here automatically instead
+// of staying invisible to the readiness report until someone edits it by hand.
+import { PROVIDER_PRESET_NAMES, providerPresetApiKeyEnv } from '../providers/registry.ts'
 
-const SECRET_ENV_NAMES = ['ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'GEMINI_API_KEY', 'NVIDIA_API_KEY', 'EXA_API_KEY', 'SERPER_API_KEY', 'ELIA_SEARCH_API_KEY', 'ELIA_BROWSER_MCP_SERVER', 'ELIA_BROWSER_BRIDGE_COMMAND', 'ELIA_BROWSER_CDP_URL', 'VERCEL_TOKEN', 'NETLIFY_AUTH_TOKEN', 'NETLIFY_SITE_ID']
+const PROVIDER_API_KEY_NAMES = PROVIDER_PRESET_NAMES.map(providerPresetApiKeyEnv).filter((name): name is string => Boolean(name))
+
+const SECRET_ENV_NAMES = [...new Set([
+  ...PROVIDER_API_KEY_NAMES,
+  'ELIA_API_KEY',
+  'EXA_API_KEY', 'SERPER_API_KEY', 'ELIA_SEARCH_API_KEY',
+  'ELIA_BROWSER_MCP_SERVER', 'ELIA_BROWSER_BRIDGE_COMMAND', 'ELIA_BROWSER_CDP_URL',
+  'VERCEL_TOKEN', 'NETLIFY_AUTH_TOKEN', 'NETLIFY_SITE_ID',
+])]
 
 function envPresence(): Record<string, boolean> {
   return Object.fromEntries(SECRET_ENV_NAMES.map((name) => [name, Boolean(process.env[name])]))
@@ -48,14 +60,14 @@ function capabilityReadiness(
 ): Record<string, CapabilityReadiness> {
   const connectedBrowserMcp = browserMcpReadiness().tools.length > 0
   const browserConfigured = connectedBrowserMcp || configured.ELIA_BROWSER_MCP_SERVER || configured.ELIA_BROWSER_BRIDGE_COMMAND || configured.ELIA_BROWSER_CDP_URL
-  const modelConfigured = configured.ANTHROPIC_API_KEY || configured.OPENAI_API_KEY || configured.GEMINI_API_KEY || configured.NVIDIA_API_KEY
+  const modelConfigured = PROVIDER_API_KEY_NAMES.some((name) => configured[name]) || configured.ELIA_API_KEY
   const deploymentCommands = ['vercel', 'netlify', 'docker', 'kubectl', 'terraform'].filter((command) => availableRuntimes[command] && availableRuntimes[command] !== 'unavailable')
   const missingDataRuntime = ['python3', 'python'].every((command) => !availableRuntimes[command] || availableRuntimes[command] === 'unavailable')
 
   return {
     llm: modelConfigured
       ? readiness('ready', 'At least one model credential is present in the process environment; authorization and quota were not tested.')
-      : readiness('missing-config', 'No supported model credential was detected in the process environment.', ['ANTHROPIC_API_KEY or OPENAI_API_KEY or GEMINI_API_KEY or NVIDIA_API_KEY']),
+      : readiness('missing-config', 'No supported model credential was detected in the process environment.', [`${PROVIDER_API_KEY_NAMES.concat('ELIA_API_KEY').join(' or ')}`]),
     browser: browserConfigured
       ? readiness('ready', 'At least one browser transport is configured; reachability, login, permissions, and authorization were not tested.')
       : readiness('missing-config', 'No browser MCP, bridge, or CDP transport is configured.', ['ELIA_BROWSER_MCP_SERVER or ELIA_BROWSER_BRIDGE_COMMAND or ELIA_BROWSER_CDP_URL']),

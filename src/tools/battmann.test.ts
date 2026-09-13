@@ -427,6 +427,7 @@ test('dashboard renders HTML, JSON, and Markdown artifacts with a derived alert 
   expect(htmlText).toContain('<!doctype html>')
   expect(htmlText).toContain('Strait Watch')
   expect(htmlText).toContain('Tanker seizure')
+  expect(htmlText).not.toContain('&amp;mdash;')
   const snapshot = JSON.parse(readFileSync(result.jsonPath, 'utf8'))
   expect(snapshot.alerts.some((alert: { kind: string }) => alert.kind === 'forecast-rising')).toBe(true)
   expect(snapshot.alerts.some((alert: { kind: string }) => alert.kind === 'geo-event')).toBe(true)

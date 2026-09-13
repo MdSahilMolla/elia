@@ -6,6 +6,14 @@ const MAX_DIFF_LINES = 500
 
 export type AdversarialSeverity = 'low' | 'medium' | 'high' | 'critical'
 
+const ADVERSARIAL_SEVERITIES: ReadonlySet<string> = new Set(['low', 'medium', 'high', 'critical'])
+
+/** Validate a severity string against the known set instead of silently casting. */
+export function assertSeverity(value: string): AdversarialSeverity {
+  if (!ADVERSARIAL_SEVERITIES.has(value)) throw new Error(`severity must be one of: low, medium, high, critical (got "${value}")`)
+  return value as AdversarialSeverity
+}
+
 export interface EdgeCase {
   type: 'boundary' | 'null' | 'race' | 'injection' | 'overflow' | 'encoding' | 'concurrency'
   description: string
@@ -166,7 +174,7 @@ export function classifyExploitVector(line: string, filePath: string): ExploitVe
 
 /** Deterministic adversarial analysis of a unified diff's added lines. */
 export function adversarialAnalyze(diff: string, opts: { minSeverity?: AdversarialSeverity } = {}): AdversarialReport {
-  const minSeverity = opts.minSeverity ?? 'low'
+  const minSeverity = opts.minSeverity ? assertSeverity(opts.minSeverity) : 'low'
   const blocks = parseDiff(diff)
   let addedCount = 0
 
@@ -230,6 +238,11 @@ async function runGit(cwd: string, args: string[]): Promise<string> {
   return stdout
 }
 
+/** Working-tree diff for a single repo-relative file (uncommitted changes only). */
+export async function gitDiffForFile(cwd: string, file: string): Promise<string> {
+  return runGit(cwd, ['diff', 'HEAD', '--', file])
+}
+
 export const adversarialVerifyTool: Tool = {
   name: 'adversarial_verify',
   description:
@@ -248,7 +261,7 @@ export const adversarialVerifyTool: Tool = {
     const file = optionalString(input.file, 'file')
     const diffInput = optionalString(input.diff, 'diff')
     const commit = optionalString(input.commit, 'commit')
-    const minSeverity = (optionalString(input.severity, 'severity') ?? 'low') as AdversarialSeverity
+    const minSeverity = assertSeverity(optionalString(input.severity, 'severity') ?? 'low')
 
     let diffText = ''
 
@@ -257,10 +270,7 @@ export const adversarialVerifyTool: Tool = {
     } else if (commit) {
       diffText = await runGit(cwd, ['show', commit, '--patch'])
     } else if (file) {
-      diffText = await runGit(cwd, ['diff', 'HEAD', '--', file])
-      if (!diffText.trim()) {
-        diffText = await runGit(cwd, ['show', `HEAD:${file}`])
-      }
+      diffText = await gitDiffForFile(cwd, file)
     } else {
       diffText = await runGit(cwd, ['diff', 'HEAD'])
     }

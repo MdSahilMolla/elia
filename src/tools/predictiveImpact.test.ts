@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test'
-import { analyzePredictiveImpact, assessFileRisk, persistCodebaseIndex, loadCodebaseIndex } from './predictiveImpact.ts'
+import { analyzePredictiveImpact, assessFileRisk, persistCodebaseIndex, loadCodebaseIndex, firstParentRef } from './predictiveImpact.ts'
 import type { ChangeModel, ChangedFile } from './intel/change.ts'
 import { indexCodebase } from './intel/codebase.ts'
 import { mkdtempSync, writeFileSync, readFileSync, mkdirSync, existsSync } from 'node:fs'
@@ -126,5 +126,28 @@ describe('persistCodebaseIndex / loadCodebaseIndex', () => {
     expect(loaded.root).toBe(root)
     expect(loaded.files.some((f) => f.path === 'src/app.ts')).toBe(true)
     expect(readFileSync(saved, 'utf-8')).toContain('app.ts')
+  })
+})
+
+describe('firstParentRef', () => {
+  it('falls back to the empty tree for the initial commit and resolves a real parent otherwise', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'impact-root-commit-'))
+    const root = join(dir, 'proj')
+    mkdirSync(root, { recursive: true })
+    writeFileSync(join(root, 'a.ts'), 'export const a = 1\n')
+    await Bun.$`git init -q`.cwd(root)
+    await Bun.$`git config user.email test@test.com`.cwd(root)
+    await Bun.$`git config user.name Test`.cwd(root)
+    await Bun.$`git add a.ts`.cwd(root)
+    await Bun.$`git commit -q -m init`.cwd(root)
+    const first = (await Bun.$`git rev-parse HEAD`.cwd(root).text()).toString().trim()
+
+    expect(await firstParentRef(root, first)).toBe('4b825dc642cb6eb9a060e54bf8d69288fbee4904')
+
+    writeFileSync(join(root, 'b.ts'), 'export const b = 2\n')
+    await Bun.$`git add b.ts`.cwd(root)
+    await Bun.$`git commit -q -m second`.cwd(root)
+    const second = (await Bun.$`git rev-parse HEAD`.cwd(root).text()).toString().trim()
+    expect(await firstParentRef(root, second)).toBe(first)
   })
 })

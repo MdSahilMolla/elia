@@ -1,5 +1,6 @@
 import { expect, test, afterEach } from 'bun:test'
 import { codexTool, codexAvailable, resetCodexAvailabilityForTests } from './codex.ts'
+import { withAgentIdentity } from '../autonomy/context.ts'
 
 afterEach(() => {
   resetCodexAvailabilityForTests()
@@ -11,6 +12,24 @@ test('rejects a missing prompt with a clear error, without spawning anything', a
 
 test('rejects an empty/whitespace-only prompt', async () => {
   await expect(codexTool.execute({ prompt: '   ' })).rejects.toThrow('non-empty "prompt"')
+})
+
+test('rejects an out-of-range timeout_ms before doing anything at all', async () => {
+  // Bounded so a runaway number can't hold a run hostage for hours; extreme
+  // values fail fast, before the availability probe or any spawn.
+  await expect(codexTool.execute({ prompt: 'x', timeout_ms: 0 })).rejects.toThrow('timeout_ms must be an integer')
+  await expect(codexTool.execute({ prompt: 'x', timeout_ms: 10_000_000 })).rejects.toThrow('timeout_ms must be an integer')
+  await expect(codexTool.execute({ prompt: 'x', timeout_ms: 1.5 })).rejects.toThrow('timeout_ms must be an integer')
+})
+
+test('an already-aborted run is short-circuited instead of delegating to codex', async () => {
+  const controller = new AbortController()
+  controller.abort()
+  const result = await withAgentIdentity({ name: 'test', role: 'lead', signal: controller.signal }, () =>
+    codexTool.execute({ prompt: 'x', timeout_ms: 5_000 }),
+  )
+  expect(result).toContain('cancelled')
+  expect(result).not.toContain('not installed')
 })
 
 // codexAvailable()'s positive path (a real `codex --version` on this

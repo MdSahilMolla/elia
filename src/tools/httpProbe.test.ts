@@ -2,7 +2,7 @@ import { afterEach, expect, test } from 'bun:test'
 import { rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { newEngagementTool, engagementDir } from './engagement.ts'
-import { httpProbeTool, parseScopeHosts, hostInScope } from './httpProbe.ts'
+import { httpProbeTool, parseScopeHosts, hostInScope, stripZoneId } from './httpProbe.ts'
 
 const originalFetch = globalThis.fetch
 const slug = 'elia-test-httpprobe-2026'
@@ -27,6 +27,17 @@ test('hostInScope matches exact hosts, subdomains, and CIDR membership', () => {
   expect(hostInScope('10.0.1.5', scope)).toBe(false)
   expect(hostInScope('x.staging.acme.com', scope)).toBe(true)
   expect(hostInScope('evil.com', scope)).toBe(false)
+})
+
+test('IPv6 zone identifiers are stripped from scope hosts and probe hostnames', () => {
+  expect(stripZoneId('fe80::1%eth0')).toBe('fe80::1')
+  expect(stripZoneId('fe80::1%25eth0')).toBe('fe80::1')
+  expect(stripZoneId('example.com')).toBe('example.com')
+  const hosts = parseScopeHosts('ffc3:3f1d:2f7:488::1%eth0 is the loopback link')
+  expect(hosts).toContain('ffc3:3f1d:2f7:488::1')
+  expect(hostInScope('fe80::1%eth0', ['fe80::1'])).toBe(true)
+  expect(hostInScope('fe80::1%25eth0', ['fe80::1'])).toBe(true)
+  expect(hostInScope('fe80::1', ['fe80::1'])).toBe(true)
 })
 
 async function scaffold() {
@@ -89,4 +100,13 @@ test('http_probe records a transport failure instead of throwing', async () => {
   expect(result).toContain('Request failed')
   const traffic = await Bun.file(join(engagementDir(slug), 'recon', 'traffic.jsonl')).text()
   expect(JSON.parse(traffic.trim()).error).toContain('ECONNREFUSED')
+})
+
+test('http_probe matches a plain IPv6 scope entry for a zoned hostname', async () => {
+  await newEngagementTool.execute({ slug, target: 'fe80::1', authorizedBy: 'own lab', scope: 'fe80::1 only' })
+  globalThis.fetch = (async () => new Response('zone ok', { status: 200 })) as unknown as typeof fetch
+
+  const result = await httpProbeTool.execute({ engagement: slug, url: 'http://[fe80::1]/' })
+  expect(result).toContain('200')
+  expect(result).toContain('zone ok')
 })

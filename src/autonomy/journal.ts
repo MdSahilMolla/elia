@@ -192,31 +192,38 @@ export function listRuns(limit = 20): RunSummary[] {
 
   return readdirSync(paths.runs)
     .filter((name) => existsSync(join(paths.runs, name, 'events.ndjson')))
-    .map((runId): RunSummary => {
-      const events = readEvents(runId)
-      const start = events.find((event) => event.kind === 'run-start')
-      const end = [...events].reverse().find((event) => event.kind === 'run-end')
-      let recoveredNodes = 0
-      const graphPath = join(paths.runs, runId, 'goal-graph.json')
-      if (existsSync(graphPath)) {
-        try {
-          const graph = JSON.parse(readFileSync(graphPath, 'utf8')) as { nodes?: Array<{ lastError?: { message?: string } }> }
-          recoveredNodes = graph.nodes?.filter((node) => node.lastError?.message?.includes('stale execution lease recovered')).length ?? 0
-        } catch {
-          recoveredNodes = 0
+    .map((runId): RunSummary | undefined => {
+      try {
+        const events = readEvents(runId)
+        const start = events.find((event) => event.kind === 'run-start')
+        const end = [...events].reverse().find((event) => event.kind === 'run-end')
+        let recoveredNodes = 0
+        const graphPath = join(paths.runs, runId, 'goal-graph.json')
+        if (existsSync(graphPath)) {
+          try {
+            const graph = JSON.parse(readFileSync(graphPath, 'utf8')) as { nodes?: Array<{ lastError?: { message?: string } }> }
+            recoveredNodes = graph.nodes?.filter((node) => node.lastError?.message?.includes('stale execution lease recovered')).length ?? 0
+          } catch {
+            recoveredNodes = 0
+          }
         }
-      }
-      return {
-        runId,
-        goal: typeof start?.data.goal === 'string' ? start.data.goal : '(unknown goal)',
-        startedAt: start?.at ?? statSync(join(paths.runs, runId)).mtimeMs,
-        updatedAt: events.at(-1)?.at ?? 0,
-        checkpoints: events.filter((event) => event.kind === 'checkpoint').length,
-        outcome: typeof end?.data.outcome === 'string' ? end.data.outcome : 'incomplete',
-        taskSessionId: typeof end?.data.taskSessionId === 'string' ? end.data.taskSessionId : undefined,
-        recoveredNodes,
+        return {
+          runId,
+          goal: typeof start?.data.goal === 'string' ? start.data.goal : '(unknown goal)',
+          startedAt: start?.at ?? statSync(join(paths.runs, runId)).mtimeMs,
+          updatedAt: events.at(-1)?.at ?? 0,
+          checkpoints: events.filter((event) => event.kind === 'checkpoint').length,
+          outcome: typeof end?.data.outcome === 'string' ? end.data.outcome : 'incomplete',
+          taskSessionId: typeof end?.data.taskSessionId === 'string' ? end.data.taskSessionId : undefined,
+          recoveredNodes,
+        }
+      } catch {
+        // A run directory that vanished between readdir and stat (concurrent
+        // cleanup) is skipped silently rather than aborting the whole list.
+        return undefined
       }
     })
+    .filter((summary): summary is RunSummary => summary !== undefined)
     .sort((a, b) => b.startedAt - a.startedAt)
     .slice(0, limit)
 }

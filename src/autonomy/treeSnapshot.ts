@@ -36,14 +36,21 @@ interface Entry {
 
 /** Parses `git status --porcelain=v1 -z` into per-file dirty entries. */
 function parsePorcelainZ(out: string): Entry[] {
+  const records = out.split('\0')
   const entries: Entry[] = []
-  for (const record of out.split('\0')) {
+  for (let i = 0; i < records.length; i++) {
+    const record = records[i]!
     if (record.length < 4) continue
     const code = record.slice(0, 2)
     let path = record.slice(3)
     if (path.includes(' -> ')) path = path.split(' -> ')[1] ?? path
     path = path.replace(/^"|"$/g, '')
     if (!path) continue
+    // porcelain v1 -z encodes rename/copy entries as TWO NUL-separated records
+    // (`R  dest\0src\0`). The second field is the *old* path — context, not a
+    // dirty file. Consume it so it isn't parsed as a phantom entry that drifts
+    // restore decisions and the dirty-path list.
+    if (/^[RC][ A-Z?]/.test(code) && i + 1 < records.length) i += 1
     const status: Entry['status'] = code === '??' || code.includes('A') ? 'added' : code.includes('D') ? 'deleted' : 'modified'
     entries.push({ path, status })
   }

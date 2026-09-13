@@ -169,6 +169,20 @@ Actions:
       const args = ['pr', 'create', '--title', title, '--body', str('body') || title]
       if (str('base')) args.push('--base', validateRefName(str('base'), 'base'))
       if (input.draft === true) args.push('--draft')
+
+      // `gh pr create` refuses a branch with no upstream — GitHub needs the
+      // commits to exist on the remote before it can open a PR. The tool
+      // describes pr_create as "pushes it first if needed", so make that true
+      // and do it explicitly (a plain `--head` push is implicit and ambiguous
+      // about which remote the push went to).
+      const branch = (await git(['rev-parse', '--abbrev-ref', 'HEAD'])).stdout.trim()
+      const upstream = await git(['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}'])
+      if (!upstream.ok) {
+        if (!branch || branch === 'HEAD') return 'Cannot create a PR: HEAD is detached. Create a branch first.'
+        const push = await git(['push', '-u', 'origin', branch])
+        if (!push.ok) return fail(push)
+      }
+
       const result = await gh(args)
       return result.ok ? `Opened PR: ${result.stdout}` : fail(result)
     }

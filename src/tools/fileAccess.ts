@@ -13,7 +13,11 @@ import { resolve } from 'node:path'
 const readPaths = new Set<string>()
 
 function key(path: string): string {
-  return resolve(path).replace(/\\/g, '/').toLowerCase()
+  // Windows paths compare case-insensitively, so normalize there; on a
+  // case-sensitive filesystem, lowercasing would merge two genuinely distinct
+  // files (File.ts vs file.ts) into one slot.
+  const normalized = resolve(path).replace(/\\/g, '/')
+  return process.platform === 'win32' ? normalized.toLowerCase() : normalized
 }
 
 /** Record that the agent has seen this file's contents (read_file / a successful edit_file). */

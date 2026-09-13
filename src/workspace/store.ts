@@ -411,7 +411,13 @@ export class WorkspaceStore {
     const reservations: string[] = []
 
     for (const task of this.tasks({ status: ['assigned', 'in-progress'] })) {
-      if (task.leaseExpiresAt && task.leaseExpiresAt <= now) {
+      // A missing/unparseable expiry must never read as `NaN <= now` (always
+      // false → the lease is treated as held forever): `Number(p.leaseExpiresAt
+      // ?? …)` in events.ts coerces a malformed payload to `NaN`, which then
+      // never expires. Something that is genuinely un-expired — or a task
+      // merely `assigned` with no lease granted yet (NULL) — stays put.
+      const expiresAt = task.leaseExpiresAt
+      if (typeof expiresAt === 'number' && Number.isFinite(expiresAt) && expiresAt <= now) {
         const target: TaskStatus = task.attemptCount >= task.maxAttempts ? 'failed' : 'ready'
         this.append({
           type: target === 'failed' ? 'TaskFailed' : 'TaskStatusChanged',
@@ -427,7 +433,12 @@ export class WorkspaceStore {
     const staleCutoff = now - LEASE_TTL_MS
     for (const agent of this.agents()) {
       const alive = agent.status !== 'cancelled' && agent.status !== 'completed' && agent.status !== 'failed'
-      if (alive && Date.parse(agent.lastHeartbeatAt) <= staleCutoff) {
+      // `Date.parse` of a malformed/unset heartbeat yields `NaN`, and
+      // `NaN <= cutoff` is false — the agent would never be faulted. A
+      // non-expired, non-heartbeating agent is a stuck agent; expire it
+      // rather than leave it immortal.
+      const heartbeatAt = Date.parse(agent.lastHeartbeatAt)
+      if (alive && (Number.isNaN(heartbeatAt) || heartbeatAt <= staleCutoff)) {
         this.append({
           type: 'AgentStateChanged', actorKind: 'system', actorId: 'lease-reconciler',
           payload: { id: agent.id, status: 'failed', lastError: 'missed heartbeat window', currentTaskId: null },
@@ -437,7 +448,12 @@ export class WorkspaceStore {
     }
 
     for (const reservation of this.reservations(true)) {
-      if (reservation.expiresAt <= now) {
+      // `reservations(true)` should only return rows with a real expiry, but a
+      // malformed persisted value must fail closed: an unbounded/`null`/`NaN`
+      // expiry must expire the reservation (freeing the file for others) rather
+      // than block the task forever.
+      const expiresAt = reservation.expiresAt
+      if (!Number.isFinite(expiresAt) || expiresAt <= now) {
         this.append({
           type: 'ReservationExpired', actorKind: 'system', actorId: 'lease-reconciler',
           taskId: reservation.taskId, payload: { id: reservation.id },

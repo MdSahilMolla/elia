@@ -610,7 +610,7 @@ async function createDashboard(input: Record<string, unknown>): Promise<string> 
     ? data.indicators.map((indicator) => `<tr><td>${html(indicator.name)}</td><td class="num">${indicator.latest === null ? '&mdash;' : `${indicator.latest} ${html(indicator.unit)}`}</td><td class="num">${indicator.zScore === null ? '&mdash;' : indicator.zScore}</td><td class="trend">${trendGlyph(indicator.trend)} ${html(indicator.trend)}</td></tr>`).join('')
     : '<tr><td colspan="4">No indicators.</td></tr>'
   const geoCatRows = data.geo.categories.length
-    ? data.geo.categories.map((category) => `<tr><td>${html(category.category)}</td><td class="num">${category.count}</td><td class="num">${category.maxSeverity}</td><td>${html(String(category.mostRecent ?? '&mdash;'))}</td></tr>`).join('')
+    ? data.geo.categories.map((category) => `<tr><td>${html(category.category)}</td><td class="num">${category.count}</td><td class="num">${category.maxSeverity}</td><td>${html(String(category.mostRecent ?? '—'))}</td></tr>`).join('')
     : '<tr><td colspan="4">No geolocated events.</td></tr>'
   const pressureRows = data.geo.objectsUnderPressure.length
     ? data.geo.objectsUnderPressure.map((object) => `<li>${html(object.name)} &mdash; ${object.events} event(s), peak severity ${object.maxSeverity}</li>`).join('')

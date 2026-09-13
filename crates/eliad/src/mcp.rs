@@ -120,9 +120,13 @@ impl McpSupervisor {
                     map.insert(config.name.clone(), Arc::new(handle));
                 }
                 Err(err) => {
-                    // A failed reconfigure must not tear down a server that was
-                    // already running fine under its old config — leave `map`
-                    // untouched and keep reporting the still-live tools.
+                    // A reconfigured server whose new process failed its
+                    // handshake must NOT drop the previous handle: `map.remove`
+                    // here would release the last Arc and Drop would `start_kill`
+                    // a server that is still healthy and whose tools still work
+                    // through `call`. Only replacement on success lets go of the
+                    // old one. Keep it running, report the failure, and surface
+                    // the tools it still serves.
                     if let Some(existing) = map.get(&config.name) {
                         tools.extend(existing.tools.iter().cloned());
                     }

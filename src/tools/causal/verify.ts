@@ -26,7 +26,7 @@ export async function verifyRegressionTest(
   cwd: string,
 ): Promise<VerificationCheck> {
   const result = await runShell(
-    `bun test --timeout=10000 "${testFilePath}" 2>&1`,
+    `bun test --timeout=10000 "${testFilePath}"`,
     VERIFY_TIMEOUT_MS,
     cwd,
   )
@@ -45,7 +45,7 @@ export async function verifyExistingTests(
   cwd: string,
 ): Promise<VerificationCheck> {
   const result = await runShell(
-    `bun test --timeout=20000 ${testPattern} 2>&1`,
+    `bun test --timeout=20000 ${testPattern}`,
     VERIFY_TIMEOUT_MS * 2,
     cwd,
   )
@@ -61,7 +61,7 @@ export async function verifyExistingTests(
 /** Run the full test suite. */
 export async function verifyFullTestSuite(cwd: string): Promise<VerificationCheck> {
   const result = await runShell(
-    'bun test --timeout=20000 src/ 2>&1',
+    'bun test --timeout=20000 src/',
     VERIFY_TIMEOUT_MS * 5,
     cwd,
   )
@@ -77,7 +77,7 @@ export async function verifyFullTestSuite(cwd: string): Promise<VerificationChec
 /** Run type checking. */
 export async function verifyTypecheck(cwd: string): Promise<VerificationCheck> {
   const result = await runShell(
-    'npx tsc --noEmit 2>&1',
+    'npx tsc --noEmit',
     VERIFY_TIMEOUT_MS * 2,
     cwd,
   )

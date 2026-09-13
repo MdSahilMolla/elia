@@ -127,7 +127,10 @@ export async function dispatchAgentRpc(
 
       const identity = store.agentIdentity(agent.id)
       const reviewerAvailable = store.agentIdentities().some((i) => REVIEWER_ROLES.has(i.role))
-      const wantsReview = ok && !task.reviewNotes && !identity?.canMergeWithoutReview
+      // A resubmission (a task a review sent back, reviewNotes still attached) goes
+      // through the same gate again — re-reviewing the fix is the point of the loop,
+      // and only the reviewer can settle it.
+      const wantsReview = ok && !identity?.canMergeWithoutReview
         && REVIEWABLE_ROLES.has(task.role) && (params.requestReview === true || reviewerAvailable)
 
       if (ok && wantsReview) {

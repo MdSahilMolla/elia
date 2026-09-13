@@ -1,6 +1,7 @@
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { ELIA_ROOT } from '../config.ts'
+import { withFileLock } from '../fileLock.ts'
 import { appendSecureFile, ensureSecureDirectory, hardenSecureFile } from '../securePersistence.ts'
 
 /**
@@ -18,6 +19,7 @@ import { appendSecureFile, ensureSecureDirectory, hardenSecureFile } from '../se
 
 export const EVOLUTION_DIR = join(ELIA_ROOT, '.evolution')
 export const LEDGER_PATH = join(EVOLUTION_DIR, 'ledger.jsonl')
+const GENERATION_COUNTER_PATH = join(EVOLUTION_DIR, 'generation-counter')
 
 export interface Metrics {
   /** Weighted fraction of bench tasks passed, 0..1. */
@@ -86,8 +88,33 @@ export function readLedger(path = LEDGER_PATH): GenerationRecord[] {
 }
 
 export function nextGenerationNumber(path = LEDGER_PATH): number {
-  const records = readLedger(path)
-  return records.reduce((highest, record) => Math.max(highest, record.generation), 0) + 1
+  /**
+   * Generation numbers are claimed under a file lock so two concurrent
+   * evolutions (an `elia evolve` plus a manual `elia run-distill`, or two
+   * terminals) cannot both compute the same next number, then fight over the
+   * same `gen-N` sandbox directory and write colliding ledger rows. The high
+   * water mark is persisted in a sidecar counter file because the ledger row
+   * itself is only appended after the whole generation runs (minutes later) —
+   * reserving the number at claim time keeps it unique even if the run dies
+   * before it appends.
+   */
+  return withFileLock(path + '.lock', () => {
+    ensureSecureDirectory(EVOLUTION_DIR)
+    const recordMax = readLedger(path).reduce((highest, record) => Math.max(highest, record.generation), 0)
+    const counter = readGenerationCounter()
+    const next = Math.max(recordMax, counter) + 1
+    writeFileSync(GENERATION_COUNTER_PATH, `${next}\n`, 'utf8')
+    return next
+  })
+}
+
+function readGenerationCounter(): number {
+  try {
+    if (!existsSync(GENERATION_COUNTER_PATH)) return 0
+    return Math.max(0, Number.parseInt(readFileSync(GENERATION_COUNTER_PATH, 'utf8').trim(), 10) || 0)
+  } catch {
+    return 0
+  }
 }
 
 /**

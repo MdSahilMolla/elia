@@ -4,7 +4,7 @@ import { currentAgent, isPathWithinWorkspace } from './context.ts'
 import { commandMayReadSensitiveData } from './sensitivePaths.ts'
 import { pauseToolSpinner, resumeToolSpinner } from '../ui/stream.ts'
 import { applyPolicy } from './policy.ts'
-import { addAllowRule, isAllowlisted, ruleFor, type AllowScope } from './allowStore.ts'
+import { addAllowRule, canPersistPrefixRule, isAllowlisted, ruleFor, type AllowScope } from './allowStore.ts'
 import { consumePreauth, currentBranch, isPreauthorized } from './preauth.ts'
 
 export type ActionRisk = 'safe' | 'review' | 'critical'
@@ -87,6 +87,15 @@ const GIT_BRANCH_LIST_ONLY = /^(?:command\s+)?git\s+branch(?:\s+(?:-a|-r|-v|-vv|
 const SHELL_CONTROL_SYNTAX = /[;&|<>`$]|[\r\n]|\$\(|\b(?:eval|exec|source)\b/i
 const SECRET_KEY = /(password|passwd|token|secret|api[-_]?key|authorization|cookie|credential)/i
 const EXTERNAL_WRITE_COMMAND = /\b(curl|wget)\b[^\n]*(--data(?:-raw)?|\s-d\s|\s-X\s*(POST|PUT|PATCH|DELETE)|--upload-file|--form)\b/i
+// Values that a tool interpolates, unquoted, into a shell command line. Unlike
+// run_command (whose whole command is assessed), causal_debug's `file` and
+// causal_verify's `test_file`/`test_pattern` become tokens inside strings the
+// tool builds, so any of these characters can escape the intended command. The
+// governor rejects them at the boundary rather than trusting shell quoting.
+const SHELL_TOKEN_BREAK = /[;&|<>`$'"\\\r\n]/
+// A newline in a whole reproduction command silently splits it into a second
+// command line in both `sh -c` and `cmd /c`.
+const COMMAND_NEWLINE = /[\r\n]/
 const DESTRUCTIVE_SHELL_VERBS = /\b(?:rm|mv|cp|mkdir|touch|chmod|chown|kill|shutdown|reboot|publish|push|apply|delete|destroy|install|add|upgrade|send|curl|wget|ssh|scp)\b/i
 const SHELL_SIDE_EFFECT = /[<>]/i
 const INTERNAL_SAFE_TOOLS = new Set(['flag_risk', 'submit_route', 'submit_proposal', 'submit_verdict', 'submit_acceptance', 'revise_plan', 'submit_assumptions', 'submit_lessons', 'delegate_tasks'])
@@ -246,6 +255,10 @@ export function assessAction(request: ActionRequest, cwd = currentAgent().cwd ??
   }
 
   if (name === 'causal_debug') {
+    const file = typeof input.file === 'string' ? input.file : ''
+    if (file && SHELL_TOKEN_BREAK.test(file)) {
+      return assessment('critical', 'approve', 'causal_debug file path contains shell metacharacters that would be interpolated unsafely', 'causal_debug', [file], false)
+    }
     return assessment('safe', 'allow', 'causal_debug performs read-only git history analysis to trace causal chains', 'causal_debug', resources, true)
   }
 
@@ -257,7 +270,27 @@ export function assessAction(request: ActionRequest, cwd = currentAgent().cwd ??
   }
 
   if (name === 'causal_verify') {
-    return assessment('safe', 'allow', 'causal_verify runs read-only verification checks (typecheck, lint, tests)', 'causal_verify', resources, true)
+    const reproduction = typeof input.reproduction_command === 'string' ? input.reproduction_command : ''
+    const testFile = typeof input.test_file === 'string' ? input.test_file : ''
+    const testPattern = typeof input.test_pattern === 'string' ? input.test_pattern : ''
+    // The tool turns these three inputs into shell commands (verify.ts), so the
+    // "read-only" claim only holds for inputs that cannot escape the commands it
+    // builds. Reject quote/control breakouts at the boundary, then assess the
+    // exact command each input becomes with the same shell risk model run_command
+    // uses — a reproduction_command may never smuggle an unassessed shell through.
+    if (COMMAND_NEWLINE.test(reproduction) || SHELL_TOKEN_BREAK.test(testFile) || SHELL_TOKEN_BREAK.test(testPattern)) {
+      return assessment('critical', 'approve', 'causal_verify input contains characters that break out of the commands it runs', 'causal_verify', resources, false)
+    }
+    if (!reproduction.trim() && !testFile.trim() && !testPattern.trim()) {
+      return assessment('safe', 'allow', 'causal_verify with no test or reproduction inputs runs only built-in typecheck and lint checks', 'causal_verify', resources, true)
+    }
+    const commands: string[] = []
+    if (reproduction.trim()) commands.push(reproduction)
+    if (testFile.trim()) commands.push(`bun test --timeout=10000 "${testFile}"`)
+    if (testPattern.trim()) commands.push(`bun test --timeout=20000 ${testPattern}`)
+    const results = commands.map((command) => assessCommand(command, cwd))
+    const worst = results.find((result) => result.risk === 'critical') ?? results.find((result) => result.risk === 'review') ?? results[0]!
+    return { ...worst, resources }
   }
 
   if (name === 'arch_drift') {
@@ -432,6 +465,24 @@ export function assessAction(request: ActionRequest, cwd = currentAgent().cwd ??
  */
 const SETTLEABLE_ONCE = new Set(['shell', 'shell.composed', 'shell.unknown', 'github.repo_create'])
 
+/**
+ * Review-band intents that still publish to or mutate state beyond this project
+ * and a shared remote. Unattended mode auto-allows the whole review band by
+ * design (local, reversible work get a standing "yes"); these are the exceptions
+ * — pushing to origin, opening a PR, creating issues/milestones on the remote,
+ * or publishing a preview deployment sends something out where other people or
+ * systems see it, and no silent auto-allow is a recorded authorization for that.
+ * They fall through to the approval/refusal path: refused when no approver is
+ * attached, asked once per run (and remembered) when one is.
+ */
+const OUTBOUND_REVIEW_INTENTS = new Set([
+  'github.push',
+  'github.pr_create',
+  'github.issue_create',
+  'github.milestone_create',
+  'deployment.preview',
+])
+
 export function createActionGovernor(options: { mode?: GovernanceMode; approve?: ActionApproval; cwd?: string; maxActions?: number } = {}): ActionGovernor {
   const mode = options.mode ?? 'unattended'
   const cwd = options.cwd ?? process.cwd()
@@ -482,8 +533,13 @@ export function createActionGovernor(options: { mode?: GovernanceMode; approve?:
           message: `Action budget exhausted after ${maxActions} tool requests. Resume with a larger bounded budget or split the goal into smaller tasks.`,
         }
       }
-      actionCount += 1
-      if (assessment.decision === 'allow') return { allowed: true, assessment }
+      // Only an action that actually happened counts against the budget — a
+      // blocked or denied request consumes nothing, otherwise every command a
+      // policy blocks would silently burn the run's maxActions.
+      if (assessment.decision === 'allow') {
+        actionCount += 1
+        return { allowed: true, assessment }
+      }
 
       // A standing "always allow" — persisted (.elia/allow.json or ~/.elia/allow.json)
       // or chosen for this session at the approval menu — clears the prompt.
@@ -494,6 +550,7 @@ export function createActionGovernor(options: { mode?: GovernanceMode; approve?:
         mode === 'supervised' &&
         (sessionAllow.has(sessionKey(request, assessment)) || isAllowlisted(request, assessment, options.cwd))
       ) {
+        actionCount += 1
         return { allowed: true, assessment: { ...assessment, decision: 'allow' } }
       }
 
@@ -514,6 +571,7 @@ export function createActionGovernor(options: { mode?: GovernanceMode; approve?:
         const branch = await resolvedBranch()
         if (isPreauthorized(assessment.intent, cwd, branch)) {
           const grant = consumePreauth(assessment.intent, cwd, branch)
+          actionCount += 1
           return {
             allowed: true,
             assessment: { ...assessment, decision: 'allow', reason: `${assessment.reason} (pre-authorized: .elia/preauth.json grant for "${assessment.intent}", use #${grant?.usedCount ?? '?'})` },
@@ -532,7 +590,8 @@ export function createActionGovernor(options: { mode?: GovernanceMode; approve?:
           message: `Action blocked by Elia’s unattended policy: ${assessment.reason}. No terminal is attached, so there is nobody to ask.`,
         }
       }
-      if (assessment.risk === 'review' && mode === 'unattended') {
+      if (assessment.risk === 'review' && mode === 'unattended' && !OUTBOUND_REVIEW_INTENTS.has(assessment.intent)) {
+        actionCount += 1
         return { allowed: true, assessment: { ...assessment, decision: 'allow' } }
       }
 
@@ -543,7 +602,10 @@ export function createActionGovernor(options: { mode?: GovernanceMode; approve?:
       const decisionKey = `${assessment.risk}:${assessment.intent}`
       if (mode === 'unattended') {
         const remembered = classDecisions.get(decisionKey)
-        if (remembered === true) return { allowed: true, assessment: { ...assessment, decision: 'allow' } }
+        if (remembered === true) {
+          actionCount += 1
+          return { allowed: true, assessment: { ...assessment, decision: 'allow' } }
+        }
         if (remembered === false) {
           return {
             allowed: false,
@@ -582,15 +644,21 @@ export function createActionGovernor(options: { mode?: GovernanceMode; approve?:
         const feedback = typeof outcome === 'object' ? outcome.feedback : undefined
         if (mode === 'unattended') classDecisions.set(decisionKey, approved)
         if (approved && remember === 'session') sessionAllow.add(sessionKey(request, assessment))
-        if (approved && (remember === 'project' || remember === 'global')) {
+        if (approved && (remember === 'project' || remember === 'global') && canPersistPrefixRule(request)) {
           try {
             addAllowRule(ruleFor(request, assessment), remember, options.cwd)
           } catch {
             // A write failure (read-only fs, permissions) must not block the
             // action the user just approved — it just won't be remembered.
+            // A command chained with shell control syntax is never persisted
+            // at all (canPersistPrefixRule): a `bun` prefix must not come to
+            // stand for `bun run x & curl …`.
           }
         }
-        if (approved) return { allowed: true, assessment: { ...assessment, decision: 'allow' } }
+        if (approved) {
+          actionCount += 1
+          return { allowed: true, assessment: { ...assessment, decision: 'allow' } }
+        }
         return {
           allowed: false,
           assessment: { ...assessment, decision: 'block' },

@@ -111,6 +111,12 @@ function majorFromVersionOutput(out: string | undefined): number | undefined {
   return m ? Number(m[1]) : undefined
 }
 
+/** A create-and-pack .venv setup command, invoking the venv's own interpreter — on Windows the venv pip lives at `.venv\Scripts\pip.exe`; `-m pip` avoids relying on the host PATH and PATHEXT either way. */
+function venvSetup(python: string): string {
+  const venvPython = process.platform === 'win32' ? '.venv\\Scripts\\python.exe' : '.venv/bin/python'
+  return `${python} -m venv .venv && ${venvPython} -m pip install -r requirements.txt`
+}
+
 export function assessEnvironment(ctx: Ctx): EnvironmentAssessment {
   const { cwd, has, versions } = ctx
   const declared: string[] = []
@@ -166,12 +172,15 @@ export function assessEnvironment(ctx: Ctx): EnvironmentAssessment {
       declared.push(`Node ${pinnedMajor}.x`)
       const actual = majorFromVersionOutput(versions.node)
       if (actual !== undefined && actual !== pinnedMajor) {
-        ;(Math.abs(actual - pinnedMajor) >= 1 ? blockers : ([] as EnvBlocker[])).push({
+        const mismatch = Math.abs(actual - pinnedMajor)
+        const blocker: EnvBlocker = {
           what: `Node ${actual} is active, the project pins ${pinnedMajor}`,
           because: 'a major Node mismatch changes API behaviour and native-module ABIs; test failures may be environmental, not real.',
           fix: `use a Node version manager to switch to ${pinnedMajor} (nvm use ${pinnedMajor} / fnm use ${pinnedMajor})`,
-        })
-        if (Math.abs(actual - pinnedMajor) < 1) {
+        }
+        if (mismatch >= 1) {
+          blockers.push(blocker)
+        } else {
           warnings.push(`Node ${actual} is active; the project pins ${pinnedMajor} (minor mismatch — usually fine).`)
         }
       } else if (actual === undefined && !has('node') && !has('bun')) {
@@ -196,7 +205,7 @@ export function assessEnvironment(ctx: Ctx): EnvironmentAssessment {
             : fileExists(cwd, 'Pipfile.lock')
               ? 'pipenv install --dev'
               : existsSync(join(cwd, 'requirements.txt'))
-                ? 'python3 -m venv .venv && .venv/bin/pip install -r requirements.txt'
+                ? venvSetup(has('python3') ? 'python3' : 'python')
                 : 'pip install -e .'
         warnings.push('No virtualenv detected — Python dependencies may not be installed for this project.')
         addSetup(cmd)

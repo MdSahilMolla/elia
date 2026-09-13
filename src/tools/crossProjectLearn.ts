@@ -6,11 +6,19 @@ import { join } from 'node:path'
 
 const MAX_RESULTS = 20
 
+export type PatternCategory = 'error-pattern' | 'optimization' | 'architecture' | 'testing' | 'security'
+const PATTERN_CATEGORIES: PatternCategory[] = ['error-pattern', 'optimization', 'architecture', 'testing', 'security']
+
+export function validatePatternCategory(value: string): PatternCategory {
+  if (PATTERN_CATEGORIES.includes(value as PatternCategory)) return value as PatternCategory
+  throw new Error(`category must be one of: ${PATTERN_CATEGORIES.join(', ')} (got "${value}")`)
+}
+
 export interface Pattern {
   id: string
   timestamp: string
   projectFingerprint: string
-  category: 'error-pattern' | 'optimization' | 'architecture' | 'testing' | 'security'
+  category: PatternCategory
   title: string
   description: string
   solution: string
@@ -161,7 +169,7 @@ export function runCrossProjectLearn(input: Record<string, unknown>, cwd: string
       if (!title) throw new Error('title is required for record action')
       const description = optionalString(input.description, 'description') ?? ''
       const solution = optionalString(input.solution, 'solution') ?? ''
-      const category = (optionalString(input.category, 'category') as Pattern['category']) ?? 'optimization'
+      const category = optionalString(input.category, 'category') ? validatePatternCategory(optionalString(input.category, 'category')!) : 'optimization'
       const keywords = optionalString(input.keywords, 'keywords')?.split(',').map((k) => k.trim()) ?? []
 
       const pattern: Pattern = {

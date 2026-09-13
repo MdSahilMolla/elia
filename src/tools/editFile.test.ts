@@ -107,6 +107,17 @@ test('identical old_string and new_string is rejected before any file work', asy
   await expect(edit({ path, old_string: 'same', new_string: 'same' })).rejects.toThrow(/identical/)
 })
 
+test('a line-ending-only rewrite is recognised as a no-op (CRLF → LF with otherwise identical text)', async () => {
+  // The raw-identity guard above can't see this one: the two strings differ
+  // byte-for-byte, but every difference is a line ending. Rewriting the file
+  // here changes nothing on disk and would have burned a write for nothing.
+  const path = join(dir, 'eol-noop.ts')
+  const original = 'line one\r\nline two\r\n'
+  writeFileSync(path, original)
+  await expect(edit({ path, old_string: 'line one\nline two', new_string: 'line one\r\nline two' })).rejects.toThrow(/identical/)
+  expect(readFileSync(path, 'utf8')).toBe(original)
+})
+
 // --- Sensitive paths ---
 
 test('refuses to edit a protected path', async () => {

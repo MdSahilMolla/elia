@@ -1044,7 +1044,7 @@ async function runGap(): Promise<void> {
 
 async function runSkills(): Promise<void> {
   const { listSkillFiles } = await import('./skills/loader.ts')
-  const { listSkillBundles } = await import('./skills/bundles.ts')
+  const { tryListSkillBundles } = await import('./skills/bundles.ts')
   const { skillCandidates } = await import('./skills/detector.ts')
   const { PROJECT_SKILLS_DIR, USER_SKILLS_DIR, SKILL_SUFFIX, SKILL_BUNDLES_FILE } = await import('./skills/paths.ts')
   const action = positionals()[0] ?? 'list'
@@ -1071,7 +1071,11 @@ async function runSkills(): Promise<void> {
   }
 
   if (action === 'bundles') {
-    const bundles = listSkillBundles()
+    const { bundles, error } = tryListSkillBundles()
+    if (error) {
+      writeNotice(`Could not read skill bundles: ${error}`)
+      return
+    }
     if (bundles.length === 0) {
       writeNotice(`No skill bundles configured. Create ${SKILL_BUNDLES_FILE} with a JSON object mapping bundle names to { skills: [...] }.`)
       return
@@ -2811,10 +2815,12 @@ async function runInteractive(): Promise<void> {
 
   async function handleSkillsPicker(): Promise<void> {
     const { listLoadedSkills } = await import('./skills/loader.ts')
-    const { listSkillBundles } = await import('./skills/bundles.ts')
+    const { tryListSkillBundles } = await import('./skills/bundles.ts')
     const { USER_SKILLS_DIR, PROJECT_SKILLS_DIR } = await import('./skills/paths.ts')
     const skills = listLoadedSkills()
-    const bundles = listSkillBundles()
+    const bundlesResult = tryListSkillBundles()
+    if (bundlesResult.error) writeNotice(`Could not read skill bundles: ${bundlesResult.error}`)
+    const bundles = bundlesResult.bundles
     if (skills.length === 0 && bundles.length === 0) {
       writeNotice(`No loaded skills. Add a validated *.skill.ts file to ${PROJECT_SKILLS_DIR} for this project or ${USER_SKILLS_DIR} for all projects, then restart Elia.`)
       return

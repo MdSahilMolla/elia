@@ -175,11 +175,16 @@ function buildCommand(provider: DeploymentProvider, plan: ReturnType<typeof plan
 function deployCommand(provider: DeploymentProvider, target: DeploymentTarget, plan: ReturnType<typeof planDeployment>, cwd: string): string | undefined {
   if (!plan.available || !plan.linked) return undefined
   if (provider === 'docker') return dockerfileExists(cwd) ? `docker push ${dockerImageRef()}:${dockerTagFor(target)}` : undefined
-  if (provider === 'vercel') return target === 'production' ? 'CI=1 vercel deploy --prod --yes' : 'CI=1 vercel deploy --yes'
+  if (provider === 'vercel') return target === 'production' ? withCiEnv('vercel deploy --prod --yes') : withCiEnv('vercel deploy --yes')
 
   const siteId = netlifySiteId(cwd)
   const siteFlag = siteId ? ` --site ${siteId}` : ''
-  return target === 'production' ? `CI=1 netlify deploy --prod --json${siteFlag}` : `CI=1 netlify deploy --json${siteFlag}`
+  return target === 'production' ? withCiEnv(`netlify deploy --prod --json${siteFlag}`) : withCiEnv(`netlify deploy --json${siteFlag}`)
+}
+
+/** Vercel/Netlify CLIs refuse to run outside a TTY unless CI is set. `CI=1 name` is POSIX shell syntax; on Windows `cmd.exe` it is not an env prefix at all — it names `CI` as the program to run, so the deploy fails before the CLI starts. `set CI=1&& ` is the cmd equivalent. */
+function withCiEnv(command: string): string {
+  return process.platform === 'win32' ? `set CI=1&& ${command}` : `CI=1 ${command}`
 }
 
 /** The registry+image the operator explicitly configured — the docker equivalent of a linked Vercel/Netlify project. Never guessed. */

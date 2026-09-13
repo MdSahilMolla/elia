@@ -227,7 +227,10 @@ async function sendDraft(draft: CommunicationDraft): Promise<string> {
 }
 
 async function verifyDraft(draft: CommunicationDraft): Promise<string> {
-  if (!draft.externalId && draft.status !== 'sent' && draft.status !== 'verified') return `Draft ${draft.id} has no send receipt to verify; current status is ${draft.status}.`
+  // 'sending' is allowed so a crash mid-send (status persisted as 'sending',
+  // no receipt yet) can be resolved against the connector instead of being
+  // stuck until another send resets it.
+  if (!draft.externalId && draft.status !== 'sent' && draft.status !== 'sending' && draft.status !== 'verified') return `Draft ${draft.id} has no send receipt to verify; current status is ${draft.status}.`
   try {
     const result = await callCommunicationAdapter({ action: 'verify', draft })
     draft.status = 'verified'

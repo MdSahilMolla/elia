@@ -214,7 +214,9 @@ export function deploymentHealth(cwd: string): { healthy: boolean; report: strin
     const raw = JSON.parse(readFileSync(path, 'utf-8')) as Array<{ at: string; ref?: string; status?: string }>
     if (!Array.isArray(raw) || raw.length === 0) return { healthy: true, report: 'No deployment records found.' }
     const last = raw[raw.length - 1]!
-    const ageDays = (Date.now() - new Date(last.at).getTime()) / 86400000
+    const timestamp = new Date(last.at).getTime()
+    if (!Number.isFinite(timestamp)) return { healthy: false, report: 'Last deployment record has no valid timestamp — cannot confirm deployment freshness.' }
+    const ageDays = (Date.now() - timestamp) / 86400000
     const ok = ageDays < 7 && (last.status === undefined || last.status === 'ok')
     return {
       healthy: ok,
