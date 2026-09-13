@@ -57,7 +57,7 @@ where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + 'static,
 {
     let (read_half, mut write_half) = tokio::io::split(stream);
-    let mut lines = BufReader::new(read_half).lines();
+    let mut reader = BufReader::new(read_half);
     let (tx, mut rx) = mpsc::channel::<Response>(64);
 
     let writer = tokio::spawn(async move {
@@ -73,7 +73,18 @@ where
         }
     });
 
-    while let Ok(Some(line)) = lines.next_line().await {
+    loop {
+        let line = match read_request_line(&mut reader, MAX_REQUEST_BYTES).await {
+            Ok(Some(RequestLine::Line(line))) => line,
+            Ok(Some(RequestLine::TooLong { id })) => {
+                let message = format!("request exceeds {MAX_REQUEST_BYTES} bytes");
+                let _ = tx
+                    .send(Response::err(id, codes::INVALID_PARAMS, message))
+                    .await;
+                continue;
+            }
+            Ok(None) | Err(_) => break,
+        };
         if line.trim().is_empty() {
             continue;
         }
@@ -99,6 +110,87 @@ where
 
     drop(tx);
     let _ = writer.await;
+}
+
+/// Largest request line accepted. `parse.check` carries a whole file's source,
+/// so this is generous, but it is a ceiling: a multi-GB line used to be
+/// buffered whole before anything looked at it (the request-side twin of
+/// M-26's per-line shell capture bound).
+const MAX_REQUEST_BYTES: usize = 32 * 1024 * 1024;
+
+enum RequestLine {
+    Line(String),
+    /// Over the cap and discarded; `id` is recovered from the line's start
+    /// (the client writes `{"id":N,…` first) so the caller gets a matching
+    /// error instead of waiting out its timeout. 0 if it could not be read.
+    TooLong {
+        id: u64,
+    },
+}
+
+/// Read one request line of at most `max` bytes. An over-long line is drained
+/// to its `\n` without being kept, so the next request still frames correctly.
+/// `Ok(None)` at EOF.
+async fn read_request_line<R>(reader: &mut R, max: usize) -> std::io::Result<Option<RequestLine>>
+where
+    R: tokio::io::AsyncBufRead + Unpin,
+{
+    let mut line = Vec::new();
+    let mut too_long = false;
+    loop {
+        let chunk = reader.fill_buf().await?;
+        if chunk.is_empty() {
+            if line.is_empty() && !too_long {
+                return Ok(None);
+            }
+            break;
+        }
+        let (piece, done) = match chunk.iter().position(|&b| b == b'\n') {
+            Some(nl) => (nl, true),
+            None => (chunk.len(), false),
+        };
+        if !too_long {
+            if line.len() + piece > max {
+                too_long = true;
+                // Keep just enough of the start to recover the id.
+                let keep = 64usize.saturating_sub(line.len()).min(piece);
+                line.extend_from_slice(&chunk[..keep]);
+            } else {
+                line.extend_from_slice(&chunk[..piece]);
+            }
+        }
+        reader.consume(if done { piece + 1 } else { piece });
+        if done {
+            break;
+        }
+    }
+    if too_long {
+        return Ok(Some(RequestLine::TooLong {
+            id: leading_id(&line),
+        }));
+    }
+    Ok(Some(RequestLine::Line(
+        String::from_utf8(line)
+            .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned()),
+    )))
+}
+
+/// The `id` from the start of a request line like `{"id":42,"method":…`.
+fn leading_id(prefix: &[u8]) -> u64 {
+    let text = String::from_utf8_lossy(prefix);
+    let Some(at) = text.find("\"id\"") else {
+        return 0;
+    };
+    let rest = text[at + 4..].trim_start();
+    let Some(rest) = rest.strip_prefix(':') else {
+        return 0;
+    };
+    let digits: String = rest
+        .trim_start()
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect();
+    digits.parse().unwrap_or(0)
 }
 
 async fn dispatch(state: Arc<AppState>, req: Request) -> Option<Response> {
@@ -393,6 +485,33 @@ mod tests {
         assert_eq!(broken["result"]["ok"], false);
         assert_eq!(broken["result"]["errors"][0]["message"], "unclosed '{'");
         transport::cleanup(&addr);
+    }
+
+    #[tokio::test]
+    async fn an_oversized_request_is_refused_by_id_and_the_next_one_still_frames() {
+        let big = format!(
+            "{{\"id\":42,\"method\":\"parse.check\",\"params\":{{\"source\":\"{}\"}}}}\n",
+            "x".repeat(200)
+        );
+        let input = format!("{big}{{\"id\":43,\"method\":\"daemon.ping\"}}\n");
+        let mut reader = BufReader::new(input.as_bytes());
+
+        match read_request_line(&mut reader, 100).await.unwrap() {
+            Some(RequestLine::TooLong { id }) => assert_eq!(id, 42),
+            _ => panic!("expected TooLong"),
+        }
+        match read_request_line(&mut reader, 100).await.unwrap() {
+            Some(RequestLine::Line(line)) => assert!(line.contains("\"id\":43"), "{line}"),
+            _ => panic!("expected the next request intact"),
+        }
+        assert!(read_request_line(&mut reader, 100).await.unwrap().is_none());
+    }
+
+    #[test]
+    fn leading_id_reads_the_id_or_falls_back_to_zero() {
+        assert_eq!(leading_id(br#"{"id":7,"method":"x"}"#), 7);
+        assert_eq!(leading_id(br#"{ "id" : 12 , "#), 12);
+        assert_eq!(leading_id(br#"{"method":"x"}"#), 0);
     }
 
     #[test]

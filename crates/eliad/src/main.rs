@@ -132,21 +132,65 @@ async fn send_shutdown() -> Result<()> {
 }
 
 /// Connect-and-ping, used only for the single-instance check.
+///
+/// Responses are matched by id rather than taken as "the first line": the
+/// server answers requests concurrently, so on a shared connection a response
+/// can arrive out of order. This connection is private and carries one
+/// request, but matching by id (and on `result.pong`, not a substring anywhere
+/// in the line, which an error message could contain) keeps a live daemon from
+/// ever looking dead, or a non-daemon from looking alive.
 async fn daemon_responds(addr: &str) -> bool {
+    const PING_ID: u64 = 1;
     let Ok(stream) = transport::connect(addr).await else {
         return false;
     };
     let (r, mut w) = tokio::io::split(stream);
-    if w.write_all(b"{\"id\":1,\"method\":\"daemon.ping\",\"params\":{}}\n")
-        .await
-        .is_err()
-    {
+    let ping = format!("{{\"id\":{PING_ID},\"method\":\"daemon.ping\",\"params\":{{}}}}\n");
+    if w.write_all(ping.as_bytes()).await.is_err() {
         return false;
     }
     let _ = w.flush().await;
     let mut lines = BufReader::new(r).lines();
-    matches!(
-        tokio::time::timeout(Duration::from_secs(2), lines.next_line()).await,
-        Ok(Ok(Some(line))) if line.contains("pong")
-    )
+    let wait_for_pong = async {
+        while let Ok(Some(line)) = lines.next_line().await {
+            if let Some(answer) = pong_answer(&line, PING_ID) {
+                return answer;
+            }
+        }
+        false
+    };
+    tokio::time::timeout(Duration::from_secs(2), wait_for_pong)
+        .await
+        .unwrap_or(false)
+}
+
+/// `Some(is_pong)` if `line` is the response to request `id`, `None` if it is
+/// some other line (another id, or not JSON) to skip.
+fn pong_answer(line: &str, id: u64) -> Option<bool> {
+    let msg: serde_json::Value = serde_json::from_str(line).ok()?;
+    if msg.get("id").and_then(serde_json::Value::as_u64) != Some(id) {
+        return None;
+    }
+    Some(msg.pointer("/result/pong") == Some(&serde_json::Value::Bool(true)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::pong_answer;
+
+    #[test]
+    fn the_ping_is_matched_by_id_not_by_line_order() {
+        assert_eq!(
+            pong_answer(r#"{"id":1,"result":{"pong":true}}"#, 1),
+            Some(true)
+        );
+        // Another request's response, or noise, is skipped rather than decisive.
+        assert_eq!(pong_answer(r#"{"id":9,"result":{"ok":true}}"#, 1), None);
+        assert_eq!(pong_answer("not json", 1), None);
+        // An error that merely mentions "pong" is not a pong.
+        assert_eq!(
+            pong_answer(r#"{"id":1,"error":{"code":-1,"message":"no pong"}}"#, 1),
+            Some(false)
+        );
+    }
 }

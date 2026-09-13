@@ -26,16 +26,26 @@ fn user_tag() -> String {
     }
 }
 
+/// The Windows pipe address for an `ELIA_ELIAD_SOCKET` override: a full
+/// `\\…` path is used as is; anything else is a bare pipe name. A pipe name may
+/// contain any character except `\`, so `foo\bar` (which would make the
+/// invalid `\\.\pipe\foo\bar`) becomes `foo-bar`. `src/daemon/client.ts` does
+/// the same.
+#[cfg(any(windows, test))]
+fn pipe_address(explicit: &str) -> String {
+    if explicit.starts_with(r"\\") {
+        explicit.to_string()
+    } else {
+        format!(r"\\.\pipe\{}", explicit.replace('\\', "-"))
+    }
+}
+
 /// The address to bind / dial, honouring `ELIA_ELIAD_SOCKET`.
 pub fn address() -> String {
     if let Ok(explicit) = std::env::var("ELIA_ELIAD_SOCKET") {
         #[cfg(windows)]
         {
-            return if explicit.starts_with(r"\\") {
-                explicit
-            } else {
-                format!(r"\\.\pipe\{explicit}")
-            };
+            return pipe_address(&explicit);
         }
         #[cfg(not(windows))]
         {
@@ -59,5 +69,17 @@ pub fn address() -> String {
         dir.join(format!("eliad-{tag}.sock"))
             .to_string_lossy()
             .into_owned()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::pipe_address;
+
+    #[test]
+    fn a_bare_pipe_name_override_never_carries_a_backslash_into_the_name() {
+        assert_eq!(pipe_address("elia-test"), r"\\.\pipe\elia-test");
+        assert_eq!(pipe_address(r"foo\bar"), r"\\.\pipe\foo-bar");
+        assert_eq!(pipe_address(r"\\.\pipe\full"), r"\\.\pipe\full");
     }
 }

@@ -44,11 +44,15 @@ final class Json {
       while (i < s.length() && Character.isWhitespace(s.charAt(i))) i++;
     }
 
+    // Both report truncated input as a JSON error rather than letting a raw
+    // StringIndexOutOfBoundsException escape.
     char next() {
+      if (atEnd()) throw new IllegalArgumentException("unexpected end of JSON");
       return s.charAt(i++);
     }
 
     char peek() {
+      if (atEnd()) throw new IllegalArgumentException("unexpected end of JSON");
       return s.charAt(i);
     }
 
@@ -129,7 +133,12 @@ final class Json {
             case 'r': sb.append('\r'); break;
             case 't': sb.append('\t'); break;
             case 'u':
-              sb.append((char) Integer.parseInt(s.substring(i, i + 4), 16));
+              if (i + 4 > s.length()) throw new IllegalArgumentException("unexpected end of JSON");
+              try {
+                sb.append((char) Integer.parseInt(s.substring(i, i + 4), 16));
+              } catch (NumberFormatException bad) {
+                throw new IllegalArgumentException("bad \\u escape at position " + i);
+              }
               i += 4;
               break;
             default:
@@ -153,11 +162,26 @@ final class Json {
     Double number() {
       int start = i;
       while (i < s.length() && "-+.eE0123456789".indexOf(s.charAt(i)) >= 0) i++;
-      return Double.parseDouble(s.substring(start, i));
+      if (start == i) {
+        // Not a number at all: say what was found instead of parseDouble's
+        // bare "empty String".
+        throw new IllegalArgumentException("unexpected '" + s.charAt(start) + "' at position " + start);
+      }
+      String text = s.substring(start, i);
+      double d;
+      try {
+        d = Double.parseDouble(text);
+      } catch (NumberFormatException e) {
+        throw new IllegalArgumentException("bad number '" + text + "' at position " + start);
+      }
+      // JSON has no Infinity: 1e999 would otherwise round-trip out as the
+      // invalid token `Infinity`.
+      if (Double.isInfinite(d)) throw new IllegalArgumentException("number out of range at position " + start);
+      return d;
     }
 
     void expect(String lit) {
-      if (!s.startsWith(lit, i)) throw new IllegalArgumentException("expected " + lit);
+      if (!s.startsWith(lit, i)) throw new IllegalArgumentException("expected " + lit + " at position " + i);
       i += lit.length();
     }
   }

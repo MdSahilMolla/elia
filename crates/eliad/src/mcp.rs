@@ -132,7 +132,9 @@ impl McpSupervisor {
                     }
                     failed.push(McpFailure {
                         server: config.name.clone(),
-                        reason: err.to_string(),
+                        // `{:#}` keeps the cause chain; `to_string()` would
+                        // report only the outer context ("mcp initialize").
+                        reason: format!("{err:#}"),
                     });
                 }
             }
@@ -281,20 +283,29 @@ impl McpProc {
         .with_context(|| format!("mcp server timed out on write for {method}"))?
         .context("write to mcp server")?;
 
+        // One deadline for the whole response, not per line: a server that keeps
+        // printing noise must not keep a request alive forever.
+        let read_deadline = tokio::time::Instant::now() + deadline;
+        let mut noise = StdoutNoise::default();
         loop {
-            let next = tokio::time::timeout(deadline, self.stdout.next_line())
-                .await
-                .with_context(|| format!("mcp server timed out on {method}"))?
-                .context("mcp server stdout error")?;
+            let next = match tokio::time::timeout_at(read_deadline, self.stdout.next_line()).await {
+                Ok(next) => next.context("mcp server stdout error")?,
+                Err(_) => return Err(anyhow!("mcp server timed out on {method}{}", noise.note())),
+            };
             let Some(text) = next else {
-                return Err(anyhow!("mcp server closed its output"));
+                return Err(anyhow!("mcp server closed its output{}", noise.note()));
             };
             if text.trim().is_empty() {
                 continue;
             }
             let msg: Value = match serde_json::from_str(&text) {
                 Ok(v) => v,
-                Err(_) => continue, // some servers print noise to stdout; skip it
+                Err(_) => {
+                    // Some servers print noise to stdout; skip it, but keep a
+                    // record so a failure can say it was not a silent server.
+                    noise.record(&text);
+                    continue;
+                }
             };
             // Skip notifications and responses to other ids.
             if msg.get("id").and_then(Value::as_i64) != Some(id) {
@@ -305,6 +316,35 @@ impl McpProc {
             }
             return Ok(msg.get("result").cloned().unwrap_or(Value::Null));
         }
+    }
+}
+
+/// Non-JSON lines a server printed on stdout while a request waited. Skipping
+/// them is right (plenty of servers log to stdout), but a timeout that says only
+/// "timed out" looks the same as a server that printed nothing at all. This lets
+/// the error show the server was talking, just not JSON-RPC.
+#[derive(Default)]
+struct StdoutNoise {
+    skipped: usize,
+    last: String,
+}
+
+impl StdoutNoise {
+    const SAMPLE_CHARS: usize = 200;
+
+    fn record(&mut self, line: &str) {
+        self.skipped += 1;
+        self.last = line.trim().chars().take(Self::SAMPLE_CHARS).collect();
+    }
+
+    fn note(&self) -> String {
+        if self.skipped == 0 {
+            return String::new();
+        }
+        format!(
+            " (skipped {} non-JSON stdout line(s); last: {:?})",
+            self.skipped, self.last
+        )
     }
 }
 
@@ -369,6 +409,48 @@ mod tests {
         assert!(serde_json::to_string(&echoed)
             .unwrap()
             .contains("hello-from-rust"));
+    }
+
+    /// A process that prints one non-JSON line and exits: not an MCP server.
+    fn noisy_non_server() -> McpServerConfig {
+        let (command, args) = if cfg!(windows) {
+            (
+                "cmd",
+                vec!["/c".to_string(), "echo not-json-rpc".to_string()],
+            )
+        } else {
+            (
+                "sh",
+                vec!["-c".to_string(), "echo not-json-rpc".to_string()],
+            )
+        };
+        McpServerConfig {
+            name: "noisy".into(),
+            command: command.into(),
+            args,
+            env: HashMap::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_failed_handshake_names_the_non_json_output_it_skipped() {
+        let supervisor = McpSupervisor::new();
+        let result = supervisor.ensure(vec![noisy_non_server()]).await;
+        assert_eq!(result.failed.len(), 1);
+        let reason = &result.failed[0].reason;
+        assert!(
+            reason.contains("skipped 1 non-JSON stdout line") && reason.contains("not-json-rpc"),
+            "reason should mention the skipped output: {reason}"
+        );
+    }
+
+    #[test]
+    fn stdout_noise_is_silent_when_nothing_was_skipped() {
+        let mut noise = StdoutNoise::default();
+        assert_eq!(noise.note(), "");
+        noise.record(&"x".repeat(1_000));
+        assert!(noise.note().contains("skipped 1"));
+        assert!(noise.note().len() < 300, "the sample is bounded");
     }
 
     #[tokio::test]

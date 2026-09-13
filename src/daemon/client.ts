@@ -56,8 +56,9 @@ export function socketPath(): string {
   const explicit = process.env.ELIA_ELIAD_SOCKET
   if (explicit) {
     // On Windows the daemon treats the override as a bare pipe name; `net`
-    // needs the full `\\.\pipe\` form.
-    if (process.platform === 'win32' && !explicit.startsWith('\\\\')) return `\\\\.\\pipe\\${explicit}`
+    // needs the full `\\.\pipe\` form. A pipe name cannot contain `\`, so the
+    // daemon maps one to `-` (`socket.rs`'s `pipe_address`); do the same.
+    if (process.platform === 'win32' && !explicit.startsWith('\\\\')) return `\\\\.\\pipe\\${explicit.replaceAll('\\', '-')}`
     return explicit
   }
   if (process.platform === 'win32') return `\\\\.\\pipe\\elia-eliad-${userTag()}`

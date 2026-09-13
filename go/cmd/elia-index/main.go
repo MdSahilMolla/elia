@@ -10,7 +10,9 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
+	"strconv"
 
 	"elia-go/internal/index"
 	"elia-go/internal/rpc"
@@ -18,13 +20,35 @@ import (
 
 const version = "0.1.0"
 
+// maxRequestBytes bounds one request line. A real index.query is tiny (the
+// pattern is capped at 10k characters), so this only ever stops a broken or
+// hostile client.
+const maxRequestBytes = 4 * 1024 * 1024
+
 func main() {
 	fmt.Fprintf(os.Stderr, "elia-index %s ready\n", version)
-	in := bufio.NewScanner(os.Stdin)
-	in.Buffer(make([]byte, 64*1024), 4*1024*1024)
-	enc := json.NewEncoder(os.Stdout)
-	for in.Scan() {
-		line := in.Bytes()
+	serve(os.Stdin, os.Stdout)
+}
+
+func serve(stdin io.Reader, stdout io.Writer) {
+	in := bufio.NewReaderSize(stdin, 64*1024)
+	enc := json.NewEncoder(stdout)
+	for {
+		line, tooLong, err := readRequest(in, maxRequestBytes)
+		if err != nil {
+			return
+		}
+		if tooLong {
+			// This used to be a bufio.Scanner, which stops for good on a line
+			// over its buffer: the process exited mid-conversation and the
+			// client saw only EOF. Answer instead, and keep serving.
+			resp := rpc.Response{ID: leadingID(line), Protocol: rpc.Version()}
+			resp.Error = &rpc.ErrorBody{Code: -32700, Message: fmt.Sprintf("request exceeds %d bytes", maxRequestBytes)}
+			if enc.Encode(resp) != nil {
+				return
+			}
+			continue
+		}
 		if len(bytes.TrimSpace(line)) == 0 {
 			continue
 		}
@@ -43,6 +67,54 @@ func main() {
 			return
 		}
 	}
+}
+
+// readRequest reads one line of at most max bytes (not counting its line
+// ending). An over-long line is read to its end and discarded, so the next
+// request still frames; only its first bytes are returned, for leadingID. err
+// is non-nil only at EOF (or a read failure) with nothing left to return.
+func readRequest(r *bufio.Reader, max int) (line []byte, tooLong bool, err error) {
+	for {
+		chunk, readErr := r.ReadSlice('\n')
+		if !tooLong {
+			line = append(line, chunk...)
+			if len(bytes.TrimRight(line, "\r\n")) > max {
+				tooLong = true
+				line = line[:min(len(line), 64):min(len(line), 64)]
+			}
+		}
+		if readErr == bufio.ErrBufferFull {
+			continue
+		}
+		if readErr != nil && len(line) == 0 && !tooLong {
+			return nil, false, readErr
+		}
+		return line, tooLong, nil
+	}
+}
+
+// leadingID recovers the id from the start of a request line such as
+// {"id":42,"method":…, so an error for an unparseable line still reaches the
+// right caller. 0 when it cannot be read.
+func leadingID(prefix []byte) int64 {
+	at := bytes.Index(prefix, []byte(`"id"`))
+	if at < 0 {
+		return 0
+	}
+	rest := bytes.TrimLeft(prefix[at+4:], " \t")
+	if len(rest) == 0 || rest[0] != ':' {
+		return 0
+	}
+	rest = bytes.TrimLeft(rest[1:], " \t")
+	end := 0
+	for end < len(rest) && rest[end] >= '0' && rest[end] <= '9' {
+		end++
+	}
+	id, err := strconv.ParseInt(string(rest[:end]), 10, 64)
+	if err != nil {
+		return 0
+	}
+	return id
 }
 
 func handle(req rpc.Request, resp *rpc.Response) {

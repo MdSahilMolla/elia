@@ -86,11 +86,58 @@ type fileTarget struct {
 	slash string
 }
 
+// fileResult is one file's scan outcome, kept in its walk-order slot so the
+// merge can replay the files exactly as a serial scan would.
+type fileResult struct {
+	matches []Match
+	large   bool
+	binary  bool
+}
+
+// prefixCap tracks the contiguous run of finished files from the start of the
+// walk. Once that prefix alone holds maxMatches rows, no later file can reach
+// the merged output, so workers stop reading them.
+//
+// It replaces a global running total, which was not safe to skip on: a late
+// file finishing first could fill the total and make a worker skip an earlier
+// file whose rows belonged in the output, so results depended on scheduling.
+type prefixCap struct {
+	mu     sync.Mutex
+	done   []bool
+	rows   []int
+	prefix int // files [0, prefix) have all finished
+	sum    int // rows produced by files [0, prefix)
+	cutoff atomic.Int64
+}
+
+func newPrefixCap(n int) *prefixCap {
+	p := &prefixCap{done: make([]bool, n), rows: make([]int, n)}
+	p.cutoff.Store(int64(n))
+	return p
+}
+
+// needed reports whether file i can still contribute to the output.
+func (p *prefixCap) needed(i int) bool { return int64(i) < p.cutoff.Load() }
+
+func (p *prefixCap) finish(i, rows int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.done[i] = true
+	p.rows[i] = rows
+	for p.sum < maxMatches && p.prefix < len(p.done) && p.done[p.prefix] {
+		p.sum += p.rows[p.prefix]
+		p.prefix++
+		if p.sum >= maxMatches {
+			p.cutoff.Store(int64(p.prefix))
+		}
+	}
+}
+
 // searchParallel scans files with a bounded worker pool. Results land in
-// walk-order slots so the merge is deterministic; size/binary counters are
-// atomic. Files that vanish or error mid-scan are skipped like the JS backend.
-func searchParallel(re *regexp.Regexp, targets []fileTarget, context int, c *counters) [][]Match {
-	slots := make([][]Match, len(targets))
+// walk-order slots so the merge is deterministic. Files that vanish or error
+// mid-scan are skipped like the JS backend.
+func searchParallel(re *regexp.Regexp, targets []fileTarget, context int) []fileResult {
+	slots := make([]fileResult, len(targets))
 	if len(targets) == 0 {
 		return slots
 	}
@@ -98,6 +145,7 @@ func searchParallel(re *regexp.Regexp, targets []fileTarget, context int, c *cou
 	if workers < 1 {
 		workers = 1
 	}
+	capped := newPrefixCap(len(targets))
 	var wg sync.WaitGroup
 	next := make(chan int, len(targets))
 	for i := range targets {
@@ -109,37 +157,36 @@ func searchParallel(re *regexp.Regexp, targets []fileTarget, context int, c *cou
 		go func() {
 			defer wg.Done()
 			for i := range next {
-				// Another file may already have filled the global cap; skip
-				// remaining reads. The merge still caps deterministically.
-				if c.total.Load() >= maxMatches {
+				if !capped.needed(i) {
 					continue
 				}
-				t := targets[i]
-				fi, err := os.Stat(t.path)
-				if err != nil {
-					continue
-				}
-				if fi.Size() > maxSearchFileBytes {
-					c.large.Add(1)
-					continue
-				}
-				data, err := os.ReadFile(t.path)
-				if err != nil {
-					continue
-				}
-				if bytes.IndexByte(data, 0) != -1 {
-					c.binary.Add(1)
-					continue
-				}
-				var matches []Match
-				scanInto(re, t.slash, splitLines(data), context, &matches)
-				c.total.Add(int64(len(matches)))
-				slots[i] = matches
+				slots[i] = scanFile(re, targets[i], context)
+				capped.finish(i, len(slots[i].matches))
 			}
 		}()
 	}
 	wg.Wait()
 	return slots
+}
+
+func scanFile(re *regexp.Regexp, t fileTarget, context int) fileResult {
+	fi, err := os.Stat(t.path)
+	if err != nil {
+		return fileResult{}
+	}
+	if fi.Size() > maxSearchFileBytes {
+		return fileResult{large: true}
+	}
+	data, err := os.ReadFile(t.path)
+	if err != nil {
+		return fileResult{}
+	}
+	if bytes.IndexByte(data, 0) != -1 {
+		return fileResult{binary: true}
+	}
+	var matches []Match
+	scanInto(re, t.slash, splitLines(data), context, &matches)
+	return fileResult{matches: matches}
 }
 
 // Skip lists mirror SKIP_DIRS / SKIP_ROOT_FILES in src/tools/ignoreDirs.ts.
@@ -164,20 +211,12 @@ type Match struct {
 	Text string `json:"text"`
 }
 
-// QueryResult is the index.query result payload. It carries no locks so it
-// can be returned by value; worker accounting lives in counters.
+// QueryResult is the index.query result payload.
 type QueryResult struct {
 	Matches       []Match `json:"matches"`
 	Truncated     bool    `json:"truncated"`
 	SkippedLarge  int     `json:"skippedLarge"`
 	SkippedBinary int     `json:"skippedBinary"`
-}
-
-// counters holds worker accounting. It is never marshaled or copied.
-type counters struct {
-	large  atomic.Int64
-	binary atomic.Int64
-	total  atomic.Int64
 }
 
 // Query searches root for pattern. Error messages mirror the TypeScript
@@ -208,20 +247,27 @@ func Query(pattern, root, globPattern string, context int) (QueryResult, error) 
 	}
 
 	targets := collectTargets(root, globPattern)
-	var c counters
-	slots := searchParallel(re, targets, context, &c)
-	out.SkippedLarge = int(c.large.Load())
-	out.SkippedBinary = int(c.binary.Load())
+	slots := searchParallel(re, targets, context)
 
 	// Merge in walk (lexical) order so output is byte-identical to a serial
 	// scan; the match cap applies during the merge with the same silent stop.
 	// Like the serial scan, hitting the cap exactly marks truncation — the
-	// scanner cannot know whether more matches exist without reading on.
-	for _, matches := range slots {
-		for _, m := range matches {
+	// scanner cannot know whether more matches exist without reading on — and
+	// files after the stop are not counted as skipped, as the serial scan never
+	// reaches them.
+	for _, slot := range slots {
+		if len(out.Matches) >= maxMatches {
+			break
+		}
+		if slot.large {
+			out.SkippedLarge++
+		}
+		if slot.binary {
+			out.SkippedBinary++
+		}
+		for _, m := range slot.matches {
 			if len(out.Matches) >= maxMatches {
-				out.Truncated = true
-				return out, nil
+				break
 			}
 			out.Matches = append(out.Matches, m)
 		}

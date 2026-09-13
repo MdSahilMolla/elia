@@ -30,7 +30,14 @@ impl Language {
     /// [`Language::Generic`] (C-family), which is a safe superset for most
     /// brace languages.
     pub fn from_path(path: &str) -> Language {
-        let ext = path.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
+        // `Path::extension`, not `rsplit('.')`: that always yields a piece (so a
+        // fallback was dead code) and took an extension-less name whole, so a
+        // file named just `go` or `ts` was read as that language.
+        let ext = std::path::Path::new(path)
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
         match ext.as_str() {
             "ts" | "tsx" | "mts" | "cts" | "js" | "jsx" | "mjs" | "cjs" => Language::JsTs,
             "py" | "pyi" => Language::Python,
@@ -294,6 +301,10 @@ mod tests {
         assert_eq!(Language::from_path("main.rs"), Language::Rust);
         assert_eq!(Language::from_path("x.py"), Language::Python);
         assert_eq!(Language::from_path("Makefile"), Language::Generic);
+        assert_eq!(Language::from_path("MAIN.GO"), Language::Go);
+        // A name with no extension is not a language, even one spelled like one.
+        assert_eq!(Language::from_path("tools/go"), Language::Generic);
+        assert_eq!(Language::from_path("ts"), Language::Generic);
     }
 
     #[test]

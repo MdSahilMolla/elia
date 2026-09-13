@@ -79,6 +79,14 @@ test('socketPath honours the override', () => {
   else expect(p).toBe(socketAddr)
 })
 
+test('a bare Windows pipe-name override maps a backslash to "-", as the daemon does', () => {
+  if (process.platform !== 'win32') return
+  process.env.ELIA_ELIAD_SOCKET = 'foo\\bar'
+  expect(socketPath()).toBe('\\\\.\\pipe\\foo-bar')
+  process.env.ELIA_ELIAD_SOCKET = '\\\\.\\pipe\\full'
+  expect(socketPath()).toBe('\\\\.\\pipe\\full')
+})
+
 test('disabled mode throws DaemonUnavailable', async () => {
   process.env.ELIA_DAEMON = 'off'
   resetDaemonClientForTests()
