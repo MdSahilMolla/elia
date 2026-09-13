@@ -641,4 +641,26 @@ mod tests {
         assert!(matches!(res, Err(ExecStop::Cancelled)));
         assert_eq!(pool.worker_count().await, 0);
     }
+
+    #[tokio::test]
+    async fn a_single_huge_physical_line_is_bounded_not_buffered_whole() {
+        let pool = ShellPool::new();
+        // One ~3 MB physical line (no embedded newline), well past
+        // MAX_CAPTURE_BYTES (2 MB) — this used to be buffered in full by
+        // `read_line` before the payload cap ever got a chance to apply.
+        let cmd = if cfg!(windows) {
+            "powershell -NoProfile -Command \"Write-Output ('a' * 3000000)\""
+        } else {
+            "head -c 3000000 /dev/zero | tr '\\0' 'a'; echo"
+        };
+        let out = run(&pool, cmd).await;
+        assert_eq!(out.exit_code, 0);
+        assert!(
+            out.stdout.len() <= MAX_CAPTURE_BYTES + 1024,
+            "payload should stay near the cap, got {} bytes",
+            out.stdout.len()
+        );
+        // Framing stayed in sync despite the truncation: the worker is reusable.
+        assert_eq!(pool.worker_count().await, 1);
+    }
 }

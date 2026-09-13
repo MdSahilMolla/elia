@@ -67,7 +67,11 @@ export class EliaBridgeClient extends EventEmitter {
         env: { ...process.env, ELIA_UI_MODE: 'json', NO_COLOR: '1' },
         stdio: ['pipe', 'pipe', 'pipe'],
         windowsHide: true,
-        ...(launch.shell ? { shell: launch.shell } : {}),
+        // A bare command (the default `cliPath: "elia"`) is a PATH-resolved
+        // `elia.cmd`/`elia.ps1` shim on Windows; spawn() without a shell only
+        // resolves literal `.exe`/`.bat` targets there; a shell is what
+        // applies PATHEXT.
+        shell: process.platform === 'win32' && !launch.isExplicitPath,
       })
       this.child = child
       // Capture the rejection path *locally*: `this.started` is already assigned
@@ -94,12 +98,14 @@ export class EliaBridgeClient extends EventEmitter {
       })
       child.once('exit', (code, signal) => {
         this.child = undefined
+        // Without this, a later `request()` sees `this.started` still
+        // resolved from the original spawn and skips re-launching — it
+        // returns the old process's stale promise, `this.child` is
+        // undefined, and the caller gets a permanent "stdin is not
+        // writable" until the window is reloaded.
+        this.started = undefined
         this.stdout?.close()
         this.stdout = undefined
-        // Without reset, `request()` after an unexpected exit throws
-        // "stdin is not writable" forever and the extension needs a reload to
-        // recover. Clearing `started` lets the next `start()` relaunch.
-        this.started = undefined
         const detail = `Elia bridge exited${code === null ? ` by ${signal ?? 'signal'}` : ` with code ${code}`}`
         this.emitEvent('bridge_exit', { code, signal, message: detail })
         this.rejectAll(new Error(detail))
@@ -184,19 +190,16 @@ export class EliaBridgeClient extends EventEmitter {
     this.pending.clear()
   }
 
-private launchCommand(): { command: string; args: string[]; shell: boolean } {
+  private launchCommand(): { command: string; args: string[]; isExplicitPath: boolean } {
     const configured = this.options.cliPath.trim() || 'elia'
     const looksLikeTypeScript = configured.endsWith('.ts') || configured.endsWith('.mts')
     if (looksLikeTypeScript) {
-      if (this.options.runtime === 'node') return { command: 'node', args: [configured, 'bridge', '--json'], shell: false }
-      return { command: 'bun', args: [configured, 'bridge', '--json'], shell: false }
+      // `node`/`bun` are real executables on PATH (installer-provided .exe on
+      // Windows), not PATHEXT shims, so they spawn fine without a shell.
+      if (this.options.runtime === 'node') return { command: 'node', args: [configured, 'bridge', '--json'], isExplicitPath: true }
+      return { command: 'bun', args: [configured, 'bridge', '--json'], isExplicitPath: true }
     }
-    // A bare `elia` resolves on Windows only via `elia.cmd`/`elia.ps1` shims
-    // that `spawn` cannot launch without a shell. Only short-circuit through a
-    // shell here; an expanded CLI path with explicit `.exe` works natively.
-    const isWindowsBare = process.platform === 'win32' && !configured.toLowerCase().endsWith('.exe')
-    if (isWindowsBare) return { command: configured, args: ['bridge', '--json'], shell: true }
-    return { command: configured, args: ['bridge', '--json'], shell: false }
+    return { command: configured, args: ['bridge', '--json'], isExplicitPath: false }
   }
 }
 

@@ -388,35 +388,34 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_failed_reconfigure_keeps_the_previous_healthy_server() {
+    async fn a_failed_reconfigure_keeps_the_previous_server_alive() {
         let Some(config) = echo_fixture() else {
             eprintln!("skipping: bun or the echo fixture is unavailable");
             return;
         };
         let supervisor = McpSupervisor::new();
 
-        let ok = supervisor.ensure(vec![config.clone()]).await;
-        assert!(ok.failed.is_empty(), "unexpected startup failures: {}", ok.failed.len());
+        let started = supervisor.ensure(vec![config.clone()]).await;
+        assert!(started.failed.is_empty());
+        assert_eq!(supervisor.server_count().await, 1);
 
-        // Reconfigure the environment so the fingerprint changes, then point
-        // the server at an unstartable command. The handshake fails, but the
-        // previously healthy process must keep serving tools.
+        // Same name, different fingerprint (bogus command), so `ensure` tries
+        // to replace the running handle and fails.
         let mut broken = config.clone();
-        broken.env.insert("CHANGED".into(), "true".into());
         broken.command = "definitely-not-a-real-binary-xyz".into();
+        let result = supervisor.ensure(vec![broken]).await;
 
-        let reconfigured = supervisor.ensure(vec![broken]).await;
-        assert_eq!(reconfigured.failed.len(), 1);
-        assert_eq!(reconfigured.failed[0].server, config.name);
-        assert_eq!(reconfigured.tools.len(), 2, "old tools still served");
+        assert_eq!(result.failed.len(), 1, "the reconfigure should be reported as failed");
+        assert_eq!(supervisor.server_count().await, 1, "the old server must still be running");
+        assert_eq!(result.tools.len(), 2, "the still-live server's tools are still reported");
 
+        // The old process is still the one actually serving calls.
         let echoed = supervisor
-            .call(&config.name, "echo", json!({ "text": "still-alive" }))
+            .call("echofix", "echo", json!({ "text": "still-alive" }))
             .await
-            .expect("old process is still serving");
+            .expect("call ok");
         assert!(serde_json::to_string(&echoed)
             .unwrap()
             .contains("still-alive"));
-        assert_eq!(supervisor.server_count().await, 1);
     }
 }

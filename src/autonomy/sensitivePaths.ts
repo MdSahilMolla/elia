@@ -68,7 +68,7 @@ export function assertSafeFileAccess(path: string): void {
  * Shared by every "does this command disclose a protected path" check below.
  */
 const SENSITIVE_PATH_MENTION =
-  /\.env(?:\.[A-Za-z0-9._-]+)?\b|\.npmrc\b|\.pypirc\b|\.netrc\b|\.(?:pem|key|p12|pfx)\b|\.ssh(?:[\\/]|\b)|\bid_(?:rsa|dsa|ecdsa|ed25519)(?:\.pub)?\b|\b(?:credentials?|secrets?|tokens?|passwords?|shadow|passwd|cookies|login data|local state|web data)\b/i
+  /\.env(?:\.[A-Za-z0-9._-]+)?\b|\.npmrc\b|\.pypirc\b|\.netrc\b|\.(?:pem|key|p12|pfx)\b|\.git-credentials\b|\.aws(?:[\\/]|\b)|\.azure(?:[\\/]|\b)|\.docker(?:[\\/]|\b)|\.kube(?:[\\/]|\b)|\.gnupg(?:[\\/]|\b)|\.config[\\/]gcloud(?:[\\/]|\b)|\.ssh(?:[\\/]|\b)|\bid_(?:rsa|dsa|ecdsa|ed25519)(?:\.pub)?\b|\b(?:credentials?|secrets?|tokens?|passwords?|shadow|passwd|cookies|login data|local state|web data|environ|sudoers|sshd_config)\b/i
 
 /** Conservative shell check for common commands that would disclose protected local files. */
 export function commandMayReadSensitiveData(command: string): boolean {
