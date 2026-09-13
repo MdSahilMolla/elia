@@ -15,6 +15,6 @@
     "jsx": "react-jsx",
     "jsxImportSource": "react"
   },
-  "include": ["src/**/*.ts", "src/**/*.tsx"],
+  "include": ["src/**/*.ts", "src/**/*.tsx", "bin/**/*.ts", "scripts/**/*.ts"],
   "exclude": ["node_modules", "workspace", "legacy", "dist"]
 }

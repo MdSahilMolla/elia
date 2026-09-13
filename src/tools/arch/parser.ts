@@ -106,11 +106,15 @@ export async function closeProjectQuietly(handle: Pick<OpenProjectResult, 'api' 
   }
 }
 
-// The Go-native compiler exposes full data through per-kind typed getters, but
-// `forEachChild` only returns a subset of a node's children (e.g. a Block's
-// statements are NOT all enumerated, and declaration bodies are skipped). To
-// walk the tree reliably we enumerate children through the strong getters for
-// each syntax kind, paired with whichever children forEachChild still yields.
+// The Go-native compiler exposes full data through per-kind typed getters.
+// Early native previews' `forEachChild` returned only a subset of a node's
+// children (a Block's statements, declaration bodies), so the walk also reads
+// the strong getters for each syntax kind, paired with whatever forEachChild
+// yields (duplicates are dropped in `childrenOf`). On the pinned `typescript`
+// 7 client, forEachChild reaches every child the arch tests exercise even with
+// this map empty. The map stays as a guard against that regressing, so it
+// should cover every expression container an `import()` can sit in; the
+// "nested expression kinds" test in parser.test.ts pins those positions.
 const KIND_CHILDREN: Partial<Record<SyntaxKind, string[]>> = {
   [SyntaxKind.SourceFile]: ['statements'],
   [SyntaxKind.Block]: ['statements'],
@@ -169,6 +173,23 @@ const KIND_CHILDREN: Partial<Record<SyntaxKind, string[]>> = {
   [SyntaxKind.ArrowFunction]: ['name', 'typeParameters', 'parameters', 'body'],
   [SyntaxKind.ImportEqualsDeclaration]: ['name', 'moduleReference'],
   [SyntaxKind.ImportType]: ['qualifier', 'typeArguments'],
+  // Expression containers the map used to omit (L-35, I-11).
+  [SyntaxKind.ConditionalExpression]: ['condition', 'whenTrue', 'whenFalse'],
+  [SyntaxKind.TemplateExpression]: ['head', 'templateSpans'],
+  [SyntaxKind.TemplateSpan]: ['expression', 'literal'],
+  [SyntaxKind.TaggedTemplateExpression]: ['tag', 'typeArguments', 'template'],
+  [SyntaxKind.PostfixUnaryExpression]: ['operand'],
+  [SyntaxKind.YieldExpression]: ['expression'],
+  [SyntaxKind.Parameter]: ['name', 'type', 'initializer'],
+  [SyntaxKind.PropertyDeclaration]: ['name', 'type', 'initializer'],
+  [SyntaxKind.ComputedPropertyName]: ['expression'],
+  [SyntaxKind.ObjectBindingPattern]: ['elements'],
+  [SyntaxKind.ArrayBindingPattern]: ['elements'],
+  [SyntaxKind.BindingElement]: ['propertyName', 'name', 'initializer'],
+  [SyntaxKind.EnumMember]: ['name', 'initializer'],
+  [SyntaxKind.LabeledStatement]: ['label', 'statement'],
+  [SyntaxKind.ExportAssignment]: ['expression'],
+  [SyntaxKind.Decorator]: ['expression'],
 }
 
 /**

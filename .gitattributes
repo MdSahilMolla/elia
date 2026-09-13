@@ -11,3 +11,20 @@
 *.h     text eol=lf
 *.hpp   text eol=lf
 *.sh    text eol=lf
+
+# The TypeScript/JavaScript/Python/JSON side too. A Windows checkout otherwise
+# gets CRLF, and anything that reads these files as text and matches on `\n`
+# (source-scanning tests, fixtures, snapshot comparisons) behaves differently
+# there than on CI.
+*.ts    text eol=lf
+*.tsx   text eol=lf
+*.js    text eol=lf
+*.mjs   text eol=lf
+*.cjs   text eol=lf
+*.jsx   text eol=lf
+*.py    text eol=lf
+*.json  text eol=lf
+
+# Vendored upstream bytes stay exactly as shipped (this bundle has mixed line
+# endings; normalizing it would make it differ from the release it came from).
+src/vendor/pptxgen.cjs.js -text
