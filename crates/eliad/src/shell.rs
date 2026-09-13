@@ -327,6 +327,37 @@ struct MarkerRead {
     hit_eof: bool,
 }
 
+/// `read_line`, but the destination buffer never grows past `cap`: once a
+/// physical line's own bytes exceed it, the remainder up to (and including)
+/// the newline is still consumed from `reader` — so framing stays in sync —
+/// but discarded rather than allocated. `read_line` itself has no such bound,
+/// so a single huge physical line (minified JS, a large `git diff`, `type` of
+/// a multi-GB one-line dump) would otherwise be buffered in full before the
+/// caller's own `MAX_CAPTURE_BYTES` check ever runs.
+async fn read_line_bounded<R>(reader: &mut R, out: &mut String, cap: usize) -> Result<usize>
+where
+    R: AsyncBufReadExt + Unpin,
+{
+    let mut total = 0usize;
+    loop {
+        let available = reader.fill_buf().await.context("reading shell output")?;
+        if available.is_empty() {
+            return Ok(total);
+        }
+        let newline_at = available.iter().position(|&b| b == b'\n');
+        let chunk_len = newline_at.map(|pos| pos + 1).unwrap_or(available.len());
+        if out.len() < cap {
+            let take = chunk_len.min(cap - out.len());
+            out.push_str(&String::from_utf8_lossy(&available[..take]));
+        }
+        total += chunk_len;
+        reader.consume(chunk_len);
+        if newline_at.is_some() {
+            return Ok(total);
+        }
+    }
+}
+
 /// Read lines until the framed END marker. Everything between BEGIN and END is
 /// the payload; on stdout the integer after the END marker is the exit code.
 async fn read_until_marker<R>(
@@ -344,10 +375,7 @@ where
     let mut line = String::new();
     loop {
         line.clear();
-        let n = reader
-            .read_line(&mut line)
-            .await
-            .context("reading shell output")?;
+        let n = read_line_bounded(reader, &mut line, MAX_CAPTURE_BYTES).await?;
         if n == 0 {
             return Ok(MarkerRead {
                 payload,
@@ -547,5 +575,27 @@ mod tests {
         let res = pool.exec(sleep, ".", 30_000, rx).await.unwrap();
         assert!(matches!(res, Err(ExecStop::Cancelled)));
         assert_eq!(pool.worker_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn a_single_huge_physical_line_is_bounded_not_buffered_whole() {
+        let pool = ShellPool::new();
+        // One ~3 MB physical line (no embedded newline), well past
+        // MAX_CAPTURE_BYTES (2 MB) — this used to be buffered in full by
+        // `read_line` before the payload cap ever got a chance to apply.
+        let cmd = if cfg!(windows) {
+            "powershell -NoProfile -Command \"Write-Output ('a' * 3000000)\""
+        } else {
+            "head -c 3000000 /dev/zero | tr '\\0' 'a'; echo"
+        };
+        let out = run(&pool, cmd).await;
+        assert_eq!(out.exit_code, 0);
+        assert!(
+            out.stdout.len() <= MAX_CAPTURE_BYTES + 1024,
+            "payload should stay near the cap, got {} bytes",
+            out.stdout.len()
+        );
+        // Framing stayed in sync despite the truncation: the worker is reusable.
+        assert_eq!(pool.worker_count().await, 1);
     }
 }

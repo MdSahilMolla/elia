@@ -26,6 +26,15 @@ export interface ReliabilitySignal {
   sampled: number
   /** Fraction of sampled runs whose verdict contradicted the facts, 0–1. */
   contradictionRate: number
+  /**
+   * Fraction of sampled runs that actually reached `verified`, 0–1. This is
+   * deliberately a separate axis from `contradictionRate`: a run that is
+   * honestly reported `failed`/`aborted` adds nothing to the contradiction
+   * rate, so a project whose runs mostly fail — but fail honestly — used to
+   * read as `clean` ("track record is sound") with zero extra scrutiny. Both
+   * axes now feed the tier below.
+   */
+  successRate: number
   /** `clean` · `watch` (some drift) · `unreliable` (frequent over-claiming). */
   tier: 'insufficient-history' | 'clean' | 'watch' | 'unreliable'
   /** Extra adversarial reviewers to add on top of the profile default. */
@@ -40,11 +49,17 @@ export interface ReliabilitySignal {
 const CLEAN: ReliabilitySignal = {
   sampled: 0,
   contradictionRate: 0,
+  successRate: 0,
   tier: 'insufficient-history',
   extraReviewers: 0,
   strictCompletion: false,
   note: 'No completion-calibration history for this project yet.',
 }
+
+/** Below this fraction of recent runs actually reaching `verified`, completion
+ * itself is rare enough here to warrant the same scrutiny as over-claiming —
+ * even when every one of those runs was honestly reported as not-done. */
+const LOW_SUCCESS_THRESHOLD = 0.34
 
 export function reliabilitySignal(cwd = process.cwd()): ReliabilitySignal {
   return signalFromEntries(readCalibrationLog(cwd))
@@ -57,34 +72,43 @@ export function signalFromEntries(all: CalibrationEntry[]): ReliabilitySignal {
 
   const contradicting = recent.filter((e) => e.contradictions.length > 0).length
   const rate = contradicting / recent.length
+  const verified = recent.filter((e) => e.reportedState === 'verified').length
+  const successRate = verified / recent.length
+  const lowSuccess = successRate < LOW_SUCCESS_THRESHOLD
+  const successNote = `${verified}/${recent.length} recent run(s) actually reached "verified" (${pct(successRate)}).`
 
   if (rate >= 0.34) {
     return {
       sampled: recent.length,
       contradictionRate: rate,
+      successRate,
       tier: 'unreliable',
       extraReviewers: 2,
       strictCompletion: true,
       note: `Reliability: ${contradicting}/${recent.length} recent runs claimed more than the facts supported (${pct(rate)}). Treat every "done" here as unproven — widen the acceptance contract, require concrete evidence, and expect extra review.`,
     }
   }
-  if (rate >= 0.15) {
+  if (rate >= 0.15 || lowSuccess) {
     return {
       sampled: recent.length,
       contradictionRate: rate,
+      successRate,
       tier: 'watch',
       extraReviewers: 1,
       strictCompletion: true,
-      note: `Reliability: ${contradicting}/${recent.length} recent runs over-claimed completion (${pct(rate)}). Be precise about what "done" means for this run and back it with evidence.`,
+      note: rate >= 0.15
+        ? `Reliability: ${contradicting}/${recent.length} recent runs over-claimed completion (${pct(rate)}). Be precise about what "done" means for this run and back it with evidence.`
+        : `Reliability: verdicts have been honest (${pct(rate)} contradiction rate), but ${successNote} Do not assume this kind of task usually finishes — treat "should be straightforward" as a hypothesis, not a plan.`,
     }
   }
   return {
     sampled: recent.length,
     contradictionRate: rate,
+    successRate,
     tier: 'clean',
     extraReviewers: 0,
     strictCompletion: false,
-    note: `Reliability: ${recent.length} recent runs, ${contradicting} verdict/facts contradiction(s) (${pct(rate)}). Track record is sound.`,
+    note: `Reliability: ${recent.length} recent runs, ${contradicting} verdict/facts contradiction(s) (${pct(rate)}), ${successNote} Track record is sound.`,
   }
 }
 

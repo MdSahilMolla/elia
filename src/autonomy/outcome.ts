@@ -24,6 +24,35 @@ export interface CompletionInput {
   actionBudget?: { maxActions: number; consumed: number; exhausted: boolean; blockedByBudget: number }
 }
 
+/**
+ * The interactive REPL's fast-path verify gate (src/index.ts) only runs for
+ * non-escalated turns — an escalated turn hands off to the autonomous
+ * pipeline (autonomy/loop.ts) instead, which owns its own verify/review
+ * phases. Without this mapping, `verifyResult` in index.ts never left its
+ * 'none' default for an escalated turn, so `.elia/outcomes.jsonl` permanently
+ * recorded every autonomous build as unverified regardless of what the
+ * pipeline actually checked — and worse, a turn recorded as verify:"none"
+ * with aborted:false reads as "clean" to the lesson-efficacy system that
+ * consumes this record, so a run that never validated its own output (or
+ * was aborted mid-flight) was reinforced as a good example.
+ *
+ * `partial`/`blocked`/`failed` all map to `fail`: none of them is a proven
+ * verified result, and this record exists specifically to catch overclaiming
+ * rather than to distinguish shades of "not done" — see CompletionState.
+ */
+export interface EscalatedVerifyMapping {
+  /** `undefined` means "leave the caller's existing verifyResult untouched". */
+  verify: 'pass' | 'fail' | undefined
+  aborted: boolean
+}
+
+export function mapCompletionToVerify(state: CompletionState | undefined): EscalatedVerifyMapping {
+  if (state === 'verified') return { verify: 'pass', aborted: false }
+  if (state === 'aborted') return { verify: undefined, aborted: true }
+  if (state) return { verify: 'fail', aborted: false }
+  return { verify: undefined, aborted: false }
+}
+
 export function assessCompletion(input: CompletionInput): CompletionAssessment {
   const steps = input.graph?.nodes.filter((node) => node.kind === 'step' || node.kind === 'delegation') ?? []
   const completedSteps = steps.filter((node) => node.status === 'completed').length

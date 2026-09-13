@@ -2090,7 +2090,7 @@ async function runInteractive(): Promise<void> {
     approveAction: ActionApproval | undefined,
     signal: AbortSignal,
     uiHooks?: TurnUiHooks,
-  ): Promise<void> {
+  ): Promise<import('./autonomy/outcome.ts').CompletionState | undefined> {
     const { runAutonomousTask, autoApprove } = await import('./autonomy/loop.ts')
     const { setReportSink } = await import('./ui/report.ts')
     const { renderProposalSummary } = await import('./autonomy/proposal.ts')
@@ -2149,6 +2149,7 @@ async function runInteractive(): Promise<void> {
       messages.push({ role: 'assistant', content: [{ type: 'text', text: summary }] })
       sessionTranscript.notice(summary)
       note(summary, undefined, 'completed')
+      return result.completion.state
     } finally {
       setReportSink(undefined)
       approvalRl?.close()
@@ -2220,6 +2221,12 @@ async function runInteractive(): Promise<void> {
     // Ordered tool calls for this turn's trajectory row (the training dataset).
     const toolTrace: { name: string; ok: boolean }[] = []
     let verifyResult: import('./autonomy/outcomes.ts').VerifyResult = 'none'
+    // The fast-path verify gate further down only runs for non-escalated
+    // turns — an escalated (autonomous-pipeline) run maps its own completion
+    // verdict into verifyResult/escalatedAborted instead, so that outcomes.jsonl
+    // and lesson-efficacy no longer record every autonomous build as
+    // verify:"none"/clean regardless of what actually happened.
+    let escalatedAborted = false
     let repairAttempts = 0
     const unregisterControls = taskSessions.registerControls(task.id, {
       cancel: () => {
@@ -2293,7 +2300,11 @@ async function runInteractive(): Promise<void> {
         await runPersonaTurn(messages, persona, skillNames, controller.signal, uiHooks)
       } else if (autoEscalate && mode === 'dev' && !uiHooks?.planMode && escalation.escalate) {
         escalated = true
-        await runEscalatedTurn(userText, escalation.reason, approveAction, controller.signal, uiHooks)
+        const completionState = await runEscalatedTurn(userText, escalation.reason, approveAction, controller.signal, uiHooks)
+        const { mapCompletionToVerify } = await import('./autonomy/outcome.ts')
+        const mapped = mapCompletionToVerify(completionState)
+        if (mapped.verify) verifyResult = mapped.verify
+        escalatedAborted = mapped.aborted
       } else {
         const turnResult = await runModelTurn()
         if (turnResult.stopReason === 'aborted') stopRequested = true
@@ -2467,9 +2478,9 @@ async function runInteractive(): Promise<void> {
           toolErrors: toolErrorCount,
           verify: verifyResult,
           repairAttempts,
-          aborted: stopRequested || controller.signal.aborted,
+          aborted: stopRequested || controller.signal.aborted || escalatedAborted,
         })
-        const cleanTurn = toolErrorCount === 0 && editRetryCount === 0 && (verifyResult === 'pass' || verifyResult === 'none' || verifyResult === 'skipped') && !(stopRequested || controller.signal.aborted)
+        const cleanTurn = toolErrorCount === 0 && editRetryCount === 0 && (verifyResult === 'pass' || verifyResult === 'none' || verifyResult === 'skipped') && !(stopRequested || controller.signal.aborted || escalatedAborted)
         try {
           const { recordLessonExposure } = await import('./autonomy/lessonEfficacy.ts')
           const { consumeInjectedLessonKeys } = await import('./autonomy/lessons.ts')
@@ -2503,7 +2514,7 @@ async function runInteractive(): Promise<void> {
               editRetries: editRetryCount,
               verify: verifyResult,
               repairAttempts,
-              aborted: stopRequested || controller.signal.aborted,
+              aborted: stopRequested || controller.signal.aborted || escalatedAborted,
             }),
           })
         } catch {

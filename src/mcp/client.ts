@@ -208,7 +208,14 @@ export class McpClient implements McpTransport {
         }
       }
     } finally {
-      this.onTransportEnded(`MCP server "${this.name}" closed its stdout`)
+      // Whichever of pumpStdout/pumpStderr's read-loop resolves `done` first
+      // wins the race to call onTransportEnded (see its own comment) — but a
+      // crashed server's exit tears down both pipes together, and there is no
+      // guaranteed ordering between the two reads settling. If stdout's
+      // resolves first, `stderrTail` may already hold the crash reason even
+      // though pumpStderr's own loop hasn't reached its `finally` yet —
+      // include it here too instead of reporting a bare, contextless close.
+      this.onTransportEnded(`MCP server "${this.name}" closed its stdout${this.stderrTail ? `: ${this.stderrTail.trim()}` : ''}`)
     }
   }
 

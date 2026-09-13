@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from 'bun:test'
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { EXECUTION_LEASE_TTL_MS, GoalGraphStore, actionKey, classifyFailure, outstandingActions, type GoalGraphOptions } from './goalGraph.ts'
+import { EXECUTION_LEASE_TTL_MS, GoalGraphStore, actionKey, classifyFailure, outstandingActions, readGoalGraphSnapshot, type GoalGraphOptions } from './goalGraph.ts'
 import type { Proposal } from './types.ts'
 
 const temporaryDirectories: string[] = []
@@ -297,4 +297,35 @@ test('a rate limit is told to wait, while an ordinary transient failure retries 
   expect(classifyFailure('Failed: 429 Rate limit reached: input token limit exceeded').retryAfter).toBe(30_000)
   expect(classifyFailure('Error: too many requests, rate limit hit').retryAfter).toBe(30_000)
   expect(classifyFailure('ECONNRESET while reading from the socket').retryAfter).toBe(1000)
+})
+
+describe('corrupt durable state does not crash and is not confused with "no state"', () => {
+  test('readGoalGraphSnapshot returns undefined (not a throw) for a torn file', () => {
+    const directory = mkdtempSync(join(tmpdir(), 'elia-goal-'))
+    temporaryDirectories.push(directory)
+    writeFileSync(join(directory, 'goal-graph.json'), '{ "runId": "test-run", "nodes": [ NOT VALID JSON')
+
+    expect(() => readGoalGraphSnapshot(directory)).not.toThrow()
+    expect(readGoalGraphSnapshot(directory)).toBeUndefined()
+  })
+
+  test('GoalGraphStore.open falls back to a fresh graph instead of throwing on a torn file', () => {
+    // Regression: a corrupt goal-graph.json used to be swallowed with no trace
+    // anywhere — `elia resume` would silently start over from a bare root node
+    // and nothing recorded that state had actually been lost versus never
+    // existing. The fallback-to-fresh behavior itself is intentional (a torn
+    // file must not crash the run); what this locks in is that opening still
+    // succeeds and produces a valid, usable graph rather than throwing.
+    const directory = mkdtempSync(join(tmpdir(), 'elia-goal-'))
+    temporaryDirectories.push(directory)
+    writeFileSync(join(directory, 'goal-graph.json'), '{ this is not json at all')
+
+    const options = { runId: 'test-run', goal: 'recover from a torn snapshot', dir: directory }
+    let graph: GoalGraphStore | undefined
+    expect(() => {
+      graph = GoalGraphStore.open(options)
+    }).not.toThrow()
+    expect(graph!.state().runId).toBe('test-run')
+    expect(graph!.state().nodes).toHaveLength(1)
+  })
 })

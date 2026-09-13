@@ -1,6 +1,28 @@
 import { expect, test } from 'bun:test'
-import { assessCompletion } from './outcome.ts'
+import { assessCompletion, mapCompletionToVerify } from './outcome.ts'
 import type { GoalGraphSnapshot } from './goalGraph.ts'
+
+test('mapCompletionToVerify: an escalated run\'s real verdict reaches outcomes.jsonl instead of always "none"', () => {
+  // Regression for: every autonomous (escalated) turn permanently recorded
+  // verify:"none" in .elia/outcomes.jsonl regardless of the autonomous
+  // pipeline's actual completion verdict, because index.ts only ever
+  // reassigned verifyResult inside its non-escalated fast-path verify gate.
+  expect(mapCompletionToVerify('verified')).toEqual({ verify: 'pass', aborted: false })
+  expect(mapCompletionToVerify('partial')).toEqual({ verify: 'fail', aborted: false })
+  expect(mapCompletionToVerify('blocked')).toEqual({ verify: 'fail', aborted: false })
+  expect(mapCompletionToVerify('failed')).toEqual({ verify: 'fail', aborted: false })
+})
+
+test('mapCompletionToVerify: an aborted run is flagged aborted, not silently "clean"', () => {
+  // Regression for: an aborted escalated run left verifyResult at its 'none'
+  // default with aborted:false, which the lesson-efficacy "clean turn" check
+  // (verify is pass/none/skipped AND not aborted) read as a clean example.
+  expect(mapCompletionToVerify('aborted')).toEqual({ verify: undefined, aborted: true })
+})
+
+test('mapCompletionToVerify: no completion state (non-escalated turn) leaves the caller untouched', () => {
+  expect(mapCompletionToVerify(undefined)).toEqual({ verify: undefined, aborted: false })
+})
 
 const graph = (statuses: Array<'completed' | 'ready'>, approvalStatus: 'approved' | 'pending' = 'approved'): GoalGraphSnapshot => ({
   version: 2,
