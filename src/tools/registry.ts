@@ -155,8 +155,10 @@ export function getSynthesizedTools(): Tool[] {
  * for the rest of the process — `bun test` shares one module registry across
  * every file. Linux `readdir` is not sorted, so the leaked tool reached
  * governor.test.ts's "every registered tool declares a contract" assertion
- * there and not on Windows: a CI-only failure with no CI-only cause. Any test
- * that loads skills must call this afterwards.
+ * there and not on Windows: a CI-only failure with no CI-only cause.
+ * `loadSkills()` now calls this on entry so the registry can't accumulate
+ * across reloads; call it directly only when a test needs isolation without
+ * going through `loadSkills()`.
  */
 export function clearSynthesizedTools(): void {
   synthesizedTools.length = 0
