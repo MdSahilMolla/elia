@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import { paths } from '../config.ts'
 import type { Tool } from './types.ts'
 import { readBoundedOutput, terminateProcessGroup } from '../shell.ts'
+import { redactSecrets } from '../ui/redact.ts'
 
 export type CommunicationChannel = 'email' | 'message' | 'calendar' | 'slack' | 'sms' | 'custom'
 type CommunicationStatus = 'draft' | 'sending' | 'sent' | 'verified' | 'send_failed' | 'cancelled'
@@ -220,7 +221,7 @@ async function sendDraft(draft: CommunicationDraft): Promise<string> {
     return `Draft ${draft.id} sent through ${draft.channel}. The connector accepted the request${externalId ? ` with external id ${externalId}` : ''}. Run communication verify with draftId=${draft.id} for delivery evidence.`
   } catch (error) {
     draft.status = 'send_failed'
-    draft.error = error instanceof Error ? error.message.slice(0, 2000) : String(error).slice(0, 2000)
+    draft.error = redactSecrets(error instanceof Error ? error.message : String(error)).slice(0, 2000)
     draft.updatedAt = new Date().toISOString()
     saveDraft(draft)
     return `Draft ${draft.id} was not confirmed as sent: ${draft.error}. Do not blindly retry; inspect the connector or verify the external system first.`
@@ -238,9 +239,9 @@ async function verifyDraft(draft: CommunicationDraft): Promise<string> {
     draft.verifiedAt = new Date().toISOString()
     draft.updatedAt = draft.verifiedAt
     saveDraft(draft)
-    return `Delivery verification succeeded for draft ${draft.id}: ${JSON.stringify(result.result ?? result.output ?? result)}`
+    return `Delivery verification succeeded for draft ${draft.id}: ${redactSecrets(JSON.stringify(result.result ?? result.output ?? result))}`
   } catch (error) {
-    return `Delivery verification did not succeed for draft ${draft.id}: ${error instanceof Error ? error.message : String(error)}. The send receipt remains preserved.`
+    return `Delivery verification did not succeed for draft ${draft.id}: ${redactSecrets(error instanceof Error ? error.message : String(error))}. The send receipt remains preserved.`
   }
 }
 
@@ -311,20 +312,29 @@ async function collectAdapterProcess(proc: Bun.Subprocess): Promise<Communicatio
       readBoundedOutput(proc.stderr as ReadableStream<Uint8Array>, MAX_COMMUNICATION_OUTPUT_LENGTH),
       proc.exited,
     ])
-    if (exitCode !== 0) throw new Error(`communication adapter exited with code ${exitCode}${stderr.trim() ? `: ${stderr.trim()}` : ''}`)
+    // Adapter stderr routinely carries the connector's own diagnostics — auth
+    // headers, tokens in URLs — and it ends up both in the draft on disk and in
+    // the model's context. Redact it the way httpProbe redacts its traffic.
+    if (exitCode !== 0) throw new Error(`communication adapter exited with code ${exitCode}${stderr.trim() ? `: ${redactSecrets(stderr.trim())}` : ''}`)
+    // "Never claim delivery without a connector response": exit 0 alone proves
+    // only that the adapter ran, not that anything was accepted. The receipt is
+    // a JSON object on the last stdout line; anything else is not a receipt.
     const raw = stdout.trim()
-    if (!raw) return { ok: true, result: 'adapter returned no response' }
-    const lastLine = raw.split('\n').at(-1) ?? raw
+    if (!raw) throw new Error('communication adapter exited 0 but returned no connector response, so delivery is unconfirmed')
+    const lastLine = raw.split('\n').at(-1)?.trim() ?? raw
+    let parsed: unknown
     try {
-      const result = JSON.parse(lastLine) as CommunicationResult
-      if (result.ok === false || result.error) throw new Error(result.error ?? 'communication adapter reported failure')
-      completed = true
-      return result
-    } catch (error) {
-      if (error instanceof Error && error.message !== 'Unexpected end of JSON input' && !error.message.startsWith('Unexpected token')) throw error
-      completed = true
-      return { ok: true, result: raw }
+      parsed = JSON.parse(lastLine)
+    } catch {
+      throw new Error(`communication adapter exited 0 but its last output line is not a JSON connector response, so delivery is unconfirmed: ${redactSecrets(lastLine).slice(0, 500)}`)
     }
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+      throw new Error('communication adapter response was not a JSON object, so delivery is unconfirmed')
+    }
+    const result = parsed as CommunicationResult
+    if (result.ok === false || result.error) throw new Error(redactSecrets(String(result.error ?? 'communication adapter reported failure')))
+    completed = true
+    return result
   } finally {
     clearTimeout(timer)
     if (!completed) terminateProcessGroup(proc)

@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test'
 import { isProviderPresetConfigured, listProviderModels, providerPresetDefaultModel, PROVIDER_PRESET_NAMES, tryResolveProvider, validateModelId } from './registry.ts'
+import { publicFetchTestHooks } from '../networkPolicy.ts'
 
 const originalProvider = process.env.ELIA_PROVIDER
 const originalModel = process.env.ELIA_MODEL
@@ -116,14 +117,13 @@ test('Codex subscription is an explicit provider with an account-managed catalog
 
 test('model discovery lists and sorts provider models without changing chat configuration', async () => {
   process.env.OPENROUTER_API_KEY = 'test-openrouter-key'
-  const originalFetch = globalThis.fetch
   let requestedURL = ''
   let authorization = ''
-  globalThis.fetch = (async (input, init) => {
+  publicFetchTestHooks.transport = async (input, init) => {
     requestedURL = String(input)
     authorization = new Headers(init?.headers).get('authorization') ?? ''
     return new Response(JSON.stringify({ data: [{ id: 'zeta-model' }, { id: 'alpha-model', name: 'Alpha' }, { id: 42 }] }), { status: 200 })
-  }) as typeof fetch
+  }
   try {
     const result = await listProviderModels('openrouter')
     expect(requestedURL).toBe('https://openrouter.ai/api/v1/models')
@@ -132,7 +132,7 @@ test('model discovery lists and sorts provider models without changing chat conf
     expect(result.models[0]?.name).toBe('Alpha')
     expect(result.error).toBeUndefined()
   } finally {
-    globalThis.fetch = originalFetch
+    publicFetchTestHooks.transport = undefined
   }
 })
 

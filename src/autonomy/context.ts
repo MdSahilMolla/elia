@@ -55,9 +55,26 @@ export function resolvePath(path: string): string {
  * write outside the workspace. The returned path is canonical, which avoids
  * continuing through a checked symlink after validation.
  */
-export function resolveWorkspacePath(inputPath: string, cwd = currentAgent().cwd ?? process.cwd()): string {
+/**
+ * The path a tool argument names. Surrounding whitespace is almost always a
+ * model's formatting slip (`"src/a.ts\n"`), so it is trimmed — unless an entry
+ * with the exact untrimmed name really exists, in which case trimming would
+ * make a file like ` notes.md` impossible to address at all.
+ */
+function toolPathInput(inputPath: string, cwd: string): string {
   if (typeof inputPath !== 'string' || inputPath.trim().length === 0) throw new Error('path must be a non-empty string')
-  const raw = inputPath.trim()
+  const trimmed = inputPath.trim()
+  if (trimmed === inputPath) return trimmed
+  try {
+    lstatSync(resolve(cwd, inputPath))
+    return inputPath
+  } catch {
+    return trimmed
+  }
+}
+
+export function resolveWorkspacePath(inputPath: string, cwd = currentAgent().cwd ?? process.cwd()): string {
+  const raw = toolPathInput(inputPath, cwd)
   const root = canonicalExistingPath(resolve(cwd))
   const target = resolve(cwd, raw)
   const canonicalTarget = canonicalPathWithExistingParent(target)
@@ -67,8 +84,7 @@ export function resolveWorkspacePath(inputPath: string, cwd = currentAgent().cwd
 
 /** Resolve a path inside the active workspace or one of explicitly designated safe roots. */
 export function resolveAllowedWorkspacePath(inputPath: string, cwd = currentAgent().cwd ?? process.cwd(), allowedRoots: string[] = []): string {
-  if (typeof inputPath !== 'string' || inputPath.trim().length === 0) throw new Error('path must be a non-empty string')
-  const raw = inputPath.trim()
+  const raw = toolPathInput(inputPath, cwd)
   const canonicalTarget = canonicalPathWithExistingParent(resolve(cwd, raw))
   const roots = [resolve(cwd), ...allowedRoots.map((root) => resolve(root))]
   if (roots.some((root) => isWithin(canonicalPathWithExistingParent(root), canonicalTarget))) return canonicalTarget

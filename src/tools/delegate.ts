@@ -27,6 +27,8 @@ export interface DelegationToolOptions {
   cwd?: string
   signal?: AbortSignal
   onTool?: (event: Parameters<NonNullable<import('../agentLoop.ts').RunAgentLoopOptions['onTool']>>[0]) => void
+  /** Test seam: replaces fleet.ts's runFleet. */
+  runFleet?: typeof import('../autonomy/fleet.ts').runFleet
 }
 
 interface ChildAssignmentInput {
@@ -128,7 +130,9 @@ export function createDelegationTool(options: DelegationToolOptions): Tool {
         if (ids.has(assignment.id)) throw new Error(`duplicate child assignment id: ${assignment.id}`)
         ids.add(assignment.id)
       }
-      const { planWaves, runFleet } = await import('../autonomy/fleet.ts')
+      const fleet = await import('../autonomy/fleet.ts')
+      const { planWaves } = fleet
+      const runFleet = options.runFleet ?? fleet.runFleet
       const planned = planWaves(assignments.map((assignment) => ({
         id: assignment.id,
         title: assignment.title,
@@ -168,49 +172,59 @@ export function createDelegationTool(options: DelegationToolOptions): Tool {
 
       const allResults: Array<{ id: string; title: string; role: RoleName; ok: boolean; report: string; steps: number; elapsedMs: number }> = []
       let priorReports = ''
-      for (const [waveIndex, wave] of planned.waves.entries()) {
-        if (options.signal?.aborted) break
-        const waveBriefing = [
-          sharedBriefing,
-          priorReports ? `## Reports from completed child wave(s)\n${priorReports}` : undefined,
-          `## Delegation wave\nThis is wave ${waveIndex + 1} of ${planned.waves.length}. Independent assignments in this wave are running in parallel.`,
-        ].filter(Boolean).join('\n\n')
-        const result = await runFleet({
-          assignments: wave,
-          briefing: redactText(waveBriefing, MAX_DELEGATION_CONTEXT),
-          concurrency: Math.min(4, wave.length),
-          showBoard: false,
-          cwd: options.cwd ?? parent.cwd,
-          runId: options.runId,
-          governor: options.governor,
-          graph: options.graph,
-          parentNodeId: options.parentNodeId,
-          delegationDepth: options.depth + 1,
-          journal: options.journal,
-          signal: options.signal,
-          onTool: options.onTool,
-          wave: waveIndex + 1,
-        })
-        for (const child of result.results) {
-          const report = redactText(child.report, 3_000)
-          allResults.push({ id: child.id, title: child.title, role: child.role, ok: child.ok, report, steps: child.steps, elapsedMs: child.elapsedMs })
+      let fleetError: unknown
+      const unrunAssignments = () => {
+        const returned = new Set(allResults.map((child) => child.id))
+        return assignments.filter((assignment) => !returned.has(assignment.id)).map((assignment) => ({ id: assignment.id, title: assignment.title, role: assignment.role }))
+      }
+      try {
+        for (const [waveIndex, wave] of planned.waves.entries()) {
+          if (options.signal?.aborted) break
+          const waveBriefing = [
+            sharedBriefing,
+            priorReports ? `## Reports from completed child wave(s)\n${priorReports}` : undefined,
+            `## Delegation wave\nThis is wave ${waveIndex + 1} of ${planned.waves.length}. Independent assignments in this wave are running in parallel.`,
+          ].filter(Boolean).join('\n\n')
+          const result = await runFleet({
+            assignments: wave,
+            briefing: redactText(waveBriefing, MAX_DELEGATION_CONTEXT),
+            concurrency: Math.min(4, wave.length),
+            showBoard: false,
+            cwd: options.cwd ?? parent.cwd,
+            runId: options.runId,
+            governor: options.governor,
+            graph: options.graph,
+            parentNodeId: options.parentNodeId,
+            delegationDepth: options.depth + 1,
+            journal: options.journal,
+            signal: options.signal,
+            onTool: options.onTool,
+            wave: waveIndex + 1,
+          })
+          for (const child of result.results) {
+            const report = redactText(child.report, 3_000)
+            allResults.push({ id: child.id, title: child.title, role: child.role, ok: child.ok, report, steps: child.steps, elapsedMs: child.elapsedMs })
+          }
+          priorReports = redactText(allResults.map((child) => `### ${child.title} (${child.role})\n${child.report}`).join('\n\n'), MAX_DELEGATION_CONTEXT)
         }
-        priorReports = redactText(allResults.map((child) => `### ${child.title} (${child.role})\n${child.report}`).join('\n\n'), MAX_DELEGATION_CONTEXT)
+      } catch (error) {
+        fleetError = error
+        throw error
+      } finally {
+        // Always close the delegation in the journal — a runFleet that throws
+        // mid-wave must still leave a delegation-end saying what came back and
+        // which assignments never ran, or the record just stops at "started".
+        const children = allResults.map((child) => ({ id: child.id, role: child.role, ok: child.ok, steps: child.steps, elapsedMs: child.elapsedMs }))
+        const unrun = unrunAssignments()
+        const error = fleetError === undefined ? undefined : redactText(fleetError instanceof Error ? fleetError.message : String(fleetError), 2_000)
+        options.journal?.append('delegation-end', { parent: options.parentName, children, unrun, ...(error ? { error } : {}) })
+        if (machineReadable) emitEvent('delegation_finished', { parent: options.parentName, children, unrun, ...(error ? { error } : {}) })
       }
 
-      options.journal?.append('delegation-end', {
-        parent: options.parentName,
-        children: allResults.map((child) => ({ id: child.id, role: child.role, ok: child.ok, steps: child.steps, elapsedMs: child.elapsedMs })),
-      })
-      if (machineReadable) {
-        emitEvent('delegation_finished', {
-          parent: options.parentName,
-          children: allResults.map((child) => ({ id: child.id, role: child.role, ok: child.ok, steps: child.steps, elapsedMs: child.elapsedMs })),
-        })
-      }
-
+      const unrun = unrunAssignments()
       const status = options.signal?.aborted ? 'aborted' : allResults.every((child) => child.ok) ? 'completed' : 'completed with child failures'
-      return `Delegation ${status}. ${allResults.length}/${assignments.length} child tasks returned.\n\n${allResults.map((child) => `[${child.ok ? 'ok' : 'failed'}] ${child.id} — ${child.title} (${child.role}, ${child.steps} steps, ${(child.elapsedMs / 1000).toFixed(1)}s)\n${child.report}`).join('\n\n')}`
+      const unrunNote = unrun.length > 0 ? `\n\nNot run: ${unrun.map((assignment) => `${assignment.id} — ${assignment.title} (${assignment.role})`).join('; ')}` : ''
+      return `Delegation ${status}. ${allResults.length}/${assignments.length} child tasks returned.${unrunNote}\n\n${allResults.map((child) => `[${child.ok ? 'ok' : 'failed'}] ${child.id} — ${child.title} (${child.role}, ${child.steps} steps, ${(child.elapsedMs / 1000).toFixed(1)}s)\n${child.report}`).join('\n\n')}`
     },
   }
 }

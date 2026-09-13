@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { withAgentIdentity } from '../autonomy/context.ts'
@@ -17,6 +17,19 @@ describe('deployment tool', () => {
       expect(result.notes.join(' ')).toContain('linked')
       expect(existsSync(join(cwd, '.elia', 'deployments.jsonl'))).toBe(true)
       expect(readFileSync(join(cwd, '.elia', 'deployments.jsonl'), 'utf8')).toContain('"action":"plan"')
+    } finally {
+      rmSync(cwd, { recursive: true, force: true })
+    }
+  })
+
+  // POSIX permission bits; Windows has no equivalent chmod semantics.
+  test.if(process.platform !== 'win32')('receipts are written owner-only, like every other .elia state file', async () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'elia-deployment-'))
+    try {
+      writeFileSync(join(cwd, 'package.json'), JSON.stringify({ scripts: { build: 'vite build' } }))
+      await withAgentIdentity({ name: 'test', role: 'lead', cwd }, () => deploymentTool.execute({ action: 'plan', provider: 'vercel', target: 'preview' }))
+      expect(statSync(join(cwd, '.elia', 'deployments.jsonl')).mode & 0o777).toBe(0o600)
+      expect(statSync(join(cwd, '.elia')).mode & 0o777).toBe(0o700)
     } finally {
       rmSync(cwd, { recursive: true, force: true })
     }

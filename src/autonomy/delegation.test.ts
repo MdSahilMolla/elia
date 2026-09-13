@@ -34,6 +34,29 @@ describe('hierarchical delegation', () => {
     ] })).rejects.toThrow('dependency cycle')
   })
 
+  test('a runFleet that throws mid-delegation still journals delegation-end and names the unrun assignments', async () => {
+    const events: Array<{ kind: string; data: Record<string, unknown> }> = []
+    const journal = { append: (kind: string, data: Record<string, unknown> = {}) => { events.push({ kind, data }); return { kind, data } } } as never
+    let wave = 0
+    const tool = createDelegationTool({
+      parentRole: 'frontend', parentName: 'frontend#1', depth: 0, journal,
+      runFleet: (async (options: { assignments: Array<{ id: string; title: string; role: string }> }) => {
+        wave++
+        if (wave === 2) throw new Error('fleet exploded')
+        return { results: options.assignments.map((a) => ({ id: a.id, title: a.title, role: a.role, ok: true, report: 'done', steps: 1, elapsedMs: 5 })) }
+      }) as never,
+    })
+    await expect(tool.execute({ assignments: [
+      { id: 'design', title: 'Design', role: 'designer', prompt: 'a' },
+      { id: 'tests', title: 'Tests', role: 'tester', prompt: 'b', dependsOn: ['design'] },
+    ] })).rejects.toThrow('fleet exploded')
+    const end = events.find((event) => event.kind === 'delegation-end')
+    expect(end).toBeDefined()
+    expect(end!.data.children).toEqual([{ id: 'design', role: 'designer', ok: true, steps: 1, elapsedMs: 5 }])
+    expect(end!.data.unrun).toEqual([{ id: 'tests', title: 'Tests', role: 'tester' }])
+    expect(end!.data.error).toBe('fleet exploded')
+  })
+
   test('persists a child node under its lead and preserves sibling dependencies', () => {
     const dir = mkdtempSync(join(tmpdir(), 'elia-delegation-'))
     temporaryDirectories.push(dir)

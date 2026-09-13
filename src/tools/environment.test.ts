@@ -1,7 +1,9 @@
 import { afterAll, beforeAll, expect, test } from 'bun:test'
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { withAgentIdentity } from '../autonomy/context.ts'
-import { environmentTool } from './environment.ts'
+import { environmentTool, versionOf } from './environment.ts'
 import { setExecForTests } from '../github/exec.ts'
 import { resetGitHubContextCache } from '../github/context.ts'
 
@@ -52,6 +54,22 @@ test('environment discovery reports project, git, runtimes, and redacted capabil
   expect(Object.values(result.capabilityReadiness).every((item) => !item.basis.match(/sk-|AIza|Bearer\s+\S+/i))).toBe(true)
   expect(result.browser.transports).toEqual({ mcp: Boolean(process.env.ELIA_BROWSER_MCP_SERVER), bridge: Boolean(process.env.ELIA_BROWSER_BRIDGE_COMMAND), cdp: Boolean(process.env.ELIA_BROWSER_CDP_URL) })
   expect(result.limitations.some((item) => item.includes('Secret values are never returned'))).toBe(true)
+})
+
+// A POSIX shell script stands in for a runtime whose `--version` never returns.
+test.if(process.platform !== 'win32')('a hung --version is abandoned after the timeout instead of blocking the tool', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'elia-hang-'))
+  try {
+    const hang = join(dir, 'hang')
+    // `exec` so the killed process is the one holding the stdout pipe.
+    writeFileSync(hang, '#!/bin/sh\nexec sleep 30\n')
+    chmodSync(hang, 0o755)
+    const started = Date.now()
+    expect(versionOf(hang, 300)).toBe('')
+    expect(Date.now() - started).toBeLessThan(5_000)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
 })
 
 test('environment discovery does not require a configured browser or provider', async () => {

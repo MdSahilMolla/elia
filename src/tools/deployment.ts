@@ -1,5 +1,7 @@
-import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { appendSecureFile } from '../securePersistence.ts'
+import { redactSecrets } from '../ui/redact.ts'
 import { currentAgent } from '../autonomy/context.ts'
 import { clampOutput, runShell } from '../shell.ts'
 import type { Tool } from './types.ts'
@@ -378,9 +380,10 @@ function tryJson(value: string): Record<string, unknown> | undefined {
 
 function recordReceipt(receipt: DeploymentReceipt): void {
   try {
-    const path = join(receipt.cwd, '.elia', 'deployments.jsonl')
-    mkdirSync(join(receipt.cwd, '.elia'), { recursive: true })
-    appendFileSync(path, `${JSON.stringify(receipt)}\n`)
+    // Same hardening as every other .elia state writer: owner-only file and
+    // directory, and secrets a CLI echoed into its output (deploy tokens,
+    // authenticated URLs) scrubbed before they are kept on disk.
+    appendSecureFile(join(receipt.cwd, '.elia', 'deployments.jsonl'), `${redactSecrets(JSON.stringify(receipt))}\n`)
   } catch {
     // A receipt failure must not transform an otherwise completed deployment into a failure.
   }

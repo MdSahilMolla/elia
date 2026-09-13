@@ -1,5 +1,70 @@
 import { expect, test } from 'bun:test'
-import { assertProviderEndpoint, assertPublicNetworkUrl, validateNetworkUrl } from './networkPolicy.ts'
+import http from 'node:http'
+import type { AddressInfo } from 'node:net'
+import { assertProviderEndpoint, assertPublicNetworkUrl, publicAddressLookup, publicFetch, validateNetworkUrl } from './networkPolicy.ts'
+
+async function withLocalServer<T>(run: (port: number, hits: () => number) => Promise<T>): Promise<T> {
+  let hits = 0
+  const server = http.createServer((req, res) => {
+    hits++
+    res.setHeader('content-type', 'text/plain')
+    res.end(`host=${req.headers.host}`)
+  })
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()))
+  try {
+    return await run((server.address() as AddressInfo).port, () => hits)
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()))
+  }
+}
+
+function getThrough(port: number, lookup: ReturnType<typeof publicAddressLookup>): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const req = http.request({ host: 'rebind.example', port, path: '/', lookup }, (res) => {
+      let body = ''
+      res.on('data', (chunk) => (body += chunk))
+      res.on('end', () => resolve(body))
+    })
+    req.on('error', reject)
+    req.end()
+  })
+}
+
+test('the connection-time lookup refuses a name that rebinds to a private address', async () => {
+  // The rebinding shape: an earlier check saw a public answer, but by connect
+  // time the same name resolves to loopback. The lookup the socket actually
+  // uses must catch it — no request may reach the private server.
+  await withLocalServer(async (port, hits) => {
+    const rebinding = publicAddressLookup({}, async () => [{ address: '127.0.0.1', family: 4 }])
+    await expect(getThrough(port, rebinding)).rejects.toThrow('private or local')
+    expect(hits()).toBe(0)
+  })
+})
+
+test('the connection-time lookup refuses when any one answer is private', async () => {
+  await withLocalServer(async (port, hits) => {
+    const mixed = publicAddressLookup({}, async () => [{ address: '93.184.216.34', family: 4 }, { address: '10.0.0.5', family: 4 }])
+    await expect(getThrough(port, mixed)).rejects.toThrow('private or local')
+    expect(hits()).toBe(0)
+  })
+})
+
+test('the connection-time lookup connects to exactly the address it validated, keeping the original Host', async () => {
+  // An allowed answer is passed straight to the socket — this one is loopback
+  // only because the test's server lives there; allowExplicitLocal+localhost
+  // is the one configuration where that is legitimate.
+  await withLocalServer(async (port) => {
+    const body = await publicFetch(`http://localhost:${port}/`, { policy: { allowExplicitLocal: true } }).then((r) => r.text())
+    expect(body).toBe(`host=localhost:${port}`)
+  })
+})
+
+test('publicFetch refuses a local target without the explicit opt-in', async () => {
+  await withLocalServer(async (port, hits) => {
+    await expect(publicFetch(`http://localhost:${port}/`)).rejects.toThrow('private or local')
+    expect(hits()).toBe(0)
+  })
+})
 
 test('network URL validation rejects unsafe schemes, credentials, and literal internal targets', () => {
   for (const url of [

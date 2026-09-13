@@ -3,7 +3,7 @@ import type { Tool } from './types.ts'
 const SEARCH_TIMEOUT_MS = 20_000
 const MAX_QUERY_LENGTH = 2_000
 type SearchProvider = 'brave' | 'exa' | 'serper'
-interface SearchResult { title: string; url: string; snippet: string; publishedAt?: string; author?: string }
+interface SearchResult { title: string; url: string; snippet: string; publishedAt?: string; age?: string; author?: string }
 
 function providerKey(provider: SearchProvider): string | undefined {
   if (provider === 'exa') return process.env.EXA_API_KEY?.trim()
@@ -35,17 +35,73 @@ function isoDate(input: unknown, name: string): string | undefined {
   return new Date(input).toISOString()
 }
 
+/** A search API page is tens of KB; anything past this is not a search result worth buffering. */
+const MAX_RESPONSE_BYTES = 5_000_000
+
+async function readBoundedBytes(response: Response, maxBytes: number): Promise<string> {
+  if (!response.body) return ''
+  const reader = response.body.getReader()
+  const chunks: Uint8Array[] = []
+  let total = 0
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      total += value.byteLength
+      if (total > maxBytes) {
+        await reader.cancel()
+        throw new Error(`web_search failed: provider response exceeded ${maxBytes} bytes`)
+      }
+      chunks.push(value)
+    }
+  } finally {
+    reader.releaseLock()
+  }
+  return Buffer.concat(chunks).toString('utf8')
+}
+
 async function requestJson(url: string, init: RequestInit): Promise<Record<string, unknown>> {
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), SEARCH_TIMEOUT_MS)
   try {
     const response = await fetch(url, { ...init, signal: controller.signal })
     if (!response.ok) throw new Error(`web_search failed: ${response.status} ${response.statusText}`)
-    return await response.json() as Record<string, unknown>
+    const text = await readBoundedBytes(response, MAX_RESPONSE_BYTES)
+    let data: unknown
+    try {
+      data = JSON.parse(text)
+    } catch {
+      throw new Error('web_search failed: provider returned a non-JSON response')
+    }
+    if (!isRecord(data)) throw new Error('web_search failed: provider returned a non-object JSON response')
+    return data
   } catch (error) {
     if (error instanceof Error && error.message.startsWith('web_search failed:')) throw error
     throw new Error(`web_search request failed: ${error instanceof Error ? error.message : String(error)}`)
   } finally { clearTimeout(timeout) }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function records(value: unknown): Record<string, unknown>[] {
+  return Array.isArray(value) ? value.filter(isRecord) : []
+}
+
+function str(value: unknown): string | undefined {
+  return typeof value === 'string' ? value : undefined
+}
+
+/**
+ * Only an absolute date belongs in `publishedAt`. Providers also hand back
+ * relative labels ("3 days ago") that are relative to *their* crawl, not to
+ * now — those are kept, but as an age label rather than a date claim.
+ */
+function dated(value: unknown): Pick<SearchResult, 'publishedAt' | 'age'> {
+  const text = str(value)?.trim()
+  if (!text) return {}
+  return Number.isFinite(Date.parse(text)) ? { publishedAt: text } : { age: text }
 }
 
 /** Server-authoritative recency: the model cannot be trusted to compute "last N days" from a date it may have wrong. */
@@ -69,13 +125,20 @@ async function braveSearch(query: string, count: number, include?: string[], exc
   const freshness = braveFreshness(recencyDays)
   if (freshness) url.searchParams.set('freshness', freshness)
   const data = await requestJson(url.toString(), { headers: { Accept: 'application/json', 'X-Subscription-Token': providerKey('brave')! } })
-  const web = data.web as { results?: Array<{ title?: string; url?: string; description?: string; age?: string }> } | undefined
-  return (web?.results ?? []).map((r) => ({ title: r.title ?? '(untitled)', url: r.url ?? '', snippet: stripTags(r.description ?? ''), publishedAt: r.age }))
+  // Brave's `age` is usually relative ("3 days ago"); `page_age` is the
+  // absolute timestamp when it has one.
+  return records(isRecord(data.web) ? data.web.results : undefined).map((r) => {
+    const absolute = dated(r.page_age)
+    return {
+      title: str(r.title) ?? '(untitled)', url: str(r.url) ?? '', snippet: stripTags(str(r.description) ?? ''),
+      ...(absolute.publishedAt ? absolute : dated(r.age)),
+    }
+  })
 }
 
 async function exaSearch(query: string, count: number, include?: string[], exclude?: string[], start?: string, end?: string): Promise<SearchResult[]> {
   const data = await requestJson('https://api.exa.ai/search', { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-api-key': providerKey('exa')! }, body: JSON.stringify({ query, numResults: count, type: 'auto', moderation: true, contents: { highlights: true }, includeDomains: include, excludeDomains: exclude, startPublishedDate: start, endPublishedDate: end }) })
-  return (Array.isArray(data.results) ? data.results as Array<Record<string, unknown>> : []).map((r) => ({
+  return records(data.results).map((r) => ({
     title: typeof r.title === 'string' ? r.title : '(untitled)', url: typeof r.url === 'string' ? r.url : '',
     snippet: typeof r.summary === 'string' ? r.summary : Array.isArray(r.highlights) ? r.highlights.filter((v): v is string => typeof v === 'string').join(' ') : typeof r.text === 'string' ? r.text.slice(0, 1_000) : '',
     publishedAt: typeof r.publishedDate === 'string' ? r.publishedDate : undefined, author: typeof r.author === 'string' ? r.author : undefined,
@@ -85,7 +148,7 @@ async function exaSearch(query: string, count: number, include?: string[], exclu
 async function serperSearch(query: string, count: number, country?: unknown, language?: unknown, recencyDays?: number): Promise<SearchResult[]> {
   const tbs = serperRecency(recencyDays)
   const data = await requestJson('https://google.serper.dev/search', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-API-KEY': providerKey('serper')! }, body: JSON.stringify({ q: query, num: count, ...(tbs ? { tbs } : {}), ...(typeof country === 'string' && country.trim() ? { gl: country.trim() } : {}), ...(typeof language === 'string' && language.trim() ? { hl: language.trim() } : {}) }) })
-  return (Array.isArray(data.organic) ? data.organic as Array<Record<string, unknown>> : []).slice(0, count).map((r) => ({ title: typeof r.title === 'string' ? r.title : '(untitled)', url: typeof r.link === 'string' ? r.link : '', snippet: typeof r.snippet === 'string' ? r.snippet : '', publishedAt: typeof r.date === 'string' ? r.date : undefined }))
+  return records(data.organic).slice(0, count).map((r) => ({ title: str(r.title) ?? '(untitled)', url: str(r.link) ?? '', snippet: str(r.snippet) ?? '', ...dated(r.date) }))
 }
 
 export const webSearchTool: Tool = {
@@ -113,7 +176,7 @@ export const webSearchTool: Tool = {
     const results = provider === 'exa' ? await exaSearch(query, count, include, exclude, start, end) : provider === 'serper' ? await serperSearch(query, count, input.country, input.language, recencyDays) : await braveSearch(query, count, include, exclude, recencyDays)
     const header = [`Search provider: ${provider}`, `Retrieved: ${new Date().toISOString()}`, `Query: ${query}`, ...(recencyDays ? [`Recency filter: last ${recencyDays} day(s)`] : [])]
     if (!results.length) return [...header, 'No results found.'].join('\n')
-    return [...header, '', ...results.map((r, i) => [`${i + 1}. ${r.title}`, `   ${r.url}`, r.publishedAt ? `   Published: ${r.publishedAt}` : '', r.author ? `   Author: ${r.author}` : '', r.snippet ? `   ${stripTags(r.snippet).slice(0, 2_000)}` : ''].filter(Boolean).join('\n'))].join('\n')
+    return [...header, '', ...results.map((r, i) => [`${i + 1}. ${r.title}`, `   ${r.url}`, r.publishedAt ? `   Published: ${r.publishedAt}` : '', r.age ? `   Age (provider-reported): ${r.age}` : '', r.author ? `   Author: ${r.author}` : '', r.snippet ? `   ${stripTags(r.snippet).slice(0, 2_000)}` : ''].filter(Boolean).join('\n'))].join('\n')
   },
 }
 

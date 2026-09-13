@@ -117,6 +117,38 @@ test('web_search maps recencyDays to a Brave freshness parameter', async () => {
   expect(calledUrl).toContain('freshness=pw')
 })
 
+test('web_search does not present Brave\'s relative age as a published date', async () => {
+  globalThis.fetch = (async () => new Response(JSON.stringify({ web: { results: [
+    { title: 'Relative', url: 'https://a.example', description: 'x', age: '3 days ago' },
+    { title: 'Absolute', url: 'https://b.example', description: 'y', age: '2 days ago', page_age: '2026-08-01T10:00:00' },
+  ] } }), { status: 200 })) as unknown as typeof fetch
+  const result = await webSearchTool.execute({ query: 'dates' })
+  expect(result).not.toContain('Published: 3 days ago')
+  expect(result).toContain('Age (provider-reported): 3 days ago')
+  expect(result).toContain('Published: 2026-08-01T10:00:00')
+  expect(result).not.toContain('2 days ago')
+})
+
+test('web_search tolerates malformed result entries instead of trusting the cast', async () => {
+  globalThis.fetch = (async () => new Response(JSON.stringify({ web: { results: [null, 'junk', 7, { title: 42, url: 'https://ok.example', description: 'fine' }] } }), { status: 200 })) as unknown as typeof fetch
+  const result = await webSearchTool.execute({ query: 'shape' })
+  expect(result).toContain('1. (untitled)')
+  expect(result).toContain('https://ok.example')
+  // Anchored to a result line, not a bare `2.`: every response carries a
+  // `Retrieved: <ISO timestamp>` header, and a substring check matched that
+  // whenever the seconds ended in 2 (`...:02.336Z`) — a real ~1-in-10 flake.
+  expect(result).not.toMatch(/^2\. /m)
+})
+
+test('web_search rejects a non-object or oversized provider response', async () => {
+  globalThis.fetch = (async () => new Response('[1,2,3]', { status: 200 })) as unknown as typeof fetch
+  await expect(webSearchTool.execute({ query: 'array' })).rejects.toThrow('non-object')
+  globalThis.fetch = (async () => new Response('<html>not json</html>', { status: 200 })) as unknown as typeof fetch
+  await expect(webSearchTool.execute({ query: 'html' })).rejects.toThrow('non-JSON')
+  globalThis.fetch = (async () => new Response('x'.repeat(5_000_001), { status: 200 })) as unknown as typeof fetch
+  await expect(webSearchTool.execute({ query: 'huge' })).rejects.toThrow('exceeded')
+})
+
 test('web_search surfaces a non-ok response as an error', async () => {
   globalThis.fetch = (async () =>
     new Response('nope', { status: 500, statusText: 'Internal Server Error' })) as unknown as typeof fetch

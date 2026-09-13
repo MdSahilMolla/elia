@@ -31,10 +31,14 @@ function trimOutput(value: string, limit = 2000): string {
   return value.trim().slice(0, limit)
 }
 
-/** `<cmd> --version` output, empty string when the command is absent or errors. */
-function versionOf(command: string): string {
+/** A `--version` that has not answered in this long is not going to; don't let it hang the readiness report. */
+const VERSION_TIMEOUT_MS = 5_000
+
+/** `<cmd> --version` output, empty string when the command is absent, errors, or hangs. */
+export function versionOf(command: string, timeoutMs = VERSION_TIMEOUT_MS): string {
   try {
-    const out = Bun.spawnSync([command, '--version'], { stdout: 'pipe', stderr: 'pipe' })
+    const out = Bun.spawnSync([command, '--version'], { stdout: 'pipe', stderr: 'pipe', timeout: timeoutMs, killSignal: 'SIGKILL' })
+    if (out.exitedDueToTimeout) return ''
     return (out.stdout?.toString() ?? '').trim() || (out.stderr?.toString() ?? '').trim()
   } catch {
     return ''

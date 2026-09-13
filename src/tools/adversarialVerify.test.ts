@@ -97,16 +97,26 @@ describe('adversarialAnalyze', () => {
   it('is deterministic', () => {
     expect(adversarialAnalyze(DIFF)).toEqual(adversarialAnalyze(DIFF))
   })
+
+  it('reports added lines past the per-file window instead of silently dropping them', () => {
+    const added = Array.from({ length: 520 }, (_, i) => `+export const v${i} = ${i}`).join('\n')
+    const report = adversarialAnalyze(`diff --git a/a.ts b/a.ts\n--- a/a.ts\n+++ b/a.ts\n${added}\n`)
+    expect(report.diffLines).toBe(500)
+    expect(report.skippedLines).toBe(20)
+    expect(report.summary).toContain('20 further added line(s)')
+    expect(formatReport(report)).not.toContain('Code appears safe for shipping')
+    expect(formatReport(report)).toContain('were not analyzed')
+  })
 })
 
 describe('formatReport', () => {
   it('warns on high risk', () => {
-    const text = formatReport({ target: 'x', diffLines: 5, edgeCases: [], exploitVectors: [], riskScore: 90, summary: 's' })
+    const text = formatReport({ target: 'x', diffLines: 5, skippedLines: 0, edgeCases: [], exploitVectors: [], riskScore: 90, summary: 's' })
     expect(text).toContain('HIGH RISK')
   })
 
   it('signals clean diffs', () => {
-    const text = formatReport({ target: 'x', diffLines: 0, edgeCases: [], exploitVectors: [], riskScore: 0, summary: 's' })
+    const text = formatReport({ target: 'x', diffLines: 0, skippedLines: 0, edgeCases: [], exploitVectors: [], riskScore: 0, summary: 's' })
     expect(text).toContain('No adversarial issues')
   })
 })
