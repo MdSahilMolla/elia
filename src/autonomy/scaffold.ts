@@ -404,7 +404,31 @@ export async function scaffoldProject(options: ScaffoldOptions): Promise<Scaffol
   const message = result.initialized
     ? `Initial commit: plan and project documents\n\n${proposal.goal}`
     : `Add project documents for: ${proposal.goal}`
-  const commit = await commitAll(cwd, message, signal, options.protect)
+  // Commit the documents this scaffold just wrote, by name — never the whole
+  // tree.
+  //
+  // `protect` alone is not enough here and never was. It is a snapshot of what
+  // was dirty when the *run* started, so it cannot know about work that appears
+  // while the run is in flight: another agent in the same checkout, or the
+  // operator still typing. Seen live — a scaffold for an unrelated goal swept
+  // ~28 files of a concurrent session's work into a commit titled "Add project
+  // documents for: Create a self-contained real-time system metrics dashboard".
+  // Nothing in it had anything to do with a dashboard.
+  //
+  // An allowlist has no such blind spot: `result.documents` is exactly the set
+  // of files written above, so anything else in the tree is out of scope by
+  // construction whenever it appeared and whoever created it. A freshly
+  // `git init`ed project is the one case where committing what is present is
+  // the point, and there is no pre-existing work in that repo to sweep.
+  //
+  // The empty case must return early rather than fall through: `commitAll`
+  // reads an empty `include` as "no allowlist given" and commits everything
+  // staged, so scaffolding that wrote nothing (every document already existed)
+  // would commit the whole tree — the very thing this is here to prevent.
+  const include = result.initialized ? undefined : result.documents
+  if (include !== undefined && include.length === 0) return result
+
+  const commit = await commitAll(cwd, message, signal, options.protect, include)
   if (commit.committed) result.commits.push(message.split('\n')[0]!)
   if (commit.warning) result.warnings.push(commit.warning)
   if (commit.excluded.length > 0) {

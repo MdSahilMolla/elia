@@ -321,9 +321,19 @@ async function runAutonomousTaskInternal(options: AutonomousRunOptions): Promise
   // Whatever was already uncommitted in this repo before the run — the scaffold
   // and per-wave commits must never sweep the operator's unrelated work into
   // elia's history. Captured once, here, before anything is written.
+  //
+  // A failure here used to `.catch(() => [])`, which silently turned the
+  // protection off: an empty `protect` list makes `commitAll`'s `git add -A`
+  // sweep every uncommitted file in the repo. A guard against losing the
+  // operator's work must not fail open, so a failure is recorded and the
+  // commit paths below refuse to run a repo-wide commit without it.
+  let protectionFailed = false
   const protectedPaths = [...new Set([
     ...(options.protectedPaths ?? []),
-    ...(await dirtyPaths(workspaceRoot).catch(() => [])),
+    ...(await dirtyPaths(workspaceRoot).catch(() => {
+      protectionFailed = true
+      return []
+    })),
   ])]
   const parentTask = taskSessions.create(inferTaskKind(goal, goal), `Autonomous: ${goal}`, 'Queued autonomous execution', { role: 'lead' })
   taskSessions.update(parentTask.id, { status: 'running', action: 'Orienting', detail: `${taskWorkspaceLabel(workspace)}; inspecting the environment and preparing a durable plan` })
@@ -1047,13 +1057,18 @@ Do not repeat whatever failed. ${retryGuidanceFor(report)}`,
       const landed = wave
         .filter((step) => graph.node(`step:${step.id}`)?.status === 'completed')
         .map((step) => `${step.id}: ${step.title}`)
-      if (landed.length > 0) {
+      // A wave whose steps declared no files would fall back to committing
+      // everything staged, which is only safe while `protectedPaths` is real.
+      const ownedFiles = wave.flatMap((step) => step.files)
+      if (landed.length > 0 && protectionFailed && ownedFiles.length === 0) {
+        writeSubStep('⚠ skipped the wave commit: could not determine what was already uncommitted, and no step declared its files')
+      } else if (landed.length > 0) {
         const commit = await commitAll(
           workspaceRoot,
           `Wave ${index + 1}: ${landed.length === 1 ? landed[0] : `${landed.length} steps`}\n\n${landed.map((entry) => `- ${entry}`).join('\n')}`,
           runSignal,
           protectedPaths,
-          wave.flatMap((step) => step.files),
+          ownedFiles,
         )
         if (commit.committed) writeSubStep(`committed wave ${index + 1} (${landed.length} step(s))`)
         if (commit.excluded.length > 0) writeSubStep(`⚠ kept out of the commit because they hold secrets: ${commit.excluded.join(', ')}`)
