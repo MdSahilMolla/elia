@@ -57,7 +57,7 @@ test('environment discovery reports project, git, runtimes, and redacted capabil
 })
 
 // A POSIX shell script stands in for a runtime whose `--version` never returns.
-test.if(process.platform !== 'win32')('a hung --version is abandoned after the timeout instead of blocking the tool', () => {
+test.if(process.platform !== 'win32')('a hung --version is abandoned after the timeout instead of blocking the tool', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'elia-hang-'))
   try {
     const hang = join(dir, 'hang')
@@ -65,7 +65,7 @@ test.if(process.platform !== 'win32')('a hung --version is abandoned after the t
     writeFileSync(hang, '#!/bin/sh\nexec sleep 30\n')
     chmodSync(hang, 0o755)
     const started = Date.now()
-    expect(versionOf(hang, 300)).toBe('')
+    expect(await versionOf(hang, 300)).toBe('')
     expect(Date.now() - started).toBeLessThan(5_000)
   } finally {
     rmSync(dir, { recursive: true, force: true })

@@ -3,23 +3,53 @@ import { readBoundedOutput } from '../shell.ts'
 import { publicFetch } from '../networkPolicy.ts'
 
 const FETCH_TIMEOUT_MS = 15_000
-const MAX_CHARS = 20_000
+const MAX_CHARS = 100_000
 const MAX_RESPONSE_CHARS = 2_000_000
+/** Redirect hops to follow. Long enough for the real chains (doi.org → publisher → CDN), short enough to bound a loop. */
+const MAX_REDIRECTS = 5
+
+/**
+ * One hop's worth of redirect, or `undefined` when the response is the answer.
+ *
+ * `publicFetch` is deliberately `redirect: 'manual'` — following redirects
+ * inside it would let the *second* hop skip the address policy the first one
+ * passed. So following them is the caller's job, and it is only safe done the
+ * way it is here: each hop goes back through `publicFetch`, which re-runs
+ * `assertPublicNetworkUrl` and re-pins DNS for the new URL. A redirect to
+ * 127.0.0.1, to a private range, or to a non-http(s) scheme is rejected on the
+ * next pass exactly as a directly-supplied one would be.
+ */
+function redirectTarget(response: Response, from: URL): URL | undefined {
+  if (response.status < 300 || response.status >= 400) return undefined
+  const location = response.headers.get('location')
+  if (!location) return undefined
+  try {
+    // Relative Locations are common and legal ("/abs/2401.00001").
+    return new URL(location, from)
+  } catch {
+    throw new Error(`web_fetch failed: redirect to an unparsable location (${location})`)
+  }
+}
 
 /** Reads one specific page a web_search turned up — a competitor site, a pricing page, a public data source. */
 export const webFetchTool: Tool = {
   name: 'web_fetch',
   description:
-    'Fetch a single web page and return its readable text content (HTML tags stripped). Use this to read a specific page a search turned up.',
+    'Fetch a single web page and return its readable text content (HTML tags stripped). Use this to read a specific page a search turned up. Redirects are followed, so DOI links and other resolvers work. Long pages are truncated; pass offset to read on from where a previous call stopped.',
   input_schema: {
     type: 'object',
     properties: {
       url: { type: 'string', description: 'The URL to fetch (must start with http:// or https://)' },
+      offset: { type: 'number', description: 'Character offset to start from, for reading on past a truncated page. Default 0.' },
     },
     required: ['url'],
   },
   async execute(input) {
     if (typeof input.url !== 'string' || input.url.trim().length === 0) throw new Error('url must be a non-empty string')
+    if (input.offset !== undefined && (typeof input.offset !== 'number' || !Number.isInteger(input.offset) || input.offset < 0)) {
+      throw new Error('offset must be a non-negative integer')
+    }
+    const offset = typeof input.offset === 'number' ? input.offset : 0
     const raw = input.url.trim()
     let url: URL
     try {
@@ -38,15 +68,34 @@ export const webFetchTool: Tool = {
       // connection's own DNS lookup, so the address that passed the policy is
       // the one the socket connects to — a rebinding DNS server gets no second
       // resolution to answer differently.
-      const response = await publicFetch(url, { signal: controller.signal, headers: { 'User-Agent': 'elia-agent/0.1' } })
-      if (response.status >= 300 && response.status < 400) throw new Error(`web_fetch refused redirect response: ${response.status}`)
+      let response = await publicFetch(url, { signal: controller.signal, headers: { 'User-Agent': 'elia-agent/0.1' } })
+      const seen = new Set<string>([url.toString()])
+      for (let hop = 0; hop < MAX_REDIRECTS; hop += 1) {
+        const next = redirectTarget(response, url)
+        if (!next) break
+        if (seen.has(next.toString())) throw new Error(`web_fetch failed: redirect loop at ${next.toString()}`)
+        seen.add(next.toString())
+        response.body?.cancel().catch(() => {})
+        url = next
+        response = await publicFetch(url, { signal: controller.signal, headers: { 'User-Agent': 'elia-agent/0.1' } })
+      }
+      if (response.status >= 300 && response.status < 400) {
+        throw new Error(`web_fetch failed: more than ${MAX_REDIRECTS} redirects, giving up at ${url.toString()}`)
+      }
       if (!response.ok) throw new Error(`web_fetch failed: ${response.status} ${response.statusText}`)
 
       const contentType = response.headers.get('content-type') ?? ''
       const body = response.body ? await readBoundedOutput(response.body, MAX_RESPONSE_CHARS) : ''
       const text = contentType.includes('html') ? htmlToText(body) : body
 
-      return text.length > MAX_CHARS ? `${text.slice(0, MAX_CHARS)}\n\n[truncated at ${MAX_CHARS} characters]` : text
+      if (offset >= text.length && text.length > 0) {
+        return `[offset ${offset} is past the end of this page — it is ${text.length} characters]`
+      }
+      const window = text.slice(offset, offset + MAX_CHARS)
+      const end = offset + window.length
+      const header = offset > 0 ? `[resuming at character ${offset} of ${text.length}]\n\n` : ''
+      const footer = end < text.length ? `\n\n[truncated at ${end} of ${text.length} characters — call web_fetch again with offset: ${end} to read on]` : ''
+      return `${header}${window}${footer}`
     } catch (err) {
       if (err instanceof Error && err.message.startsWith('web_fetch failed:')) throw err
       throw new Error(`web_fetch request failed: ${err instanceof Error ? err.message : String(err)}`)

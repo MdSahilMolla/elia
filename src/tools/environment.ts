@@ -34,12 +34,25 @@ function trimOutput(value: string, limit = 2000): string {
 /** A `--version` that has not answered in this long is not going to; don't let it hang the readiness report. */
 const VERSION_TIMEOUT_MS = 5_000
 
-/** `<cmd> --version` output, empty string when the command is absent, errors, or hangs. */
-export function versionOf(command: string, timeoutMs = VERSION_TIMEOUT_MS): string {
+/**
+ * `<cmd> --version` output, empty string when the command is absent, errors, or hangs.
+ *
+ * Async, and awaited in parallel with the rest of discovery. It used to be
+ * `spawnSync`: each probe blocked the event loop for up to the full timeout, and
+ * they ran one after another. On Windows that is not theoretical — `python3`
+ * resolves to the Store app-execution alias, which hangs until it is killed — so
+ * environment discovery routinely took ~20s and its own test timed out at 5s.
+ */
+export async function versionOf(command: string, timeoutMs = VERSION_TIMEOUT_MS): Promise<string> {
   try {
-    const out = Bun.spawnSync([command, '--version'], { stdout: 'pipe', stderr: 'pipe', timeout: timeoutMs, killSignal: 'SIGKILL' })
-    if (out.exitedDueToTimeout) return ''
-    return (out.stdout?.toString() ?? '').trim() || (out.stderr?.toString() ?? '').trim()
+    const proc = Bun.spawn([command, '--version'], { stdout: 'pipe', stderr: 'pipe', timeout: timeoutMs, killSignal: 'SIGKILL' })
+    const [stdout, stderr] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()])
+    await proc.exited
+    // A timeout kills the process with `killSignal`; the async Subprocess
+    // reports that as a signal rather than a flag. Any signalled exit means the
+    // output is partial at best, so it is not a version string.
+    if (proc.signalCode) return ''
+    return stdout.trim() || stderr.trim()
   } catch {
     return ''
   }
@@ -118,16 +131,20 @@ export const environmentTool: Tool = {
     ])
     const availableRuntimes = runtimes
     const configured = envPresence()
+    const present = (command: string): boolean => Boolean(availableRuntimes[command] && availableRuntimes[command] !== 'unavailable')
+    // Both probes at once rather than one after the other: a hung `python3`
+    // should not add its whole timeout to what `node` already cost.
+    const [nodeVersion, pythonVersion] = await Promise.all([
+      present('node') ? versionOf('node') : Promise.resolve(''),
+      present('python3') ? versionOf('python3') : Promise.resolve(''),
+    ])
     // Declared-vs-available: what the project expects that this machine does not
     // have, so the orient phase catches a broken environment before the run
     // spends its budget discovering it.
     const readiness = assessEnvironment({
       cwd,
-      has: (command) => Boolean(availableRuntimes[command] && availableRuntimes[command] !== 'unavailable'),
-      versions: {
-        node: availableRuntimes.node && availableRuntimes.node !== 'unavailable' ? versionOf('node') : '',
-        python3: availableRuntimes.python3 && availableRuntimes.python3 !== 'unavailable' ? versionOf('python3') : '',
-      },
+      has: present,
+      versions: { node: nodeVersion, python3: pythonVersion },
     })
     // The project's own track record: do past autonomous runs here tend to
     // claim more than the facts support? Feeds the acceptance contract the

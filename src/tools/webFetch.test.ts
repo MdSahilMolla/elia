@@ -54,16 +54,83 @@ test('web_fetch surfaces a non-ok response as an error', async () => {
   await expect(webFetchTool.execute({ url: 'https://example.com/missing' })).rejects.toThrow('404')
 })
 
-test('web_fetch refuses to follow a redirect', async () => {
-  respond('', { status: 302, headers: { location: 'http://169.254.169.254/' } })
-  await expect(webFetchTool.execute({ url: 'https://example.com/moved' })).rejects.toThrow('refused redirect')
+// A redirect is followed, but every hop goes back through the address policy —
+// the reason publicFetch stays `redirect: manual` and the caller does the hop.
+
+/** Serve a scripted map of url -> response, so a redirect chain can be walked. */
+function route(routes: Record<string, ResponseInit & { body?: string }>): string[] {
+  const visited: string[] = []
+  publicFetchTestHooks.transport = async (url) => {
+    const key = url.toString()
+    visited.push(key)
+    const hit = routes[key]
+    if (!hit) return new Response('unrouted', { status: 404, statusText: 'Not Found' })
+    const { body, ...init } = hit
+    return new Response(body ?? '', init)
+  }
+  return visited
+}
+
+test('web_fetch follows a redirect chain to the final page', async () => {
+  const visited = route({
+    'https://doi.org/10.1000/xyz': { status: 302, headers: { location: 'https://www.example.com/article/1' } },
+    'https://www.example.com/article/1': { status: 301, headers: { location: '/article/1/full' } },
+    'https://www.example.com/article/1/full': { status: 200, headers: { 'content-type': 'text/plain' }, body: 'the paper text' },
+  })
+  expect(await webFetchTool.execute({ url: 'https://doi.org/10.1000/xyz' })).toBe('the paper text')
+  // Including the relative Location resolved against the hop it came from.
+  expect(visited).toEqual([
+    'https://doi.org/10.1000/xyz',
+    'https://www.example.com/article/1',
+    'https://www.example.com/article/1/full',
+  ])
 })
 
-test('web_fetch truncates very long pages', async () => {
-  respond('x'.repeat(25_000), { status: 200, headers: { 'content-type': 'text/plain' } })
+test('web_fetch rejects a redirect into a private address', async () => {
+  // The whole reason following redirects is done hop-by-hop: the second hop
+  // must not inherit the first hop's clearance.
+  respond('', { status: 302, headers: { location: 'http://169.254.169.254/latest/meta-data' } })
+  await expect(webFetchTool.execute({ url: 'https://example.com/moved' })).rejects.toThrow('private or local')
+})
 
+test('web_fetch stops on a redirect loop', async () => {
+  route({
+    'https://example.com/a': { status: 302, headers: { location: 'https://example.com/b' } },
+    'https://example.com/b': { status: 302, headers: { location: 'https://example.com/a' } },
+  })
+  await expect(webFetchTool.execute({ url: 'https://example.com/a' })).rejects.toThrow('redirect loop')
+})
+
+test('web_fetch gives up after too many redirects', async () => {
+  publicFetchTestHooks.transport = async (url) => {
+    const n = Number(url.pathname.slice(1)) || 0
+    return new Response('', { status: 302, headers: { location: `https://example.com/${n + 1}` } })
+  }
+  await expect(webFetchTool.execute({ url: 'https://example.com/0' })).rejects.toThrow('more than 5 redirects')
+})
+
+test('web_fetch truncates a very long page and says how to read on', async () => {
+  respond('x'.repeat(250_000), { status: 200, headers: { 'content-type': 'text/plain' } })
   const result = await webFetchTool.execute({ url: 'https://example.com/huge' })
-  expect(result).toContain('[truncated at 20000 characters]')
+  expect(result).toContain('[truncated at 100000 of 250000 characters')
+  expect(result).toContain('offset: 100000')
+})
+
+test('web_fetch reads on from an offset', async () => {
+  respond(`${'a'.repeat(100_000)}THE-TAIL`, { status: 200, headers: { 'content-type': 'text/plain' } })
+  const result = await webFetchTool.execute({ url: 'https://example.com/huge', offset: 100_000 })
+  expect(result).toContain('[resuming at character 100000 of 100008]')
+  expect(result).toContain('THE-TAIL')
+  expect(result).not.toContain('truncated')
+})
+
+test('web_fetch reports an offset past the end rather than returning nothing', async () => {
+  respond('short', { status: 200, headers: { 'content-type': 'text/plain' } })
+  expect(await webFetchTool.execute({ url: 'https://example.com/s', offset: 9_000 })).toContain('past the end')
+})
+
+test('web_fetch rejects a negative offset', async () => {
+  await expect(webFetchTool.execute({ url: 'https://example.com/s', offset: -1 })).rejects.toThrow('non-negative')
 })
 
 test('htmlToText does not leak attribute text when a quoted attribute contains ">"', () => {
