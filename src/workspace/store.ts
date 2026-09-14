@@ -420,13 +420,22 @@ export class WorkspaceStore {
     const reservations: string[] = []
 
     for (const task of this.tasks({ status: ['assigned', 'in-progress'] })) {
-      // A missing/unparseable expiry must never read as `NaN <= now` (always
-      // false → the lease is treated as held forever): `Number(p.leaseExpiresAt
-      // ?? …)` in events.ts coerces a malformed payload to `NaN`, which then
-      // never expires. Something that is genuinely un-expired — or a task
-      // merely `assigned` with no lease granted yet (NULL) — stays put.
+      // A lease that can never expire must not hold a task forever (M-33).
+      //
+      // No lease at all reads back as `undefined` — SQL NULL through `optNum`.
+      // For an `assigned` task that is legitimate: none has been granted yet,
+      // and it stays put. For an `in-progress` task it never is: `TaskStarted`
+      // is the only way into that status and it always writes a lease, so a
+      // NULL there means one was lost. The way that happened was a malformed
+      // lease coerced to `NaN`, which SQLite stores as NULL — indistinguishable
+      // from "never leased", so the old finite-only guard let it through on
+      // every pass and the task was stranded with no agent behind it.
+      // `leaseExpiry` in events.ts now stops new ones being written; this
+      // reclaims any already on disk. A non-finite in-memory value is treated
+      // as expired too, matching the heartbeat and reservation checks below.
       const expiresAt = task.leaseExpiresAt
-      if (typeof expiresAt === 'number' && Number.isFinite(expiresAt) && expiresAt <= now) {
+      const stranded = expiresAt === undefined && task.status === 'in-progress'
+      if (stranded || (expiresAt !== undefined && (!Number.isFinite(expiresAt) || expiresAt <= now))) {
         const target: TaskStatus = task.attemptCount >= task.maxAttempts ? 'failed' : 'ready'
         this.append({
           type: target === 'failed' ? 'TaskFailed' : 'TaskStatusChanged',

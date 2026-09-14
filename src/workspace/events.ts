@@ -108,6 +108,23 @@ const eventMs = (event: PersistedEvent): number => {
   return Number.isFinite(parsed) ? parsed : Date.now()
 }
 
+/**
+ * The lease expiry to persist for an event: the one it carries if that is a
+ * real timestamp, otherwise the default lease from the event's own clock.
+ *
+ * It used to be `Number(p.leaseExpiresAt ?? default)`, which handled a *missing*
+ * lease but not a *malformed* one — a corrupt payload became `NaN`, SQLite
+ * stores `NaN` as NULL, and NULL reads back as "no lease". So a task started
+ * with a bad lease sat `in-progress` with nothing that would ever expire it,
+ * and `reconcileLeases` could not tell it from a task that was never leased at
+ * all (M-33). A malformed lease now gets the ordinary default instead: bounded,
+ * so it expires and is reclaimed like any other.
+ */
+const leaseExpiry = (value: unknown, event: PersistedEvent): number => {
+  const provided = typeof value === 'number' ? value : typeof value === 'string' && value.trim() ? Number(value) : Number.NaN
+  return Number.isFinite(provided) ? provided : eventMs(event) + 120_000
+}
+
 /** A dependency is satisfied once it reaches a terminal state. `cancelled` counts:
  * a dependent that waited on `done` only would strand forever behind a cancel. */
 const TERMINAL_DEP_STATUSES: ReadonlySet<TaskStatus> = new Set(['done', 'cancelled'])
@@ -334,14 +351,14 @@ export function applyProjection(db: Database, event: PersistedEvent): void {
       setTaskStatus(db, String(event.taskId), 'in-progress', event.at, {
         started_at: event.at,
         lease_owner: p.leaseOwner == null ? null : String(p.leaseOwner),
-        lease_expires_at: Number(p.leaseExpiresAt ?? eventMs(event) + 120_000),
+        lease_expires_at: leaseExpiry(p.leaseExpiresAt, event),
         attempt_count: Number(toTask(requireTaskRow(db, String(event.taskId))).attemptCount) + 1,
       })
       return
     }
     case 'TaskProgress': {
       db.query('UPDATE tasks SET lease_expires_at = ?, updated_at = ? WHERE id = ?')
-        .run(Number(p.leaseExpiresAt ?? eventMs(event) + 120_000), event.at, String(event.taskId))
+        .run(leaseExpiry(p.leaseExpiresAt, event), event.at, String(event.taskId))
       return
     }
     case 'TaskCompleted': {

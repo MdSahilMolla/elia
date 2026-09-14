@@ -317,6 +317,70 @@ test('reconcileLeases requeues a task whose lease expired', () => {
   expect(store.task('t1')!.status).toBe('ready')
 })
 
+/** A task that has been assigned and started, with whatever lease payload the test supplies. */
+function startedTask(leasePayload: Record<string, unknown>): { store: WorkspaceStore } {
+  const { store, ownerId, projectId } = bootstrap()
+  const objectiveId = seedObjective(store, ownerId, projectId)
+  store.append({ type: 'TaskCreated', actorKind: 'member', actorId: ownerId, objectiveId, payload: { id: 't1', objectiveId, projectId, title: 'One', role: 'builder', dependsOn: [], files: [] } })
+  store.append({ type: 'ObjectiveStatusChanged', actorKind: 'member', actorId: ownerId, objectiveId, payload: { status: 'awaiting-approval' } })
+  store.append({ type: 'ObjectiveStatusChanged', actorKind: 'member', actorId: ownerId, objectiveId, payload: { status: 'active', approvedBy: ownerId } })
+  store.append({ type: 'TaskAssigned', actorKind: 'system', actorId: 'orch', objectiveId, taskId: 't1', payload: { assigneeKind: 'agent', assigneeId: 'a1' } })
+  store.append({ type: 'TaskStarted', actorKind: 'agent', actorId: 'a1', objectiveId, taskId: 't1', payload: { leaseOwner: 'a1', ...leasePayload } })
+  return { store }
+}
+
+test('a malformed lease is stored as a bounded default lease, so it expires and is reclaimed (M-33)', () => {
+  // It used to be coerced to NaN, which SQLite stores as NULL, which reads back
+  // as "no lease" — so the task sat in progress with nothing that would ever
+  // expire it. It now gets the ordinary default lease instead.
+  const { store } = startedTask({ leaseExpiresAt: 'not-a-timestamp' })
+  const lease = store.task('t1')!.leaseExpiresAt
+  expect(typeof lease).toBe('number')
+  expect(Number.isFinite(lease)).toBe(true)
+
+  // Live for now, like any fresh lease...
+  expect(store.reconcileLeases(Date.now()).tasks).toEqual([])
+  // ...and reclaimed once that lease runs out, rather than never.
+  expect(store.reconcileLeases(Date.now() + 121_000).tasks).toEqual(['t1'])
+  expect(store.task('t1')!.status).toBe('ready')
+})
+
+test('a task already stranded in progress with no lease is reclaimed (M-33)', () => {
+  // Databases written before the fix above can already hold such a row: in
+  // progress, lease NULL. `TaskStarted` is the only way into that status and it
+  // always writes a lease, so NULL there can only mean a lost one. Written
+  // directly, the way it would already sit on disk.
+  const { store } = startedTask({ leaseExpiresAt: Date.now() + 60_000 })
+  ;(store as unknown as { db: { run: (sql: string) => void } }).db.run("UPDATE tasks SET lease_expires_at = NULL WHERE id = 't1'")
+  expect(store.task('t1')!.status).toBe('in-progress')
+  expect(store.task('t1')!.leaseExpiresAt).toBeUndefined()
+
+  expect(store.reconcileLeases(Date.now()).tasks).toEqual(['t1'])
+  expect(store.task('t1')!.status).toBe('ready')
+})
+
+test('an assigned task that has not been granted a lease yet is left alone', () => {
+  // The case the stranded-task fix must not swallow: here NULL genuinely is
+  // "no lease yet", and reclaiming it would requeue work an agent is about to
+  // pick up.
+  const { store, ownerId, projectId } = bootstrap()
+  const objectiveId = seedObjective(store, ownerId, projectId)
+  store.append({ type: 'TaskCreated', actorKind: 'member', actorId: ownerId, objectiveId, payload: { id: 't1', objectiveId, projectId, title: 'One', role: 'builder', dependsOn: [], files: [] } })
+  store.append({ type: 'ObjectiveStatusChanged', actorKind: 'member', actorId: ownerId, objectiveId, payload: { status: 'awaiting-approval' } })
+  store.append({ type: 'ObjectiveStatusChanged', actorKind: 'member', actorId: ownerId, objectiveId, payload: { status: 'active', approvedBy: ownerId } })
+  store.append({ type: 'TaskAssigned', actorKind: 'system', actorId: 'orch', objectiveId, taskId: 't1', payload: { assigneeKind: 'agent', assigneeId: 'a1' } })
+  expect(store.task('t1')!.status).toBe('assigned')
+  expect(store.task('t1')!.leaseExpiresAt).toBeUndefined()
+
+  expect(store.reconcileLeases(Date.now()).tasks).toEqual([])
+  expect(store.task('t1')!.status).toBe('assigned')
+})
+
+test('reconcileLeases leaves a lease that has not expired yet', () => {
+  const { store } = startedTask({ leaseExpiresAt: Date.now() + 60_000 })
+  expect(store.reconcileLeases(Date.now()).tasks).toEqual([])
+})
+
 test('agent messages are scoped: a directed message is visible to its recipient and broadcasts to all', () => {
   const { store, ownerId, projectId } = bootstrap()
   const objectiveId = seedObjective(store, ownerId, projectId)
