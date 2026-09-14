@@ -62,3 +62,25 @@ test('checkRendered flags an empty body and an error status', async () => {
     boom.stop()
   }
 })
+
+test('checkRendered does not flag a source-module index when it is not a static server', () => {
+  // A running Vite dev server serves exactly this and renders it correctly — it
+  // transforms the module on request. The unbuilt-bundler heuristic is only ever
+  // a real failure for a plain static server, so `preview { url }` (which points
+  // at whatever the user is already running) must opt out of it.
+  const s = serve(
+    () =>
+      new Response(
+        '<!doctype html><html><body><div id="root"></div><script type="module" src="/src/main.tsx"></script></body></html>',
+        { headers: { 'content-type': 'text/html' } },
+      ),
+  )
+  return (async () => {
+    try {
+      expect((await checkRendered(s.url, undefined, { staticServer: true })).ok).toBe(false)
+      expect((await checkRendered(s.url, undefined, { staticServer: false })).ok).toBe(true)
+    } finally {
+      s.stop()
+    }
+  })()
+})

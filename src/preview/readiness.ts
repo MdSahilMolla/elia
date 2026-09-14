@@ -30,6 +30,21 @@ export async function waitForHttp(url: string, timeoutMs = 10_000, signal?: Abor
   return { ok: false, reason: `server did not respond within ${Math.round(timeoutMs / 1000)}s (${lastError})` }
 }
 
+export interface RenderOptions {
+  /**
+   * Whether `url` is served by a plain static server (elia's own preview
+   * server) rather than a real dev server.
+   *
+   * It gates the raw-source-module check below, which is only ever a failure
+   * for a static server. A running Vite/Next dev server serves that exact
+   * markup *correctly* — it transforms the module on request — so applying the
+   * check to a dev-server URL rejects a page that renders perfectly well.
+   * Defaults to true: every caller that does not say otherwise is serving from
+   * elia's own static server.
+   */
+  staticServer?: boolean
+}
+
 /**
  * Fetches the app root and checks it actually renders something. Catches the
  * common "blank white page" failures: a non-2xx root, an empty body, a
@@ -37,7 +52,7 @@ export async function waitForHttp(url: string, timeoutMs = 10_000, signal?: Abor
  * a static server (the browser can't execute the TypeScript modules it points
  * at, so nothing paints).
  */
-export async function checkRendered(url: string, signal?: AbortSignal): Promise<RenderCheck> {
+export async function checkRendered(url: string, signal?: AbortSignal, options: RenderOptions = {}): Promise<RenderCheck> {
   let res: Response
   try {
     res = await fetch(url, { signal: signal ?? AbortSignal.timeout(5_000) })
@@ -60,7 +75,8 @@ export async function checkRendered(url: string, signal?: AbortSignal): Promise<
   if (contentType.includes('text/html')) {
     const lower = body.toLowerCase()
     // A raw Vite/CRA source entry: points at a module that must be transformed.
-    const rawSourceModule = /<script[^>]+type=["']module["'][^>]+src=["'][^"']*(?:\/src\/|\.tsx|\.jsx|main\.ts)["']/i.test(body)
+    const rawSourceModule = (options.staticServer ?? true)
+      && /<script[^>]+type=["']module["'][^>]+src=["'][^"']*(?:\/src\/|\.tsx|\.jsx|main\.ts)["']/i.test(body)
       && !/\/assets\/[a-z0-9._-]+\.js/i.test(body)
     if (rawSourceModule) {
       return {

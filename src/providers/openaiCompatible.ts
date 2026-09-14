@@ -84,7 +84,11 @@ export function createOpenAICompatibleProvider(
           ...requestParams,
         }, signal ? { signal } : undefined)
         .on('content', (delta) => {
-          if (delta) emittedContent = true
+          // Empty content chunks are keepalive/role noise, not output. Passing
+          // them on breaks transcript accumulation downstream (see
+          // ui/app/store.ts assistantDelta), so they stop here.
+          if (!delta) return
+          emittedContent = true
           onText(delta)
         })
 

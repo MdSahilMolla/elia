@@ -59,10 +59,25 @@ export interface ResolvedFailure {
   fixedBy: string
 }
 
+/** A tool call that failed and was never made to work in this turn. */
+export interface UnresolvedFailure {
+  failed: string
+  error: string
+}
+
 export interface TurnEvidence {
   failures: ResolvedFailure[]
   /** elia's "your checks fail" / "the page does not render" messages from a repair loop. */
   checkFailures: string[]
+  /**
+   * What broke and stayed broken. A turn that ends still failing is the single
+   * richest signal there is — it is the case where elia demonstrably did not
+   * know something — and it used to be discarded entirely: `worthLearningFrom`
+   * returns false the moment verification failed, so the run that most needed
+   * to teach the next one taught it nothing. These do not become "the fix is
+   * X" lessons (nobody has verified a fix yet); they become constraints.
+   */
+  unresolved?: UnresolvedFailure[]
 }
 
 const MAX_FAILURES = 6
@@ -120,7 +135,13 @@ export function turnEvidence(messages: ChatMessage[], fromIndex: number): TurnEv
       }
     }
   }
-  return { failures: failures.slice(0, MAX_FAILURES), checkFailures: checkFailures.slice(-2) }
+  // Whatever is still `open` never found a working call: these are the turn's
+  // unresolved failures.
+  return {
+    failures: failures.slice(0, MAX_FAILURES),
+    checkFailures: checkFailures.slice(-2),
+    unresolved: open.slice(0, MAX_FAILURES).map(({ failed, error }) => ({ failed, error })),
+  }
 }
 
 export interface TurnOutcomeSignal {
@@ -129,15 +150,35 @@ export interface TurnOutcomeSignal {
 }
 
 /**
- * Only friction that was mechanically put right is worth a lesson: a tool call
- * that failed and then worked, or checks that failed and then passed. A turn
- * that ended still broken teaches nothing reliable — nobody knows the fix yet —
- * and that is the same line `elia auto` draws (loop.ts captureLessons).
+ * Whether this turn can teach an *instruction*: friction that was mechanically
+ * put right, so the fix is known — a tool call that failed and then worked, or
+ * checks that failed and then passed. That is the same line `elia auto` draws
+ * (loop.ts captureLessons). A turn that ended still broken does not qualify
+ * here, because nobody knows the fix yet; `learningMode` routes it to `blocker`
+ * so it still teaches the constraint.
  */
 export function worthLearningFrom(evidence: TurnEvidence, outcome: TurnOutcomeSignal): boolean {
   if (outcome.verify === 'fail') return false
   const repairedChecks = outcome.repairAttempts > 0 && outcome.verify === 'pass' && evidence.checkFailures.length > 0
   return evidence.failures.length > 0 || repairedChecks
+}
+
+/**
+ * What, if anything, this turn can teach.
+ *
+ * `repair` — something broke and was mechanically put right, so the fix is
+ * known and can be stated as an instruction.
+ *
+ * `blocker` — the turn ended still failing. No fix is known, so nothing may be
+ * phrased as one; what *is* known is that a specific approach does not work
+ * here, which is exactly what stops the next session repeating it. These carry
+ * a lower confidence and their own source tag so lesson-efficacy retirement
+ * prunes them first if they turn out not to help.
+ */
+export function learningMode(evidence: TurnEvidence, outcome: TurnOutcomeSignal): 'repair' | 'blocker' | undefined {
+  if (worthLearningFrom(evidence, outcome)) return 'repair'
+  const stuck = (evidence.unresolved?.length ?? 0) > 0 || evidence.checkFailures.length > 0
+  return outcome.verify === 'fail' && stuck ? 'blocker' : undefined
 }
 
 export function reflectionPrompt(request: string, evidence: TurnEvidence, known: string[]): string {
@@ -156,6 +197,32 @@ export function reflectionPrompt(request: string, evidence: TurnEvidence, known:
   lines.push(
     '',
     'Write at most 2 lessons that a future session in this same project should know before it starts, so it never hits this again. Only durable facts about this project or its environment: how a command has to be run here, where something lives, a constraint that is not obvious from the code. One sentence each, phrased as an instruction to a future run. Never describe what this turn did, and never give generic advice ("read files carefully", "test your changes"). If these were simple slips with nothing durable to learn, return an empty list.',
+    '',
+    'Reply with JSON only: {"lessons": ["..."]}',
+  )
+  return lines.join('\n')
+}
+
+/**
+ * The prompt for a turn that ended still broken. Deliberately does not ask for
+ * a fix: no fix was verified, and a lesson that asserts an unverified one is
+ * worse than no lesson — it sends the next session confidently down the same
+ * dead end. It asks for the constraint instead.
+ */
+export function blockerPrompt(request: string, evidence: TurnEvidence, known: string[]): string {
+  const lines = [
+    `The user asked: ${clip(request, 400)}`,
+    '',
+    'This turn ended without getting it working. This is the real tool output for what failed and was never made to work:',
+  ]
+  for (const failure of evidence.unresolved ?? []) lines.push(`✗ ${failure.failed}`, `  → ${failure.error}`)
+  for (const check of evidence.checkFailures) lines.push('✗ the project checks were still failing at the end:', `  ${check}`)
+  if (known.length > 0) {
+    lines.push('', 'Already known about this project (do not repeat or rephrase these):', ...known.map((lesson) => `- ${lesson}`))
+  }
+  lines.push(
+    '',
+    'Write at most 2 lessons recording what a future session in this same project should know *before* it tries this again. Nobody has found a working fix, so do NOT state one, do not guess a cause, and do not say "try X instead" unless the output above proves X works. Record only what the output establishes: which exact command, path, tool, or approach fails here, and the error it fails with. One sentence each, phrased as a warning to a future run. If the output shows nothing durable — a transient network blip, an approval the operator withheld, a one-off typo — return an empty list.',
     '',
     'Reply with JSON only: {"lessons": ["..."]}',
   )
@@ -242,15 +309,17 @@ export interface LearnedFromTurn {
  */
 export async function learnFromTurn(options: LearnFromTurnOptions): Promise<LearnedFromTurn> {
   const evidence = turnEvidence(options.messages, options.fromIndex)
-  if (!worthLearningFrom(evidence, options.outcome)) return { lessons: [] }
+  const mode = learningMode(evidence, options.outcome)
+  if (!mode) return { lessons: [] }
   const known = loadLessons(options.lessonsPath).map((lesson) => lesson.text)
   const timeout = AbortSignal.timeout(options.timeoutMs ?? 20_000)
   options.onReflecting?.()
   try {
+    const prompt = mode === 'repair' ? reflectionPrompt(options.request, evidence, known) : blockerPrompt(options.request, evidence, known)
     const result = await options.provider.streamTurn({
       cwd: options.cwd,
       system: "You are elia's long-term memory for one software project. You distil hard-won, durable facts from real tool output. Reply with JSON only.",
-      messages: [{ role: 'user', content: [{ type: 'text', text: reflectionPrompt(options.request, evidence, known) }] }],
+      messages: [{ role: 'user', content: [{ type: 'text', text: prompt }] }],
       tools: [],
       onText: () => {},
       signal: options.signal ? AbortSignal.any([options.signal, timeout]) : timeout,
@@ -258,7 +327,15 @@ export async function learnFromTurn(options: LearnFromTurnOptions): Promise<Lear
     })
     const reply = result.content.flatMap((block) => (block.type === 'text' ? [block.text] : [])).join('')
     const lessons = parseLessons(reply, known)
-    if (lessons.length > 0) appendLessons(lessons.map((text) => ({ text, source: 'interactive-auto', confidence: 0.7 })), options.lessonsPath)
+    if (lessons.length > 0) {
+      // A blocker lesson records an unverified constraint, not a proven fix, so
+      // it enters with lower confidence and its own source — lesson-efficacy
+      // retirement can then drop it ahead of lessons that were earned by a
+      // failure actually being put right.
+      const source = mode === 'repair' ? 'interactive-auto' : 'interactive-blocker'
+      const confidence = mode === 'repair' ? 0.7 : 0.4
+      appendLessons(lessons.map((text) => ({ text, source, confidence })), options.lessonsPath)
+    }
     return { lessons, usage: result.usage }
   } catch {
     return { lessons: [] }

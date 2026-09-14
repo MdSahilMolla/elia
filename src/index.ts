@@ -2592,7 +2592,10 @@ async function runInteractive(): Promise<void> {
         // checked it when it opened it, and a later edit can still break it.
         try {
           const { checkRendered } = await import('./preview/readiness.ts')
-          const rendered = await checkRendered(previewedUrl, AbortSignal.any([controller.signal, AbortSignal.timeout(5_000)]))
+          // The model chose this URL, so it may well be a dev server rather than
+          // elia's static server — don't fail it on the unbuilt-bundler
+          // heuristic, which is only ever a real failure for a static server.
+          const rendered = await checkRendered(previewedUrl, AbortSignal.any([controller.signal, AbortSignal.timeout(5_000)]), { staticServer: false })
           verifyResult = rendered.ok ? 'pass' : 'fail'
           // Status lines reach only the live UI. Without this, a turn recorded
           // "verification: fail" and nothing anywhere said what had failed.
@@ -2621,7 +2624,7 @@ async function runInteractive(): Promise<void> {
           outcome: { verify: verifyResult, repairAttempts },
           cwd: process.cwd(),
           signal: controller.signal,
-          onReflecting: () => uiHooks?.onActivity?.({ kind: 'status', status: 'updated', title: 'Learning from what went wrong' }),
+          onReflecting: () => uiHooks?.onActivity?.({ kind: 'status', status: 'updated', title: 'Learning from this turn' }),
         })
         if (learned.usage) {
           const { recordUsage } = await import('./usage.ts')

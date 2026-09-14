@@ -3,7 +3,7 @@ import { basename, dirname, join, relative } from 'node:path'
 import type { Tool } from './types.ts'
 import { ensurePreviewServer } from '../preview/server.ts'
 import { launchInBrowser } from '../preview/launchChrome.ts'
-import { checkRendered } from '../preview/readiness.ts'
+import { checkRendered, waitForHttp } from '../preview/readiness.ts'
 import { findProject, pickBuildOutput } from '../preview/project.ts'
 import { resolveProjectPath } from '../autonomy/context.ts'
 import { paths } from '../config.ts'
@@ -11,11 +11,13 @@ import { runShell } from '../shell.ts'
 import { activeActionGovernor } from '../autonomy/governor.ts'
 
 const BUILD_TIMEOUT_MS = 240_000
+/** A server the user says is already running should answer promptly; this is not a startup wait. */
+const URL_READY_TIMEOUT_MS = 5_000
 
 export const previewTool: Tool = {
   name: 'preview',
   description:
-    'Open something visually in a real Chrome window. Pass `path` for a file under the workspace (served locally with push-based live-reload). If the file belongs to a project that needs a build (Vite, Next, etc.), preview runs its `build` script first and serves the output — so you never have to start a dev server. Pass `url` instead for an already-running server, opened directly. For a `path`, preview fetches the page before opening it and fails with the reason if it would not render (missing file, HTTP error, blank or unbuilt page), so a successful result means the page really loads.',
+    'Open something visually in a real Chrome window. Pass `path` for a file under the workspace (served locally with push-based live-reload). If the file belongs to a project that needs a build (Vite, Next, etc.), preview runs its `build` script first and serves the output — so you never have to start a dev server. Pass `url` instead for a server that is already running. Either way preview loads the page before opening it and fails with the reason if it would not render (missing file, nothing listening on that port, HTTP error, blank or unbuilt page), so a successful result means the page really loads and the URL in that result is a link the user can actually open. Never report a preview URL you did not get back from a successful preview result.',
   input_schema: {
     type: 'object',
     properties: {
@@ -40,6 +42,23 @@ export const previewTool: Tool = {
         throw new Error(`preview URL is invalid: ${url}`)
       }
       if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') throw new Error('preview URL must use http or https')
+      // The `path` branch below has checked its page since the "preview called a
+      // 404 opened" fix; this branch never did. It opened whatever URL it was
+      // handed and returned "Opened … in Chrome" — so a guessed dev-server port
+      // that nothing was listening on was announced to the user as a working
+      // preview link, and the turn's `previewedUrl` was set from that message.
+      // A URL is only a preview link if something answers on it and paints.
+      const reachable = await waitForHttp(url, URL_READY_TIMEOUT_MS)
+      if (!reachable.ok) {
+        throw new Error(`Nothing is serving ${url} — ${reachable.reason ?? 'no response'}. Nothing was opened. Start the server first, or pass \`path\` to have preview serve the files itself.`)
+      }
+      // Not a static server: this URL belongs to something the user is already
+      // running, very possibly a dev server, so the unbuilt-bundler heuristic
+      // must not fire on markup that dev server renders correctly.
+      const live = await checkRendered(url, undefined, { staticServer: false })
+      if (!live.ok) {
+        throw new Error(`${url} answered but would not render: ${live.reason}. Nothing was opened — fix the page, then preview again.`)
+      }
       return (await launchInBrowser(url)).message
     }
 

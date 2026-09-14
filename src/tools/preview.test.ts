@@ -81,3 +81,21 @@ test('an isolated task workspace never reaches up into the shared scratch folder
   writeFileSync(join(workspace, 'index.html'), '<h1>a different project</h1>')
   expect(resolveProjectPath('index.html', task, workspace)).toBe(join(task, 'index.html'))
 })
+
+// --- A `url` is only a preview link if something answers on it and paints -----
+
+test('preview refuses a url with nothing listening instead of reporting it opened', async () => {
+  // Port 9 (discard) is reserved and never accepts — the shape of the real bug:
+  // the model guessed a dev-server port, preview opened it blind, and the user
+  // was handed a localhost link that was never serving anything.
+  await expect(preview({ url: 'http://127.0.0.1:9/' })).rejects.toThrow('Nothing is serving')
+}, 15_000)
+
+test('preview refuses a url that answers with an error status', async () => {
+  const server = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => new Response('nope', { status: 404 }) })
+  try {
+    await expect(preview({ url: `http://127.0.0.1:${server.port}/` })).rejects.toThrow('would not render')
+  } finally {
+    server.stop(true)
+  }
+})

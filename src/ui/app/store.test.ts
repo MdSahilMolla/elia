@@ -192,3 +192,31 @@ test('redacts secrets in shell-escape (!command) output', () => {
   expect(shellItem?.text).not.toContain(secret)
   expect(shellItem?.text).toContain('[REDACTED]')
 })
+
+// --- Empty deltas must not shatter the transcript -----------------------------
+
+test('empty deltas interleaved with reasoning keep it as one thinking item', () => {
+  // Exactly what mercury-2.5 streams: an empty `content` chunk between every
+  // reasoning chunk. Each one used to append an empty assistant item, which
+  // displaced the streaming thinking item from the tail and forced the next
+  // reasoning token into a brand-new `✻` block — one word per line on screen.
+  const s = createTranscriptStore()
+  s.appendUser('build a birds website')
+  for (const word of ['The ', 'plan ', 'says ', 'create ', 'a ', 'birds ', 'website']) {
+    s.assistantDelta('')
+    s.thinkingDelta(word)
+  }
+  const { live } = s.getSnapshot()
+  expect(live.filter((i) => i.kind === 'thinking')).toHaveLength(1)
+  expect(live.filter((i) => i.kind === 'assistant')).toHaveLength(0)
+  expect((live.find((i) => i.kind === 'thinking') as { text: string }).text).toBe('The plan says create a birds website')
+})
+
+test('an empty assistant delta adds no bullet-only item', () => {
+  const s = createTranscriptStore()
+  s.appendUser('hi')
+  s.assistantDelta('')
+  expect(s.getSnapshot().live.filter((i) => i.kind === 'assistant')).toHaveLength(0)
+  s.assistantDelta('real')
+  expect(s.getSnapshot().live.filter((i) => i.kind === 'assistant')).toHaveLength(1)
+})

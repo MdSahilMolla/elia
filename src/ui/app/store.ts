@@ -155,7 +155,18 @@ export function createTranscriptStore(): TranscriptStore {
       changed()
     },
 
+    // An empty delta carries no content, and appending an item for one is not
+    // harmless: it shatters the transcript. A stream that interleaves empty
+    // `content` chunks between reasoning chunks (mercury-2.5 does) added an
+    // empty assistant item between every reasoning token — each rendering as a
+    // bare `● ` bullet, and each displacing the streaming thinking item from
+    // the tail, so the *next* reasoning token could no longer append to it and
+    // started a new `✻` block instead. The result was one word per line, down
+    // the whole screen. Providers vary in how much of this they emit, so the
+    // guard belongs here, where every provider passes through, rather than only
+    // in the one known to do it.
     assistantDelta(delta) {
+      if (delta.length === 0) return
       const last = lastLive()
       if (last?.kind === 'assistant' && last.streaming) {
         live = live.map((item) => (item === last ? { ...last, text: last.text + delta } : item))
@@ -166,6 +177,7 @@ export function createTranscriptStore(): TranscriptStore {
     },
 
     thinkingDelta(delta) {
+      if (delta.length === 0) return
       const last = lastLive()
       if (last?.kind === 'thinking' && last.streaming) {
         live = live.map((item) => (item === last ? { ...last, text: last.text + delta } : item))

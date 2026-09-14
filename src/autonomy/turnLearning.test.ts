@@ -2,7 +2,7 @@ import { afterEach, expect, test } from 'bun:test'
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { learnFromTurn, memoryReceipt, parseLessons, similarity, turnEvidence, worthLearningFrom } from './turnLearning.ts'
+import { blockerPrompt, learnFromTurn, learningMode, memoryReceipt, parseLessons, similarity, turnEvidence, worthLearningFrom } from './turnLearning.ts'
 import type { ChatMessage, Provider, StreamTurnParams } from '../providers/types.ts'
 
 const dirs: string[] = []
@@ -148,4 +148,45 @@ test('a reflection call that fails never breaks the finished turn', async () => 
   }
   const learned = await learnFromTurn({ provider, messages: WINDOWS_TURN, fromIndex: 1, request: 'x', outcome: { verify: 'none', repairAttempts: 0 }, cwd: '/tmp', lessonsPath: lessonsFile() })
   expect(learned.lessons).toEqual([])
+})
+
+// --- A turn that ended still broken teaches the constraint --------------------
+
+test('a failure that was never fixed is captured as unresolved, minus denials and slips', () => {
+  const messages: ChatMessage[] = [
+    { role: 'assistant', content: [call('a', 'run_command', { command: 'npm publish' }), call('b', 'edit_file', { path: 'a.ts' }), call('c', 'run_command', { command: 'make' })] },
+    { role: 'user', content: [result('a', 'Action denied by the operator', true), result('b', 'old_string not found in the file', true), result('c', 'make: *** No rule', true)] },
+  ]
+  expect(turnEvidence(messages, 0).unresolved).toEqual([{ failed: 'run_command make', error: 'make: *** No rule' }])
+})
+
+test('a failed turn teaches as a blocker instead of being discarded', () => {
+  const stuck = turnEvidence(
+    [
+      { role: 'assistant', content: [call('a', 'run_command', { command: 'cargo build' })] },
+      { role: 'user', content: [result('a', 'error: linker link.exe not found', true)] },
+    ],
+    0,
+  )
+  // The old gate returned false here and the turn taught nothing at all.
+  expect(worthLearningFrom(stuck, { verify: 'fail', repairAttempts: 1 })).toBe(false)
+  expect(learningMode(stuck, { verify: 'fail', repairAttempts: 1 })).toBe('blocker')
+})
+
+test('a resolved failure still takes the repair path, and a clean turn teaches nothing', () => {
+  expect(learningMode(turnEvidence(WINDOWS_TURN, 1), { verify: 'pass', repairAttempts: 0 })).toBe('repair')
+  expect(learningMode({ failures: [], checkFailures: [], unresolved: [] }, { verify: 'pass', repairAttempts: 0 })).toBeUndefined()
+  // Failed, but nothing mechanical to point at — no lesson worth recording.
+  expect(learningMode({ failures: [], checkFailures: [], unresolved: [] }, { verify: 'fail', repairAttempts: 0 })).toBeUndefined()
+})
+
+test('the blocker prompt asks for the constraint and forbids inventing a fix', () => {
+  const prompt = blockerPrompt(
+    'build the rust crate',
+    { failures: [], checkFailures: [], unresolved: [{ failed: 'run_command cargo build', error: 'linker link.exe not found' }] },
+    [],
+  )
+  expect(prompt).toContain('cargo build')
+  expect(prompt).toContain('linker link.exe not found')
+  expect(prompt).toContain('do NOT state one')
 })
