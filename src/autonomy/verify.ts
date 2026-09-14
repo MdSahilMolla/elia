@@ -16,6 +16,13 @@ const VERIFY_TIMEOUT_MS = 300_000
 export interface VerificationOutcome {
   results: ShellResult[]
   passed: boolean
+  /**
+   * Set when the governor refused to run a check: the work is unverified, not
+   * failed, and no edit to the code can change a policy. The interactive gate
+   * used to hand the refusal to the model as a failing build and spend both
+   * repair attempts on it.
+   */
+  blocked?: string
 }
 
 /**
@@ -73,9 +80,10 @@ export async function runVerification(commands: string[], cwd?: string, signal?:
   for (const command of runnable) {
     const gate = await (governor ?? activeActionGovernor()).check({ name: 'run_command', input: { command } })
     if (!gate.allowed) {
-      const result: ShellResult = { command, exitCode: 126, stdout: '', stderr: gate.message ?? 'verification command blocked by autonomy governor', elapsedMs: 0, timedOut: false }
+      const reason = gate.message ?? 'verification command blocked by autonomy governor'
+      const result: ShellResult = { command, exitCode: 126, stdout: '', stderr: reason, elapsedMs: 0, timedOut: false }
       results.push(result)
-      return { results, passed: false }
+      return { results, passed: false, blocked: reason }
     }
     const result = await runShell(command, VERIFY_TIMEOUT_MS, cwd, signal ?? currentAgent().signal)
     results.push(result)

@@ -7,7 +7,7 @@ import { editFileTool } from './editFile.ts'
 import { grepTool, searchWithJs } from './grep.ts'
 import { listFilesTool } from './listFiles.ts'
 import { readFileTool } from './readFile.ts'
-import { defaultTimeoutForCommand, runCommandTool, workspaceScopedEnv } from './runCommand.ts'
+import { alreadyExistingMkdir, defaultTimeoutForCommand, runCommandTool, workspaceScopedEnv } from './runCommand.ts'
 import { runProgramTool } from './runProgram.ts'
 import { paths } from '../config.ts'
 import { writeFileTool } from './writeFile.ts'
@@ -386,5 +386,26 @@ test('run_command gives installs, builds, and test runs a longer default timeout
   }
   for (const command of ['echo hello', 'git status', 'ls -la']) {
     expect(defaultTimeoutForCommand(command)).toBe(60_000)
+  }
+})
+
+test('mkdir of directories that already exist succeeds without running', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'elia-mkdir-'))
+  try {
+    mkdirSync(join(root, 'app', 'src', 'data'), { recursive: true })
+    expect(alreadyExistingMkdir('mkdir app', root)).toEqual([join(root, 'app')])
+    expect(alreadyExistingMkdir(`mkdir "${join(root, 'app', 'src')}" app/src/data`, root)).toEqual([join(root, 'app', 'src'), join(root, 'app', 'src', 'data')])
+    expect(alreadyExistingMkdir('mkdir -p app/src', root)).toEqual([join(root, 'app', 'src')])
+    // Anything that would really create something, or that is more than a bare mkdir, still runs.
+    expect(alreadyExistingMkdir('mkdir app new-dir', root)).toBeUndefined()
+    expect(alreadyExistingMkdir('mkdir app && echo hi', root)).toBeUndefined()
+    expect(alreadyExistingMkdir('mkdir -m 700 app', root)).toBeUndefined()
+    expect(alreadyExistingMkdir('mkdir %TEMP%', root)).toBeUndefined()
+
+    const result = await runCommandTool.execute({ command: `mkdir "${join(root, 'app')}"` })
+    expect(result).toStartWith('exit code: 0')
+    expect(result).toContain('already exists')
+  } finally {
+    rmSync(root, { recursive: true, force: true })
   }
 })

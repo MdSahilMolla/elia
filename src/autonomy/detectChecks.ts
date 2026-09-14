@@ -113,7 +113,9 @@ export function changedStaticPages(paths: string[]): string[] {
  * first (the project's own declared checks), then language markers.
  *
  * Deliberately conservative — a build or a full e2e run is too slow and too
- * flaky to gate every turn on. Typecheck + unit tests is the sweet spot.
+ * flaky to gate every turn on. Typecheck + unit tests is the sweet spot. The
+ * one build that does get run is a bundler app's `tsc && vite build`: see
+ * `TYPECHECKING_BUNDLER_BUILD`.
  */
 
 const CODE_EXT = /\.(ts|tsx|js|jsx|mjs|cjs|py|go|rs|java|rb|php|c|cc|cpp|h|hpp|swift|kt)$/i
@@ -184,6 +186,7 @@ export function detectChecks(cwd: string = process.cwd()): string[] {
 
     const typecheckScript = ['typecheck', 'type-check', 'tsc', 'check-types'].find((name) => scripts[name])
     if (typecheckScript) checks.push(scriptCmd(pm, typecheckScript))
+    else if (typecheckingBundlerBuild(scripts.build)) checks.push(scriptCmd(pm, 'build'))
 
     const testScript = ['test', 'test:unit', 'tests'].find((name) => scripts[name] && !/(?:^|\s)(?:--)?watch\b/.test(scripts[name]!))
     if (testScript) checks.push(scriptCmd(pm, testScript))
@@ -257,7 +260,9 @@ export function classifyRegime(
   const root = checkRoot(changedPaths, repoRoot)
   if (root) {
     const checks = detectChecks(root)
-    if (anyMechanical(checks)) return 'mechanical'
+    // `bun run build` names no type-checker, but detectChecks only picks a build
+    // whose script runs one.
+    if (anyMechanical(checks) || (checks.length > 0 && typecheckingBundlerBuild(readPackageJson(root)?.scripts?.build))) return 'mechanical'
     if (checks.length > 0) return 'empirical'
   }
 
@@ -275,6 +280,25 @@ export function weakestRegime(regimes: VerificationRegime[]): VerificationRegime
     (weakest, regime) => (rank[regime] < rank[weakest] ? regime : weakest),
     'mechanical',
   )
+}
+
+/**
+ * A `build` script that type-checks and then bundles — the Vite/React/Vue
+ * templates' `tsc && vite build`, `tsc -b && vite build`, `vue-tsc -b && vite build`.
+ *
+ * Those templates declare no `typecheck` or `test` script, so the build is the
+ * only type gate the project has, and every app elia scaffolded from one was
+ * reported "verification: skipped" on every turn — while the agent itself ran
+ * that same build by hand and fixed what it found. The type-checker in these
+ * templates is noEmit and the bundler writes only to its output directory, so
+ * running it leaves the source tree as it was. A bare `build: "tsc"` is not
+ * included: that one can emit .js next to the sources.
+ */
+const TYPECHECK_STEP = /(?:^|&&|;)\s*(?:npx\s+|bunx\s+)?(?:tsc|vue-tsc|svelte-check)\b/
+const BUNDLER_BUILD = /\b(?:vite|next|astro|nuxt|remix|react-router|react-scripts|parcel)\s+build\b|\b(?:webpack|rollup|tsup|esbuild)\b/
+
+function typecheckingBundlerBuild(build: string | undefined): boolean {
+  return build !== undefined && TYPECHECK_STEP.test(build) && BUNDLER_BUILD.test(build)
 }
 
 function hasMypyConfig(cwd: string): boolean {

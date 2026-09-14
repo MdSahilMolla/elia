@@ -2461,15 +2461,23 @@ async function runInteractive(): Promise<void> {
           const line = `Not verified — ${why}`
           uiHooks?.onActivity?.({ kind: 'status', status: 'warning', title: line })
           if (!uiHooks) writeNotice(`▸ ${line}`)
+          sessionTranscript.notice(line)
         }
         if (checks.length > 0) {
           const where = root === process.cwd() ? '' : ` in ${root}`
           taskSessions.update(task.id, { status: 'running', action: 'Verifying', detail: `${checks.join(' && ')}${where}` })
           uiHooks?.onActivity?.({ kind: 'status', status: 'updated', title: `Verifying${where} — ${checks.join(', ')}` })
           if (!uiHooks) writeNotice(`Verifying${where}: ${checks.join(' && ')}`)
-          let outcome = await runVerification(checks, root, controller.signal)
+          // The gate runs after runTurn has returned, outside the turn's own
+          // governor, so it used to fall through to the default unattended one
+          // with no approver: anything off the read-only list — a Vite app's
+          // `bun run build` — was refused even when the user had just allowed
+          // the model to run that exact command. Ask the way the turn asks.
+          const { createActionGovernor } = await import('./autonomy/governor.ts')
+          const gateGovernor = createActionGovernor({ mode: approveAction ? 'supervised' : 'unattended', approve: approveAction })
+          let outcome = await runVerification(checks, root, controller.signal, gateGovernor)
           sessionTranscript.notice(describeVerification(outcome))
-          for (let attempt = 1; !outcome.passed && attempt <= 2 && !controller.signal.aborted; attempt += 1) {
+          for (let attempt = 1; !outcome.passed && !outcome.blocked && attempt <= 2 && !controller.signal.aborted; attempt += 1) {
             repairAttempts = attempt
             const summary = `Verification failed (repair ${attempt}/2)`
             uiHooks?.onActivity?.({ kind: 'status', status: 'warning', title: summary })
@@ -2480,15 +2488,20 @@ async function runInteractive(): Promise<void> {
               ),
             )
             await runModelTurn()
-            outcome = await runVerification(checks, root, controller.signal)
+            outcome = await runVerification(checks, root, controller.signal, gateGovernor)
             sessionTranscript.notice(describeVerification(outcome))
           }
-          verifyResult = outcome.passed ? 'pass' : 'fail'
+          // A check the governor would not run proved nothing either way, and no
+          // repair can change a policy — record the turn as unverified, not failed.
+          verifyResult = outcome.passed ? 'pass' : outcome.blocked ? 'skipped' : 'fail'
           const verdict = outcome.passed
             ? `✓ verified — ${checks.join(', ')} pass`
-            : `⚠ checks still failing after 2 repair attempts — ${describeVerification(outcome).split('\n')[0]}`
+            : outcome.blocked
+              ? `Not verified — ${checks.join(', ')} was not allowed to run: ${outcome.blocked}`
+              : `⚠ checks still failing after 2 repair attempts — ${describeVerification(outcome).split('\n')[0]}`
           uiHooks?.onActivity?.({ kind: 'status', status: outcome.passed ? 'completed' : 'warning', title: verdict })
           if (!uiHooks) writeNotice(verdict)
+          if (outcome.blocked) sessionTranscript.notice(verdict)
         }
       }
 
@@ -2555,6 +2568,7 @@ async function runInteractive(): Promise<void> {
 
               if (ownsVerification) {
                 verifyResult = rendered.ok ? 'pass' : 'fail'
+                sessionTranscript.notice(rendered.ok ? `Render check passed — ${url}` : `Render check failed — ${rendered.reason ?? 'it painted nothing'} (${url})`)
               }
               if (rendered.ok) {
                 const detail = url
@@ -2580,6 +2594,9 @@ async function runInteractive(): Promise<void> {
           const { checkRendered } = await import('./preview/readiness.ts')
           const rendered = await checkRendered(previewedUrl, AbortSignal.any([controller.signal, AbortSignal.timeout(5_000)]))
           verifyResult = rendered.ok ? 'pass' : 'fail'
+          // Status lines reach only the live UI. Without this, a turn recorded
+          // "verification: fail" and nothing anywhere said what had failed.
+          sessionTranscript.notice(rendered.ok ? `Render check passed — ${previewedUrl}` : `Render check failed — ${rendered.reason ?? 'it painted nothing'} (${previewedUrl})`)
           if (!rendered.ok && !machineReadable) {
             const line = `Page no longer renders — ${rendered.reason ?? 'it painted nothing'}`
             if (uiHooks) uiHooks.onActivity?.({ kind: 'status', status: 'warning', title: line })

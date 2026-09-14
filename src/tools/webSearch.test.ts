@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test'
-import { webSearchTool } from './webSearch.ts'
+import { staleYearNote, webSearchTool } from './webSearch.ts'
 
 const originalFetch = globalThis.fetch
 const originalApiKey = process.env.ELIA_SEARCH_API_KEY
@@ -153,4 +153,14 @@ test('web_search surfaces a non-ok response as an error', async () => {
   globalThis.fetch = (async () =>
     new Response('nope', { status: 500, statusText: 'Internal Server Error' })) as unknown as typeof fetch
   await expect(webSearchTool.execute({ query: 'anything' })).rejects.toThrow('500')
+})
+
+test('staleYearNote flags a query pinned to a recent past year, and only that', () => {
+  const now = new Date('2026-09-14T06:00:00Z')
+  // The query the lead actually sent when asked for live prices in September 2026.
+  expect(staleYearNote('MacBook Air M2 price in India 2025 Amazon Flipkart', undefined, now)).toContain('names 2025, but today is 2026-09-14')
+  expect(staleYearNote('MacBook Air M2 price September 2026 India', undefined, now)).toBeUndefined()
+  expect(staleYearNote('MacBook Air M2 price in India 2025', 30, now)).toBeUndefined()
+  expect(staleYearNote('2011 cricket world cup final scorecard', undefined, now)).toBeUndefined()
+  expect(staleYearNote('laptop prices India', undefined, now)).toBeUndefined()
 })

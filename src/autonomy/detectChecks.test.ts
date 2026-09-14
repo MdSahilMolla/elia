@@ -39,6 +39,30 @@ test('no check when the project declares only unrelated scripts', () => {
   expect(detectChecks(dir)).toEqual([])
 })
 
+test('a Vite template with no typecheck script is checked by its type-checking build', () => {
+  // The exact package.json elia scaffolded for workspace/laptop-suggestor, whose
+  // turns all recorded "verification: skipped" while the agent ran this build by hand.
+  writeFileSync(join(dir, 'package.json'), JSON.stringify({ scripts: { dev: 'vite', build: 'tsc && vite build', preview: 'vite preview' } }))
+  writeFileSync(join(dir, 'bun.lock'), '')
+  expect(detectChecks(dir)).toEqual(['bun run build'])
+  for (const build of ['tsc -b && vite build', 'vue-tsc -b && vite build', 'npx tsc --noEmit && next build']) {
+    writeFileSync(join(dir, 'package.json'), JSON.stringify({ scripts: { build } }))
+    expect(detectChecks(dir)).toEqual(['bun run build'])
+  }
+})
+
+test('a build that bundles without type-checking is not a check', () => {
+  writeFileSync(join(dir, 'package.json'), JSON.stringify({ scripts: { build: 'vite build' } }))
+  writeFileSync(join(dir, 'package-lock.json'), '{}')
+  expect(detectChecks(dir)).toEqual([])
+})
+
+test('a typecheck script still wins over the build', () => {
+  writeFileSync(join(dir, 'package.json'), JSON.stringify({ scripts: { typecheck: 'tsc --noEmit', build: 'tsc && vite build', test: 'vitest run' } }))
+  writeFileSync(join(dir, 'package-lock.json'), '{}')
+  expect(detectChecks(dir)).toEqual(['npm run typecheck', 'npm test'])
+})
+
 test('rust project', () => {
   writeFileSync(join(dir, 'Cargo.toml'), '[package]')
   expect(detectChecks(dir)).toEqual(['cargo check', 'cargo test'])
@@ -177,6 +201,15 @@ test('classifyRegime: a project with typecheck + tests is mechanical', () => {
   const file = join(dir, 'src', 'a.ts')
   mkdirSync(join(dir, 'src'), { recursive: true })
   writeFileSync(file, 'export const a = 1')
+  expect(classifyRegime([file], [], dir)).toBe('mechanical')
+})
+
+test('classifyRegime: a type-checking bundler build is mechanical', () => {
+  writeFileSync(join(dir, 'package.json'), JSON.stringify({ scripts: { build: 'tsc && vite build' } }))
+  writeFileSync(join(dir, 'bun.lock'), '')
+  const file = join(dir, 'src', 'App.tsx')
+  mkdirSync(join(dir, 'src'), { recursive: true })
+  writeFileSync(file, 'export default function App() { return null }')
   expect(classifyRegime([file], [], dir)).toBe('mechanical')
 })
 

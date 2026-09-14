@@ -174,11 +174,30 @@ export const webSearchTool: Tool = {
     const start = recencyStart(recencyDays) ?? isoDate(input.startPublishedDate, 'startPublishedDate'); const end = isoDate(input.endPublishedDate, 'endPublishedDate')
     if (start && end && start > end) throw new Error('startPublishedDate must not be after endPublishedDate')
     const results = provider === 'exa' ? await exaSearch(query, count, include, exclude, start, end) : provider === 'serper' ? await serperSearch(query, count, input.country, input.language, recencyDays) : await braveSearch(query, count, include, exclude, recencyDays)
-    const header = [`Search provider: ${provider}`, `Retrieved: ${new Date().toISOString()}`, `Query: ${query}`, ...(recencyDays ? [`Recency filter: last ${recencyDays} day(s)`] : [])]
+    const staleYear = staleYearNote(query, recencyDays)
+    const header = [`Search provider: ${provider}`, `Retrieved: ${new Date().toISOString()}`, `Query: ${query}`, ...(recencyDays ? [`Recency filter: last ${recencyDays} day(s)`] : []), ...(staleYear ? [staleYear] : [])]
     if (!results.length) return [...header, 'No results found.'].join('\n')
     return [...header, '', ...results.map((r, i) => [`${i + 1}. ${r.title}`, `   ${r.url}`, r.publishedAt ? `   Published: ${r.publishedAt}` : '', r.age ? `   Age (provider-reported): ${r.age}` : '', r.author ? `   Author: ${r.author}` : '', r.snippet ? `   ${stripTags(r.snippet).slice(0, 2_000)}` : ''].filter(Boolean).join('\n'))].join('\n')
   },
 }
 
 function stripTags(text: string): string { return text.replace(/<[^>]+>/g, '') }
+
+/**
+ * A query that pins a recent past year, with no recency filter. A model's sense
+ * of "this year" is its training cutoff: asked for live Indian laptop prices on
+ * 2026-09-14, the lead searched "… price in India 2025" eight times and then
+ * told the user the prices were "as of September 2026" (session
+ * mu0ty0ty-ywj5gf). The note goes in the result, where the model is looking.
+ * The query is not rewritten, because the user may really want that year.
+ */
+export function staleYearNote(query: string, recencyDays: number | undefined, now = new Date()): string | undefined {
+  if (recencyDays !== undefined) return undefined
+  const current = now.getUTCFullYear()
+  const years = [...query.matchAll(/\b(20\d{2})\b/g)].map((match) => Number(match[1]))
+  if (years.includes(current)) return undefined
+  const stale = years.find((year) => year < current && year >= current - 2)
+  if (stale === undefined) return undefined
+  return `Note: this query names ${stale}, but today is ${now.toISOString().slice(0, 10)}. For current information search ${current} or pass recencyDays, and do not call these results current unless their dates show it.`
+}
 export { resolveProvider }

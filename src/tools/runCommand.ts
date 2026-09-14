@@ -1,7 +1,7 @@
 import type { Tool } from './types.ts'
 import { DEFAULT_SHELL_TIMEOUT_MS, formatShellResult, isLongRunningServerCommand, runShell, shellCommandAlternative, type ShellResult } from '../shell.ts'
-import { existsSync, readdirSync } from 'node:fs'
-import { delimiter, isAbsolute, join, relative } from 'node:path'
+import { existsSync, readdirSync, statSync } from 'node:fs'
+import { delimiter, isAbsolute, join, relative, resolve } from 'node:path'
 import { currentAgent, resolveProjectPath } from '../autonomy/context.ts'
 import { paths } from '../config.ts'
 import { commandMayReadSensitiveData } from '../autonomy/sensitivePaths.ts'
@@ -75,6 +75,35 @@ function shellMismatch(raw: string): string | null {
   }
 
   return null
+}
+
+/**
+ * The directories a bare `mkdir`/`md` would create, when every one of them is
+ * already there — otherwise undefined.
+ *
+ * cmd.exe's `mkdir` (and POSIX `mkdir` without -p) exits 1 on an existing
+ * directory, and that exit code was recorded as a failed action. write_file
+ * creates parent directories itself, so the usual sequence is files first,
+ * `mkdir` after: session mu0ty0ty-ywj5gf logged two such "failures", each one
+ * counted against the turn's clean rate that decides where elia distrusts itself.
+ * Nothing needs doing, so nothing is run.
+ */
+export function alreadyExistingMkdir(command: string, cwd: string): string[] | undefined {
+  const match = /^\s*(?:mkdir|md)((?:\s+(?:"[^"]+"|[^\s"&|<>;^%$`]+))+)\s*$/i.exec(command)
+  if (!match) return undefined
+  const args = [...match[1]!.matchAll(/"([^"]+)"|(\S+)/g)].map((arg) => arg[1] ?? arg[2]!)
+  const dirs = args.filter((arg) => arg !== '-p' && arg !== '--parents')
+  if (dirs.length === 0 || dirs.some((dir) => dir.startsWith('-'))) return undefined
+  const resolved = dirs.map((dir) => resolve(cwd, dir))
+  return resolved.every((dir) => isDirectory(dir)) ? resolved : undefined
+}
+
+function isDirectory(path: string): boolean {
+  try {
+    return statSync(path).isDirectory()
+  } catch {
+    return false
+  }
 }
 
 /** `node_modules` exists and holds more than a stray `.package-lock.json`. */
@@ -168,6 +197,11 @@ Shell: on Windows the command runs through \`cmd.exe\`; on macOS/Linux through \
     if (mismatch) throw new Error(mismatch)
     const timeoutMs = typeof input.timeoutMs === 'number' ? input.timeoutMs : defaultTimeoutForCommand(input.command)
     const cwd = resolveRunCwd(typeof input.cwd === 'string' ? input.cwd.trim() : '')
+    const existing = alreadyExistingMkdir(input.command, cwd)
+    if (existing) {
+      const stdout = `${existing.length === 1 ? 'Directory already exists' : 'These directories already exist'}, nothing to do: ${existing.join(', ')}`
+      return formatShellResult({ command: input.command, exitCode: 0, stdout, stderr: '', elapsedMs: 0, timedOut: false })
+    }
     const signal = currentAgent().signal
     const env = workspaceScopedEnv(cwd)
 
