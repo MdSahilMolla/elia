@@ -30,6 +30,11 @@ test('run_command preview shows the exact command and cwd', () => {
   expect(approvalPreviewLines('run_command', { command: 'ls' })).toEqual(['  $ ls'])
 })
 
+test('process start preview shows the command it will keep running', () => {
+  expect(approvalPreviewLines('process', { action: 'start', command: 'npm run dev', cwd: 'web' })).toEqual(['  $ npm run dev', '  in web'])
+  expect(approvalPreviewLines('process', { action: 'logs', id: 'proc_1' })).toBeUndefined()
+})
+
 test('run_program preview preserves each literal argument', () => {
   expect(approvalPreviewLines('run_program', { program: 'bun', args: ['install', 'folder with spaces'], cwd: 'app' }))
     .toEqual(['  $ bun "install" "folder with spaces"', '  in app'])

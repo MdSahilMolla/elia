@@ -157,10 +157,12 @@ export function applyPolicy(assessment: ActionAssessment, request: ActionRequest
   if (policy.denyIntents.includes(assessment.intent)) {
     return { assessment: { ...assessment, decision: 'block' }, blocked: true, message: `Blocked by .elia/policy.json: "${assessment.intent}" is on the deny list.` }
   }
-  if (request.name === 'run_command' || request.name === 'run_program') {
-    const command = request.name === 'run_command'
-      ? (typeof request.input.command === 'string' ? request.input.command : '')
-      : [typeof request.input.program === 'string' ? request.input.program : '', ...(Array.isArray(request.input.args) ? request.input.args.filter((arg): arg is string => typeof arg === 'string') : [])].join(' ')
+  // `process start` runs a shell command too; a forbidden command must not get
+  // through just because it was asked to keep running.
+  if (request.name === 'run_command' || request.name === 'run_program' || (request.name === 'process' && request.input.action === 'start')) {
+    const command = request.name === 'run_program'
+      ? [typeof request.input.program === 'string' ? request.input.program : '', ...(Array.isArray(request.input.args) ? request.input.args.filter((arg): arg is string => typeof arg === 'string') : [])].join(' ')
+      : (typeof request.input.command === 'string' ? request.input.command : '')
     const hit = policy.denyCommandPatterns.find((pattern) => compiledPattern(pattern).test(command))
     if (hit) {
       return { assessment: { ...assessment, decision: 'block' }, blocked: true, message: `Blocked by .elia/policy.json: command matches forbidden pattern /${hit}/i.` }

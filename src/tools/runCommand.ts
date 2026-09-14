@@ -168,7 +168,7 @@ export const runCommandTool: Tool = {
 
 Pass \`cwd\` (relative to the workspace) to run inside a sub-project you created — e.g. cwd:"my-app" so \`npm install\` and \`npm run build\` use that project's package.json, not elia's own. Commands do NOT persist a directory between calls; always pass \`cwd\` rather than \`cd\`.
 
-Do NOT run dev servers (\`npm run dev\`, \`vite\`, \`next dev\`, …) here — they never exit and will time out. Use the \`preview\` tool to serve and open a project instead. Inherits the active autonomous cancellation signal.
+Do NOT run dev servers (\`npm run dev\`, \`vite\`, \`next dev\`, …) or any other command that does not exit here — they will time out. Use the \`process\` tool to start one in the background and read its logs, or \`preview\` to build and open a page without a server at all. Inherits the active autonomous cancellation signal.
 
 Shell: on Windows the command runs through \`cmd.exe\`; on macOS/Linux through \`sh\`. Write for that shell, not bash:
 - Probe for a tool with \`where <tool>\` on Windows / \`command -v <tool>\` on POSIX — not \`which\` (absent on Windows) and not \`bash -c …\` (bash is often just a WSL stub).

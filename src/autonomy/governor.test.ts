@@ -420,6 +420,19 @@ test('a genuinely unknown tool still fails closed', () => {
   expect(assessment.reason).toContain('no declared safety contract')
 })
 
+test('process start is assessed as the shell command it runs; reading and stopping are allowed', () => {
+  for (const command of ['rm -rf build', 'npm run dev', 'bun test --watch']) {
+    const started = assessAction({ name: 'process', input: { action: 'start', command } }, '/repo')
+    const ran = assessAction({ name: 'run_command', input: { command } }, '/repo')
+    expect({ risk: started.risk, decision: started.decision, intent: started.intent }).toEqual({ risk: ran.risk, decision: ran.decision, intent: ran.intent })
+  }
+  expect(assessAction({ name: 'process', input: { action: 'start', command: 'rm -rf build' } }, '/repo').risk).toBe('critical')
+  for (const action of ['logs', 'list', 'stop']) {
+    expect(assessAction({ name: 'process', input: { action, id: 'proc_1' } }, '/repo')).toMatchObject({ risk: 'safe', decision: 'allow' })
+  }
+  expect(assessAction({ name: 'process', input: { action: 'restart' } }, '/repo')).toMatchObject({ risk: 'critical', decision: 'approve' })
+})
+
 test('codex_delegate requires approval and is not assumed reversible', () => {
   const assessment = assessAction({ name: 'codex_delegate', input: { prompt: 'fix the bug' } })
   expect(assessment.risk).toBe('critical')

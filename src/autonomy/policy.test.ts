@@ -75,6 +75,14 @@ test('applyPolicy applies command patterns to direct program arguments too', () 
   expect(outcome.blocked).toBe(true)
 })
 
+test('applyPolicy applies command patterns to `process start`, which runs a shell command too', () => {
+  const policy: EliaPolicy = { ...base, denyCommandPatterns: ['playwright\\s+install'] }
+  const start = { name: 'process', input: { action: 'start', command: 'npx playwright install' } }
+  expect(applyPolicy(assessAction(start, '/repo'), start, '/repo', policy).blocked).toBe(true)
+  const logs = { name: 'process', input: { action: 'logs', id: 'proc_1', filter: 'playwright install' } }
+  expect(applyPolicy(assessAction(logs, '/repo'), logs, '/repo', policy).blocked).toBe(false)
+})
+
 test('applyPolicy raises a safe allow to approve when the risk bar is lowered', () => {
   const safe = { name: 'web_search', input: { query: 'tls best practice' } }
   const assessment = assessAction(safe, process.cwd())

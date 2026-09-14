@@ -12,6 +12,7 @@ import { endTextTurn, writeNotice, writeToolCall, writeToolResult } from './ui/s
 import { startThinkingAnimation } from './ui/animator.ts'
 import { createStreamCursor } from './ui/streamCursor.ts'
 import { ZERO_USAGE, addUsage } from './usage.ts'
+import { spendState, spendStopPrompt } from './spendLimit.ts'
 import { SPECULABLE_TOOLS, type CacheStats, type ToolResultCache } from './speculation/cache.ts'
 import { readMemo } from './speculation/deterministicCache.ts'
 import type { Prefetcher } from './speculation/prefetch.ts'
@@ -150,7 +151,7 @@ export interface RunAgentLoopOptions {
   drainDirectives?: () => string[]
 }
 
-export type StopReason = 'complete' | 'step-budget' | 'aborted' | 'no-progress'
+export type StopReason = 'complete' | 'step-budget' | 'aborted' | 'no-progress' | 'spend-budget'
 
 /** Consecutive all-error tool turns before elia firmly tells the model to change tack. */
 const UNPRODUCTIVE_NUDGE_AT = 3
@@ -354,6 +355,14 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
         'step-budget',
       )
     }
+
+    // Money, checked before spending more of it. Deliberately the same graceful
+    // wrap-up as the step budget rather than a hard abort: one final tool-less
+    // call costs very little and is the difference between a run that reports
+    // what it did and one that simply stops mid-edit. That call can carry the
+    // total slightly past the ceiling, which is the intended trade.
+    const spend = spendState(config.model, totalUsage)
+    if (spend.exceeded) return wrapUpAndFinish(spendStopPrompt(spend), 'spend-budget')
 
     steps += 1
     let content: ContentBlock[]

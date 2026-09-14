@@ -29,7 +29,7 @@ export function approvalPreviewLines(name: string, input: Record<string, unknown
     ]
   }
 
-  if (name === 'run_command') {
+  if (name === 'run_command' || (name === 'process' && input.action === 'start')) {
     const command = str(input.command)
     if (!command) return undefined
     return [`  $ ${command}`, ...(str(input.cwd) ? [`  in ${str(input.cwd)}`] : [])]

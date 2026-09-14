@@ -37,6 +37,10 @@ const CATALOG: CapabilityContract[] = [
     .map((tool) => contract(tool, 'review', ['workspace-write'], false, 'written artifact and postcondition')),
   contract('run_command', 'review', ['process'], false, 'exit status, bounded output, and declared postcondition'),
   contract('run_program', 'review', ['process'], false, 'exit status, bounded output, and declared postcondition'),
+  // Not idempotent, and unlike run_command it leaves something behind: a
+  // process that outlives the call. Two `start`s are two servers competing for
+  // a port, so it is reviewed like any other process capability.
+  contract('process', 'review', ['process'], false, 'process id, live status, and captured output'),
   contract('provision_environment', 'review', ['process', 'workspace-write'], false, 'installed dependency or recorded blocker'),
   contract('github', 'review', ['network-read', 'external-write'], false, 'provider response and readback'),
   contract('deployment', 'critical', ['process', 'network-read', 'external-write'], false, 'provider receipt and live postcondition'),

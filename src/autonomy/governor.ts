@@ -113,6 +113,17 @@ export function assessAction(request: ActionRequest, cwd = currentAgent().cwd ??
     const args = Array.isArray(input.args) ? input.args.filter((arg): arg is string => typeof arg === 'string') : []
     return assessCommand([program, ...args].join(' '), cwd)
   }
+  // `process start` launches a shell command exactly as run_command does — it
+  // just doesn't wait for it — so it gets the same command assessment. The
+  // other actions only read or stop processes this session itself started.
+  if (name === 'process') {
+    const action = typeof input.action === 'string' ? input.action : ''
+    if (action === 'start') return assessCommand(typeof input.command === 'string' ? input.command : '', cwd)
+    if (action === 'logs' || action === 'list' || action === 'stop') {
+      return assessment('safe', 'allow', `process ${action} only touches processes this session started`, `process.${action}`, [], action !== 'stop')
+    }
+    return assessment('critical', 'approve', `process ${action || '(no action)'} is not a known process action`, 'process', resources, false)
+  }
 
   if (name === 'presentation') {
     return assessment('review', 'approve', 'presentation generation creates a derived document artifact', 'presentation.from_workbook', resources, true)
@@ -506,8 +517,8 @@ export function createActionGovernor(options: { mode?: GovernanceMode; approve?:
   /** "Allow for this session" choices from the supervised approval menu. */
   const sessionAllow = new Set<string>()
   const sessionKey = (request: ActionRequest, assessment: ActionAssessment): string =>
-    request.name === 'run_command'
-      ? `run_command:${String(request.input.command ?? '').trim().split(/[\s;|&]+/, 1)[0] ?? ''}`
+    request.name === 'run_command' || (request.name === 'process' && request.input.action === 'start')
+      ? `${request.name}:${String(request.input.command ?? '').trim().split(/[\s;|&]+/, 1)[0] ?? ''}`
       : request.name === 'run_program'
         ? `run_program:${String(request.input.program ?? '').trim()}:${Array.isArray(request.input.args) && typeof request.input.args[0] === 'string' ? request.input.args[0].trim() : ''}:${assessment.intent}`
       : `${request.name}:${assessment.intent}`

@@ -105,9 +105,20 @@ const COMMAND_CHAIN_SYNTAX = /[;&|<>`$]|\$\(/i
  * session/run only and never persisted.
  */
 export function canPersistPrefixRule(request: ActionRequest): boolean {
-  if (request.name !== 'run_command') return true
-  const command = typeof request.input.command === 'string' ? request.input.command : ''
-  return !COMMAND_CHAIN_SYNTAX.test(command)
+  const command = shellCommandOf(request)
+  return command === undefined || !COMMAND_CHAIN_SYNTAX.test(command)
+}
+
+/**
+ * The shell command line a request runs, for the tools whose rules are keyed to
+ * its leading token: run_command, and `process start`, which runs the same kind
+ * of command without waiting for it. Undefined for every other request — a
+ * `process` rule keyed to an intent like `shell.unknown` would auto-allow every
+ * command the governor doesn't recognise.
+ */
+function shellCommandOf(request: ActionRequest): string | undefined {
+  if (request.name !== 'run_command' && !(request.name === 'process' && request.input.action === 'start')) return undefined
+  return typeof request.input.command === 'string' ? request.input.command : ''
 }
 
 /** The leading token of a shell command — `git push --force` → `git`. */
@@ -127,17 +138,17 @@ function directProgramPrefix(input: Record<string, unknown>): string {
 
 function matches(rule: AllowRule, request: ActionRequest, assessment: ActionAssessment): boolean {
   if (rule.tool !== request.name) return false
-  if (request.name === 'run_command' || request.name === 'run_program') {
-    if (request.name === 'run_command') {
-      const command = typeof request.input.command === 'string' ? request.input.command : ''
-      // A persisted prefix rule was approved for a single leading token. A
-      // command that chains further work behind shell control syntax reaches
-      // far beyond that token (`bun` must not cover `bun run x & curl … -d
-      // @secrets.txt`, `git` must not cover `git reset --hard; git push --force`),
-      // so it must never ride in on a prefix rule — prompt instead.
-      if (COMMAND_CHAIN_SYNTAX.test(command)) return false
-      return Boolean(rule.commandPrefix) && commandPrefix(command) === rule.commandPrefix
-    }
+  const command = shellCommandOf(request)
+  if (command !== undefined) {
+    // A persisted prefix rule was approved for a single leading token. A
+    // command that chains further work behind shell control syntax reaches
+    // far beyond that token (`bun` must not cover `bun run x & curl … -d
+    // @secrets.txt`, `git` must not cover `git reset --hard; git push --force`),
+    // so it must never ride in on a prefix rule — prompt instead.
+    if (COMMAND_CHAIN_SYNTAX.test(command)) return false
+    return Boolean(rule.commandPrefix) && commandPrefix(command) === rule.commandPrefix
+  }
+  if (request.name === 'run_program') {
     const prefix = directProgramPrefix(request.input)
     const prefixMatches = Boolean(rule.commandPrefix) && prefix === rule.commandPrefix
     return prefixMatches && (!rule.intent || rule.intent === assessment.intent)
@@ -154,14 +165,9 @@ export function isAllowlisted(request: ActionRequest, assessment: ActionAssessme
 /** Builds the rule an approval prompt would persist for this request. */
 export function ruleFor(request: ActionRequest, assessment: ActionAssessment): AllowRule {
   const base: AllowRule = { tool: request.name, addedAt: new Date().toISOString(), note: assessment.reason }
-  if (request.name === 'run_command' || request.name === 'run_program') {
-    const prefix = request.name === 'run_command'
-      ? commandPrefix(typeof request.input.command === 'string' ? request.input.command : '')
-      : directProgramPrefix(request.input)
-    return request.name === 'run_program'
-      ? { ...base, commandPrefix: prefix, intent: assessment.intent }
-      : { ...base, commandPrefix: prefix }
-  }
+  const command = shellCommandOf(request)
+  if (command !== undefined) return { ...base, commandPrefix: commandPrefix(command) }
+  if (request.name === 'run_program') return { ...base, commandPrefix: directProgramPrefix(request.input), intent: assessment.intent }
   return { ...base, intent: assessment.intent }
 }
 
