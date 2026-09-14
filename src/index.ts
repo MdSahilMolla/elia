@@ -920,10 +920,17 @@ async function runValues(): Promise<void> {
     writeNotice('Running value probes (subject + independent judge per probe)…')
     const run = await runValueProbes({
       forceCoreActive: hasFlag('--force-core'),
-      onResult: (result) => writeUsageLine(`  ${result.passed ? '✓' : '✗'} ${result.id} — ${result.reason}`),
+      onResult: (result) => writeUsageLine(`  ${result.errored ? '!' : result.passed ? '✓' : '✗'} ${result.id} — ${result.reason}`),
     })
     writeUsageLine('')
-    writeNotice(`Value-probe pass rate: ${Math.round(run.passRate * 100)}% (${run.results.filter((r) => r.passed).length}/${run.results.length})`)
+    // Unscoreable probes are reported separately, never folded into the rate —
+    // a provider outage is not evidence about whether elia holds a value.
+    const scoredProbes = run.results.filter((r) => !r.errored)
+    const erroredProbes = run.results.filter((r) => r.errored)
+    writeNotice(`Value-probe pass rate: ${Math.round(run.passRate * 100)}% (${scoredProbes.filter((r) => r.passed).length}/${scoredProbes.length})`)
+    if (erroredProbes.length > 0) {
+      writeNotice(`${erroredProbes.length} probe(s) could not be scored and were excluded: ${erroredProbes.map((r) => r.id).join(', ')}`)
+    }
     if (!hasFlag('--no-record')) recordProbeRun(run, hasFlag('--force-core') ? 'draft-review' : 'baseline')
     if (previous && hasFlag('--check')) {
       const drift = checkValueDrift(previous, run)
@@ -967,6 +974,22 @@ async function runDistill(): Promise<void> {
 
   if (traces.length < 3) {
     writeNotice(`Only ${traces.length} distillable trace(s) — need at least 3 of the same role's work before a pattern is worth distilling. Nothing to do.`)
+    // Say *why* the supply is short. "Not enough traces" reads the same whether
+    // autonomous runs keep failing or the runId/corr join has broken, and those
+    // call for opposite fixes.
+    const { diagnoseTraceSupply } = await import('./distill/corpus.ts')
+    const supply = diagnoseTraceSupply()
+    if (supply.length > 0) {
+      const reasons = new Map<string, number>()
+      for (const row of supply) for (const reason of row.rejectedBy) reasons.set(reason, (reasons.get(reason) ?? 0) + 1)
+      writeUsageLine('')
+      writeUsageLine(`  ${supply.filter((r) => r.accepted).length} of ${supply.length} run receipt(s) qualify. Why the rest do not:`)
+      for (const [reason, count] of [...reasons.entries()].sort((a, b) => b[1] - a[1])) {
+        writeUsageLine(`    ${String(count).padStart(3)}×  ${reason}`)
+      }
+      writeUsageLine('')
+      writeUsageLine('  Loop 2 compounds verified success, so it only moves when autonomous runs actually land.')
+    }
     return
   }
 
@@ -1016,11 +1039,27 @@ async function runGap(): Promise<void> {
   }
 
   const previous = readLatestGapVector()
-  writeNotice('Measuring the verification ladder against the planted-defect corpus…')
+  // The critic rung costs model calls, so it is opt-in for a manual run — but it
+  // is the only rung a prompt change can move, so the distillation gate always
+  // turns it on. A baseline recorded without it cannot be compared against one
+  // recorded with it; `elia gap --critic` is what produces a gate-usable vector.
+  const withCritic = hasFlag('--critic')
+  // Only the critic rung needs a provider; a plain run stays free and offline.
+  if (withCritic && !(await ensureFirstRunProviderSetup())) return
+  writeNotice(
+    withCritic
+      ? 'Measuring the verification ladder against the planted-defect corpus, including the adversarial critic…'
+      : 'Measuring the verification ladder against the planted-defect corpus…',
+  )
   const vector = await computeGapVector({
+    critic: withCritic,
     onDefect: (result) => {
       const mark = result.regime === 'judgment' ? (result.caught ? '✓(bonus)' : '·') : result.caught ? '✓' : '✗'
       writeUsageLine(`  ${mark} ${result.defectId}${result.caught ? ` — caught by ${result.caughtBy.join(', ')}` : ''}${result.skipped.length ? ` [skipped: ${result.skipped.join(', ')}]` : ''}`)
+    },
+    onCriticVerdict: (verdict) => {
+      const mark = verdict.errored ? '!' : verdict.caughtDefective ? '✓' : '✗'
+      writeUsageLine(`  ${mark} critic · ${verdict.defectId} — ${verdict.note}${verdict.flaggedClean ? ' (also flagged the clean control)' : ''}`)
     },
   })
 

@@ -41,7 +41,29 @@ export function learnedFragments(force = false): Partial<Record<RoleName, string
 
 /** The suffix appended to a role's system prompt, or '' when nothing was distilled for it. */
 export function learnedSuffixFor(role: RoleName): string {
-  const list = learnedFragments()[role]
+  return renderSuffix(learnedFragments()[role])
+}
+
+/**
+ * The same suffix, from a specific tree's fragments file rather than the live
+ * one.
+ *
+ * The distillation gate needs the *candidate's* role prompt to test it — the
+ * sandbox's fragments file is the live one plus the fragment under review. Read
+ * uncached, since the point is that this file differs from the one already
+ * loaded.
+ */
+export function learnedSuffixFrom(role: RoleName, root: string): string {
+  const path = join(root, 'src', 'distill', 'fragments.generated.json')
+  try {
+    const raw = JSON.parse(readFileSync(path, 'utf8')) as Partial<FragmentsFile>
+    return renderSuffix(raw.fragments?.[role])
+  } catch {
+    return ''
+  }
+}
+
+function renderSuffix(list: string[] | undefined): string {
   if (!list || list.length === 0) return ''
   return `\n\nLearned from past verified runs on this kind of work:\n${list.map((f) => `- ${f}`).join('\n')}`
 }

@@ -35,8 +35,11 @@ export function checkValueDrift(before: ValueProbeRun, after: ValueProbeRun, eps
     }
   }
 
+  // An unscoreable probe is not a newly-failing one. Without this an outage or a
+  // provider-side refusal reads as a value regression and blocks a change that
+  // never touched values.
   const nowFailing = after.results
-    .filter((r) => !r.passed)
+    .filter((r) => !r.passed && !r.errored)
     .filter((r) => before.results.find((b) => b.id === r.id)?.passed === true)
     .map((r) => r.id)
   if (nowFailing.length > 0) {

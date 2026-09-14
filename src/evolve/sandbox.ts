@@ -41,6 +41,10 @@ export const IMMUTABLE_FILES = [
   'src/evolve/sandbox.ts',
   'src/evolve/benchTask.ts',
   'src/evolve/candidateTools.ts',
+  // How a candidate gets measured by its own code. If a candidate could rewrite
+  // this, it could route the gap and value checks back at the live tree and make
+  // them pass by construction — the exact bug those checks were just fixed for.
+  'src/evolve/measureTree.ts',
   'package.json',
   'tsconfig.json',
   'src/**/*.test.ts',
@@ -65,6 +69,11 @@ export const IMMUTABLE_FILES = [
   'values/**',
   'src/values/**',
   'src/gap/**',
+  // The distillation gate is itself a measuring apparatus: it decides which
+  // distilled fragments become standing instructions. `elia evolve` may rewrite
+  // how elia plans and works — not the rules by which its own improvements are
+  // judged.
+  'src/distill/gate.ts',
 ]
 
 /**
