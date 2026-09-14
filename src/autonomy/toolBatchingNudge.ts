@@ -13,6 +13,8 @@
  * model that course-corrects is never nagged again.
  */
 
+import { activeTodoList } from './todoList.ts'
+
 const BATCHABLE_READS = new Set(['read_file', 'grep', 'list_files'])
 
 /** True when a turn's tool calls are exactly one batchable read — the shape we want to discourage repeating. */
@@ -111,7 +113,16 @@ export interface PlanlessWorkTracker {
   observe(toolNames: string[]): string | undefined
 }
 
-export function createPlanlessWorkTracker(): PlanlessWorkTracker {
+/**
+ * A plan with work still open is already on the board — elia drafted it before
+ * the loop started (autonomy/upfrontPlan.ts), or an earlier step wrote it. A
+ * finished list from a previous request does not count: new work needs its own.
+ */
+function openPlanExists(): boolean {
+  return activeTodoList().read().some((item) => item.status !== 'completed')
+}
+
+export function createPlanlessWorkTracker(hasOpenPlan: () => boolean = openPlanExists): PlanlessWorkTracker {
   let calls = 0
   let changes = 0
   let done = false
@@ -119,6 +130,10 @@ export function createPlanlessWorkTracker(): PlanlessWorkTracker {
   return {
     observe(toolNames) {
       if (done) return undefined
+      if (hasOpenPlan()) {
+        done = true
+        return undefined
+      }
       for (const name of toolNames) {
         // It wrote a plan. Nothing to say, now or later.
         if (name === 'todo_write') {

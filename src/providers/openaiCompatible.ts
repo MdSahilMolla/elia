@@ -5,6 +5,17 @@ import { warmConnection } from './prewarm.ts'
 
 export interface OpenAICompatibleProviderOptions {
   thinking?: ThinkingOption
+  /**
+   * Ask the endpoint for a summary of its reasoning. Inception's Mercury
+   * reasons before every answer (hundreds of `reasoning_tokens` a step) but
+   * returns none of it unless the request sets `reasoning_summary`, and then
+   * only as a top-level `reasoning_summary: { content, status }` on the final
+   * chunk — never as a streamed delta. Other endpoints reject the unknown flag,
+   * so it is only sent where the registry knows it is understood.
+   */
+  reasoningSummary?: boolean
+  /** The endpoint takes Inception's per-request `reasoning_effort` (instant/low/medium/high). */
+  reasoningEffort?: boolean
 }
 
 // A generous ceiling on a single response (billed by actual usage, not the cap)
@@ -30,18 +41,27 @@ export function createOpenAICompatibleProvider(
   // field with no enable/disable request param — there is nothing to toggle in
   // the request itself, only whether elia surfaces what the model already sends.
   const passthroughReasoning = options.thinking?.enabled ?? true
+  // `reasoning_summary_wait` holds the final chunk until the summary is ready;
+  // without it the summary is routinely "unavailable" by the time the answer ends.
+  const summaryParams: Record<string, unknown> = passthroughReasoning && options.reasoningSummary
+    ? { reasoning_summary: true, reasoning_summary_wait: true }
+    : {}
 
   return {
     prewarm() {
       warmConnection(validatedBaseURL ?? client.baseURL)
     },
 
-    async streamTurn({ system, systemDynamic, messages, tools, onText, onThinking, onToolBlock, signal }: StreamTurnParams) {
+    async streamTurn({ system, systemDynamic, messages, tools, onText, onThinking, onToolBlock, signal, reasoningEffort }: StreamTurnParams) {
       // The stable prompt stays first so an OpenAI-compatible endpoint's
       // automatic prefix caching still matches on it; the per-turn dynamic
       // suffix follows it.
       const fullSystem = systemDynamic && systemDynamic.trim() ? `${system}\n\n${systemDynamic}` : system
       const openAITools = toOpenAITools(tools)
+      const requestParams: Record<string, unknown> = {
+        ...summaryParams,
+        ...(options.reasoningEffort && reasoningEffort ? { reasoning_effort: reasoningEffort } : {}),
+      }
       // Tracks whether the caller's callbacks have already surfaced any part of
       // this response before a streaming failure. Only a completely silent
       // stream (nothing emitted yet) is safe to silently retry non-streaming and
@@ -61,6 +81,7 @@ export function createOpenAICompatibleProvider(
           ...(openAITools.length > 0 ? { parallel_tool_calls: true } : {}),
           // Without this the final streamed response has no usage data at all.
           stream_options: { include_usage: true },
+          ...requestParams,
         }, signal ? { signal } : undefined)
         .on('content', (delta) => {
           if (delta) emittedContent = true
@@ -84,6 +105,9 @@ export function createOpenAICompatibleProvider(
         })
       }
 
+      // The SDK's accumulated message never carries `reasoning_summary` (it is
+      // a sibling of `choices`, not part of the message), so it is kept here.
+      let summary = ''
       if (passthroughReasoning) {
         runner.on('chunk', (chunk) => {
           // The reasoning field is non-standard, so the SDK's delta type has no
@@ -96,6 +120,12 @@ export function createOpenAICompatibleProvider(
             emittedContent = true
             onThinking?.(reasoning)
           }
+          const summarised = readReasoningSummary(chunk)
+          if (summarised && !summary) {
+            summary = summarised
+            emittedContent = true
+            onThinking?.(summarised)
+          }
         })
       }
 
@@ -105,7 +135,7 @@ export function createOpenAICompatibleProvider(
         if (!message) {
           throw new Error('Provider returned no message in response')
         }
-        return { content: toContentBlocks(message, passthroughReasoning), usage: usageFrom(completion.usage) }
+        return { content: withReasoningSummary(toContentBlocks(message, passthroughReasoning), summary), usage: usageFrom(completion.usage) }
       } catch (err) {
         // The non-streaming fallback below re-issues the whole request and
         // replays the full response through onText/onThinking — safe only when
@@ -122,10 +152,14 @@ export function createOpenAICompatibleProvider(
           tools: openAITools,
           ...(openAITools.length > 0 ? { parallel_tool_calls: true } : {}),
           stream: false,
+          ...requestParams,
         }, signal ? { signal } : undefined)
         const message = completion.choices[0]?.message
         if (!message) throw new Error('Provider returned no message in non-streaming response')
-        const content = toContentBlocks(message, passthroughReasoning)
+        const content = withReasoningSummary(
+          toContentBlocks(message, passthroughReasoning),
+          passthroughReasoning ? (readReasoningSummary(completion) ?? '') : '',
+        )
         for (const block of content) {
           if (block.type === 'thinking') onThinking?.(block.text)
           if (block.type === 'text') onText(block.text)
@@ -279,6 +313,25 @@ function usageFrom(rawUsage: { prompt_tokens?: number; completion_tokens?: numbe
 function isStreamingUnsupported(error: unknown): boolean {
   const text = error instanceof Error ? error.message : String(error)
   return /streaming is not supported|stream is not supported|request ended without sending any chunks/i.test(text)
+}
+
+/**
+ * The text of a Mercury-style `reasoning_summary` on a chunk or completion.
+ * Mercury sends the key on every chunk, as `null` until (and unless) a summary
+ * exists, and a model that has no summary to give reports `null` throughout.
+ */
+export function readReasoningSummary(payload: unknown): string | undefined {
+  if (!payload || typeof payload !== 'object') return undefined
+  const summary = (payload as { reasoning_summary?: unknown }).reasoning_summary
+  if (!summary || typeof summary !== 'object') return undefined
+  const content = (summary as { content?: unknown }).content
+  return typeof content === 'string' && content.trim() ? content.trim() : undefined
+}
+
+/** Records a reasoning summary as the turn's thinking block, unless the model already streamed its own reasoning. */
+function withReasoningSummary(content: ContentBlock[], summary: string): ContentBlock[] {
+  if (!summary || content.some((block) => block.type === 'thinking')) return content
+  return [{ type: 'thinking', text: summary, signature: '' }, ...content]
 }
 
 /** Pulls a reasoning fragment off a raw streamed delta, tolerating either non-standard field name. */

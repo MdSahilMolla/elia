@@ -7,7 +7,8 @@ import { allWorkerTools, battmannTools, businessTools, cyberTools, getSynthesize
 import { taskTool } from './tools/task.ts'
 import { previewTool } from './tools/preview.ts'
 import { codexTool } from './tools/codex.ts'
-import { writeProviderActivity, writeText, writeThinking, writeUsageLine } from './ui/stream.ts'
+import { writeNotice, writeProviderActivity, writeText, writeThinking, writeUsageLine } from './ui/stream.ts'
+import { activeSessionTranscript } from './ui/transcript.ts'
 import { recordUsage, recordTopLevelTurn, formatUsageLine } from './usage.ts'
 import { createToolResultCache } from './speculation/cache.ts'
 import { createPrefetcher } from './speculation/prefetch.ts'
@@ -22,11 +23,13 @@ import { createActionGovernor, withActionGovernor, type ActionApproval, type Gov
 import { loadDevelopmentToolHooks, withToolHooks } from './autonomy/devHooks.ts'
 import { expandSkillSelection } from './skills/bundles.ts'
 import { activeTodoList, type TodoList, withTodoList } from './autonomy/todoList.ts'
-import { renderLessons } from './autonomy/lessons.ts'
+import { renderLessonsWithKeys } from './autonomy/lessons.ts'
 import { renderRationale } from './autonomy/rationale.ts'
 import { regretNudge, weakDomainCaution } from './autonomy/outcomes.ts'
 import { disputeNudge } from './autonomy/disputeNudge.ts'
 import { renderSkillHint } from './skills/relevance.ts'
+import { draftUpfrontPlan, planActivity, planBriefing, planTodoItems, stripInjectedContext, upfrontPlanEnabled, wantsUpfrontPlan } from './autonomy/upfrontPlan.ts'
+import { memoryReceipt } from './autonomy/turnLearning.ts'
 
 /** The most recent user message text — the query project memory is ranked against. */
 function lastUserTextFor(messages: ConversationMessage[]): string {
@@ -111,6 +114,18 @@ export interface RunTurnOptions {
   skipStats?: boolean
   /** Mid-run steering: pending operator messages to splice in at the next step boundary (see runAgentLoop). */
   drainSteering?: () => string[]
+  /**
+   * This call opens a fresh user request (not a verification-repair or
+   * self-review continuation): say what memory the turn is drawing on, and for
+   * multi-step work think it through out loud and draft the plan before any
+   * tool runs — see autonomy/upfrontPlan.ts.
+   */
+  upfrontPlan?: boolean
+}
+
+/** The lessons a `note_lesson` call recorded, for its ✦ receipt. */
+function notedLessons(input: Record<string, unknown>): string[] {
+  return Array.isArray(input.lessons) ? input.lessons.filter((lesson): lesson is string => typeof lesson === 'string' && lesson.trim().length > 0) : []
 }
 
 export async function runTurn(
@@ -143,8 +158,12 @@ async function runScopedTurn(
   // files this turn is about to touch. Derived on read from the second brain;
   // empty (and free) until the brain has something anchored to those paths.
   const brainCards = mode === 'dev' && turnPaths.length > 0 ? await renderBrainCards(turnPaths) : ''
+  const lessonMemory = mode === 'dev' ? renderLessonsWithKeys() : { text: '', keys: [] }
+  const rationale = mode === 'dev' ? renderRationale(turnQuery, turnPaths) : ''
+  const weakCaution = mode === 'dev' ? weakDomainCaution(turnQuery, turnPaths) : ''
+  const lastTurnFriction = mode === 'dev' ? regretNudge() : ''
   const projectMemory = mode === 'dev'
-    ? `${renderLessons()}${renderRationale(turnQuery, turnPaths)}${brainCards}${renderSkillHint(turnQuery)}${weakDomainCaution(turnQuery, turnPaths)}${regretNudge()}${disputeNudge(turnQuery)}`
+    ? `${lessonMemory.text}${rationale}${brainCards}${renderSkillHint(turnQuery)}${weakCaution}${lastTurnFriction}${disputeNudge(turnQuery)}`
     : ''
 
   // The system prompt is split so prompt caching survives across user turns:
@@ -162,6 +181,54 @@ async function runScopedTurn(
   // real time, and it must not bake into the cached stable prefix (a daemon can
   // stay up across midnight, or for days).
   const systemDynamicPrompt = [turnContextPrompt(), projectMemory].map((part) => part.trim()).filter(Boolean).join('\n\n') || undefined
+
+  // Plans and learning receipts are part of the turn's visible record: the Ink
+  // UI receives them as activities, the plain terminal prints them.
+  const surface = (activity: ProviderActivity): void => {
+    if (!options.silent) {
+      if (activity.title.startsWith('✦')) writeNotice(activity.title)
+      // "completed" keeps the plan in the Ink scrollback; in plain output its ✓
+      // would read as "plan finished" — it has only just been written.
+      else writeProviderActivity(activity.kind === 'plan' ? { ...activity, status: 'updated' } : activity)
+    }
+    options.onActivity?.(activity)
+  }
+
+  if (options.upfrontPlan && mode === 'dev') {
+    const request = stripInjectedContext(turnQuery)
+    const isWork = wantsUpfrontPlan(request)
+    // What this turn carries in from earlier sessions, said out loud — the
+    // compounding used to be a system-prompt block nobody could see.
+    const receipt = memoryReceipt({ lessons: lessonMemory.keys.length, rationale, brainCards, weakCaution, regretNudge: lastTurnFriction })
+    if (receipt && (isWork || weakCaution || lastTurnFriction)) surface({ kind: 'status', status: 'completed', title: receipt })
+
+    // A ChatGPT-subscription turn plans inside Codex and streams its own plan.
+    if (isWork && !options.planMode && upfrontPlanEnabled() && (options.providerName ?? config.providerName) !== 'codex') {
+      options.onActivity?.({ kind: 'status', status: 'updated', title: 'Thinking it through' })
+      const plan = await draftUpfrontPlan({
+        provider: options.provider ?? config.provider,
+        cwd: process.cwd(),
+        system: systemPrompt,
+        systemDynamic: systemDynamicPrompt,
+        messages,
+        request,
+        onThinking: options.onThinking ?? writeThinking,
+        signal: options.signal,
+      })
+      if (plan) {
+        activeTodoList().write(planTodoItems(plan.steps))
+        surface(planActivity(plan.steps))
+        activeSessionTranscript()?.notice(`${plan.thinking ? `Thinking: ${plan.thinking}\n` : ''}Plan:\n${plan.steps.map((step, index) => `${index + 1}. ${step}`).join('\n')}`)
+        // The lead starts from the plan: it is told the plan exists and is its
+        // todo list, in the same user message it is answering.
+        const last = messages[messages.length - 1]
+        if (last?.role === 'user') {
+          messages[messages.length - 1] = { ...last, content: [...last.content, { type: 'text', text: planBriefing(plan.steps) }] }
+        }
+        if (!options.skipStats) recordUsage(plan.usage, options.model ?? config.model)
+      }
+    }
+  }
 
   // One cache per turn rather than per session: the turn boundary is the point at
   // which the user may have edited files behind elia's back.
@@ -217,6 +284,11 @@ async function runScopedTurn(
         noteToolUse(event.input)
         noteBrainToolUse(event.input)
         options.onTool?.(event.name === 'codex_delegate' ? { ...event, name: 'ChatGPT subscription', input: {} } : event)
+        // Something just went into long-term memory — show it, the way `elia
+        // auto` shows what a run learned.
+        if (event.name === 'note_lesson' && !event.isError) {
+          for (const lesson of notedLessons(event.input)) surface({ kind: 'status', status: 'completed', title: `✦ learned: ${lesson}` })
+        }
       },
     })))
   } finally {

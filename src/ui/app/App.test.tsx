@@ -202,6 +202,46 @@ test('maps structured provider plan activity into workspace todo state', () => {
     { content: 'implement', status: 'in_progress' },
     { content: 'verify', status: 'pending' },
   ])
+  // elia's own up-front plan uses the panel's glyphs.
+  expect(providerPlanItems('◐ write the data\n□ build the filters\n✓ already done')).toEqual([
+    { content: 'write the data', status: 'in_progress' },
+    { content: 'build the filters', status: 'pending' },
+    { content: 'already done', status: 'completed' },
+  ])
+})
+
+test('a planned turn shows the thinking, then the plan, before the first tool runs', async () => {
+  const props = {
+    ...baseProps(),
+    submitTurn: async (_text: string, hooks: import('./App.tsx').TurnHooks) => {
+      hooks.onActivity({ kind: 'status', status: 'completed', title: '✦ memory · 9 lessons from earlier sessions' })
+      hooks.onThinking('The user wants a laptop picker. ')
+      hooks.onThinking('A static page previews fastest.')
+      hooks.onActivity({ kind: 'plan', status: 'completed', title: 'Plan · 2 steps', detail: '◐ Write index.html\n□ Open the page to check it' })
+      hooks.onToolStart({ id: 't1', name: 'write_file', input: { path: 'index.html' } })
+      hooks.onTool({ id: 't1', name: 'write_file', input: { path: 'index.html' }, result: 'wrote index.html', isError: false, durationMs: 3, cached: false })
+    },
+  }
+  const { stdin, lastFrame, frames, unmount } = render(<App {...props} />)
+  try {
+    await waitForFrame(lastFrame, 'mercury-2 · manual')
+    await settle()
+    stdin.write('create a laptop suggestion website')
+    await waitForFrame(lastFrame, 'create a laptop suggestion website')
+    stdin.write('\r')
+    await waitForFrame(lastFrame, 'index.html')
+    const screen = frames.join('\n')
+    const thinkingAt = screen.indexOf('✻ The user wants a laptop picker. A static page previews fastest.')
+    const planAt = screen.indexOf('Plan · 2 steps')
+    const toolAt = screen.lastIndexOf('index.html')
+    expect(screen).toContain('✦ memory · 9 lessons from earlier sessions')
+    expect(thinkingAt).toBeGreaterThan(-1)
+    expect(planAt).toBeGreaterThan(thinkingAt)
+    expect(toolAt).toBeGreaterThan(planAt)
+    expect(screen).toContain('◐ Write index.html')
+  } finally {
+    unmount()
+  }
 })
 
 test('an open approval hides the live workspace panel behind it', async () => {

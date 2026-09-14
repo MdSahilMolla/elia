@@ -153,6 +153,109 @@ test('an empty reasoning string produces no thinking block', () => {
   expect(toContentBlocks({ reasoning: '', content: 'answer' })).toEqual([{ type: 'text', text: 'answer' }])
 })
 
+/** A Mercury-shaped stream: the answer, then a final chunk carrying `reasoning_summary` beside `choices`. */
+function mercuryStream(summary: unknown): string {
+  const base = { id: '1', object: 'chat.completion.chunk', created: 1, model: 'mercury-2' }
+  return sse(
+    { ...base, choices: [{ index: 0, delta: { role: 'assistant', content: 'answer' }, finish_reason: null }], reasoning_summary: null },
+    { ...base, choices: [{ index: 0, delta: {}, finish_reason: 'stop' }], reasoning_summary: summary },
+    { ...base, choices: [], usage: { prompt_tokens: 5, completion_tokens: 2, total_tokens: 7 }, reasoning_summary: summary },
+  ) + 'data: [DONE]\n\n'
+}
+
+test('a reasoning summary on the final chunk is shown as thinking once and kept as the thinking block', async () => {
+  process.env.ELIA_ALLOW_INSECURE_LOCAL_ENDPOINT = '1'
+  let requestBody: Record<string, unknown> = {}
+  server = Bun.serve({
+    port: 0,
+    async fetch(request) {
+      requestBody = (await request.json()) as Record<string, unknown>
+      return new Response(mercuryStream({ content: 'The user wants X, so I planned Y.', status: 'complete' }), {
+        headers: { 'content-type': 'text/event-stream' },
+      })
+    },
+  })
+  const provider = createOpenAICompatibleProvider('key', 'mercury-2', `http://127.0.0.1:${server.port}`, { reasoningSummary: true })
+
+  const thinking: string[] = []
+  const result = await provider.streamTurn({
+    cwd: process.cwd(),
+    system: 'sys',
+    messages: USER_MESSAGES,
+    tools: [],
+    onText: () => {},
+    onThinking: (delta) => thinking.push(delta),
+  })
+
+  expect(requestBody.reasoning_summary).toBe(true)
+  expect(requestBody.reasoning_summary_wait).toBe(true)
+  // The summary repeats on the trailing usage chunk — it must reach the screen once.
+  expect(thinking).toEqual(['The user wants X, so I planned Y.'])
+  expect(result.content).toEqual([
+    { type: 'thinking', text: 'The user wants X, so I planned Y.', signature: '' },
+    { type: 'text', text: 'answer' },
+  ])
+})
+
+test('a null reasoning summary — what mercury-2.5 sends — shows nothing', async () => {
+  process.env.ELIA_ALLOW_INSECURE_LOCAL_ENDPOINT = '1'
+  server = Bun.serve({
+    port: 0,
+    fetch: () => new Response(mercuryStream(null), { headers: { 'content-type': 'text/event-stream' } }),
+  })
+  const provider = createOpenAICompatibleProvider('key', 'mercury-2.5', `http://127.0.0.1:${server.port}`, { reasoningSummary: true })
+
+  const thinking: string[] = []
+  const result = await provider.streamTurn({
+    cwd: process.cwd(),
+    system: 'sys',
+    messages: USER_MESSAGES,
+    tools: [],
+    onText: () => {},
+    onThinking: (delta) => thinking.push(delta),
+  })
+
+  expect(thinking).toEqual([])
+  expect(result.content).toEqual([{ type: 'text', text: 'answer' }])
+})
+
+test('the summary flag is only sent when asked for, and never with reasoning turned off', async () => {
+  process.env.ELIA_ALLOW_INSECURE_LOCAL_ENDPOINT = '1'
+  const bodies: Record<string, unknown>[] = []
+  server = Bun.serve({
+    port: 0,
+    async fetch(request) {
+      bodies.push((await request.json()) as Record<string, unknown>)
+      return new Response(mercuryStream(null), { headers: { 'content-type': 'text/event-stream' } })
+    },
+  })
+  const url = `http://127.0.0.1:${server.port}`
+  const turn = { cwd: process.cwd(), system: 'sys', messages: USER_MESSAGES, tools: [], onText: () => {} }
+  await createOpenAICompatibleProvider('key', 'm', url).streamTurn(turn)
+  await createOpenAICompatibleProvider('key', 'm', url, { reasoningSummary: true, thinking: { enabled: false, budgetTokens: 0 } }).streamTurn(turn)
+
+  expect(bodies.map((body) => 'reasoning_summary' in body)).toEqual([false, false])
+})
+
+test('a per-request reasoning effort is sent only to an endpoint that takes one', async () => {
+  process.env.ELIA_ALLOW_INSECURE_LOCAL_ENDPOINT = '1'
+  const bodies: Record<string, unknown>[] = []
+  server = Bun.serve({
+    port: 0,
+    async fetch(request) {
+      bodies.push((await request.json()) as Record<string, unknown>)
+      return new Response(mercuryStream(null), { headers: { 'content-type': 'text/event-stream' } })
+    },
+  })
+  const url = `http://127.0.0.1:${server.port}`
+  const turn = { cwd: process.cwd(), system: 'sys', messages: USER_MESSAGES, tools: [], onText: () => {}, reasoningEffort: 'low' as const }
+  await createOpenAICompatibleProvider('key', 'mercury-2.5', url, { reasoningEffort: true }).streamTurn(turn)
+  await createOpenAICompatibleProvider('key', 'gpt-4.1', url).streamTurn(turn)
+  await createOpenAICompatibleProvider('key', 'mercury-2.5', url, { reasoningEffort: true }).streamTurn({ ...turn, reasoningEffort: undefined })
+
+  expect(bodies.map((body) => body.reasoning_effort)).toEqual(['low', undefined, undefined])
+})
+
 test('a streaming failure after partial content propagates instead of silently replaying the whole response', async () => {
   process.env.ELIA_ALLOW_INSECURE_LOCAL_ENDPOINT = '1'
   let requestCount = 0

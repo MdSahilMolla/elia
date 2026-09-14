@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test'
-import { isProviderPresetConfigured, listProviderModels, providerPresetDefaultModel, PROVIDER_PRESET_NAMES, tryResolveProvider, validateModelId } from './registry.ts'
+import { isInceptionEndpoint, isProviderPresetConfigured, listProviderModels, providerPresetDefaultModel, PROVIDER_PRESET_NAMES, tryResolveProvider, validateModelId } from './registry.ts'
 import { publicFetchTestHooks } from '../networkPolicy.ts'
 
 const originalProvider = process.env.ELIA_PROVIDER
@@ -36,6 +36,14 @@ afterEach(() => {
   restore('OPENROUTER_API_KEY', originalOpenRouterKey)
   restore('MISTRAL_API_KEY', originalMistralKey)
   restore('ELIA_API_KEY', originalEliaKey)
+})
+
+test('only Inception endpoints are sent the reasoning-summary and reasoning-effort flags', () => {
+  expect(isInceptionEndpoint('https://api.inceptionlabs.ai/v1')).toBe(true)
+  expect(isInceptionEndpoint('https://api.openai.com/v1')).toBe(false)
+  expect(isInceptionEndpoint('https://inceptionlabs.ai.evil.example/v1')).toBe(false)
+  expect(isInceptionEndpoint(undefined)).toBe(false)
+  expect(isInceptionEndpoint('not a url')).toBe(false)
 })
 
 test('Google Gemini has a documented default model and reports configuration from its key variable', () => {

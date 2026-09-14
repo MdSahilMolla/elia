@@ -1,6 +1,11 @@
-import { expect, test } from 'bun:test'
+import { beforeEach, expect, test } from 'bun:test'
 import { createPlanlessWorkTracker } from './toolBatchingNudge.ts'
 import { createRedundantReadTracker, isLoneBatchableRead, serialReadNudge, SERIAL_READ_NUDGE_THRESHOLD } from './toolBatchingNudge.ts'
+import { activeTodoList, resetActiveTodoList } from './todoList.ts'
+
+// The planless-work tracker consults the live todo list; another test file
+// leaving an open item on it must not silence the nudge tests here.
+beforeEach(() => resetActiveTodoList())
 
 test('isLoneBatchableRead is true only for a single read_file / grep / list_files call', () => {
   expect(isLoneBatchableRead(['read_file'])).toBe(true)
@@ -72,4 +77,25 @@ test('a short assignment is left alone — a one-file step should not produce a 
 test('a long read-only investigation with no changes is not nudged', () => {
   const tracker = createPlanlessWorkTracker()
   expect(tracker.observe(['read_file', 'grep', 'list_files', 'read_file', 'grep', 'read_file', 'grep', 'list_files', 'read_file'])).toBeUndefined()
+})
+
+test('work that starts from a plan elia already drafted is never nudged', () => {
+  const tracker = createPlanlessWorkTracker(() => true)
+  for (let i = 0; i < 5; i += 1) {
+    expect(tracker.observe(['write_file', 'edit_file', 'run_command'])).toBeUndefined()
+  }
+})
+
+test('the default check reads the live todo list — open items count, a finished list does not', () => {
+  resetActiveTodoList()
+  activeTodoList().write([{ content: 'done already', status: 'completed' }])
+  const afterFinished = createPlanlessWorkTracker()
+  afterFinished.observe(['read_file', 'read_file', 'grep', 'write_file', 'edit_file'])
+  expect(afterFinished.observe(['run_command', 'read_file', 'edit_file'])).toContain('todo_write')
+
+  activeTodoList().write([{ content: 'scaffold', status: 'in_progress' }, { content: 'verify', status: 'pending' }])
+  const withOpenPlan = createPlanlessWorkTracker()
+  withOpenPlan.observe(['read_file', 'read_file', 'grep', 'write_file', 'edit_file'])
+  expect(withOpenPlan.observe(['run_command', 'read_file', 'edit_file'])).toBeUndefined()
+  resetActiveTodoList()
 })

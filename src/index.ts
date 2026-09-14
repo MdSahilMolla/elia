@@ -2328,7 +2328,10 @@ async function runInteractive(): Promise<void> {
     const escalation = classifyEscalation(userText)
     let escalated = false
 
-    const runModelTurn = () =>
+    // `opening` marks the call that answers the user's request itself — the one
+    // that thinks it through and plans up front. Repair and self-review passes
+    // continue that work and must not re-plan it.
+    const runModelTurn = (opening = false) =>
       runTurn(messages, {
         mode,
         approveAction,
@@ -2336,6 +2339,7 @@ async function runInteractive(): Promise<void> {
         signal: controller.signal,
         silent: Boolean(uiHooks),
         planMode: uiHooks?.planMode,
+        upfrontPlan: opening,
         drainSteering: uiHooks?.drainSteering,
         onText: uiHooks?.onText,
         onThinking: uiHooks?.onThinking,
@@ -2385,7 +2389,7 @@ async function runInteractive(): Promise<void> {
         if (mapped.verify) verifyResult = mapped.verify
         escalatedAborted = mapped.aborted
       } else {
-        const turnResult = await runModelTurn()
+        const turnResult = await runModelTurn(true)
         if (turnResult.stopReason === 'aborted') stopRequested = true
       }
       if (stopRequested || controller.signal.aborted) {
@@ -2572,6 +2576,34 @@ async function runInteractive(): Promise<void> {
           }
         } catch {
           // Preview is a convenience; never fail a completed turn over it.
+        }
+      }
+
+      // A failure this turn hit and then put right — a command that only worked
+      // another way, checks that failed until a fix — becomes a lesson every
+      // later session starts with, and the user sees it land. Interactive turns
+      // used to forget these: note_lesson is voluntary and almost never called.
+      if (!persona && !escalated && !uiHooks?.planMode && !controller.signal.aborted) {
+        const { learnFromTurn } = await import('./autonomy/turnLearning.ts')
+        const learned = await learnFromTurn({
+          provider: config.tiers.fast.provider,
+          messages,
+          fromIndex: messagesBefore.length,
+          request: requestText,
+          outcome: { verify: verifyResult, repairAttempts },
+          cwd: process.cwd(),
+          signal: controller.signal,
+          onReflecting: () => uiHooks?.onActivity?.({ kind: 'status', status: 'updated', title: 'Learning from what went wrong' }),
+        })
+        if (learned.usage) {
+          const { recordUsage } = await import('./usage.ts')
+          recordUsage(learned.usage, config.tiers.fast.model)
+        }
+        for (const lesson of learned.lessons) {
+          const line = `✦ learned: ${lesson}`
+          sessionTranscript.notice(line)
+          if (uiHooks) uiHooks.onActivity?.({ kind: 'status', status: 'completed', title: line })
+          else writeNotice(line)
         }
       }
 

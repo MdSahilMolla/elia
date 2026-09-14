@@ -111,13 +111,17 @@ export interface AppProps {
   version: string
 }
 
+/**
+ * A plan activity's checklist: Codex's `[done]/[active]/[pending]` lines, or
+ * elia's own up-front plan in the glyphs the plan panel itself draws.
+ */
 export function providerPlanItems(detail?: string): TodoItem[] {
   if (!detail) return []
+  const STATUS: Record<string, TodoItem['status']> = { done: 'completed', active: 'in_progress', pending: 'pending', '✓': 'completed', '◐': 'in_progress', '□': 'pending' }
   return detail.split(/\r?\n/).flatMap((line) => {
-    const match = /^\[(done|active|pending)\]\s+(.+)$/.exec(line.trim())
+    const match = /^(?:\[(done|active|pending)\]|([✓◐□]))\s+(.+)$/.exec(line.trim())
     if (!match) return []
-    const status = match[1] === 'done' ? 'completed' : match[1] === 'active' ? 'in_progress' : 'pending'
-    return [{ content: match[2]!, status } as TodoItem]
+    return [{ content: match[3]!, status: STATUS[match[1] ?? match[2]!]! }]
   })
 }
 
@@ -352,7 +356,12 @@ export function App(props: AppProps) {
           setStatus(a.title)
           if (a.kind === 'plan') {
             const parsed = providerPlanItems(a.detail)
-            if (parsed.length > 0) setProviderPlan(parsed)
+            if (parsed.length > 0) {
+              setProviderPlan(parsed)
+              // A fresh plan supersedes the last request's todo list, which
+              // would otherwise keep the panel (plan wins over providerPlan).
+              setPlan([])
+            }
           }
           // The turn runner offers a live preview after scaffolding a site
           // (including Codex-subscription turns, which never call the tool).

@@ -150,16 +150,22 @@ export function describeReviewers(): string {
  * for every other OpenAI-compatible provider we generically pass through
  * whatever reasoning field the model sends, but we cannot know ahead of a real
  * call whether a given model produces one at all, so we say that plainly
- * instead of guessing. Older Mercury diffusion models (e.g. `mercury-2`) have
- * no reasoning channel at all, so they report the passthrough line and then
- * simply never emit anything — that is a model limitation, not a bug;
- * `mercury-2.5` (this account's default) adds tunable reasoning, so it may.
+ * instead of guessing. Inception's Mercury reasons before every answer but
+ * hides it: it only returns a *summary*, only when asked (`reasoning_summary`),
+ * and only on the final chunk of each step. elia asks; as of 2026-09 `mercury-2`
+ * answers with one and `mercury-2.5` returns null, so on 2.5 the visible
+ * reasoning is elia's own up-front plan (autonomy/upfrontPlan.ts).
  */
 export function describeThinking(): string {
   if (config.providerName === 'anthropic') {
     return currentThinking.enabled
       ? `reasoning: extended thinking on (${currentThinking.budgetTokens}-token budget)`
       : 'reasoning: off'
+  }
+  if (config.providerName === 'mercury') {
+    return currentThinking.enabled
+      ? 'reasoning: Mercury summaries requested each step — shown when Inception returns one (not every Mercury model does)'
+      : 'reasoning: off (Mercury summaries not requested)'
   }
   return currentThinking.enabled
     ? 'reasoning: shown automatically if the model returns one (not every model does)'

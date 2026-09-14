@@ -323,9 +323,30 @@ export function tryResolveProvider(request: ProviderRequest = {}): ResolvedProvi
   const provider =
     preset.kind === 'anthropic'
       ? createAnthropicProvider(apiKey, model, { thinking: request.thinking })
-      : createOpenAICompatibleProvider(apiKey, model, baseURL, { thinking: request.thinking })
+      : createOpenAICompatibleProvider(apiKey, model, baseURL, {
+          thinking: request.thinking,
+          reasoningSummary: isInceptionEndpoint(baseURL) && process.env.ELIA_REASONING_SUMMARY !== 'off',
+          reasoningEffort: isInceptionEndpoint(baseURL),
+        })
 
   return { provider, providerName, model }
+}
+
+/**
+ * Inception's API (the `mercury` preset, or `custom` pointed at it) is the one
+ * OpenAI-compatible endpoint here that hides its reasoning unless the request
+ * asks for a summary, and that takes a per-request `reasoning_effort` with an
+ * `instant` level. Any other endpoint gets neither — OpenAI itself rejects
+ * unrecognised request arguments.
+ */
+export function isInceptionEndpoint(baseURL: string | undefined): boolean {
+  if (!baseURL) return false
+  try {
+    const host = new URL(baseURL).hostname
+    return host === 'inceptionlabs.ai' || host.endsWith('.inceptionlabs.ai')
+  } catch {
+    return false
+  }
 }
 
 function fail(message: string): never {

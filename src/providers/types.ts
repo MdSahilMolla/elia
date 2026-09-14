@@ -71,6 +71,14 @@ export interface StreamTurnParams {
   onToolBlock?: (block: ContentBlock) => void
   /** Structured progress from agentic providers (plans, commands, edits, and runtime status). */
   onActivity?: (activity: ProviderActivity) => void
+  /**
+   * How hard this one request should deliberate, for providers with a
+   * per-request effort knob (Inception's Mercury). A hint: providers without
+   * one ignore it. elia's own short side-calls — drafting a plan, distilling a
+   * lesson — ask for `low`, which on mercury-2.5 cut planning from ~3–5 s to
+   * ~1.5 s with plans of the same quality.
+   */
+  reasoningEffort?: 'instant' | 'low' | 'medium' | 'high'
   /** Abort the in-flight provider request when the owning run is cancelled. */
   signal?: AbortSignal
 }

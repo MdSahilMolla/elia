@@ -68,7 +68,8 @@ function shapeOf(item: Item, expanded: boolean): Shape {
     case 'assistant':
       return { chrome: 1, gutter: 0, bodyLimit: Infinity }
     case 'thinking':
-      return { chrome: 0, gutter: 2, bodyLimit: Infinity }
+      // marginTop + marginBottom; every row is indented two columns behind "✻ ".
+      return { chrome: 2, gutter: 2, bodyLimit: Infinity }
     case 'tool':
       // marginTop + the one-line summary header; the body is folded to ~26 rows
       // collapsed (foldText headLines 16 / ShellBody's last 8) and 600 expanded.
