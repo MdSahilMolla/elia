@@ -5,6 +5,7 @@ import { paths } from '../config.ts'
 import type { Tool } from '../tools/types.ts'
 import { exposedCorrs, loadEfficacy, MIN_EXPOSURES } from './lessonEfficacy.ts'
 import { rankBm25 } from '../bm25.ts'
+import { globalLessonsPath, partitionByScope } from './lessonScope.ts'
 import { competenceReport } from './outcomes.ts'
 
 /**
@@ -39,6 +40,16 @@ export function lessonKey(text: string): string {
 }
 
 const MAX_INJECTED_LESSONS = 25
+
+const PROJECT_HEADING = '# Lessons\n\nThings elia learned about this project, carried into future runs.\n\n'
+const GLOBAL_HEADING = '# Lessons about this machine\n\nEnvironment facts elia learned that hold across every project here.\n\n'
+
+/**
+ * Global lessons never exceed this share of the injection budget. They are
+ * about the machine, so they are relevant everywhere and would otherwise crowd
+ * out the project's own hard-won facts on every turn in every repository.
+ */
+const MAX_INJECTED_GLOBAL = 5
 
 /**
  * The keys of the lessons injected into the most recent briefing.
@@ -88,24 +99,55 @@ function formatLessonLine(lesson: LessonWrite, stamp: string): string {
   return `- ${lesson.text} <!-- ${meta.join(' ')} -->`
 }
 
-export function appendLessons(texts: Array<string | LessonWrite>, path = paths.lessons): void {
-  const cleaned = normalizeLessonInput(texts)
-  if (cleaned.length === 0) return
-
-  const existing = new Set(loadLessons(path).map((lesson) => lesson.text.toLowerCase()))
-  const fresh = cleaned.filter((lesson) => !existing.has(lesson.text.toLowerCase()))
-  if (fresh.length === 0) return
-
+function writeLessonBlock(lessons: LessonWrite[], path: string, heading: string): void {
+  if (lessons.length === 0) return
   const stamp = new Date().toISOString()
-  const block = fresh.map((lesson) => formatLessonLine(lesson, stamp)).join('\n')
-
+  const block = lessons.map((lesson) => formatLessonLine(lesson, stamp)).join('\n')
   try {
     ensureSecureDirectory(dirname(path))
-    const header = existsSync(path) ? '' : '# Lessons\n\nThings elia learned about this project, carried into future runs.\n\n'
+    const header = existsSync(path) ? '' : heading
     appendSecureFile(path, `${header}${block}\n`)
   } catch {
     // Losing a lesson costs future efficiency, not this run's correctness.
   }
+}
+
+/**
+ * Writes lessons, sending the ones about *this machine* to the global store
+ * rather than this project's.
+ *
+ * A fact about the environment — that `ls` is not a command here, that a
+ * toolchain needs a particular target — is true of every repository on this
+ * machine, but lessons lived only in each project's `.elia/lessons.md`, so it
+ * was learned painfully in one repo and unavailable in the next, where it was
+ * learned painfully again.
+ *
+ * `globalPath` defaults to the real global store only when writing to the real
+ * project store. A caller that passes its own `path` (every test does) keeps
+ * everything in that one file unless it asks otherwise — so no test can write
+ * into the operator's home directory by omission.
+ */
+export function appendLessons(
+  texts: Array<string | LessonWrite>,
+  path = paths.lessons,
+  globalPath = path === paths.lessons ? globalLessonsPath() : path,
+): void {
+  const cleaned = normalizeLessonInput(texts)
+  if (cleaned.length === 0) return
+
+  const seen = new Set(
+    [...loadLessons(path), ...(globalPath === path ? [] : loadLessons(globalPath))].map((lesson) => lesson.text.toLowerCase()),
+  )
+  const fresh = cleaned.filter((lesson) => !seen.has(lesson.text.toLowerCase()))
+  if (fresh.length === 0) return
+
+  if (globalPath === path) {
+    writeLessonBlock(fresh, path, PROJECT_HEADING)
+    return
+  }
+  const { project, environment } = partitionByScope(fresh)
+  writeLessonBlock(project, path, PROJECT_HEADING)
+  writeLessonBlock(environment, globalPath, GLOBAL_HEADING)
 }
 
 /** Split `- <text> <!-- <meta> -->` into its text and trailing metadata. */
@@ -241,9 +283,24 @@ function selectLessons(all: Lesson[], query: string): Lesson[] {
  *
  * `query` is what the turn is about; without one this falls back to pure
  * recency, so a caller with no query behaves exactly as before.
+ *
+ * Machine-level lessons from the global store are injected alongside the
+ * project's own, capped at `MAX_INJECTED_GLOBAL`: they are true everywhere, so
+ * without a cap they would crowd out the project's hard-won facts on every turn
+ * in every repository. `globalPath` follows the same rule as `appendLessons` —
+ * the real global store only when reading the real project store, so a test
+ * passing its own path never reaches the operator's home directory.
  */
-export function renderLessonsWithKeys(query = '', path = paths.lessons): { text: string; keys: string[] } {
-  const lessons = selectLessons(loadLessons(path), query)
+export function renderLessonsWithKeys(
+  query = '',
+  path = paths.lessons,
+  globalPath = path === paths.lessons ? globalLessonsPath() : undefined,
+): { text: string; keys: string[] } {
+  const project = selectLessons(loadLessons(path), query)
+  const global = globalPath && globalPath !== path ? selectLessons(loadLessons(globalPath), query).slice(-MAX_INJECTED_GLOBAL) : []
+  // Machine facts first: they constrain how a command can be run at all, which
+  // is worth knowing before anything specific to this repository.
+  const lessons = [...global, ...project]
   lastInjectedLessonKeys = lessons.map((lesson) => lesson.key ?? lessonKey(lesson.text))
   if (lessons.length === 0) return { text: '', keys: [] }
   const text = `\n\n## What earlier runs learned about this project\n${lessons

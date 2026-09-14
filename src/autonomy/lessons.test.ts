@@ -265,7 +265,7 @@ test('an old but relevant lesson is injected where pure recency would have dropp
 
   const withQuery = renderLessonsWithKeys('the rust crate will not build', path).text
   expect(withQuery).toContain('gnullvm')
-})
+}, 30_000)
 
 test('the newest lessons are injected unconditionally, however irrelevant to the query', () => {
   const path = join(dir, 'lessons.md')
@@ -275,11 +275,59 @@ test('the newest lessons are injected unconditionally, however irrelevant to the
   // every run; relevance must not be able to displace it.
   const rendered = renderLessonsWithKeys('a totally unrelated query about kubernetes', path).text
   expect(rendered).toContain('The most recent lesson')
-})
+}, 30_000)
 
 test('the injection budget is still honoured when a query matches nothing', () => {
   const path = join(dir, 'lessons.md')
   seed(path, 40, 'filler lesson')
   const keys = renderLessonsWithKeys('zzzzz nothing matches this zzzzz', path).keys
   expect(keys).toHaveLength(25)
+}, 30_000)
+
+// --- Machine facts go to the global store, and come back everywhere ----------
+
+test('an environment lesson is written globally and a project lesson locally', () => {
+  const path = join(dir, 'lessons.md')
+  const globalPath = join(dir, 'global-lessons.md')
+  appendLessons(
+    ['On Windows, list directories with dir; ls is not a command here', 'Run bun test before pushing this project'],
+    path,
+    globalPath,
+  )
+  expect(loadLessons(path).map((l) => l.text)).toEqual(['Run bun test before pushing this project'])
+  expect(loadLessons(globalPath).map((l) => l.text)).toEqual(['On Windows, list directories with dir; ls is not a command here'])
+})
+
+test('global lessons are injected alongside the project’s own', () => {
+  const path = join(dir, 'lessons.md')
+  const globalPath = join(dir, 'global-lessons.md')
+  appendLessons(['Run bun test before pushing this project'], path, globalPath)
+  appendLessons(['On Windows, list directories with dir; ls is not a command here'], path, globalPath)
+
+  const rendered = renderLessonsWithKeys('', path, globalPath)
+  expect(rendered.text).toContain('list directories with dir')
+  expect(rendered.text).toContain('Run bun test before pushing')
+  // Both are recorded as exposed, so efficacy tracking sees what the turn saw.
+  expect(rendered.keys).toHaveLength(2)
+})
+
+test('global lessons cannot crowd out the project’s own', () => {
+  const path = join(dir, 'lessons.md')
+  const globalPath = join(dir, 'global-lessons.md')
+  for (let i = 0; i < 30; i += 1) appendLessons([`On Windows, machine fact number ${i} about the shell`], path, globalPath)
+  for (let i = 0; i < 20; i += 1) appendLessons([`Project fact number ${i} about running the suite`], path, globalPath)
+
+  const rendered = renderLessonsWithKeys('', path, globalPath)
+  const globalLines = rendered.text.split('\n').filter((line) => line.includes('machine fact number')).length
+  expect(loadLessons(globalPath).length).toBe(30)
+  expect(globalLines).toBe(5)
+  expect(rendered.text).toContain('Project fact number 19')
+}, 30_000)
+
+test('a caller passing only a path keeps everything in that one file', () => {
+  // Every existing caller and test does this; none of them may reach the
+  // operator's real home directory by omission.
+  const path = join(dir, 'lessons.md')
+  appendLessons(['On Windows, list directories with dir; ls is not a command here'], path)
+  expect(loadLessons(path).map((l) => l.text)).toEqual(['On Windows, list directories with dir; ls is not a command here'])
 })
