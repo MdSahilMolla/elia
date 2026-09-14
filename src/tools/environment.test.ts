@@ -80,4 +80,11 @@ test('environment discovery does not require a configured browser or provider', 
   expect(result.project.root).toBe(scratchDir)
   expect(result.browser.configured).toBe(Boolean(process.env.ELIA_BROWSER_MCP_SERVER || process.env.ELIA_BROWSER_BRIDGE_COMMAND || process.env.ELIA_BROWSER_CDP_URL))
   expect(result.capabilityReadiness.browser.status).toBe(result.browser.configured ? 'ready' : 'missing-config')
-})
+  // Discovery legitimately costs seconds: ~20 `Bun.which` probes, three git
+  // shells and two `--version` spawns. Making versionOf async and parallel took
+  // it from ~20s to ~5s in isolation, but bun runs 281 test files at once and
+  // under that contention it still measured ~17s — so the default 5s budget was
+  // never realistic for this test, and the timeout it kept hitting was the
+  // suite's load, not a hang in the tool. Given explicitly so a genuine
+  // regression still fails instead of the clock deciding.
+}, 60_000)
