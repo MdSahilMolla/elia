@@ -1,3 +1,4 @@
+import { setDefaultTimeout } from 'bun:test'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -44,3 +45,21 @@ process.env.LINES ??= '24'
 const testState = mkdtempSync(join(tmpdir(), 'elia-test-state-'))
 ;(paths as { promptHistory: string }).promptHistory = join(testState, 'prompt-history')
 ;(paths as { diagnostics: string }).diagnostics = join(testState, 'diagnostics.ndjson')
+
+/**
+ * One per-test timeout for every way the suite is run.
+ *
+ * CI runs `bun test --timeout=20000`; a plain local `bun test` used bun's 5s
+ * default. So the two were never running the same suite: tests that spawn the
+ * real CLI, a shell, or a language server take seconds, and on a machine
+ * already busy with other work they crossed 5s and failed locally while CI,
+ * with four times the budget, passed. That split taught people to read a red
+ * local run as "probably load" — which is exactly how a real regression gets
+ * waved through.
+ *
+ * bun 1.3 ignores `[test] timeout` in bunfig.toml, so it is set here, where it
+ * applies to every test module however the suite is invoked. A test that
+ * passes its own timeout still gets that one, so deliberately tight bounds
+ * still bite. Keep this equal to the CI flag.
+ */
+setDefaultTimeout(20_000)

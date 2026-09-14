@@ -100,7 +100,13 @@ describe('fileLock', () => {
 
   test('gives a cross-host lock a grace period before reclaiming it, but reclaims it once that grace elapses', () => {
     const lock = join(lockDir(), 'f.lock')
-    const ttlMs = 50
+    // A cross-host lock is stealable past 2× its TTL. At a 50ms TTL that
+    // boundary was 100ms, and the "not yet stealable" check below sat at 55ms
+    // and then retried for 30ms — about 15ms of margin, so any scheduler stall
+    // that long on a loaded machine pushed the lock past the grace and the
+    // assertion failed. The ages here are back-dated timestamps, not real waits,
+    // so a 1s TTL costs no runtime and leaves ~950ms of margin either way.
+    const ttlMs = 1_000
     const foreignHost = `${hostname()}-remote`
     const writeForeignOwner = (ageMs: number) =>
       writeFileSync(lock, JSON.stringify({ pid: process.pid, token: 'remote-owner', at: Date.now() - ageMs, host: foreignHost }))
