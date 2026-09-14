@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from 'bun:test'
-import { ownedBrowserEndpoint, ownedBrowserRequested, resetOwnedBrowserForTests } from './browserOwned.ts'
+import { ownedBrowserEndpoint, ownedBrowserRequested, resetOwnedBrowserForTests, useOwnedBrowserByDefault } from './browserOwned.ts'
 
 const originalMode = process.env.ELIA_BROWSER
 
@@ -42,3 +42,30 @@ test('two concurrent callers during first launch both get the same instance, not
   const [a, b] = await Promise.all([ownedBrowserEndpoint(), ownedBrowserEndpoint()])
   expect(a).toBe(b)
 }, 20_000)
+
+// --- The built-in browser is the default, not an opt-in ----------------------
+
+const chromium = () => true
+const noChromium = () => false
+
+test('with nothing configured, the built-in browser is used whenever a Chromium-family browser is installed', () => {
+  // It used to need ELIA_BROWSER=owned, which left most sessions with no
+  // browser at all — every call failed with "no browser bridge is configured".
+  expect(useOwnedBrowserByDefault({}, chromium)).toBe(true)
+})
+
+test('with nothing configured and no Chromium installed, there is no built-in browser to fall back to', () => {
+  expect(useOwnedBrowserByDefault({}, noChromium)).toBe(false)
+})
+
+test('ELIA_BROWSER=off turns the fallback off, however it is spelled', () => {
+  for (const off of ['off', 'OFF', ' none ', 'false', '0', 'no']) {
+    expect(useOwnedBrowserByDefault({ ELIA_BROWSER: off }, chromium)).toBe(false)
+  }
+})
+
+test('ELIA_BROWSER=owned still asks for it explicitly', () => {
+  // Explicit wins over detection: the launch reports a missing browser itself,
+  // rather than being silently skipped.
+  expect(useOwnedBrowserByDefault({ ELIA_BROWSER: 'owned' }, noChromium)).toBe(true)
+})

@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from 'bun:test'
-import { browserTool, validateRequest } from './browser.ts'
+import { browserTool, unwrapCdpEvaluateValue, validateRequest } from './browser.ts'
 import { clearBrowserMcpToolsForTests, registerBrowserMcpTool } from '../mcp/browserRegistry.ts'
 
 afterEach(() => clearBrowserMcpToolsForTests())
@@ -136,4 +136,24 @@ test('console and network are accepted actions with bounded limits', () => {
   expect(validateRequest({ action: 'console', limit: 10_000 })).toMatchObject({ limit: 200 })
   expect(validateRequest({ action: 'console', limit: 0 })).toMatchObject({ limit: 1 })
   expect(() => validateRequest({ action: 'console', errorsOnly: 'yes' })).toThrow('errorsOnly must be a boolean')
+})
+
+// --- The CDP path returns the page's value, not the RemoteObject around it ----
+
+test('a Runtime.evaluate result is unwrapped to the value the page script returned', () => {
+  // The real shape: cdpRequest resolves the message's `result`, so the value
+  // sits one level down. This used to come back as `{ type, value }` for every
+  // status/snapshot/extract/console/network read on the CDP path.
+  const final = { result: { type: 'object', value: { url: 'https://example.com/', title: 'Example' } } }
+  expect(unwrapCdpEvaluateValue(final)).toEqual({ url: 'https://example.com/', title: 'Example' })
+})
+
+test('the doubly-nested form is unwrapped too, whichever the transport hands back', () => {
+  const final = { result: { result: { type: 'object', value: { text: 'hello' } } } }
+  expect(unwrapCdpEvaluateValue(final)).toEqual({ text: 'hello' })
+})
+
+test('a result that carries no RemoteObject is returned as it is', () => {
+  // Page.navigate answers with frame ids, not a RemoteObject.
+  expect(unwrapCdpEvaluateValue({ result: { frameId: 'F1', loaderId: 'L1' } })).toEqual({ frameId: 'F1', loaderId: 'L1' })
 })

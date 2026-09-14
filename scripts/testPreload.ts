@@ -63,3 +63,12 @@ const testState = mkdtempSync(join(tmpdir(), 'elia-test-state-'))
  * still bite. Keep this equal to the CI flag.
  */
 setDefaultTimeout(20_000)
+
+/**
+ * `browser` falls back to launching elia's own headless Chrome when no bridge
+ * is configured. A test that calls the tool with nothing configured — several
+ * do, to check the no-bridge message — would otherwise start a real browser
+ * process on any machine that has Chrome. Tests that want the built-in browser
+ * set `ELIA_BROWSER=owned` themselves.
+ */
+process.env.ELIA_BROWSER ??= 'off'

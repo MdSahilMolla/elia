@@ -8,6 +8,7 @@ import type { Tool } from './types.ts'
 
 const COMMANDS = ['bun', 'node', 'npm', 'pnpm', 'yarn', 'python3', 'python', 'pip3', 'pytest', 'docker', 'kubectl', 'terraform', 'vercel', 'netlify', 'git', 'gh', 'psql', 'mysql', 'curl']
 import { browserMcpReadiness } from '../mcp/browserRegistry.ts'
+import { useOwnedBrowserByDefault } from './browserOwned.ts'
 // Derived rather than hardcoded so a newly added provider preset (which keeps
 // its API-key env name in PROVIDER_PRESETS) shows up here automatically instead
 // of staying invisible to the readiness report until someone edits it by hand.
@@ -85,9 +86,14 @@ function capabilityReadiness(
     llm: modelConfigured
       ? readiness('ready', 'At least one model credential is present in the process environment; authorization and quota were not tested.')
       : readiness('missing-config', 'No supported model credential was detected in the process environment.', [`${PROVIDER_API_KEY_NAMES.concat('ELIA_API_KEY').join(' or ')}`]),
+    // With no bridge configured, `browser` now falls back to elia's own headless
+    // browser. Reporting that as missing-config would tell the agent it has no
+    // browser when it does, and the agent reads this before deciding what to try.
     browser: browserConfigured
       ? readiness('ready', 'At least one browser transport is configured; reachability, login, permissions, and authorization were not tested.')
-      : readiness('missing-config', 'No browser MCP, bridge, or CDP transport is configured.', ['ELIA_BROWSER_MCP_SERVER or ELIA_BROWSER_BRIDGE_COMMAND or ELIA_BROWSER_CDP_URL']),
+      : useOwnedBrowserByDefault()
+        ? readiness('ready', "No browser bridge is configured, so elia's own headless browser will be used. It has no login state: it cannot see anything behind the user's own signed-in sessions.")
+        : readiness('missing-config', 'No browser MCP, bridge, or CDP transport is configured, and the built-in headless browser is unavailable (turned off, or no Chromium-family browser installed).', ['ELIA_BROWSER_MCP_SERVER or ELIA_BROWSER_BRIDGE_COMMAND or ELIA_BROWSER_CDP_URL, or install Chrome/Edge/Brave/Chromium']),
     sourceControl: availableRuntimes.git && availableRuntimes.git !== 'unavailable'
       ? readiness('ready', 'The git executable is available; repository permissions and remote access were not tested.')
       : readiness('unavailable', 'The git executable is not available.', ['git']),

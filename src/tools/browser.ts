@@ -2,7 +2,7 @@ import type { Tool } from './types.ts'
 import { taskSessions } from '../taskSessions.ts'
 import { readBoundedOutput, shellInvocation, terminateProcessGroup } from '../shell.ts'
 import { browserMcpReadiness, findBrowserMcpTool } from '../mcp/browserRegistry.ts'
-import { ownedBrowserEndpoint, ownedBrowserRequested } from './browserOwned.ts'
+import { ownedBrowserEndpoint, useOwnedBrowserByDefault } from './browserOwned.ts'
 import { RECORDER_SOURCE, formatRecorderRead, readRecorderExpression } from './browserRecorder.ts'
 
 /** Actions supported by the browser bridge. The bridge can be a user-Chrome MCP wrapper or CDP endpoint. */
@@ -46,7 +46,7 @@ const SAFE_RETRY_ACTIONS = new Set<BrowserAction>(['status', 'snapshot', 'extrac
 
 export const browserTool: Tool = {
   name: 'browser',
-  description: `Control a browser through a configured bridge. Use status first, then navigate, refresh/back/forward, snapshot/extract, click, type, press, scroll, wait_for, or verify as needed. When a page looks wrong — blank, stuck, half-rendered, or not doing what a click should — read console and network before guessing from the DOM: a JavaScript exception or a failed request is the cause far more often than the markup, and snapshot cannot show you either. console returns the page's console output plus uncaught errors and unhandled rejections; network returns fetch/XHR requests with their status. Pass errorsOnly: true to see only failures. Add expectText or expectUrl after state-changing work so Elia observes the final page instead of assuming a transport success means the UI changed. The bridge can be a user-Chrome connector, a Chrome DevTools endpoint, or (ELIA_BROWSER=owned) a headless Chromium-family browser Elia launches and drives itself, with no login state of its own. Never bypass authentication, CAPTCHAs, paywalls, or site safety controls. Actions that change page state (click, type, press, scroll, verify) go through Elia's action governor for approval before this tool ever runs them — do not expect or ask for a separate confirmation token here.`,
+  description: `Control a browser through a configured bridge. Use status first, then navigate, refresh/back/forward, snapshot/extract, click, type, press, scroll, wait_for, or verify as needed. When a page looks wrong — blank, stuck, half-rendered, or not doing what a click should — read console and network before guessing from the DOM: a JavaScript exception or a failed request is the cause far more often than the markup, and snapshot cannot show you either. console returns the page's console output plus uncaught errors and unhandled rejections; network returns fetch/XHR requests with their status. Pass errorsOnly: true to see only failures. Add expectText or expectUrl after state-changing work so Elia observes the final page instead of assuming a transport success means the UI changed. The bridge can be a user-Chrome connector, a Chrome DevTools endpoint, or, when none of those is configured, a headless Chromium-family browser Elia launches and drives itself, with no login state of its own (ELIA_BROWSER=off disables it). Never bypass authentication, CAPTCHAs, paywalls, or site safety controls. Actions that change page state (click, type, press, scroll, verify) go through Elia's action governor for approval before this tool ever runs them — do not expect or ask for a separate confirmation token here.`,
   input_schema: {
     type: 'object',
     properties: {
@@ -263,15 +263,19 @@ async function dispatchBrowserRequest(request: BrowserRequest): Promise<BrowserR
   // The owned backend: a headless Chromium-family process elia launches and
   // keeps alive itself, driven with the exact same CDP client as an
   // externally-supplied ELIA_BROWSER_CDP_URL above. Only reached when none of
-  // the user-supplied bridges are configured, and only when explicitly
-  // opted into — launching a whole browser process is not something to do
-  // as a silent, un-asked-for fallback.
-  if (ownedBrowserRequested()) {
+  // the user-supplied bridges are configured — a real bridge always wins — and
+  // now the default rather than an opt-in, since a session without it had no
+  // browser at all. See useOwnedBrowserByDefault for what bounds it.
+  if (useOwnedBrowserByDefault()) {
     const origin = await ownedBrowserEndpoint()
     return callCdp(origin, request)
   }
 
-  throw new Error('no browser bridge is configured')
+  throw new Error(
+    (process.env.ELIA_BROWSER ?? '').trim()
+      ? 'no browser bridge is configured, and ELIA_BROWSER has turned the built-in headless browser off'
+      : 'no browser bridge is configured, and no Chrome, Edge, Brave or Chromium is installed for the built-in headless browser',
+  )
 }
 
 async function callMcpTool(server: string, request: BrowserRequest): Promise<BrowserResult | string> {
@@ -414,18 +418,29 @@ function cdpRequest(
 
 /**
  * A CDP `Runtime.evaluate` reply wraps the value the page script returned
- * inside a RemoteObject: `final.result.result.value`. Returning the whole cage
- * meant `extractUrl`/`verifyBrowserResult`/`formatBrowserResult` never saw the
- * `url`, `title`, or `text` they were promised — every `status`/`snapshot`
- * observation came back empty. Unwrap the value when present and leave the
- * shape alone for commands whose result carries no RemoteObject.
+ * inside a RemoteObject — `{ type, value }`. Returning the whole cage meant
+ * `extractUrl`/`verifyBrowserResult`/`formatBrowserResult` never saw the `url`,
+ * `title`, or `text` they were promised.
+ *
+ * This used to look one level too deep. It expected `final.result.result.value`,
+ * but `cdpRequest` resolves with the CDP message's own `result` field, so for
+ * Runtime.evaluate `final` is already `{ result: RemoteObject }` and the value
+ * is at `final.result.value`. The inner `'result' in raw` check never matched,
+ * and every status, snapshot, extract, console and network read on the CDP path
+ * came back as the raw RemoteObject JSON. Nothing tested the CDP path — the
+ * browser tests all go through fake MCP tools — so it went unnoticed until a
+ * real headless browser was driven end to end.
+ *
+ * Both nestings are accepted, so this holds whichever form the transport hands
+ * back. A command whose result carries no RemoteObject (Page.navigate,
+ * Input.dispatchKeyEvent) is returned as it is.
  */
-function unwrapCdpEvaluateValue(final: BrowserResult): unknown {
-  const raw = final.result as Record<string, unknown> | undefined
-  if (raw && typeof raw === 'object' && 'result' in raw) {
-    const remote = raw.result as Record<string, unknown> | undefined
-    if (remote && typeof remote === 'object' && 'value' in remote) return remote.value
+export function unwrapCdpEvaluateValue(final: BrowserResult): unknown {
+  let node = final.result as Record<string, unknown> | undefined
+  if (node && typeof node === 'object' && !('type' in node) && 'result' in node) {
+    node = node.result as Record<string, unknown> | undefined
   }
+  if (node && typeof node === 'object' && 'type' in node && 'value' in node) return node.value
   return final.result ?? {}
 }
 
@@ -526,7 +541,7 @@ function formatBrowserResult(value: BrowserResult | string): string {
 function browserSetupHint(): string {
   const readiness = browserMcpReadiness()
   const detected = readiness.tools.length ? ` Connected browser MCP tools: ${readiness.tools.join(', ')}.` : ''
-  return `Configure a browser MCP server in .elia/mcp.json (auto-detected), ELIA_BROWSER_MCP_SERVER to select one, ELIA_BROWSER_BRIDGE_COMMAND for a trusted wrapper, ELIA_BROWSER_CDP_URL for Chrome DevTools, or ELIA_BROWSER=owned to have Elia launch and drive its own headless Chromium-family browser (needs Chrome, Edge, Brave, or Chromium installed; no login state — nothing that needs the user's own signed-in session).${detected} Keep credentials in the browser or bridge environment, not in Elia prompts or source files.`
+  return `Configure a browser MCP server in .elia/mcp.json (auto-detected), ELIA_BROWSER_MCP_SERVER to select one, ELIA_BROWSER_BRIDGE_COMMAND for a trusted wrapper, ELIA_BROWSER_CDP_URL for Chrome DevTools, With none of those set, Elia launches and drives its own headless Chromium-family browser automatically (needs Chrome, Edge, Brave, or Chromium installed; no login state — nothing that needs the user's own signed-in session); ELIA_BROWSER=off turns that off.${detected} Keep credentials in the browser or bridge environment, not in Elia prompts or source files.`
 }
 
 function connectedMcpInput(toolName: string, request: BrowserRequest): Record<string, unknown> {

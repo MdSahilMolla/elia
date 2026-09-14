@@ -24,6 +24,33 @@ export function ownedBrowserRequested(): boolean {
   return (process.env.ELIA_BROWSER ?? '').trim().toLowerCase() === 'owned'
 }
 
+const DISABLED = new Set(['off', 'none', 'false', '0', 'no'])
+
+/**
+ * Whether `browser` should fall back to elia's own headless browser when no
+ * user bridge is configured.
+ *
+ * It used to require `ELIA_BROWSER=owned`, on the grounds that launching a
+ * browser is not something to do as a silent, un-asked-for fallback. In
+ * practice that left most sessions with no browser at all: every call failed
+ * with "no browser bridge is configured", so elia could not look at the page
+ * it had just built, and now that it can read the console and network as well
+ * as the DOM, that absence costs far more. And a `browser` call *is* the ask —
+ * nothing is launched until the model uses the tool.
+ *
+ * What made the old concern real is kept in hand: the browser is headless, so
+ * no window appears; it is launched on first use, not at startup; it is killed
+ * when the session ends; and it has no login state of its own, so it cannot act
+ * as the user anywhere. `ELIA_BROWSER=off` turns the fallback off entirely, and
+ * with no Chromium-family browser installed it simply reports that, as before.
+ */
+export function useOwnedBrowserByDefault(env: NodeJS.ProcessEnv = process.env, chromiumAvailable: () => boolean = () => findChromePath() !== undefined): boolean {
+  const mode = (env.ELIA_BROWSER ?? '').trim().toLowerCase()
+  if (mode === 'owned') return true
+  if (DISABLED.has(mode)) return false
+  return chromiumAvailable()
+}
+
 interface OwnedBrowserInstance {
   proc: Bun.Subprocess
   /** Base HTTP origin of the DevTools endpoint — e.g. http://127.0.0.1:54321 */
