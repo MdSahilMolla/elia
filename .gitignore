@@ -60,6 +60,13 @@ __pycache__/
 .DS_Store
 Thumbs.db
 
+# --- PowerShell's $null leaking into a shell that treats it as a filename ---
+# `cmd > $null` is only a discard in PowerShell; run the same line under sh or
+# cmd.exe and the redirect creates an empty file literally named `$null` in the
+# working directory. It is never wanted, and an untracked one in the root has
+# already been swept into a commit by a `git add -A`.
+/$null
+
 # --- Archived pre-v2 source, kept for reference only ---
 legacy/
 
@@ -74,6 +81,7 @@ research/
 /static-site/
 meat-awareness/
 /kerala-navigator/
+/adamas-university-site/
 
 # --- Playwright MCP browser-tool session logs and page snapshots ---
 .playwright-mcp/
