@@ -376,7 +376,11 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
     // call costs very little and is the difference between a run that reports
     // what it did and one that simply stops mid-edit. That call can carry the
     // total slightly past the ceiling, which is the intended trade.
-    const spend = spendState(config.model, totalUsage)
+    // Priced against the model this loop actually runs on — `model ?? config.model`,
+    // the same resolution the fallback label uses below. A sub-agent on a cheaper
+    // tier priced as the selected model would hit the ceiling early; one on a
+    // dearer tier would blow straight past it.
+    const spend = spendState(model ?? config.model, totalUsage)
     if (spend.exceeded) return wrapUpAndFinish(spendStopPrompt(spend), 'spend-budget')
 
     steps += 1
