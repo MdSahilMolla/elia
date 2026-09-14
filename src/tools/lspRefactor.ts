@@ -47,6 +47,30 @@ function describeAction(action: CodeAction | Command, index: number): string {
   return `${index}. (unrecognized action)`
 }
 
+const CHANGED_FILE_INDENT = '  '
+
+/**
+ * The files a refactor changed, as the indented list both results end with.
+ *
+ * Paired with `changedFilesFromResult`, and the two live together on purpose:
+ * the autonomous loop reads this list back to know which files a wave wrote, so
+ * a rename that touches ten files is committed as ten files rather than the one
+ * named in the tool's input. Keeping the writer and the reader side by side is
+ * what stops a rewording of the message from silently breaking that.
+ */
+export function listChangedFiles(files: string[]): string {
+  return files.map((file) => `\n${CHANGED_FILE_INDENT}${file}`).join('')
+}
+
+/** The files an `lsp_refactor` result reports it changed; empty for a result that changed nothing. */
+export function changedFilesFromResult(result: string): string[] {
+  return result
+    .split(/\r?\n/)
+    .slice(1)
+    .filter((line) => line.startsWith(CHANGED_FILE_INDENT) && line.trim().length > 0)
+    .map((line) => line.slice(CHANGED_FILE_INDENT.length).trim())
+}
+
 export const lspRefactorTool: Tool = {
   name: 'lsp_refactor',
   description: `Language-server-driven refactors, distinct from edit_file's plain text substitution: a rename that follows every reference across the project, and the quick-fixes/refactors a language server can offer at a position. Requires a language server configured for the file type (see lsp/servers.ts) — when none is available, say so plainly rather than guessing at a manual edit.
@@ -86,7 +110,7 @@ Actions:
       assertEditWithinWorkspace(edit, cwd)
       const { applied } = await applyWorkspaceEdit(edit, captureBeforeWrite)
       const totalEdits = Object.values(edit.changes).reduce((sum, edits) => sum + edits.length, 0)
-      return `Renamed to "${newName}": ${totalEdits} edit(s) across ${applied.length} file(s):\n${applied.map((f) => `  ${f}`).join('\n')}`
+      return `Renamed to "${newName}": ${totalEdits} edit(s) across ${applied.length} file(s):${listChangedFiles(applied)}`
     }
 
     const actions = await listCodeActions(path, text, { start: position, end: position }, [], cwd)
@@ -110,6 +134,6 @@ Actions:
     if (currentAgent().signal?.aborted) throw new Error('Refactor cancelled before writing — the run was aborted.')
     assertEditWithinWorkspace(edit, cwd)
     const { applied } = await applyWorkspaceEdit(edit, captureBeforeWrite)
-    return `Applied "${chosen.title}": ${applied.length} file(s) changed:\n${applied.map((f) => `  ${f}`).join('\n')}`
+    return `Applied "${chosen.title}": ${applied.length} file(s) changed:${listChangedFiles(applied)}`
   },
 }

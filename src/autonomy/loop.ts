@@ -1,7 +1,7 @@
 import { join } from 'node:path'
 import { config, paths, systemPromptForMode, tierConfig, turnContextPrompt } from '../config.ts'
 import { withFileLockAsync } from '../fileLock.ts'
-import { lastAssistantText, runAgentLoop, type ConversationMessage } from '../agentLoop.ts'
+import { lastAssistantText, runAgentLoop, type ConversationMessage, type ToolEvent } from '../agentLoop.ts'
 import { taskTool } from '../tools/task.ts'
 import { allWorkerTools } from '../tools/registry.ts'
 import { environmentTool } from '../tools/environment.ts'
@@ -27,6 +27,7 @@ import { loadDevelopmentToolHooks, withToolHooks } from './devHooks.ts'
 import { createJournal, newRunId, runDir, type Journal } from './journal.ts'
 import { captureTreeSnapshot, discardTreeSnapshot, dirtyPaths, restoreTreeSnapshot, type TreeSnapshot } from './treeSnapshot.ts'
 import { planWaves, runFleet } from './fleet.ts'
+import { filesWrittenBy } from './waveWrites.ts'
 import { runVariants } from './variants.ts'
 import { createProposalTool, renderProposal, renderProposalSummary } from './proposal.ts'
 import { savePlanArtifact } from './artifacts.ts'
@@ -880,6 +881,13 @@ Finding that an assumption is FALSE is worth more than a confident guess on ever
       const index = waveCursor
       const wave = waves[index]!
       waveCursor += 1
+      // What this wave's workers actually wrote, read off their tool calls —
+      // the only record that separates this run's changes from whatever else
+      // appeared in the tree while it ran. See filesWrittenBy.
+      const writtenThisWave = new Set<string>()
+      const recordWrites = (event: ToolEvent): void => {
+        for (const file of filesWrittenBy(event, workspaceRoot)) writtenThisWave.add(file)
+      }
       if (runSignal?.aborted) return abortedAt('execute (waves)', { proposal })
       if (waves.length > 1) writeSubStep(`wave ${index + 1} of ${waves.length}`)
       taskSessions.update(parentTask.id, {
@@ -940,6 +948,7 @@ Finding that an assumption is FALSE is worth more than a confident guess on ever
         cwd: workspaceRoot,
         signal: runSignal,
         wave: index + 1,
+        onTool: recordWrites,
       })
       track(fleet.usage)
       totalSavedMs += fleet.savedMs
@@ -1023,6 +1032,7 @@ Do not repeat whatever failed. ${retryGuidanceFor(report)}`,
           cwd: workspaceRoot,
           signal: runSignal,
           wave: index + 1,
+          onTool: recordWrites,
         })
         track(retryFleet.usage)
         totalSavedMs += retryFleet.savedMs
@@ -1057,11 +1067,19 @@ Do not repeat whatever failed. ${retryGuidanceFor(report)}`,
       const landed = wave
         .filter((step) => graph.node(`step:${step.id}`)?.status === 'completed')
         .map((step) => `${step.id}: ${step.title}`)
-      // A wave whose steps declared no files would fall back to committing
-      // everything staged, which is only safe while `protectedPaths` is real.
-      const ownedFiles = wave.flatMap((step) => step.files)
-      if (landed.length > 0 && protectionFailed && ownedFiles.length === 0) {
-        writeSubStep('⚠ skipped the wave commit: could not determine what was already uncommitted, and no step declared its files')
+      // The commit is scoped to what this wave demonstrably wrote, plus anything
+      // its steps declared. It used to be the declared files alone, and a wave
+      // whose steps declared none — the common case, since workers edit files
+      // no plan predicted — fell back to committing everything staged. The
+      // pre-run `protectedPaths` snapshot only ever guarded that fallback
+      // against work that existed *before* the run; work that appeared while it
+      // ran, from another session in the same checkout or the operator still
+      // typing, was in no snapshot and went straight into the commit. So with
+      // nothing attributable, commit nothing: the changes stay in the tree,
+      // which is recoverable, instead of taking someone else's work with them.
+      const ownedFiles = [...new Set([...wave.flatMap((step) => step.files), ...writtenThisWave])]
+      if (landed.length > 0 && ownedFiles.length === 0) {
+        writeSubStep(`⚠ skipped the wave commit: no file written in wave ${index + 1} could be attributed to its steps, so nothing was committed rather than everything`)
       } else if (landed.length > 0) {
         const commit = await commitAll(
           workspaceRoot,
@@ -1071,6 +1089,10 @@ Do not repeat whatever failed. ${retryGuidanceFor(report)}`,
           ownedFiles,
         )
         if (commit.committed) writeSubStep(`committed wave ${index + 1} (${landed.length} step(s))`)
+        // Without the pre-run snapshot there is no telling the operator's own
+        // uncommitted edits apart from this wave's inside a file both touched.
+        // The allowlist still keeps every *other* file out; say what it cannot.
+        if (commit.committed && protectionFailed) writeSubStep('⚠ could not snapshot pre-existing uncommitted work, so a file this wave edited may also carry edits that were already there')
         if (commit.excluded.length > 0) writeSubStep(`⚠ kept out of the commit because they hold secrets: ${commit.excluded.join(', ')}`)
         if (commit.warning) writeSubStep(`⚠ ${commit.warning}`)
         if (commit.committed) hasLocalHistory = true

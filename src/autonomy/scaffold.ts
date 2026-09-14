@@ -119,22 +119,28 @@ export async function commitAll(
   protect: readonly string[] = [],
   include?: readonly string[],
 ): Promise<CommitResult> {
+  const included = include
+    ?.map((path) => path.replace(/\\/g, '/').replace(/^\.\//, '').replace(/\/$/, ''))
+    .filter((path) => path && path !== '.')
+  // An empty allowlist commits nothing. It used to mean the opposite — "no
+  // scope restriction, commit everything staged" — because a wave whose steps
+  // declared no files passed `[]`. That turned the one input meaning "I own
+  // nothing here" into the widest possible commit, and it is how concurrent
+  // work was swept into commits for unrelated goals, twice. Both callers now
+  // pass what they actually wrote, so nothing needs that reading any more; it
+  // stays closed so no future caller can reopen it. `undefined` is still "no
+  // allowlist", for the one case that wants it: a freshly initialised repo.
+  // Returning before `git add` leaves the index exactly as it was found.
+  if (included !== undefined && included.length === 0) {
+    return { committed: false, excluded: [], warning: 'nothing to commit: this commit owns no files' }
+  }
+
   const add = await execCapture('git', ['add', '-A'], cwd, signal)
   if (!add.ok) return { committed: false, excluded: [], warning: `git add failed: ${add.stderr || add.stdout}` }
 
   const staged = await execCapture('git', ['diff', '--cached', '--name-only'], cwd, signal)
   const paths = staged.stdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean)
   const protectedSet = new Set(protect.map((p) => p.replace(/\\/g, '/')))
-  const includedRaw = include
-    ?.map((path) => path.replace(/\\/g, '/').replace(/^\.\//, '').replace(/\/$/, ''))
-    .filter((path) => path && path !== '.')
-  // An `include` list with zero entries is not a caller asking to commit
-  // nothing — it means no step in this wave declared specific files (a real,
-  // supported case: `wave.flatMap((step) => step.files)` is `[]` whenever
-  // every step's `files` is unspecified). Scope restriction only makes sense
-  // when there is an actual allowlist to restrict to, so an empty computed
-  // list behaves like `include === undefined`: commit everything staged.
-  const included = includedRaw && includedRaw.length > 0 ? includedRaw : undefined
 
   // Second line of defence behind .gitignore. A commit is one `git push` away
   // from being public and permanent, so a secret must never reach one. Same

@@ -177,24 +177,42 @@ test('a scoped commit never sweeps concurrent changes outside the worker-owned f
   expect((await git('status', '--porcelain')).stdout).toContain('other.ts')
 })
 
-test('an empty include list means no scope restriction, not "commit nothing" — the real case when no step in a wave declared files', async () => {
+test('an empty include list commits nothing, and leaves every change in the tree', async () => {
+  // This used to assert the opposite: an empty allowlist meant "no scope
+  // restriction", so a wave whose steps declared no files committed everything
+  // staged — which is how another session's in-flight work was swept into a
+  // commit for an unrelated goal, twice. An empty allowlist is a caller that
+  // owns nothing, and the only safe commit for it is none.
   await ensureRepository(dir)
   writeFileSync(join(dir, 'seed.ts'), 'export const seed = 0')
   await commitAll(dir, 'seed')
+  const before = (await git('rev-parse', 'HEAD')).stdout.trim()
 
   writeFileSync(join(dir, 'a.ts'), 'export const a = 0')
   writeFileSync(join(dir, 'b.ts'), 'export const b = 0')
 
-  // `wave.flatMap((step) => step.files)` is exactly `[]` when every step in
-  // the wave left `files` unspecified — a real, supported case, not a caller
-  // asking to scope the commit down to zero files.
   const result = await commitAll(dir, 'wave commit', undefined, [], [])
 
+  expect(result.committed).toBe(false)
+  expect(result.warning).toContain('owns no files')
+  expect((await git('rev-parse', 'HEAD')).stdout.trim()).toBe(before)
+  // Nothing lost: both changes are still sitting in the tree, unstaged.
+  const status = (await git('status', '--porcelain')).stdout
+  expect(status).toContain('a.ts')
+  expect(status).toContain('b.ts')
+  expect((await git('diff', '--cached', '--name-only')).stdout.trim()).toBe('')
+})
+
+test('no allowlist at all still commits everything — the freshly initialised repo case', async () => {
+  // `undefined` and `[]` must not be confused again: a brand-new repository has
+  // nothing pre-existing to protect, so its first commit takes what is there.
+  await ensureRepository(dir)
+  writeFileSync(join(dir, 'a.ts'), 'export const a = 0')
+  const result = await commitAll(dir, 'initial')
   expect(result.committed).toBe(true)
-  expect(result.warning).toBeUndefined()
-  const committed = (await git('diff-tree', '--no-commit-id', '--name-only', '-r', 'HEAD')).stdout
-  expect(committed).toContain('a.ts')
-  expect(committed).toContain('b.ts')
+  // `ls-tree`, not `diff-tree`: this is the root commit, and diff-tree shows a
+  // parentless commit as empty unless told `--root`.
+  expect((await git('ls-tree', '-r', '--name-only', 'HEAD')).stdout).toContain('a.ts')
 })
 
 test('scaffoldProject in a dirty repo leaves the operator’s changes alone', async () => {
