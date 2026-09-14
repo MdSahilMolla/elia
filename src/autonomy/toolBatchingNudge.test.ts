@@ -2,6 +2,7 @@ import { beforeEach, expect, test } from 'bun:test'
 import { createPlanlessWorkTracker } from './toolBatchingNudge.ts'
 import { createRedundantReadTracker, isLoneBatchableRead, serialReadNudge, SERIAL_READ_NUDGE_THRESHOLD } from './toolBatchingNudge.ts'
 import { activeTodoList, resetActiveTodoList } from './todoList.ts'
+import { beginPlanRequest } from './planProgress.ts'
 
 // The planless-work tracker consults the live todo list; another test file
 // leaving an open item on it must not silence the nudge tests here.
@@ -97,5 +98,21 @@ test('the default check reads the live todo list — open items count, a finishe
   const withOpenPlan = createPlanlessWorkTracker()
   withOpenPlan.observe(['read_file', 'read_file', 'grep', 'write_file', 'edit_file'])
   expect(withOpenPlan.observe(['run_command', 'read_file', 'edit_file'])).toBeUndefined()
+  resetActiveTodoList()
+})
+
+test('a half-done plan from an earlier request no longer passes for this request\'s plan', () => {
+  resetActiveTodoList()
+  activeTodoList().write([{ content: 'last request', status: 'in_progress' }, { content: 'never finished', status: 'pending' }])
+  // A new user request begins (agent.ts does this on the opening call).
+  beginPlanRequest(activeTodoList())
+  const tracker = createPlanlessWorkTracker()
+  tracker.observe(['read_file', 'read_file', 'grep', 'write_file', 'edit_file'])
+  expect(tracker.observe(['run_command', 'read_file', 'edit_file'])).toContain('todo_write')
+  // Once this request writes its own plan, that plan counts.
+  activeTodoList().write([{ content: 'this request', status: 'in_progress' }])
+  const planned = createPlanlessWorkTracker()
+  planned.observe(['read_file', 'read_file', 'grep', 'write_file', 'edit_file'])
+  expect(planned.observe(['run_command', 'read_file', 'edit_file'])).toBeUndefined()
   resetActiveTodoList()
 })

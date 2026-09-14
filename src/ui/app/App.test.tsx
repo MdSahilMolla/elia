@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test'
 import { render } from 'ink-testing-library'
-import { App, providerPlanItems, shouldPersistActivity } from './App.tsx'
+import { App, planReceipt, providerPlanItems, shouldPersistActivity } from './App.tsx'
 import { REPL_COMMANDS_FOR_TEST, waitForFrame } from './testFixtures.ts'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
@@ -242,6 +242,45 @@ test('a planned turn shows the thinking, then the plan, before the first tool ru
   } finally {
     unmount()
   }
+})
+
+test('the plan panel follows elia\'s ticks during the turn and gives way to a receipt after it', async () => {
+  let release!: () => void
+  const held = new Promise<void>((resolve) => { release = resolve })
+  const props = {
+    ...baseProps(),
+    submitTurn: async (_text: string, hooks: import('./App.tsx').TurnHooks) => {
+      hooks.onActivity({ kind: 'plan', status: 'completed', title: 'Plan · 3 steps', detail: '◐ Write index.html\n□ Add the styles\n□ Open the page to check it' })
+      // What agent.ts surfaces when the evidence ticks a step.
+      hooks.onActivity({ kind: 'plan', status: 'updated', title: 'Plan · 1/3 done', detail: '✓ Write index.html\n◐ Add the styles\n□ Open the page to check it' })
+      await held
+    },
+  }
+  const { stdin, lastFrame, unmount } = render(<App {...props} />)
+  try {
+    await waitForFrame(lastFrame, 'mercury-2 · manual')
+    await settle()
+    stdin.write('create a laptop suggestion website')
+    await waitForFrame(lastFrame, 'create a laptop suggestion website')
+    stdin.write('\r')
+    const during = await waitForFrame(lastFrame, '1/3')
+    expect(during).toContain('✓ Write index.html')
+    expect(during).toContain('◐ Add the styles')
+    release()
+    const after = await waitForFrame(lastFrame, 'still open')
+    expect(after).toContain('◐ Plan · 1/3 done — still open:')
+    expect(after).toContain('□ Add the styles')
+    // The live panel is gone; the receipt is the record.
+    expect(after).not.toContain('PLAN')
+  } finally {
+    unmount()
+  }
+})
+
+test('planReceipt says a finished plan is finished and names what is still open', () => {
+  expect(planReceipt([{ content: 'a', status: 'completed' }, { content: 'b', status: 'completed' }])).toBe('✓ Plan complete · 2/2 steps')
+  expect(planReceipt([{ content: 'a', status: 'completed' }, { content: 'b', status: 'in_progress' }, { content: 'c', status: 'pending' }]))
+    .toBe('◐ Plan · 1/3 done — still open:\n  □ b\n  □ c')
 })
 
 test('an open approval hides the live workspace panel behind it', async () => {

@@ -718,3 +718,59 @@ test('a failed postcondition preserves the tool\'s real output, not just the gen
   expect(text).toContain('Expected: 200')
   expect(text).toContain('Received: 500')
 })
+
+test('the plan follows the work when the model never calls todo_write: ticks from evidence, a note, then a nudge for the step elia cannot judge', async () => {
+  const { createTodoList, withTodoList } = await import('./autonomy/todoList.ts')
+  const { beginPlanRequest } = await import('./autonomy/planProgress.ts')
+  const { mkdirSync, writeFileSync } = await import('node:fs')
+  const { dirname } = await import('node:path')
+  const dir = mkdtempSync(join(tmpdir(), 'elia-plan-progress-'))
+  const list = createTodoList()
+  beginPlanRequest(list)
+  list.write([
+    { content: 'Create `site/index.html` with the page structure', status: 'in_progress' },
+    { content: 'Add responsive styling', status: 'pending' },
+    { content: 'Run `bun run build` to verify', status: 'pending' },
+  ])
+  // mercury-2.5's habit, as recorded: it does the work and never touches the plan.
+  const script: ContentBlock[][] = [
+    [{ type: 'tool_use', id: 'w1', name: 'write_file', input: { path: 'site/index.html', content: '<main></main>' } }],
+    ...Array.from({ length: 6 }, (_, i): ContentBlock[] => [{ type: 'tool_use', id: `s${i}`, name: 'write_file', input: { path: `site/style${i}.css`, content: 'main{}' } }]),
+    [{ type: 'tool_use', id: 'b1', name: 'run_command', input: { command: 'bun run build' } }],
+    [{ type: 'text', text: 'Done.' }],
+  ]
+  let call = 0
+  const seen: string[][] = []
+  const updates: string[] = []
+  const tools: Tool[] = [
+    {
+      name: 'write_file', description: 'write', input_schema: { type: 'object', properties: {} },
+      async execute(input) {
+        const target = join(dir, String(input.path))
+        mkdirSync(dirname(target), { recursive: true })
+        writeFileSync(target, String(input.content))
+        return `Created ${input.path} (+1 −0)`
+      },
+    },
+    { name: 'run_command', description: 'run', input_schema: { type: 'object', properties: {} }, async execute() { return 'exit code: 0\nstdout: built' } },
+  ]
+  const messages: ConversationMessage[] = [{ role: 'user', content: [{ type: 'text', text: 'build the page' }] }]
+  try {
+    await withAgentIdentity({ name: 'lead', role: 'lead', cwd: dir }, () => withTodoList(list, () => withActionGovernor(createActionGovernor({ mode: 'supervised', cwd: dir, approve: async () => true }), () => runAgentLoop({
+      messages, systemPrompt: 'test', tools, providerName: 'anthropic', model: 'plan-progress-test', useAnimation: false, verbose: false,
+      provider: { async streamTurn(params) {
+        seen.push(params.messages.flatMap((m) => m.content.flatMap((b) => (b.type === 'text' && b.text.startsWith('[elia]') ? [b.text] : []))))
+        return { content: script[call++]!, usage: ZERO_USAGE }
+      } },
+      onPlanProgress: (update) => updates.push(update.items.map((item) => item.status[0]).join('')),
+    }))))
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+  // Step 1 ticked by the write, step 3 by the build; step 2 names nothing, so it stays the model's call.
+  expect(updates).toEqual(['cip', 'cic'])
+  expect(list.read().map((item) => item.status)).toEqual(['completed', 'in_progress', 'completed'])
+  const told = seen.at(-1)!
+  expect(told.some((text) => text.includes('Plan updated from what just ran: ✓ 1. Create `site/index.html`'))).toBe(true)
+  expect(told.some((text) => text.includes('Your plan has not changed in 6 actions') && text.includes('◐ 2. Add responsive styling'))).toBe(true)
+})

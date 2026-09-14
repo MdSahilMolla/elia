@@ -5,6 +5,8 @@ import { compactionThresholdFor } from './contextWindow.ts'
 import { isCapacityError, isRequestTooLargeError } from './providerErrors.ts'
 import { createPlanlessWorkTracker, createRedundantReadTracker, isLoneBatchableRead, serialReadNudge } from './autonomy/toolBatchingNudge.ts'
 import { createReadAhead } from './autonomy/readAhead.ts'
+import { createPlanProgressTracker, planBelongsToRequest, type PlanProgressUpdate, type ToolOutcome } from './autonomy/planProgress.ts'
+import { activeTodoList } from './autonomy/todoList.ts'
 import type { ChatMessage, ContentBlock, Provider, ProviderActivity, Usage } from './providers/types.ts'
 import type { Tool } from './tools/types.ts'
 import { unknownToolMessage } from './tools/toolNameSuggest.ts'
@@ -149,6 +151,13 @@ export interface RunAgentLoopOptions {
    * return and clear its own buffer.
    */
   drainDirectives?: () => string[]
+  /**
+   * Keep this request's plan moving with the work: tick a step when what just
+   * ran proves it done, and remind the model when the plan has gone stale —
+   * see autonomy/planProgress.ts. Called with the list after each tick. Only the
+   * top-level agent passes it; a sub-agent's list is its own.
+   */
+  onPlanProgress?: (update: PlanProgressUpdate) => void
 }
 
 export type StopReason = 'complete' | 'step-budget' | 'aborted' | 'no-progress' | 'spend-budget'
@@ -196,6 +205,7 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
     signal,
     drainSteering,
     drainDirectives,
+    onPlanProgress,
   } = opts
 
   const transcript = activeSessionTranscript()
@@ -275,6 +285,11 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
   let unproductiveStreak = 0
   const redundantReads = createRedundantReadTracker()
   const planlessWork = createPlanlessWorkTracker()
+  // The list this loop runs under — the turn's, via withTodoList.
+  const todoList = activeTodoList()
+  const planProgress = onPlanProgress
+    ? createPlanProgressTracker({ list: () => todoList, root: currentAgent().cwd ?? process.cwd(), owned: () => planBelongsToRequest(todoList) })
+    : undefined
   // Deterministically pulls the rest of a just-searched worklist into the same
   // turn, for models that ignore the batch-your-reads nudge (measured: mercury-2
   // taking 9 round-trips where 2 is ideal). Reuses read_file's own cross-turn memo.
@@ -406,8 +421,11 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
     }
 
     const observed: { name: string; input: Record<string, unknown>; result: string }[] = []
+    // Every outcome in the order the model issued the calls — the batch runs
+    // concurrently, but "the earliest open step" must mean the model's order.
+    const outcomes: ToolOutcome[] = new Array(toolUseBlocks.length)
 
-    const toolResults = await runWithConcurrencyLimit(toolUseBlocks, toolBatchConcurrency(toolUseBlocks), async (block) => {
+    const toolResults = await runWithConcurrencyLimit(toolUseBlocks, toolBatchConcurrency(toolUseBlocks), async (block, blockIndex) => {
       const tool = toolsByName[block.name]
       const startedAt = Date.now()
 
@@ -418,6 +436,7 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
       // finishing the whole batch first.
       if (signal?.aborted) {
         onTool?.({ id: block.id, name: block.name, input: block.input, result: 'Run aborted before this tool ran.', isError: true, durationMs: 0, cached: false, failureClass: 'aborted' })
+        outcomes[blockIndex] = { name: block.name, input: block.input, result: 'Run aborted before this tool ran.', isError: true }
         return { type: 'tool_result' as const, tool_use_id: block.id, content: 'Run aborted before this tool ran.', is_error: true }
       }
 
@@ -429,6 +448,7 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
         const resultText = unknownToolMessage(block.name, Object.keys(toolsByName))
         if (verbose) writeToolResult(block.name, resultText, true, false)
         onTool?.({ id: block.id, name: block.name, input: block.input, result: resultText, isError: true, durationMs: Date.now() - startedAt, cached: false, failureClass: 'invalid-request' })
+        outcomes[blockIndex] = { name: block.name, input: block.input, result: resultText, isError: true }
         return { type: 'tool_result' as const, tool_use_id: block.id, content: resultText, is_error: true }
       }
 
@@ -578,6 +598,7 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
       const durationMs = Date.now() - startedAt
       if (verbose) writeToolResult(block.name, resultText, isError, cached)
       onTool?.({ id: block.id, name: block.name, input: block.input, result: resultText, isError, durationMs, cached, assessment, actionId: reservation?.action.id, idempotencyKey: reservation?.action.idempotencyKey, replayed, failureClass })
+      outcomes[blockIndex] = { name: block.name, input: block.input, result: resultText, isError }
       if (!isError) observed.push({ name: block.name, input: block.input, result: resultText })
       // A *failed* command is where stack traces and compiler errors live — the
       // files the model is about to open. Feed those to the prefetcher even
@@ -624,6 +645,12 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
       if (verbose) writeNotice('elia: warned the model it is not making progress')
     }
 
+    // The plan moves with the work, not with the model's memory of it: tick what
+    // this batch proved done, and tell the model so its next todo_write keeps it.
+    const progress = planProgress?.observe(outcomes.filter(Boolean))
+    if (progress?.update) onPlanProgress?.(progress.update)
+    if (progress?.note) messages.push({ role: 'user', content: [{ type: 'text', text: progress.note }] })
+
     // The model opened one file from a list it just searched. Rather than only
     // nudge and let it walk the list one round-trip at a time, read the rest of
     // that worklist now and hand it back in the same turn.
@@ -650,11 +677,18 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
     const planlessNudge = planlessWork.observe(toolUseBlocks.map((block) => block.name))
     // A read-ahead expansion already did the batching for the model this turn;
     // don't also scold it for not batching.
-    const nudge = redundantReadNudge ?? (readAheadExpansion ? undefined : serialReadNudge(loneReadStreak)) ?? planlessNudge
+    const nudge = redundantReadNudge ?? (readAheadExpansion ? undefined : serialReadNudge(loneReadStreak)) ?? planlessNudge ?? progress?.nudge
     if (nudge) {
       messages.push({ role: 'user', content: [{ type: 'text', text: nudge }] })
       loneReadStreak = 0
-      if (verbose) writeNotice(redundantReadNudge ? 'elia: told the model to stop re-reading files' : nudge === planlessNudge ? 'elia: asked the model to write down its plan' : 'elia: reminded the model to batch its reads')
+      if (verbose) {
+        writeNotice(
+          redundantReadNudge ? 'elia: told the model to stop re-reading files'
+            : nudge === planlessNudge ? 'elia: asked the model to write down its plan'
+            : nudge === progress?.nudge ? 'elia: asked the model to bring its plan up to date'
+            : 'elia: reminded the model to batch its reads',
+        )
+      }
     }
 
     // Kick off predicted reads *before* looping back, so they run in parallel with
@@ -974,7 +1008,7 @@ function isFallbackableProviderError(error: unknown): boolean {
 export async function runWithConcurrencyLimit<T, R>(
   items: T[],
   limit: number,
-  fn: (item: T) => Promise<R>,
+  fn: (item: T, index: number) => Promise<R>,
 ): Promise<R[]> {
   const results: R[] = new Array(items.length)
   let cursor = 0
@@ -983,7 +1017,7 @@ export async function runWithConcurrencyLimit<T, R>(
     while (true) {
       const index = cursor++
       if (index >= items.length) return
-      results[index] = await fn(items[index]!)
+      results[index] = await fn(items[index]!, index)
     }
   }
 

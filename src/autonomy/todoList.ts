@@ -27,6 +27,8 @@ export interface TodoList {
   read(): TodoItem[]
   /** Compact text rendering, suitable for a tool result or a prompt. */
   render(): string
+  /** Bumped on every write — lets a caller tell a plan written for this request from one left over by the last. */
+  revision(): number
 }
 
 const MAX_ITEMS = 50
@@ -34,6 +36,7 @@ const MAX_CONTENT_LENGTH = 300
 
 export function createTodoList(persistPath?: string): TodoList {
   let items: TodoItem[] = []
+  let revision = 0
 
   function persist(): void {
     if (!persistPath) return
@@ -50,12 +53,17 @@ export function createTodoList(persistPath?: string): TodoList {
         content: item.content.length > MAX_CONTENT_LENGTH ? `${item.content.slice(0, MAX_CONTENT_LENGTH)}…` : item.content,
         status: item.status,
       }))
+      revision += 1
       persist()
       return [...items]
     },
 
     read() {
       return [...items]
+    },
+
+    revision() {
+      return revision
     },
 
     render() {

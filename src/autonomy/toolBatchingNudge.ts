@@ -14,6 +14,7 @@
  */
 
 import { activeTodoList } from './todoList.ts'
+import { planIsCurrent } from './planProgress.ts'
 
 const BATCHABLE_READS = new Set(['read_file', 'grep', 'list_files'])
 
@@ -116,10 +117,12 @@ export interface PlanlessWorkTracker {
 /**
  * A plan with work still open is already on the board — elia drafted it before
  * the loop started (autonomy/upfrontPlan.ts), or an earlier step wrote it. A
- * finished list from a previous request does not count: new work needs its own.
+ * list from a previous request does not count, finished or not: new work needs
+ * its own, and a stale half-done list used to silence this nudge for good.
  */
 function openPlanExists(): boolean {
-  return activeTodoList().read().some((item) => item.status !== 'completed')
+  const list = activeTodoList()
+  return planIsCurrent(list) && list.read().some((item) => item.status !== 'completed')
 }
 
 export function createPlanlessWorkTracker(hasOpenPlan: () => boolean = openPlanExists): PlanlessWorkTracker {

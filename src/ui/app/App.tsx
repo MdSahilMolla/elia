@@ -125,6 +125,22 @@ export function providerPlanItems(detail?: string): TodoItem[] {
   })
 }
 
+/**
+ * What the plan came to, said once in scrollback when the turn ends. The panel
+ * is cleared after it: a plan left on screen once its turn is over is exactly
+ * the "it never updated" the user sees, even when every step got done.
+ */
+export function planReceipt(items: TodoItem[]): string {
+  const done = items.filter((item) => item.status === 'completed').length
+  if (done === items.length) return `✓ Plan complete · ${done}/${items.length} steps`
+  const open = items.filter((item) => item.status !== 'completed')
+  return [
+    `◐ Plan · ${done}/${items.length} done — still open:`,
+    ...open.slice(0, 6).map((item) => `  □ ${item.content}`),
+    ...(open.length > 6 ? [`  … ${open.length - 6} more`] : []),
+  ].join('\n')
+}
+
 /** Progress belongs in the single live status line; only durable outcomes enter scrollback. */
 export function shouldPersistActivity(activity: import('../../providers/types.ts').ProviderActivity): boolean {
   return activity.status === 'completed' || activity.status === 'failed' || activity.status === 'warning' || activity.kind === 'warning'
@@ -179,6 +195,9 @@ export function App(props: AppProps) {
   const [turnStartedAt, setTurnStartedAt] = useState(0)
   const [plan, setPlan] = useState<TodoItem[]>([])
   const [providerPlan, setProviderPlan] = useState<TodoItem[]>([])
+  // The plan as the running turn last showed it — read when the turn ends, after
+  // its state updates may not have rendered yet.
+  const turnPlan = useRef<TodoItem[]>([])
   const [agents, setAgents] = useState<TaskSession[]>(() => taskSessions.list())
   // When this REPL started — the fleet panel uses it to drop finished subagents
   // that belong to earlier sessions (loaded from .elia/tasks.json on startup).
@@ -341,6 +360,7 @@ export function App(props: AppProps) {
       // execution) still echo here.
       if (opts?.echo !== false) store.appendUser(text)
       lastUserText.current = text
+      turnPlan.current = []
       const controller = new AbortController()
       abortRef.current = controller
       const hooks: TurnHooks = {
@@ -357,6 +377,7 @@ export function App(props: AppProps) {
           if (a.kind === 'plan') {
             const parsed = providerPlanItems(a.detail)
             if (parsed.length > 0) {
+              turnPlan.current = parsed
               setProviderPlan(parsed)
               // A fresh plan supersedes the last request's todo list, which
               // would otherwise keep the panel (plan wins over providerPlan).
@@ -374,7 +395,8 @@ export function App(props: AppProps) {
         },
         onTool: (e) => {
           if (e.name === 'todo_write' && !e.isError) {
-            setPlan(activeTodoList().read())
+            turnPlan.current = activeTodoList().read()
+            setPlan(turnPlan.current)
             setProviderPlan([])
           }
           if (e.name === 'preview' && !e.isError) {
@@ -411,6 +433,12 @@ export function App(props: AppProps) {
         if (tools.length > 2) {
           const line = rollupLine(rollupTools(tools))
           if (line) store.notice(`⏺ ${line}`)
+        }
+        // A plan-mode turn's plan is a proposal waiting on Enter — it stays up.
+        if (turnPlan.current.length > 0 && modeRef.current !== 'plan') {
+          store.notice(planReceipt(turnPlan.current))
+          setPlan([])
+          setProviderPlan([])
         }
         store.commit()
         busyRef.current = false

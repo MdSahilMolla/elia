@@ -29,6 +29,7 @@ import { regretNudge, weakDomainCaution } from './autonomy/outcomes.ts'
 import { disputeNudge } from './autonomy/disputeNudge.ts'
 import { renderSkillHint } from './skills/relevance.ts'
 import { draftUpfrontPlan, planActivity, planBriefing, planTodoItems, stripInjectedContext, upfrontPlanEnabled, wantsUpfrontPlan } from './autonomy/upfrontPlan.ts'
+import { beginPlanRequest, planChecklist, planProgressTitle, type PlanProgressUpdate } from './autonomy/planProgress.ts'
 import { memoryReceipt } from './autonomy/turnLearning.ts'
 
 /** The most recent user message text — the query project memory is ranked against. */
@@ -143,6 +144,10 @@ async function runScopedTurn(
 ): Promise<RunAgentLoopResult> {
   const startedAt = Date.now()
   const mode = options.mode ?? 'dev'
+  // A new user request starts here. A list written before this point — the last
+  // request's plan, finished or abandoned — is not this request's plan: elia
+  // neither ticks it nor nags about it, and it no longer passes for a plan.
+  if (options.upfrontPlan) beginPlanRequest(activeTodoList())
   // Ambient for the whole turn, including sub-agents dispatched via the task
   // tool arbitrarily deep in a tool call — see autonomy/mode.ts.
   const PLAN_MODE_TOOLS = new Set(['read_file', 'list_files', 'grep', 'web_search', 'web_fetch', 'todo_write'])
@@ -181,6 +186,16 @@ async function runScopedTurn(
   // real time, and it must not bake into the cached stable prefix (a daemon can
   // stay up across midnight, or for days).
   const systemDynamicPrompt = [turnContextPrompt(), projectMemory].map((part) => part.trim()).filter(Boolean).join('\n\n') || undefined
+
+  // A step elia ticked from evidence: the plan panel redraws from the checklist
+  // (an "updated" activity, so scrollback is not filled with one per tick), and
+  // the plain terminal gets one line saying what was ticked.
+  const planProgressed = (update: PlanProgressUpdate): void => {
+    const title = planProgressTitle(update.items)
+    options.onActivity?.({ kind: 'plan', status: 'updated', title, detail: planChecklist(update.items) })
+    // After the activity, so the Ink status line ends on the line that says what was ticked.
+    if (!options.silent) writeNotice(`${title} · ${update.ticked.map((step) => `✓ ${step.length > 70 ? `${step.slice(0, 69)}…` : step}`).join(' · ')}`)
+  }
 
   // Plans and learning receipts are part of the turn's visible record: the Ink
   // UI receives them as activities, the plain terminal prints them.
@@ -269,6 +284,8 @@ async function runScopedTurn(
       prefetcher,
       signal: options.signal,
       drainSteering: options.drainSteering,
+      // Plan mode proposes a plan; there is nothing yet to tick.
+      onPlanProgress: mode === 'dev' && !options.planMode ? planProgressed : undefined,
       // A ChatGPT-subscription turn is one internal `codex_delegate` action for
       // the audit ledger and skill detector, but the client (terminal card,
       // desktop app) should see it as "ChatGPT subscription", with none of Codex's
