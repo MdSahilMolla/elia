@@ -100,7 +100,16 @@ export interface Usage {
   inputTokens: number
   outputTokens: number
   cacheReadTokens: number
+  /** Every cache write, whatever its lifetime. */
   cacheWriteTokens: number
+  /**
+   * The part of `cacheWriteTokens` written with a 1-hour lifetime. Those cost 2×
+   * input rather than the 1.25× of a 5-minute write, and the Anthropic provider
+   * writes both kinds — its stable system prompt and tools at 1 hour, the
+   * per-turn prompt and history at 5 minutes. Optional and 0 when absent, so a
+   * provider that does not report the split is priced exactly as before.
+   */
+  cacheWrite1hTokens?: number
 }
 
 /** User-visible progress emitted by agentic providers while a turn is running. */

@@ -6,11 +6,15 @@ import { logSwallowedError } from './diagnostics.ts'
 export const ZERO_USAGE: Usage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 }
 
 export function addUsage(a: Usage, b: Usage): Usage {
+  const cacheWrite1hTokens = (a.cacheWrite1hTokens ?? 0) + (b.cacheWrite1hTokens ?? 0)
   return {
     inputTokens: a.inputTokens + b.inputTokens,
     outputTokens: a.outputTokens + b.outputTokens,
     cacheReadTokens: a.cacheReadTokens + b.cacheReadTokens,
     cacheWriteTokens: a.cacheWriteTokens + b.cacheWriteTokens,
+    // Carried only when something reported it, so a sum of usages from
+    // providers that never split cache writes stays the same shape it was.
+    ...(cacheWrite1hTokens > 0 ? { cacheWrite1hTokens } : {}),
   }
 }
 
@@ -23,14 +27,31 @@ interface Pricing {
   inputPerM: number
   outputPerM: number
   cacheReadPerM?: number
+  /** A 5-minute cache write — and any write whose lifetime was not reported. */
   cacheWritePerM?: number
+  /** A 1-hour cache write. Falls back to `cacheWritePerM` when absent. */
+  cacheWrite1hPerM?: number
 }
 
-// Verified against provider pricing pages/aggregators as of 2026-08-18.
 // Providers change pricing without notice — treat this as a best-effort
 // estimate for orientation, not an authoritative bill.
+//
+// Claude rates: first-party Claude API, checked against
+// platform.claude.com/docs/en/about-claude/pricing on 2026-09-15. Cache writes
+// are 1.25× input for a 5-minute lifetime and 2× for 1 hour; cache reads are
+// 0.1× input — except Fable 5.1, whose reads are 0.025× ($0.25/MTok). Sonnet 5's
+// $2/$10 began as introductory pricing; that page states it is now the standard
+// price and the scheduled rise to $3/$15 will not happen.
+//
+// Every model elia can route to should be here. One that is not cannot be
+// priced, and ELIA_MAX_SPEND_USD then reports itself unenforceable for it —
+// honest, but it means Opus, the costliest tier, ran with no ceiling at all.
 const PRICING: Record<string, Pricing> = {
-  'claude-sonnet-5': { inputPerM: 2, outputPerM: 10, cacheReadPerM: 0.2, cacheWritePerM: 2.5 },
+  'claude-fable-5-1': { inputPerM: 10, outputPerM: 50, cacheReadPerM: 0.25, cacheWritePerM: 12.5, cacheWrite1hPerM: 20 },
+  'claude-opus-5': { inputPerM: 5, outputPerM: 25, cacheReadPerM: 0.5, cacheWritePerM: 6.25, cacheWrite1hPerM: 10 },
+  'claude-opus-4-8': { inputPerM: 5, outputPerM: 25, cacheReadPerM: 0.5, cacheWritePerM: 6.25, cacheWrite1hPerM: 10 },
+  'claude-sonnet-5': { inputPerM: 2, outputPerM: 10, cacheReadPerM: 0.2, cacheWritePerM: 2.5, cacheWrite1hPerM: 4 },
+  'claude-haiku-4-5': { inputPerM: 1, outputPerM: 5, cacheReadPerM: 0.1, cacheWritePerM: 1.25, cacheWrite1hPerM: 2 },
   'gpt-4.1': { inputPerM: 2, outputPerM: 8, cacheReadPerM: 0.5 },
   'openai/gpt-oss-120b': { inputPerM: 0.15, outputPerM: 0.6, cacheReadPerM: 0.075 },
   'openai/gpt-oss-20b': { inputPerM: 0.075, outputPerM: 0.3, cacheReadPerM: 0.0375 },
@@ -44,7 +65,7 @@ const PRICING: Record<string, Pricing> = {
  * number — fabricating a price would be worse than not showing one. This is
  * the honest alternative: let the operator supply their own verified rate in
  * `.elia/pricing.json` (shaped `{ "<model>": { "inputPerM": n, "outputPerM": n,
- * "cacheReadPerM"?: n, "cacheWritePerM"?: n } }`), which is consulted first —
+ * "cacheReadPerM"?: n, "cacheWritePerM"?: n, "cacheWrite1hPerM"?: n } }`), which is consulted first —
  * an entry here can also override a built-in rate that has drifted.
  */
 let customPricingCache: { path: string; pricing: Record<string, Pricing> } | undefined
@@ -79,6 +100,7 @@ function isValidPricing(value: unknown): value is Pricing {
   if (!numeric(rate.inputPerM) || !numeric(rate.outputPerM)) return false
   if (rate.cacheReadPerM !== undefined && !numeric(rate.cacheReadPerM)) return false
   if (rate.cacheWritePerM !== undefined && !numeric(rate.cacheWritePerM)) return false
+  if (rate.cacheWrite1hPerM !== undefined && !numeric(rate.cacheWrite1hPerM)) return false
   return true
 }
 
@@ -110,12 +132,18 @@ export function estimateCostUsd(model: string, usage: Usage, cwd = process.cwd()
   const outputTokens = sanitizeTokenCount('outputTokens', usage.outputTokens)
   const cacheReadTokens = sanitizeTokenCount('cacheReadTokens', usage.cacheReadTokens)
   const cacheWriteTokens = sanitizeTokenCount('cacheWriteTokens', usage.cacheWriteTokens)
+  // The 1-hour share of the writes, never more than the writes themselves — a
+  // provider reporting an inconsistent split must not be billed twice for it.
+  const cacheWrite1hTokens = Math.min(cacheWriteTokens, sanitizeTokenCount('cacheWrite1hTokens', usage.cacheWrite1hTokens ?? 0))
+  const cacheWrite5mTokens = cacheWriteTokens - cacheWrite1hTokens
+  const write5mRate = pricing.cacheWritePerM ?? pricing.inputPerM
 
   return (
     (inputTokens / 1_000_000) * pricing.inputPerM +
     (outputTokens / 1_000_000) * pricing.outputPerM +
     (cacheReadTokens / 1_000_000) * (pricing.cacheReadPerM ?? pricing.inputPerM) +
-    (cacheWriteTokens / 1_000_000) * (pricing.cacheWritePerM ?? pricing.inputPerM)
+    (cacheWrite5mTokens / 1_000_000) * write5mRate +
+    (cacheWrite1hTokens / 1_000_000) * (pricing.cacheWrite1hPerM ?? write5mRate)
   )
 }
 

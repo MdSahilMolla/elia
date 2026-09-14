@@ -161,3 +161,54 @@ test('renderUsageBreakdown shows the token table and a cost estimate for a known
   expect(out).toContain('turns         2')
   expect(out).toContain('$2.00')
 })
+
+// --- Every Claude model elia routes to can be priced -------------------------
+
+const MTOK = 1_000_000
+/** A per-MTok figure for one token class, so each assertion names the rate it checks. */
+const usageOf = (fields: Partial<Record<'inputTokens' | 'outputTokens' | 'cacheReadTokens' | 'cacheWriteTokens' | 'cacheWrite1hTokens', number>>) =>
+  ({ inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, ...fields })
+
+test('every Claude model elia routes to has a price, so a spend ceiling can be enforced on it', () => {
+  // Opus, Fable and Haiku used to be missing, and ELIA_MAX_SPEND_USD reported
+  // itself unenforceable on them — Opus, the costliest tier, ran with no limit.
+  for (const model of ['claude-fable-5-1', 'claude-opus-5', 'claude-opus-4-8', 'claude-sonnet-5', 'claude-haiku-4-5']) {
+    expect(estimateCostUsd(model, usageOf({ inputTokens: MTOK }))).toBeGreaterThan(0)
+  }
+})
+
+test('input and output are priced at the published per-MTok rates', () => {
+  expect(estimateCostUsd('claude-opus-5', usageOf({ inputTokens: MTOK, outputTokens: MTOK }))).toBeCloseTo(5 + 25)
+  expect(estimateCostUsd('claude-fable-5-1', usageOf({ inputTokens: MTOK, outputTokens: MTOK }))).toBeCloseTo(10 + 50)
+  expect(estimateCostUsd('claude-haiku-4-5', usageOf({ inputTokens: MTOK, outputTokens: MTOK }))).toBeCloseTo(1 + 5)
+})
+
+test('Fable 5.1 cache reads are 0.025x input, not the usual 0.1x', () => {
+  expect(estimateCostUsd('claude-fable-5-1', usageOf({ cacheReadTokens: MTOK }))).toBeCloseTo(0.25)
+  expect(estimateCostUsd('claude-opus-5', usageOf({ cacheReadTokens: MTOK }))).toBeCloseTo(0.5)
+})
+
+test('1-hour cache writes cost 2x input and 5-minute ones 1.25x, and a mix is priced by its parts', () => {
+  // The Anthropic provider writes both: the stable system prompt and tools at 1
+  // hour, the per-turn prompt and history at 5 minutes. Pricing all of it at the
+  // 5-minute rate undercounted the 1-hour share by 37.5%.
+  expect(estimateCostUsd('claude-opus-5', usageOf({ cacheWriteTokens: MTOK }))).toBeCloseTo(6.25)
+  expect(estimateCostUsd('claude-opus-5', usageOf({ cacheWriteTokens: MTOK, cacheWrite1hTokens: MTOK }))).toBeCloseTo(10)
+  // 600k at 5 minutes + 400k at 1 hour.
+  expect(estimateCostUsd('claude-opus-5', usageOf({ cacheWriteTokens: MTOK, cacheWrite1hTokens: 400_000 }))).toBeCloseTo(0.6 * 6.25 + 0.4 * 10)
+})
+
+test('a 1-hour share larger than the writes it belongs to is not billed twice', () => {
+  expect(estimateCostUsd('claude-opus-5', usageOf({ cacheWriteTokens: 100_000, cacheWrite1hTokens: 5 * MTOK }))).toBeCloseTo(0.1 * 10)
+})
+
+test('a model with no 1-hour rate prices its 1-hour writes at its ordinary write rate', () => {
+  expect(estimateCostUsd('mercury-2.5', usageOf({ cacheWriteTokens: MTOK, cacheWrite1hTokens: MTOK })))
+    .toBeCloseTo(estimateCostUsd('mercury-2.5', usageOf({ cacheWriteTokens: MTOK }))!)
+})
+
+test('addUsage carries the 1-hour share, and leaves usages that never had one unchanged in shape', () => {
+  expect(addUsage(usageOf({ cacheWriteTokens: 10, cacheWrite1hTokens: 4 }), usageOf({ cacheWriteTokens: 6, cacheWrite1hTokens: 1 })))
+    .toEqual({ inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 16, cacheWrite1hTokens: 5 })
+  expect(addUsage(ZERO_USAGE, ZERO_USAGE)).toEqual(ZERO_USAGE)
+})

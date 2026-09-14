@@ -48,3 +48,13 @@ test('the stop prompt and notice both name the spend and the limit', () => {
   expect(spendStopPrompt(state)).toContain('Stop calling tools')
   expect(spendStopNotice(state)).toContain('ELIA_MAX_SPEND_USD')
 })
+
+test('the ceiling is enforceable on every Claude model elia routes to, Opus included', () => {
+  // Opus was missing from the price table, so a ceiling on it reported itself
+  // unenforceable and the costliest tier ran with no limit at all.
+  for (const model of ['claude-opus-5', 'claude-opus-4-8', 'claude-fable-5-1', 'claude-haiku-4-5', 'claude-sonnet-5']) {
+    const state = spendState(model, EXPENSIVE, { ELIA_MAX_SPEND_USD: '1' })
+    expect(state.unenforceable).toBeUndefined()
+    expect(state.exceeded).toBe(true)
+  }
+})

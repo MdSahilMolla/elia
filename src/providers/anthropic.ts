@@ -130,6 +130,9 @@ export function createAnthropicProvider(
         outputTokens: finalMessage.usage.output_tokens,
         cacheReadTokens: finalMessage.usage.cache_read_input_tokens ?? 0,
         cacheWriteTokens: finalMessage.usage.cache_creation_input_tokens ?? 0,
+        // The stable system prompt and tools are cached for 1 hour, the rest
+        // for 5 minutes, and the two are billed at different rates.
+        cacheWrite1hTokens: finalMessage.usage.cache_creation?.ephemeral_1h_input_tokens ?? 0,
       }
 
       return { content, usage }
