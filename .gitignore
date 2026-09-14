@@ -73,3 +73,7 @@ research/
 /workspace/
 /static-site/
 meat-awareness/
+/kerala-navigator/
+
+# --- Playwright MCP browser-tool session logs and page snapshots ---
+.playwright-mcp/
