@@ -4,6 +4,7 @@ import { appendSecureFile, ensureSecureDirectory, hardenSecureFile, writeSecureF
 import { paths } from '../config.ts'
 import type { Tool } from '../tools/types.ts'
 import { exposedCorrs, loadEfficacy, MIN_EXPOSURES } from './lessonEfficacy.ts'
+import { rankBm25 } from '../bm25.ts'
 import { competenceReport } from './outcomes.ts'
 
 /**
@@ -178,13 +179,71 @@ export function rewriteLessons(lessons: Lesson[], path = paths.lessons): void {
 }
 
 /**
- * The most recent lessons, formatted for injection into a planner's briefing,
- * together with their keys — so the caller can record which lessons a run saw.
- * Also stashes the keys module-locally for the interactive path (see
- * `consumeInjectedLessonKeys`).
+ * How many of the newest lessons go in unconditionally, before relevance picks
+ * the rest.
+ *
+ * Not arbitrary, and not just a safety net. Exposure is what
+ * `lessonEfficacy`/`retireLessons` measure against a control group of runs that
+ * did *not* see a lesson, so *which* lessons get injected decides what that
+ * statistic means. Keeping the newest slice unconditional keeps their exposure
+ * pattern exactly as it was, so efficacy data already on disk stays comparable;
+ * the relevance-picked remainder only ever reaches lessons that under pure
+ * recency were never injected at all past the ceiling, and therefore have no
+ * efficacy history to invalidate. Their exposure does become topic-correlated,
+ * which is a real confound for their lift — but a confounded signal on a lesson
+ * that could never be measured before is strictly more than none.
  */
-export function renderLessonsWithKeys(path = paths.lessons): { text: string; keys: string[] } {
-  const lessons = loadLessons(path).slice(-MAX_INJECTED_LESSONS)
+const RECENCY_FLOOR = 10
+
+/** Lessons in file order, so the injected block reads chronologically however members were chosen. */
+function inFileOrder(all: Lesson[], chosen: Set<Lesson>): Lesson[] {
+  return all.filter((lesson) => chosen.has(lesson))
+}
+
+/**
+ * The lessons to inject for a turn: the newest `RECENCY_FLOOR`, plus whatever
+ * else is most relevant to `query`, up to `MAX_INJECTED_LESSONS`.
+ *
+ * Pure recency capped compounding at a fixed horizon — past 25 lessons the most
+ * relevant one in the store silently stopped being injected because it was old,
+ * while 25 unrelated recent ones took the whole budget. The store kept growing
+ * and recall did not improve. BM25 is already how `recall` and `brain` search
+ * rank; lessons were the one consumer that did not use it.
+ */
+function selectLessons(all: Lesson[], query: string): Lesson[] {
+  if (all.length <= MAX_INJECTED_LESSONS) return all
+  const recent = all.slice(-RECENCY_FLOOR)
+  const chosen = new Set(recent)
+  const budget = MAX_INJECTED_LESSONS - chosen.size
+  if (budget <= 0 || !query.trim()) return inFileOrder(all, new Set(all.slice(-MAX_INJECTED_LESSONS)))
+
+  const older = all.slice(0, -RECENCY_FLOOR)
+  const byId = new Map(older.map((lesson, index) => [String(index), lesson]))
+  const ranked = rankBm25(older.map((lesson, index) => ({ id: String(index), text: lesson.text })), query)
+  for (const hit of ranked) {
+    if (chosen.size >= MAX_INJECTED_LESSONS) break
+    const lesson = byId.get(hit.id)
+    if (lesson) chosen.add(lesson)
+  }
+  // Nothing matched the query — fall back to recency for the remaining budget
+  // rather than injecting fewer lessons than the budget allows.
+  if (chosen.size < MAX_INJECTED_LESSONS) {
+    for (const lesson of older.slice(-(MAX_INJECTED_LESSONS - chosen.size))) chosen.add(lesson)
+  }
+  return inFileOrder(all, chosen)
+}
+
+/**
+ * The lessons most worth this turn, formatted for injection into a planner's
+ * briefing, together with their keys — so the caller can record which lessons a
+ * run saw. Also stashes the keys module-locally for the interactive path (see
+ * `consumeInjectedLessonKeys`).
+ *
+ * `query` is what the turn is about; without one this falls back to pure
+ * recency, so a caller with no query behaves exactly as before.
+ */
+export function renderLessonsWithKeys(query = '', path = paths.lessons): { text: string; keys: string[] } {
+  const lessons = selectLessons(loadLessons(path), query)
   lastInjectedLessonKeys = lessons.map((lesson) => lesson.key ?? lessonKey(lesson.text))
   if (lessons.length === 0) return { text: '', keys: [] }
   const text = `\n\n## What earlier runs learned about this project\n${lessons
@@ -198,9 +257,9 @@ export function renderLessonsWithKeys(path = paths.lessons): { text: string; key
   return { text, keys: lastInjectedLessonKeys }
 }
 
-/** The most recent lessons, formatted for injection into a planner's briefing. */
-export function renderLessons(path = paths.lessons): string {
-  return renderLessonsWithKeys(path).text
+/** The lessons most worth this turn, formatted for injection into a planner's briefing. */
+export function renderLessons(query = '', path = paths.lessons): string {
+  return renderLessonsWithKeys(query, path).text
 }
 
 /** Ceiling on how much of the file one retirement pass may remove — a runaway signal, not a cleanup. */

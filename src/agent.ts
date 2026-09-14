@@ -158,7 +158,7 @@ async function runScopedTurn(
   // files this turn is about to touch. Derived on read from the second brain;
   // empty (and free) until the brain has something anchored to those paths.
   const brainCards = mode === 'dev' && turnPaths.length > 0 ? await renderBrainCards(turnPaths) : ''
-  const lessonMemory = mode === 'dev' ? renderLessonsWithKeys() : { text: '', keys: [] }
+  const lessonMemory = mode === 'dev' ? renderLessonsWithKeys(turnQuery) : { text: '', keys: [] }
   const rationale = mode === 'dev' ? renderRationale(turnQuery, turnPaths) : ''
   const weakCaution = mode === 'dev' ? weakDomainCaution(turnQuery, turnPaths) : ''
   const lastTurnFriction = mode === 'dev' ? regretNudge() : ''

@@ -542,7 +542,7 @@ async function runAutonomousTaskInternal(options: AutonomousRunOptions): Promise
       content: [
         {
           type: 'text',
-          text: `## Goal\n${goal}\n\n## Project snapshot\n${snapshot}${renderLessons()}\n\nOrient yourself, then submit a proposal.`,
+          text: `## Goal\n${goal}\n\n## Project snapshot\n${snapshot}${renderLessons(goal)}\n\nOrient yourself, then submit a proposal.`,
         },
       ],
     },

@@ -34,7 +34,7 @@ test('the recorder installs, and installing twice does not double-wrap', () => {
 test('the recorder captures console output and still calls through', () => {
   const { run, win } = page()
   run(RECORDER_SOURCE)
-  const patched = win.console as Record<string, (...args: unknown[]) => void>
+  const patched = win.console as { log: (...args: unknown[]) => void; error: (...args: unknown[]) => void }
   patched.error('boom', { code: 42 })
   patched.log('ordinary')
   const state = win.__eliaRecorder as { console: { level: string; text: string }[] }
@@ -83,7 +83,7 @@ test('reading installs the recorder when it is missing, and says the buffer is e
 test('errorsOnly keeps errors and failed requests only', () => {
   const { run, win } = page()
   run(RECORDER_SOURCE)
-  const patched = win.console as Record<string, (...args: unknown[]) => void>
+  const patched = win.console as { log: (...args: unknown[]) => void; error: (...args: unknown[]) => void }
   patched.log('noise')
   patched.error('the real problem')
   const read = run(readRecorderExpression('console', 50, true)) as { entries: { text: string }[]; total: number }

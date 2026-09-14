@@ -70,7 +70,7 @@ test('loadLessons attaches a stable key derived from the text', () => {
 
 test('renderLessonsWithKeys exposes the injected keys and stashes them for the recorder', () => {
   appendLessons(['a', 'b'], path)
-  const rendered = renderLessonsWithKeys(path)
+  const rendered = renderLessonsWithKeys('', path)
   expect(rendered.keys).toHaveLength(2)
   expect(rendered.text).toContain('- a')
   // the module-local stash mirrors the returned keys
@@ -207,7 +207,7 @@ test('an empty list writes nothing at all', () => {
   appendLessons([], path)
 
   expect(loadLessons(path)).toEqual([])
-  expect(renderLessons(path)).toBe('')
+  expect(renderLessons('', path)).toBe('')
 })
 
 test('a missing file loads as no lessons rather than throwing', () => {
@@ -223,10 +223,10 @@ test('the timestamp comment is stripped from the lesson text but recorded', () =
 })
 
 test('rendering produces a prompt section only when there is something to say', () => {
-  expect(renderLessons(path)).toBe('')
+  expect(renderLessons('', path)).toBe('')
 
   appendLessons(['the build needs --target=node'], path)
-  const rendered = renderLessons(path)
+  const rendered = renderLessons('', path)
 
   expect(rendered).toContain('What earlier runs learned')
   expect(rendered).toContain('the build needs --target=node')
@@ -238,5 +238,48 @@ test('lessons keep optional source and confidence provenance', () => {
   expect(lesson.text).toBe('use bun test')
   expect(lesson.source).toBe('repair')
   expect(lesson.confidence).toBeCloseTo(0.9)
-  expect(renderLessons(path)).toContain('source: repair')
+  expect(renderLessons('', path)).toContain('source: repair')
+})
+
+// --- Relevance ranking, on top of an unconditional recency floor -------------
+
+/** `count` lessons whose text is distinct and searchable. */
+function seed(path: string, count: number, prefix: string): void {
+  for (let i = 0; i < count; i += 1) appendLessons([`${prefix} number ${i} about topic${i}`], path)
+}
+
+test('below the injection ceiling every lesson still goes in, query or not', () => {
+  const path = join(dir, 'lessons.md')
+  seed(path, 5, 'small store lesson')
+  expect(renderLessonsWithKeys('topic3', path).keys).toHaveLength(5)
+})
+
+test('an old but relevant lesson is injected where pure recency would have dropped it', () => {
+  const path = join(dir, 'lessons.md')
+  // The needle is the oldest entry, far outside the newest-25 window.
+  appendLessons(['On this project the rust crate must be built with the gnullvm toolchain'], path)
+  seed(path, 40, 'unrelated filler lesson')
+
+  const withoutQuery = renderLessonsWithKeys('', path).text
+  expect(withoutQuery).not.toContain('gnullvm')
+
+  const withQuery = renderLessonsWithKeys('the rust crate will not build', path).text
+  expect(withQuery).toContain('gnullvm')
+})
+
+test('the newest lessons are injected unconditionally, however irrelevant to the query', () => {
+  const path = join(dir, 'lessons.md')
+  seed(path, 40, 'older filler lesson')
+  appendLessons(['The most recent lesson, about something else entirely'], path)
+  // Efficacy baselines already on disk depend on the newest slice being exposed
+  // every run; relevance must not be able to displace it.
+  const rendered = renderLessonsWithKeys('a totally unrelated query about kubernetes', path).text
+  expect(rendered).toContain('The most recent lesson')
+})
+
+test('the injection budget is still honoured when a query matches nothing', () => {
+  const path = join(dir, 'lessons.md')
+  seed(path, 40, 'filler lesson')
+  const keys = renderLessonsWithKeys('zzzzz nothing matches this zzzzz', path).keys
+  expect(keys).toHaveLength(25)
 })
