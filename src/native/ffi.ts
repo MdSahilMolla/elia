@@ -17,7 +17,7 @@
  */
 
 import { existsSync, readdirSync, statSync } from 'node:fs'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import type { Pointer } from 'bun:ffi'
 import { ELIA_ROOT } from '../statePaths.ts'
 import type { ParseCheckResult } from '../daemon/types.ts'
@@ -82,31 +82,47 @@ function resolveLibPath(): string | undefined {
   const override = process.env.ELIA_NATIVE_PATH
   if (override && existsSync(override)) return override
 
-  const published = join(
-    ELIA_ROOT,
-    'node_modules',
-    `@elia/native-${process.platform}-${process.arch}`,
-    file,
-  )
-  if (existsSync(published)) return published
+  // Searched from `ELIA_ROOT` upward, not at `ELIA_ROOT` alone. An evolution
+  // sandbox is a copy of `src/` at `<live root>/.evolution/gen-N` with no
+  // `target/` or `node_modules/` of its own, so a root-only lookup reports the
+  // structural checker as unavailable there. That is not a cosmetic gap: the
+  // gap ladder's structural rung then skips, both structural defects score as
+  // escapees, and `checkGapNotRegressed` rejects every candidate for a
+  // regression that exists only because the sandbox could not find the library.
+  for (const root of rootsUpward()) {
+    const published = join(root, 'node_modules', `@elia/native-${process.platform}-${process.arch}`, file)
+    if (existsSync(published)) return published
 
-  const targetRoot = join(ELIA_ROOT, 'target')
-  const dirs = ['', ...safeReaddir(targetRoot)]
-  const profiles = process.env.ELIA_NATIVE_PROFILE === 'debug' ? ['debug', 'release'] : ['release', 'debug']
-  for (const profile of profiles) {
-    let newest: { path: string; mtimeMs: number } | undefined
-    for (const dir of dirs) {
-      const candidate = join(targetRoot, dir, profile, file)
-      try {
-        const { mtimeMs } = statSync(candidate)
-        if (!newest || mtimeMs > newest.mtimeMs) newest = { path: candidate, mtimeMs }
-      } catch {
-        // not built for this profile / target triple
+    const targetRoot = join(root, 'target')
+    const dirs = ['', ...safeReaddir(targetRoot)]
+    const profiles = process.env.ELIA_NATIVE_PROFILE === 'debug' ? ['debug', 'release'] : ['release', 'debug']
+    for (const profile of profiles) {
+      let newest: { path: string; mtimeMs: number } | undefined
+      for (const dir of dirs) {
+        const candidate = join(targetRoot, dir, profile, file)
+        try {
+          const { mtimeMs } = statSync(candidate)
+          if (!newest || mtimeMs > newest.mtimeMs) newest = { path: candidate, mtimeMs }
+        } catch {
+          // not built for this profile / target triple
+        }
       }
+      if (newest) return newest.path
     }
-    if (newest) return newest.path
   }
   return undefined
+}
+
+/** `ELIA_ROOT` and each ancestor, nearest first. */
+function rootsUpward(): string[] {
+  const roots: string[] = []
+  let dir = ELIA_ROOT
+  for (;;) {
+    roots.push(dir)
+    const parent = dirname(dir)
+    if (parent === dir) return roots
+    dir = parent
+  }
 }
 
 function safeReaddir(dir: string): string[] {

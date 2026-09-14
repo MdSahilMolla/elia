@@ -149,6 +149,75 @@ export function collectDistillableTraces(cwd = process.cwd()): DistillableTrace[
   return traces.sort((a, b) => b.at - a.at)
 }
 
+/** One run receipt and why it did or did not become distillable material. */
+export interface TraceSupplyRow {
+  runId: string
+  accepted: boolean
+  /** The filter stages this run failed, in the order they are applied. */
+  rejectedBy: string[]
+}
+
+/**
+ * Why Loop 2 has the corpus it has.
+ *
+ * `elia distill` used to say only "Only N distillable trace(s) … Nothing to do",
+ * which reads identically whether the pipeline is starved because autonomous runs
+ * keep failing or because the filter is broken. Those need opposite responses, so
+ * the breakdown is worth surfacing: a wall of `completion=failed` means go fix the
+ * agent, while a wall of `reward=—` next to a populated trajectory log means the
+ * runId/corr join has come apart.
+ *
+ * Deliberately a separate read rather than a by-product of
+ * `collectDistillableTraces`: the hot path should not pay to describe its own
+ * rejections.
+ */
+export function diagnoseTraceSupply(cwd = process.cwd()): TraceSupplyRow[] {
+  const runsDir = join(cwd, '.elia', 'runs')
+  if (!existsSync(runsDir)) return []
+
+  const rewardByCorr = new Map<string, number>()
+  try {
+    for (const row of readTrajectories('autonomous')) rewardByCorr.set(row.corr, row.reward.scalar)
+  } catch {
+    // no trajectory data yet
+  }
+
+  const rows: TraceSupplyRow[] = []
+  for (const entry of readdirSync(runsDir, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue
+    const receiptPath = join(runsDir, entry.name, 'receipt.json')
+    if (!existsSync(receiptPath)) {
+      rows.push({ runId: entry.name, accepted: false, rejectedBy: ['no receipt (run never finished)'] })
+      continue
+    }
+    let receipt: RawReceipt
+    try {
+      receipt = JSON.parse(readFileSync(receiptPath, 'utf8')) as RawReceipt
+    } catch {
+      rows.push({ runId: entry.name, accepted: false, rejectedBy: ['unreadable receipt'] })
+      continue
+    }
+
+    const rejectedBy: string[] = []
+    if (receipt.outcome !== 'completed') rejectedBy.push(`outcome=${receipt.outcome ?? 'unknown'}`)
+    if (receipt.completion?.state !== 'verified') rejectedBy.push(`completion=${receipt.completion?.state ?? 'unknown'}`)
+    if (receipt.verdict?.verdict === 'revise') rejectedBy.push('review verdict=revise')
+    const verifyRecords = Array.isArray(receipt.verification) ? receipt.verification : []
+    const verifyPassed = verifyRecords.some((r) => r && typeof r === 'object' && (r as { passed?: boolean }).passed === true)
+    if (verifyRecords.length > 0 && !verifyPassed) rejectedBy.push(`verification ran ${verifyRecords.length}× and never passed`)
+
+    const steps = (receipt.proposal?.steps ?? []).filter((step): step is { role: string; files?: string[] } => typeof step.role === 'string')
+    const regime = classifyRegime(steps.flatMap((s) => s.files ?? []), receipt.proposal?.verification ?? [], cwd)
+    if (regime === 'judgment') rejectedBy.push('regime=judgment (nothing outside the model’s own opinion checked it)')
+
+    const reward = rewardByCorr.get(receipt.runId ?? entry.name)
+    if (reward !== undefined && reward < MIN_REWARD) rejectedBy.push(`reward=${reward.toFixed(2)} (below ${MIN_REWARD})`)
+
+    rows.push({ runId: entry.name, accepted: rejectedBy.length === 0, rejectedBy })
+  }
+  return rows.sort((a, b) => a.runId.localeCompare(b.runId))
+}
+
 /** Groups traces by the role that did most of the work — the unit a fragment is distilled for. */
 export function clusterByDominantRole(traces: DistillableTrace[]): Map<RoleName, DistillableTrace[]> {
   const clusters = new Map<RoleName, DistillableTrace[]>()

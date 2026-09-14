@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { ELIA_ROOT } from '../config.ts'
@@ -17,7 +17,30 @@ import type { LadderResult, LadderRung, PlantedDefect } from './types.ts'
 
 const RUNG_TIMEOUT_MS = 60_000
 
-const TSC_BIN = join(ELIA_ROOT, 'node_modules', '.bin', process.platform === 'win32' ? 'tsc.exe' : 'tsc')
+/**
+ * `tsc`, found by walking up from wherever this copy of elia lives.
+ *
+ * A plain `join(ELIA_ROOT, 'node_modules', ...)` is right for the live tree and
+ * wrong everywhere else that matters: an evolution sandbox sits at
+ * `<live root>/.evolution/gen-N` and deliberately has no `node_modules` of its
+ * own (Bun resolves those by walking up, but a literal path join does not). The
+ * typecheck rung would then report `spawnFailed` for every fixture, both
+ * typecheck defects would be scored as escapees, and `checkGapNotRegressed`
+ * would reject every candidate for a regression that never happened.
+ */
+const TSC_BIN = resolveTsc()
+
+function resolveTsc(): string {
+  const binName = process.platform === 'win32' ? 'tsc.exe' : 'tsc'
+  let dir = ELIA_ROOT
+  for (;;) {
+    const candidate = join(dir, 'node_modules', '.bin', binName)
+    if (existsSync(candidate)) return candidate
+    const parent = dirname(dir)
+    if (parent === dir) return join(ELIA_ROOT, 'node_modules', '.bin', binName)
+    dir = parent
+  }
+}
 
 export async function runLadder(defect: PlantedDefect): Promise<LadderResult> {
   const caughtBy: LadderRung[] = []

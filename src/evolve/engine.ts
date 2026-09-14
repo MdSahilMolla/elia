@@ -30,6 +30,9 @@ import {
   type Sandbox,
 } from './sandbox.ts'
 import { candidateTools } from './candidateTools.ts'
+import { gapVectorIn, valueProbesIn } from './measureTree.ts'
+import { checkGapNotRegressed } from '../gap/guard.ts'
+import { checkValueDrift, recordProbeRun } from '../values/drift.ts'
 import { allBenchTasks, type BenchTask } from './suite.ts'
 
 /**
@@ -294,7 +297,58 @@ async function runGeneration(
 
   base.baseline = confirmationBaseline
   base.candidate = confirmationCandidate
-  const confirmedReason = `${comparison.reason}; confirmed independently (${confirmation.reason})`
+
+  // A benchmark win is not sufficient to promote.
+  //
+  // `src/gap/guard.ts` says in its own doc comment that "any path that would
+  // train or rewrite a generator on the strength of 'the verifier said it was
+  // fine' — Loop 2 distillation, `elia evolve` promotion — calls this first."
+  // That was true of distillation and false here: evolve promoted on
+  // `compareScorecards` alone. It is the more dangerous of the two loops, since
+  // it may rewrite the planner, the loop policy, the reviewers, and the critic's
+  // own prompt — everything outside IMMUTABLE_FILES. A candidate that scores
+  // better because it stopped noticing its own mistakes is exactly what the
+  // benchmark cannot see and what these two checks exist to catch.
+  //
+  // Both are measured by running each tree's own code, never in-process: an
+  // in-process check scores the live installation whatever the sandbox holds,
+  // which is how the distillation gate's copy of this check sat inert.
+  writeSubStep('checking the verifier did not get worse')
+  const candidateGap = await gapVectorIn(sandbox.root, options.signal)
+  const baselineGap = await gapVectorIn(ELIA_ROOT, options.signal)
+  if (!candidateGap || !baselineGap) {
+    const reason = 'could not measure the generator–verifier gap — refusing to promote unverified'
+    writeFail(`rejected: ${reason}`)
+    writeSubStep(`sandbox kept at ${sandbox.root} if you want to inspect it`)
+    return { ...base, verdict: 'rejected', reason }
+  }
+  const gapGuard = checkGapNotRegressed(baselineGap, candidateGap)
+  if (!gapGuard.ok) {
+    const reason = `the verifier got worse: ${gapGuard.regressions.join('; ')}`
+    writeFail(`rejected: ${reason}`)
+    writeSubStep(`sandbox kept at ${sandbox.root} if you want to inspect it`)
+    return { ...base, verdict: 'rejected', reason }
+  }
+
+  writeSubStep('checking the values did not move')
+  const candidateProbes = await valueProbesIn(sandbox.root, { signal: options.signal })
+  const baselineProbes = await valueProbesIn(ELIA_ROOT, { signal: options.signal })
+  if (!candidateProbes || !baselineProbes) {
+    const reason = 'could not run the value probes — refusing to promote unverified'
+    writeFail(`rejected: ${reason}`)
+    writeSubStep(`sandbox kept at ${sandbox.root} if you want to inspect it`)
+    return { ...base, verdict: 'rejected', reason }
+  }
+  const valueGuard = checkValueDrift(baselineProbes, candidateProbes)
+  if (!valueGuard.ok) {
+    const reason = `value drift: ${valueGuard.regressions.join('; ')}`
+    writeFail(`rejected: ${reason}`)
+    writeSubStep(`sandbox kept at ${sandbox.root} if you want to inspect it`)
+    return { ...base, verdict: 'rejected', reason }
+  }
+  recordProbeRun(candidateProbes, `evolve-gen-${generation}`)
+
+  const confirmedReason = `${comparison.reason}; confirmed independently (${confirmation.reason}); verifier and values held`
 
   if (options.dryRun) {
     writePass(`would promote: ${confirmedReason}`)

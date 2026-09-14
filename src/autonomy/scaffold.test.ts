@@ -271,3 +271,57 @@ test('an existing repository keeps its history and just gains the documents', as
 function mkdirp(path: string): void {
   mkdirSync(path, { recursive: true })
 }
+
+test('scaffoldProject does not commit work that appeared after the run started', async () => {
+  // The incident this guards against, reproduced: `protect` is a snapshot taken
+  // when the run began, so it is blind to files created while the run is in
+  // flight — another agent in the same checkout, or the operator still working.
+  // A scaffold for an unrelated goal swept ~28 files of a concurrent session's
+  // work into a commit titled "Add project documents for: <a dashboard>".
+  await git('init', '-b', 'main')
+  writeFileSync(join(dir, 'seed.ts'), 'export const seed = 1\n')
+  await git('add', '-A')
+  await git('-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-m', 'seed')
+
+  // Nothing dirty when the run starts, so `protect` is legitimately empty.
+  const protect: string[] = []
+
+  // A concurrent session writes files *after* that snapshot.
+  mkdirSync(join(dir, 'src'), { recursive: true })
+  writeFileSync(join(dir, 'src/someone-elses-work.ts'), 'export const wip = true\n')
+  writeFileSync(join(dir, 'unrelated.md'), '# not mine\n')
+
+  const result = await scaffoldProject({ cwd: dir, goal: 'goal', proposal, protect })
+  expect(result.commits.length).toBe(1)
+
+  const committed = (await git('show', '--stat', '--name-only', '--format=', 'HEAD')).stdout
+  expect(committed).not.toContain('someone-elses-work.ts')
+  expect(committed).not.toContain('unrelated.md')
+  // And the concurrent work is still sitting in the tree, untouched.
+  expect(existsSync(join(dir, 'src/someone-elses-work.ts'))).toBe(true)
+  // `--untracked-files=all`: plain porcelain collapses an untracked directory
+  // to `?? src/` and would hide which file survived.
+  expect((await git('status', '--porcelain', '--untracked-files=all')).stdout).toContain('someone-elses-work.ts')
+})
+
+test('scaffoldProject commits nothing rather than everything when it wrote no documents', async () => {
+  // `commitAll` reads an empty allowlist as "no allowlist", so a scaffold that
+  // wrote nothing would otherwise commit the whole tree.
+  await git('init', '-b', 'main')
+  writeFileSync(join(dir, 'seed.ts'), 'export const seed = 1\n')
+  await git('add', '-A')
+  await git('-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-m', 'seed')
+
+  // Everything the scaffold would write already exists, so it writes nothing.
+  writeFileSync(join(dir, '.gitignore'), 'node_modules/\n')
+  for (const document of renderProjectDocs('goal', proposal)) {
+    const target = join(dir, document.path)
+    mkdirSync(join(target, '..'), { recursive: true })
+    writeFileSync(target, 'already here\n')
+  }
+  writeFileSync(join(dir, 'concurrent.ts'), 'export const wip = true\n')
+
+  const result = await scaffoldProject({ cwd: dir, goal: 'goal', proposal, protect: [] })
+  expect(result.commits).toEqual([])
+  expect((await git('status', '--porcelain')).stdout).toContain('concurrent.ts')
+})

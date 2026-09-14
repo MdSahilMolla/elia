@@ -4,12 +4,13 @@ import { ELIA_ROOT } from '../config.ts'
 import { appendSecureFile, ensureSecureDirectory } from '../securePersistence.ts'
 import { readBoundedOutput, terminateProcessGroup } from '../shell.ts'
 import { createSandbox, promote } from '../evolve/sandbox.ts'
-import { compareScorecards, measureFitness, toMetrics } from '../evolve/fitness.ts'
-import { computeGapVector } from '../gap/scoreboard.ts'
+import { gapVectorIn } from '../evolve/measureTree.ts'
+import { measureFitness, toMetrics } from '../evolve/fitness.ts'
 import { checkGapNotRegressed } from '../gap/guard.ts'
 import { readLatestGapVector } from '../gap/report.ts'
 import { runValueProbes } from '../values/probes.ts'
 import { checkValueDrift, readLatestProbeRun, recordProbeRun } from '../values/drift.ts'
+import { promptForRole, promptForRoleIn } from '../autonomy/roles.ts'
 import { addFragment } from './fragments.ts'
 import type { DistillationCandidate } from './mine.ts'
 
@@ -71,24 +72,66 @@ export async function evaluateCandidate(candidate: DistillationCandidate, option
     if (cand.passRate < base.passRate) return record('rejected', `benchmark pass rate fell ${pct(base.passRate)} → ${pct(cand.passRate)}`)
 
     // 4. the generator–verifier gap must not regress
+    //
+    // Measured on both sides by spawning each tree's own `src/gap/measure.ts`,
+    // with the critic rung on. Both halves of that matter. Running it in-process
+    // measured the *live* installation whatever the sandbox contained, so the
+    // candidate could not move the result; and without the critic rung every
+    // number in the vector is deterministic (tsc, bun test, a structural parse,
+    // a hygiene audit) and a role-prompt fragment cannot move those either. The
+    // check passed unconditionally on both counts — a Verifier-Leads invariant
+    // that could not observe the thing it exists to stop.
     stage('generator–verifier gap')
-    const priorGap = readLatestGapVector()
-    if (priorGap) {
-      const nowGap = await computeGapVector()
-      const guard = checkGapNotRegressed(priorGap, nowGap)
-      if (!guard.ok) return record('rejected', `gap regressed: ${guard.regressions.join('; ')}`)
+    const candidateGap = await gapVectorIn(sandbox.root, options.signal)
+    if (!candidateGap) {
+      return record('rejected', 'could not measure the candidate’s generator–verifier gap — refusing to promote unverified')
     }
+    // A stored vector is only a valid baseline if it was recorded the same way.
+    // One measured without the critic has `criticFalseAcceptRate: undefined`,
+    // and comparing that against a critic-scored candidate silently skips the
+    // one clause this gate exists for.
+    const stored = readLatestGapVector()
+    const baselineGap =
+      stored?.criticFalseAcceptRate !== undefined ? stored : await gapVectorIn(ELIA_ROOT, options.signal)
+    if (!baselineGap) {
+      return record('rejected', 'could not measure the live baseline generator–verifier gap — refusing to promote unverified')
+    }
+    const guard = checkGapNotRegressed(baselineGap, candidateGap)
+    if (!guard.ok) return record('rejected', `gap regressed: ${guard.regressions.join('; ')}`)
 
     // 5. the value probes must not move
+    //
+    // Probed under the *role's* prompt, before and after, rather than under the
+    // bare base prompt. A distilled fragment only ever changes a role suffix, so
+    // probing the base prompt compares two identical subjects and can never
+    // fail — the same way the gap check could never fail before the critic rung
+    // existed. The Value Core's §6 asks for exactly this: a change to a system
+    // prompt clears the probes before it ships, and a role prompt is one.
     stage('value probes')
-    let probeBaseline = readLatestProbeRun()
-    if (!probeBaseline) {
-      probeBaseline = await runValueProbes({ signal: options.signal })
-      recordProbeRun(probeBaseline, 'gate-baseline')
-    }
-    const probeAfter = await runValueProbes({ signal: options.signal })
-    const drift = checkValueDrift(probeBaseline, probeAfter)
+    // Read before writing: `recordProbeRun` appends, so reading the standing
+    // baseline after recording this run's would hand back the run itself and
+    // compare it to itself.
+    const standingBaseline = readLatestProbeRun()
+    const probeBefore = await runValueProbes({
+      subjectPrompt: promptForRole(candidate.role),
+      signal: options.signal,
+    })
+    recordProbeRun(probeBefore, `gate-before:${candidate.role}`)
+    const probeAfter = await runValueProbes({
+      subjectPrompt: promptForRoleIn(candidate.role, sandbox.root),
+      signal: options.signal,
+    })
+    recordProbeRun(probeAfter, `gate-after:${candidate.role}`)
+    const drift = checkValueDrift(probeBefore, probeAfter)
     if (!drift.ok) return record('rejected', `value drift: ${drift.regressions.join('; ')}`)
+    // A standing baseline catches slow drift that a single before/after pair
+    // cannot see, so it is still consulted when one exists.
+    if (standingBaseline) {
+      const standingDrift = checkValueDrift(standingBaseline, probeAfter)
+      if (!standingDrift.ok) {
+        return record('rejected', `value drift vs the recorded baseline: ${standingDrift.regressions.join('; ')}`)
+      }
+    }
 
     // 6. ship it
     if (options.dryRun) {
@@ -121,7 +164,7 @@ const GATE_OUTPUT_BYTES = 100_000
  * budget into the process group that outlived `proc.kill()`. The race rejects
  * when the deadline hits and terminates the whole process tree.
  */
-async function spawnIn(cwd: string, cmd: string[]): Promise<SpawnResult> {
+async function spawnIn(cwd: string, cmd: string[], timeoutMs = GATE_TIMEOUT_MS): Promise<SpawnResult> {
   const proc = Bun.spawn(cmd, {
     cwd,
     stdout: 'pipe',
@@ -140,8 +183,8 @@ async function spawnIn(cwd: string, cmd: string[]): Promise<SpawnResult> {
   const deadline = new Promise<SpawnResult>((resolve) => {
     const timer = setTimeout(() => {
       terminateProcessGroup(proc)
-      resolve({ exitCode: 1, output: `gate command exceeded ${GATE_TIMEOUT_MS / 1000}s and was terminated` })
-    }, GATE_TIMEOUT_MS)
+      resolve({ exitCode: 1, output: `gate command exceeded ${timeoutMs / 1000}s and was terminated` })
+    }, timeoutMs)
     void collect.then(() => clearTimeout(timer))
   })
   try {

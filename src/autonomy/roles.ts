@@ -2,7 +2,7 @@ import type { Tier } from '../config.ts'
 import type { Tool } from '../tools/types.ts'
 import { allWorkerTools, getSynthesizedTools } from '../tools/registry.ts'
 import type { RoleName } from './types.ts'
-import { learnedSuffixFor } from '../distill/fragments.ts'
+import { learnedSuffixFor, learnedSuffixFrom } from '../distill/fragments.ts'
 
 /**
  * The kinds of worker elia can put on a job.
@@ -261,6 +261,14 @@ export function role(name: RoleName): Role {
  */
 export function promptForRole(name: RoleName): string {
   return `${ROLES[name].prompt}${learnedSuffixFor(name)}`
+}
+
+/**
+ * The same prompt as a different tree would assemble it — used by the
+ * distillation gate to test the candidate's role prompt rather than the live one.
+ */
+export function promptForRoleIn(name: RoleName, root: string): string {
+  return `${ROLES[name].prompt}${learnedSuffixFrom(name, root)}`
 }
 
 /** Resolves a role's allowlist against the live tool set, including synthesized skills. */

@@ -52,6 +52,18 @@ export interface LadderResult {
   notes: string[]
 }
 
+/** What the adversarial-critic rung did with one defect. */
+export interface CriticVerdict {
+  defectId: string
+  /** The critic named the planted defect in the defective variant. */
+  caughtDefective: boolean
+  /** The critic raised the same issue against the *clean* control — a false positive. */
+  flaggedClean: boolean
+  note: string
+  /** The rung could not run for this defect (provider failure); excluded from scoring. */
+  errored?: boolean
+}
+
 export interface GapVector {
   at: string
   /** git HEAD short sha the scoreboard ran against, or 'working-tree'. */
@@ -68,6 +80,15 @@ export interface GapVector {
   calibrationContradictionRate: number
   /** Present only when the scoreboard was run with an adversarial-model pass. */
   criticFalseAcceptRate?: number
+  /** Per-defect critic detail, when that rung ran. */
+  criticVerdicts?: CriticVerdict[]
   /** Ids of defects that got all the way through the ladder. */
   escapees: string[]
+  /**
+   * Defects whose expected rung could not run, so nothing was learned about
+   * them. Excluded from `defectsScored` and from `escapees` rather than counted
+   * as escapes — a checker that is missing is a hole in the measurement, not
+   * evidence that the verifier is weak. Surfaced so the hole stays visible.
+   */
+  notMeasured?: string[]
 }

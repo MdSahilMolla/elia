@@ -1,4 +1,7 @@
 import { expect, test } from 'bun:test'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { isImmutablePath } from '../evolve/sandbox.ts'
 import { checkGapNotRegressed, assertGapNotRegressed } from './guard.ts'
 import type { GapVector } from './types.ts'
 
@@ -56,4 +59,26 @@ test('a rise in critic false-accept is a regression when both sides measured it'
 
 test('assertGapNotRegressed throws with the regression list', () => {
   expect(() => assertGapNotRegressed(base, { ...base, mechanicalCatchRate: 0.5 })).toThrow(/gap regressed/i)
+})
+
+test('every promotion path actually calls this guard', () => {
+  // This module's own doc comment claims that "any path that would train or
+  // rewrite a generator on the strength of 'the verifier said it was fine' —
+  // Loop 2 distillation, `elia evolve` promotion — calls this first." That was
+  // true of distillation and false of evolve, which promoted on the benchmark
+  // alone for as long as both existed. A doc comment cannot enforce itself, so
+  // the claim is pinned here.
+  for (const path of ['../distill/gate.ts', '../evolve/engine.ts']) {
+    const source = readFileSync(join(import.meta.dir, path), 'utf8')
+    expect(source).toContain('checkGapNotRegressed')
+    expect(source).toContain('checkValueDrift')
+  }
+})
+
+test('the measuring apparatus is immutable to self-improvement', () => {
+  // A candidate that could edit these could point the gap and value checks back
+  // at the live tree and pass them by construction.
+  for (const path of ['src/evolve/measureTree.ts', 'src/gap/measure.ts', 'src/values/measure.ts', 'src/distill/gate.ts']) {
+    expect(isImmutablePath(path)).toBe(true)
+  }
 })

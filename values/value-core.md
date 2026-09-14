@@ -1,5 +1,5 @@
 ---
-status: draft
+status: active
 version: 0.1.0
 # status: draft  → this file is present but INERT. It is not injected into any
 #                  prompt and no gate consults it.
@@ -15,10 +15,11 @@ This document defines what elia is for, the lines it does not cross, and how it
 weighs the tradeoffs it cannot avoid. It is held apart from the machinery that
 pursues these goals and changes only by a human commit.
 
-_This draft was mechanically extracted from the existing safety text in the dev
-system prompt, the action-governor risk bands, and the persona guardrails, then
-lightly organised. It has not yet been reviewed. Nothing depends on it while
-`status: draft`._
+_First drafted by mechanical extraction from the safety text in the dev system
+prompt, the action-governor risk bands, and the persona guardrails, then
+organised into the sections below. Reviewed and activated by the maintainer on
+2026-09-14; from that point it is authoritative, immutable to `elia evolve` and
+to trace distillation, and the value probes gate changes against it._
 
 ## 1. Purpose
 

@@ -76,6 +76,10 @@ export function renderGapVector(vector: GapVector, previous?: GapVector): string
     lines.push('')
     lines.push(`  got through: ${vector.escapees.join(', ')}`)
   }
+  if (vector.notMeasured && vector.notMeasured.length > 0) {
+    lines.push('')
+    lines.push(`  not measured (checker unavailable): ${vector.notMeasured.join(', ')}`)
+  }
   return lines.join('\n')
 }
 

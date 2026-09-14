@@ -177,7 +177,8 @@ async function runScopedTurn(
   // memory — which changes with every user message — rides in a separate
   // `systemDynamicPrompt` block that never invalidates the cached stable prefix.
   // The Value Core rides in the stable prefix (authoritative, cache-friendly).
-  // While it is still a draft this returns '' — safe to wire in ahead of review.
+  // Returns '' while the document is a draft, so this stays wired in whether or
+  // not a given checkout has activated it.
   const valueCore = valueCoreSection()
   const systemPrompt = (options.planMode
     ? `${baseSystemPrompt}\n\n# PLAN MODE\nYou are planning, not doing. Use only the read-only tools to investigate. Do NOT write files, run commands, or make any change. When you have enough understanding, stop and present a concrete plan: a short numbered list of the exact steps you would take (files to touch, what changes, how you would verify). Keep it tight. The user will approve, edit, or reject it before anything runs.`
