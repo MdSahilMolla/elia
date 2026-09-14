@@ -70,6 +70,17 @@ interface MinimalSyntaxNode {
   childForFieldName(field: string): MinimalSyntaxNode | null
 }
 
+// web-tree-sitter is pinned to exactly 0.22.6 in package.json, and cannot be
+// bumped on its own. Its grammars come prebuilt from `tree-sitter-wasms`, whose
+// latest release (0.1.13, last published 2025-10) is built with the tree-sitter
+// 0.20-era toolchain. web-tree-sitter 0.25+ both changed its API — named
+// `Parser`/`Language` exports instead of a default export with
+// `Parser.Language.load` — and cannot load those grammars: tried against 0.27.0
+// on 2026-09-15, the API migration typechecked cleanly and `Language.load` still
+// failed on the first grammar. Upgrading means replacing the grammar source (for
+// example per-language grammar packages that ship current-format .wasm) at the
+// same time, not accepting a Dependabot bump.
+//
 // Lazily imported: nothing here pays web-tree-sitter's WASM-runtime init cost
 // unless a symbol query actually runs. Typed via a type-only import (accurate
 // for this package's `export =` CJS shape under esModuleInterop); the value
