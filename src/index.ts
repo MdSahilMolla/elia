@@ -55,7 +55,9 @@ const REPL_COMMANDS: SlashCommand[] = [
   { name: '/betamode', description: 'experimental modes & personas — sports, fitness, marketing, finance, …' },
   { name: '/thinking', description: 'set reasoning effort' },
   { name: '/rewind', description: 'restore an earlier checkpoint' },
-  { name: '/settings', description: 'model, effort, risk checks, skills' },
+  { name: '/compact', description: 'summarise the conversation to free context · /compact [focus]' },
+  { name: '/clear', description: 'start a fresh conversation (the old one stays resumable)' },
+  { name: '/settings', description: 'model, effort, risk checks, compact, clear' },
   { name: '/mcp', description: 'MCP servers — add, test, reload, remove' },
   { name: '/connector', description: 'hosted MCP connectors — add, test, remove' },
   { name: '/marketplace', description: 'packages, skills, MCP: installed · suggested · add' },
@@ -271,7 +273,12 @@ Inside an interactive session:
                               finance, business, data, research, cybersecurity, automation,
                               communications, ai, production
   /betamode <name>            Switch directly, e.g. /betamode sports
-  /settings                   Risk checks (auto/manual), model, reasoning effort, and skills
+  /settings                   Risk checks (auto/manual), model, reasoning effort, skills,
+                              and compact / clear the conversation
+  /compact [focus]            Summarise the conversation so far into one recallable episode and
+                              continue from the summary; optional focus, e.g. /compact the auth bug
+  /clear                      Start a fresh conversation; the previous one is saved and can be
+                              reopened with elia --resume <id>
   /model                      Pick a provider/model or enable auto fallback
   /model auto                 Keep the selected model primary; fail over to another ready provider
   /model <provider>           Switch provider (e.g. /model groq), keeping its default model
@@ -2021,8 +2028,8 @@ async function runInteractive(): Promise<void> {
    * live status via sessionRegistry.ts (`/sessions`) — separate from and in
    * addition to taskSessions.ts's own in-process dashboard (`/task`).
    */
-  function pushHeartbeat(busy: boolean, lastAction: string): void {
-    writeSessionHeartbeat({
+  function sessionStatus(busy: boolean, lastAction: string) {
+    return {
       sessionId,
       pid: process.pid,
       mode: persona ?? mode,
@@ -2033,7 +2040,11 @@ async function runInteractive(): Promise<void> {
       lastAction,
       taskSummary: renderTaskSummary(taskSessions),
       messageCount: messages.length,
-    })
+    }
+  }
+
+  function pushHeartbeat(busy: boolean, lastAction: string): void {
+    writeSessionHeartbeat(sessionStatus(busy, lastAction))
   }
 
   function cumulativeSessionUsage(): SessionUsageSnapshot {
@@ -2075,9 +2086,7 @@ async function runInteractive(): Promise<void> {
   // reaching the interactive loop's own Goodbye code below), Ctrl+C, and
   // signals — since registerShutdownCleanup's callbacks run on process 'exit'
   // regardless of why the process is exiting (see ui/shutdown.ts).
-  registerShutdownCleanup(() =>
-    writeSessionEnded({ sessionId, pid: process.pid, mode: persona ?? mode, providerLabel: config.providerLabel, model: config.model, startedAt: sessionStartedAt, busy: false, lastAction: 'Session ended', taskSummary: renderTaskSummary(taskSessions), messageCount: messages.length }),
-  )
+  registerShutdownCleanup(() => writeSessionEnded(sessionStatus(false, 'Session ended')))
 
   /** Snapshots messages + touched files around one turn, then records a rewind point. */
   /**
@@ -2182,6 +2191,62 @@ async function runInteractive(): Promise<void> {
     if (typeof loaded === 'string') return `Could not attach — ${loaded}`
     pendingAttachments.push(loaded)
     return `📎 Attached ${loaded.alt} (${formatBytes(loaded.bytes)}, ${loaded.mediaType}) — sent with your next message. /attach clear to undo.`
+  }
+
+  /** After `/clear` or `/compact` rewrote `messages`, drop any copy of the conversation a provider keeps on its side. */
+  function resetProviderConversations(): void {
+    const providers = new Set([config.tiers.deep.provider, config.tiers.fast.provider, ...Object.values(config.roleOverrides).map((route) => route?.provider)])
+    for (const provider of providers) provider?.resetConversation?.()
+  }
+
+  /**
+   * `/compact [focus]` — summarise the whole conversation into one recallable
+   * episode now, rather than waiting for the automatic threshold, and continue
+   * from the summary.
+   */
+  async function compactNow(focus: string | undefined): Promise<string> {
+    const { compactConversation } = await import('./compaction.ts')
+    const { formatTokenCount } = await import('./usage.ts')
+    if (messages.length > 0) writeNotice('Compacting the conversation…')
+    // Persist the archived turns as an episode of this session, so the recall
+    // tool can still reach the detail the summary leaves out.
+    setActiveLedgerSession({ id: sessionId, turn: checkpoints.length })
+    const result = await compactConversation(messages, focus)
+    if (!result.compacted) return result.reason
+    resetProviderConversations()
+    const text = `Compacted ${result.archivedMessages} messages into a summary — context ${formatTokenCount(result.tokensBefore)} → ${formatTokenCount(result.tokensAfter)} tokens. The full detail stays recallable from this session's archive.`
+    sessionTranscript.notice(text)
+    await persistInteractiveSession()
+    return text
+  }
+
+  /**
+   * `/clear` — start a fresh conversation, as if elia had just been launched
+   * here. The current one is saved first under its own id, so
+   * `elia --resume <id>` brings it back; nothing is deleted.
+   */
+  async function clearConversation(): Promise<string> {
+    const previousId = sessionId
+    const hadConversation = messages.length > 0
+    if (hadConversation) await persistInteractiveSession()
+    writeSessionEnded(sessionStatus(false, 'Cleared — continued in a new session'))
+
+    sessionId = newSessionId()
+    messages.length = 0
+    checkpoints.length = 0
+    sessionTranscript.clear()
+    pendingAttachments.length = 0
+    carriedShellContext.length = 0
+    taskSessions.setActiveSession(sessionId)
+    setActiveLedgerSession(undefined)
+    const { resetActiveTodoList } = await import('./autonomy/todoList.ts')
+    resetActiveTodoList()
+    resetProviderConversations()
+    pushHeartbeat(false, 'Idle at prompt')
+
+    return hadConversation
+      ? `Started a fresh conversation. The previous one is saved — elia --resume ${previousId} reopens it.`
+      : 'Started a fresh conversation.'
   }
 
   async function runCheckpointedTurn(userText: string, approveAction?: ActionApproval, skillNames = selectedSkillNames, uiHooks?: TurnUiHooks): Promise<void> {
@@ -3057,6 +3122,11 @@ async function runInteractive(): Promise<void> {
     }
   }
 
+  /** The settings-row detail for the compact/clear entries: how much conversation there is, then what the action does. */
+  function conversationDetail(action: string): string {
+    return `${messages.length} message${messages.length === 1 ? '' : 's'} · ${action}`
+  }
+
   /** Top-level settings screen: every switchable setting in one arrow-key menu, looping until esc/cancel. */
   async function handleSettingsCommand(): Promise<void> {
     while (true) {
@@ -3066,6 +3136,8 @@ async function runInteractive(): Promise<void> {
         { label: 'Provider connections', detail: `${savedProviderNames().length} API key(s) · ChatGPT subscription`, value: 'providers' },
         { label: 'Reasoning effort', detail: describeThinking(), value: 'thinking' },
         { label: 'Skills', detail: selectedSkillNames ? selectedSkillNames.join(', ') : 'all loaded', value: 'skills' },
+        { label: 'Compact conversation', detail: conversationDetail('summarise it to free context'), value: 'compact' },
+        { label: 'Clear conversation', detail: conversationDetail('start fresh; this one stays resumable'), value: 'clear' },
       ]
       const result = await pick('Settings', options)
       if (result.type === 'unavailable') {
@@ -3078,7 +3150,21 @@ async function runInteractive(): Promise<void> {
       else if (result.value === 'providers') await handleProviderSettings()
       else if (result.value === 'thinking') await handleThinkingCommand('')
       else if (result.value === 'skills') await handleSkillsPicker()
+      else if (result.value === 'compact') {
+        writeNotice(await compactNow(undefined))
+        return
+      } else if (result.value === 'clear') {
+        writeNotice(await clearClassicScreen())
+        return
+      }
     }
+  }
+
+  /** `/clear` for the plain readline REPL: the same fresh conversation, plus a wiped terminal. */
+  async function clearClassicScreen(): Promise<string> {
+    const text = await clearConversation()
+    if (process.stdout.isTTY) process.stdout.write('\x1b[2J\x1b[3J\x1b[H')
+    return text
   }
 
   /** Run a read-only command and return its stdout, or '' if it fails / isn't installed. */
@@ -3205,6 +3291,14 @@ async function runInteractive(): Promise<void> {
       }
     }
 
+    const compactMatch = /^\/compact(?:\s+(.+))?$/.exec(trimmed)
+    if (compactMatch) return done(await compactNow(compactMatch[1]?.trim()))
+
+    if (trimmed === '/clear' || trimmed === '/reset' || trimmed === '/new') {
+      const text = await clearConversation()
+      return { handled: true, text, clear: { sessionId } }
+    }
+
     if (trimmed === '/settings') {
       return {
         handled: true,
@@ -3215,6 +3309,8 @@ async function runInteractive(): Promise<void> {
             { label: 'Model & provider', detail: `${config.providerLabel} · ${config.model}`, value: 'model' },
             { label: 'Reasoning effort', detail: describeThinking(), value: 'thinking' },
             { label: 'Mode / persona', detail: persona ?? mode, value: 'mode' },
+            { label: 'Compact conversation', detail: conversationDetail('summarise it to free context'), value: 'compact' },
+            { label: 'Clear conversation', detail: conversationDetail('start fresh; this one stays resumable'), value: 'clear' },
           ],
           onSelect: (value) => {
             if (value === 'risk') {
@@ -3235,6 +3331,8 @@ async function runInteractive(): Promise<void> {
             if (value === 'model') return handleSlashForInk('/model')
             if (value === 'thinking') return handleSlashForInk('/thinking')
             if (value === 'mode') return handleSlashForInk('/mode')
+            if (value === 'compact') return handleSlashForInk('/compact')
+            if (value === 'clear') return handleSlashForInk('/clear')
           },
         },
       }
@@ -3810,6 +3908,15 @@ async function runInteractive(): Promise<void> {
     }
     if (trimmed === '/settings') {
       await handleSettingsCommand()
+      continue
+    }
+    const compactClassic = /^\/compact(?:\s+(.+))?$/.exec(trimmed)
+    if (compactClassic) {
+      writeNotice(await compactNow(compactClassic[1]?.trim()))
+      continue
+    }
+    if (trimmed === '/clear' || trimmed === '/reset' || trimmed === '/new') {
+      writeNotice(await clearClassicScreen())
       continue
     }
     const whyClassic = /^\/why(?:\s+(.+))?$/.exec(trimmed)

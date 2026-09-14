@@ -180,3 +180,21 @@ test('pendingWrites drains back to 0 once a confirmation write settles, instead 
   await flushPendingConfirmations()
   expect(pendingWriteCount()).toBe(0)
 })
+
+test('archiveEpisode keeps the opening and the latest work of a history too long for one call', async () => {
+  let prompt = ''
+  config.tiers.fast.provider = {
+    async streamTurn({ messages, onText }) {
+      const first = messages[0]?.content[0]
+      prompt = first?.type === 'text' ? first.text : ''
+      onText('summary')
+      return { content: [{ type: 'text', text: 'summary' }] as ContentBlock[], usage: { inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 } }
+    },
+  }
+  const history = [userText('ORIGINAL ASK'), userText('x'.repeat(200_000)), userText('LATEST WORK')]
+  await archiveEpisode(history, testDir)
+  expect(prompt).toContain('ORIGINAL ASK')
+  expect(prompt).toContain('LATEST WORK')
+  expect(prompt).toContain('omitted')
+  expect(prompt.length).toBeLessThan(61_000)
+})

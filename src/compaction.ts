@@ -167,6 +167,37 @@ export function beginCompaction(messages: ChatMessage[], threshold = COMPACTION_
   }
 }
 
+export type ManualCompactionResult =
+  | { compacted: true; archivedMessages: number; tokensBefore: number; tokensAfter: number }
+  | { compacted: false; reason: string }
+
+/**
+ * `/compact [focus]`: fold the whole conversation into one summary now, however
+ * small it is, instead of waiting for {@link beginCompaction}'s threshold.
+ *
+ * Unlike the automatic path, nothing is kept verbatim — the operator asked for
+ * a clean slate with the gist carried over. The summary goes into a user
+ * message followed by a short assistant acknowledgement, so the next real
+ * prompt still alternates user/assistant correctly. As with the automatic path,
+ * the archived turns are persisted as a recallable episode when a ledger session
+ * is active. Leaves `messages` untouched if the summary call fails.
+ */
+export async function compactConversation(messages: ChatMessage[], focus?: string): Promise<ManualCompactionResult> {
+  if (messages.length === 0) return { compacted: false, reason: 'Nothing to compact yet — the conversation is empty.' }
+  const tokensBefore = estimateTokens(messages)
+  const summary = await archiveEpisode(messages, undefined, focus)
+  if (!summary) return { compacted: false, reason: 'Could not summarise the conversation (the fast-tier model call failed or returned nothing), so it was left as it was.' }
+
+  const archivedMessages = messages.length
+  messages.splice(
+    0,
+    messages.length,
+    { role: 'user', content: [{ type: 'text', text: `## Summary of earlier conversation (compacted on request, ${archivedMessages} messages)\n${summary}` }] },
+    { role: 'assistant', content: [{ type: 'text', text: 'Understood. I have the summary of our conversation so far and will continue from it.' }] },
+  )
+  return { compacted: true, archivedMessages, tokensBefore, tokensAfter: estimateTokens(messages) }
+}
+
 /**
  * A terminal status line showing how much of the live window is in use, and —
  * once at least one episode has been archived — that the bound doesn't mean

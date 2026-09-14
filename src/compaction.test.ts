@@ -7,7 +7,7 @@ import type { ChatMessage, ContentBlock } from './providers/types.ts'
 process.env.ANTHROPIC_API_KEY ??= 'test-key-for-compaction-test'
 
 const { config } = await import('./config.ts')
-const { beginCompaction, estimateTokens, findSafeCutIndex, maybeCompact, renderContextStatus, shrinkForOversizedRequest, COMPACTION_TOKEN_THRESHOLD } = await import(
+const { beginCompaction, compactConversation, estimateTokens, findSafeCutIndex, maybeCompact, renderContextStatus, shrinkForOversizedRequest, COMPACTION_TOKEN_THRESHOLD } = await import(
   './compaction.ts'
 )
 
@@ -328,4 +328,58 @@ test('a truncated result says it was truncated and why', () => {
     expect(truncated.content).toContain('characters dropped')
     expect(truncated.content).toContain('too large')
   }
+})
+
+// --- /compact: manual compaction of the whole conversation ---
+
+/** Stubs the fast tier's summariser and records the prompt it was sent. */
+function stubSummariser(summary: string | Error): { prompts: string[] } {
+  const seen = { prompts: [] as string[] }
+  config.tiers.fast.provider = {
+    async streamTurn({ messages, onText }) {
+      const first = messages[0]?.content[0]
+      seen.prompts.push(first?.type === 'text' ? first.text : '')
+      if (summary instanceof Error) throw summary
+      onText(summary)
+      return { content: [{ type: 'text', text: summary }] as ContentBlock[], usage: { inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 } }
+    },
+  }
+  return seen
+}
+
+test('compactConversation folds a short conversation into a summary + acknowledgement pair, below any threshold', async () => {
+  stubSummariser('{"summary":"Fixed the login bug in auth.ts.","decisions":[],"filesTouched":["auth.ts"],"symbols":[],"openThreads":[]}')
+  const messages: ChatMessage[] = [userText('fix login'), toolUse('t1'), toolResult('t1', 'x'.repeat(4_000)), assistantText('fixed it')]
+  const before = estimateTokens(messages)
+
+  const result = await compactConversation(messages)
+
+  expect(result).toMatchObject({ compacted: true, archivedMessages: 4, tokensBefore: before })
+  expect(messages.map((m) => m.role)).toEqual(['user', 'assistant'])
+  const summary = messages[0]!.content[0]!
+  expect(summary.type === 'text' && summary.text).toContain('Fixed the login bug in auth.ts.')
+  expect(summary.type === 'text' && summary.text).toContain('compacted on request, 4 messages')
+  if (result.compacted) expect(result.tokensAfter).toBeLessThan(result.tokensBefore)
+})
+
+test('compactConversation passes the operator focus to the summariser', async () => {
+  const seen = stubSummariser('summary')
+  await compactConversation([userText('a'), assistantText('b')], 'the database migration')
+  expect(seen.prompts[0]).toContain('focus on: the database migration')
+})
+
+test('compactConversation leaves the conversation untouched when the summary call fails', async () => {
+  stubSummariser(new Error('provider down'))
+  const messages: ChatMessage[] = [userText('a'), assistantText('b')]
+  const before = JSON.stringify(messages)
+  const result = await compactConversation(messages)
+  expect(result.compacted).toBe(false)
+  expect(JSON.stringify(messages)).toBe(before)
+})
+
+test('compactConversation on an empty conversation makes no model call', async () => {
+  const seen = stubSummariser('summary')
+  const result = await compactConversation([])
+  expect(result).toMatchObject({ compacted: false })
+  expect(seen.prompts).toHaveLength(0)
 })

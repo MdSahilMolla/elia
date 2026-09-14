@@ -294,6 +294,17 @@ export function createCodexSubscriptionProvider(model = 'default'): Provider {
       })
     },
 
+    // The thread holds the whole conversation Codex has seen. Dropping it makes
+    // the next turn start a fresh thread seeded from Elia's (now cleared or
+    // compacted) messages via buildCodexSubscriptionPrompt.
+    resetConversation() {
+      threadId = undefined
+      threadInstructions = undefined
+      lastDynamic = undefined
+      completedTurns = 0
+      recordCodexContextTokens(0)
+    },
+
     async streamTurn({ cwd, system, systemDynamic, messages, onText, onThinking, onActivity, signal }) {
       if (!codexSubscriptionConfigured()) {
         throw new Error('Codex is not signed in. Select Settings > Provider connections > ChatGPT subscription (Codex) and complete sign-in first.')

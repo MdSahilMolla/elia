@@ -227,6 +227,23 @@ Respond with ONLY a JSON object, no markdown fences, no commentary, shaped exact
 "openThreads": anything explicitly deferred or left unresolved.
 Every array may be empty if nothing qualifies.`
 
+/** The most rendered history one archive call sees. */
+const ARCHIVE_INPUT_CHARS = 60_000
+/** Of that, how much comes from the start (the original ask); the rest is the most recent work. */
+const ARCHIVE_HEAD_CHARS = 15_000
+
+/**
+ * Keeps a history that is too long for one archive call to its opening and its
+ * latest stretch. A plain head slice summarised only the start of a long
+ * conversation — fine for the small prefixes auto-compaction archives, wrong
+ * for `/compact`, where the recent work is what the next turn needs most.
+ */
+function clampForArchive(rendered: string): string {
+  if (rendered.length <= ARCHIVE_INPUT_CHARS) return rendered
+  const omitted = rendered.length - ARCHIVE_INPUT_CHARS
+  return `${rendered.slice(0, ARCHIVE_HEAD_CHARS)}\n… [${omitted} characters from the middle of the conversation omitted] …\n${rendered.slice(-(ARCHIVE_INPUT_CHARS - ARCHIVE_HEAD_CHARS))}`
+}
+
 function renderForArchive(messages: ChatMessage[]): string {
   const lines: string[] = []
   for (const message of messages) {
@@ -286,10 +303,14 @@ function parseArchiveResponse(raw: string): ParsedArchive {
  * fold-in compaction.ts prepends to the live prompt (the return value) and, when a
  * session is active, the structured record persisted to the ledger. Never throws —
  * an archival failure must not break the compaction it was supporting.
+ *
+ * `focus` is the operator's `/compact <instructions>`: what the summary should
+ * keep in detail.
  */
-export async function archiveEpisode(messages: ChatMessage[], dir: string = SESSIONS_DIR): Promise<string | undefined> {
+export async function archiveEpisode(messages: ChatMessage[], dir: string = SESSIONS_DIR, focus?: string): Promise<string | undefined> {
   const rendered = renderForArchive(messages)
   if (!rendered.trim()) return undefined
+  const focusNote = focus?.trim() ? `\n\nThe operator asked the summary to focus on: ${focus.trim()}` : ''
 
   try {
     const fast = tierConfig('fast')
@@ -297,7 +318,7 @@ export async function archiveEpisode(messages: ChatMessage[], dir: string = SESS
     await fast.provider.streamTurn({
       cwd: process.cwd(),
       system: ARCHIVE_SYSTEM_PROMPT,
-      messages: [{ role: 'user', content: [{ type: 'text', text: rendered.slice(0, 60_000) } as ContentBlock] }],
+      messages: [{ role: 'user', content: [{ type: 'text', text: `${clampForArchive(rendered)}${focusNote}` } as ContentBlock] }],
       tools: [],
       onText: (delta) => {
         text += delta

@@ -272,3 +272,35 @@ test('keeps transient progress out of scrollback and preserves outcomes', () => 
   expect(shouldPersistActivity({ kind: 'command', status: 'completed', title: 'Build passed' })).toBe(true)
   expect(shouldPersistActivity({ kind: 'warning', status: 'warning', title: 'Build failed' })).toBe(true)
 })
+
+test('a /clear outcome wipes the transcript and continues as the new session', async () => {
+  let slashCalls = 0
+  const props = {
+    ...baseProps(),
+    handleSlash: async () => {
+      slashCalls += 1
+      return { handled: true, text: 'Started a fresh conversation.', clear: { sessionId: 'fresh-session' } }
+    },
+  }
+  const { stdin, lastFrame, stdout, unmount } = render(<App {...props} />)
+  try {
+    await waitForFrame(lastFrame, 'mercury-2 · manual')
+    await settle()
+    stdin.write('hi there')
+    await waitForFrame(lastFrame, 'hi there')
+    stdin.write('\r')
+    await waitForFrame(lastFrame, 'Hello world')
+    await settle()
+    stdin.write('/clear')
+    await waitForFrame(lastFrame, '/clear')
+    stdin.write('\r')
+    // The notice is the first item after the reset — <Static> must not skip it.
+    const frame = await waitForFrame(lastFrame, 'Started a fresh conversation.')
+    expect(slashCalls).toBe(1)
+    // The screen-and-scrollback erase went to the terminal.
+    expect(stdout.frames.some((f) => f.includes('\x1b[2J\x1b[3J\x1b[H'))).toBe(true)
+    expect(frame.split('\x1b[2J\x1b[3J\x1b[H').at(-1)).not.toContain('Hello world')
+  } finally {
+    unmount()
+  }
+})

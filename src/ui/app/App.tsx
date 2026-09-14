@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Box, Text, useApp, useInput } from 'ink'
+import { Box, Text, useApp, useInput, useStdout } from 'ink'
 import { setInkSink } from '../stream.ts'
 import type { SlashCommand } from '../slashPrompt.ts'
 import { createTranscriptStore } from './store.ts'
@@ -85,6 +85,8 @@ export interface SlashOutcome {
   prompt?: SlashPromptRequest
   /** Run a shell command after an explicit confirmation (install / uninstall). */
   runCommand?: SlashRunRequest
+  /** `/clear`: wipe the screen and transcript and continue as this new session. */
+  clear?: { sessionId: string }
 }
 
 export interface AppEnv {
@@ -126,8 +128,15 @@ export function shouldPersistActivity(activity: import('../../providers/types.ts
 
 export function App(props: AppProps) {
   const { exit } = useApp()
+  const { write: writeStdout } = useStdout()
   const store = useRef(createTranscriptStore()).current
   const snap = useTranscript(store)
+  // `/clear` moves the REPL onto a new session id; the fleet panel follows it.
+  const [sessionId, setSessionId] = useState(props.sessionId)
+  // Bumped by `/clear` to remount <Static>: it tracks how many items it has
+  // already printed, so an emptied-then-refilled list would otherwise skip the
+  // first new items.
+  const [transcriptEpoch, setTranscriptEpoch] = useState(0)
 
   const [mode, setMode] = useState<ReplMode>(props.initialReplMode)
   const modeRef = useRef<ReplMode>(props.initialReplMode)
@@ -512,6 +521,19 @@ export function App(props: AppProps) {
           }
           const submitText = typeof outcome === 'object' && outcome ? outcome.submitText : undefined
           const finalText = typeof outcome === 'string' ? outcome : outcome?.text
+          const cleared = typeof outcome === 'object' && outcome ? outcome.clear : undefined
+          if (cleared) {
+            // Erase the screen and scrollback like a fresh launch — Ink repaints
+            // its live frame underneath — then drop everything the old
+            // conversation put in the transcript and panels.
+            writeStdout('\x1b[2J\x1b[3J\x1b[H')
+            store.reset()
+            setTranscriptEpoch((n) => n + 1)
+            setPlan([])
+            setProviderPlan([])
+            setSessionId(cleared.sessionId)
+            lastUserText.current = ''
+          }
           if (finalText) store.notice(finalText)
           store.commit()
           if (submitText) await runOne(submitText)
@@ -584,7 +606,7 @@ export function App(props: AppProps) {
         turnStartingRef.current = false
       }
     },
-    [busy, mode, props, store, runOne, exit],
+    [busy, mode, props, store, runOne, exit, writeStdout],
   )
 
   const repo = useMemo(() => repoLabel(), [])
@@ -627,6 +649,7 @@ export function App(props: AppProps) {
     <Box flexDirection="column">
       <ErrorBoundary area="transcript" onError={boundaryError}>
         <Transcript
+          key={transcriptEpoch}
           committed={snap.committed}
           live={clampedLive?.items ?? snap.live}
           hiddenRows={clampedLive?.hiddenRows ?? 0}
@@ -650,7 +673,7 @@ export function App(props: AppProps) {
 
       {!modalOpen && (
         <ErrorBoundary area="workspace panel" onError={boundaryError}>
-          <WorkspacePanel plan={visiblePlan} agents={agents} since={sessionStartedAt} sessionId={props.sessionId} />
+          <WorkspacePanel plan={visiblePlan} agents={agents} since={sessionStartedAt} sessionId={sessionId} />
         </ErrorBoundary>
       )}
       {previewUrl && !modalOpen && (

@@ -116,4 +116,11 @@ export interface Provider {
    * pre-establish a session/thread keyed on it.
    */
   prewarm?(hint?: { system?: string }): void
+  /**
+   * Optional: forget any conversation state the provider keeps on its own side
+   * (the ChatGPT subscription's Codex thread). Called after `/clear` or
+   * `/compact` rewrites the history, so the next turn starts from Elia's
+   * messages instead of the provider's stale copy.
+   */
+  resetConversation?(): void
 }
