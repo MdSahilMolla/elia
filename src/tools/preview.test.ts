@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { resolveProjectPath, withAgentIdentity } from '../autonomy/context.ts'
 import { resetPreviewServerForTests } from '../preview/server.ts'
-import { previewTool } from './preview.ts'
+import { consumeLastPreviewedUrl, previewTool } from './preview.ts'
 
 let dir: string
 
@@ -98,4 +98,32 @@ test('preview refuses a url that answers with an error status', async () => {
   } finally {
     server.stop(true)
   }
+})
+
+// --- The verified URL is handed over, not scraped out of prose ---------------
+
+test('the previewed url is reported through the stash, and draining it clears it', async () => {
+  writeFileSync(join(dir, 'page.html'), '<h1>A page with a decoy link https://decoy.example/not-the-preview inside it</h1>')
+  // No window: this asserts the handover, not the ability to open Chrome — and
+  // a test suite must not leave browser processes behind.
+  process.env.ELIA_NO_BROWSER_LAUNCH = '1'
+  let url: string | undefined
+  try {
+    await preview({ path: 'page.html' })
+    url = consumeLastPreviewedUrl()
+  } finally {
+    delete process.env.ELIA_NO_BROWSER_LAUNCH
+  }
+  // The old regex took the first URL in the human-readable message. What the
+  // turn verifies must be the URL preview actually served.
+  expect(url).toContain('/page.html')
+  expect(url).not.toContain('decoy.example')
+  // Drained, so a later turn cannot re-verify a stale page.
+  expect(consumeLastPreviewedUrl()).toBeUndefined()
+})
+
+test('a refused preview leaves no url behind to verify', async () => {
+  consumeLastPreviewedUrl()
+  await expect(preview({ path: 'does-not-exist.html' })).rejects.toThrow('Nothing to preview')
+  expect(consumeLastPreviewedUrl()).toBeUndefined()
 })

@@ -11,6 +11,28 @@ import { runShell } from '../shell.ts'
 import { activeActionGovernor } from '../autonomy/governor.ts'
 
 const BUILD_TIMEOUT_MS = 240_000
+
+/**
+ * The URL of the last page preview actually opened, for the turn to verify.
+ *
+ * The turn used to recover this by running `/https?:\/\/\S+/` over preview's
+ * human-readable result and taking the first match — so the thing elia verified
+ * was whatever URL happened to appear first in a sentence written for a person.
+ * Rewording that sentence silently changed what got checked, and a message
+ * containing two URLs checked the wrong one. Tools return strings, so rather
+ * than reshape that interface for one value, this is the same module-local
+ * stash `lessons.ts` uses for injected lesson keys, with the same
+ * justification: one process, one turn at a time, filled by the producer and
+ * drained by the consumer.
+ */
+let lastPreviewedUrl: string | undefined
+
+/** The URL preview last opened, clearing it so a later turn cannot re-read a stale one. */
+export function consumeLastPreviewedUrl(): string | undefined {
+  const url = lastPreviewedUrl
+  lastPreviewedUrl = undefined
+  return url
+}
 /** A server the user says is already running should answer promptly; this is not a startup wait. */
 const URL_READY_TIMEOUT_MS = 5_000
 
@@ -27,6 +49,7 @@ export const previewTool: Tool = {
     },
   },
   async execute(input) {
+    lastPreviewedUrl = undefined
     const path = input.path === undefined ? undefined : typeof input.path === 'string' ? input.path.trim() : undefined
     const url = input.url === undefined ? undefined : typeof input.url === 'string' ? input.url.trim() : undefined
     if (input.path !== undefined && typeof input.path !== 'string') throw new Error('preview "path" must be a string')
@@ -59,6 +82,7 @@ export const previewTool: Tool = {
       if (!live.ok) {
         throw new Error(`${url} answered but would not render: ${live.reason}. Nothing was opened — fix the page, then preview again.`)
       }
+      lastPreviewedUrl = url
       return (await launchInBrowser(url)).message
     }
 
@@ -113,6 +137,11 @@ export const previewTool: Tool = {
     if (!rendered.ok) {
       throw new Error(`Preview would not render ${servedFile}: ${rendered.reason} (at ${target}). Nothing was opened — fix the page, then preview again.`)
     }
+    // Stashed here rather than after the launch: the check above has proven this
+    // URL serves a page, which is exactly what the turn wants to verify.
+    // Whether a browser window then opened is a separate question, and one a
+    // headless environment answers differently.
+    lastPreviewedUrl = target
     return `${(await launchInBrowser(target)).message}${note}\nServing ${servedFile}`
   },
 }

@@ -8,6 +8,7 @@ import { colorizeDiffBlock } from './ui/render.ts'
 import { approvalPreviewLines } from './ui/approvalPreview.ts'
 import { ruleFor, ruleLabel } from './autonomy/allowStore.ts'
 import { lastAssistantText, type ToolEvent } from './agentLoop.ts'
+import { consumeLastPreviewedUrl } from './tools/preview.ts'
 import type { ProviderActivity } from './providers/types.ts'
 import type { SlashOutcome as InkSlashOutcome } from './ui/app/index.tsx'
 import type { PackageKind } from './marketplace/registry.ts'
@@ -2355,7 +2356,7 @@ async function runInteractive(): Promise<void> {
           toolTrace.push({ name: event.name, ok: !event.isError })
           if (event.name === 'preview' && !event.isError) {
             previewedThisTurn = true
-            previewedUrl = /\bhttps?:\/\/\S+/.exec(event.result)?.[0] ?? previewedUrl
+            previewedUrl = consumeLastPreviewedUrl() ?? previewedUrl
           }
           if (event.isError) {
             toolErrorCount += 1

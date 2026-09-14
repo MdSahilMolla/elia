@@ -3,7 +3,7 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 
 export interface LaunchResult {
-  browser: 'chrome' | 'default'
+  browser: 'chrome' | 'default' | 'none'
   message: string
 }
 
@@ -86,6 +86,14 @@ export async function launchInBrowser(
   url: string,
   exists: (path: string) => boolean = existsSync,
 ): Promise<LaunchResult> {
+  // Somewhere with no display to open a window on — CI, a headless box, a test
+  // suite — opening one is at best useless and at worst a browser process per
+  // run with nothing to close it. The page is still served and still checked;
+  // only the window is skipped, and the result says so rather than claiming a
+  // window that does not exist.
+  if (process.env.ELIA_NO_BROWSER_LAUNCH === '1') {
+    return { browser: 'none', message: `Serving ${url} (ELIA_NO_BROWSER_LAUNCH=1, so no window was opened)` }
+  }
   const chromePath = findChromePath(exists)
   if (chromePath) {
     Bun.spawn([chromePath, '--new-window', url], { stdin: 'ignore', stdout: 'ignore', stderr: 'ignore' })
