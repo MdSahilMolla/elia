@@ -8,6 +8,7 @@ import { findSymbolTool } from './findSymbol.ts'
 import { runCommandTool } from './runCommand.ts'
 import { runProgramTool } from './runProgram.ts'
 import { processTool } from './processTool.ts'
+import { paperTool } from './paper.ts'
 import { boardPostTool, boardReadTool } from './blackboard.ts'
 import { newEngagementTool } from './engagement.ts'
 import { runSecurityToolTool } from './securityScan.ts'
@@ -66,6 +67,7 @@ export const tools: Tool[] = [
   processTool,
   webSearchTool,
   webFetchTool,
+  paperTool,
   visualizeTool,
   todoWriteTool,
   recallTool,

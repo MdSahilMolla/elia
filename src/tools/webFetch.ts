@@ -1,6 +1,7 @@
 import type { Tool } from './types.ts'
 import { readBoundedOutput } from '../shell.ts'
 import { publicFetch } from '../networkPolicy.ts'
+import { looksLikePdf, pdfToText, thinExtractionReason } from './pdfText.ts'
 
 const FETCH_TIMEOUT_MS = 15_000
 const MAX_CHARS = 100_000
@@ -35,7 +36,7 @@ function redirectTarget(response: Response, from: URL): URL | undefined {
 export const webFetchTool: Tool = {
   name: 'web_fetch',
   description:
-    'Fetch a single web page and return its readable text content (HTML tags stripped). Use this to read a specific page a search turned up. Redirects are followed, so DOI links and other resolvers work. Long pages are truncated; pass offset to read on from where a previous call stopped.',
+    'Fetch a single web page or PDF and return its readable text (HTML tags stripped, PDF text extracted). Use this to read a specific document a search turned up. Redirects are followed, so DOI links and other resolvers work. Long documents are truncated; pass offset to read on from where a previous call stopped. A scanned, image-only PDF says so rather than coming back empty.',
   input_schema: {
     type: 'object',
     properties: {
@@ -85,8 +86,29 @@ export const webFetchTool: Tool = {
       if (!response.ok) throw new Error(`web_fetch failed: ${response.status} ${response.statusText}`)
 
       const contentType = response.headers.get('content-type') ?? ''
-      const body = response.body ? await readBoundedOutput(response.body, MAX_RESPONSE_CHARS) : ''
-      const text = contentType.includes('html') ? htmlToText(body) : body
+      let text: string
+      if (contentType.includes('pdf')) {
+        // Every non-HTML body used to be returned verbatim, so a PDF arrived as
+        // undecoded binary and the model tried to read it as prose. Research
+        // papers are almost always PDFs, which made "read this paper" fail in
+        // the least useful way available: a page of mojibake that looks like
+        // content. A thin extraction is reported as *why* it is thin, because
+        // an empty result and a scanned document must not look alike.
+        const bytes = new Uint8Array(await response.arrayBuffer())
+        const extracted = pdfToText(bytes)
+        const thin = thinExtractionReason(extracted)
+        if (thin) return `[${url.toString()} is a PDF, but ${thin}]${extracted.text ? `\n\nWhat little text was found:\n${extracted.text}` : ''}`
+        text = extracted.text
+      } else {
+        const body = response.body ? await readBoundedOutput(response.body, MAX_RESPONSE_CHARS) : ''
+        // A server that mislabels a PDF as octet-stream or text/plain is common;
+        // sniff the header rather than trust the label.
+        text = contentType.includes('html')
+          ? htmlToText(body)
+          : looksLikePdf(new TextEncoder().encode(body.slice(0, 1024)))
+            ? pdfToText(new Uint8Array(Buffer.from(body, 'latin1'))).text
+            : body
+      }
 
       if (offset >= text.length && text.length > 0) {
         return `[offset ${offset} is past the end of this page — it is ${text.length} characters]`

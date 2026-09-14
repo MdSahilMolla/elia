@@ -251,8 +251,14 @@ export function assessAction(request: ActionRequest, cwd = currentAgent().cwd ??
     return assessment('safe', 'allow', 'web search is read-only retrieval; the query leaves the machine but no external state changes', 'web_search', resources, true)
   }
 
+  if (name === 'paper') {
+    return assessment('safe', 'allow', 'paper lookup is read-only retrieval from public scholarly indexes; no external state changes', 'paper', resources, true)
+  }
   if (name === 'web_fetch') {
-    return assessment('safe', 'allow', 'web fetch is a bounded read-only GET restricted to public http(s) addresses with redirects refused', 'web_fetch', resources, true)
+    // Redirects are followed now, but each hop is re-validated against the
+    // public-address policy before the socket opens, so the constraint that
+    // made this safe still holds per hop rather than by refusing to move.
+    return assessment('safe', 'allow', 'web fetch is a bounded read-only GET restricted to public http(s) addresses, with every redirect hop re-validated', 'web_fetch', resources, true)
   }
 
   if (name === 'visualize') {

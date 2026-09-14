@@ -154,3 +154,42 @@ test('htmlToText decodes numeric and common named entities, leaving unknown ones
 test('htmlToText drops noscript, template and svg content', () => {
   expect(htmlToText('<noscript>enable js</noscript><template><b>t</b></template><svg><text>s</text></svg><p>body</p>')).toBe('body')
 })
+
+// --- PDFs come back as text, not as binary noise -----------------------------
+
+/** A tiny PDF with one uncompressed text stream. */
+function pdfBytes(body: string): ArrayBuffer {
+  const payload = Buffer.from(body, 'latin1')
+  const joined = Buffer.concat([
+    Buffer.from('%PDF-1.7\n', 'latin1'),
+    Buffer.from(`<< /Length ${payload.length} >>\nstream\n`, 'latin1'),
+    payload,
+    Buffer.from('\nendstream\n%%EOF\n', 'latin1'),
+  ])
+  return joined.buffer.slice(joined.byteOffset, joined.byteOffset + joined.byteLength) as ArrayBuffer
+}
+
+test('web_fetch extracts the text of a PDF instead of returning its bytes', async () => {
+  const bytes = pdfBytes(`BT (${'Scaling laws for neural language models. '.repeat(8)}) Tj ET`)
+  publicFetchTestHooks.transport = async () => new Response(bytes, { status: 200, headers: { 'content-type': 'application/pdf' } })
+  const result = await webFetchTool.execute({ url: 'https://example.com/paper.pdf' })
+  expect(result).toContain('Scaling laws for neural language models')
+  expect(result).not.toContain('%PDF')
+})
+
+test('an image-only PDF says it needs OCR rather than coming back empty', async () => {
+  // The failure that matters: an empty string reads as "this paper says
+  // nothing", and the model then summarises a document it never saw.
+  const bytes = pdfBytes('q 612 0 0 792 0 0 cm /Im1 Do Q')
+  publicFetchTestHooks.transport = async () => new Response(bytes, { status: 200, headers: { 'content-type': 'application/pdf' } })
+  const result = await webFetchTool.execute({ url: 'https://example.com/scan.pdf' })
+  expect(result).toContain('is a PDF, but')
+  expect(result).toContain('OCR')
+})
+
+test('a PDF mislabelled as octet-stream is still detected and extracted', async () => {
+  const bytes = pdfBytes(`BT (${'Mislabelled but perfectly readable text. '.repeat(8)}) Tj ET`)
+  publicFetchTestHooks.transport = async () => new Response(bytes, { status: 200, headers: { 'content-type': 'application/octet-stream' } })
+  const result = await webFetchTool.execute({ url: 'https://example.com/unlabelled' })
+  expect(result).toContain('Mislabelled but perfectly readable text')
+})
