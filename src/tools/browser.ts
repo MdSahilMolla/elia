@@ -3,9 +3,10 @@ import { taskSessions } from '../taskSessions.ts'
 import { readBoundedOutput, shellInvocation, terminateProcessGroup } from '../shell.ts'
 import { browserMcpReadiness, findBrowserMcpTool } from '../mcp/browserRegistry.ts'
 import { ownedBrowserEndpoint, ownedBrowserRequested } from './browserOwned.ts'
+import { RECORDER_SOURCE, formatRecorderRead, readRecorderExpression } from './browserRecorder.ts'
 
 /** Actions supported by the browser bridge. The bridge can be a user-Chrome MCP wrapper or CDP endpoint. */
-export type BrowserAction = 'status' | 'navigate' | 'refresh' | 'back' | 'forward' | 'snapshot' | 'click' | 'type' | 'press' | 'scroll' | 'wait' | 'wait_for' | 'extract' | 'verify'
+export type BrowserAction = 'status' | 'navigate' | 'refresh' | 'back' | 'forward' | 'snapshot' | 'click' | 'type' | 'press' | 'scroll' | 'wait' | 'wait_for' | 'extract' | 'verify' | 'console' | 'network'
 
 interface BrowserRequest {
   action: BrowserAction
@@ -19,6 +20,10 @@ interface BrowserRequest {
   expectText?: string
   expectUrl?: string
   ms?: number
+  /** console/network: how many of the most recent entries to return. */
+  limit?: number
+  /** console/network: keep only error-level messages and failed requests. */
+  errorsOnly?: boolean
 }
 
 interface BrowserResult {
@@ -35,17 +40,19 @@ const MAX_SCROLL_PX = 4_000
 const MAX_EXPECTATION_LENGTH = 4_000
 const BROWSER_DEADLINE_MS = 45_000
 const MAX_BROWSER_OUTPUT_LENGTH = 200_000
-const SAFE_RETRY_ACTIONS = new Set<BrowserAction>(['status', 'snapshot', 'extract', 'verify', 'wait_for'])
+const DEFAULT_RECORD_LIMIT = 50
+const MAX_RECORD_LIMIT = 200
+const SAFE_RETRY_ACTIONS = new Set<BrowserAction>(['status', 'snapshot', 'extract', 'verify', 'wait_for', 'console', 'network'])
 
 export const browserTool: Tool = {
   name: 'browser',
-  description: `Control a browser through a configured bridge. Use status first, then navigate, refresh/back/forward, snapshot/extract, click, type, press, scroll, wait_for, or verify as needed. Add expectText or expectUrl after state-changing work so Elia observes the final page instead of assuming a transport success means the UI changed. The bridge can be a user-Chrome connector, a Chrome DevTools endpoint, or (ELIA_BROWSER=owned) a headless Chromium-family browser Elia launches and drives itself, with no login state of its own. Never bypass authentication, CAPTCHAs, paywalls, or site safety controls. Actions that change page state (click, type, press, scroll, verify) go through Elia's action governor for approval before this tool ever runs them — do not expect or ask for a separate confirmation token here.`,
+  description: `Control a browser through a configured bridge. Use status first, then navigate, refresh/back/forward, snapshot/extract, click, type, press, scroll, wait_for, or verify as needed. When a page looks wrong — blank, stuck, half-rendered, or not doing what a click should — read console and network before guessing from the DOM: a JavaScript exception or a failed request is the cause far more often than the markup, and snapshot cannot show you either. console returns the page's console output plus uncaught errors and unhandled rejections; network returns fetch/XHR requests with their status. Pass errorsOnly: true to see only failures. Add expectText or expectUrl after state-changing work so Elia observes the final page instead of assuming a transport success means the UI changed. The bridge can be a user-Chrome connector, a Chrome DevTools endpoint, or (ELIA_BROWSER=owned) a headless Chromium-family browser Elia launches and drives itself, with no login state of its own. Never bypass authentication, CAPTCHAs, paywalls, or site safety controls. Actions that change page state (click, type, press, scroll, verify) go through Elia's action governor for approval before this tool ever runs them — do not expect or ask for a separate confirmation token here.`,
   input_schema: {
     type: 'object',
     properties: {
       action: {
         type: 'string',
-        enum: ['status', 'navigate', 'refresh', 'back', 'forward', 'snapshot', 'click', 'type', 'press', 'scroll', 'wait', 'wait_for', 'extract', 'verify'],
+        enum: ['status', 'navigate', 'refresh', 'back', 'forward', 'snapshot', 'click', 'type', 'press', 'scroll', 'wait', 'wait_for', 'extract', 'verify', 'console', 'network'],
         description: 'Browser action to perform',
       },
       url: { type: 'string', description: 'Absolute http(s) URL for navigate; verify may use this as an expected URL prefix' },
@@ -61,6 +68,8 @@ export const browserTool: Tool = {
       expectText: { type: 'string', description: 'Text that must appear in the post-action snapshot' },
       expectUrl: { type: 'string', description: 'URL prefix or exact URL that must match after the action' },
       ms: { type: 'number', description: 'Milliseconds to wait, capped at 30 seconds' },
+      limit: { type: 'number', description: `For console/network: how many of the most recent entries to return, capped at ${MAX_RECORD_LIMIT}. Default ${DEFAULT_RECORD_LIMIT}.` },
+      errorsOnly: { type: 'boolean', description: 'For console/network: return only error-level messages and failed requests.' },
     },
     required: ['action'],
   },
@@ -70,7 +79,10 @@ export const browserTool: Tool = {
     taskSessions.update(session.id, { status: 'running', action: request.action, detail: request.url ?? request.target ?? request.text?.slice(0, 120) ?? 'Working' })
     try {
       const result = await withDeadline(runBrowserRequest(request), BROWSER_DEADLINE_MS, 'browser action timed out')
-      const output = formatBrowserResult(result)
+      const recorded = request.action === 'console' || request.action === 'network'
+        ? formatRecorderRead(request.action, typeof result === 'string' ? result : (result.result ?? result.output ?? result))
+        : undefined
+      const output = recorded ?? formatBrowserResult(result)
       taskSessions.update(session.id, { status: 'done', action: 'Finished', detail: output.slice(0, 240) })
       return `${output}\nTask session: ${session.id}`
     } catch (error) {
@@ -83,8 +95,8 @@ export const browserTool: Tool = {
 
 export function validateRequest(input: Record<string, unknown>): BrowserRequest {
   const action = input.action
-  if (typeof action !== 'string' || !['status', 'navigate', 'refresh', 'back', 'forward', 'snapshot', 'click', 'type', 'press', 'scroll', 'wait', 'wait_for', 'extract', 'verify'].includes(action)) {
-    throw new Error('action must be one of status, navigate, refresh, back, forward, snapshot, click, type, press, scroll, wait, wait_for, extract, or verify')
+  if (typeof action !== 'string' || !['status', 'navigate', 'refresh', 'back', 'forward', 'snapshot', 'click', 'type', 'press', 'scroll', 'wait', 'wait_for', 'extract', 'verify', 'console', 'network'].includes(action)) {
+    throw new Error('action must be one of status, navigate, refresh, back, forward, snapshot, click, type, press, scroll, wait, wait_for, extract, verify, console, or network')
   }
 
   const request: BrowserRequest = { action: action as BrowserAction }
@@ -140,6 +152,14 @@ export function validateRequest(input: Record<string, unknown>): BrowserRequest 
   if (action === 'extract' && input.selector !== undefined) {
     if (typeof input.selector !== 'string' || input.selector.trim().length === 0) throw new Error('extract selector must be a non-empty string')
     request.selector = input.selector.trim()
+  }
+  if (action === 'console' || action === 'network') {
+    const limit = typeof input.limit === 'number' && Number.isFinite(input.limit) ? Math.round(input.limit) : DEFAULT_RECORD_LIMIT
+    request.limit = Math.max(1, Math.min(MAX_RECORD_LIMIT, limit))
+    if (input.errorsOnly !== undefined) {
+      if (typeof input.errorsOnly !== 'boolean') throw new Error('errorsOnly must be a boolean')
+      request.errorsOnly = input.errorsOnly
+    }
   }
   if (action === 'verify' && !request.expectText && !request.expectUrl && !request.selector) throw new Error('verify requires expectText, expectUrl, or selector')
   return request
@@ -310,6 +330,15 @@ async function callCdp(endpoint: string, request: BrowserRequest): Promise<Brows
       try {
         const response = await cdpRequest(socket, pending, () => nextId++, 'Runtime.enable', {})
         if (response.error) throw new Error(response.error ?? 'failed to enable runtime')
+        if (request.action === 'navigate' || request.action === 'refresh') {
+          // Register the console/network recorder to run before the new
+          // document's own scripts. A recorder injected *after* navigation
+          // misses exactly the errors worth having — the ones thrown during
+          // boot. Best-effort: a bridge or browser that refuses these still
+          // navigates, and the recorder installs itself on first read instead.
+          await cdpRequest(socket, pending, () => nextId++, 'Page.enable', {}).catch(() => undefined)
+          await cdpRequest(socket, pending, () => nextId++, 'Page.addScriptToEvaluateOnNewDocument', { source: RECORDER_SOURCE }).catch(() => undefined)
+        }
         const command = await cdpCommandFor(request)
         const final = await cdpRequest(socket, pending, () => nextId++, command.method, command.params)
         if (final.error) throw new Error(final.error ?? 'browser command failed')
@@ -401,6 +430,9 @@ function unwrapCdpEvaluateValue(final: BrowserResult): unknown {
 }
 
 async function cdpCommandFor(request: BrowserRequest): Promise<{ method: string; params: Record<string, unknown> }> {
+  if (request.action === 'console' || request.action === 'network') {
+    return evaluate(readRecorderExpression(request.action, request.limit ?? DEFAULT_RECORD_LIMIT, request.errorsOnly === true))
+  }
   if (request.action === 'status') return evaluate('({ url: location.href, title: document.title })')
   if (request.action === 'navigate') return { method: 'Page.navigate', params: { url: request.url } }
   if (request.action === 'refresh') return { method: 'Page.reload', params: { ignoreCache: false } }

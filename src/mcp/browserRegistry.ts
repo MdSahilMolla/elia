@@ -5,6 +5,9 @@ interface BrowserMcpTool { server: string; originalName: string; tool: Tool }
 const entries: BrowserMcpTool[] = []
 const candidates: Record<BrowserAction, string[]> = {
   status: ['browser_status', 'browser_snapshot'], navigate: ['browser_navigate'], refresh: ['browser_refresh', 'browser_reload'], back: ['browser_back', 'browser_go_back', 'browser_navigate_back'], forward: ['browser_forward', 'browser_go_forward', 'browser_navigate_forward'], snapshot: ['browser_snapshot'], click: ['browser_click'], type: ['browser_type'], press: ['browser_press', 'browser_press_key'], scroll: ['browser_scroll'], wait: ['browser_wait'], wait_for: ['browser_wait_for'], extract: ['browser_extract', 'browser_snapshot'], verify: ['browser_snapshot'],
+  // A browser MCP that exposes these natively is a better source than elia's
+  // injected page recorder, so prefer it when the server has one.
+  console: ['browser_console_messages', 'browser_console'], network: ['browser_network_requests', 'browser_network'],
 }
 
 export function registerBrowserMcpTool(server: string, originalName: string, tool: Tool): void {

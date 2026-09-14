@@ -127,3 +127,13 @@ test('accepts Playwright MCP Markdown accessibility snapshots', async () => {
     if (previousCdp === undefined) delete process.env.ELIA_BROWSER_CDP_URL; else process.env.ELIA_BROWSER_CDP_URL = previousCdp
   }
 })
+
+test('console and network are accepted actions with bounded limits', () => {
+  expect(validateRequest({ action: 'console' })).toMatchObject({ action: 'console', limit: 50 })
+  expect(validateRequest({ action: 'network', limit: 5, errorsOnly: true })).toMatchObject({ action: 'network', limit: 5, errorsOnly: true })
+  // A limit past the cap is clamped rather than refused — the caller asked for
+  // "as much as possible", and the page buffer is bounded anyway.
+  expect(validateRequest({ action: 'console', limit: 10_000 })).toMatchObject({ limit: 200 })
+  expect(validateRequest({ action: 'console', limit: 0 })).toMatchObject({ limit: 1 })
+  expect(() => validateRequest({ action: 'console', errorsOnly: 'yes' })).toThrow('errorsOnly must be a boolean')
+})
