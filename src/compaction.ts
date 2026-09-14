@@ -248,8 +248,8 @@ const EMERGENCY_TOOL_RESULT_FLOOR = 1_000
  */
 export function shrinkForOversizedRequest(messages: ChatMessage[]): boolean {
   const before = estimateTokens(messages)
-  // Never touch the tail: it holds the current task, the last tool call, and
-  // whatever the model is mid-way through reasoning about.
+  // Prefer the history: the tail holds the current task, the last tool call,
+  // and whatever the model is mid-way through reasoning about.
   const cutoff = Math.max(0, messages.length - KEEP_RECENT_MESSAGES)
   let changed = false
 
@@ -263,5 +263,27 @@ export function shrinkForOversizedRequest(messages: ChatMessage[]): boolean {
     }
   }
 
+  // Nothing old left to cut, but the tail itself can still be the problem —
+  // and then protecting it verbatim guarantees the retry fails identically.
+  // Seen live (session mu0t6bvd-urf6i6): three ~200 KB `git` outputs, all
+  // inside the last seven messages, overflowed a 260k-token window; the only
+  // cuttable history was a few hundred bytes, so the session could never
+  // recover. A result that size is never read verbatim anyway, so keep both
+  // ends (where an error and its summary live) and drop the middle.
+  if (!changed) {
+    for (let i = cutoff; i < messages.length; i++) {
+      for (const block of messages[i]!.content) {
+        if (block.type !== 'tool_result' || block.content.length <= TAIL_TOOL_RESULT_KEEP) continue
+        const half = Math.floor(TAIL_TOOL_RESULT_KEEP / 2)
+        const dropped = block.content.length - TAIL_TOOL_RESULT_KEEP
+        block.content = `${block.content.slice(0, half)}\n… [${dropped} characters dropped from the middle: the provider rejected this request as too large. Re-run the command with narrower output if you need them.] …\n${block.content.slice(-half)}`
+        changed = true
+      }
+    }
+  }
+
   return changed && estimateTokens(messages) < before
 }
+
+/** How much of an oversized *recent* tool result survives an emergency shrink — generous, because the model is likely still using it. */
+const TAIL_TOOL_RESULT_KEEP = 8_000

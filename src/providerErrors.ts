@@ -48,7 +48,7 @@ export function isCapacityError(message: string): boolean {
  * "rate-limited" in one alternative.
  */
 const CAPACITY_ERROR =
-  /\b(?:413|429)\b|rate[_ -]?limit|payload too large|request(?:ed)? (?:body )?too large|too many requests|quota exceeded|prompt is too long|context[_ ]?length[_ ]?exceeded|too many tokens|reduce your (?:message|prompt|request) size|tokens per (?:minute|min)\b|\bTPM\b|\bTPD\b/i
+  /\b(?:413|429)\b|rate[_ -]?limit|payload too large|request(?:ed)? (?:body )?too large|too many requests|quota exceeded|prompt is too long|context[_ ]?length[_ ]?exceeded|maximum context length|exceeds? (?:the )?(?:model'?s? )?(?:maximum )?context (?:window|length)|input is too long|too many tokens|reduce (?:the length of the messages|your (?:message|prompt|request) size)|tokens per (?:minute|min)\b|\bTPM\b|\bTPD\b/i
 
 /**
  * The narrower half: the request was too *big*, as opposed to merely too
@@ -59,8 +59,17 @@ export function isRequestTooLargeError(message: string): boolean {
   return REQUEST_TOO_LARGE.test(message)
 }
 
+/**
+ * "maximum context length" is the OpenAI-compatible spelling mercury (and
+ * vLLM-served models generally) use: "You exceeded the maximum context length
+ * for this model of 260000. Please reduce the length of the messages or
+ * completion." It matched nothing here, so a session that outgrew the window
+ * was treated as a fatal error — no shrink, no retry — and because the history
+ * that caused it was saved, every later prompt in that session died the same
+ * way before a single token was generated (session mu0t6bvd-urf6i6, 2026-09-14).
+ */
 const REQUEST_TOO_LARGE =
-  /\b413\b|payload too large|request(?:ed)? (?:body )?too large|prompt is too long|context[_ ]?length[_ ]?exceeded|too many tokens|reduce your (?:message|prompt|request) size/i
+  /\b413\b|payload too large|request(?:ed)? (?:body )?too large|prompt is too long|context[_ ]?length[_ ]?exceeded|maximum context length|exceeds? (?:the )?(?:model'?s? )?(?:maximum )?context (?:window|length)|input is too long|too many tokens|reduce (?:the length of the messages|your (?:message|prompt|request) size)/i
 
 /**
  * How long to wait before re-attempting a capacity failure.

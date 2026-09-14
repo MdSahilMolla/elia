@@ -37,6 +37,8 @@ export interface TurnOutcome {
   verify: VerifyResult
   repairAttempts: number
   aborted: boolean
+  /** The turn ended by throwing (provider error, context overflow). Absent on older lines and on turns that finished. */
+  failed?: boolean
 }
 
 export function classifyDomain(path: string): Domain {
@@ -112,7 +114,7 @@ export function competenceReport(path = OUTCOMES_PATH, options: CompetenceReport
   const outcomes = loadOutcomes(path)
   const excluded = options.excludeCorrs
   const changing = outcomes.filter((o) => o.filesChanged > 0 && !o.aborted && !(excluded && o.corr !== undefined && excluded.has(o.corr)))
-  const clean = (o: TurnOutcome) => o.toolErrors === 0 && o.editRetries === 0 && (o.verify === 'pass' || o.verify === 'none' || o.verify === 'skipped')
+  const clean = (o: TurnOutcome) => !o.failed && o.toolErrors === 0 && o.editRetries === 0 && (o.verify === 'pass' || o.verify === 'none' || o.verify === 'skipped')
 
   const cleanTurns = changing.filter(clean).length
   const totalEdits = changing.reduce((n, o) => n + o.editRetries + o.filesChanged, 0)

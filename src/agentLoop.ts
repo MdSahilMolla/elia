@@ -22,6 +22,7 @@ import { currentAgent, resolveWorkspacePath } from './autonomy/context.ts'
 import { activeMode } from './autonomy/mode.ts'
 import { activeToolHooks, evaluateToolHooks } from './autonomy/devHooks.ts'
 import { clampOutput } from './shell.ts'
+import { boundToolResult } from './toolOutputBudget.ts'
 import { isRepoMutatingTool, withRepoLock } from './repoLock.ts'
 import { profilingEnabled, recordModelCall, recordToolCall } from './profile.ts'
 import { codexSubscriptionApprovedThisSession, markCodexSubscriptionApproved } from './providers/codexSubscription.ts'
@@ -577,7 +578,10 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
       return {
         type: 'tool_result' as const,
         tool_use_id: block.id,
-        content: resultText,
+        // The operator, the ledger, and the prefetcher above all saw the full
+        // text; only the copy that re-enters the prompt on every later step is
+        // bounded, so one noisy command cannot overflow the context window.
+        content: boundToolResult(resultText, block.name),
         is_error: isError,
       }
     })
@@ -732,7 +736,7 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
               && isRequestTooLargeError(error instanceof Error ? error.message : String(error))
               && shrinkForOversizedRequest(messages)
             ) {
-              if (verbose) writeNotice('request was over the provider limit; dropped older tool output and retrying smaller')
+              if (verbose) writeNotice('request was over the provider limit; trimmed oversized tool output and retrying smaller')
               continue
             }
 

@@ -2405,17 +2405,28 @@ async function runInteractive(): Promise<void> {
       if (!persona && !escalated && !uiHooks?.planMode && !controller.signal.aborted) {
         const { touchedWeakDomain } = await import('./autonomy/outcomes.ts')
         const weak = touchedWeakDomain(Object.keys(tracker.snapshot()))
-        if (weak.length > 0) {
+        // elia builds the diff from the turn's own before-images. Asking the
+        // model to "run `git diff`" in a project that is not a repository got
+        // `git init` + `git add .` with no .gitignore, 200 KB outputs, and a
+        // context overflow that killed the session — see autonomy/turnDiff.ts.
+        const { buildTurnDiff } = await import('./autonomy/turnDiff.ts')
+        const diff = weak.length > 0 ? buildTurnDiff(tracker.snapshot()) : undefined
+        if (weak.length > 0 && diff && diff.files.length > 0) {
           const label = `Self-reviewing ${weak.join('/')} change (weak area)`
           taskSessions.update(task.id, { status: 'running', action: 'Self-review', detail: label })
           uiHooks?.onActivity?.({ kind: 'status', status: 'updated', title: label })
           if (!uiHooks) writeNotice(label)
+          const { writeSecureFile } = await import('./securePersistence.ts')
+          const { paths } = await import('./statePaths.ts')
+          const diffPath = pathModule.join(paths.state, 'review', `${task.id}.diff`)
+          writeSecureFile(diffPath, diff.text)
+          const inline = diff.text.length <= 6_000 ? `\n\nThe diff:\n\`\`\`diff\n${diff.text}\n\`\`\`` : ''
           messages.push(
             userMessage(
               `This change is in "${weak.join('/')}", an area where past turns on this project landed clean less than 75% of the time. Before you finish:\n`
-                + '1. Run `git diff` to capture the full change.\n'
-                + '2. In one message, make two `task` calls in parallel — one with role "critic", one with role "bughunter". Each call MUST include a non-empty `prompt` that pastes the diff in full and a short `description`; the sub-agents cannot see this conversation.\n'
-                + '3. Fix anything blocking they raise, then verify. Do not skip this.',
+                + `1. elia saved the diff of this turn to ${diffPath} (paths inside it are relative to ${process.cwd()}). Do not run \`git init\` or \`git add\` to produce one. The changed files, by absolute path:\n${diff.absolute.slice(0, 12).map((file) => `   - ${file}`).join('\n')}${diff.absolute.length > 12 ? `\n   - … and ${diff.absolute.length - 12} more in the diff` : ''}\n`
+                + `2. In one message, make two \`task\` calls in parallel — one with role "critic", one with role "bughunter". Each call MUST include a short \`description\` and a non-empty \`prompt\` that says what the change is for and tells the reviewer to read_file ${diffPath} first, then the changed files in full by the absolute paths above; the sub-agents cannot see this conversation.\n`
+                + `3. Reviewers are often wrong. Before changing anything they raise, check it against the code and fix only what is actually broken — skip style opinions and anything you cannot confirm. Then verify. Do not skip the review.${inline}`,
             ),
           )
           await runModelTurn()
@@ -2630,6 +2641,13 @@ async function runInteractive(): Promise<void> {
       if (!persona) {
         const { recordOutcome, domainsOf } = await import('./autonomy/outcomes.ts')
         const changedPaths = Object.keys(tracker.snapshot())
+        // A turn that threw (a provider error, a context overflow) used to be
+        // recorded with no trace of it: zero tool errors, verify "none", not
+        // aborted — so it counted as *clean*, credited every lesson it saw, and
+        // earned a positive trajectory reward. Seen live: the prompt after a
+        // context overflow died before generating a token and was logged
+        // `clean: true`. Learning from that teaches the wrong thing.
+        const turnFailed = taskSessions.get(task.id)?.status === 'failed'
         recordOutcome({
           corr: task.id,
           prompt: redactText(userText, 120),
@@ -2640,8 +2658,9 @@ async function runInteractive(): Promise<void> {
           verify: verifyResult,
           repairAttempts,
           aborted: stopRequested || controller.signal.aborted || escalatedAborted,
+          ...(turnFailed ? { failed: true } : {}),
         })
-        const cleanTurn = toolErrorCount === 0 && editRetryCount === 0 && (verifyResult === 'pass' || verifyResult === 'none' || verifyResult === 'skipped') && !(stopRequested || controller.signal.aborted || escalatedAborted)
+        const cleanTurn = !turnFailed && toolErrorCount === 0 && editRetryCount === 0 && (verifyResult === 'pass' || verifyResult === 'none' || verifyResult === 'skipped') && !(stopRequested || controller.signal.aborted || escalatedAborted)
         try {
           const { recordLessonExposure } = await import('./autonomy/lessonEfficacy.ts')
           const { consumeInjectedLessonKeys } = await import('./autonomy/lessons.ts')
@@ -2676,6 +2695,7 @@ async function runInteractive(): Promise<void> {
               verify: verifyResult,
               repairAttempts,
               aborted: stopRequested || controller.signal.aborted || escalatedAborted,
+              ...(turnFailed ? { completionState: 'failed' as const } : {}),
             }),
           })
         } catch {
