@@ -88,10 +88,28 @@ coverage/
 .elia/
 `
 
-/** Creates the repository if the directory isn't one yet. */
+/**
+ * Creates the repository if the directory doesn't have one that can hold it.
+ *
+ * Being inside *a* work tree is not the same thing. A directory the enclosing
+ * repository ignores passes `--is-inside-work-tree`, yet that repository will
+ * never track a file in it — and elia's own `workspace/`, where every run
+ * launched from the elia checkout builds, is exactly that. Treating it as
+ * "already a repository" left those runs with no history of their own, and
+ * every git call they made resolved to elia's repository instead: the review
+ * diff showed other sessions' uncommitted elia changes and none of the run's
+ * own files, so reviewers went looking for `src/autonomy/goalGraph.ts` inside a
+ * guitar shop (runs 2026-09-12-zjga-se2f, 2026-09-13-d8vi-u8dp). An ignored
+ * directory gets a repository of its own.
+ */
 export async function ensureRepository(cwd: string, signal?: AbortSignal): Promise<{ initialized: boolean; warning?: string }> {
   const inside = await execCapture('git', ['rev-parse', '--is-inside-work-tree'], cwd, signal)
-  if (inside.ok && inside.stdout.trim() === 'true') return { initialized: false }
+  if (inside.ok && inside.stdout.trim() === 'true') {
+    // Exit 0 means ignored. Exit 1 (tracked territory) or an error leaves the
+    // directory to the repository it is already in, as before.
+    const ignored = await execCapture('git', ['check-ignore', '-q', '.'], cwd, signal)
+    if (ignored.exitCode !== 0) return { initialized: false }
+  }
   if (inside.missing) return { initialized: false, warning: 'git is not installed, so this run has no version history or rollback point.' }
 
   const init = await execCapture('git', ['init', '-b', 'main'], cwd, signal)

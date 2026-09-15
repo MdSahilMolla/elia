@@ -466,6 +466,10 @@ async function runAutonomousTaskInternal(options: AutonomousRunOptions): Promise
   // the verify phase begins; declared here so `done()` can always clean it up.
   let greenSnapshot: TreeSnapshot | undefined
   let rewoundOnce = false
+  // What the run's own tool calls wrote since `greenSnapshot` was taken — the
+  // only files a rewind may touch in a workspace the run does not own outright.
+  // See restoreTreeSnapshot's `only`.
+  const writtenSinceGreen = new Set<string>()
   const track = (delta: Usage) => {
     usage = addUsage(usage, delta)
   }
@@ -1340,6 +1344,7 @@ Read the changed files in full context. Improve only concrete issues directly re
   // Baseline: the post-execute state. Each passing verification refreshes this
   // to the current state; a wrong-approach stall rewinds the working tree here.
   greenSnapshot = await captureTreeSnapshot(workspaceRoot, runDir(runId))
+  writtenSinceGreen.clear()
 
   while (true) {
     if (runSignal?.aborted) return abortedAt('verify', { proposal, verdict })
@@ -1378,7 +1383,11 @@ Read the changed files in full context. Improve only concrete issues directly re
     // A fresh green: this is now the state a "wrong approach" rewind returns to.
     // captureTreeSnapshot overwrites the single per-run snapshot slot.
     if (verification.passed && !rewoundOnce) {
-      greenSnapshot = (await captureTreeSnapshot(workspaceRoot, runDir(runId))) ?? greenSnapshot
+      const fresh = await captureTreeSnapshot(workspaceRoot, runDir(runId))
+      if (fresh) {
+        greenSnapshot = fresh
+        writtenSinceGreen.clear()
+      }
     }
     const verificationData = {
       passed: verification.passed,
@@ -1599,11 +1608,19 @@ Judge what is there, not what the code looks like it would probably do. A criter
         // of on top of a pile of failed edits. One rewind per run.
         let rewindNote = ''
         if (stuck.recovery === 'replan' && greenSnapshot && !rewoundOnce) {
-          const { reverted, warnings } = await restoreTreeSnapshot(greenSnapshot)
+          // An isolated workspace is a repository only this run writes to, so
+          // the whole tree goes back — shell-generated files included. Anywhere
+          // else, only what this run's tool calls wrote since the snapshot.
+          const scope = workspace.kind === 'isolated' ? {} : { only: writtenSinceGreen }
+          const { reverted, warnings } = await restoreTreeSnapshot(greenSnapshot, scope)
           rewoundOnce = true
           const base = greenSnapshot.clean ? 'the pristine starting state (verification never passed)' : 'the last state that passed verification'
-          rewindNote = `\n\nThe working tree has been reset to ${base}: ${reverted.length} file(s) from the failed attempts were discarded.${warnings.length > 0 ? ` (Could not fully restore: ${warnings.join('; ')}.)` : ''} Do not try to re-apply what was there — start the new approach from what is on disk now.`
-          writeSubStep(`Rewound the working tree to the last green checkpoint (${reverted.length} file(s) discarded) before re-planning.`)
+          if (reverted.length > 0) {
+            rewindNote = `\n\nThe working tree has been reset to ${base}: ${reverted.length} file(s) from the failed attempts were discarded.${warnings.length > 0 ? ` (Could not fully restore: ${warnings.join('; ')}.)` : ''} Do not try to re-apply what was there — start the new approach from what is on disk now.`
+            writeSubStep(`Rewound the working tree to the last green checkpoint (${reverted.length} file(s) discarded) before re-planning.`)
+          } else {
+            writeSubStep('Nothing this run wrote since the last green checkpoint needed discarding before re-planning.')
+          }
           journal.append('phase', { phase: 'reflect', attempt, note: `tree rewound to last green: ${reverted.length} file(s) discarded${warnings.length ? `; warnings: ${warnings.join('; ')}` : ''}` })
         }
 
@@ -1699,7 +1716,10 @@ Judge what is there, not what the code looks like it would probably do. A criter
       cache,
       prefetcher: createPrefetcher({ tools: repairTools, cache }),
       signal: runSignal,
-      onTool: (event) => appendActionAudit(event, runId),
+      onTool: (event) => {
+        appendActionAudit(event, runId)
+        for (const file of filesWrittenBy(event, workspaceRoot)) writtenSinceGreen.add(file)
+      },
     }))))
     track(repair.usage)
     recordUsage(repair.usage)

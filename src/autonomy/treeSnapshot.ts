@@ -102,26 +102,40 @@ export async function captureTreeSnapshot(root: string, storeDir: string): Promi
 /**
  * Reverts the working tree to exactly the snapshot: every file dirty *now* is
  * put back to HEAD (or removed, if it is not in HEAD), then the snapshot's own
- * dirty files are written back. Returns the list of paths it touched, and any
+ * dirty files are written back. Returns the paths it actually reverted, and any
  * it could not fully restore.
+ *
+ * `only` limits all of that to the given root-relative paths. Without it the
+ * whole tree goes back — right for a repository only the run writes to, and
+ * wrong for any other: "dirty now" cannot say who made a file dirty, so an
+ * unscoped restore in a checkout someone else is also working in reverts their
+ * uncommitted edits and deletes the files they created since the snapshot. The
+ * caller passes what the run's own tool calls wrote; anything else is left as
+ * it is, which is recoverable, where reverting someone else's work is not.
  */
-export async function restoreTreeSnapshot(snapshot: TreeSnapshot): Promise<{ reverted: string[]; warnings: string[] }> {
+export async function restoreTreeSnapshot(snapshot: TreeSnapshot, options: { only?: ReadonlySet<string> } = {}): Promise<{ reverted: string[]; warnings: string[] }> {
   const { root } = snapshot
   const warnings: string[] = []
-  const nowDirty = await dirtyEntries(root)
+  const inScope = (path: string): boolean => !options.only || options.only.has(path.replace(/\\/g, '/'))
+  const nowDirty = (await dirtyEntries(root)).filter((entry) => inScope(entry.path))
+  const reverted: string[] = []
 
   // 1. Everything the run touched since the snapshot goes back to HEAD.
   for (const entry of nowDirty) {
     if (entry.status === 'added') {
-      await rm(join(root, entry.path), { force: true }).catch(() => warnings.push(`could not remove ${entry.path}`))
+      const removed = await rm(join(root, entry.path), { force: true }).then(() => true, () => false)
+      if (removed) reverted.push(entry.path)
+      else warnings.push(`could not remove ${entry.path}`)
     } else {
       const result = await runGit(['checkout', 'HEAD', '--', entry.path], root)
-      if (result.exitCode !== 0) warnings.push(`could not revert ${entry.path}: ${result.stderr.trim()}`)
+      if (result.exitCode === 0) reverted.push(entry.path)
+      else warnings.push(`could not revert ${entry.path}: ${result.stderr.trim()}`)
     }
   }
 
   // 2. Re-apply the snapshot's own dirty files.
   for (const [index, entry] of snapshot.files.entries()) {
+    if (!inScope(entry.path)) continue
     const target = join(root, entry.path)
     if (entry.status === 'deleted') {
       await rm(target, { force: true }).catch(() => {})
@@ -136,7 +150,7 @@ export async function restoreTreeSnapshot(snapshot: TreeSnapshot): Promise<{ rev
     await writeFile(target, await readFile(saved))
   }
 
-  return { reverted: nowDirty.map((entry) => entry.path), warnings }
+  return { reverted, warnings }
 }
 
 export async function discardTreeSnapshot(snapshot: TreeSnapshot): Promise<void> {
