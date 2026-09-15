@@ -9,6 +9,10 @@ updates:
     labels:
       - dependencies
       - security
+    ignore:
+      # Pinned: 0.25+ cannot load the tree-sitter-wasms grammars, so a bump has
+      # to replace the grammar source too. See src/goindex/symbolIndex.ts.
+      - dependency-name: web-tree-sitter
   - package-ecosystem: github-actions
     directory: /
     target-branch: production
