@@ -157,6 +157,22 @@ describe('a run that died before writing a receipt', () => {
     expect(rows[0]!.rejectedBy[0]).toContain('21s in')
   })
 
+  test('names what the run was doing inside a phase when the journal recorded it', () => {
+    // Runs 2026-09-12-rud7-xpqd and 2026-09-13-6trz-872u died checking the
+    // plan's assumptions, and read as having died writing the repository.
+    const rows = diagnoseTraceSupply(
+      unfinished(
+        [
+          { seq: 0, at: 1000, kind: 'run-start', data: {} },
+          { seq: 1, at: 1500, kind: 'phase', data: { phase: 'scaffold', initialized: true } },
+          { seq: 2, at: 1600, kind: 'phase', data: { phase: 'scaffold', activity: 'checking assumptions', assumptions: 3 } },
+        ],
+        [{ at: 16_000, actor: 'assumptions#1', tool: 'grep', isError: false }],
+      ),
+    )
+    expect(rows[0]!.rejectedBy[0]).toContain('during the scaffold phase, checking assumptions; assumptions#1 had just run grep')
+  })
+
   test('says so plainly when the run left no journal at all', () => {
     const rows = diagnoseTraceSupply(unfinished([]))
     expect(rows[0]!.rejectedBy[0]).toContain('left no journal')

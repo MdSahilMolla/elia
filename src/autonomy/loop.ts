@@ -901,6 +901,9 @@ async function runAutonomousTaskInternal(options: AutonomousRunOptions): Promise
   let assumptionBriefing = ''
   if (planApproved && proposal.assumptions.length > 0) {
     writePhase('scaffold', `checking ${proposal.assumptions.length} assumption(s) the plan rests on`)
+    // Marked on its way in, not only on its way out: a run that dies here would
+    // otherwise read as having died writing the repository.
+    journal.append('phase', { phase: 'scaffold', activity: 'checking assumptions', assumptions: proposal.assumptions.length })
     const capture = createAssumptionTool(proposal.assumptions)
     const checker = await runSubAgent({
       role: 'scout',

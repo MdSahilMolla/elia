@@ -193,7 +193,8 @@ function describeUnfinishedRun(dir: string): string {
   const lastActionAt = typeof lastAction?.at === 'number' ? (lastAction.at as number) : 0
   const endedAt = Math.max(lastEventAt, lastActionAt)
 
-  const phase = [...events].reverse().map((event) => (event.kind === 'phase' ? ((event.data as { phase?: string } | undefined)?.phase ?? undefined) : undefined)).find(Boolean)
+  const lastPhase = [...events].reverse().find((event) => event.kind === 'phase')?.data as { phase?: string; activity?: string } | undefined
+  const phase = lastPhase?.phase ? `${lastPhase.phase} phase${lastPhase.activity ? `, ${lastPhase.activity}` : ''}` : undefined
   const ran = startedAt !== undefined && endedAt > startedAt ? `${Math.round((endedAt - startedAt) / 1000)}s in` : 'immediately'
 
   let where: string
@@ -205,7 +206,7 @@ function describeUnfinishedRun(dir: string): string {
     const kind = typeof events[events.length - 1]?.kind === 'string' ? (events[events.length - 1]!.kind as string) : 'an event'
     where = `its last journal entry was ${kind}`
   }
-  return `no receipt (died ${ran}${phase ? `, during the ${phase} phase` : ''}; ${where})`
+  return `no receipt (died ${ran}${phase ? `, during the ${phase}` : ''}; ${where})`
 }
 
 function readNdjson(path: string): Record<string, unknown>[] {
