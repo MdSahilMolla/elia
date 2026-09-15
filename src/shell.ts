@@ -396,6 +396,22 @@ export function shellCommandAlternative(executable: string, platform: NodeJS.Pla
 }
 
 /**
+ * Whether `command` starts with another shell's vocabulary that this machine
+ * cannot run — `ls` under cmd.exe, or a PowerShell cmdlet called directly —
+ * so it fails before running anything, in every mode, on every attempt. A name
+ * that is on PATH anyway (Git's `usr/bin` puts a real `ls` there) is not one.
+ */
+export function startsWithForeignShellCommand(
+  command: string,
+  platform: NodeJS.Platform = process.platform,
+  which: (name: string) => string | null = (name) => Bun.which(name),
+): boolean {
+  const first = /^([A-Za-z][A-Za-z0-9_-]*)(?:\s|$)/.exec(command.trim())?.[1]
+  if (!first || shellCommandAlternative(first, platform) === undefined) return false
+  return which(first) === null
+}
+
+/**
  * Deliberately points at elia's own tools where one exists: they work the same
  * on every platform, and they are cheaper and more reliable than shelling out.
  */

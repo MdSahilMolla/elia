@@ -48,6 +48,7 @@ import {
   mergeVerdicts,
   requireCriticVerdict,
   runVerification,
+  unwinnableVerificationCommands,
 } from './verify.ts'
 import { assessProgress, failureFingerprints, repeatedFailureLesson, type AttemptSnapshot } from './progress.ts'
 import { filesFromGitStatus, hygieneVerdict, scanProjectFiles, type HygieneInput } from './hygiene.ts'
@@ -64,7 +65,7 @@ import { reliabilitySignal } from './reliability.ts'
 import type { CriticVerdict, Proposal } from './types.ts'
 import { appendActionAudit, readActionLedger, writeRunReceipt } from './audit.ts'
 import { buildReviewDiffSection } from './reviewContext.ts'
-import { blockedInUnattendedMode, createActionGovernor, withActionGovernor, type ActionApproval, type ActionGovernor, type ActionGovernorStats, type GovernanceMode } from './governor.ts'
+import { createActionGovernor, withActionGovernor, type ActionApproval, type ActionGovernor, type ActionGovernorStats, type GovernanceMode } from './governor.ts'
 import { GoalGraphStore, withGoalGraph, type GoalGraphStore as GoalGraphStoreType } from './goalGraph.ts'
 import { assessCompletion, type CompletionAssessment } from './outcome.ts'
 import { inferTaskKind, taskSessions } from '../taskSessions.ts'
@@ -822,14 +823,17 @@ async function runAutonomousTaskInternal(options: AutonomousRunOptions): Promise
     }
   }
 
-  if (planApproved && proposal.verification.length > 0 && (options.governanceMode ?? 'unattended') === 'unattended') {
-    const refused = proposal.verification.filter((command) => blockedInUnattendedMode(command))
+  // A command this machine's shell does not have can never pass in any mode;
+  // see unwinnableVerificationCommands.
+  if (planApproved && proposal.verification.length > 0) {
+    const unattended = (options.governanceMode ?? 'unattended') === 'unattended'
+    const refused = unwinnableVerificationCommands(proposal.verification, { unattended })
     if (refused.length > 0) {
       const usable = proposal.verification.filter((command) => !refused.includes(command))
       const replacement = usable.length > 0 ? usable : detectChecks(workspaceRoot)
       proposal = { ...proposal, verification: replacement }
       writeSubStep(
-        `${refused.length} planned verification command(s) can never run unattended (${refused.map((command) => command.slice(0, 60)).join('; ')}) — ` +
+        `${refused.length} planned verification command(s) can never pass in this run (${refused.map((command) => command.slice(0, 60)).join('; ')}) — ` +
           (replacement.length > 0 ? `verifying with ${replacement.join(' · ')} instead` : 'no runnable check remains, so review alone decides this run'),
       )
       journal.append('phase', { phase: 'propose', note: `verification rewritten: refused ${JSON.stringify(refused)}, using ${JSON.stringify(replacement)}` })

@@ -1,10 +1,10 @@
 import { existsSync } from 'node:fs'
 import { basename, relative, resolve, sep } from 'node:path'
 import type { Tool } from '../tools/types.ts'
-import { clampOutput, isLongRunningServerCommand, runShell, type ShellResult } from '../shell.ts'
+import { clampOutput, isLongRunningServerCommand, runShell, startsWithForeignShellCommand, type ShellResult } from '../shell.ts'
 import type { CriticIssue, CriticVerdict } from './types.ts'
 import { currentAgent } from './context.ts'
-import { activeActionGovernor, type ActionGovernor } from './governor.ts'
+import { activeActionGovernor, blockedInUnattendedMode, type ActionGovernor } from './governor.ts'
 import { changedStaticPages } from './detectChecks.ts'
 import { scanProjectFiles } from './hygiene.ts'
 import { ensurePreviewServer } from '../preview/server.ts'
@@ -23,6 +23,26 @@ export interface VerificationOutcome {
    * repair attempts on it.
    */
   blocked?: string
+}
+
+/**
+ * The declared verification commands that can never pass in this run, so the
+ * plan drops them before committing to a gate it cannot win: a command this
+ * machine's shell does not have, in any mode, and — unattended, with nobody
+ * there to approve it — one the governor refuses outright.
+ *
+ * The first is not hypothetical. `ls workspace/edcdemo/` on Windows failed
+ * "'ls' is not recognized" on all three attempts of run 2026-09-10-oabx-7ui6,
+ * and every repair between them rewrote an app that was never broken. The
+ * runtime fallback for unrunnable checks did not apply, because the plan's
+ * other check (`bun --version`) ran fine.
+ */
+export function unwinnableVerificationCommands(
+  commands: string[],
+  options: { unattended: boolean; platform?: NodeJS.Platform; which?: (name: string) => string | null },
+): string[] {
+  return commands.filter((command) =>
+    startsWithForeignShellCommand(command, options.platform, options.which) || (options.unattended && blockedInUnattendedMode(command)))
 }
 
 /**

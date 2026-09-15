@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, expect, test } from 'bun:test'
-import { fallbackStaticPageVerification, hasBlockingIssues, isUnrunnableCommandFailure, requireCriticVerdict, runVerification } from './verify.ts'
+import { fallbackStaticPageVerification, hasBlockingIssues, isUnrunnableCommandFailure, requireCriticVerdict, runVerification, unwinnableVerificationCommands } from './verify.ts'
 import { resetPreviewServerForTests } from '../preview/server.ts'
 
 afterEach(() => {
@@ -56,6 +56,25 @@ test('verification fails closed and stops when the governor blocks a command', a
 // was manual-testing prose, so cmd.exe rejected it on every attempt with this
 // exact message — a failure that proves nothing about the built game, which
 // actually worked.
+test('a check written in another shell’s vocabulary is dropped from the plan, in every mode', () => {
+  // Run 2026-09-10-oabx-7ui6 on Windows: `bun --version` passed and `ls` failed
+  // "'ls' is not recognized" three times, so the all-unrunnable fallback never
+  // applied and each repair rewrote working code.
+  const plan = ['bun --version', 'ls workspace/edcdemo/']
+  const noLs = () => null
+  expect(unwinnableVerificationCommands(plan, { unattended: false, platform: 'win32', which: noLs })).toEqual(['ls workspace/edcdemo/'])
+  expect(unwinnableVerificationCommands(plan, { unattended: true, platform: 'win32', which: noLs })).toEqual(['ls workspace/edcdemo/'])
+  // Where it is a real command — any POSIX shell, or Git's `ls` on a Windows PATH — it stays.
+  expect(unwinnableVerificationCommands(plan, { unattended: false, platform: 'linux', which: noLs })).toEqual([])
+  expect(unwinnableVerificationCommands(plan, { unattended: false, platform: 'win32', which: () => 'C:/Program Files/Git/usr/bin/ls.exe' })).toEqual([])
+})
+
+test('a command the governor refuses is dropped only when there is nobody to approve it', () => {
+  const plan = ['bun test', 'bun run src/server.ts & sleep 2 && curl -s http://localhost:3000/']
+  expect(unwinnableVerificationCommands(plan, { unattended: true, platform: 'linux' })).toEqual([plan[1]!])
+  expect(unwinnableVerificationCommands(plan, { unattended: false, platform: 'linux' })).toEqual([])
+})
+
 test('a shell-rejected command is recognised as unrunnable, not a real failure', () => {
   const result = {
     command: 'Open X in browser, verify Y',
