@@ -262,6 +262,29 @@ describe('what actually counts as work still owed', () => {
     expect(graph.canCompleteGoal()).toBe(false)
   })
 
+  test('what an advisory worker was refused is not work the goal owes', () => {
+    // Run 2026-09-15-cqd0-omdu: every step done, the render check passing, the
+    // review approving — and still needs-attention, because the assumption
+    // scout's exploratory reads outside its workspace were refused unattended
+    // and sat as human-review holds under `check:assumptions`, which is not a
+    // node of the goal at all.
+    const { graph } = createGraph()
+    graph.seedProposal(proposal)
+    graph.resolveApproval(graph.requestApproval('plan', 'proposal').id, true)
+    const refused = graph.reserveAction({ name: 'read_file', input: { path: 'D:/elsewhere/notes.md' } }, 'check:assumptions')
+    graph.requestApproval('action', refused.action.idempotencyKey, { name: 'read_file' }, 'reaches outside the workspace')
+    graph.blockAction(refused.action.id, 'Action blocked by Elia’s unattended policy: read_file may access data outside the active workspace', true)
+    for (const id of ['step:inspect', 'step:build']) {
+      graph.startNode(id)
+      graph.finishNode(id, { ok: true, report: 'done' })
+    }
+    graph.recordVerification(true, {})
+    graph.recordReview(true, {})
+
+    expect(outstandingActions(graph.state())).toEqual([])
+    expect(graph.canCompleteGoal()).toBe(true)
+  })
+
   test('an action reserved but never resolved is owed even when its step completed — its outcome is unknown', () => {
     const { graph } = createGraph()
     graph.seedProposal(proposal)
