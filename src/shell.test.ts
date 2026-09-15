@@ -2,7 +2,7 @@ import { afterEach, expect, test } from 'bun:test'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { isLongRunningServerCommand, runProcess, runShell, shellCommandAlternative } from './shell.ts'
+import { isLongRunningServerCommand, mayStartServer, runProcess, runShell, shellCommandAlternative } from './shell.ts'
 import { resetContainerSandboxWarningForTests } from './sandbox/container.ts'
 
 afterEach(() => {
@@ -169,5 +169,53 @@ test('a dev server is recognised but a build or test is not', () => {
   }
   for (const command of ['bun run build', 'npm test', 'tsc --noEmit', 'bun install', 'cargo build', 'docker compose up -d']) {
     expect(isLongRunningServerCommand(command)).toBe(false)
+  }
+})
+
+test('the servers Python apps are started with are recognised, however they are launched', () => {
+  for (const command of [
+    'streamlit run app.py --server.headless true',
+    'python -m streamlit run app.py',
+    'python manage.py runserver',
+    'python3 src/manage.py runserver 0.0.0.0:8000',
+    'gradio app.py',
+    'panel serve app.py',
+    'fastapi dev main.py',
+    'uv run uvicorn main:app',
+    'python -m flask run',
+    'PORT=3000 npm run dev',
+    './node_modules/.bin/vite --port 3000',
+    'npm install && npm run dev',
+    'docker compose up --build',
+  ]) {
+    expect(isLongRunningServerCommand(command)).toBe(true)
+  }
+})
+
+// The list used to match a server's name anywhere in the line, so installing
+// one read as starting it, and run_command refused `pip install uvicorn`.
+test('installing or building with a server package is not starting a server', () => {
+  for (const command of [
+    'pip install uvicorn',
+    'pip install gunicorn flask',
+    'uv add uvicorn',
+    'npm install serve',
+    'python -m pip install streamlit gradio',
+    'vite build',
+    'npx vite build',
+    'docker compose up --build -d',
+    'serverless deploy',
+  ]) {
+    expect(isLongRunningServerCommand(command)).toBe(false)
+  }
+})
+
+test('an app entrypoint may start a server, and is not a dev server by name alone', () => {
+  for (const command of ['python app.py', 'python app.py --port 5000', 'node server.js', 'bun run src/server.ts', 'python3 backend/main.py']) {
+    expect(mayStartServer(command)).toBe(true)
+    expect(isLongRunningServerCommand(command)).toBe(false)
+  }
+  for (const command of ['python -m pytest', 'python scripts/seed.py', 'node build.js']) {
+    expect(mayStartServer(command)).toBe(false)
   }
 })

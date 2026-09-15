@@ -124,6 +124,31 @@ test('the gate reports an empty test suite as inconclusive instead of failing â€
   }
 })
 
+// A Flask plan's `python app.py` kept one run on "Checking the result" for the
+// full five-minute verification timeout, and was then reported as a failure.
+test('an app entrypoint that starts a server is probed out as unproven, not waited out as a failure', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'elia-verify-server-probe-'))
+  try {
+    writeFileSync(join(dir, 'server.ts'), 'setInterval(() => {}, 1000)\n')
+    writeFileSync(join(dir, 'check.ts'), 'process.exit(0)\n')
+
+    const started = Date.now()
+    const alone = await runVerification(['bun server.ts'], dir, undefined, allowAllGovernor(), { serverProbeMs: 1500 })
+    expect(Date.now() - started).toBeLessThan(15_000)
+    // Nothing but a server: unrunnable, so the loop's fallback applies â€” never a pass.
+    expect(alone.passed).toBe(false)
+    expect(alone.results[0]!.stderr).toContain('starts a server rather than finishing')
+    expect(isUnrunnableCommandFailure(alone.results[0]!)).toBe(true)
+
+    // Beside a check that finishes, the server is skipped and the check decides.
+    const mixed = await runVerification(['bun server.ts', 'bun check.ts'], dir, undefined, allowAllGovernor(), { serverProbeMs: 1500 })
+    expect(mixed.passed).toBe(true)
+    expect(mixed.results.map((result) => result.command)).toEqual(['[skipped] bun server.ts', 'bun check.ts'])
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+}, 30_000)
+
 test('fallbackStaticPageVerification has nothing to check when no page changed', async () => {
   const outcome = await fallbackStaticPageVerification(['src/thing.ts'], process.cwd())
   expect(outcome).toBeUndefined()

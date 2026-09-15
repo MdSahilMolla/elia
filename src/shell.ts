@@ -346,13 +346,57 @@ export function clampOutput(text: string, maxLength = 4000): string {
  * the run ended `needs-attention` with a working Vite build on disk.
  *
  * One list, exported, so the three call sites cannot drift apart again.
+ *
+ * It is matched against the program each segment of the command actually runs
+ * (see invokedProgram), not anywhere in the line. Matching anywhere made a
+ * server's *name* enough: `pip install uvicorn`, `uv add uvicorn`, `pip install
+ * gunicorn flask` and `npm install serve` all read as starting a server, so
+ * run_command refused to install the one package a FastAPI project cannot run
+ * without — and `vite build` read as `vite`.
  */
 export function isLongRunningServerCommand(command: string): boolean {
-  return LONG_RUNNING_SERVER.test(command.trim())
+  return command.split(COMMAND_SEPARATOR).some((segment) => LONG_RUNNING_SERVER.test(invokedProgram(segment)))
 }
 
+/**
+ * A run of an app's own entrypoint — `python app.py`, `node server.js`, `bun
+ * run src/server.ts` — which starts a server as often as it runs a script. The
+ * name cannot say which, so this is deliberately not part of
+ * isLongRunningServerCommand: run_command must still be able to run a script
+ * that happens to be called app.py. Verification probes these instead of
+ * waiting out its full timeout on them.
+ */
+export function mayStartServer(command: string): boolean {
+  return command.split(COMMAND_SEPARATOR).some((segment) => APP_ENTRYPOINT.test(invokedProgram(segment)))
+}
+
+/** `&&`, `||`, `;`, `|`, a backgrounding `&`, a line break. */
+const COMMAND_SEPARATOR = /&&|\|\||[;|&\r\n]/
+
+/**
+ * One command segment with whatever only *launches* the real program stripped:
+ * environment assignments, `npx`/`bunx`/`pnpm dlx`/`npm exec`, `uv run`/`uvx`/
+ * `poetry run`/`pipenv run`/`bundle exec`, and `python -m`. What is left starts
+ * with the program that actually runs.
+ */
+function invokedProgram(segment: string): string {
+  let program = segment.trim()
+  for (;;) {
+    const next = program
+      .replace(/^(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)+/, '')
+      .replace(/^(?:npx|bunx|pnpx|uvx|(?:pnpm|yarn)\s+dlx|npm\s+exec|uv\s+run|poetry\s+run|pipenv\s+run|pdm\s+run|hatch\s+run|bundle\s+exec)(?:\s+-{1,2}[A-Za-z][\w-]*)*\s+/i, '')
+      .replace(/^(?:python3?|py)(?:\.exe)?\s+-m\s+/i, '')
+    if (next === program) return program
+    program = next
+  }
+}
+
+// Anchored: the program itself, optionally behind a path (`./node_modules/.bin/vite`, `bin/rails`).
 const LONG_RUNNING_SERVER =
-  /\b(?:(?:npm|pnpm|yarn|bun|deno)\s+(?:run\s+)?(?:dev|start|serve|preview|watch)|vite(?:\s|$)|next\s+(?:dev|start)|nuxt\s+(?:dev|start)|astro\s+dev|remix\s+dev|nodemon|ts-node-dev|concurrently|http-server|live-server|serve(?:\s|$)|flask\s+run|uvicorn|gunicorn|daphne|rails\s+s(?:erver)?|php\s+artisan\s+serve|python\s+-m\s+http\.server|jekyll\s+serve|hugo\s+server|webpack(?:-dev)?-server|ng\s+serve|expo\s+start|docker\s+compose\s+up(?!\s+-d\b)|tail\s+-f|watchexec)\b/i
+  /^(?:\S*[\\/])?(?:(?:npm|pnpm|yarn|bun|deno)\s+(?:run\s+|task\s+)?(?:dev|start|serve|preview|watch)\b|vite(?:\s+(?:dev|serve|preview)\b|\s+-|\s*$)|next\s+(?:dev|start)\b|nuxt\s+(?:dev|start)\b|nuxi\s+dev\b|astro\s+dev\b|remix\s+dev\b|nodemon\b|ts-node-dev\b|concurrently\b|http-server\b|live-server\b|serve(?:\s|$)|http\.server\b|flask\s+run\b|uvicorn\b|gunicorn\b|daphne\b|hypercorn\b|waitress-serve\b|fastapi\s+(?:dev|run)\b|streamlit\s+run\b|gradio\s+\S+\.py\b|(?:panel|bokeh)\s+serve\b|(?:chainlit|solara|reflex|shiny)\s+run\b|(?:django-admin|django)\s+runserver\b|(?:python3?|py)(?:\.exe)?\s+(?:\S*[\\/])?manage\.py\s+runserver\b|rails\s+s(?:erver)?\b|php\s+artisan\s+serve\b|jekyll\s+serve\b|hugo\s+server\b|webpack(?:-dev)?-server\b|webpack\s+serve\b|ng\s+serve\b|expo\s+start\b|docker(?:-compose|\s+compose)\s+up\b(?!.*\s(?:-d|--detach)\b)|(?:bun|node|deno)\b.*\s--(?:watch|hot)\b|tail\s+-f\b|watchexec\b)/i
+
+const APP_ENTRYPOINT =
+  /^(?:\S*[\\/])?(?:python3?|py|node|bun|deno|tsx|ts-node)(?:\.exe)?\s+(?:run\s+)?(?:-\S+\s+)*(?:\S*[\\/])?(?:app|server|main|index|run|wsgi|asgi|api|web)\.(?:py|[cm]?[jt]sx?)(?:\s|$)/i
 
 /**
  * Guidance for a command name that does not exist in *this* platform's shell

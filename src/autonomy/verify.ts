@@ -1,7 +1,7 @@
 import { existsSync } from 'node:fs'
 import { basename, relative, resolve, sep } from 'node:path'
 import type { Tool } from '../tools/types.ts'
-import { clampOutput, isLongRunningServerCommand, runShell, startsWithForeignShellCommand, type ShellResult } from '../shell.ts'
+import { clampOutput, isLongRunningServerCommand, mayStartServer, runShell, startsWithForeignShellCommand, type ShellResult } from '../shell.ts'
 import type { CriticIssue, CriticVerdict } from './types.ts'
 import { currentAgent } from './context.ts'
 import { activeActionGovernor, blockedInUnattendedMode, type ActionGovernor } from './governor.ts'
@@ -68,8 +68,15 @@ export function unwinnableVerificationCommands(
  * the next being meaningful, and a typecheck failure makes the test output noise
  * rather than information.
  */
-export async function runVerification(commands: string[], cwd?: string, signal?: AbortSignal, governor?: ActionGovernor): Promise<VerificationOutcome> {
+export async function runVerification(
+  commands: string[],
+  cwd?: string,
+  signal?: AbortSignal,
+  governor?: ActionGovernor,
+  options: { serverProbeMs?: number } = {},
+): Promise<VerificationOutcome> {
   const results: ShellResult[] = []
+  let probedServers = 0
 
   // `proposal.ts` rejects a dev server as a verification command at approval
   // time, but a run resumed from a plan approved before that check — or a
@@ -119,7 +126,25 @@ export async function runVerification(commands: string[], cwd?: string, signal?:
       results.push(result)
       return { results, passed: false, blocked: reason }
     }
-    const result = await runShell(command, VERIFY_TIMEOUT_MS, cwd, signal ?? currentAgent().signal)
+    const probe = mayStartServer(command)
+    const probeMs = options.serverProbeMs ?? SERVER_PROBE_MS
+    const result = await runShell(command, probe ? probeMs : VERIFY_TIMEOUT_MS, cwd, signal ?? currentAgent().signal)
+    if (probe && result.timedOut) {
+      // Still up long after a script would have finished: it started the app's
+      // server. That is not a check any more than `npm run dev` is, so it is
+      // recorded the same way — unproven, not failed. Waiting out the full
+      // VERIFY_TIMEOUT_MS on `python app.py` (a Flask app) kept one run on
+      // "Checking the result" for over eight minutes, and then failed it.
+      probedServers += 1
+      results.push({
+        ...result,
+        command: `[skipped] ${command}`,
+        exitCode: 0,
+        timedOut: false,
+        stderr: `${SKIPPED_SERVER_PREFIX}: still running after ${Math.round(probeMs / 1000)}s — it starts a server rather than finishing, so it cannot be a pass/fail check.`,
+      })
+      continue
+    }
     results.push(result)
     // "No tests to run" is not a failing check — keep going so a typecheck or
     // build after it still gets its say.
@@ -130,9 +155,21 @@ export async function runVerification(commands: string[], cwd?: string, signal?:
   const empty = results.filter(isNoTestsResult).map((result) => result.command)
   const inconclusive = empty.length > 0 ? `${empty.join(', ')} found no tests to run` : undefined
   const provedSomething = results.some((result) => result.exitCode === 0 && !result.timedOut && !result.command.startsWith('[skipped]'))
+  // Nothing ran but servers: the same outcome as a plan of nothing but dev
+  // servers (above), so the caller's fallback for unrunnable checks applies.
+  // A pass here would be "verified" having verified nothing.
+  if (probedServers > 0 && !provedSomething) {
+    return {
+      passed: false,
+      results: results.map((result) => (result.command.startsWith('[skipped] ') ? { ...result, command: result.command.slice('[skipped] '.length), exitCode: 1 } : result)),
+    }
+  }
   if (inconclusive && !provedSomething) return { results, passed: false, inconclusive }
   return { results, passed: true, inconclusive }
 }
+
+/** How long a bare app entrypoint (`python app.py`) may run as a check before it is taken to be a server. */
+export const SERVER_PROBE_MS = 20_000
 
 /**
  * A shell rejected `result.command` outright — it never ran the intended

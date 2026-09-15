@@ -99,6 +99,27 @@ test('one prose entry among otherwise-real commands still gets rejected', () => 
   expect(error).toContain('not a command a shell can run')
 })
 
+// A real mercury plan for "a python web app for visualization of a neural
+// network": Flask's server started as a check, then a request to it. The first
+// sat out the whole verification timeout; the second could never pass.
+test('a plan that starts the app and then requests localhost is sent back with checks that finish', () => {
+  const error = expectError({ ...minimal, verification: ['python app.py', 'curl http://localhost:5000'] })
+  expect(error).toContain('starts the app ("python app.py")')
+  expect(error).toContain('requests a local server')
+  expect(error).toContain('python -m py_compile app.py')
+})
+
+test('the servers Python data apps use are caught like any dev server', () => {
+  for (const command of ['streamlit run app.py --server.headless true', 'python manage.py runserver', 'gradio app.py', 'uvicorn main:app --reload']) {
+    expect(expectError({ ...minimal, verification: ['bun run build', command] })).toContain('starts a server and never exits')
+  }
+})
+
+test('an entrypoint on its own is left to the runtime probe — it may be a CLI', () => {
+  const proposal = expectOk({ ...minimal, verification: ['python -m pytest', 'python main.py --help'] })
+  expect(proposal.verification).toEqual(['python -m pytest', 'python main.py --help'])
+})
+
 test('a step without instructions is rejected, naming its index', () => {
   const error = expectError({ ...minimal, steps: [{ title: 'no body' }] })
 
