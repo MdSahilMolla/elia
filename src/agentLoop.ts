@@ -2,7 +2,7 @@ import { availableParallelism, cpus } from 'node:os'
 import { autoFallbacksFor, config } from './config.ts'
 import { beginCompaction, shrinkForOversizedRequest, type PendingCompaction } from './compaction.ts'
 import { compactionThresholdFor } from './contextWindow.ts'
-import { isCapacityError, isRequestTooLargeError } from './providerErrors.ts'
+import { isCapacityError, isMalformedToolCallError, isRequestTooLargeError } from './providerErrors.ts'
 import { createPlanlessWorkTracker, createRedundantReadTracker, isLoneBatchableRead, serialReadNudge } from './autonomy/toolBatchingNudge.ts'
 import { createReadAhead } from './autonomy/readAhead.ts'
 import { createPlanProgressTracker, planBelongsToRequest, type PlanProgressUpdate, type ToolOutcome } from './autonomy/planProgress.ts'
@@ -727,6 +727,10 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
     const healthyRoutes = routes.filter((route) => (providerHealth.get(providerHealthKey(route))?.cooldownUntil ?? 0) <= now)
     const activeRoutes = healthyRoutes.length > 0 ? healthyRoutes : routes
     let emittedOutput = false
+    // The part of that output which *did* something — a Codex hand-off, or
+    // provider activity such as a command or a file edit. Streamed text can be
+    // shown twice; an action must never be taken twice.
+    let emittedActions = false
     let firstOutputAt: number | undefined
     const noteFirstOutput = () => {
       if (firstOutputAt === undefined) firstOutputAt = Date.now()
@@ -762,6 +766,20 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
             return result.content
           } catch (error) {
             lastError = error
+            // Ask the same model again, even after text has streamed: the
+            // failed attempt's text never reached `messages`, so the only cost
+            // is seeing it twice, against losing the turn — or, in a sub-agent,
+            // the whole run. Not after an action, and not a provider-health
+            // failure: the route is fine, the sample was not.
+            if (
+              isMalformedToolCallError(error instanceof Error ? error.message : String(error))
+              && !emittedActions
+              && !signal?.aborted
+              && attempt < MAX_PROVIDER_ATTEMPTS
+            ) {
+              if (verbose) writeNotice('the model sent a tool call that was not valid JSON; asking it again')
+              continue
+            }
             if (isFallbackableProviderError(error)) {
               const key = providerHealthKey(route)
               const previous = providerHealth.get(key)
@@ -839,6 +857,7 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
         // Once the user has seen the hand-off, we are committed to it: a silent
         // retry or fallback would duplicate work or swap providers mid-answer.
         emittedOutput = true
+        emittedActions = true
       }
 
       let recordedText = ''
@@ -897,6 +916,7 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
               // is visible or actionable, retrying another route could repeat
               // work, so it has the same no-retry boundary as streamed text.
               emittedOutput = true
+              emittedActions = true
               noteFirstOutput()
               stopAnimation()
               // Providers may execute tools internally, but their plan and

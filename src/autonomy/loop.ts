@@ -940,8 +940,17 @@ Ask the right question for each kind:
 Only report unverifiable when the answer genuinely depends on the user's preference and no amount of looking would settle it. "I could not find it in the code" is not unverifiable.
 
 Finding that an assumption is FALSE is worth more than a confident guess on every other one. Finish by calling submit_assumptions with one entry per assumption.`,
+    }).catch((error: unknown) => {
+      // Advisory, so a failure here costs the check, not the run: the plan goes
+      // ahead on its assumptions unverified, which is where it stood before the
+      // check existed. Run 2026-09-15-lot0-alkr died outright here on one
+      // provider error before a single file was built.
+      const message = error instanceof Error ? error.message : String(error)
+      writeSubStep(`⚠ the assumption check failed (${message.slice(0, 160)}) — going ahead with the plan's assumptions unverified`)
+      journal.append('phase', { phase: 'scaffold', activity: 'checking assumptions', failed: message.slice(0, 500) })
+      return undefined
     })
-    track(checker.usage)
+    if (checker) track(checker.usage)
     const outcome = assumptionOutcome(proposal.assumptions, capture.taken())
     assumptionBriefing = outcome.briefing
     writeSubStep(outcome.summary)

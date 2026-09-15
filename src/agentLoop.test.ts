@@ -495,6 +495,70 @@ test('runAgentLoop retries transient provider failures before output', async () 
   expect(calls).toBe(3)
 })
 
+// What Inception's server sends mid-stream when mercury garbles a tool call; the
+// OpenAI SDK throws it as an APIError with no status. Run 2026-09-15-lot0-alkr
+// died outright on it.
+const GARBLED = 'Failed to parse tool call arguments as JSON'
+
+test('a tool call the model garbled is asked for again, even after text streamed', async () => {
+  config.routingMode = 'selected'
+  let calls = 0
+  config.provider = {
+    async streamTurn({ onText }) {
+      calls += 1
+      onText('Let me build the page. ')
+      if (calls === 1) throw new Error(GARBLED)
+      return {
+        content: [{ type: 'text', text: 'Let me build the page. Done.' }] as ContentBlock[],
+        usage: { inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 },
+      }
+    },
+  }
+
+  const messages: ConversationMessage[] = [{ role: 'user', content: [{ type: 'text', text: 'go' }] }]
+  const result = await runAgentLoop({ messages, systemPrompt: 'test', tools: [], useAnimation: false, verbose: false, onText: () => {} })
+
+  expect(result.stopReason).toBe('complete')
+  expect(calls).toBe(2)
+  // The failed attempt left nothing in the conversation.
+  expect(messages.filter((m) => m.role === 'assistant')).toHaveLength(1)
+})
+
+test('a garbled tool call is not asked for again once the provider has acted', async () => {
+  config.routingMode = 'selected'
+  let calls = 0
+  config.provider = {
+    async streamTurn({ onActivity }) {
+      calls += 1
+      onActivity?.({ kind: 'command', title: 'bun install', status: 'completed' })
+      throw new Error(GARBLED)
+    },
+  }
+
+  const messages: ConversationMessage[] = [{ role: 'user', content: [{ type: 'text', text: 'go' }] }]
+  await expect(
+    runAgentLoop({ messages, systemPrompt: 'test', tools: [], useAnimation: false, verbose: false, onActivity: () => {} }),
+  ).rejects.toThrow(GARBLED)
+  expect(calls).toBe(1)
+})
+
+test('a model that keeps garbling its tool calls gives up after the attempt limit', async () => {
+  config.routingMode = 'selected'
+  let calls = 0
+  config.provider = {
+    async streamTurn() {
+      calls += 1
+      throw new Error(GARBLED)
+    },
+  }
+
+  const messages: ConversationMessage[] = [{ role: 'user', content: [{ type: 'text', text: 'go' }] }]
+  await expect(
+    runAgentLoop({ messages, systemPrompt: 'test', tools: [], useAnimation: false, verbose: false }),
+  ).rejects.toThrow(GARBLED)
+  expect(calls).toBe(3)
+})
+
 test('runAgentLoop does not retry permanent provider errors', async () => {
   config.routingMode = 'selected'
   let calls = 0
