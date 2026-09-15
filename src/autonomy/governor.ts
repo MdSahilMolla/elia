@@ -65,7 +65,32 @@ export interface ActionGovernor {
 }
 
 const CRITICAL_COMMAND = /\b(rm\s+-rf|rm\s+--no-preserve-root|mkfs|dd\s+if=|shutdown|reboot|poweroff|drop\s+(database|table)|truncate\s+table|git\s+(push|reset\s+--hard|clean\s+-fd)|force[- ]push|sudo\b|chmod\s+777|chown\s+-R|kill\s+-9|kubectl\s+(apply|delete|rollout|scale)|helm\s+(install|upgrade|uninstall)|docker\s+(push|rm|system\s+prune)|terraform\s+(apply|destroy)|prisma\s+migrate\s+(deploy|reset)|alembic\s+upgrade|drizzle-kit\s+push|npm\s+publish|pnpm\s+publish|bun\s+publish|vercel\s+.*--prod|fly\s+deploy|railway\s+up|gcloud\s+.*\bdeploy\b|aws\s+(cloudformation|ecs|rds|lambda)|curl[^\n|]*\|\s*(sh|bash)|wget[^\n|]*\|\s*(sh|bash)|deploy\s+(to\s+)?prod(uction)?|send\s+.*(email|message)|publish\b|tweet\b|buy\b|purchase\b|checkout\b|transfer\b|wire\b)\b/i
-const REVIEW_COMMAND = /\b(git\s+commit|npm\s+install|pnpm\s+install|yarn\s+add|bun\s+(add|install)|pip\s+install|docker\s+build|docker\s+run|curl\b|wget\b|ssh\b|scp\b|gh\s+pr|deploy\b)\b/i
+/**
+ * Unattended mode auto-allows the review band by design — the code comment at
+ * the SETTLEABLE_ONCE declaration below calls it "local, reversible work get a
+ * standing yes". The verbs below are NOT that, which is why each is pulled OUT
+ * of REVIEW_COMMAND and classified critical instead. They must never be
+ * auto-allowed by an unattended run; reaching one requires an exact approval
+ * boundary (or an explicit `--authorize` pre-grant), because each executes
+ * arbitrary code on the host, runs inside a container that can mount the host
+ * filesystem, or opens an unvalidated network channel.
+ */
+// Package-manager installs run arbitrary build scripts (setup.py, postinstall,
+// prebuild) on the host as the current user. A package a model installs is
+// supply-chain code by definition.
+const CODE_EXEC_COMMAND = /\b(pip3?\s+install|npm\s+install|pnpm\s+install|yarn\s+(?:add|install)|bun\s+(?:add|install))\b/i
+// Docker build/run execute arbitrary code (RUN steps, container entrypoint)
+// with the ability to mount the host filesystem or devices; ssh/scp are
+// remote shells and data movement. None of these are local or reversible.
+const REMOTE_SHELL_COMMAND = /\b(docker\s+(?:build|run)|ssh|scp)\b/i
+// Bare curl/wget are an unvalidated data channel: even a plain GET rides data
+// out of the machine in the query string, and wget writes an arbitrary
+// downloaded file to disk. The model has the URL-validated, response-bounded
+// http_probe/web_fetch tools for legitimate HTTP work; shell curl/wget stays
+// critical. (curl/wget with --data/-d/--upload-file etc. are already caught
+// by EXTERNAL_WRITE_COMMAND further down; this catches the bare GET form.)
+const REMOTE_FETCH_COMMAND = /^(?:\S+=\S+\s+)*(?:command\s+)?(?:curl|wget)\b/i
+const REVIEW_COMMAND = /\b(git\s+commit|gh\s+pr|deploy\b)\b/i
 const READ_ONLY_COMMAND = /^(?:command\s+)?(?:pwd|ls|find|grep|rg|git\s+(?:status|diff|log|show|branch)|(?:bun|npm|pnpm|yarn)\s+(?:test|run\s+(?:test|typecheck|type-check|tsc|check-types|lint|format\s+--check|check))|npx\s+(?:--no-install\s+)?tsc\s+--noEmit|cargo\s+(?:check|test|clippy)|go\s+(?:build|test|vet)\b[^\n]*|mvn\s+(?:-[^\s]+\s+)*(?:compile|test-compile|test)\b[^\n]*|(?:\.\/)?gradlew(?:\.bat)?\s+(?:build|test|check|compileJava|compileTestJava)\b[^\n]*|gradle\s+(?:build|test|check|compileJava|compileTestJava)\b[^\n]*|ctest\b[^\n]*|pytest\b[^\n]*|mypy\b[^\n]*|node\s+--version|bun\s+--version|npm\s+--version|printf|echo|cat|head|tail|sed|awk)\b/i
 // `sed`/`awk` are allowed above only for their plain print-to-stdout form.
 // Both also support in-place file rewriting (`sed -i`, `sed --in-place`,
@@ -590,7 +615,7 @@ export function createActionGovernor(options: { mode?: GovernanceMode; approve?:
           actionCount += 1
           return {
             allowed: true,
-            assessment: { ...assessment, decision: 'allow', reason: `${assessment.reason} (pre-authorized: .elia/preauth.json grant for "${assessment.intent}", use #${grant?.usedCount ?? '?'})` },
+            assessment: { ...assessment, decision: 'allow', reason: `${assessment.reason} (pre-authorized: ~/.elia/preauth.json grant for "${assessment.intent}", use #${grant?.usedCount ?? '?'})` },
           }
         }
         return {
@@ -729,6 +754,18 @@ function assessCommand(command: string, cwd: string): ActionAssessment {
   }
   if (CRITICAL_COMMAND.test(command)) {
     return assessment('critical', 'approve', 'shell command may cause an irreversible or external side effect', 'shell', [], false)
+  }
+  // Supply-chain installs, container/SSH execution, and bare remote fetch are
+  // critical with a dedicated intent — they execute arbitrary code or open an
+  // unvalidated network channel, so no unattended run may auto-allow them.
+  if (CODE_EXEC_COMMAND.test(command)) {
+    return assessment('critical', 'approve', 'shell command installs packages whose build scripts can execute arbitrary code on the host', 'shell.code-exec', [], false)
+  }
+  if (REMOTE_SHELL_COMMAND.test(command)) {
+    return assessment('critical', 'approve', 'shell command executes code on a remote host or inside a container that may mount the host filesystem', 'shell.remote', [], false)
+  }
+  if (REMOTE_FETCH_COMMAND.test(command)) {
+    return assessment('critical', 'approve', 'shell command opens an unvalidated network channel (a bare GET already rides data out of the machine); use web_fetch/http_probe for safe bounded retrieval', 'shell.external-write', [], false)
   }
   if (REVIEW_COMMAND.test(command)) {
     return assessment('review', 'approve', 'shell command changes dependencies, reaches a remote system, or creates a durable artifact', 'shell', [], true)
