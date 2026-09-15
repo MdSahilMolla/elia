@@ -27,7 +27,7 @@ const verifiedReceipt = {
   outcome: 'completed',
   completion: { state: 'verified' },
   verdict: { verdict: 'approve' },
-  verification: [{ passed: true }],
+  verification: [{ passed: true, results: [{ command: 'bun test', exitCode: 0 }] }],
   proposal: { steps: [{ role: 'builder', title: 'build', files: ['src/a.ts'] }], verification: ['bun test'] },
   completedAt: 1,
 }
@@ -65,6 +65,21 @@ describe('diagnoseTraceSupply', () => {
     expect(reasons).toContain('outcome=needs-attention')
     expect(reasons).toContain('completion=failed')
     expect(reasons).toContain('never passed')
+  })
+
+  test('verification that "passed" without running a check does not qualify a run', () => {
+    // What 2026-09-12-tona-tgmi — for a long time the only qualifying run — and
+    // 2026-09-15-7cj7-8oi2 looked like: a plan with nothing runnable, recorded
+    // as a pass.
+    const root = project({
+      empty: { ...verifiedReceipt, verification: [{ passed: true, results: [] }] },
+      none: { ...verifiedReceipt, verification: [] },
+    })
+    const rows = Object.fromEntries(diagnoseTraceSupply(root).map((row) => [row.runId, row]))
+    expect(rows.empty!.accepted).toBe(false)
+    expect(rows.empty!.rejectedBy).toContain('verification "passed" without running a single check')
+    expect(rows.none!.rejectedBy).toContain('verification never ran')
+    expect(collectDistillableTraces(root)).toEqual([])
   })
 
   test('a review verdict of revise disqualifies the run', () => {
