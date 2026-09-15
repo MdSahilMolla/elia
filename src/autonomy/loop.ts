@@ -283,6 +283,14 @@ interface InFlightRun {
   usage: () => Usage
   /** Drops the shutdown hook once the run no longer needs finalizing. */
   unregisterShutdown: () => void
+  /**
+   * Stops what `done()` would have stopped: the supervisor poll, the wall-clock
+   * timer, the task's controls. A run that threw never reaches `done()`, and
+   * those timers then kept the process alive — run 2026-09-15-lot0-alkr
+   * printed its error and never exited, and inside an interactive session the
+   * 250 ms poll would have run for as long as the session did.
+   */
+  release: () => void
 }
 
 let inFlightRun: InFlightRun | undefined
@@ -303,6 +311,11 @@ function claimInFlightRun(): InFlightRun | undefined {
 function finalizeDeadRun(reason: string, error?: unknown): void {
   const run = claimInFlightRun()
   if (!run) return
+  try {
+    run.release()
+  } catch {
+    // Same rule as below: never throw over the original failure.
+  }
   try {
     const events = run.journal.events()
     const lastPhase = [...events].reverse().find((event) => event.kind === 'phase')?.data as { phase?: string } | undefined
@@ -491,7 +504,23 @@ async function runAutonomousTaskInternal(options: AutonomousRunOptions): Promise
   const unregisterShutdown = registerShutdownCleanup(() => {
     finalizeDeadRun('the process was stopped before the run could finish (Ctrl+C, a closed terminal, or SIGTERM)')
   })
-  inFlightRun = { runId, goal, taskSessionId: parentTask.id, journal, graph, startedAt, usage: () => usage, unregisterShutdown }
+  inFlightRun = {
+    runId,
+    goal,
+    taskSessionId: parentTask.id,
+    journal,
+    graph,
+    startedAt,
+    usage: () => usage,
+    unregisterShutdown,
+    release: () => {
+      if (budgetTimer) clearTimeout(budgetTimer)
+      if (supervisorTimer) clearInterval(supervisorTimer)
+      unregisterParentControls()
+      signal?.removeEventListener('abort', forwardAbort)
+      taskSessions.update(parentTask.id, { status: 'failed', action: 'Stopped', detail: 'The run ended before it could finish; its receipt records how.' })
+    },
+  }
 
   /**
    * Ends the run as aborted, recording *where* it stopped and *why*.
