@@ -63,3 +63,10 @@ test('an empty diff is reported as such rather than as an empty section', () => 
   expect(section.text).toContain('no diff against HEAD')
   expect(section.text).toContain('(no files changed against HEAD)')
 })
+
+test('a diff taken from where the run began says so, so committed wave work reads as part of the change', () => {
+  const section = buildReviewDiffSection({ diff: 'diff --git a/index.html b/index.html', numstat: '12\t0\tindex.html', base: '38d92d8f0c1e2b3a4d5e6f708192a3b4c5d6e7f8' })
+  expect(section.text).toContain('## What actually changed (git diff 38d92d8)')
+  expect(section.text).toContain('including what it has already committed')
+  expect(section.text).not.toContain('git diff HEAD')
+})

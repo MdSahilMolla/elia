@@ -881,6 +881,15 @@ async function runAutonomousTaskInternal(options: AutonomousRunOptions): Promise
     hasLocalHistory = scaffold.commits.length > 0
   }
 
+  // Where this run's own work begins. The polish pass and the reviewers are
+  // shown everything since here, committed or not: each wave commits what it
+  // wrote, and `git diff HEAD` stops showing that work the moment it lands, so
+  // in run 2026-09-15-7cj7-8oi2 the bug hunter reviewed the polish pass's
+  // aria-labels and never saw the calculator the wave had already committed.
+  // A SHA, or HEAD itself when there is no history to pin.
+  const head = await runShell('git rev-parse --verify -q HEAD', 30_000, workspaceRoot, runSignal)
+  const runBase = head.exitCode === 0 && /^[0-9a-f]{7,64}$/i.test(head.stdout.trim()) ? head.stdout.trim() : 'HEAD'
+
   // --- Execute --------------------------------------------------------------
 
   taskSessions.update(parentTask.id, {
@@ -1280,7 +1289,7 @@ Do not repeat whatever failed. ${retryGuidanceFor(report)}`,
       if (runSignal?.aborted) return abortedAt('polish', { proposal })
       journal.append('phase', { phase: 'polish', attempt: polishAttempt })
 
-      const diff = await runShell('git diff HEAD', 30_000, workspaceRoot, runSignal)
+      const diff = await runShell(`git diff ${runBase}`, 30_000, workspaceRoot, runSignal)
       const diffText = diff.stdout.trim() ? clampOutput(diff.stdout.trim(), 8000) : '(no diff yet — inspect the completed work and the goal)'
       const polish = await runSubAgent({
         role: 'polisher',
@@ -1306,7 +1315,7 @@ Read the changed files in full context. Improve only concrete issues directly re
 
       // A second pass is useful only when the first pass actually changed the
       // tree; otherwise stop early rather than rewarding autonomous churn.
-      const after = await runShell('git diff HEAD', 30_000, workspaceRoot, runSignal)
+      const after = await runShell(`git diff ${runBase}`, 30_000, workspaceRoot, runSignal)
       if (after.stdout === diff.stdout) break
     }
   }
@@ -1422,13 +1431,13 @@ Read the changed files in full context. Improve only concrete issues directly re
       // tool_result, all billed) to ask git the same question. Three reviewers
       // asking separately used to cost 3x this round-trip for identical output.
       const [diff, numstat, status] = await Promise.all([
-        runShell('git diff HEAD', 30_000, workspaceRoot, runSignal),
+        runShell(`git diff ${runBase}`, 30_000, workspaceRoot, runSignal),
         // The file inventory comes from --numstat rather than from the clamped
         // diff text, so it stays complete even when the diff itself is cut.
-        runShell('git diff --numstat HEAD', 30_000, workspaceRoot, runSignal),
+        runShell(`git diff --numstat ${runBase}`, 30_000, workspaceRoot, runSignal),
         runShell('git status --porcelain=v1', 30_000, workspaceRoot, runSignal),
       ])
-      const diffSection = buildReviewDiffSection({ diff: diff.stdout, numstat: numstat.stdout })
+      const diffSection = buildReviewDiffSection({ diff: diff.stdout, numstat: numstat.stdout, base: runBase })
       const changedFiles = diffSection.files.map((file) => file.path)
       // A diff that only touches prose has no exploit surface and no logic to
       // break, so paying for a security and a bug-hunt pass on it is waste —
