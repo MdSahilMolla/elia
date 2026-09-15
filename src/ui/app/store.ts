@@ -11,7 +11,8 @@
 // live region empties.
 import type { ToolEvent } from '../../agentLoop.ts'
 import type { ProviderActivity } from '../../providers/types.ts'
-import { redactRecord, redactSecrets, redactText } from '../redact.ts'
+import { redactRecord, redactSecrets, redactText, relativizeProjectPaths } from '../redact.ts'
+import { isExploreTool } from './toolSummary.ts'
 
 export interface UserItem {
   id: string
@@ -23,12 +24,19 @@ export interface AssistantItem {
   kind: 'assistant'
   text: string
   streaming: boolean
+  /**
+   * A later paragraph of the same reply. Long answers are committed to
+   * scrollback a finished paragraph at a time (see `stableCut`), so the part
+   * still streaming stays small; continuations carry no leading `●`.
+   */
+  continuation?: boolean
 }
 export interface ThinkingItem {
   id: string
   kind: 'thinking'
   text: string
   streaming: boolean
+  continuation?: boolean
 }
 export interface ToolItem {
   id: string
@@ -40,13 +48,30 @@ export interface ToolItem {
   durationMs?: number
   parentId?: string
 }
+/** A run of consecutive read-only lookups, rendered as one line. */
+export interface GroupItem {
+  id: string
+  kind: 'group'
+  tools: ToolItem[]
+}
 export interface NoticeItem {
   id: string
   kind: 'notice' | 'error' | 'shell'
   text: string
 }
+/** The session header, printed once at the top of scrollback. */
+export interface HeaderItem {
+  id: string
+  kind: 'header'
+  version: string
+  /** e.g. "dev mode". */
+  greeting: string
+  /** e.g. "elia ⎇ production". */
+  location?: string
+  lessons?: number
+}
 
-export type Item = UserItem | AssistantItem | ThinkingItem | ToolItem | NoticeItem
+export type Item = UserItem | AssistantItem | ThinkingItem | ToolItem | GroupItem | NoticeItem | HeaderItem
 
 export interface Snapshot {
   committed: readonly Item[]
@@ -61,6 +86,7 @@ export interface TranscriptStore {
   getSnapshot(): Snapshot
   subscribe(listener: () => void): () => void
 
+  header(info: Omit<HeaderItem, 'id' | 'kind'>): void
   appendUser(text: string): void
   assistantDelta(delta: string): void
   thinkingDelta(delta: string): void
@@ -81,6 +107,59 @@ export interface TranscriptStore {
   turnItems(): readonly Item[]
   toMarkdown(title?: string): string
   reset(): void
+}
+
+/** Every tool call in `items`, with grouped lookups flattened back out. */
+export function toolsOf(items: readonly Item[]): ToolItem[] {
+  return items.flatMap((item) => (item.kind === 'tool' ? [item] : item.kind === 'group' ? item.tools : []))
+}
+
+const FENCE_LINE = /^\s{0,3}(?:`{3,}|~{3,})/
+
+/**
+ * Where a streaming reply can be cut so the part before it never changes
+ * again: just past the last blank line that sits outside a code fence and has
+ * real text after it. -1 when there is no such point yet.
+ *
+ * Ink repaints the whole live region every frame with a blind cursor-up; once
+ * one streaming answer grows taller than the terminal that repaint lands in the
+ * wrong place and duplicates the frame into scrollback. Committing finished
+ * paragraphs as they complete keeps the live part to the paragraph in flight.
+ */
+export function stableCut(text: string): number {
+  const lines = text.split('\n')
+  let offset = 0
+  let inFence = false
+  const candidates: number[] = []
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i]!
+    if (FENCE_LINE.test(line)) inFence = !inFence
+    offset += line.length + 1
+    if (!inFence && line.trim() === '' && i > 0 && i < lines.length - 1) candidates.push(offset)
+  }
+  for (let i = candidates.length - 1; i >= 0; i -= 1) {
+    const cut = candidates[i]!
+    if (cut < text.length && text.slice(cut).trim() && text.slice(0, cut).trim()) return cut
+  }
+  return -1
+}
+
+/** Reasoning has no paragraph structure to speak of — any finished line is final. */
+function thinkingCut(text: string): number {
+  const at = text.lastIndexOf('\n')
+  if (at <= 0 || !text.slice(at + 1).trim() || !text.slice(0, at).trim()) return -1
+  return at + 1
+}
+
+/** Activity text keeps its line structure — a plan or a check list flattened into one run-on line is unreadable. */
+function activityText(activity: ProviderActivity): string {
+  const raw = activity.detail ? `${activity.title}\n${activity.detail}` : activity.title
+  const text = redactSecrets(relativizeProjectPaths(raw)).replace(/\r\n?/g, '\n').trim()
+  const lines = text.split('\n').map((line) => line.trimEnd())
+  const kept = lines.slice(0, 12)
+  if (lines.length > kept.length) kept.push(`… ${lines.length - kept.length} more lines`)
+  const joined = kept.join('\n')
+  return joined.length > 2_000 ? `${joined.slice(0, 1_999)}…` : joined
 }
 
 export function createTranscriptStore(): TranscriptStore {
@@ -128,13 +207,15 @@ export function createTranscriptStore(): TranscriptStore {
   // ordering is never broken; `commit()` at turn end just flushes the tail.
   const isSettled = (item: Item): boolean => {
     if (item.kind === 'tool') return item.status !== 'running'
+    if (item.kind === 'group') return item.tools.every((tool) => tool.status !== 'running')
     if (item.kind === 'assistant' || item.kind === 'thinking') return !item.streaming
-    return true // user / notice / error / shell never change after being added
+    return true // user / notice / error / shell / header never change after being added
   }
   const flushSettled = (): void => {
     // Migrate the settled prefix, but always leave the final live item in place:
-    // it may be a streaming paragraph still repainting, and keeping `live`
-    // non-empty during a turn keeps `commit()`'s end-of-turn contract simple.
+    // it may be a streaming paragraph still repainting (or a lookup group that
+    // the next call may still join), and keeping `live` non-empty during a turn
+    // keeps `commit()`'s end-of-turn contract simple.
     let cut = 0
     while (cut < live.length - 1 && isSettled(live[cut]!)) cut += 1
     if (cut === 0) return
@@ -142,11 +223,50 @@ export function createTranscriptStore(): TranscriptStore {
     live = live.slice(cut)
   }
 
+  /** Append a tool item — into the open lookup group when it is one. */
+  const addTool = (tool: ToolItem): void => {
+    const last = lastLive()
+    if (isExploreTool(tool.name) && !tool.parentId) {
+      if (last?.kind === 'group') {
+        live = live.map((item) => (item === last ? { ...last, tools: [...last.tools, tool] } : item))
+        return
+      }
+      live = [...live, { id: `g-${tool.id}`, kind: 'group', tools: [tool] }]
+      return
+    }
+    live = [...live, tool]
+  }
+
+  /** Stream `delta` into the trailing item of `kind`, committing finished text as it goes. */
+  const streamInto = (kind: 'assistant' | 'thinking', delta: string, cutAt: (text: string) => number): void => {
+    const last = lastLive()
+    if (last?.kind === kind && last.streaming) {
+      const text = last.text + delta
+      const cut = cutAt(text)
+      if (cut > 0) {
+        // The finished head settles (and flushes to <Static>); the tail keeps streaming.
+        const head = { ...last, text: text.slice(0, cut).replace(/\s+$/, ''), streaming: false }
+        const tail = { id: nextId(), kind, text: text.slice(cut), streaming: true, continuation: true } as Item
+        live = [...live.slice(0, -1), head, tail]
+      } else {
+        live = live.map((item) => (item === last ? { ...last, text } : item))
+      }
+    } else {
+      live = [...live, { id: nextId(), kind, text: delta, streaming: true } as Item]
+    }
+    changed()
+  }
+
   return {
     getSnapshot: () => snapshot,
     subscribe(listener) {
       listeners.add(listener)
       return () => listeners.delete(listener)
+    },
+
+    header(info) {
+      committed = [...committed, { id: nextId(), kind: 'header', ...info }]
+      changed()
     },
 
     appendUser(text) {
@@ -167,33 +287,18 @@ export function createTranscriptStore(): TranscriptStore {
     // in the one known to do it.
     assistantDelta(delta) {
       if (delta.length === 0) return
-      const last = lastLive()
-      if (last?.kind === 'assistant' && last.streaming) {
-        live = live.map((item) => (item === last ? { ...last, text: last.text + delta } : item))
-      } else {
-        live = [...live, { id: nextId(), kind: 'assistant', text: delta, streaming: true }]
-      }
-      changed()
+      streamInto('assistant', delta, stableCut)
     },
 
     thinkingDelta(delta) {
       if (delta.length === 0) return
-      const last = lastLive()
-      if (last?.kind === 'thinking' && last.streaming) {
-        live = live.map((item) => (item === last ? { ...last, text: last.text + delta } : item))
-      } else {
-        live = [...live, { id: nextId(), kind: 'thinking', text: delta, streaming: true }]
-      }
-      changed()
+      streamInto('thinking', delta, thinkingCut)
     },
 
     toolStart(call) {
       // A new tool call ends the assistant's current streaming paragraph.
       live = live.map((item) => (item.kind === 'assistant' || item.kind === 'thinking' ? { ...item, streaming: false } : item))
-      live = [
-        ...live,
-        { id: call.id, kind: 'tool', name: call.name, input: redactRecord(call.input), status: 'running', parentId: call.parentId },
-      ]
+      addTool({ id: call.id, kind: 'tool', name: call.name, input: redactRecord(call.input), status: 'running', parentId: call.parentId })
       changed()
     },
 
@@ -206,33 +311,41 @@ export function createTranscriptStore(): TranscriptStore {
       // output keep their formatting and full length; only credential-shaped
       // substrings get replaced.
       const safeResult = redactSecrets(event.result)
+      const isMatch = (item: ToolItem): boolean =>
+        event.id ? item.id === event.id : item.name === event.name && item.status === 'running'
+      const finish = (item: ToolItem): ToolItem => ({ ...item, status, result: safeResult, durationMs: event.durationMs })
       let matched = false
       live = live.map((item) => {
-        if (matched || item.kind !== 'tool') return item
-        const isMatch = event.id ? item.id === event.id : item.name === event.name && item.status === 'running'
-        if (!isMatch) return item
-        matched = true
-        return { ...item, status, result: safeResult, durationMs: event.durationMs }
+        if (matched) return item
+        if (item.kind === 'tool' && isMatch(item)) {
+          matched = true
+          return finish(item)
+        }
+        if (item.kind === 'group') {
+          const index = item.tools.findIndex(isMatch)
+          if (index >= 0) {
+            matched = true
+            return { ...item, tools: item.tools.map((tool, i) => (i === index ? finish(tool) : tool)) }
+          }
+        }
+        return item
       })
       if (!matched) {
-        live = [
-          ...live,
-          {
-            id: event.id ?? nextId(),
-            kind: 'tool',
-            name: event.name,
-            input: redactRecord(event.input),
-            status,
-            result: safeResult,
-            durationMs: event.durationMs,
-          },
-        ]
+        addTool({
+          id: event.id ?? nextId(),
+          kind: 'tool',
+          name: event.name,
+          input: redactRecord(event.input),
+          status,
+          result: safeResult,
+          durationMs: event.durationMs,
+        })
       }
       changed()
     },
 
     activity(activity) {
-      const text = redactText(activity.detail ? `${activity.title}\n${activity.detail}` : activity.title, 2_000)
+      const text = activityText(activity)
       // A repair loop emits the same warning on each attempt. Collapse an
       // immediately-repeated activity into one line with a ×N counter rather
       // than stacking identical rows in scrollback.
@@ -340,12 +453,12 @@ export function createTranscriptStore(): TranscriptStore {
     },
 
     lastTool(n) {
-      const tools = [...committed, ...live].filter((item): item is ToolItem => item.kind === 'tool')
+      const tools = toolsOf([...committed, ...live])
       return n === undefined ? tools[tools.length - 1] : tools[n]
     },
     turnItems: () => [...committed.slice(turnBase), ...live],
     toolCount() {
-      return [...committed, ...live].filter((item) => item.kind === 'tool').length
+      return toolsOf([...committed, ...live]).length
     },
 
     toMarkdown(title) {
@@ -353,26 +466,32 @@ export function createTranscriptStore(): TranscriptStore {
       const out: string[] = [`# ${title ?? 'elia session'}`, '']
       let renderedTurn = -1
       let seenUser = false
+      const pushTool = (item: ToolItem) =>
+        out.push(
+          `<details><summary>🔧 ${item.name} · ${item.status}</summary>`,
+          '',
+          '```',
+          redactText(item.result ?? '(no output)', 8_000),
+          '```',
+          '',
+          '</details>',
+          '',
+        )
       for (const item of all) {
+        if (item.kind === 'header') continue
         if (item.kind === 'user') {
           renderedTurn += 1
           seenUser = true
           out.push(`## Turn ${renderedTurn + 1}`, '', '**You:**', '', item.text, '')
         } else if (item.kind === 'assistant') {
-          out.push('**elia:**', '', item.text, '')
+          if (item.continuation) out.push(item.text, '')
+          else out.push('**elia:**', '', item.text, '')
         } else if (item.kind === 'thinking') {
           out.push('<details><summary>Reasoning</summary>', '', item.text, '', '</details>', '')
         } else if (item.kind === 'tool') {
-          out.push(
-            `<details><summary>🔧 ${item.name} · ${item.status}</summary>`,
-            '',
-            '```',
-            redactText(item.result ?? '(no output)', 8_000),
-            '```',
-            '',
-            '</details>',
-            '',
-          )
+          pushTool(item)
+        } else if (item.kind === 'group') {
+          for (const tool of item.tools) pushTool(tool)
         } else if (item.kind === 'shell') {
           out.push('```console', item.text, '```', '')
         } else {

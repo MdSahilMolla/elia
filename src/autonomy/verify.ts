@@ -23,6 +23,20 @@ export interface VerificationOutcome {
    * repair attempts on it.
    */
   blocked?: string
+  /**
+   * Set when a test runner found no tests to run. That proves nothing either
+   * way — and handing it to the model as a failure is how "change the greeting"
+   * in a project with no tests ended with elia writing a test file nobody asked
+   * for (Bun exits 1 on "0 test files matching …"). Unverified, not failed.
+   */
+  inconclusive?: string
+}
+
+/** A test runner that ran and found nothing to test — Bun, Jest, Vitest, Mocha, pytest. */
+const NO_TESTS_COLLECTED = /\b0 test files matching\b|\bno tests? (?:were )?found\b|\bno test files found\b|\bno tests ran\b|\bcollected 0 items\b/i
+
+export function isNoTestsResult(result: ShellResult): boolean {
+  return !result.timedOut && result.exitCode !== 0 && NO_TESTS_COLLECTED.test(`${result.stdout}\n${result.stderr}`)
 }
 
 /**
@@ -107,10 +121,17 @@ export async function runVerification(commands: string[], cwd?: string, signal?:
     }
     const result = await runShell(command, VERIFY_TIMEOUT_MS, cwd, signal ?? currentAgent().signal)
     results.push(result)
+    // "No tests to run" is not a failing check — keep going so a typecheck or
+    // build after it still gets its say.
+    if (isNoTestsResult(result)) continue
     if (result.exitCode !== 0 || result.timedOut) return { results, passed: false }
   }
 
-  return { results, passed: true }
+  const empty = results.filter(isNoTestsResult).map((result) => result.command)
+  const inconclusive = empty.length > 0 ? `${empty.join(', ')} found no tests to run` : undefined
+  const provedSomething = results.some((result) => result.exitCode === 0 && !result.timedOut && !result.command.startsWith('[skipped]'))
+  if (inconclusive && !provedSomething) return { results, passed: false, inconclusive }
+  return { results, passed: true, inconclusive }
 }
 
 /**
@@ -128,8 +149,8 @@ export function isUnrunnableCommandFailure(result: ShellResult): boolean {
   if (result.timedOut || result.exitCode === 0) return false
   // A dev server elia refused to run never produced a verdict either, so it
   // belongs in the same bucket as a command the shell rejected: the work is
-  // unproven, not disproven.
-  return SHELL_REJECTED_COMMAND.test(result.stderr) || result.stderr.startsWith(SKIPPED_SERVER_PREFIX)
+  // unproven, not disproven. So does a test runner with no tests to run.
+  return SHELL_REJECTED_COMMAND.test(result.stderr) || result.stderr.startsWith(SKIPPED_SERVER_PREFIX) || isNoTestsResult(result)
 }
 
 /**

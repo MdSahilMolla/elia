@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { createTranscriptStore } from './store.ts'
+import { createTranscriptStore, stableCut, toolsOf } from './store.ts'
 import type { ToolEvent } from '../../agentLoop.ts'
 
 const evt = (over: Partial<ToolEvent> & { id?: string } = {}): ToolEvent & { id?: string } => ({
@@ -37,8 +37,10 @@ test('flushSettled keeps the live region bounded across a long tool batch', () =
   s.appendUser('do a lot')
   const naive: string[] = []
   for (let i = 0; i < 30; i += 1) {
-    s.toolStart({ id: `t${i}`, name: 'grep', input: { pattern: String(i) } })
-    s.toolEnd(evt({ id: `t${i}`, name: 'grep', result: `r${i}` }))
+    // Alternate a lookup with a command so nothing merges into one group.
+    const name = i % 2 ? 'run_command' : 'grep'
+    s.toolStart({ id: `t${i}`, name, input: { pattern: String(i) } })
+    s.toolEnd(evt({ id: `t${i}`, name, result: `r${i}` }))
     naive.push(`t${i}`)
   }
   s.assistantDelta('all done')
@@ -46,10 +48,75 @@ test('flushSettled keeps the live region bounded across a long tool batch', () =
   // Everything that settled moved to <Static>; the live region never piles up.
   expect(snap.live.length).toBeLessThanOrEqual(3)
   // Order across the two lists still matches a single append-only list.
-  const toolIds = [...snap.committed, ...snap.live].filter((i) => i.kind === 'tool').map((i) => i.id)
-  expect(toolIds).toEqual(naive)
+  expect(toolsOf([...snap.committed, ...snap.live]).map((t) => t.id)).toEqual(naive)
   expect(s.toolCount()).toBe(30)
-  expect(s.turnItems().filter((i) => i.kind === 'tool')).toHaveLength(30)
+  expect(toolsOf(s.turnItems())).toHaveLength(30)
+})
+
+test('consecutive lookups share one group row; anything else closes it', () => {
+  const s = createTranscriptStore()
+  s.appendUser('look around')
+  for (const [id, name] of [['r1', 'read_file'], ['r2', 'grep'], ['r3', 'list_files']] as const) {
+    s.toolStart({ id, name, input: { path: id } })
+  }
+  // Results land out of order, as parallel calls do.
+  s.toolEnd(evt({ id: 'r2', name: 'grep', result: 'x.ts:1:hit' }))
+  s.toolEnd(evt({ id: 'r1', name: 'read_file', result: '1\tline' }))
+  s.toolEnd(evt({ id: 'r3', name: 'list_files', result: 'a.ts' }))
+  s.toolStart({ id: 'e1', name: 'edit_file', input: { path: 'a.ts' } })
+  s.toolStart({ id: 'r4', name: 'read_file', input: { path: 'b.ts' } })
+
+  const items = [...s.getSnapshot().committed, ...s.getSnapshot().live]
+  const groups = items.filter((i) => i.kind === 'group')
+  expect(groups).toHaveLength(2)
+  const first = groups[0] as { tools: { id: string; status: string }[] }
+  expect(first.tools.map((t) => t.id)).toEqual(['r1', 'r2', 'r3'])
+  expect(first.tools.every((t) => t.status === 'ok')).toBe(true)
+  // The edit sits between the two groups, not inside either.
+  expect(items.map((i) => i.kind)).toEqual(['user', 'group', 'tool', 'group'])
+  expect(s.toolCount()).toBe(5)
+})
+
+test('a long reply commits finished paragraphs so only the one in flight stays live', () => {
+  const s = createTranscriptStore()
+  s.appendUser('explain')
+  const paragraphs = Array.from({ length: 8 }, (_, i) => `Paragraph ${i + 1} explains one more thing.`)
+  for (const p of paragraphs) s.assistantDelta(`${p}\n\n`)
+  s.assistantDelta('And the tail is still streaming')
+  const { committed, live } = s.getSnapshot()
+  const replies = [...committed, ...live].filter((i) => i.kind === 'assistant') as { text: string; continuation?: boolean; streaming: boolean }[]
+  // Nothing lost, nothing duplicated, in order.
+  expect(replies.map((r) => r.text).join('\n\n')).toBe([...paragraphs, 'And the tail is still streaming'].join('\n\n'))
+  // Only the reply's first part carries the leading ●.
+  expect(replies[0]!.continuation).toBeFalsy()
+  expect(replies.slice(1).every((r) => r.continuation)).toBe(true)
+  // The live region holds just the paragraph still streaming.
+  expect(live.filter((i) => i.kind === 'assistant')).toHaveLength(1)
+  expect((live.at(-1) as { streaming: boolean }).streaming).toBe(true)
+})
+
+test('stableCut never splits inside a code fence', () => {
+  expect(stableCut('intro\n\n```ts\nconst a = 1\n\nconst b = 2')).toBe('intro\n\n'.length)
+  expect(stableCut('```ts\nconst a = 1\n\nconst b = 2')).toBe(-1)
+  expect(stableCut('no break yet')).toBe(-1)
+  // A trailing blank line with nothing after it is not a cut yet.
+  expect(stableCut('done paragraph\n\n')).toBe(-1)
+})
+
+test('the header prints once, straight into scrollback', () => {
+  const s = createTranscriptStore()
+  s.header({ version: '1.2.3', greeting: 'dev mode', location: 'elia ⎇ main', lessons: 4 })
+  const { committed, live } = s.getSnapshot()
+  expect(live).toHaveLength(0)
+  expect(committed).toEqual([expect.objectContaining({ kind: 'header', version: '1.2.3', lessons: 4 })])
+  expect(s.toMarkdown()).not.toContain('1.2.3')
+})
+
+test('an activity keeps its line breaks instead of flattening a checklist onto one line', () => {
+  const s = createTranscriptStore()
+  s.activity({ kind: 'status', status: 'completed', title: 'Checks', detail: '✓ build\n✗ tests' })
+  const notice = s.getSnapshot().live.find((i) => i.kind === 'notice') as { text: string }
+  expect(notice.text).toBe('Checks\n✓ build\n✗ tests')
 })
 
 test('toolEnd matches the running card by id', () => {
@@ -210,6 +277,17 @@ test('empty deltas interleaved with reasoning keep it as one thinking item', () 
   expect(live.filter((i) => i.kind === 'thinking')).toHaveLength(1)
   expect(live.filter((i) => i.kind === 'assistant')).toHaveLength(0)
   expect((live.find((i) => i.kind === 'thinking') as { text: string }).text).toBe('The plan says create a birds website')
+})
+
+test('finished reasoning lines settle while the line in flight keeps streaming', () => {
+  const s = createTranscriptStore()
+  s.appendUser('think')
+  s.thinkingDelta('first line\nsecond line\nthird ')
+  s.thinkingDelta('line still going')
+  const { committed, live } = s.getSnapshot()
+  const thoughts = [...committed, ...live].filter((i) => i.kind === 'thinking') as { text: string; continuation?: boolean }[]
+  expect(thoughts.map((t) => t.text)).toEqual(['first line\nsecond line', 'third line still going'])
+  expect(thoughts[1]!.continuation).toBe(true)
 })
 
 test('an empty assistant delta adds no bullet-only item', () => {

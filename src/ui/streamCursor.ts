@@ -4,6 +4,7 @@
 // never flickers; any incoming text instantly erases it first.
 import { interactiveTerminal } from './runtime.ts'
 import { registerShutdownCleanup } from './shutdown.ts'
+import { inkOwnsScreen } from './stream.ts'
 
 const CURSOR_CHAR = '_'
 const BLINK_INTERVAL_MS = 500
@@ -18,8 +19,9 @@ export interface StreamCursor {
 const NOOP_CURSOR: StreamCursor = { beforeText() {}, afterText() {}, stop() {} }
 
 export function createStreamCursor(): StreamCursor {
-  // Escape codes corrupt output when stdout isn't a real terminal (piped/redirected).
-  if (!interactiveTerminal) return NOOP_CURSOR
+  // Escape codes corrupt output when stdout isn't a real terminal (piped/redirected),
+  // and a backspace-blink under the Ink REPL's frame corrupts that frame.
+  if (!interactiveTerminal || inkOwnsScreen()) return NOOP_CURSOR
 
   let blinkTimer: ReturnType<typeof setInterval> | null = null
   let idleTimer: ReturnType<typeof setTimeout> | null = null

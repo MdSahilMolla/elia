@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, expect, test } from 'bun:test'
-import { fallbackStaticPageVerification, hasBlockingIssues, isUnrunnableCommandFailure, requireCriticVerdict, runVerification, unwinnableVerificationCommands } from './verify.ts'
+import { fallbackStaticPageVerification, hasBlockingIssues, isNoTestsResult, isUnrunnableCommandFailure, requireCriticVerdict, runVerification, unwinnableVerificationCommands } from './verify.ts'
 import { resetPreviewServerForTests } from '../preview/server.ts'
 
 afterEach(() => {
@@ -95,6 +95,33 @@ test('a real test-suite failure is not mistaken for an unrunnable command', () =
 test('a timeout is not mistaken for an unrunnable command', () => {
   const result = { command: 'bun test', exitCode: 1, stdout: '', stderr: '', elapsedMs: 300_000, timedOut: true }
   expect(isUnrunnableCommandFailure(result)).toBe(false)
+})
+
+// Seen live 2026-09-15: "change the greeting" in a project with no tests. Bun
+// exits 1 on "0 test files matching …", the gate called it a failing check, and
+// the repair turn wrote a test file nobody asked for.
+test('a test runner with nothing to run is unproven, not failed', () => {
+  const bun = { command: 'npm test', exitCode: 1, stdout: '', stderr: 'error: 0 test files matching **{.test,.spec,_test_,_spec_}.{js,ts,jsx,tsx} in --cwd="x"', elapsedMs: 90, timedOut: false }
+  const jest = { command: 'npx jest', exitCode: 1, stdout: 'No tests found, exiting with code 1', stderr: '', elapsedMs: 90, timedOut: false }
+  expect(isNoTestsResult(bun)).toBe(true)
+  expect(isNoTestsResult(jest)).toBe(true)
+  expect(isUnrunnableCommandFailure(bun)).toBe(true)
+  expect(isNoTestsResult({ command: 'bun test', exitCode: 1, stdout: '', stderr: '3 tests failed', elapsedMs: 90, timedOut: false })).toBe(false)
+})
+
+test('the gate reports an empty test suite as inconclusive instead of failing — and a real check beside it still counts', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'elia-verify-no-tests-'))
+  try {
+    writeFileSync(join(dir, 'package.json'), '{ "name": "t" }')
+    const alone = await runVerification(['bun test'], dir, undefined, allowAllGovernor())
+    expect(alone.passed).toBe(false)
+    expect(alone.inconclusive).toContain('found no tests')
+    const withTypecheck = await runVerification(['exit 0', 'bun test'], dir, undefined, allowAllGovernor())
+    expect(withTypecheck.passed).toBe(true)
+    expect(withTypecheck.inconclusive).toContain('bun test found no tests')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
 })
 
 test('fallbackStaticPageVerification has nothing to check when no page changed', async () => {

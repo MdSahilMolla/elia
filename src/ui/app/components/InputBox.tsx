@@ -42,13 +42,11 @@ function toKeyEvent(input: string, key: Key): { str: string | undefined; event: 
   return { str: name ? undefined : input, event: { name, ctrl: key.ctrl, meta: key.meta } }
 }
 
-const MODE_CHIP: Record<ReplMode, string> = { manual: 'manual', auto: 'auto', plan: 'plan' }
-
 export interface InputBoxProps {
   commands: SlashCommand[]
   disabled: boolean
   placeholder: string
-  /** Drawn as a coloured `[mode]` chip left of the prompt glyph. */
+  /** Colours the prompt glyph in plan / auto mode (the status row names the mode). */
   mode?: ReplMode
   onSubmit(line: string): void
   onInterrupt(): void
@@ -283,6 +281,7 @@ export function InputBox(props: InputBoxProps) {
       ? 0
       : Math.min(Math.max(0, selected - Math.floor(MAX_VISIBLE / 2)), menu.length - MAX_VISIBLE)
   const visible = menu.slice(start, start + MAX_VISIBLE)
+  const nameWidth = Math.min(22, Math.max(0, ...visible.map((cmd) => cmd.name.length)))
   const hiddenAbove = start
   const hiddenBelow = menu.length - (start + visible.length)
 
@@ -293,18 +292,19 @@ export function InputBox(props: InputBoxProps) {
           mis-wrap. */}
       <Box
         borderStyle="single"
-        borderColor={props.disabled ? palette.muted : palette.accent}
+        borderColor={palette.muted}
+        borderDimColor
         borderTop
         borderBottom={false}
         borderLeft={false}
         borderRight={false}
       >
-        {props.mode ? (
-          <Text color={props.mode === 'plan' ? palette.warning : props.mode === 'auto' ? palette.success : palette.muted}>
-            [{MODE_CHIP[props.mode]}]{' '}
-          </Text>
-        ) : null}
-        <Text color={palette.accent}>{glyphs.user} </Text>
+        <Text
+          bold
+          color={props.disabled ? palette.muted : props.mode === 'plan' ? palette.warning : props.mode === 'auto' ? palette.success : undefined}
+        >
+          {glyphs.user}{' '}
+        </Text>
         {search ? (
           <Text>
             <Text color={palette.muted}>⌕ </Text>
@@ -322,7 +322,8 @@ export function InputBox(props: InputBoxProps) {
             <Text color={palette.muted}>{search.query ? 'no matching history' : 'reverse-search history — type to search'}</Text>
           ) : (
             searchResults.map((entry, i) => (
-              <Text key={entry} inverse={i === search.index} wrap="truncate-end">
+              <Text key={entry} bold={i === search.index} color={i === search.index ? undefined : palette.muted} wrap="truncate-end">
+                {i === search.index ? `${glyphs.user} ` : '  '}
                 {entry}
               </Text>
             ))
@@ -337,24 +338,35 @@ export function InputBox(props: InputBoxProps) {
           ) : fileMatches.length === 0 ? (
             <Text color={palette.muted}>no files match “{mention!.query}”</Text>
           ) : (
-            fileMatches.map((path, i) => (
-              <Text key={path} inverse={i === Math.min(mentionSel, fileMatches.length - 1)} wrap="truncate-end">
-                {path}
-              </Text>
-            ))
+            fileMatches.map((path, i) => {
+              const active = i === Math.min(mentionSel, fileMatches.length - 1)
+              return (
+                <Text key={path} bold={active} color={active ? undefined : palette.muted} wrap="truncate-end">
+                  {active ? `${glyphs.user} ` : '  '}
+                  {path}
+                </Text>
+              )
+            })
           )}
         </Box>
       )}
 
       {menu.length > 0 && !search && (
-        <Box flexDirection="column" marginLeft={2}>
-          {hiddenAbove > 0 && <Text color={palette.muted}>↑ {hiddenAbove} more</Text>}
-          {visible.map((cmd) => (
-            <Text key={cmd.name} inverse={menu[selected]?.name === cmd.name}>
-              {cmd.name} <Text color={palette.muted}>{cmd.description}</Text>
-            </Text>
-          ))}
-          {hiddenBelow > 0 && <Text color={palette.muted}>↓ {hiddenBelow} more</Text>}
+        <Box flexDirection="column">
+          {hiddenAbove > 0 && <Text color={palette.muted}>  ↑ {hiddenAbove} more</Text>}
+          {visible.map((cmd) => {
+            const active = menu[selected]?.name === cmd.name
+            return (
+              <Text key={cmd.name} wrap="truncate-end">
+                <Text bold={active} color={active ? undefined : palette.muted}>
+                  {active ? `${glyphs.user} ` : '  '}
+                  {cmd.name.padEnd(nameWidth)}
+                </Text>
+                <Text color={palette.muted}>  {cmd.description}</Text>
+              </Text>
+            )
+          })}
+          {hiddenBelow > 0 && <Text color={palette.muted}>  ↓ {hiddenBelow} more</Text>}
         </Box>
       )}
     </Box>

@@ -36,10 +36,8 @@ export class ErrorBoundary extends Component<Props, State> {
     if (this.state.error) {
       return (
         <Box flexDirection="column" marginTop={1}>
-          <Text color={palette.failure}>
-            ┃ the {this.props.area} hit a render error and was skipped
-          </Text>
-          <Text color={palette.muted}>┃ {this.state.error.message}</Text>
+          <Text color={palette.failure}>✗ the {this.props.area} hit a render error and was skipped</Text>
+          <Text color={palette.muted}>  {this.state.error.message}</Text>
         </Box>
       )
     }

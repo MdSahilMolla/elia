@@ -126,6 +126,19 @@ describe('autonomy governor', () => {
     }
   })
 
+  // Seen live 2026-09-15 on Windows: `dir *.html *.css *.js` stopped a build
+  // run behind an approval prompt that `ls *.html` never would have.
+  test('the Windows spellings of ls / cat / grep are read-only too — and still fail closed when composed', () => {
+    for (const command of ['dir *.html *.css *.js', 'dir /s /b src', 'type index.html', 'findstr /n "TODO" app.js']) {
+      const result = assessAction({ name: 'run_command', input: { command } }, '/repo')
+      expect(result.risk).toBe('safe')
+      expect(result.decision).toBe('allow')
+    }
+    for (const command of ['type nul > created.txt', 'dir & del /q *.js', 'type a.js | findstr x']) {
+      expect(assessAction({ name: 'run_command', input: { command } }, '/repo').decision).not.toBe('allow')
+    }
+  })
+
   test('sed/awk in-place edits are not classified read-only, but plain stdout usage still is', () => {
     for (const command of [
       "sed -i 's/a/b/' file.ts",

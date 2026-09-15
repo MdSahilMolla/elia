@@ -26,7 +26,7 @@ interface TurnUiHooks {
   /** Mid-run steering: drained at each step boundary and spliced into the turn. */
   drainSteering?: () => string[]
   /** Ink approval menu — used for the plan gate when a turn escalates into the autonomous pipeline. */
-  approve?: (req: { title: string; lines: string[]; preview?: string[]; ruleLabel: string }) => Promise<import('./autonomy/governor.ts').ApprovalResult>
+  approve?: (req: { title: string; lines: string[]; preview?: string[]; ruleLabel: string; variant?: 'action' | 'plan' }) => Promise<import('./autonomy/governor.ts').ApprovalResult>
 }
 import { playIntro } from './ui/character.ts'
 import { ZERO_USAGE, addUsage, getSessionSummaryLine, recordTopLevelTurn, formatUsageLine, formatElapsed, sessionUsageSnapshot, setCurrentUsageModel, type SessionUsageSnapshot } from './usage.ts'
@@ -442,6 +442,26 @@ async function classifyCommandRisk(command: string): Promise<{ risky: boolean; r
 /** The plan-approval gate for `elia auto`/`elia fork` — thin wrapper over the shared confirmOnce helper. */
 function createInteractiveApprover(rl: readline.Interface) {
   return () => confirmOnce(rl, 'Approve this plan? [y]es / [n]o / [e]dit <what to change>: ')
+}
+
+/** The approval menu's heading — the question, in words, not the tool's id. */
+function approvalTitle(toolName: string): string {
+  switch (toolName) {
+    case 'run_command':
+      return 'Run this command?'
+    case 'run_program':
+      return 'Run this program?'
+    case 'edit_file':
+      return 'Edit this file?'
+    case 'write_file':
+      return 'Write this file?'
+    case 'task':
+      return 'Start a subagent?'
+    case 'codex_delegate':
+      return 'Hand this task to Codex?'
+    default:
+      return `Allow ${toolName}?`
+  }
 }
 
 function actionApprovalPrompt(assessment: ActionAssessment, request: ActionRequest): string {
@@ -2162,10 +2182,19 @@ async function runInteractive(): Promise<void> {
           // Learning is elia's strongest "getting smarter" signal — give it the
           // ✦ mark and make it durable in scrollback, not an ephemeral status.
           uiHooks.onActivity?.({ kind: 'status', status: 'completed', title: `✦ ${text.replace(/^learned:\s*/i, '')}` })
-        } else if (kind === 'pass') {
-          uiHooks.onActivity?.({ kind: 'status', status: 'completed', title: text })
+        } else if (kind === 'pass' || kind === 'fail') {
+          // A review verdict joins every reviewer with " | " — one row per
+          // reviewer, each kept to a line, instead of a seven-row wall.
+          const [head = text, ...rest] = text.split(' | ')
+          const clip = (line: string) => (line.length > 140 ? `${line.slice(0, 139)}…` : line)
+          uiHooks.onActivity?.({
+            kind: 'status',
+            status: kind === 'pass' ? 'completed' : 'warning',
+            title: clip(head),
+            detail: rest.length > 0 ? rest.map((line) => `  ${clip(line.trim())}`).join('\n') : undefined,
+          })
         } else {
-          uiHooks.onActivity?.({ kind: 'status', status: kind === 'fail' ? 'warning' : 'updated', title: text })
+          uiHooks.onActivity?.({ kind: 'status', status: 'updated', title: text })
         }
       })
     }
@@ -2175,7 +2204,7 @@ async function runInteractive(): Promise<void> {
     const approve: import('./autonomy/loop.ts').Approver = uiHooks?.approve
       ? async (proposal) => {
           const preview = renderProposalSummary(proposal)
-          const res = await uiHooks.approve!({ title: 'PLAN · awaiting approval', lines: [], preview, ruleLabel: 'run this plan' })
+          const res = await uiHooks.approve!({ title: 'Run this plan?', lines: [], preview, ruleLabel: 'this plan', variant: 'plan' })
           const outcome = typeof res === 'boolean' ? { approved: res, feedback: undefined } : res
           if (outcome.approved) return { action: 'approve' }
           if ('feedback' in outcome && outcome.feedback) return { action: 'amend', feedback: outcome.feedback }
@@ -2196,11 +2225,13 @@ async function runInteractive(): Promise<void> {
         signal,
         polish: true,
       })
-      const { formatAutonomousRunSummary } = await import('./autonomy/runSummary.ts')
+      const { formatAutonomousRunReceipt, formatAutonomousRunSummary } = await import('./autonomy/runSummary.ts')
       const summary = formatAutonomousRunSummary(goal, result)
       messages.push({ role: 'assistant', content: [{ type: 'text', text: summary }] })
       sessionTranscript.notice(summary)
-      note(summary, undefined, 'completed')
+      // The model gets the summary above; the person gets the outcome, not an
+      // instruction addressed to the next turn.
+      note(formatAutonomousRunReceipt(goal, result), undefined, 'completed')
       return result.completion.state
     } finally {
       setReportSink(undefined)
@@ -2517,7 +2548,7 @@ async function runInteractive(): Promise<void> {
           const gateGovernor = createActionGovernor({ mode: approveAction ? 'supervised' : 'unattended', approve: approveAction })
           let outcome = await runVerification(checks, root, controller.signal, gateGovernor)
           sessionTranscript.notice(describeVerification(outcome))
-          for (let attempt = 1; !outcome.passed && !outcome.blocked && attempt <= 2 && !controller.signal.aborted; attempt += 1) {
+          for (let attempt = 1; !outcome.passed && !outcome.blocked && !outcome.inconclusive && attempt <= 2 && !controller.signal.aborted; attempt += 1) {
             repairAttempts = attempt
             const summary = `Verification failed (repair ${attempt}/2)`
             uiHooks?.onActivity?.({ kind: 'status', status: 'warning', title: summary })
@@ -2533,15 +2564,21 @@ async function runInteractive(): Promise<void> {
           }
           // A check the governor would not run proved nothing either way, and no
           // repair can change a policy — record the turn as unverified, not failed.
-          verifyResult = outcome.passed ? 'pass' : outcome.blocked ? 'skipped' : 'fail'
+          // Same for a test runner with no tests to run.
+          verifyResult = outcome.passed ? 'pass' : outcome.blocked || outcome.inconclusive ? 'skipped' : 'fail'
+          const passedChecks = outcome.results
+            .filter((result) => result.exitCode === 0 && !result.timedOut && !result.command.startsWith('[skipped]'))
+            .map((result) => result.command)
           const verdict = outcome.passed
-            ? `✓ verified — ${checks.join(', ')} pass`
+            ? `✓ verified — ${(passedChecks.length > 0 ? passedChecks : checks).join(', ')} pass${outcome.inconclusive ? ` (${outcome.inconclusive})` : ''}`
             : outcome.blocked
               ? `Not verified — ${checks.join(', ')} was not allowed to run: ${outcome.blocked}`
-              : `⚠ checks still failing after 2 repair attempts — ${describeVerification(outcome).split('\n')[0]}`
+              : outcome.inconclusive
+                ? `Not verified — ${outcome.inconclusive}`
+                : `⚠ checks still failing after 2 repair attempts — ${describeVerification(outcome).split('\n')[0]}`
           uiHooks?.onActivity?.({ kind: 'status', status: outcome.passed ? 'completed' : 'warning', title: verdict })
           if (!uiHooks) writeNotice(verdict)
-          if (outcome.blocked) sessionTranscript.notice(verdict)
+          if (outcome.blocked || outcome.inconclusive) sessionTranscript.notice(verdict)
         }
       }
 
@@ -2821,6 +2858,11 @@ async function runInteractive(): Promise<void> {
   // keeps the workspace-panel snapshot.
   if (!machineReadable && !quietOutput && !interactiveTerminal) {
     process.stdout.write(`${renderWorkspacePanel({ sessionId, mode, providerLabel: config.providerLabel, model: config.model })}\n`)
+  }
+  if (!interactiveTerminal && !machineReadable && !plainOutput && !process.stdin.isTTY && !process.stdout.isTTY && (process.env.MSYSTEM || process.env.TERM_PROGRAM === 'mintty')) {
+    // Git Bash's mintty hands Bun pipes, not a console, so the live UI can't
+    // start and the line-mode REPL takes over — say why, once.
+    writeNotice('This terminal (Git Bash / mintty) is not a real console, so elia is in line mode. For the full UI run `winpty elia`, or use Windows Terminal / PowerShell.')
   }
   if (!interactiveTerminal) {
     writeNotice(
@@ -3811,7 +3853,7 @@ async function runInteractive(): Promise<void> {
     // ensureThread dedupes on the resolved instructions.
     prewarmActiveProvider()
     const { runInkRepl } = await import('./ui/app/index.tsx')
-    const greeting = `${mode} mode · "/" for commands · "!" for shell`
+    const greeting = `${mode} mode`
     const cliVersion = JSON.parse(await Bun.file(new URL('../package.json', import.meta.url)).text()).version as string
 
     await runInkRepl({
@@ -3822,7 +3864,18 @@ async function runInteractive(): Promise<void> {
       initialReplMode: replMode,
       messages,
       greeting,
-      classifyRisk: (command) => classifyCommandRisk(command),
+      // A pre-check that could not answer is not a verdict. Every risky action
+      // in this REPL is still gated one at a time by the governor's approval
+      // menu, so a classifier outage lets the message through instead of
+      // stopping a harmless request behind an error and a y/n prompt.
+      classifyRisk: async (command) => {
+        try {
+          const verdict = await classifyCommandRisk(command)
+          return 'unavailable' in verdict && verdict.unavailable ? { risky: false } : verdict
+        } catch {
+          return { risky: false }
+        }
+      },
       runShellLine: async (command) => {
         const { runShell, formatShellResult, clampOutput } = await import('./shell.ts')
         const result = await runShell(command, undefined, process.cwd())
@@ -3841,11 +3894,8 @@ async function runInteractive(): Promise<void> {
           turnText,
           async (assessment, request) =>
             hooks.approve({
-              title: `Approve ${request.name}?`,
-              lines: [
-                redactText(assessment.reason, 300),
-                `risk: ${assessment.risk} · reversible: ${assessment.reversible ? 'yes' : 'no'}`,
-              ],
+              title: approvalTitle(request.name),
+              lines: [redactText(assessment.reason, 300)],
               preview: approvalPreviewLines(request.name, request.input),
               ruleLabel: ruleLabel(ruleFor(request, assessment)),
               command:

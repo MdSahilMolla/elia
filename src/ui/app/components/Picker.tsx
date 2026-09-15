@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { Text, useInput } from 'ink'
-import { palette } from '../theme.ts'
+import { glyphs, palette } from '../theme.ts'
 import { Panel } from './Panel.tsx'
 import { applySearchKey, type PickerOption } from '../../picker.ts'
 
@@ -74,26 +74,34 @@ export function Picker({ request }: { request: PickerRequest }) {
   const start = Math.max(0, Math.min(selected - Math.floor(PAGE / 2), Math.max(0, filtered.length - PAGE)))
   const visible = filtered.slice(start, start + PAGE)
 
+  const hiddenAbove = start
+  const hiddenBelow = Math.max(0, filtered.length - (start + visible.length))
+
   return (
     <Panel title={request.title}>
-      <Text color={palette.muted}>↑↓ · type to filter · enter · esc</Text>
-      {request.searchable && (
-        <Text color={palette.muted}>
-          search: {query}
-          <Text color={palette.muted}>▏</Text>
+      {(request.searchable || query) && (
+        <Text>
+          <Text color={palette.muted}>⌕ </Text>
+          {query || <Text color={palette.muted}>type to filter</Text>}
+          <Text inverse> </Text>
         </Text>
       )}
+      {hiddenAbove > 0 && <Text color={palette.muted}>  ↑ {hiddenAbove} more</Text>}
       {visible.map((option) => {
         const isSel = filtered[selected] === option
         return (
-          <Text key={option.value} inverse={isSel}>
-            {isSel ? '❯ ' : '  '}
-            {option.label}
-            {option.detail ? <Text color={palette.muted}> {option.detail}</Text> : null}
+          <Text key={option.value} wrap="truncate-end">
+            <Text bold={isSel} color={isSel ? undefined : palette.muted}>
+              {isSel ? `${glyphs.user} ` : '  '}
+              {option.label}
+            </Text>
+            {option.detail ? <Text color={palette.muted}>  {option.detail}</Text> : null}
           </Text>
         )
       })}
-      {filtered.length === 0 && <Text color={palette.muted}>no matches</Text>}
+      {hiddenBelow > 0 && <Text color={palette.muted}>  ↓ {hiddenBelow} more</Text>}
+      {filtered.length === 0 && <Text color={palette.muted}>  no matches</Text>}
+      <Text color={palette.muted}>↑↓ to move · enter to select · esc to cancel</Text>
     </Panel>
   )
 }

@@ -9,6 +9,8 @@ import { eliaBookMenu, listEliaBooks } from '../../eliaBook.ts'
 
 const SHIFT_TAB = '\x1b[Z'
 const settle = () => new Promise((resolve) => setTimeout(resolve, 30))
+/** The status row in the default (manual) mode — the frame is mounted and idle. */
+const READY = '? for shortcuts'
 
 function baseProps() {
   return {
@@ -30,15 +32,69 @@ function baseProps() {
   }
 }
 
-test('App shows the greeting before any turn', async () => {
+test('App prints a one-line header and a quiet status row before any turn', async () => {
   const { lastFrame } = render(<App {...baseProps()} />)
   const frame = await waitForFrame(lastFrame, 'dev mode — say hi')
-  expect(frame).toContain('mercury-2 · manual')
+  expect(frame).toContain('elia v0.0.0-test · dev mode — say hi')
+  expect(frame).toContain(READY)
+  expect(frame).toContain('mercury-2')
+  // The default mode, tokens and cost are not status-row material.
+  expect(frame).not.toContain('manual')
+  expect(frame).not.toContain('$0')
+  expect(frame).not.toContain('[manual]')
+})
+
+test('a busy turn shows what is running, not a random verb', async () => {
+  let release!: () => void
+  const held = new Promise<void>((resolve) => { release = resolve })
+  const props = {
+    ...baseProps(),
+    submitTurn: async (_text: string, hooks: import('./App.tsx').TurnHooks) => {
+      hooks.onToolStart({ id: 'r', name: 'read_file', input: { path: 'src/store.ts' } })
+      await held
+    },
+  }
+  const { stdin, lastFrame, unmount } = render(<App {...props} />)
+  try {
+    await waitForFrame(lastFrame, READY)
+    await settle()
+    stdin.write('look at the store')
+    await waitForFrame(lastFrame, 'look at the store')
+    stdin.write('\r')
+    const frame = await waitForFrame(lastFrame, 'Reading store.ts…')
+    expect(frame).toContain('esc to interrupt')
+    release()
+  } finally {
+    unmount()
+  }
+})
+
+test('a failed risk pre-check lets the message through instead of raising an error and a y/n', async () => {
+  let submitted = ''
+  const props = {
+    ...baseProps(),
+    classifyRisk: async () => {
+      throw new Error('Tool call validation failed: attempted to call tool run_command')
+    },
+    submitTurn: async (text: string) => {
+      submitted = text
+    },
+  }
+  const { stdin, lastFrame } = render(<App {...props} />)
+  await waitForFrame(lastFrame, READY)
+  await settle()
+  stdin.write('change the greeting')
+  await waitForFrame(lastFrame, 'change the greeting')
+  stdin.write('\r')
+  await new Promise((resolve) => setTimeout(resolve, 80))
+  expect(submitted).toBe('change the greeting')
+  expect(lastFrame()).not.toContain('Risk check failed')
+  expect(lastFrame()).not.toContain('y/n')
 })
 
 test('App streams a turn: user line, tool card, assistant text', async () => {
   const { stdin, lastFrame } = render(<App {...baseProps()} />)
-  await waitForFrame(lastFrame, 'mercury-2 · manual')
+  await waitForFrame(lastFrame, READY)
   await settle()
   stdin.write('hi there')
   await waitForFrame(lastFrame, 'hi there')
@@ -59,7 +115,7 @@ test('a fast double-submit starts exactly one turn and echoes the prompt once', 
     },
   }
   const { stdin, lastFrame } = render(<App {...props} />)
-  await waitForFrame(lastFrame, 'mercury-2 · manual')
+  await waitForFrame(lastFrame, READY)
   await settle()
   stdin.write('build the thing')
   await waitForFrame(lastFrame, 'build the thing')
@@ -81,12 +137,12 @@ test('Shift+Tab into plan mode makes the turn read-only and offers to execute', 
     },
   }
   const { stdin, lastFrame } = render(<App {...props} />)
-  await waitForFrame(lastFrame, 'mercury-2 · manual')
+  await waitForFrame(lastFrame, READY)
   await settle()
   stdin.write(SHIFT_TAB) // manual → auto-accept
-  await waitForFrame(lastFrame, '· auto-accept')
+  await waitForFrame(lastFrame, 'auto-accept on')
   stdin.write(SHIFT_TAB) // auto-accept → plan
-  await waitForFrame(lastFrame, '· plan')
+  await waitForFrame(lastFrame, 'plan mode on')
   stdin.write('research the task')
   await waitForFrame(lastFrame, 'research the task')
   stdin.write('\r')
@@ -96,7 +152,7 @@ test('Shift+Tab into plan mode makes the turn read-only and offers to execute', 
 
 test('App routes a slash command through handleSlash', async () => {
   const { stdin, lastFrame } = render(<App {...baseProps()} />)
-  await waitForFrame(lastFrame, 'mercury-2 · manual')
+  await waitForFrame(lastFrame, READY)
   await settle()
   stdin.write('/cost')
   await waitForFrame(lastFrame, '/cost')
@@ -114,7 +170,7 @@ test('App submits an Elia Book workflow returned by a slash command', async () =
     },
   }
   const { stdin, lastFrame } = render(<App {...props} />)
-  await waitForFrame(lastFrame, 'mercury-2 · manual')
+  await waitForFrame(lastFrame, READY)
   await settle()
   stdin.write('/eliabook run verified-workflow')
   await waitForFrame(lastFrame, '/eliabook run verified-workflow')
@@ -137,7 +193,7 @@ test('Elia Book menu saves the session with Enter and lets the user browse the s
     handleSlash={async (command) => eliaBookMenu(command.slice('/eliabook'.length), () => session, cwd)}
     submitTurn={async () => { modelCalls += 1 }} />)
   try {
-    await waitForFrame(lastFrame, 'mercury-2 · manual')
+    await waitForFrame(lastFrame, READY)
     await settle()
     stdin.write('/eliabook')
     await waitForFrame(lastFrame, '/eliabook')
@@ -166,10 +222,11 @@ test('Elia Book menu saves the session with Enter and lets the user browse the s
 test('status bar reflects a live model change from getEnv', async () => {
   let model = 'mercury-2'
   const { lastFrame, rerender } = render(<App {...baseProps()} getEnv={() => ({ model, providerLabel: 'X', providerName: 'inception' })} />)
-  await waitForFrame(lastFrame, 'mercury-2 · manual')
+  await waitForFrame(lastFrame, READY)
+  expect(lastFrame()).toContain('mercury-2')
   model = 'gpt-5.6-terra'
   rerender(<App {...baseProps()} getEnv={() => ({ model, providerLabel: 'X', providerName: 'codex' })} />)
-  await waitForFrame(lastFrame, 'gpt-5.6-terra · manual')
+  await waitForFrame(lastFrame, 'gpt-5.6-terra')
 })
 
 test('a codex-subscription message submits without a per-turn hand-off prompt', async () => {
@@ -186,7 +243,7 @@ test('a codex-subscription message submits without a per-turn hand-off prompt', 
     },
   }
   const { stdin, lastFrame } = render(<App {...props} />)
-  await waitForFrame(lastFrame, 'gpt-5.6-terra · auto-accept')
+  await waitForFrame(lastFrame, 'auto-accept on')
   await settle()
   stdin.write('build me a thing')
   await waitForFrame(lastFrame, 'build me a thing')
@@ -224,7 +281,7 @@ test('a planned turn shows the thinking, then the plan, before the first tool ru
   }
   const { stdin, lastFrame, frames, unmount } = render(<App {...props} />)
   try {
-    await waitForFrame(lastFrame, 'mercury-2 · manual')
+    await waitForFrame(lastFrame, READY)
     await settle()
     stdin.write('create a laptop suggestion website')
     await waitForFrame(lastFrame, 'create a laptop suggestion website')
@@ -232,13 +289,15 @@ test('a planned turn shows the thinking, then the plan, before the first tool ru
     await waitForFrame(lastFrame, 'index.html')
     const screen = frames.join('\n')
     const thinkingAt = screen.indexOf('✻ The user wants a laptop picker. A static page previews fastest.')
-    const planAt = screen.indexOf('Plan · 2 steps')
+    // The plan shows up in the live panel — once, not also flattened into scrollback.
+    const planAt = screen.indexOf('Plan · 0/2')
     const toolAt = screen.lastIndexOf('index.html')
     expect(screen).toContain('✦ memory · 9 lessons from earlier sessions')
     expect(thinkingAt).toBeGreaterThan(-1)
     expect(planAt).toBeGreaterThan(thinkingAt)
     expect(toolAt).toBeGreaterThan(planAt)
     expect(screen).toContain('◐ Write index.html')
+    expect(screen).not.toContain('Plan · 2 steps')
   } finally {
     unmount()
   }
@@ -258,7 +317,7 @@ test('the plan panel follows elia\'s ticks during the turn and gives way to a re
   }
   const { stdin, lastFrame, unmount } = render(<App {...props} />)
   try {
-    await waitForFrame(lastFrame, 'mercury-2 · manual')
+    await waitForFrame(lastFrame, READY)
     await settle()
     stdin.write('create a laptop suggestion website')
     await waitForFrame(lastFrame, 'create a laptop suggestion website')
@@ -270,8 +329,8 @@ test('the plan panel follows elia\'s ticks during the turn and gives way to a re
     const after = await waitForFrame(lastFrame, 'still open')
     expect(after).toContain('◐ Plan · 1/3 done — still open:')
     expect(after).toContain('□ Add the styles')
-    // The live panel is gone; the receipt is the record.
-    expect(after).not.toContain('PLAN')
+    // The live panel (a "Plan · n/m" heading at the left edge) is gone; the receipt is the record.
+    expect(after).not.toMatch(/^Plan · /m)
   } finally {
     unmount()
   }
@@ -292,7 +351,7 @@ test('an open approval hides the live workspace panel behind it', async () => {
     },
   }
   const { stdin, lastFrame } = render(<App {...props} />)
-  await waitForFrame(lastFrame, 'mercury-2 · manual')
+  await waitForFrame(lastFrame, READY)
   await settle()
   stdin.write('do the thing')
   await waitForFrame(lastFrame, 'do the thing')
@@ -321,7 +380,7 @@ test('a queued command does not auto-run after the turn is aborted with Esc', as
       }),
   }
   const { stdin, lastFrame } = render(<App {...props} />)
-  await waitForFrame(lastFrame, 'mercury-2 · manual')
+  await waitForFrame(lastFrame, READY)
   await settle()
   stdin.write('long running task')
   await waitForFrame(lastFrame, 'long running task')
@@ -348,6 +407,8 @@ test('a queued command does not auto-run after the turn is aborted with Esc', as
 test('keeps transient progress out of scrollback and preserves outcomes', () => {
   expect(shouldPersistActivity({ kind: 'status', status: 'updated', title: 'Repairing' })).toBe(false)
   expect(shouldPersistActivity({ kind: 'plan', status: 'updated', title: 'Plan updated' })).toBe(false)
+  // A plan lives in the plan panel even when it arrives as "completed".
+  expect(shouldPersistActivity({ kind: 'plan', status: 'completed', title: 'Plan · 3 steps' })).toBe(false)
   expect(shouldPersistActivity({ kind: 'command', status: 'completed', title: 'Build passed' })).toBe(true)
   expect(shouldPersistActivity({ kind: 'warning', status: 'warning', title: 'Build failed' })).toBe(true)
 })
@@ -363,7 +424,7 @@ test('a /clear outcome wipes the transcript and continues as the new session', a
   }
   const { stdin, lastFrame, stdout, unmount } = render(<App {...props} />)
   try {
-    await waitForFrame(lastFrame, 'mercury-2 · manual')
+    await waitForFrame(lastFrame, READY)
     await settle()
     stdin.write('hi there')
     await waitForFrame(lastFrame, 'hi there')

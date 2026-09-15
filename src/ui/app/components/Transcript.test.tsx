@@ -9,7 +9,7 @@ const notice = (id: string, text: string): Item => ({ id, kind: 'notice', text }
 test('no trim marker when the live region fits', () => {
   const { lastFrame } = render(<Transcript committed={[]} live={[notice('n', 'working')]} expandedAll={false} />)
   expect(strip(lastFrame() ?? '')).toContain('working')
-  expect(strip(lastFrame() ?? '')).not.toContain('earlier row')
+  expect(strip(lastFrame() ?? '')).not.toContain('above')
 })
 
 test('the trim marker says where the trimmed rows went', () => {
@@ -17,13 +17,12 @@ test('the trim marker says where the trimmed rows went', () => {
     <Transcript committed={[]} live={[notice('n', 'working')]} expandedAll={false} hiddenRows={12} />,
   )
   const frame = strip(lastFrame() ?? '')
-  expect(frame).toContain('↑ 12 earlier rows')
-  expect(frame).toContain('printed to scrollback as they finish')
+  expect(frame).toContain('… 12 lines above, printed in full once finished')
   // The marker sits above the live items, where the trimmed content used to be.
-  expect(frame.indexOf('earlier rows')).toBeLessThan(frame.indexOf('working'))
+  expect(frame.indexOf('lines above')).toBeLessThan(frame.indexOf('working'))
 })
 
 test('the marker is singular for a single trimmed row', () => {
   const { lastFrame } = render(<Transcript committed={[]} live={[]} expandedAll={false} hiddenRows={1} />)
-  expect(strip(lastFrame() ?? '')).toContain('↑ 1 earlier row —')
+  expect(strip(lastFrame() ?? '')).toContain('… 1 line above')
 })

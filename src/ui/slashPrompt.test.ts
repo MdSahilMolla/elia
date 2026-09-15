@@ -33,6 +33,16 @@ describe('filteredCommands', () => {
     expect(filteredCommands('/CY', commands).map((c) => c.name)).toEqual(['/cyber'])
     expect(filteredCommands('/', commands).map((c) => c.name)).toEqual(['/cyber', '/dev', '/rewind'])
   })
+
+  // Seen in a real terminal: "/mode" + Enter ran "/model", listed first.
+  test('a command typed out in full is highlighted ahead of longer names it prefixes', () => {
+    const modes: SlashCommand[] = [
+      { name: '/model', description: 'switch model' },
+      { name: '/mode', description: 'switch mode' },
+    ]
+    expect(filteredCommands('/mode', modes).map((c) => c.name)).toEqual(['/mode', '/model'])
+    expect(filteredCommands('/mod', modes).map((c) => c.name)).toEqual(['/model', '/mode'])
+  })
 })
 
 describe('typing and editing', () => {

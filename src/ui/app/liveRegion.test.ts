@@ -40,13 +40,15 @@ afterAll(() => {
   else process.env.ELIA_LIVE_CAP_RESERVE = ambient.reserve
 })
 
-test('the cap is off unless explicitly switched on', () => {
-  expect(liveCapEnabled()).toBe(false)
-  process.env.ELIA_LIVE_CAP = 'off'
-  expect(liveCapEnabled()).toBe(false)
+test('the cap is on unless explicitly switched off', () => {
+  expect(liveCapEnabled()).toBe(true)
   for (const on of ['on', '1', 'true', 'ON']) {
     process.env.ELIA_LIVE_CAP = on
     expect(liveCapEnabled()).toBe(true)
+  }
+  for (const off of ['off', '0', 'false', 'OFF']) {
+    process.env.ELIA_LIVE_CAP = off
+    expect(liveCapEnabled()).toBe(false)
   }
 })
 
@@ -64,6 +66,9 @@ test('wrappedRows counts wrapping against the gutter-reduced width', () => {
 test('estimateItemHeight adds each kind s chrome to its payload', () => {
   // assistant: 1 row of marginTop + 3 payload rows
   expect(estimateItemHeight(assistant('a', 'one\ntwo\nthree'), 80)).toBe(4)
+  // a lookup group: marginTop + header + one summary row, however many calls
+  const group: Item = { id: 'g', kind: 'group', tools: [tool('r1', { name: 'read_file' }) as ToolItem, tool('r2', { name: 'grep' }) as ToolItem] }
+  expect(estimateItemHeight(group, 80)).toBe(3)
   // notice: a bare single-line Text, no margin
   expect(estimateItemHeight(notice('n', 'saved'), 80)).toBe(1)
   // tool: marginTop + header, and no result means no body
@@ -73,9 +78,9 @@ test('estimateItemHeight adds each kind s chrome to its payload', () => {
 
 test('a collapsed tool body is estimated against the fold limit, not its full result', () => {
   const huge = tool('t', { status: 'ok', result: lines(5000) })
-  // Collapsed cards fold to ~26 rows, so a 5000-line result must not be
+  // Collapsed cards fold to ~14 rows, so a 5000-line result must not be
   // estimated as 5000 rows — that would blow the whole budget on one card.
-  expect(estimateItemHeight(huge, 80)).toBe(2 + 26)
+  expect(estimateItemHeight(huge, 80)).toBe(2 + 14)
   expect(estimateItemHeight(huge, 80, true)).toBe(2 + 600)
 })
 

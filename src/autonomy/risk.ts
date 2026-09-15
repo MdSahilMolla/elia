@@ -6,6 +6,8 @@ import type { Usage } from '../providers/types.ts'
 export interface RiskVerdict {
   risky: boolean
   reason: string
+  /** The classifier never answered — `risky` is the fail-closed default, not a judgement. */
+  unavailable?: boolean
 }
 
 // A cheap first-pass signal, same role as router.ts's KEYWORD_TABLE — a hint
@@ -145,6 +147,7 @@ export async function classifyRisk(command: string): Promise<RiskVerdict & { usa
   const verdict = riskCapture.taken() ?? {
     risky: true,
     reason: 'risk classifier did not respond; defaulting to asking first',
+    unavailable: true,
   }
   return { ...verdict, usage: result.usage }
 }

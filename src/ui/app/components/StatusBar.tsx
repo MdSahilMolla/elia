@@ -1,21 +1,20 @@
 import { Box, Text } from 'ink'
 import { palette } from '../theme.ts'
-import { formatCostUsd, formatTokenCount } from '../../../usage.ts'
 
 export type ReplMode = 'manual' | 'auto' | 'plan'
 
+/**
+ * The mode as the status row shows it. The default (manual: risky actions ask
+ * first) says nothing — only a mode you switched into earns a label, the way a
+ * lit indicator only means something when most of them are off.
+ */
 const MODE_LABEL: Record<ReplMode, string> = {
-  manual: 'manual',
-  auto: 'auto-accept',
-  plan: 'plan',
+  manual: '',
+  auto: 'auto-accept on',
+  plan: 'plan mode on',
 }
 
-function meter(pct: number): string {
-  const filled = Math.round((Math.min(100, Math.max(0, pct)) / 100) * 10)
-  return '▓'.repeat(filled) + '░'.repeat(10 - filled)
-}
-
-/** Keep the repo label from wrapping the HUD on a long branch name. */
+/** Keep the repo label from crowding the row on a long branch name. */
 function shortRepo(repo: string, max = 28): string {
   if (repo.length <= max) return repo
   return `…${repo.slice(-(max - 1))}`
@@ -32,10 +31,10 @@ export interface StatusBarProps {
    * read 100% on a model with most of its window still free.
    */
   contextLimit: number
-  sessionInput: number
-  sessionOutput: number
-  costUsd: number | undefined
-  /** Provider id — 'codex' switches the cost readout to "ChatGPT plan" since subscription turns aren't metered in dollars. */
+  /** Kept for callers; token and cost detail live in /cost, not the status row. */
+  sessionInput?: number
+  sessionOutput?: number
+  costUsd?: number | undefined
   providerName?: string
   busy: boolean
   queued: number
@@ -43,50 +42,50 @@ export interface StatusBarProps {
   steering?: number
   /** "elia ⎇ production" — cwd + branch. */
   repo?: string
-  /**
-   * WS0.8 — under 80 columns the two halves of the line collide and
-   * `space-between` squashes both. Drop what is recoverable elsewhere (the repo
-   * label, the session token counts) and keep model · mode · context · cost.
-   */
+  /** Under 80 columns: drop the repo label, keep model · context. */
   narrow?: boolean
 }
 
-/**
- * A conditional row above the stats line — renders only when a compaction pass
- * is close enough that the operator should know. Silent otherwise, so the HUD
- * stays a single line in the common case.
- */
-function AlertLine({ pct }: { pct: number }) {
-  if (pct < 80) return null
-  return (
-    <Text color={palette.warning} wrap="truncate-end">
-      ⚠ context {pct}% full — a compaction pass is near
-    </Text>
-  )
+/** Context use only earns space once it is worth watching. */
+export function contextPercent(tokens: number, limit: number): number {
+  return limit > 0 ? Math.min(100, Math.round((tokens / limit) * 100)) : 0
 }
 
+/**
+ * One quiet row under the input: the mode (only when it is not the default)
+ * or the shortcut hint on the left; model, repo and — once it is filling up —
+ * context on the right. Tokens and cost moved to /cost.
+ */
 export function StatusBar(props: StatusBarProps) {
-  const pct = props.contextLimit > 0 ? Math.min(100, Math.round((props.contextTokens / props.contextLimit) * 100)) : 0
-  // The context meter earns attention as it fills — a compaction pass is coming.
-  const meterColor = pct >= 85 ? palette.failure : pct >= 60 ? palette.accent : palette.success
-  const cost = props.providerName === 'codex' ? 'ChatGPT plan' : formatCostUsd(props.costUsd)
+  const pct = contextPercent(props.contextTokens, props.contextLimit)
+  const modeLabel = MODE_LABEL[props.mode]
+  const modeColor = props.mode === 'plan' ? palette.warning : props.mode === 'auto' ? palette.success : palette.muted
+  const ctxColor = pct >= 92 ? palette.failure : pct >= 80 ? palette.warning : palette.muted
+  const extras = [
+    props.queued > 0 ? `${props.queued} queued` : '',
+    props.steering ? `${props.steering} steering` : '',
+  ].filter(Boolean)
+
   return (
-    <Box flexDirection="column" marginTop={1}>
-      <AlertLine pct={pct} />
-      <Box justifyContent="space-between">
-        {/* model · mode lead the line and truncate-end, so a long repo label can
-            never wrap the line and split the `<model> · <mode>` fragment. */}
-        <Text color={palette.muted} wrap="truncate-end">
-          <Text color={palette.accent}>{props.busy ? '● ' : '  '}</Text>
-          {props.model} · {MODE_LABEL[props.mode]}
-          {props.steering ? <Text color={palette.accent}> · {props.steering} steering</Text> : null}
-          {props.queued > 0 ? ` · ${props.queued} queued` : ''}
-          {props.repo && !props.narrow ? <Text color={palette.toolName}> · {shortRepo(props.repo)}</Text> : null}
+    <Box justifyContent="space-between" width="100%">
+      <Box flexShrink={1}>
+        <Text wrap="truncate-end">
+          {modeLabel ? (
+            <Text color={modeColor}>
+              {modeLabel}
+              <Text color={palette.muted}> (shift+tab to cycle)</Text>
+            </Text>
+          ) : (
+            <Text color={palette.muted}>? for shortcuts</Text>
+          )}
+          {extras.length > 0 ? <Text color={palette.muted}> · {extras.join(' · ')}</Text> : null}
         </Text>
-        <Text color={palette.muted} wrap="truncate-end">
-          <Text color={meterColor}>{meter(pct)}</Text> {pct}% ctx
-          {props.narrow ? '' : ` · ${formatTokenCount(props.sessionInput)} in · ${formatTokenCount(props.sessionOutput)} out`} ·{' '}
-          {cost}
+      </Box>
+      <Box flexShrink={1} marginLeft={2}>
+        <Text color={palette.muted} wrap="truncate-start">
+          {props.model}
+          {props.repo && !props.narrow ? ` · ${shortRepo(props.repo)}` : ''}
+          {pct >= 50 ? <Text color={ctxColor}> · {pct}% context{pct >= 80 ? ' — compaction soon' : ''}</Text> : null}
         </Text>
       </Box>
     </Box>

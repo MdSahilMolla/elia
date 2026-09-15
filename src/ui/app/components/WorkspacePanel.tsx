@@ -82,14 +82,6 @@ export function WorkspacePanel({
   const start = Math.max(0, Math.min(current - 1, plan.length - 6))
   const shown = plan.slice(start, start + 6)
   const planDone = plan.filter((item) => item.status === 'completed').length
-  // A boxless progress bar — the panel has no border to read fullness from, so
-  // the fraction gets a visual.
-  const progressBar = (() => {
-    if (plan.length < 2) return ''
-    const width = 10
-    const filled = Math.round((planDone / plan.length) * width)
-    return `${'▓'.repeat(filled)}${'░'.repeat(width - filled)}`
-  })()
 
   const receipt = [
     doneCount > 0 ? `${doneCount} done` : '',
@@ -103,18 +95,20 @@ export function WorkspacePanel({
     <Box flexDirection="column" width="100%" marginTop={1}>
       {plan.length > 0 && (
         <Box flexDirection="column">
-          <Text color={palette.muted}>
-            PLAN {plan.length > 1 ? `${progressBar}  ${planDone}/${plan.length}` : ''}
+          <Text>
+            <Text bold>Plan</Text>
+            {plan.length > 1 ? <Text color={palette.muted}> · {planDone}/{plan.length}</Text> : null}
           </Text>
           {start > 0 && <Text color={palette.muted}>  … {start} done</Text>}
           {shown.map((item, i) => (
-            <Text
-              key={start + i}
-              wrap="truncate-end"
-              color={item.status === 'completed' ? palette.muted : item.status === 'in_progress' ? palette.accent : undefined}
-            >
-              {' '}
-              {TODO_MARK[item.status]} {item.content}
+            <Text key={start + i} wrap="truncate-end">
+              {'  '}
+              <Text color={item.status === 'completed' ? palette.success : item.status === 'in_progress' ? undefined : palette.muted}>
+                {TODO_MARK[item.status]}
+              </Text>{' '}
+              <Text bold={item.status === 'in_progress'} color={item.status === 'in_progress' ? undefined : palette.muted}>
+                {item.content}
+              </Text>
             </Text>
           ))}
           {start + shown.length < plan.length && <Text color={palette.muted}>  … {plan.length - start - shown.length} more</Text>}
@@ -123,24 +117,21 @@ export function WorkspacePanel({
 
       {live.length > 0 && (
         <Box flexDirection="column" marginTop={plan.length > 0 ? 1 : 0}>
-          <Text color={palette.muted}>
-            SUBAGENTS · {live.length} active
-            {liveWaves.length > 0 ? ` · wave ${liveWaves.join(', ')}` : ''}
+          <Text>
+            <Text bold>Subagents</Text>
+            <Text color={palette.muted}>
+              {' '}· {live.length} running
+              {liveWaves.length > 0 ? ` · wave ${liveWaves.join(', ')}` : ''}
+            </Text>
           </Text>
           {live.slice(0, 6).map((agent) => (
             <Box key={agent.id}>
-              <Text color={palette.toolName}>
-                {' '}
-                <Spinner />{' '}
-              </Text>
+              <Text>{'  '}</Text>
+              <Box width={2} flexShrink={0}>
+                <Spinner />
+              </Box>
               <Text wrap="truncate-end">
-                <Text bold>{agent.role}</Text>
-                {agent.providerName && agent.model && (
-                  <Text color={palette.muted}>
-                    {' '}
-                    · {agent.providerName}/{agent.model}
-                  </Text>
-                )}
+                <Text>{agent.role}</Text>
                 {agent.attempts > 1 && <Text color={palette.muted}> · try {agent.attempts}</Text>}
                 <Text color={palette.muted}> · {agent.action || agent.title}</Text>
                 {elapsed(agent) ? <Text color={palette.muted}> · {elapsed(agent)}</Text> : null}
@@ -153,7 +144,7 @@ export function WorkspacePanel({
 
       {live.length === 0 && finished.length > 0 && receipt && (
         <Box marginTop={plan.length > 0 ? 1 : 0}>
-          <Text color={reviewCount > 0 || failedCount > 0 ? palette.failure : palette.success}>
+          <Text color={reviewCount > 0 || failedCount > 0 ? palette.warning : palette.success}>
             {reviewCount > 0 || failedCount > 0 ? '!' : '✓'}{' '}
           </Text>
           <Text color={palette.muted}>

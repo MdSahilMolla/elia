@@ -35,10 +35,12 @@ test('shows the plan with status markers', () => {
     />,
   )
   const frame = lastFrame() ?? ''
-  expect(frame).toContain('PLAN')
+  expect(frame).toContain('Plan · 1/3')
   expect(frame).toContain('✓ read the code')
   expect(frame).toContain('◐ make the change')
   expect(frame).toContain('□ run tests')
+  // No progress-bar glyphs — the count says it.
+  expect(frame).not.toMatch(/[▓░]/)
 })
 
 test('shows live subagents and what each is doing; finished ones roll into a receipt', () => {
@@ -54,9 +56,10 @@ test('shows live subagents and what each is doing; finished ones roll into a rec
     />,
   )
   const frame = lastFrame() ?? ''
-  expect(frame).toContain('SUBAGENTS · 1 active')
+  expect(frame).toContain('Subagents · 1 running')
   expect(frame).toContain('builder')
-  expect(frame).toContain('anthropic/claude-test')
+  // Which provider/model a worker runs on is /task detail, not panel noise.
+  expect(frame).not.toContain('anthropic/claude-test')
   expect(frame).toContain('wave 2')
   expect(frame).toContain('editing src/foo.ts')
   expect(frame).not.toContain('lead') // the lead agent is not a "subagent"
@@ -103,7 +106,7 @@ test('collapses a retried step to its latest attempt instead of two builder rows
     />,
   )
   const frame = lastFrame() ?? ''
-  expect(frame).toContain('SUBAGENTS · 1 active')
+  expect(frame).toContain('Subagents · 1 running')
   expect(frame).toContain('try 2')
   expect(frame).toContain('second pass')
 })
