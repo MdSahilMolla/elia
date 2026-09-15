@@ -1,9 +1,10 @@
 import { afterEach, expect, test } from 'bun:test'
-import { existsSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { execCapture } from '../github/exec.ts'
 import { ELIA_ROOT } from '../statePaths.ts'
-import { provisionTaskWorkspace } from './taskWorkspace.ts'
+import { initOwnRepository, provisionTaskWorkspace } from './taskWorkspace.ts'
 
 const created: string[] = []
 
@@ -20,12 +21,36 @@ function isolated(runId: string) {
 test('a run launched from the elia checkout gets a workspace that is its own git repository', async () => {
   const workspace = isolated(`test-${Date.now()}-own-repo`)
   expect(workspace.kind).toBe('isolated')
+  // Checked first so a failure names what `git init` answered, not just that
+  // there is no `.git` — this failed in a sibling session's full runs with no
+  // other clue.
+  expect(workspace.repositoryWarning).toBeUndefined()
   expect(existsSync(join(workspace.root, '.git'))).toBe(true)
 
   // Before this, git resolved every call made from here to elia's checkout —
   // the review diff, the rewind snapshot, the "already dirty" list.
   const toplevel = await execCapture('git', ['rev-parse', '--show-toplevel'], workspace.root)
   expect(realpathSync(toplevel.stdout)).toBe(realpathSync(workspace.root))
+})
+
+test('a .git left without a HEAD — an init killed part-way — is initialised again, not trusted', () => {
+  const runId = `test-${Date.now()}-torn-init`
+  const first = isolated(runId)
+  rmSync(join(first.root, '.git'), { recursive: true, force: true })
+  mkdirSync(join(first.root, '.git'))
+
+  const again = isolated(runId)
+  expect(again.repositoryWarning).toBeUndefined()
+  expect(existsSync(join(again.root, '.git', 'HEAD'))).toBe(true)
+})
+
+test('a git init that cannot run is reported with its reason, not swallowed', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'elia-init-fails-'))
+  created.push(dir)
+  const warning = initOwnRepository(dir, 'elia-no-such-git-binary')
+  expect(warning).toContain('could not give this workspace a repository of its own')
+  expect(warning).toContain('ENOENT')
+  expect(existsSync(join(dir, '.git'))).toBe(false)
 })
 
 test('provisioning the same run again keeps the history it already has', async () => {

@@ -449,6 +449,10 @@ async function runAutonomousTaskInternal(options: AutonomousRunOptions): Promise
   let supervisorTimer: ReturnType<typeof setInterval> | undefined
   let supervisorRequest: SupervisorControlRequest | undefined
   const journal = createJournal(runId, goal)
+  if (workspace.repositoryWarning) {
+    writeSubStep(`⚠ ${workspace.repositoryWarning}`)
+    journal.append('phase', { phase: 'orient', note: workspace.repositoryWarning })
+  }
   supervisorTimer = setInterval(() => {
     const request = readRunControl(runId)
     if (!request || supervisorRequest) return
