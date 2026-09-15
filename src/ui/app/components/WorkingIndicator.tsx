@@ -39,17 +39,21 @@ export function WorkingIndicator({ startedAt, status, steeringPending = 0 }: { s
   const seconds = Math.floor((Date.now() - startedAt) / 1000)
   const label = (status?.trim() || 'Working').replace(/[.…]+$/, '')
 
+  // The label gives way first: a long status truncates, the clock and the
+  // "esc to interrupt" hint never do.
   return (
     <Box marginTop={1}>
       <Box width={2} flexShrink={0}>
         <Spinner />
       </Box>
-      <Text wrap="truncate-end">
-        {label}…
+      <Box flexShrink={1}>
+        <Text wrap="truncate-end">{label}…</Text>
+      </Box>
+      <Box flexShrink={0}>
         <Text color={palette.muted}>
           {' '}({formatClock(seconds)} · esc to interrupt{steeringPending > 0 ? ` · ${steeringPending} steering queued` : ''})
         </Text>
-      </Text>
+      </Box>
     </Box>
   )
 }

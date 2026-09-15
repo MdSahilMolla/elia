@@ -27,6 +27,8 @@ interface TurnUiHooks {
   drainSteering?: () => string[]
   /** Ink approval menu — used for the plan gate when a turn escalates into the autonomous pipeline. */
   approve?: (req: { title: string; lines: string[]; preview?: string[]; ruleLabel: string; variant?: 'action' | 'plan' }) => Promise<import('./autonomy/governor.ts').ApprovalResult>
+  /** An escalated run's approved plan — the Ink plan panel tracks its steps. */
+  onRunPlan?: (steps: { id: string; title: string }[]) => void
 }
 import { playIntro } from './ui/character.ts'
 import { ZERO_USAGE, addUsage, getSessionSummaryLine, recordTopLevelTurn, formatUsageLine, formatElapsed, sessionUsageSnapshot, setCurrentUsageModel, type SessionUsageSnapshot } from './usage.ts'
@@ -2171,13 +2173,30 @@ async function runInteractive(): Promise<void> {
       if (uiHooks?.onActivity) uiHooks.onActivity({ kind: 'status', status, title, detail })
       else writeNotice(detail ? `${title}\n${detail}` : title)
     }
-    note(`This looks like a full build (${reason}) — planning it properly.`)
+    // Said once and kept in scrollback: the pipeline starts by researching, so
+    // without this the first thing on screen was subagents nobody asked for.
+    note(
+      uiHooks
+        ? 'This reads as a new project, so elia will research it first and show you a plan to approve before building anything.'
+        : `This looks like a full build (${reason}) — planning it properly.`,
+      uiHooks ? '/auto off answers requests like this in a single reply instead.' : undefined,
+      'completed',
+    )
 
     if (uiHooks) {
+      const { friendlyPhase } = await import('./ui/app/phases.ts')
       setReportSink((kind, text) => {
         if (kind === 'block' || kind === 'summary') {
-          const [title, ...body] = text.split('\n')
-          uiHooks.onActivity?.({ kind: 'plan', status: 'updated', title: title ?? text, detail: body.join('\n') || undefined })
+          const [title = text, ...body] = text.split('\n')
+          // The approval menu shows the plan and the receipt closes the run, so
+          // those two stay transient. Everything else a block carries — issues
+          // found, a decision elia needs from you — belongs in scrollback; it
+          // used to flash past as a status line and vanish.
+          const transient = /^(?:Plan · awaiting approval|Run complete)\b/.test(title)
+          const needsYou = /^(?:Needs a decision|Issues found)/.test(title)
+          uiHooks.onActivity?.({ kind: 'status', status: transient ? 'updated' : needsYou ? 'warning' : 'completed', title, detail: body.join('\n') || undefined })
+        } else if (kind === 'phase') {
+          uiHooks.onActivity?.({ kind: 'status', status: 'updated', title: friendlyPhase(text) })
         } else if (kind === 'substep' && /^learned:\s*/i.test(text)) {
           // Learning is elia's strongest "getting smarter" signal — give it the
           // ✦ mark and make it durable in scrollback, not an ephemeral status.
@@ -2206,7 +2225,12 @@ async function runInteractive(): Promise<void> {
           const preview = renderProposalSummary(proposal)
           const res = await uiHooks.approve!({ title: 'Run this plan?', lines: [], preview, ruleLabel: 'this plan', variant: 'plan' })
           const outcome = typeof res === 'boolean' ? { approved: res, feedback: undefined } : res
-          if (outcome.approved) return { action: 'approve' }
+          if (outcome.approved) {
+            // The live plan panel follows these steps; each ticks off as the
+            // worker carrying its step id finishes.
+            uiHooks.onRunPlan?.(proposal.steps.map((step) => ({ id: step.id, title: step.title })))
+            return { action: 'approve' }
+          }
           if ('feedback' in outcome && outcome.feedback) return { action: 'amend', feedback: outcome.feedback }
           return { action: 'reject' }
         }
@@ -2224,6 +2248,9 @@ async function runInteractive(): Promise<void> {
         governanceMode: 'supervised',
         signal,
         polish: true,
+        // A build asked for from the chat stays local unless the request itself
+        // mentions GitHub — the run's own commits are still made either way.
+        publish: /\b(?:git\s*hub|repo(?:sitory)?|publish|push)\b/i.test(goal),
       })
       const { formatAutonomousRunReceipt, formatAutonomousRunSummary } = await import('./autonomy/runSummary.ts')
       const summary = formatAutonomousRunSummary(goal, result)
@@ -3915,6 +3942,7 @@ async function runInteractive(): Promise<void> {
             signal: hooks.signal,
             drainSteering: hooks.drainSteering,
             approve: hooks.approve,
+            onRunPlan: hooks.onRunPlan,
           },
         )
         await persistInteractiveSession()

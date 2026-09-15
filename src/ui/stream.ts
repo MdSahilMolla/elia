@@ -6,6 +6,7 @@ import { createMarkdownStream, type MarkdownStream } from './markdown.ts'
 import { registerShutdownCleanup } from './shutdown.ts'
 import type { ProviderActivity } from '../providers/types.ts'
 import { visualizationTerminalPreview } from '../tools/visualize.ts'
+import { toolActivity } from './app/toolSummary.ts'
 
 const REPLY_MARKER = `${boldGold('●')} `
 
@@ -173,13 +174,14 @@ export function writeToolCall(name: string, input: Record<string, unknown>): voi
     return
   }
   if (quietOutput) return
-  const summary = summarizeInput(safeInput)
   if (inkSink) {
-    // One transient line in the REPL's status row — never a transcript row or
-    // a raw write under the live frame.
-    inkSink('status', `${name}${summary ? ` ${summary}` : ''}`)
+    // One transient line in the REPL's status row, in words ("Delegating to
+    // scout: research viz libraries") — never the raw `key: value` argument
+    // dump, and never a transcript row or a raw write under the live frame.
+    inkSink('status', toolActivity({ name, input: safeInput }))
     return
   }
+  const summary = summarizeInput(safeInput)
   hideSpinner()
   if (!toolBlockOpen) {
     toolBlockOpen = true

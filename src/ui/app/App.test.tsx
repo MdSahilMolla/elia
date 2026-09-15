@@ -336,6 +336,38 @@ test('the plan panel follows elia\'s ticks during the turn and gives way to a re
   }
 })
 
+test("an escalated run's approved plan shows in the panel and closes with a receipt", async () => {
+  let release!: () => void
+  const held = new Promise<void>((resolve) => { release = resolve })
+  const props = {
+    ...baseProps(),
+    submitTurn: async (_text: string, hooks: import('./App.tsx').TurnHooks) => {
+      hooks.onRunPlan?.([
+        { id: 'step-a', title: 'Set up the Streamlit project' },
+        { id: 'step-b', title: 'Chart the training metrics' },
+      ])
+      await held
+    },
+  }
+  const { stdin, lastFrame, unmount } = render(<App {...props} />)
+  try {
+    await waitForFrame(lastFrame, READY)
+    await settle()
+    stdin.write('create me a python web app')
+    await waitForFrame(lastFrame, 'create me a python web app')
+    stdin.write('\r')
+    const during = await waitForFrame(lastFrame, 'Plan · 0/2')
+    expect(during).toContain('□ Set up the Streamlit project')
+    expect(during).toContain('□ Chart the training metrics')
+    release()
+    const after = await waitForFrame(lastFrame, 'still open')
+    expect(after).toContain('◐ Plan · 0/2 done — still open:')
+    expect(after).not.toMatch(/^Plan · /m)
+  } finally {
+    unmount()
+  }
+})
+
 test('planReceipt says a finished plan is finished and names what is still open', () => {
   expect(planReceipt([{ content: 'a', status: 'completed' }, { content: 'b', status: 'completed' }])).toBe('✓ Plan complete · 2/2 steps')
   expect(planReceipt([{ content: 'a', status: 'completed' }, { content: 'b', status: 'in_progress' }, { content: 'c', status: 'pending' }]))

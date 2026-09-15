@@ -105,6 +105,14 @@ export interface AutonomousRunOptions {
   resumeGraph?: boolean
   /** Run a bounded final quality pass before verification; enabled by default. */
   polish?: boolean
+  /**
+   * Publish the finished project to GitHub (create or push the repository, then
+   * milestones and issues) — each still behind the governor. Default true: the
+   * `elia auto` behaviour. A REPL turn that escalated passes false unless the
+   * request asked for GitHub — "create me a python web app" used to stop mid-build
+   * for three GitHub questions nobody expected.
+   */
+  publish?: boolean
   /** Maximum final polish passes; bounded to prevent autonomous thrashing. */
   maxPolishPasses?: number
   /** Maximum governed tool requests for the entire run; 0 means no additional action-count limit. */
@@ -1307,7 +1315,7 @@ Do not repeat whatever failed. ${retryGuidanceFor(report)}`,
   // just the initial commit of `.gitignore` and generated docs. Everything
   // above already happened locally, so a run that cannot or may not publish
   // still has its full history and documents.
-  if (planApproved && hasLocalHistory) {
+  if (planApproved && hasLocalHistory && options.publish !== false) {
     writePhase('publish', 'pushing the completed work to GitHub')
     const published = await publishProject({ cwd: workspaceRoot, proposal, governor, signal: runSignal })
     if (published.status === 'created') writeSubStep(`created and pushed ${published.url ?? 'the GitHub repository'}`)

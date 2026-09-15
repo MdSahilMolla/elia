@@ -29,8 +29,11 @@ const RECEIPT_HEAD: Record<AutonomousRunResult['outcome'], string> = {
  * a line and a file list.
  */
 export function formatAutonomousRunReceipt(goal: string, result: AutonomousRunResult): string {
-  const touchedFiles = [...new Set(result.proposal?.steps.flatMap((step) => step.files) ?? [])]
-  const steps = result.completion.totalSteps > 0 ? ` · ${result.completion.completedSteps}/${result.completion.totalSteps} steps` : ''
+  // A plan that never ran touched nothing — listing its intended files (and
+  // "0/4 steps") read as if something had been built.
+  const ran = result.outcome === 'completed' || result.outcome === 'needs-attention'
+  const touchedFiles = ran ? [...new Set(result.proposal?.steps.flatMap((step) => step.files) ?? [])] : []
+  const steps = ran && result.completion.totalSteps > 0 ? ` · ${result.completion.completedSteps}/${result.completion.totalSteps} steps` : ''
   const head = `${RECEIPT_HEAD[result.outcome] ?? result.outcome} — ${redactText(result.proposal?.goal ?? goal, 120)}${steps} · ${formatElapsed(result.elapsedMs)}`
   if (touchedFiles.length === 0) return head
   const shown = touchedFiles.slice(0, 6).join(', ')

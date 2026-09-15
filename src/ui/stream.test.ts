@@ -39,7 +39,22 @@ test('with the live REPL mounted, the line-mode writers never touch stdout', () 
   }
   expect(writes).toEqual([])
   // Progress still reaches the REPL — as a transient status, not a transcript row.
-  expect(statuses).toEqual(['read_file src/app.ts', 'Orienting'])
+  expect(statuses).toEqual(['Reading app.ts', 'Orienting'])
+})
+
+// Seen live: the status row read "task description: Research NN viz libs,
+// role: scout, prompt: Identify Python libraries specifically designed…".
+test('a delegated task reaches the status row in words, not as an argument dump', () => {
+  const statuses: string[] = []
+  setInkSink((kind, text) => {
+    if (kind === 'status') statuses.push(text)
+  })
+  try {
+    writeToolCall('task', { description: 'Research NN viz libs', role: 'scout', prompt: 'Identify Python libraries for…' })
+  } finally {
+    setInkSink(undefined)
+  }
+  expect(statuses).toEqual(['Delegating to scout: Research NN viz libs'])
 })
 
 test('provider activity preserves useful multiline progress while redacting secrets', () => {

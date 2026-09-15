@@ -1,8 +1,61 @@
+import { useEffect, useState } from 'react'
 import { Box, Text } from 'ink'
 import { Spinner } from './Spinner.tsx'
 import { palette } from '../theme.ts'
 import type { TodoItem } from '../../../autonomy/todoList.ts'
 import type { TaskSession } from '../../../taskSessions.ts'
+
+/** One step of an escalated run's approved plan. */
+export interface RunStep {
+  id: string
+  title: string
+}
+
+/**
+ * An approved run plan as a checklist, each step's state read off the worker
+ * that carries its id (fleet workers are created with `stepId` = the plan
+ * step's id). The latest attempt wins, so a retried step shows its retry.
+ * A step whose worker finished — even one flagged for review — is done here;
+ * the review verdict lands in scrollback.
+ */
+export function runPlanFromWorkers(steps: readonly RunStep[], agents: readonly TaskSession[], sessionId?: string): TodoItem[] {
+  return steps.map((step) => {
+    let latest: TaskSession | undefined
+    for (const agent of agents) {
+      if (agent.stepId !== step.id) continue
+      if (sessionId && agent.sessionId !== sessionId) continue
+      if (!latest || agent.updatedAt >= latest.updatedAt) latest = agent
+    }
+    const status: TodoItem['status'] = !latest
+      ? 'pending'
+      : latest.status === 'done' || latest.status === 'needs-review'
+        ? 'completed'
+        : latest.status === 'running'
+          ? 'in_progress'
+          : 'pending'
+    return { content: step.title, status }
+  })
+}
+
+/** Re-render once a second while something is running, so elapsed times move on their own. */
+function useTicker(active: boolean): void {
+  const [, setTick] = useState(0)
+  useEffect(() => {
+    if (!active) return
+    const timer = setInterval(() => setTick((n) => n + 1), 1_000)
+    return () => clearInterval(timer)
+  }, [active])
+}
+
+/**
+ * What a worker is doing, in words: its task, plus how far along it is. The
+ * `action` field is just the last tool that *finished* ("list_files"), which
+ * sat unchanged while the model thought — it read as a frozen row.
+ */
+function workerLabel(agent: TaskSession): string {
+  const steps = agent.stepsCompleted > 0 ? ` · ${agent.stepsCompleted} step${agent.stepsCompleted === 1 ? '' : 's'}` : ''
+  return `${agent.title || agent.action}${steps}`
+}
 
 const TODO_MARK: Record<TodoItem['status'], string> = {
   pending: '□',
@@ -73,6 +126,7 @@ export function WorkspacePanel({
   const doneCount = finished.filter((a) => a.status === 'done').length
   const reviewCount = finished.filter((a) => a.status === 'needs-review').length
   const failedCount = finished.filter((a) => a.status === 'failed' || a.status === 'paused').length
+  useTicker(live.length > 0)
 
   if (plan.length === 0 && live.length === 0 && finished.length === 0) return null
 
@@ -133,7 +187,7 @@ export function WorkspacePanel({
               <Text wrap="truncate-end">
                 <Text>{agent.role}</Text>
                 {agent.attempts > 1 && <Text color={palette.muted}> · try {agent.attempts}</Text>}
-                <Text color={palette.muted}> · {agent.action || agent.title}</Text>
+                <Text color={palette.muted}> · {workerLabel(agent)}</Text>
                 {elapsed(agent) ? <Text color={palette.muted}> · {elapsed(agent)}</Text> : null}
               </Text>
             </Box>

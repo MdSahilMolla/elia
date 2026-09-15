@@ -100,6 +100,14 @@ const SHELL_SIDE_EFFECT = /[<>]/i
 const INTERNAL_SAFE_TOOLS = new Set(['flag_risk', 'submit_route', 'submit_proposal', 'submit_verdict', 'submit_acceptance', 'revise_plan', 'submit_assumptions', 'submit_lessons', 'delegate_tasks'])
 export const MAX_GOVERNED_ACTIONS = 10_000
 
+/**
+ * Roles whose workers get no write tools — `canWrite: false` in roles.ts. Kept
+ * here as a literal because importing roles.ts would pull the tool registry
+ * (and with it the `task` tool, which imports this module) into a cycle;
+ * governor.test.ts fails if the two lists drift.
+ */
+export const READ_ONLY_ROLES: ReadonlySet<string> = new Set(['scout', 'designer', 'accessibility', 'critic', 'security', 'bughunter'])
+
 export function assessAction(request: ActionRequest, cwd = currentAgent().cwd ?? process.cwd()): ActionAssessment {
   const { name, input } = request
   if (INTERNAL_SAFE_TOOLS.has(name)) return assessment('safe', 'allow', `${name} records structured control-flow metadata`, name, [], true)
@@ -428,6 +436,15 @@ export function assessAction(request: ActionRequest, cwd = currentAgent().cwd ??
   }
   if (name === 'engagement_report') {
     return assessment('review', 'approve', 'engagement_report compiles a workspace-local Markdown report from logged findings', 'engagement_report', resources, true)
+  }
+
+  // A read-only worker (a scout researching, a critic reviewing) cannot change
+  // anything itself, and every action it takes still passes this governor on
+  // its own — so approving the hand-off added a prompt that guarded nothing.
+  // It was the first thing a "build me an app" request showed: "Start a
+  // subagent?" before any plan existed. Writers still ask.
+  if (name === 'task' && READ_ONLY_ROLES.has(typeof input.role === 'string' ? input.role : 'builder')) {
+    return assessment('safe', 'allow', 'a read-only subagent; each action it takes is still checked on its own', 'task.read-only', resources, true)
   }
 
   if (name === 'preview' || name === 'task') {

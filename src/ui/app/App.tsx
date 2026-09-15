@@ -17,7 +17,8 @@ import type { ApprovalResult } from '../../autonomy/governor.ts'
 import { Picker, type PickerRequest } from './components/Picker.tsx'
 import { TextPrompt, type TextPromptRequest } from './components/TextPrompt.tsx'
 import { WorkingIndicator } from './components/WorkingIndicator.tsx'
-import { WorkspacePanel } from './components/WorkspacePanel.tsx'
+import { WorkspacePanel, runPlanFromWorkers, type RunStep } from './components/WorkspacePanel.tsx'
+import { isInternalNudge } from './phases.ts'
 import { HelpOverlay } from './components/HelpOverlay.tsx'
 import { ErrorBoundary } from './components/ErrorBoundary.tsx'
 import { activeTodoList, type TodoItem } from '../../autonomy/todoList.ts'
@@ -52,6 +53,8 @@ export interface TurnHooks {
   planMode: boolean
   /** Drained by the agent loop at each step boundary — operator guidance typed mid-run. */
   drainSteering(): string[]
+  /** An escalated run's approved steps — the plan panel ticks each off as its worker finishes. */
+  onRunPlan?(steps: RunStep[]): void
 }
 
 export interface SlashPickerRequest {
@@ -185,6 +188,8 @@ export function App(props: AppProps) {
   const snap = useTranscript(store)
   // `/clear` moves the REPL onto a new session id; the fleet panel follows it.
   const [sessionId, setSessionId] = useState(props.sessionId)
+  const sessionIdRef = useRef(sessionId)
+  sessionIdRef.current = sessionId
   // Bumped by `/clear` to remount <Static>: it tracks how many items it has
   // already printed, so an emptied-then-refilled list would otherwise skip the
   // first new items.
@@ -227,6 +232,12 @@ export function App(props: AppProps) {
   const [turnStartedAt, setTurnStartedAt] = useState(0)
   const [plan, setPlan] = useState<TodoItem[]>([])
   const [providerPlan, setProviderPlan] = useState<TodoItem[]>([])
+  // An escalated run's approved steps; their status comes from the workers.
+  // The ref is what the turn-end receipt reads: a passive effect syncing it
+  // could still be pending when the turn's `finally` runs, which dropped the
+  // receipt under load.
+  const [runSteps, setRunSteps] = useState<RunStep[]>([])
+  const runStepsRef = useRef<RunStep[]>([])
   // The plan as the running turn last showed it — read when the turn ends, after
   // its state updates may not have rendered yet.
   const turnPlan = useRef<TodoItem[]>([])
@@ -279,6 +290,9 @@ export function App(props: AppProps) {
   useEffect(() => {
     setInkSink((kind, text) => {
       if (kind === 'error') store.error(text)
+      // elia's notes to itself about the model ("told the model to stop
+      // re-reading files") would only overwrite what is really happening.
+      else if (isInternalNudge(text)) return
       // A tool line or progress title from a deep layer: the status row only.
       else if (kind === 'status') {
         if (busyRef.current) setStatus(text.split('\n', 1)[0] ?? '')
@@ -409,7 +423,7 @@ export function App(props: AppProps) {
           store.thinkingDelta(d)
         },
         onActivity: (a) => {
-          setStatus(a.title)
+          if (!isInternalNudge(a.title)) setStatus(a.title.replace(/^◆\s*/, ''))
           if (a.kind === 'plan') {
             const parsed = providerPlanItems(a.detail)
             if (parsed.length > 0) {
@@ -458,6 +472,12 @@ export function App(props: AppProps) {
           if (pending.length > 0) setStatus('Steering applied')
           return pending
         },
+        onRunPlan: (steps) => {
+          runStepsRef.current = steps
+          setRunSteps(steps)
+          setPlan([])
+          setProviderPlan([])
+        },
       }
       try {
         await props.submitTurn(text, hooks)
@@ -470,12 +490,18 @@ export function App(props: AppProps) {
           const line = rollupLine(rollupTools(tools))
           if (line) store.notice(line)
         }
+        // An escalated run's plan, read fresh from the workers as the turn ends.
+        if (runStepsRef.current.length > 0) {
+          turnPlan.current = runPlanFromWorkers(runStepsRef.current, taskSessions.list(), sessionIdRef.current)
+          runStepsRef.current = []
+        }
         // A plan-mode turn's plan is a proposal waiting on Enter — it stays up.
         if (turnPlan.current.length > 0 && modeRef.current !== 'plan') {
           store.notice(planReceipt(turnPlan.current))
           setPlan([])
           setProviderPlan([])
         }
+        setRunSteps([])
         store.commit()
         busyRef.current = false
         setBusy(false)
@@ -696,7 +722,10 @@ export function App(props: AppProps) {
     () => (isCodex ? contextWindowFor(env.model) : compactionThresholdFor(env.model)),
     [isCodex, env.model],
   )
-  const visiblePlan = plan.length > 0 ? plan : providerPlan
+  // An escalated run's plan, ticked from its workers — the report sink never
+  // carried step progress, so this panel used to show no plan at all there.
+  const runPlan = useMemo(() => runPlanFromWorkers(runSteps, agents, sessionId), [runSteps, agents, sessionId])
+  const visiblePlan = runPlan.length > 0 ? runPlan : plan.length > 0 ? plan : providerPlan
   // An approval / confirm is a modal state: freeze the live panels behind it so
   // a background repaint can't corrupt the menu and the user sees only what the
   // decision is about. The transcript (append-only) and the menu itself stay.

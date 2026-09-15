@@ -101,8 +101,11 @@ export function summarizeTool(tool: ToolItem): ToolSummary {
       return { verb: 'Searched the web', target: firstString(input, 'query') ?? '', stat, expandable: done }
     case 'web_fetch':
       return { verb: 'Fetched', target: firstString(input, 'url') ?? '', stat, expandable: done }
-    case 'task':
-      return { verb: 'Delegated to', target: firstString(input, 'role', 'description') ?? 'a subagent', stat, expandable: done }
+    case 'task': {
+      const role = firstString(input, 'role') ?? 'a subagent'
+      const description = firstString(input, 'description')
+      return { verb: 'Delegated to', target: description ? `${role}: ${description}` : role, stat, expandable: done }
+    }
     case 'todo_write':
       return { verb: 'Updated the plan', target: '', stat, expandable: done }
     case 'visualize':

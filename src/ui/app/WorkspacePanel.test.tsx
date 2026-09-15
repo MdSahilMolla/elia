@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test'
 import { render } from 'ink-testing-library'
-import { WorkspacePanel } from './components/WorkspacePanel.tsx'
+import { WorkspacePanel, runPlanFromWorkers } from './components/WorkspacePanel.tsx'
 import type { TaskSession } from '../../taskSessions.ts'
 
 const agent = (over: Partial<TaskSession>): TaskSession => ({
@@ -49,7 +49,7 @@ test('shows live subagents and what each is doing; finished ones roll into a rec
       plan={[]}
       sessionId="s1"
       agents={[
-        agent({ id: '1', sessionId: 's1', role: 'builder', providerName: 'anthropic', model: 'claude-test', wave: 2, action: 'editing src/foo.ts' }),
+        agent({ id: '1', sessionId: 's1', role: 'builder', providerName: 'anthropic', model: 'claude-test', wave: 2, title: 'build the settings page', action: 'edit_file', stepsCompleted: 3 }),
         agent({ id: '2', sessionId: 's1', role: 'tester', status: 'done', finishedAt: 5, action: 'ran 42 tests' }),
         agent({ id: '3', sessionId: 's1', role: 'lead', action: 'orchestrating' }),
       ]}
@@ -61,7 +61,10 @@ test('shows live subagents and what each is doing; finished ones roll into a rec
   // Which provider/model a worker runs on is /task detail, not panel noise.
   expect(frame).not.toContain('anthropic/claude-test')
   expect(frame).toContain('wave 2')
-  expect(frame).toContain('editing src/foo.ts')
+  // What the worker is doing (its task) and how far along — not the name of
+  // the last tool that finished, which sat frozen while the model thought.
+  expect(frame).toContain('build the settings page · 3 steps')
+  expect(frame).not.toContain('edit_file')
   expect(frame).not.toContain('lead') // the lead agent is not a "subagent"
   // A live worker is still going, so the finished tester is not surfaced yet.
   expect(frame).not.toContain('ran 42 tests')
@@ -101,7 +104,7 @@ test('collapses a retried step to its latest attempt instead of two builder rows
       sessionId="s1"
       agents={[
         agent({ id: 'attempt-1', sessionId: 's1', stepId: 's2', role: 'builder', status: 'failed', updatedAt: 1, finishedAt: 1 }),
-        agent({ id: 'attempt-2', sessionId: 's1', stepId: 's2', role: 'builder', status: 'running', updatedAt: 2, attempts: 2, action: 'second pass' }),
+        agent({ id: 'attempt-2', sessionId: 's1', stepId: 's2', role: 'builder', status: 'running', updatedAt: 2, attempts: 2, title: 'second pass' }),
       ]}
     />,
   )
@@ -109,6 +112,30 @@ test('collapses a retried step to its latest attempt instead of two builder rows
   expect(frame).toContain('Subagents · 1 running')
   expect(frame).toContain('try 2')
   expect(frame).toContain('second pass')
+})
+
+// "It's not updating the plan — closing ones that are done": an escalated run's
+// plan never reached the panel, so nothing ever ticked. The panel now reads
+// each approved step's state off the worker carrying that step's id.
+test('an approved run plan ticks each step off from the worker that carries it', () => {
+  const steps = [
+    { id: 's1', title: 'Set up the project' },
+    { id: 's2', title: 'Chart the training metrics' },
+    { id: 's3', title: 'Draw the architecture' },
+  ]
+  const agents = [
+    agent({ id: 'w1', sessionId: 'run', stepId: 's1', role: 'builder', status: 'done', updatedAt: 3 }),
+    // A failed first attempt, then the retry that is running now.
+    agent({ id: 'w2a', sessionId: 'run', stepId: 's2', role: 'frontend', status: 'failed', updatedAt: 1 }),
+    agent({ id: 'w2b', sessionId: 'run', stepId: 's2', role: 'frontend', status: 'running', updatedAt: 4 }),
+    // Another session's worker for a same-named step id must not count.
+    agent({ id: 'old', sessionId: 'yesterday', stepId: 's3', role: 'builder', status: 'done', updatedAt: 9 }),
+  ]
+  expect(runPlanFromWorkers(steps, agents, 'run')).toEqual([
+    { content: 'Set up the project', status: 'completed' },
+    { content: 'Chart the training metrics', status: 'in_progress' },
+    { content: 'Draw the architecture', status: 'pending' },
+  ])
 })
 
 test('legacy: with no sessionId, unstamped finished work from a reloaded tasks.json stays hidden', () => {
