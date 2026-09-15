@@ -5,8 +5,10 @@ import { join } from 'node:path'
 import { runAgentLoop, type RunAgentLoopResult, type ToolEvent } from '../../agentLoop.ts'
 import { withAgentIdentity } from '../../autonomy/context.ts'
 import { createActionGovernor, withActionGovernor, type ActionRequest } from '../../autonomy/governor.ts'
+import { createVerdictTool } from '../../autonomy/verify.ts'
 import { clearAllCaches } from '../../cacheRegistry.ts'
-import type { Usage } from '../../providers/types.ts'
+import type { ContentBlock, Provider, Usage } from '../../providers/types.ts'
+import { requiredToolReminders } from '../../requiredTool.ts'
 import { editFileTool } from '../../tools/editFile.ts'
 import { previewTool } from '../../tools/preview.ts'
 import { processTool, resetProcessesForTests } from '../../tools/processTool.ts'
@@ -193,6 +195,60 @@ test('a model that never stops calling tools is halted by the step budget', asyn
   expect(result.stopReason).toBe('step-budget')
   // Not one tool call past the budget ran.
   expect(existsSync(join(dir, 'f10.txt'))).toBe(false)
+})
+
+test('a reviewer still reading when its budget runs low is told to submit, and the verdict it then submits is recorded', async () => {
+  for (let i = 0; i < 12; i++) writeFileSync(join(dir, `part${i}.ts`), `export const part${i} = ${i}`)
+  // Like critic#1 in runs 2026-09-10-754n-8z17 and 2026-09-12-zjga-se2f: reads
+  // for as long as it is allowed to, and makes the structured call only when
+  // told to. Once it has, it stops.
+  let reads = 0
+  const readsUntilTold: Provider = {
+    async streamTurn({ messages }) {
+      const submitted = messages.some((m) => m.role === 'assistant' && m.content.some((b) => b.type === 'tool_use' && b.name === 'submit_verdict'))
+      const last = messages[messages.length - 1]
+      const told = last?.role === 'user' && last.content.some((b) => b.type === 'text' && b.text.includes('call submit_verdict now'))
+      const content: ContentBlock[] = submitted
+        ? [{ type: 'text', text: 'Review submitted.' }]
+        : told
+          ? [{ type: 'tool_use', id: 'verdict', name: 'submit_verdict', input: { verdict: 'approve', summary: 'Every part is present and exported.' } }]
+          : [{ type: 'tool_use', id: `read-${reads}`, name: 'read_file', input: { path: `part${reads++ % 12}.ts` } }]
+      return { content, usage: { inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 } }
+    },
+  }
+  const review = async (remind: boolean) => {
+    reads = 0
+    const verdict = createVerdictTool()
+    const reminders = remind ? requiredToolReminders('submit_verdict', 8) : undefined
+    const result = await withAgentIdentity({ name: 'critic#1', role: 'critic', cwd: dir }, () =>
+      runAgentLoop({
+        messages: [{ role: 'user', content: [{ type: 'text', text: 'review the change' }] }],
+        systemPrompt: 'You are a reviewer.',
+        tools: [readFileTool, verdict.tool],
+        provider: readsUntilTold,
+        providerName: 'scripted',
+        model: 'scripted-behaviour',
+        useAnimation: false,
+        verbose: false,
+        maxSteps: 8,
+        onText: () => {},
+        onTool: (event) => reminders?.onTool(event),
+        drainDirectives: reminders?.drain,
+      }),
+    )
+    return { stopReason: result.stopReason, verdict: verdict.taken() }
+  }
+
+  // Without it: the budget runs out mid-read, the wrap-up tells it to stop
+  // calling tools, and there is no verdict — the gate fails a review that never
+  // happened, on a build that had already passed.
+  const unreminded = await review(false)
+  expect(unreminded.stopReason).toBe('step-budget')
+  expect(unreminded.verdict).toBeUndefined()
+
+  const reminded = await review(true)
+  expect(reminded.verdict?.verdict).toBe('approve')
+  expect(reminded.stopReason).toBe('complete')
 })
 
 /** Enough per call on a priced model that a $1 ceiling is crossed on the first step. */

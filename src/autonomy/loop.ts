@@ -1488,6 +1488,7 @@ Read the changed files in full for context beyond the diff above — a diff hide
             cwd: workspaceRoot,
             tools: [...reviewerTools, verdictCapture.tool],
             signal: runSignal,
+            requiredTool: 'submit_verdict',
 
             prompt: `${reviewContext}
 
@@ -1527,6 +1528,7 @@ This reviewer session is intentionally read-only. The current diff, status, and 
           cwd: workspaceRoot,
           tools: [...allWorkerTools().filter((tool) => REVIEWER_TOOL_NAMES.has(tool.name)), acceptanceCapture.tool],
           signal: runSignal,
+          requiredTool: 'submit_acceptance',
           prompt: `${reviewContext}
 
 ## The acceptance criteria this run declared

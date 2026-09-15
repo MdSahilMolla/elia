@@ -18,6 +18,7 @@ import { activeActionGovernor, withActionGovernor, type ActionGovernor } from '.
 import { createDelegationTool } from './tools/delegate.ts'
 import { activeGoalGraph, withGoalGraph, withGoalNode, type GoalGraphStore } from './autonomy/goalGraph.ts'
 import type { Journal } from './autonomy/journal.ts'
+import { requiredToolReminders } from './requiredTool.ts'
 
 export interface SubAgentRequest {
   prompt: string
@@ -54,6 +55,13 @@ export interface SubAgentRequest {
   parentNodeId?: string
   /** Parent autonomous journal for nested delegation lifecycle events. */
   journal?: Journal
+  /**
+   * A tool this worker has to call for its work to count — the structured
+   * verdict or report the caller reads back. The worker is warned before its
+   * step budget runs out and nudged once if it tries to finish without the
+   * call; see requiredToolReminders.
+   */
+  requiredTool?: string
 }
 
 export interface SubAgentResult {
@@ -152,6 +160,7 @@ export async function runSubAgent(request: SubAgentRequest): Promise<SubAgentRes
           ? BATTMANN_SUBAGENT_SYSTEM_PROMPT
           : SUBAGENT_SYSTEM_PROMPT
   const cwd = request.cwd ?? currentAgent().cwd
+  const reminders = request.requiredTool ? requiredToolReminders(request.requiredTool, definition.maxSteps) : undefined
 
   // Each worker gets its own working list. `todo_write` *replaces* the list it
   // writes to, and until now every sub-agent resolved the single ambient
@@ -174,6 +183,7 @@ export async function runSubAgent(request: SubAgentRequest): Promise<SubAgentRes
       verbose: false,
       onTool: (event) => {
         appendActionAudit(event, runId)
+        reminders?.onTool(event)
         request.onTool?.(event)
       },
       cache,
@@ -184,6 +194,7 @@ export async function runSubAgent(request: SubAgentRequest): Promise<SubAgentRes
       // its own step boundaries instead. Parallel workers share the source;
       // whichever iterates first consumes it.
       drainSteering: drainParentSteering,
+      drainDirectives: reminders?.drain,
     }))))),
   )
 
