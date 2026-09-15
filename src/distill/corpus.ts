@@ -171,6 +171,61 @@ export interface TraceSupplyRow {
  * `collectDistillableTraces`: the hot path should not pay to describe its own
  * rejections.
  */
+
+/**
+ * A run with no receipt died before it could write one. "Run never finished" is
+ * true but useless — it names no phase, no action, no error, and every such run
+ * looks identical in the report. The journal it left behind holds all of that,
+ * so read where it actually stopped: the phase it was in, what it last did, and
+ * how long it had been running. Nine of the first twenty-three runs landed here,
+ * and diagnosing them meant reading these same two files by hand.
+ */
+function describeUnfinishedRun(dir: string): string {
+  const events = readNdjson(join(dir, 'events.ndjson'))
+  const actions = readNdjson(join(dir, 'actions.ndjson'))
+  if (events.length === 0) return 'no receipt (run never finished, and left no journal)'
+
+  const startedAt = typeof events[0]?.at === 'number' ? (events[0].at as number) : undefined
+  // The journal does not mark every phase, so the last action can be newer than
+  // the last event — take whichever the run truly reached last.
+  const lastEventAt = typeof events[events.length - 1]?.at === 'number' ? (events[events.length - 1]!.at as number) : 0
+  const lastAction = actions[actions.length - 1]
+  const lastActionAt = typeof lastAction?.at === 'number' ? (lastAction.at as number) : 0
+  const endedAt = Math.max(lastEventAt, lastActionAt)
+
+  const phase = [...events].reverse().map((event) => (event.kind === 'phase' ? ((event.data as { phase?: string } | undefined)?.phase ?? undefined) : undefined)).find(Boolean)
+  const ran = startedAt !== undefined && endedAt > startedAt ? `${Math.round((endedAt - startedAt) / 1000)}s in` : 'immediately'
+
+  let where: string
+  if (lastAction && lastActionAt >= lastEventAt) {
+    const actor = typeof lastAction.actor === 'string' ? lastAction.actor : 'an agent'
+    const tool = typeof lastAction.tool === 'string' ? lastAction.tool : 'a tool'
+    where = `${actor} had just run ${tool}${lastAction.isError === true ? ', which failed' : ''}`
+  } else {
+    const kind = typeof events[events.length - 1]?.kind === 'string' ? (events[events.length - 1]!.kind as string) : 'an event'
+    where = `its last journal entry was ${kind}`
+  }
+  return `no receipt (died ${ran}${phase ? `, during the ${phase} phase` : ''}; ${where})`
+}
+
+function readNdjson(path: string): Record<string, unknown>[] {
+  if (!existsSync(path)) return []
+  const rows: Record<string, unknown>[] = []
+  try {
+    for (const line of readFileSync(path, 'utf8').split('\n')) {
+      if (!line.trim()) continue
+      try {
+        rows.push(JSON.parse(line) as Record<string, unknown>)
+      } catch {
+        // A run killed mid-write leaves a torn last line; the rest still counts.
+      }
+    }
+  } catch {
+    return rows
+  }
+  return rows
+}
+
 export function diagnoseTraceSupply(cwd = process.cwd()): TraceSupplyRow[] {
   const runsDir = join(cwd, '.elia', 'runs')
   if (!existsSync(runsDir)) return []
@@ -187,7 +242,7 @@ export function diagnoseTraceSupply(cwd = process.cwd()): TraceSupplyRow[] {
     if (!entry.isDirectory()) continue
     const receiptPath = join(runsDir, entry.name, 'receipt.json')
     if (!existsSync(receiptPath)) {
-      rows.push({ runId: entry.name, accepted: false, rejectedBy: ['no receipt (run never finished)'] })
+      rows.push({ runId: entry.name, accepted: false, rejectedBy: [describeUnfinishedRun(join(runsDir, entry.name))] })
       continue
     }
     let receipt: RawReceipt

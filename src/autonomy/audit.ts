@@ -49,6 +49,12 @@ export interface RunReceiptInput {
   maxWallClockMs?: number
   actionBudget?: { maxActions: number; consumed: number; exhausted: boolean; blockedByBudget: number }
   completion?: CompletionAssessment
+  /**
+   * Set only when the run did not reach its own ending — it threw, or its
+   * process was killed. Without this a dead run left no receipt at all, and
+   * `elia distill` could say nothing about it but "run never finished".
+   */
+  interruption?: { reason: string; error?: string; stack?: string; lastPhase?: string }
 }
 
 export function appendActionAudit(event: ToolEvent, runIdOverride?: string): void {
@@ -127,6 +133,7 @@ export function writeRunReceipt(input: RunReceiptInput): void {
     elapsedMs: input.elapsedMs,
     maxWallClockMs: input.maxWallClockMs,
     actionBudget: input.actionBudget,
+    interruption: input.interruption,
     usage: input.usage,
     proposal: input.proposal
       ? {
@@ -213,6 +220,7 @@ function renderReceipt(receipt: {
   elapsedMs?: number
   maxWallClockMs?: number
   actionBudget?: { maxActions: number; consumed: number; exhausted: boolean; blockedByBudget: number }
+  interruption?: { reason: string; error?: string; stack?: string; lastPhase?: string }
   actions: { total: number; failed: number; blocked: number; irreversible: number; replayed?: number; humanReview?: number; retryable?: number }
   graph?: { nodes: { id: string; status: string; attempts: number }[]; pendingApprovals: number; recoveredNodes?: number; activeLeases?: number; retryableActions?: number; humanReviewActions?: number; contractedActions?: number; preconditionFailures?: { id: string; tool: string; failures: string[]; nextAction?: string }[]; postconditionFailures?: { id: string; tool: string; failures: string[]; nextAction?: string }[]; takeoverActions?: { id: string; tool: string; state: string; error?: string }[] }
   completion?: CompletionAssessment
@@ -231,6 +239,12 @@ function renderReceipt(receipt: {
     '',
     `- **Run:** ${receipt.runId}`,
     `- **Outcome:** ${receipt.outcome}`,
+    ...(receipt.interruption
+      ? [
+          `- **Interrupted:** ${receipt.interruption.reason}${receipt.interruption.lastPhase ? ` during the ${receipt.interruption.lastPhase} phase` : ''}`,
+          ...(receipt.interruption.error ? [`- **Error:** ${receipt.interruption.error}`] : []),
+        ]
+      : []),
     ...(receipt.taskSessionId ? [`- **Task session:** ${receipt.taskSessionId}`] : []),
     ...(receipt.completion ? [`- **Completion state:** ${receipt.completion.state} (${receipt.completion.confidence} confidence)`, `- **Completion:** ${receipt.completion.summary}`, `- **Evidence:** ${receipt.completion.evidence.length > 0 ? receipt.completion.evidence.join('; ') : 'none'}`, `- **Blockers:** ${receipt.completion.blockers.length > 0 ? receipt.completion.blockers.join('; ') : 'none'}`, `- **Next actions:** ${receipt.completion.nextActions.join('; ')}`] : []),
     `- **Goal:** ${receipt.goal}`,

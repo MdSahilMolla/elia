@@ -77,6 +77,38 @@ describe('autonomy audit ledger and receipt', () => {
     }
   }, 60_000)
 
+  test('a run that died before finishing records why, and the phase it died in', () => {
+    // A run that throws or is killed never reaches the one place a receipt is
+    // written, so it used to leave nothing at all and `elia distill` could say
+    // only "run never finished" — no phase, no error, nothing to act on.
+    const deadRunId = `${runId}-interrupted`
+    writeRunReceipt({
+      runId: deadRunId,
+      goal: 'build a thing that never finished',
+      outcome: 'interrupted',
+      events: [],
+      interruption: {
+        reason: 'the run threw and did not reach its own ending',
+        error: 'ENOENT: no such file or directory',
+        stack: 'Error: ENOENT\n    at builder',
+        lastPhase: 'execute',
+      },
+    })
+    const dir = join(process.cwd(), '.elia', 'runs', deadRunId)
+    try {
+      const receipt = JSON.parse(readFileSync(join(dir, 'receipt.json'), 'utf8')) as { outcome: string; interruption?: { reason: string; lastPhase?: string; stack?: string } }
+      expect(receipt.outcome).toBe('interrupted')
+      expect(receipt.interruption?.lastPhase).toBe('execute')
+      expect(receipt.interruption?.stack).toContain('at builder')
+      const markdown = readFileSync(join(dir, 'receipt.md'), 'utf8')
+      expect(markdown).toContain('Interrupted')
+      expect(markdown).toContain('during the execute phase')
+      expect(markdown).toContain('ENOENT')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
   afterAll(() => {
     rmSync(runDir, { recursive: true, force: true })
   })

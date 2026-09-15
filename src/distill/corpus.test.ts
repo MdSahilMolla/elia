@@ -105,3 +105,72 @@ describe('diagnoseTraceSupply', () => {
     expect(keptByCollector).toEqual(['good'])
   })
 })
+
+describe('a run that died before writing a receipt', () => {
+  /** A run directory holding only the journal a killed run leaves behind. */
+  function unfinished(events: Record<string, unknown>[], actions: Record<string, unknown>[] = []): string {
+    const root = mkdtempSync(join(tmpdir(), 'elia-distill-unfinished-'))
+    made.push(root)
+    const dir = join(root, '.elia', 'runs', 'dead-run')
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, 'events.ndjson'), events.map((event) => JSON.stringify(event)).join('\n'))
+    if (actions.length > 0) writeFileSync(join(dir, 'actions.ndjson'), actions.map((action) => JSON.stringify(action)).join('\n'))
+    return root
+  }
+
+  test('is reported with the phase it was in and what it last did, not just "never finished"', () => {
+    // Every unfinished run used to read identically, naming no phase, no action
+    // and no error — so nine of them in one report said nothing actionable.
+    const rows = diagnoseTraceSupply(
+      unfinished(
+        [
+          { seq: 0, at: 1000, kind: 'run-start', data: { runId: 'dead-run', goal: 'build a thing' } },
+          { seq: 1, at: 2000, kind: 'phase', data: { phase: 'execute' } },
+        ],
+        [{ at: 26_000, actor: 'builder#1', tool: 'run_command', isError: true }],
+      ),
+    )
+    expect(rows[0]!.accepted).toBe(false)
+    const reason = rows[0]!.rejectedBy[0]!
+    expect(reason).toContain('no receipt')
+    expect(reason).toContain('execute')
+    expect(reason).toContain('builder#1')
+    expect(reason).toContain('run_command')
+    expect(reason).toContain('which failed')
+    expect(reason).toContain('25s in')
+  })
+
+  test('uses the last action even when it happened after the last journal event', () => {
+    // Not every phase writes a phase event, so a run that looked like it died in
+    // scaffold had in fact gone on working for another 20 seconds.
+    const rows = diagnoseTraceSupply(
+      unfinished(
+        [
+          { seq: 0, at: 1000, kind: 'run-start', data: {} },
+          { seq: 1, at: 1500, kind: 'phase', data: { phase: 'scaffold' } },
+        ],
+        [{ at: 21_500, actor: 'assumptions#1', tool: 'grep', isError: false }],
+      ),
+    )
+    expect(rows[0]!.rejectedBy[0]).toContain('assumptions#1')
+    // 20.5s elapsed, and the journal's own last event was at 0.5s.
+    expect(rows[0]!.rejectedBy[0]).toContain('21s in')
+  })
+
+  test('says so plainly when the run left no journal at all', () => {
+    const rows = diagnoseTraceSupply(unfinished([]))
+    expect(rows[0]!.rejectedBy[0]).toContain('left no journal')
+  })
+
+  test('a torn final line from a run killed mid-write does not lose the rest', () => {
+    const root = mkdtempSync(join(tmpdir(), 'elia-distill-torn-'))
+    made.push(root)
+    const dir = join(root, '.elia', 'runs', 'dead-run')
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(
+      join(dir, 'events.ndjson'),
+      `${JSON.stringify({ seq: 0, at: 1000, kind: 'run-start', data: {} })}\n${JSON.stringify({ seq: 1, at: 3000, kind: 'phase', data: { phase: 'verify' } })}\n{"seq":2,"at":40`,
+    )
+    expect(diagnoseTraceSupply(root)[0]!.rejectedBy[0]).toContain('verify')
+  })
+})

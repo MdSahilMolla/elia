@@ -25,6 +25,7 @@ import { withAgentIdentity } from './context.ts'
 import { activeMode, withActiveMode, type AgentMode } from './mode.ts'
 import { loadDevelopmentToolHooks, withToolHooks } from './devHooks.ts'
 import { createJournal, newRunId, runDir, type Journal } from './journal.ts'
+import { registerShutdownCleanup } from '../ui/shutdown.ts'
 import { captureTreeSnapshot, discardTreeSnapshot, dirtyPaths, restoreTreeSnapshot, type TreeSnapshot } from './treeSnapshot.ts'
 import { planWaves, runFleet } from './fleet.ts'
 import { filesWrittenBy } from './waveWrites.ts'
@@ -259,10 +260,90 @@ let runningInThisProcess = false
 /** A long-running plan must not have its lock stolen; a crashed one must not hold it. */
 const RUN_LOCK_TTL_MS = 6 * 60 * 60 * 1000
 
+/**
+ * The run in flight, so a run that dies can still be finalized from outside the
+ * function that was running it.
+ *
+ * A receipt is written in exactly one place: the end of the happy path. Anything
+ * that leaves the run early — a thrown error in any phase — used to skip both
+ * the run-end event and the receipt, so the run's entire record was discarded at
+ * the moment it mattered most. `elia distill` could then say only "no receipt
+ * (run never finished)": no phase, no error, nothing to fix. Nine of the first
+ * twenty-three runs ended that way.
+ */
+interface InFlightRun {
+  runId: string
+  goal: string
+  taskSessionId?: string
+  journal: Journal
+  graph: GoalGraphStoreType
+  startedAt: number
+  /** Read at finalization: `usage` is reassigned as the run spends. */
+  usage: () => Usage
+  /** Drops the shutdown hook once the run no longer needs finalizing. */
+  unregisterShutdown: () => void
+}
+
+let inFlightRun: InFlightRun | undefined
+
+/** Claim the in-flight run, so the happy path and a crash cannot both finalize it. */
+function claimInFlightRun(): InFlightRun | undefined {
+  const run = inFlightRun
+  inFlightRun = undefined
+  run?.unregisterShutdown()
+  return run
+}
+
+/**
+ * Write the record of a run that never reached its own ending. Best-effort by
+ * design: it runs while something has already gone wrong, so it must never
+ * throw over the original error.
+ */
+function finalizeDeadRun(reason: string, error?: unknown): void {
+  const run = claimInFlightRun()
+  if (!run) return
+  try {
+    const events = run.journal.events()
+    const lastPhase = [...events].reverse().find((event) => event.kind === 'phase')?.data as { phase?: string } | undefined
+    const message = error instanceof Error ? error.message : error === undefined ? undefined : String(error)
+    const interruption = {
+      reason,
+      error: message,
+      stack: error instanceof Error ? error.stack : undefined,
+      lastPhase: lastPhase?.phase,
+    }
+    run.journal.append('run-end', { outcome: 'interrupted', interruption })
+    writeRunReceipt({
+      runId: run.runId,
+      goal: run.goal,
+      outcome: 'interrupted',
+      taskSessionId: run.taskSessionId,
+      events: run.journal.events(),
+      graph: run.graph.state(),
+      usage: run.usage(),
+      elapsedMs: Date.now() - run.startedAt,
+      interruption,
+    })
+  } catch {
+    // Nothing here is worth losing the original failure over.
+  }
+}
+
 export function runAutonomousTask(options: AutonomousRunOptions): Promise<AutonomousRunResult> {
   const mode = options.mode ?? activeMode()
   const hooks = mode === 'dev' ? loadDevelopmentToolHooks() : []
-  return withActiveMode(mode, () => withToolHooks(hooks, () => withRunLock(() => runAutonomousTaskInternal(options))))
+  return withActiveMode(mode, () =>
+    withToolHooks(hooks, () =>
+      withRunLock(async () => {
+        try {
+          return await runAutonomousTaskInternal(options)
+        } catch (error) {
+          finalizeDeadRun('the run threw and did not reach its own ending', error)
+          throw error
+        }
+      }),
+    ),
+  )
 }
 
 async function withRunLock<T>(fn: () => Promise<T>): Promise<T> {
@@ -389,6 +470,24 @@ async function runAutonomousTaskInternal(options: AutonomousRunOptions): Promise
     usage = addUsage(usage, delta)
   }
 
+  // From here the run has everything a receipt needs, so a death from this point
+  // on is recorded rather than silent. Released on the normal path below.
+  //
+  // The shutdown hook covers the other way a run dies, and the more common one:
+  // Ctrl+C, a closed terminal or SIGTERM. Those do not throw — the signal
+  // handlers run the registered cleanups and then call process.exit, and this
+  // run's other cleanup only calls controller.abort(), which returns
+  // immediately. The run is told to stop and the process is gone before it can
+  // react, which is why the same Ctrl+C sometimes left a receipt (the in-app
+  // stop, which aborts without exiting) and sometimes nothing at all.
+  // finalizeDeadRun is fully synchronous, so its writes land before the exit;
+  // cleanups also run in reverse registration order, so this one runs before the
+  // abort that would otherwise race it.
+  const unregisterShutdown = registerShutdownCleanup(() => {
+    finalizeDeadRun('the process was stopped before the run could finish (Ctrl+C, a closed terminal, or SIGTERM)')
+  })
+  inFlightRun = { runId, goal, taskSessionId: parentTask.id, journal, graph, startedAt, usage: () => usage, unregisterShutdown }
+
   /**
    * Ends the run as aborted, recording *where* it stopped and *why*.
    *
@@ -462,6 +561,9 @@ async function runAutonomousTaskInternal(options: AutonomousRunOptions): Promise
       blockedReason: completion.blockers[0],
       error: completion.state === 'verified' ? undefined : completion.blockers.join('; ') || undefined,
     })
+    // This run reached its own ending: it writes its own receipt, so the
+    // crash path must not write a second one over it.
+    claimInFlightRun()
     journal.append('run-end', { outcome: finalOutcome, completion, taskSessionId: parentTask.id, graph: graph.state().nodes.map((node) => ({ id: node.id, status: node.status })) })
     writeRunReceipt({ runId, goal, outcome: finalOutcome, taskSessionId: parentTask.id, proposal: extra.proposal, verdict: extra.verdict, lessons: extra.lessons, completion, events: journal.events(), graph: graph.state(), usage, elapsedMs: Date.now() - startedAt, maxWallClockMs: maxWallClockMs || undefined, actionBudget })
     const completionFacts = {
