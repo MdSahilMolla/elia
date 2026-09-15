@@ -57,7 +57,7 @@ import { applyPlanRevisions, createPlanRevisionTool, MAX_PLAN_REVISIONS } from '
 import { assumptionOutcome, auditPlanFeasibility, createAssumptionTool } from './assumptions.ts'
 import { isSensitivePath } from './sensitivePaths.ts'
 import { classifyStuck, type StuckRecovery } from './stuck.ts'
-import { checkRoot, classifyRegime, detectChecks, type VerificationRegime } from './detectChecks.ts'
+import { changedStaticPages, checkRoot, classifyRegime, detectChecks, type VerificationRegime } from './detectChecks.ts'
 import { detectContradictions, recordCompletion } from './calibration.ts'
 import { deriveReward, recordTrajectory, refSystemPrompt } from '../trajectory/record.ts'
 import { ELIA_ROOT } from '../statePaths.ts'
@@ -1362,15 +1362,33 @@ Read the changed files in full context. Improve only concrete issues directly re
   greenSnapshot = await captureTreeSnapshot(workspaceRoot, runDir(runId))
   writtenSinceGreen.clear()
 
+  // A static site with no project manifest has no build or test to run, and a
+  // plan for one usually names a check that cannot run here either (`test -f
+  // index.html`, unattended on Windows), so it reached review with nothing
+  // checked at all (run 2026-09-15-7cj7-8oi2) — while classifyRegime was
+  // already calling it `empirical` on the strength of a render that only ever
+  // ran as a fallback. Render the pages every time, as the interactive loop
+  // does. Not for a project with a manifest: its own build and tests are the
+  // gate, and a bundler app's raw index.html rightly fails a static render.
+  const deliveredFiles = proposal.steps.flatMap((step) => step.files)
+  const renderStaticPages = changedStaticPages(deliveredFiles).length > 0 && !checkRoot(deliveredFiles, workspaceRoot)
+  const checksLabel = [...proposal.verification, ...(renderStaticPages ? ['static-page render check'] : [])]
+
   while (true) {
     if (runSignal?.aborted) return abortedAt('verify', { proposal, verdict })
 
-    taskSessions.update(parentTask.id, { status: 'running', action: 'Verifying', detail: proposal.verification.length > 0 ? `Running ${proposal.verification.length} verification command(s)` : 'Running structured review without declared commands' })
-    writePhase('verify', proposal.verification.length > 0 ? proposal.verification.join(' · ') : 'review only')
+    taskSessions.update(parentTask.id, { status: 'running', action: 'Verifying', detail: checksLabel.length > 0 ? `Running ${checksLabel.length} verification check(s)` : 'Running structured review without declared commands' })
+    writePhase('verify', checksLabel.length > 0 ? checksLabel.join(' · ') : 'review only')
     journal.append('phase', { phase: 'verify', attempt })
 
     const verification = await runVerification(proposal.verification, verificationRoot, runSignal, governor)
-    if (!verification.passed && verification.results.length > 0 && verification.results.every(isUnrunnableCommandFailure)) {
+    if (verification.passed && renderStaticPages) {
+      const rendered = await fallbackStaticPageVerification(deliveredFiles, verificationRoot, runSignal)
+      if (rendered) {
+        verification.results.push(...rendered.results)
+        verification.passed = rendered.passed
+      }
+    } else if (!verification.passed && verification.results.length > 0 && verification.results.every(isUnrunnableCommandFailure)) {
       // Every declared check was rejected by the shell outright (e.g. "'Open'
       // is not recognized") — the command was prose, not a real check, so its
       // failure says nothing about the work. Falling straight into repair here
@@ -1379,11 +1397,7 @@ Read the changed files in full context. Improve only concrete issues directly re
       // run 2026-09-11-5q7z-abo2, where the built game worked (confirmed by
       // playing it) but the plan's only "verification" was manual-testing
       // prose. Substitute the interactive loop's own static-page render check.
-      const fallback = await fallbackStaticPageVerification(
-        proposal.steps.flatMap((step) => step.files),
-        verificationRoot,
-        runSignal,
-      )
+      const fallback = await fallbackStaticPageVerification(deliveredFiles, verificationRoot, runSignal)
       if (fallback) {
         writeSubStep('declared verification command(s) were not runnable shell commands — falling back to a static-page render check')
         verification.passed = fallback.passed
