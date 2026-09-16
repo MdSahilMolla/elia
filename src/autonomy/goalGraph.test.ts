@@ -104,6 +104,58 @@ describe('durable goal graph', () => {
     expect(graph.state().actions[0]?.state).toBe('retryable')
   })
 
+  test('startAction is idempotent for the owning execution and refuses a live foreign owner', () => {
+    const { graph } = createGraph()
+    graph.seedProposal(proposal)
+    const action = graph.reserveAction({ name: 'run_command', input: { command: 'deploy --once' } }, 'step:build')
+    expect(action.decision).toBe('execute')
+
+    const first = graph.startAction(action.action.id)
+    const repeated = graph.startAction(action.action.id)
+    expect(repeated.state).toBe('running')
+    expect(repeated.attempts).toBe(1)
+    expect(repeated.id).toBe(first.id)
+
+    // A *different, still-alive* elia process (this test's own pid) holds a
+    // valid lease: the caller must refuse to stamp over it and start a second
+    // execution of the same durable action.
+    const options = graph.state().actions[0]
+    const graphPath = join(temporaryDirectories.at(-1)!, 'goal-graph.json')
+    const snapshot = JSON.parse(readFileSync(graphPath, 'utf8'))
+    const actionRecord = snapshot.actions.find((a: { id: string }) => a.id === action.action.id)
+    actionRecord.leaseOwner = `${process.pid}:foreign-worker`
+    actionRecord.leaseExpiresAt = Date.now() + 60_000
+    writeFileSync(graphPath, JSON.stringify(snapshot))
+
+    const reopened = GoalGraphStore.open({ runId: 'test-run', goal: 'ship a durable graph', dir: temporaryDirectories.at(-1)! })
+    expect(() => reopened.startAction(action.action.id)).toThrow(/still being executed by a live owner/)
+    expect(reopened.state().actions.find((a) => a.id === action.action.id)?.state).toBe('running')
+  })
+
+  test('startAction reclaims a stale lease from a dead owner but only once', () => {
+    const { graph } = createGraph()
+    graph.seedProposal(proposal)
+    const action = graph.reserveAction({ name: 'run_command', input: { command: 'deploy --once' } }, 'step:build')
+    graph.startAction(action.action.id)
+
+    // Simulate a crashed worker: its pid can never be reaped, so it reads dead.
+    const graphPath = join(temporaryDirectories.at(-1)!, 'goal-graph.json')
+    const snapshot = JSON.parse(readFileSync(graphPath, 'utf8'))
+    const actionRecord = snapshot.actions.find((a: { id: string }) => a.id === action.action.id)
+    actionRecord.leaseOwner = '2147483647:ghost'
+    actionRecord.leaseExpiresAt = Date.now() - 5_000
+    writeFileSync(graphPath, JSON.stringify(snapshot))
+
+    const reopened = GoalGraphStore.open({ runId: 'test-run', goal: 'ship a durable graph', dir: temporaryDirectories.at(-1)! })
+    const restarted = reopened.startAction(action.action.id)
+    expect(restarted.state).toBe('running')
+    expect(restarted.attempts).toBe(2)
+
+    // The reclaimed slot is now held by a live owner again: no third start.
+    expect(() => reopened.startAction(action.action.id)).not.toThrow()
+    expect(reopened.state().actions.find((a) => a.id === action.action.id)?.attempts).toBe(2)
+  })
+
   test('does not reclaim an expired lease whose owner process is still alive until the grace elapses', () => {
     const { graph, options } = createGraph()
     graph.seedProposal(proposal)

@@ -85,7 +85,16 @@ const GIT_BRANCH_LIST_ONLY = /^(?:command\s+)?git\s+branch(?:\s+(?:-a|-r|-v|-vv|
 // harmful tail past the start-anchored read-only allowance.
 const SHELL_CONTROL_SYNTAX = /[;&|<>`$]|[\r\n]|\$\(|\b(?:eval|exec|source)\b/i
 const SECRET_KEY = /(password|passwd|token|secret|api[-_]?key|authorization|cookie|credential)/i
-const EXTERNAL_WRITE_COMMAND = /\b(curl|wget)\b[^\n]*(--data(?:-raw)?|\s-d\s|\s-X\s*(POST|PUT|PATCH|DELETE)|--upload-file|--form)\b/i
+// Every data-upload form of curl/wget transmits local content to a remote
+// host — inline `-d`/`--data`, `-d@file`/`--data @file` (payload read from a
+// file), `-F`/`--form` (multipart, typically a file upload), and `-T`/
+// `--upload-file`. The old pattern required whitespace on both sides of `-d`,
+// so `curl -d@secret.txt` and the whole `-F`/`-T` families fell through to the
+// merely-`review` bucket and were auto-allowed in unattended runs. The short
+// options are matched in an explicit case-sensitive pass so that curl's
+// harmless lowercase `-f`/`-t` flags are not swept up by /i.
+const EXTERNAL_WRITE_COMMAND = /\b(curl|wget)\b[^\n]*(\s-X\s*(?:POST|PUT|PATCH|DELETE)|--data(?:-raw|-binary|-urlencode)?|--upload-file|--form|--post-file|--post-data|--body-data|--request\s+(?:POST|PUT|PATCH|DELETE)|-d@)/i
+const EXTERNAL_WRITE_SHORT_OPTIONS = /\b(curl|wget)\b[^\n]*(?:^|\s)-(?:[a-zA-Z]*[FT]|d\s|d@)/
 // Values that a tool interpolates, unquoted, into a shell command line. Unlike
 // run_command (whose whole command is assessed), causal_debug's `file` and
 // causal_verify's `test_file`/`test_pattern` become tokens inside strings the
@@ -741,7 +750,7 @@ function assessCommand(command: string, cwd: string): ActionAssessment {
   if (commandMayReadSensitiveData(command)) {
     return assessment('critical', 'approve', 'shell command may read credentials or protected system data', 'shell.sensitive-read', [], false)
   }
-  if (EXTERNAL_WRITE_COMMAND.test(command)) {
+  if (EXTERNAL_WRITE_COMMAND.test(command) || EXTERNAL_WRITE_SHORT_OPTIONS.test(command)) {
     return assessment('critical', 'approve', 'shell command may transmit data to an external system', 'shell.external-write', [], false)
   }
   if (CRITICAL_COMMAND.test(command)) {

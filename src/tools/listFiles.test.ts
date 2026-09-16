@@ -43,3 +43,34 @@ test('an empty match produces the polite "nothing matched" message', async () =>
   )
   expect(output).toBe('No files matched.')
 })
+
+test('a parent-traversal pattern is rejected before any scan runs', async () => {
+  const outside = mkdtempSync(join(tmpdir(), 'elia-listfiles-out-'))
+  try {
+    writeFileSync(join(outside, 'secret.txt'), 'do not leak')
+    writeFileSync(join(dir, 'inside.txt'), 'fine')
+
+    for (const pattern of ['../*/secret.txt', '../../**/secret.txt', 'C:\\Windows\\**\\config', '../../**']) {
+      await expect(
+        withAgentIdentity({ name: 'test', role: 'lead', cwd: dir }, () => listFilesTool.execute({ pattern })),
+        pattern,
+      ).rejects.toThrow(/stay within the active workspace/)
+    }
+  } finally {
+    rmSync(outside, { recursive: true, force: true })
+  }
+})
+
+test('sibling traversal results are dropped while in-workspace matches survive', async () => {
+  const outside = mkdtempSync(join(tmpdir(), 'elia-listfiles-out2-'))
+  try {
+    writeFileSync(join(dir, 'keep.txt'), 'a')
+    writeFileSync(join(outside, 'drop.txt'), 'b')
+
+    await expect(
+      withAgentIdentity({ name: 'test', role: 'lead', cwd: dir }, () => listFilesTool.execute({ pattern: '../**/*.txt' })),
+    ).rejects.toThrow(/stay within the active workspace/)
+  } finally {
+    rmSync(outside, { recursive: true, force: true })
+  }
+})

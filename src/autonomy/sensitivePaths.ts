@@ -40,10 +40,27 @@ const SENSITIVE_FILE_PATTERNS = [
   /\.(?:pem|key|p12|pfx)$/i,
 ]
 
+/**
+ * NTFS alternate data streams let `read_file .env::$DATA` open the default
+ * stream of a real `.env` file while presenting a segment that matches no
+ * sensitive-name rule. On Windows, `:` is never a legal filename character, so
+ * it is safe to strip everything from the first colon when classifying a
+ * segment. On POSIX `:` is a legal filename character, so the stripping is
+ * limited to win32 to avoid over-classifying legitimate files like `.env:1`.
+ */
+function stripAlternateStreamTail(segment: string): string {
+  if (process.platform !== 'win32') return segment
+  const colon = segment.indexOf(':')
+  if (colon === -1) return segment
+  // A bare drive letter segment (`C:`) is not a stream suffix.
+  if (colon === 1 && segment.length === 2 && /^[A-Za-z]/.test(segment)) return segment
+  return segment.slice(0, colon)
+}
+
 /** Returns true when a path names a file or directory that commonly stores secrets. */
 export function isSensitivePath(inputPath: string): boolean {
   const normalized = inputPath.replaceAll('\\', '/').replace(/^\/+/, '')
-  const segments = normalized.split('/').filter(Boolean)
+  const segments = normalized.split('/').filter(Boolean).map(stripAlternateStreamTail)
   const lowerSegments = segments.map((segment) => segment.toLocaleLowerCase())
   const lowerPath = lowerSegments.join('/')
   const fileName = lowerSegments.at(-1) ?? ''
@@ -77,8 +94,12 @@ export function commandMayReadSensitiveData(command: string): boolean {
   // `.env` directly can still read it via `git show HEAD:.env`, `git log -p --
   // .env`, or `git diff HEAD~5 -- .env` unless those are recognised here too.
   // Windows cmd.exe's own readers (`type`, `more`, `certutil`, `print`, and the
-  // PowerShell Echo-token `TYPE`) must be covered the same way.
-  if (!/\b(?:cat|type|less|more|head|tail|sed|awk|grep|rg|cut|strings|xxd|od|base64|openssl|certutil|print|source|git\s+(?:show|log|diff)|\.\s*)\b/i.test(command)) return false
+  // PowerShell Echo-token `TYPE`) must be covered the same way. PowerShell
+  // cmdlets (`get-content` + its `gc` alias, `select-string`, `import-csv`,
+  // `import-clixml`, `get-filehash`) are listed explicitly because none of
+  // them contain a bare `cat`/`type`/`grep` token for the word-boundary test
+  // below to trip over.
+  if (!/\b(?:cat|type|less|more|head|tail|sed|awk|grep|rg|cut|strings|xxd|od|base64|openssl|certutil|print|source|get-content|select-string|import-csv|import-clixml|get-filehash|gc\b|git\s+(?:show|log|diff)|\.\s*)\b/i.test(command)) return false
   return SENSITIVE_PATH_MENTION.test(command)
 }
 

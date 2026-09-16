@@ -646,6 +646,27 @@ export class GoalGraphStore {
   startAction(id: string, contract?: ActionContract, precondition?: ContractEvaluation): DurableActionRecord {
     return this.mutate(() => {
     const action = this.requireAction(id)
+    if (action.state === 'running') {
+      // A lease still in force may only be re-entered by the owner that took
+      // it out — otherwise two workers would both be "executing" the same
+      // durable action (issue #21 for actions). The node path in `startNode`
+      // already refuses exactly this; the action path used to stamp over the
+      // existing lease unconditionally, which a second caller (or a crashed
+      // first caller that reserveAction had already handed an `execute`
+      // decision) could ride back into a duplicate run.
+      if (action.leaseOwner === EXECUTION_OWNER) {
+        if (action.leaseExpiresAt && action.leaseExpiresAt > Date.now()) return structuredClone(action)
+      } else if (action.leaseOwner && leaseOwnerAlive(action.leaseOwner)
+        && action.leaseExpiresAt && action.leaseExpiresAt > Date.now() - LEASE_LIVE_OWNER_GRACE_MS) {
+        throw new Error(`durable action ${id} is still being executed by a live owner (${action.leaseOwner})`)
+      }
+      // Stale lease from a dead or vanished owner: reclaim the slot the same
+      // way reserveAction does, never launching a second attempt blindly.
+      action.state = 'retryable'
+      action.error = classifyFailure('stale action execution lease recovered')
+      action.leaseOwner = undefined
+      action.leaseExpiresAt = undefined
+    }
     action.state = 'running'
     action.attempts += 1
     action.leaseOwner = EXECUTION_OWNER

@@ -78,6 +78,20 @@ test('an invalid request envelope gets a clear error instead of a dropped connec
   }
 })
 
+test('an unknown method never reaches a handler — even over the network', async () => {
+  const server = await runHttpBridge({ port: 0, hostname: '127.0.0.1' })
+  try {
+    const ws = await connect(server.port!)
+    ws.send(JSON.stringify({ id: 'rX', method: 'shell.exec', params: { command: 'calc' } }))
+    const message = (await nextMessage(ws)) as { ok: boolean; error?: string }
+    expect(message.ok).toBe(false)
+    expect(message.error).toContain('Invalid bridge request envelope')
+    ws.close()
+  } finally {
+    server.stop(true)
+  }
+})
+
 test('malformed JSON gets a clear error instead of crashing the server', async () => {
   const server = await runHttpBridge({ port: 0, hostname: '127.0.0.1' })
   try {

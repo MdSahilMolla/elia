@@ -169,9 +169,23 @@ export function applyPolicy(assessment: ActionAssessment, request: ActionRequest
     }
   }
 
-  if (assessment.decision === 'allow' && RISK_ORDER[assessment.risk] >= RISK_ORDER[policy.requireApprovalAtOrAbove]) {
+  // The old guard only bumped `decision` from "allow" → "approve" when risk
+  // met the threshold. That was a no-op for the governor's own "review"-band
+  // actions, which already carry decision "approve" — line 635 of governor.ts
+  // then auto-allowed them in unattended mode, completely ignoring the policy
+  // setting.  Raising `risk` to "critical" is what makes the downstream gate
+  // (unattended critical block or per-action approval) actually enforce the
+  // threshold: review-risk actions are no longer eligible for the risk ===
+  // review auto-allow, and safe-risk actions never hit the decision === allow
+  // shortcut that bypasses the gate entirely.
+  if (RISK_ORDER[assessment.risk] >= RISK_ORDER[policy.requireApprovalAtOrAbove] && policy.requireApprovalAtOrAbove !== 'critical') {
     return {
-      assessment: { ...assessment, decision: 'approve', reason: `${assessment.reason} (.elia/policy.json requires approval at or above "${policy.requireApprovalAtOrAbove}" risk)` },
+      assessment: {
+        ...assessment,
+        risk: 'critical',
+        decision: 'approve',
+        reason: `${assessment.reason} (.elia/policy.json requires approval at or above "${policy.requireApprovalAtOrAbove}" risk)`,
+      },
       blocked: false,
     }
   }

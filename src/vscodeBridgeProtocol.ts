@@ -13,6 +13,23 @@ export type BridgeMethod =
   | 'deployment.run'
   | 'shutdown'
 
+/** The exact set of methods any transport may dispatch — the rejection is done at the envelope, before a handler can run. */
+export const BRIDGE_METHODS: readonly BridgeMethod[] = [
+  'chat.send',
+  'autonomous.start',
+  'autonomous.approve',
+  'autonomous.control',
+  'tasks.list',
+  'task.control',
+  'runs.list',
+  'runs.inspect',
+  'skills.list',
+  'git.diff',
+  'environment.inspect',
+  'deployment.run',
+  'shutdown',
+]
+
 export interface BridgeRequest {
   id: string
   method: BridgeMethod
@@ -69,10 +86,14 @@ export interface BridgeAutonomousResult {
   lessons: string[]
 }
 
+export function isBridgeMethod(method: string): method is BridgeMethod {
+  return (BRIDGE_METHODS as readonly string[]).includes(method)
+}
+
 export function isBridgeRequest(value: unknown): value is BridgeRequest {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
   const request = value as Partial<BridgeRequest>
-  return typeof request.id === 'string' && request.id.length > 0 && typeof request.method === 'string'
+  return typeof request.id === 'string' && request.id.length > 0 && typeof request.method === 'string' && isBridgeMethod(request.method)
 }
 
 export function encodeBridgeMessage(message: BridgeMessage): string {

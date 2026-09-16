@@ -212,11 +212,13 @@ function isUnsafeIpv6(address: string): boolean {
   const value = ipv6ToBigInt(normalized)
   if (value === undefined) return true
   if (value === 0n || value === 1n) return true
-  if ((value >> 32n) === 0xffffn) {
-    const mappedValue = Number(value & 0xffffffffn)
-    const mappedAddress = [mappedValue >>> 24, (mappedValue >>> 16) & 255, (mappedValue >>> 8) & 255, mappedValue & 255].join('.')
-    return isUnsafeIpv4(mappedAddress)
-  }
+  // Any documented IPv4-embedding class must be checked against the IPv4
+  // rules, not just the classic `::ffff:a.b.c.d` form. Bun normalizes
+  // `::ffff:0:127.0.0.1` to `[::ffff:0:7f00:1]`, where the `ffff` marker sits
+  // one group higher, so the old `(value >> 32n) === 0xffffn` test missed the
+  // IPv4-translated, IPv4-compatible, and NAT64 classes entirely.
+  const embeddedIpv4 = embeddedIpv4From(value)
+  if (embeddedIpv4 !== undefined) return isUnsafeIpv4(embeddedIpv4)
   // 6to4 (2002::/16) and Teredo (2001:0::/32) embed a v4 address that must be checked too.
   const sixToFour = (value >> 112n) === 0x2002n
   const teredo = (value >> 96n) === 0x20010000n
@@ -250,6 +252,32 @@ function isUnsafeIpv6(address: string): boolean {
   const mask10 = BigInt('0xffc00000000000000000000000000000')
   const mask8 = BigInt('0xff000000000000000000000000000000')
   return (value & mask7) === (fc00 & mask7) || (value & mask10) === (fe80 & mask10) || (value & mask8) === ff00
+}
+
+/**
+ * Recognize the documented IPv4-embedding IPv6 classes and return the embedded
+ * IPv4 address (as dotted decimal) so the IPv4 rules can be re-applied to it:
+ *
+ *   ::a.b.c.d                 IPv4-compatible `::/96`
+ *   ::ffff:a.b.c.d            IPv4-mapped    `::ffff:0:0/96`
+ *   ::ffff:0:a.b.c.d          IPv4-translated `::ffff:0:0:0/96` (URL parsers
+ *                             render `::ffff:0:127.0.0.1` as `[::ffff:0:7f00:1]`,
+ *                             pushing the `ffff` marker a group higher)
+ *   64:ff9b::a.b.c.d          NAT64 well-known prefix RFC 6052
+ *   64:ff9b:1::a.b.c.d        NAT64 local-use prefix
+ *
+ * Returns undefined when the address does not embed an IPv4 under a known
+ * prefix, so ordinary global IPv6 addresses are never miscounted.
+ */
+function embeddedIpv4From(value: bigint): string | undefined {
+  const mid = (value >> 32n) & 0xffffffffn
+  const mappedOrTranslated = mid === 0xffffn || mid === 0xffff0000n
+  const compatible = (value >> 32n) === 0n
+  const nat64WellKnown = (value >> 32n) === 0x0064ff9b0000000000000000n
+  const nat64LocalUse = (value >> 32n) === 0x0064ff9b0001000000000000n
+  if (!mappedOrTranslated && !compatible && !nat64WellKnown && !nat64LocalUse) return undefined
+  const embedded = Number(value & 0xffffffffn)
+  return [embedded >>> 24, (embedded >>> 16) & 255, (embedded >>> 8) & 255, embedded & 255].join('.')
 }
 
 function ipv6ToBigInt(address: string): bigint | undefined {

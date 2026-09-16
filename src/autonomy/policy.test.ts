@@ -90,8 +90,37 @@ test('applyPolicy raises a safe allow to approve when the risk bar is lowered', 
   expect(assessment.risk).toBe('safe')
   const outcome = applyPolicy(assessment, safe, process.cwd(), { ...base, requireApprovalAtOrAbove: 'safe' })
   expect(outcome.assessment.decision).toBe('approve')
+  expect(outcome.assessment.risk).toBe('critical')
   expect(outcome.assessment.reason).toContain('policy.json requires approval')
   expect(outcome.blocked).toBe(false)
+})
+
+test('review-band actions with requireApprovalAtOrAbove "review" are escalated out of the unattended auto-allow bucket', () => {
+  const review = { name: 'run_command', input: { command: 'npm install' } }
+  const assessment = assessAction(review, process.cwd())
+  expect(assessment.risk).toBe('review')
+  expect(assessment.decision).toBe('approve')
+  const outcome = applyPolicy(assessment, review, process.cwd(), { ...base, requireApprovalAtOrAbove: 'review' })
+  // Risk is raised to critical so the governor's `risk === review` auto-allow
+  // (line 635) no longer fires and the action must be explicitly approved.
+  expect(outcome.assessment.risk).toBe('critical')
+  expect(outcome.assessment.decision).toBe('approve')
+  expect(outcome.assessment.reason).toContain('policy.json requires approval')
+})
+
+test('safe-band actions stay untouched when requireApprovalAtOrAbove is "review" (they are below the bar)', () => {
+  const safe = { name: 'read_file', input: { path: 'src/index.ts' } }
+  const assessment = assessAction(safe, process.cwd())
+  const outcome = applyPolicy(assessment, safe, process.cwd(), { ...base, requireApprovalAtOrAbove: 'review' })
+  expect(outcome.assessment).toBe(assessment)
+  expect(outcome.blocked).toBe(false)
+})
+
+test('requireApprovalAtOrAbove "critical" does not touch review-band actions (the built-in default)', () => {
+  const review = { name: 'run_command', input: { command: 'npm install' } }
+  const assessment = assessAction(review, process.cwd())
+  const outcome = applyPolicy(assessment, review, process.cwd(), { ...base, requireApprovalAtOrAbove: 'critical' })
+  expect(outcome.assessment).toBe(assessment)
 })
 
 test('governor blocks a policy-denied tool before consuming action budget', async () => {
