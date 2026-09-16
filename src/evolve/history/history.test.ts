@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { parseCounts } from './verifyRun.ts'
 import { isCandidateShape, partitionFiles, verifyCommandFor } from './harvest.ts'
 import { checkTestsUntouched, promptFor, toBenchTask } from './suite.ts'
-import { contentHash } from './materialize.ts'
+import { assertPreloadsResolvable, contentHash, preloadSpecifiers } from './materialize.ts'
 import type { HistoryTaskSpec } from './types.ts'
 
 const SPEC: HistoryTaskSpec = {
@@ -123,5 +123,24 @@ test('the generated tasks file, if present, only holds validated tasks', () => {
     expect(spec.testFiles.length).toBeGreaterThan(0)
     expect(spec.sourceFiles.length).toBeGreaterThan(0)
     expect(spec.id).toBe(`hist-${spec.sha.slice(0, 7)}`)
+  }
+})
+
+test('reads every preload a bunfig names, in either form', () => {
+  expect(preloadSpecifiers('[test]\npreload = ["./scripts/testPreload.ts"]\n')).toEqual(['./scripts/testPreload.ts'])
+  expect(preloadSpecifiers('preload = ["@opentui/solid/preload", \'./x.ts\']\n')).toEqual(['@opentui/solid/preload', './x.ts'])
+  expect(preloadSpecifiers('preload = "some-pkg/register"\n')).toEqual(['some-pkg/register'])
+  expect(preloadSpecifiers('# preload = ["commented"]\n[run]\nsilent = true\n')).toEqual([])
+})
+
+test('a checkout that preloads a package the dependencies dropped is a stale task', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'elia-hist-preload-'))
+  try {
+    writeFileSync(join(dir, 'bunfig.toml'), 'preload = ["@gone/solid/preload", "./local.ts"]\n')
+    expect(() => assertPreloadsResolvable(dir)).toThrow(/stale task: .*@gone\/solid/)
+    writeFileSync(join(dir, 'bunfig.toml'), 'preload = ["./local.ts"]\n')
+    expect(() => assertPreloadsResolvable(dir)).not.toThrow()
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
   }
 })

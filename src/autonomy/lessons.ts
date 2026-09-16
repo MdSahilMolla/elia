@@ -3,7 +3,7 @@ import { dirname } from 'node:path'
 import { appendSecureFile, ensureSecureDirectory, hardenSecureFile, writeSecureFile } from '../securePersistence.ts'
 import { paths } from '../config.ts'
 import type { Tool } from '../tools/types.ts'
-import { exposedCorrs, loadEfficacy, MIN_EXPOSURES } from './lessonEfficacy.ts'
+import { exposedCorrs, lessonTrials, loadEfficacy, MIN_EXPOSURES } from './lessonEfficacy.ts'
 import { rankBm25 } from '../bm25.ts'
 import { globalLessonsPath, partitionByScope } from './lessonScope.ts'
 import { competenceReport } from './outcomes.ts'
@@ -62,11 +62,48 @@ const MAX_INJECTED_GLOBAL = 5
  * scope.
  */
 let lastInjectedLessonKeys: string[] = []
+let lastHeldOutLessonKeys: string[] | undefined
 
 export function consumeInjectedLessonKeys(): string[] {
   const keys = lastInjectedLessonKeys
   lastInjectedLessonKeys = []
   return keys
+}
+
+/**
+ * The lessons the most recent briefing selected and then withheld — drained
+ * like the injected set. `undefined` when holdout was not running for it, so
+ * the recorder can keep that run out of the randomized trial.
+ */
+export function consumeHeldOutLessonKeys(): string[] | undefined {
+  const keys = lastHeldOutLessonKeys
+  lastHeldOutLessonKeys = undefined
+  return keys
+}
+
+/**
+ * Chance that a selected project lesson is withheld from a briefing.
+ *
+ * Without this, nothing can say whether a lesson helps: lessons are chosen by
+ * recency and topic, so the runs that saw one differ from the runs that did not
+ * in what they were about, not only in the lesson. Withholding a random slice of
+ * the *selected* lessons gives each one a control arm split by a coin flip —
+ * `lessonTrials` compares the two. 15% keeps the cost small (a withheld lesson
+ * is one this run might have wanted) while a lesson selected on most turns still
+ * gathers a usable control arm within a few dozen runs.
+ *
+ * `ELIA_LESSON_HOLDOUT` overrides it (0 turns holdout off; capped at 0.5).
+ * Machine-level lessons are never withheld: they are what keeps commands
+ * working on this machine at all, and one missing costs a broken run.
+ */
+export const DEFAULT_LESSON_HOLDOUT_RATE = 0.15
+
+export function lessonHoldoutRate(env: Record<string, string | undefined> = process.env): number {
+  const raw = env.ELIA_LESSON_HOLDOUT
+  if (raw === undefined || raw.trim() === '') return DEFAULT_LESSON_HOLDOUT_RATE
+  const value = Number(raw)
+  if (!Number.isFinite(value) || value <= 0) return 0
+  return Math.min(value, 0.5)
 }
 
 export interface LessonWrite {
@@ -295,14 +332,23 @@ export function renderLessonsWithKeys(
   query = '',
   path = paths.lessons,
   globalPath = path === paths.lessons ? globalLessonsPath() : undefined,
-): { text: string; keys: string[] } {
-  const project = selectLessons(loadLessons(path), query)
+  holdout: { rate: number; random?: () => number } = { rate: path === paths.lessons ? lessonHoldoutRate() : 0 },
+): { text: string; keys: string[]; heldOut: string[] } {
+  const selected = selectLessons(loadLessons(path), query)
+  const random = holdout.random ?? Math.random
+  const project: Lesson[] = []
+  const heldOut: string[] = []
+  for (const lesson of selected) {
+    if (holdout.rate > 0 && random() < holdout.rate) heldOut.push(lesson.key ?? lessonKey(lesson.text))
+    else project.push(lesson)
+  }
   const global = globalPath && globalPath !== path ? selectLessons(loadLessons(globalPath), query).slice(-MAX_INJECTED_GLOBAL) : []
   // Machine facts first: they constrain how a command can be run at all, which
   // is worth knowing before anything specific to this repository.
   const lessons = [...global, ...project]
   lastInjectedLessonKeys = lessons.map((lesson) => lesson.key ?? lessonKey(lesson.text))
-  if (lessons.length === 0) return { text: '', keys: [] }
+  lastHeldOutLessonKeys = holdout.rate > 0 ? heldOut : undefined
+  if (lessons.length === 0) return { text: '', keys: [], heldOut }
   const text = `\n\n## What earlier runs learned about this project\n${lessons
     .map((lesson) => {
       const bits = [lesson.text]
@@ -311,7 +357,7 @@ export function renderLessonsWithKeys(
       return `- ${bits.join(' ')}`
     })
     .join('\n')}`
-  return { text, keys: lastInjectedLessonKeys }
+  return { text, keys: lastInjectedLessonKeys, heldOut }
 }
 
 /** The lessons most worth this turn, formatted for injection into a planner's briefing. */
@@ -366,10 +412,19 @@ export function retireLessons(
   if (lessons.length === 0) return { retired: [], kept: 0 }
 
   const counts = loadEfficacy(options.efficacyPath)
+  const trials = lessonTrials(options.efficacyPath)
 
   const dead = new Set<string>()
   for (const lesson of lessons) {
     const key = lesson.key ?? lessonKey(lesson.text)
+    // A randomized trial outranks the observational comparison below: once a
+    // lesson has one, its verdict is the only one that says what the lesson
+    // itself did.
+    const trial = trials.get(key)
+    if (trial) {
+      if (trial.verdict === 'hurts') dead.add(key)
+      continue
+    }
     const entry = counts.get(key)
     if (!entry || entry.exposures < MIN_EXPOSURES) continue
 

@@ -13,11 +13,12 @@ import { emitEvent, machineReadable, quietOutput } from '../ui/runtime.ts'
 import {
   appendGeneration,
   nextGenerationNumber,
+  readLedger,
   renderLedgerForPrompt,
   type GenerationRecord,
   type Metrics,
 } from './ledger.ts'
-import { compareScorecards, measureFitness, renderScorecard, toMetrics, type Scorecard } from './fitness.ts'
+import { compareScorecards, measureFitness, renderScorecard, toMetrics, type Scorecard, type TaskOutcome } from './fitness.ts'
 import {
   IMMUTABLE_FILES,
   changedFiles,
@@ -34,6 +35,14 @@ import { gapVectorIn, valueProbesIn } from './measureTree.ts'
 import { checkGapNotRegressed } from '../gap/guard.ts'
 import { checkValueDrift, recordProbeRun } from '../values/drift.ts'
 import { allBenchTasks, type BenchTask } from './suite.ts'
+import {
+  incumbentStrategy,
+  pickStrategy,
+  settleStrategyTrial,
+  shouldProposeChallenger,
+  type Strategy,
+} from './strategy.ts'
+import { proposeChallengerStrategy } from './metaPropose.ts'
 
 /**
  * Elia improving elia.
@@ -72,6 +81,8 @@ export interface EvolveOptions {
   generations?: number
   /** Evaluate and report, but never write to the live source. */
   dryRun?: boolean
+  /** Score only these task ids (fixed for the whole run). Default: every task. */
+  taskIds?: string[]
   signal?: AbortSignal
 }
 
@@ -79,6 +90,8 @@ export interface EvolveResult {
   generations: GenerationRecord[]
   baseline: Metrics
   final: Metrics
+  /** Set when no generation was attempted, and why. */
+  stoppedReason?: string
 }
 
 export async function evolve(options: EvolveOptions = {}): Promise<EvolveResult> {
@@ -94,7 +107,15 @@ export async function evolve(options: EvolveOptions = {}): Promise<EvolveResult>
   // Resolved once per evolve() call, not per generation, so every baseline
   // and candidate measurement in this run is scored on the identical set —
   // required for compareScorecards' pass/fail comparison to mean anything.
-  const tasks = allBenchTasks()
+  // The recursive half: settle any finished strategy trial before this run
+  // chooses how to search. See strategy.ts.
+  const trial = settleStrategyTrial(readLedger())
+  if (trial.verdict === 'adopt') writePass(`search strategy ${trial.challenger!.id} adopted — its generations went further (${trial.challenger!.meanDepth.toFixed(2)} vs ${trial.incumbent.meanDepth.toFixed(2)})`)
+  else if (trial.verdict === 'reject') writeSubStep(`search strategy ${trial.challenger!.id} retired — not ahead after ${trial.challenger!.generations} generations`)
+
+  const everyTask = allBenchTasks()
+  const tasks = options.taskIds ? everyTask.filter((task) => options.taskIds!.includes(task.id)) : everyTask
+  if (tasks.length === 0) throw new Error('evolve was given a task subset that matches no benchmark task')
 
   writePhase('orient', `measuring the current elia against ${ELIA_ROOT} (${tasks.length} tasks)`)
   const baselineCard = await measureFitness({
@@ -109,11 +130,25 @@ export async function evolve(options: EvolveOptions = {}): Promise<EvolveResult>
   const firstBaseline = toMetrics(baselineCard)
   let baseline = firstBaseline
 
+  // Every generation compares against this baseline, and compareScorecards
+  // refuses any comparison with a task missing from it. Starting anyway would
+  // spend a full propose/implement/measure cycle per generation on a rejection
+  // that is already certain.
+  if (baselineCard.unmeasured.length > 0) {
+    const stoppedReason = `the baseline could not measure ${baselineCard.unmeasured.join(', ')} — fix the provider or the tasks before evolving (see the scorecard above)`
+    writeFail(stoppedReason)
+    return { generations: [], baseline: firstBaseline, final: firstBaseline, stoppedReason }
+  }
+
+  // What the proposer studies. Only the card that produced the current baseline
+  // is evidence about it, so this is replaced whenever a candidate is promoted.
+  let evidence = baselineCard.outcomes.filter((outcome) => !outcome.passed)
+
   for (let index = 0; index < generations; index++) {
     if (options.signal?.aborted) break
 
     const generation = nextGenerationNumber()
-    const record = await runGeneration(generation, baseline, options, tasks)
+    const { record, candidateCard } = await runGeneration(generation, baseline, options, tasks, evidence)
     records.push(record)
     appendGeneration(record)
 
@@ -121,6 +156,13 @@ export async function evolve(options: EvolveOptions = {}): Promise<EvolveResult>
       // Stand on the winner: the next generation is measured against, and builds
       // on, the version that just won.
       baseline = record.candidate
+      if (candidateCard) evidence = candidateCard.outcomes.filter((outcome) => !outcome.passed)
+    }
+
+    // A search that keeps banking nothing writes itself a different way to
+    // search; the next generations put it on trial against the incumbent.
+    if (!options.signal?.aborted && shouldProposeChallenger(readLedger())) {
+      await proposeChallengerStrategy(generation, options.signal)
     }
   }
 
@@ -132,11 +174,29 @@ async function runGeneration(
   baseline: Metrics,
   options: EvolveOptions,
   tasks: BenchTask[],
+  evidence: TaskOutcome[],
+): Promise<{ record: GenerationRecord; candidateCard?: Scorecard }> {
+  let candidateCard: Scorecard | undefined
+  const record = await attemptGeneration(generation, baseline, options, tasks, evidence, (card) => {
+    candidateCard = card
+  })
+  return { record, candidateCard }
+}
+
+async function attemptGeneration(
+  generation: number,
+  baseline: Metrics,
+  options: EvolveOptions,
+  tasks: BenchTask[],
+  evidence: TaskOutcome[],
+  onCandidateCard: (card: Scorecard) => void,
 ): Promise<GenerationRecord> {
   const startedAt = Date.now()
+  const strategy = pickStrategy()
   const base: GenerationRecord = {
     generation,
     at: Date.now(),
+    strategyId: strategy.id,
     hypothesis: '',
     rationale: '',
     targetFiles: [],
@@ -156,12 +216,12 @@ async function runGeneration(
   const readOnly = allWorkerTools().filter((tool) => ['read_file', 'list_files', 'grep'].includes(tool.name))
 
   const messages: ConversationMessage[] = [
-    { role: 'user', content: [{ type: 'text', text: hypothesisBrief(sandbox, baseline) }] },
+    { role: 'user', content: [{ type: 'text', text: hypothesisBrief(sandbox, baseline, evidence) }] },
   ]
 
   await runAgentLoop({
     messages,
-    systemPrompt: HYPOTHESIS_PROMPT,
+    systemPrompt: hypothesisPrompt(strategy),
     tools: [...readOnly, capture.tool],
     onText: writeText,
     useAnimation: true,
@@ -176,6 +236,7 @@ async function runGeneration(
   }
 
   Object.assign(base, {
+    funnel: 'proposed',
     hypothesis: hypothesis.title,
     rationale: hypothesis.rationale,
     targetFiles: hypothesis.targetFiles,
@@ -208,6 +269,7 @@ async function runGeneration(
     return { ...base, reason: 'the builder changed nothing' }
   }
   writeSubStep(`changed ${changed.length} file${changed.length === 1 ? '' : 's'}`)
+  base.funnel = 'built'
   if (machineReadable) emitEvent('candidate_changes', { generation, files: changed, description: describeChanges(sandbox, changed) })
   else process.stdout.write(`${describeChanges(sandbox, changed)}\n`)
 
@@ -238,6 +300,7 @@ async function runGeneration(
   } else {
     writePass('typecheck')
   }
+  base.funnel = 'compiled'
 
   const unitTests = await runShell('bun test', GATE_TIMEOUT_MS, sandbox.root)
   if (unitTests.exitCode !== 0) {
@@ -249,6 +312,7 @@ async function runGeneration(
     }
   }
   writePass('unit tests')
+  base.funnel = 'tested'
 
   // --- Measure the candidate, using the candidate ---------------------------
 
@@ -269,6 +333,8 @@ async function runGeneration(
 
   const candidate = toMetrics(candidateCard)
   base.candidate = candidate
+  base.funnel = 'measured'
+  onCandidateCard(candidateCard)
 
   const comparison = compareScorecards(baseline, candidate)
   if (!comparison.better) {
@@ -276,6 +342,8 @@ async function runGeneration(
     writeSubStep(`sandbox kept at ${sandbox.root} if you want to look`)
     return { ...base, verdict: 'rejected', reason: comparison.reason }
   }
+
+  base.funnel = 'better'
 
   // Model-driven benchmarks are stochastic. A single baseline/candidate pair
   // can manufacture an efficiency "win" from sampling variance, so a provisional
@@ -297,6 +365,7 @@ async function runGeneration(
 
   base.baseline = confirmationBaseline
   base.candidate = confirmationCandidate
+  base.funnel = 'confirmed'
 
   // A benchmark win is not sufficient to promote.
   //
@@ -347,6 +416,7 @@ async function runGeneration(
     return { ...base, verdict: 'rejected', reason }
   }
   recordProbeRun(candidateProbes, `evolve-gen-${generation}`)
+  base.funnel = 'guarded'
 
   const confirmedReason = `${comparison.reason}; confirmed independently (${confirmation.reason}); verifier and values held`
 
@@ -370,23 +440,43 @@ async function runGeneration(
     ['rollback', `copy ${backupDir} back over ${ELIA_ROOT}`],
   ])
 
-  return { ...base, verdict: 'promoted', reason: confirmedReason }
+  return { ...base, funnel: 'promoted', verdict: 'promoted', reason: confirmedReason }
 }
 
-const HYPOTHESIS_PROMPT = `You are elia, examining your own source code in order to improve yourself.
+/**
+ * The proposer's instructions. The frame — what this phase produces and the
+ * honesty requirement — is fixed here; the "how to choose" guidance in the
+ * middle is the current search strategy, which the loop itself rewrites and
+ * puts on trial (strategy.ts).
+ */
+export function hypothesisPrompt(strategy: Strategy = incumbentStrategy()): string {
+  return `You are elia, examining your own source code in order to improve yourself.
 
 You have read-only tools. This phase produces exactly one thing: a single, specific, testable hypothesis about what change to your own implementation would make you measurably better at the benchmark, submitted with \`submit_hypothesis\`.
 
-How to choose well:
-- Start from the evidence. A task that FAILED tells you far more than any amount of reading — go and understand why it failed before proposing anything.
-- Change one thing. A hypothesis touching four files cannot be attributed when the score moves, and it will not be promoted if any part of it regresses.
-- Prefer changes to how you *decide* over changes to how you *execute*: the system prompt, the role prompts, the planner's guidance, the tool descriptions the model reads, the loop's policy on when to batch or delegate. These compound, because they also improve the next attempt at improving yourself.
-- Tool descriptions are prompt, not documentation. A tool the model misuses is usually a tool whose description does not say when to reach for it.
-- Do not propose speculative rewrites, new abstractions for their own sake, or "clean up X". If you cannot name the benchmark task that gets better and say how, it is not a hypothesis.
+How to choose well (search strategy ${strategy.id}):
+${strategy.text}
 
 Be honest about mechanism. "Improve the prompt to be clearer" is not a hypothesis; "the precise-edit task fails because the system prompt never tells the model to re-read a file after editing it, so it cannot notice it matched the wrong occurrence" is.`
+}
 
-function hypothesisBrief(sandbox: Sandbox, baseline: Metrics): string {
+/** How many failing tasks' details go into the brief — enough to pick from, not a transcript dump. */
+const MAX_EVIDENCE_TASKS = 8
+
+export function renderFailureEvidence(evidence: TaskOutcome[]): string {
+  if (evidence.length === 0) return ''
+  const lines = evidence.slice(0, MAX_EVIDENCE_TASKS).map((outcome) => {
+    const bits = [`- ${outcome.taskId} (${outcome.steps} steps${outcome.stopReason ? `, stopped: ${outcome.stopReason}` : ''}): ${outcome.error ?? outcome.detail}`]
+    if (outcome.keptDir) bits.push(`  its final state is kept at ${outcome.keptDir} — read it to see what the agent actually did`)
+    return bits.join('\n')
+  })
+  const more = evidence.length > MAX_EVIDENCE_TASKS ? `\n(${evidence.length - MAX_EVIDENCE_TASKS} more not shown)` : ''
+  return `\n\n## Why the failing tasks failed
+This is your best evidence. A task in the hist-* family is a real commit from elia's own history; its prompt is the failing test files.
+${lines.join('\n')}${more}`
+}
+
+function hypothesisBrief(sandbox: Sandbox, baseline: Metrics, evidence: TaskOutcome[] = []): string {
   const failing = baseline.failed.length > 0 ? baseline.failed.join(', ') : '(none — everything currently passes)'
 
   return `## Your own source
@@ -400,7 +490,7 @@ Current weighted pass rate: ${Math.round(baseline.passRate * 100)}%
 Passing: ${baseline.passed.join(', ') || '(none)'}
 FAILING: ${failing}
 Observed model steps: ${baseline.steps ? Object.entries(baseline.steps).map(([id, steps]) => `${id}=${steps}`).join(', ') : '(not recorded)'}
-Cost of one full run: ${baseline.totalTokens} tokens, ${Math.round(baseline.totalElapsedMs / 1000)}s of agent time.
+Cost of one full run: ${baseline.totalTokens} tokens, ${Math.round(baseline.totalElapsedMs / 1000)}s of agent time.${renderFailureEvidence(evidence)}
 
 ## What you may not change
 These files define how you are judged or enforce deterministic safety boundaries, and editing them is an automatic rejection:

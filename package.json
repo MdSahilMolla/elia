@@ -74,6 +74,7 @@
     "@types/react": "^19.2.18",
     "cors": "^2.8.6",
     "ink-testing-library": "^4.0.0",
+    "jest": "^30.5.1",
     "pptxgenjs": "4.0.1",
     "react-dom": "^19.3.0"
   }

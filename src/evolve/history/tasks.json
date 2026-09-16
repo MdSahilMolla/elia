@@ -1,17 +1,659 @@
 [
   {
-    "id": "hist-f3e622a",
-    "sha": "f3e622a18e16bdc600ff339f0b9ff9a05da3d784",
-    "parent": "18367d71751872744ab21485a77719bee345027f",
-    "subject": "Make the Ink render tests wait on frame content, not a fixed sleep",
+    "id": "hist-7b04b58",
+    "sha": "7b04b588091bb1973f565586d4353795385da5fc",
+    "parent": "f38df2a4e252b6aa48fb80c19e6994977415c9a9",
+    "subject": "fix(autonomy): say why a run's workspace got no repository, instead of failing silently",
     "testFiles": [
-      "src/ui/app/App.test.tsx",
-      "src/ui/app/components/InputBox.test.tsx"
+      "src/autonomy/taskWorkspace.test.ts"
     ],
     "sourceFiles": [
-      "src/ui/app/testFixtures.ts"
+      "src/autonomy/loop.ts",
+      "src/autonomy/taskWorkspace.ts"
     ],
-    "verifyCommand": "bun test --timeout=20000 src/ui/app/App.test.tsx src/ui/app/components/InputBox.test.tsx",
+    "verifyCommand": "bun test --timeout=20000 src/autonomy/taskWorkspace.test.ts",
+    "evidence": {
+      "failingBefore": 1,
+      "passingAfter": 4
+    },
+    "weight": 2
+  },
+  {
+    "id": "hist-13e0ae2",
+    "sha": "13e0ae248a63154d7778c2d417fb3e1e6cf797ac",
+    "parent": "a6adb1cb524857467fe1505eb853b443a07e46f8",
+    "subject": "fix(distill): a run whose verification ran nothing is not a verified trace",
+    "testFiles": [
+      "src/distill/corpus.test.ts"
+    ],
+    "sourceFiles": [
+      "src/distill/corpus.ts"
+    ],
+    "verifyCommand": "bun test --timeout=20000 src/distill/corpus.test.ts",
+    "evidence": {
+      "failingBefore": 1,
+      "passingAfter": 13
+    },
+    "weight": 2
+  },
+  {
+    "id": "hist-f30cdab",
+    "sha": "f30cdab9668d2fa92f5ab2c0a557d60dd17a6fc4",
+    "parent": "c6e363d6544650b8f87e68bb9d949b83b82d607f",
+    "subject": "fix(autonomy): what an advisory worker was refused does not hold the goal open",
+    "testFiles": [
+      "src/autonomy/goalGraph.test.ts"
+    ],
+    "sourceFiles": [
+      "src/autonomy/goalGraph.ts"
+    ],
+    "verifyCommand": "bun test --timeout=20000 src/autonomy/goalGraph.test.ts",
+    "evidence": {
+      "failingBefore": 1,
+      "passingAfter": 27
+    },
+    "weight": 2
+  },
+  {
+    "id": "hist-c6e363d",
+    "sha": "c6e363d6544650b8f87e68bb9d949b83b82d607f",
+    "parent": "43597e6623f9f5fc840ad03043203fa574032817",
+    "subject": "fix(autonomy): a run that throws lets the process exit",
+    "testFiles": [
+      "src/autonomy/runExit.test.ts"
+    ],
+    "sourceFiles": [
+      "src/autonomy/loop.ts"
+    ],
+    "verifyCommand": "bun test --timeout=20000 src/autonomy/runExit.test.ts",
+    "evidence": {
+      "failingBefore": 1,
+      "passingAfter": 1
+    },
+    "weight": 2
+  },
+  {
+    "id": "hist-43597e6",
+    "sha": "43597e6623f9f5fc840ad03043203fa574032817",
+    "parent": "efbd34b0a34d015bbd881b782e5f46577dc860a4",
+    "subject": "fix(agent): a tool call the model garbled is asked for again, not fatal",
+    "testFiles": [
+      "src/agentLoop.test.ts"
+    ],
+    "sourceFiles": [
+      "src/agentLoop.ts",
+      "src/autonomy/loop.ts",
+      "src/providerErrors.ts"
+    ],
+    "verifyCommand": "bun test --timeout=20000 src/agentLoop.test.ts",
+    "evidence": {
+      "failingBefore": 2,
+      "passingAfter": 24
+    },
+    "weight": 2
+  },
+  {
+    "id": "hist-e0e135a",
+    "sha": "e0e135aec801ad550b50f9c5744ddda2cfe75847",
+    "parent": "468a401147b5b8102adf7f7bdef2ace40957eadf",
+    "subject": "fix(autonomy): reviewers see everything the run changed, not just what is uncommitted",
+    "testFiles": [
+      "src/autonomy/reviewContext.test.ts"
+    ],
+    "sourceFiles": [
+      "src/autonomy/loop.ts",
+      "src/autonomy/reviewContext.ts"
+    ],
+    "verifyCommand": "bun test --timeout=20000 src/autonomy/reviewContext.test.ts",
+    "evidence": {
+      "failingBefore": 1,
+      "passingAfter": 9
+    },
+    "weight": 2
+  },
+  {
+    "id": "hist-8130f62",
+    "sha": "8130f6256ddc596edcb6dae5ef39e94dc6a9fa10",
+    "parent": "1600019985053b28d52bf8c6f0d00ef649d42b74",
+    "subject": "fix(distill): say what a dead run was doing inside its phase",
+    "testFiles": [
+      "src/distill/corpus.test.ts"
+    ],
+    "sourceFiles": [
+      "src/autonomy/loop.ts",
+      "src/distill/corpus.ts"
+    ],
+    "verifyCommand": "bun test --timeout=20000 src/distill/corpus.test.ts",
+    "evidence": {
+      "failingBefore": 1,
+      "passingAfter": 12
+    },
+    "weight": 2
+  },
+  {
+    "id": "hist-1600019",
+    "sha": "1600019985053b28d52bf8c6f0d00ef649d42b74",
+    "parent": "18e90876545fafebe589676485261c6b215c0c3c",
+    "subject": "fix(hygiene): an integrity hash that can never match blocks the run",
+    "testFiles": [
+      "src/autonomy/hygiene.test.ts"
+    ],
+    "sourceFiles": [
+      "src/autonomy/hygiene.ts"
+    ],
+    "verifyCommand": "bun test --timeout=20000 src/autonomy/hygiene.test.ts",
+    "evidence": {
+      "failingBefore": 2,
+      "passingAfter": 37
+    },
+    "weight": 2
+  },
+  {
+    "id": "hist-18e9087",
+    "sha": "18e90876545fafebe589676485261c6b215c0c3c",
+    "parent": "abaa6dfd6849764ff9a5678c99fe4ed66c1f7bc4",
+    "subject": "fix(autonomy): drop a verification command this machine's shell does not have",
+    "testFiles": [
+      "src/autonomy/verify.test.ts"
+    ],
+    "sourceFiles": [
+      "src/autonomy/loop.ts",
+      "src/autonomy/verify.ts",
+      "src/shell.ts"
+    ],
+    "verifyCommand": "bun test --timeout=20000 src/autonomy/verify.test.ts",
+    "evidence": {
+      "failingBefore": 1,
+      "passingAfter": 15
+    },
+    "weight": 2
+  },
+  {
+    "id": "hist-abaa6df",
+    "sha": "abaa6dfd6849764ff9a5678c99fe4ed66c1f7bc4",
+    "parent": "7761d36fedc74ba5d367d2fc205a184671932be9",
+    "subject": "fix(autonomy): a reviewer is told to submit before its step budget runs out",
+    "testFiles": [
+      "src/bench/correctness/agentBehaviour.test.ts",
+      "src/requiredTool.test.ts"
+    ],
+    "sourceFiles": [
+      "src/autonomy/loop.ts",
+      "src/requiredTool.ts",
+      "src/subagent.ts"
+    ],
+    "verifyCommand": "bun test --timeout=20000 src/bench/correctness/agentBehaviour.test.ts src/requiredTool.test.ts",
+    "evidence": {
+      "failingBefore": 2,
+      "passingAfter": 18
+    },
+    "weight": 2
+  },
+  {
+    "id": "hist-8eda0fe",
+    "sha": "8eda0fecf5ff5b9e842058795446ab6b815b44a2",
+    "parent": "0df0570cd1ed2afed785c49db28e2496b99d1b70",
+    "subject": "fix(spend): price every Claude model elia routes to, and cache writes by lifetime",
+    "testFiles": [
+      "src/spendLimit.test.ts",
+      "src/usage.test.ts"
+    ],
+    "sourceFiles": [
+      "src/providers/anthropic.ts",
+      "src/providers/types.ts",
+      "src/usage.ts"
+    ],
+    "verifyCommand": "bun test --timeout=20000 src/spendLimit.test.ts src/usage.test.ts",
+    "evidence": {
+      "failingBefore": 7,
+      "passingAfter": 34
+    },
+    "weight": 2
+  },
+  {
+    "id": "hist-2dbc929",
+    "sha": "2dbc92958bc1c23fd74356d7bf4705d1d6987613",
+    "parent": "ac2d4b04aa942ed1c7b671636b3e9c9f5f00d570",
+    "subject": "fix(workspace): a corrupt lease can no longer strand a task forever (M-33)",
+    "testFiles": [
+      "src/workspace/rpcOrchestration.test.ts",
+      "src/workspace/store.test.ts"
+    ],
+    "sourceFiles": [
+      "src/workspace/events.ts",
+      "src/workspace/store.ts"
+    ],
+    "verifyCommand": "bun test --timeout=20000 src/workspace/rpcOrchestration.test.ts src/workspace/store.test.ts",
+    "evidence": {
+      "failingBefore": 2,
+      "passingAfter": 31
+    },
+    "weight": 2
+  },
+  {
+    "id": "hist-56b4e00",
+    "sha": "56b4e008029dfe2de49bdb990149c0eabb5ed0aa",
+    "parent": "26cbb2147289b4e6344bf4141a979f7b95b597d4",
+    "subject": "feat(lessons): carry machine-level lessons across projects",
+    "testFiles": [
+      "src/autonomy/lessonScope.test.ts",
+      "src/autonomy/lessons.test.ts"
+    ],
+    "sourceFiles": [
+      "src/autonomy/lessonScope.ts",
+      "src/autonomy/lessons.ts"
+    ],
+    "verifyCommand": "bun test --timeout=20000 src/autonomy/lessonScope.test.ts src/autonomy/lessons.test.ts",
+    "evidence": {
+      "failingBefore": 3,
+      "passingAfter": 33
+    },
+    "weight": 2
+  },
+  {
+    "id": "hist-84ae149",
+    "sha": "84ae1496606ac0abc4485915d39515ef88ec8815",
+    "parent": "8f2224283cca6beb23e7068769b9c9fc0959c25d",
+    "subject": "fix(preview): hand the verified URL to the turn instead of scraping it from prose",
+    "testFiles": [
+      "src/tools/preview.test.ts"
+    ],
+    "sourceFiles": [
+      "src/index.ts",
+      "src/preview/launchChrome.ts",
+      "src/tools/preview.ts"
+    ],
+    "verifyCommand": "bun test --timeout=20000 src/tools/preview.test.ts",
+    "evidence": {
+      "failingBefore": 1,
+      "passingAfter": 14
+    },
+    "weight": 2
+  },
+  {
+    "id": "hist-04c33c7",
+    "sha": "04c33c76e2f3842b9e8df885df96185c5d2f89ed",
+    "parent": "738192832efea2e8b7be0e4b113ab9854e0423dc",
+    "subject": "fix(autonomy): scaffolding commits what it wrote, not the whole tree",
+    "testFiles": [
+      "src/autonomy/scaffold.test.ts"
+    ],
+    "sourceFiles": [
+      "src/autonomy/loop.ts",
+      "src/autonomy/scaffold.ts"
+    ],
+    "verifyCommand": "bun test --timeout=20000 src/autonomy/scaffold.test.ts",
+    "evidence": {
+      "failingBefore": 2,
+      "passingAfter": 19
+    },
+    "weight": 2
+  },
+  {
+    "id": "hist-7c2db18",
+    "sha": "7c2db18e9bfe55009dcbd7f02b18b20bad4e3a32",
+    "parent": "1d3213fb1104278788c014532cfe0575f6a07939",
+    "subject": "feat(lessons): inject the lessons this turn needs, not just the newest ones",
+    "testFiles": [
+      "src/autonomy/lessons.test.ts",
+      "src/tools/browserRecorder.test.ts"
+    ],
+    "sourceFiles": [
+      "src/agent.ts",
+      "src/autonomy/lessons.ts",
+      "src/autonomy/loop.ts"
+    ],
+    "verifyCommand": "bun test --timeout=20000 src/autonomy/lessons.test.ts src/tools/browserRecorder.test.ts",
+    "evidence": {
+      "failingBefore": 7,
+      "passingAfter": 33
+    },
+    "weight": 2
+  },
+  {
+    "id": "hist-1d3213f",
+    "sha": "1d3213fb1104278788c014532cfe0575f6a07939",
+    "parent": "a4a39a8489d0653f3b9fdadfaa2223ca2f13d686",
+    "subject": "feat(browser): read the console and the network, not just the DOM",
+    "testFiles": [
+      "src/tools/browser.test.ts",
+      "src/tools/browserRecorder.test.ts"
+    ],
+    "sourceFiles": [
+      "src/mcp/browserRegistry.ts",
+      "src/tools/browser.ts",
+      "src/tools/browserRecorder.ts"
+    ],
+    "verifyCommand": "bun test --timeout=20000 src/tools/browser.test.ts src/tools/browserRecorder.test.ts",
+    "evidence": {
+      "failingBefore": 2,
+      "passingAfter": 23
+    },
+    "weight": 2
+  },
+  {
+    "id": "hist-79d9b3f",
+    "sha": "79d9b3f16bedde7a8b395ceb9d3faa68f7d76fc9",
+    "parent": "bdd93cf05fd8ff12d3bfbc6c7944627d364df6b3",
+    "subject": "fix(ui,autonomy): stop repeating one line forever, and always produce a plan",
+    "testFiles": [
+      "src/autonomy/loop.test.ts",
+      "src/ui/app/store.test.ts"
+    ],
+    "sourceFiles": [
+      "src/agentLoop.ts",
+      "src/autonomy/loop.ts",
+      "src/ui/app/store.ts"
+    ],
+    "verifyCommand": "bun test --timeout=20000 src/autonomy/loop.test.ts src/ui/app/store.test.ts",
+    "evidence": {
+      "failingBefore": 5,
+      "passingAfter": 23
+    },
+    "weight": 2
+  },
+  {
+    "id": "hist-7b4fb6a",
+    "sha": "7b4fb6a97b6e5bfa8b4158a598245ea76f4158d1",
+    "parent": "159845416d588a17ef8dc010719273d728d33eef",
+    "subject": "fix(native): restore daemon shell line breaks; harden eliad, elia-index and the JVM bridge (I-25..I-36)",
+    "testFiles": [
+      "src/daemon/client.test.ts"
+    ],
+    "sourceFiles": [
+      "src/daemon/client.ts"
+    ],
+    "verifyCommand": "bun test --timeout=20000 src/daemon/client.test.ts",
+    "evidence": {
+      "failingBefore": 1,
+      "passingAfter": 5
+    },
+    "weight": 2
+  },
+  {
+    "id": "hist-e777db8",
+    "sha": "e777db8a47345f36919b5fa1d39b07bf10e8523e",
+    "parent": "f6ee278e3384df9c9434618f95ca7a5ad4821e65",
+    "subject": "fix(commands): let the command loader take an explicit home dir, so its test runs on Linux",
+    "testFiles": [
+      "src/commands/loader.test.ts"
+    ],
+    "sourceFiles": [
+      "src/commands/loader.ts"
+    ],
+    "verifyCommand": "bun test --timeout=20000 src/commands/loader.test.ts",
+    "evidence": {
+      "failingBefore": 1,
+      "passingAfter": 5
+    },
+    "weight": 2
+  },
+  {
+    "id": "hist-fff28b3",
+    "sha": "fff28b3bd8920adc105238ce509ae754dbb8c261",
+    "parent": "ba22335eeb5bd0120b7a8c8a8ffb9596e07d22ca",
+    "subject": "fix(skills): clear synthesized tools on reload, so a loaded skill cannot leak",
+    "testFiles": [
+      "src/skills/loader.test.ts"
+    ],
+    "sourceFiles": [
+      "src/skills/loader.ts",
+      "src/tools/registry.ts"
+    ],
+    "verifyCommand": "bun test --timeout=20000 src/skills/loader.test.ts",
+    "evidence": {
+      "failingBefore": 2,
+      "passingAfter": 7
+    },
+    "weight": 2
+  },
+  {
+    "id": "hist-79ddaf2",
+    "sha": "79ddaf28fb2b3b667fe04d8f053fda427059b449",
+    "parent": "065a53aaaa8d613993abbfbd46bbdc56535cce1a",
+    "subject": "fix(autonomy): show untracked deliverables to reviewers; coalesce repeated activity",
+    "testFiles": [
+      "src/autonomy/scaffold.test.ts",
+      "src/ui/app/store.test.ts"
+    ],
+    "sourceFiles": [
+      "src/autonomy/loop.ts",
+      "src/autonomy/scaffold.ts",
+      "src/ui/app/store.ts"
+    ],
+    "verifyCommand": "bun test --timeout=20000 src/autonomy/scaffold.test.ts src/ui/app/store.test.ts",
+    "evidence": {
+      "failingBefore": 2,
+      "passingAfter": 29
+    },
+    "weight": 2
+  },
+  {
+    "id": "hist-422dca8",
+    "sha": "422dca8bb3cdd7b539bcfa3c635ed638e8bb598c",
+    "parent": "4b9e1a5f836862098f83307232be12c8e3395b33",
+    "subject": "fix(governor): reject CR/LF command chains and widen secret-path scope",
+    "testFiles": [
+      "src/autonomy/governor.test.ts"
+    ],
+    "sourceFiles": [
+      "src/autonomy/governor.ts",
+      "src/autonomy/sensitivePaths.ts"
+    ],
+    "verifyCommand": "bun test --timeout=20000 src/autonomy/governor.test.ts",
+    "evidence": {
+      "failingBefore": 4,
+      "passingAfter": 37
+    },
+    "weight": 2
+  },
+  {
+    "id": "hist-7eac216",
+    "sha": "7eac2167aeb974ba7e45e7b9c9aac594d515bcdc",
+    "parent": "1134156422f43f8c5750bb6eb51ecfc7a06d7425",
+    "subject": "fix(security): route causal_verify/causal_debug shell through the run_command risk model",
+    "testFiles": [
+      "src/autonomy/governor.test.ts"
+    ],
+    "sourceFiles": [
+      "src/autonomy/governor.ts",
+      "src/tools/causal/reproduction.ts",
+      "src/tools/causal/verify.ts"
+    ],
+    "verifyCommand": "bun test --timeout=20000 src/autonomy/governor.test.ts",
+    "evidence": {
+      "failingBefore": 2,
+      "passingAfter": 33
+    },
+    "weight": 2
+  },
+  {
+    "id": "hist-fa1f598",
+    "sha": "fa1f59838ddaa6c5af781b70cdf632dce6c47751",
+    "parent": "12dfff1ce5665aa6c481b027b510a3a02be71740",
+    "subject": "feat(browser): owned headless browser backend (ELIA_BROWSER=owned)",
+    "testFiles": [
+      "src/tools/browserOwned.test.ts"
+    ],
+    "sourceFiles": [
+      "src/tools/browser.ts",
+      "src/tools/browserOwned.ts"
+    ],
+    "verifyCommand": "bun test --timeout=20000 src/tools/browserOwned.test.ts",
+    "evidence": {
+      "failingBefore": 1,
+      "passingAfter": 4
+    },
+    "weight": 2
+  },
+  {
+    "id": "hist-12dfff1",
+    "sha": "12dfff1ce5665aa6c481b027b510a3a02be71740",
+    "parent": "352ce7047bb1ab974685f321265269c989348a51",
+    "subject": "feat(sandbox): container execution backend, additive to worktree isolation",
+    "testFiles": [
+      "src/sandbox/container.test.ts",
+      "src/shell.test.ts"
+    ],
+    "sourceFiles": [
+      "src/sandbox/container.ts",
+      "src/shell.ts"
+    ],
+    "verifyCommand": "bun test --timeout=20000 src/sandbox/container.test.ts src/shell.test.ts",
+    "evidence": {
+      "failingBefore": 2,
+      "passingAfter": 14
+    },
+    "weight": 2
+  },
+  {
+    "id": "hist-352ce70",
+    "sha": "352ce7047bb1ab974685f321265269c989348a51",
+    "parent": "c9d115e1c7ac48fd765012ddd55d0017da4e5fa1",
+    "subject": "feat(observability): optional OTLP/HTTP+JSON export of autonomy journal events",
+    "testFiles": [
+      "src/autonomy/otel.test.ts"
+    ],
+    "sourceFiles": [
+      "src/autonomy/journal.ts",
+      "src/autonomy/otel.ts",
+      "src/index.ts"
+    ],
+    "verifyCommand": "bun test --timeout=20000 src/autonomy/otel.test.ts",
+    "evidence": {
+      "failingBefore": 1,
+      "passingAfter": 6
+    },
+    "weight": 2
+  },
+  {
+    "id": "hist-c9d115e",
+    "sha": "c9d115e1c7ac48fd765012ddd55d0017da4e5fa1",
+    "parent": "669d36f91b1864b930c2d7ae19c19680749913b2",
+    "subject": "feat(deployment): add a docker provider alongside Vercel/Netlify",
+    "testFiles": [
+      "src/tools/deployment.test.ts"
+    ],
+    "sourceFiles": [
+      "src/tools/deployment.ts"
+    ],
+    "verifyCommand": "bun test --timeout=20000 src/tools/deployment.test.ts",
+    "evidence": {
+      "failingBefore": 5,
+      "passingAfter": 7
+    },
+    "weight": 2
+  },
+  {
+    "id": "hist-da3b00f",
+    "sha": "da3b00f15265545d38a486d5dd099fcc5947989b",
+    "parent": "47c0cec57f732f98ab2d3c401cd5f90a140e3c80",
+    "subject": "feat(github): pr_checks_log and pr_unresolved_reviews — the missing halves of a CI/PR-review loop",
+    "testFiles": [
+      "src/tools/github.test.ts"
+    ],
+    "sourceFiles": [
+      "src/autonomy/governor.ts",
+      "src/tools/github.ts"
+    ],
+    "verifyCommand": "bun test --timeout=20000 src/tools/github.test.ts",
+    "evidence": {
+      "failingBefore": 8,
+      "passingAfter": 21
+    },
+    "weight": 2
+  },
+  {
+    "id": "hist-47c0cec",
+    "sha": "47c0cec57f732f98ab2d3c401cd5f90a140e3c80",
+    "parent": "9dc9af6f15bfb2e0b8d5de56a64d7f68ca145cf3",
+    "subject": "feat(providers): per-assignment difficulty routing + operator-supplied pricing",
+    "testFiles": [
+      "src/config.test.ts",
+      "src/usage.test.ts"
+    ],
+    "sourceFiles": [
+      "src/autonomy/fleet.ts",
+      "src/config.ts",
+      "src/usage.ts"
+    ],
+    "verifyCommand": "bun test --timeout=20000 src/config.test.ts src/usage.test.ts",
+    "evidence": {
+      "failingBefore": 6,
+      "passingAfter": 42
+    },
+    "weight": 2
+  },
+  {
+    "id": "hist-9dc9af6",
+    "sha": "9dc9af6f15bfb2e0b8d5de56a64d7f68ca145cf3",
+    "parent": "99ade902da4cb59064312d0959db430f8fe7795f",
+    "subject": "feat(evolve): wire the history-harvested benchmark corpus into the actual generation loop",
+    "testFiles": [
+      "src/evolve/suite.test.ts"
+    ],
+    "sourceFiles": [
+      "src/evolve/engine.ts",
+      "src/evolve/suite.ts"
+    ],
+    "verifyCommand": "bun test --timeout=20000 src/evolve/suite.test.ts",
+    "evidence": {
+      "failingBefore": 1,
+      "passingAfter": 15
+    },
+    "weight": 2
+  },
+  {
+    "id": "hist-99ade90",
+    "sha": "99ade902da4cb59064312d0959db430f8fe7795f",
+    "parent": "6ef245eb9ddb436d08f1c6a4356449a518405c58",
+    "subject": "feat(autonomy): scoped pre-authorization — a real third governance mode",
+    "testFiles": [
+      "src/autonomy/governor.test.ts",
+      "src/autonomy/preauth.test.ts"
+    ],
+    "sourceFiles": [
+      "src/autonomy/governor.ts",
+      "src/autonomy/preauth.ts",
+      "src/index.ts"
+    ],
+    "verifyCommand": "bun test --timeout=20000 src/autonomy/governor.test.ts src/autonomy/preauth.test.ts",
+    "evidence": {
+      "failingBefore": 2,
+      "passingAfter": 45
+    },
+    "weight": 2
+  },
+  {
+    "id": "hist-6ef245e",
+    "sha": "6ef245eb9ddb436d08f1c6a4356449a518405c58",
+    "parent": "e2202ff1abddb3d301a683420525598e1171a107",
+    "subject": "fix(usage): guard estimateCostUsd against NaN or negative token counts",
+    "testFiles": [
+      "src/usage.test.ts"
+    ],
+    "sourceFiles": [
+      "src/usage.ts"
+    ],
+    "verifyCommand": "bun test --timeout=20000 src/usage.test.ts",
+    "evidence": {
+      "failingBefore": 1,
+      "passingAfter": 18
+    },
+    "weight": 2
+  },
+  {
+    "id": "hist-e2202ff",
+    "sha": "e2202ff1abddb3d301a683420525598e1171a107",
+    "parent": "38d8330a7d1941682853c93532860847b732349f",
+    "subject": "fix(workspace): handle \"?\" and \"{a,b}\" in glob-overlap reservation checks",
+    "testFiles": [
+      "src/workspace/reservations.test.ts"
+    ],
+    "sourceFiles": [
+      "src/workspace/reservations.ts"
+    ],
+    "verifyCommand": "bun test --timeout=20000 src/workspace/reservations.test.ts",
     "evidence": {
       "failingBefore": 2,
       "passingAfter": 9
@@ -19,39 +661,35 @@
     "weight": 2
   },
   {
-    "id": "hist-43c1f6c",
-    "sha": "43c1f6ccb071fb7064d4b68431653f2ce0e50738",
-    "parent": "e2783b107cc15e93f3ad3e1190421362e2303ce8",
-    "subject": "Report where a file landed, and re-verify when the user says elia is wrong",
+    "id": "hist-a4b38a1",
+    "sha": "a4b38a1b0c73d55983ad1c285a300d8886c62059",
+    "parent": "e329d7ecf1506b803da136755e045dc98e1d1974",
+    "subject": "fix(ledger): drain pendingWrites once each confirmation write settles",
     "testFiles": [
-      "src/autonomy/disputeNudge.test.ts",
-      "src/tools/tools.test.ts"
+      "src/ledger.test.ts"
     ],
     "sourceFiles": [
-      "src/agent.ts",
-      "src/autonomy/disputeNudge.ts",
-      "src/tools/writeFile.ts"
+      "src/ledger.ts"
     ],
-    "verifyCommand": "bun test --timeout=20000 src/autonomy/disputeNudge.test.ts src/tools/tools.test.ts",
+    "verifyCommand": "bun test --timeout=20000 src/ledger.test.ts",
     "evidence": {
-      "failingBefore": 2,
-      "passingAfter": 36
+      "failingBefore": 1,
+      "passingAfter": 11
     },
     "weight": 2
   },
   {
-    "id": "hist-e2783b1",
-    "sha": "e2783b107cc15e93f3ad3e1190421362e2303ce8",
-    "parent": "22942798987cf1e469655541aca8fa2ba7e658b6",
-    "subject": "Scope the preview server to the target's own directory + serve directory indexes",
+    "id": "hist-e329d7e",
+    "sha": "e329d7ecf1506b803da136755e045dc98e1d1974",
+    "parent": "ea8e90d1d146118c210827454c7329b0cc5348f4",
+    "subject": "fix(checkpoint): make restoreCheckpoint transactional and cross-process locked",
     "testFiles": [
-      "src/preview/server.test.ts"
+      "src/checkpoint.test.ts"
     ],
     "sourceFiles": [
-      "src/preview/server.ts",
-      "src/tools/preview.ts"
+      "src/checkpoint.ts"
     ],
-    "verifyCommand": "bun test --timeout=20000 src/preview/server.test.ts",
+    "verifyCommand": "bun test --timeout=20000 src/checkpoint.test.ts",
     "evidence": {
       "failingBefore": 1,
       "passingAfter": 12
@@ -59,131 +697,36 @@
     "weight": 2
   },
   {
-    "id": "hist-98a1b3f",
-    "sha": "98a1b3f5a7cb022c0057fa2422a74047869d52aa",
-    "parent": "b4101fc394f71c3759b0fbc344a844cb9e123d3f",
-    "subject": "Rewind the working tree to the last green checkpoint on a wrong-approach stall",
+    "id": "hist-48453af",
+    "sha": "48453afa0cec266abf1e2a710ae08fe5a25991fc",
+    "parent": "6cc272bc57bc23c83458eb80be8ae96910941f79",
+    "subject": "fix(mcp): lock and atomically write mcp.json to close a read-modify-write race",
     "testFiles": [
-      "src/autonomy/treeSnapshot.test.ts"
+      "src/mcp/config.test.ts"
     ],
     "sourceFiles": [
-      "src/autonomy/loop.ts",
-      "src/autonomy/treeSnapshot.ts",
-      "src/autonomy/worktree.ts"
+      "src/mcp/config.ts"
     ],
-    "verifyCommand": "bun test --timeout=20000 src/autonomy/treeSnapshot.test.ts",
+    "verifyCommand": "bun test --timeout=20000 src/mcp/config.test.ts",
     "evidence": {
       "failingBefore": 1,
-      "passingAfter": 5
+      "passingAfter": 17
     },
     "weight": 2
   },
   {
-    "id": "hist-a74115b",
-    "sha": "a74115b19c6d6b2d3233cefff21b1c5329c67201",
-    "parent": "1c5350a59781edb8c46691406509c4e1b9f83e1d",
-    "subject": "Use `elia-ai` as the npm package name",
+    "id": "hist-923fb09",
+    "sha": "923fb09b9e37f6b4894bff388e24fdb521105aa1",
+    "parent": "26b591cab4678c71a22283255401380fa69f339c",
+    "subject": "feat(evolve): learning-rate signal so a saturated benchmark is visible",
     "testFiles": [
-      "src/updateCheck.test.ts"
+      "src/evolve/ledger.test.ts"
     ],
     "sourceFiles": [
-      "src/updateCheck.ts"
-    ],
-    "verifyCommand": "bun test --timeout=20000 src/updateCheck.test.ts",
-    "evidence": {
-      "failingBefore": 1,
-      "passingAfter": 4
-    },
-    "weight": 2
-  },
-  {
-    "id": "hist-5995574",
-    "sha": "59955747fc9b6fe08c2a4676b139d4e9535a2ee4",
-    "parent": "ef56807698ebfb03ccf0e2f9ee2b809b64bd1b4b",
-    "subject": "Rename package to unscoped `elia` for `npm install elia`",
-    "testFiles": [
-      "src/updateCheck.test.ts"
-    ],
-    "sourceFiles": [
-      "src/updateCheck.ts"
-    ],
-    "verifyCommand": "bun test --timeout=20000 src/updateCheck.test.ts",
-    "evidence": {
-      "failingBefore": 1,
-      "passingAfter": 4
-    },
-    "weight": 2
-  },
-  {
-    "id": "hist-42154fe",
-    "sha": "42154fe497fb3beaf9b83defa4d4a8c7fa79525a",
-    "parent": "73c0c6a7e5806e6aca4f60db2579980ed9f1be61",
-    "subject": "Log completion-assessor calibration and flag verdict/fact contradictions",
-    "testFiles": [
-      "src/autonomy/calibration.test.ts"
-    ],
-    "sourceFiles": [
-      "src/autonomy/calibration.ts",
-      "src/autonomy/loop.ts",
+      "src/evolve/ledger.ts",
       "src/index.ts"
     ],
-    "verifyCommand": "bun test --timeout=20000 src/autonomy/calibration.test.ts",
-    "evidence": {
-      "failingBefore": 1,
-      "passingAfter": 7
-    },
-    "weight": 2
-  },
-  {
-    "id": "hist-73c0c6a",
-    "sha": "73c0c6a7e5806e6aca4f60db2579980ed9f1be61",
-    "parent": "2f3e2e12cead747f18bf0ff08bebf6c8b988f8db",
-    "subject": "Classify why a repair loop is stuck and act on it, not just stop",
-    "testFiles": [
-      "src/autonomy/stuck.test.ts"
-    ],
-    "sourceFiles": [
-      "src/autonomy/loop.ts",
-      "src/autonomy/stuck.ts"
-    ],
-    "verifyCommand": "bun test --timeout=20000 src/autonomy/stuck.test.ts",
-    "evidence": {
-      "failingBefore": 1,
-      "passingAfter": 10
-    },
-    "weight": 2
-  },
-  {
-    "id": "hist-bfd7bab",
-    "sha": "bfd7bab645eecc4b75504b44868fb0c0162a5f45",
-    "parent": "697cc56eebc9686012cababe9e244631634e47dc",
-    "subject": "Stop a thrashing repair loop early with a deterministic progress signal",
-    "testFiles": [
-      "src/autonomy/progress.test.ts"
-    ],
-    "sourceFiles": [
-      "src/autonomy/loop.ts",
-      "src/autonomy/progress.ts"
-    ],
-    "verifyCommand": "bun test --timeout=20000 src/autonomy/progress.test.ts",
-    "evidence": {
-      "failingBefore": 1,
-      "passingAfter": 12
-    },
-    "weight": 2
-  },
-  {
-    "id": "hist-697cc56",
-    "sha": "697cc56eebc9686012cababe9e244631634e47dc",
-    "parent": "871821fa80399a528744affdf496042d801c230b",
-    "subject": "Detect Edge/Brave/Chromium for preview, not just Chrome",
-    "testFiles": [
-      "src/preview/launchChrome.test.ts"
-    ],
-    "sourceFiles": [
-      "src/preview/launchChrome.ts"
-    ],
-    "verifyCommand": "bun test --timeout=20000 src/preview/launchChrome.test.ts",
+    "verifyCommand": "bun test --timeout=20000 src/evolve/ledger.test.ts",
     "evidence": {
       "failingBefore": 1,
       "passingAfter": 5
@@ -191,41 +734,41 @@
     "weight": 2
   },
   {
-    "id": "hist-341e1f3",
-    "sha": "341e1f38f60f1b6fde959f850a56122e4f67158e",
-    "parent": "1a0594532fe7ccd18232a05104b2da85b6cbc0e2",
-    "subject": "Preserve real tool output on a failed action postcondition",
+    "id": "hist-5327b25",
+    "sha": "5327b25b25a4cd21c921679bdde04d43da77bd15",
+    "parent": "0da249a7174a8e481a031277642c7f7f8e82246f",
+    "subject": "feat(config): P3 — independent adversarial reviewers (G3)",
     "testFiles": [
-      "src/agentLoop.test.ts"
+      "src/config.test.ts"
     ],
     "sourceFiles": [
-      "src/agentLoop.ts"
+      "src/config.ts",
+      "src/index.ts"
     ],
-    "verifyCommand": "bun test --timeout=20000 src/agentLoop.test.ts",
+    "verifyCommand": "bun test --timeout=20000 src/config.test.ts",
     "evidence": {
-      "failingBefore": 1,
-      "passingAfter": 10
+      "failingBefore": 3,
+      "passingAfter": 15
     },
     "weight": 2
   },
   {
-    "id": "hist-1a05945",
-    "sha": "1a0594532fe7ccd18232a05104b2da85b6cbc0e2",
-    "parent": "305b7c2ce9e2f39897c19373776913f0a923ed10",
-    "subject": "Fix two autonomous-loop failures found by running real end-to-end tasks",
+    "id": "hist-c31d87f",
+    "sha": "c31d87fc13aff96b091a3da068bf18deaa5acb47",
+    "parent": "6892585c342afd189e2c80cb8c1bf187655aa1b0",
+    "subject": "ui: error boundaries so one bad render can't kill the whole REPL",
     "testFiles": [
-      "src/agentLoop.test.ts",
-      "src/tools/tools.test.ts"
+      "src/ui/app/components/ErrorBoundary.test.tsx"
     ],
     "sourceFiles": [
-      "src/agentLoop.ts",
-      "src/autonomy/loop.ts",
-      "src/tools/editFile.ts"
+      "src/ui/app/App.tsx",
+      "src/ui/app/components/ErrorBoundary.tsx",
+      "src/ui/app/index.tsx"
     ],
-    "verifyCommand": "bun test --timeout=20000 src/agentLoop.test.ts src/tools/tools.test.ts",
+    "verifyCommand": "bun test --timeout=20000 src/ui/app/components/ErrorBoundary.test.tsx",
     "evidence": {
-      "failingBefore": 4,
-      "passingAfter": 39
+      "failingBefore": 1,
+      "passingAfter": 3
     },
     "weight": 2
   }

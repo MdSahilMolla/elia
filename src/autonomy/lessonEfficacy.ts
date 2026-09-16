@@ -25,12 +25,26 @@ export interface LessonExposureOutcome {
   regime?: 'mechanical' | 'empirical' | 'judgment'
   /** The run landed with no tool errors, no failed verification, no contradictions. */
   clean: boolean
+  /**
+   * Lessons that were selected for this run and then withheld at random (see
+   * `renderLessonsWithKeys`). They are the randomized control arm: the only
+   * comparison that says whether a lesson *causes* anything, because the runs
+   * that saw it and the runs that did not were picked by the same selection.
+   *
+   * `undefined` means holdout was not running for this run; `[]` means it was
+   * and the coin kept everything. Only the second kind belongs in a trial.
+   */
+  heldOut?: string[]
 }
 
-interface ExposureRecord extends LessonExposureOutcome {
+interface ExposureRecord {
   at: number
   corr: string
   lessonKeys: string[]
+  heldOutKeys?: string[]
+  verify: VerifyResult
+  regime?: LessonExposureOutcome['regime']
+  clean: boolean
 }
 
 export interface EfficacyCounts {
@@ -60,9 +74,18 @@ export function recordLessonExposure(
   outcome: LessonExposureOutcome,
   path = EFFICACY_PATH,
 ): void {
-  if (lessonKeys.length === 0) return
+  const heldOut = outcome.heldOut
+  if (lessonKeys.length === 0 && (heldOut?.length ?? 0) === 0) return
   try {
-    const record: ExposureRecord = { at: Date.now(), corr, lessonKeys, verify: outcome.verify, regime: outcome.regime, clean: outcome.clean }
+    const record: ExposureRecord = {
+      at: Date.now(),
+      corr,
+      lessonKeys,
+      ...(heldOut ? { heldOutKeys: heldOut } : {}),
+      verify: outcome.verify,
+      regime: outcome.regime,
+      clean: outcome.clean,
+    }
     appendSecureFile(path, `${JSON.stringify(record)}\n`)
   } catch {
     // A lost exposure line costs a data point, not correctness.
@@ -135,6 +158,76 @@ export function lessonLift(key: string, counts: Map<string, EfficacyCounts>, bas
   return entry.cleanRuns / entry.exposures - baselineCleanRate
 }
 
+/**
+ * Held-out runs a lesson needs before its randomized lift is trusted. Lower
+ * than `MIN_EXPOSURES` because the held-out arm is deliberately the small one
+ * (see `DEFAULT_LESSON_HOLDOUT_RATE` in lessons.ts) — the standard error below carries
+ * the uncertainty, this only keeps a handful of runs from being read at all.
+ */
+export const MIN_HELD_OUT = 8
+
+/** One-tailed ~95%: a lift must clear this many standard errors to count. */
+export const TRIAL_CONFIDENCE_Z = 1.645
+
+export interface LessonTrial {
+  shown: { runs: number; clean: number }
+  heldOut: { runs: number; clean: number }
+  /** clean rate when shown − clean rate when held out. */
+  lift: number
+  /** Standard error of that difference. */
+  se: number
+  verdict: 'helps' | 'hurts' | 'unclear'
+}
+
+/**
+ * Every lesson's randomized trial: shown-vs-withheld among runs that selected it.
+ *
+ * Unlike `lessonLift`, which compares against runs that never selected the
+ * lesson (and so differ in topic, not just in the lesson), both arms here were
+ * chosen by the same selection and split only by a coin flip. Only records
+ * written while holdout was running carry a control arm; a lesson with fewer than
+ * `MIN_HELD_OUT` withheld runs is left out of the map.
+ */
+export function lessonTrials(path = EFFICACY_PATH): Map<string, LessonTrial> {
+  const arms = new Map<string, { shown: { runs: number; clean: number }; heldOut: { runs: number; clean: number } }>()
+  const arm = (key: string) => {
+    let entry = arms.get(key)
+    if (!entry) arms.set(key, (entry = { shown: { runs: 0, clean: 0 }, heldOut: { runs: 0, clean: 0 } }))
+    return entry
+  }
+  for (const record of readExposureRecords(path)) {
+    // Only runs that went through the coin flip. A run from before holdout
+    // existed (or with it switched off) saw its lessons by selection alone, and
+    // mixing it in would bring back exactly the confound this exists to remove.
+    if (!Array.isArray(record.heldOutKeys)) continue
+    for (const key of record.lessonKeys) {
+      const entry = arm(key).shown
+      entry.runs += 1
+      if (record.clean) entry.clean += 1
+    }
+    for (const key of record.heldOutKeys ?? []) {
+      const entry = arm(key).heldOut
+      entry.runs += 1
+      if (record.clean) entry.clean += 1
+    }
+  }
+
+  const trials = new Map<string, LessonTrial>()
+  for (const [key, { shown, heldOut }] of arms) {
+    if (heldOut.runs < MIN_HELD_OUT || shown.runs < MIN_HELD_OUT) continue
+    const p1 = shown.clean / shown.runs
+    const p0 = heldOut.clean / heldOut.runs
+    const lift = p1 - p0
+    // Floor the variance so an arm that happens to be all-clean or all-dirty
+    // does not claim a standard error of zero.
+    const variance = (p: number, n: number) => Math.max(p * (1 - p), 1 / (4 * n)) / n
+    const se = Math.sqrt(variance(p1, shown.runs) + variance(p0, heldOut.runs))
+    const verdict = lift > TRIAL_CONFIDENCE_Z * se ? 'helps' : lift < -TRIAL_CONFIDENCE_Z * se ? 'hurts' : 'unclear'
+    trials.set(key, { shown, heldOut, lift, se, verdict })
+  }
+  return trials
+}
+
 /** One-line efficacy summary for `/lessons` / `/brain`. */
 export function renderEfficacyLine(baselineCleanRate: number, path = EFFICACY_PATH): string {
   const counts = loadEfficacy(path)
@@ -147,5 +240,11 @@ export function renderEfficacyLine(baselineCleanRate: number, path = EFFICACY_PA
     judged += 1
     if (lift <= 0) deadWeight += 1
   }
-  return `Lesson efficacy: ${judged} lesson(s) have enough exposures to judge, ${deadWeight} showing no lift.`
+  const trials = [...lessonTrials(path).values()]
+  const helps = trials.filter((trial) => trial.verdict === 'helps').length
+  const hurts = trials.filter((trial) => trial.verdict === 'hurts').length
+  const randomized = trials.length === 0
+    ? ' No lesson has a randomized trial yet.'
+    : ` Randomized trials: ${trials.length} judged, ${helps} proven to help, ${hurts} proven to hurt.`
+  return `Lesson efficacy: ${judged} lesson(s) have enough exposures to judge, ${deadWeight} showing no lift.${randomized}`
 }

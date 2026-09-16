@@ -32,8 +32,16 @@ function timeoutFor(task: BenchTask): number {
   if (!task.maxSteps) return TASK_TIMEOUT_MS
   return Math.max(TASK_TIMEOUT_MS, Math.round((TASK_TIMEOUT_MS / 30) * task.maxSteps))
 }
-/** Parallel tasks are faster, but provider rate limits turn a high number into retries and noise. */
-const DEFAULT_CONCURRENCY = 2
+/**
+ * Parallel tasks are faster, but provider rate limits turn a high number into
+ * retries and noise. `ELIA_BENCH_CONCURRENCY` overrides it — a provider with a
+ * per-minute input-token cap (mercury's free tier) needs 1 for the history
+ * tasks, which send hundreds of thousands of tokens each.
+ */
+export function benchConcurrency(env: Record<string, string | undefined> = process.env): number {
+  const value = Number(env.ELIA_BENCH_CONCURRENCY)
+  return Number.isInteger(value) && value >= 1 ? value : 2
+}
 
 export interface TaskOutcome {
   taskId: string
@@ -51,6 +59,12 @@ export interface TaskOutcome {
   keptDir?: string
   /** Execution stop classification returned by the child loop. */
   stopReason?: string
+  /**
+   * The task could not be measured at all — the provider refused (out of credit,
+   * overloaded) or the task's environment could not start — and retrying did not
+   * help. Neither a pass nor a fail: it says nothing about the agent.
+   */
+  unmeasured?: boolean
   /** Speculative read effectiveness for this task. */
   cacheHits?: number
   cacheMisses?: number
@@ -60,8 +74,10 @@ export interface Scorecard {
   sourceRoot: string
   model: string
   outcomes: TaskOutcome[]
-  /** Weighted fraction of tasks passed, 0..1. */
+  /** Weighted fraction of the *measured* tasks passed, 0..1. */
   passRate: number
+  /** Tasks that produced no verdict (see `TaskOutcome.unmeasured`). */
+  unmeasured: string[]
   totalTokens: number
   /** Sum of the tasks' own durations. */
   totalElapsedMs: number
@@ -85,7 +101,7 @@ export async function measureFitness(options: MeasureOptions): Promise<Scorecard
 
   const outcomes = await runWithConcurrencyLimit(
     tasks,
-    options.concurrency ?? DEFAULT_CONCURRENCY,
+    options.concurrency ?? benchConcurrency(),
     async (task) => {
       const outcome = await runTaskWithRetry(task, options.sourceRoot)
       options.onTaskDone?.(outcome)
@@ -99,7 +115,14 @@ export async function measureFitness(options: MeasureOptions): Promise<Scorecard
 
   const weightOf = (id: string) => tasks.find((task) => task.id === id)?.weight ?? 1
   const earned = outcomes.filter((outcome) => outcome.passed).reduce((sum, outcome) => sum + weightOf(outcome.taskId), 0)
-  const available = tasks.reduce((sum, task) => sum + task.weight, 0) || TOTAL_WEIGHT
+  // An unmeasured task leaves the denominator. Counting it as a failure is how a
+  // provider running out of credit reads as "elia got worse" — and a comparison
+  // between two cards with different unmeasured sets is refused outright in
+  // compareScorecards, so this never lets a gap flatter a candidate.
+  const unmeasured = outcomes.filter((outcome) => outcome.unmeasured).map((outcome) => outcome.taskId)
+  const available = tasks.length === 0
+    ? TOTAL_WEIGHT
+    : tasks.filter((task) => !unmeasured.includes(task.id)).reduce((sum, task) => sum + task.weight, 0)
 
   const cacheHits = outcomes.reduce((sum, outcome) => sum + (outcome.cacheHits ?? 0), 0)
   const cacheMisses = outcomes.reduce((sum, outcome) => sum + (outcome.cacheMisses ?? 0), 0)
@@ -110,6 +133,7 @@ export async function measureFitness(options: MeasureOptions): Promise<Scorecard
     model,
     outcomes,
     passRate: available === 0 ? 0 : earned / available,
+    unmeasured,
     totalTokens: outcomes.reduce((sum, outcome) => sum + outcome.totalTokens, 0),
     totalElapsedMs: outcomes.reduce((sum, outcome) => sum + outcome.elapsedMs, 0),
     wallClockMs: Date.now() - startedAt,
@@ -130,6 +154,13 @@ export async function measureFitness(options: MeasureOptions): Promise<Scorecard
  */
 const INFRASTRUCTURE_ERROR = /server had an error|rate.?limit|overloaded|ECONNRESET|ETIMEDOUT|fetch failed|502|503|529/i
 
+/**
+ * Errors no retry will fix inside one benchmark run: the account is out of
+ * credit, or the task's own checkout cannot start. Retrying these only burns
+ * time, so they go straight to unmeasured.
+ */
+const PERMANENT_INFRASTRUCTURE_ERROR = /402|requires more credits|free tier limit|insufficient.?(credit|quota|funds)|quota exceeded|preload not found|stale task/i
+
 export function isInfrastructureFailure(outcome: Pick<TaskOutcome, 'error' | 'steps'>): boolean {
   if (!outcome.error) return false
   // A hang is the candidate's own fault and must be allowed to score as a failure,
@@ -140,17 +171,40 @@ export function isInfrastructureFailure(outcome: Pick<TaskOutcome, 'error' | 'st
   return outcome.steps === 0 || INFRASTRUCTURE_ERROR.test(outcome.error)
 }
 
-async function runTaskWithRetry(task: BenchTask, sourceRoot: string, attempts = 2): Promise<TaskOutcome> {
+const RATE_LIMITED = /429|rate.?limit/i
+
+/**
+ * How long to wait before retry `attempt` (1-based), or undefined to stop.
+ *
+ * A rate limit is a quota window, not a blip: a 2-second pause just spends the
+ * retry inside the same window, which is how a full benchmark came back with
+ * real tasks unmeasured. So a rate limit gets more attempts spread across
+ * minutes; anything else keeps the short pause.
+ */
+export function retryDelayMs(outcome: Pick<TaskOutcome, 'error' | 'steps'>, attempt: number): number | undefined {
+  if (!isInfrastructureFailure(outcome) || PERMANENT_INFRASTRUCTURE_ERROR.test(outcome.error ?? '')) return undefined
+  if (RATE_LIMITED.test(outcome.error ?? '')) return attempt <= 3 ? 30_000 * 2 ** (attempt - 1) : undefined
+  return attempt <= 1 ? 2000 * attempt : undefined
+}
+
+async function runTaskWithRetry(task: BenchTask, sourceRoot: string): Promise<TaskOutcome> {
   let last = await runOneTask(task, sourceRoot)
 
-  for (let attempt = 1; attempt < attempts && isInfrastructureFailure(last); attempt++) {
+  for (let attempt = 1; ; attempt++) {
+    const delay = retryDelayMs(last, attempt)
+    if (delay === undefined) break
     if (last.keptDir) rmSync(last.keptDir, { recursive: true, force: true })
-    // A short pause, since the usual causes (rate limit, overload) clear with time.
-    await new Promise((resolve) => setTimeout(resolve, 2000 * attempt))
+    await new Promise((resolve) => setTimeout(resolve, delay))
     last = await runOneTask(task, sourceRoot)
   }
 
-  return last
+  return markUnmeasured(last)
+}
+
+/** An outcome that is still an infrastructure failure after retrying says nothing about the agent. */
+export function markUnmeasured(outcome: TaskOutcome): TaskOutcome {
+  if (outcome.passed || !isInfrastructureFailure(outcome)) return outcome
+  return { ...outcome, unmeasured: true }
 }
 
 async function runOneTask(task: BenchTask, sourceRoot: string): Promise<TaskOutcome> {
@@ -287,7 +341,8 @@ export function toMetrics(card: Scorecard): Metrics {
   return {
     passRate: card.passRate,
     passed: card.outcomes.filter((outcome) => outcome.passed).map((outcome) => outcome.taskId),
-    failed: card.outcomes.filter((outcome) => !outcome.passed).map((outcome) => outcome.taskId),
+    failed: card.outcomes.filter((outcome) => !outcome.passed && !outcome.unmeasured).map((outcome) => outcome.taskId),
+    ...(card.unmeasured.length > 0 ? { unmeasured: card.unmeasured } : {}),
     steps: Object.fromEntries(card.outcomes.map((outcome) => [outcome.taskId, outcome.steps])),
     totalTokens: card.totalTokens,
     totalElapsedMs: card.totalElapsedMs,
@@ -318,6 +373,14 @@ export interface Comparison {
  * and the ledger fills with false wins that future generations then "build on".
  */
 export function compareScorecards(baseline: Metrics, candidate: Metrics): Comparison {
+  // Fail closed on an incomplete measurement. A task one side could not run is a
+  // task the two numbers do not agree on, so neither the pass rate nor the
+  // regression list below would mean anything.
+  const unmeasured = [...new Set([...(baseline.unmeasured ?? []), ...(candidate.unmeasured ?? [])])]
+  if (unmeasured.length > 0) {
+    return { better: false, reason: `could not measure ${unmeasured.join(', ')} — refusing to compare an incomplete benchmark` }
+  }
+
   const regressions = baseline.passed.filter((id) => !candidate.passed.includes(id))
   if (regressions.length > 0) {
     return { better: false, reason: `regressed on ${regressions.join(', ')} — a task that passed before now fails` }
@@ -370,7 +433,8 @@ function signed(value: number): string {
 }
 
 export function renderScorecard(card: Scorecard, title = 'Scorecard'): string {
-  const lines: string[] = ['', `${bold(title)} ${dim(`— ${pct(card.passRate)} weighted pass rate`)}`, '']
+  const unmeasuredNote = card.unmeasured.length > 0 ? ` of the measured tasks, ${card.unmeasured.length} unmeasured` : ''
+  const lines: string[] = ['', `${bold(title)} ${dim(`— ${pct(card.passRate)} weighted pass rate${unmeasuredNote}`)}`, '']
 
   const rows = table(
     [
@@ -381,7 +445,7 @@ export function renderScorecard(card: Scorecard, title = 'Scorecard'): string {
       { header: 'tokens', align: 'right' },
     ],
     card.outcomes.map((outcome) => [
-      outcome.passed ? green('✓') : red('✗'),
+      outcome.passed ? green('✓') : outcome.unmeasured ? dim('?') : red('✗'),
       outcome.taskId,
       String(outcome.steps),
       formatElapsed(outcome.elapsedMs),
@@ -392,7 +456,8 @@ export function renderScorecard(card: Scorecard, title = 'Scorecard'): string {
   lines.push(`  ${header}`, `  ${separator}`)
   card.outcomes.forEach((outcome, i) => {
     lines.push(`  ${dataRows[i]}`)
-    if (outcome.error) lines.push(`      ${red(`error: ${outcome.error}`)}`)
+    if (outcome.unmeasured) lines.push(`      ${dim(`unmeasured: ${outcome.error ?? 'no verdict'}`)}`)
+    else if (outcome.error) lines.push(`      ${red(`error: ${outcome.error}`)}`)
     else if (outcome.detail) lines.push(`      ${dim(outcome.detail)}`)
     if (outcome.keptDir) lines.push(`      ${dim(`kept for inspection: ${outcome.keptDir}`)}`)
   })

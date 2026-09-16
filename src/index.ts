@@ -124,7 +124,7 @@ function requestedAgentMode(): AgentMode {
   return 'dev'
 }
 
-const SUBCOMMANDS = ['auto', 'agent', 'evolve', 'gap', 'values', 'distill', 'bench', 'bench-latency', 'skills', 'runs', 'fork', 'resume', 'schedule', 'daemon', 'doctor', 'config', 'codex-login', 'control', 'bridge', 'workspace'] as const
+const SUBCOMMANDS = ['auto', 'agent', 'evolve', 'gap', 'values', 'distill', 'compounding', 'bench', 'bench-latency', 'skills', 'runs', 'fork', 'resume', 'schedule', 'daemon', 'doctor', 'config', 'codex-login', 'control', 'bridge', 'workspace'] as const
 type Subcommand = (typeof SUBCOMMANDS)[number]
 
 function printHelp(): void {
@@ -801,6 +801,15 @@ async function runBench(): Promise<void> {
   // are real checkouts of this repository and cost minutes, so they are asked
   // for explicitly.
   const tasks = hasFlag('--all') ? allBenchTasks() : hasFlag('--history') ? historyTasks() : BENCH_TASKS
+  // --lessons: every task gets this project's lessons, as a real turn would
+  // (history tasks only those older than their commit — see benchLessons.ts).
+  // Compare against a run without it to learn whether the store helps.
+  const withLessons = hasFlag('--lessons')
+  if (withLessons) {
+    const { BENCH_LESSONS_ENV } = await import('./evolve/benchLessons.ts')
+    const { paths } = await import('./statePaths.ts')
+    process.env[BENCH_LESSONS_ENV] = paths.lessons
+  }
   if (tasks.length === 0) {
     writeNotice('No tasks to run. `elia bench --harvest` builds the history-derived set.')
     process.exitCode = 1
@@ -819,6 +828,8 @@ async function runBench(): Promise<void> {
     onTaskDone: (outcome) =>
       writeUsageLine(`  ${outcome.passed ? '✓' : '✗'} ${outcome.taskId} — ${outcome.error ?? outcome.detail}`),
   })
+  const { recordBenchRun } = await import('./compounding/status.ts')
+  recordBenchRun(card, `${hasFlag('--all') ? 'all' : hasFlag('--history') ? 'history' : 'synthetic'}${withLessons ? '+lessons' : ''}`)
   if (machineReadable) emitEvent('benchmark_scorecard', { stage: 'current', scorecard: card })
   else {
     process.stdout.write(renderScorecard(card, 'elia'))
@@ -896,6 +907,14 @@ async function runBenchLatency(): Promise<void> {
   }
 }
 
+/** `elia compounding` — where the self-improvement loop stands, stage by stage, from elia's own records. */
+async function runCompounding(): Promise<void> {
+  const { compoundingStatus, renderCompoundingStatus } = await import('./compounding/status.ts')
+  const stages = compoundingStatus()
+  if (machineReadable) emitEvent('compounding_status', { stages })
+  else writeUsageLine(renderCompoundingStatus(stages))
+}
+
 async function runEvolve(): Promise<void> {
   const generationsRaw = flagValue('--generations', '-n') ?? '1'
   const generations = strictInteger(generationsRaw)
@@ -908,7 +927,34 @@ async function runEvolve(): Promise<void> {
   if (!(await ensureFirstRunProviderSetup())) return
   await loadRuntimeSkills()
   const { evolve } = await import('./evolve/engine.ts')
-  const result = await evolve({ generations, dryRun: hasFlag('--dry-run') })
+  // --focus N: score on the built-in tasks, the last full run's failures, and N
+  // of its passing history tasks — a fraction of the full set's cost, and
+  // still the same fixed set for the baseline and every candidate.
+  let taskIds: string[] | undefined
+  const focusRaw = flagValue('--focus')
+  if (focusRaw !== undefined) {
+    const focus = strictInteger(focusRaw)
+    if (focus === undefined || focus < 0) {
+      writeError('--focus must be a non-negative integer (how many passing history tasks to keep as regression guards).')
+      process.exitCode = 1
+      return
+    }
+    const { BENCH_TASKS } = await import('./evolve/suite.ts')
+    const { focusTaskIds } = await import('./compounding/status.ts')
+    taskIds = focusTaskIds(BENCH_TASKS.map((task) => task.id), focus)
+    if (!taskIds) {
+      writeError('--focus needs a complete `elia bench --all` run to focus from (none recorded with every task measured).')
+      process.exitCode = 1
+      return
+    }
+    writeNotice(`Focused on ${taskIds.length} task(s): the built-in set, the last full run's failures, and ${focus} passing history task(s).`)
+  }
+  const result = await evolve({ generations, dryRun: hasFlag('--dry-run'), taskIds })
+  if (result.stoppedReason) {
+    writeError(`No generation was attempted: ${result.stoppedReason}`)
+    process.exitCode = 1
+    return
+  }
   const promoted = result.generations.filter((record) => record.verdict === 'promoted')
 
   writeNotice(
@@ -989,8 +1035,26 @@ async function runDistill(): Promise<void> {
     return
   }
 
+  if (action === 'export') {
+    // The weights half of the loop: a training set from verified work, and how
+    // far it is from being worth training on. Local only; nothing is uploaded.
+    const { allTrajectoryRows, defaultExportPath, readiness, renderReadiness, selectTrainingExamples, writeTrainingExport } = await import('./distill/export.ts')
+    const rows = allTrajectoryRows()
+    const selection = selectTrainingExamples(rows)
+    writeNotice(renderReadiness(readiness(selection.examples, rows)))
+    writeUsageLine(`  ${selection.examples.length} of ${selection.considered} recorded turn(s)/run(s) qualify. Why the rest do not:`)
+    for (const [reason, count] of [...selection.rejectedBy.entries()].sort((x, y) => y[1] - x[1])) {
+      writeUsageLine(`    ${String(count).padStart(3)}×  ${reason}`)
+    }
+    if (hasFlag('--dry-run')) return
+    const out = flagValue('--out') ?? defaultExportPath()
+    writeTrainingExport(selection.examples, out)
+    writeNotice(`Wrote ${selection.examples.length} example(s) to ${out}`)
+    return
+  }
+
   if (action !== 'run') {
-    writeError(`Unknown: elia distill ${action}. Use "run" (add --promote to apply) or "traces".`)
+    writeError(`Unknown: elia distill ${action}. Use "run" (add --promote to apply), "traces", or "export" (--out <file>, --dry-run).`)
     process.exitCode = 1
     return
   }
@@ -2787,8 +2851,8 @@ async function runInteractive(): Promise<void> {
         const cleanTurn = !turnFailed && toolErrorCount === 0 && editRetryCount === 0 && (verifyResult === 'pass' || verifyResult === 'none' || verifyResult === 'skipped') && !(stopRequested || controller.signal.aborted || escalatedAborted)
         try {
           const { recordLessonExposure } = await import('./autonomy/lessonEfficacy.ts')
-          const { consumeInjectedLessonKeys } = await import('./autonomy/lessons.ts')
-          recordLessonExposure(task.id, consumeInjectedLessonKeys(), { verify: verifyResult, clean: cleanTurn })
+          const { consumeInjectedLessonKeys, consumeHeldOutLessonKeys } = await import('./autonomy/lessons.ts')
+          recordLessonExposure(task.id, consumeInjectedLessonKeys(), { verify: verifyResult, clean: cleanTurn, heldOut: consumeHeldOutLessonKeys() })
         } catch {
           // best-effort
         }
@@ -4455,6 +4519,8 @@ async function main() {
       return runValues()
     case 'distill':
       return runDistill()
+    case 'compounding':
+      return runCompounding()
     case 'bench':
       return runBench()
     case 'bench-latency':

@@ -75,3 +75,56 @@ test('renderEfficacyLine summarises how many lessons show no lift', () => {
   expect(line).toContain('2 lesson(s)')
   expect(line).toContain('1 showing no lift')
 })
+
+const { lessonTrials, MIN_HELD_OUT } = await import('./lessonEfficacy.ts')
+
+/** One run of a randomized trial: `key` either shown or held out, with the run's outcome. */
+function trialRun(corr: string, key: string, shown: boolean, clean: boolean): void {
+  recordLessonExposure(corr, shown ? [key] : [], { verify: clean ? 'pass' : 'fail', clean, heldOut: shown ? [] : [key] }, path)
+}
+
+test('a run whose only lesson was held out is still recorded', () => {
+  trialRun('run-1', 'k', false, true)
+  expect(exposedCorrs('k', path)).toEqual(new Set())
+  expect(loadEfficacy(path).size).toBe(0)
+})
+
+test('lessonTrials needs enough held-out runs before judging', () => {
+  for (let i = 0; i < 30; i += 1) trialRun(`s-${i}`, 'k', true, true)
+  for (let i = 0; i < MIN_HELD_OUT - 1; i += 1) trialRun(`h-${i}`, 'k', false, false)
+  expect(lessonTrials(path).has('k')).toBe(false)
+})
+
+test('lessonTrials calls a lesson helpful only when shown beats held out by a clear margin', () => {
+  for (let i = 0; i < 30; i += 1) trialRun(`s-${i}`, 'good', true, i % 10 !== 0) // 90% clean
+  for (let i = 0; i < 12; i += 1) trialRun(`h-${i}`, 'good', false, i % 3 === 0) // 33% clean
+  for (let i = 0; i < 30; i += 1) trialRun(`s2-${i}`, 'noise', true, i % 2 === 0) // 50%
+  for (let i = 0; i < 12; i += 1) trialRun(`h2-${i}`, 'noise', false, i % 2 === 1) // 50%
+  const trials = lessonTrials(path)
+  expect(trials.get('good')?.verdict).toBe('helps')
+  expect(trials.get('good')?.lift).toBeCloseTo(0.9 - 4 / 12)
+  expect(trials.get('noise')?.verdict).toBe('unclear')
+})
+
+test('lessonTrials flags a lesson whose held-out runs go clearly better', () => {
+  for (let i = 0; i < 30; i += 1) trialRun(`s-${i}`, 'bad', true, i % 5 === 0) // 20%
+  for (let i = 0; i < 12; i += 1) trialRun(`h-${i}`, 'bad', false, true) // 100%
+  expect(lessonTrials(path).get('bad')?.verdict).toBe('hurts')
+})
+
+test('lessonTrials ignores shown runs from before holdout existed', () => {
+  // A long pre-holdout history of dirty runs must not drag the shown arm down:
+  // those runs were never split by a coin flip.
+  for (let i = 0; i < 100; i += 1) recordLessonExposure(`old-${i}`, ['k'], { verify: 'fail', clean: false }, path)
+  for (let i = 0; i < 10; i += 1) trialRun(`s-${i}`, 'k', true, true)
+  for (let i = 0; i < 10; i += 1) trialRun(`h-${i}`, 'k', false, true)
+  const trial = lessonTrials(path).get('k')
+  expect(trial?.shown.runs).toBe(10)
+  expect(trial?.verdict).toBe('unclear')
+})
+
+test('renderEfficacyLine reports randomized verdicts', () => {
+  for (let i = 0; i < 30; i += 1) trialRun(`s-${i}`, 'good', true, true)
+  for (let i = 0; i < 12; i += 1) trialRun(`h-${i}`, 'good', false, false)
+  expect(renderEfficacyLine(0.5, path)).toContain('Randomized trials: 1 judged, 1 proven to help, 0 proven to hurt')
+})

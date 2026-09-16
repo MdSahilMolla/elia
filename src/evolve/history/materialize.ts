@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { ELIA_ROOT } from '../../statePaths.ts'
@@ -87,6 +87,7 @@ export async function materializeTask(options: MaterializeOptions): Promise<Map<
   const repoRoot = options.repoRoot ?? ELIA_ROOT
   await checkoutTree(options.parent, options.dir, repoRoot)
   linkDependencies(options.dir, repoRoot)
+  assertPreloadsResolvable(options.dir)
 
   const hashes = new Map<string, string>()
   for (const testFile of options.testFiles) {
@@ -95,6 +96,38 @@ export async function materializeTask(options: MaterializeOptions): Promise<Map<
     hashes.set(testFile, contentHash(content))
   }
   return hashes
+}
+
+/**
+ * Refuses a checkout whose `bunfig.toml` preloads a package the linked
+ * dependencies no longer contain.
+ *
+ * The dependencies are today's, the tree is an old commit's. When an old
+ * bunfig preloads something elia has since dropped, every `bun` process in the
+ * task — the agent's and the grader's — dies before running a line, and that
+ * used to be scored as the agent failing the task. It is a task that can no
+ * longer be posed, so it says so, and the harness counts it as unmeasured.
+ */
+export function assertPreloadsResolvable(dir: string): void {
+  const bunfig = join(dir, 'bunfig.toml')
+  if (!existsSync(bunfig)) return
+  for (const spec of preloadSpecifiers(readFileSync(bunfig, 'utf8'))) {
+    if (spec.startsWith('.') || spec.startsWith('/') || /^[A-Za-z]:[\\/]/.test(spec)) continue
+    const parts = spec.split('/')
+    const pkg = spec.startsWith('@') ? parts.slice(0, 2).join('/') : parts[0]!
+    if (!existsSync(join(dir, 'node_modules', pkg))) {
+      throw new Error(`stale task: bunfig.toml preloads "${spec}", but elia's current dependencies no longer include ${pkg}`)
+    }
+  }
+}
+
+/** Every string inside a `preload = [...]` (or `preload = "..."`) line of a bunfig. */
+export function preloadSpecifiers(toml: string): string[] {
+  const out: string[] = []
+  for (const match of toml.matchAll(/^\s*preload\s*=\s*(\[[^\]]*\]|"[^"]*"|'[^']*')/gm)) {
+    for (const item of match[1]!.matchAll(/"([^"]*)"|'([^']*)'/g)) out.push(item[1] ?? item[2] ?? '')
+  }
+  return out.filter(Boolean)
 }
 
 /** A throwaway directory for one task run. */

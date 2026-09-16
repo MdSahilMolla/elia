@@ -331,3 +331,55 @@ test('a caller passing only a path keeps everything in that one file', () => {
   appendLessons(['On Windows, list directories with dir; ls is not a command here'], path)
   expect(loadLessons(path).map((l) => l.text)).toEqual(['On Windows, list directories with dir; ls is not a command here'])
 })
+
+const { consumeHeldOutLessonKeys, lessonHoldoutRate, DEFAULT_LESSON_HOLDOUT_RATE } = await import('./lessons.ts')
+
+test('renderLessonsWithKeys withholds project lessons by coin flip and stashes the withheld keys', () => {
+  appendLessons(['first', 'second', 'third'], path)
+  const flips = [0.9, 0.1, 0.9] // only the second draw falls under the rate
+  const rendered = renderLessonsWithKeys('', path, undefined, { rate: 0.15, random: () => flips.shift()! })
+  const [first, second, third] = loadLessons(path).map((l) => l.key!)
+  expect(rendered.keys).toEqual([first!, third!])
+  expect(rendered.heldOut).toEqual([second!])
+  expect(rendered.text).not.toContain('- second')
+  expect(consumeInjectedLessonKeys()).toEqual([first!, third!])
+  expect(consumeHeldOutLessonKeys()).toEqual([second!])
+  expect(consumeHeldOutLessonKeys()).toBeUndefined()
+})
+
+test('machine-level lessons are never withheld', () => {
+  const globalPath = join(dir, 'global.md')
+  appendLessons(['project fact'], path)
+  appendLessons(['quote paths with single quotes on this machine'], globalPath)
+  const rendered = renderLessonsWithKeys('', path, globalPath, { rate: 0.5, random: () => 0 })
+  expect(rendered.text).toContain('quote paths with single quotes')
+  expect(rendered.text).not.toContain('project fact')
+  expect(rendered.heldOut).toHaveLength(1)
+})
+
+test('a test path never gets holdout unless it asks for it, and says holdout was off', () => {
+  appendLessons(['a', 'b', 'c', 'd'], path)
+  expect(renderLessonsWithKeys('', path).heldOut).toEqual([])
+  expect(consumeHeldOutLessonKeys()).toBeUndefined()
+})
+
+test('lessonHoldoutRate reads ELIA_LESSON_HOLDOUT, turns off at 0, and caps at 0.5', () => {
+  expect(lessonHoldoutRate({})).toBe(DEFAULT_LESSON_HOLDOUT_RATE)
+  expect(lessonHoldoutRate({ ELIA_LESSON_HOLDOUT: '0' })).toBe(0)
+  expect(lessonHoldoutRate({ ELIA_LESSON_HOLDOUT: 'nope' })).toBe(0)
+  expect(lessonHoldoutRate({ ELIA_LESSON_HOLDOUT: '0.3' })).toBe(0.3)
+  expect(lessonHoldoutRate({ ELIA_LESSON_HOLDOUT: '0.9' })).toBe(0.5)
+})
+
+test('retireLessons follows a randomized trial over the observational comparison', () => {
+  appendLessons(['looks bad but helps', 'filler one', 'filler two'], path)
+  const efficacyPath = join(dir, 'efficacy.jsonl')
+  const outcomesPath = join(dir, 'outcomes.jsonl')
+  const [key] = loadLessons(path).map((l) => l.key!)
+  for (let i = 0; i < 20; i += 1) appendTurn(outcomesPath, `ctrl-${i}`, true)
+  // Held-out runs are all dirty; shown runs are mostly dirty too — observationally
+  // "dead weight" against the clean control group, but better than going without.
+  for (let i = 0; i < 12; i += 1) recordLessonExposure(`h-${i}`, [], { verify: 'fail', clean: false, heldOut: [key!] }, efficacyPath)
+  for (let i = 0; i < 20; i += 1) recordLessonExposure(`s-${i}`, [key!], { verify: 'fail', clean: i % 4 === 0, heldOut: [] }, efficacyPath)
+  expect(retireLessons({ lessonsPath: path, efficacyPath, outcomesPath }).retired).toEqual([])
+})

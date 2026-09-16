@@ -45,6 +45,11 @@ export const IMMUTABLE_FILES = [
   // this, it could route the gap and value checks back at the live tree and make
   // them pass by construction — the exact bug those checks were just fixed for.
   'src/evolve/measureTree.ts',
+  // How search strategies are trialled and adopted. The strategy itself is
+  // state the loop rewrites; the rules that judge a strategy are not.
+  'src/evolve/strategy.ts',
+  'src/evolve/benchLessons.ts',
+  'src/evolve/metaPropose.ts',
   'package.json',
   'tsconfig.json',
   'src/**/*.test.ts',
