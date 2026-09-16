@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { runAgentLoop, type RunAgentLoopResult, type ToolEvent } from '../../agentLoop.ts'
 import { withAgentIdentity } from '../../autonomy/context.ts'
+import { GoalGraphStore, withGoalGraph } from '../../autonomy/goalGraph.ts'
 import { createActionGovernor, withActionGovernor, type ActionRequest } from '../../autonomy/governor.ts'
 import { createVerdictTool } from '../../autonomy/verify.ts'
 import { clearAllCaches } from '../../cacheRegistry.ts'
@@ -60,7 +61,7 @@ interface Run {
 /** Drive the real loop with a scripted model, inside `dir`, and record everything the tools did. */
 async function run(
   turns: ScriptedTurn[],
-  options: { maxSteps?: number; usage?: Usage; model?: string; approve?: (request: ActionRequest) => boolean } = {},
+  options: { maxSteps?: number; usage?: Usage; model?: string; approve?: (request: ActionRequest) => boolean; graph?: GoalGraphStore } = {},
 ): Promise<Run> {
   const provider = createScriptedProvider(turns, options.usage ? { usage: options.usage } : {})
   const events: ToolEvent[] = []
@@ -72,7 +73,8 @@ async function run(
     approve
       ? withActionGovernor(createActionGovernor({ mode: 'supervised', cwd: dir, approve: async (_assessment, request) => approve(request) }), fn)
       : fn()
-  const result = await governed(() => withAgentIdentity({ name: 'behaviour', role: 'lead', cwd: dir }, () =>
+  const inGraph = <T>(fn: () => Promise<T>): Promise<T> => (options.graph ? withGoalGraph(options.graph, fn) : fn())
+  const result = await governed(() => inGraph(() => withAgentIdentity({ name: 'behaviour', role: 'lead', cwd: dir }, () =>
     runAgentLoop({
       messages: [{ role: 'user', content: [{ type: 'text', text: 'do the task' }] }],
       systemPrompt: 'You are elia.',
@@ -86,7 +88,7 @@ async function run(
       onText: () => {},
       onTool: (event) => events.push(event),
     }),
-  ))
+  )))
   return { result, events, calls: provider.calls }
 }
 
@@ -310,3 +312,86 @@ test('a process that dies on startup is reported as not running', async () => {
   expect(events[0]!.result).toContain('it is not running')
   expect(events[0]!.result).not.toContain('started:')
 }, 30_000)
+
+test('inside an autonomous run, a file read after an edit is the edited file, not a replay of the first read', async () => {
+  // Run 2026-09-16-87rg-29ia: the goal graph replayed identical calls from their
+  // recorded result, so every re-read of src/index.ts returned the pre-fix file
+  // and three reviewers kept flagging a bug that no longer existed.
+  writeFileSync(join(dir, 'slug.ts'), 'export const sep = "-"\n')
+  const graph = GoalGraphStore.open({ runId: 'observation-replay', goal: 'fix the separator', dir: join(dir, '.graph') })
+  const { events } = await run(
+    [
+      call('read_file', { path: 'slug.ts' }),
+      call('write_file', { path: 'slug.ts', content: 'export const sep = "_"\n' }),
+      call('read_file', { path: 'slug.ts' }),
+      done,
+    ],
+    { graph, approve: () => true },
+  )
+  const reads = events.filter((event) => event.name === 'read_file')
+  expect(reads).toHaveLength(2)
+  expect(reads[0]!.result).toContain('"-"')
+  expect(reads[1]!.result).toContain('"_"')
+  expect(reads[1]!.cached).toBe(false)
+})
+
+test('inside an autonomous run, a repeated test command runs again instead of replaying its old output', async () => {
+  // The same replay handed a repair loop the first `bun test` result again after
+  // the code under test had changed.
+  writeFileSync(join(dir, 'value.ts'), 'export const value = 1\n')
+  writeFileSync(
+    join(dir, 'value.test.ts'),
+    ["import { expect, test } from 'bun:test'", "import { value } from './value.ts'", "test('value is 2', () => expect(value).toBe(2))", ''].join('\n'),
+  )
+  const graph = GoalGraphStore.open({ runId: 'command-replay', goal: 'rerun a check', dir: join(dir, '.graph') })
+  const { events } = await run(
+    [
+      call('run_command', { command: 'bun test' }),
+      call('read_file', { path: 'value.ts' }),
+      call('write_file', { path: 'value.ts', content: 'export const value = 2\n' }),
+      call('run_command', { command: 'bun test' }),
+      done,
+    ],
+    { graph, approve: () => true },
+  )
+  const runs = events.filter((event) => event.name === 'run_command')
+  expect(runs[0]!.result).toMatch(/1 fail/)
+  expect(runs[1]!.result).toMatch(/1 pass/)
+  expect(runs[1]!.cached).toBe(false)
+}, 60_000)
+
+test('a refusal with nobody to ask is recorded as a policy block, not a decision waiting on a person', async () => {
+  // Run 2026-09-16-co1c-79fr: three setup commands refused unattended, worked
+  // around by the step, still left "3 approval(s) remain pending" and held the
+  // run at needs-attention with its checks green and its review approving.
+  const { pendingApprovals } = await import('../../autonomy/goalGraph.ts')
+  const graph = GoalGraphStore.open({ runId: 'no-approver', goal: 'build without asking', dir: join(dir, '.graph') })
+  const { events } = await run([call('run_command', { command: 'rm -rf dist' }), done], { graph })
+  expect(events[0]!.isError).toBe(true)
+  expect(events[0]!.result).toContain('nobody to ask')
+  const snapshot = graph.state()
+  expect(snapshot.actions.map((action) => action.state)).toEqual(['blocked'])
+  expect(pendingApprovals(snapshot)).toEqual([])
+})
+
+test('an unattended run can remove a leftover file it was asked to, without a shell command', async () => {
+  // Run 2026-09-16-fgbo-oq50: a reviewer asked for a duplicate test file to go,
+  // `rm` was refused with nobody to ask, and the run failed on it.
+  writeFileSync(join(dir, 'index.test.ts'), 'duplicate\n')
+  writeFileSync(join(dir, '.env'), 'SECRET=1\n')
+  const tools = await import('../../tools/deleteFile.ts')
+  TOOLS.push(tools.deleteFileTool)
+  try {
+    const { events } = await run([
+      call('delete_file', { path: 'index.test.ts' }),
+      call('delete_file', { path: '.env' }),
+      call('delete_file', { path: '../outside.txt' }),
+      done,
+    ])
+    expect(events.map((event) => event.isError)).toEqual([false, true, true])
+    expect(existsSync(join(dir, 'index.test.ts'))).toBe(false)
+    expect(existsSync(join(dir, '.env'))).toBe(true)
+  } finally {
+    TOOLS.pop()
+  }
+})

@@ -36,7 +36,7 @@ import { commitAll, scaffoldProject, stageUntrackedForReview } from './scaffold.
 import { publishProject } from './publish.ts'
 import { emitEvent, machineReadable } from '../ui/runtime.ts'
 import { redactText } from '../ui/redact.ts'
-import { appendLessons, consumeInjectedLessonKeys, createLessonsTool, renderLessons } from './lessons.ts'
+import { appendLessons, consumeHeldOutLessonKeys, consumeInjectedLessonKeys, createLessonsTool, renderLessons } from './lessons.ts'
 import { recordLessonExposure } from './lessonEfficacy.ts'
 import {
   createVerdictTool,
@@ -628,6 +628,7 @@ async function runAutonomousTaskInternal(options: AutonomousRunOptions): Promise
       verify: verificationPassed ? 'pass' : 'fail',
       regime: verificationRegime,
       clean: verificationPassed && contradictions.length === 0,
+      heldOut: consumeHeldOutLessonKeys(),
     })
     if (contradictions.length > 0) {
       journal.append('phase', { phase: 'learn', note: `completion contradiction: ${contradictions.join('; ')}` })

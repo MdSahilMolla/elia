@@ -60,9 +60,12 @@ try {
   const { createPrefetcher } = await import('../speculation/prefetch.ts')
   const cache = createToolResultCache()
 
+  // Empty unless `elia bench --lessons` asked for project memory (benchLessons.ts).
+  const { benchLessonBlock } = await import('./benchLessons.ts')
+  const lessonBlock = await benchLessonBlock(taskId, task.prompt)
   const result = await runAgentLoop({
     messages: [{ role: 'user', content: [{ type: 'text', text: task.prompt }] }],
-    systemPrompt: DEV_SYSTEM_PROMPT,
+    systemPrompt: `${DEV_SYSTEM_PROMPT}${lessonBlock}`,
     tools,
     useAnimation: false,
     verbose: false,

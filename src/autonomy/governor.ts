@@ -28,6 +28,12 @@ export interface ActionGateResult {
   allowed: boolean
   message?: string
   assessment: ActionAssessment
+  /**
+   * Refused because there is no approval channel at all (unattended, no
+   * terminal). No person was asked and none can be later in this run, so the
+   * refusal is a policy block — not a decision left waiting on someone.
+   */
+  noApprover?: boolean
 }
 
 /**
@@ -245,7 +251,7 @@ export function assessAction(request: ActionRequest, cwd = currentAgent().cwd ??
     return assessment('critical', 'approve', `browser ${action} changes page state and needs an authorization record`, `browser.${action}`, resources, false)
   }
 
-  if (name === 'write_file' || name === 'edit_file' || name === 'lsp_refactor') {
+  if (name === 'write_file' || name === 'edit_file' || name === 'lsp_refactor' || name === 'delete_file') {
     const path = typeof input.path === 'string' ? input.path : ''
     const outside = path.length === 0 || !isPathWithinWorkspace(path, cwd)
     return outside
@@ -630,6 +636,7 @@ export function createActionGovernor(options: { mode?: GovernanceMode; approve?:
           allowed: false,
           assessment: { ...assessment, decision: 'block' },
           message: `Action blocked by Elia’s unattended policy: ${assessment.reason}. No terminal is attached, so there is nobody to ask.`,
+          noApprover: true,
         }
       }
       if (assessment.risk === 'review' && mode === 'unattended' && !OUTBOUND_REVIEW_INTENTS.has(assessment.intent)) {

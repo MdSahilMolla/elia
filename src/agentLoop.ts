@@ -182,6 +182,28 @@ export interface RunAgentLoopResult {
  * and sub-agents (src/subagent.ts) so both get parallel tool execution,
  * speculative prefetch, and the same step budget.
  */
+/**
+ * A call whose whole value is what it sees right now: a read, a search, a
+ * read-only command such as a test run.
+ *
+ * The goal graph makes actions idempotent — an identical call that already
+ * completed in this run is replayed from its recorded result instead of run
+ * again — which is exactly right for a side effect and exactly wrong for an
+ * observation. Replaying a read hands back the file as it was the first time
+ * anyone looked. Seen live, run 2026-09-16-87rg-29ia: the lead edited
+ * src/index.ts and every later read of it — the lead's own and all three
+ * reviewers' in every round — returned the pre-edit file, so the reviewers
+ * kept reporting a bug that had been fixed, and the run failed "diverging".
+ * A second `bun test` replayed the first run's output the same way.
+ * Observations therefore bypass the reservation and always run.
+ */
+export function isObservation(request: { name: string; input: Record<string, unknown> }): boolean {
+  if (SPECULABLE_TOOLS.has(request.name)) return true
+  if (request.name !== 'run_command') return false
+  const assessment = assessAction(request)
+  return assessment.risk === 'safe' && assessment.intent === 'shell.read-only'
+}
+
 export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentLoopResult> {
   const {
     messages,
@@ -420,7 +442,7 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
     // The deterministic read cache tolerates elia's own edits (flushed per-path
     // below), but anything opaque in the batch — a shell command, a sub-agent —
     // could have rewritten files we can't track. Clear it wholesale then.
-    if (toolUseBlocks.some((block) => !SPECULABLE_TOOLS.has(block.name) && block.name !== 'edit_file' && block.name !== 'write_file')) {
+    if (toolUseBlocks.some((block) => !SPECULABLE_TOOLS.has(block.name) && block.name !== 'edit_file' && block.name !== 'write_file' && block.name !== 'delete_file')) {
       readMemo.clear()
     }
 
@@ -474,7 +496,7 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
         // A reporting tool's whole effect is the structured value it captures in
         // this process; replaying its recorded result string would return
         // "Verdict recorded." while capturing nothing. See REPORTING_TOOLS.
-        reservation = isReportingTool(block.name) ? undefined : graph?.reserveAction(request, activeGoalNode())
+        reservation = isReportingTool(block.name) || isObservation(request) ? undefined : graph?.reserveAction(request, activeGoalNode())
         if (reservation?.decision === 'replay') {
           replayed = true
           cached = true
@@ -522,10 +544,16 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
                 isError = true
                 failureClass = classifyFailure(gate.message ?? gate.assessment.reason).class
                 resultText = gate.message ?? `Action blocked by Elia’s autonomy governor: ${gate.assessment.reason}`
-                if (reservation && gate.assessment.risk === 'critical') {
+                // A refusal with nobody to ask is a policy block, not a question
+                // waiting on a person: filing it as `human-review` with a pending
+                // approval held run 2026-09-16-co1c-79fr at needs-attention with
+                // its checks green and its review approving, over three setup
+                // commands its step had already worked around.
+                const awaitsPerson = gate.assessment.risk === 'critical' && !gate.noApprover
+                if (reservation && awaitsPerson) {
                   activeGoalGraph()?.requestApproval('action', reservation.action.idempotencyKey, { name: block.name, input: redactActionInput(block.name, block.input) }, gate.assessment.reason)
                 }
-                if (reservation) activeGoalGraph()?.blockAction(reservation.action.id, resultText, gate.assessment.risk === 'critical', precondition, undefined, contract)
+                if (reservation) activeGoalGraph()?.blockAction(reservation.action.id, resultText, awaitsPerson, precondition, undefined, contract)
               } else {
                 if (reservation) {
                   graph?.startAction(reservation.action.id, contract, precondition)
@@ -554,7 +582,7 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
                       ? await withRepoLock(() => tool.execute(block.input))
                       : await tool.execute(block.input)
                     if (block.name === 'read_file' && !batchMutates) readMemo.put(block.input, resultText)
-                    else if ((block.name === 'edit_file' || block.name === 'write_file') && typeof block.input.path === 'string') {
+                    else if ((block.name === 'edit_file' || block.name === 'write_file' || block.name === 'delete_file') && typeof block.input.path === 'string') {
                       try {
                         readMemo.invalidatePath(resolveWorkspacePath(block.input.path))
                       } catch {

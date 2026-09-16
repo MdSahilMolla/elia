@@ -550,7 +550,7 @@ export function evidenceFor(proof: Proof, anchor: Anchor): string[] {
 // ---------------------------------------------------------------------------
 
 /** Tools that change something — the actions that move a plan, or should have. */
-const CHANGING_TOOLS = new Set(['write_file', 'edit_file', 'run_command', 'run_program', 'process'])
+const CHANGING_TOOLS = new Set(['write_file', 'edit_file', 'delete_file', 'run_command', 'run_program', 'process'])
 
 /** Changing actions with no plan update before the model is asked to bring it up to date. */
 export const STALE_PLAN_ACTIONS = 6

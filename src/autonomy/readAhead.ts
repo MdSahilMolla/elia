@@ -105,7 +105,7 @@ export function createReadAhead(cwd: string = process.cwd()): ReadAhead {
           }
           continue
         }
-        if (call.name === 'edit_file' || call.name === 'write_file') {
+        if (call.name === 'edit_file' || call.name === 'write_file' || call.name === 'delete_file') {
           const path = typeof call.input.path === 'string' ? normalize(call.input.path) : undefined
           // The model just wrote this file, so it already has the content — drop
           // it from the worklist rather than pull a copy forward. A later
