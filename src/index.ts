@@ -907,12 +907,23 @@ async function runBenchLatency(): Promise<void> {
   }
 }
 
-/** `elia compounding` — where the self-improvement loop stands, stage by stage, from elia's own records. */
+/**
+ * `elia compounding` — where the self-improvement loop stands, stage by stage,
+ * from elia's own records.
+ *
+ * The six stages measure the slow loop: evolve changing elia's source between
+ * generations. The reasoning library underneath them measures the fast one —
+ * what each turn's search learned about how to attack work of that shape — so
+ * both channels are read off the same command rather than one of them being
+ * invisible until someone goes looking for a JSON file.
+ */
 async function runCompounding(): Promise<void> {
   const { compoundingStatus, renderCompoundingStatus } = await import('./compounding/status.ts')
+  const { readLibrary, renderLibrary } = await import('./reason/library.ts')
   const stages = compoundingStatus()
-  if (machineReadable) emitEvent('compounding_status', { stages })
-  else writeUsageLine(renderCompoundingStatus(stages))
+  const library = readLibrary()
+  if (machineReadable) emitEvent('compounding_status', { stages, reasoning: library.records })
+  else writeUsageLine(`${renderCompoundingStatus(stages)}\n\n${renderLibrary(library)}`)
 }
 
 async function runEvolve(): Promise<void> {
