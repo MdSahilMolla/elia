@@ -123,6 +123,17 @@ export function contractForAction(request: ActionRequest, cwd: string, idempoten
     postconditions.push({ kind: 'workspace-path', value: target, description: `${basename(target || rawPath || 'file')} must exist after the write` })
   }
 
+  if (request.name === 'delete_file') {
+    const rawPath = typeof request.input.path === 'string' ? request.input.path : ''
+    let target = rawPath
+    try {
+      target = resolveWorkspacePath(rawPath, cwd)
+    } catch {
+      // Preserve the raw value so evaluation records an explicit containment failure.
+    }
+    preconditions.push({ kind: 'workspace-path', value: target, description: 'the file to delete must be inside the active workspace and contain no symlink escape' })
+  }
+
   return {
     idempotencyKey,
     preconditions,
