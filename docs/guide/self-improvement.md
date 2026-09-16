@@ -2,7 +2,7 @@
 
 [← Back to the README](../../README.md)
 
-> **Status:** the machinery below exists and its gates are enforced, but `elia evolve` hasn't yet promoted a change to its own source. Every generation run so far was rejected by the benchmark. Treat it as a strictly gated experiment, not a proven source of improvement.
+> **Status:** the machinery below exists and its gates are enforced, but `elia evolve` hasn't yet promoted a change to its own source. Every generation run so far was rejected by the benchmark. Treat it as a strictly gated experiment, not a proven source of improvement. For how this fits into elia's main goal, see [Recursive intelligence compounding](compounding.md).
 
 ## Self-improvement: `elia bench` / `elia evolve`
 
