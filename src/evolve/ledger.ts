@@ -31,6 +31,12 @@ export interface Metrics {
   unmeasured?: string[]
   /** Model round-trips per task, so efficiency hypotheses can cite actual activation evidence. */
   steps?: Record<string, number>
+  /**
+   * Fraction of attempts each measured task passed, when the benchmark ran each
+   * task more than once (ELIA_BENCH_REPEATS). Absent on single-run records,
+   * where `passed`/`failed` already are the rates.
+   */
+  taskRates?: Record<string, number>
   totalTokens: number
   totalElapsedMs: number
   /** User-visible suite duration when benchmark tasks run in parallel. */
