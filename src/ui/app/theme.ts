@@ -1,40 +1,54 @@
-// Semantic palette for the Ink REPL. Ink takes chalk-style color names, so this
-// stays close to src/ui/theme.ts's meanings (gold = brand accent, cyan = tool
-// names, green = success, red = failure, gray = secondary).
-// Deliberately near-monochrome, like Devin's CLI. Anything that used to be a
-// brand accent (the prompt, the banner, tool names, links) is now "ash" — a
-// soft off-white that's easier on the eye than pure #fff against a black
-// terminal. Gray stays for secondary text; colour is reserved for the two
-// things that actually need to jump out, success and failure.
-const ASH = '#c8ccc6'
+// Semantic palette for the Ink REPL — deliberately near-monochrome.
+//
+// Text that needs weight uses the terminal's *own* foreground (undefined here)
+// plus bold, never a hard-coded off-white: a fixed `#c8ccc6` accent vanished on
+// light terminal themes. Named ANSI colours are reserved for meaning — green
+// success, red failure, yellow warning, cyan code — because terminals remap
+// those to fit their theme. `NO_COLOR` / `--no-color` drop colour entirely.
+import { colorless } from '../runtime.ts'
+
+// Under `bun test` the palette stays fixed, so a suite run from a shell that
+// happens to export NO_COLOR asserts the same frames CI does.
+const dropColor = colorless && process.env.NODE_ENV !== 'test'
+const tone = <T extends string>(color: T): T | undefined => (dropColor ? undefined : color)
 
 export const palette = {
-  accent: ASH,
-  toolName: ASH,
-  success: 'green',
-  failure: 'red',
-  /** Reserved for the conditional HUD alert line and non-fatal warnings — the one hue between success and failure. */
-  warning: 'yellow',
-  muted: 'gray',
-  user: ASH,
+  /** Emphasis without a hue: the terminal's own foreground. Pair with `bold`. */
+  accent: undefined as string | undefined,
+  /** Tool names / targets — plain foreground, weight comes from layout. */
+  toolName: undefined as string | undefined,
+  success: tone('green'),
+  failure: tone('red'),
+  /** Non-fatal warnings and the context meter once it is getting full. */
+  warning: tone('yellow'),
+  /** Secondary text: hints, stats, finished items. */
+  muted: tone('gray'),
+  user: undefined as string | undefined,
   text: undefined as string | undefined,
-  /** Background for inline-code pills. A near-black grey — subtle on dark terminals, still legible on light. */
-  codeBg: '#2f2f2f',
+  /** Inline code and links — the one "look here" hue. */
+  code: tone('cyan'),
+  /** Kept for callers that still shade inline code; no background by default. */
+  codeBg: undefined as string | undefined,
 } as const
 
 export const glyphs = {
+  /** The input prompt, and the marker on each message you sent. */
   user: '❯',
-  bullet: '⏺',
+  /** Every assistant message and tool call starts with one dot. */
+  bullet: '●',
   ok: '✓',
   error: '✗',
-  cached: '⚡',
+  warn: '!',
   running: '◐',
+  pending: '□',
+  /** Continuation under a tool call: its result, summary, or diff. */
   branch: '⎿',
+  thinking: '✻',
   skill: '✦',
   /** Everything elia commits to durable memory — a lesson, a verified workflow, a rationale. */
   learn: '✦',
-  /** A left rail for error bodies — a boxless alternative to a red-bordered card. */
-  errorRail: '┃',
+  /** Kept for compatibility — errors now lead with `error`, not a rail. */
+  errorRail: '✗',
 } as const
 
 /** Spinner frames shared with src/ui/stream.ts's tool spinner. */

@@ -87,10 +87,12 @@ export function summarizeTool(tool: ToolItem): ToolSummary {
     case 'grep':
       return { verb: 'Searched', target: firstString(input, 'pattern') ?? '', stat, expandable: done }
     case 'run_command': {
-      const cmd = firstString(input, 'command') ?? ''
+      // First line only — a heredoc or a chained script would otherwise push the
+      // header onto several rows. The row itself truncates to the terminal width.
+      const cmd = (firstString(input, 'command') ?? '').split('\n', 1)[0]!
       return {
         verb: 'Ran',
-        target: cmd.length > 60 ? `${cmd.slice(0, 59)}…` : cmd,
+        target: cmd.length > 120 ? `${cmd.slice(0, 119)}…` : cmd,
         stat: done ? shellExitStat(tool.result) : '',
         expandable: done,
       }
@@ -99,8 +101,11 @@ export function summarizeTool(tool: ToolItem): ToolSummary {
       return { verb: 'Searched the web', target: firstString(input, 'query') ?? '', stat, expandable: done }
     case 'web_fetch':
       return { verb: 'Fetched', target: firstString(input, 'url') ?? '', stat, expandable: done }
-    case 'task':
-      return { verb: 'Delegated to', target: firstString(input, 'role', 'description') ?? 'a subagent', stat, expandable: done }
+    case 'task': {
+      const role = firstString(input, 'role') ?? 'a subagent'
+      const description = firstString(input, 'description')
+      return { verb: 'Delegated to', target: description ? `${role}: ${description}` : role, stat, expandable: done }
+    }
     case 'todo_write':
       return { verb: 'Updated the plan', target: '', stat, expandable: done }
     case 'visualize':
@@ -110,6 +115,76 @@ export function summarizeTool(tool: ToolItem): ToolSummary {
       return { verb: tool.name, target: arg ? (arg.length > 50 ? `${arg.slice(0, 49)}…` : arg) : '', stat, expandable: done }
     }
   }
+}
+
+/**
+ * Read-only lookups. A run of them renders as one grouped line ("Read 3 files,
+ * searched 1 pattern") instead of a card each — the exploration phase of a
+ * turn is where the transcript used to turn into a wall of near-identical rows.
+ */
+export const EXPLORE_TOOLS: ReadonlySet<string> = new Set([
+  'read_file',
+  'grep',
+  'list_files',
+  'find_symbol',
+  'recall',
+  'web_search',
+  'web_fetch',
+  'read_spreadsheet',
+  'board_read',
+])
+
+export function isExploreTool(name: string): boolean {
+  return EXPLORE_TOOLS.has(name)
+}
+
+const ACTIVE_VERB: Record<string, string> = {
+  Read: 'Reading',
+  Edited: 'Editing',
+  Created: 'Writing',
+  Overwrote: 'Writing',
+  Listed: 'Listing',
+  Searched: 'Searching',
+  Ran: 'Running',
+  'Searched the web': 'Searching the web',
+  Fetched: 'Fetching',
+  'Delegated to': 'Delegating to',
+  'Updated the plan': 'Updating the plan',
+  Visualized: 'Visualizing',
+}
+
+/** "Ran" → "Running": the verb for a call that has not finished yet. */
+export function activeVerb(verb: string): string {
+  return ACTIVE_VERB[verb] ?? verb
+}
+
+/** "Reading app.ts" — what the working indicator says while a tool runs. */
+export function toolActivity(call: { name: string; input: Record<string, unknown> }): string {
+  const s = summarizeTool({ id: '', kind: 'tool', name: call.name, input: call.input, status: 'running' })
+  const verb = activeVerb(s.verb)
+  return s.target ? `${verb} ${s.target}` : verb
+}
+
+const plural = (n: number, one: string, many = `${one}s`): string => `${n} ${n === 1 ? one : many}`
+
+/** One line for a run of explore calls: "Read 3 files, searched 2 patterns". */
+export function exploreSummary(tools: readonly ToolItem[]): string {
+  const count = (name: string) => tools.filter((tool) => tool.name === name).length
+  const parts: string[] = []
+  const read = count('read_file') + count('read_spreadsheet')
+  const searched = count('grep') + count('find_symbol')
+  const listed = count('list_files')
+  const web = count('web_search')
+  const fetched = count('web_fetch')
+  const recalled = count('recall') + count('board_read')
+  if (read) parts.push(`read ${plural(read, 'file')}`)
+  if (searched) parts.push(`searched ${plural(searched, 'pattern')}`)
+  if (listed) parts.push(`listed ${plural(listed, 'path')}`)
+  if (web) parts.push(`searched the web${web > 1 ? ` ${web} times` : ''}`)
+  if (fetched) parts.push(`fetched ${plural(fetched, 'page')}`)
+  if (recalled) parts.push(`checked memory${recalled > 1 ? ` ${recalled} times` : ''}`)
+  const line = parts.join(', ')
+  return line.charAt(0).toUpperCase() + line.slice(1)
 }
 
 export interface TurnRollup {
@@ -153,6 +228,6 @@ export function rollupLine(r: TurnRollup): string {
   if (parts.length < 2 && !r.edited && !r.created && !r.commands) return ''
   if (parts.length === 0) return ''
   const head = parts.join(', ').replace(/^./, (c) => c.toUpperCase())
-  const stat = r.added || r.removed ? `  +${r.added} −${r.removed}` : ''
+  const stat = r.added || r.removed ? ` · +${r.added} −${r.removed}` : ''
   return `${head}${stat}`
 }

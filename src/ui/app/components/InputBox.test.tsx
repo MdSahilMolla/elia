@@ -94,12 +94,24 @@ test('backspace deletes at the caret, not the end', async () => {
   expect(frame).not.toContain('axbc')
 })
 
-test('a [mode] chip renders left of the prompt when a mode is given', async () => {
+test('the prompt carries no [mode] chip — the status row names the mode', async () => {
   const { lastFrame } = render(
-    <InputBox commands={[]} disabled={false} placeholder="x" mode="plan" onSubmit={noop} onInterrupt={noop} onEof={noop} onTabEmpty={noop} />,
+    <InputBox commands={[]} disabled={false} placeholder="describe it" mode="plan" onSubmit={noop} onInterrupt={noop} onEof={noop} onTabEmpty={noop} />,
   )
-  const frame = await waitForFrame(lastFrame, '[plan]')
-  expect(frame).toContain('[plan] ❯')
+  const frame = await waitForFrame(lastFrame, 'describe it')
+  expect(frame).toContain('❯')
+  expect(frame).not.toContain('[plan]')
+})
+
+test('the / menu marks the highlighted command with a pointer and lines descriptions up', async () => {
+  const { stdin, lastFrame } = mount([
+    { name: '/model', description: 'switch model' },
+    { name: '/compact', description: 'summarise the chat' },
+  ])
+  stdin.write('/')
+  const frame = await waitForFrame(lastFrame, '/compact')
+  expect(frame).toMatch(/❯ \/model\s+switch model/)
+  expect(frame).toMatch(/ {2}\/compact\s+summarise the chat/)
 })
 
 test('Ctrl+R opens the reverse-search overlay', async () => {

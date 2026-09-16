@@ -82,6 +82,34 @@ test('a directory that is not a repository becomes one, and an existing reposito
   expect((await ensureRepository(dir)).initialized).toBe(false)
 })
 
+test('a directory the enclosing repository ignores gets a repository of its own', async () => {
+  // elia's own layout: a checkout whose .gitignore excludes the workspace/ that
+  // every run launched from it builds in.
+  await ensureRepository(dir)
+  writeFileSync(join(dir, '.gitignore'), '/workspace/\n')
+  writeFileSync(join(dir, 'host.ts'), 'export const host = 1')
+  await commitAll(dir, 'host')
+  writeFileSync(join(dir, 'host.ts'), 'export const host = 2 // someone else, uncommitted')
+  const run = join(dir, 'workspace', 'run-1')
+  mkdirSync(run, { recursive: true })
+
+  expect((await ensureRepository(run)).initialized).toBe(true)
+  expect(existsSync(join(run, '.git'))).toBe(true)
+  // Every git read from the run now sees the run's project, not the host's:
+  // the host's uncommitted change is invisible and the run's file is not ignored.
+  writeFileSync(join(run, 'index.html'), '<h1>run</h1>')
+  const status = await execCapture('git', ['status', '--porcelain'], run)
+  expect(status.stdout).toContain('index.html')
+  expect(status.stdout).not.toContain('host.ts')
+})
+
+test('a tracked subdirectory of a repository is left to that repository', async () => {
+  await ensureRepository(dir)
+  mkdirSync(join(dir, 'packages', 'app'), { recursive: true })
+  expect((await ensureRepository(join(dir, 'packages', 'app'))).initialized).toBe(false)
+  expect(existsSync(join(dir, 'packages', 'app', '.git'))).toBe(false)
+})
+
 // --- commits ---
 
 test('a file holding secrets is kept out of the commit even when it was staged', async () => {

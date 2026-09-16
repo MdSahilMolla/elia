@@ -6,14 +6,21 @@ import { createMarkdownStream, type MarkdownStream } from './markdown.ts'
 import { registerShutdownCleanup } from './shutdown.ts'
 import type { ProviderActivity } from '../providers/types.ts'
 import { visualizationTerminalPreview } from '../tools/visualize.ts'
+import { toolActivity } from './app/toolSummary.ts'
 
 const REPLY_MARKER = `${boldGold('●')} `
 
 // When the Ink REPL is mounted it owns the screen — any stray process.stdout
 // write from a deep handler corrupts its frame. While a sink is installed,
-// notice/usage/error text is handed to it instead of stdout. Tool and stream
-// output already route through the Ink app's own callbacks (silent runTurn).
-let inkSink: ((kind: 'notice' | 'usage' | 'error', text: string) => void) | undefined
+// notice/usage/error text is handed to it instead of stdout, and the streaming
+// writers below (reply text, tool lines, the tool spinner) go quiet or hand a
+// one-line `status` to it. That matters most when a REPL turn escalates into
+// the autonomous pipeline: its planner runs with `verbose`/`useAnimation` on,
+// and every spinner frame's cursor-up-and-erase used to eat a line Ink thought
+// it owned — the "old UI" bleeding through and whole frames duplicating into
+// scrollback.
+export type InkSinkKind = 'notice' | 'usage' | 'error' | 'status'
+let inkSink: ((kind: InkSinkKind, text: string) => void) | undefined
 export function setInkSink(sink: typeof inkSink): void {
   inkSink = sink
 }
@@ -52,7 +59,7 @@ function spinnerLine(): string {
 }
 
 function showSpinner(): void {
-  if (!interactiveTerminal || spinnerVisible || pendingTools === 0) return
+  if (!interactiveTerminal || inkSink || spinnerVisible || pendingTools === 0) return
   spinnerVisible = true
   process.stdout.write(`${spinnerLine()}\n`)
   unregisterSpinnerShutdown = registerShutdownCleanup(hideSpinner)
@@ -96,7 +103,7 @@ function closeThinkingBlock(): void {
     emitEvent('thinking_end')
     return
   }
-  if (quietOutput) return
+  if (quietOutput || inkSink) return
   process.stdout.write(colorEnabled ? `${raw.reset}\n\n` : '\n\n')
 }
 
@@ -106,7 +113,8 @@ export function writeThinking(delta: string): void {
     emitEvent('thinking_delta', { text: delta })
     return
   }
-  if (quietOutput) return
+  // The Ink REPL receives reasoning through its own turn hooks.
+  if (quietOutput || inkSink) return
   if (!inThinkingBlock) {
     inThinkingBlock = true
     if (colorEnabled) process.stdout.write(`${raw.dim}${raw.italic}`)
@@ -124,6 +132,7 @@ export function writeText(delta: string): void {
     quietReply += delta
     return
   }
+  if (inkSink) return
   if (!replyStarted) {
     replyStarted = true
     toolBlockOpen = false
@@ -144,6 +153,11 @@ export function endTextTurn(): void {
     quietReply = ''
     return
   }
+  if (inkSink) {
+    markdownStream = undefined
+    replyStarted = false
+    return
+  }
   if (markdownStream) {
     process.stdout.write(markdownStream.flush())
     markdownStream = undefined
@@ -160,12 +174,19 @@ export function writeToolCall(name: string, input: Record<string, unknown>): voi
     return
   }
   if (quietOutput) return
+  if (inkSink) {
+    // One transient line in the REPL's status row, in words ("Delegating to
+    // scout: research viz libraries") — never the raw `key: value` argument
+    // dump, and never a transcript row or a raw write under the live frame.
+    inkSink('status', toolActivity({ name, input: safeInput }))
+    return
+  }
+  const summary = summarizeInput(safeInput)
   hideSpinner()
   if (!toolBlockOpen) {
     toolBlockOpen = true
     process.stdout.write('\n')
   }
-  const summary = summarizeInput(safeInput)
   process.stdout.write(`  ${gold('●')} ${dimCyan(`${name}${summary ? `(${summary})` : ''}`)}\n`)
   if (pendingTools === 0) batchStartedAt = Date.now()
   pendingTools += 1
@@ -179,7 +200,7 @@ export function writeToolResult(name: string, result: string, isError: boolean, 
     emitEvent('tool_finished', { name, ok: !isError, cached, result: safeResult, durationMs })
     return
   }
-  if (quietOutput) return
+  if (quietOutput || inkSink) return
   hideSpinner()
   pendingTools = Math.max(0, pendingTools - 1)
   const mark = isError ? '✗' : cached ? '⚡' : '✓'
@@ -250,6 +271,10 @@ export function writeProviderActivity(activity: ProviderActivity): void {
     return
   }
   if (quietOutput) return
+  if (inkSink) {
+    inkSink('status', title)
+    return
+  }
   closeThinkingBlock()
   hideSpinner()
   if (!toolBlockOpen) {

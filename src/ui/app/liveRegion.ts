@@ -19,15 +19,15 @@
 // and they print in full, in order, to scrollback. So the cap trims what is
 // repainted, never what the operator ends up seeing.
 //
-// Off by default. `ELIA_LIVE_CAP=on` enables it; the plan's risk table
-// (docs/terminal-ui-redesign-plan.md) requires a real-PTY pass on Windows
-// Terminal / iTerm2 / Linux console before this becomes the only path.
+// On by default since the ConPTY pass (2026-09-15): a real Windows console
+// driven with mercury-2.5 duplicated whole frames into scrollback without it.
+// `ELIA_LIVE_CAP=off` turns it back off.
 import type { Item } from './store.ts'
 
-/** Is the live-region cap enabled? Off unless explicitly switched on. */
+/** Is the live-region cap enabled? On unless explicitly switched off. */
 export function liveCapEnabled(): boolean {
-  const raw = (process.env.ELIA_LIVE_CAP ?? 'off').toLowerCase()
-  return raw === 'on' || raw === '1' || raw === 'true'
+  const raw = (process.env.ELIA_LIVE_CAP ?? 'on').toLowerCase()
+  return !(raw === 'off' || raw === '0' || raw === 'false')
 }
 
 // Rows the rest of the frame needs below the transcript: the workspace panel,
@@ -66,32 +66,49 @@ function shapeOf(item: Item, expanded: boolean): Shape {
     case 'user':
       return { chrome: 1, gutter: 2, bodyLimit: Infinity }
     case 'assistant':
-      return { chrome: 1, gutter: 0, bodyLimit: Infinity }
+      // Every row sits behind the two-column "● " lead.
+      return { chrome: 1, gutter: 2, bodyLimit: Infinity }
     case 'thinking':
-      // marginTop + marginBottom; every row is indented two columns behind "✻ ".
-      return { chrome: 2, gutter: 2, bodyLimit: Infinity }
+      // marginTop (a continuation has none); every row is indented behind "✻ ".
+      return { chrome: item.continuation ? 0 : 1, gutter: 2, bodyLimit: Infinity }
     case 'tool':
-      // marginTop + the one-line summary header; the body is folded to ~26 rows
-      // collapsed (foldText headLines 16 / ShellBody's last 8) and 600 expanded.
-      return { chrome: 2, gutter: 4, bodyLimit: expanded ? 600 : 26 }
+      // marginTop + the one-line header; the body is folded to ~14 rows
+      // collapsed (diff / shell tail / summary line) and 600 expanded.
+      return { chrome: 2, gutter: 4, bodyLimit: expanded ? 600 : 14 }
+    case 'group':
+      // marginTop + header + one summary row; expanded lists one row per call.
+      return { chrome: 2, gutter: 4, bodyLimit: expanded ? 600 : 1 }
     case 'shell':
-      return { chrome: 1, gutter: 0, bodyLimit: Infinity }
+      return { chrome: 1, gutter: 2, bodyLimit: Infinity }
     case 'error':
       return { chrome: 1, gutter: 2, bodyLimit: Infinity }
     case 'notice':
-      return { chrome: 0, gutter: 0, bodyLimit: Infinity }
+      return { chrome: 0, gutter: 2, bodyLimit: Infinity }
+    case 'header':
+      return { chrome: 1, gutter: 2, bodyLimit: 3 }
   }
 }
 
 /** The text an item renders as rows. Tool cards render their `result` as the body. */
 function payloadOf(item: Item): string {
-  return item.kind === 'tool' ? (item.result ?? '') : item.text
+  switch (item.kind) {
+    case 'tool':
+      return item.result ?? ''
+    case 'group':
+      return item.tools.map((tool) => tool.name).join('\n')
+    case 'header':
+      return 'header\nline'
+    default:
+      return item.text
+  }
 }
 
 function withPayload(item: Item, payload: string): Item {
   // Same `id` on purpose: it is the React key, and swapping it mid-stream would
   // make Ink unmount and remount the row it is in the middle of repainting.
-  return item.kind === 'tool' ? { ...item, result: payload } : { ...item, text: payload }
+  if (item.kind === 'tool') return { ...item, result: payload }
+  if (item.kind === 'group' || item.kind === 'header') return item
+  return { ...item, text: payload }
 }
 
 /**

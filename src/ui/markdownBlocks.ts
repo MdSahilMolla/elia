@@ -1,5 +1,5 @@
 export type InlineRun =
-  | { kind: 'text' | 'strong' | 'code'; text: string }
+  | { kind: 'text' | 'strong' | 'em' | 'code'; text: string }
   | { kind: 'link'; text: string; url: string }
 
 export type MarkdownBlock =
@@ -71,6 +71,26 @@ export function parseInline(input: string): InlineRun[] {
         flushPlain()
         runs.push({ kind: 'strong', text: text.slice(index + 2, end) })
         index = end + 2
+        continue
+      }
+    }
+
+    // *emphasis* / _emphasis_ — only a delimiter that hugs its word, so `2 * 3`,
+    // a bare `*`, and snake_case identifiers stay literal.
+    const delimiter = text[index]
+    if ((delimiter === '*' || delimiter === '_') && text[index + 1] !== delimiter && /\S/.test(text[index + 1] ?? '')) {
+      const opensAtBoundary = delimiter === '*' || index === 0 || /[^\w]/.test(text[index - 1] ?? '')
+      let end = opensAtBoundary ? text.indexOf(delimiter, index + 1) : -1
+      while (end > index + 1) {
+        const hugs = /\S/.test(text[end - 1] ?? '') && text[end + 1] !== delimiter
+        const closesAtBoundary = delimiter === '*' || end + 1 >= text.length || /[^\w]/.test(text[end + 1] ?? '')
+        if (hugs && closesAtBoundary) break
+        end = text.indexOf(delimiter, end + 1)
+      }
+      if (end > index + 1) {
+        flushPlain()
+        runs.push({ kind: 'em', text: text.slice(index + 1, end) })
+        index = end + 1
         continue
       }
     }

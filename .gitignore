@@ -73,7 +73,8 @@ legacy/
 # --- Local-only analysis notes ---
 gap.md
 lacking/
-docs/
+docs/*
+!docs/guide/
 research/
 
 # --- Scratch workspace: elia builds throwaway projects here ---

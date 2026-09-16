@@ -1,5 +1,61 @@
 import { expect, test } from 'bun:test'
-import { providerActivityText, summarizeResult } from './stream.ts'
+import {
+  endTextTurn,
+  providerActivityText,
+  setInkSink,
+  summarizeResult,
+  writeProviderActivity,
+  writeText,
+  writeThinking,
+  writeToolCall,
+  writeToolResult,
+} from './stream.ts'
+
+// The "old UI bleeding through" bug: a REPL turn that escalated into the
+// autonomous pipeline ran its planner with verbose/animated output, and these
+// writers printed `● tool(...)` lines, a spinner and reply text straight to
+// stdout underneath the live Ink frame — whose next repaint then smeared.
+test('with the live REPL mounted, the line-mode writers never touch stdout', () => {
+  const writes: string[] = []
+  const statuses: string[] = []
+  const realWrite = process.stdout.write
+  process.stdout.write = ((chunk: string | Uint8Array) => {
+    writes.push(String(chunk))
+    return true
+  }) as typeof process.stdout.write
+  setInkSink((kind, text) => {
+    if (kind === 'status') statuses.push(text)
+  })
+  try {
+    writeToolCall('read_file', { path: 'src/app.ts' })
+    writeToolResult('read_file', '1\tconst x = 1', false, false, 1200)
+    writeThinking('let me look')
+    writeText('Here is the answer')
+    endTextTurn()
+    writeProviderActivity({ kind: 'status', status: 'updated', title: 'Orienting' })
+  } finally {
+    setInkSink(undefined)
+    process.stdout.write = realWrite
+  }
+  expect(writes).toEqual([])
+  // Progress still reaches the REPL — as a transient status, not a transcript row.
+  expect(statuses).toEqual(['Reading app.ts', 'Orienting'])
+})
+
+// Seen live: the status row read "task description: Research NN viz libs,
+// role: scout, prompt: Identify Python libraries specifically designed…".
+test('a delegated task reaches the status row in words, not as an argument dump', () => {
+  const statuses: string[] = []
+  setInkSink((kind, text) => {
+    if (kind === 'status') statuses.push(text)
+  })
+  try {
+    writeToolCall('task', { description: 'Research NN viz libs', role: 'scout', prompt: 'Identify Python libraries for…' })
+  } finally {
+    setInkSink(undefined)
+  }
+  expect(statuses).toEqual(['Delegating to scout: Research NN viz libs'])
+})
 
 test('provider activity preserves useful multiline progress while redacting secrets', () => {
   expect(providerActivityText({

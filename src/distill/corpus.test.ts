@@ -27,7 +27,7 @@ const verifiedReceipt = {
   outcome: 'completed',
   completion: { state: 'verified' },
   verdict: { verdict: 'approve' },
-  verification: [{ passed: true }],
+  verification: [{ passed: true, results: [{ command: 'bun test', exitCode: 0 }] }],
   proposal: { steps: [{ role: 'builder', title: 'build', files: ['src/a.ts'] }], verification: ['bun test'] },
   completedAt: 1,
 }
@@ -65,6 +65,21 @@ describe('diagnoseTraceSupply', () => {
     expect(reasons).toContain('outcome=needs-attention')
     expect(reasons).toContain('completion=failed')
     expect(reasons).toContain('never passed')
+  })
+
+  test('verification that "passed" without running a check does not qualify a run', () => {
+    // What 2026-09-12-tona-tgmi — for a long time the only qualifying run — and
+    // 2026-09-15-7cj7-8oi2 looked like: a plan with nothing runnable, recorded
+    // as a pass.
+    const root = project({
+      empty: { ...verifiedReceipt, verification: [{ passed: true, results: [] }] },
+      none: { ...verifiedReceipt, verification: [] },
+    })
+    const rows = Object.fromEntries(diagnoseTraceSupply(root).map((row) => [row.runId, row]))
+    expect(rows.empty!.accepted).toBe(false)
+    expect(rows.empty!.rejectedBy).toContain('verification "passed" without running a single check')
+    expect(rows.none!.rejectedBy).toContain('verification never ran')
+    expect(collectDistillableTraces(root)).toEqual([])
   })
 
   test('a review verdict of revise disqualifies the run', () => {
@@ -155,6 +170,22 @@ describe('a run that died before writing a receipt', () => {
     expect(rows[0]!.rejectedBy[0]).toContain('assumptions#1')
     // 20.5s elapsed, and the journal's own last event was at 0.5s.
     expect(rows[0]!.rejectedBy[0]).toContain('21s in')
+  })
+
+  test('names what the run was doing inside a phase when the journal recorded it', () => {
+    // Runs 2026-09-12-rud7-xpqd and 2026-09-13-6trz-872u died checking the
+    // plan's assumptions, and read as having died writing the repository.
+    const rows = diagnoseTraceSupply(
+      unfinished(
+        [
+          { seq: 0, at: 1000, kind: 'run-start', data: {} },
+          { seq: 1, at: 1500, kind: 'phase', data: { phase: 'scaffold', initialized: true } },
+          { seq: 2, at: 1600, kind: 'phase', data: { phase: 'scaffold', activity: 'checking assumptions', assumptions: 3 } },
+        ],
+        [{ at: 16_000, actor: 'assumptions#1', tool: 'grep', isError: false }],
+      ),
+    )
+    expect(rows[0]!.rejectedBy[0]).toContain('during the scaffold phase, checking assumptions; assumptions#1 had just run grep')
   })
 
   test('says so plainly when the run left no journal at all', () => {

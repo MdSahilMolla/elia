@@ -3,7 +3,10 @@ import { isRoleName, ROLE_NAMES, type Proposal, type ProposalStep } from './type
 import { fileCollisions, planWaves } from './fleet.ts'
 import { bold, dim, cyan, red, gold } from '../ui/theme.ts'
 import { wrapText } from '../ui/layout.ts'
-import { isLongRunningServerCommand } from '../shell.ts'
+import { isLongRunningServerCommand, mayStartServer } from '../shell.ts'
+
+/** A fetch against a server on this machine — curl, wget, httpie, PowerShell's Invoke-WebRequest. */
+const LOCAL_SERVER_REQUEST = /(?:^|[\s;&|(])(?:curl|wget|http|Invoke-WebRequest|iwr)\s[^\n]*\b(?:localhost|127\.0\.0\.1|0\.0\.0\.0)\b/i
 
 const MAX_PROPOSAL_STEPS = 32
 const MAX_VERIFICATION_COMMANDS = 16
@@ -129,6 +132,24 @@ export function parseProposal(raw: unknown): { proposal: Proposal } | { error: s
         `proposal.verification contains a command that starts a server and never exits: ${serverEntries.map((entry) => `"${entry}"`).join(', ')}. ` +
         'Verification runs to completion and is judged on its exit code, so a dev server can only ever time out and look like a failure. ' +
         "Use a command that terminates — the project's build, test, or typecheck — and leave \"the dev server comes up\" to acceptanceCriteria; elia serves and renders the result itself.",
+    }
+  }
+
+  // The same mistake one step removed. Nothing is kept running while
+  // verification runs, so a request to a local server can only fail, and an
+  // app's own entrypoint beside one is plainly meant to start that server — a
+  // Flask plan proposed exactly `["python app.py", "curl http://localhost:5000"]`,
+  // sat out the whole verification timeout on the first and could never pass
+  // the second. An entrypoint on its own may be a CLI (`python main.py --help`),
+  // so only verification's runtime probe judges that one.
+  const localRequests = verification.filter((entry) => LOCAL_SERVER_REQUEST.test(entry))
+  if (localRequests.length > 0) {
+    const entrypoints = verification.filter((entry) => mayStartServer(entry))
+    return {
+      error:
+        `proposal.verification ${entrypoints.length > 0 ? `starts the app (${entrypoints.map((entry) => `"${entry}"`).join(', ')}) and then ` : ''}requests a local server: ${localRequests.map((entry) => `"${entry}"`).join(', ')}. ` +
+        'Nothing is kept running while verification runs, so the app never finishes starting and the request has nothing to answer it. ' +
+        'Check the code with commands that finish instead: its tests (pytest, bun test), a compile or import check (python -m py_compile app.py, python -c "import app"), or a script that exercises it through a test client. Put "the server responds" in acceptanceCriteria.',
     }
   }
 

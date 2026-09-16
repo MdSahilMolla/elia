@@ -1,0 +1,162 @@
+import { mkdirSync, writeFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { paths } from '../statePaths.ts'
+import { redactSecrets } from '../ui/redact.ts'
+import { readTrajectories, type TrajectoryRow } from '../trajectory/record.ts'
+
+/**
+ * The weights half of the compounding loop, as far as it can go without a GPU:
+ * turn the trajectory ledger into a training set, and say honestly how far that
+ * set is from being worth training on.
+ *
+ * Prompt-level self-improvement (evolve, distilled fragments, lessons) is capped
+ * by the model underneath it. Getting past that cap means training on elia's own
+ * verified work, and the first thing that needs is a clean dataset. This does not
+ * train anything.
+ *
+ * What a row is, and is not: the ledger keeps the request, the ordered tool calls
+ * (as digests), and every touched file's before/after, plus how the work was
+ * checked. It does not keep the model's own messages. So an example here is
+ * outcome-supervised — "asked this, in this state, the right end state was that,
+ * and a real check agreed" — which suits rejection-sampling fine-tuning and
+ * reward modelling, not turn-by-turn imitation.
+ *
+ * The filter trusts checks, not the reward scalar: an unchecked turn keeps a
+ * reward of 0.85 (see deriveReward), so a scalar cut alone would let "nobody
+ * looked" into the set.
+ */
+
+export interface TrainingExample {
+  id: string
+  kind: TrajectoryRow['kind']
+  /** Groups examples produced under the same system prompt + value core. */
+  systemPromptRef: string
+  prompt: string
+  toolTrace: Array<{ name: string; ok: boolean; args?: string }>
+  files: Array<{ path: string; before: string | null; after: string | null }>
+  verify: 'pass'
+  regime?: TrajectoryRow['regime']
+  reward: number
+  category: 'clean' | 'repaired'
+}
+
+export interface ExportSelection {
+  examples: TrainingExample[]
+  considered: number
+  rejectedBy: Map<string, number>
+}
+
+const OMITTED = '[omitted: row too large]'
+
+/** Why a row cannot be a training example, or undefined when it can. */
+export function rejectReason(row: TrajectoryRow): string | undefined {
+  if (row.reward.category === 'aborted') return 'aborted'
+  if (row.reward.category === 'failed' || row.verify === 'fail') return 'its check failed'
+  if (row.verify !== 'pass') return `no check passed (verify=${row.verify})`
+  if (row.regime === 'judgment') return 'checked only by a model’s opinion'
+  if (row.reward.category !== 'clean' && row.reward.category !== 'repaired') return `reward category ${row.reward.category}`
+  if ((row.contradictions?.length ?? 0) > 0) return 'its verdict contradicted the facts'
+  if (row.touched.length === 0) return 'changed no files'
+  if (row.touched.some((file) => file.before === OMITTED || file.after === OMITTED)) return 'file bodies were too large to keep'
+  if (row.touched.some((file) => file.after?.includes('more chars]'))) return 'a file body was truncated'
+  return undefined
+}
+
+function contentKey(row: TrajectoryRow): string {
+  return Bun.hash(`${row.promptRedacted}\u0000${row.touched.map((file) => `${file.path}\u0000${file.after ?? ''}`).join('\u0001')}`).toString(36)
+}
+
+export function selectTrainingExamples(rows: TrajectoryRow[]): ExportSelection {
+  const rejectedBy = new Map<string, number>()
+  const seen = new Set<string>()
+  const examples: TrainingExample[] = []
+  for (const row of rows) {
+    const reason = rejectReason(row)
+    if (reason) {
+      rejectedBy.set(reason, (rejectedBy.get(reason) ?? 0) + 1)
+      continue
+    }
+    const key = contentKey(row)
+    if (seen.has(key)) {
+      rejectedBy.set('duplicate of an earlier example', (rejectedBy.get('duplicate of an earlier example') ?? 0) + 1)
+      continue
+    }
+    seen.add(key)
+    examples.push({
+      id: `${row.kind}-${row.corr}`,
+      kind: row.kind,
+      systemPromptRef: row.systemPromptRef,
+      // Rows are redacted when written; redact again so a pattern added since
+      // then still applies to old rows before they leave the ledger.
+      prompt: redactSecrets(row.promptRedacted),
+      toolTrace: row.tools.map((tool) => ({ name: tool.name, ok: tool.ok, ...(tool.argsDigest ? { args: redactSecrets(tool.argsDigest) } : {}) })),
+      files: row.touched.map((file) => ({
+        path: file.path,
+        before: file.before === null ? null : redactSecrets(file.before),
+        after: file.after === null ? null : redactSecrets(file.after),
+      })),
+      verify: 'pass',
+      ...(row.regime ? { regime: row.regime } : {}),
+      reward: row.reward.scalar,
+      category: row.reward.category as 'clean' | 'repaired',
+    })
+  }
+  return { examples, considered: rows.length, rejectedBy }
+}
+
+/**
+ * A working floor, not a law: below roughly a thousand varied, verified
+ * examples, a fine-tune of a capable model rarely moves a held-out score by
+ * more than its noise. The number exists so the readiness line says "how far",
+ * not "not yet".
+ */
+export const TRAINING_FLOOR = 1000
+
+export interface Readiness {
+  examples: number
+  floor: number
+  /** Distinct projects the examples came from (first two path segments of their files). */
+  projects: number
+  /** Share of examples that are elia editing its own source. */
+  selfShare: number
+  /** Distinct system-prompt regimes; many means the examples were made by different elias. */
+  promptRegimes: number
+}
+
+export function readiness(examples: TrainingExample[], rows: TrajectoryRow[] = []): Readiness {
+  const self = new Set(rows.filter((row) => row.cwdIsEliaRoot && !row.touched.some((file) => /^workspace[\\/]/.test(file.path))).map((row) => `${row.kind}-${row.corr}`))
+  const projects = new Set(
+    examples.flatMap((example) =>
+      example.files.map((file) => {
+        const parts = file.path.split(/[\\/]/)
+        return parts[0] === 'workspace' ? parts.slice(0, 2).join('/') : parts.length > 1 ? '(this repository)' : '(project root)'
+      }),
+    ),
+  )
+  return {
+    examples: examples.length,
+    floor: TRAINING_FLOOR,
+    projects: projects.size,
+    selfShare: examples.length === 0 ? 0 : examples.filter((example) => self.has(example.id)).length / examples.length,
+    promptRegimes: new Set(examples.map((example) => example.systemPromptRef)).size,
+  }
+}
+
+export function renderReadiness(r: Readiness): string {
+  const pct = Math.min(100, Math.round((r.examples / r.floor) * 100))
+  return `${r.examples} verified example(s) of the ~${r.floor} a fine-tune needs to show anything (${pct}%) · from ${r.projects} project(s) · ${Math.round(r.selfShare * 100)}% elia editing itself · ${r.promptRegimes} prompt regime(s)`
+}
+
+export function defaultExportPath(now = new Date()): string {
+  return join(paths.trajectories, '..', 'training', `export-${now.toISOString().slice(0, 10)}.jsonl`)
+}
+
+/** Both ledgers, oldest first. */
+export function allTrajectoryRows(): TrajectoryRow[] {
+  return [...readTrajectories('interactive'), ...readTrajectories('autonomous')].sort((a, b) => a.at - b.at)
+}
+
+export function writeTrainingExport(examples: TrainingExample[], outPath: string): void {
+  mkdirSync(dirname(outPath), { recursive: true })
+  writeFileSync(outPath, examples.map((example) => JSON.stringify(example)).join('\n') + (examples.length > 0 ? '\n' : ''), { mode: 0o600 })
+}

@@ -28,7 +28,11 @@ export function initialState(): PromptState {
 export function filteredCommands(buffer: string, commands: SlashCommand[]): SlashCommand[] {
   if (!buffer.startsWith('/') && !buffer.startsWith('@')) return []
   const prefix = buffer.toLowerCase()
-  return commands.filter((c) => c.name.toLowerCase().startsWith(prefix))
+  const matches = commands.filter((c) => c.name.toLowerCase().startsWith(prefix))
+  // A command typed out in full wins the highlight: "/mode" + Enter used to run
+  // "/model", the first prefix match in menu order.
+  const exact = matches.findIndex((c) => c.name.toLowerCase() === prefix)
+  return exact > 0 ? [matches[exact]!, ...matches.slice(0, exact), ...matches.slice(exact + 1)] : matches
 }
 
 /** The subset of Node's keypress event this module reacts to — kept minimal and structural so tests don't need a real TTY. */

@@ -72,6 +72,22 @@ const REQUEST_TOO_LARGE =
   /\b413\b|payload too large|request(?:ed)? (?:body )?too large|prompt is too long|context[_ ]?length[_ ]?exceeded|maximum context length|exceeds? (?:the )?(?:model'?s? )?(?:maximum )?context (?:window|length)|input is too long|too many tokens|reduce (?:the length of the messages|your (?:message|prompt|request) size)/i
 
 /**
+ * The model garbled one of its own tool calls, and the provider refused to
+ * relay arguments that were not valid JSON. Nothing reached a tool and nothing
+ * is wrong with the request; the next sample almost always parses.
+ *
+ * mercury-2.5 does this mid-stream — Inception's server sends
+ * `{"error": {"message": "Failed to parse tool call arguments as JSON"}}` as an
+ * SSE chunk, which the OpenAI SDK throws as an APIError with no status. No
+ * classifier recognised it, so it was fatal: run 2026-09-15-lot0-alkr died
+ * outright on it while checking its plan's assumptions, and an interactive
+ * session (mu0a4z96-ec8e56) lost a turn the same way.
+ */
+export function isMalformedToolCallError(message: string): boolean {
+  return /failed to parse tool call arguments/i.test(message)
+}
+
+/**
  * How long to wait before re-attempting a capacity failure.
  *
  * A per-minute token cap ("tokens per minute (TPM): Limit 8000") clears on a

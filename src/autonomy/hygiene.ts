@@ -256,9 +256,68 @@ export function hardcodedSecrets(input: HygieneInput): HardcodedSecret[] {
   return found
 }
 
-/** Both checks, as review issues the repair phase can act on. */
+export interface ImpossibleIntegrity {
+  file: string
+  line: number
+  algorithm: string
+  /** Base64 characters in the digest, padding excluded. */
+  length: number
+  expected: number
+}
+
+/** Digest sizes in unpadded base64 characters: 32, 48 and 64 bytes. */
+const SRI_DIGEST_CHARS: Record<string, number> = { sha256: 43, sha384: 64, sha512: 86 }
+const MARKUP_EXT = /\.(?:html?|[cm]?[jt]sx?|vue|svelte|astro)$/i
+
+/**
+ * `integrity` values that can never match the file they guard.
+ *
+ * A browser compares any token it can parse — a known algorithm and base64
+ * characters — against the resource, and refuses to load the resource when
+ * none matches. A digest of the wrong length cannot match anything, so the
+ * script or stylesheet behind it never loads. That is what a model produces
+ * when asked for an SRI hash it has no way to compute offline: run
+ * 2026-09-14-1rmx-chk1, told by its security reviewer to add one to a CDN
+ * script, wrote `sha384-y4cC1f8LXf8X8f8f8X…` (66 characters; a sha384 digest
+ * is 64) and so switched off every chart on the page, while its `findstr`
+ * verification went on passing. The length is decidable from the markup
+ * alone; a well-formed digest that is merely wrong is not, and is not claimed.
+ */
+export function impossibleIntegrityHashes(input: HygieneInput): ImpossibleIntegrity[] {
+  const root = resolve(input.cwd)
+  const found: ImpossibleIntegrity[] = []
+  for (const file of input.changedFiles) {
+    const absolute = toAbsolute(file, root)
+    if (!MARKUP_EXT.test(absolute) || !isReadableFile(absolute)) continue
+    const source = readTextFile(absolute) ?? ''
+    for (const attribute of source.matchAll(/\bintegrity\s*=\s*(["'])([^"']*)\1/gi)) {
+      for (const token of (attribute[2] ?? '').trim().split(/\s+/)) {
+        const parsed = /^(sha256|sha384|sha512)-([A-Za-z0-9+/_-]+)(={0,2})(?:\?.*)?$/i.exec(token)
+        if (!parsed) continue // unparseable: the browser ignores it, so it breaks nothing
+        const algorithm = parsed[1]!.toLowerCase()
+        const expected = SRI_DIGEST_CHARS[algorithm]!
+        const length = parsed[2]!.length
+        if (length !== expected) found.push({ file: relativeTo(absolute, root), line: lineOf(source, attribute.index ?? 0), algorithm, length, expected })
+      }
+    }
+  }
+  return found
+}
+
+/** Every check, as review issues the repair phase can act on. */
 export function auditDeliverable(input: HygieneInput): CriticIssue[] {
   const issues: CriticIssue[] = []
+
+  for (const integrity of impossibleIntegrityHashes(input)) {
+    issues.push({
+      severity: 'blocker',
+      file: integrity.file,
+      detail:
+        `${integrity.file}:${integrity.line} has an integrity value whose ${integrity.algorithm} digest is ${integrity.length} characters long; a real one is ${integrity.expected}. ` +
+        'It can never match, so the browser refuses to load that script or stylesheet and everything that depends on it is broken. ' +
+        'Remove the integrity attribute, or compute it from the exact file being loaded — never write one by hand.',
+    })
+  }
 
   for (const secret of hardcodedSecrets(input)) {
     issues.push({
@@ -303,8 +362,8 @@ export function hygieneVerdict(input: HygieneInput): CriticVerdict {
     verdict: issues.length > 0 ? 'revise' : 'approve',
     summary:
       issues.length > 0
-        ? `${issues.length} deliverable-hygiene problem(s): hardcoded secrets, undeclared dependencies, or leftover scratch files.`
-        : 'No hardcoded secrets, dependencies are declared, and no scratch files were left behind.',
+        ? `${issues.length} deliverable-hygiene problem(s): hardcoded secrets, undeclared dependencies, leftover scratch files, or integrity hashes that cannot match.`
+        : 'No hardcoded secrets, dependencies are declared, no scratch files were left behind, and no integrity hash is impossible.',
     issues,
   }
 }

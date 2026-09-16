@@ -1,7 +1,7 @@
 import { expect, test } from 'bun:test'
 import { render } from 'ink-testing-library'
 import type { ToolItem } from '../store.ts'
-import { ToolCard } from './ToolCard.tsx'
+import { ExploreCard, ToolCard } from './ToolCard.tsx'
 
 test('shows a completed visualization preview without requiring expansion', () => {
   const tool: ToolItem = {
@@ -19,19 +19,23 @@ test('shows a completed visualization preview without requiring expansion', () =
   expect(frame).not.toContain('SVG:')
 })
 
-test('run_command shows the $ echo, output tail and exit code without expansion', () => {
+test('run_command shows the command and its output tail without expansion — no noise on success', () => {
   const tool: ToolItem = {
     id: 'cmd-1',
     kind: 'tool',
     name: 'run_command',
     input: { command: 'bun test' },
     status: 'ok',
-    result: 'exit code: 0\nstdout:\n10 pass\n0 fail',
+    result: 'exit code: 0\nstdout:\n10 pass\n0 fail\n\n',
   }
   const frame = render(<ToolCard tool={tool} expanded={false} />).lastFrame() ?? ''
-  expect(frame).toContain('$ bun test')
-  expect(frame).toContain('10 pass')
-  expect(frame).toContain('exit 0')
+  expect(frame).toContain('Ran bun test')
+  expect(frame).toContain('⎿ 10 pass')
+  expect(frame).toContain('0 fail')
+  // A clean exit is the expected case: no "exit 0", no ✓, no trailing blank rows.
+  expect(frame).not.toContain('exit 0')
+  expect(frame).not.toContain('✓')
+  expect(frame.trimEnd().endsWith('0 fail')).toBe(true)
 })
 
 test('a non-zero exit is flagged even when the tool call itself did not error', () => {
@@ -45,7 +49,41 @@ test('a non-zero exit is flagged even when the tool call itself did not error', 
   }
   const frame = render(<ToolCard tool={tool} expanded={false} />).lastFrame() ?? ''
   expect(frame).toContain('exit 1')
-  expect(frame).toContain('✗')
+  expect(frame).toContain('Build failed')
+})
+
+test('the header carries no cache mark, check mark or expand chevron', () => {
+  const tool: ToolItem = { id: 'r0', kind: 'tool', name: 'read_file', input: { path: 'src/app.ts' }, status: 'cached', result: '1\tx\n2\ty' }
+  const frame = render(<ToolCard tool={tool} expanded={false} />).lastFrame() ?? ''
+  expect(frame).toContain('● Read app.ts')
+  for (const noise of ['⚡', '✓', '›', '⏺']) expect(frame).not.toContain(noise)
+})
+
+test('a run of lookups renders as one summary row with the targets underneath', () => {
+  const tools: ToolItem[] = [
+    { id: 'a', kind: 'tool', name: 'read_file', input: { path: 'src/app.ts' }, status: 'ok', result: '1\tx' },
+    { id: 'b', kind: 'tool', name: 'read_file', input: { path: 'package.json' }, status: 'ok', result: '1\t{}' },
+    { id: 'c', kind: 'tool', name: 'grep', input: { pattern: 'hello' }, status: 'ok', result: 'a.ts:1:hello' },
+  ]
+  const frame = render(<ExploreCard tools={tools} expanded={false} />).lastFrame() ?? ''
+  expect(frame).toContain('Read 2 files, searched 1 pattern')
+  expect(frame).toContain('⎿ app.ts, package.json, hello')
+  // One header, not three cards.
+  expect(frame.split('●').length - 1).toBe(1)
+})
+
+test('a failed lookup inside a group is still spelled out', () => {
+  const tools: ToolItem[] = [
+    { id: 'a', kind: 'tool', name: 'read_file', input: { path: 'src/app.ts' }, status: 'ok', result: '1\tx' },
+    { id: 'b', kind: 'tool', name: 'read_file', input: { path: 'missing.ts' }, status: 'error', result: 'ENOENT: no such file' },
+  ]
+  const frame = render(<ExploreCard tools={tools} expanded={false} />).lastFrame() ?? ''
+  expect(frame).toContain('Read missing.ts — ENOENT: no such file')
+})
+
+test('a successful plan update draws nothing — the plan panel owns it', () => {
+  const tool: ToolItem = { id: 'p', kind: 'tool', name: 'todo_write', input: {}, status: 'ok', result: 'ok' }
+  expect((render(<ToolCard tool={tool} expanded={false} />).lastFrame() ?? '').trim()).toBe('')
 })
 
 test('a read shows a ⎿ result summary without expansion', () => {
@@ -76,9 +114,11 @@ test('edit_file diff renders a line-number gutter without expansion', () => {
   expect(frame).toContain('- old line')
   expect(frame).toContain('+ new line')
   expect(frame).toContain('11') // the changed line's number in the gutter
+  // The gutter already carries the line numbers — the hunk header is noise.
+  expect(frame).not.toContain('@@')
 })
 
-test('a long edit_file diff collapses to a Ctrl+O footer until expanded', () => {
+test('a long edit_file diff collapses to a ctrl+o footer until expanded', () => {
   const body = Array.from({ length: 40 }, (_, i) => `+added line ${i}`).join('\n')
   const tool: ToolItem = {
     id: 'edit-2',
@@ -89,7 +129,8 @@ test('a long edit_file diff collapses to a Ctrl+O footer until expanded', () => 
     result: `Edited big.ts (+40 −0)\n\`\`\`diff\n@@ -1,0 +1,40 @@\n${body}\n\`\`\``,
   }
   const collapsed = render(<ToolCard tool={tool} expanded={false} />).lastFrame() ?? ''
-  expect(collapsed).toContain('Ctrl+O')
+  expect(collapsed).toContain('ctrl+o to expand')
+  expect(collapsed).not.toContain('added line 39')
   const expanded = render(<ToolCard tool={tool} expanded />).lastFrame() ?? ''
   expect(expanded).toContain('added line 39')
 })

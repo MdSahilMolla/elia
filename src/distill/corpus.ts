@@ -100,9 +100,7 @@ export function collectDistillableTraces(cwd = process.cwd()): DistillableTrace[
     // The review gate: a verdict must exist and must not be a "revise".
     if (receipt.verdict && receipt.verdict.verdict === 'revise') continue
     // Verification must have actually run and passed at least once.
-    const verifyRecords = Array.isArray(receipt.verification) ? receipt.verification : []
-    const verifyPassed = verifyRecords.some((r) => r && typeof r === 'object' && (r as { passed?: boolean }).passed === true)
-    if (verifyRecords.length > 0 && !verifyPassed) continue
+    if (!verificationRanAndPassed(receipt.verification)) continue
 
     const steps = (receipt.proposal?.steps ?? [])
       .filter((step): step is { role: string; title?: string; files?: string[] } => typeof step.role === 'string')
@@ -193,7 +191,8 @@ function describeUnfinishedRun(dir: string): string {
   const lastActionAt = typeof lastAction?.at === 'number' ? (lastAction.at as number) : 0
   const endedAt = Math.max(lastEventAt, lastActionAt)
 
-  const phase = [...events].reverse().map((event) => (event.kind === 'phase' ? ((event.data as { phase?: string } | undefined)?.phase ?? undefined) : undefined)).find(Boolean)
+  const lastPhase = [...events].reverse().find((event) => event.kind === 'phase')?.data as { phase?: string; activity?: string } | undefined
+  const phase = lastPhase?.phase ? `${lastPhase.phase} phase${lastPhase.activity ? `, ${lastPhase.activity}` : ''}` : undefined
   const ran = startedAt !== undefined && endedAt > startedAt ? `${Math.round((endedAt - startedAt) / 1000)}s in` : 'immediately'
 
   let where: string
@@ -205,7 +204,25 @@ function describeUnfinishedRun(dir: string): string {
     const kind = typeof events[events.length - 1]?.kind === 'string' ? (events[events.length - 1]!.kind as string) : 'an event'
     where = `its last journal entry was ${kind}`
   }
-  return `no receipt (died ${ran}${phase ? `, during the ${phase} phase` : ''}; ${where})`
+  return `no receipt (died ${ran}${phase ? `, during the ${phase}` : ''}; ${where})`
+}
+
+/**
+ * Whether verification ran a check and it passed. Both halves are needed: the
+ * loop records `passed: true` with no results when a plan ends up with nothing
+ * runnable ("review alone decides this run"), and that counted as verified.
+ * It is how the only run that qualified before 2026-09-15,
+ * 2026-09-12-tona-tgmi, got in — and 2026-09-15-7cj7-8oi2 after it, labelled
+ * `empirical` by classifyRegime on the strength of a render check that never
+ * ran. A run with no verification record at all does not qualify either.
+ */
+function verificationRanAndPassed(records: unknown): boolean {
+  if (!Array.isArray(records)) return false
+  return records.some((record) => {
+    if (!record || typeof record !== 'object') return false
+    const { passed, results } = record as { passed?: unknown; results?: unknown }
+    return passed === true && Array.isArray(results) && results.length > 0
+  })
 }
 
 function readNdjson(path: string): Record<string, unknown>[] {
@@ -258,8 +275,16 @@ export function diagnoseTraceSupply(cwd = process.cwd()): TraceSupplyRow[] {
     if (receipt.completion?.state !== 'verified') rejectedBy.push(`completion=${receipt.completion?.state ?? 'unknown'}`)
     if (receipt.verdict?.verdict === 'revise') rejectedBy.push('review verdict=revise')
     const verifyRecords = Array.isArray(receipt.verification) ? receipt.verification : []
-    const verifyPassed = verifyRecords.some((r) => r && typeof r === 'object' && (r as { passed?: boolean }).passed === true)
-    if (verifyRecords.length > 0 && !verifyPassed) rejectedBy.push(`verification ran ${verifyRecords.length}× and never passed`)
+    if (!verificationRanAndPassed(verifyRecords)) {
+      const passedEmpty = verifyRecords.some((r) => r && typeof r === 'object' && (r as { passed?: boolean }).passed === true)
+      rejectedBy.push(
+        verifyRecords.length === 0
+          ? 'verification never ran'
+          : passedEmpty
+            ? 'verification "passed" without running a single check'
+            : `verification ran ${verifyRecords.length}× and never passed`,
+      )
+    }
 
     const steps = (receipt.proposal?.steps ?? []).filter((step): step is { role: string; files?: string[] } => typeof step.role === 'string')
     const regime = classifyRegime(steps.flatMap((s) => s.files ?? []), receipt.proposal?.verification ?? [], cwd)

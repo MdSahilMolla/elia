@@ -26,7 +26,9 @@ interface TurnUiHooks {
   /** Mid-run steering: drained at each step boundary and spliced into the turn. */
   drainSteering?: () => string[]
   /** Ink approval menu — used for the plan gate when a turn escalates into the autonomous pipeline. */
-  approve?: (req: { title: string; lines: string[]; preview?: string[]; ruleLabel: string }) => Promise<import('./autonomy/governor.ts').ApprovalResult>
+  approve?: (req: { title: string; lines: string[]; preview?: string[]; ruleLabel: string; variant?: 'action' | 'plan' }) => Promise<import('./autonomy/governor.ts').ApprovalResult>
+  /** An escalated run's approved plan — the Ink plan panel tracks its steps. */
+  onRunPlan?: (steps: { id: string; title: string }[]) => void
 }
 import { playIntro } from './ui/character.ts'
 import { ZERO_USAGE, addUsage, getSessionSummaryLine, recordTopLevelTurn, formatUsageLine, formatElapsed, sessionUsageSnapshot, setCurrentUsageModel, type SessionUsageSnapshot } from './usage.ts'
@@ -122,7 +124,7 @@ function requestedAgentMode(): AgentMode {
   return 'dev'
 }
 
-const SUBCOMMANDS = ['auto', 'agent', 'evolve', 'gap', 'values', 'distill', 'bench', 'bench-latency', 'skills', 'runs', 'fork', 'resume', 'schedule', 'daemon', 'doctor', 'config', 'codex-login', 'control', 'bridge', 'workspace'] as const
+const SUBCOMMANDS = ['auto', 'agent', 'evolve', 'gap', 'values', 'distill', 'compounding', 'bench', 'bench-latency', 'skills', 'runs', 'fork', 'resume', 'schedule', 'daemon', 'doctor', 'config', 'codex-login', 'control', 'bridge', 'workspace'] as const
 type Subcommand = (typeof SUBCOMMANDS)[number]
 
 function printHelp(): void {
@@ -442,6 +444,26 @@ async function classifyCommandRisk(command: string): Promise<{ risky: boolean; r
 /** The plan-approval gate for `elia auto`/`elia fork` — thin wrapper over the shared confirmOnce helper. */
 function createInteractiveApprover(rl: readline.Interface) {
   return () => confirmOnce(rl, 'Approve this plan? [y]es / [n]o / [e]dit <what to change>: ')
+}
+
+/** The approval menu's heading — the question, in words, not the tool's id. */
+function approvalTitle(toolName: string): string {
+  switch (toolName) {
+    case 'run_command':
+      return 'Run this command?'
+    case 'run_program':
+      return 'Run this program?'
+    case 'edit_file':
+      return 'Edit this file?'
+    case 'write_file':
+      return 'Write this file?'
+    case 'task':
+      return 'Start a subagent?'
+    case 'codex_delegate':
+      return 'Hand this task to Codex?'
+    default:
+      return `Allow ${toolName}?`
+  }
 }
 
 function actionApprovalPrompt(assessment: ActionAssessment, request: ActionRequest): string {
@@ -779,6 +801,15 @@ async function runBench(): Promise<void> {
   // are real checkouts of this repository and cost minutes, so they are asked
   // for explicitly.
   const tasks = hasFlag('--all') ? allBenchTasks() : hasFlag('--history') ? historyTasks() : BENCH_TASKS
+  // --lessons: every task gets this project's lessons, as a real turn would
+  // (history tasks only those older than their commit — see benchLessons.ts).
+  // Compare against a run without it to learn whether the store helps.
+  const withLessons = hasFlag('--lessons')
+  if (withLessons) {
+    const { BENCH_LESSONS_ENV } = await import('./evolve/benchLessons.ts')
+    const { paths } = await import('./statePaths.ts')
+    process.env[BENCH_LESSONS_ENV] = paths.lessons
+  }
   if (tasks.length === 0) {
     writeNotice('No tasks to run. `elia bench --harvest` builds the history-derived set.')
     process.exitCode = 1
@@ -797,6 +828,8 @@ async function runBench(): Promise<void> {
     onTaskDone: (outcome) =>
       writeUsageLine(`  ${outcome.passed ? '✓' : '✗'} ${outcome.taskId} — ${outcome.error ?? outcome.detail}`),
   })
+  const { recordBenchRun } = await import('./compounding/status.ts')
+  recordBenchRun(card, `${hasFlag('--all') ? 'all' : hasFlag('--history') ? 'history' : 'synthetic'}${withLessons ? '+lessons' : ''}`)
   if (machineReadable) emitEvent('benchmark_scorecard', { stage: 'current', scorecard: card })
   else {
     process.stdout.write(renderScorecard(card, 'elia'))
@@ -874,6 +907,25 @@ async function runBenchLatency(): Promise<void> {
   }
 }
 
+/**
+ * `elia compounding` — where the self-improvement loop stands, stage by stage,
+ * from elia's own records.
+ *
+ * The six stages measure the slow loop: evolve changing elia's source between
+ * generations. The reasoning library underneath them measures the fast one —
+ * what each turn's search learned about how to attack work of that shape — so
+ * both channels are read off the same command rather than one of them being
+ * invisible until someone goes looking for a JSON file.
+ */
+async function runCompounding(): Promise<void> {
+  const { compoundingStatus, renderCompoundingStatus } = await import('./compounding/status.ts')
+  const { readLibrary, renderLibrary } = await import('./reason/library.ts')
+  const stages = compoundingStatus()
+  const library = readLibrary()
+  if (machineReadable) emitEvent('compounding_status', { stages, reasoning: library.records })
+  else writeUsageLine(`${renderCompoundingStatus(stages)}\n\n${renderLibrary(library)}`)
+}
+
 async function runEvolve(): Promise<void> {
   const generationsRaw = flagValue('--generations', '-n') ?? '1'
   const generations = strictInteger(generationsRaw)
@@ -886,7 +938,34 @@ async function runEvolve(): Promise<void> {
   if (!(await ensureFirstRunProviderSetup())) return
   await loadRuntimeSkills()
   const { evolve } = await import('./evolve/engine.ts')
-  const result = await evolve({ generations, dryRun: hasFlag('--dry-run') })
+  // --focus N: score on the built-in tasks, the last full run's failures, and N
+  // of its passing history tasks — a fraction of the full set's cost, and
+  // still the same fixed set for the baseline and every candidate.
+  let taskIds: string[] | undefined
+  const focusRaw = flagValue('--focus')
+  if (focusRaw !== undefined) {
+    const focus = strictInteger(focusRaw)
+    if (focus === undefined || focus < 0) {
+      writeError('--focus must be a non-negative integer (how many passing history tasks to keep as regression guards).')
+      process.exitCode = 1
+      return
+    }
+    const { BENCH_TASKS } = await import('./evolve/suite.ts')
+    const { focusTaskIds } = await import('./compounding/status.ts')
+    taskIds = focusTaskIds(BENCH_TASKS.map((task) => task.id), focus)
+    if (!taskIds) {
+      writeError('--focus needs a complete `elia bench --all` run to focus from (none recorded with every task measured).')
+      process.exitCode = 1
+      return
+    }
+    writeNotice(`Focused on ${taskIds.length} task(s): the built-in set, the last full run's failures, and ${focus} passing history task(s).`)
+  }
+  const result = await evolve({ generations, dryRun: hasFlag('--dry-run'), taskIds })
+  if (result.stoppedReason) {
+    writeError(`No generation was attempted: ${result.stoppedReason}`)
+    process.exitCode = 1
+    return
+  }
   const promoted = result.generations.filter((record) => record.verdict === 'promoted')
 
   writeNotice(
@@ -967,8 +1046,26 @@ async function runDistill(): Promise<void> {
     return
   }
 
+  if (action === 'export') {
+    // The weights half of the loop: a training set from verified work, and how
+    // far it is from being worth training on. Local only; nothing is uploaded.
+    const { allTrajectoryRows, defaultExportPath, readiness, renderReadiness, selectTrainingExamples, writeTrainingExport } = await import('./distill/export.ts')
+    const rows = allTrajectoryRows()
+    const selection = selectTrainingExamples(rows)
+    writeNotice(renderReadiness(readiness(selection.examples, rows)))
+    writeUsageLine(`  ${selection.examples.length} of ${selection.considered} recorded turn(s)/run(s) qualify. Why the rest do not:`)
+    for (const [reason, count] of [...selection.rejectedBy.entries()].sort((x, y) => y[1] - x[1])) {
+      writeUsageLine(`    ${String(count).padStart(3)}×  ${reason}`)
+    }
+    if (hasFlag('--dry-run')) return
+    const out = flagValue('--out') ?? defaultExportPath()
+    writeTrainingExport(selection.examples, out)
+    writeNotice(`Wrote ${selection.examples.length} example(s) to ${out}`)
+    return
+  }
+
   if (action !== 'run') {
-    writeError(`Unknown: elia distill ${action}. Use "run" (add --promote to apply) or "traces".`)
+    writeError(`Unknown: elia distill ${action}. Use "run" (add --promote to apply), "traces", or "export" (--out <file>, --dry-run).`)
     process.exitCode = 1
     return
   }
@@ -2151,21 +2248,47 @@ async function runInteractive(): Promise<void> {
       if (uiHooks?.onActivity) uiHooks.onActivity({ kind: 'status', status, title, detail })
       else writeNotice(detail ? `${title}\n${detail}` : title)
     }
-    note(`This looks like a full build (${reason}) — planning it properly.`)
+    // Said once and kept in scrollback: the pipeline starts by researching, so
+    // without this the first thing on screen was subagents nobody asked for.
+    note(
+      uiHooks
+        ? 'This reads as a new project, so elia will research it first and show you a plan to approve before building anything.'
+        : `This looks like a full build (${reason}) — planning it properly.`,
+      uiHooks ? '/auto off answers requests like this in a single reply instead.' : undefined,
+      'completed',
+    )
 
     if (uiHooks) {
+      const { friendlyPhase } = await import('./ui/app/phases.ts')
       setReportSink((kind, text) => {
         if (kind === 'block' || kind === 'summary') {
-          const [title, ...body] = text.split('\n')
-          uiHooks.onActivity?.({ kind: 'plan', status: 'updated', title: title ?? text, detail: body.join('\n') || undefined })
+          const [title = text, ...body] = text.split('\n')
+          // The approval menu shows the plan and the receipt closes the run, so
+          // those two stay transient. Everything else a block carries — issues
+          // found, a decision elia needs from you — belongs in scrollback; it
+          // used to flash past as a status line and vanish.
+          const transient = /^(?:Plan · awaiting approval|Run complete)\b/.test(title)
+          const needsYou = /^(?:Needs a decision|Issues found)/.test(title)
+          uiHooks.onActivity?.({ kind: 'status', status: transient ? 'updated' : needsYou ? 'warning' : 'completed', title, detail: body.join('\n') || undefined })
+        } else if (kind === 'phase') {
+          uiHooks.onActivity?.({ kind: 'status', status: 'updated', title: friendlyPhase(text) })
         } else if (kind === 'substep' && /^learned:\s*/i.test(text)) {
           // Learning is elia's strongest "getting smarter" signal — give it the
           // ✦ mark and make it durable in scrollback, not an ephemeral status.
           uiHooks.onActivity?.({ kind: 'status', status: 'completed', title: `✦ ${text.replace(/^learned:\s*/i, '')}` })
-        } else if (kind === 'pass') {
-          uiHooks.onActivity?.({ kind: 'status', status: 'completed', title: text })
+        } else if (kind === 'pass' || kind === 'fail') {
+          // A review verdict joins every reviewer with " | " — one row per
+          // reviewer, each kept to a line, instead of a seven-row wall.
+          const [head = text, ...rest] = text.split(' | ')
+          const clip = (line: string) => (line.length > 140 ? `${line.slice(0, 139)}…` : line)
+          uiHooks.onActivity?.({
+            kind: 'status',
+            status: kind === 'pass' ? 'completed' : 'warning',
+            title: clip(head),
+            detail: rest.length > 0 ? rest.map((line) => `  ${clip(line.trim())}`).join('\n') : undefined,
+          })
         } else {
-          uiHooks.onActivity?.({ kind: 'status', status: kind === 'fail' ? 'warning' : 'updated', title: text })
+          uiHooks.onActivity?.({ kind: 'status', status: 'updated', title: text })
         }
       })
     }
@@ -2175,9 +2298,14 @@ async function runInteractive(): Promise<void> {
     const approve: import('./autonomy/loop.ts').Approver = uiHooks?.approve
       ? async (proposal) => {
           const preview = renderProposalSummary(proposal)
-          const res = await uiHooks.approve!({ title: 'PLAN · awaiting approval', lines: [], preview, ruleLabel: 'run this plan' })
+          const res = await uiHooks.approve!({ title: 'Run this plan?', lines: [], preview, ruleLabel: 'this plan', variant: 'plan' })
           const outcome = typeof res === 'boolean' ? { approved: res, feedback: undefined } : res
-          if (outcome.approved) return { action: 'approve' }
+          if (outcome.approved) {
+            // The live plan panel follows these steps; each ticks off as the
+            // worker carrying its step id finishes.
+            uiHooks.onRunPlan?.(proposal.steps.map((step) => ({ id: step.id, title: step.title })))
+            return { action: 'approve' }
+          }
           if ('feedback' in outcome && outcome.feedback) return { action: 'amend', feedback: outcome.feedback }
           return { action: 'reject' }
         }
@@ -2195,12 +2323,17 @@ async function runInteractive(): Promise<void> {
         governanceMode: 'supervised',
         signal,
         polish: true,
+        // A build asked for from the chat stays local unless the request itself
+        // mentions GitHub — the run's own commits are still made either way.
+        publish: /\b(?:git\s*hub|repo(?:sitory)?|publish|push)\b/i.test(goal),
       })
-      const { formatAutonomousRunSummary } = await import('./autonomy/runSummary.ts')
+      const { formatAutonomousRunReceipt, formatAutonomousRunSummary } = await import('./autonomy/runSummary.ts')
       const summary = formatAutonomousRunSummary(goal, result)
       messages.push({ role: 'assistant', content: [{ type: 'text', text: summary }] })
       sessionTranscript.notice(summary)
-      note(summary, undefined, 'completed')
+      // The model gets the summary above; the person gets the outcome, not an
+      // instruction addressed to the next turn.
+      note(formatAutonomousRunReceipt(goal, result), undefined, 'completed')
       return result.completion.state
     } finally {
       setReportSink(undefined)
@@ -2517,7 +2650,7 @@ async function runInteractive(): Promise<void> {
           const gateGovernor = createActionGovernor({ mode: approveAction ? 'supervised' : 'unattended', approve: approveAction })
           let outcome = await runVerification(checks, root, controller.signal, gateGovernor)
           sessionTranscript.notice(describeVerification(outcome))
-          for (let attempt = 1; !outcome.passed && !outcome.blocked && attempt <= 2 && !controller.signal.aborted; attempt += 1) {
+          for (let attempt = 1; !outcome.passed && !outcome.blocked && !outcome.inconclusive && attempt <= 2 && !controller.signal.aborted; attempt += 1) {
             repairAttempts = attempt
             const summary = `Verification failed (repair ${attempt}/2)`
             uiHooks?.onActivity?.({ kind: 'status', status: 'warning', title: summary })
@@ -2533,15 +2666,21 @@ async function runInteractive(): Promise<void> {
           }
           // A check the governor would not run proved nothing either way, and no
           // repair can change a policy — record the turn as unverified, not failed.
-          verifyResult = outcome.passed ? 'pass' : outcome.blocked ? 'skipped' : 'fail'
+          // Same for a test runner with no tests to run.
+          verifyResult = outcome.passed ? 'pass' : outcome.blocked || outcome.inconclusive ? 'skipped' : 'fail'
+          const passedChecks = outcome.results
+            .filter((result) => result.exitCode === 0 && !result.timedOut && !result.command.startsWith('[skipped]'))
+            .map((result) => result.command)
           const verdict = outcome.passed
-            ? `✓ verified — ${checks.join(', ')} pass`
+            ? `✓ verified — ${(passedChecks.length > 0 ? passedChecks : checks).join(', ')} pass${outcome.inconclusive ? ` (${outcome.inconclusive})` : ''}`
             : outcome.blocked
               ? `Not verified — ${checks.join(', ')} was not allowed to run: ${outcome.blocked}`
-              : `⚠ checks still failing after 2 repair attempts — ${describeVerification(outcome).split('\n')[0]}`
+              : outcome.inconclusive
+                ? `Not verified — ${outcome.inconclusive}`
+                : `⚠ checks still failing after 2 repair attempts — ${describeVerification(outcome).split('\n')[0]}`
           uiHooks?.onActivity?.({ kind: 'status', status: outcome.passed ? 'completed' : 'warning', title: verdict })
           if (!uiHooks) writeNotice(verdict)
-          if (outcome.blocked) sessionTranscript.notice(verdict)
+          if (outcome.blocked || outcome.inconclusive) sessionTranscript.notice(verdict)
         }
       }
 
@@ -2723,8 +2862,8 @@ async function runInteractive(): Promise<void> {
         const cleanTurn = !turnFailed && toolErrorCount === 0 && editRetryCount === 0 && (verifyResult === 'pass' || verifyResult === 'none' || verifyResult === 'skipped') && !(stopRequested || controller.signal.aborted || escalatedAborted)
         try {
           const { recordLessonExposure } = await import('./autonomy/lessonEfficacy.ts')
-          const { consumeInjectedLessonKeys } = await import('./autonomy/lessons.ts')
-          recordLessonExposure(task.id, consumeInjectedLessonKeys(), { verify: verifyResult, clean: cleanTurn })
+          const { consumeInjectedLessonKeys, consumeHeldOutLessonKeys } = await import('./autonomy/lessons.ts')
+          recordLessonExposure(task.id, consumeInjectedLessonKeys(), { verify: verifyResult, clean: cleanTurn, heldOut: consumeHeldOutLessonKeys() })
         } catch {
           // best-effort
         }
@@ -2821,6 +2960,11 @@ async function runInteractive(): Promise<void> {
   // keeps the workspace-panel snapshot.
   if (!machineReadable && !quietOutput && !interactiveTerminal) {
     process.stdout.write(`${renderWorkspacePanel({ sessionId, mode, providerLabel: config.providerLabel, model: config.model })}\n`)
+  }
+  if (!interactiveTerminal && !machineReadable && !plainOutput && !process.stdin.isTTY && !process.stdout.isTTY && (process.env.MSYSTEM || process.env.TERM_PROGRAM === 'mintty')) {
+    // Git Bash's mintty hands Bun pipes, not a console, so the live UI can't
+    // start and the line-mode REPL takes over — say why, once.
+    writeNotice('This terminal (Git Bash / mintty) is not a real console, so elia is in line mode. For the full UI run `winpty elia`, or use Windows Terminal / PowerShell.')
   }
   if (!interactiveTerminal) {
     writeNotice(
@@ -3811,7 +3955,7 @@ async function runInteractive(): Promise<void> {
     // ensureThread dedupes on the resolved instructions.
     prewarmActiveProvider()
     const { runInkRepl } = await import('./ui/app/index.tsx')
-    const greeting = `${mode} mode · "/" for commands · "!" for shell`
+    const greeting = `${mode} mode`
     const cliVersion = JSON.parse(await Bun.file(new URL('../package.json', import.meta.url)).text()).version as string
 
     await runInkRepl({
@@ -3822,7 +3966,18 @@ async function runInteractive(): Promise<void> {
       initialReplMode: replMode,
       messages,
       greeting,
-      classifyRisk: (command) => classifyCommandRisk(command),
+      // A pre-check that could not answer is not a verdict. Every risky action
+      // in this REPL is still gated one at a time by the governor's approval
+      // menu, so a classifier outage lets the message through instead of
+      // stopping a harmless request behind an error and a y/n prompt.
+      classifyRisk: async (command) => {
+        try {
+          const verdict = await classifyCommandRisk(command)
+          return 'unavailable' in verdict && verdict.unavailable ? { risky: false } : verdict
+        } catch {
+          return { risky: false }
+        }
+      },
       runShellLine: async (command) => {
         const { runShell, formatShellResult, clampOutput } = await import('./shell.ts')
         const result = await runShell(command, undefined, process.cwd())
@@ -3841,11 +3996,8 @@ async function runInteractive(): Promise<void> {
           turnText,
           async (assessment, request) =>
             hooks.approve({
-              title: `Approve ${request.name}?`,
-              lines: [
-                redactText(assessment.reason, 300),
-                `risk: ${assessment.risk} · reversible: ${assessment.reversible ? 'yes' : 'no'}`,
-              ],
+              title: approvalTitle(request.name),
+              lines: [redactText(assessment.reason, 300)],
               preview: approvalPreviewLines(request.name, request.input),
               ruleLabel: ruleLabel(ruleFor(request, assessment)),
               command:
@@ -3865,6 +4017,7 @@ async function runInteractive(): Promise<void> {
             signal: hooks.signal,
             drainSteering: hooks.drainSteering,
             approve: hooks.approve,
+            onRunPlan: hooks.onRunPlan,
           },
         )
         await persistInteractiveSession()
@@ -4377,6 +4530,8 @@ async function main() {
       return runValues()
     case 'distill':
       return runDistill()
+    case 'compounding':
+      return runCompounding()
     case 'bench':
       return runBench()
     case 'bench-latency':

@@ -75,6 +75,41 @@ test('a clean checkpoint (nothing dirty) restores the tree to pristine HEAD', as
   expect(existsSync(join(repo, 'extra.txt'))).toBe(false)
 })
 
+test('a scoped restore reverts only what the run wrote — work someone else did meanwhile survives', async () => {
+  // Green checkpoint: the run has a good edit to a.txt.
+  writeFileSync(join(repo, 'a.txt'), 'good edit to A\n')
+  const snapshot = (await captureTreeSnapshot(repo, store))!
+
+  // The failed repair (the run) breaks a.txt and adds junk.txt. Meanwhile an
+  // operator — or another session in the same checkout — edits b.txt and
+  // creates notes.txt. `git status` shows all four as dirty; only two are the run's.
+  writeFileSync(join(repo, 'a.txt'), 'BROKEN\n')
+  writeFileSync(join(repo, 'junk.txt'), 'garbage from the failed attempt\n')
+  writeFileSync(join(repo, 'b.txt'), 'operator work in progress\n')
+  writeFileSync(join(repo, 'notes.txt'), 'operator notes\n')
+
+  const { reverted, warnings } = await restoreTreeSnapshot(snapshot, { only: new Set(['a.txt', 'junk.txt']) })
+  expect(warnings).toEqual([])
+  expect(reverted.sort()).toEqual(['a.txt', 'junk.txt'])
+
+  expect(readFileSync(join(repo, 'a.txt'), 'utf8')).toBe('good edit to A\n')
+  expect(existsSync(join(repo, 'junk.txt'))).toBe(false)
+  expect(readFileSync(join(repo, 'b.txt'), 'utf8')).toBe('operator work in progress\n')
+  expect(readFileSync(join(repo, 'notes.txt'), 'utf8')).toBe('operator notes\n')
+})
+
+test('an unscoped restore reports what it reverted, not everything git called dirty', async () => {
+  const snapshot = (await captureTreeSnapshot(repo, store))!
+  writeFileSync(join(repo, 'a.txt'), 'changed after a clean snapshot\n')
+
+  const { reverted } = await restoreTreeSnapshot(snapshot)
+  expect(reverted).toEqual(['a.txt'])
+  // Nothing in scope, nothing touched, and the count says so.
+  writeFileSync(join(repo, 'b.txt'), 'someone else\n')
+  expect((await restoreTreeSnapshot(snapshot, { only: new Set() })).reverted).toEqual([])
+  expect(readFileSync(join(repo, 'b.txt'), 'utf8')).toBe('someone else\n')
+})
+
 test('a file deleted at checkpoint time stays deleted after restore', async () => {
   rmSync(join(repo, 'b.txt'))
   const snapshot = (await captureTreeSnapshot(repo, store))!

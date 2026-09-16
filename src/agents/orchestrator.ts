@@ -4,7 +4,7 @@ import { runAgentLoop, lastAssistantText, type ConversationMessage, type ToolEve
 import { allWorkerTools, getSynthesizedTools } from '../tools/registry.ts'
 import { taskTool } from '../tools/task.ts'
 import { autoFallbacksFor, tierConfig } from '../config.ts'
-import { endTextTurn, writeText, writeNotice } from '../ui/stream.ts'
+import { endTextTurn, inkOwnsScreen, writeText, writeNotice } from '../ui/stream.ts'
 import { emitEvent, machineReadable } from '../ui/runtime.ts'
 import type { AgentPersona } from './types.ts'
 import { parseOverride, classifyRequest, deterministicRoute } from './router.ts'
@@ -214,6 +214,7 @@ export async function runAgentRequest(request: string, opts: { signal?: AbortSig
       recordUsage(sectionUsage)
       if (multiPersona) {
         if (machineReadable) emitEvent('persona_completed', { persona: section.persona, report: section.report, failed: section.failed ?? false, wave: waveIndex + 1 })
+        else if (inkOwnsScreen()) writeNotice(`${capitalize(section.persona)} take\n${section.report}`)
         else {
           process.stdout.write(`\n## ${capitalize(section.persona)} take\n\n`)
           writeText(section.report)
@@ -230,6 +231,7 @@ export async function runAgentRequest(request: string, opts: { signal?: AbortSig
     usage = addUsage(usage, synthesis.usage)
     recordUsage(synthesis.usage)
     if (machineReadable) emitEvent('combined_recommendation', { text: combined })
+    else if (inkOwnsScreen()) writeNotice(`Combined recommendation\n${combined}`)
     else process.stdout.write(`\n## Combined recommendation\n\n${combined}\n`)
   }
 

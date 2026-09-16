@@ -168,6 +168,43 @@ test('the audit votes revise, with the undeclared dependency as a blocker', () =
   expect(verdict.issues.find((issue) => issue.detail.includes('tmp_scratch.ts'))?.severity).toBe('major')
 })
 
+test('an integrity hash that cannot be a real digest blocks the run — the one run 1rmx wrote by hand', () => {
+  const page = write('index.html', [
+    '<!DOCTYPE html><html><head>',
+    '<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js" integrity="sha384-y4cC1f8LXf8X8f8f8X8f8f8f8X8f8f8f8X8f8f8f8X8f8f8f8X8f8f8f8X8f8f8f8X" crossorigin="anonymous"></script>',
+    '</head><body><canvas id="cpu"></canvas></body></html>',
+  ].join('\n'))
+
+  const verdict = hygieneVerdict({ cwd: dir, addedFiles: [page], changedFiles: [page] })
+  expect(verdict.verdict).toBe('revise')
+  const issue = verdict.issues.find((entry) => entry.detail.includes('integrity'))!
+  expect(issue.severity).toBe('blocker')
+  expect(issue.detail).toContain('index.html:2')
+  expect(issue.detail).toContain('66 characters long; a real one is 64')
+})
+
+test('real digests of every size pass, padded or not, and a value the browser cannot parse is not claimed', () => {
+  const { createHash } = require('node:crypto') as typeof import('node:crypto')
+  const digest = (algorithm: string) => createHash(algorithm).update('console.log(1)').digest('base64')
+  const page = write('index.html', [
+    `<script src="a.js" integrity="sha256-${digest('sha256')}"></script>`,
+    `<script src="b.js" integrity='sha384-${digest('sha384')}'></script>`,
+    `<link rel="stylesheet" href="c.css" integrity="sha512-${digest('sha512').replace(/=+$/, '')} sha256-${digest('sha256')}">`,
+    // Not parseable as a hash at all, so the browser ignores it rather than blocking.
+    '<script src="d.js" integrity="{{ chartSri }}"></script>',
+    '<script src="e.js" integrity=""></script>',
+  ].join('\n'))
+
+  expect(auditDeliverable({ cwd: dir, addedFiles: [page], changedFiles: [page] })).toEqual([])
+})
+
+test('a placeholder shaped like a hash is claimed — the browser parses it, compares it, and blocks the script', () => {
+  // `_` is a base64url character, which current SRI parsing accepts.
+  const page = write('index.html', '<script src="d.js" integrity="sha384-REPLACE_WITH_REAL_HASH"></script>')
+  const [issue] = auditDeliverable({ cwd: dir, addedFiles: [page], changedFiles: [page] })
+  expect(issue?.detail).toContain('22 characters long; a real one is 64')
+})
+
 test('a clean deliverable approves', () => {
   manifest({ express: '^4' })
   const file = write('src/server.ts', "import express from 'express'\n")

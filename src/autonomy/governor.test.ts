@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { assessAction, blockedInUnattendedMode, createActionGovernor, redactActionInput } from './governor.ts'
+import { READ_ONLY_ROLES, assessAction, blockedInUnattendedMode, createActionGovernor, redactActionInput } from './governor.ts'
 import { clearPreauthCaches, grantPreauth } from './preauth.ts'
 import { clearAllowCache } from './allowStore.ts'
 
@@ -157,6 +157,37 @@ describe('autonomy governor', () => {
       const result = assessAction({ name: 'run_command', input: { command } }, '/repo')
       expect(result.risk).toBe('safe')
       expect(result.decision).toBe('allow')
+    }
+  })
+
+  // Seen live 2026-09-15: "create me a python web app" opened with "Start a
+  // subagent?" for a read-only scout — before any plan existed.
+  test('a read-only subagent needs no approval; a writer still does', () => {
+    for (const role of ['scout', 'critic', 'security']) {
+      const result = assessAction({ name: 'task', input: { role, description: 'research', prompt: 'look around' } }, '/repo')
+      expect(result.decision).toBe('allow')
+    }
+    for (const input of [{ role: 'builder', prompt: 'write it' }, { prompt: 'no role means builder' }]) {
+      expect(assessAction({ name: 'task', input }, '/repo').decision).toBe('approve')
+    }
+  })
+
+  test('the read-only role list matches the role table', async () => {
+    const { ROLES } = await import('./roles.ts')
+    const readOnly = Object.values(ROLES).filter((role) => !role.canWrite).map((role) => role.name).sort()
+    expect([...READ_ONLY_ROLES].sort()).toEqual(readOnly)
+  })
+
+  // Seen live 2026-09-15 on Windows: `dir *.html *.css *.js` stopped a build
+  // run behind an approval prompt that `ls *.html` never would have.
+  test('the Windows spellings of ls / cat / grep are read-only too — and still fail closed when composed', () => {
+    for (const command of ['dir *.html *.css *.js', 'dir /s /b src', 'type index.html', 'findstr /n "TODO" app.js']) {
+      const result = assessAction({ name: 'run_command', input: { command } }, '/repo')
+      expect(result.risk).toBe('safe')
+      expect(result.decision).toBe('allow')
+    }
+    for (const command of ['type nul > created.txt', 'dir & del /q *.js', 'type a.js | findstr x']) {
+      expect(assessAction({ name: 'run_command', input: { command } }, '/repo').decision).not.toBe('allow')
     }
   })
 

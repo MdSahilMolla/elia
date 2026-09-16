@@ -26,7 +26,9 @@ import { changedFilesFromResult } from '../tools/lspRefactor.ts'
 export function filesWrittenBy(event: ToolEvent, root: string): string[] {
   if (event.isError) return []
   let written: string[] = []
-  if (event.name === 'write_file' || event.name === 'edit_file') {
+  // A deletion is a write too: the wave commit has to carry it, or the file
+  // stays deleted in the tree and present in history.
+  if (event.name === 'write_file' || event.name === 'edit_file' || event.name === 'delete_file') {
     if (typeof event.input.path === 'string' && event.input.path.trim()) written = [event.input.path.trim()]
   } else if (event.name === 'lsp_refactor') {
     // A rename edits every file that references the symbol, not just the one

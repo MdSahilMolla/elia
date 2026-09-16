@@ -1,8 +1,9 @@
 import { Fragment, type ReactNode } from 'react'
 import { Box, Text } from 'ink'
 import { parseMarkdownBlocks, type InlineRun, type MarkdownBlock } from '../../markdownBlocks.ts'
-import { palette } from '../theme.ts'
+import { glyphs, palette } from '../theme.ts'
 import { highlightLine, normalizeLanguage } from '../highlight.ts'
+import { useFrameWidth, wrapRuns } from '../wrap.ts'
 
 /** One code line, syntax-highlighted into coloured Text runs. */
 function CodeLine({ line, language, trailingCursor }: { line: string; language?: string; trailingCursor?: boolean }) {
@@ -24,11 +25,13 @@ function InlineText({ runs }: { runs: InlineRun[] }) {
     <>
       {runs.map((run, index) => {
         if (run.kind === 'strong') return <Text key={index} bold>{run.text}</Text>
-        // A shaded pill for inline code — easier to spot in a wall of prose than colour alone.
-        if (run.kind === 'code') return <Text key={index} color={palette.toolName} backgroundColor={palette.codeBg}>{run.text}</Text>
+        if (run.kind === 'em') return <Text key={index} italic>{run.text}</Text>
+        // Code gets the one "look here" hue — no background pill, which turned
+        // into a black slab on light terminal themes.
+        if (run.kind === 'code') return <Text key={index} color={palette.code}>{run.text}</Text>
         if (run.kind === 'link') {
           const visible = run.text === run.url ? run.url : `${run.text} (${run.url})`
-          return <Text key={index} color={palette.toolName} underline>{visible}</Text>
+          return <Text key={index} color={palette.code} underline>{visible}</Text>
         }
         return <Fragment key={index}>{run.text}</Fragment>
       })}
@@ -43,7 +46,9 @@ function Cursor() {
 function BlockShell({ lead, marginTop, children }: { lead: boolean; marginTop: number; children: ReactNode }) {
   return (
     <Box width="100%" marginTop={marginTop}>
-      <Text color={palette.accent}>{lead ? '● ' : '  '}</Text>
+      <Box width={2} flexShrink={0}>
+        <Text>{lead ? glyphs.bullet : ' '}</Text>
+      </Box>
       <Box flexDirection="column" flexBasis={0} flexGrow={1}>{children}</Box>
     </Box>
   )
@@ -52,7 +57,7 @@ function BlockShell({ lead, marginTop, children }: { lead: boolean; marginTop: n
 function TableCell({ runs, header, align, cursor }: { runs: InlineRun[]; header?: boolean; align: 'left' | 'right' | 'center'; cursor?: boolean }) {
   return (
     <Box flexBasis={0} flexGrow={1} marginRight={1} justifyContent={align === 'right' ? 'flex-end' : align === 'center' ? 'center' : 'flex-start'}>
-      <Text bold={header} underline={header} wrap="wrap">
+      <Text bold={header} wrap="wrap">
         <InlineText runs={runs} />
         {cursor ? <Cursor /> : null}
       </Text>
@@ -60,24 +65,22 @@ function TableCell({ runs, header, align, cursor }: { runs: InlineRun[]; header?
   )
 }
 
-function BlockBody({ block, cursor }: { block: MarkdownBlock; cursor: boolean }) {
+function BlockBody({ block, cursor, width }: { block: MarkdownBlock; cursor: boolean; width: number }) {
+  // A streaming block ends in a one-column cursor — leave room for it.
+  const room = (columns: number) => columns - (cursor ? 1 : 0)
   switch (block.kind) {
-    case 'heading': {
-      // A visible hierarchy, like Devin's: gold → cyan → green, then plain bold.
-      const headingColor =
-        block.level === 1 ? palette.accent : block.level === 2 ? palette.toolName : block.level === 3 ? palette.success : undefined
+    case 'heading':
+      // Hierarchy from weight, not a rainbow: h1/h2 bold, h3+ bold and quieter.
       return (
-        <Text bold color={headingColor} wrap="wrap">
-          {block.level <= 2 ? '' : '▸ '}
-          <InlineText runs={block.content} />
+        <Text bold color={block.level >= 3 ? palette.muted : undefined} wrap="wrap">
+          <InlineText runs={wrapRuns(block.content, room(width))} />
           {cursor ? <Cursor /> : null}
         </Text>
       )
-    }
     case 'paragraph':
       return (
         <Text wrap="wrap">
-          <InlineText runs={block.content} />
+          <InlineText runs={wrapRuns(block.content, room(width))} />
           {cursor ? <Cursor /> : null}
         </Text>
       )
@@ -86,13 +89,19 @@ function BlockBody({ block, cursor }: { block: MarkdownBlock; cursor: boolean })
         <Box flexDirection="column">
           {block.items.map((item, index) => {
             const marker = item.checked === true ? '✓' : item.checked === false ? '□' : /^\d/.test(item.marker) ? item.marker : '•'
+            const last = cursor && index === block.items.length - 1
+            const itemWidth = width - item.depth * 2 - (Bun.stringWidth(marker) + 1) - (last ? 1 : 0)
             return (
               <Box key={index} paddingLeft={item.depth * 2}>
-                <Text color={item.checked === true ? palette.success : item.checked === false ? palette.muted : palette.accent}>{marker} </Text>
-                <Text wrap="wrap">
-                  <InlineText runs={item.content} />
-                  {cursor && index === block.items.length - 1 ? <Cursor /> : null}
-                </Text>
+                <Box flexShrink={0}>
+                  <Text color={item.checked === true ? palette.success : palette.muted}>{marker} </Text>
+                </Box>
+                <Box flexGrow={1} flexShrink={1}>
+                  <Text wrap="wrap">
+                    <InlineText runs={wrapRuns(item.content, itemWidth)} />
+                    {last ? <Cursor /> : null}
+                  </Text>
+                </Box>
               </Box>
             )
           })}
@@ -105,7 +114,7 @@ function BlockBody({ block, cursor }: { block: MarkdownBlock; cursor: boolean })
             <Box key={index}>
               <Text color={palette.muted}>│ </Text>
               <Text italic color={palette.muted} wrap="wrap">
-                <InlineText runs={line} />
+                <InlineText runs={wrapRuns(line, width - 2 - (cursor && index === block.lines.length - 1 ? 1 : 0))} />
                 {cursor && index === block.lines.length - 1 ? <Cursor /> : null}
               </Text>
             </Box>
@@ -120,7 +129,7 @@ function BlockBody({ block, cursor }: { block: MarkdownBlock; cursor: boolean })
       return (
         <Box flexDirection="column" width="100%">
           {block.language ? (
-            <Text bold color={palette.muted}>
+            <Text color={palette.muted}>
               {block.language}
               {!block.complete ? ' …' : ''}
             </Text>
@@ -163,18 +172,29 @@ function BlockBody({ block, cursor }: { block: MarkdownBlock; cursor: boolean })
   }
 }
 
-export function AssistantMessage({ text, streaming }: { text: string; streaming: boolean }) {
+/**
+ * An assistant reply (or one finished paragraph-run of it). `lead` draws the
+ * `●` that opens a reply; a continuation — the next paragraphs of the same
+ * reply, committed separately while it streams — lines up under it instead.
+ */
+export function AssistantMessage({ text, streaming, lead = true }: { text: string; streaming: boolean; lead?: boolean }) {
   const blocks = parseMarkdownBlocks(text)
+  // Every block sits behind the two-column `●` lead.
+  const width = useFrameWidth() - 2
 
   if (blocks.length === 0) {
-    return streaming ? <Text color={palette.accent}>● <Cursor /></Text> : null
+    return streaming ? (
+      <BlockShell lead={lead} marginTop={0}>
+        <Cursor />
+      </BlockShell>
+    ) : null
   }
 
   return (
     <Box flexDirection="column" width="100%">
       {blocks.map((block, index) => (
-        <BlockShell key={index} lead={index === 0} marginTop={index === 0 ? 0 : 1}>
-          <BlockBody block={block} cursor={streaming && index === blocks.length - 1} />
+        <BlockShell key={index} lead={lead && index === 0} marginTop={index === 0 ? 0 : 1}>
+          <BlockBody block={block} cursor={streaming && index === blocks.length - 1} width={width} />
         </BlockShell>
       ))}
     </Box>

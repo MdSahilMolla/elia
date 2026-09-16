@@ -2,6 +2,7 @@ import { FACE_NEUTRAL, FACE_BLINK, FACE_LEFT, FACE_RIGHT } from './character.ts'
 import { dim, gold } from './theme.ts'
 import { interactiveTerminal } from './runtime.ts'
 import { registerShutdownCleanup } from './shutdown.ts'
+import { inkOwnsScreen } from './stream.ts'
 
 // Eyes dart around while "thinking", blink once, and repeat — a small loop, not
 // a set piece. Each entry gets one FRAME_MS tick.
@@ -28,7 +29,9 @@ const NOOP_ANIMATION: Animation = { stop() {} }
  * takes: one glyph, one phrase, one clock.
  */
 export function startThinkingAnimation(): Animation {
-  if (!interactiveTerminal) return NOOP_ANIMATION
+  // Under the Ink REPL this line would be drawn *beneath* Ink's frame with a
+  // blind cursor-up redraw — the REPL has its own working indicator.
+  if (!interactiveTerminal || inkOwnsScreen()) return NOOP_ANIMATION
 
   const startedAt = Date.now()
   let frameIndex = 0

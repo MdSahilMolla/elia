@@ -843,8 +843,17 @@ export function actionKey(runId: string, nodeId: string, request: ActionRequest)
  * being decided.
  */
 export function outstandingActions(snapshot: GoalGraphSnapshot): DurableActionRecord[] {
+  const nodeIds = new Set(snapshot.nodes.map((node) => node.id))
   return snapshot.actions.filter((action) => {
     if (action.state === 'completed') return false
+    // An advisory worker — the assumption check, a reviewer — acts under a node
+    // id of its own (`check:assumptions`, `review:critic#1`) that is not a node
+    // of the goal, so nothing the goal delivers waits on what it did, whatever
+    // became of it. Counting its refusals kept run 2026-09-15-cqd0-omdu at
+    // needs-attention with every step done, its render check passing and its
+    // review approving: the assumption scout had tried `dir /a` and a read
+    // outside its workspace, unattended, five times.
+    if (!nodeIds.has(action.nodeId) && action.nodeId !== snapshot.rootId) return false
     // `blocked` joins `failed` and `retryable` in the moot-if-the-step-finished
     // rule, for the same reason: a governor refusal or a failed precondition
     // that the worker then routed around is not outstanding work — the step it

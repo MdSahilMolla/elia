@@ -1,10 +1,10 @@
 import { existsSync } from 'node:fs'
 import { basename, relative, resolve, sep } from 'node:path'
 import type { Tool } from '../tools/types.ts'
-import { clampOutput, isLongRunningServerCommand, runShell, type ShellResult } from '../shell.ts'
+import { clampOutput, isLongRunningServerCommand, mayStartServer, runShell, startsWithForeignShellCommand, type ShellResult } from '../shell.ts'
 import type { CriticIssue, CriticVerdict } from './types.ts'
 import { currentAgent } from './context.ts'
-import { activeActionGovernor, type ActionGovernor } from './governor.ts'
+import { activeActionGovernor, blockedInUnattendedMode, type ActionGovernor } from './governor.ts'
 import { changedStaticPages } from './detectChecks.ts'
 import { scanProjectFiles } from './hygiene.ts'
 import { ensurePreviewServer } from '../preview/server.ts'
@@ -23,6 +23,40 @@ export interface VerificationOutcome {
    * repair attempts on it.
    */
   blocked?: string
+  /**
+   * Set when a test runner found no tests to run. That proves nothing either
+   * way — and handing it to the model as a failure is how "change the greeting"
+   * in a project with no tests ended with elia writing a test file nobody asked
+   * for (Bun exits 1 on "0 test files matching …"). Unverified, not failed.
+   */
+  inconclusive?: string
+}
+
+/** A test runner that ran and found nothing to test — Bun, Jest, Vitest, Mocha, pytest. */
+const NO_TESTS_COLLECTED = /\b0 test files matching\b|\bno tests? (?:were )?found\b|\bno test files found\b|\bno tests ran\b|\bcollected 0 items\b/i
+
+export function isNoTestsResult(result: ShellResult): boolean {
+  return !result.timedOut && result.exitCode !== 0 && NO_TESTS_COLLECTED.test(`${result.stdout}\n${result.stderr}`)
+}
+
+/**
+ * The declared verification commands that can never pass in this run, so the
+ * plan drops them before committing to a gate it cannot win: a command this
+ * machine's shell does not have, in any mode, and — unattended, with nobody
+ * there to approve it — one the governor refuses outright.
+ *
+ * The first is not hypothetical. `ls workspace/edcdemo/` on Windows failed
+ * "'ls' is not recognized" on all three attempts of run 2026-09-10-oabx-7ui6,
+ * and every repair between them rewrote an app that was never broken. The
+ * runtime fallback for unrunnable checks did not apply, because the plan's
+ * other check (`bun --version`) ran fine.
+ */
+export function unwinnableVerificationCommands(
+  commands: string[],
+  options: { unattended: boolean; platform?: NodeJS.Platform; which?: (name: string) => string | null },
+): string[] {
+  return commands.filter((command) =>
+    startsWithForeignShellCommand(command, options.platform, options.which) || (options.unattended && blockedInUnattendedMode(command)))
 }
 
 /**
@@ -34,8 +68,15 @@ export interface VerificationOutcome {
  * the next being meaningful, and a typecheck failure makes the test output noise
  * rather than information.
  */
-export async function runVerification(commands: string[], cwd?: string, signal?: AbortSignal, governor?: ActionGovernor): Promise<VerificationOutcome> {
+export async function runVerification(
+  commands: string[],
+  cwd?: string,
+  signal?: AbortSignal,
+  governor?: ActionGovernor,
+  options: { serverProbeMs?: number } = {},
+): Promise<VerificationOutcome> {
   const results: ShellResult[] = []
+  let probedServers = 0
 
   // `proposal.ts` rejects a dev server as a verification command at approval
   // time, but a run resumed from a plan approved before that check — or a
@@ -85,13 +126,50 @@ export async function runVerification(commands: string[], cwd?: string, signal?:
       results.push(result)
       return { results, passed: false, blocked: reason }
     }
-    const result = await runShell(command, VERIFY_TIMEOUT_MS, cwd, signal ?? currentAgent().signal)
+    const probe = mayStartServer(command)
+    const probeMs = options.serverProbeMs ?? SERVER_PROBE_MS
+    const result = await runShell(command, probe ? probeMs : VERIFY_TIMEOUT_MS, cwd, signal ?? currentAgent().signal)
+    if (probe && result.timedOut) {
+      // Still up long after a script would have finished: it started the app's
+      // server. That is not a check any more than `npm run dev` is, so it is
+      // recorded the same way — unproven, not failed. Waiting out the full
+      // VERIFY_TIMEOUT_MS on `python app.py` (a Flask app) kept one run on
+      // "Checking the result" for over eight minutes, and then failed it.
+      probedServers += 1
+      results.push({
+        ...result,
+        command: `[skipped] ${command}`,
+        exitCode: 0,
+        timedOut: false,
+        stderr: `${SKIPPED_SERVER_PREFIX}: still running after ${Math.round(probeMs / 1000)}s — it starts a server rather than finishing, so it cannot be a pass/fail check.`,
+      })
+      continue
+    }
     results.push(result)
+    // "No tests to run" is not a failing check — keep going so a typecheck or
+    // build after it still gets its say.
+    if (isNoTestsResult(result)) continue
     if (result.exitCode !== 0 || result.timedOut) return { results, passed: false }
   }
 
-  return { results, passed: true }
+  const empty = results.filter(isNoTestsResult).map((result) => result.command)
+  const inconclusive = empty.length > 0 ? `${empty.join(', ')} found no tests to run` : undefined
+  const provedSomething = results.some((result) => result.exitCode === 0 && !result.timedOut && !result.command.startsWith('[skipped]'))
+  // Nothing ran but servers: the same outcome as a plan of nothing but dev
+  // servers (above), so the caller's fallback for unrunnable checks applies.
+  // A pass here would be "verified" having verified nothing.
+  if (probedServers > 0 && !provedSomething) {
+    return {
+      passed: false,
+      results: results.map((result) => (result.command.startsWith('[skipped] ') ? { ...result, command: result.command.slice('[skipped] '.length), exitCode: 1 } : result)),
+    }
+  }
+  if (inconclusive && !provedSomething) return { results, passed: false, inconclusive }
+  return { results, passed: true, inconclusive }
 }
+
+/** How long a bare app entrypoint (`python app.py`) may run as a check before it is taken to be a server. */
+export const SERVER_PROBE_MS = 20_000
 
 /**
  * A shell rejected `result.command` outright — it never ran the intended
@@ -108,8 +186,8 @@ export function isUnrunnableCommandFailure(result: ShellResult): boolean {
   if (result.timedOut || result.exitCode === 0) return false
   // A dev server elia refused to run never produced a verdict either, so it
   // belongs in the same bucket as a command the shell rejected: the work is
-  // unproven, not disproven.
-  return SHELL_REJECTED_COMMAND.test(result.stderr) || result.stderr.startsWith(SKIPPED_SERVER_PREFIX)
+  // unproven, not disproven. So does a test runner with no tests to run.
+  return SHELL_REJECTED_COMMAND.test(result.stderr) || result.stderr.startsWith(SKIPPED_SERVER_PREFIX) || isNoTestsResult(result)
 }
 
 /**

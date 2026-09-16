@@ -101,7 +101,7 @@ export function createRedundantReadTracker(): RedundantReadTracker {
  * is unambiguously multi-step — several actions in, with real changes made — and
  * never again for that agent, whether or not it takes the advice.
  */
-const CHANGING_TOOLS = new Set(['write_file', 'edit_file', 'run_command'])
+const CHANGING_TOOLS = new Set(['write_file', 'edit_file', 'delete_file', 'run_command'])
 
 /** Total tool calls before an absent plan is worth mentioning. */
 export const PLANLESS_CALL_THRESHOLD = 8

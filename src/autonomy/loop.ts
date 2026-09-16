@@ -36,7 +36,7 @@ import { commitAll, scaffoldProject, stageUntrackedForReview } from './scaffold.
 import { publishProject } from './publish.ts'
 import { emitEvent, machineReadable } from '../ui/runtime.ts'
 import { redactText } from '../ui/redact.ts'
-import { appendLessons, consumeInjectedLessonKeys, createLessonsTool, renderLessons } from './lessons.ts'
+import { appendLessons, consumeHeldOutLessonKeys, consumeInjectedLessonKeys, createLessonsTool, renderLessons } from './lessons.ts'
 import { recordLessonExposure } from './lessonEfficacy.ts'
 import {
   createVerdictTool,
@@ -48,6 +48,7 @@ import {
   mergeVerdicts,
   requireCriticVerdict,
   runVerification,
+  unwinnableVerificationCommands,
 } from './verify.ts'
 import { assessProgress, failureFingerprints, repeatedFailureLesson, type AttemptSnapshot } from './progress.ts'
 import { filesFromGitStatus, hygieneVerdict, scanProjectFiles, type HygieneInput } from './hygiene.ts'
@@ -56,7 +57,7 @@ import { applyPlanRevisions, createPlanRevisionTool, MAX_PLAN_REVISIONS } from '
 import { assumptionOutcome, auditPlanFeasibility, createAssumptionTool } from './assumptions.ts'
 import { isSensitivePath } from './sensitivePaths.ts'
 import { classifyStuck, type StuckRecovery } from './stuck.ts'
-import { checkRoot, classifyRegime, detectChecks, type VerificationRegime } from './detectChecks.ts'
+import { changedStaticPages, checkRoot, classifyRegime, detectChecks, type VerificationRegime } from './detectChecks.ts'
 import { detectContradictions, recordCompletion } from './calibration.ts'
 import { deriveReward, recordTrajectory, refSystemPrompt } from '../trajectory/record.ts'
 import { ELIA_ROOT } from '../statePaths.ts'
@@ -64,7 +65,7 @@ import { reliabilitySignal } from './reliability.ts'
 import type { CriticVerdict, Proposal } from './types.ts'
 import { appendActionAudit, readActionLedger, writeRunReceipt } from './audit.ts'
 import { buildReviewDiffSection } from './reviewContext.ts'
-import { blockedInUnattendedMode, createActionGovernor, withActionGovernor, type ActionApproval, type ActionGovernor, type ActionGovernorStats, type GovernanceMode } from './governor.ts'
+import { createActionGovernor, withActionGovernor, type ActionApproval, type ActionGovernor, type ActionGovernorStats, type GovernanceMode } from './governor.ts'
 import { GoalGraphStore, withGoalGraph, type GoalGraphStore as GoalGraphStoreType } from './goalGraph.ts'
 import { assessCompletion, type CompletionAssessment } from './outcome.ts'
 import { inferTaskKind, taskSessions } from '../taskSessions.ts'
@@ -104,6 +105,14 @@ export interface AutonomousRunOptions {
   resumeGraph?: boolean
   /** Run a bounded final quality pass before verification; enabled by default. */
   polish?: boolean
+  /**
+   * Publish the finished project to GitHub (create or push the repository, then
+   * milestones and issues) — each still behind the governor. Default true: the
+   * `elia auto` behaviour. A REPL turn that escalated passes false unless the
+   * request asked for GitHub — "create me a python web app" used to stop mid-build
+   * for three GitHub questions nobody expected.
+   */
+  publish?: boolean
   /** Maximum final polish passes; bounded to prevent autonomous thrashing. */
   maxPolishPasses?: number
   /** Maximum governed tool requests for the entire run; 0 means no additional action-count limit. */
@@ -282,6 +291,14 @@ interface InFlightRun {
   usage: () => Usage
   /** Drops the shutdown hook once the run no longer needs finalizing. */
   unregisterShutdown: () => void
+  /**
+   * Stops what `done()` would have stopped: the supervisor poll, the wall-clock
+   * timer, the task's controls. A run that threw never reaches `done()`, and
+   * those timers then kept the process alive — run 2026-09-15-lot0-alkr
+   * printed its error and never exited, and inside an interactive session the
+   * 250 ms poll would have run for as long as the session did.
+   */
+  release: () => void
 }
 
 let inFlightRun: InFlightRun | undefined
@@ -302,6 +319,11 @@ function claimInFlightRun(): InFlightRun | undefined {
 function finalizeDeadRun(reason: string, error?: unknown): void {
   const run = claimInFlightRun()
   if (!run) return
+  try {
+    run.release()
+  } catch {
+    // Same rule as below: never throw over the original failure.
+  }
   try {
     const events = run.journal.events()
     const lastPhase = [...events].reverse().find((event) => event.kind === 'phase')?.data as { phase?: string } | undefined
@@ -435,6 +457,10 @@ async function runAutonomousTaskInternal(options: AutonomousRunOptions): Promise
   let supervisorTimer: ReturnType<typeof setInterval> | undefined
   let supervisorRequest: SupervisorControlRequest | undefined
   const journal = createJournal(runId, goal)
+  if (workspace.repositoryWarning) {
+    writeSubStep(`⚠ ${workspace.repositoryWarning}`)
+    journal.append('phase', { phase: 'orient', note: workspace.repositoryWarning })
+  }
   supervisorTimer = setInterval(() => {
     const request = readRunControl(runId)
     if (!request || supervisorRequest) return
@@ -466,6 +492,10 @@ async function runAutonomousTaskInternal(options: AutonomousRunOptions): Promise
   // the verify phase begins; declared here so `done()` can always clean it up.
   let greenSnapshot: TreeSnapshot | undefined
   let rewoundOnce = false
+  // What the run's own tool calls wrote since `greenSnapshot` was taken — the
+  // only files a rewind may touch in a workspace the run does not own outright.
+  // See restoreTreeSnapshot's `only`.
+  const writtenSinceGreen = new Set<string>()
   const track = (delta: Usage) => {
     usage = addUsage(usage, delta)
   }
@@ -486,7 +516,23 @@ async function runAutonomousTaskInternal(options: AutonomousRunOptions): Promise
   const unregisterShutdown = registerShutdownCleanup(() => {
     finalizeDeadRun('the process was stopped before the run could finish (Ctrl+C, a closed terminal, or SIGTERM)')
   })
-  inFlightRun = { runId, goal, taskSessionId: parentTask.id, journal, graph, startedAt, usage: () => usage, unregisterShutdown }
+  inFlightRun = {
+    runId,
+    goal,
+    taskSessionId: parentTask.id,
+    journal,
+    graph,
+    startedAt,
+    usage: () => usage,
+    unregisterShutdown,
+    release: () => {
+      if (budgetTimer) clearTimeout(budgetTimer)
+      if (supervisorTimer) clearInterval(supervisorTimer)
+      unregisterParentControls()
+      signal?.removeEventListener('abort', forwardAbort)
+      taskSessions.update(parentTask.id, { status: 'failed', action: 'Stopped', detail: 'The run ended before it could finish; its receipt records how.' })
+    },
+  }
 
   /**
    * Ends the run as aborted, recording *where* it stopped and *why*.
@@ -582,6 +628,7 @@ async function runAutonomousTaskInternal(options: AutonomousRunOptions): Promise
       verify: verificationPassed ? 'pass' : 'fail',
       regime: verificationRegime,
       clean: verificationPassed && contradictions.length === 0,
+      heldOut: consumeHeldOutLessonKeys(),
     })
     if (contradictions.length > 0) {
       journal.append('phase', { phase: 'learn', note: `completion contradiction: ${contradictions.join('; ')}` })
@@ -818,14 +865,17 @@ async function runAutonomousTaskInternal(options: AutonomousRunOptions): Promise
     }
   }
 
-  if (planApproved && proposal.verification.length > 0 && (options.governanceMode ?? 'unattended') === 'unattended') {
-    const refused = proposal.verification.filter((command) => blockedInUnattendedMode(command))
+  // A command this machine's shell does not have can never pass in any mode;
+  // see unwinnableVerificationCommands.
+  if (planApproved && proposal.verification.length > 0) {
+    const unattended = (options.governanceMode ?? 'unattended') === 'unattended'
+    const refused = unwinnableVerificationCommands(proposal.verification, { unattended })
     if (refused.length > 0) {
       const usable = proposal.verification.filter((command) => !refused.includes(command))
       const replacement = usable.length > 0 ? usable : detectChecks(workspaceRoot)
       proposal = { ...proposal, verification: replacement }
       writeSubStep(
-        `${refused.length} planned verification command(s) can never run unattended (${refused.map((command) => command.slice(0, 60)).join('; ')}) — ` +
+        `${refused.length} planned verification command(s) can never pass in this run (${refused.map((command) => command.slice(0, 60)).join('; ')}) — ` +
           (replacement.length > 0 ? `verifying with ${replacement.join(' · ')} instead` : 'no runnable check remains, so review alone decides this run'),
       )
       journal.append('phase', { phase: 'propose', note: `verification rewritten: refused ${JSON.stringify(refused)}, using ${JSON.stringify(replacement)}` })
@@ -873,6 +923,15 @@ async function runAutonomousTaskInternal(options: AutonomousRunOptions): Promise
     hasLocalHistory = scaffold.commits.length > 0
   }
 
+  // Where this run's own work begins. The polish pass and the reviewers are
+  // shown everything since here, committed or not: each wave commits what it
+  // wrote, and `git diff HEAD` stops showing that work the moment it lands, so
+  // in run 2026-09-15-7cj7-8oi2 the bug hunter reviewed the polish pass's
+  // aria-labels and never saw the calculator the wave had already committed.
+  // A SHA, or HEAD itself when there is no history to pin.
+  const head = await runShell('git rev-parse --verify -q HEAD', 30_000, workspaceRoot, runSignal)
+  const runBase = head.exitCode === 0 && /^[0-9a-f]{7,64}$/i.test(head.stdout.trim()) ? head.stdout.trim() : 'HEAD'
+
   // --- Execute --------------------------------------------------------------
 
   taskSessions.update(parentTask.id, {
@@ -893,6 +952,9 @@ async function runAutonomousTaskInternal(options: AutonomousRunOptions): Promise
   let assumptionBriefing = ''
   if (planApproved && proposal.assumptions.length > 0) {
     writePhase('scaffold', `checking ${proposal.assumptions.length} assumption(s) the plan rests on`)
+    // Marked on its way in, not only on its way out: a run that dies here would
+    // otherwise read as having died writing the repository.
+    journal.append('phase', { phase: 'scaffold', activity: 'checking assumptions', assumptions: proposal.assumptions.length })
     const capture = createAssumptionTool(proposal.assumptions)
     const checker = await runSubAgent({
       role: 'scout',
@@ -920,8 +982,17 @@ Ask the right question for each kind:
 Only report unverifiable when the answer genuinely depends on the user's preference and no amount of looking would settle it. "I could not find it in the code" is not unverifiable.
 
 Finding that an assumption is FALSE is worth more than a confident guess on every other one. Finish by calling submit_assumptions with one entry per assumption.`,
+    }).catch((error: unknown) => {
+      // Advisory, so a failure here costs the check, not the run: the plan goes
+      // ahead on its assumptions unverified, which is where it stood before the
+      // check existed. Run 2026-09-15-lot0-alkr died outright here on one
+      // provider error before a single file was built.
+      const message = error instanceof Error ? error.message : String(error)
+      writeSubStep(`⚠ the assumption check failed (${message.slice(0, 160)}) — going ahead with the plan's assumptions unverified`)
+      journal.append('phase', { phase: 'scaffold', activity: 'checking assumptions', failed: message.slice(0, 500) })
+      return undefined
     })
-    track(checker.usage)
+    if (checker) track(checker.usage)
     const outcome = assumptionOutcome(proposal.assumptions, capture.taken())
     assumptionBriefing = outcome.briefing
     writeSubStep(outcome.summary)
@@ -1245,7 +1316,7 @@ Do not repeat whatever failed. ${retryGuidanceFor(report)}`,
   // just the initial commit of `.gitignore` and generated docs. Everything
   // above already happened locally, so a run that cannot or may not publish
   // still has its full history and documents.
-  if (planApproved && hasLocalHistory) {
+  if (planApproved && hasLocalHistory && options.publish !== false) {
     writePhase('publish', 'pushing the completed work to GitHub')
     const published = await publishProject({ cwd: workspaceRoot, proposal, governor, signal: runSignal })
     if (published.status === 'created') writeSubStep(`created and pushed ${published.url ?? 'the GitHub repository'}`)
@@ -1269,7 +1340,7 @@ Do not repeat whatever failed. ${retryGuidanceFor(report)}`,
       if (runSignal?.aborted) return abortedAt('polish', { proposal })
       journal.append('phase', { phase: 'polish', attempt: polishAttempt })
 
-      const diff = await runShell('git diff HEAD', 30_000, workspaceRoot, runSignal)
+      const diff = await runShell(`git diff ${runBase}`, 30_000, workspaceRoot, runSignal)
       const diffText = diff.stdout.trim() ? clampOutput(diff.stdout.trim(), 8000) : '(no diff yet — inspect the completed work and the goal)'
       const polish = await runSubAgent({
         role: 'polisher',
@@ -1295,7 +1366,7 @@ Read the changed files in full context. Improve only concrete issues directly re
 
       // A second pass is useful only when the first pass actually changed the
       // tree; otherwise stop early rather than rewarding autonomous churn.
-      const after = await runShell('git diff HEAD', 30_000, workspaceRoot, runSignal)
+      const after = await runShell(`git diff ${runBase}`, 30_000, workspaceRoot, runSignal)
       if (after.stdout === diff.stdout) break
     }
   }
@@ -1340,16 +1411,35 @@ Read the changed files in full context. Improve only concrete issues directly re
   // Baseline: the post-execute state. Each passing verification refreshes this
   // to the current state; a wrong-approach stall rewinds the working tree here.
   greenSnapshot = await captureTreeSnapshot(workspaceRoot, runDir(runId))
+  writtenSinceGreen.clear()
+
+  // A static site with no project manifest has no build or test to run, and a
+  // plan for one usually names a check that cannot run here either (`test -f
+  // index.html`, unattended on Windows), so it reached review with nothing
+  // checked at all (run 2026-09-15-7cj7-8oi2) — while classifyRegime was
+  // already calling it `empirical` on the strength of a render that only ever
+  // ran as a fallback. Render the pages every time, as the interactive loop
+  // does. Not for a project with a manifest: its own build and tests are the
+  // gate, and a bundler app's raw index.html rightly fails a static render.
+  const deliveredFiles = proposal.steps.flatMap((step) => step.files)
+  const renderStaticPages = changedStaticPages(deliveredFiles).length > 0 && !checkRoot(deliveredFiles, workspaceRoot)
+  const checksLabel = [...proposal.verification, ...(renderStaticPages ? ['static-page render check'] : [])]
 
   while (true) {
     if (runSignal?.aborted) return abortedAt('verify', { proposal, verdict })
 
-    taskSessions.update(parentTask.id, { status: 'running', action: 'Verifying', detail: proposal.verification.length > 0 ? `Running ${proposal.verification.length} verification command(s)` : 'Running structured review without declared commands' })
-    writePhase('verify', proposal.verification.length > 0 ? proposal.verification.join(' · ') : 'review only')
+    taskSessions.update(parentTask.id, { status: 'running', action: 'Verifying', detail: checksLabel.length > 0 ? `Running ${checksLabel.length} verification check(s)` : 'Running structured review without declared commands' })
+    writePhase('verify', checksLabel.length > 0 ? checksLabel.join(' · ') : 'review only')
     journal.append('phase', { phase: 'verify', attempt })
 
     const verification = await runVerification(proposal.verification, verificationRoot, runSignal, governor)
-    if (!verification.passed && verification.results.length > 0 && verification.results.every(isUnrunnableCommandFailure)) {
+    if (verification.passed && renderStaticPages) {
+      const rendered = await fallbackStaticPageVerification(deliveredFiles, verificationRoot, runSignal)
+      if (rendered) {
+        verification.results.push(...rendered.results)
+        verification.passed = rendered.passed
+      }
+    } else if (!verification.passed && verification.results.length > 0 && verification.results.every(isUnrunnableCommandFailure)) {
       // Every declared check was rejected by the shell outright (e.g. "'Open'
       // is not recognized") — the command was prose, not a real check, so its
       // failure says nothing about the work. Falling straight into repair here
@@ -1358,11 +1448,7 @@ Read the changed files in full context. Improve only concrete issues directly re
       // run 2026-09-11-5q7z-abo2, where the built game worked (confirmed by
       // playing it) but the plan's only "verification" was manual-testing
       // prose. Substitute the interactive loop's own static-page render check.
-      const fallback = await fallbackStaticPageVerification(
-        proposal.steps.flatMap((step) => step.files),
-        verificationRoot,
-        runSignal,
-      )
+      const fallback = await fallbackStaticPageVerification(deliveredFiles, verificationRoot, runSignal)
       if (fallback) {
         writeSubStep('declared verification command(s) were not runnable shell commands — falling back to a static-page render check')
         verification.passed = fallback.passed
@@ -1378,7 +1464,11 @@ Read the changed files in full context. Improve only concrete issues directly re
     // A fresh green: this is now the state a "wrong approach" rewind returns to.
     // captureTreeSnapshot overwrites the single per-run snapshot slot.
     if (verification.passed && !rewoundOnce) {
-      greenSnapshot = (await captureTreeSnapshot(workspaceRoot, runDir(runId))) ?? greenSnapshot
+      const fresh = await captureTreeSnapshot(workspaceRoot, runDir(runId))
+      if (fresh) {
+        greenSnapshot = fresh
+        writtenSinceGreen.clear()
+      }
     }
     const verificationData = {
       passed: verification.passed,
@@ -1406,13 +1496,13 @@ Read the changed files in full context. Improve only concrete issues directly re
       // tool_result, all billed) to ask git the same question. Three reviewers
       // asking separately used to cost 3x this round-trip for identical output.
       const [diff, numstat, status] = await Promise.all([
-        runShell('git diff HEAD', 30_000, workspaceRoot, runSignal),
+        runShell(`git diff ${runBase}`, 30_000, workspaceRoot, runSignal),
         // The file inventory comes from --numstat rather than from the clamped
         // diff text, so it stays complete even when the diff itself is cut.
-        runShell('git diff --numstat HEAD', 30_000, workspaceRoot, runSignal),
+        runShell(`git diff --numstat ${runBase}`, 30_000, workspaceRoot, runSignal),
         runShell('git status --porcelain=v1', 30_000, workspaceRoot, runSignal),
       ])
-      const diffSection = buildReviewDiffSection({ diff: diff.stdout, numstat: numstat.stdout })
+      const diffSection = buildReviewDiffSection({ diff: diff.stdout, numstat: numstat.stdout, base: runBase })
       const changedFiles = diffSection.files.map((file) => file.path)
       // A diff that only touches prose has no exploit surface and no logic to
       // break, so paying for a security and a bug-hunt pass on it is waste —
@@ -1479,6 +1569,7 @@ Read the changed files in full for context beyond the diff above — a diff hide
             cwd: workspaceRoot,
             tools: [...reviewerTools, verdictCapture.tool],
             signal: runSignal,
+            requiredTool: 'submit_verdict',
 
             prompt: `${reviewContext}
 
@@ -1518,6 +1609,7 @@ This reviewer session is intentionally read-only. The current diff, status, and 
           cwd: workspaceRoot,
           tools: [...allWorkerTools().filter((tool) => REVIEWER_TOOL_NAMES.has(tool.name)), acceptanceCapture.tool],
           signal: runSignal,
+          requiredTool: 'submit_acceptance',
           prompt: `${reviewContext}
 
 ## The acceptance criteria this run declared
@@ -1599,11 +1691,19 @@ Judge what is there, not what the code looks like it would probably do. A criter
         // of on top of a pile of failed edits. One rewind per run.
         let rewindNote = ''
         if (stuck.recovery === 'replan' && greenSnapshot && !rewoundOnce) {
-          const { reverted, warnings } = await restoreTreeSnapshot(greenSnapshot)
+          // An isolated workspace is a repository only this run writes to, so
+          // the whole tree goes back — shell-generated files included. Anywhere
+          // else, only what this run's tool calls wrote since the snapshot.
+          const scope = workspace.kind === 'isolated' ? {} : { only: writtenSinceGreen }
+          const { reverted, warnings } = await restoreTreeSnapshot(greenSnapshot, scope)
           rewoundOnce = true
           const base = greenSnapshot.clean ? 'the pristine starting state (verification never passed)' : 'the last state that passed verification'
-          rewindNote = `\n\nThe working tree has been reset to ${base}: ${reverted.length} file(s) from the failed attempts were discarded.${warnings.length > 0 ? ` (Could not fully restore: ${warnings.join('; ')}.)` : ''} Do not try to re-apply what was there — start the new approach from what is on disk now.`
-          writeSubStep(`Rewound the working tree to the last green checkpoint (${reverted.length} file(s) discarded) before re-planning.`)
+          if (reverted.length > 0) {
+            rewindNote = `\n\nThe working tree has been reset to ${base}: ${reverted.length} file(s) from the failed attempts were discarded.${warnings.length > 0 ? ` (Could not fully restore: ${warnings.join('; ')}.)` : ''} Do not try to re-apply what was there — start the new approach from what is on disk now.`
+            writeSubStep(`Rewound the working tree to the last green checkpoint (${reverted.length} file(s) discarded) before re-planning.`)
+          } else {
+            writeSubStep('Nothing this run wrote since the last green checkpoint needed discarding before re-planning.')
+          }
           journal.append('phase', { phase: 'reflect', attempt, note: `tree rewound to last green: ${reverted.length} file(s) discarded${warnings.length ? `; warnings: ${warnings.join('; ')}` : ''}` })
         }
 
@@ -1699,7 +1799,10 @@ Judge what is there, not what the code looks like it would probably do. A criter
       cache,
       prefetcher: createPrefetcher({ tools: repairTools, cache }),
       signal: runSignal,
-      onTool: (event) => appendActionAudit(event, runId),
+      onTool: (event) => {
+        appendActionAudit(event, runId)
+        for (const file of filesWrittenBy(event, workspaceRoot)) writtenSinceGreen.add(file)
+      },
     }))))
     track(repair.usage)
     recordUsage(repair.usage)

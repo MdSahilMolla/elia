@@ -1,36 +1,36 @@
+import { homedir } from 'node:os'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Box, Text, useApp, useInput, useStdout } from 'ink'
 import { setInkSink } from '../stream.ts'
 import type { SlashCommand } from '../slashPrompt.ts'
-import { createTranscriptStore } from './store.ts'
+import { createTranscriptStore, toolsOf, type TranscriptStore } from './store.ts'
 import { useTranscript } from './useSyncStore.ts'
 import { Transcript } from './components/Transcript.tsx'
 import { useTerminalSize } from './useTerminalSize.ts'
 import { clampLive, liveBudgetRows, liveCapEnabled } from './liveRegion.ts'
 import { StatusBar, type ReplMode } from './components/StatusBar.tsx'
-import { Banner } from './components/Banner.tsx'
 import { InputBox } from './components/InputBox.tsx'
+import { FrameWidth } from './wrap.ts'
 import { Confirm, type ConfirmRequest } from './components/Confirm.tsx'
 import { ApprovalMenu, type ApprovalRequest } from './components/ApprovalMenu.tsx'
 import type { ApprovalResult } from '../../autonomy/governor.ts'
 import { Picker, type PickerRequest } from './components/Picker.tsx'
 import { TextPrompt, type TextPromptRequest } from './components/TextPrompt.tsx'
 import { WorkingIndicator } from './components/WorkingIndicator.tsx'
-import { WorkspacePanel } from './components/WorkspacePanel.tsx'
+import { WorkspacePanel, runPlanFromWorkers, type RunStep } from './components/WorkspacePanel.tsx'
+import { isInternalNudge } from './phases.ts'
 import { HelpOverlay } from './components/HelpOverlay.tsx'
 import { ErrorBoundary } from './components/ErrorBoundary.tsx'
 import { activeTodoList, type TodoItem } from '../../autonomy/todoList.ts'
 import { loadLessons } from '../../autonomy/lessons.ts'
 import { taskSessions, type TaskSession } from '../../taskSessions.ts'
 import type { PickerOption } from '../picker.ts'
-import type { ToolItem } from './store.ts'
-import { rollupLine, rollupTools } from './toolSummary.ts'
+import { rollupLine, rollupTools, toolActivity } from './toolSummary.ts'
 import { palette } from './theme.ts'
 import { repoLabel } from './gitInfo.ts'
 import { estimateTokens } from '../../compaction.ts'
 import { looksLikeImageAttachmentLine } from '../../attachments.ts'
 import { compactionThresholdFor, contextWindowFor } from '../../contextWindow.ts'
-import { sessionUsageSnapshot, estimateCostUsd } from '../../usage.ts'
 import { codexContextTokens } from '../../providers/codexSubscription.ts'
 import type { ChatMessage } from '../../providers/types.ts'
 
@@ -53,6 +53,8 @@ export interface TurnHooks {
   planMode: boolean
   /** Drained by the agent loop at each step boundary — operator guidance typed mid-run. */
   drainSteering(): string[]
+  /** An escalated run's approved steps — the plan panel ticks each off as its worker finishes. */
+  onRunPlan?(steps: RunStep[]): void
 }
 
 export interface SlashPickerRequest {
@@ -141,18 +143,53 @@ export function planReceipt(items: TodoItem[]): string {
   ].join('\n')
 }
 
-/** Progress belongs in the single live status line; only durable outcomes enter scrollback. */
+/**
+ * Progress belongs in the single live status line; only durable outcomes enter
+ * scrollback. A plan never does: its checklist lives in the live plan panel and
+ * a receipt closes the turn — printing it into scrollback as well showed every
+ * plan twice, the first copy flattened onto one line.
+ */
 export function shouldPersistActivity(activity: import('../../providers/types.ts').ProviderActivity): boolean {
+  if (activity.kind === 'plan') return false
   return activity.status === 'completed' || activity.status === 'failed' || activity.status === 'warning' || activity.kind === 'warning'
 }
 
 export function App(props: AppProps) {
   const { exit } = useApp()
   const { write: writeStdout } = useStdout()
-  const store = useRef(createTranscriptStore()).current
+  const repo = useMemo(() => repoLabel(), [])
+  // What earlier runs taught elia about this project — surfaced once, in the
+  // header, so the operator can see what's being carried in. See
+  // docs/terminal-ui-redesign-plan.md WS4.
+  const lessonCount = useMemo(() => {
+    try {
+      return loadLessons().length
+    } catch {
+      return 0
+    }
+  }, [])
+  // Where this session runs — the status row already carries repo ⎇ branch.
+  const location = useMemo(() => {
+    const cwd = process.cwd()
+    const home = homedir()
+    return home && cwd.toLowerCase().startsWith(home.toLowerCase()) ? `~${cwd.slice(home.length)}` : cwd
+  }, [])
+  const printHeader = (target: TranscriptStore) =>
+    target.header({ version: props.version, greeting: props.greeting, location, lessons: lessonCount })
+  // The header is the first scrollback item — printed once through <Static>,
+  // so it stays put at the top instead of vanishing (and re-flowing the frame)
+  // the moment the first message is sent.
+  const storeRef = useRef<TranscriptStore | null>(null)
+  if (!storeRef.current) {
+    storeRef.current = createTranscriptStore()
+    printHeader(storeRef.current)
+  }
+  const store = storeRef.current
   const snap = useTranscript(store)
   // `/clear` moves the REPL onto a new session id; the fleet panel follows it.
   const [sessionId, setSessionId] = useState(props.sessionId)
+  const sessionIdRef = useRef(sessionId)
+  sessionIdRef.current = sessionId
   // Bumped by `/clear` to remount <Static>: it tracks how many items it has
   // already printed, so an emptied-then-refilled list would otherwise skip the
   // first new items.
@@ -195,6 +232,12 @@ export function App(props: AppProps) {
   const [turnStartedAt, setTurnStartedAt] = useState(0)
   const [plan, setPlan] = useState<TodoItem[]>([])
   const [providerPlan, setProviderPlan] = useState<TodoItem[]>([])
+  // An escalated run's approved steps; their status comes from the workers.
+  // The ref is what the turn-end receipt reads: a passive effect syncing it
+  // could still be pending when the turn's `finally` runs, which dropped the
+  // receipt under load.
+  const [runSteps, setRunSteps] = useState<RunStep[]>([])
+  const runStepsRef = useRef<RunStep[]>([])
   // The plan as the running turn last showed it — read when the turn ends, after
   // its state updates may not have rendered yet.
   const turnPlan = useRef<TodoItem[]>([])
@@ -239,7 +282,6 @@ export function App(props: AppProps) {
     return next
   }
 
-  const usage = sessionUsageSnapshot()
   const env = props.getEnv()
 
   // Deep handlers (slash commands, provider fallback) still call writeNotice/
@@ -248,7 +290,15 @@ export function App(props: AppProps) {
   useEffect(() => {
     setInkSink((kind, text) => {
       if (kind === 'error') store.error(text)
-      else if (busyRef.current) setStatus(text.split('\n', 1)[0] ?? '')
+      // elia's notes to itself about the model ("told the model to stop
+      // re-reading files") would only overwrite what is really happening.
+      else if (isInternalNudge(text)) return
+      // A tool line or progress title from a deep layer: the status row only.
+      else if (kind === 'status') {
+        if (busyRef.current) setStatus(text.split('\n', 1)[0] ?? '')
+      }
+      // Mid-turn, a one-liner is progress; a multi-line notice is content.
+      else if (busyRef.current && !text.includes('\n')) setStatus(text)
       else store.notice(text)
     })
     return () => setInkSink(undefined)
@@ -373,7 +423,7 @@ export function App(props: AppProps) {
           store.thinkingDelta(d)
         },
         onActivity: (a) => {
-          setStatus(a.title)
+          if (!isInternalNudge(a.title)) setStatus(a.title.replace(/^◆\s*/, ''))
           if (a.kind === 'plan') {
             const parsed = providerPlanItems(a.detail)
             if (parsed.length > 0) {
@@ -406,7 +456,7 @@ export function App(props: AppProps) {
           store.toolEnd(e)
         },
         onToolStart: (c) => {
-          setStatus(`Running ${c.name}`)
+          setStatus(toolActivity(c))
           store.toolStart(c)
         },
         approve: (req) =>
@@ -422,6 +472,12 @@ export function App(props: AppProps) {
           if (pending.length > 0) setStatus('Steering applied')
           return pending
         },
+        onRunPlan: (steps) => {
+          runStepsRef.current = steps
+          setRunSteps(steps)
+          setPlan([])
+          setProviderPlan([])
+        },
       }
       try {
         await props.submitTurn(text, hooks)
@@ -429,10 +485,15 @@ export function App(props: AppProps) {
         store.error(`Error: ${error instanceof Error ? error.message : String(error)}`)
       } finally {
         abortRef.current = null
-        const tools = store.turnItems().filter((i): i is ToolItem => i.kind === 'tool')
+        const tools = toolsOf(store.turnItems())
         if (tools.length > 2) {
           const line = rollupLine(rollupTools(tools))
-          if (line) store.notice(`⏺ ${line}`)
+          if (line) store.notice(line)
+        }
+        // An escalated run's plan, read fresh from the workers as the turn ends.
+        if (runStepsRef.current.length > 0) {
+          turnPlan.current = runPlanFromWorkers(runStepsRef.current, taskSessions.list(), sessionIdRef.current)
+          runStepsRef.current = []
         }
         // A plan-mode turn's plan is a proposal waiting on Enter — it stays up.
         if (turnPlan.current.length > 0 && modeRef.current !== 'plan') {
@@ -440,6 +501,7 @@ export function App(props: AppProps) {
           setPlan([])
           setProviderPlan([])
         }
+        setRunSteps([])
         store.commit()
         busyRef.current = false
         setBusy(false)
@@ -565,6 +627,7 @@ export function App(props: AppProps) {
             // conversation put in the transcript and panels.
             writeStdout('\x1b[2J\x1b[3J\x1b[H')
             store.reset()
+            printHeader(store)
             setTranscriptEpoch((n) => n + 1)
             setPlan([])
             setProviderPlan([])
@@ -596,15 +659,16 @@ export function App(props: AppProps) {
         if (live.providerName !== 'codex' && mode === 'manual') {
           setBusy(true)
           setTurnStartedAt(Date.now())
-          setStatus('Checking whether this needs confirmation…')
-          const { risky, reason } = await props.classifyRisk(trimmed).catch((error) => {
-            store.error(`Risk check failed — asking to be safe: ${error instanceof Error ? error.message : String(error)}`)
-            return { risky: true, reason: 'risk check failed — asking to be safe' }
-          })
+          setStatus('Checking the request')
+          // A pre-check that fails is not a verdict. In manual mode every risky
+          // action is still put to you one at a time by the approval menu, so an
+          // unreachable classifier lets a harmless message through instead of
+          // greeting it with an error and a y/n prompt.
+          const { risky, reason } = await props.classifyRisk(trimmed).catch(() => ({ risky: false, reason: undefined }))
           if (risky) {
             setBusy(false)
             setStatus('')
-            const ok = await ask('This looks risky', [reason ?? '', `About to: ${trimmed}`])
+            const ok = await ask('This request looks risky', [reason ?? '', `About to: ${trimmed}`])
             if (!ok) {
               store.notice('Skipped.')
               store.commit()
@@ -646,17 +710,6 @@ export function App(props: AppProps) {
     [busy, mode, props, store, runOne, exit, writeStdout],
   )
 
-  const repo = useMemo(() => repoLabel(), [])
-  // What earlier runs taught elia about this project — surfaced once, on the
-  // home screen, so the operator can see what's being carried in. See
-  // docs/terminal-ui-redesign-plan.md WS4.
-  const lessonCount = useMemo(() => {
-    try {
-      return loadLessons().length
-    } catch {
-      return 0
-    }
-  }, [])
   // In ChatGPT-subscription mode Elia's own `messages` array stays near-empty
   // (Codex keeps the real transcript in its thread), so meter against Codex's
   // reported prompt size and its model's real window instead.
@@ -669,7 +722,10 @@ export function App(props: AppProps) {
     () => (isCodex ? contextWindowFor(env.model) : compactionThresholdFor(env.model)),
     [isCodex, env.model],
   )
-  const visiblePlan = plan.length > 0 ? plan : providerPlan
+  // An escalated run's plan, ticked from its workers — the report sink never
+  // carried step progress, so this panel used to show no plan at all there.
+  const runPlan = useMemo(() => runPlanFromWorkers(runSteps, agents, sessionId), [runSteps, agents, sessionId])
+  const visiblePlan = runPlan.length > 0 ? runPlan : plan.length > 0 ? plan : providerPlan
   // An approval / confirm is a modal state: freeze the live panels behind it so
   // a background repaint can't corrupt the menu and the user sees only what the
   // decision is about. The transcript (append-only) and the menu itself stay.
@@ -682,8 +738,15 @@ export function App(props: AppProps) {
     store.error(`UI: the ${area} failed to render — ${error.message}`)
   }, [store])
 
+  // Never let a row reach the terminal's last column. A line that fills it
+  // exactly leaves the cursor in the "pending wrap" state, which Windows
+  // consoles resolve differently from how Ink counts rows — the next repaint
+  // then erases one row too few and the frame smears into scrollback.
+  const frameWidth = Math.max(20, termSize.columns - 1)
+
   return (
-    <Box flexDirection="column">
+    <FrameWidth.Provider value={frameWidth}>
+    <Box flexDirection="column" width={frameWidth}>
       <ErrorBoundary area="transcript" onError={boundaryError}>
         <Transcript
           key={transcriptEpoch}
@@ -691,35 +754,27 @@ export function App(props: AppProps) {
           live={clampedLive?.items ?? snap.live}
           hiddenRows={clampedLive?.hiddenRows ?? 0}
           expandedAll={expandedAll}
+          width={frameWidth}
         />
       </ErrorBoundary>
 
-      {snap.committed.length === 0 && snap.live.length === 0 && (
-        <Box flexDirection="column" marginTop={1}>
-          <Banner version={props.version} />
-          <Box marginTop={1}>
-            <Text color={palette.muted}>{props.greeting}</Text>
-          </Box>
-          {lessonCount > 0 && (
-            <Text color={palette.accent}>
-              ✦ carrying {lessonCount} lesson{lessonCount === 1 ? '' : 's'} from past runs here <Text color={palette.muted}>· /lessons</Text>
-            </Text>
-          )}
-        </Box>
-      )}
-
-      {!modalOpen && (
+      {/* The plan and the workers are "right now" — once the turn is over the
+          receipt in scrollback is the record, and a leftover "3 workers · 3
+          done" parked above the input only competes with it. */}
+      {!modalOpen && (busy || planReady || visiblePlan.length > 0) && (
         <ErrorBoundary area="workspace panel" onError={boundaryError}>
           <WorkspacePanel plan={visiblePlan} agents={agents} since={sessionStartedAt} sessionId={sessionId} />
         </ErrorBoundary>
       )}
       {previewUrl && !modalOpen && (
         <Box marginTop={1}>
-          <Text color={palette.toolName}>▸ Preview </Text>
-          <Text underline color={palette.accent}>
-            {previewUrl}
+          <Text wrap="truncate-end">
+            <Text color={palette.muted}>Preview </Text>
+            <Text underline color={palette.code}>
+              {previewUrl}
+            </Text>
+            <Text color={palette.muted}> · reloads as files change</Text>
           </Text>
-          <Text color={palette.muted}> · live-reloading as files change</Text>
         </Box>
       )}
       {busy && !modalOpen && <WorkingIndicator startedAt={turnStartedAt} status={status} steeringPending={steeringCount} />}
@@ -731,10 +786,9 @@ export function App(props: AppProps) {
       {planReady && !busy && (
         <Box marginTop={1}>
           <Text>
-            <Text color={palette.success} bold>
-              ✓ Plan ready.
-            </Text>{' '}
-            <Text color={palette.success}>Enter</Text> to execute · <Text color={palette.muted}>Esc / k to keep planning</Text>
+            <Text color={palette.success}>● </Text>
+            <Text bold>Plan ready</Text>
+            <Text color={palette.muted}> — enter to run it · esc to keep planning</Text>
           </Text>
         </Box>
       )}
@@ -749,10 +803,10 @@ export function App(props: AppProps) {
           disabled={confirm !== null || approval !== null || picker !== null || textPrompt !== null || planReady || showHelp}
           placeholder={
             busy
-              ? 'working — type to steer elia now · / ! wait for the turn to finish · Esc to stop'
+              ? 'Type to steer elia · esc to stop'
               : mode === 'plan'
-                ? 'PLAN MODE — describe the task; elia researches & proposes, then you approve.  Tab to exit'
-                : 'Ask elia…   Tab = plan mode · / commands · ! shell · Ctrl+C quit'
+                ? 'Describe the task — elia will research and propose a plan first'
+                : 'Ask anything, or type / for commands'
           }
           onSubmit={onSubmit}
           onInterrupt={() => {
@@ -768,9 +822,6 @@ export function App(props: AppProps) {
             mode={mode}
             contextTokens={contextTokens}
             contextLimit={contextLimit}
-            sessionInput={usage.usage.inputTokens + usage.usage.cacheReadTokens}
-            sessionOutput={usage.usage.outputTokens}
-            costUsd={estimateCostUsd(env.model, usage.usage)}
             providerName={env.providerName}
             busy={busy}
             queued={queue.length}
@@ -781,5 +832,6 @@ export function App(props: AppProps) {
         </ErrorBoundary>
       </Box>
     </Box>
+    </FrameWidth.Provider>
   )
 }

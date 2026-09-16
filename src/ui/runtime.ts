@@ -13,9 +13,18 @@ export const uiMode: UiMode =
       ? 'quiet'
       : requestedMode === 'verbose' || hasArg('--verbose')
         ? 'verbose'
-        : requestedMode === 'plain' || hasArg('--plain') || hasArg('--no-color') || Boolean(process.env.NO_COLOR)
+        : requestedMode === 'plain' || hasArg('--plain')
           ? 'plain'
           : 'normal'
+
+/**
+ * `NO_COLOR` / `--no-color` mean exactly what they say: no colour. They used to
+ * also switch the whole UI to `plain`, which on a real terminal meant the old
+ * readline REPL instead of the live one — and `NO_COLOR` is set by plenty of
+ * hosts (editor terminals, agent shells) the user never chose. `--plain` is the
+ * one switch for the line-mode UI.
+ */
+export const colorless = hasArg('--no-color') || Boolean(process.env.NO_COLOR)
 
 export const machineReadable = uiMode === 'json'
 export const plainOutput = uiMode === 'plain' || uiMode === 'quiet' || machineReadable

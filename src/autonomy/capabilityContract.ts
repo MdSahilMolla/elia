@@ -33,7 +33,7 @@ const CATALOG: CapabilityContract[] = [
     .map((tool) => contract(tool, 'safe', ['workspace-read'], true, 'bounded local observation')),
   ...['web_search', 'web_fetch', 'paper'].map((tool) => contract(tool, 'safe', ['network-read'], true, 'dated source or fetched response')),
   ...['visualize', 'finance', 'data_science', 'sports', 'fitness'].map((tool) => contract(tool, 'safe', ['workspace-read'], true, 'deterministic result or generated artifact')),
-  ...['write_file', 'edit_file', 'lsp_refactor', 'todo_write', 'note_lesson', 'record_rationale', 'causal_fix', 'causal_verify', 'cross_project_learn', 'self_healing_monitor', 'federated_collab', 'board_post']
+  ...['write_file', 'edit_file', 'delete_file', 'lsp_refactor', 'todo_write', 'note_lesson', 'record_rationale', 'causal_fix', 'causal_verify', 'cross_project_learn', 'self_healing_monitor', 'federated_collab', 'board_post']
     .map((tool) => contract(tool, 'review', ['workspace-write'], false, 'written artifact and postcondition')),
   contract('run_command', 'review', ['process'], false, 'exit status, bounded output, and declared postcondition'),
   contract('run_program', 'review', ['process'], false, 'exit status, bounded output, and declared postcondition'),

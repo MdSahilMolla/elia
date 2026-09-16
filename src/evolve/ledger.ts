@@ -27,8 +27,16 @@ export interface Metrics {
   /** Which task ids passed — needed to detect a regression that a tied pass rate would hide. */
   passed: string[]
   failed: string[]
+  /** Tasks with no verdict (provider or environment failure); absent on older records. */
+  unmeasured?: string[]
   /** Model round-trips per task, so efficiency hypotheses can cite actual activation evidence. */
   steps?: Record<string, number>
+  /**
+   * Fraction of attempts each measured task passed, when the benchmark ran each
+   * task more than once (ELIA_BENCH_REPEATS). Absent on single-run records,
+   * where `passed`/`failed` already are the rates.
+   */
+  taskRates?: Record<string, number>
   totalTokens: number
   totalElapsedMs: number
   /** User-visible suite duration when benchmark tasks run in parallel. */
@@ -57,6 +65,10 @@ export interface GenerationRecord {
   reason: string
   /** Model used for the attempt, so records stay comparable across model upgrades. */
   model: string
+  /** The furthest gate this generation got through (see strategy.ts FUNNEL); absent on older records. */
+  funnel?: import('./strategy.ts').FunnelStage
+  /** The search strategy that steered the proposal; absent on records from before strategies were state. */
+  strategyId?: string
 }
 
 export function appendGeneration(record: GenerationRecord, path = LEDGER_PATH): void {

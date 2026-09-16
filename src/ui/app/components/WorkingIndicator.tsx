@@ -3,9 +3,14 @@ import { Box, Text } from 'ink'
 import { Spinner } from './Spinner.tsx'
 import { palette } from '../theme.ts'
 
-const VERBS = ['Thinking', 'Working', 'Pondering', 'Digging', 'Wiring things up', 'Reticulating']
+/** `12s`, `3m04s`, `~14m` — precise while it matters, coarse once it doesn't. */
+export function formatClock(seconds: number): string {
+  if (seconds < 60) return `${seconds}s`
+  if (seconds < 300) return `${Math.floor(seconds / 60)}m${String(seconds % 60).padStart(2, '0')}s`
+  return `~${Math.floor(seconds / 60)}m`
+}
 
-/** The "still working" line: spinner · elapsed · a rotating verb (or the live status). */
+/** The one "still working" line: spinner · what is happening · (elapsed · esc to interrupt). */
 export function WorkingIndicator({ startedAt, status, steeringPending = 0 }: { startedAt: number; status?: string; steeringPending?: number }) {
   const [, force] = useState(0)
   useEffect(() => {
@@ -32,24 +37,23 @@ export function WorkingIndicator({ startedAt, status, steeringPending = 0 }: { s
   }, [startedAt])
 
   const seconds = Math.floor((Date.now() - startedAt) / 1000)
-  const clock =
-    seconds < 60
-      ? `${seconds}s`
-      : seconds < 300
-        ? `${Math.floor(seconds / 60)}m${String(seconds % 60).padStart(2, '0')}s`
-        : `~${Math.floor(seconds / 60)}m`
-  const label = status?.trim() || VERBS[Math.floor(seconds / 4) % VERBS.length]
+  const label = (status?.trim() || 'Working').replace(/[.…]+$/, '')
 
+  // The label gives way first: a long status truncates, the clock and the
+  // "esc to interrupt" hint never do.
   return (
     <Box marginTop={1}>
-      <Spinner color={palette.accent} />
-      <Text color={palette.muted}>
-        {' '}
-        {label} · {clock} · esc to interrupt
-      </Text>
-      {steeringPending > 0 && (
-        <Text color={palette.accent}> · {steeringPending} steering queued (folds in at the next step)</Text>
-      )}
+      <Box width={2} flexShrink={0}>
+        <Spinner />
+      </Box>
+      <Box flexShrink={1}>
+        <Text wrap="truncate-end">{label}…</Text>
+      </Box>
+      <Box flexShrink={0}>
+        <Text color={palette.muted}>
+          {' '}({formatClock(seconds)} · esc to interrupt{steeringPending > 0 ? ` · ${steeringPending} steering queued` : ''})
+        </Text>
+      </Box>
     </Box>
   )
 }

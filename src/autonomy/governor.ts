@@ -28,6 +28,12 @@ export interface ActionGateResult {
   allowed: boolean
   message?: string
   assessment: ActionAssessment
+  /**
+   * Refused because there is no approval channel at all (unattended, no
+   * terminal). No person was asked and none can be later in this run, so the
+   * refusal is a policy block — not a decision left waiting on someone.
+   */
+  noApprover?: boolean
 }
 
 /**
@@ -91,7 +97,7 @@ const REMOTE_SHELL_COMMAND = /\b(docker\s+(?:build|run)|ssh|scp)\b/i
 // by EXTERNAL_WRITE_COMMAND further down; this catches the bare GET form.)
 const REMOTE_FETCH_COMMAND = /^(?:\S+=\S+\s+)*(?:command\s+)?(?:curl|wget)\b/i
 const REVIEW_COMMAND = /\b(git\s+commit|gh\s+pr|deploy\b)\b/i
-const READ_ONLY_COMMAND = /^(?:command\s+)?(?:pwd|ls|find|grep|rg|git\s+(?:status|diff|log|show|branch)|(?:bun|npm|pnpm|yarn)\s+(?:test|run\s+(?:test|typecheck|type-check|tsc|check-types|lint|format\s+--check|check))|npx\s+(?:--no-install\s+)?tsc\s+--noEmit|cargo\s+(?:check|test|clippy)|go\s+(?:build|test|vet)\b[^\n]*|mvn\s+(?:-[^\s]+\s+)*(?:compile|test-compile|test)\b[^\n]*|(?:\.\/)?gradlew(?:\.bat)?\s+(?:build|test|check|compileJava|compileTestJava)\b[^\n]*|gradle\s+(?:build|test|check|compileJava|compileTestJava)\b[^\n]*|ctest\b[^\n]*|pytest\b[^\n]*|mypy\b[^\n]*|node\s+--version|bun\s+--version|npm\s+--version|printf|echo|cat|head|tail|sed|awk)\b/i
+const READ_ONLY_COMMAND = /^(?:command\s+)?(?:pwd|ls|find|grep|rg|git\s+(?:status|diff|log|show|branch)|(?:bun|npm|pnpm|yarn)\s+(?:test|run\s+(?:test|typecheck|type-check|tsc|check-types|lint|format\s+--check|check))|npx\s+(?:--no-install\s+)?tsc\s+--noEmit|cargo\s+(?:check|test|clippy)|go\s+(?:build|test|vet)\b[^\n]*|mvn\s+(?:-[^\s]+\s+)*(?:compile|test-compile|test)\b[^\n]*|(?:\.\/)?gradlew(?:\.bat)?\s+(?:build|test|check|compileJava|compileTestJava)\b[^\n]*|gradle\s+(?:build|test|check|compileJava|compileTestJava)\b[^\n]*|ctest\b[^\n]*|pytest\b[^\n]*|mypy\b[^\n]*|node\s+--version|bun\s+--version|npm\s+--version|printf|echo|cat|head|tail|sed|awk|dir|type|findstr)\b/i
 // `sed`/`awk` are allowed above only for their plain print-to-stdout form.
 // Both also support in-place file rewriting (`sed -i`, `sed --in-place`,
 // `awk -i inplace`) which overwrites the target file — a write, not a read.
@@ -124,6 +130,14 @@ const DESTRUCTIVE_SHELL_VERBS = /\b(?:rm|mv|cp|mkdir|touch|chmod|chown|kill|shut
 const SHELL_SIDE_EFFECT = /[<>]/i
 const INTERNAL_SAFE_TOOLS = new Set(['flag_risk', 'submit_route', 'submit_proposal', 'submit_verdict', 'submit_acceptance', 'revise_plan', 'submit_assumptions', 'submit_lessons', 'delegate_tasks'])
 export const MAX_GOVERNED_ACTIONS = 10_000
+
+/**
+ * Roles whose workers get no write tools — `canWrite: false` in roles.ts. Kept
+ * here as a literal because importing roles.ts would pull the tool registry
+ * (and with it the `task` tool, which imports this module) into a cycle;
+ * governor.test.ts fails if the two lists drift.
+ */
+export const READ_ONLY_ROLES: ReadonlySet<string> = new Set(['scout', 'designer', 'accessibility', 'critic', 'security', 'bughunter'])
 
 export function assessAction(request: ActionRequest, cwd = currentAgent().cwd ?? process.cwd()): ActionAssessment {
   const { name, input } = request
@@ -253,7 +267,7 @@ export function assessAction(request: ActionRequest, cwd = currentAgent().cwd ??
     return assessment('critical', 'approve', `browser ${action} changes page state and needs an authorization record`, `browser.${action}`, resources, false)
   }
 
-  if (name === 'write_file' || name === 'edit_file' || name === 'lsp_refactor') {
+  if (name === 'write_file' || name === 'edit_file' || name === 'lsp_refactor' || name === 'delete_file') {
     const path = typeof input.path === 'string' ? input.path : ''
     const outside = path.length === 0 || !isPathWithinWorkspace(path, cwd)
     return outside
@@ -455,6 +469,15 @@ export function assessAction(request: ActionRequest, cwd = currentAgent().cwd ??
     return assessment('review', 'approve', 'engagement_report compiles a workspace-local Markdown report from logged findings', 'engagement_report', resources, true)
   }
 
+  // A read-only worker (a scout researching, a critic reviewing) cannot change
+  // anything itself, and every action it takes still passes this governor on
+  // its own — so approving the hand-off added a prompt that guarded nothing.
+  // It was the first thing a "build me an app" request showed: "Start a
+  // subagent?" before any plan existed. Writers still ask.
+  if (name === 'task' && READ_ONLY_ROLES.has(typeof input.role === 'string' ? input.role : 'builder')) {
+    return assessment('safe', 'allow', 'a read-only subagent; each action it takes is still checked on its own', 'task.read-only', resources, true)
+  }
+
   if (name === 'preview' || name === 'task') {
     return assessment('review', 'approve', `${name} can create an external process or delegate work`, name, resources, true)
   }
@@ -629,6 +652,7 @@ export function createActionGovernor(options: { mode?: GovernanceMode; approve?:
           allowed: false,
           assessment: { ...assessment, decision: 'block' },
           message: `Action blocked by Elia’s unattended policy: ${assessment.reason}. No terminal is attached, so there is nobody to ask.`,
+          noApprover: true,
         }
       }
       if (assessment.risk === 'review' && mode === 'unattended' && !OUTBOUND_REVIEW_INTENTS.has(assessment.intent)) {

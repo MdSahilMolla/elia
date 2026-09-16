@@ -61,16 +61,21 @@ function renameDestination(path: string): string {
 }
 
 /** One line per changed file, so a reviewer can open anything the diff omitted. */
-export function renderChangedFiles(files: ChangedFile[]): string {
-  if (files.length === 0) return '(no files changed against HEAD)'
+export function renderChangedFiles(files: ChangedFile[], base = 'HEAD'): string {
+  if (files.length === 0) return `(no files changed against ${base})`
   return files.map((file) => `- ${file.path} (+${file.added} −${file.removed})`).join('\n')
 }
 
 export interface ReviewDiffOptions {
-  /** Raw `git diff HEAD` output. */
+  /** Raw `git diff <base>` output. */
   diff: string
-  /** Raw `git diff --numstat HEAD` output. */
+  /** Raw `git diff --numstat <base>` output. */
   numstat: string
+  /**
+   * The commit the diff was taken against — where the run's own work began, so
+   * work its waves already committed is still in it. Defaults to HEAD.
+   */
+  base?: string
   limit?: number
 }
 
@@ -86,14 +91,16 @@ export function buildReviewDiffSection(options: ReviewDiffOptions): ReviewDiffSe
   const diff = options.diff.trim()
   const files = parseNumstat(options.numstat)
   const truncated = diff.length > limit
+  const base = !options.base || options.base === 'HEAD' ? 'HEAD' : options.base.slice(0, 7)
 
-  const body = diff ? clampOutput(diff, limit) : '(no diff against HEAD — check git status below)'
+  const body = diff ? clampOutput(diff, limit) : `(no diff against ${base} — check git status below)`
 
   const sections = [
     `## Files changed (${files.length})`,
-    renderChangedFiles(files),
+    renderChangedFiles(files, base),
     '',
-    `## What actually changed (git diff HEAD)${truncated ? ' — TRUNCATED' : ''}`,
+    `## What actually changed (git diff ${base})${truncated ? ' — TRUNCATED' : ''}`,
+    ...(base === 'HEAD' ? [] : [`Everything since ${base}, where this run's work began — including what it has already committed.`]),
     body,
   ]
 
