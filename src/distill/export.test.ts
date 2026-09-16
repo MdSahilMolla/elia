@@ -40,7 +40,7 @@ test('only work a real check passed becomes an example', () => {
 })
 
 test('selection dedupes identical work, counts every rejection, and redacts on the way out', () => {
-  const secret = 'sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789'
+  const secret = 'sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789'  // pragma: allowlist secret
   const rows = [
     row({ corr: 'a', touched: [{ path: 'src/k.ts', before: null, after: `const key = '${secret}'` }] }),
     row({ corr: 'b', touched: [{ path: 'src/k.ts', before: null, after: `const key = '${secret}'` }] }),
