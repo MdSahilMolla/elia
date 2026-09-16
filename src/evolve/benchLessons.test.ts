@@ -39,5 +39,9 @@ test('a history task never sees a lesson written after its commit', async () => 
   )
   const block = await benchLessonBlock(spec.id, 'fix the tests', { [BENCH_LESSONS_ENV]: store })
   expect(block).not.toContain('the answer key')
-  expect(block).toContain('an old fact about the repo')
+  // A shallow clone (CI) does not have the task's commit, so its date cannot be
+  // read — and then the task gets no lessons at all rather than a guess.
+  const known = Bun.spawnSync(['git', 'cat-file', '-e', `${spec.sha}^{commit}`]).exitCode === 0
+  if (known) expect(block).toContain('an old fact about the repo')
+  else expect(block).toBe('')
 })
