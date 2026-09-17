@@ -177,8 +177,8 @@ test('governor: a denial with feedback surfaces the operator guidance', async ()
 
 // A2-09: the persisted allow-file records a "never ask again" for a command
 // class — a grant of authority — so it must carry owner-only permissions, not
-// world-readable defaults.
-test('the allow-file is written with owner-only permissions', () => {
+// world-readable defaults. Windows has no POSIX mode bits to assert on.
+test.if(process.platform !== 'win32')('the allow-file is written with owner-only permissions', () => {
   const dir = project()
   addAllowRule(ruleFor({ name: 'run_command', input: { command: 'bun test' } }, assessAction({ name: 'run_command', input: { command: 'bun test' } }, dir)), 'project', dir)
   const mode = statSync(allowPath('project', dir)).mode & 0o777

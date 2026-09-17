@@ -145,7 +145,8 @@ test('a hyphenated intent (like the governor actually emits) can be granted', ()
   expect(isPreauthorized('github.pr_merge', repoDir, 'main')).toBe(true)
 })
 
-test('the grant store is written with owner-only permissions', () => {
+// Windows has no POSIX mode bits to assert on.
+test.if(process.platform !== 'win32')('the grant store is written with owner-only permissions', () => {
   grantPreauth(['deployment.production'], repoDir, 'main')
   const mode = statSync(preauthPath()).mode & 0o777
   expect(mode).toBe(0o600)

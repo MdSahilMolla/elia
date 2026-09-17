@@ -4,7 +4,7 @@ import { commandMayReadSensitiveData } from './sensitivePaths.ts'
 import { pauseToolSpinner, resumeToolSpinner } from '../ui/stream.ts'
 import { applyPolicy } from './policy.ts'
 import { addAllowRule, canPersistPrefixRule, isAllowlisted, ruleFor, type AllowScope } from './allowStore.ts'
-import { consumePreauth, currentBranch, isPreauthorized } from './preauth.ts'
+import { consumePreauth, currentBranch, isPreauthorized, preauthPath } from './preauth.ts'
 import { approveSelfEditFile, needsSelfEditApproval, SELF_EDIT_INTENT, selfEditLabel, selfEditRefusal, setSelfEditAllowed } from './selfEdit.ts'
 import { resolve as resolvePath } from 'node:path'
 
@@ -95,12 +95,17 @@ const CRITICAL_COMMAND = /\b(rm\s+-rf|rm\s+--no-preserve-root|mkfs|dd\s+if=|shut
 // Package-manager installs run arbitrary build scripts (setup.py, postinstall,
 // prebuild) on the host as the current user. A package a model installs is
 // supply-chain code by definition.
-const CODE_EXEC_COMMAND = /\b(pip3?\s+install|npm\s+(?:add|install|i|ci)|pnpm\s+(?:add|install|i|ci)|yarn\s+(?:(?:global|dlx)\s+)?(?:add|install|set\s+version)|bun\s+(?:add|install|i))\b/i
+// Start-anchored (like REMOTE_FETCH_COMMAND below) so a command that merely
+// mentions these verbs as an argument — `echo npm install later` — is not
+// misclassified; only the command actually being run counts. `sudo` is an
+// allowed prefix modifier (it still runs the named verb, just elevated), not
+// an arbitrary preceding word.
+const CODE_EXEC_COMMAND = /^(?:\S+=\S+\s+)*(?:command\s+)?(?:sudo\s+)?(?:pip3?\s+install|npm\s+(?:add|install|i|ci)|pnpm\s+(?:add|install|i|ci)|yarn\s+(?:(?:global|dlx)\s+)?(?:add|install|set\s+version)|bun\s+(?:add|install|i))\b/i
 // Docker build/run/exec/compose/deploy and scp/rsync/rcp/sftp execute arbitrary
 // code (RUN steps, container entrypoint, remote shell) with the ability to
 // mount the host filesystem or devices, or move data across a network. None of
-// these are local or reversible.
-const REMOTE_SHELL_COMMAND = /\b(?:docker\s+(?:build|run|exec|compose|rm|push|deploy)|ssh|scp|rsync|rcp|sftp)\b/i
+// these are local or reversible. Start-anchored for the same reason as above.
+const REMOTE_SHELL_COMMAND = /^(?:\S+=\S+\s+)*(?:command\s+)?(?:sudo\s+)?(?:docker\s+(?:build|run|exec|compose|rm|push|deploy)|ssh|scp|rsync|rcp|sftp)\b/i
 // Bare curl/wget are an unvalidated data channel: even a plain GET rides data
 // out of the machine in the query string, and wget writes an arbitrary
 // downloaded file to disk. The model has the URL-validated, response-bounded
@@ -665,7 +670,7 @@ const decide = async (request: ActionRequest): Promise<ActionGateResult> => {
           actionCount += 1
           return {
             allowed: true,
-            assessment: { ...assessment, decision: 'allow', reason: `${assessment.reason} (pre-authorized: ~/.elia/preauth.json grant for "${assessment.intent}", use #${grant?.usedCount ?? '?'})` },
+            assessment: { ...assessment, decision: 'allow', reason: `${assessment.reason} (pre-authorized: ${preauthPath()} grant for "${assessment.intent}", use #${grant?.usedCount ?? '?'})` },
           }
         }
         return {
