@@ -6,7 +6,7 @@ import { createMarkdownStream, type MarkdownStream } from './markdown.ts'
 import { registerShutdownCleanup } from './shutdown.ts'
 import type { ProviderActivity } from '../providers/types.ts'
 import { visualizationTerminalPreview } from '../tools/visualize.ts'
-import { toolActivity } from './app/toolSummary.ts'
+import { shortUrl, toolActivity } from './app/toolSummary.ts'
 
 const REPLY_MARKER = `${boldGold('●')} `
 
@@ -379,11 +379,49 @@ function summarizeReadFile(result: string): string {
   return more ? `${lineCount} lines shown, ${more[1]} more` : `${lineCount} line${lineCount === 1 ? '' : 's'}`
 }
 
+/**
+ * A finished browser call in one row.
+ *
+ * The raw result is a JSON blob plus a trailing task-session id, so the generic
+ * "first meaningful line" fallback rendered a lone `{` under every browser card.
+ * What is actually worth the row is where the browser ended up and what it saw.
+ */
+export function summarizeBrowserResult(result: string): string {
+  // The tool appends its own "Task session: <id>" line to every result. It is a
+  // handle for the task dashboard, not something the transcript row should spend
+  // its width on.
+  const body = result.replace(/^Task session:.*$/gm, '').trim()
+  const brace = body.indexOf('{')
+  const close = body.lastIndexOf('}')
+  if (brace !== -1 && close > brace) {
+    try {
+      const parsed: unknown = JSON.parse(body.slice(brace, close + 1))
+      if (parsed && typeof parsed === 'object') {
+        const record = parsed as Record<string, unknown>
+        const title = typeof record.title === 'string' ? record.title.trim() : ''
+        const url = typeof record.url === 'string' ? record.url.trim() : ''
+        const text = typeof record.text === 'string' ? record.text.replace(/\s+/g, ' ').trim() : ''
+        const where = [title, url && shortUrl(url)].filter(Boolean).join(' — ')
+        // An extract has no title and its text *is* the answer; a snapshot has
+        // both, and there the page it landed on matters more than the prose.
+        if (where && text && !title) return `${where} — ${text.slice(0, 120)}`
+        if (where) return where
+        if (text) return text.slice(0, 160)
+      }
+    } catch {
+      // Not JSON after all — fall through to the first readable line.
+    }
+  }
+  const first = body.split(/\r?\n/).map((line) => line.trim()).find(Boolean) ?? ''
+  return first === '{}' ? 'done' : first
+}
+
 const RESULT_SUMMARIZERS: Record<string, (result: string) => string> = {
   run_command: summarizeShellResult,
   list_files: summarizeFileList,
   grep: summarizeGrep,
   read_file: summarizeReadFile,
+  browser: summarizeBrowserResult,
 }
 
 export function summarizeResult(name: string, result: string): string {

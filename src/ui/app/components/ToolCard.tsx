@@ -1,5 +1,6 @@
 import { Box, Text } from 'ink'
 import { Spinner } from './Spinner.tsx'
+import { BrowserMotion } from './BrowserMotion.tsx'
 import { glyphs, palette } from '../theme.ts'
 import type { ToolItem } from '../store.ts'
 import { activeVerb, exploreSummary, summarizeTool } from '../toolSummary.ts'
@@ -179,6 +180,11 @@ export function ToolCard({ tool, expanded }: { tool: ToolItem; expanded: boolean
           </Text>
         </Box>
       </Box>
+      {/* The one tool whose running state carries information worth drawing: which
+          browser action is in flight, and that it has not stalled. */}
+      {running && tool.name === 'browser' && (
+        <BrowserMotion action={typeof tool.input.action === 'string' ? tool.input.action : undefined} />
+      )}
       {!running && <ToolBody tool={tool} expanded={expanded} isShell={isShell} isEdit={isEdit} target={s.target} />}
     </Box>
   )

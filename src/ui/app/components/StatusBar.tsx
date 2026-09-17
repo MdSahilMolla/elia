@@ -44,6 +44,11 @@ export interface StatusBarProps {
   repo?: string
   /** Under 80 columns: drop the repo label, keep model · context. */
   narrow?: boolean
+  /**
+   * Set only for a session on elia's own source: whether it may change that
+   * source. Only "on" is shown — like the mode, the default earns no label.
+   */
+  selfEdit?: boolean
 }
 
 /** Context use only earns space once it is worth watching. */
@@ -78,6 +83,7 @@ export function StatusBar(props: StatusBarProps) {
           ) : (
             <Text color={palette.muted}>? for shortcuts</Text>
           )}
+          {props.selfEdit ? <Text color={palette.warning}> · self-edit on</Text> : null}
           {extras.length > 0 ? <Text color={palette.muted}> · {extras.join(' · ')}</Text> : null}
         </Text>
       </Box>

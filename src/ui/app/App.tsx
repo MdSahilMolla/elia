@@ -25,6 +25,7 @@ import { HelpOverlay } from './components/HelpOverlay.tsx'
 import { ErrorBoundary } from './components/ErrorBoundary.tsx'
 import { activeTodoList, type TodoItem } from '../../autonomy/todoList.ts'
 import { loadLessons } from '../../autonomy/lessons.ts'
+import { selfEditGuard } from '../../autonomy/selfEdit.ts'
 import { taskSessions, type TaskSession } from '../../taskSessions.ts'
 import type { PickerOption } from '../picker.ts'
 import { rollupLine, rollupTools, toolActivity } from './toolSummary.ts'
@@ -917,6 +918,7 @@ export function App(props: AppProps) {
             steering={steeringCount}
             repo={repo}
             narrow={termSize.narrow}
+            selfEdit={selfEditGuard()?.allowed}
           />
         </ErrorBoundary>
         )}

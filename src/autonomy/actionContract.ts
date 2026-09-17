@@ -3,6 +3,7 @@ import { basename } from 'node:path'
 import type { ActionRequest } from './governor.ts'
 import { isPathWithinWorkspace, resolveWorkspacePath } from './context.ts'
 import { isLongRunningServerCommand, shellCommandAlternative } from '../shell.ts'
+import { useOwnedBrowserByDefault } from '../tools/browserOwned.ts'
 
 export type ContractFailureDisposition = 'retryable' | 'human-review'
 export type ContractCheckKind = 'command-available' | 'browser-transport' | 'workspace-path' | 'shell-exit-zero' | 'result-contains' | 'result-url-prefix'
@@ -149,9 +150,19 @@ export async function evaluatePreconditions(contract: ActionContract, cwd: strin
   const evidence: string[] = []
   for (const check of contract.preconditions) {
     if (check.kind === 'browser-transport') {
-      const configured = Boolean(environment.ELIA_BROWSER_MCP_SERVER || environment.ELIA_BROWSER_BRIDGE_COMMAND || environment.ELIA_BROWSER_CDP_URL)
-      if (configured) evidence.push('browser transport configured; login, reachability, and authorization remain unverified')
-      else failures.push('no browser transport configured; configure an enabled user-Chrome connector, trusted bridge, or CDP endpoint')
+      // This used to test the three bridge variables and nothing else, which
+      // was the whole transport story when it was written. It stopped being so
+      // once `browser` grew a fourth branch: with no user bridge configured it
+      // launches and drives its own headless Chromium (see browserOwned.ts).
+      // The gate runs ahead of the tool, so a machine with Chrome installed and
+      // no bridge set — the common case — had every browser call refused with
+      // "no browser transport configured" by a check standing in front of a
+      // transport that was available the entire time. Ask the same predicate
+      // the tool itself uses rather than re-deriving a narrower one here.
+      const bridged = Boolean(environment.ELIA_BROWSER_MCP_SERVER || environment.ELIA_BROWSER_BRIDGE_COMMAND || environment.ELIA_BROWSER_CDP_URL)
+      if (bridged) evidence.push('browser transport configured; login, reachability, and authorization remain unverified')
+      else if (useOwnedBrowserByDefault(environment)) evidence.push("no user bridge configured; elia's own headless browser will be launched on demand, with no login state of its own")
+      else failures.push('no browser transport configured, and no usable browser to fall back on: set ELIA_BROWSER_MCP_SERVER, ELIA_BROWSER_BRIDGE_COMMAND, or ELIA_BROWSER_CDP_URL, install a Chromium-family browser, or clear ELIA_BROWSER=off')
       continue
     }
     if (check.kind === 'command-available') {

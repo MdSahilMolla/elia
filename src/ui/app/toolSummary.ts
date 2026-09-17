@@ -50,6 +50,63 @@ export function shellExitStat(result: string | undefined): string {
   return code ? `exit ${code[1]}` : ''
 }
 
+/**
+ * A browser call's header verb, past tense — "Clicked Publish", "Read the page".
+ *
+ * Without this, every browser call fell through to the `default:` branch, which
+ * prints the tool name and the first string it can find in the input:
+ * `browser https://example.com`, with no hint of whether that was a navigation,
+ * a click or a console read. For this tool the action *is* the content of the
+ * call, so it belongs in the verb rather than nowhere.
+ */
+const BROWSER_VERB: Record<string, string> = {
+  status: 'Checked the browser',
+  navigate: 'Opened',
+  refresh: 'Reloaded',
+  back: 'Went back',
+  forward: 'Went forward',
+  snapshot: 'Read the page',
+  extract: 'Extracted',
+  click: 'Clicked',
+  type: 'Typed into',
+  press: 'Pressed',
+  scroll: 'Scrolled',
+  wait: 'Waited',
+  wait_for: 'Waited for',
+  verify: 'Verified',
+  console: 'Read the console',
+  network: 'Read network activity',
+}
+
+/** Host and path without the scheme — the part of a URL worth one transcript row. */
+export function shortUrl(raw: string): string {
+  try {
+    const url = new URL(raw)
+    return `${url.host}${url.pathname === '/' ? '' : url.pathname}${url.search}`
+  } catch {
+    return raw
+  }
+}
+
+/**
+ * What a browser action acted on.
+ *
+ * `type` deliberately reports the field and never the text. The governor already
+ * redacts browser.type text from its own records because it is where a password
+ * or a token gets entered; printing it in the transcript instead would defeat
+ * that from two rows away.
+ */
+function browserTarget(action: string, input: Record<string, unknown>): string {
+  if (action === 'navigate') return shortUrl(firstString(input, 'url') ?? '')
+  if (action === 'click') return firstString(input, 'target') ?? ''
+  if (action === 'type') return firstString(input, 'target') ?? 'the focused field'
+  if (action === 'press') return firstString(input, 'key') ?? ''
+  if (action === 'extract' || action === 'wait_for') return firstString(input, 'selector', 'expectText') ?? ''
+  if (action === 'scroll') return firstString(input, 'direction') ?? 'down'
+  if (action === 'verify') return firstString(input, 'expectText', 'expectUrl', 'selector') ?? ''
+  return ''
+}
+
 export interface ToolSummary {
   verb: string
   target: string
@@ -96,6 +153,10 @@ export function summarizeTool(tool: ToolItem): ToolSummary {
         stat: done ? shellExitStat(tool.result) : '',
         expandable: done,
       }
+    }
+    case 'browser': {
+      const action = (firstString(input, 'action') ?? 'status').toLowerCase()
+      return { verb: BROWSER_VERB[action] ?? 'Browsed', target: browserTarget(action, input), stat, expandable: done }
     }
     case 'web_search':
       return { verb: 'Searched the web', target: firstString(input, 'query') ?? '', stat, expandable: done }
@@ -151,6 +212,23 @@ const ACTIVE_VERB: Record<string, string> = {
   'Delegated to': 'Delegating to',
   'Updated the plan': 'Updating the plan',
   Visualized: 'Visualizing',
+  Opened: 'Navigating to',
+  Reloaded: 'Reloading',
+  'Went back': 'Going back',
+  'Went forward': 'Going forward',
+  'Read the page': 'Reading the page',
+  Extracted: 'Extracting',
+  Clicked: 'Clicking',
+  'Typed into': 'Typing into',
+  Pressed: 'Pressing',
+  Scrolled: 'Scrolling',
+  Waited: 'Waiting',
+  'Waited for': 'Waiting for',
+  Verified: 'Verifying',
+  'Read the console': 'Reading the console',
+  'Read network activity': 'Reading network activity',
+  'Checked the browser': 'Checking the browser',
+  Browsed: 'Browsing',
 }
 
 /** "Ran" → "Running": the verb for a call that has not finished yet. */
