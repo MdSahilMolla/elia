@@ -6,6 +6,7 @@ import { SESSIONS_DIR } from './session.ts'
 import { ensureSecureDirectory, hardenSecureFile, writeSecureBunFile } from './securePersistence.ts'
 import { clearAllCaches } from './cacheRegistry.ts'
 import { withFileLockAsync } from './fileLock.ts'
+import { assertSelfEditAllowed } from './autonomy/selfEdit.ts'
 
 /**
  * Per-turn checkpoints for the interactive session: enough to put both the
@@ -110,8 +111,14 @@ export function setActiveTracker(tracker: FileTracker | undefined): void {
   activeTracker = tracker
 }
 
-/** Called by write_file/edit_file just before they touch a file. No-op with no active tracker. */
+/**
+ * Called by every file tool just before it touches a file. Snapshots the file
+ * for the active turn (no-op with no tracker) — and, being the one step every
+ * write shares, is where a session running on elia's own source refuses a
+ * write to it while self-edit is off (see autonomy/selfEdit.ts).
+ */
 export async function captureBeforeWrite(path: string): Promise<void> {
+  assertSelfEditAllowed(path)
   await activeTracker?.capture(path)
 }
 

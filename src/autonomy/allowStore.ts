@@ -137,6 +137,9 @@ function directProgramPrefix(input: Record<string, unknown>): string {
 }
 
 function matches(rule: AllowRule, request: ActionRequest, assessment: ActionAssessment): boolean {
+  // "Always allow changes to elia's own source" means every file tool, not only
+  // the one that happened to ask.
+  if (rule.intent === 'self_edit') return assessment.intent === 'self_edit'
   if (rule.tool !== request.name) return false
   const command = shellCommandOf(request)
   if (command !== undefined) {
@@ -174,6 +177,7 @@ export function ruleFor(request: ActionRequest, assessment: ActionAssessment): A
 /** A short human label for what a rule covers — for the approval menu. */
 export function ruleLabel(rule: AllowRule): string {
   if (rule.commandPrefix) return `\`${rule.commandPrefix}\` commands`
+  if (rule.intent === 'self_edit') return "changes to elia's own source"
   return `\`${rule.tool}\``
 }
 

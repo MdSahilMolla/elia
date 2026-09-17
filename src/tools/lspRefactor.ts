@@ -4,6 +4,7 @@ import type { Tool } from './types.ts'
 import { captureBeforeWrite } from '../checkpoint.ts'
 import { currentAgent, isPathWithinWorkspace, resolveWorkspacePath } from '../autonomy/context.ts'
 import { isSensitivePath } from '../autonomy/sensitivePaths.ts'
+import { assertSelfEditAllowed } from '../autonomy/selfEdit.ts'
 import { listCodeActions, renameSymbol } from '../lsp/registry.ts'
 import { applyWorkspaceEdit } from '../lsp/applyEdit.ts'
 import { noteFileRead } from './fileAccess.ts'
@@ -34,6 +35,9 @@ function assertEditWithinWorkspace(edit: WorkspaceEdit, cwd: string): void {
     if (!isPathWithinWorkspace(path, cwd) || isSensitivePath(path)) {
       throw new Error(`Refusing to apply an edit outside the active workspace or to a protected path: ${path}`)
     }
+    // Checked for every file up front: captureBeforeWrite would refuse too, but
+    // only after the files before it in the edit had already been rewritten.
+    assertSelfEditAllowed(path)
   }
 }
 
