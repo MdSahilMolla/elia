@@ -73,6 +73,7 @@ const REPL_COMMANDS: SlashCommand[] = [
   { name: '/artifact', description: 'browse saved plan artifacts' },
   { name: '/verify', description: 'run project checks · /verify on|off' },
   { name: '/auto', description: 'auto-escalate big builds to the autonomous pipeline · /auto on|off' },
+  { name: '/self', description: "stop asking before elia changes its own source · /self on|off" },
   { name: '/cost', description: 'token & cost breakdown' },
   { name: '/usage', description: 'live token consumption, context & limits' },
   { name: '/status', description: 'session, plan, subagents, artifacts' },
@@ -125,7 +126,7 @@ function requestedAgentMode(): AgentMode {
   return 'dev'
 }
 
-const SUBCOMMANDS = ['auto', 'agent', 'evolve', 'gap', 'values', 'distill', 'compounding', 'bench', 'bench-latency', 'skills', 'runs', 'fork', 'resume', 'schedule', 'daemon', 'doctor', 'config', 'codex-login', 'control', 'bridge', 'workspace'] as const
+const SUBCOMMANDS = ['auto', 'agent', 'evolve', 'gap', 'values', 'distill', 'compounding', 'jev', 'bench', 'bench-latency', 'skills', 'runs', 'fork', 'resume', 'schedule', 'daemon', 'doctor', 'config', 'codex-login', 'control', 'bridge', 'workspace'] as const
 type Subcommand = (typeof SUBCOMMANDS)[number]
 
 function printHelp(): void {
@@ -137,6 +138,8 @@ Usage:
   elia --continue, -c         Resume the most recent session in this directory
   elia --resume <id>          Resume a specific session by id
   elia --no-escalate          Never auto-route a big "build me an X" request through the autonomous pipeline
+  elia --self                 Started inside elia's own repository, change elia's source without asking
+                              (by default elia asks first there, for anything outside workspace/ and .elia/)
 
 Dev mode (default): elia is the general-purpose development mode for building,
 debugging, testing, refactoring, and operating software. A request that reads as
@@ -448,7 +451,8 @@ function createInteractiveApprover(rl: readline.Interface) {
 }
 
 /** The approval menu's heading — the question, in words, not the tool's id. */
-function approvalTitle(toolName: string): string {
+function approvalTitle(toolName: string, intent?: string): string {
+  if (intent === 'self_edit') return toolName === 'delete_file' ? "Delete a file from elia's own source?" : "Change elia's own source?"
   switch (toolName) {
     case 'run_command':
       return 'Run this command?'
@@ -921,10 +925,61 @@ async function runBenchLatency(): Promise<void> {
 async function runCompounding(): Promise<void> {
   const { compoundingStatus, renderCompoundingStatus } = await import('./compounding/status.ts')
   const { readLibrary, renderLibrary } = await import('./reason/library.ts')
+  const { coverageOf, recentCoverage, renderCoverage } = await import('./reason/coverage.ts')
+  const { loadOutcomes } = await import('./autonomy/outcomes.ts')
   const stages = compoundingStatus()
   const library = readLibrary()
-  if (machineReadable) emitEvent('compounding_status', { stages, reasoning: library.records })
-  else writeUsageLine(`${renderCompoundingStatus(stages)}\n\n${renderLibrary(library)}`)
+  const outcomes = loadOutcomes()
+  const coverage = { lifetime: coverageOf(outcomes), recent: recentCoverage(outcomes) }
+  if (machineReadable) emitEvent('compounding_status', { stages, reasoning: library.records, coverage })
+  else writeUsageLine([renderCompoundingStatus(stages), renderCoverage(coverage.lifetime, coverage.recent), renderLibrary(library)].join('\n\n'))
+}
+
+/**
+ * `elia jev` — how Jev, the optional System One judge, is scoring against elia's
+ * own decisions. `elia jev ping` checks the key; `elia jev bench` scores it on
+ * the planted-defect corpus, where the right answers are known.
+ */
+async function runJev(): Promise<void> {
+  const { jevEnabled, askJev } = await import('./providers/jev.ts')
+  const { readLedger, summarize, renderSummary } = await import('./reason/systemOne.ts')
+  const action = positionals()[0] ?? 'status'
+  if (action !== 'status' && !jevEnabled()) {
+    writeNotice('Jev is off — set ELIA_JEV_API_KEY (in your environment or .env) to enable it.')
+    process.exitCode = 1
+    return
+  }
+  if (action === 'ping') {
+    const result = await askJev({ observation: 'The sky is blue on a clear day.' }, { outcome: { type: 'noul', instructions: 'The observation is true.' } }, { timeoutMs: 10_000 })
+    if (result?.ok) writeUsageLine(`✓ Jev answered in ${result.latencyMs}ms: ${JSON.stringify(result.answers)}`)
+    else {
+      writeUsageLine(`✗ Jev did not answer: ${result?.error ?? 'not configured'}`)
+      process.exitCode = 1
+    }
+    return
+  }
+  if (action === 'bench') {
+    const { runSystemOneBench } = await import('./reason/systemOneBench.ts')
+    const rows = await runSystemOneBench({
+      onRow: (row) => {
+        const r = row.result
+        const expected = row.variant === 'clean'
+        const mark = r?.ok === undefined ? '!' : r.ok === expected ? '✓' : '✗'
+        const said = r?.ok === undefined ? 'no answer' : `${r.ok ? 'correct' : 'defect'} (${Math.round((r.confidence ?? 0) * 100)}%)`
+        writeUsageLine(`  ${mark} ${row.defectId} · ${row.variant.padEnd(9)} → ${said}`)
+      },
+    })
+    const answered = rows.filter((row) => row.result?.ok !== undefined)
+    const right = answered.filter((row) => row.result!.ok === (row.variant === 'clean')).length
+    writeUsageLine(`\n${right}/${answered.length} right${rows.length > answered.length ? `, ${rows.length - answered.length} unanswered` : ''}`)
+  } else if (action !== 'status') {
+    writeNotice('Usage: elia jev [status|ping|bench]')
+    process.exitCode = 1
+    return
+  }
+  const summaries = summarize(readLedger())
+  if (machineReadable) emitEvent('jev_status', { enabled: jevEnabled(), summaries })
+  else writeUsageLine(`\n${renderSummary(summaries)}`)
 }
 
 async function runEvolve(): Promise<void> {
@@ -933,6 +988,21 @@ async function runEvolve(): Promise<void> {
   if (generations === undefined || generations < 1) {
     writeError('--generations must be a positive integer.')
     process.exitCode = 1
+    return
+  }
+
+  // `elia evolve --explain` — print the real-world evidence the proposer will
+  // be shown, and stop. Before the provider check on purpose: it costs no model
+  // call and writes nothing, so it works when `evolve` itself cannot run at all.
+  // That matters more than it sounds. With no provider credit the baseline
+  // measurement leaves every task unmeasured and `evolve()` returns before a
+  // single line of the brief is built, so `--dry-run` can never show this. And
+  // "nobody could see what the proposer sees" is the root cause of the loop
+  // having run twice and promoted nothing.
+  if (hasFlag('--explain')) {
+    const { fieldEvidenceSection } = await import('./evolve/fieldEvidence.ts')
+    const section = fieldEvidenceSection().trim()
+    writeUsageLine(section || 'No field evidence yet — this project has no audited tool calls on record.')
     return
   }
 
@@ -2113,6 +2183,19 @@ async function runInteractive(): Promise<void> {
   // turn wing a twenty-file scaffold. On by default in dev mode; --no-escalate
   // or /auto off. Targeted edits and questions always stay on the fast path.
   let autoEscalate = !hasFlag('--no-escalate')
+  // Answer work that has something executable to check by trying it several
+  // different ways at once — each in its own worktree — and keeping the one a
+  // real check passes, instead of committing to whichever line of attack the
+  // model happened to open with. See src/reason/. The library decides how wide
+  // to go per kind of work and starts at a single attempt, so this costs what a
+  // plain turn costs until it has evidence that going wider pays. On by
+  // default; --no-search or /search off.
+  let reasonSearch = !hasFlag('--no-search')
+  // Started inside elia's own checkout, a session asks before it changes elia —
+  // see autonomy/selfEdit.ts. --self, ELIA_SELF_EDIT=1, or /self on skip the
+  // question. Anywhere else this arms nothing.
+  const selfEdit = await import('./autonomy/selfEdit.ts')
+  selfEdit.armSelfEditGuard(process.cwd(), hasFlag('--self') || selfEdit.selfEditFromEnv())
   // Output from `!cmd` lines, held until the next real prompt so the model sees
   // what the user just ran without an extra round-trip.
   const carriedShellContext: string[] = []
@@ -2343,6 +2426,123 @@ async function runInteractive(): Promise<void> {
   }
 
   /**
+   * Whether this request is worth answering by search rather than by one
+   * attempt, and with what to check the attempts against.
+   *
+   * Runs on every turn, so it never calls a model: `taskSignature` is regexes
+   * over the request and `detectChecks` is a look at the project's manifest.
+   * Undefined means "answer it the ordinary way", which is the answer for
+   * questions, for work with nothing executable to check, and for anything the
+   * classifier is unsure of — a search that cannot be judged is just a
+   * three-times-more-expensive guess.
+   */
+  async function planSearch(requestText: string): Promise<{ signature: import('./reason/signature.ts').TaskSignature; checks: import('./reason/reason.ts').ProjectChecks } | undefined> {
+    const { detectChecks } = await import('./autonomy/detectChecks.ts')
+    const { decideSearch } = await import('./reason/decide.ts')
+    // Nothing has changed yet, so there are no changed paths to infer a project
+    // from the way the post-turn gate does — the project that would check this
+    // turn's work is simply the one owning the working tree.
+    return decideSearch(requestText, detectChecks(process.cwd())).plan
+  }
+
+  /**
+   * Answers a request by searching: several genuinely different attempts, each
+   * in its own git worktree, each checked by something that ran, and only the
+   * winner merged into the user's tree.
+   *
+   * Modelled on `runEscalatedTurn` above, which is the existing precedent for a
+   * turn handled by a different engine: it owns the whole turn, pushes the
+   * reply into `messages` itself so the conversation stays coherent, and hands
+   * back a verify verdict for the turn record.
+   *
+   * The verdict it returns is the search's own, and the caller must not run the
+   * post-turn verify gate over the top of it — the winner was chosen *by* that
+   * check, so re-running it would spend the same commands to learn the same
+   * thing.
+   */
+  async function runSearchedTurn(
+    requestText: string,
+    plan: { signature: import('./reason/signature.ts').TaskSignature; checks: import('./reason/reason.ts').ProjectChecks },
+    /** This turn's file tracker, so the merged files land in the turn record and in a rewind. */
+    tracker: { capture(path: string): Promise<void> },
+    signal: AbortSignal,
+    uiHooks?: TurnUiHooks,
+  ): Promise<{ verify: import('./autonomy/outcomes.ts').VerifyResult; attempts: number }> {
+    const { isolatedSearch } = await import('./reason/attempt.ts')
+    const { subAgentRunner } = await import('./reason/runner.ts')
+    const { reason } = await import('./reason/reason.ts')
+
+    const note = (title: string, detail?: string, status: 'updated' | 'completed' | 'warning' = 'updated') => {
+      if (uiHooks?.onActivity) uiHooks.onActivity({ kind: 'status', status, title, detail })
+      else writeNotice(detail ? `${title}\n${detail}` : title)
+    }
+
+    const runId = `search-${Date.now().toString(36)}`
+    const search = isolatedSearch({
+      runId,
+      sourceRoot: process.cwd(),
+      run: subAgentRunner({ request: requestText, runId }),
+    })
+
+    try {
+      const outcome = await reason({
+        request: requestText,
+        checks: plan.checks,
+        produce: search.produce,
+        signal,
+        onAttempt: (record) => {
+          note(
+            `${record.verdict.passed ? '✓' : '✗'} attempt "${record.candidate.approach}" — ${record.verdict.detail}`,
+            record.verdict.passed ? undefined : record.verdict.evidence.split('\n')[0],
+            record.verdict.passed ? 'completed' : 'warning',
+          )
+        },
+      })
+
+      // `searched: false` can still happen here — the library may have found no
+      // harness for this signature — and the caller falls back to a plain turn.
+      if (!outcome.searched || !outcome.result) {
+        await search.settle(undefined)
+        return { verify: 'none', attempts: 0 }
+      }
+
+      // Snapshot what the winner touched *before* the merge overwrites it —
+      // afterwards the tracker would capture the new content and a rewind would
+      // restore nothing. See `changedBy` in reason/attempt.ts.
+      if (outcome.result.best) {
+        const { resolve } = await import('node:path')
+        for (const relative of await search.changedBy(outcome.result.best)) {
+          await tracker.capture(resolve(process.cwd(), relative)).catch(() => {})
+        }
+      }
+      const merged = await search.settle(outcome.result.best)
+      const report = outcome.result.best?.text ?? 'The search produced no answer.'
+      // The model sees the winning attempt's own report, so a follow-up turn
+      // knows what was done; the receipt is for the person and says plainly
+      // whether it was proved or merely chosen.
+      messages.push({ role: 'assistant', content: [{ type: 'text', text: report }] })
+      sessionTranscript.appendAssistant(report)
+      sessionTranscript.notice(`Search: ${outcome.receipt} · ${outcome.choice ?? ''} · merged ${merged.length} file(s)`)
+      note(
+        `${outcome.harness?.id} search over ${outcome.result.attempts.length} attempt(s) — ${outcome.receipt}`,
+        merged.length > 0 ? `merged ${merged.length} file(s) from the winning attempt` : 'nothing was merged',
+        outcome.result.verified ? 'completed' : 'warning',
+      )
+      if (uiHooks?.onText) uiHooks.onText(report)
+      else writeUsageLine(report)
+
+      return {
+        verify: outcome.result.verified ? 'pass' : outcome.result.bestVerdict?.passed ? 'skipped' : 'fail',
+        attempts: outcome.result.attempts.length,
+      }
+    } finally {
+      // A thrown search must not leave worktrees behind holding the user's
+      // branch namespace; settle is safe to call twice.
+      await search.settle(undefined).catch(() => {})
+    }
+  }
+
+  /**
    * `/attach <path>` — queue an image for the next prompt. No arg lists what's
    * queued; `/attach clear` empties the queue. Pasting or dragging an image
    * path straight into a prompt works too and doesn't need this command.
@@ -2502,6 +2702,22 @@ async function runInteractive(): Promise<void> {
     const escalation = classifyEscalation(userText)
     let escalated = false
 
+    // Decided before the turn runs, because it decides *how* the turn runs.
+    // Costs nothing when it declines — regexes over the request and one look at
+    // the project manifest — and declines for everything that a second attempt
+    // could not be told apart from a first.
+    // A search merges its winning attempt by copying files straight into this
+    // tree, past the governor and the file tools' self-edit check, so it does
+    // not run while elia's own source still needs asking about.
+    const selfEditClosed = selfEdit.selfEditGuard()?.allowed === false
+    const searchPlan =
+      reasonSearch && !selfEditClosed && mode === 'dev' && !persona && !uiHooks?.planMode && !(autoEscalate && escalation.escalate)
+        ? await planSearch(userText)
+        : undefined
+    // A searched turn already chose its winner with the project's own checks;
+    // the post-turn gate must not run them a second time to learn the same thing.
+    let searched = false
+
     // `opening` marks the call that answers the user's request itself — the one
     // that thinks it through and plans up front. Repair and self-review passes
     // continue that work and must not re-plan it.
@@ -2562,6 +2778,19 @@ async function runInteractive(): Promise<void> {
         const mapped = mapCompletionToVerify(completionState)
         if (mapped.verify) verifyResult = mapped.verify
         escalatedAborted = mapped.aborted
+      } else if (searchPlan) {
+        // The search owns the whole turn: it runs the attempts, picks the
+        // winner by a check that ran, and merges only that one. A search that
+        // declined (no harness for this signature) falls through to the plain
+        // turn rather than leaving the request unanswered.
+        const outcome = await runSearchedTurn(userText, searchPlan, tracker, controller.signal, uiHooks)
+        if (outcome.attempts === 0) {
+          const turnResult = await runModelTurn(true)
+          if (turnResult.stopReason === 'aborted') stopRequested = true
+        } else {
+          searched = true
+          verifyResult = outcome.verify
+        }
       } else {
         const turnResult = await runModelTurn(true)
         if (turnResult.stopReason === 'aborted') stopRequested = true
@@ -2611,7 +2840,7 @@ async function runInteractive(): Promise<void> {
       // project's own checks pass. Detect them, run them, and hand any failure
       // back for a bounded repair — the "done!" that isn't is the single most
       // common way an autonomous agent wastes your time.
-      if (!persona && !escalated && autoVerify && !uiHooks?.planMode) {
+      if (!persona && !escalated && !searched && autoVerify && !uiHooks?.planMode) {
         const { changedCodeFiles, detectChecks, verificationRoot } = await import('./autonomy/detectChecks.ts')
         const { runVerification, describeVerification } = await import('./autonomy/verify.ts')
         const changedAll = Object.keys(tracker.snapshot())
@@ -2623,19 +2852,82 @@ async function runInteractive(): Promise<void> {
         // the undefined case has to be handled here rather than defaulted away.
         const root = verificationRoot(changedAll, process.cwd())
         const checks = root ? detectChecks(root) : []
+        // Jev, when configured, predicts whether this change passes — in
+        // parallel with the checks, scored against them afterwards. See
+        // reason/systemOne.ts for when that prediction is allowed to matter.
+        const askSystemOne = async () => {
+          if (changed.length === 0) return undefined
+          const { jevEnabled } = await import('./providers/jev.ts')
+          if (!jevEnabled()) return undefined
+          const { predict } = await import('./reason/systemOne.ts')
+          const { buildTurnDiff } = await import('./autonomy/turnDiff.ts')
+          const state = {
+            request: requestText.slice(0, 4_000),
+            agent_closing_report: lastAssistantText(messages, '(none)').slice(0, 2_000),
+            change_diff: buildTurnDiff(tracker.snapshot()).text.slice(0, 12_000),
+          }
+          // The agent stopping is its own claim that the change is done.
+          return predict('turn-verify', state, {
+            instructions: 'The change in change_diff is correct: it would pass the project\'s typecheck and tests, and it does what the request asked.',
+            criteria: {
+              true: 'The diff is complete and consistent — no syntax or type errors, no broken references, no missing pieces the request needs',
+              false: 'The diff has a bug, a type or syntax error, a broken reference, or leaves part of the request undone',
+            },
+          }, { local: true, signal: controller.signal })
+        }
         if (checks.length === 0 && changed.length > 0) {
-          // Code changed and nothing could check it. Say so — "none" used to
-          // mean both "nothing to check" and "we never looked", and a turn that
-          // reported success having verified nothing is the failure mode this
-          // whole gate exists to prevent.
-          verifyResult = 'skipped'
+          // Code changed and no command could check it. Saying so was already
+          // honest — "none" used to mean both "nothing to check" and "we never
+          // looked" — but it left a third of elia's file-changing turns with
+          // nothing having read the bytes at all. A parse is what is left when
+          // every other check is unavailable: no project, no server, no network,
+          // no model. It cannot say the code is right; it catches the writes
+          // that arrived broken, which currently ship in silence.
+          //
+          // A clean parse is deliberately NOT recorded as a pass — see
+          // reason/structural.ts. It can fail a turn and it can never pass one,
+          // so the unverified count it was built to reduce cannot be reduced by
+          // this gate scoring itself.
+          const { describeStructural, parseChangedFiles, repairBriefing } = await import('./reason/structural.ts')
           const why = root
             ? `no typecheck or test command could be inferred in ${root}`
             : 'the changed files are not inside a project (no package.json, Cargo.toml, go.mod, …)'
-          const line = `Not verified — ${why}`
+          let structural = parseChangedFiles(changedAll)
+          for (let attempt = 1; structural.broken.length > 0 && attempt <= 2 && !controller.signal.aborted; attempt += 1) {
+            repairAttempts = attempt
+            const summary = `A changed file does not parse (repair ${attempt}/2)`
+            uiHooks?.onActivity?.({ kind: 'status', status: 'warning', title: summary })
+            if (!uiHooks) writeNotice(`${summary} — ${describeStructural(structural, why)}`)
+            messages.push(userMessage(repairBriefing(structural)))
+            await runModelTurn()
+            structural = parseChangedFiles(Object.keys(tracker.snapshot()))
+          }
+          const stillBroken = structural.broken.length > 0
+          verifyResult = stillBroken ? 'fail' : 'skipped'
+          const line = stillBroken
+            ? `⚠ ${describeStructural(structural, why)} — still broken after ${repairAttempts} repair attempt(s)`
+            : describeStructural(structural, why)
           uiHooks?.onActivity?.({ kind: 'status', status: 'warning', title: line })
           if (!uiHooks) writeNotice(`▸ ${line}`)
           sessionTranscript.notice(line)
+          // Nothing executable checked this change, which is exactly where a
+          // second judge is worth the most. Jev earns the right to act here on
+          // the turns that *were* checked (the prediction above is scored
+          // there), and even then it only buys one self-review — it never marks
+          // a turn passed or failed.
+          const systemOne = !stillBroken && !controller.signal.aborted ? await askSystemOne().catch(() => undefined) : undefined
+          if (systemOne?.actionable && systemOne.ok === false) {
+            const note = `Jev doubts this change (${Math.round((systemOne.confidence ?? 0) * 100)}% confident it is wrong) — self-reviewing`
+            uiHooks?.onActivity?.({ kind: 'status', status: 'warning', title: note })
+            if (!uiHooks) writeNotice(`▸ ${note}`)
+            sessionTranscript.notice(note)
+            messages.push(
+              userMessage(
+                'An independent checker predicts, with high confidence, that this change is broken or does not do what was asked — and nothing executable was available to check it. It gives no reason and is sometimes wrong. Re-read each changed file in full against the request, fix only what you can confirm is actually wrong, and say plainly what you checked.',
+              ),
+            )
+            await runModelTurn()
+          }
         }
         if (checks.length > 0) {
           const where = root === process.cwd() ? '' : ` in ${root}`
@@ -2649,7 +2941,15 @@ async function runInteractive(): Promise<void> {
           // the model to run that exact command. Ask the way the turn asks.
           const { createActionGovernor } = await import('./autonomy/governor.ts')
           const gateGovernor = createActionGovernor({ mode: approveAction ? 'supervised' : 'unattended', approve: approveAction })
-          let outcome = await runVerification(checks, root, controller.signal, gateGovernor)
+          const [systemOne, firstOutcome] = await Promise.all([
+            askSystemOne().catch(() => undefined),
+            runVerification(checks, root, controller.signal, gateGovernor),
+          ])
+          let outcome = firstOutcome
+          if (systemOne && !outcome.blocked && !outcome.inconclusive) {
+            const { resolvePrediction } = await import('./reason/systemOne.ts')
+            resolvePrediction(systemOne.id, outcome.passed)
+          }
           sessionTranscript.notice(describeVerification(outcome))
           for (let attempt = 1; !outcome.passed && !outcome.blocked && !outcome.inconclusive && attempt <= 2 && !controller.signal.aborted; attempt += 1) {
             repairAttempts = attempt
@@ -3965,12 +4265,43 @@ async function runInteractive(): Promise<void> {
       return done(`${outcome.passed ? '✓ all checks pass' : '✗ checks failing'}\n${describeVerification(outcome)}`)
     }
 
+    const searchMatch = /^\/(?:search|reason)(?:\s+(on|off))?$/.exec(trimmed)
+    if (searchMatch) {
+      if (searchMatch[1]) {
+        reasonSearch = searchMatch[1] === 'on'
+        return done(
+          `Reasoning search ${reasonSearch ? 'on' : 'off'} — work with something executable to check ${reasonSearch ? 'is attempted several different ways in isolated worktrees, and the one a real check passes is kept' : 'runs as a single attempt'}.`,
+        )
+      }
+      // No argument: say what it would do with *this* project, which is the
+      // question anyone typing it actually has.
+      const { readLibrary, renderLibrary } = await import('./reason/library.ts')
+      const { detectChecks } = await import('./autonomy/detectChecks.ts')
+      const checks = detectChecks(process.cwd())
+      return done(
+        [
+          `Reasoning search is ${reasonSearch ? 'on' : 'off'}.`,
+          checks.length === 0
+            ? 'No project checks detected here, so a search would have nothing to judge attempts by and will decline.'
+            : `Attempts would be checked with: ${checks.join(', ')}`,
+          '',
+          renderLibrary(readLibrary()),
+        ].join('\n'),
+      )
+    }
+
     const escalateMatch = /^\/(?:auto|escalate)(?:\s+(on|off))?$/.exec(trimmed)
     if (escalateMatch) {
       if (escalateMatch[1]) autoEscalate = escalateMatch[1] === 'on'
       return done(
         `Auto-escalation ${autoEscalate ? 'on' : 'off'} — a request that reads as a whole new project ${autoEscalate ? 'routes through the autonomous pipeline (plan → workers → verify → repair)' : 'runs as a plain turn'}. Targeted edits are unaffected.`,
       )
+    }
+
+    const selfMatch = /^\/self(?:\s+(on|off))?$/.exec(trimmed)
+    if (selfMatch) {
+      if (selfMatch[1]) selfEdit.setSelfEditAllowed(selfMatch[1] === 'on')
+      return done(selfEdit.describeSelfEdit())
     }
 
     const custom = resolveCustomCommand(trimmed)
@@ -4032,7 +4363,7 @@ async function runInteractive(): Promise<void> {
           turnText,
           async (assessment, request) =>
             hooks.approve({
-              title: approvalTitle(request.name),
+              title: approvalTitle(request.name, assessment.intent),
               lines: [redactText(assessment.reason, 300)],
               preview: approvalPreviewLines(request.name, request.input),
               ruleLabel: ruleLabel(ruleFor(request, assessment)),
@@ -4308,6 +4639,12 @@ async function runInteractive(): Promise<void> {
       writeNotice(`Auto-escalation ${autoEscalate ? 'on' : 'off'} — big new-project requests ${autoEscalate ? 'route through the autonomous pipeline' : 'run as a plain turn'}.`)
       continue
     }
+    const selfClassic = /^\/self(?:\s+(on|off))?$/.exec(trimmed)
+    if (selfClassic) {
+      if (selfClassic[1]) selfEdit.setSelfEditAllowed(selfClassic[1] === 'on')
+      writeNotice(selfEdit.describeSelfEdit())
+      continue
+    }
 
     const modelMatch = /^\/model(?:\s+(.*))?$/.exec(trimmed)
     if (modelMatch) {
@@ -4568,6 +4905,8 @@ async function main() {
       return runDistill()
     case 'compounding':
       return runCompounding()
+    case 'jev':
+      return runJev()
     case 'bench':
       return runBench()
     case 'bench-latency':
