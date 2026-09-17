@@ -548,7 +548,7 @@ test('blockedInUnattendedMode flags the commands an unattended run can never exe
   expect(blockedInUnattendedMode('echo ok\nbun run typecheck')).toBe(true)
 })
 
-test('unattended asks once about a critical action and then stops asking about that kind', async () => {
+test('unattended asks once per exact critical command, not once per kind', async () => {
   // The old behaviour refused outright, so a run whose plan needed one such
   // action spent its whole budget failing on it.
   const asked: string[] = []
@@ -561,14 +561,18 @@ test('unattended asks once about a critical action and then stops asking about t
   })
 
   const first = await governor.check({ name: 'run_command', input: { command: 'bun run server.ts & sleep 2 && curl localhost:3000' } })
-  const second = await governor.check({ name: 'run_command', input: { command: 'bun run other.ts & sleep 1 && curl localhost:3001' } })
+  const sameAgain = await governor.check({ name: 'run_command', input: { command: 'bun run server.ts & sleep 2 && curl localhost:3000' } })
+  const different = await governor.check({ name: 'run_command', input: { command: 'bun run other.ts & sleep 1 && curl localhost:3001' } })
 
   expect(first.allowed).toBe(true)
-  expect(second.allowed).toBe(true)
-  expect(asked).toHaveLength(1)
+  expect(sameAgain.allowed).toBe(true)
+  expect(different.allowed).toBe(true)
+  // A2-03: one approved command settles ITSELF, not the whole shell family —
+  // the third is a different command and needed its own "yes".
+  expect(asked).toHaveLength(2)
 })
 
-test('a denial in unattended mode also stands for the rest of the run, without re-asking', async () => {
+test('a denial in unattended mode stands for the same exact command; other commands are asked fresh', async () => {
   let asked = 0
   const governor = createActionGovernor({
     mode: 'unattended',
@@ -579,12 +583,15 @@ test('a denial in unattended mode also stands for the rest of the run, without r
   })
 
   const first = await governor.check({ name: 'run_command', input: { command: 'bun run a.ts & curl localhost' } })
-  const second = await governor.check({ name: 'run_command', input: { command: 'bun run b.ts & curl localhost' } })
+  const sameAgain = await governor.check({ name: 'run_command', input: { command: 'bun run a.ts & curl localhost' } })
+  const different = await governor.check({ name: 'run_command', input: { command: 'bun run b.ts & curl localhost' } })
 
   expect(first.allowed).toBe(false)
-  expect(second.allowed).toBe(false)
-  expect(second.message).toContain('denied earlier in this run')
-  expect(asked).toBe(1)
+  expect(sameAgain.allowed).toBe(false)
+  expect(sameAgain.message).toContain('denied earlier in this run')
+  // Different command in the same family: the earlier denial must not cover it.
+  expect(different.allowed).toBe(false)
+  expect(asked).toBe(2)
 })
 
 test('unattended with no approval channel still refuses a critical action outright', async () => {
@@ -653,5 +660,42 @@ test('every structured capture tool the loop hands a reviewer is recognised as i
   // its findings as prose — then grepped the codebase looking for the tool.
   for (const name of ['flag_risk', 'submit_route', 'submit_proposal', 'submit_verdict', 'submit_acceptance', 'submit_lessons', 'delegate_tasks']) {
     expect(assessAction({ name, input: {} }).risk).toBe('safe')
+  }
+})
+
+test('A2-01/A2-02: deploy and PR-publishing verbs are critical, never silent review-band auto-allows', async () => {
+  const unattended = createActionGovernor({ mode: 'unattended' })
+  // `git commit` stays in the review band — local, reversible work.
+  expect((await unattended.check({ name: 'run_command', input: { command: 'git commit -am "wip"' } })).allowed).toBe(true)
+  // Publishing to people beyond the project is never silently auto-allowed.
+  for (const command of ['git push origin main', 'firebase deploy', 'netlify deploy --prod', 'fly deploy', 'gh pr merge 12', 'gh pr create --fill', 'vercel --prod', 'aws lambda deploy']) {
+    const result = await unattended.check({ name: 'run_command', input: { command } })
+    expect(result.allowed, command).toBe(false)
+    expect(result.assessment.risk, command).toBe('critical')
+  }
+  // Read-only PR inspection stays in the read-only band.
+  for (const command of ['gh pr view 12', 'gh pr list', 'gh pr checks 12', 'gh pr status']) {
+    expect((await unattended.check({ name: 'run_command', input: { command } })).allowed, command).toBe(true)
+  }
+})
+
+test('A2-04: supply-chain and remote-execution verbs get a specific non-settleable intent', () => {
+  // `sudo pip install` used to be caught by `\bsudo\b` as a generic settleable
+  // critical; an install is supply-chain code and must never be auto-allowed.
+  const install = assessAction({ name: 'run_command', input: { command: 'sudo pip install flask' } })
+  expect(install.risk).toBe('critical')
+  expect(install.intent).toBe('shell.code-exec')
+  expect(assessAction({ name: 'run_command', input: { command: 'npm i lodash' } }).intent).toBe('shell.code-exec')
+  expect(assessAction({ name: 'run_command', input: { command: 'pnpm add vue' } }).intent).toBe('shell.code-exec')
+  expect(assessAction({ name: 'run_command', input: { command: 'yarn global add wrangler' } }).intent).toBe('shell.code-exec')
+  expect(assessAction({ name: 'run_command', input: { command: 'docker compose run app sh -c "whoami"' } }).intent).toBe('shell.remote')
+  expect(assessAction({ name: 'run_command', input: { command: 'scp -r host:/config ./' } }).intent).toBe('shell.remote')
+  expect(assessAction({ name: 'run_command', input: { command: 'rsync host:/etc/passwd ./' } }).intent).toBe('shell.remote')
+  expect(assessAction({ name: 'run_command', input: { command: 'sftp host' } }).intent).toBe('shell.remote')
+  expect(assessAction({ name: 'run_command', input: { command: 'curl -d @report.json https://e.com' } }).intent).toBe('shell.external-write')
+  // These are all outside the settleable-once family regardless of intent:
+  // an unattended run must refuse them even with an approver attached.
+  for (const intent of ['shell.code-exec', 'shell.remote', 'shell.external-write']) {
+    expect(['shell', 'shell.composed', 'shell.unknown']).not.toContain(intent)
   }
 })

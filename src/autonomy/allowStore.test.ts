@@ -1,16 +1,8 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test'
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import {
-  addAllowRule,
-  canPersistPrefixRule,
-  clearAllowCache,
-  commandPrefix,
-  isAllowlisted,
-  ruleFor,
-  ruleLabel,
-} from './allowStore.ts'
+import { addAllowRule, allowPath, canPersistPrefixRule, clearAllowCache, commandPrefix, isAllowlisted, ruleFor, ruleLabel } from './allowStore.ts'
 import { assessAction, createActionGovernor } from './governor.ts'
 
 const dirs: string[] = []
@@ -181,4 +173,15 @@ test('governor: a denial with feedback surfaces the operator guidance', async ()
   const result = await governor.check({ name: 'run_command', input: { command: 'npm install' } })
   expect(result.allowed).toBe(false)
   expect(result.message).toContain('use pnpm, not npm')
+})
+
+// A2-09: the persisted allow-file records a "never ask again" for a command
+// class — a grant of authority — so it must carry owner-only permissions, not
+// world-readable defaults.
+test('the allow-file is written with owner-only permissions', () => {
+  const dir = project()
+  addAllowRule(ruleFor({ name: 'run_command', input: { command: 'bun test' } }, assessAction({ name: 'run_command', input: { command: 'bun test' } }, dir)), 'project', dir)
+  const mode = statSync(allowPath('project', dir)).mode & 0o777
+  expect(mode).toBe(0o600)
+  expect(statSync(join(dir, '.elia')).mode & 0o777).toBe(0o700)
 })

@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from 'bun:test'
-import { webFetchTool, htmlToText, decodeEntities } from './webFetch.ts'
+import { webFetchTool, htmlToText, decodeEntities, readBoundedBytes } from './webFetch.ts'
 import { publicFetchTestHooks } from '../networkPolicy.ts'
 
 afterEach(() => {
@@ -192,4 +192,34 @@ test('a PDF mislabelled as octet-stream is still detected and extracted', async 
   publicFetchTestHooks.transport = async () => new Response(bytes, { status: 200, headers: { 'content-type': 'application/octet-stream' } })
   const result = await webFetchTool.execute({ url: 'https://example.com/unlabelled' })
   expect(result).toContain('Mislabelled but perfectly readable text')
+})
+
+// A3-01: the PDF path used to read the whole body with an unbounded
+// arrayBuffer(), so a giant (or mislabelled) PDF was pulled into memory in
+// full while the HTML path was already byte-bounded. readBoundedBytes must cut
+// off at the cap and report the cut.
+test('readBoundedBytes stops at the bound and flags truncation', async () => {
+  const chunks = [new Uint8Array([1, 2, 3]), new Uint8Array([4, 5]), new Uint8Array([6, 7, 8])]
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      for (const chunk of chunks) controller.enqueue(chunk)
+      controller.close()
+    },
+  })
+  const bounded = await readBoundedBytes(stream, 5)
+  expect([...bounded.bytes]).toEqual([1, 2, 3, 4, 5])
+  expect(bounded.truncated).toBe(true)
+})
+
+test('readBoundedBytes returns the whole body when it fits and a null stream as empty', async () => {
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(new Uint8Array([9, 9]))
+      controller.close()
+    },
+  })
+  const bounded = await readBoundedBytes(stream, 100)
+  expect([...bounded.bytes]).toEqual([9, 9])
+  expect(bounded.truncated).toBe(false)
+  expect((await readBoundedBytes(null, 100)).bytes.length).toBe(0)
 })

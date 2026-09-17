@@ -81,9 +81,15 @@ export async function runShell(
   // unreachable) falls through to host execution — anything else the
   // sandboxed command produced, including its own failure, is returned as-is
   // rather than silently re-run outside the isolation the caller asked for.
-  if (containerSandboxRequested() && !env) {
+  //
+  // An env-scoped command runs in-process only because `runShellInContainer`
+  // lacked an env channel at all — silently dropping the sandbox for every
+  // workspace-scoped command (the audit finding A2-08). The container runner
+  // now forwards env via docker `-e`, so an env override no longer cancels
+  // the isolation.
+  if (containerSandboxRequested()) {
     try {
-      return await runShellInContainer(command, timeoutMs, cwd, signal)
+      return await runShellInContainer(command, timeoutMs, cwd, signal, env)
     } catch (err) {
       if (signal?.aborted) {
         return { command, exitCode: 1, stdout: '', stderr: 'cancelled by operator', elapsedMs: Date.now() - startedAt, timedOut: false }

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test'
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { clearPreauthCaches, consumePreauth, DEFAULT_PREAUTH_TTL_MS, grantPreauth, isPreauthorized, preauthPath } from './preauth.ts'
@@ -132,4 +132,23 @@ test('ttlMs is clamped: negative and oversized TTLs resolve to valid windows', (
   const hugeGrant = grantPreauth(['github.pr_merge'], repoDir, 'main', Infinity)[0]!
   // The clamped TTL is at most MAX_ACCEPTED_TTL_MS (8h)
   expect(hugeGrant.expiresAt - hugeGrant.grantedAt).toBeLessThanOrEqual(DEFAULT_PREAUTH_TTL_MS * 2 + 100)
+})
+
+// A2-07: hyphenated governor intents (shell.code-exec, github.pr_merge, …)
+// used to fail INTENT_PATTERN, so the governor's own `--authorize <intent>`
+// advice produced a grant that was silently dropped. A hyphen is a legal
+// intent character.
+test('a hyphenated intent (like the governor actually emits) can be granted', () => {
+  const granted = grantPreauth(['shell.code-exec', 'github.pr_merge'], repoDir, 'main')
+  expect(granted).toHaveLength(2)
+  expect(isPreauthorized('shell.code-exec', repoDir, 'main')).toBe(true)
+  expect(isPreauthorized('github.pr_merge', repoDir, 'main')).toBe(true)
+})
+
+test('the grant store is written with owner-only permissions', () => {
+  grantPreauth(['deployment.production'], repoDir, 'main')
+  const mode = statSync(preauthPath()).mode & 0o777
+  expect(mode).toBe(0o600)
+  // The store directory is owner-only too.
+  expect(statSync(preauthDir).mode & 0o777).toBe(0o700)
 })

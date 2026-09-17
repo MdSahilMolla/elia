@@ -3,7 +3,7 @@ import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { AsyncLocalStorage } from 'node:async_hooks'
 import type { Proposal } from './types.ts'
-import type { ActionRequest } from './governor.ts'
+import type { ActionRequest, GovernanceMode } from './governor.ts'
 import type { ActionContract, ContractEvaluation } from './actionContract.ts'
 import { canonicalizeCommandForIdentity } from './commandIdentity.ts'
 import { ensureSecureDirectory, hardenSecureFile, writeSecureFile } from '../securePersistence.ts'
@@ -14,6 +14,14 @@ import { capacityRetryDelayMs, isCapacityError } from '../providerErrors.ts'
 export const GOAL_GRAPH_VERSION = 2
 export const EXECUTION_LEASE_TTL_MS = 120_000
 const EXECUTION_OWNER = `${process.pid}:${randomUUID()}`
+
+/**
+ * How long an approved durable action stays valid before it must be
+ * re-approved. Mirrors the preauth grant TTL (preauth.ts): generous enough to
+ * cover a long run and any resumption within it, short enough that an approval
+ * written today cannot silently cash out a much later resume.
+ */
+export const ACTION_APPROVAL_TTL_MS = 4 * 60 * 60_000
 
 /** Whether the process that holds a node/action lease (`<pid>:<uuid>`) is still running. */
 function leaseOwnerAlive(leaseOwner: string | undefined): boolean {
@@ -79,6 +87,21 @@ export interface ApprovalRecord {
   reason?: string
   at: number
   resolvedAt?: number
+  /**
+   * The governance mode ('supervised' | 'unattended') the approval was granted
+   * under. A durable approval survives a goal-graph reopen for resumption, and
+   * it must never apply to a run in a DIFFERENT mode: consent given to a
+   * supervised session with a human at the terminal is not consent for an
+   * unattended / scheduled execution. `isActionApproved` requires an exact
+   * mode match.
+   */
+  mode?: GovernanceMode
+  /**
+   * When kind === 'action' and the approval was granted: the approval lapses
+   * after this instant. A durable "yes" is time-bounded like a preauth grant —
+   * an approval written today must not cash out a resume three weeks later.
+   */
+  expiresAt?: number
 }
 
 export interface FailureRecord {
@@ -472,7 +495,7 @@ export class GoalGraphStore {
     })
   }
 
-  requestApproval(kind: ApprovalRecord['kind'], subject: string, request?: Record<string, unknown>, reason?: string): ApprovalRecord {
+  requestApproval(kind: ApprovalRecord['kind'], subject: string, request?: Record<string, unknown>, reason?: string, mode?: GovernanceMode): ApprovalRecord {
     return this.mutate(() => {
     const existing = this.snapshot.approvals.find((approval) => approval.kind === kind && approval.subject === subject)
     if (existing) {
@@ -480,8 +503,10 @@ export class GoalGraphStore {
         existing.status = 'pending'
         existing.at = Date.now()
         existing.resolvedAt = undefined
+        existing.expiresAt = undefined
         existing.reason = reason
         existing.request = request
+        existing.mode = mode
         this.persist()
       }
       return structuredClone(existing)
@@ -494,6 +519,7 @@ export class GoalGraphStore {
       request,
       reason,
       at: Date.now(),
+      mode,
     }
     this.snapshot.approvals.push(record)
     const root = this.requireNode(this.snapshot.rootId)
@@ -512,6 +538,10 @@ export class GoalGraphStore {
     record.reason = reason ?? record.reason
     record.resolvedAt = Date.now()
     if (record.kind === 'action') {
+      // Time-bound the durable "yes" so a resumed run cannot cash out an
+      // approval written long ago (or one written in a different mode — the
+      // mode check in isActionApproved handles that half).
+      if (approved) record.expiresAt = Date.now() + ACTION_APPROVAL_TTL_MS
       const action = this.snapshot.actions.find((item) => item.idempotencyKey === record.subject)
       if (action) {
         action.state = approved ? 'planned' : 'blocked'
@@ -544,9 +574,21 @@ export class GoalGraphStore {
     return this.snapshot.approvals.filter((approval) => approval.status === 'pending').map((approval) => structuredClone(approval))
   }
 
-  isActionApproved(request: ActionRequest, nodeId = this.snapshot.rootId): boolean {
+  isActionApproved(request: ActionRequest, nodeId = this.snapshot.rootId, mode?: GovernanceMode): boolean {
     const subject = actionKey(this.snapshot.runId, nodeId, request)
-    return this.snapshot.approvals.some((approval) => approval.kind === 'action' && approval.subject === subject && approval.status === 'approved')
+    // Exact mode match (undefined when caller does not track it) AND unexpired:
+    // a durable approval must never apply to a different governance mode, and
+    // must never cash out past its time bound. Legacy approvals recorded
+    // before either field existed fail closed here.
+    return this.snapshot.approvals.some(
+      (approval) =>
+        approval.kind === 'action' &&
+        approval.subject === subject &&
+        approval.status === 'approved' &&
+        (mode === undefined || approval.mode === mode) &&
+        approval.expiresAt !== undefined &&
+        approval.expiresAt > Date.now(),
+    )
   }
 
   addEvidence(evidence: EvidenceRecord): EvidenceRecord {

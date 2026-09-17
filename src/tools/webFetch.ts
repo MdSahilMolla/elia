@@ -94,11 +94,16 @@ export const webFetchTool: Tool = {
         // the least useful way available: a page of mojibake that looks like
         // content. A thin extraction is reported as *why* it is thin, because
         // an empty result and a scanned document must not look alike.
-        const bytes = new Uint8Array(await response.arrayBuffer())
+        //
+        // The body is read through a byte bound just like the text path: an
+        // unbounded `arrayBuffer()` used to pull a whole multi-gigabyte PDF
+        // into memory instead of being cut off the way HTML already is.
+        const { bytes, truncated } = await readBoundedBytes(response.body, MAX_RESPONSE_CHARS * 4)
         const extracted = pdfToText(bytes)
         const thin = thinExtractionReason(extracted)
-        if (thin) return `[${url.toString()} is a PDF, but ${thin}]${extracted.text ? `\n\nWhat little text was found:\n${extracted.text}` : ''}`
-        text = extracted.text
+        const truncatedPrefix = truncated ? `[PDF body exceeded ${MAX_RESPONSE_CHARS * 4} bytes; extraction reflects only the leading part]\n\n` : ''
+        if (thin) return `${truncatedPrefix}[${url.toString()} is a PDF, but ${thin}]${extracted.text ? `\n\nWhat little text was found:\n${extracted.text}` : ''}`
+        text = truncatedPrefix + extracted.text
       } else {
         const body = response.body ? await readBoundedOutput(response.body, MAX_RESPONSE_CHARS) : ''
         // A server that mislabels a PDF as octet-stream or text/plain is common;
@@ -160,6 +165,55 @@ export function decodeEntities(text: string): string {
     }
     return NAMED_ENTITIES[name.toLowerCase()] ?? match
   })
+}
+
+/**
+ * Reads a response stream up to `maxBytes`, cancelling once the bound is hit.
+ * The text path already bounds its read (readBoundedOutput); the PDF path
+ * converts to bytes, so it needs the byte-bound twin — otherwise a giant PDF
+ * (or a mislabeled text file sniffed as PDF) is pulled into memory unbounded.
+ */
+export async function readBoundedBytes(
+  stream: ReadableStream<Uint8Array> | null,
+  maxBytes: number,
+): Promise<{ bytes: Uint8Array; truncated: boolean }> {
+  if (!stream) return { bytes: new Uint8Array(0), truncated: false }
+  const reader = stream.getReader()
+  const chunks: Uint8Array[] = []
+  let total = 0
+  let truncated = false
+  try {
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      if (value) {
+        const room = maxBytes - total
+        if (room <= 0) {
+          truncated = true
+          await reader.cancel().catch(() => {})
+          break
+        }
+        if (value.length > room) {
+          chunks.push(value.subarray(0, room))
+          total = maxBytes
+          truncated = true
+          await reader.cancel().catch(() => {})
+          break
+        }
+        chunks.push(value)
+        total += value.length
+      }
+    }
+  } finally {
+    reader.releaseLock()
+  }
+  const bytes = new Uint8Array(total)
+  let offset = 0
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset)
+    offset += chunk.length
+  }
+  return { bytes, truncated }
 }
 
 export function htmlToText(html: string): string {

@@ -87,6 +87,17 @@ export async function runVerification(
   const runnable = commands.filter((command) => !isLongRunningServerCommand(command))
   const skipped = commands.filter(isLongRunningServerCommand)
 
+  // Nothing was declared at all (or the command list is empty): there is no
+  // evidence gate here, and a pass would be "verified" having verified
+  // nothing. An empty verification is an unverified change, not a green one.
+  if (runnable.length === 0 && skipped.length === 0) {
+    return {
+      passed: false,
+      results: [],
+      inconclusive: 'no verification commands were declared to run — there is nothing proving this change',
+    }
+  }
+
   // Every declared check was a server: nothing here can prove anything, so
   // report it the same way a shell-rejected command is reported. The caller
   // already recognises that shape (`isUnrunnableCommandFailure`) and falls back

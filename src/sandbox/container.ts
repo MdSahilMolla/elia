@@ -57,14 +57,23 @@ const CONTAINER_WORKDIR = '/workspace'
  * the bare host would silently discard the isolation the caller explicitly
  * asked for.
  */
-export async function runShellInContainer(command: string, timeoutMs: number, cwd?: string, signal?: AbortSignal): Promise<ShellResult> {
+export async function runShellInContainer(command: string, timeoutMs: number, cwd?: string, signal?: AbortSignal, env?: Record<string, string>): Promise<ShellResult> {
   const image = sandboxImage()
   if (!image) throw new ContainerUnavailable('ELIA_SANDBOX_IMAGE is not set — elia will not guess a sandbox image')
   if (!Bun.which('docker')) throw new ContainerUnavailable('docker is not installed or not on PATH')
 
   const workspace = cwd ?? process.cwd()
   const networkArgs = (process.env.ELIA_SANDBOX_NETWORK ?? '').trim().toLowerCase() === 'off' ? ['--network', 'none'] : []
-  const args = ['run', '--rm', '-v', `${workspace}:${CONTAINER_WORKDIR}`, '-w', CONTAINER_WORKDIR, ...networkArgs, image, 'sh', '-c', command]
+  const envArgs: string[] = []
+  if (env) {
+    for (const [key, value] of Object.entries(env)) {
+      // Skip elia's own sandbox controls so they cannot recursively re-trigger
+      // a nested sandbox decision inside the container; everything else follows.
+      if (key === 'ELIA_SANDBOX' || key === 'ELIA_SANDBOX_IMAGE' || key === 'ELIA_SANDBOX_NETWORK') continue
+      envArgs.push('-e', `${key}=${value}`)
+    }
+  }
+  const args = ['run', '--rm', '-v', `${workspace}:${CONTAINER_WORKDIR}`, '-w', CONTAINER_WORKDIR, ...envArgs, ...networkArgs, image, 'sh', '-c', command]
 
   const result = await runProcess({ executable: 'docker', args, timeoutMs, cwd: workspace, signal })
 

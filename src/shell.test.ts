@@ -73,6 +73,21 @@ test('ELIA_SANDBOX=container falls back to host execution when the sandbox is un
   expect(result.stdout).toContain('elia-shell-ok')
 })
 
+test('A2-08: an env-scoped command still honors the container sandbox path, falling back only when docker cannot run it', async () => {
+  // Before the fix, `containerSandboxRequested() && !env` silently skipped the
+  // sandbox for every env-scoped command (workspace-scoped PATH overrides,
+  // node_modules .bin prepends) and ran it on the bare host instead. With no
+  // image configured the container path must be attempted and only docker's
+  // own unavailability (ContainerUnavailable) may fall back — which still
+  // completes, exactly like the no-env case above.
+  process.env.ELIA_SANDBOX = 'container'
+  delete process.env.ELIA_SANDBOX_IMAGE
+  const env = Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined))
+  const result = await runShell('echo env-scoped-sandbox-ok', 10_000, undefined, undefined, env)
+  expect(result.exitCode).toBe(0)
+  expect(result.stdout).toContain('env-scoped-sandbox-ok')
+})
+
 test('echo through the shell returns its output', async () => {
   const result = await runShell('echo elia-shell-ok', 10_000)
   expect(result.exitCode).toBe(0)

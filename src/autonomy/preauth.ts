@@ -56,7 +56,7 @@ interface PreauthFile {
 }
 
 const MAX_GRANTS = 50
-const INTENT_PATTERN = /^[a-z][a-z0-9_.]{1,80}$/
+const INTENT_PATTERN = /^[a-z][a-z0-9_.-]{1,80}$/
 /** Generous enough to cover a long unattended run; short enough that a forgotten grant doesn't linger across sessions. */
 export const DEFAULT_PREAUTH_TTL_MS = 4 * 60 * 60_000
 /**
@@ -150,8 +150,8 @@ function load(path: string): PreauthFile {
 }
 
 function save(path: string, file: PreauthFile): void {
-  mkdirSync(dirname(path), { recursive: true })
-  writeFileSync(path, `${JSON.stringify(file, null, 2)}\n`)
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 })
+  writeFileSync(path, `${JSON.stringify(file, null, 2)}\n`, { mode: 0o600 })
   cache.delete(path)
 }
 

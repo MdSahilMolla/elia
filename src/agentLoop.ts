@@ -18,7 +18,8 @@ import { spendState, spendStopPrompt } from './spendLimit.ts'
 import { SPECULABLE_TOOLS, type CacheStats, type ToolResultCache } from './speculation/cache.ts'
 import { readMemo } from './speculation/deterministicCache.ts'
 import type { Prefetcher } from './speculation/prefetch.ts'
-import { activeActionGovernor, assessAction, redactActionInput, type ActionAssessment } from './autonomy/governor.ts'
+import { activeActionGovernor, assessAction, redactActionInput, type ActionAssessment, type ActionGateResult } from './autonomy/governor.ts'
+import { applyPolicy } from './autonomy/policy.ts'
 import { activeGoalGraph, activeGoalNode, type ActionReservation, classifyFailure, isReportingTool } from './autonomy/goalGraph.ts'
 import { contractForAction, evaluatePostconditions, evaluatePreconditions, type ActionContract, type ContractEvaluation } from './autonomy/actionContract.ts'
 import { currentAgent, resolveWorkspacePath } from './autonomy/context.ts'
@@ -535,10 +536,22 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
               if (reservation) graph?.blockAction(reservation.action.id, resultText, contract.failureDisposition === 'human-review', precondition, undefined, contract)
             }
             if (!isError) {
-              const alreadyApproved = activeGoalGraph()?.isActionApproved(request, activeGoalNode()) ?? false
-              const gate = alreadyApproved
-                ? { allowed: true, assessment: { ...assessAction(request), decision: 'allow' as const } }
-                : await activeActionGovernor().check(request)
+              const governor = activeActionGovernor()
+              const alreadyApproved = activeGoalGraph()?.isActionApproved(request, activeGoalNode(), governor.mode) ?? false
+              // A durable approval funded a compatible-mode session, so this
+              // run may skip the approval channel. But the policy review is
+              // always re-run: a checked-in `.elia/policy.json` can only ever
+              // tighten, and it may have changed since the approval was
+              // granted — the durable "yes" must not ride past a fresh deny.
+              let gate: ActionGateResult
+              if (alreadyApproved) {
+                const policied = applyPolicy(assessAction(request), request, cwd)
+                gate = policied.blocked
+                  ? { allowed: false, assessment: policied.assessment, message: policied.message }
+                  : { allowed: true, assessment: { ...policied.assessment, decision: 'allow' as const } }
+              } else {
+                gate = await governor.check(request)
+              }
               assessment = gate.assessment
               if (!gate.allowed) {
                 isError = true
@@ -551,7 +564,7 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
                 // commands its step had already worked around.
                 const awaitsPerson = gate.assessment.risk === 'critical' && !gate.noApprover
                 if (reservation && awaitsPerson) {
-                  activeGoalGraph()?.requestApproval('action', reservation.action.idempotencyKey, { name: block.name, input: redactActionInput(block.name, block.input) }, gate.assessment.reason)
+                  activeGoalGraph()?.requestApproval('action', reservation.action.idempotencyKey, { name: block.name, input: redactActionInput(block.name, block.input) }, gate.assessment.reason, activeActionGovernor().mode)
                 }
                 if (reservation) activeGoalGraph()?.blockAction(reservation.action.id, resultText, awaitsPerson, precondition, undefined, contract)
               } else {

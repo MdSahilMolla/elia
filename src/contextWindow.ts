@@ -120,24 +120,32 @@ export function contextWindowOverride(env: NodeJS.ProcessEnv = process.env): num
  * elia does not recognise must not end up with a smaller working memory than
  * it had before this was model-aware.
  *
- * An *explicit* `ELIA_CONTEXT_WINDOW` is honoured all the way down, because
- * the 30,000 floor used to apply to it too — which made the escape hatch this
- * function documents ("for dialling the budget *down* on a provider that
- * charges by the token") impossible to actually use below 30,000. That is not
+ * An *explicit* `ELIA_CONTEXT_WINDOW` is honoured all the way down to
+ * `MIN_COMPACTION_THRESHOLD`, because the 30,000 floor used to apply to it
+ * too — which made the escape hatch this function documents ("for dialling
+ * the budget *down* on a provider that charges by the token") impossible to
+ * actually use below 30,000. That is not
  * hypothetical: a run against a tier capped at 8,000 tokens per minute built
  * 42,000-token requests, because the model's *context window* is 128k and
  * nothing here knew about the much smaller per-request cap the provider
  * actually enforces. The operator's only lever silently snapped back to
  * 30,000 — still four times over the limit. An override is a statement about
- * the provider, so it wins.
+ * the provider, so it wins. Values below `MIN_COMPACTION_THRESHOLD` are
+ * impossible to honour — the system prompt alone does not fit — so they are
+ * pulled up to that floor rather than producing a budget that loops forever.
  */
 export function compactionThresholdFor(model: string, env: NodeJS.ProcessEnv = process.env): number {
   const override = contextWindowOverride(env)
   if (override !== undefined) {
-    // Bounded by `override` itself as well as by the floor: promising more
-    // working memory than the operator said exists would recreate the very
-    // overflow this override is set to prevent.
-    return Math.min(MAX_COMPACTION_THRESHOLD, override, Math.max(MIN_COMPACTION_THRESHOLD, Math.floor(override * USABLE_FRACTION)))
+    // An override is a statement about the provider, so it wins — down to
+    // `MIN_COMPACTION_THRESHOLD`. Below that there is no budget at all (the
+    // system prompt and tool definitions alone exceed it), so the override is
+    // pulled up to that floor instead of being honoured into a compaction
+    // loop that can never fit. Bounded above by the override itself as well as
+    // by MAX: promising more working memory than the operator said exists
+    // would recreate the very overflow this override is set to prevent.
+    const floor = Math.max(MIN_COMPACTION_THRESHOLD, override)
+    return Math.min(MAX_COMPACTION_THRESHOLD, floor, Math.max(MIN_COMPACTION_THRESHOLD, Math.floor(floor * USABLE_FRACTION)))
   }
   const derived = Math.floor(contextWindowFor(model) * USABLE_FRACTION)
   const floor = Math.floor(DEFAULT_CONTEXT_WINDOW * USABLE_FRACTION)
