@@ -43,6 +43,7 @@ import {
   type Strategy,
 } from './strategy.ts'
 import { proposeChallengerStrategy } from './metaPropose.ts'
+import { fieldEvidenceSection } from './fieldEvidence.ts'
 
 /**
  * Elia improving elia.
@@ -476,7 +477,7 @@ This is your best evidence. A task in the hist-* family is a real commit from el
 ${lines.join('\n')}${more}`
 }
 
-function hypothesisBrief(sandbox: Sandbox, baseline: Metrics, evidence: TaskOutcome[] = []): string {
+export function hypothesisBrief(sandbox: Sandbox, baseline: Metrics, evidence: TaskOutcome[] = []): string {
   const failing = baseline.failed.length > 0 ? baseline.failed.join(', ') : '(none — everything currently passes)'
 
   return `## Your own source
@@ -490,7 +491,7 @@ Current weighted pass rate: ${Math.round(baseline.passRate * 100)}%
 Passing: ${baseline.passed.join(', ') || '(none)'}
 FAILING: ${failing}
 Observed model steps: ${baseline.steps ? Object.entries(baseline.steps).map(([id, steps]) => `${id}=${steps}`).join(', ') : '(not recorded)'}
-Cost of one full run: ${baseline.totalTokens} tokens, ${Math.round(baseline.totalElapsedMs / 1000)}s of agent time.${renderFailureEvidence(evidence)}
+Cost of one full run: ${baseline.totalTokens} tokens, ${Math.round(baseline.totalElapsedMs / 1000)}s of agent time.${renderFailureEvidence(evidence)}${fieldEvidenceSection()}
 
 ## What you may not change
 These files define how you are judged or enforce deterministic safety boundaries, and editing them is an automatic rejection:

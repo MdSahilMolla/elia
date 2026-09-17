@@ -120,6 +120,32 @@ test('a search that found nothing still leaves the tree clean', async () => {
   for (const worktree of held) expect(existsSync(worktree.path)).toBe(false)
 })
 
+test('the winner`s changed files are discoverable before the merge overwrites them', async () => {
+  // Without this the turn records filesChanged: 0 for a searched turn — the
+  // merge writes straight into the tree, so nothing else in the turn sees it.
+  const search = isolatedSearch({
+    runId: 'test-changed-by',
+    sourceRoot: repo,
+    async run({ cwd, approach }) {
+      writeFileSync(join(cwd, 'answer.txt'), `${approach.id}\n`)
+      writeFileSync(join(cwd, 'extra.txt'), 'new file\n')
+      return { text: approach.id, cost: 1 }
+    },
+  })
+  const result = await solve({ approaches: APPROACHES.slice(0, 1), produce: search.produce, verifier: answerIs('first'), budget: { attempts: 1 }, width: 1 })
+
+  const changed = await search.changedBy(result.best!)
+  expect(changed.sort()).toEqual(['answer.txt', 'extra.txt'])
+
+  await search.settle(result.best)
+  expect(existsSync(join(repo, 'extra.txt'))).toBe(true)
+})
+
+test('asking what an unknown candidate changed is empty, not a throw', async () => {
+  const search = isolatedSearch({ runId: 'test-unknown', sourceRoot: repo, async run() { return { text: 'x' } } })
+  expect(await search.changedBy({ id: 'never-produced', approach: 'a', text: '' })).toEqual([])
+})
+
 test('settling twice is harmless', async () => {
   const search = isolatedSearch({
     runId: 'test-twice',

@@ -89,6 +89,21 @@ test('lessons are parsed from JSON, capped at two, and generic or already-known 
   expect(similarity('Run the tests with bun test, not node', 'Install dependencies with bun install before building')).toBeLessThan(0.7)
 })
 
+test('a lesson that tells the next run to fabricate whatever was not found is never kept', () => {
+  // The three lessons below were written to a real project's lessons.md, and
+  // the first was in context when a run wrote a stub "skill" for a name its own
+  // searches had just shown did not exist.
+  const reply = JSON.stringify({
+    lessons: [
+      'Verify that all imported module paths exist on disk and match the file name’s case; create placeholder files if any are missing to avoid TypeScript module-not-found errors.',
+      "Before attempting to list or access the .agents/skills directory, idempotently create it with 'mkdir -p .agents/skills' so that Windows commands like 'dir' do not exit with code 1 when the folder is absent.",
+      'If src/skills/registry.ts is referenced in imports but does not exist, create a minimal placeholder file (e.g., an empty module or export default {}) to avoid runtime file-not-found errors.',
+      'The skills registry lives in src/tools/registry.ts, not src/skills/registry.ts',
+    ],
+  })
+  expect(parseLessons(reply, [])).toEqual(['The skills registry lives in src/tools/registry.ts, not src/skills/registry.ts'])
+})
+
 function reflectingProvider(reply: string): Provider & { calls: StreamTurnParams[] } {
   const calls: StreamTurnParams[] = []
   return {

@@ -5,6 +5,8 @@ import { pauseToolSpinner, resumeToolSpinner } from '../ui/stream.ts'
 import { applyPolicy } from './policy.ts'
 import { addAllowRule, canPersistPrefixRule, isAllowlisted, ruleFor, type AllowScope } from './allowStore.ts'
 import { consumePreauth, currentBranch, isPreauthorized } from './preauth.ts'
+import { approveSelfEditFile, needsSelfEditApproval, SELF_EDIT_INTENT, selfEditLabel, selfEditRefusal, setSelfEditAllowed } from './selfEdit.ts'
+import { resolve as resolvePath } from 'node:path'
 
 export type ActionRisk = 'safe' | 'review' | 'critical'
 export type ActionDecision = 'allow' | 'approve' | 'block'
@@ -287,9 +289,19 @@ export function assessAction(request: ActionRequest, cwd = currentAgent().cwd ??
   if (name === 'write_file' || name === 'edit_file' || name === 'lsp_refactor' || name === 'delete_file') {
     const path = typeof input.path === 'string' ? input.path : ''
     const outside = path.length === 0 || !isPathWithinWorkspace(path, cwd)
-    return outside
-      ? assessment('critical', 'approve', `${name} targets a path outside the active workspace or uses an invalid path`, name, path ? [path] : [], false)
-      : assessment('safe', 'allow', `${name} is workspace-scoped and checkpointable`, name, path ? [path] : [], true)
+    if (outside) return assessment('critical', 'approve', `${name} targets a path outside the active workspace or uses an invalid path`, name, path ? [path] : [], false)
+    // Inside the workspace, but the workspace is elia's own checkout — see selfEdit.ts.
+    if (needsSelfEditApproval(resolvePath(cwd, path))) {
+      return assessment(
+        'critical',
+        'approve',
+        `This changes ${selfEditLabel(resolvePath(cwd, path))} — part of elia's OWN source, not a project it is building. The session was started inside elia's repository.`,
+        SELF_EDIT_INTENT,
+        [path],
+        true,
+      )
+    }
+    return assessment('safe', 'allow', `${name} is workspace-scoped and checkpointable`, name, path ? [path] : [], true)
   }
 
   if (name === 'read_file' || name === 'list_files' || name === 'grep' || name === 'find_symbol' || name === 'recall' || name === 'brain' || name === 'board_read' || name === 'board_post' || name === 'todo_write' || name === 'why' || name === 'record_rationale' || name === 'note_lesson') {
@@ -544,7 +556,7 @@ export function assessAction(request: ActionRequest, cwd = currentAgent().cwd ??
  * project, and there one "yes" must never authorize the next one. That is the
  * distinction the old blanket refusal was protecting, and it is kept.
  */
-const SETTLEABLE_ONCE = new Set(['shell', 'shell.composed', 'shell.unknown', 'github.repo_create'])
+const SETTLEABLE_ONCE = new Set(['shell', 'shell.composed', 'shell.unknown', 'github.repo_create', SELF_EDIT_INTENT])
 
 /**
  * Review-band intents that still publish to or mutate state beyond this project
@@ -594,10 +606,7 @@ export function createActionGovernor(options: { mode?: GovernanceMode; approve?:
         ? `run_program:${String(request.input.program ?? '').trim()}:${Array.isArray(request.input.args) && typeof request.input.args[0] === 'string' ? request.input.args[0].trim() : ''}:${assessment.intent}`
       : `${request.name}:${assessment.intent}`
 
-  return {
-    mode,
-    stats: () => ({ maxActions, consumed: actionCount, exhausted: maxActions > 0 && actionCount >= maxActions, blockedByBudget }),
-    async check(request) {
+const decide = async (request: ActionRequest): Promise<ActionGateResult> => {
       const baseAssessment = assessAction(request, options.cwd)
       // A checked-in .elia/policy.json can only tighten this: block the action
       // outright, or raise its decision from allow to approve. Applied before
@@ -666,6 +675,15 @@ export function createActionGovernor(options: { mode?: GovernanceMode; approve?:
         }
       }
       if (mode === 'unattended' && assessment.risk === 'critical' && !options.approve) {
+        if (assessment.intent === SELF_EDIT_INTENT) {
+          const target = resolvePath(options.cwd ?? currentAgent().cwd ?? process.cwd(), assessment.resources[0] ?? '')
+          return {
+            allowed: false,
+            assessment: { ...assessment, decision: 'block' },
+            message: selfEditRefusal(target) ?? assessment.reason,
+            noApprover: true,
+          }
+        }
         return {
           allowed: false,
           assessment: { ...assessment, decision: 'block' },
@@ -749,6 +767,9 @@ export function createActionGovernor(options: { mode?: GovernanceMode; approve?:
         const feedback = typeof outcome === 'object' ? outcome.feedback : undefined
         if (mode === 'unattended') classDecisions.set(decisionKey, approved)
         if (approved && remember === 'session') sessionAllow.add(sessionKey(request, assessment))
+        // "Don't ask again" for elia's own source covers every file tool for the
+        // session, not just the tool that asked — the same state as /self on.
+        if (approved && remember && assessment.intent === SELF_EDIT_INTENT) setSelfEditAllowed(true)
         if (approved && (remember === 'project' || remember === 'global') && canPersistPrefixRule(request)) {
           try {
             addAllowRule(ruleFor(request, assessment), remember, options.cwd)
@@ -775,6 +796,20 @@ export function createActionGovernor(options: { mode?: GovernanceMode; approve?:
         resumeToolSpinner()
         release()
       }
+  }
+
+  return {
+    mode,
+    stats: () => ({ maxActions, consumed: actionCount, exhausted: maxActions > 0 && actionCount >= maxActions, blockedByBudget }),
+    async check(request) {
+      const result = await decide(request)
+      // Every way a self_edit gets through — a yes at the prompt, a remembered
+      // class decision, an allow rule — opens that file at the tool-level
+      // backstop too, or the write the governor just allowed would be refused.
+      if (result.allowed && result.assessment.intent === SELF_EDIT_INTENT) {
+        approveSelfEditFile(resolvePath(options.cwd ?? currentAgent().cwd ?? process.cwd(), result.assessment.resources[0] ?? ''))
+      }
+      return result
     },
   }
 }

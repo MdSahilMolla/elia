@@ -136,7 +136,7 @@ function BlockBody({ block, cursor, width }: { block: MarkdownBlock; cursor: boo
           ) : null}
           {(block.lines.length > 0 ? block.lines : ['']).map((line, index) => (
             <Box key={index}>
-              <Text color={palette.muted}>│ </Text>
+              <Text color={palette.subtle}>│ </Text>
               <CodeLine
                 line={line}
                 language={lang}
@@ -148,7 +148,7 @@ function BlockBody({ block, cursor, width }: { block: MarkdownBlock; cursor: boo
       )
     }
     case 'rule':
-      return <Text color={palette.muted}>────────────────{cursor ? <Cursor /> : null}</Text>
+      return <Text color={palette.subtle}>────────────────{cursor ? <Cursor /> : null}</Text>
     case 'table': {
       const rows = [block.header, ...block.rows]
       return (

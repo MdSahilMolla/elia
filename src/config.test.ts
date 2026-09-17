@@ -182,3 +182,21 @@ test('routeForAssignment defers entirely to an explicit per-role override, never
     config.roleOverrides.scout = previous
   }
 })
+
+test('elia is told, accurately, that it can change its own source', () => {
+  // elia described itself as unable to modify its own architecture. `elia evolve`
+  // does exactly that, under a benchmark gate. Nothing in the repo denied it —
+  // the model simply fell back to its default prior because the one place it is
+  // told what it is with respect to this codebase never mentioned the loop.
+  //
+  // config.ts is deliberately NOT immutable to evolve: the system prompt is the
+  // highest-value target the loop has, and locking it would gut the loop. This
+  // test is the pin instead — src/**/*.test.ts IS immutable, so a candidate may
+  // reword the sentence but cannot make it stop being true or delete it.
+  const { SHARED_CONTEXT } = require('./config.ts') as { SHARED_CONTEXT: string }
+
+  expect(SHARED_CONTEXT).toContain('elia evolve')
+  expect(SHARED_CONTEXT.toLowerCase()).toContain('benchmark')
+  // And it must not overclaim: weights are explicitly out of scope.
+  expect(SHARED_CONTEXT.toLowerCase()).toContain('weights')
+})

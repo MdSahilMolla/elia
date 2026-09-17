@@ -1,4 +1,4 @@
-import { Text, useInput } from 'ink'
+import { Box, Text, useInput } from 'ink'
 import { palette } from '../theme.ts'
 import { Panel } from './Panel.tsx'
 
@@ -21,14 +21,16 @@ export function HelpOverlay({ onClose }: { onClose(): void }) {
   useInput(() => onClose())
   const width = Math.max(...KEYS.map(([k]) => k.length))
   return (
-    <Panel title="Shortcuts">
+    <Panel title="Shortcuts" tone="brand">
       {KEYS.map(([key, desc]) => (
         <Text key={key}>
           <Text bold>{key.padEnd(width)}</Text>
           <Text color={palette.muted}>  {desc}</Text>
         </Text>
       ))}
-      <Text color={palette.muted}>any key to close</Text>
+      <Box marginTop={1}>
+        <Text color={palette.muted}>any key to close</Text>
+      </Box>
     </Panel>
   )
 }

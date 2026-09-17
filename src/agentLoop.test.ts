@@ -838,3 +838,94 @@ test('the plan follows the work when the model never calls todo_write: ticks fro
   expect(told.some((text) => text.includes('Plan updated from what just ran: ✓ 1. Create `site/index.html`'))).toBe(true)
   expect(told.some((text) => text.includes('Your plan has not changed in 6 actions') && text.includes('◐ 2. Add responsive styling'))).toBe(true)
 })
+
+test('finishAfterTool ends the loop as soon as the report tool succeeds', async () => {
+  let call = 0
+  const report: Tool = {
+    name: 'submit_assumptions',
+    description: 'report',
+    input_schema: { type: 'object', properties: {} },
+    async execute() {
+      return 'Recorded.'
+    },
+  }
+  const stub = {
+    async streamTurn() {
+      call += 1
+      // A failed first submission must not end the loop; the second one does.
+      return {
+        content: [{ type: 'tool_use', id: `t${call}`, name: call === 1 ? 'missing_tool' : 'submit_assumptions', input: {} }] as ContentBlock[],
+        usage: ZERO_USAGE,
+      }
+    },
+  }
+  const result = await runAgentLoop({
+    messages: [{ role: 'user', content: [{ type: 'text', text: 'go' }] }],
+    systemPrompt: 'test',
+    tools: [report],
+    provider: stub,
+    providerName: 'stub',
+    model: 'stub',
+    fallbacks: [],
+    useAnimation: false,
+    verbose: false,
+    finishAfterTool: 'submit_assumptions',
+  })
+  expect(result.stopReason).toBe('complete')
+  expect(call).toBe(2)
+})
+
+test('auto mode hands a turn on when the selected provider is out of credit or refuses its key', async () => {
+  const original = { provider: config.provider, providerName: config.providerName, model: config.model, providerLabel: config.providerLabel, routingMode: config.routingMode, fallbacks: config.fallbacks }
+  config.routingMode = 'auto'
+  config.fallbacks = [{
+    provider: { async streamTurn() { return { content: [{ type: 'text', text: 'backup' }] as ContentBlock[], usage: ZERO_USAGE } } },
+    providerName: 'credit-backup', model: 'backup-model', label: 'credit-backup (backup-model)',
+  }]
+  try {
+    for (const failure of ['402 Insufficient credits. This account never purchased credits.', '401 Incorrect API key provided']) {
+      resetProviderHealthForTests()
+      config.provider = { async streamTurn() { throw new Error(failure) } }
+      config.providerName = 'credit-primary'
+      config.model = 'primary-model'
+      const messages: ConversationMessage[] = [{ role: 'user', content: [{ type: 'text', text: 'go' }] }]
+      const result = await runAgentLoop({ messages, systemPrompt: 'test', tools: [], useAnimation: false, verbose: false })
+      expect(result.stopReason).toBe('complete')
+      expect(lastAssistantText(messages, '')).toBe('backup')
+    }
+  } finally {
+    resetProviderHealthForTests()
+    Object.assign(config, original)
+  }
+})
+
+test('a running loop follows a model switch on its next call', async () => {
+  resetProviderHealthForTests()
+  const used: string[] = []
+  const reply = (name: string, content: ContentBlock[]) => ({
+    async streamTurn() {
+      used.push(name)
+      return { content, usage: ZERO_USAGE }
+    },
+  })
+  const route = {
+    provider: reply('stuck', [{ type: 'tool_use', id: 't1', name: 'read_file', input: { path: 'package.json' } }]),
+    providerName: 'stuck',
+    model: 'rate-limited',
+  }
+  const result = await runAgentLoop({
+    messages: [{ role: 'user', content: [{ type: 'text', text: 'go' }] }],
+    systemPrompt: 'test',
+    tools: [],
+    resolveRoute: () => route,
+    fallbacks: [],
+    useAnimation: false,
+    verbose: false,
+    onTool: () => {
+      // The operator switches while the first call's tool runs.
+      Object.assign(route, { provider: reply('switched', [{ type: 'text', text: 'done' }]), providerName: 'switched', model: 'working' })
+    },
+  })
+  expect(result.stopReason).toBe('complete')
+  expect(used).toEqual(['stuck', 'switched'])
+})

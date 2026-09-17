@@ -112,3 +112,10 @@ test('root gate configuration changes are included in candidate change detection
     rmSync(temp, { recursive: true, force: true })
   }
 })
+
+test('the proposer’s view of its own behaviour cannot be edited by a candidate', () => {
+  // Nothing in the promotion gate reads the field evidence, so a candidate that
+  // made a real benchmark gain *and* quietly narrowed the evidence would pass
+  // every check and leave the next generation unable to see the damage.
+  expect(violatedImmutables(['src/evolve/fieldEvidence.ts', 'src/agent.ts'])).toEqual(['src/evolve/fieldEvidence.ts'])
+})

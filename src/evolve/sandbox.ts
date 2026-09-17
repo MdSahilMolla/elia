@@ -41,6 +41,17 @@ export const IMMUTABLE_FILES = [
   'src/evolve/sandbox.ts',
   'src/evolve/benchTask.ts',
   'src/evolve/candidateTools.ts',
+  // What the proposer is allowed to see about its own real-world behaviour.
+  // engine.ts is immutable because hypothesisBrief() is the proposer's entire
+  // view of the world, and a slice of that brief living in a mutable file
+  // reopens the hole immutability closed: nothing in the promotion gate reads
+  // the field evidence, so a candidate that made a real benchmark gain *and*
+  // quietly narrowed the evidence — dropped the shape its own change made
+  // worse, raised the occurrence floor, emptied a benchTasks list — would pass
+  // every check, and the next generation would propose into a narrower world
+  // without being able to see the damage. The same attack is already fixtured
+  // one layer down, in gap/critic.test.ts.
+  'src/evolve/fieldEvidence.ts',
   // How a candidate gets measured by its own code. If a candidate could rewrite
   // this, it could route the gap and value checks back at the live tree and make
   // them pass by construction — the exact bug those checks were just fixed for.

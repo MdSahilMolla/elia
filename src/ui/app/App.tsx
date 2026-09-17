@@ -16,23 +16,27 @@ import { ApprovalMenu, type ApprovalRequest } from './components/ApprovalMenu.ts
 import type { ApprovalResult } from '../../autonomy/governor.ts'
 import { Picker, type PickerRequest } from './components/Picker.tsx'
 import { TextPrompt, type TextPromptRequest } from './components/TextPrompt.tsx'
-import { WorkingIndicator } from './components/WorkingIndicator.tsx'
+import { WorkingIndicator, type TurnProgress } from './components/WorkingIndicator.tsx'
+import { ClockProvider } from './animation.tsx'
+import { RECEIPT_AFTER_MS, streamedTokens, tipFor, tipsEnabled, turnReceipt, turnVerb, workingLabel } from './working.ts'
 import { WorkspacePanel, runPlanFromWorkers, type RunStep } from './components/WorkspacePanel.tsx'
 import { isInternalNudge } from './phases.ts'
 import { HelpOverlay } from './components/HelpOverlay.tsx'
 import { ErrorBoundary } from './components/ErrorBoundary.tsx'
 import { activeTodoList, type TodoItem } from '../../autonomy/todoList.ts'
 import { loadLessons } from '../../autonomy/lessons.ts'
+import { selfEditGuard } from '../../autonomy/selfEdit.ts'
 import { taskSessions, type TaskSession } from '../../taskSessions.ts'
 import type { PickerOption } from '../picker.ts'
 import { rollupLine, rollupTools, toolActivity } from './toolSummary.ts'
-import { palette } from './theme.ts'
+import { onThemeChange, palette } from './theme.ts'
 import { repoLabel } from './gitInfo.ts'
 import { estimateTokens } from '../../compaction.ts'
 import { looksLikeImageAttachmentLine } from '../../attachments.ts'
 import { compactionThresholdFor, contextWindowFor } from '../../contextWindow.ts'
 import { codexContextTokens } from '../../providers/codexSubscription.ts'
 import type { ChatMessage } from '../../providers/types.ts'
+import { sessionUsageSnapshot } from '../../usage.ts'
 
 export interface TurnHooks {
   onText(delta: string): void
@@ -174,8 +178,18 @@ export function App(props: AppProps) {
     const home = homedir()
     return home && cwd.toLowerCase().startsWith(home.toLowerCase()) ? `~${cwd.slice(home.length)}` : cwd
   }, [])
-  const printHeader = (target: TranscriptStore) =>
-    target.header({ version: props.version, greeting: props.greeting, location, lessons: lessonCount })
+  const printHeader = (target: TranscriptStore) => {
+    const { model, providerLabel } = props.getEnv()
+    // "mercury (mercury-2.5)" → "mercury"; named only when the model's own name doesn't say it.
+    const provider = (providerLabel ?? '').replace(/\s*\(.*\)\s*$/, '').trim()
+    target.header({
+      version: props.version,
+      greeting: props.greeting,
+      location,
+      lessons: lessonCount,
+      model: provider && !model.toLowerCase().includes(provider.toLowerCase()) ? `${model} · ${provider}` : model,
+    })
+  }
   // The header is the first scrollback item — printed once through <Static>,
   // so it stays put at the top instead of vanishing (and re-flowing the frame)
   // the moment the first message is sent.
@@ -209,6 +223,11 @@ export function App(props: AppProps) {
   const [textPrompt, setTextPrompt] = useState<TextPromptRequest | null>(null)
   const [expandedAll, setExpandedAll] = useState(false)
   const [showHelp, setShowHelp] = useState(false)
+  // A completion menu takes the status row's place, as it does in the prompt it copies.
+  const [inputMenuOpen, setInputMenuOpen] = useState(false)
+  // `/theme` switches the palette in place; redraw the live frame in it.
+  const [, setThemeEpoch] = useState(0)
+  useEffect(() => onThemeChange(() => setThemeEpoch((n) => n + 1)), [])
 
   // WS0.7/0.8 — terminal geometry, and the live region trimmed to fit it.
   // Read once per mount: flipping the flag mid-session would change how the
@@ -228,7 +247,15 @@ export function App(props: AppProps) {
   )
   const [steeringCount, setSteeringCount] = useState(0)
   const [queue, setQueue] = useState<string[]>([])
+  // The working line's inputs. `status` is the phase or progress a deeper
+  // layer last reported; running tools and the stream mode outrank it.
   const [status, setStatus] = useState('')
+  const [runningTools, setRunningTools] = useState<{ id: string; name: string; activity: string }[]>([])
+  const [streamMode, setStreamMode] = useState<'thinking' | 'writing' | null>(null)
+  // Tokens and the last sign of life change on every streamed chunk; the
+  // indicator reads them each frame, so they live in a ref, not in state.
+  const progress = useRef<TurnProgress>({ tokens: 0, lastAt: 0 })
+  const turnsRun = useRef(0)
   const [turnStartedAt, setTurnStartedAt] = useState(0)
   const [plan, setPlan] = useState<TodoItem[]>([])
   const [providerPlan, setProviderPlan] = useState<TodoItem[]>([])
@@ -400,11 +427,16 @@ export function App(props: AppProps) {
 
   const runOne = useCallback(
     async (text: string, opts?: { echo?: boolean }) => {
+      const startedAt = Date.now()
       busyRef.current = true
       setBusy(true)
       setStatus('')
+      setRunningTools([])
+      setStreamMode(null)
+      progress.current = { tokens: 0, lastAt: startedAt }
+      const outputBefore = sessionUsageSnapshot().usage.outputTokens
       abortedRef.current = false
-      setTurnStartedAt(Date.now())
+      setTurnStartedAt(startedAt)
       // onSubmit echoes the message the instant Enter is pressed so it never
       // waits behind the risk check; the other callers (queue drain, plan
       // execution) still echo here.
@@ -413,17 +445,30 @@ export function App(props: AppProps) {
       turnPlan.current = []
       const controller = new AbortController()
       abortRef.current = controller
+      // Every streamed chunk and every tool boundary is a sign of life.
+      const alive = (produced = '') => {
+        progress.current.lastAt = Date.now()
+        if (produced) progress.current.tokens += streamedTokens(produced)
+      }
       const hooks: TurnHooks = {
         onText: (d) => {
+          alive(d)
           setStatus('')
+          setStreamMode('writing')
           store.assistantDelta(d)
         },
         onThinking: (d) => {
-          setStatus('Thinking')
+          alive(d)
+          setStatus('')
+          setStreamMode('thinking')
           store.thinkingDelta(d)
         },
         onActivity: (a) => {
-          if (!isInternalNudge(a.title)) setStatus(a.title.replace(/^◆\s*/, ''))
+          // Only what is still under way names the working line. A finished
+          // step ("verified — tests pass") goes to the transcript instead, and
+          // clears whatever it was the end of.
+          const underway = a.status === undefined || a.status === 'started' || a.status === 'updated'
+          if (a.kind !== 'plan' && !isInternalNudge(a.title)) setStatus(underway ? a.title.replace(/^◆\s*/, '') : '')
           if (a.kind === 'plan') {
             const parsed = providerPlanItems(a.detail)
             if (parsed.length > 0) {
@@ -453,10 +498,19 @@ export function App(props: AppProps) {
             const url = /https?:\/\/[^\s)]+/.exec(e.result)?.[0]
             if (url) setPreviewUrl(url)
           }
+          alive()
+          setRunningTools((running) => {
+            const index = e.id ? running.findIndex((tool) => tool.id === e.id) : running.findIndex((tool) => tool.name === e.name)
+            return index === -1 ? running : [...running.slice(0, index), ...running.slice(index + 1)]
+          })
           store.toolEnd(e)
         },
         onToolStart: (c) => {
-          setStatus(toolActivity(c))
+          // The call's arguments were written by the model too.
+          alive(JSON.stringify(c.input ?? {}))
+          setStatus('')
+          setStreamMode(null)
+          setRunningTools((running) => [...running, { id: c.id, name: c.name, activity: toolActivity(c) }])
           store.toolStart(c)
         },
         approve: (req) =>
@@ -485,11 +539,6 @@ export function App(props: AppProps) {
         store.error(`Error: ${error instanceof Error ? error.message : String(error)}`)
       } finally {
         abortRef.current = null
-        const tools = toolsOf(store.turnItems())
-        if (tools.length > 2) {
-          const line = rollupLine(rollupTools(tools))
-          if (line) store.notice(line)
-        }
         // An escalated run's plan, read fresh from the workers as the turn ends.
         if (runStepsRef.current.length > 0) {
           turnPlan.current = runPlanFromWorkers(runStepsRef.current, taskSessions.list(), sessionIdRef.current)
@@ -501,11 +550,23 @@ export function App(props: AppProps) {
           setPlan([])
           setProviderPlan([])
         }
+        // The closing line: how long, what changed, how much was written. Real
+        // usage when the provider reported it, the streamed estimate otherwise.
+        const tools = toolsOf(store.turnItems())
+        const elapsedMs = Date.now() - startedAt
+        const rollup = tools.length > 2 || elapsedMs >= RECEIPT_AFTER_MS ? rollupLine(rollupTools(tools)) : ''
+        if (elapsedMs >= RECEIPT_AFTER_MS || rollup) {
+          const reported = sessionUsageSnapshot().usage.outputTokens - outputBefore
+          store.receipt(turnReceipt({ elapsedMs, rollup, tokens: reported > 0 ? reported : Math.round(progress.current.tokens) }))
+        }
+        turnsRun.current += 1
         setRunSteps([])
         store.commit()
         busyRef.current = false
         setBusy(false)
         setStatus('')
+        setRunningTools([])
+        setStreamMode(null)
         // A plan-mode turn just proposed — offer to run it.
         if (modeRef.current === 'plan') setPlanReady(true)
       }
@@ -731,6 +792,22 @@ export function App(props: AppProps) {
   // decision is about. The transcript (append-only) and the menu itself stay.
   const modalOpen = confirm !== null || approval !== null || picker !== null || textPrompt !== null
 
+  // The working line: the most specific thing known about what elia is doing.
+  const planStep = visiblePlan.find((item) => item.status === 'in_progress')?.content
+  const workingText = workingLabel({
+    runningTools: runningTools.map((tool) => tool.activity),
+    activity: status,
+    thinking: streamMode === 'thinking',
+    writing: streamMode === 'writing',
+    planStep,
+    verb: turnVerb(Math.floor(turnStartedAt / 1000)),
+  })
+  // A tip only when nothing else is sitting above the line.
+  const workersLive = agents.some(
+    (agent) => agent.role !== undefined && agent.role !== 'lead' && (agent.status === 'running' || agent.status === 'pending') && (!sessionId || agent.sessionId === sessionId),
+  )
+  const tip = tipsEnabled() && visiblePlan.length === 0 && !workersLive ? tipFor(turnsRun.current) : undefined
+
   // A render throw anywhere below used to kill the whole Ink tree and drop the
   // user to a bare shell mid-turn (Devin audit #1). Boundaries keep the rest of
   // the frame — crucially the input — alive, and log what broke to scrollback.
@@ -745,6 +822,7 @@ export function App(props: AppProps) {
   const frameWidth = Math.max(20, termSize.columns - 1)
 
   return (
+    <ClockProvider>
     <FrameWidth.Provider value={frameWidth}>
     <Box flexDirection="column" width={frameWidth}>
       <ErrorBoundary area="transcript" onError={boundaryError}>
@@ -777,7 +855,17 @@ export function App(props: AppProps) {
           </Text>
         </Box>
       )}
-      {busy && !modalOpen && <WorkingIndicator startedAt={turnStartedAt} status={status} steeringPending={steeringCount} />}
+      {busy && !modalOpen && (
+        <WorkingIndicator
+          startedAt={turnStartedAt}
+          label={workingText}
+          progress={progress}
+          thinking={streamMode === 'thinking'}
+          waitingOnModel={runningTools.length === 0}
+          steeringPending={steeringCount}
+          tip={tip}
+        />
+      )}
       {showHelp && <HelpOverlay onClose={() => setShowHelp(false)} />}
       {confirm && <Confirm request={confirm} />}
       {approval && <ApprovalMenu request={approval} />}
@@ -786,7 +874,7 @@ export function App(props: AppProps) {
       {planReady && !busy && (
         <Box marginTop={1}>
           <Text>
-            <Text color={palette.success}>● </Text>
+            <Text color={palette.plan}>● </Text>
             <Text bold>Plan ready</Text>
             <Text color={palette.muted}> — enter to run it · esc to keep planning</Text>
           </Text>
@@ -800,6 +888,7 @@ export function App(props: AppProps) {
           mode={mode}
           onTabEmpty={() => setMode((m) => (m === 'plan' ? 'manual' : 'plan'))}
           onHelp={() => setShowHelp(true)}
+          onMenuChange={setInputMenuOpen}
           disabled={confirm !== null || approval !== null || picker !== null || textPrompt !== null || planReady || showHelp}
           placeholder={
             busy
@@ -816,6 +905,7 @@ export function App(props: AppProps) {
           onEof={() => exit()}
         />
         </ErrorBoundary>
+        {!inputMenuOpen && (
         <ErrorBoundary area="status bar" onError={boundaryError}>
           <StatusBar
             model={env.model}
@@ -828,10 +918,13 @@ export function App(props: AppProps) {
             steering={steeringCount}
             repo={repo}
             narrow={termSize.narrow}
+            selfEdit={selfEditGuard()?.allowed}
           />
         </ErrorBoundary>
+        )}
       </Box>
     </Box>
     </FrameWidth.Provider>
+    </ClockProvider>
   )
 }

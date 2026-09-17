@@ -1,6 +1,7 @@
 import { Box, Text, useInput } from 'ink'
 import { palette } from '../theme.ts'
 import { Panel } from './Panel.tsx'
+import { DiffPreview } from './DiffPreview.tsx'
 
 export interface ConfirmRequest {
   title: string
@@ -21,7 +22,7 @@ export function Confirm({ request }: { request: ConfirmRequest }) {
   })
 
   return (
-    <Panel title={request.title}>
+    <Panel title={request.title} tone="warning">
       {request.lines.map((line, i) => (
         <Text key={i} color={palette.muted} wrap="wrap">
           {line}
@@ -29,18 +30,7 @@ export function Confirm({ request }: { request: ConfirmRequest }) {
       ))}
       {request.preview && request.preview.length > 0 && (
         <Box flexDirection="column" marginTop={1}>
-          {request.preview.slice(0, PREVIEW_LIMIT).map((line, i) => (
-            <Text
-              key={i}
-              wrap="truncate-end"
-              color={line.startsWith('+') ? palette.success : line.startsWith('-') ? palette.failure : undefined}
-            >
-              {line}
-            </Text>
-          ))}
-          {request.preview.length > PREVIEW_LIMIT && (
-            <Text color={palette.muted}>… +{request.preview.length - PREVIEW_LIMIT} more lines</Text>
-          )}
+          <DiffPreview lines={request.preview} limit={PREVIEW_LIMIT} />
         </Box>
       )}
       <Box marginTop={1}>

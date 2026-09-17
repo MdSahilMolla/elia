@@ -10,7 +10,12 @@ export type ContentBlock =
   | { type: 'thinking'; text: string; signature: string }
   /** A thinking block Anthropic redacted for safety; opaque, but must still round-trip verbatim. */
   | { type: 'redacted_thinking'; data: string }
-  | { type: 'tool_use'; id: string; name: string; input: Record<string, unknown> }
+  /**
+   * `extra` is provider data that has to travel back with the call on the next
+   * request — Gemini 3's `extra_content.google.thought_signature`, without which
+   * it refuses the following step (HTTP 400).
+   */
+  | { type: 'tool_use'; id: string; name: string; input: Record<string, unknown>; extra?: Record<string, unknown> }
   | { type: 'tool_result'; tool_use_id: string; content: string; is_error: boolean }
   /**
    * An image the user attached to a prompt (a pasted/dragged screenshot, or

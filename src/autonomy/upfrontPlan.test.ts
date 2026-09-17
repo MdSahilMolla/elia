@@ -6,6 +6,7 @@ import {
   parsePlannerReply,
   planActivity,
   planBriefing,
+  plannerPrompt,
   planTodoItems,
   stripInjectedContext,
   visibleThinking,
@@ -174,4 +175,53 @@ test('the plan becomes a todo list with step one under way, and a checklist the 
   expect(activity).toMatchObject({ kind: 'plan', status: 'completed', title: 'Plan · 2 steps' })
   expect(activity.detail).toBe('◐ a\n□ b')
   expect(planBriefing(['a', 'b'])).toContain('call todo_write')
+})
+
+test('neither the planner nor the plan it hands over licenses inventing a thing the request names', () => {
+  // "install ponytail skill" was planned as "3. If it's a new skill, create the
+  // necessary files"; the lead searched twice, found nothing, and followed step 3
+  // to a stub that printed "installed". Both prompts now close that door.
+  expect(plannerPrompt('install ponytail skill', '')).toMatch(/Never plan a step like "if it is new, create it"/)
+  expect(plannerPrompt('install ponytail skill', '')).toContain('asks the user what they meant')
+  const briefing = planBriefing(['Search for ponytail', 'If it is a new skill, create the files'])
+  expect(briefing).toContain('A step is not permission to invent')
+  expect(briefing).toMatch(/Never create a stub, placeholder/)
+})
+
+test('a provider failure is reported rather than swallowed, but NONE stays quiet', async () => {
+  // The bug this pins: every failure here returned undefined silently, so a 402
+  // from the provider and "the planner judged this too small to plan" produced
+  // exactly the same thing on screen — no plan, no thinking, `Working…` — and
+  // telling them apart took a debugging session.
+  const problems: string[] = []
+  await draftUpfrontPlan({
+    provider: scriptedProvider('', { fail: true }),
+    cwd: '/tmp', system: 's', messages: REQUEST, request: 'build a thing',
+    onProblem: (message) => problems.push(message),
+  })
+  expect(problems).toHaveLength(1)
+  expect(problems[0]).toContain('provider down')
+
+  // NONE is the planner working correctly on a small ask — nothing to report.
+  const quiet: string[] = []
+  await draftUpfrontPlan({
+    provider: scriptedProvider('NONE'),
+    cwd: '/tmp', system: 's', messages: REQUEST, request: 'x',
+    onProblem: (message) => quiet.push(message),
+  })
+  expect(quiet).toEqual([])
+})
+
+test('pressing Esc during planning is not narrated as a failure', async () => {
+  const controller = new AbortController()
+  controller.abort()
+  const problems: string[] = []
+  const plan = await draftUpfrontPlan({
+    provider: scriptedProvider('', { fail: true }),
+    cwd: '/tmp', system: 's', messages: REQUEST, request: 'build a thing',
+    signal: controller.signal,
+    onProblem: (message) => problems.push(message),
+  })
+  expect(plan).toBeUndefined()
+  expect(problems).toEqual([])
 })

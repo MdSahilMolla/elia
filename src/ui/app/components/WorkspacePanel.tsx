@@ -63,6 +63,18 @@ const TODO_MARK: Record<TodoItem['status'], string> = {
   completed: '✓',
 }
 
+/** A short bar after the plan's count — how far along it is, at a glance. */
+function ProgressBar({ done, total, width = 12 }: { done: number; total: number; width?: number }) {
+  const filled = total > 0 ? Math.round((done / total) * width) : 0
+  return (
+    <Text>
+      {'  '}
+      <Text color={palette.success}>{'━'.repeat(filled)}</Text>
+      <Text color={palette.subtle}>{'─'.repeat(width - filled)}</Text>
+    </Text>
+  )
+}
+
 /** `m:ss` since a worker started — the panel re-renders on every task update, so this ticks forward on its own. */
 function elapsed(agent: TaskSession): string {
   const from = agent.startedAt ?? agent.createdAt
@@ -152,15 +164,20 @@ export function WorkspacePanel({
           <Text>
             <Text bold>Plan</Text>
             {plan.length > 1 ? <Text color={palette.muted}> · {planDone}/{plan.length}</Text> : null}
+            {plan.length > 1 ? <ProgressBar done={planDone} total={plan.length} /> : null}
           </Text>
           {start > 0 && <Text color={palette.muted}>  … {start} done</Text>}
           {shown.map((item, i) => (
             <Text key={start + i} wrap="truncate-end">
               {'  '}
-              <Text color={item.status === 'completed' ? palette.success : item.status === 'in_progress' ? undefined : palette.muted}>
+              <Text color={item.status === 'completed' ? palette.success : item.status === 'in_progress' ? palette.brand : palette.muted}>
                 {TODO_MARK[item.status]}
               </Text>{' '}
-              <Text bold={item.status === 'in_progress'} color={item.status === 'in_progress' ? undefined : palette.muted}>
+              <Text
+                bold={item.status === 'in_progress'}
+                strikethrough={item.status === 'completed'}
+                color={item.status === 'in_progress' ? undefined : palette.muted}
+              >
                 {item.content}
               </Text>
             </Text>

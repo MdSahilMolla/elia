@@ -395,3 +395,125 @@ test('an unattended run can remove a leftover file it was asked to, without a sh
     TOOLS.pop()
   }
 })
+
+// Seen live: "install ponytail skill", run from elia's repository root, found
+// nothing and wrote src/skills/ponytail.ts and a new src/skills/index.ts — both
+// "inside the workspace", because the workspace was elia. `dir` stands in for
+// the checkout in these scenarios.
+
+test("inside elia's own checkout, a change to elia's source is asked about first, named as elia's own", async () => {
+  const { armSelfEditGuard, disarmSelfEditGuard, selfEditGuard } = await import('../../autonomy/selfEdit.ts')
+  armSelfEditGuard(dir, false, dir)
+  const asked: unknown[] = []
+  const answers = [false, true]
+  try {
+    const { events } = await run(
+      [
+        call('write_file', { path: 'src/skills/ponytail.ts', content: 'export function ponytail() {}\n' }),
+        call('write_file', { path: 'src/skills/real.ts', content: 'export {}\n' }),
+        call('write_file', { path: 'workspace/app/index.html', content: '<h1>app</h1>\n' }),
+        call('write_file', { path: 'src/skills/other.ts', content: 'export {}\n' }),
+        done,
+      ],
+      {
+        approve: (request) => {
+          asked.push(request.input.path)
+          return answers.shift() ?? false
+        },
+      },
+    )
+    // Asked for each elia file — declined, approved, declined — never for workspace/.
+    expect(asked).toEqual(['src/skills/ponytail.ts', 'src/skills/real.ts', 'src/skills/other.ts'])
+    expect(events.map((event) => event.isError)).toEqual([true, false, false, true])
+    expect(existsSync(join(dir, 'src', 'skills', 'ponytail.ts'))).toBe(false)
+    expect(existsSync(join(dir, 'src', 'skills', 'real.ts'))).toBe(true)
+    expect(existsSync(join(dir, 'workspace', 'app', 'index.html'))).toBe(true)
+    // A single yes opens that file, not the session.
+    expect(selfEditGuard()?.allowed).toBe(false)
+  } finally {
+    disarmSelfEditGuard()
+  }
+})
+
+test("inside elia's own checkout, 'don't ask again' opens elia's source for the rest of the session", async () => {
+  const { armSelfEditGuard, disarmSelfEditGuard, selfEditGuard } = await import('../../autonomy/selfEdit.ts')
+  const { assessAction } = await import('../../autonomy/governor.ts')
+  armSelfEditGuard(dir, false, dir)
+  try {
+    const assessment = assessAction({ name: 'write_file', input: { path: 'src/a.ts', content: '' } }, dir)
+    expect(assessment).toMatchObject({ intent: 'self_edit', risk: 'critical', decision: 'approve' })
+    expect(assessment.reason).toContain("elia's OWN source")
+    let asked = 0
+    const provider = createScriptedProvider([
+      call('write_file', { path: 'src/a.ts', content: 'export const a = 1\n' }),
+      call('write_file', { path: 'src/b.ts', content: 'export const b = 1\n' }),
+      done,
+    ])
+    const governor = createActionGovernor({
+      mode: 'supervised',
+      cwd: dir,
+      approve: async () => {
+        asked += 1
+        return { approved: true, remember: 'session' }
+      },
+    })
+    await withActionGovernor(governor, () => withAgentIdentity({ name: 'behaviour', role: 'lead', cwd: dir }, () =>
+      runAgentLoop({
+        messages: [{ role: 'user', content: [{ type: 'text', text: 'do the task' }] }],
+        systemPrompt: 'You are elia.',
+        tools: TOOLS,
+        provider,
+        providerName: 'scripted',
+        model: 'scripted-behaviour',
+        useAnimation: false,
+        verbose: false,
+        maxSteps: 10,
+        onText: () => {},
+        onTool: () => {},
+      }),
+    ))
+    expect(asked).toBe(1)
+    expect(selfEditGuard()?.allowed).toBe(true)
+    expect(existsSync(join(dir, 'src', 'a.ts'))).toBe(true)
+    expect(existsSync(join(dir, 'src', 'b.ts'))).toBe(true)
+  } finally {
+    disarmSelfEditGuard()
+  }
+})
+
+test("inside elia's own checkout with nobody to ask, elia's source is refused and self-edit on lets it through", async () => {
+  const { armSelfEditGuard, disarmSelfEditGuard, setSelfEditAllowed } = await import('../../autonomy/selfEdit.ts')
+  writeFileSync(join(dir, 'package.json'), '{"name":"elia-ai"}\n')
+  armSelfEditGuard(dir, false, dir)
+  try {
+    const closed = await run([
+      call('write_file', { path: 'src/skills/ponytail.ts', content: 'export function ponytail() {}\n' }),
+      call('read_file', { path: 'package.json' }),
+      call('edit_file', { path: 'package.json', old_string: 'elia-ai', new_string: 'ponytail' }),
+      call('write_file', { path: 'workspace/ponytail/index.html', content: '<h1>ponytail</h1>\n' }),
+      call('write_file', { path: '.elia/notes.md', content: 'state\n' }),
+      done,
+    ])
+    expect(closed.events.map((event) => [event.name, event.isError])).toEqual([
+      ['write_file', true],
+      ['read_file', false],
+      ['edit_file', true],
+      ['write_file', false],
+      ['write_file', false],
+    ])
+    // The model is told why, and told to stop and ask rather than route around it.
+    expect(closed.events[0]!.result).toContain("part of elia's own source")
+    expect(closed.events[0]!.result).toContain('/self on')
+    expect(existsSync(join(dir, 'src', 'skills', 'ponytail.ts'))).toBe(false)
+    expect(readFileSync(join(dir, 'package.json'), 'utf8')).toBe('{"name":"elia-ai"}\n')
+    expect(existsSync(join(dir, 'workspace', 'ponytail', 'index.html'))).toBe(true)
+
+    setSelfEditAllowed(true)
+    clearAllCaches()
+    const open = await run([call('write_file', { path: 'src/skills/ponytail.ts', content: 'export {}\n' }), done])
+    expect(open.events[0]).toMatchObject({ name: 'write_file', isError: false })
+    expect(existsSync(join(dir, 'src', 'skills', 'ponytail.ts'))).toBe(true)
+  } finally {
+    disarmSelfEditGuard()
+  }
+})

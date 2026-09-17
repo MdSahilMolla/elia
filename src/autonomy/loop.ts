@@ -71,6 +71,8 @@ import { assessCompletion, type CompletionAssessment } from './outcome.ts'
 import { inferTaskKind, taskSessions } from '../taskSessions.ts'
 import { clearRunControl, readRunControl, type SupervisorControlRequest } from './control.ts'
 import { provisionTaskWorkspace, taskWorkspaceLabel, type TaskWorkspace } from './taskWorkspace.ts'
+import { jevEnabled } from '../providers/jev.ts'
+import { inBackground, predict, resolvePrediction, settleSystemOne } from '../reason/systemOne.ts'
 
 export type ApprovalDecision =
   | { action: 'approve' }
@@ -358,7 +360,9 @@ export function runAutonomousTask(options: AutonomousRunOptions): Promise<Autono
     withToolHooks(hooks, () =>
       withRunLock(async () => {
         try {
-          return await runAutonomousTaskInternal(options)
+          const result = await runAutonomousTaskInternal(options)
+          await settleSystemOne()
+          return result
         } catch (error) {
           finalizeDeadRun('the run threw and did not reach its own ending', error)
           throw error
@@ -633,6 +637,31 @@ async function runAutonomousTaskInternal(options: AutonomousRunOptions): Promise
     if (contradictions.length > 0) {
       journal.append('phase', { phase: 'learn', note: `completion contradiction: ${contradictions.join('; ')}` })
       writeSubStep(`⚠ completion verdict "${completion.state}/${completion.confidence}" doesn't match the facts: ${contradictions.join('; ')}`)
+    }
+    if (jevEnabled()) {
+      // Jev gives a second verdict on "is this run really done?". It is scored
+      // only on runs a real check judged (mechanical), and may speak up only on
+      // runs nothing executable judged — the same measured-then-transferred
+      // rule as the per-turn gate in index.ts. `runAutonomousTask` waits for it.
+      const regime = verificationRegime
+      const cleanByFacts = verificationPassed && contradictions.length === 0
+      inBackground(async () => {
+        const systemOne = await predict('run-complete', {
+          goal: goal.slice(0, 4_000),
+          completion_report: completion.summary,
+          reported_blockers: completion.blockers,
+        }, {
+          instructions: 'The run fully accomplished the goal.',
+          criteria: {
+            true: 'Everything the goal asks for is done and nothing reported suggests otherwise',
+            false: 'Part of the goal is undone, blocked, unverified, or the report contradicts itself',
+          },
+        }, { local: completion.state === 'verified' })
+        if (systemOne && regime === 'mechanical') resolvePrediction(systemOne.id, cleanByFacts)
+        if (systemOne?.actionable && systemOne.ok === false && completion.state === 'verified' && regime !== 'mechanical') {
+          writeSubStep(`⚠ Jev doubts this run is done (${Math.round((systemOne.confidence ?? 0) * 100)}% confident) and no executable check backed the verdict — review before relying on it`)
+        }
+      })
     }
     try {
       // One trajectory row per run: the per-wave commits already hold the diff,
@@ -965,6 +994,8 @@ async function runAutonomousTaskInternal(options: AutonomousRunOptions): Promise
       nodeId: 'check:assumptions',
       cwd: workspaceRoot,
       tools: [...allWorkerTools().filter((tool) => ASSUMPTION_TOOL_NAMES.has(tool.name)), capture.tool],
+      requiredTool: 'submit_assumptions',
+      finishAfterTool: 'submit_assumptions',
       signal: runSignal,
       prompt: `The plan for this run rests on assumptions nobody has verified:
 
@@ -1570,6 +1601,7 @@ Read the changed files in full for context beyond the diff above — a diff hide
             tools: [...reviewerTools, verdictCapture.tool],
             signal: runSignal,
             requiredTool: 'submit_verdict',
+            finishAfterTool: 'submit_verdict',
 
             prompt: `${reviewContext}
 
@@ -1610,6 +1642,7 @@ This reviewer session is intentionally read-only. The current diff, status, and 
           tools: [...allWorkerTools().filter((tool) => REVIEWER_TOOL_NAMES.has(tool.name)), acceptanceCapture.tool],
           signal: runSignal,
           requiredTool: 'submit_acceptance',
+          finishAfterTool: 'submit_acceptance',
           prompt: `${reviewContext}
 
 ## The acceptance criteria this run declared

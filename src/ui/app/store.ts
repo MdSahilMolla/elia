@@ -56,7 +56,8 @@ export interface GroupItem {
 }
 export interface NoticeItem {
   id: string
-  kind: 'notice' | 'error' | 'shell'
+  /** `receipt`: the line that closes a turn — "Worked for 25s · edited 1 file". */
+  kind: 'notice' | 'error' | 'shell' | 'receipt'
   text: string
 }
 /** The session header, printed once at the top of scrollback. */
@@ -66,9 +67,11 @@ export interface HeaderItem {
   version: string
   /** e.g. "dev mode". */
   greeting: string
-  /** e.g. "elia ⎇ production". */
+  /** The working directory, `~`-relative when it can be. */
   location?: string
   lessons?: number
+  /** "mercury-2.5 · Mercury" — what answers in this session. */
+  model?: string
 }
 
 export type Item = UserItem | AssistantItem | ThinkingItem | ToolItem | GroupItem | NoticeItem | HeaderItem
@@ -94,6 +97,8 @@ export interface TranscriptStore {
   toolEnd(event: ToolEvent & { id?: string }): void
   activity(activity: ProviderActivity): void
   notice(text: string): void
+  /** The line that closes a turn. */
+  receipt(text: string): void
   error(text: string): void
   shell(command: string, output: string): void
 
@@ -426,6 +431,10 @@ export function createTranscriptStore(): TranscriptStore {
         }
       }
       live = [...live, { id: nextId(), kind: 'notice', text }]
+      changed()
+    },
+    receipt(text) {
+      live = [...live, { id: nextId(), kind: 'receipt', text }]
       changed()
     },
     error(text) {

@@ -196,7 +196,7 @@ export function reflectionPrompt(request: string, evidence: TurnEvidence, known:
   }
   lines.push(
     '',
-    'Write at most 2 lessons that a future session in this same project should know before it starts, so it never hits this again. Only durable facts about this project or its environment: how a command has to be run here, where something lives, a constraint that is not obvious from the code. One sentence each, phrased as an instruction to a future run. Never describe what this turn did, and never give generic advice ("read files carefully", "test your changes"). If these were simple slips with nothing durable to learn, return an empty list.',
+    'Write at most 2 lessons that a future session in this same project should know before it starts, so it never hits this again. Only durable facts about this project or its environment: how a command has to be run here, where something lives, a constraint that is not obvious from the code. One sentence each, phrased as an instruction to a future run. Never describe what this turn did, and never give generic advice ("read files carefully", "test your changes"). A file, folder, or module that was not found is a fact to record, never something a future run should create to make the error go away. If these were simple slips with nothing durable to learn, return an empty list.',
     '',
     'Reply with JSON only: {"lessons": ["..."]}',
   )
@@ -230,6 +230,21 @@ export function blockerPrompt(request: string, evidence: TurnEvidence, known: st
 }
 
 const GENERIC_ADVICE = /\b(?:carefully|double[-\s]?check|be careful|pay attention|make sure to test|always test|best practice|good practice)\b/i
+
+/**
+ * A lesson that tells the next run to paper over something missing — "create a
+ * placeholder file if the import does not exist", "mkdir the folder first so
+ * `dir` stops failing". The reflection model reaches for these whenever a read
+ * came back "not found", and every later prompt then carries an instruction to
+ * fabricate. Seen live: one such lesson was in context when a run asked to
+ * "install ponytail skill" searched twice, found nothing, and wrote a stub whose
+ * only content logged "Ponytail skill installed", plus a barrel to export it.
+ * A missing thing is a finding to report, never a gap to fill.
+ */
+const FABRICATES_MISSING = [
+  /\b(?:placeholder|stub|dummy|empty module|fake)\b/i,
+  /\bcreate\b.*?\b(?:if|when|so that|to avoid)\b.*?\b(?:missing|absent|does not exist|doesn't exist|not found|not exist)\b/i,
+]
 
 const STOPWORDS = new Set([
   'a', 'an', 'the', 'on', 'in', 'of', 'to', 'for', 'with', 'from', 'into', 'at', 'by', 'as', 'and', 'or', 'not', 'no',
@@ -274,6 +289,7 @@ export function parseLessons(reply: string, known: string[]): string[] {
     if (typeof entry !== 'string') continue
     const lesson = entry.replace(/\s+/g, ' ').trim()
     if (lesson.length < 20 || lesson.length > 280 || GENERIC_ADVICE.test(lesson)) continue
+    if (FABRICATES_MISSING.some((pattern) => pattern.test(lesson))) continue
     if ([...known, ...kept].some((existing) => similarity(existing, lesson) >= 0.7)) continue
     kept.push(lesson)
     if (kept.length === 2) break

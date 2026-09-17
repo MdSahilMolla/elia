@@ -35,6 +35,9 @@ const NEEDS_NODE_MODULES = /^\s*(?:npx|pnpm\s+dlx|yarn\s+dlx|bunx)\s+\S|\b(?:npm
  * These are the exact shapes seen in the wild on Windows, where the shell is
  * `cmd.exe` but the model reaches for POSIX/PowerShell idioms.
  */
+/** POSIX text filters people pipe into; cmd.exe has none of them unless something put them on PATH. */
+const POSIX_FILTERS = new Set(['head', 'tail', 'grep', 'wc', 'sed', 'awk', 'cut', 'sort', 'uniq', 'tr', 'xargs', 'tee', 'jq'])
+
 function shellMismatch(raw: string): string | null {
   const command = raw.trim()
   const win = process.platform === 'win32'
@@ -63,6 +66,23 @@ function shellMismatch(raw: string): string | null {
   const bare = command.replace(/"[^"]*"/g, '""').replace(/'[^']*'/g, "''")
   if (/\|\s*[A-Z][a-z]{2,}-[A-Z][a-z]{2,}/.test(bare)) {
     return 'A PowerShell cmdlet (Verb-Noun) is being piped at the shell level, where it is not an executable — this is what makes cmd.exe say "\'Out-String\' is not recognized". Put the whole pipeline inside one quoted argument: powershell -NoProfile -Command "… | Out-String".'
+  }
+
+  if (win) {
+    // cmd.exe splits a command at `&`, so an unquoted query string runs its
+    // second half as a command of its own — run 2026-09-17-1dnk-gzpt got
+    // "'longitude' is not recognized" from a curl it believed had worked.
+    if (/https?:\/\/[^\s"']*&/i.test(bare)) {
+      return 'This URL has a `&` outside quotes, and cmd.exe treats `&` as "run the next command" — the request would be cut short. Put the whole URL in double quotes: curl -s "https://…?a=1&b=2".'
+    }
+    // Piping into a POSIX filter that cmd.exe cannot find fails only after the
+    // left-hand side has run (and, for a network call, after its approval).
+    for (const match of bare.matchAll(/\|\s*([A-Za-z][\w-]*)/g)) {
+      const filter = match[1]!
+      if (POSIX_FILTERS.has(filter.toLowerCase()) && !Bun.which(filter)) {
+        return `\`${filter}\` is not available in this cmd.exe shell, so \`| ${filter}\` would fail after the first half ran. Drop the pipe and read the output as it comes back (run_command already returns it, truncated if large), or use findstr instead of grep.`
+      }
+    }
   }
 
   // An inline -c/-e one-liner whose payload carries backslash escapes: cmd.exe

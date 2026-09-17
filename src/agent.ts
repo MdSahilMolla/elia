@@ -2,6 +2,7 @@ import { config, systemPromptForMode, turnContextPrompt } from './config.ts'
 import { valueCoreSection } from './values/core.ts'
 import { runAgentLoop, type ConversationMessage, type RunAgentLoopResult, type ToolEvent } from './agentLoop.ts'
 import { setParentSteering } from './autonomy/steering.ts'
+import { currentAgent, withAgentIdentity } from './autonomy/context.ts'
 import type { Provider, ProviderActivity } from './providers/types.ts'
 import { allWorkerTools, battmannTools, businessTools, cyberTools, getSynthesizedTools } from './tools/registry.ts'
 import { taskTool } from './tools/task.ts'
@@ -230,6 +231,7 @@ async function runScopedTurn(
         request,
         onThinking: options.onThinking ?? writeThinking,
         signal: options.signal,
+        onProblem: (message) => surface({ kind: 'status', status: 'warning', title: message }),
       })
       if (plan) {
         activeTodoList().write(planTodoItems(plan.steps))
@@ -263,7 +265,13 @@ async function runScopedTurn(
   setParentSteering(options.drainSteering)
   let result: RunAgentLoopResult
   try {
-    result = await withToolHooks(hooks, () => withActionGovernor(governor, () => runAgentLoop({
+    // The turn's signal has to be on the agent identity too: that is where
+    // `task` (and every shell tool) reads it from. Without it Esc stopped this
+    // loop but not the critic and bughunter it was waiting on — they kept
+    // retrying a rate-limited model and asking for approvals, and the REPL could
+    // only say "a running command may not be interruptible" twenty times.
+    const identity = currentAgent()
+    result = await withAgentIdentity({ ...identity, signal: options.signal ?? identity.signal }, () => withToolHooks(hooks, () => withActionGovernor(governor, () => runAgentLoop({
       messages,
       systemPrompt,
       systemDynamicPrompt,
@@ -308,7 +316,7 @@ async function runScopedTurn(
           for (const lesson of notedLessons(event.input)) surface({ kind: 'status', status: 'completed', title: `✦ learned: ${lesson}` })
         }
       },
-    })))
+    }))))
   } finally {
     setParentSteering(undefined)
   }

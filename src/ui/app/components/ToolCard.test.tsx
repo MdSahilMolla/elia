@@ -134,3 +134,85 @@ test('a long edit_file diff collapses to a ctrl+o footer until expanded', () => 
   const expanded = render(<ToolCard tool={tool} expanded />).lastFrame() ?? ''
   expect(expanded).toContain('added line 39')
 })
+
+test('a running browser call names the action and animates a track under it', () => {
+  const tool: ToolItem = {
+    id: 'browser-1',
+    kind: 'tool',
+    name: 'browser',
+    input: { action: 'navigate', url: 'https://example.com/pricing?tier=pro' },
+    status: 'running',
+  }
+  const frame = render(<ToolCard tool={tool} expanded={false} />).lastFrame() ?? ''
+  // Present tense while it runs, and the scheme stripped — the host and path are
+  // what a transcript row is for.
+  expect(frame).toContain('Navigating to example.com/pricing?tier=pro')
+  expect(frame).not.toContain('https://')
+  // The track is drawn, and it is the browser's own motion rather than the
+  // generic braille spinner.
+  expect(frame).toContain('▸')
+  expect(frame).toContain('loading')
+})
+
+test('a running click reads as interaction, not as loading', () => {
+  const tool: ToolItem = {
+    id: 'browser-2',
+    kind: 'tool',
+    name: 'browser',
+    input: { action: 'click', target: 'Publish' },
+    status: 'running',
+  }
+  const frame = render(<ToolCard tool={tool} expanded={false} />).lastFrame() ?? ''
+  expect(frame).toContain('Clicking Publish')
+  expect(frame).toContain('interacting')
+})
+
+test('typing shows the field and never the text that was typed into it', () => {
+  const tool: ToolItem = {
+    id: 'browser-3',
+    kind: 'tool',
+    name: 'browser',
+    input: { action: 'type', target: 'css:#password', text: 'hunter2-not-in-the-transcript' },
+    status: 'running',
+  }
+  const frame = render(<ToolCard tool={tool} expanded={false} />).lastFrame() ?? ''
+  expect(frame).toContain('Typing into css:#password')
+  expect(frame).not.toContain('hunter2')
+})
+
+test('a finished browser call summarises where it landed instead of showing a bare brace', () => {
+  const tool: ToolItem = {
+    id: 'browser-4',
+    kind: 'tool',
+    name: 'browser',
+    input: { action: 'navigate', url: 'https://example.com/pricing' },
+    status: 'ok',
+    result: `{
+  "url": "https://example.com/pricing",
+  "title": "Pricing — Example"
+}
+Task session: mu4eebx5-43v5kz`,
+  }
+  const frame = render(<ToolCard tool={tool} expanded={false} />).lastFrame() ?? ''
+  expect(frame).toContain('Opened example.com/pricing')
+  expect(frame).toContain('Pricing — Example')
+  // The task-session handle belongs to the dashboard, not to this row, and the
+  // old fallback printed the opening brace of the JSON and nothing else.
+  expect(frame).not.toContain('Task session')
+  expect(frame.trimEnd().endsWith('{')).toBe(false)
+})
+
+test('a finished call shows no track — the animation costs nothing once it is done', () => {
+  const tool: ToolItem = {
+    id: 'browser-5',
+    kind: 'tool',
+    name: 'browser',
+    input: { action: 'click', target: 'Publish' },
+    status: 'ok',
+    result: '{\n  "clicked": "Publish"\n}',
+  }
+  const frame = render(<ToolCard tool={tool} expanded={false} />).lastFrame() ?? ''
+  expect(frame).toContain('Clicked Publish')
+  expect(frame).not.toContain('interacting')
+  expect(frame).not.toContain('◌')
+})

@@ -117,6 +117,7 @@ export function plannerPrompt(request: string, digest: string): string {
     '1. <a concrete step — what you will do, naming the files, commands, or pages involved>',
     '2. ...',
     `(3 to ${MAX_STEPS - 1} steps. The last step checks the result for real: run the build or the tests, or open the page.)`,
+    'If the request names something you cannot confirm exists here — a package, skill, plugin, file, or command — the first step finds out what it is. Never plan a step like "if it is new, create it": when the thing turns out not to exist, the plan stops and asks the user what they meant.',
   ]
     .filter((line, index) => index !== 0 || line)
     .join('\n')
@@ -224,6 +225,18 @@ export interface DraftUpfrontPlanOptions {
   onThinking?: (delta: string) => void
   signal?: AbortSignal
   timeoutMs?: number
+  /**
+   * Called when the plan could not be drafted for a reason the user should know
+   * about — a provider error, a timeout, an unreadable reply.
+   *
+   * Not decoration. Swallowing every failure here makes "the provider is out of
+   * credit" and "the planner judged this too small to plan" the same observable
+   * event: no plan, no thinking, and a status line that says `Working…`. That
+   * cost a debugging session to tell apart from the outside, which is precisely
+   * the cost this callback exists to remove. An abort stays silent — the user
+   * pressed Esc and does not need to be told what they just did.
+   */
+  onProblem?: (message: string) => void
 }
 
 /**
@@ -274,9 +287,21 @@ export async function draftUpfrontPlan(options: DraftUpfrontPlanOptions): Promis
     const streamed = stream.finish()
     const reply = streamed || result.content.flatMap((block) => (block.type === 'text' ? [block.text] : [])).join('')
     const parsed = parsePlannerReply(reply)
-    if (!parsed) return undefined
+    if (!parsed) {
+      // NONE is the planner doing its job on a small ask and stays quiet. A
+      // reply that simply could not be read is a different event and says so.
+      if (reply.trim() && !NONE_REPLY.test(reply.trim())) {
+        options.onProblem?.('The planner replied with something that was not a plan, so this turn runs unplanned.')
+      }
+      return undefined
+    }
     return { ...parsed, usage: result.usage, elapsedMs: Date.now() - startedAt }
-  } catch {
+  } catch (error) {
+    // Esc is not a failure worth narrating.
+    if (!signal.aborted) {
+      const detail = error instanceof Error ? error.message : String(error)
+      options.onProblem?.(`Could not draft a plan — ${detail.split('\n', 1)[0]}. Running unplanned.`)
+    }
     return undefined
   }
 }
@@ -303,6 +328,7 @@ export function planBriefing(steps: string[]): string {
     'Before starting, elia thought this request through and showed the user this plan. It is already your todo list, with step 1 in progress:',
     ...steps.map((step, index) => `${index + 1}. ${step}`),
     'Work through it in order. When a step is done, call todo_write to mark it completed and the next one in_progress; if the plan turns out wrong, rewrite the list instead of silently diverging from it. Before each batch of tool calls, say in one short sentence what you are about to do.',
+    'A step is not permission to invent. If a search shows that something the request names does not exist, stop: tell the user what you looked for and found, and ask what they meant. Never create a stub, placeholder, or file whose only content claims the work is done.',
     '</elia-plan>',
   ].join('\n')
 }

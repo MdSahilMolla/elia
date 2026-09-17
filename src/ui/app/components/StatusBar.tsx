@@ -1,5 +1,5 @@
 import { Box, Text } from 'ink'
-import { palette } from '../theme.ts'
+import { glyphs, palette } from '../theme.ts'
 
 export type ReplMode = 'manual' | 'auto' | 'plan'
 
@@ -10,8 +10,8 @@ export type ReplMode = 'manual' | 'auto' | 'plan'
  */
 const MODE_LABEL: Record<ReplMode, string> = {
   manual: '',
-  auto: 'auto-accept on',
-  plan: 'plan mode on',
+  auto: `${glyphs.auto} auto-accept on`,
+  plan: `${glyphs.plan} plan mode on`,
 }
 
 /** Keep the repo label from crowding the row on a long branch name. */
@@ -44,6 +44,11 @@ export interface StatusBarProps {
   repo?: string
   /** Under 80 columns: drop the repo label, keep model · context. */
   narrow?: boolean
+  /**
+   * Set only for a session on elia's own source: whether it may change that
+   * source. Only "on" is shown — like the mode, the default earns no label.
+   */
+  selfEdit?: boolean
 }
 
 /** Context use only earns space once it is worth watching. */
@@ -59,7 +64,7 @@ export function contextPercent(tokens: number, limit: number): number {
 export function StatusBar(props: StatusBarProps) {
   const pct = contextPercent(props.contextTokens, props.contextLimit)
   const modeLabel = MODE_LABEL[props.mode]
-  const modeColor = props.mode === 'plan' ? palette.warning : props.mode === 'auto' ? palette.success : palette.muted
+  const modeColor = props.mode === 'plan' ? palette.plan : props.mode === 'auto' ? palette.auto : palette.muted
   const ctxColor = pct >= 92 ? palette.failure : pct >= 80 ? palette.warning : palette.muted
   const extras = [
     props.queued > 0 ? `${props.queued} queued` : '',
@@ -67,7 +72,7 @@ export function StatusBar(props: StatusBarProps) {
   ].filter(Boolean)
 
   return (
-    <Box justifyContent="space-between" width="100%">
+    <Box justifyContent="space-between" width="100%" paddingLeft={2}>
       <Box flexShrink={1}>
         <Text wrap="truncate-end">
           {modeLabel ? (
@@ -78,6 +83,7 @@ export function StatusBar(props: StatusBarProps) {
           ) : (
             <Text color={palette.muted}>? for shortcuts</Text>
           )}
+          {props.selfEdit ? <Text color={palette.warning}> · self-edit on</Text> : null}
           {extras.length > 0 ? <Text color={palette.muted}> · {extras.join(' · ')}</Text> : null}
         </Text>
       </Box>

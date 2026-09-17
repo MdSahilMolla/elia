@@ -59,10 +59,36 @@ describe('action contracts', () => {
     const contract = contractForAction({ name: 'browser', input: { action: 'click', target: 'Publish', expectUrl: 'https://example.test/done' } }, process.cwd(), 'run:browser:1')
     expect(contract.requiresUserTakeover).toBe(true)
     expect(contract.failureDisposition).toBe('human-review')
-    expect((await evaluatePreconditions(contract, process.cwd(), undefined, {})).ok).toBe(false)
+    // Every environment here is pinned so the result cannot depend on whether
+    // the machine running the suite happens to have Chrome installed — the same
+    // trap the vercel precondition below documents. ELIA_BROWSER=off and
+    // ELIA_BROWSER=owned both short-circuit before useOwnedBrowserByDefault
+    // looks at the filesystem.
+    expect((await evaluatePreconditions(contract, process.cwd(), undefined, { ELIA_BROWSER: 'off' })).ok).toBe(false)
     expect((await evaluatePreconditions(contract, process.cwd(), undefined, { ELIA_BROWSER_CDP_URL: 'ws://configured-for-test' })).ok).toBe(true)
+    // A bridge variable still wins while the owned browser is switched off: the
+    // bridge is a transport in its own right, not a consumer of the fallback.
+    expect((await evaluatePreconditions(contract, process.cwd(), undefined, { ELIA_BROWSER: 'off', ELIA_BROWSER_CDP_URL: 'ws://configured-for-test' })).ok).toBe(true)
     expect(evaluatePostconditions(contract, '{\n  "url": "https://example.test/start"\n}', process.cwd())).toMatchObject({ ok: false })
     expect(evaluatePostconditions(contract, '{\n  "url": "https://example.test/done"\n}', process.cwd())).toMatchObject({ ok: true })
+  })
+
+  test("passes browser preconditions on elia's own headless browser when no bridge is configured", async () => {
+    // The regression this covers: the gate knew only the three bridge variables,
+    // so it refused every browser call on an ordinary machine with Chrome
+    // installed and no bridge set — standing in front of a transport that was
+    // there the whole time. Reported as evidence rather than silence, because
+    // which browser answered changes how a later failure reads.
+    const contract = contractForAction({ name: 'browser', input: { action: 'status' } }, process.cwd(), 'run:browser:owned')
+    const owned = await evaluatePreconditions(contract, process.cwd(), undefined, { ELIA_BROWSER: 'owned' })
+    expect(owned.ok).toBe(true)
+    expect(owned.evidence.some((entry) => entry.includes('headless browser'))).toBe(true)
+
+    // Turned off with nothing else configured is the one genuine failure, and it
+    // has to name the fallback so the fix is not another round of bridge setup.
+    const disabled = await evaluatePreconditions(contract, process.cwd(), undefined, { ELIA_BROWSER: 'off' })
+    expect(disabled.ok).toBe(false)
+    expect(disabled.failures.join(' ')).toContain('ELIA_BROWSER=off')
   })
 
   test('requires an exact approval boundary for production deployment and verifies the result', async () => {

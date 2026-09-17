@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { Box, Text, useInput } from 'ink'
 import { glyphs, palette } from '../theme.ts'
 import { Panel } from './Panel.tsx'
+import { DiffPreview } from './DiffPreview.tsx'
 import type { ApprovalResult } from '../../../autonomy/governor.ts'
 
 export interface ApprovalRequest {
@@ -118,23 +119,8 @@ export function ApprovalMenu({ request }: { request: ApprovalRequest }) {
   })
 
   return (
-    <Panel title={request.title}>
-      {request.preview && request.preview.length > 0 && (
-        <Box flexDirection="column">
-          {request.preview.slice(0, PREVIEW_LIMIT).map((line, i) => (
-            <Text
-              key={i}
-              wrap="truncate-end"
-              color={line.startsWith('+') ? palette.success : line.startsWith('-') ? palette.failure : undefined}
-            >
-              {line}
-            </Text>
-          ))}
-          {request.preview.length > PREVIEW_LIMIT && (
-            <Text color={palette.muted}>… +{request.preview.length - PREVIEW_LIMIT} more lines</Text>
-          )}
-        </Box>
-      )}
+    <Panel title={request.title} tone={plan ? 'plan' : 'permission'}>
+      {request.preview && request.preview.length > 0 && <DiffPreview lines={request.preview} limit={PREVIEW_LIMIT} />}
       {request.lines.filter(Boolean).map((line, i) => (
         <Text key={i} color={palette.muted} wrap="wrap">
           {line}
@@ -153,7 +139,7 @@ export function ApprovalMenu({ request }: { request: ApprovalRequest }) {
       ) : feedback !== null ? (
         <Box flexDirection="column" marginTop={1}>
           <Text>
-            <Text bold>{glyphs.user} </Text>
+            <Text bold color={palette.selection}>{glyphs.user} </Text>
             {feedback || <Text color={palette.muted}>what should elia do instead?</Text>}
             <Text inverse> </Text>
           </Text>
@@ -162,14 +148,16 @@ export function ApprovalMenu({ request }: { request: ApprovalRequest }) {
       ) : (
         <Box flexDirection="column" marginTop={1}>
           {choices.map((choice, i) => (
-            <Text key={choice.key} bold={i === cursor} color={i === cursor ? undefined : palette.muted} wrap="truncate-end">
+            <Text key={choice.key} bold={i === cursor} color={i === cursor ? palette.selection : palette.muted} wrap="truncate-end">
               {i === cursor ? `${glyphs.user} ` : '  '}
               {choice.key}. {choice.label}
             </Text>
           ))}
-          <Text color={palette.muted}>
-            {'  '}esc to decline{request.command !== undefined && !plan ? ' · e to edit the command' : ''}
-          </Text>
+          <Box marginTop={1}>
+            <Text color={palette.muted}>
+              {'  '}esc to decline{request.command !== undefined && !plan ? ' · e to edit the command' : ''}
+            </Text>
+          </Box>
         </Box>
       )}
     </Panel>
