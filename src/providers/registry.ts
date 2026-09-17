@@ -327,6 +327,7 @@ export function tryResolveProvider(request: ProviderRequest = {}): ResolvedProvi
           thinking: request.thinking,
           reasoningSummary: isInceptionEndpoint(baseURL) && process.env.ELIA_REASONING_SUMMARY !== 'off',
           reasoningEffort: isInceptionEndpoint(baseURL),
+          gemini: isGeminiEndpoint(baseURL),
         })
 
   return { provider, providerName, model }
@@ -344,6 +345,16 @@ export function isInceptionEndpoint(baseURL: string | undefined): boolean {
   try {
     const host = new URL(baseURL).hostname
     return host === 'inceptionlabs.ai' || host.endsWith('.inceptionlabs.ai')
+  } catch {
+    return false
+  }
+}
+
+/** Google's OpenAI-compatible Gemini API (the `google` preset, or `custom` pointed at it). */
+export function isGeminiEndpoint(baseURL: string | undefined): boolean {
+  if (!baseURL) return false
+  try {
+    return new URL(baseURL).hostname === 'generativelanguage.googleapis.com'
   } catch {
     return false
   }

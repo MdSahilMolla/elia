@@ -123,6 +123,14 @@ export interface RunAgentLoopOptions {
   model?: string
   /** Additional providers to try when the selected route is unavailable before output. */
   fallbacks?: ProviderRoute[]
+  /**
+   * Looked up before every model call, in place of `provider`/`providerName`/
+   * `model`, so a `/model` switch reaches a worker that is already running.
+   * A reviewer used to keep calling the model it started on — a rate-limited
+   * one, in the session that prompted this — however often the operator
+   * switched away from it. Fallbacks follow the looked-up provider.
+   */
+  resolveRoute?: () => ProviderRoute
   /** Max model round-trips before the loop gives up (default 80). */
   maxSteps?: number
   /** Called after every tool result — used by the journal and the skill-synthesis detector. */
@@ -158,6 +166,15 @@ export interface RunAgentLoopOptions {
    * top-level agent passes it; a sub-agent's list is its own.
    */
   onPlanProgress?: (update: PlanProgressUpdate) => void
+  /**
+   * A reporting tool whose successful call is the whole point of this loop:
+   * once it succeeds, the loop ends there. Without it a scout that had already
+   * submitted its verdict kept exploring — run 2026-09-17-1dnk-gzpt's
+   * assumption check filed its answers one second in, then spent four more
+   * minutes putting `curl | head` pipelines in front of the operator for
+   * approval, all while the run showed "Checking the 3 assumptions".
+   */
+  finishAfterTool?: string
 }
 
 export type StopReason = 'complete' | 'step-budget' | 'aborted' | 'no-progress' | 'spend-budget'
@@ -219,6 +236,7 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
     providerName,
     model,
     fallbacks,
+    resolveRoute,
     maxSteps = DEFAULT_MAX_STEPS,
     onTool: toolListener,
     onToolStart,
@@ -228,6 +246,7 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
     drainSteering,
     drainDirectives,
     onPlanProgress,
+    finishAfterTool,
   } = opts
 
   const transcript = activeSessionTranscript()
@@ -652,6 +671,10 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
 
     messages.push({ role: 'user', content: toolResults })
 
+    if (finishAfterTool && outcomes.some((outcome) => outcome?.name === finishAfterTool && !outcome.isError)) {
+      return finishAndFlush('complete')
+    }
+
     // No-progress circuit breaker. A turn where every tool call errored is a turn
     // that moved nothing forward; a run of them is thrashing. Nudge once, hard,
     // then stop the step so the caller can decide what happens next.
@@ -741,15 +764,18 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
 
     // Resolve routes per call so the ambient provider remains swappable while
     // role-pinned tiers can still supply their own provider and fallback list.
-    const active = provider ?? config.provider
+    const live = resolveRoute?.()
+    const active = live?.provider ?? provider ?? config.provider
+    const activeName = live?.providerName ?? providerName ?? config.providerName
+    const activeModel = live?.model ?? model ?? config.model
     const routes: ProviderRoute[] = [
       {
         provider: active,
-        providerName: providerName ?? config.providerName,
-        model: model ?? config.model,
-        label: `${providerName ?? config.providerName} (${model ?? config.model})`,
+        providerName: activeName,
+        model: activeModel,
+        label: `${activeName} (${activeModel})`,
       },
-      ...(fallbacks ?? (provider ? [] : autoFallbacksFor(config.providerName))),
+      ...(fallbacks ?? (provider && !live ? [] : autoFallbacksFor(activeName))),
     ]
     const now = Date.now()
     const healthyRoutes = routes.filter((route) => (providerHealth.get(providerHealthKey(route))?.cooldownUntil ?? 0) <= now)
@@ -808,14 +834,15 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
               if (verbose) writeNotice('the model sent a tool call that was not valid JSON; asking it again')
               continue
             }
-            if (isFallbackableProviderError(error)) {
+            const unusable = isUnusableRouteError(error)
+            if (unusable || isFallbackableProviderError(error)) {
               const key = providerHealthKey(route)
               const previous = providerHealth.get(key)
               providerHealth.set(key, { failures: (previous?.failures ?? 0) + 1, cooldownUntil: Date.now() + PROVIDER_HEALTH_COOLDOWN_MS, lastError: error instanceof Error ? error.message : String(error) })
             }
             // Retrying after output was emitted would duplicate a partial answer in
             // the terminal. Only route before any output has been emitted.
-            if (emittedOutput || !isFallbackableProviderError(error)) throw error
+            if (emittedOutput || !(unusable || isFallbackableProviderError(error))) throw error
             if (signal?.aborted) throw error
 
             // The request was rejected for its *size*. Neither routing nor
@@ -843,7 +870,7 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
               break
             }
 
-            if (attempt >= MAX_PROVIDER_ATTEMPTS) throw error
+            if (unusable || attempt >= MAX_PROVIDER_ATTEMPTS) throw error
             await Bun.sleep(250 * 2 ** (attempt - 1))
           }
         }
@@ -1048,6 +1075,16 @@ export function resetProviderHealthForTests(): void {
  * error this function called fatal. `isCapacityError` is now the single
  * spelling of that family, shared with `classifyFailure`.
  */
+/**
+ * A route that cannot be used at all — out of credit, or its key refused. Asking
+ * it again is pointless, but the next route may well answer: these used to end
+ * the turn, so a free-tier OpenRouter key with no credit (402) never handed over.
+ */
+function isUnusableRouteError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error)
+  return /(?:401|402|403)|payment required|insufficient[_ ](?:credits?|quota|balance|funds)|requires more credits|invalid[_ ]api[_ ]key|incorrect api key|unauthori[sz]ed/i.test(message)
+}
+
 function isFallbackableProviderError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error)
   if (isCapacityError(message)) return true

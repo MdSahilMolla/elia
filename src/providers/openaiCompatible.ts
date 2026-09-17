@@ -2,6 +2,7 @@ import OpenAI from 'openai'
 import type { ChatMessage, ContentBlock, Provider, StreamTurnParams, ThinkingOption, ToolDefinition, Usage } from './types.ts'
 import { validateNetworkUrl } from '../networkPolicy.ts'
 import { warmConnection } from './prewarm.ts'
+import { geminiFetch } from './geminiStream.ts'
 
 export interface OpenAICompatibleProviderOptions {
   thinking?: ThinkingOption
@@ -16,7 +17,21 @@ export interface OpenAICompatibleProviderOptions {
   reasoningSummary?: boolean
   /** The endpoint takes Inception's per-request `reasoning_effort` (instant/low/medium/high). */
   reasoningEffort?: boolean
+  /**
+   * Google's OpenAI-compatible Gemini endpoint. Two things differ there: a
+   * Gemini 3 tool call carries a `thought_signature` that must be sent back
+   * with it or the next step is refused (HTTP 400), and its thoughts are only
+   * returned when asked for — inline in `content`, wrapped in `<thought>` tags.
+   */
+  gemini?: boolean
 }
+
+/**
+ * Google's documented stand-in for a tool call that has no signature of its own
+ * — one made by another provider before a fallback or `/model` switch landed on
+ * Gemini. Without it that history is refused outright.
+ */
+export const GEMINI_SKIP_SIGNATURE = 'skip_thought_signature_validator'
 
 // A generous ceiling on a single response (billed by actual usage, not the cap)
 // so a runaway generation can't rack up unbounded cost or block the turn
@@ -24,6 +39,17 @@ export interface OpenAICompatibleProviderOptions {
 // field every OpenAI-compatible endpoint in scope here (Groq, DeepSeek, …)
 // understands; the newer `max_completion_tokens` is not universally supported.
 const MAX_TOKENS = 32_000
+
+/**
+ * How long a started response may go without sending anything before it counts
+ * as stalled. The SDK's own request timeout stops at the response headers, so a
+ * body that stops arriving was waited on forever: a turn on a rate-limited free
+ * OpenRouter model sat for half an hour, and fallback never got its turn.
+ */
+export function streamIdleMs(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = Number(env.ELIA_STREAM_IDLE_MS)
+  return Number.isFinite(raw) && raw > 0 ? raw : 120_000
+}
 
 export function createOpenAICompatibleProvider(
   apiKey: string,
@@ -35,7 +61,7 @@ export function createOpenAICompatibleProvider(
   const validatedBaseURL = baseURL
     ? validateNetworkUrl(baseURL, { allowExplicitLocal, requireHttps: true }).toString()
     : baseURL
-  const client = new OpenAI({ apiKey, baseURL: validatedBaseURL, timeout: 180_000, maxRetries: 1 })
+  const client = new OpenAI({ apiKey, baseURL: validatedBaseURL, timeout: 180_000, maxRetries: 1, ...(options.gemini ? { fetch: geminiFetch() } : {}) })
   // Reasoning-capable OpenAI-compatible models (Groq's gpt-oss, DeepSeek's API,
   // others) emit reasoning as a non-standard `reasoning`/`reasoning_content`
   // field with no enable/disable request param — there is nothing to toggle in
@@ -46,6 +72,11 @@ export function createOpenAICompatibleProvider(
   const summaryParams: Record<string, unknown> = passthroughReasoning && options.reasoningSummary
     ? { reasoning_summary: true, reasoning_summary_wait: true }
     : {}
+  const geminiThoughts = Boolean(options.gemini && passthroughReasoning)
+  const thoughtParams: Record<string, unknown> = geminiThoughts
+    ? { extra_body: { google: { thinking_config: { include_thoughts: true } } } }
+    : {}
+  const wire: WireOptions = { gemini: Boolean(options.gemini), geminiThoughts }
 
   return {
     prewarm() {
@@ -60,6 +91,7 @@ export function createOpenAICompatibleProvider(
       const openAITools = toOpenAITools(tools)
       const requestParams: Record<string, unknown> = {
         ...summaryParams,
+        ...thoughtParams,
         ...(options.reasoningEffort && reasoningEffort ? { reasoning_effort: reasoningEffort } : {}),
       }
       // Tracks whether the caller's callbacks have already surfaced any part of
@@ -68,11 +100,21 @@ export function createOpenAICompatibleProvider(
       // replay below — replaying after real content already reached the caller
       // would double-send it. See the catch block below.
       let emittedContent = false
+      const thoughts = geminiThoughts ? createThoughtSplitter() : undefined
+      const idleMs = streamIdleMs()
+      const stall = new AbortController()
+      let idleTimer: ReturnType<typeof setTimeout> | undefined
+      const stillAlive = () => {
+        if (idleTimer) clearTimeout(idleTimer)
+        idleTimer = setTimeout(() => stall.abort(), idleMs)
+      }
+      stillAlive()
+      const streamSignal = signal ? AbortSignal.any([signal, stall.signal]) : stall.signal
       const runner = client.chat.completions
         .stream({
           model,
           max_tokens: MAX_TOKENS,
-          messages: toOpenAIMessages(fullSystem, messages),
+          messages: toOpenAIMessages(fullSystem, messages, wire),
           tools: openAITools,
           // Let the model emit several tool calls in one response so elia can run
           // them in parallel — the single biggest lever on agent wall-clock is
@@ -82,14 +124,19 @@ export function createOpenAICompatibleProvider(
           // Without this the final streamed response has no usage data at all.
           stream_options: { include_usage: true },
           ...requestParams,
-        }, signal ? { signal } : undefined)
+        }, { signal: streamSignal })
+        .on('chunk', stillAlive)
         .on('content', (delta) => {
           // Empty content chunks are keepalive/role noise, not output. Passing
           // them on breaks transcript accumulation downstream (see
           // ui/app/store.ts assistantDelta), so they stop here.
           if (!delta) return
           emittedContent = true
-          onText(delta)
+          if (!thoughts) return onText(delta)
+          for (const part of thoughts.feed(delta)) {
+            if (part.thought) onThinking?.(part.text)
+            else onText(part.text)
+          }
         })
 
       if (onToolBlock) {
@@ -112,6 +159,9 @@ export function createOpenAICompatibleProvider(
       // The SDK's accumulated message never carries `reasoning_summary` (it is
       // a sibling of `choices`, not part of the message), so it is kept here.
       let summary = ''
+      // The SDK keeps a non-standard delta field by overwriting it chunk by
+      // chunk, so its final message holds only the last reasoning fragment.
+      let reasoningText = ''
       if (passthroughReasoning) {
         runner.on('chunk', (chunk) => {
           // The reasoning field is non-standard, so the SDK's delta type has no
@@ -122,6 +172,7 @@ export function createOpenAICompatibleProvider(
           const reasoning = readReasoning(delta)
           if (reasoning) {
             emittedContent = true
+            reasoningText += reasoning
             onThinking?.(reasoning)
           }
           const summarised = readReasoningSummary(chunk)
@@ -134,12 +185,17 @@ export function createOpenAICompatibleProvider(
       }
 
       try {
-        const completion = await runner.finalChatCompletion()
+        const completion = await runner.finalChatCompletion().catch((error: unknown) => {
+          // Worded to read as a timeout, which is what routes to the next provider.
+          if (stall.signal.aborted && !signal?.aborted) throw new Error(`response stalled: nothing arrived for ${Math.round(idleMs / 1000)}s (timed out)`)
+          throw error
+        })
         const message = completion.choices[0]?.message
         if (!message) {
           throw new Error('Provider returned no message in response')
         }
-        return { content: withReasoningSummary(toContentBlocks(message, passthroughReasoning), summary), usage: usageFrom(completion.usage) }
+        const streamed: CompletionMessageLike = reasoningText ? { ...message, reasoning: reasoningText, reasoning_content: undefined } : message
+        return { content: withReasoningSummary(toContentBlocks(streamed, passthroughReasoning, wire), summary), usage: usageFrom(completion.usage) }
       } catch (err) {
         // The non-streaming fallback below re-issues the whole request and
         // replays the full response through onText/onThinking — safe only when
@@ -152,7 +208,7 @@ export function createOpenAICompatibleProvider(
         const completion = await client.chat.completions.create({
           model,
           max_tokens: MAX_TOKENS,
-          messages: toOpenAIMessages(fullSystem, messages),
+          messages: toOpenAIMessages(fullSystem, messages, wire),
           tools: openAITools,
           ...(openAITools.length > 0 ? { parallel_tool_calls: true } : {}),
           stream: false,
@@ -161,7 +217,7 @@ export function createOpenAICompatibleProvider(
         const message = completion.choices[0]?.message
         if (!message) throw new Error('Provider returned no message in non-streaming response')
         const content = withReasoningSummary(
-          toContentBlocks(message, passthroughReasoning),
+          toContentBlocks(message, passthroughReasoning, wire),
           passthroughReasoning ? (readReasoningSummary(completion) ?? '') : '',
         )
         for (const block of content) {
@@ -169,6 +225,8 @@ export function createOpenAICompatibleProvider(
           if (block.type === 'text') onText(block.text)
         }
         return { content, usage: usageFrom(completion.usage) }
+      } finally {
+        if (idleTimer) clearTimeout(idleTimer)
       }
     },
   }
@@ -185,6 +243,8 @@ export interface CompletionMessageLike {
         id?: string
         type?: string
         function?: { name?: string; arguments?: string }
+        /** Gemini's `{ google: { thought_signature } }`. */
+        extra_content?: unknown
       }
     | undefined
     | null
@@ -203,13 +263,22 @@ export interface CompletionMessageLike {
  * model sees the tool it asked for produce nothing and can retry, which is
  * recoverable in a way that a crashed agent loop is not.
  */
-export function toContentBlocks(message: CompletionMessageLike, includeReasoning = true): ContentBlock[] {
+export function toContentBlocks(message: CompletionMessageLike, includeReasoning = true, wire: WireOptions = {}): ContentBlock[] {
   const content: ContentBlock[] = []
 
   const reasoning = includeReasoning ? (message.reasoning ?? message.reasoning_content) : undefined
   if (reasoning) content.push({ type: 'thinking', text: reasoning, signature: '' })
 
-  if (message.content) content.push({ type: 'text', text: message.content })
+  if (message.content && wire.geminiThoughts) {
+    const splitter = createThoughtSplitter()
+    const pieces = [...splitter.feed(message.content), ...splitter.flush()]
+    const thought = pieces.filter((piece) => piece.thought).map((piece) => piece.text).join('')
+    const text = pieces.filter((piece) => !piece.thought).map((piece) => piece.text).join('')
+    if (thought && includeReasoning) content.push({ type: 'thinking', text: thought, signature: '' })
+    if (text) content.push({ type: 'text', text })
+  } else if (message.content) {
+    content.push({ type: 'text', text: message.content })
+  }
 
   for (const [index, toolCall] of (message.tool_calls ?? []).entries()) {
     if (!toolCall || (toolCall.type !== undefined && toolCall.type !== 'function')) continue
@@ -222,15 +291,24 @@ export function toContentBlocks(message: CompletionMessageLike, includeReasoning
       id: toolCall.id || `call_${index}`,
       name,
       input: safeJsonParse(toolCall.function?.arguments ?? ''),
+      ...(isRecord(toolCall.extra_content) ? { extra: { extra_content: toolCall.extra_content } } : {}),
     })
   }
 
   return content
 }
 
+export interface WireOptions {
+  /** Talking to Gemini: send tool-call signatures back (see GEMINI_SKIP_SIGNATURE). */
+  gemini?: boolean
+  /** Gemini was asked for its thoughts, so `content` carries `<thought>` spans. */
+  geminiThoughts?: boolean
+}
+
 export function toOpenAIMessages(
   system: string,
   messages: ChatMessage[],
+  wire: WireOptions = {},
 ): OpenAI.Chat.ChatCompletionMessageParam[] {
   const result: OpenAI.Chat.ChatCompletionMessageParam[] = [{ role: 'system', content: system }]
 
@@ -248,10 +326,14 @@ export function toOpenAIMessages(
         content: textParts.length > 0 ? textParts.map((b) => b.text).join('') : null,
         ...(toolUseBlocks.length > 0
           ? {
-              tool_calls: toolUseBlocks.map((b) => ({
+              tool_calls: toolUseBlocks.map((b, index) => ({
                 id: b.id,
                 type: 'function' as const,
                 function: { name: b.name, arguments: JSON.stringify(b.input) },
+                // Only Gemini gets these back: other endpoints reject a field
+                // they do not know. Gemini checks the first call of each step,
+                // so that one always carries a signature.
+                ...(wire.gemini ? geminiToolCallExtra(b.extra, index === 0) : {}),
               })),
             }
           : {}),
@@ -289,6 +371,69 @@ export function toOpenAIMessages(
   }
 
   return result
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
+}
+
+function geminiToolCallExtra(extra: Record<string, unknown> | undefined, first: boolean): Record<string, unknown> {
+  const own = extra?.extra_content
+  const google = isRecord(own) && isRecord(own.google) ? own.google : undefined
+  if (google && typeof google.thought_signature === 'string') return { extra_content: own }
+  return first ? { extra_content: { google: { thought_signature: GEMINI_SKIP_SIGNATURE } } } : {}
+}
+
+export interface ThoughtPiece {
+  text: string
+  thought: boolean
+}
+
+const THOUGHT_OPEN = '<thought>'
+const THOUGHT_CLOSE = '</thought>'
+
+/**
+ * Splits Gemini's streamed `content` into thought and answer. A tag can arrive
+ * cut across two chunks, so a tail that could still become one is held back
+ * until the next chunk (or `flush`) settles it.
+ */
+export function createThoughtSplitter(): { feed(chunk: string): ThoughtPiece[]; flush(): ThoughtPiece[] } {
+  let inThought = false
+  let pending = ''
+  return {
+    feed(chunk) {
+      let rest = pending + chunk
+      pending = ''
+      const pieces: ThoughtPiece[] = []
+      while (rest) {
+        const tag = inThought ? THOUGHT_CLOSE : THOUGHT_OPEN
+        const at = rest.indexOf(tag)
+        if (at >= 0) {
+          if (at > 0) pieces.push({ text: rest.slice(0, at), thought: inThought })
+          inThought = !inThought
+          rest = rest.slice(at + tag.length)
+          continue
+        }
+        let keep = 0
+        for (let length = Math.min(tag.length - 1, rest.length); length > 0; length -= 1) {
+          if (tag.startsWith(rest.slice(-length))) {
+            keep = length
+            break
+          }
+        }
+        const emit = rest.slice(0, rest.length - keep)
+        if (emit) pieces.push({ text: emit, thought: inThought })
+        pending = rest.slice(rest.length - keep)
+        rest = ''
+      }
+      return pieces
+    },
+    flush() {
+      const text = pending
+      pending = ''
+      return text ? [{ text, thought: inThought }] : []
+    },
+  }
 }
 
 function toOpenAITools(tools: ToolDefinition[]): OpenAI.Chat.ChatCompletionTool[] {

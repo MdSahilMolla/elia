@@ -264,6 +264,12 @@ test.if(process.platform === 'win32')('run_command steers away from cmd.exe-host
   await expect(executeTool('run_command', { command: 'bash -c "ls"' })).rejects.toThrow(/WSL launcher stub|cmd\.exe/)
   await expect(executeTool('run_command', { command: `python -c "import os; print('\\n'.join(os.listdir('.')))"` }))
     .rejects.toThrow(/backslash escapes|write a real/)
+  await expect(executeTool('run_command', { command: 'curl -s https://api.example.com/v1?latitude=52.5&longitude=13.4' }))
+    .rejects.toThrow(/outside quotes/)
+  if (!Bun.which('head')) {
+    await expect(executeTool('run_command', { command: 'curl -s "https://api.example.com/v1?a=1&b=2" | head -c 200' }))
+      .rejects.toThrow(/not available in this cmd\.exe shell/)
+  }
 })
 
 test('content tools deny protected files before bytes reach the model', async () => {

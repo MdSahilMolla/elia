@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from 'bun:test'
-import { createOpenAICompatibleProvider, toContentBlocks, toOpenAIMessages } from './openaiCompatible.ts'
+import { GEMINI_SKIP_SIGNATURE, createOpenAICompatibleProvider, createThoughtSplitter, toContentBlocks, toOpenAIMessages } from './openaiCompatible.ts'
 import type { ChatMessage } from './types.ts'
 
 // The fake server below is plain http://127.0.0.1 — allow that explicitly for
@@ -343,4 +343,141 @@ test('a streaming failure with no content emitted yet safely falls back to a non
   expect(texts).toEqual(['fallback answer'])
   expect(result.content).toEqual([{ type: 'text', text: 'fallback answer' }])
   expect(requestCount).toBe(2)
+})
+
+test('Gemini thoughts split out of content even when a tag is cut across chunks', () => {
+  const splitter = createThoughtSplitter()
+  const pieces = [
+    ...splitter.feed('<thou'),
+    ...splitter.feed('ght>weighing it'),
+    ...splitter.feed(' up</tho'),
+    ...splitter.feed('ught>0.05'),
+    ...splitter.flush(),
+  ]
+  expect(pieces.filter((piece) => piece.thought).map((piece) => piece.text).join('')).toBe('weighing it up')
+  expect(pieces.filter((piece) => !piece.thought).map((piece) => piece.text).join('')).toBe('0.05')
+  // A lone "<" that never becomes a tag is still text.
+  const plain = createThoughtSplitter()
+  expect([...plain.feed('a <'), ...plain.flush()].map((piece) => piece.text).join('')).toBe('a <')
+})
+
+test('a Gemini tool-call signature is kept and sent back only to Gemini', () => {
+  const [block] = toContentBlocks({
+    tool_calls: [{ id: 'c1', type: 'function', function: { name: 'read_file', arguments: '{}' }, extra_content: { google: { thought_signature: 'SIG' } } }],
+  })
+  expect(block).toMatchObject({ type: 'tool_use', extra: { extra_content: { google: { thought_signature: 'SIG' } } } })
+  const history: ChatMessage[] = [{ role: 'assistant', content: [block!] }]
+  const [, toGemini] = toOpenAIMessages('s', history, { gemini: true }) as Array<{ tool_calls?: Array<Record<string, unknown>> }>
+  expect(toGemini!.tool_calls![0]!.extra_content).toEqual({ google: { thought_signature: 'SIG' } })
+  const [, toGroq] = toOpenAIMessages('s', history) as Array<{ tool_calls?: Array<Record<string, unknown>> }>
+  expect('extra_content' in toGroq!.tool_calls![0]!).toBe(false)
+})
+
+test('a tool call made by another provider gets Gemini\'s placeholder signature on the first call of its step', () => {
+  const history: ChatMessage[] = [{
+    role: 'assistant',
+    content: [
+      { type: 'tool_use', id: 'a', name: 'read_file', input: {} },
+      { type: 'tool_use', id: 'b', name: 'read_file', input: {} },
+    ],
+  }]
+  const [, message] = toOpenAIMessages('s', history, { gemini: true }) as Array<{ tool_calls?: Array<Record<string, unknown>> }>
+  expect(message!.tool_calls![0]!.extra_content).toEqual({ google: { thought_signature: GEMINI_SKIP_SIGNATURE } })
+  expect('extra_content' in message!.tool_calls![1]!).toBe(false)
+})
+
+test('Gemini is asked for its thoughts, and they stream as thinking rather than answer text', async () => {
+  process.env.ELIA_ALLOW_INSECURE_LOCAL_ENDPOINT = '1'
+  let requestBody: Record<string, unknown> = {}
+  const base = { id: 'g', object: 'chat.completion.chunk', created: 0, model: 'gemini-3.8-flash' }
+  server = Bun.serve({
+    port: 0,
+    async fetch(request) {
+      requestBody = (await request.json()) as Record<string, unknown>
+      return new Response(sse(
+        { ...base, choices: [{ index: 0, delta: { role: 'assistant', content: '<thought>**Checking**\nit adds up', extra_content: { google: { thought: true } } }, finish_reason: null }] },
+        { ...base, choices: [{ index: 0, delta: { content: '</thought>0.05' }, finish_reason: null }] },
+        { ...base, choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] },
+      ) + 'data: [DONE]\n\n', { headers: { 'content-type': 'text/event-stream' } })
+    },
+  })
+  const provider = createOpenAICompatibleProvider('key', 'gemini-3.8-flash', `http://127.0.0.1:${server.port}`, { gemini: true })
+  const thinking: string[] = []
+  const text: string[] = []
+  const result = await provider.streamTurn({ cwd: process.cwd(), system: 'sys', messages: USER_MESSAGES, tools: [], onText: (delta) => text.push(delta), onThinking: (delta) => thinking.push(delta) })
+
+  expect(requestBody.extra_body).toEqual({ google: { thinking_config: { include_thoughts: true } } })
+  expect(thinking.join('')).toBe('**Checking**\nit adds up')
+  expect(text.join('')).toBe('0.05')
+  expect(result.content).toEqual([
+    { type: 'thinking', text: '**Checking**\nit adds up', signature: '' },
+    { type: 'text', text: '0.05' },
+  ])
+})
+
+test('streamed reasoning is kept whole, not just its last fragment', async () => {
+  process.env.ELIA_ALLOW_INSECURE_LOCAL_ENDPOINT = '1'
+  const base = { id: 'r', object: 'chat.completion.chunk', created: 0, model: 'gpt-oss' }
+  server = Bun.serve({
+    port: 0,
+    fetch: () => new Response(sse(
+      { ...base, choices: [{ index: 0, delta: { role: 'assistant', reasoning: 'first, ' }, finish_reason: null }] },
+      { ...base, choices: [{ index: 0, delta: { reasoning: 'then second' }, finish_reason: null }] },
+      { ...base, choices: [{ index: 0, delta: { content: 'ok' }, finish_reason: 'stop' }] },
+    ) + 'data: [DONE]\n\n', { headers: { 'content-type': 'text/event-stream' } }),
+  })
+  const provider = createOpenAICompatibleProvider('key', 'gpt-oss', `http://127.0.0.1:${server.port}`)
+  const result = await provider.streamTurn({ cwd: process.cwd(), system: 'sys', messages: USER_MESSAGES, tools: [], onText: () => {} })
+  expect(result.content[0]).toEqual({ type: 'thinking', text: 'first, then second', signature: '' })
+})
+
+test('a Gemini tool-call stream — no index on its calls — comes back as tool calls with their signature', async () => {
+  process.env.ELIA_ALLOW_INSECURE_LOCAL_ENDPOINT = '1'
+  const base = { id: 'g', object: 'chat.completion.chunk', created: 0, model: 'gemini-3.6-flash' }
+  server = Bun.serve({
+    port: 0,
+    fetch: () => new Response(sse(
+      { ...base, choices: [{ index: 0, delta: { role: 'assistant', content: '<thought>plan', extra_content: { google: { thought: true } } } }] },
+      { ...base, choices: [{ index: 0, delta: { role: 'assistant', content: '</thought>', tool_calls: [{ extra_content: { google: { thought_signature: 'SIG' } }, function: { arguments: '{"path":"notes.txt"}', name: 'read_file' }, id: 'call_1', type: 'function' }] } }] },
+      { ...base, choices: [{ index: 0, delta: { role: 'assistant', tool_calls: [{ function: { arguments: '{}', name: 'list_files' }, id: 'call_2', type: 'function' }] } }] },
+      { ...base, choices: [{ index: 0, delta: { role: 'assistant' }, finish_reason: 'stop' }] },
+    ) + 'data: [DONE]\n\n', { headers: { 'content-type': 'text/event-stream' } }),
+  })
+  const provider = createOpenAICompatibleProvider('key', 'gemini-3.6-flash', `http://127.0.0.1:${server.port}`, { gemini: true })
+  const result = await provider.streamTurn({
+    cwd: process.cwd(), system: 'sys', messages: USER_MESSAGES, onText: () => {},
+    tools: [{ name: 'read_file', description: 'r', input_schema: { type: 'object', properties: {} } }],
+  })
+  expect(result.content).toEqual([
+    { type: 'thinking', text: 'plan', signature: '' },
+    { type: 'tool_use', id: 'call_1', name: 'read_file', input: { path: 'notes.txt' }, extra: { extra_content: { google: { thought_signature: 'SIG' } } } },
+    { type: 'tool_use', id: 'call_2', name: 'list_files', input: {} },
+  ])
+})
+
+test('a response that stops arriving fails as a timeout instead of waiting forever', async () => {
+  process.env.ELIA_ALLOW_INSECURE_LOCAL_ENDPOINT = '1'
+  const previousIdle = process.env.ELIA_STREAM_IDLE_MS
+  process.env.ELIA_STREAM_IDLE_MS = '300'
+  const base = { id: 's', object: 'chat.completion.chunk', created: 0, model: 'm' }
+  server = Bun.serve({
+    port: 0,
+    idleTimeout: 30,
+    fetch: () => new Response(new ReadableStream({
+      start(controller) {
+        // One chunk, then nothing — the connection stays open.
+        controller.enqueue(new TextEncoder().encode(sse({ ...base, choices: [{ index: 0, delta: { role: 'assistant' }, finish_reason: null }] })))
+      },
+    }), { headers: { 'content-type': 'text/event-stream' } }),
+  })
+  try {
+    const provider = createOpenAICompatibleProvider('key', 'm', `http://127.0.0.1:${server.port}`)
+    const startedAt = Date.now()
+    await expect(provider.streamTurn({ cwd: process.cwd(), system: 'sys', messages: USER_MESSAGES, tools: [], onText: () => {} }))
+      .rejects.toThrow(/stalled.*timed out/)
+    expect(Date.now() - startedAt).toBeLessThan(5_000)
+  } finally {
+    if (previousIdle === undefined) delete process.env.ELIA_STREAM_IDLE_MS
+    else process.env.ELIA_STREAM_IDLE_MS = previousIdle
+  }
 })

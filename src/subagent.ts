@@ -1,4 +1,4 @@
-import { autoFallbacksFor, BATTMANN_SUBAGENT_SYSTEM_PROMPT, CYBER_SUBAGENT_SYSTEM_PROMPT, FITNESS_SUBAGENT_SYSTEM_PROMPT, roleConfig, SPORTS_SUBAGENT_SYSTEM_PROMPT, SUBAGENT_SYSTEM_PROMPT, turnContextPrompt } from './config.ts'
+import { BATTMANN_SUBAGENT_SYSTEM_PROMPT, CYBER_SUBAGENT_SYSTEM_PROMPT, FITNESS_SUBAGENT_SYSTEM_PROMPT, roleConfig, SPORTS_SUBAGENT_SYSTEM_PROMPT, SUBAGENT_SYSTEM_PROMPT, turnContextPrompt } from './config.ts'
 import { runAgentLoop, lastAssistantText, type ConversationMessage, type ToolEvent } from './agentLoop.ts'
 import type { Usage } from './providers/types.ts'
 import type { Tool } from './tools/types.ts'
@@ -62,6 +62,8 @@ export interface SubAgentRequest {
    * call; see requiredToolReminders.
    */
   requiredTool?: string
+  /** End the worker as soon as this reporting tool succeeds; see RunAgentLoopOptions.finishAfterTool. */
+  finishAfterTool?: string
 }
 
 export interface SubAgentResult {
@@ -174,10 +176,9 @@ export async function runSubAgent(request: SubAgentRequest): Promise<SubAgentRes
       messages,
       systemPrompt: `${basePrompt}\n\n${turnContextPrompt(new Date(), cwd)}\n\n## Your role\n${promptForRole(request.role)}`,
       tools,
-      provider: tier.provider,
-      providerName: tier.providerName,
-      model: tier.model,
-      fallbacks: autoFallbacksFor(tier.providerName),
+      // The tier object is updated in place by a `/model` switch, so reading
+      // it per call is what lets a running worker follow the switch.
+      resolveRoute: () => ({ provider: tier.provider, providerName: tier.providerName, model: tier.model }),
       maxSteps: definition.maxSteps,
       useAnimation: false,
       verbose: false,
@@ -195,6 +196,7 @@ export async function runSubAgent(request: SubAgentRequest): Promise<SubAgentRes
       // whichever iterates first consumes it.
       drainSteering: drainParentSteering,
       drainDirectives: reminders?.drain,
+      finishAfterTool: request.finishAfterTool,
     }))))),
   )
 
