@@ -31,11 +31,12 @@ export function liveCapEnabled(): boolean {
 }
 
 // Rows the rest of the frame needs below the transcript: the workspace panel,
-// the working indicator, the input box and the two-line HUD, plus their
-// margins. Deliberately generous — under-reserving reintroduces exactly the
-// overflow this module exists to prevent, while over-reserving only trims a
-// couple more rows off a live region that is already too tall to read.
-export const DEFAULT_CHROME_ROWS = 14
+// the working indicator and its tip, the input between its two rules and the
+// status row, plus their margins. Deliberately generous — under-reserving
+// reintroduces exactly the overflow this module exists to prevent, while
+// over-reserving only trims a couple more rows off a live region that is
+// already too tall to read.
+export const DEFAULT_CHROME_ROWS = 16
 /** Never squeeze the live region below this, however small the terminal. */
 export const MIN_LIVE_ROWS = 6
 
@@ -84,6 +85,8 @@ function shapeOf(item: Item, expanded: boolean): Shape {
       return { chrome: 1, gutter: 2, bodyLimit: Infinity }
     case 'notice':
       return { chrome: 0, gutter: 2, bodyLimit: Infinity }
+    case 'receipt':
+      return { chrome: 1, gutter: 2, bodyLimit: Infinity }
     case 'header':
       return { chrome: 1, gutter: 2, bodyLimit: 3 }
   }

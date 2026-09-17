@@ -64,6 +64,23 @@ test('rollupLine summarizes a mixed batch', () => {
   expect(line).toContain('+8 −1')
 })
 
+test('rollupTools counts files, not calls, and a failed call changed nothing', () => {
+  const tools = [
+    tool({ id: 'e1', name: 'edit_file', input: { path: 'src/stats.ts' }, result: 'Edited (+1 −1)' }),
+    tool({ id: 'e2', name: 'edit_file', input: { path: 'src/stats.ts' }, result: 'Edited (+1 −1)' }),
+    tool({ id: 'e3', name: 'edit_file', input: { path: 'src/other.ts' }, status: 'error', result: 'old_string not found' }),
+    tool({ id: 'w1', name: 'write_file', input: { path: 'notes.md' }, result: 'Wrote notes.md' }),
+    tool({ id: 'e4', name: 'edit_file', input: { path: 'notes.md' }, result: 'Edited (+2 −0)' }),
+    tool({ id: 'r1', name: 'read_file', input: { path: 'src/stats.ts' } }),
+    tool({ id: 'r2', name: 'read_file', input: { path: 'src/stats.ts', offset: 5, limit: 10 } }),
+  ]
+  const rollup = rollupTools(tools)
+  expect(rollup.edited).toBe(1)
+  expect(rollup.created).toBe(1)
+  expect(rollup.read).toBe(1)
+  expect(rollupLine(rollup)).toContain('Edited 1 file, created 1 file')
+})
+
 test('visualize surfaces the chart title', () => {
   const s = summarizeTool(tool({ name: 'visualize', input: { type: 'bar', title: 'Quarterly revenue' } }))
   expect(s.verb).toBe('Visualized')

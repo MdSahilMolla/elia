@@ -21,7 +21,7 @@ export function TextPrompt({ request }: { request: TextPromptRequest }) {
   return (
     <Panel>
       <Text>
-        <Text color={palette.accent}>{request.label} </Text>
+        <Text bold color={palette.selection}>{request.label} </Text>
         {value || <Text color={palette.muted}>{request.placeholder ?? ''}</Text>}
         <Text color={palette.muted}>▏</Text>
       </Text>

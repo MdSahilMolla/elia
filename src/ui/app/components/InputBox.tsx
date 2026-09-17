@@ -55,6 +55,8 @@ export interface InputBoxProps {
   onTabEmpty(): void
   /** `?` on an empty line — opens the keybinding help. */
   onHelp?(): void
+  /** A completion menu (commands, files, history search) opened or closed below the prompt. */
+  onMenuChange?(open: boolean): void
 }
 
 /**
@@ -282,38 +284,51 @@ export function InputBox(props: InputBoxProps) {
       : Math.min(Math.max(0, selected - Math.floor(MAX_VISIBLE / 2)), menu.length - MAX_VISIBLE)
   const visible = menu.slice(start, start + MAX_VISIBLE)
   const nameWidth = Math.min(22, Math.max(0, ...visible.map((cmd) => cmd.name.length)))
+  const anyMenu = menu.length > 0 || mentionOpen || search !== null
+  const { onMenuChange } = props
+  useEffect(() => {
+    onMenuChange?.(anyMenu)
+  }, [anyMenu, onMenuChange])
   const hiddenAbove = start
   const hiddenBelow = menu.length - (start + visible.length)
 
+  // The rules take the colour of whatever mode the next Enter will act in:
+  // a `!` shell line, plan mode, auto-accept — or recede when it is the default.
+  const shellLine = !search && state.buffer.startsWith('!')
+  const modeColor = shellLine ? palette.bash : props.mode === 'plan' ? palette.plan : props.mode === 'auto' ? palette.auto : undefined
+  const ruleColor = props.disabled ? palette.subtle : modeColor ?? palette.subtle
+
   return (
     <Box flexDirection="column">
-      {/* One dim rule above the prompt — the single structural line in the whole
-          UI. Was a top+bottom border box; a lone rule reads lighter and can't
-          mis-wrap. */}
+      {/* A rule above and below the prompt — the only structural lines in the
+          UI. Top and bottom only: side borders are what mis-wrap and flatten
+          into `| |` soup when a stray write lands mid-frame. */}
       <Box
         borderStyle="single"
-        borderColor={palette.muted}
-        borderDimColor
+        borderColor={ruleColor}
         borderTop
-        borderBottom={false}
+        borderBottom
         borderLeft={false}
         borderRight={false}
       >
-        <Text
-          bold
-          color={props.disabled ? palette.muted : props.mode === 'plan' ? palette.warning : props.mode === 'auto' ? palette.success : undefined}
-        >
-          {glyphs.user}{' '}
-        </Text>
-        {search ? (
-          <Text>
-            <Text color={palette.muted}>⌕ </Text>
-            {search.query}
-            <Text inverse> </Text>
+        {/* The glyph keeps its own column: a long line wraps beside it
+            instead of squeezing it against the text. */}
+        <Box width={2} flexShrink={0}>
+          <Text bold color={props.disabled ? palette.muted : modeColor}>
+            {glyphs.user}
           </Text>
-        ) : (
-          <BufferView buffer={state.buffer} cursor={state.cursor} placeholder={props.placeholder} showCursor={!props.disabled} />
-        )}
+        </Box>
+        <Box flexGrow={1} flexShrink={1}>
+          {search ? (
+            <Text>
+              <Text color={palette.muted}>⌕ </Text>
+              {search.query}
+              <Text inverse> </Text>
+            </Text>
+          ) : (
+            <BufferView buffer={state.buffer} cursor={state.cursor} placeholder={props.placeholder} showCursor={!props.disabled} />
+          )}
+        </Box>
       </Box>
 
       {search && (
@@ -322,7 +337,7 @@ export function InputBox(props: InputBoxProps) {
             <Text color={palette.muted}>{search.query ? 'no matching history' : 'reverse-search history — type to search'}</Text>
           ) : (
             searchResults.map((entry, i) => (
-              <Text key={entry} bold={i === search.index} color={i === search.index ? undefined : palette.muted} wrap="truncate-end">
+              <Text key={entry} bold={i === search.index} color={i === search.index ? palette.selection : palette.muted} wrap="truncate-end">
                 {i === search.index ? `${glyphs.user} ` : '  '}
                 {entry}
               </Text>
@@ -341,7 +356,7 @@ export function InputBox(props: InputBoxProps) {
             fileMatches.map((path, i) => {
               const active = i === Math.min(mentionSel, fileMatches.length - 1)
               return (
-                <Text key={path} bold={active} color={active ? undefined : palette.muted} wrap="truncate-end">
+                <Text key={path} bold={active} color={active ? palette.selection : palette.muted} wrap="truncate-end">
                   {active ? `${glyphs.user} ` : '  '}
                   {path}
                 </Text>
@@ -358,7 +373,7 @@ export function InputBox(props: InputBoxProps) {
             const active = menu[selected]?.name === cmd.name
             return (
               <Text key={cmd.name} wrap="truncate-end">
-                <Text bold={active} color={active ? undefined : palette.muted}>
+                <Text bold={active} color={active ? palette.selection : palette.muted}>
                   {active ? `${glyphs.user} ` : '  '}
                   {cmd.name.padEnd(nameWidth)}
                 </Text>

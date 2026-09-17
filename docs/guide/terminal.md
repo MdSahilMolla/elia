@@ -64,6 +64,19 @@ On a real TTY, `elia` / `elia` uses the Ink terminal workspace; plain or piped o
 
 `edit_file` and `write_file` results render as a colored unified diff (folded to the changed hunks; `/expand` reprints any tool result the scrollback truncated). Visualizations render their terminal chart without requiring expansion. A line starting with `!` runs the rest as a shell command and carries its output into the next turn as context. `/team` shows the active deep/fast tiers and configured role routes; `/cost` shows usage; `/export [path]` writes the conversation to Markdown.
 
+**While elia works.** One line under the transcript says what is happening: elia's spark breathes beside a label that names the running tool, the plan step in progress, or the phase of a longer run, with a bright band sweeping across it — then the elapsed time, the tokens streamed so far, and `esc to interrupt`. If the model goes quiet the spark cools toward red, and after half a minute the line says how long it has been silent (a long test run is not counted as silence). Longer turns close with a receipt — `✧ Worked for 23s · edited 1 file, ran 2 commands · +2 −2 · ↓ 2.9k tokens`.
+
+**Look and feel.** Diffs sit on green and red bands with the changed words marked; the messages you sent sit on a quiet band so they are easy to find in scrollback; the prompt's rules take the colour of the mode you are in (plan, auto-accept, or a `!` shell line). These settings change it:
+
+| Setting | Effect |
+| --- | --- |
+| `ELIA_THEME=dark\|light\|ansi` | Pick the palette. Without it elia uses `dark`, `light` when the terminal advertises a light background through `COLORFGBG`, and `ansi` (the terminal's own 16 colours) on 16-colour consoles. |
+| `NO_COLOR=1` / `--no-color` | No colour at all; the live UI is otherwise unchanged. |
+| `ELIA_REDUCED_MOTION=1` | A still spark, no shimmer, and a clock that ticks once a second. |
+| `ELIA_TIPS=off` | No rotating tip under the working line. |
+| `ELIA_INK_INCREMENTAL=off` | Redraw the whole live region on every frame instead of only the rows that changed. |
+| `ELIA_FAST_RENDER=off` | Measure text with the `string-width` package and run React's development build, as before. By default the live UI uses Bun's native text measurement and React's production build, without setting `NODE_ENV` for the commands elia runs. |
+
 **Images.** Paste or drag an image file (`.png`, `.jpg`, `.gif`, `.webp`) straight onto the prompt line — Elia reads it, strips the path from your text, and sends the picture along with the message. `/attach <path>` queues one explicitly for your next message (`/attach` lists what's queued, `/attach clear` empties it). Images go to any vision-capable API model; the ChatGPT-subscription (Codex) provider has no image channel, so an attachment there becomes a text marker naming the file.
 
 ## LSP diagnostics on every edit

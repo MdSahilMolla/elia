@@ -9,57 +9,17 @@ import { redactText } from '../../redact.ts'
 import { visualizationTerminalPreview } from '../../../tools/visualize.ts'
 import { listLoadedSkills } from '../../../skills/loader.ts'
 import { highlightLine, normalizeLanguage } from '../highlight.ts'
+import { paintRow, parseDiff, type DiffRow } from '../diffRows.ts'
+import { useFrameWidth } from '../wrap.ts'
 
 // One tool call reads as a single line, Claude-Code style:
 //
 //   ● Edited src/app.ts  +1 −1
 //     ⎿ …a short body when there is one worth seeing…
 //
-// The dot carries the state — a spinner while running, green when it worked,
-// red when it failed — so there is no trailing ✓, no cache mark and no
+// The dot carries the state — a slow pulse while running, green when it
+// worked, red when it failed — so there is no trailing ✓, no cache mark and no
 // "expand me" chevron competing with the text. Ctrl+O expands every body.
-
-interface DiffRow {
-  kind: 'hunk' | 'add' | 'del' | 'ctx' | 'meta'
-  num?: number
-  text: string
-}
-
-/** Parses the `` ```diff `` block of an edit/write result into rows with a line-number gutter. */
-function parseDiff(result: string): DiffRow[] {
-  const start = result.indexOf('```diff')
-  if (start === -1) return []
-  const afterFence = result.indexOf('\n', start)
-  const end = result.indexOf('```', afterFence + 1)
-  const body = result.slice(afterFence + 1, end === -1 ? undefined : end).split('\n')
-
-  const rows: DiffRow[] = []
-  let oldLn = 0
-  let newLn = 0
-  for (const line of body) {
-    if (line.length === 0) continue
-    const hunk = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(line)
-    if (hunk) {
-      oldLn = Number(hunk[1])
-      newLn = Number(hunk[2])
-      rows.push({ kind: 'hunk', text: line })
-      continue
-    }
-    const marker = line[0]
-    const text = line.slice(1)
-    if (marker === '+') rows.push({ kind: 'add', num: newLn++, text })
-    else if (marker === '-') rows.push({ kind: 'del', num: oldLn++, text })
-    else if (marker === '\\') rows.push({ kind: 'meta', text: text.trim() })
-    else {
-      rows.push({ kind: 'ctx', num: newLn, text })
-      oldLn += 1
-      newLn += 1
-    }
-  }
-  // The first hunk header only restates the line numbers the gutter already
-  // shows; later ones become a quiet "⋮" gap marker.
-  return rows.filter((row, i) => !(row.kind === 'hunk' && rows.slice(0, i).every((r) => r.kind === 'hunk')))
-}
 
 const gutter = (n: number | undefined): string => (n === undefined ? '' : String(n)).padStart(4, ' ')
 
@@ -74,33 +34,50 @@ const COLLAPSED_SHELL_ROWS = 5
 
 function MoreRows({ hidden, expanded }: { hidden: number; expanded: boolean }) {
   if (hidden <= 0) return null
-  return <Text color={palette.muted}>… +{hidden} lines{expanded ? '' : ' (ctrl+o to expand)'}</Text>
+  return <Text color={palette.muted}>{'     '}… +{hidden} lines{expanded ? '' : ' (ctrl+o to expand)'}</Text>
+}
+
+/**
+ * One diff row. Changed rows sit on a green or red band that runs the width of
+ * the card, keep their syntax colours, and the words that actually changed get
+ * a stronger band. Without band colours (ANSI theme, NO_COLOR) a changed row is
+ * plain green or red text, as it always was.
+ */
+function DiffLine({ row, language, width }: { row: DiffRow; language?: string; width: number }) {
+  const added = row.kind === 'add'
+  const removed = row.kind === 'del'
+  const band = added ? palette.diffAddBg : removed ? palette.diffDelBg : undefined
+  const wordBand = added ? palette.diffAddWordBg : removed ? palette.diffDelWordBg : undefined
+  const sign = added ? '+' : removed ? '-' : ' '
+  const text = row.text || ' '
+  const flat = (added || removed) && !band ? (added ? palette.success : palette.failure) : undefined
+  const paints = flat ? [{ text, color: flat }] : paintRow(highlightLine(text, language), band ? row.changes : undefined)
+  const used = gutter(row.num).length + 3 + Bun.stringWidth(text)
+  const pad = band && Number.isFinite(width) ? Math.max(0, width - used) : 0
+  return (
+    <Text wrap="truncate-end" backgroundColor={band}>
+      <Text color={palette.muted}>{gutter(row.num)} </Text>
+      <Text color={added ? palette.success : removed ? palette.failure : undefined}>{sign}</Text>{' '}
+      {paints.map((paint, index) => (
+        <Text key={index} color={paint.color} bold={paint.bold} backgroundColor={'changed' in paint && paint.changed ? wordBand : undefined}>
+          {paint.text}
+        </Text>
+      ))}
+      {pad > 0 ? ' '.repeat(pad) : null}
+    </Text>
+  )
 }
 
 function DiffBody({ rows, limit, language, expanded }: { rows: DiffRow[]; limit: number; language?: string; expanded: boolean }) {
   const shown = rows.slice(0, limit)
+  // The card body starts two columns in.
+  const width = useFrameWidth() - 2
   return (
     <Box flexDirection="column" marginLeft={2}>
       {shown.map((row, i) => {
-        if (row.kind === 'hunk') return <Text key={i} color={palette.muted}>{'   ⋮'}</Text>
+        if (row.kind === 'hunk') return <Text key={i} color={palette.subtle}>{'   ⋮'}</Text>
         if (row.kind === 'meta') return <Text key={i} color={palette.muted}>{`     ${row.text}`}</Text>
-        const sign = row.kind === 'add' ? '+' : row.kind === 'del' ? '-' : ' '
-        // Added / removed lines keep their green / red so the change reads at a
-        // glance; context lines get syntax highlighting instead of flat grey.
-        const lineColor = row.kind === 'add' ? palette.success : row.kind === 'del' ? palette.failure : undefined
-        return (
-          <Text key={i} color={lineColor} wrap="truncate-end">
-            <Text color={palette.muted}>{gutter(row.num)} </Text>
-            {sign}{' '}
-            {row.kind === 'ctx'
-              ? highlightLine(row.text || ' ', language).map((seg, j) => (
-                  <Text key={j} color={seg.color} bold={seg.bold}>
-                    {seg.text}
-                  </Text>
-                ))
-              : row.text || ' '}
-          </Text>
-        )
+        return <DiffLine key={i} row={row} language={language} width={width} />
       })}
       <MoreRows hidden={rows.length - shown.length} expanded={expanded} />
     </Box>
@@ -145,13 +122,25 @@ function SummaryRow({ text, color }: { text: string; color?: string }) {
 
 /** The dot that leads every tool row — the state lives here. */
 function Dot({ running, failed, color }: { running: boolean; failed: boolean; color?: string }) {
-  if (running) return <Spinner />
+  if (running) return <Spinner variant="pulse" />
   return <Text color={color ?? (failed ? palette.failure : palette.success)}>{glyphs.bullet}</Text>
+}
+
+/** "+12 −3", with each half in its own colour. */
+function ChangeStat({ stat }: { stat: string }) {
+  const match = /^\+(\d+) −(\d+)$/.exec(stat)
+  if (!match) return <Text color={palette.muted}>  {stat}</Text>
+  return (
+    <Text>
+      {'  '}
+      <Text color={palette.success}>+{match[1]}</Text> <Text color={palette.failure}>−{match[2]}</Text>
+    </Text>
+  )
 }
 
 function seconds(ms: number | undefined): string {
   if (ms === undefined || ms < 3_000) return ''
-  return ms < 60_000 ? `${Math.round(ms / 1000)}s` : `${Math.floor(ms / 60_000)}m${String(Math.round((ms % 60_000) / 1000)).padStart(2, '0')}s`
+  return ms < 60_000 ? `${Math.round(ms / 1000)}s` : `${Math.floor(ms / 60_000)}m ${Math.round((ms % 60_000) / 1000)}s`
 }
 
 /** First meaningful line of a result — the one-line gist for tools with no custom summary. */
@@ -179,13 +168,13 @@ export function ToolCard({ tool, expanded }: { tool: ToolItem; expanded: boolean
     <Box flexDirection="column">
       <Box>
         <Box width={2} flexShrink={0}>
-          {isSkill && !running ? <Text>{glyphs.skill}</Text> : <Dot running={running} failed={failed} />}
+          {isSkill && !running ? <Text color={palette.brand}>{glyphs.skill}</Text> : <Dot running={running} failed={failed} />}
         </Box>
         <Box flexGrow={1} flexShrink={1}>
           <Text wrap="truncate-end">
             {isSkill ? <Text bold>Skill {tool.name}</Text> : <Text bold>{running ? activeVerb(s.verb) : s.verb}</Text>}
             {s.target && !isSkill ? <Text> {s.target}</Text> : null}
-            {stat ? <Text color={failed ? palette.failure : palette.muted}>  {stat}</Text> : null}
+            {stat ? failed ? <Text color={palette.failure}>  {stat}</Text> : <ChangeStat stat={stat} /> : null}
             {time ? <Text color={palette.muted}>  {time}</Text> : null}
           </Text>
         </Box>

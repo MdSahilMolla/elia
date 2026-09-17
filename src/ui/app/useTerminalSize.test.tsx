@@ -3,6 +3,7 @@ import { EventEmitter } from 'node:events'
 import { render } from 'ink-testing-library'
 import { Text } from 'ink'
 import { NARROW_COLUMNS, readTerminalSize, useTerminalSize } from './useTerminalSize.ts'
+import { waitForFrame } from './testFixtures.ts'
 
 /** A stdout stand-in that can be resized and that records its listeners. */
 class FakeStream extends EventEmitter {
@@ -51,6 +52,8 @@ test('the hook re-renders with the new geometry on a resize', async () => {
 
   fake.resize(60, 20)
   await flush()
+  // Ink throttles its writes; on a loaded machine the frame can land a tick later.
+  await waitForFrame(lastFrame, '60x20 narrow')
   expect(lastFrame()).toBe('60x20 narrow')
 
   unmount()

@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Text, useInput } from 'ink'
+import { Box, Text, useInput } from 'ink'
 import { glyphs, palette } from '../theme.ts'
 import { Panel } from './Panel.tsx'
 import { applySearchKey, type PickerOption } from '../../picker.ts'
@@ -74,11 +74,13 @@ export function Picker({ request }: { request: PickerRequest }) {
   const start = Math.max(0, Math.min(selected - Math.floor(PAGE / 2), Math.max(0, filtered.length - PAGE)))
   const visible = filtered.slice(start, start + PAGE)
 
+  // Details line up in one column, as far as a sensible label width allows.
+  const labelWidth = Math.min(32, Math.max(0, ...visible.map((option) => Bun.stringWidth(option.label))))
   const hiddenAbove = start
   const hiddenBelow = Math.max(0, filtered.length - (start + visible.length))
 
   return (
-    <Panel title={request.title}>
+    <Panel title={request.title} tone="brand">
       {(request.searchable || query) && (
         <Text>
           <Text color={palette.muted}>⌕ </Text>
@@ -91,17 +93,23 @@ export function Picker({ request }: { request: PickerRequest }) {
         const isSel = filtered[selected] === option
         return (
           <Text key={option.value} wrap="truncate-end">
-            <Text bold={isSel} color={isSel ? undefined : palette.muted}>
+            <Text bold={isSel} color={isSel ? palette.selection : palette.muted}>
               {isSel ? `${glyphs.user} ` : '  '}
               {option.label}
             </Text>
-            {option.detail ? <Text color={palette.muted}>  {option.detail}</Text> : null}
+            {option.detail ? (
+              <Text color={palette.muted}>
+                {' '.repeat(Math.max(0, labelWidth - Bun.stringWidth(option.label)))}  {option.detail}
+              </Text>
+            ) : null}
           </Text>
         )
       })}
       {hiddenBelow > 0 && <Text color={palette.muted}>  ↓ {hiddenBelow} more</Text>}
       {filtered.length === 0 && <Text color={palette.muted}>  no matches</Text>}
-      <Text color={palette.muted}>↑↓ to move · enter to select · esc to cancel</Text>
+      <Box marginTop={1}>
+        <Text color={palette.muted}>↑↓ to move · enter to select · esc to cancel</Text>
+      </Box>
     </Panel>
   )
 }

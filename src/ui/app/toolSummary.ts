@@ -198,8 +198,16 @@ export interface TurnRollup {
   removed: number
 }
 
+/**
+ * What a turn did, counted in files rather than calls: three edits to one file
+ * are "edited 1 file". A call that failed changed nothing, so it is not counted
+ * as an edit, a write or a read.
+ */
 export function rollupTools(tools: ToolItem[]): TurnRollup {
   const r: TurnRollup = { commands: 0, edited: 0, created: 0, read: 0, searched: 0, other: 0, added: 0, removed: 0 }
+  const edited = new Set<string>()
+  const created = new Set<string>()
+  const read = new Set<string>()
   for (const tool of tools) {
     const s = summarizeTool(tool)
     const stat = /\+(\d+) −(\d+)/.exec(s.stat)
@@ -207,13 +215,23 @@ export function rollupTools(tools: ToolItem[]): TurnRollup {
       r.added += Number(stat[1])
       r.removed += Number(stat[2])
     }
+    const file = s.target.replace(/:\d+(?:-\d+)?$/, '') || tool.id
+    const failed = tool.status === 'error'
     if (tool.name === 'run_command') r.commands += 1
-    else if (tool.name === 'edit_file') r.edited += 1
-    else if (tool.name === 'write_file') r.created += 1
-    else if (tool.name === 'read_file') r.read += 1
-    else if (tool.name === 'grep' || tool.name === 'list_files' || tool.name === 'web_search') r.searched += 1
+    else if (tool.name === 'edit_file') {
+      if (!failed) edited.add(file)
+    } else if (tool.name === 'write_file') {
+      if (!failed) created.add(file)
+    } else if (tool.name === 'read_file') {
+      if (!failed) read.add(file)
+    } else if (tool.name === 'grep' || tool.name === 'list_files' || tool.name === 'web_search') r.searched += 1
     else r.other += 1
   }
+  // A file this turn wrote and then edited was created, not edited.
+  for (const file of created) edited.delete(file)
+  r.edited = edited.size
+  r.created = created.size
+  r.read = read.size
   return r
 }
 

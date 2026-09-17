@@ -57,6 +57,7 @@ const REPL_COMMANDS: SlashCommand[] = [
   { name: '/mode', description: 'switch mode: dev, cyber, battmann' },
   { name: '/betamode', description: 'experimental modes & personas — sports, fitness, marketing, finance, …' },
   { name: '/thinking', description: 'set reasoning effort' },
+  { name: '/theme', description: 'colours: dark, light, or your terminal\'s own' },
   { name: '/rewind', description: 'restore an earlier checkpoint' },
   { name: '/compact', description: 'summarise the conversation to free context · /compact [focus]' },
   { name: '/clear', description: 'start a fresh conversation (the old one stays resumable)' },
@@ -3564,6 +3565,7 @@ async function runInteractive(): Promise<void> {
             { label: 'Risk checks', detail: replMode, value: 'risk' },
             { label: 'Model & provider', detail: `${config.providerLabel} · ${config.model}`, value: 'model' },
             { label: 'Reasoning effort', detail: describeThinking(), value: 'thinking' },
+            { label: 'Theme', detail: (await import('./ui/app/theme.ts')).themeName, value: 'theme' },
             { label: 'Mode / persona', detail: persona ?? mode, value: 'mode' },
             { label: 'Compact conversation', detail: conversationDetail('summarise it to free context'), value: 'compact' },
             { label: 'Clear conversation', detail: conversationDetail('start fresh; this one stays resumable'), value: 'clear' },
@@ -3586,9 +3588,38 @@ async function runInteractive(): Promise<void> {
             }
             if (value === 'model') return handleSlashForInk('/model')
             if (value === 'thinking') return handleSlashForInk('/thinking')
+            if (value === 'theme') return handleSlashForInk('/theme')
             if (value === 'mode') return handleSlashForInk('/mode')
             if (value === 'compact') return handleSlashForInk('/compact')
             if (value === 'clear') return handleSlashForInk('/clear')
+          },
+        },
+      }
+    }
+
+    // /theme — switch the palette now and keep the choice for later sessions.
+    if (trimmed === '/theme') {
+      const theme = await import('./ui/app/theme.ts')
+      return {
+        handled: true,
+        picker: {
+          title: 'Theme',
+          initialIndex: Math.max(0, theme.THEME_CHOICES.findIndex((choice) => choice.name === theme.themeName)),
+          options: theme.THEME_CHOICES.map((choice) => ({
+            label: choice.name === theme.themeName ? `${choice.name} (current)` : choice.name,
+            detail: choice.detail,
+            value: choice.name,
+          })),
+          onSelect: (value) => {
+            if (value !== 'dark' && value !== 'light' && value !== 'ansi') return
+            theme.setTheme(value)
+            process.env.ELIA_THEME = value
+            try {
+              writeUserConfig({ ELIA_THEME: value })
+              return `Theme: ${value} — saved for next time.`
+            } catch {
+              return `Theme: ${value} — for this session (could not save it).`
+            }
           },
         },
       }
