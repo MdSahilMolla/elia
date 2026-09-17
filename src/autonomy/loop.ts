@@ -9,8 +9,9 @@ import { runSubAgent } from '../subagent.ts'
 import { runShell, clampOutput } from '../shell.ts'
 import { ZERO_USAGE, addUsage, formatElapsed, recordUsage } from '../usage.ts'
 import type { Usage } from '../providers/types.ts'
-import { writeText } from '../ui/stream.ts'
+import { writeText, writeThinking } from '../ui/stream.ts'
 import { reportSinkActive, writeBlock, writeFail, writePass, writePhase, writeSubStep, writeSummary } from '../ui/report.ts'
+import { draftRunThinking, upfrontPlanEnabled } from './upfrontPlan.ts'
 
 // When a report sink is installed (the Ink REPL escalated into this pipeline),
 // the raw planner/repair token stream would have to be shredded into hundreds of
@@ -138,6 +139,12 @@ export interface AutonomousRunOptions {
    * turn escalating into the pipeline mid-edit).
    */
   protectedPaths?: readonly string[]
+  /**
+   * Where the run's visible reasoning goes. The Ink REPL passes its own thinking
+   * channel so an escalated turn reasons on screen exactly as a chat turn does;
+   * `elia auto` leaves it unset and `writeThinking` streams to stdout.
+   */
+  onThinking?: (delta: string) => void
 }
 
 export type AutonomyProfile = 'fast' | 'balanced' | 'thorough'
@@ -737,6 +744,32 @@ async function runAutonomousTaskInternal(options: AutonomousRunOptions): Promise
     },
   ]
 
+  // Think it through out loud before any of it — the same step a chat turn
+  // takes (autonomy/upfrontPlan.ts), for the same reason. Orienting is all
+  // read_file and grep, mercury-2.5 returns no reasoning of its own, and the
+  // planner is told not to narrate its plan in prose, so between "elia will
+  // research this first" and a finished five-step plan the user saw a silent
+  // minute and read it as elia planning without thinking. The pipeline still
+  // writes the plan itself; this call only produces the deliberation.
+  const thinkingSink = options.onThinking ?? writeThinking
+  if (!options.resumeMessages && !options.resumeGraph && upfrontPlanEnabled()) {
+    const thought = await draftRunThinking({
+      provider: config.provider,
+      cwd: workspaceRoot,
+      system: systemPromptForMode(activeMode()),
+      systemDynamic: turnContextPrompt(),
+      goal,
+      context: snapshot,
+      onThinking: thinkingSink,
+      signal: runSignal,
+    })
+    if (thought) {
+      track(thought.usage)
+      recordUsage(thought.usage)
+      journal.append('phase', { phase: 'thinking', thinking: thought.thinking })
+    }
+  }
+
   journal.checkpoint('before-orient', messages)
 
   let proposal: Proposal | undefined = options.resumeGraph ? graph.state().proposal : undefined
@@ -775,7 +808,13 @@ async function runAutonomousTaskInternal(options: AutonomousRunOptions): Promise
       messages,
       systemPrompt: plannerPrompt,
       tools: planningTools,
-      onText: streamOnText(),
+      // Under a report sink the planner's prose has nowhere to go as assistant
+      // text (it would shred into hundreds of transcript items), but it is not
+      // an answer to the user — it is the lead reasoning about what it just
+      // read. It belongs in the thinking channel, which coalesces it, rather
+      // than in the bin it used to go to.
+      onText: streamOnText() ?? thinkingSink,
+      onThinking: thinkingSink,
       useAnimation: true,
       verbose: true,
       maxSteps: defaults.plannerSteps,

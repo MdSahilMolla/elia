@@ -87,3 +87,69 @@ test('an operator can override the orient budget', () => {
     expect(orientBudgetMsFor(90_000, { ELIA_ORIENT_BUDGET_S: raw })).toBe(90_000)
   }
 })
+
+// An escalated turn ("create a expo app for notetaking") produced a plan with
+// nothing in front of it: orienting is all read_file and grep, mercury-2.5
+// returns no reasoning of its own, and the planner is told not to narrate its
+// plan in prose. So between "elia will research this first" and a finished
+// five-step plan the user watched a silent minute and asked, fairly, why it had
+// not thought before planning — a chat turn had always thought out loud first.
+// This drives the real run: the opening thought must reach the thinking channel
+// before the proposal does.
+test('an autonomous run thinks out loud before it proposes a plan', async () => {
+  const { mkdtempSync, rmSync } = await import('node:fs')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+  const { config } = await import('../config.ts')
+  const { createScriptedProvider } = await import('../bench/latency/scriptedProvider.ts')
+  const { runAutonomousTask } = await import('./loop.ts')
+
+  const provider = createScriptedProvider([
+    { text: 'I read this as a plain Expo notes app. I will scaffold it and keep notes on the device. The risk is the CLI stopping for a prompt.' },
+    {
+      toolCalls: [
+        {
+          name: 'submit_proposal',
+          input: {
+            goal: 'create an expo app for notetaking',
+            understanding: 'A fresh Expo app with local note storage.',
+            steps: [{ id: 's1', title: 'Scaffold the Expo app', instructions: 'Run create-expo-app', role: 'builder', files: ['package.json'], dependsOn: [] }],
+            verification: ['npx tsc --noEmit'],
+            acceptanceCriteria: ['The app builds'],
+          },
+        },
+      ],
+    },
+  ])
+  const original = config.provider
+  const workspace = mkdtempSync(join(tmpdir(), 'elia-orient-'))
+  const seen: string[] = []
+  let thinkingBeforePlan = ''
+  try {
+    config.provider = provider
+    const result = await runAutonomousTask({
+      goal: 'create a expo app for notetaking',
+      workspaceRoot: workspace,
+      // The plan is rejected, so the run stops at the gate: this covers
+      // orienting only, and nothing is ever built or committed.
+      approve: async () => {
+        thinkingBeforePlan = seen.join('')
+        return { action: 'reject' as const }
+      },
+      onThinking: (delta) => seen.push(delta),
+      profile: 'fast',
+      polish: false,
+      publish: false,
+      learn: false,
+    })
+    expect(result.outcome).toBe('rejected')
+  } finally {
+    config.provider = original
+    rmSync(workspace, { recursive: true, force: true })
+  }
+
+  expect(thinkingBeforePlan).toContain('Expo notes app')
+  expect(thinkingBeforePlan).toContain('The risk is')
+  // Streamed as it was written, not delivered in one block at the end.
+  expect(seen.length).toBeGreaterThan(5)
+})

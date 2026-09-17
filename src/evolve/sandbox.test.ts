@@ -5,7 +5,7 @@ import { join } from 'node:path'
 
 process.env.ANTHROPIC_API_KEY ??= 'test-key-for-sandbox-test'
 
-const { changedFiles, promote, rollback, violatedImmutables } = await import('./sandbox.ts')
+const { changedFiles, isImmutablePath, promote, rollback, violatedImmutables } = await import('./sandbox.ts')
 
 function write(path: string, content: string): void {
   mkdirSync(join(path, '..'), { recursive: true })
@@ -118,4 +118,14 @@ test('the proposer’s view of its own behaviour cannot be edited by a candidate
   // made a real benchmark gain *and* quietly narrowed the evidence would pass
   // every check and leave the next generation unable to see the damage.
   expect(violatedImmutables(['src/evolve/fieldEvidence.ts', 'src/agent.ts'])).toEqual(['src/evolve/fieldEvidence.ts'])
+})
+
+test('the files that decide a verdict are off limits to the candidate that the verdict is about', () => {
+  // sieve.ts chooses which tasks run and when to stop; reach.ts and its recorder
+  // supply the evidence for "this task cannot be affected"; baselineCache.ts
+  // supplies the side being compared against. A candidate able to edit any of
+  // them could be promoted for a change that nothing ever ran.
+  for (const file of ['src/evolve/sieve.ts', 'src/evolve/reach.ts', 'src/evolve/reachRecorder.ts', 'src/evolve/baselineCache.ts']) {
+    expect(isImmutablePath(file)).toBe(true)
+  }
 })

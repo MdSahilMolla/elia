@@ -924,6 +924,8 @@ async function runBenchLatency(): Promise<void> {
  */
 async function runCompounding(): Promise<void> {
   const { compoundingStatus, renderCompoundingStatus } = await import('./compounding/status.ts')
+  const { evidenceVelocity, renderVelocity } = await import('./compounding/velocity.ts')
+  const { readLedger } = await import('./evolve/ledger.ts')
   const { readLibrary, renderLibrary } = await import('./reason/library.ts')
   const { coverageOf, recentCoverage, renderCoverage } = await import('./reason/coverage.ts')
   const { loadOutcomes } = await import('./autonomy/outcomes.ts')
@@ -931,8 +933,15 @@ async function runCompounding(): Promise<void> {
   const library = readLibrary()
   const outcomes = loadOutcomes()
   const coverage = { lifetime: coverageOf(outcomes), recent: recentCoverage(outcomes) }
-  if (machineReadable) emitEvent('compounding_status', { stages, reasoning: library.records, coverage })
-  else writeUsageLine([renderCompoundingStatus(stages), renderCoverage(coverage.lifetime, coverage.recent), renderLibrary(library)].join('\n\n'))
+  // What a verdict costs, and whether that is falling: the loop can only compound
+  // as fast as it can afford to decide. See compounding/velocity.ts.
+  const velocity = evidenceVelocity(readLedger())
+  if (machineReadable) emitEvent('compounding_status', { stages, reasoning: library.records, coverage, velocity })
+  else {
+    writeUsageLine(
+      [renderCompoundingStatus(stages), renderVelocity(velocity), renderCoverage(coverage.lifetime, coverage.recent), renderLibrary(library)].join('\n\n'),
+    )
+  }
 }
 
 /**
@@ -2402,6 +2411,10 @@ async function runInteractive(): Promise<void> {
         goal,
         approve,
         approveAction,
+        // An escalated turn reasons on screen exactly as a chat turn does: the
+        // pipeline's opening thinking, and any reasoning the model returns while
+        // it orients, stream into the Ink transcript instead of being dropped.
+        onThinking: uiHooks?.onThinking,
         mode,
         profile: 'balanced',
         governanceMode: 'supervised',
@@ -3400,10 +3413,13 @@ async function runInteractive(): Promise<void> {
         : config.providerName === 'codex'
           ? 1
           : selectableProviderNames.indexOf(config.providerName) + 2
+      const autoRouting = config.routingMode === 'auto'
       const options = [
         {
-          label: config.routingMode === 'auto' ? 'auto (current)' : 'auto',
-          detail: 'transparent fallback across every ready provider',
+          label: autoRouting ? 'auto (current)' : 'auto',
+          detail: autoRouting
+            ? `leads with ${config.providerLabel}, falls back across every ready provider`
+            : 'transparent fallback across every ready provider',
           value: 'auto',
         },
         {
@@ -3412,7 +3428,7 @@ async function runInteractive(): Promise<void> {
           value: 'codex-subscription',
         },
         ...selectableProviderNames.map((name) => ({
-        label: name === config.providerName ? `${name} (current)` : name,
+        label: name !== config.providerName ? name : autoRouting ? `${name} (leading auto)` : `${name} (current)`,
         detail: `${isProviderPresetConfigured(name) ? 'ready' : 'no key set'} · ${providerPresetDefaultModel(name) ?? 'custom'}`,
           value: name,
         })),
@@ -3717,7 +3733,7 @@ async function runInteractive(): Promise<void> {
     while (true) {
       const options = [
         { label: 'Risk checks', detail: replMode, value: 'replMode' },
-        { label: 'Model & provider', detail: `${config.providerLabel} · ${config.model}`, value: 'model' },
+        { label: 'Model & provider', detail: `${config.routingMode === 'auto' ? 'auto · ' : ''}${config.providerLabel} · ${config.model}`, value: 'model' },
         { label: 'Provider connections', detail: `${savedProviderNames().length} API key(s) · ChatGPT subscription`, value: 'providers' },
         { label: 'Reasoning effort', detail: describeThinking(), value: 'thinking' },
         { label: 'Skills', detail: selectedSkillNames ? selectedSkillNames.join(', ') : 'all loaded', value: 'skills' },
@@ -3774,11 +3790,21 @@ async function runInteractive(): Promise<void> {
 
     if (trimmed === '/model' || trimmed === '/provider') {
       const selectable = PROVIDER_PRESET_NAMES.filter((n) => n !== 'codex')
+      const auto = config.routingMode === 'auto'
       const options = [
-        { label: config.routingMode === 'auto' ? 'auto (current)' : 'auto', detail: 'transparent fallback across every ready provider', value: 'auto' },
+        {
+          label: auto ? 'auto (current)' : 'auto',
+          // On auto the selected provider stays the first route, so this row
+          // has to say which one — otherwise the only way to read the picker
+          // was two rows both claiming to be current.
+          detail: auto
+            ? `leads with ${config.providerLabel}, falls back across every ready provider`
+            : 'transparent fallback across every ready provider',
+          value: 'auto',
+        },
         { label: 'ChatGPT subscription (Codex)', detail: 'use your signed-in ChatGPT plan', value: 'codex' },
         ...selectable.map((name) => ({
-          label: name === config.providerName ? `${name} (current)` : name,
+          label: name !== config.providerName ? name : auto ? `${name} (leading auto)` : `${name} (current)`,
           detail: `${isProviderPresetConfigured(name) ? 'ready' : 'no key set'} · ${providerPresetDefaultModel(name) ?? 'custom'}`,
           value: name,
         })),
@@ -3891,7 +3917,7 @@ async function runInteractive(): Promise<void> {
           title: 'Settings',
           options: [
             { label: 'Risk checks', detail: replMode, value: 'risk' },
-            { label: 'Model & provider', detail: `${config.providerLabel} · ${config.model}`, value: 'model' },
+            { label: 'Model & provider', detail: `${config.routingMode === 'auto' ? 'auto · ' : ''}${config.providerLabel} · ${config.model}`, value: 'model' },
             { label: 'Reasoning effort', detail: describeThinking(), value: 'thinking' },
             { label: 'Theme', detail: (await import('./ui/app/theme.ts')).themeName, value: 'theme' },
             { label: 'Mode / persona', detail: persona ?? mode, value: 'mode' },
@@ -4356,7 +4382,7 @@ async function runInteractive(): Promise<void> {
     await runInkRepl({
       sessionId,
       version: cliVersion,
-      getEnv: () => ({ model: config.model, providerLabel: config.providerLabel, providerName: config.providerName }),
+      getEnv: () => ({ model: config.model, providerLabel: config.providerLabel, providerName: config.providerName, routing: config.routingMode }),
       commands: allSlashCommands(),
       initialReplMode: replMode,
       messages,

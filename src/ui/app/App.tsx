@@ -99,6 +99,13 @@ export interface AppEnv {
   model: string
   providerLabel: string
   providerName: string
+  /**
+   * `auto` when the session falls back across every ready provider. The model
+   * below is still the one that answers first, so the row says both: "auto"
+   * alone would hide which model is talking, and the model alone hid that the
+   * session was on auto at all.
+   */
+  routing?: 'auto' | 'selected'
 }
 
 export interface AppProps {
@@ -179,15 +186,16 @@ export function App(props: AppProps) {
     return home && cwd.toLowerCase().startsWith(home.toLowerCase()) ? `~${cwd.slice(home.length)}` : cwd
   }, [])
   const printHeader = (target: TranscriptStore) => {
-    const { model, providerLabel } = props.getEnv()
+    const { model, providerLabel, routing } = props.getEnv()
     // "mercury (mercury-2.5)" → "mercury"; named only when the model's own name doesn't say it.
     const provider = (providerLabel ?? '').replace(/\s*\(.*\)\s*$/, '').trim()
+    const named = provider && !model.toLowerCase().includes(provider.toLowerCase()) ? `${model} · ${provider}` : model
     target.header({
       version: props.version,
       greeting: props.greeting,
       location,
       lessons: lessonCount,
-      model: provider && !model.toLowerCase().includes(provider.toLowerCase()) ? `${model} · ${provider}` : model,
+      model: routing === 'auto' ? `auto · ${named}` : named,
     })
   }
   // The header is the first scrollback item — printed once through <Static>,
@@ -913,6 +921,7 @@ export function App(props: AppProps) {
             contextTokens={contextTokens}
             contextLimit={contextLimit}
             providerName={env.providerName}
+            routing={env.routing}
             busy={busy}
             queued={queue.length}
             steering={steeringCount}

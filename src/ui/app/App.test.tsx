@@ -229,6 +229,26 @@ test('status bar reflects a live model change from getEnv', async () => {
   await waitForFrame(lastFrame, 'gpt-5.6-terra')
 })
 
+test('auto routing is named next to the model it is leading with', async () => {
+  // Two rows of the /model picker used to claim to be current at once, and the
+  // status row said only "mercury-2.5" — nothing on screen said the session was
+  // on auto at all.
+  const { lastFrame } = render(
+    <App {...baseProps()} getEnv={() => ({ model: 'mercury-2.5', providerLabel: 'mercury', providerName: 'mercury', routing: 'auto' as const })} />,
+  )
+  await waitForFrame(lastFrame, READY)
+  expect(lastFrame()).toContain('auto · mercury-2.5')
+})
+
+test('a session on one selected provider says nothing about routing', async () => {
+  const { lastFrame } = render(
+    <App {...baseProps()} getEnv={() => ({ model: 'mercury-2.5', providerLabel: 'mercury', providerName: 'mercury', routing: 'selected' as const })} />,
+  )
+  await waitForFrame(lastFrame, READY)
+  expect(lastFrame()).toContain('mercury-2.5')
+  expect(lastFrame()).not.toContain('auto · ')
+})
+
 test('a codex-subscription message submits without a per-turn hand-off prompt', async () => {
   // The subscription is confirmed once per session by the agent loop's own
   // governor, not re-approved on every message, so the App submits straight

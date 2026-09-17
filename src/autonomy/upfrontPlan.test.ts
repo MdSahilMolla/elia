@@ -2,12 +2,14 @@ import { expect, test } from 'bun:test'
 import {
   conversationDigest,
   createThinkingStream,
+  draftRunThinking,
   draftUpfrontPlan,
   parsePlannerReply,
   planActivity,
   planBriefing,
   plannerPrompt,
   planTodoItems,
+  runThinkingPrompt,
   stripInjectedContext,
   visibleThinking,
   wantsUpfrontPlan,
@@ -224,4 +226,52 @@ test('pressing Esc during planning is not narrated as a failure', async () => {
   })
   expect(plan).toBeUndefined()
   expect(problems).toEqual([])
+})
+
+test('an escalated run thinks out loud first, and asks for reasoning rather than a plan', async () => {
+  const provider = scriptedProvider('I read this as a plain Expo notes app. I will scaffold with create-expo-app and keep notes in AsyncStorage. The risk is the Expo CLI prompting for input and stalling the run.')
+  const thinking: string[] = []
+  const thought = await draftRunThinking({
+    provider,
+    cwd: '/tmp',
+    system: 'PLANNER SYSTEM',
+    systemDynamic: 'today is friday',
+    goal: 'create a expo app for notetaking',
+    context: 'empty directory',
+    onThinking: (delta) => thinking.push(delta),
+  })
+
+  expect(thought?.thinking).toContain('create-expo-app')
+  // It streamed as it was written, not dumped at the end.
+  expect(thinking.length).toBeGreaterThan(1)
+  expect(thinking.join('')).toBe(thought!.thinking)
+  expect(provider.calls[0]!.tools).toEqual([])
+  expect(provider.calls[0]!.system).toBe('PLANNER SYSTEM')
+  const asked = provider.calls[0]!.messages[0]!.content.map((block) => (block.type === 'text' ? block.text : '')).join('')
+  expect(asked).toContain('empty directory')
+  expect(asked).toContain('Do not write the plan')
+})
+
+test("the run's opening thought never fails the run", async () => {
+  expect(await draftRunThinking({ provider: scriptedProvider('', { fail: true }), cwd: '/tmp', system: 's', goal: 'build it' })).toBeUndefined()
+  expect(await draftRunThinking({ provider: scriptedProvider('   '), cwd: '/tmp', system: 's', goal: 'build it' })).toBeUndefined()
+})
+
+test("the run's thinking prompt keeps the project out of it when there is none", () => {
+  expect(runThinkingPrompt('build a notes app')).not.toContain('<project>')
+  expect(runThinkingPrompt('build a notes app', 'package.json, src/')).toContain('<project>')
+})
+
+test('a reply that opens with blank lines does not leave the ✻ mark stranded above a gap', async () => {
+  // mercury-2.5 does this, and the thinking block rendered as a lone ✻, then an
+  // empty line, then the thought.
+  const provider = scriptedProvider('\n\nI will scaffold it with create-expo-app.')
+  const thinking: string[] = []
+  const thought = await draftRunThinking({ provider, cwd: '/tmp', system: 's', goal: 'build it', onThinking: (delta) => thinking.push(delta) })
+  expect(thinking.join('')).toBe('I will scaffold it with create-expo-app.')
+  expect(thought!.thinking.startsWith('I will')).toBe(true)
+})
+
+test('the same blank opening does not strand the mark on a chat turn either', () => {
+  expect(visibleThinking('\n\nGoing static, then checking it.', true)).toBe('Going static, then checking it.')
 })

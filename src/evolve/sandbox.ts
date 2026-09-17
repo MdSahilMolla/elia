@@ -56,6 +56,15 @@ export const IMMUTABLE_FILES = [
   // this, it could route the gap and value checks back at the live tree and make
   // them pass by construction — the exact bug those checks were just fixed for.
   'src/evolve/measureTree.ts',
+  // Which tasks a candidate is measured on, and when the measuring stops. These
+  // decide the verdict just as much as fitness.ts computes it: a candidate that
+  // could rewrite the sieve could mark every task unreachable and be promoted
+  // for a change nothing ever ran, and one that could rewrite the recorder or
+  // the baseline cache could poison the evidence those decisions are made from.
+  'src/evolve/sieve.ts',
+  'src/evolve/reach.ts',
+  'src/evolve/reachRecorder.ts',
+  'src/evolve/baselineCache.ts',
   // How search strategies are trialled and adopted. The strategy itself is
   // state the loop rewrites; the rules that judge a strategy are not.
   'src/evolve/strategy.ts',

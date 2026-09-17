@@ -36,6 +36,12 @@ export interface StatusBarProps {
   sessionOutput?: number
   costUsd?: number | undefined
   providerName?: string
+  /**
+   * `auto` when the session falls back across every ready provider. Shown next
+   * to the model because they answer different questions: the model is what is
+   * talking now, `auto` is that it may quietly move to another provider.
+   */
+  routing?: 'auto' | 'selected'
   busy: boolean
   queued: number
   /** Operator messages waiting to be folded into the running turn. */
@@ -89,6 +95,7 @@ export function StatusBar(props: StatusBarProps) {
       </Box>
       <Box flexShrink={1} marginLeft={2}>
         <Text color={palette.muted} wrap="truncate-start">
+          {props.routing === 'auto' ? 'auto · ' : ''}
           {props.model}
           {props.repo && !props.narrow ? ` · ${shortRepo(props.repo)}` : ''}
           {pct >= 50 ? <Text color={ctxColor}> · {pct}% context{pct >= 80 ? ' — compaction soon' : ''}</Text> : null}

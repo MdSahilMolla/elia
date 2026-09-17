@@ -8,6 +8,8 @@ import type { Metrics } from './ledger.ts'
 import { bold, dim, green, red } from '../ui/theme.ts'
 import { table } from '../ui/layout.ts'
 import { MAX_SHELL_OUTPUT_LENGTH, readBoundedOutput, terminateProcessGroup } from '../shell.ts'
+import { ELIA_ROOT } from '../statePaths.ts'
+import { REACH_OUT_ENV, absorbReachFile } from './reach.ts'
 
 /**
  * Runs the benchmark suite against a given copy of elia's source and scores it.
@@ -164,6 +166,19 @@ export async function measureFitness(options: MeasureOptions): Promise<Scorecard
     },
   )
 
+  return cardFromOutcomes(options.sourceRoot, tasks, outcomes, Date.now() - startedAt)
+}
+
+/**
+ * Score a set of outcomes against the task set they belong to.
+ *
+ * Split out of `measureFitness` so that a card can also be assembled from
+ * outcomes that were not all produced by one pass — `sieve.ts` measures only the
+ * tasks a candidate's diff can reach and carries the rest over from the
+ * baseline, and the result has to be scored by exactly the same arithmetic or
+ * the two cards would not be comparable.
+ */
+export function cardFromOutcomes(sourceRoot: string, tasks: BenchTask[], outcomes: TaskOutcome[], wallClockMs: number): Scorecard {
   // Every task reports the model it ran on; they agree, so the first one that got
   // far enough to report is the card's model.
   const model = outcomes.find((outcome) => outcome.model)?.model ?? ''
@@ -184,14 +199,14 @@ export async function measureFitness(options: MeasureOptions): Promise<Scorecard
   const cacheAttempts = cacheHits + cacheMisses
 
   return {
-    sourceRoot: options.sourceRoot,
+    sourceRoot,
     model,
     outcomes,
     passRate: available === 0 ? 0 : earned / available,
     unmeasured,
     totalTokens: outcomes.reduce((sum, outcome) => sum + outcome.totalTokens, 0),
     totalElapsedMs: outcomes.reduce((sum, outcome) => sum + outcome.elapsedMs, 0),
-    wallClockMs: Date.now() - startedAt,
+    wallClockMs,
     cacheHits,
     cacheMisses,
     cacheHitRate: cacheAttempts === 0 ? 0 : cacheHits / cacheAttempts,
@@ -278,11 +293,19 @@ async function runOneTask(task: BenchTask, sourceRoot: string): Promise<TaskOutc
     await task.setup(dir)
 
     const entry = join(sourceRoot, 'src', 'evolve', 'benchTask.ts')
-    const proc = Bun.spawn(['bun', 'run', entry, task.id], {
+
+    // Ride along on a run that is happening anyway and record which of the
+    // tree's modules this task loads, so the next candidate can skip the tasks
+    // its diff provably cannot reach (see reach.ts). The recorder comes from the
+    // live root rather than `sourceRoot`: a candidate may rewrite elia, but not
+    // the thing that watches which of its files ran. The output goes beside the
+    // task's repository, never inside it, so no check ever sees it.
+    const reachOut = `${dir}.reach`
+    const proc = Bun.spawn(['bun', 'run', '--preload', join(ELIA_ROOT, 'src', 'evolve', 'reachRecorder.ts'), entry, task.id], {
       cwd: dir,
       stdout: 'pipe',
       stderr: 'pipe',
-      env: process.env,
+      env: { ...process.env, [REACH_OUT_ENV]: reachOut },
     })
 
     let timedOut = false
@@ -308,6 +331,17 @@ async function runOneTask(task: BenchTask, sourceRoot: string): Promise<TaskOutc
     }
 
     const run = parseRunOutput(stdout)
+
+    // Only a run that actually reached the agent loop is evidence about what the
+    // task loads. A child that died on a missing key, or was killed at the
+    // timeout, or reported an error back, loaded a fraction of the tree — and
+    // folding that in would shrink the task's recorded footprint. A shrunken
+    // footprint is what makes a task look unreachable when it is not, and
+    // under-recording is the one direction
+    // `reach.ts` cannot be safe in, so it is refused at the source.
+    if (run && !run.error && !timedOut) absorbReachFile(task.id, reachOut, sourceRoot)
+    rmSync(reachOut, { force: true })
+
     if (timedOut) {
       return { ...base, error: `timed out after ${taskTimeoutMs}ms`, detail: 'agent did not finish', keptDir: dir }
     }
@@ -413,7 +447,7 @@ export function toMetrics(card: Scorecard): Metrics {
 }
 
 /** The smallest per-task pass-rate movement that counts as real (half the attempts, or a full flip on a single run). */
-const REAL_CHANGE = 0.5
+export const REAL_CHANGE = 0.5
 
 /** A candidate must be at least this much cheaper or faster to win on a tied pass rate. */
 const EFFICIENCY_MARGIN = 0.05

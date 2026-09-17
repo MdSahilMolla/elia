@@ -42,6 +42,36 @@ A loop that improves itself will happily improve its *score* instead of itself, 
 
 Details of the evolve gate are in [Self-improvement](self-improvement.md).
 
+## What a verdict costs
+
+The machinery above was complete for weeks and the loop still turned twice. The reason was never a missing part — it was the price of an answer. Scoring one candidate meant running all 54 benchmark tasks against a paid model, and since nearly every candidate is rejected, almost all of that spend bought a single bit: *no*. A search that costs a day's credit per step cannot compound, however good its gates are.
+
+**The sieve** (`src/evolve/sieve.ts`) buys the verdict instead of the scoreboard. It reads the decision rule rather than the totals, and exploits three things that rule already implies:
+
+1. **A regression is the whole answer.** `compareScorecards` rejects the moment any task regresses, whatever the other fifty-three say — so a run that has seen one has already produced its final verdict, and every task after it is paid for and thrown away. The sieve stops there. This is not an approximation: it returns the identical `better` the full sweep would have, from the same comparison on the same arithmetic.
+2. **Order is free to choose.** Only a task that passes today can regress, and a task that loads more of the changed code is likelier to be the one that breaks. Running those first is what turns a rejection from a 54-task question into a two-task one.
+3. **Most tasks cannot be affected at all.** A Bun preload plugin records which of elia's modules each task actually loads — free, riding along on runs that were happening anyway. A task that never loads a changed file is provably unmoved, so its baseline row carries straight over: result, tokens and time alike. A diff that reaches no task at all is rejected as *inert*, for nothing.
+
+Carrying the cost, not just the result, is what keeps this honest. Dropping unreachable tasks from the totals would hand every candidate a fake efficiency win — four fewer tasks in the denominator reads as "80% fewer tokens". For the same reason a partial race is never timed by how long the race took; its wall clock is the baseline's, scaled by the ratio of summed task durations, and the tasks it never ran are recorded as *unmeasured* so the card fails closed rather than passing for a result.
+
+**The baseline cache** (`src/evolve/baselineCache.ts`, on by default, `ELIA_BASELINE_CACHE=off` to disable) closes the other half. `elia evolve` opens by measuring the live tree — a full sweep, paid before a hypothesis exists — and with no promotions between runs it is scoring identical code every time. Each task's outcome is keyed on the hashed contents of the modules that task loads, plus the model, so an untouched tree costs nothing to re-baseline and any edit inside a task's footprint misses.
+
+Neither shortcut can promote anything. A provisional winner still has to reproduce on two full sweeps, pass the verifier-gap check and the value probes, and clear the immutable-file guard. What they change is how many hypotheses the same budget can afford to test.
+
+Turn it all off with `ELIA_SIEVE=off`, which is also the control arm for measuring what it is worth.
+
+### The number that shows it compounding
+
+`elia compounding` now reports **evidence velocity**: task runs and tokens per verdict, and whether that price is falling. It is the one figure here that can show a loop compounding without a weight changing anywhere — cheaper verdicts mean more generations per budget, more generations mean more promotions, and a promotion that lands in the search itself makes the next verdict cheaper again.
+
+Stage 6 deliberately does *not* move on it. The first drop came from switching the sieve on, which is one change by one hand, not the loop compounding on itself. The number is reported; the stage stays earned by promotions.
+
+### What it also made visible
+
+Recording what the benchmark loads answered a question nobody had asked. Half of elia's source — 218 of 436 modules, most of `src/ui`, `src/autonomy` and `src/workspace` — is never loaded by a benchmark task at all. A hypothesis confined to those cannot move a score no matter how good it is, and the loop used to spend a full sweep finding that out. The proposer is now told up front which areas the benchmark can see.
+
+The same recording showed the limit of the idea: every benchmark child loads the same 218-module core, because `src/tools/registry.ts` imports every tool statically. So reachability prunes *candidates*, not tasks — the per-task saving comes from the stop rules, not from carrying. Making the tool registry lazy would give the map real per-task discrimination, and is the obvious next thing to try.
+
 ## Where it stands today
 
 Run `elia compounding` for the live picture. As of 2026-09-16, on `mercury-2.5`:

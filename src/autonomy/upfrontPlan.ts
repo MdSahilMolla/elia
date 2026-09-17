@@ -179,7 +179,9 @@ export function visibleThinking(partial: string, final: boolean): string | undef
   if (!final && text.length < 24 && !text.includes('\n')) return undefined
   const start = planStart(text)
   const shown = start >= 0 ? text.slice(0, start) : final ? text : text.slice(0, Math.max(0, text.length - 12))
-  return shown.replace(THINKING_LABEL, '').trimEnd().slice(0, MAX_THINKING_CHARS)
+  // Trimmed at both ends: a reply that opens with a blank line would put the
+  // ✻ mark on that line and the thought below a gap.
+  return shown.replace(THINKING_LABEL, '').trim().slice(0, MAX_THINKING_CHARS)
 }
 
 /** Feeds reply deltas in, emits only the growing thinking prefix — never the label, never the plan. */
@@ -336,4 +338,93 @@ export function planBriefing(steps: string[]): string {
 /** `ELIA_UPFRONT_PLAN=off` restores the old behaviour: the model plans (or doesn't) on its own. */
 export function upfrontPlanEnabled(): boolean {
   return process.env.ELIA_UPFRONT_PLAN !== 'off'
+}
+
+/**
+ * The same question, asked before an autonomous run instead of a chat turn:
+ * what is this, how will I go at it, what is most likely to go wrong.
+ *
+ * The pipeline writes its own plan (the planner's `submit_proposal` call), so
+ * this call produces only the thinking. It exists because the orient phase is
+ * otherwise silent: between "elia will research it first" and a finished
+ * five-step plan the user saw nothing for a minute, and read it — fairly — as
+ * elia planning without thinking. mercury-2.5 returns no reasoning of its own,
+ * and the planner prompt tells the model not to narrate its plan in prose, so
+ * on an escalated run there was nothing left to show.
+ */
+export function runThinkingPrompt(goal: string, context = ''): string {
+  return [
+    context ? `<project>\n${clip(context, 1_500)}\n</project>\n` : '',
+    `<request>\n${goal}\n</request>`,
+    '',
+    'You are about to investigate this project and then propose a plan for it. Before you start, think it through where the user can see it.',
+    'Reply with 2-4 short first-person sentences and nothing else: what the user actually wants, how you mean to approach it, and the one thing most likely to go wrong. Name the frameworks, files, or commands you expect to be involved.',
+    'Do not write the plan, do not use a numbered or bulleted list, and do not say anything is done or created — none of the work has started.',
+  ]
+    .filter((line, index) => index !== 0 || line)
+    .join('\n')
+}
+
+export interface DraftRunThinkingOptions {
+  provider: Provider
+  cwd: string
+  /** The planner's own system prompt, so the thinking obeys the same rules. */
+  system: string
+  systemDynamic?: string
+  goal: string
+  /** The project snapshot the planner is about to work from, if there is one. */
+  context?: string
+  onThinking?: (delta: string) => void
+  signal?: AbortSignal
+  timeoutMs?: number
+}
+
+/**
+ * One tool-less call whose whole output is reasoning. Never throws and never
+ * reports a problem: a run must not fail, or grow an error line, because its
+ * opening thought could not be drafted.
+ */
+export async function draftRunThinking(
+  options: DraftRunThinkingOptions,
+): Promise<{ thinking: string; usage: Usage } | undefined> {
+  const timeout = AbortSignal.timeout(options.timeoutMs ?? DEFAULT_TIMEOUT_MS)
+  const signal = options.signal ? AbortSignal.any([options.signal, timeout]) : timeout
+  let thinking = ''
+  let modelReasoned = false
+  let separated = false
+  try {
+    const result = await options.provider.streamTurn({
+      cwd: options.cwd,
+      system: options.system,
+      systemDynamic: options.systemDynamic,
+      messages: [{ role: 'user', content: [{ type: 'text', text: runThinkingPrompt(options.goal, options.context) }] }],
+      tools: [],
+      onText: (delta) => {
+        if (thinking.length >= MAX_THINKING_CHARS) return
+        // mercury-2.5 opens its reply with a blank line or two, and the ✻ mark
+        // sits on the first line of whatever it is handed — so the block on screen
+        // was a lone ✻ above a gap above the thought.
+        const piece = thinking ? delta : delta.replace(/^\s+/, '')
+        if (!piece) return
+        // The model's own reasoning streams first on the providers that return
+        // it; keep elia's written-out thinking visibly separate from it.
+        if (modelReasoned && !separated) {
+          separated = true
+          options.onThinking?.('\n\n')
+        }
+        thinking += piece
+        options.onThinking?.(piece)
+      },
+      onThinking: (delta) => {
+        modelReasoned = true
+        options.onThinking?.(delta)
+      },
+      signal,
+      reasoningEffort: 'low',
+    })
+    const written = thinking || result.content.flatMap((block) => (block.type === 'text' ? [block.text] : [])).join('')
+    return written.trim() ? { thinking: written.trim().slice(0, MAX_THINKING_CHARS), usage: result.usage } : undefined
+  } catch {
+    return undefined
+  }
 }

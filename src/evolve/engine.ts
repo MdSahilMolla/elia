@@ -15,10 +15,24 @@ import {
   nextGenerationNumber,
   readLedger,
   renderLedgerForPrompt,
+  type EvidenceCost,
   type GenerationRecord,
   type Metrics,
 } from './ledger.ts'
-import { compareScorecards, measureFitness, renderScorecard, toMetrics, type Scorecard, type TaskOutcome } from './fitness.ts'
+import {
+  benchConcurrency,
+  cardFromOutcomes,
+  compareScorecards,
+  measureFitness,
+  renderScorecard,
+  toMetrics,
+  type Comparison,
+  type Scorecard,
+  type TaskOutcome,
+} from './fitness.ts'
+import { raceCandidate, renderRace, sieveEnabled } from './sieve.ts'
+import { hasReachEvidence, measurableAreas } from './reach.ts'
+import { baselineCacheEnabled, lookupBaselines, rememberBaselines } from './baselineCache.ts'
 import {
   IMMUTABLE_FILES,
   changedFiles,
@@ -119,12 +133,7 @@ export async function evolve(options: EvolveOptions = {}): Promise<EvolveResult>
   if (tasks.length === 0) throw new Error('evolve was given a task subset that matches no benchmark task')
 
   writePhase('orient', `measuring the current elia against ${ELIA_ROOT} (${tasks.length} tasks)`)
-  const baselineCard = await measureFitness({
-    sourceRoot: ELIA_ROOT,
-    tasks,
-    onTaskDone: (outcome) =>
-      outcome.passed ? writePass(`${outcome.taskId} — ${outcome.detail}`) : writeFail(`${outcome.taskId} — ${outcome.error ?? outcome.detail}`),
-  })
+  const baselineCard = await measureBaseline(tasks)
   if (machineReadable) emitEvent('benchmark_scorecard', { stage: 'baseline', scorecard: baselineCard })
   else if (!quietOutput) process.stdout.write(renderScorecard(baselineCard, 'Baseline'))
 
@@ -145,11 +154,17 @@ export async function evolve(options: EvolveOptions = {}): Promise<EvolveResult>
   // is evidence about it, so this is replaced whenever a candidate is promoted.
   let evidence = baselineCard.outcomes.filter((outcome) => !outcome.passed)
 
+  // The baseline's per-task rows, not just its totals. `sieve.ts` carries the row
+  // of any task the candidate's diff provably cannot reach straight across, so
+  // the two cards stay comparable without paying to re-run a task whose code did
+  // not change. Replaced on a promotion for the same reason `baseline` is.
+  let baselineOutcomes = baselineCard.outcomes
+
   for (let index = 0; index < generations; index++) {
     if (options.signal?.aborted) break
 
     const generation = nextGenerationNumber()
-    const { record, candidateCard } = await runGeneration(generation, baseline, options, tasks, evidence)
+    const { record, candidateCard } = await runGeneration(generation, baseline, options, tasks, evidence, baselineOutcomes)
     records.push(record)
     appendGeneration(record)
 
@@ -157,7 +172,10 @@ export async function evolve(options: EvolveOptions = {}): Promise<EvolveResult>
       // Stand on the winner: the next generation is measured against, and builds
       // on, the version that just won.
       baseline = record.candidate
-      if (candidateCard) evidence = candidateCard.outcomes.filter((outcome) => !outcome.passed)
+      if (candidateCard) {
+        evidence = candidateCard.outcomes.filter((outcome) => !outcome.passed)
+        baselineOutcomes = candidateCard.outcomes
+      }
     }
 
     // A search that keeps banking nothing writes itself a different way to
@@ -170,15 +188,50 @@ export async function evolve(options: EvolveOptions = {}): Promise<EvolveResult>
   return { generations: records, baseline: firstBaseline, final: baseline }
 }
 
+/**
+ * Score the live tree, reusing any task whose own code has not changed since it
+ * was last scored.
+ *
+ * The reuse trades a measurement for an assumption — see baselineCache.ts for
+ * which one, and why the direction it can be wrong in is the safe one. It is on
+ * by default and `ELIA_BASELINE_CACHE=off` goes back to measuring every time.
+ */
+async function measureBaseline(tasks: BenchTask[]): Promise<Scorecard> {
+  const startedAt = Date.now()
+  const report = (outcome: TaskOutcome) =>
+    outcome.passed ? writePass(`${outcome.taskId} — ${outcome.detail}`) : writeFail(`${outcome.taskId} — ${outcome.error ?? outcome.detail}`)
+
+  if (!baselineCacheEnabled()) {
+    return measureFitness({ sourceRoot: ELIA_ROOT, tasks, onTaskDone: report })
+  }
+
+  const { hits, misses } = lookupBaselines(tasks.map((task) => task.id), ELIA_ROOT, config.model)
+  if (hits.length > 0) writeSubStep(`${hits.length} of ${tasks.length} baseline task(s) unchanged since they were last scored — reused`)
+  for (const hit of hits) report(hit)
+
+  const toMeasure = tasks.filter((task) => misses.includes(task.id))
+  const measured = toMeasure.length > 0 ? await measureFitness({ sourceRoot: ELIA_ROOT, tasks: toMeasure, onTaskDone: report }) : undefined
+  if (measured) rememberBaselines(measured.outcomes, ELIA_ROOT, config.model)
+
+  const outcomes = [...hits, ...(measured?.outcomes ?? [])]
+  // A card made partly of remembered rows cannot report the wall clock it did
+  // not spend, and the whole point is that it did not spend it. The summed task
+  // durations are what the tasks cost when they last ran, which is the honest
+  // stand-in and the number `compareScorecards` falls back to.
+  const wallClockMs = hits.length === 0 ? Date.now() - startedAt : outcomes.reduce((sum, outcome) => sum + outcome.elapsedMs, 0)
+  return cardFromOutcomes(ELIA_ROOT, tasks, outcomes, wallClockMs)
+}
+
 async function runGeneration(
   generation: number,
   baseline: Metrics,
   options: EvolveOptions,
   tasks: BenchTask[],
   evidence: TaskOutcome[],
+  baselineOutcomes: TaskOutcome[],
 ): Promise<{ record: GenerationRecord; candidateCard?: Scorecard }> {
   let candidateCard: Scorecard | undefined
-  const record = await attemptGeneration(generation, baseline, options, tasks, evidence, (card) => {
+  const record = await attemptGeneration(generation, baseline, options, tasks, evidence, baselineOutcomes, (card) => {
     candidateCard = card
   })
   return { record, candidateCard }
@@ -190,6 +243,7 @@ async function attemptGeneration(
   options: EvolveOptions,
   tasks: BenchTask[],
   evidence: TaskOutcome[],
+  baselineOutcomes: TaskOutcome[],
   onCandidateCard: (card: Scorecard) => void,
 ): Promise<GenerationRecord> {
   const startedAt = Date.now()
@@ -317,15 +371,53 @@ async function attemptGeneration(
 
   // --- Measure the candidate, using the candidate ---------------------------
 
+  // Race for the verdict rather than buying the whole scoreboard: the tasks this
+  // diff cannot reach keep their baseline rows, and the run stops the moment a
+  // regression has already decided the answer. Same rule, same arithmetic, far
+  // fewer model calls — see sieve.ts. `ELIA_SIEVE=off` restores the full sweep.
   writeSubStep('running the benchmark against the candidate')
   let candidateCard: Scorecard
+  let comparison: Comparison
+  let evidenceCost: EvidenceCost | undefined
+  const onBenchTask = (outcome: TaskOutcome) =>
+    outcome.passed ? writePass(`${outcome.taskId} — ${outcome.detail}`) : writeFail(`${outcome.taskId} — ${outcome.error ?? outcome.detail}`)
+
   try {
-    candidateCard = await measureFitness({
-      sourceRoot: sandbox.root,
-      tasks,
-      onTaskDone: (outcome) =>
-        outcome.passed ? writePass(`${outcome.taskId} — ${outcome.detail}`) : writeFail(`${outcome.taskId} — ${outcome.error ?? outcome.detail}`),
-    })
+    if (sieveEnabled()) {
+      const race = await raceCandidate({
+        sourceRoot: sandbox.root,
+        tasks,
+        baseline,
+        baselineOutcomes,
+        changedFiles: changed,
+        concurrency: benchConcurrency(),
+        ...(options.signal ? { signal: options.signal } : {}),
+        onTaskDone: onBenchTask,
+      })
+      candidateCard = race.card
+      comparison = race.comparison
+      evidenceCost = {
+        tasksRun: race.ran.length,
+        tasksCarried: race.carried.length,
+        tasksSkipped: race.skipped.length,
+        tasksTotal: tasks.length,
+        tokens: race.tokens,
+        msToVerdict: race.elapsedMs,
+        ...(race.settledBy ? { settledBy: race.settledBy } : {}),
+      }
+      writeSubStep(renderRace(race, tasks.length))
+    } else {
+      candidateCard = await measureFitness({ sourceRoot: sandbox.root, tasks, onTaskDone: onBenchTask })
+      comparison = compareScorecards(baseline, toMetrics(candidateCard))
+      evidenceCost = {
+        tasksRun: candidateCard.outcomes.length,
+        tasksCarried: 0,
+        tasksSkipped: 0,
+        tasksTotal: tasks.length,
+        tokens: candidateCard.totalTokens,
+        msToVerdict: candidateCard.wallClockMs,
+      }
+    }
   } catch (err) {
     return { ...base, reason: `benchmark could not run: ${err instanceof Error ? err.message : String(err)}` }
   }
@@ -334,10 +426,9 @@ async function attemptGeneration(
 
   const candidate = toMetrics(candidateCard)
   base.candidate = candidate
+  base.evidenceCost = evidenceCost
   base.funnel = 'measured'
   onCandidateCard(candidateCard)
-
-  const comparison = compareScorecards(baseline, candidate)
   if (!comparison.better) {
     writeFail(`rejected: ${comparison.reason}`)
     writeSubStep(`sandbox kept at ${sandbox.root} if you want to look`)
@@ -367,6 +458,11 @@ async function attemptGeneration(
   base.baseline = confirmationBaseline
   base.candidate = confirmationCandidate
   base.funnel = 'confirmed'
+
+  // The confirmation pair measured every task on both trees. That is a fuller
+  // picture of the candidate than the raced card, so it — not the race — becomes
+  // what the next generation treats as its baseline rows and its failure evidence.
+  onCandidateCard(confirmationCandidateCard)
 
   // A benchmark win is not sufficient to promote.
   //
@@ -498,11 +594,32 @@ These files define how you are judged or enforce deterministic safety boundaries
 ${IMMUTABLE_FILES.map((file) => `- ${file}`).join('\n')}
 
 Improving your score by changing the benchmark or weakening a safety boundary is not improvement. Do not attempt it.
+${measurableSection(baseline)}
 
 ## What has already been tried
 ${renderLedgerForPrompt()}
 
 Investigate, then submit exactly one hypothesis.`
+}
+
+/**
+ * Which parts of the tree the benchmark can actually see.
+ *
+ * Read from what the tasks were observed to load, so it is a fact rather than a
+ * rule, and omitted entirely until something has been recorded — an empty list
+ * would read as "nothing is measurable" and stop the search dead.
+ */
+function measurableSection(baseline: Metrics): string {
+  const taskIds = [...baseline.passed, ...baseline.failed]
+  if (!hasReachEvidence(taskIds)) return ''
+  const areas = measurableAreas()
+  if (areas.length === 0) return ''
+  return `
+## What the benchmark can see
+Every task run so far loaded code from these areas, and only these:
+${areas.map((area) => `- ${area}`).join('\n')}
+
+A change confined to anything else cannot move a score — it will be measured as inert and rejected without a task being run. If you want to improve something the benchmark cannot see, say so in your rationale and propose it anyway; it will be rejected, but the ledger will carry the reason.`
 }
 
 function implementationBrief(sandbox: Sandbox, hypothesis: Hypothesis): string {

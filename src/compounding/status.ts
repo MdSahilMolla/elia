@@ -6,6 +6,7 @@ import { readTrajectories } from '../trajectory/record.ts'
 import { learningRate, readLedger } from '../evolve/ledger.ts'
 import { lessonTrials } from '../autonomy/lessonEfficacy.ts'
 import { recursionSignal, renderRecursion } from './recursion.ts'
+import { evidenceVelocity } from './velocity.ts'
 import type { Scorecard } from '../evolve/fitness.ts'
 
 /**
@@ -163,6 +164,7 @@ export function compoundingStatus(): StageReport[] {
 
   const learning = learningRate(ledger)
   const recursion = recursionSignal(ledger)
+  const velocity = evidenceVelocity(ledger)
   const benchRuns = readBenchRuns()
   const storeEffect = lessonStoreEffect(benchRuns)
 
@@ -207,8 +209,12 @@ export function compoundingStatus(): StageReport[] {
     {
       stage: 6,
       name: 'Gains improve the improver',
+      // Deliberately not moved by evidence velocity. Verdicts getting cheaper is
+      // the improver improving — but the first drop came from switching `sieve.ts`
+      // on, which is one change by one hand, not the loop compounding on itself.
+      // The number is reported below; the stage stays earned by promotions.
       state: recursion.compounding ? 'working' : recursion.promotions > 0 || recursion.trial !== 'no challenger' ? 'partial' : 'no evidence',
-      evidence: `${renderRecursion(recursion)}; improvement trend: ${learning.trend}`,
+      evidence: `${renderRecursion(recursion)}; improvement trend: ${learning.trend}${velocity.all.verdicts > 0 ? `; ${Math.round(velocity.avoided * 100)}% of benchmark task runs avoided per verdict` : ''}`,
       next: recursion.compounding
         ? undefined
         : 'keep `elia evolve --focus N` running: stalls write a new search strategy and trial it; promotions to the loop/roles/tools are tracked for their effect on later search',

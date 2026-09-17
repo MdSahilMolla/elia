@@ -69,6 +69,33 @@ export interface GenerationRecord {
   funnel?: import('./strategy.ts').FunnelStage
   /** The search strategy that steered the proposal; absent on records from before strategies were state. */
   strategyId?: string
+  /**
+   * What this verdict cost to reach, when `sieve.ts` raced for it.
+   *
+   * The ledger already says what was tried and what came of it; this says what
+   * the answer was worth buying. It is the input to the only number that can
+   * show a self-improvement loop compounding without weights: verdicts per
+   * token. A loop whose gains make the *next* verdict cheaper searches further
+   * on the same budget, and that is visible here and nowhere else.
+   */
+  evidenceCost?: EvidenceCost
+}
+
+export interface EvidenceCost {
+  /** Tasks actually measured against the candidate. */
+  tasksRun: number
+  /** Tasks whose baseline row carried over because the diff could not reach them. */
+  tasksCarried: number
+  /** Tasks never run because the verdict was already settled. */
+  tasksSkipped: number
+  /** Tasks in the set the verdict is about — what a full sweep would have run. */
+  tasksTotal: number
+  /** Tokens the raced measurement spent. */
+  tokens: number
+  /** Wall clock from the first task to the verdict. */
+  msToVerdict: number
+  /** The task whose result ended the race, when one did. */
+  settledBy?: string
 }
 
 export function appendGeneration(record: GenerationRecord, path = LEDGER_PATH): void {
