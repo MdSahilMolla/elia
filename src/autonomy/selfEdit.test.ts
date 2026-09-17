@@ -19,7 +19,9 @@ import {
 let root: string
 
 beforeEach(() => {
-  root = realpathSync(mkdtempSync(join(tmpdir(), 'elia-self-')))
+  // .native: the plain one leaves an 8.3 name (C:\Users\RUNNER~1) unexpanded,
+  // and the guard stores the long form.
+  root = realpathSync.native(mkdtempSync(join(tmpdir(), 'elia-self-')))
   mkdirSync(join(root, 'workspace', 'app'), { recursive: true })
   mkdirSync(join(root, 'src'), { recursive: true })
 })
