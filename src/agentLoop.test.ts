@@ -929,3 +929,64 @@ test('a running loop follows a model switch on its next call', async () => {
   expect(result.stopReason).toBe('complete')
   expect(used).toEqual(['stuck', 'switched'])
 })
+
+test("a worker whose cheap model refuses hands the call to the session's model, without waiting", async () => {
+  resetProviderHealthForTests()
+  const used: string[] = []
+  const fast = {
+    async streamTurn(): Promise<never> {
+      used.push('fast')
+      throw new Error('429 Rate limit reached for model openai/gpt-oss-20b on tokens per minute (TPM): Limit 8000')
+    },
+  }
+  const deep = {
+    async streamTurn() {
+      used.push('deep')
+      return { content: [{ type: 'text', text: 'done' }] as ContentBlock[], usage: ZERO_USAGE }
+    },
+  }
+  const started = Date.now()
+  try {
+    const result = await runAgentLoop({
+      messages: [{ role: 'user', content: [{ type: 'text', text: 'go' }] }],
+      systemPrompt: 'test',
+      tools: [],
+      resolveRoute: () => ({ provider: fast, providerName: 'groq', model: 'openai/gpt-oss-20b' }),
+      resolveFallbacks: () => [{ provider: deep, providerName: 'mercury', model: 'mercury-2.5' }],
+      fallbacks: [],
+      useAnimation: false,
+      verbose: false,
+    })
+    expect(result.stopReason).toBe('complete')
+    expect(used).toEqual(['fast', 'deep'])
+    expect(Date.now() - started).toBeLessThan(1_000)
+  } finally {
+    resetProviderHealthForTests()
+  }
+})
+
+test('a fallback naming the route already in use is not tried twice', async () => {
+  resetProviderHealthForTests()
+  let calls = 0
+  const failing = {
+    async streamTurn(): Promise<never> {
+      calls += 1
+      throw new Error('402 Payment Required')
+    },
+  }
+  try {
+    await expect(runAgentLoop({
+      messages: [{ role: 'user', content: [{ type: 'text', text: 'go' }] }],
+      systemPrompt: 'test',
+      tools: [],
+      resolveRoute: () => ({ provider: failing, providerName: 'mercury', model: 'mercury-2.5' }),
+      resolveFallbacks: () => [{ provider: failing, providerName: 'mercury', model: 'mercury-2.5' }],
+      fallbacks: [],
+      useAnimation: false,
+      verbose: false,
+    })).rejects.toThrow('402')
+    expect(calls).toBe(1)
+  } finally {
+    resetProviderHealthForTests()
+  }
+})

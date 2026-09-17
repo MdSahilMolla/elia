@@ -3295,10 +3295,35 @@ async function runInteractive(): Promise<void> {
     }
   }
 
-  function applyModelChoice(providerName: string, model?: string): void {
+  async function applyModelChoice(providerName: string, model?: string, options: { anyway?: boolean } = {}): Promise<void> {
+    const previous = { providerName: config.providerName, model: config.model, routingMode: config.routingMode }
     const result = switchModel({ providerName, model })
     if (!result.ok) writeError(result.error)
     else {
+      // What gets picked is saved for every later launch, so it has to answer
+      // first. A rate-limited free model used to be saved as readily as a
+      // working one, and every restart then came back on it.
+      if (providerName !== 'auto' && !options.anyway) {
+        const chosen = { providerName: config.providerName, model: config.model }
+        writeNotice(`Checking that ${result.label} answers…`)
+        const { describeProbeFailure, probeModel } = await import('./providers/probe.ts')
+        const probe = await probeModel(config.provider)
+        if (!probe.ok) {
+          const failure = describeProbeFailure(result.label, probe)
+          const anyway = `/model ${chosen.providerName} ${chosen.model} --anyway`
+          const restored = switchModel({ providerName: previous.providerName, model: previous.model })
+          if (restored.ok) {
+            config.routingMode = previous.routingMode
+            setCurrentUsageModel(config.model)
+            prewarmActiveProvider()
+            writeError(`Not switched: ${failure}. Still on ${restored.label}. To use it anyway: ${anyway}`)
+          } else {
+            setCurrentUsageModel(config.model)
+            writeError(`${failure}. Using it for this session only (not saved), since ${previous.providerName} (${previous.model}) could not be restored either.`)
+          }
+          return
+        }
+      }
       setCurrentUsageModel(config.model)
       if (providerName !== 'auto') {
         // Persist the switch so it survives a restart, mirroring the codex
@@ -3338,14 +3363,17 @@ async function runInteractive(): Promise<void> {
   }
 
   async function handleModelCommand(argLine: string): Promise<void> {
-    const args = argLine.split(/\s+/).filter(Boolean)
+    const words = argLine.split(/\s+/).filter(Boolean)
+    // `--anyway` skips the check that the model answers (see applyModelChoice).
+    const anyway = words.includes('--anyway')
+    const args = words.filter((word) => word !== '--anyway')
 
     async function chooseModelForProvider(providerName: string): Promise<void> {
       const discovery = await listProviderModels(providerName)
       const fallbackModel = providerName === config.providerName ? config.model : providerPresetDefaultModel(providerName)
       if (discovery.models.length === 0) {
         if (discovery.error) writeNotice(`Could not list ${providerName} models: ${discovery.error}`)
-        if (fallbackModel) applyModelChoice(providerName, fallbackModel)
+        if (fallbackModel) await applyModelChoice(providerName, fallbackModel, { anyway })
         else writeNotice(`No model list or default model is available for ${providerName}. Use /model ${providerName} <model-id>.`)
         return
       }
@@ -3360,7 +3388,7 @@ async function runInteractive(): Promise<void> {
       const result = await pick(`Models for ${providerName} (${modelOptions.length})`, modelOptions, Math.max(0, modelOptions.findIndex((option) => option.value === currentModel)))
       if (result.type === 'select') {
         if (providerName === 'codex') activateCodexSubscription(result.value)
-        else applyModelChoice(providerName, result.value)
+        else await applyModelChoice(providerName, result.value, { anyway })
       }
       else if (result.type === 'unavailable') writeNotice(`${providerName} exposes ${discovery.models.length} selectable model(s).`)
     }
@@ -3391,7 +3419,7 @@ async function runInteractive(): Promise<void> {
       ]
       const result = await pick('Switch model', options, Math.max(0, currentIndex))
       if (result.type === 'select') {
-        if (result.value === 'auto') applyModelChoice('auto')
+        if (result.value === 'auto') await applyModelChoice('auto')
         else if (result.value === 'codex-subscription') {
           await chooseModelForProvider('codex')
         }
@@ -3416,15 +3444,15 @@ async function runInteractive(): Promise<void> {
     }
 
     const [first, second] = args
-    if (first === 'auto') applyModelChoice('auto')
+    if (first === 'auto') await applyModelChoice('auto')
     else if (first === 'codex') {
       if (second) activateCodexSubscription(second)
       else await chooseModelForProvider('codex')
     }
     else if (PROVIDER_PRESET_NAMES.includes(first!)) {
-      if (second) applyModelChoice(first!, second)
+      if (second) await applyModelChoice(first!, second, { anyway })
       else await chooseModelForProvider(first!)
-    } else applyModelChoice(config.providerName, first)
+    } else await applyModelChoice(config.providerName, first, { anyway })
   }
 
   function applyThinkingChoice(arg: string): void {
@@ -3763,14 +3791,14 @@ async function runInteractive(): Promise<void> {
           onSelect: async (provider) => {
             if (!provider) return
             if (provider === 'auto') {
-              applyModelChoice('auto')
+              await applyModelChoice('auto')
               return
             }
             const discovery = await listProviderModels(provider)
             if (discovery.models.length === 0) {
               const fallback = provider === config.providerName ? config.model : providerPresetDefaultModel(provider)
               if (provider === 'codex') activateCodexSubscription(fallback ?? 'default')
-              else if (fallback) applyModelChoice(provider, fallback)
+              else if (fallback) await applyModelChoice(provider, fallback)
               else return `${provider}: no model list available — use /model ${provider} <model-id> in the classic prompt.`
               return
             }
@@ -3786,10 +3814,10 @@ async function runInteractive(): Promise<void> {
                   detail: m.name ?? m.ownedBy ?? 'available model',
                   value: m.id,
                 })),
-                onSelect: (modelId) => {
+                onSelect: async (modelId) => {
                   if (!modelId) return
                   if (provider === 'codex') activateCodexSubscription(modelId)
-                  else applyModelChoice(provider, modelId)
+                  else await applyModelChoice(provider, modelId)
                 },
               },
             }

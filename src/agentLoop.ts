@@ -131,6 +131,12 @@ export interface RunAgentLoopOptions {
    * switched away from it. Fallbacks follow the looked-up provider.
    */
   resolveRoute?: () => ProviderRoute
+  /**
+   * Routes tried after the looked-up one and before `fallbacks`/auto routing,
+   * read per call like `resolveRoute`. A worker on a cheaper model than the
+   * session's uses it to fall back to the session's own model.
+   */
+  resolveFallbacks?: () => ProviderRoute[]
   /** Max model round-trips before the loop gives up (default 80). */
   maxSteps?: number
   /** Called after every tool result — used by the journal and the skill-synthesis detector. */
@@ -237,6 +243,7 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
     model,
     fallbacks,
     resolveRoute,
+    resolveFallbacks,
     maxSteps = DEFAULT_MAX_STEPS,
     onTool: toolListener,
     onToolStart,
@@ -768,15 +775,19 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
     const active = live?.provider ?? provider ?? config.provider
     const activeName = live?.providerName ?? providerName ?? config.providerName
     const activeModel = live?.model ?? model ?? config.model
-    const routes: ProviderRoute[] = [
+    const routes: ProviderRoute[] = []
+    for (const route of [
       {
         provider: active,
         providerName: activeName,
         model: activeModel,
         label: `${activeName} (${activeModel})`,
       },
+      ...(resolveFallbacks?.() ?? []),
       ...(fallbacks ?? (provider && !live ? [] : autoFallbacksFor(activeName))),
-    ]
+    ]) {
+      if (!routes.some((known) => known.providerName === route.providerName && known.model === route.model)) routes.push(route)
+    }
     const now = Date.now()
     const healthyRoutes = routes.filter((route) => (providerHealth.get(providerHealthKey(route))?.cooldownUntil ?? 0) <= now)
     const activeRoutes = healthyRoutes.length > 0 ? healthyRoutes : routes

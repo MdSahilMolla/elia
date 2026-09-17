@@ -1,4 +1,4 @@
-import { BATTMANN_SUBAGENT_SYSTEM_PROMPT, CYBER_SUBAGENT_SYSTEM_PROMPT, FITNESS_SUBAGENT_SYSTEM_PROMPT, roleConfig, SPORTS_SUBAGENT_SYSTEM_PROMPT, SUBAGENT_SYSTEM_PROMPT, turnContextPrompt } from './config.ts'
+import { BATTMANN_SUBAGENT_SYSTEM_PROMPT, CYBER_SUBAGENT_SYSTEM_PROMPT, FITNESS_SUBAGENT_SYSTEM_PROMPT, roleConfig, SPORTS_SUBAGENT_SYSTEM_PROMPT, SUBAGENT_SYSTEM_PROMPT, tierConfig, turnContextPrompt } from './config.ts'
 import { runAgentLoop, lastAssistantText, type ConversationMessage, type ToolEvent } from './agentLoop.ts'
 import type { Usage } from './providers/types.ts'
 import type { Tool } from './tools/types.ts'
@@ -179,6 +179,15 @@ export async function runSubAgent(request: SubAgentRequest): Promise<SubAgentRes
       // The tier object is updated in place by a `/model` switch, so reading
       // it per call is what lets a running worker follow the switch.
       resolveRoute: () => ({ provider: tier.provider, providerName: tier.providerName, model: tier.model }),
+      // A worker on the fast tier (or its own role provider) is on a cheaper
+      // model by choice, not because the session's model is unusable. When
+      // that model refuses — a free Groq key's 8k-tokens-a-minute cap refused
+      // every ~10k-token scout request, and each scout spent two minutes
+      // retrying before it failed — the session's model takes the call.
+      resolveFallbacks: () => {
+        const deep = tierConfig('deep')
+        return deep.providerName === 'unconfigured' ? [] : [{ provider: deep.provider, providerName: deep.providerName, model: deep.model, label: deep.label }]
+      },
       maxSteps: definition.maxSteps,
       useAnimation: false,
       verbose: false,
