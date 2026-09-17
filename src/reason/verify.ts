@@ -111,6 +111,16 @@ export function commandVerifier(options: {
   timeoutMs?: number
   strength?: VerdictStrength
   costHint?: 'cheap' | 'dear'
+  /**
+   * The turn's cancellation signal.
+   *
+   * Without it the check is the one part of a search Esc cannot reach: `solve`
+   * receives the signal and stops scheduling attempts, but the command already
+   * running keeps running to completion. On a project whose test command takes
+   * minutes that is the whole turn, and the REPL can only offer "a running
+   * command may not be interruptible. Press Ctrl+C twice to force-quit".
+   */
+  signal?: AbortSignal
 }): Verifier {
   const strength = options.strength ?? 'executed'
   return {
@@ -121,7 +131,7 @@ export function commandVerifier(options: {
       if (!candidate.cwd) {
         return { passed: false, strength, detail: 'no working tree to check', evidence: '', elapsedMs: 0 }
       }
-      const result = await runShell(options.command, options.timeoutMs ?? DEFAULT_TIMEOUT_MS, candidate.cwd)
+      const result = await runShell(options.command, options.timeoutMs ?? DEFAULT_TIMEOUT_MS, candidate.cwd, options.signal)
       const passed = result.exitCode === 0 && !result.timedOut
       const detail = result.timedOut
         ? `\`${options.command}\` timed out after ${result.elapsedMs}ms`

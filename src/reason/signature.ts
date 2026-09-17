@@ -121,17 +121,35 @@ export function taskSignature(request: string, context: { hasExecutableCheck: bo
 }
 
 /**
+ * Classes whose work a check can actually judge.
+ *
+ * The test is not "does this project have checks" but "would running them say
+ * anything about *this* attempt". A repair, a feature and a refactor all end in
+ * changed code that the suite exercises. Finding where something lives, or
+ * sequencing a piece of work, does not: the attempt changes nothing the checks
+ * touch, so the suite passes identically for every attempt, including the ones
+ * that found the wrong thing.
+ *
+ * That distinction matters more than it looks. A green suite on a `locate`
+ * attempt is an `executed` pass by the letter of verify.ts — the behaviour
+ * genuinely ran — and the search would stop on the first attempt believing it
+ * had proof, having established nothing at all. A verifier that passes
+ * regardless of the answer is worse than no verifier, because it launders a
+ * guess into a verdict.
+ */
+const CHECKABLE_BY_RUNNING = new Set<TaskClass>(['repair', 'implement', 'refactor'])
+
+/**
  * Whether a task of this shape is worth more than one attempt.
  *
- * A search costs k times a single answer, so it has to be reserved for the work
- * where k attempts can actually be told apart. Two things rule it out: nothing
- * executable to check against (where extra attempts buy agreement, not
- * correctness), and a question that produces no artifact at all. Everything else
- * is eligible — the harness still decides how wide to go, and on an easy task
- * the first attempt passes and the rest is never bought.
+ * A search costs k times a single answer, so it is reserved for work where k
+ * attempts can actually be told apart: the answer has to be an artifact, and
+ * something has to be able to judge it. A repair qualifies even with no project
+ * checks, because the failure it names is itself reproducible and elia can turn
+ * it into one. Everything else needs the project to bring a check.
  */
 export function worthSearching(signature: TaskSignature): boolean {
-  if (signature.taskClass === 'explain') return false
-  if (!signature.features.hasExecutableCheck && signature.taskClass !== 'repair') return false
-  return true
+  if (!CHECKABLE_BY_RUNNING.has(signature.taskClass)) return false
+  if (signature.taskClass === 'repair') return true
+  return signature.features.hasExecutableCheck
 }

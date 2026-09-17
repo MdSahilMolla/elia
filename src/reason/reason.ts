@@ -83,10 +83,12 @@ export async function resolveVerifier(options: {
   checks: ProjectChecks
   signature: TaskSignature
   synthesizeProbe?: ReasonOptions['synthesizeProbe']
+  /** Threaded to the check commands so Esc can interrupt the part of a search that actually takes the time. */
+  signal?: AbortSignal
 }): Promise<{ verifier: Verifier | ((all: Candidate[]) => Verifier); degraded: boolean }> {
-  const { kind, checks, signature, synthesizeProbe } = options
-  const build = checks.build ? commandVerifier({ id: 'build', command: checks.build, timeoutMs: checks.timeoutMs, strength: 'structural', costHint: 'cheap' }) : undefined
-  const test = checks.test ? commandVerifier({ id: 'tests', command: checks.test, timeoutMs: checks.timeoutMs }) : undefined
+  const { kind, checks, signature, synthesizeProbe, signal } = options
+  const build = checks.build ? commandVerifier({ id: 'build', command: checks.build, timeoutMs: checks.timeoutMs, strength: 'structural', costHint: 'cheap', signal }) : undefined
+  const test = checks.test ? commandVerifier({ id: 'tests', command: checks.test, timeoutMs: checks.timeoutMs, signal }) : undefined
 
   if (kind === 'project-tests' && test) {
     return { verifier: build ? allOf('project checks', [build, test]) : test, degraded: false }
@@ -137,6 +139,7 @@ export async function reason(options: ReasonOptions): Promise<ReasonResult> {
     checks: options.checks,
     signature,
     synthesizeProbe: options.synthesizeProbe,
+    signal: options.signal,
   })
 
   const result = await solve({

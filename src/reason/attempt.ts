@@ -1,5 +1,6 @@
 import { join } from 'node:path'
-import { createWorktree, mergeWorktreeIntoCwd, removeWorktree } from '../autonomy/worktree.ts'
+import { createWorktree, mergeWorktreeIntoCwd, parseStatus, removeWorktree, runGit } from '../autonomy/worktree.ts'
+import { withRepoLock } from '../repoLock.ts'
 import type { Worktree } from '../autonomy/worktree.ts'
 import { failureBriefing } from './select.ts'
 import type { AttemptRecord, Approach, Producer } from './select.ts'
@@ -50,6 +51,17 @@ export interface IsolatedSearch {
   settle(winner?: Candidate): Promise<string[]>
   /** Worktrees currently held, so a caller can report or clean up after a crash. */
   held(): Worktree[]
+  /**
+   * The paths a candidate's worktree changed, relative to its root.
+   *
+   * The merge copies files straight into the user's tree rather than going
+   * through elia's write tools, so nothing in the turn would otherwise know
+   * those files changed: the turn would record `filesChanged: 0`, the
+   * verification-coverage metric would treat a searched turn as having had
+   * nothing to check, and a rewind would not restore them. The caller snapshots
+   * these before settling.
+   */
+  changedBy(candidate: Candidate): Promise<string[]>
 }
 
 export interface IsolatedSearchOptions {
@@ -82,7 +94,23 @@ export function isolatedSearch(options: IsolatedSearchOptions): IsolatedSearch {
 
   const produce: Producer = async ({ approach, round, priorFailures, signal }) => {
     const slot = index++
-    const worktree = await createWorktree(options.runId, slot, options.sourceRoot, options.baseDir ?? join(options.sourceRoot, '.elia'))
+    // Creating the worktree is serialized; running the attempt is not.
+    //
+    // `git worktree add` mutates the repository — it writes under
+    // `.git/worktrees` and creates a branch — and a round opens several at once
+    // on the same repo. Concurrent git writes to one repository contend for the
+    // index and ref locks, and the failure is intermittent rather than loud: one
+    // attempt of the round simply never gets a tree. Under load that showed up
+    // as a search that "found nothing" with no error anywhere to explain it.
+    //
+    // The serialization costs nothing worth having. Creating a worktree takes
+    // milliseconds and the attempt that follows it takes a model call, so the
+    // attempts still overlap almost completely. `withRepoLock` is the same
+    // primitive elia's write tools use, so this also holds against a second
+    // elia process working in the same checkout — which is the normal case here.
+    const worktree = await withRepoLock(() =>
+      createWorktree(options.runId, slot, options.sourceRoot, options.baseDir ?? join(options.sourceRoot, '.elia')),
+    )
     const id = `${approach.id}-r${round}-${slot}`
     worktrees.set(id, worktree)
 
@@ -102,6 +130,12 @@ export function isolatedSearch(options: IsolatedSearchOptions): IsolatedSearch {
   return {
     produce,
     held: () => [...worktrees.values()],
+    async changedBy(candidate) {
+      const worktree = worktrees.get(candidate.id)
+      if (!worktree) return []
+      const status = await runGit(['status', '--porcelain'], worktree.path)
+      return status.exitCode === 0 ? parseStatus(status.stdout).map((change) => change.path) : []
+    },
     async settle(winner) {
       if (settled) return []
       settled = true
