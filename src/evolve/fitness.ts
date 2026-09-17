@@ -214,7 +214,7 @@ const INFRASTRUCTURE_ERROR = /server had an error|rate.?limit|overloaded|ECONNRE
  * credit, or the task's own checkout cannot start. Retrying these only burns
  * time, so they go straight to unmeasured.
  */
-const PERMANENT_INFRASTRUCTURE_ERROR = /402|requires more credits|free tier limit|insufficient.?(credit|quota|funds)|quota exceeded|preload not found|stale task/i
+const PERMANENT_INFRASTRUCTURE_ERROR = /\b402\b|requires more credits|free tier limit|insufficient.?(credit|quota|funds)|quota exceeded|preload not found|stale task/i
 
 export function isInfrastructureFailure(outcome: Pick<TaskOutcome, 'error' | 'steps'>): boolean {
   if (!outcome.error) return false
@@ -226,7 +226,7 @@ export function isInfrastructureFailure(outcome: Pick<TaskOutcome, 'error' | 'st
   return outcome.steps === 0 || INFRASTRUCTURE_ERROR.test(outcome.error)
 }
 
-const RATE_LIMITED = /429|rate.?limit/i
+const RATE_LIMITED = /\b429\b|rate.?limit/i
 
 /**
  * How long to wait before retry `attempt` (1-based), or undefined to stop.

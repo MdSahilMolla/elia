@@ -77,13 +77,10 @@ export function createOpenAICompatibleProvider(
     ? { extra_body: { google: { thinking_config: { include_thoughts: true } } } }
     : {}
   const wire: WireOptions = { gemini: Boolean(options.gemini), geminiThoughts }
+  // Lowered when the account can only pay for a shorter answer (see affordableTokens).
+  let outputCap: { tokens: number; until: number } | undefined
 
-  return {
-    prewarm() {
-      warmConnection(validatedBaseURL ?? client.baseURL)
-    },
-
-    async streamTurn({ system, systemDynamic, messages, tools, onText, onThinking, onToolBlock, signal, reasoningEffort }: StreamTurnParams) {
+  async function streamOnce({ system, systemDynamic, messages, tools, onText, onThinking, onToolBlock, signal, reasoningEffort }: StreamTurnParams, maxTokens: number) {
       // The stable prompt stays first so an OpenAI-compatible endpoint's
       // automatic prefix caching still matches on it; the per-turn dynamic
       // suffix follows it.
@@ -113,7 +110,7 @@ export function createOpenAICompatibleProvider(
       const runner = client.chat.completions
         .stream({
           model,
-          max_tokens: MAX_TOKENS,
+          max_tokens: maxTokens,
           messages: toOpenAIMessages(fullSystem, messages, wire),
           tools: openAITools,
           // Let the model emit several tool calls in one response so elia can run
@@ -207,7 +204,7 @@ export function createOpenAICompatibleProvider(
         if (!isStreamingUnsupported(err) || emittedContent) throw err
         const completion = await client.chat.completions.create({
           model,
-          max_tokens: MAX_TOKENS,
+          max_tokens: maxTokens,
           messages: toOpenAIMessages(fullSystem, messages, wire),
           tools: openAITools,
           ...(openAITools.length > 0 ? { parallel_tool_calls: true } : {}),
@@ -228,8 +225,49 @@ export function createOpenAICompatibleProvider(
       } finally {
         if (idleTimer) clearTimeout(idleTimer)
       }
+  }
+
+  return {
+    prewarm() {
+      warmConnection(validatedBaseURL ?? client.baseURL)
+    },
+
+    async streamTurn(params: StreamTurnParams) {
+      const now = Date.now()
+      if (outputCap && outputCap.until <= now) outputCap = undefined
+      const maxTokens = outputCap?.tokens ?? MAX_TOKENS
+      try {
+        return await streamOnce(params, maxTokens)
+      } catch (error) {
+        // OpenRouter prices the whole requested answer up front: a key with a
+        // few cents left was refused (402) on every request for asking for
+        // 32k tokens, though the answers it needed were a few hundred. Ask for
+        // what the account can pay for instead, and keep asking for that.
+        const affordable = affordableTokens(error)
+        if (affordable === undefined || affordable >= maxTokens || affordable < MIN_OUTPUT_TOKENS || params.signal?.aborted) throw error
+        outputCap = { tokens: affordable, until: now + OUTPUT_CAP_TTL_MS }
+        return await streamOnce(params, affordable)
+      }
     },
   }
+}
+
+/** Below this an answer with a tool call rarely fits; the 402 is left to route elsewhere. */
+const MIN_OUTPUT_TOKENS = 1_024
+/** A top-up should not need a restart to be used. */
+const OUTPUT_CAP_TTL_MS = 10 * 60_000
+
+/**
+ * The answer length a 402 says the account can still pay for — OpenRouter's
+ * "You requested up to 32000 tokens, but can only afford 3594" — less a margin,
+ * since the prompt is billed from the same balance. Undefined for any other error.
+ */
+export function affordableTokens(error: unknown): number | undefined {
+  const message = error instanceof Error ? error.message : String(error)
+  if (!/\b402\b|payment required|more credits/i.test(message)) return undefined
+  const match = /can only afford (\d+)/i.exec(message)
+  if (!match) return undefined
+  return Math.floor(Number(match[1]) * 0.9)
 }
 
 /** The shape this adapter actually depends on, kept loose because "OpenAI-compatible" providers vary. */

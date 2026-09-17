@@ -15,7 +15,7 @@ const BUILD_TIMEOUT_MS = 240_000
 /**
  * The URL of the last page preview actually opened, for the turn to verify.
  *
- * The turn used to recover this by running `/https?:\/\/\S+/` over preview's
+ * The turn used to recover this by running `/\bhttps?:\/\/\S+/` over preview's
  * human-readable result and taking the first match — so the thing elia verified
  * was whatever URL happened to appear first in a sentence written for a person.
  * Rewording that sentence silently changed what got checked, and a message

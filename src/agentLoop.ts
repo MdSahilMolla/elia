@@ -1093,7 +1093,7 @@ export function resetProviderHealthForTests(): void {
  */
 function isUnusableRouteError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error)
-  return /(?:401|402|403)|payment required|insufficient[_ ](?:credits?|quota|balance|funds)|requires more credits|invalid[_ ]api[_ ]key|incorrect api key|unauthori[sz]ed/i.test(message)
+  return /\b(?:401|402|403)\b|payment required|insufficient[_ ](?:credits?|quota|balance|funds)|requires more credits|invalid[_ ]api[_ ]key|incorrect api key|unauthori[sz]ed/i.test(message)
 }
 
 function isFallbackableProviderError(error: unknown): boolean {

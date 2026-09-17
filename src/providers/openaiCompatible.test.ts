@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from 'bun:test'
-import { GEMINI_SKIP_SIGNATURE, createOpenAICompatibleProvider, createThoughtSplitter, toContentBlocks, toOpenAIMessages } from './openaiCompatible.ts'
+import { GEMINI_SKIP_SIGNATURE, affordableTokens, createOpenAICompatibleProvider, createThoughtSplitter, toContentBlocks, toOpenAIMessages } from './openaiCompatible.ts'
 import type { ChatMessage } from './types.ts'
 
 // The fake server below is plain http://127.0.0.1 — allow that explicitly for
@@ -480,4 +480,55 @@ test('a response that stops arriving fails as a timeout instead of waiting forev
     if (previousIdle === undefined) delete process.env.ELIA_STREAM_IDLE_MS
     else process.env.ELIA_STREAM_IDLE_MS = previousIdle
   }
+})
+
+// OpenRouter's wording, from the live 402 on the user's free-tier key.
+const CANNOT_AFFORD = {
+  error: {
+    code: 402,
+    message: 'This request requires more credits, or fewer max_tokens. You requested up to 32000 tokens, but can only afford 3594. To increase, visit https://openrouter.ai/settings/keys',
+  },
+}
+
+test('a key that cannot pay for 32k tokens asks for what it can, and keeps asking for that', async () => {
+  process.env.ELIA_ALLOW_INSECURE_LOCAL_ENDPOINT = '1'
+  const asked: number[] = []
+  const base = { id: 'c', object: 'chat.completion.chunk', created: 0, model: 'm' }
+  server = Bun.serve({
+    port: 0,
+    fetch: async (request) => {
+      const body = await request.json() as { max_tokens: number }
+      asked.push(body.max_tokens)
+      if (body.max_tokens > 3594) return Response.json(CANNOT_AFFORD, { status: 402 })
+      return new Response(sse(
+        { ...base, choices: [{ index: 0, delta: { role: 'assistant', content: 'ok' }, finish_reason: null }] },
+        { ...base, choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] },
+      ) + 'data: [DONE]\n\n', { headers: { 'content-type': 'text/event-stream' } })
+    },
+  })
+  const provider = createOpenAICompatibleProvider('key', 'm', `http://127.0.0.1:${server.port}`)
+  const turn = () => provider.streamTurn({ cwd: process.cwd(), system: 'sys', messages: USER_MESSAGES, tools: [], onText: () => {} })
+  expect((await turn()).content).toEqual([{ type: 'text', text: 'ok' }])
+  expect((await turn()).content).toEqual([{ type: 'text', text: 'ok' }])
+  // One refusal, then the lowered cap is used straight away.
+  expect(asked).toEqual([32_000, 3234, 3234])
+})
+
+test('a 402 with no affordable length, or too little of one, stays a 402', async () => {
+  expect(affordableTokens(new Error('402 This request requires more credits'))).toBeUndefined()
+  expect(affordableTokens(new Error('429 Too many requests, can only afford 3594'))).toBeUndefined()
+  expect(affordableTokens(new Error(`402 ${CANNOT_AFFORD.error.message}`))).toBe(3234)
+
+  process.env.ELIA_ALLOW_INSECURE_LOCAL_ENDPOINT = '1'
+  let calls = 0
+  server = Bun.serve({
+    port: 0,
+    fetch: () => {
+      calls += 1
+      return Response.json({ error: { code: 402, message: 'requires more credits. You requested up to 32000 tokens, but can only afford 200.' } }, { status: 402 })
+    },
+  })
+  const provider = createOpenAICompatibleProvider('key', 'm', `http://127.0.0.1:${server.port}`)
+  await expect(provider.streamTurn({ cwd: process.cwd(), system: 'sys', messages: USER_MESSAGES, tools: [], onText: () => {} })).rejects.toThrow('402')
+  expect(calls).toBe(1)
 })
