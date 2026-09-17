@@ -3954,6 +3954,11 @@ async function runInteractive(): Promise<void> {
     // (not just the connection) so the first turn skips cold start. Idempotent —
     // ensureThread dedupes on the resolved instructions.
     prewarmActiveProvider()
+    // Before Ink and React load: native text measurement and React's
+    // production build — without touching NODE_ENV, which every command elia
+    // runs would inherit. See ui/app/fastRender.ts.
+    const { installFastRendering } = await import('./ui/app/fastRender.ts')
+    installFastRendering()
     const { runInkRepl } = await import('./ui/app/index.tsx')
     const greeting = `${mode} mode`
     const cliVersion = JSON.parse(await Bun.file(new URL('../package.json', import.meta.url)).text()).version as string
