@@ -62,10 +62,10 @@ test('a credential in the state is redacted before it leaves the machine', async
     sent = String(init.body)
     return new Response(JSON.stringify({ answers: { outcome: { type: 'noul', noul: 0.9 } } }))
   }) as unknown as typeof fetch
-  await askJev('OPENAI_API_KEY=sk-proj-abcdefghijklmnopqrstuvwxyz0123456789', QUESTIONS)
-  expect(sent).not.toContain('sk-proj-abcdefghijklmnopqrstuvwxyz0123456789')
-  await askJev({ nested: ['token sk-proj-abcdefghijklmnopqrstuvwxyz0123456789'] }, QUESTIONS)
-  expect(sent).not.toContain('sk-proj-abcdefghijklmnopqrstuvwxyz0123456789')
+  await askJev('OPENAI_API_KEY=sk-proj-abcdefghijklmnopqrstuvwxyz0123456789', QUESTIONS) // pragma: allowlist secret
+  expect(sent).not.toContain('sk-proj-abcdefghijklmnopqrstuvwxyz0123456789') // pragma: allowlist secret
+  await askJev({ nested: ['token sk-proj-abcdefghijklmnopqrstuvwxyz0123456789'] }, QUESTIONS) // pragma: allowlist secret
+  expect(sent).not.toContain('sk-proj-abcdefghijklmnopqrstuvwxyz0123456789') // pragma: allowlist secret
 })
 
 test('HTTP errors, garbage and network failures come back as errors, not throws', async () => {

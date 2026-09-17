@@ -1,5 +1,5 @@
 import { realpathSync } from 'node:fs'
-import { isAbsolute, relative, resolve } from 'node:path'
+import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { ELIA_ROOT } from '../statePaths.ts'
 
 /**
@@ -53,12 +53,26 @@ function fileKey(path: string): string {
   return process.platform === 'win32' ? key.toLowerCase() : key
 }
 
+/**
+ * The real path, even for a file that does not exist yet — the usual case for a
+ * write. Its nearest existing folder is resolved and the rest appended, so
+ * `C:\Users\RUNNER~1\…\new.ts` and a root spelled `C:\Users\runneradmin\…`
+ * still compare as one tree.
+ */
 function canonical(path: string): string {
   const absolute = resolve(path)
-  try {
-    return (realpathSync.native ?? realpathSync)(absolute)
-  } catch {
-    return absolute
+  const realpath = realpathSync.native ?? realpathSync
+  const rest: string[] = []
+  let current = absolute
+  for (;;) {
+    try {
+      return join(realpath(current), ...rest)
+    } catch {
+      const parent = dirname(current)
+      if (parent === current) return absolute
+      rest.unshift(basename(current))
+      current = parent
+    }
   }
 }
 
