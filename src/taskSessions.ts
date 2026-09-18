@@ -90,6 +90,8 @@ export class TaskSessionStore {
   private readonly listeners = new Set<TaskSessionListener>()
   private readonly controls = new Map<string, TaskControls>()
   private writeQueued = false
+  private writeChain = Promise.resolve()
+  private pendingSnapshot: TaskSession[] = []
   private persistencePath = TASKS_FILE
   private activeSessionId: string | undefined
 
@@ -263,16 +265,28 @@ export class TaskSessionStore {
   }
 
   private persistSoon(): void {
+    // Always remember the freshest snapshot; the flush below writes whichever
+    // is newest by the time it actually runs. Coalescing on top of that is
+    // purely a debounce — no snapshot is ever lost or reordered by a coalesced
+    // flush (A3-03: overlapping writes could previously interleave and land a
+    // stale newer file).
+    this.pendingSnapshot = this.list()
     if (this.writeQueued) return
     this.writeQueued = true
-    queueMicrotask(async () => {
+    queueMicrotask(() => {
       this.writeQueued = false
-      try {
-        ensureSecureDirectory(join(this.persistencePath, '..'))
-        await writeSecureBunFile(this.persistencePath, JSON.stringify({ version: TASKS_SCHEMA_VERSION, tasks: this.list() }, null, 2))
-      } catch {
-        // Persistence is best-effort. The live dashboard remains authoritative.
-      }
+      const snapshot = this.pendingSnapshot
+      // Serialize on a chain so concurrent flushes never race the file: each
+      // write runs only after the previous one finished, and snapshots are
+      // captured in emit order, so the last write always holds the latest state.
+      this.writeChain = this.writeChain.then(async () => {
+        try {
+          ensureSecureDirectory(join(this.persistencePath, '..'))
+          await writeSecureBunFile(this.persistencePath, JSON.stringify({ version: TASKS_SCHEMA_VERSION, tasks: snapshot }, null, 2))
+        } catch {
+          // Persistence is best-effort. The live dashboard remains authoritative.
+        }
+      })
     })
   }
 }

@@ -1,8 +1,8 @@
-import { afterEach, describe, expect, test } from 'bun:test'
+import { afterEach, describe, expect, setSystemTime, test } from 'bun:test'
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { EXECUTION_LEASE_TTL_MS, GoalGraphStore, actionKey, classifyFailure, isReportingTool, outstandingActions, readGoalGraphSnapshot, type GoalGraphOptions } from './goalGraph.ts'
+import { ACTION_APPROVAL_TTL_MS, EXECUTION_LEASE_TTL_MS, GoalGraphStore, actionKey, classifyFailure, isReportingTool, outstandingActions, readGoalGraphSnapshot, type GoalGraphOptions } from './goalGraph.ts'
 import type { Proposal } from './types.ts'
 
 const temporaryDirectories: string[] = []
@@ -501,4 +501,66 @@ test('a blocked action whose step completed is not outstanding', () => {
   expect(outstanding).toContain('a3')
   // Never started: genuinely unfinished.
   expect(outstanding).toContain('a4')
+})
+
+// A4-02: a durable approval survives a graph reopen (that is its purpose), but
+// it may never fund a run in a DIFFERENT governance mode. Consent given to a
+// supervised session with a person at the terminal is not consent for an
+// unattended or scheduled execution.
+test('a durable action approval only funds the governance mode that granted it', () => {
+  const { graph } = createGraph()
+  graph.seedProposal(proposal)
+  const request = { name: 'run_command', input: { command: 'npm publish' } }
+  const reserved = graph.reserveAction(request, 'step:build')
+  const approval = graph.requestApproval('action', reserved.action.idempotencyKey, request, 'granted interactively', 'supervised')
+  graph.resolveApproval(approval.id, true)
+
+  expect(graph.isActionApproved(request, 'step:build', 'supervised')).toBe(true)
+  expect(graph.isActionApproved(request, 'step:build', 'unattended')).toBe(false)
+  // A caller that does not track modes (legacy shape) still sees the approval.
+  expect(graph.isActionApproved(request, 'step:build')).toBe(true)
+})
+
+test('a durable action approval lapses after its time bound', () => {
+  const { graph } = createGraph()
+  graph.seedProposal(proposal)
+  const request = { name: 'run_command', input: { command: 'npm publish' } }
+  const reserved = graph.reserveAction(request, 'step:build')
+  const approval = graph.requestApproval('action', reserved.action.idempotencyKey, request, undefined, 'unattended')
+  const resolved = graph.resolveApproval(approval.id, true)
+
+  expect(graph.isActionApproved(request, 'step:build', 'unattended')).toBe(true)
+  // Advance the clock past the approval's TTL: the durable "yes" must not cash
+  // out a later resume.
+  setSystemTime((resolved.resolvedAt ?? 0) + ACTION_APPROVAL_TTL_MS + 1_000)
+  try {
+    expect(graph.isActionApproved(request, 'step:build', 'unattended')).toBe(false)
+  } finally {
+    setSystemTime()
+  }
+})
+
+test('legacy approvals recorded without mode or expiry never fund a run (fail closed)', async () => {
+  const { graph, options } = createGraph()
+  graph.seedProposal(proposal)
+  const request = { name: 'run_command', input: { command: 'npm publish' } }
+  const reserved = graph.reserveAction(request, 'step:build')
+  const approval = graph.requestApproval('action', reserved.action.idempotencyKey, request)
+  graph.resolveApproval(approval.id, true)
+
+  // Simulate a PRE-FIX snapshot on disk: the action approval is approved but
+  // carries neither mode nor expiresAt. Reopen the graph exactly like a resume
+  // would; the durable yes must not fund anything.
+  const onDisk = JSON.parse(readFileSync(graph.path, 'utf8')) as { approvals: Array<Record<string, unknown>> }
+  for (const record of onDisk.approvals) {
+    delete record.mode
+    delete record.expiresAt
+  }
+  writeFileSync(graph.path, JSON.stringify(onDisk, null, 2))
+  const reopened = GoalGraphStore.open(options)
+
+  expect(reopened.isActionApproved(request, 'step:build', 'unattended')).toBe(false)
+  expect(reopened.isActionApproved(request, 'step:build', 'supervised')).toBe(false)
+  // A caller that predates mode tracking also gets no credit: no expiresAt.
+  expect(reopened.isActionApproved(request, 'step:build')).toBe(false)
 })

@@ -59,12 +59,22 @@ test('an explicit override below the inferred floor is honoured', () => {
 })
 
 // Never hand back more room than the operator said exists — that would
-// recreate the overflow the override is set to prevent.
+// recreate the overflow the override is set to prevent. The floor is clamped
+// to MIN_COMPACTION_THRESHOLD (2000): below it there is no budget at all.
 test('an override never yields a budget larger than itself', () => {
-  for (const window of ['1000', '2000', '3000', '8000']) {
+  for (const window of ['2000', '3000', '8000']) {
     const value = Number.parseInt(window, 10)
     expect(compactionThresholdFor('claude-sonnet-5', { ELIA_CONTEXT_WINDOW: window })).toBeLessThanOrEqual(value)
   }
+})
+
+// A1-01: an override of 1500 used to produce a 1500 budget — below
+// MIN_COMPACTION_THRESHOLD, where the system prompt and tool definitions alone
+// do not fit, so compaction loops forever. The floor is a floor; sub-MIN
+// values are raised to it instead of being honoured into that loop.
+test('an override below the minimum viable budget is clamped up to the floor', () => {
+  expect(compactionThresholdFor('claude-sonnet-5', { ELIA_CONTEXT_WINDOW: '1500' })).toBe(2_000)
+  expect(compactionThresholdFor('claude-sonnet-5', { ELIA_CONTEXT_WINDOW: '1000' })).toBe(2_000)
 })
 
 // An unrecognised model still keeps the historical budget: the floor exists

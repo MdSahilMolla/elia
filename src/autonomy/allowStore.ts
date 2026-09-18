@@ -188,8 +188,8 @@ export function addAllowRule(rule: AllowRule, scope: AllowScope, cwd = process.c
     (r) => r.tool === rule.tool && r.commandPrefix === rule.commandPrefix && r.intent === rule.intent,
   )
   const next: AllowFile = duplicate ? file : { rules: [...file.rules, rule].slice(-MAX_RULES) }
-  mkdirSync(dirname(path), { recursive: true })
-  writeFileSync(path, `${JSON.stringify(next, null, 2)}\n`)
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 })
+  writeFileSync(path, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 })
   cache.delete(path)
 }
 

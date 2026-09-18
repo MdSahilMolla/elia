@@ -140,8 +140,12 @@ function cacheHitRate(input: number, read: number, write: number): number {
 }
 
 function percentile(values: number[], p: number): number | undefined {
-  if (values.length === 0) return undefined
-  const sorted = [...values].sort((a, b) => a - b)
+  // NaN/Infinity timings (a stopwatch that never started, a clock that went
+  // backwards) must not pollute the percentile — a NaN index result slips past
+  // the caller's `?? 0` since it is not undefined.
+  const finite = values.filter((value) => Number.isFinite(value))
+  if (finite.length === 0) return undefined
+  const sorted = [...finite].sort((a, b) => a - b)
   const index = Math.min(sorted.length - 1, Math.floor((p / 100) * sorted.length))
   return sorted[index]
 }

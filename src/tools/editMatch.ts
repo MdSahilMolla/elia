@@ -60,8 +60,17 @@ export function closestRegions(text: string, needle: string, k = 2): { line: num
   const maxStart = fileLines.length - height
   for (let i = 0; i <= maxStart; i += 1) {
     const window = fileLines.slice(i, i + height).map(normalizeWs)
+    const windowMinLen = window.reduce((min, w) => Math.min(min, w.length), Infinity)
     let hits = 0
-    for (const t of target) if (window.some((w) => w === t || (w.length > 8 && (w.includes(t) || t.includes(w))))) hits += 1
+    for (const t of target) {
+      // Containment scoring needs a meaty token on both sides: a one- or
+      // two-character needle line (`}`, `x`, `//`) is inside half the lines in
+      // the file, so letting it count as a hit inflates a distant region into
+      // the "closest match". Exact equality still always counts (it is cheap
+      // and precise).
+      const comparable = windowMinLen >= 4 && t.length >= 4
+      if (window.some((w) => w === t || (comparable && w.length > 8 && (w.includes(t) || t.includes(w))))) hits += 1
+    }
     const score = hits / target.length
     if (score >= 0.5) scored.push({ line: i + 1, score })
   }

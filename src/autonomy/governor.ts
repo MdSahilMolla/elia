@@ -4,7 +4,7 @@ import { commandMayReadSensitiveData } from './sensitivePaths.ts'
 import { pauseToolSpinner, resumeToolSpinner } from '../ui/stream.ts'
 import { applyPolicy } from './policy.ts'
 import { addAllowRule, canPersistPrefixRule, isAllowlisted, ruleFor, type AllowScope } from './allowStore.ts'
-import { consumePreauth, currentBranch, isPreauthorized } from './preauth.ts'
+import { consumePreauth, currentBranch, isPreauthorized, preauthPath } from './preauth.ts'
 import { approveSelfEditFile, needsSelfEditApproval, SELF_EDIT_INTENT, selfEditLabel, selfEditRefusal, setSelfEditAllowed } from './selfEdit.ts'
 import { resolve as resolvePath } from 'node:path'
 
@@ -70,11 +70,58 @@ export interface ActionGovernorStats {
 export interface ActionGovernor {
   check(request: ActionRequest): Promise<ActionGateResult>
   stats(): ActionGovernorStats
+  /**
+   * The governance mode this governor enforces. Exposed so durable-action
+   * approvals (goalGraph.ts) can be scoped to the mode that granted them — an
+   * approval from a supervised session must not fund an unattended resume.
+   */
+  mode: GovernanceMode
 }
 
-const CRITICAL_COMMAND = /\b(rm\s+-rf|rm\s+--no-preserve-root|mkfs|dd\s+if=|shutdown|reboot|poweroff|drop\s+(database|table)|truncate\s+table|git\s+(push|reset\s+--hard|clean\s+-fd)|force[- ]push|sudo\b|chmod\s+777|chown\s+-R|kill\s+-9|kubectl\s+(apply|delete|rollout|scale)|helm\s+(install|upgrade|uninstall)|docker\s+(push|rm|system\s+prune)|terraform\s+(apply|destroy)|prisma\s+migrate\s+(deploy|reset)|alembic\s+upgrade|drizzle-kit\s+push|npm\s+publish|pnpm\s+publish|bun\s+publish|vercel\s+.*--prod|fly\s+deploy|railway\s+up|gcloud\s+.*\bdeploy\b|aws\s+(cloudformation|ecs|rds|lambda)|curl[^\n|]*\|\s*(sh|bash)|wget[^\n|]*\|\s*(sh|bash)|deploy\s+(to\s+)?prod(uction)?|send\s+.*(email|message)|publish\b|tweet\b|buy\b|purchase\b|checkout\b|transfer\b|wire\b)\b/i
-const REVIEW_COMMAND = /\b(git\s+commit|npm\s+install|pnpm\s+install|yarn\s+add|bun\s+(add|install)|pip\s+install|docker\s+build|docker\s+run|curl\b|wget\b|ssh\b|scp\b|gh\s+pr|deploy\b)\b/i
-const READ_ONLY_COMMAND = /^(?:command\s+)?(?:pwd|ls|find|grep|rg|git\s+(?:status|diff|log|show|branch)|(?:bun|npm|pnpm|yarn)\s+(?:test|run\s+(?:test|typecheck|type-check|tsc|check-types|lint|format\s+--check|check))|npx\s+(?:--no-install\s+)?tsc\s+--noEmit|cargo\s+(?:check|test|clippy)|go\s+(?:build|test|vet)\b[^\n]*|mvn\s+(?:-[^\s]+\s+)*(?:compile|test-compile|test)\b[^\n]*|(?:\.\/)?gradlew(?:\.bat)?\s+(?:build|test|check|compileJava|compileTestJava)\b[^\n]*|gradle\s+(?:build|test|check|compileJava|compileTestJava)\b[^\n]*|ctest\b[^\n]*|pytest\b[^\n]*|mypy\b[^\n]*|node\s+--version|bun\s+--version|npm\s+--version|printf|echo|cat|head|tail|sed|awk|dir|type|findstr)\b/i
+const CRITICAL_COMMAND = /\b(rm\s+-rf|rm\s+--no-preserve-root|mkfs|dd\s+if=|shutdown|reboot|poweroff|drop\s+(database|table)|truncate\s+table|git\s+(push|reset\s+--hard|clean\s+-fd)|force[- ]push|sudo\b|chmod\s+777|chown\s+-R|kill\s+-9|kubectl\s+(apply|delete|rollout|scale)|helm\s+(install|upgrade|uninstall)|docker\s+(push|rm|system\s+prune|deploy)|terraform\s+(apply|destroy)|prisma\s+migrate\s+(deploy|reset)|alembic\s+upgrade|drizzle-kit\s+push|npm\s+publish|pnpm\s+publish|bun\s+publish|vercel\s+(?:deploy|.*--prod)|(?:firebase|netlify|amplify|serverless|now|wrangler|edgio|fastlane)\s+(?:deploy|release|publish)|fly\s+(?:deploy|release|migrate)|railway\s+up|az\s+.*\bdeploy\b|gcloud\s+.*\bdeploy\b|aws\s+(cloudformation|ecs|rds|lambda)|gh\s+pr\s+(create|merge|close|reopen|ready|comment|review|edit|draft|delete|lock|unlock|unresolve)|curl[^\n|]*\|\s*(sh|bash)|wget[^\n|]*\|\s*(sh|bash)|deploy\s+(to\s+)?prod(uction)?|send\s+.*(email|message)|publish\b|tweet\b|buy\b|purchase\b|checkout\b|transfer\b|wire\b)\b/i
+/**
+ * Unattended mode auto-allows the review band by design — the code comment at
+ * the SETTLEABLE_ONCE declaration below calls it "local, reversible work get a
+ * standing yes". The verbs below are NOT that, which is why each is pulled OUT
+ * of REVIEW_COMMAND and classified critical instead. They must never be
+ * auto-allowed by an unattended run; reaching one requires an exact approval
+ * boundary (or an explicit `--authorize` pre-grant), because each executes
+ * arbitrary code on the host, runs inside a container that can mount the host
+ * filesystem, or opens an unvalidated network channel. Deploy/PR publishing
+ * verbs (firebase/netlify/fly/gh pr merge/…) were previously swallowed by the
+ * broad `deploy\b`/`gh\s+pr` review matches; they are classified critical here
+ * so an unattended run can never silently push changes at other people.
+ */
+// Package-manager installs run arbitrary build scripts (setup.py, postinstall,
+// prebuild) on the host as the current user. A package a model installs is
+// supply-chain code by definition.
+// Start-anchored (like REMOTE_FETCH_COMMAND below) so a command that merely
+// mentions these verbs as an argument — `echo npm install later` — is not
+// misclassified; only the command actually being run counts. `sudo` is an
+// allowed prefix modifier (it still runs the named verb, just elevated), not
+// an arbitrary preceding word.
+const CODE_EXEC_COMMAND = /^(?:\S+=\S+\s+)*(?:command\s+)?(?:sudo\s+)?(?:pip3?\s+install|npm\s+(?:add|install|i|ci)|pnpm\s+(?:add|install|i|ci)|yarn\s+(?:(?:global|dlx)\s+)?(?:add|install|set\s+version)|bun\s+(?:add|install|i))\b/i
+// Docker build/run/exec/compose/deploy and scp/rsync/rcp/sftp execute arbitrary
+// code (RUN steps, container entrypoint, remote shell) with the ability to
+// mount the host filesystem or devices, or move data across a network. None of
+// these are local or reversible. Start-anchored for the same reason as above.
+const REMOTE_SHELL_COMMAND = /^(?:\S+=\S+\s+)*(?:command\s+)?(?:sudo\s+)?(?:docker\s+(?:build|run|exec|compose|rm|push|deploy)|ssh|scp|rsync|rcp|sftp)\b/i
+// Bare curl/wget are an unvalidated data channel: even a plain GET rides data
+// out of the machine in the query string, and wget writes an arbitrary
+// downloaded file to disk. The model has the URL-validated, response-bounded
+// http_probe/web_fetch tools for legitimate HTTP work; shell curl/wget stays
+// critical. (curl/wget with --data/-d/--upload-file etc. are already caught
+// by EXTERNAL_WRITE_COMMAND further down; this catches the bare GET form.)
+const REMOTE_FETCH_COMMAND = /^(?:\S+=\S+\s+)*(?:command\s+)?(?:curl|wget)\b/i
+// `git commit` is local, reversible work that the review band exists to
+// cover. Publishing actions are NOT: `deploy` used to be classified review
+// here, but "deploy" is never what starts a deployment in practice, and
+// `gh\s+pr` matched every subcommand including `pr merge`. Both are dangerous
+// when auto-allowed — a silent publish to people outside the project — so
+// each deployment/PR verb is classified critical (CRITICAL_COMMAND) instead
+// of riding the unattended review-band auto-allow.
+const REVIEW_COMMAND = /\bgit\s+commit\b/i
+const READ_ONLY_COMMAND = /^(?:command\s+)?(?:pwd|ls|find|grep|rg|git\s+(?:status|diff|log|show|branch)|gh\s+pr\s+(?:view|list|checks|status|diff)|(?:bun|npm|pnpm|yarn)\s+(?:test|run\s+(?:test|typecheck|type-check|tsc|check-types|lint|format\s+--check|check))|npx\s+(?:--no-install\s+)?tsc\s+--noEmit|cargo\s+(?:check|test|clippy)|go\s+(?:build|test|vet)\b[^\n]*|mvn\s+(?:-[^\s]+\s+)*(?:compile|test-compile|test)\b[^\n]*|(?:\.\/)?gradlew(?:\.bat)?\s+(?:build|test|check|compileJava|compileTestJava)\b[^\n]*|gradle\s+(?:build|test|check|compileJava|compileTestJava)\b[^\n]*|ctest\b[^\n]*|pytest\b[^\n]*|mypy\b[^\n]*|node\s+--version|bun\s+--version|npm\s+--version|printf|echo|cat|head|tail|sed|awk|dir|type|findstr)\b/i
 // `sed`/`awk` are allowed above only for their plain print-to-stdout form.
 // Both also support in-place file rewriting (`sed -i`, `sed --in-place`,
 // `awk -i inplace`) which overwrites the target file — a write, not a read.
@@ -338,7 +385,7 @@ export function assessAction(request: ActionRequest, cwd = currentAgent().cwd ??
     const commands: string[] = []
     if (reproduction.trim()) commands.push(reproduction)
     if (testFile.trim()) commands.push(`bun test --timeout=10000 "${testFile}"`)
-    if (testPattern.trim()) commands.push(`bun test --timeout=20000 ${testPattern}`)
+    if (testPattern.trim()) commands.push(`bun test --timeout=20000 "${testPattern}"`)
     const results = commands.map((command) => assessCommand(command, cwd))
     const worst = results.find((result) => result.risk === 'critical') ?? results.find((result) => result.risk === 'review') ?? results[0]!
     return { ...worst, resources }
@@ -573,7 +620,7 @@ export function createActionGovernor(options: { mode?: GovernanceMode; approve?:
         ? `run_program:${String(request.input.program ?? '').trim()}:${Array.isArray(request.input.args) && typeof request.input.args[0] === 'string' ? request.input.args[0].trim() : ''}:${assessment.intent}`
       : `${request.name}:${assessment.intent}`
 
-  const decide = async (request: ActionRequest): Promise<ActionGateResult> => {
+const decide = async (request: ActionRequest): Promise<ActionGateResult> => {
       const baseAssessment = assessAction(request, options.cwd)
       // A checked-in .elia/policy.json can only tighten this: block the action
       // outright, or raise its decision from allow to approve. Applied before
@@ -632,7 +679,7 @@ export function createActionGovernor(options: { mode?: GovernanceMode; approve?:
           actionCount += 1
           return {
             allowed: true,
-            assessment: { ...assessment, decision: 'allow', reason: `${assessment.reason} (pre-authorized: .elia/preauth.json grant for "${assessment.intent}", use #${grant?.usedCount ?? '?'})` },
+            assessment: { ...assessment, decision: 'allow', reason: `${assessment.reason} (pre-authorized: ${preauthPath()} grant for "${assessment.intent}", use #${grant?.usedCount ?? '?'})` },
           }
         }
         return {
@@ -667,7 +714,29 @@ export function createActionGovernor(options: { mode?: GovernanceMode; approve?:
       // class of action stands for the rest of the run. Supervised mode
       // deliberately does not remember — a per-action boundary is the whole
       // point of it.
-      const decisionKey = `${assessment.risk}:${assessment.intent}`
+      //
+      // The settleable family (`shell`, `shell.composed`, `shell.unknown`) is
+      // keyed by the EXACT command, not just by intent: an approved
+      // `git push origin main` must never stand in for `git push -f …` or an
+      // unrelated `pip install …`. Each distinct command in the family needs
+      // its own "yes" — that is the one-approval-per-boundary property A2-03
+      // checks for. Everything else keeps its risk:intent class key.
+      const scopedCommand = (() => {
+        if (!SETTLEABLE_ONCE.has(assessment.intent)) return undefined
+        let raw: string | undefined
+        if (request.name === 'run_command') {
+          raw = typeof request.input.command === 'string' ? request.input.command : undefined
+        } else if (request.name === 'run_program') {
+          const program = typeof request.input.program === 'string' ? request.input.program : ''
+          const args = Array.isArray(request.input.args) ? request.input.args.filter((a): a is string => typeof a === 'string') : []
+          raw = [program, ...args].join(' ')
+        } else if (request.name === 'process' && request.input.action === 'start') {
+          raw = typeof request.input.command === 'string' ? request.input.command : undefined
+        }
+        const normalized = raw?.trim().replace(/\s+/g, ' ')
+        return normalized ? normalized : undefined
+      })()
+      const decisionKey = scopedCommand ?? `${assessment.risk}:${assessment.intent}`
       if (mode === 'unattended') {
         const remembered = classDecisions.get(decisionKey)
         if (remembered === true) {
@@ -744,6 +813,7 @@ export function createActionGovernor(options: { mode?: GovernanceMode; approve?:
   }
 
   return {
+    mode,
     stats: () => ({ maxActions, consumed: actionCount, exhausted: maxActions > 0 && actionCount >= maxActions, blockedByBudget }),
     async check(request) {
       const result = await decide(request)
@@ -792,8 +862,34 @@ function assessCommand(command: string, cwd: string): ActionAssessment {
   if (commandMayReadSensitiveData(command)) {
     return assessment('critical', 'approve', 'shell command may read credentials or protected system data', 'shell.sensitive-read', [], false)
   }
+  // The named hazard intents are checked BEFORE the generic CRITICAL_COMMAND
+  // (and before the settleable-once classification those matches fall into).
+  // Order matters: `sudo pip install` and `docker exec` and `curl --data …`
+  // would otherwise be caught by `sudo`, CRITICAL_COMMAND's broad shell
+  // match, or EXTERNAL_WRITE below — and an unattended run's "asked once"
+  // memory is keyed per exact command, so a settled `sudo pip install` must
+  // not stand in for an unrelated critical. A command belongs to exactly one
+  // intent here precisely so the least-settling classification wins.
+  //
+  // The exfil forms stay ahead of the bare-GET branch below: an upload
+  // (`-d@file`, `-F`, `-T`, `--data-binary`, …) can sit anywhere in the line,
+  // including past a prefix that REMOTE_FETCH_COMMAND's start anchor would
+  // miss, and it deserves the transmit-data reason rather than the weaker
+  // "opens a channel" one.
   if (EXTERNAL_WRITE_COMMAND.test(command) || EXTERNAL_WRITE_SHORT_OPTIONS.test(command)) {
     return assessment('critical', 'approve', 'shell command may transmit data to an external system', 'shell.external-write', [], false)
+  }
+  if (REMOTE_FETCH_COMMAND.test(command)) {
+    return assessment('critical', 'approve', 'shell command opens an unvalidated network channel (a bare GET already rides data out of the machine); use web_fetch/http_probe for safe bounded retrieval', 'shell.external-write', [], false)
+  }
+  // Supply-chain installs, container/SSH execution are critical with a
+  // dedicated intent — they execute arbitrary code, so no unattended run may
+  // auto-allow them, and no settled sibling may ever cover commander.
+  if (CODE_EXEC_COMMAND.test(command)) {
+    return assessment('critical', 'approve', 'shell command installs packages whose build scripts can execute arbitrary code on the host', 'shell.code-exec', [], false)
+  }
+  if (REMOTE_SHELL_COMMAND.test(command)) {
+    return assessment('critical', 'approve', 'shell command executes code on a remote host or inside a container that may mount the host filesystem', 'shell.remote', [], false)
   }
   if (CRITICAL_COMMAND.test(command)) {
     return assessment('critical', 'approve', 'shell command may cause an irreversible or external side effect', 'shell', [], false)

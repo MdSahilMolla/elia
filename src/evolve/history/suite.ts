@@ -29,7 +29,15 @@ export function loadTaskSpecs(file = TASKS_FILE): HistoryTaskSpec[] {
     cached = []
     return cached
   }
-  cached = JSON.parse(readFileSync(file, 'utf8')) as HistoryTaskSpec[]
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(file, 'utf8'))
+    cached = Array.isArray(parsed) ? (parsed as HistoryTaskSpec[]) : []
+  } catch {
+    // A corrupt or non-array tasks file must not take the whole benchmark
+    // down — report "no tasks" so the operator sees an empty run instead of a
+    // crash, and can regenerate or repair the file.
+    cached = []
+  }
   return cached
 }
 
