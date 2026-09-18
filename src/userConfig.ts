@@ -49,12 +49,21 @@ export function loadUserConfig(filePath = userConfigPath()): UserConfigLoadResul
     return { path: filePath, loaded: [] }
   }
 
-  const loaded: string[] = []
+  // Duplicate keys are resolved last-wins across the file (the mode
+  // `readUserConfigValues` already uses), while an externally-provided
+  // variable still beats every file value. Processing the lines into a single
+  // map keeps the two consistent without mutating `process.env` mid-parse.
+  const fileValues: Record<string, string> = {}
   for (const line of content.split(/\r?\n/)) {
     const parsed = parseEnvLine(line)
-    if (!parsed || process.env[parsed.key] !== undefined) continue
-    process.env[parsed.key] = parsed.value
-    loaded.push(parsed.key)
+    if (parsed) fileValues[parsed.key] = parsed.value
+  }
+
+  const loaded: string[] = []
+  for (const [key, value] of Object.entries(fileValues)) {
+    if (process.env[key] !== undefined) continue
+    process.env[key] = value
+    loaded.push(key)
   }
   return { path: filePath, loaded }
 }
@@ -116,17 +125,35 @@ function parseEnvLine(line: string): { key: string; value: string } | undefined 
 }
 
 function decodeEnvValue(value: string): string {
-  const trimmed = value.trim()
-  if (trimmed.startsWith('"') && trimmed.endsWith('"')) {
+  const withoutComment = stripInlineComment(value.trim())
+  if (withoutComment.startsWith('"') && withoutComment.endsWith('"')) {
     try {
-      const decoded = JSON.parse(trimmed)
-      return typeof decoded === 'string' ? decoded : trimmed
+      const decoded = JSON.parse(withoutComment)
+      return typeof decoded === 'string' ? decoded : withoutComment
     } catch {
-      return trimmed.slice(1, -1)
+      return withoutComment.slice(1, -1)
     }
   }
-  if (trimmed.startsWith("'") && trimmed.endsWith("'")) return trimmed.slice(1, -1)
-  return trimmed
+  if (withoutComment.startsWith("'") && withoutComment.endsWith("'")) return withoutComment.slice(1, -1)
+  // An opener with no matching closer is malformed, not a literal that should
+  // silently swallow the quote character into the value.
+  if (withoutComment.startsWith('"') || withoutComment.startsWith("'")) return withoutComment.slice(1)
+  return withoutComment
+}
+
+/** Removes an unquoted ` # ...` trailing comment, leaving `#` inside quotes alone. */
+function stripInlineComment(value: string): string {
+  let inSingle = false
+  let inDouble = false
+  for (let index = 0; index < value.length; index++) {
+    const char = value[index]!
+    if (char === "'" && !inDouble) inSingle = !inSingle
+    else if (char === '"' && !inSingle) inDouble = !inDouble
+    else if (char === '#' && !inSingle && !inDouble && index > 0 && /[ \t]/.test(value[index - 1]!)) {
+      return value.slice(0, index).trimEnd()
+    }
+  }
+  return value
 }
 
 function encodeEnvValue(value: string): string {

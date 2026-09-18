@@ -2,7 +2,7 @@ import { expect, test } from 'bun:test'
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { loadUserConfig, writeUserConfig } from './userConfig.ts'
+import { loadUserConfig, readUserConfigValues, writeUserConfig } from './userConfig.ts'
 
 function tempPath(): string {
   return join(mkdtempSync(join(tmpdir(), 'elia-user-config-')), 'config.env')
@@ -67,3 +67,50 @@ test('a rename failure cleans up the temp file instead of leaving a just-written
   const leftoverTemps = readdirSync(dir).filter((name) => name.includes('.tmp-'))
   expect(leftoverTemps).toEqual([])
 }, 10_000)
+
+test('inline comments on unquoted values are stripped, not baked into the secret', () => {
+  const path = tempPath()
+  writeFileSync(path, 'PLAIN=abc  # the real value is abc\nSTARTING_HASH=#not-a-comment\nPOUND_NO_SPACE=abc#def\n')
+  expect(readUserConfigValues(path)).toMatchObject({
+    PLAIN: 'abc',
+    STARTING_HASH: '#not-a-comment',
+    POUND_NO_SPACE: 'abc#def',
+  })
+})
+
+test('a comment after a quoted value never reaches the value', () => {
+  const path = tempPath()
+  writeFileSync(path, 'QUOTED="hello world" # trailing note\nSINGLE=\'my value\' # note\n')
+  expect(readUserConfigValues(path)).toEqual({ QUOTED: 'hello world', SINGLE: 'my value' })
+})
+
+test('a hash inside quotes is data, not a comment', () => {
+  const path = tempPath()
+  writeFileSync(path, 'IN_DOUBLE="a # b"\nIN_SINGLE=\'a # b\'\n')
+  expect(readUserConfigValues(path)).toEqual({ IN_DOUBLE: 'a # b', IN_SINGLE: 'a # b' })
+})
+
+test('an unterminated quote is a malformed value, not a swallowed quote char', () => {
+  const path = tempPath()
+  writeFileSync(path, 'OPEN="abc definitely\nSINGLE_OPEN=\'xyz definitely\n')
+  // These are ambiguous files; the important guarantee is that the opening
+  // quote never pollutes the loaded value as a literal character.
+  expect(readUserConfigValues(path).OPEN).toBe('abc definitely')
+  expect(readUserConfigValues(path).SINGLE_OPEN).toBe('xyz definitely')
+})
+
+test('duplicate keys resolve last-wins the same way in both reader and loader', () => {
+  const path = tempPath()
+  const previous = process.env.DUP_KEY
+  delete process.env.DUP_KEY
+  writeFileSync(path, 'DUP_KEY=first\nDUP_KEY=last\n')
+  try {
+    expect(readUserConfigValues(path)).toEqual({ DUP_KEY: 'last' })
+    const result = loadUserConfig(path)
+    expect(process.env.DUP_KEY as string | undefined).toBe('last')
+    expect(result.loaded).toEqual(['DUP_KEY'])
+  } finally {
+    if (previous === undefined) delete process.env.DUP_KEY
+    else process.env.DUP_KEY = previous
+  }
+})

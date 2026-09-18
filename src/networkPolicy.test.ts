@@ -95,6 +95,50 @@ test('network URL validation rejects IPv6 loopback and address-embedding bypass 
   }
 })
 
+test('network URL validation rejects IPv4-translated, compatible, and NAT64 embedding forms', () => {
+  // Bun normalizes `[::ffff:0:127.0.0.1]` to `[::ffff:0:7f00:1]`, pushing the
+  // `ffff` marker a group higher than the classic mapped form — the old
+  // `(value >> 32n) === 0xffffn` check missed every one of these. Each embeds
+  // a local/private IPv4 that an attacker could reach through a NAT64 gateway
+  // or IPv4-compatible routing.
+  for (const url of [
+    'http://[::ffff:0:127.0.0.1]/', // IPv4-translated ??::ffff:0:0:0/96
+    'http://[::ffff:0:10.0.0.1]/',
+    'http://[::ffff:0:192.168.1.1]/',
+    'http://[::ffff:0:169.254.169.254]/', // host metadata via translation
+    'http://[::127.0.0.1]/', // IPv4-compatible ::/96
+    'http://[::192.168.1.1]/',
+    'http://[::10.0.0.1]/',
+    'http://[::169.254.169.254]/',
+    'http://[64:ff9b::127.0.0.1]/', // NAT64 well-known prefix
+    'http://[64:ff9b::10.0.0.1]/',
+    'http://[64:ff9b::169.254.169.254]/',
+    'http://[64:ff9b:1::7f00:1]/', // NAT64 local-use prefix
+    'http://[64:ff9b:1::a00:1]/',
+  ]) {
+    expect(() => validateNetworkUrl(url)).toThrow()
+  }
+})
+
+test('network URL validation still accepts authoritative public IPv6 globals', () => {
+  for (const url of [
+    'http://[2606:4700:4700::1111]/', // Cloudflare DNS
+    'http://[2001:4860:4860::8888]/', // Google DNS
+    'http://[2606:4700:4700::1111:1]/',
+    'http://[2400:cb00:2049:1::c629:d7a2]/', // Cloudflare front-end
+  ]) {
+    expect(() => validateNetworkUrl(url)).not.toThrow()
+  }
+})
+
+test('the DNS-answer path refuses NAT64 and translated loopback answers', async () => {
+  const rebinding = publicAddressLookup({}, async () => [{ address: '64:ff9b::7f00:1', family: 6 }])
+  await withLocalServer(async (port, hits) => {
+    await expect(getThrough(port, rebinding)).rejects.toThrow('private or local')
+    expect(hits()).toBe(0)
+  })
+})
+
 test('network URL validation accepts public HTTPS syntax and requires TLS for providers', async () => {
   expect(validateNetworkUrl('https://api.example.com/v1').origin).toBe('https://api.example.com')
   await expect(assertPublicNetworkUrl('https://203.0.113.8')).rejects.toThrow('private or local')
