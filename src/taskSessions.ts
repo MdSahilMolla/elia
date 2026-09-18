@@ -51,9 +51,11 @@ export interface TaskSession {
   stepId?: string
   /** Stable identity used to suppress an equivalent active worker request. */
   fingerprint?: string
+  /** The worker's last few tool calls, newest last — what Ctrl+O shows under a live subagent. */
+  recentSteps?: string[]
 }
 
-export type TaskSessionPatch = Partial<Pick<TaskSession, 'status' | 'action' | 'detail' | 'stepsCompleted' | 'stepsTotal' | 'progress' | 'attempts' | 'lastHeartbeatAt' | 'nextAction' | 'blockedReason' | 'acceptanceCriteria' | 'verificationCommands' | 'error'>>
+export type TaskSessionPatch = Partial<Pick<TaskSession, 'status' | 'action' | 'detail' | 'stepsCompleted' | 'stepsTotal' | 'progress' | 'attempts' | 'lastHeartbeatAt' | 'nextAction' | 'blockedReason' | 'acceptanceCriteria' | 'verificationCommands' | 'error' | 'recentSteps'>>
 export interface TaskSessionMeta {
   parentId?: string
   depth?: number
@@ -204,6 +206,7 @@ export class TaskSessionStore {
     if (patch.nextAction !== undefined) safePatch.nextAction = redactText(patch.nextAction, 500)
     if (patch.blockedReason !== undefined) safePatch.blockedReason = redactText(patch.blockedReason, 1000)
     if (patch.error !== undefined) safePatch.error = redactText(patch.error, 2000)
+    if (patch.recentSteps !== undefined) safePatch.recentSteps = patch.recentSteps.slice(-5).map((step) => redactText(step, 160))
     if (patch.progress !== undefined) safePatch.progress = Math.max(0, Math.min(1, patch.progress))
     Object.assign(record, safePatch, { updatedAt: Date.now() })
     if (patch.status === 'running') {

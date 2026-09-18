@@ -148,3 +148,13 @@ test('is not a dashboard — a fresh chat with other sessions and old artifacts 
   const { lastFrame } = render(<WorkspacePanel plan={[]} agents={[]} />)
   expect((lastFrame() ?? '').trim()).toBe('')
 })
+
+test('ctrl+o expands a live subagent into its task and last tool calls (#1239)', () => {
+  const worker = agent({ id: 'w', role: 'builder', sessionId: 's1', title: 'add the login form', recentSteps: ['✓ read_file src/app.ts', '✗ run_command bun test'] })
+  const collapsed = render(<WorkspacePanel plan={[]} agents={[worker]} sessionId="s1" />).lastFrame() ?? ''
+  expect(collapsed).not.toContain('run_command')
+  const expanded = render(<WorkspacePanel plan={[]} agents={[worker]} sessionId="s1" expanded />).lastFrame() ?? ''
+  expect(expanded).toContain('task: add the login form')
+  expect(expanded).toContain('✓ read_file src/app.ts')
+  expect(expanded).toContain('✗ run_command bun test')
+})

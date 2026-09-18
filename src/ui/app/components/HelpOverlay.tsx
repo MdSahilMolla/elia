@@ -11,7 +11,7 @@ const KEYS: [string, string][] = [
   ['tab', 'on an empty line, toggle plan mode'],
   ['type while working', 'steer the running turn at its next step'],
   ['esc', 'stop the turn · clear the queue'],
-  ['ctrl+o', 'expand / collapse tool output'],
+  ['ctrl+o', 'expand / collapse tool output and subagents'],
   ['ctrl+r', 'search your prompt history'],
   ['ctrl+c', 'stop · press twice to quit'],
 ]

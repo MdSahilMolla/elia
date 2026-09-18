@@ -849,7 +849,7 @@ export function App(props: AppProps) {
           done" parked above the input only competes with it. */}
       {!modalOpen && (busy || planReady || visiblePlan.length > 0) && (
         <ErrorBoundary area="workspace panel" onError={boundaryError}>
-          <WorkspacePanel plan={visiblePlan} agents={agents} since={sessionStartedAt} sessionId={sessionId} />
+          <WorkspacePanel plan={visiblePlan} agents={agents} since={sessionStartedAt} sessionId={sessionId} expanded={expandedAll} />
         </ErrorBoundary>
       )}
       {previewUrl && !modalOpen && (

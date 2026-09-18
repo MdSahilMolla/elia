@@ -90,6 +90,7 @@ Scouts run on a faster, cheaper model and cannot modify anything, so prefer a ha
               action: event.isError ? `Retrying after ${event.name}` : event.name,
               detail: event.isError ? event.result : `step ${event.name} completed`,
               stepsCompleted,
+              recentSteps: [...(current?.recentSteps ?? []), stepLine(event)],
               nextAction: event.isError ? 'Diagnose the failed tool call and retry safely' : 'Continue until acceptance evidence is complete',
             })
         },
@@ -126,4 +127,11 @@ Scouts run on a faster, cheaper model and cannot modify anything, so prefer a ha
       throw error
     }
   },
+}
+
+/** One line per worker tool call: `✗ run_command bun test`. */
+function stepLine(event: { name: string; input: Record<string, unknown>; isError: boolean }): string {
+  const arg = ['path', 'command', 'pattern', 'query', 'url', 'description'].map((key) => event.input[key]).find((value): value is string => typeof value === 'string' && value.trim().length > 0)
+  const target = arg ? ` ${arg.replace(/\s+/g, ' ').trim().slice(0, 80)}` : ''
+  return `${event.isError ? '✗' : '✓'} ${event.name}${target}`
 }

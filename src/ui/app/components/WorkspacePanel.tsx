@@ -102,12 +102,15 @@ export function WorkspacePanel({
   agents,
   since = 0,
   sessionId,
+  expanded = false,
 }: {
   plan: TodoItem[]
   agents: TaskSession[]
   since?: number
   /** The current REPL/run session. When set, only workers stamped with it are shown. */
   sessionId?: string
+  /** Ctrl+O: show each live worker's task and last few tool calls. */
+  expanded?: boolean
 }) {
   // A worker belongs to this run if it carries this session's id. `tasks.json`
   // is reloaded on every startup, so without this check a `needs-review` or
@@ -196,7 +199,8 @@ export function WorkspacePanel({
             </Text>
           </Text>
           {live.slice(0, 6).map((agent) => (
-            <Box key={agent.id}>
+            <Box key={agent.id} flexDirection="column">
+            <Box>
               <Text>{'  '}</Text>
               <Box width={2} flexShrink={0}>
                 <Spinner />
@@ -207,6 +211,19 @@ export function WorkspacePanel({
                 <Text color={palette.muted}> · {workerLabel(agent)}</Text>
                 {elapsed(agent) ? <Text color={palette.muted}> · {elapsed(agent)}</Text> : null}
               </Text>
+            </Box>
+            {expanded && (
+              <Box flexDirection="column" marginLeft={6}>
+                <Text color={palette.muted} wrap="truncate-end">task: {agent.title}</Text>
+                {(agent.recentSteps ?? []).length === 0 ? (
+                  <Text color={palette.muted}>no tool calls yet</Text>
+                ) : (
+                  (agent.recentSteps ?? []).map((step, i) => (
+                    <Text key={i} color={palette.muted} wrap="truncate-end">{step}</Text>
+                  ))
+                )}
+              </Box>
+            )}
             </Box>
           ))}
           {live.length > 6 && <Text color={palette.muted}>  … {live.length - 6} more</Text>}
