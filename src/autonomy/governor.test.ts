@@ -242,7 +242,14 @@ describe('autonomy governor', () => {
     }
   })
 
-  test('a plain curl/wget download that writes nothing and uploads nothing stays a review action', () => {
+  test('a plain curl/wget download is critical as a bare channel, not misread as an upload', () => {
+    // This asserted `review` when it was written. Bare curl/wget is now
+    // critical in its own right (REMOTE_FETCH_COMMAND): even a GET rides data
+    // out in the query string, and wget writes an arbitrary remote file to
+    // disk. What the case is still here to pin is the negative half — that
+    // the case-sensitive short-option exfil pass does not sweep up curl's
+    // harmless lowercase -f/-t. So each of these must land on the
+    // bare-channel reason, never on the transmit-data one.
     for (const command of [
       'curl -s https://api.example.com/data',
       'curl -f https://setup.example.com/install.sh -o setup.sh',
@@ -250,7 +257,9 @@ describe('autonomy governor', () => {
       'wget -q https://example.com/index.html',
     ]) {
       const result = assessAction({ name: 'run_command', input: { command } }, '/repo')
-      expect(result.risk, command).toBe('review')
+      expect(result.risk, command).toBe('critical')
+      expect(result.reason, command).toContain('opens an unvalidated network channel')
+      expect(result.reason, command).not.toContain('may transmit data to an external system')
     }
   })
 

@@ -620,7 +620,7 @@ export function createActionGovernor(options: { mode?: GovernanceMode; approve?:
         ? `run_program:${String(request.input.program ?? '').trim()}:${Array.isArray(request.input.args) && typeof request.input.args[0] === 'string' ? request.input.args[0].trim() : ''}:${assessment.intent}`
       : `${request.name}:${assessment.intent}`
 
-const decide = async (request: ActionRequest): Promise<ActionGateResult> => {
+  const decide = async (request: ActionRequest): Promise<ActionGateResult> => {
       const baseAssessment = assessAction(request, options.cwd)
       // A checked-in .elia/policy.json can only tighten this: block the action
       // outright, or raise its decision from allow to approve. Applied before
@@ -865,7 +865,7 @@ function assessCommand(command: string, cwd: string): ActionAssessment {
   // The named hazard intents are checked BEFORE the generic CRITICAL_COMMAND
   // (and before the settleable-once classification those matches fall into).
   // Order matters: `sudo pip install` and `docker exec` and `curl --data …`
-  // would otherwise be caught by `sudo`, CRITICAL_COMMAND's broad shell
+  // would otherwise be caught by `\bsudo\b`, CRITICAL_COMMAND's broad shell
   // match, or EXTERNAL_WRITE below — and an unattended run's "asked once"
   // memory is keyed per exact command, so a settled `sudo pip install` must
   // not stand in for an unrelated critical. A command belongs to exactly one

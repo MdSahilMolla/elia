@@ -96,7 +96,7 @@ test('applyPolicy raises a safe allow to approve when the risk bar is lowered', 
 })
 
 test('review-band actions with requireApprovalAtOrAbove "review" are escalated out of the unattended auto-allow bucket', () => {
-  const review = { name: 'run_command', input: { command: 'npm install' } }
+  const review = { name: 'run_command', input: { command: 'git commit -m wip' } }
   const assessment = assessAction(review, process.cwd())
   expect(assessment.risk).toBe('review')
   expect(assessment.decision).toBe('approve')
@@ -117,7 +117,7 @@ test('safe-band actions stay untouched when requireApprovalAtOrAbove is "review"
 })
 
 test('requireApprovalAtOrAbove "critical" does not touch review-band actions (the built-in default)', () => {
-  const review = { name: 'run_command', input: { command: 'npm install' } }
+  const review = { name: 'run_command', input: { command: 'git commit -m wip' } }
   const assessment = assessAction(review, process.cwd())
   const outcome = applyPolicy(assessment, review, process.cwd(), { ...base, requireApprovalAtOrAbove: 'critical' })
   expect(outcome.assessment).toBe(assessment)
