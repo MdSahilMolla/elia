@@ -3,7 +3,7 @@ import { join } from 'node:path'
 import { stateDir } from '../statePaths.ts'
 import { appendSecureFile } from '../securePersistence.ts'
 import { readTrajectories } from '../trajectory/record.ts'
-import { learningRate, readLedger } from '../evolve/ledger.ts'
+import { learningRate, readLedger, type GenerationRecord } from '../evolve/ledger.ts'
 import { lessonTrials } from '../autonomy/lessonEfficacy.ts'
 import { recursionSignal, renderRecursion } from './recursion.ts'
 import { evidenceVelocity } from './velocity.ts'
@@ -81,6 +81,24 @@ export function readBenchRuns(path = BENCH_HISTORY_PATH): BenchRecord[] {
   } catch {
     return []
   }
+}
+
+/**
+ * Whether the generations that scored better did so where they could see the
+ * failure, or where they could not.
+ *
+ * A pass rate that went up is not the same claim as an agent that got better —
+ * `split.ts` exists because the proposer is handed every failing task's error
+ * and can write to it. This reads back what actually happened, and says nothing
+ * at all on records written before the corpus was split rather than guessing.
+ */
+function generalizationNote(ledger: GenerationRecord[]): string {
+  const scored = ledger.filter((record) => record.generalization && record.generalization.verdict !== 'not-split')
+  if (scored.length === 0) return ''
+  const generalized = scored.filter((record) => record.generalization!.verdict === 'generalized').length
+  const shownOnly = scored.filter((record) => record.generalization!.verdict === 'shown-only').length
+  if (generalized === 0 && shownOnly === 0) return `; none of ${scored.length} scored generation(s) moved a task either way`
+  return `; of ${scored.length} scored generation(s), ${generalized} gained on tasks it was never shown, ${shownOnly} only where it was`
 }
 
 /** A benchmark this close to perfect can only reward cheaper, not better. */
@@ -188,7 +206,7 @@ export function compoundingStatus(): StageReport[] {
       state: promoted > 0 ? 'working' : ledger.length > 0 ? 'partial' : 'no evidence',
       evidence: ledger.length === 0
         ? 'evolve has never run'
-        : `${ledger.length} evolve generation(s), ${promoted} promoted; last ${new Date(lastGen!.at).toISOString().slice(0, 10)} (${lastGen!.verdict})`,
+        : `${ledger.length} evolve generation(s), ${promoted} promoted; last ${new Date(lastGen!.at).toISOString().slice(0, 10)} (${lastGen!.verdict})${generalizationNote(ledger)}`,
       next: promoted === 0 ? 'once stage 4 is measured cleanly: `elia evolve --generations 3`' : undefined,
     },
     benchStage(benchRuns),

@@ -63,6 +63,14 @@ export const IMMUTABLE_FILES = [
   // the baseline cache could poison the evidence those decisions are made from.
   'src/evolve/sieve.ts',
   'src/evolve/reach.ts',
+  // Which half of the corpus the proposer is blind to. This is the one file
+  // whose whole value is that the candidate cannot see past it: a candidate
+  // able to edit split.ts could set the held-out fraction to nothing, or return
+  // the full failure list from blindEvidence, and every later generation would
+  // be briefed on the tasks it is supposed to be judged on blind. The
+  // generalisation label in the ledger would keep printing, and would mean
+  // nothing — the failure mode this whole file list exists to prevent.
+  'src/evolve/split.ts',
   'src/evolve/reachRecorder.ts',
   'src/evolve/baselineCache.ts',
   // How search strategies are trialled and adopted. The strategy itself is

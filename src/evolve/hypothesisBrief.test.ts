@@ -54,6 +54,31 @@ test('field evidence sits after the benchmark evidence and before the immutable 
   }
 })
 
+test('a held-out task appears nowhere in the brief the proposer reads', async () => {
+  const { blindEvidence, blindMetrics, halfMetrics, splitTasks } = await import('./split.ts')
+  const ids = ['precise-edit', 'find-symbol', 'fix-failing-test', 'propagate-rename', 'hist-7c2db18', 'hist-fa1f598', 'slugify', 'stats-median']
+  const tasks = ids.map((id) => ({ id, weight: 1, prompt: id, setup: async () => {}, check: async () => ({ passed: true, detail: '' }) }))
+  const split = splitTasks(tasks)
+  expect(split.heldOut.length).toBeGreaterThan(0)
+
+  // Every task fails, so every one of them has an id, a step count and a
+  // failure detail that could reach the brief. Only the shown half may.
+  const rows = tasks.map((task) => ({ taskId: task.id, weight: 1, passed: false, detail: `${task.id} blew up`, steps: 9, elapsedMs: 1, totalTokens: 1, model: 'm' }))
+  const whole: Metrics = {
+    passRate: 0,
+    passed: [],
+    failed: ids,
+    steps: Object.fromEntries(ids.map((id) => [id, 9])),
+    totalTokens: 1_000,
+    totalElapsedMs: 60_000,
+  }
+
+  const brief = hypothesisBrief(SANDBOX, blindMetrics(whole, split, halfMetrics(rows, split.train).passRate), blindEvidence(rows, split))
+
+  for (const heldOut of split.heldOut) expect(brief).not.toContain(heldOut.id)
+  for (const shown of split.train) expect(brief).toContain(shown.id)
+})
+
 test('the brief never throws when every log is missing', () => {
   const empty = join(dir, 'nothing-here.ndjson')
   writeFileSync(join(dir, 'placeholder'), '')

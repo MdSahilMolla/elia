@@ -79,6 +79,16 @@ export interface GenerationRecord {
    * on the same budget, and that is visible here and nowhere else.
    */
   evidenceCost?: EvidenceCost
+  /**
+   * Where the gain landed: on the tasks whose failures the proposer was handed,
+   * or on the ones held back from it (see split.ts). Absent on records written
+   * before the corpus was split, and on runs too small to split.
+   *
+   * A pass rate says a candidate scored better. This says whether it got
+   * better — the difference between the two is the only thing that makes a
+   * promotion worth standing on.
+   */
+  generalization?: import('./split.ts').GeneralizationRecord
 }
 
 export interface EvidenceCost {
