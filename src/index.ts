@@ -195,6 +195,8 @@ Self-improvement:
   elia bench --history        Score it on tasks taken from this repository's own git history
   elia bench --all            Score it on both suites
   elia bench --harvest        Rebuild the history task set from git (no model calls)
+  elia bench --split held-out Score only the half whose failures the evolution loop never
+                              shows its proposer (--split shown for the other half)
   elia bench swe --file <tasks.json> [--sample N] [--out results.json]
                               Run a SWE-bench-Verified-shaped task file (see src/bench/swe/types.ts) —
                               real checkout, real agent run, real test execution, scored resolved/
@@ -795,7 +797,7 @@ async function runBenchSwe(): Promise<void> {
 }
 
 async function runBench(): Promise<void> {
-  if (positionals(['--file', '--sample', '--out'])[0] === 'swe') return runBenchSwe()
+  if (positionals(['--file', '--sample', '--out', '--split'])[0] === 'swe') return runBenchSwe()
   if (hasFlag('--harvest')) return runBenchHarvest()
 
   const { BENCH_TASKS, allBenchTasks } = await import('./evolve/suite.ts')
@@ -805,7 +807,23 @@ async function runBench(): Promise<void> {
   // set the evolution loop has always compared candidates on. The history tasks
   // are real checkouts of this repository and cost minutes, so they are asked
   // for explicitly.
-  const tasks = hasFlag('--all') ? allBenchTasks() : hasFlag('--history') ? historyTasks() : BENCH_TASKS
+  const wholeSet = hasFlag('--all') ? allBenchTasks() : hasFlag('--history') ? historyTasks() : BENCH_TASKS
+  // --split: score one side of the held-out line on its own (see split.ts).
+  // The evolution loop hides the held-out half's failures from the proposer, so
+  // scoring it alone is how you see what it is hiding — and scoring the shown
+  // half alone is the number the proposer is briefed on.
+  const { splitTasks, renderSplit } = await import('./evolve/split.ts')
+  const half = (flagValue('--split') ?? '').toLowerCase()
+  const split = splitTasks(wholeSet)
+  if (half && !['train', 'shown', 'heldout', 'held-out', 'unseen', 'all'].includes(half)) {
+    writeError(`elia bench --split <shown|held-out|all> — "${half}" is not one of those`)
+    process.exitCode = 1
+    return
+  }
+  const shownHalf = half === 'train' || half === 'shown'
+  const heldOutHalf = half === 'heldout' || half === 'held-out' || half === 'unseen'
+  const tasks = shownHalf ? split.train : heldOutHalf ? split.heldOut : wholeSet
+  if (shownHalf || heldOutHalf) writeNotice(renderSplit(split))
   // --lessons: every task gets this project's lessons, as a real turn would
   // (history tasks only those older than their commit — see benchLessons.ts).
   // Compare against a run without it to learn whether the store helps.
@@ -834,7 +852,12 @@ async function runBench(): Promise<void> {
       writeUsageLine(`  ${outcome.passed ? '✓' : '✗'} ${outcome.taskId} — ${outcome.error ?? outcome.detail}`),
   })
   const { recordBenchRun } = await import('./compounding/status.ts')
-  recordBenchRun(card, `${hasFlag('--all') ? 'all' : hasFlag('--history') ? 'history' : 'synthetic'}${withLessons ? '+lessons' : ''}`)
+  // The half is part of the set's name. A held-out-only run scores a different
+  // corpus, and recording it as a full run would move the headroom number in
+  // `elia compounding` on evidence that is not about the same tasks.
+  const setName = hasFlag('--all') ? 'all' : hasFlag('--history') ? 'history' : 'synthetic'
+  const halfName = shownHalf ? '/shown' : heldOutHalf ? '/held-out' : ''
+  recordBenchRun(card, `${setName}${halfName}${withLessons ? '+lessons' : ''}`)
   if (machineReadable) emitEvent('benchmark_scorecard', { stage: 'current', scorecard: card })
   else {
     process.stdout.write(renderScorecard(card, 'elia'))

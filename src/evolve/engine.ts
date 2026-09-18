@@ -20,6 +20,7 @@ import {
   type Metrics,
 } from './ledger.ts'
 import {
+  REAL_CHANGE,
   benchConcurrency,
   cardFromOutcomes,
   compareScorecards,
@@ -31,6 +32,16 @@ import {
   type TaskOutcome,
 } from './fitness.ts'
 import { raceCandidate, renderRace, sieveEnabled } from './sieve.ts'
+import {
+  blindEvidence,
+  blindMetrics,
+  classifyGeneralization,
+  halfMetrics,
+  renderGeneralization,
+  renderSplit,
+  splitTasks,
+  type TaskSplit,
+} from './split.ts'
 import { hasReachEvidence, measurableAreas } from './reach.ts'
 import { baselineCacheEnabled, lookupBaselines, rememberBaselines } from './baselineCache.ts'
 import {
@@ -150,6 +161,13 @@ export async function evolve(options: EvolveOptions = {}): Promise<EvolveResult>
     return { generations: [], baseline: firstBaseline, final: firstBaseline, stoppedReason }
   }
 
+  // One slice of the corpus is scored but never described to the proposer, so
+  // that a gain there cannot have been aimed at. See split.ts for what that
+  // does and does not buy. Computed once per run: a split that moved between
+  // generations would make the halves' scores incomparable within the run.
+  const split = splitTasks(tasks)
+  writeSubStep(renderSplit(split))
+
   // What the proposer studies. Only the card that produced the current baseline
   // is evidence about it, so this is replaced whenever a candidate is promoted.
   let evidence = baselineCard.outcomes.filter((outcome) => !outcome.passed)
@@ -164,7 +182,7 @@ export async function evolve(options: EvolveOptions = {}): Promise<EvolveResult>
     if (options.signal?.aborted) break
 
     const generation = nextGenerationNumber()
-    const { record, candidateCard } = await runGeneration(generation, baseline, options, tasks, evidence, baselineOutcomes)
+    const { record, candidateCard } = await runGeneration(generation, baseline, options, tasks, evidence, baselineOutcomes, split)
     records.push(record)
     appendGeneration(record)
 
@@ -229,9 +247,10 @@ async function runGeneration(
   tasks: BenchTask[],
   evidence: TaskOutcome[],
   baselineOutcomes: TaskOutcome[],
+  split: TaskSplit,
 ): Promise<{ record: GenerationRecord; candidateCard?: Scorecard }> {
   let candidateCard: Scorecard | undefined
-  const record = await attemptGeneration(generation, baseline, options, tasks, evidence, baselineOutcomes, (card) => {
+  const record = await attemptGeneration(generation, baseline, options, tasks, evidence, baselineOutcomes, split, (card) => {
     candidateCard = card
   })
   return { record, candidateCard }
@@ -244,6 +263,7 @@ async function attemptGeneration(
   tasks: BenchTask[],
   evidence: TaskOutcome[],
   baselineOutcomes: TaskOutcome[],
+  split: TaskSplit,
   onCandidateCard: (card: Scorecard) => void,
 ): Promise<GenerationRecord> {
   const startedAt = Date.now()
@@ -270,8 +290,12 @@ async function attemptGeneration(
   const capture = createHypothesisTool()
   const readOnly = allWorkerTools().filter((tool) => ['read_file', 'list_files', 'grep'].includes(tool.name))
 
+  // The proposer is briefed on the shown half only. `baseline` itself stays
+  // whole — it is what the candidate is compared against, and thinning that
+  // would change the verdict rather than the prompt.
+  const shownBaseline = blindMetrics(baseline, split, halfMetrics(baselineOutcomes, split.train).passRate)
   const messages: ConversationMessage[] = [
-    { role: 'user', content: [{ type: 'text', text: hypothesisBrief(sandbox, baseline, evidence) }] },
+    { role: 'user', content: [{ type: 'text', text: hypothesisBrief(sandbox, shownBaseline, blindEvidence(evidence, split)) }] },
   ]
 
   await runAgentLoop({
@@ -379,6 +403,7 @@ async function attemptGeneration(
   let candidateCard: Scorecard
   let comparison: Comparison
   let evidenceCost: EvidenceCost | undefined
+  let ranTaskIds: string[] = []
   const onBenchTask = (outcome: TaskOutcome) =>
     outcome.passed ? writePass(`${outcome.taskId} — ${outcome.detail}`) : writeFail(`${outcome.taskId} — ${outcome.error ?? outcome.detail}`)
 
@@ -396,6 +421,7 @@ async function attemptGeneration(
       })
       candidateCard = race.card
       comparison = race.comparison
+      ranTaskIds = race.ran
       evidenceCost = {
         tasksRun: race.ran.length,
         tasksCarried: race.carried.length,
@@ -409,6 +435,7 @@ async function attemptGeneration(
     } else {
       candidateCard = await measureFitness({ sourceRoot: sandbox.root, tasks, onTaskDone: onBenchTask })
       comparison = compareScorecards(baseline, toMetrics(candidateCard))
+      ranTaskIds = candidateCard.outcomes.map((outcome) => outcome.taskId)
       evidenceCost = {
         tasksRun: candidateCard.outcomes.length,
         tasksCarried: 0,
@@ -428,6 +455,17 @@ async function attemptGeneration(
   base.candidate = candidate
   base.evidenceCost = evidenceCost
   base.funnel = 'measured'
+  // Recorded for every generation, not only the promoted ones: a rejected
+  // candidate that gained on a held-out task is a near-miss worth knowing
+  // about, and the ledger is where the next generation reads its history.
+  base.generalization = classifyGeneralization({
+    baselineOutcomes,
+    candidateOutcomes: candidateCard.outcomes,
+    split,
+    ranTaskIds,
+    realChange: REAL_CHANGE,
+  })
+  writeSubStep(renderGeneralization(base.generalization))
   onCandidateCard(candidateCard)
   if (!comparison.better) {
     writeFail(`rejected: ${comparison.reason}`)
