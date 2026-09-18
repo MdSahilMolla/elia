@@ -67,14 +67,24 @@ export function recordOutcome(outcome: Omit<TurnOutcome, 'at'>, path = OUTCOMES_
 /** Competence should reflect *recent* performance — as elia improves, old rough turns shouldn't hold its record down forever. */
 const RECENT_WINDOW = 200
 
-export function loadOutcomes(path = OUTCOMES_PATH): TurnOutcome[] {
+/**
+ * Every outcome ever recorded, oldest first.
+ *
+ * `loadOutcomes` keeps only the last `RECENT_WINDOW` because competence is a
+ * statement about how elia is doing *now*. Anything that reports a lifetime
+ * figure needs this instead: reading a windowed slice and calling the result
+ * "lifetime" is how `elia compounding` came to print 3% of file-changing turns
+ * unchecked when the true figure across every record was 31%. A number that
+ * flatters by an order of magnitude is worse than no number, because it retires
+ * the very work it was built to motivate.
+ */
+export function loadAllOutcomes(path = OUTCOMES_PATH): TurnOutcome[] {
   if (!existsSync(path)) return []
   hardenSecureFile(path)
   try {
     return readFileSync(path, 'utf8')
       .split('\n')
       .filter(Boolean)
-      .slice(-RECENT_WINDOW)
       .map((line) => {
         try {
           return JSON.parse(line) as TurnOutcome
@@ -86,6 +96,11 @@ export function loadOutcomes(path = OUTCOMES_PATH): TurnOutcome[] {
   } catch {
     return []
   }
+}
+
+/** The most recent `RECENT_WINDOW` outcomes — what competence and lesson efficacy judge against. */
+export function loadOutcomes(path = OUTCOMES_PATH): TurnOutcome[] {
+  return loadAllOutcomes(path).slice(-RECENT_WINDOW)
 }
 
 export interface CompetenceReport {

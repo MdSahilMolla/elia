@@ -2,7 +2,7 @@ import { afterEach, beforeEach, expect, test } from 'bun:test'
 import { appendFileSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { classifyDomain, competenceReport, domainsInPlay, domainsOf, loadOutcomes, recordOutcome, regretNudge, renderCompetence, touchedWeakDomain, weakDomainCaution } from './outcomes.ts'
+import { classifyDomain, competenceReport, domainsInPlay, domainsOf, loadAllOutcomes, loadOutcomes, recordOutcome, regretNudge, renderCompetence, touchedWeakDomain, weakDomainCaution } from './outcomes.ts'
 import type { TurnOutcome } from './outcomes.ts'
 
 let path: string
@@ -111,4 +111,25 @@ test('touchedWeakDomain flags a changed file in a weak area', () => {
   for (let i = 0; i < 3; i += 1) recordOutcome(turn({ domains: ['frontend'], toolErrors: 3 }), path)
   expect(touchedWeakDomain(['src/components/Nav.tsx'], path)).toContain('frontend')
   expect(touchedWeakDomain(['src/lib/math.ts'], path)).toEqual([])
+})
+
+test('loadAllOutcomes reads past the recent window so a lifetime figure is a lifetime figure', () => {
+  // `elia compounding` printed "lifetime: 2/59 unchecked (3%)" off loadOutcomes,
+  // which keeps only the last 200 records. Across all 480 the real figure was
+  // 34/108 (31%) — the label overstated coverage by an order of magnitude.
+  for (let i = 0; i < 250; i++) appendFileSync(path, `${JSON.stringify({ at: i + 1, ...turn({ verify: i < 100 ? 'none' : 'pass' }) })}\n`)
+
+  expect(loadOutcomes(path).length).toBe(200)
+  expect(loadAllOutcomes(path).length).toBe(250)
+  // The windowed read cannot see the 100 unchecked turns at the start; the full read can.
+  expect(loadOutcomes(path).filter((o) => o.verify === 'none').length).toBe(50)
+  expect(loadAllOutcomes(path).filter((o) => o.verify === 'none').length).toBe(100)
+})
+
+test('loadAllOutcomes skips unparseable lines rather than throwing', () => {
+  appendFileSync(path, `${JSON.stringify({ at: 1, ...turn() })}\n`)
+  appendFileSync(path, 'not json\n')
+  appendFileSync(path, `${JSON.stringify({ missing: 'at' })}\n`)
+  appendFileSync(path, `${JSON.stringify({ at: 2, ...turn() })}\n`)
+  expect(loadAllOutcomes(path).length).toBe(2)
 })
