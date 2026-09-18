@@ -926,13 +926,21 @@ async function runCompounding(): Promise<void> {
   const { compoundingStatus, renderCompoundingStatus } = await import('./compounding/status.ts')
   const { readLibrary, renderLibrary } = await import('./reason/library.ts')
   const { coverageOf, recentCoverage, renderCoverage } = await import('./reason/coverage.ts')
-  const { loadOutcomes } = await import('./autonomy/outcomes.ts')
+  const { loadAllOutcomes } = await import('./autonomy/outcomes.ts')
+  const { readBenchRuns } = await import('./compounding/status.ts')
+  const { inferTasks, isAssumed, renderGatePower } = await import('./evolve/power.ts')
+  const { benchRepeats } = await import('./evolve/fitness.ts')
   const stages = compoundingStatus()
   const library = readLibrary()
-  const outcomes = loadOutcomes()
+  // Every record, not the last 200: one of these two lines is labelled "lifetime".
+  const outcomes = loadAllOutcomes()
   const coverage = { lifetime: coverageOf(outcomes), recent: recentCoverage(outcomes) }
+  // Stage 3 reports that nothing was promoted. This says whether the gate could
+  // have seen a win if one had been proposed, which is the other half of that.
+  const lastBench = [...readBenchRuns()].reverse().find((run) => run.set === 'all')
+  const gatePower = lastBench ? renderGatePower(inferTasks(lastBench), benchRepeats(), 1, isAssumed(lastBench)) : undefined
   if (machineReadable) emitEvent('compounding_status', { stages, reasoning: library.records, coverage })
-  else writeUsageLine([renderCompoundingStatus(stages), renderCoverage(coverage.lifetime, coverage.recent), renderLibrary(library)].join('\n\n'))
+  else writeUsageLine([renderCompoundingStatus(stages), renderCoverage(coverage.lifetime, coverage.recent), gatePower, renderLibrary(library)].filter(Boolean).join('\n\n'))
 }
 
 /**
