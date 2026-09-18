@@ -55,30 +55,73 @@ export function seededRandom(seed: number): () => number {
   }
 }
 
-/** One benchmark sweep, drawn rather than run. */
-export function simulateSweep(tasks: PowerTask[], repeats: number, random: () => number): Metrics {
-  const passed: string[] = []
-  const failed: string[] = []
-  const taskRates: Record<string, number> = {}
+/** Per-task pass rates for one sweep, drawn rather than run. */
+function drawRates(tasks: PowerTask[], repeats: number, random: () => number): Record<string, number> {
+  const rates: Record<string, number> = {}
   for (const task of tasks) {
     let hits = 0
     for (let attempt = 0; attempt < repeats; attempt++) if (random() < task.pi) hits++
-    const rate = hits / repeats
-    taskRates[task.id] = rate
-    if (rate > 0.5) passed.push(task.id)
-    else failed.push(task.id)
+    rates[task.id] = hits / repeats
   }
-  const passRate = tasks.length === 0 ? 0 : Object.values(taskRates).reduce((sum, r) => sum + r, 0) / tasks.length
+  return rates
+}
+
+function toMetricsFromRates(rates: Record<string, number>, repeats: number): Metrics {
+  const ids = Object.keys(rates)
   return {
-    passRate,
-    passed,
-    failed,
+    passRate: ids.length === 0 ? 0 : ids.reduce((sum, id) => sum + rates[id]!, 0) / ids.length,
+    passed: ids.filter((id) => rates[id]! > 0.5),
+    failed: ids.filter((id) => rates[id]! <= 0.5),
     // Matches toMetrics: single-run records carry no rates, because passed/failed already are them.
-    ...(repeats > 1 ? { taskRates } : {}),
+    ...(repeats > 1 ? { taskRates: rates } : {}),
     totalTokens: 1_000_000,
     totalElapsedMs: 1_000_000,
     wallClockMs: 1_000_000,
   }
+}
+
+/** One benchmark sweep, drawn rather than run. */
+export function simulateSweep(tasks: PowerTask[], repeats: number, random: () => number): Metrics {
+  return toMetricsFromRates(drawRates(tasks, repeats, random), repeats)
+}
+
+/**
+ * One baseline/candidate pair under the sieve.
+ *
+ * `raceCandidate` copies the baseline's own row for any task the diff provably
+ * cannot reach (`carryOutcome`, sieve.ts), so a carried task is byte-identical on
+ * both sides and cannot flip. That makes the multiple-comparison exposure the
+ * re-run set rather than the whole corpus, and it matters enormously: on the
+ * current suite a genuine win goes from 5% promoted at 54 re-run tasks to 96% at
+ * 4. Modelling all tasks as independently re-drawn — as this module first did —
+ * understates the gate badly on any diff the reach map can narrow.
+ */
+function drawPair(
+  tasks: PowerTask[],
+  candidate: PowerTask[],
+  repeats: number,
+  random: () => number,
+  rerun?: Set<string>,
+): [Metrics, Metrics] {
+  const baseRates = drawRates(tasks, repeats, random)
+  const candRates = drawRates(candidate, repeats, random)
+  const merged: Record<string, number> = {}
+  for (const task of candidate) merged[task.id] = !rerun || rerun.has(task.id) ? candRates[task.id]! : baseRates[task.id]!
+  return [toMetricsFromRates(baseRates, repeats), toMetricsFromRates(merged, repeats)]
+}
+
+/**
+ * The tasks a diff aimed at the current failures would re-run: every failing task,
+ * plus `neighbours` passing ones the reach map also implicates.
+ */
+export function rerunSet(tasks: PowerTask[], size: number): Set<string> {
+  const failing = tasks.filter((task) => task.pi < 0.5).map((task) => task.id)
+  const ids = new Set(failing)
+  for (const task of tasks) {
+    if (ids.size >= size) break
+    ids.add(task.id)
+  }
+  return ids
 }
 
 /** A candidate improved by `delta` absolute pass probability on every task. */
@@ -95,6 +138,11 @@ export interface PowerOptions {
   seed?: number
   /** Defaults to the live gate. Supplied by tests, and by anyone comparing a replacement rule. */
   rule?: (baseline: Metrics, candidate: Metrics) => boolean
+  /**
+   * Tasks the sieve actually re-runs. Everything else carries the baseline's own
+   * row and cannot flip. Omit to model ELIA_SIEVE=off, where every task is re-run.
+   */
+  rerun?: Set<string>
 }
 
 const liveRule = (baseline: Metrics, candidate: Metrics) => compareScorecards(baseline, candidate).better
@@ -108,13 +156,13 @@ const liveRule = (baseline: Metrics, candidate: Metrics) => compareScorecards(ba
  * gate's reach by the square root.
  */
 export function measurePower(options: PowerOptions): PowerResult {
-  const { tasks, repeats, delta, trials = 2000, seed = 1, rule = liveRule } = options
+  const { tasks, repeats, delta, trials = 2000, seed = 1, rule = liveRule, rerun } = options
   const random = seededRandom(seed)
   const better = improvedBy(tasks, delta)
 
-  const clearsBoth = (candidate: PowerTask[]): boolean =>
-    rule(simulateSweep(tasks, repeats, random), simulateSweep(candidate, repeats, random)) &&
-    rule(simulateSweep(tasks, repeats, random), simulateSweep(candidate, repeats, random))
+  const clears = (candidate: PowerTask[]): boolean => rule(...drawPair(tasks, candidate, repeats, random, rerun))
+  // The race, then the independent confirmation pair engine.ts requires.
+  const clearsBoth = (candidate: PowerTask[]): boolean => clears(candidate) && clears(candidate)
 
   let promoted = 0
   let falsePromoted = 0
@@ -122,11 +170,12 @@ export function measurePower(options: PowerOptions): PowerResult {
     if (clearsBoth(better)) promoted++
     if (clearsBoth(tasks)) falsePromoted++
   }
+  const measured = rerun ? rerun.size : tasks.length
   return {
     promoted: promoted / trials,
     falsePromoted: falsePromoted / trials,
-    // Race and confirmation each measure both trees.
-    costPerGeneration: 4 * tasks.length * repeats,
+    // Race and confirmation each measure both trees; carried tasks cost nothing.
+    costPerGeneration: 4 * measured * repeats,
   }
 }
 
@@ -189,23 +238,47 @@ export function isAssumed(record: BenchLike): boolean {
   return !(record.taskRates && (record.attempts ?? 1) > 1)
 }
 
+/**
+ * How the gate's reach depends on how far the sieve narrows the re-run set.
+ *
+ * Reported as a curve rather than one number because the answer is dominated by
+ * the reach map, not by the benchmark: a diff the sieve narrows to its four
+ * failing tasks is promoted on a real win almost always, and the same diff
+ * measured across all 54 almost never. Nothing in the ledger records the re-run
+ * count yet, so there is no single honest figure to print — only the curve, and
+ * a note about which end of it a given run lands on.
+ */
 export function renderGatePower(tasks: PowerTask[], repeats: number, seed = 1, assumed = true): string {
   if (tasks.length === 0) return 'gate sensitivity — no benchmark recorded yet'
-  const floor = detectableEffect({ tasks, repeats, seed, trials: 600 })
-  const noise = measurePower({ tasks, repeats, delta: 0, seed, trials: 600 })
   const basis = assumed
     ? `assuming a passing task passes ${Math.round(ASSUMED_RELIABILITY.passed * 100)}% of the time — run with ELIA_BENCH_REPEATS>1 to measure it`
     : 'from measured per-task rates'
-  const head =
-    `gate sensitivity — ${tasks.length} task(s), ELIA_BENCH_REPEATS=${repeats}, ${4 * tasks.length * repeats} task-runs per generation\n` +
-    `  (${basis})`
-  const floorLine = floor
-    ? `  smallest gain promoted 80% of the time: +${Math.round(floor.delta * 100)} points`
-    : `  no gain up to +${Math.round(LADDER[LADDER.length - 1]! * 100)} points is promoted 80% of the time — the suite cannot carry a win`
-  const noiseLine = `  a candidate no better than the baseline is promoted ${(100 * noise.falsePromoted).toFixed(1)}% of the time`
-  const repeatsNote =
-    repeats > 3
-      ? `  note: REAL_CHANGE is ${REAL_CHANGE} of attempts, so repeats above 3 shrink each task's movement below the threshold and cost sensitivity rather than buying it`
-      : undefined
-  return [head, floorLine, noiseLine, repeatsNote].filter(Boolean).join('\n')
+  const lines = [
+    `gate sensitivity — ${tasks.length} task(s), ELIA_BENCH_REPEATS=${repeats}`,
+    `  (${basis}; "real win" = every task's pass probability up 85 points, capped — the failures fixed, the rest a little steadier)`,
+  ]
+
+  const failing = tasks.filter((task) => task.pi < 0.5).length
+  const sizes = [...new Set([Math.max(1, failing), Math.max(1, failing) * 2, Math.ceil(tasks.length / 2), tasks.length])]
+    .filter((size) => size <= tasks.length)
+    .sort((a, b) => a - b)
+
+  for (const size of sizes) {
+    const rerun = size >= tasks.length ? undefined : rerunSet(tasks, size)
+    const win = measurePower({ tasks, repeats, delta: 0.85, seed, trials: 400, rerun })
+    const label = rerun ? `${size} task(s) re-run` : `all ${tasks.length} re-run (ELIA_SIEVE=off)`
+    lines.push(
+      `  ${label.padEnd(32)} real win promoted ${(100 * win.promoted).toFixed(0).padStart(3)}%   ` +
+        `noise promoted ${(100 * win.falsePromoted).toFixed(0).padStart(2)}%   ` +
+        `${win.costPerGeneration} task-runs/gen`,
+    )
+  }
+
+  lines.push('  the sieve, not the benchmark, decides which end of this you get — nothing records the re-run count yet')
+  if (repeats > 3) {
+    lines.push(
+      `  note: REAL_CHANGE is ${REAL_CHANGE} of attempts, so repeats above 3 shrink each task's movement below the threshold and cost sensitivity rather than buying it`,
+    )
+  }
+  return lines.join('\n')
 }

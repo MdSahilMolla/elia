@@ -2,7 +2,7 @@ import { expect, test } from 'bun:test'
 
 process.env.ANTHROPIC_API_KEY ??= 'test-key-for-evolve-power-test'
 
-const { ASSUMED_RELIABILITY, detectableEffect, improvedBy, inferTasks, isAssumed, measurePower, renderGatePower, seededRandom, simulateSweep } = await import('./power.ts')
+const { ASSUMED_RELIABILITY, detectableEffect, improvedBy, inferTasks, isAssumed, measurePower, renderGatePower, rerunSet, seededRandom, simulateSweep } = await import('./power.ts')
 import type { PowerTask } from './power.ts'
 
 /** The suite as it stands: 54 tasks, ~93% pass rate, 4 real failures. */
@@ -28,11 +28,33 @@ test('cost is both trees, twice — the race and the confirmation pair', () => {
   expect(measurePower({ tasks: currentSuite(), repeats: 3, delta: 0, trials: 10 }).costPerGeneration).toBe(4 * 54 * 3)
 })
 
-test('the current suite cannot carry even a large win to a promotion', () => {
+test('with every task re-run, the suite cannot carry even a large win', () => {
   // This is the finding the module exists to keep honest. If re-banding the
   // benchmark ever fixes it, this expectation is what will fail and say so.
   const floor = detectableEffect({ tasks: currentSuite(), repeats: 1, trials: 300, seed: 3 })
   expect(floor).toBeUndefined()
+})
+
+test('the sieve rescues the gate: carried tasks cannot flip, so they cannot reject', () => {
+  // raceCandidate copies the baseline row for unreachable tasks. Modelling every
+  // task as independently re-drawn understates the gate badly — a real win goes
+  // from near-never promoted across all 54 to near-always across the 4 it reaches.
+  const tasks = currentSuite()
+  const wide = measurePower({ tasks, repeats: 1, delta: 0.85, trials: 400, seed: 21 })
+  const narrow = measurePower({ tasks, repeats: 1, delta: 0.85, trials: 400, seed: 21, rerun: rerunSet(tasks, 4) })
+  expect(narrow.promoted).toBeGreaterThan(wide.promoted + 0.4)
+})
+
+test('a narrowed re-run set costs proportionally less', () => {
+  const tasks = currentSuite()
+  const narrow = measurePower({ tasks, repeats: 1, delta: 0.5, trials: 50, seed: 2, rerun: rerunSet(tasks, 6) })
+  expect(narrow.costPerGeneration).toBe(4 * 6 * 1)
+})
+
+test('rerunSet always includes every failing task', () => {
+  const ids = rerunSet(currentSuite(), 6)
+  for (let i = 0; i < 4; i++) expect(ids.has(`hard-${i}`)).toBe(true)
+  expect(ids.size).toBe(6)
 })
 
 test('a candidate no better than the baseline is still promoted sometimes', () => {
@@ -75,9 +97,10 @@ test('the report names the assumption it rests on', () => {
   expect(renderGatePower([{ id: 'a', pi: 0.97 }], 3, 1, false)).toContain('measured per-task rates')
 })
 
-test('the report names the floor and warns when repeats fight REAL_CHANGE', () => {
+test('the report shows the sieve curve and warns when repeats fight REAL_CHANGE', () => {
   const report = renderGatePower(currentSuite(), 9, 2)
   expect(report).toContain('54 task(s)')
+  expect(report).toContain('ELIA_SIEVE=off')
   expect(report).toContain('repeats above 3')
 })
 
