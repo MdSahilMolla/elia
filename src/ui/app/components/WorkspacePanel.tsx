@@ -1,7 +1,9 @@
 import { useEffect, useState } from 'react'
 import { Box, Text } from 'ink'
 import { Spinner } from './Spinner.tsx'
-import { palette } from '../theme.ts'
+import { blendable, palette } from '../theme.ts'
+import { motionReduced, useAnimationClock } from '../animation.tsx'
+import { mixColor } from '../motion.ts'
 import type { TodoItem } from '../../../autonomy/todoList.ts'
 import type { TaskSession } from '../../../taskSessions.ts'
 
@@ -57,6 +59,35 @@ function workerLabel(agent: TaskSession): string {
   return `${agent.title || agent.action}${steps}`
 }
 
+/** What proved a plan step, and when elia ticked it. */
+export interface StepProof {
+  text: string
+  at: number
+}
+
+/** A step's identity across rewrites — the model often drops backticks or quotes when it copies a step back. */
+export function stepEvidenceKey(content: string): string {
+  return content.replace(/[`'"*]/g, '').replace(/\s+/g, ' ').trim().toLowerCase()
+}
+
+/** A tick on evidence lands bright and settles into the plain success green over this long. */
+export const TICK_FLASH_MS = 700
+
+function flashColor(sinceMs: number): string | undefined {
+  if (!blendable || motionReduced) return palette.success
+  return mixColor(palette.brandShimmer, palette.success, Math.min(1, Math.max(0, sinceMs / TICK_FLASH_MS)))
+}
+
+/** The ✓ of a step that was just proven — mounted only while it is still settling, so an idle plan costs no frames. */
+function FlashingTick({ at }: { at: number }) {
+  const now = useAnimationClock()
+  return (
+    <Text color={flashColor(now - at)} bold>
+      ✓
+    </Text>
+  )
+}
+
 const TODO_MARK: Record<TodoItem['status'], string> = {
   pending: '□',
   in_progress: '◐',
@@ -84,6 +115,17 @@ function elapsed(agent: TaskSession): string {
   return secs < 60 ? `${secs}s` : `${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, '0')}`
 }
 
+/**
+ * How far one wave of the fleet has got: workers in it that finished (done or
+ * handed over for review) out of all of them. Undefined for a wave of one —
+ * a bar over a single worker says nothing its own row does not.
+ */
+export function waveProgress(workers: readonly TaskSession[], wave: number): { done: number; total: number } | undefined {
+  const inWave = workers.filter((worker) => worker.wave === wave)
+  if (inWave.length < 2) return undefined
+  return { done: inWave.filter((worker) => worker.status === 'done' || worker.status === 'needs-review').length, total: inWave.length }
+}
+
 /** Genuinely-active states — the only ones that stay in the live panel across refreshes. */
 const LIVE_STATUS = new Set<TaskSession['status']>(['running', 'pending'])
 
@@ -103,6 +145,7 @@ export function WorkspacePanel({
   since = 0,
   sessionId,
   expanded = false,
+  evidence,
 }: {
   plan: TodoItem[]
   agents: TaskSession[]
@@ -111,6 +154,8 @@ export function WorkspacePanel({
   sessionId?: string
   /** Ctrl+O: show each live worker's task and last few tool calls. */
   expanded?: boolean
+  /** Steps elia ticked on evidence (keyed by `stepEvidenceKey`), and what proved each. */
+  evidence?: ReadonlyMap<string, StepProof>
 }) {
   // A worker belongs to this run if it carries this session's id. `tasks.json`
   // is reloaded on every startup, so without this check a `needs-review` or
@@ -141,6 +186,8 @@ export function WorkspacePanel({
   const doneCount = finished.filter((a) => a.status === 'done').length
   const reviewCount = finished.filter((a) => a.status === 'needs-review').length
   const failedCount = finished.filter((a) => a.status === 'failed' || a.status === 'paused').length
+  // One wave under way: how far through it the fleet is, at a glance.
+  const wave = liveWaves.length === 1 ? waveProgress(workers, liveWaves[0]!) : undefined
   useTicker(live.length > 0)
 
   if (plan.length === 0 && live.length === 0 && finished.length === 0) return null
@@ -170,21 +217,32 @@ export function WorkspacePanel({
             {plan.length > 1 ? <ProgressBar done={planDone} total={plan.length} /> : null}
           </Text>
           {start > 0 && <Text color={palette.muted}>  … {start} done</Text>}
-          {shown.map((item, i) => (
-            <Text key={start + i} wrap="truncate-end">
-              {'  '}
-              <Text color={item.status === 'completed' ? palette.success : item.status === 'in_progress' ? palette.brand : palette.muted}>
-                {TODO_MARK[item.status]}
-              </Text>{' '}
-              <Text
-                bold={item.status === 'in_progress'}
-                strikethrough={item.status === 'completed'}
-                color={item.status === 'in_progress' ? undefined : palette.muted}
-              >
-                {item.content}
+          {shown.map((item, i) => {
+            // Proven by something elia watched run, not just marked done by the
+            // model: say what proved it, and let the tick land.
+            const proof = item.status === 'completed' ? evidence?.get(stepEvidenceKey(item.content)) : undefined
+            const settling = proof !== undefined && Date.now() - proof.at < TICK_FLASH_MS
+            return (
+              <Text key={start + i} wrap="truncate-end">
+                {'  '}
+                {settling ? (
+                  <FlashingTick at={proof.at} />
+                ) : (
+                  <Text color={item.status === 'completed' ? palette.success : item.status === 'in_progress' ? palette.brand : palette.muted} bold={proof !== undefined}>
+                    {TODO_MARK[item.status]}
+                  </Text>
+                )}{' '}
+                <Text
+                  bold={item.status === 'in_progress'}
+                  strikethrough={item.status === 'completed'}
+                  color={item.status === 'in_progress' ? undefined : palette.muted}
+                >
+                  {item.content}
+                </Text>
+                {proof ? <Text color={palette.muted}> · {proof.text}</Text> : null}
               </Text>
-            </Text>
-          ))}
+            )
+          })}
           {start + shown.length < plan.length && <Text color={palette.muted}>  … {plan.length - start - shown.length} more</Text>}
         </Box>
       )}
@@ -197,6 +255,8 @@ export function WorkspacePanel({
               {' '}· {live.length} running
               {liveWaves.length > 0 ? ` · wave ${liveWaves.join(', ')}` : ''}
             </Text>
+            {wave ? <ProgressBar done={wave.done} total={wave.total} width={8} /> : null}
+            {wave ? <Text color={palette.muted}> {wave.done}/{wave.total}</Text> : null}
           </Text>
           {live.slice(0, 6).map((agent) => (
             <Box key={agent.id} flexDirection="column">

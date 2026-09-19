@@ -32,6 +32,17 @@ export interface VerificationOutcome {
   inconclusive?: string
 }
 
+/**
+ * One check's progress, for a UI that wants to show each one land. `queued`
+ * arrives for every runnable check before the first starts, so a watcher knows
+ * the whole set up front; checks after a failure are never reported again and
+ * stay queued — fail-fast means they did not run.
+ */
+export interface CheckEvent {
+  command: string
+  state: 'queued' | 'running' | 'passed' | 'failed' | 'skipped'
+}
+
 /** A test runner that ran and found nothing to test — Bun, Jest, Vitest, Mocha, pytest. */
 const NO_TESTS_COLLECTED = /\b0 test files matching\b|\bno tests? (?:were )?found\b|\bno test files found\b|\bno tests ran\b|\bcollected 0 items\b/i
 
@@ -73,7 +84,7 @@ export async function runVerification(
   cwd?: string,
   signal?: AbortSignal,
   governor?: ActionGovernor,
-  options: { serverProbeMs?: number } = {},
+  options: { serverProbeMs?: number; onCheck?: (event: CheckEvent) => void } = {},
 ): Promise<VerificationOutcome> {
   const results: ShellResult[] = []
   let probedServers = 0
@@ -129,14 +140,24 @@ export async function runVerification(
     })
   }
 
+  // A watcher must never be able to break the gate itself.
+  const report = (command: string, state: CheckEvent['state']): void => {
+    try {
+      options.onCheck?.({ command, state })
+    } catch {}
+  }
+  for (const command of runnable) report(command, 'queued')
+
   for (const command of runnable) {
     const gate = await (governor ?? activeActionGovernor()).check({ name: 'run_command', input: { command } })
     if (!gate.allowed) {
       const reason = gate.message ?? 'verification command blocked by autonomy governor'
       const result: ShellResult = { command, exitCode: 126, stdout: '', stderr: reason, elapsedMs: 0, timedOut: false }
       results.push(result)
+      report(command, 'skipped')
       return { results, passed: false, blocked: reason }
     }
+    report(command, 'running')
     const probe = mayStartServer(command)
     const probeMs = options.serverProbeMs ?? SERVER_PROBE_MS
     const result = await runShell(command, probe ? probeMs : VERIFY_TIMEOUT_MS, cwd, signal ?? currentAgent().signal)
@@ -154,13 +175,19 @@ export async function runVerification(
         timedOut: false,
         stderr: `${SKIPPED_SERVER_PREFIX}: still running after ${Math.round(probeMs / 1000)}s — it starts a server rather than finishing, so it cannot be a pass/fail check.`,
       })
+      report(command, 'skipped')
       continue
     }
     results.push(result)
     // "No tests to run" is not a failing check — keep going so a typecheck or
     // build after it still gets its say.
-    if (isNoTestsResult(result)) continue
-    if (result.exitCode !== 0 || result.timedOut) return { results, passed: false }
+    if (isNoTestsResult(result)) {
+      report(command, 'skipped')
+      continue
+    }
+    const failed = result.exitCode !== 0 || result.timedOut
+    report(command, failed ? 'failed' : 'passed')
+    if (failed) return { results, passed: false }
   }
 
   const empty = results.filter(isNoTestsResult).map((result) => result.command)

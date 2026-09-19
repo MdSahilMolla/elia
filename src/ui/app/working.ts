@@ -161,3 +161,53 @@ export function reducedMotion(env: Record<string, string | undefined> = process.
   const raw = (env.ELIA_REDUCED_MOTION ?? '').trim().toLowerCase()
   return raw === '1' || raw === 'true' || raw === 'on' || raw === 'yes'
 }
+
+// ------------------------------------------------------------------- checks
+
+export type CheckState = 'queued' | 'running' | 'passed' | 'failed' | 'skipped'
+
+/** One verification check on the working line: a short name and where it stands. */
+export interface CheckChip {
+  command: string
+  label: string
+  state: CheckState
+}
+
+const TEST_RUNNER = /\b(?:test|tests|jest|vitest|mocha|pytest|unittest|rspec|phpunit|ctest)\b/i
+const TYPECHECK = /\b(?:tsc|typecheck|type-check|mypy|pyright|vue-tsc|svelte-check)\b/i
+const BUILD = /\b(?:build|compile|make|javac|gradle|mvn)\b/i
+const LINT = /\b(?:lint|eslint|ruff|clippy|flake8|biome|golangci-lint)\b/i
+
+/**
+ * What a check is called on the working line — what it proves, not how it
+ * is spelled: `bunx tsc --noEmit` is "tsc", `npm run test:unit` is "tests".
+ * Anything unrecognised keeps its program's name.
+ */
+export function checkLabel(command: string): string {
+  const text = command.trim()
+  const typecheck = TYPECHECK.exec(text)
+  if (typecheck) return /tsc$/i.test(typecheck[0]) ? 'tsc' : 'types'
+  if (/\bcargo\s+check\b|\bgo\s+vet\b/i.test(text)) return 'check'
+  if (TEST_RUNNER.test(text)) return 'tests'
+  if (LINT.test(text)) return 'lint'
+  if (BUILD.test(text)) return 'build'
+  const program = text.split(/\s+/).find((word) => !/^(?:npx|bunx|pnpm|yarn|npm|bun|run|exec|uv|poetry|python3?|-m)$/i.test(word)) ?? text
+  const name = program.split(/[\\/]/).pop() ?? program
+  return name.length > 12 ? `${name.slice(0, 11)}…` : name
+}
+
+/**
+ * The chips after one check event. Queued events arrive as a burst before a
+ * pass starts, so one for a command already on the line — or arriving after
+ * every chip has left the queue — begins a new pass (a repair re-running the
+ * gate), and the last pass's ticks no longer describe the code.
+ */
+export function applyCheckEvent(chips: readonly CheckChip[], event: { command: string; state: CheckState }): CheckChip[] {
+  const index = chips.findIndex((chip) => chip.command === event.command)
+  if (event.state === 'queued') {
+    const fresh = index !== -1 || chips.every((chip) => chip.state !== 'queued')
+    return [...(fresh ? [] : chips), { command: event.command, label: checkLabel(event.command), state: 'queued' }]
+  }
+  if (index === -1) return [...chips, { command: event.command, label: checkLabel(event.command), state: event.state }]
+  return chips.map((chip, i) => (i === index ? { ...chip, state: event.state } : chip))
+}

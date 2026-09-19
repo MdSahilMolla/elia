@@ -562,6 +562,40 @@ export interface PlanProgressUpdate {
   items: TodoItem[]
   /** Steps elia just marked done. */
   ticked: string[]
+  /** What proved each ticked step, in the same order — "ran bun test", "wrote parser.ts". */
+  proofs: string[]
+}
+
+/**
+ * The tool call that proved a step, as a few words the plan panel can print
+ * beside the tick — so a step elia ticked on evidence reads differently from
+ * one the model only said was done.
+ */
+export function proofLabel(outcome: ToolOutcome): string {
+  const input = outcome.input
+  const base = (path: string): string => path.split(/[\\/]/).filter(Boolean).pop() ?? path
+  const clipped = (text: string): string => clip(text, 40)
+  switch (outcome.name) {
+    case 'write_file':
+    case 'edit_file':
+      return `wrote ${base(str(input.path))}`
+    case 'read_file':
+      return `read ${base(str(input.path))}`
+    case 'list_files':
+      return 'listed the files'
+    case 'run_command':
+      return `ran ${clipped(str(input.command))}`
+    case 'run_program':
+      return `ran ${clipped([str(input.program), ...(Array.isArray(input.args) ? input.args.filter((arg): arg is string => typeof arg === 'string') : [])].join(' '))}`
+    case 'process':
+      return `started ${clipped(str(input.command))}`
+    case 'preview':
+      return 'page rendered'
+    case 'browser':
+      return 'opened in the browser'
+    default:
+      return outcome.name
+  }
 }
 
 export interface PlanProgressResult {
@@ -643,6 +677,7 @@ export function createPlanProgressTracker(options: PlanProgressOptions): PlanPro
       if (items.length === 0 || (!wroteThisLoop && !(options.owned?.() ?? false))) return {}
 
       const ticked: string[] = []
+      const proofs: string[] = []
       for (const outcome of batch) {
         if (outcome.name === 'todo_write') continue
         if (CHANGING_TOOLS.has(outcome.name)) actionsSinceUpdate += 1
@@ -668,6 +703,7 @@ export function createPlanProgressTracker(options: PlanProgressOptions): PlanPro
           if (anchors.every((anchor) => done.has(anchorId(anchor)))) {
             item.status = 'completed'
             ticked.push(item.content)
+            proofs.push(proofLabel(outcome))
           }
         }
       }
@@ -684,7 +720,7 @@ export function createPlanProgressTracker(options: PlanProgressOptions): PlanPro
         const numbered = (content: string): string => `${items.findIndex((item) => item.content === content) + 1}. ${clip(content, 90)}`
         const next = firstOpen >= 0 ? items[firstOpen] : undefined
         return {
-          update: { items: items.map((item) => ({ ...item })), ticked },
+          update: { items: items.map((item) => ({ ...item })), ticked, proofs },
           note:
             `[elia] Plan updated from what just ran: ${ticked.map((content) => `✓ ${numbered(content)}`).join('; ')}. ` +
             (next ? `Now in progress: ${numbered(next.content)}. ` : 'Every step is done. ') +

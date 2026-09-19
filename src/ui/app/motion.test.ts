@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { easeToward, mixColor, parseHex, pulseLevel, shimmerRuns, sparkFrame, SPARK_FRAME_MS, stallLevel, STALL_AFTER_MS, STALL_FULL_MS } from './motion.ts'
+import { easeToward, FLARE_FRAMES, FLARE_MS, FLARE_STEP_MS, flareFrame, flareRuns, mixColor, parseHex, pulseLevel, shimmerRuns, sparkFrame, SPARK_FRAME_MS, stallLevel, STALL_AFTER_MS, STALL_FULL_MS } from './motion.ts'
 import { sparkFrames } from './theme.ts'
 
 test('the spark steps through its shapes on a fixed beat and breathes back', () => {
@@ -88,4 +88,32 @@ test('a slow frame rate never leaves the counter behind', () => {
   // One late frame covers the time that passed, not a fixed fraction.
   expect(easeToward(0, 5_000, 3_000)).toBe(5_000)
   expect(easeToward(0, 5_000, 300)).toBeGreaterThan(easeToward(0, 5_000, 60))
+})
+
+test('the learning flare plays the spark once and settles', () => {
+  expect(flareFrame(0)).toBe('·')
+  expect(flareFrame(FLARE_STEP_MS * 5)).toBe('✸')
+  expect(flareFrame(FLARE_MS - 1)).toBe(FLARE_FRAMES[FLARE_FRAMES.length - 1])
+  // Settled: the caller draws the plain ✦ from here on.
+  expect(flareFrame(FLARE_MS)).toBeUndefined()
+  expect(flareFrame(-1)).toBeUndefined()
+})
+
+test('the flare band crosses the lesson once, left to right, then leaves it plain', () => {
+  const text = 'prefer bun test over jest here'
+  const brightest = (since: number) => {
+    const runs = flareRuns(text, since, '#E8B452', '#FFE7B0')
+    let at = 0
+    for (const run of runs) {
+      if (run.color === '#ffe7b0') return at
+      at += run.text.length
+    }
+    return -1
+  }
+  const early = brightest(FLARE_MS * 0.25)
+  const late = brightest(FLARE_MS * 0.75)
+  expect(early).toBeGreaterThanOrEqual(0)
+  expect(late).toBeGreaterThan(early)
+  expect(flareRuns(text, FLARE_MS, '#E8B452', '#FFE7B0')).toEqual([{ text, color: '#E8B452' }])
+  expect(flareRuns(text, 100, '#E8B452', '#FFE7B0', false)).toEqual([{ text, color: '#E8B452' }])
 })

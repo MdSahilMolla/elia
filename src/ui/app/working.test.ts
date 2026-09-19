@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { formatElapsed, formatTokens, gerund, reducedMotion, streamedTokens, tipFor, TIPS, tipsEnabled, turnReceipt, turnVerb, TURN_VERBS, workingLabel } from './working.ts'
+import { applyCheckEvent, checkLabel, formatElapsed, formatTokens, gerund, reducedMotion, streamedTokens, tipFor, TIPS, tipsEnabled, turnReceipt, turnVerb, TURN_VERBS, workingLabel } from './working.ts'
 
 test('elapsed time reads precisely while it is short and coarsely once it is long', () => {
   expect(formatElapsed(0)).toBe('0s')
@@ -68,4 +68,31 @@ test('tips rotate per turn and can be switched off; motion can be reduced', () =
   expect(tipsEnabled({ ELIA_TIPS: '0' })).toBe(false)
   expect(reducedMotion({})).toBe(false)
   expect(reducedMotion({ ELIA_REDUCED_MOTION: '1' })).toBe(true)
+})
+
+test('a check is named for what it proves, not how it is spelled', () => {
+  expect(checkLabel('bunx tsc --noEmit')).toBe('tsc')
+  expect(checkLabel('npx vue-tsc --noEmit')).toBe('tsc')
+  expect(checkLabel('mypy src')).toBe('types')
+  expect(checkLabel('bun test')).toBe('tests')
+  expect(checkLabel('npm run test:unit')).toBe('tests')
+  expect(checkLabel('python -m pytest -q')).toBe('tests')
+  expect(checkLabel('cargo check')).toBe('check')
+  expect(checkLabel('npm run build')).toBe('build')
+  expect(checkLabel('bunx eslint .')).toBe('lint')
+  expect(checkLabel('./scripts/verify-everything-thoroughly.sh')).toBe('verify-ever…')
+})
+
+test('check events fold into chips, and a re-run of the gate starts a fresh pass', () => {
+  let chips = [] as ReturnType<typeof applyCheckEvent>
+  for (const command of ['bunx tsc --noEmit', 'bun test', 'bun run build']) chips = applyCheckEvent(chips, { command, state: 'queued' })
+  chips = applyCheckEvent(chips, { command: 'bunx tsc --noEmit', state: 'passed' })
+  chips = applyCheckEvent(chips, { command: 'bun test', state: 'failed' })
+  expect(chips.map((chip) => `${chip.label}:${chip.state}`)).toEqual(['tsc:passed', 'tests:failed', 'build:queued'])
+
+  // The repair re-runs the gate: build is still queued from the failed pass,
+  // but tsc coming back into the queue means the old ticks are stale.
+  chips = applyCheckEvent(chips, { command: 'bunx tsc --noEmit', state: 'queued' })
+  chips = applyCheckEvent(chips, { command: 'bun test', state: 'queued' })
+  expect(chips.map((chip) => `${chip.label}:${chip.state}`)).toEqual(['tsc:queued', 'tests:queued'])
 })

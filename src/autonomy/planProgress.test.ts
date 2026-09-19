@@ -10,6 +10,7 @@ import {
   planChecklist,
   planIsCurrent,
   planProgressTitle,
+  proofLabel,
   stepAnchors,
   type ToolOutcome,
 } from './planProgress.ts'
@@ -236,4 +237,12 @@ test('the panel checklist and title use the glyphs the plan panel draws', () => 
   expect(planChecklist(items)).toBe('✓ a\n◐ b\n□ c')
   expect(planProgressTitle(items)).toBe('Plan · 1/3 done')
   expect(planProgressTitle(items.map((item) => ({ ...item, status: 'completed' as const })))).toBe('Plan complete · 3/3')
+})
+
+test('each tick carries what proved it, in words the plan panel can print', () => {
+  const { tracker } = planOf('Create `src/data.ts` with sample data', 'Run `bun test` to verify')
+  expect(tracker.observe([wrote('app\\src\\data.ts')]).update?.proofs).toEqual(['wrote data.ts'])
+  expect(tracker.observe([ok('bun test')]).update?.proofs).toEqual(['ran bun test'])
+  expect(proofLabel(previewed)).toBe('page rendered')
+  expect(proofLabel(ok('bun test --coverage --reporter=junit --reporter-outfile=out/report.xml'))).toMatch(/^ran bun test --coverage.{0,40}…$/)
 })

@@ -55,6 +55,7 @@ export function Transcript({
             item={item}
             expanded={expandedAll}
             gapAbove={leadsNotes(item, i === 0 ? committed[committed.length - 1] : live[i - 1])}
+            live
           />
         ))}
       </Box>

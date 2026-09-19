@@ -1,7 +1,9 @@
 import { Box, Text } from 'ink'
 import { Spinner } from './Spinner.tsx'
 import { BrowserMotion } from './BrowserMotion.tsx'
-import { glyphs, palette } from '../theme.ts'
+import { blendable, glyphs, palette } from '../theme.ts'
+import { motionReduced, useAnimationClock } from '../animation.tsx'
+import { mixColor } from '../motion.ts'
 import type { ToolItem } from '../store.ts'
 import { activeVerb, exploreSummary, summarizeTool } from '../toolSummary.ts'
 import { summarizeResult } from '../../stream.ts'
@@ -121,10 +123,23 @@ function SummaryRow({ text, color }: { text: string; color?: string }) {
   )
 }
 
+/** A finished call's dot lands in elia's bright gold and settles into its outcome colour over this long. */
+export const LAND_MS = 500
+
+/** The dot of a call that just finished — mounted only while it settles, so a quiet transcript costs no frames. */
+function LandingDot({ endedAt, color }: { endedAt: number; color: string | undefined }) {
+  const now = useAnimationClock()
+  return <Text color={mixColor(palette.brandShimmer, color, Math.min(1, Math.max(0, (now - endedAt) / LAND_MS)))}>{glyphs.bullet}</Text>
+}
+
 /** The dot that leads every tool row — the state lives here. */
-function Dot({ running, failed, color }: { running: boolean; failed: boolean; color?: string }) {
+function Dot({ running, failed, color, endedAt }: { running: boolean; failed: boolean; color?: string; endedAt?: number }) {
   if (running) return <Spinner variant="pulse" />
-  return <Text color={color ?? (failed ? palette.failure : palette.success)}>{glyphs.bullet}</Text>
+  const settled = color ?? (failed ? palette.failure : palette.success)
+  // Only in the live region (`endedAt` is passed there alone): scrollback is
+  // printed once, and a mid-landing colour would stay there for good.
+  if (endedAt !== undefined && blendable && !motionReduced && Date.now() - endedAt < LAND_MS) return <LandingDot endedAt={endedAt} color={settled} />
+  return <Text color={settled}>{glyphs.bullet}</Text>
 }
 
 /** "+12 −3", with each half in its own colour. */
@@ -150,7 +165,7 @@ function gist(result: string): string {
   return redactText(line, 160)
 }
 
-export function ToolCard({ tool, expanded }: { tool: ToolItem; expanded: boolean }) {
+export function ToolCard({ tool, expanded, live = false }: { tool: ToolItem; expanded: boolean; live?: boolean }) {
   const s = summarizeTool(tool)
   const running = tool.status === 'running'
   const isError = tool.status === 'error'
@@ -169,7 +184,7 @@ export function ToolCard({ tool, expanded }: { tool: ToolItem; expanded: boolean
     <Box flexDirection="column">
       <Box>
         <Box width={2} flexShrink={0}>
-          {isSkill && !running ? <Text color={palette.brand}>{glyphs.skill}</Text> : <Dot running={running} failed={failed} />}
+          {isSkill && !running ? <Text color={palette.brand}>{glyphs.skill}</Text> : <Dot running={running} failed={failed} endedAt={live ? tool.endedAt : undefined} />}
         </Box>
         <Box flexGrow={1} flexShrink={1}>
           <Text wrap="truncate-end">

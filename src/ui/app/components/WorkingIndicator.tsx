@@ -1,9 +1,9 @@
 import { useRef, type MutableRefObject } from 'react'
 import { Box, Text } from 'ink'
-import { blendable, glyphs, palette } from '../theme.ts'
+import { blendable, glyphs, palette, spinnerFrames } from '../theme.ts'
 import { motionReduced, useAnimationClock } from '../animation.tsx'
 import { easeToward, mixColor, shimmerRuns, sparkFrame, stallLevel } from '../motion.ts'
-import { formatElapsed, formatTokens } from '../working.ts'
+import { formatElapsed, formatTokens, type CheckChip } from '../working.ts'
 import { useFrameWidth } from '../wrap.ts'
 
 /** What the running turn has produced so far — read on every frame, written without re-rendering the app. */
@@ -26,6 +26,8 @@ export interface WorkingIndicatorProps {
   steeringPending?: number
   /** A rotating hint, shown under the line. */
   tip?: string
+  /** The verification pass under way: each check lands on the line as it finishes. */
+  checks?: readonly CheckChip[]
 }
 
 /** The label keeps at least this many columns before details start to give way. */
@@ -47,6 +49,35 @@ export function fitDetails(details: { key: string; text: string }[], labelColumn
   }
   if (Number.isFinite(width) && !room(kept)) kept = kept.map((item) => (item.key === 'esc' ? { ...item, text: 'esc' } : item))
   return kept.map((item) => item.text)
+}
+
+const CHECK_MARK: Record<Exclude<CheckChip['state'], 'running'>, string> = {
+  queued: '·',
+  passed: glyphs.ok,
+  failed: glyphs.error,
+  skipped: '–',
+}
+
+/** A running check's spinner turns once per this many ms — the same pace as a running tool's. */
+const CHECK_SPIN_MS = 80
+
+export function checkMark(chip: CheckChip, elapsedMs: number, reduced = false): string {
+  if (chip.state !== 'running') return CHECK_MARK[chip.state]
+  if (reduced) return glyphs.running
+  return spinnerFrames[Math.floor(Math.max(0, elapsedMs) / CHECK_SPIN_MS) % spinnerFrames.length]!
+}
+
+function checkColor(state: CheckChip['state']): string | undefined {
+  if (state === 'passed') return palette.success
+  if (state === 'failed') return palette.failure
+  if (state === 'running') return palette.brand
+  return palette.subtle
+}
+
+/** Columns the chips take: two spaces before the set, `label mark` each, a space apart. */
+export function checksWidth(checks: readonly CheckChip[]): number {
+  if (checks.length === 0) return 0
+  return 2 + checks.reduce((sum, chip) => sum + Bun.stringWidth(chip.label) + 2, 0) + (checks.length - 1)
 }
 
 /** The number on screen rolls up toward the real count instead of jumping. */
@@ -71,7 +102,7 @@ function useRollingCount(target: number, now: number): number {
  * label; if the model goes quiet the spark cools toward red, and after a while
  * the line says how long it has been silent.
  */
-export function WorkingIndicator({ startedAt, label, progress, thinking = false, waitingOnModel = false, steeringPending = 0, tip }: WorkingIndicatorProps) {
+export function WorkingIndicator({ startedAt, label, progress, thinking = false, waitingOnModel = false, steeringPending = 0, tip, checks = [] }: WorkingIndicatorProps) {
   const now = useAnimationClock()
   const width = useFrameWidth()
   const elapsed = Math.max(0, now - startedAt)
@@ -83,6 +114,13 @@ export function WorkingIndicator({ startedAt, label, progress, thinking = false,
   const text = `${label.trim().replace(/[.…]+$/, '') || 'Working'}…`
   const runs = shimmerRuns(text, elapsed, palette.brand, palette.brandShimmer, blendable && !motionReduced)
   const sparkColor = stall > 0 ? mixColor(palette.brand, palette.stall, stall) : palette.brand
+  // The checks are the most specific news on the line, so they outrank every
+  // detail but the clock — and they go entirely rather than half-render.
+  const labelColumns = Bun.stringWidth(text)
+  const chipColumns = checksWidth(checks)
+  const showChecks =
+    chipColumns > 0 &&
+    (!Number.isFinite(width) || 2 + Math.min(labelColumns, MIN_LABEL_COLUMNS) + chipColumns + Bun.stringWidth(` (${formatElapsed(elapsed / 1000)} · esc)`) <= width)
   const details = fitDetails(
     [
       { key: 'clock', text: formatElapsed(elapsed / 1000) },
@@ -92,8 +130,8 @@ export function WorkingIndicator({ startedAt, label, progress, thinking = false,
       { key: 'steering', text: steeringPending > 0 ? `${steeringPending} steering queued` : '' },
       { key: 'esc', text: 'esc to interrupt' },
     ].filter((item) => item.text),
-    Bun.stringWidth(text),
-    width,
+    labelColumns,
+    showChecks ? width - chipColumns : width,
   )
 
   // The label gives way first: a long one truncates, the clock and the
@@ -115,6 +153,23 @@ export function WorkingIndicator({ startedAt, label, progress, thinking = false,
             ))}
           </Text>
         </Box>
+        {showChecks ? (
+          <Box flexShrink={0}>
+            <Text>
+              {' '}
+              {checks.map((chip) => (
+                <Text key={chip.command}>
+                  {' '}
+                  <Text color={chip.state === 'queued' ? palette.subtle : palette.muted}>{chip.label}</Text>
+                  {' '}
+                  <Text color={checkColor(chip.state)} bold={chip.state !== 'queued'}>
+                    {checkMark(chip, elapsed, motionReduced)}
+                  </Text>
+                </Text>
+              ))}
+            </Text>
+          </Box>
+        ) : null}
         <Box flexShrink={0}>
           <Text color={palette.muted}> ({details.join(' · ')})</Text>
         </Box>

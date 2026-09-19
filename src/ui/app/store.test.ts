@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { createTranscriptStore, stableCut, toolsOf } from './store.ts'
+import { createTranscriptStore, flareHoldMs, stableCut, toolsOf } from './store.ts'
 import type { ToolEvent } from '../../agentLoop.ts'
 
 const evt = (over: Partial<ToolEvent> & { id?: string } = {}): ToolEvent & { id?: string } => ({
@@ -297,4 +297,21 @@ test('an empty assistant delta adds no bullet-only item', () => {
   expect(s.getSnapshot().live.filter((i) => i.kind === 'assistant')).toHaveLength(0)
   s.assistantDelta('real')
   expect(s.getSnapshot().live.filter((i) => i.kind === 'assistant')).toHaveLength(1)
+})
+
+test('a lesson stays live while its flare plays, and the turn knows how long to hold for it', () => {
+  const store = createTranscriptStore()
+  store.activity({ kind: 'status', status: 'completed', title: '✦ learned: run bun test from the package root' })
+  store.activity({ kind: 'status', status: 'completed', title: '✓ verified — bun test pass' })
+  const learned = store.getSnapshot().live.find((item) => item.kind === 'notice' && item.text.startsWith('✦ learned'))
+  // Not swept into scrollback mid-flare, even with a later line behind it.
+  expect(learned).toBeDefined()
+  expect(learned && 'at' in learned ? learned.at : undefined).toBeNumber()
+  const hold = flareHoldMs(store.turnItems())
+  expect(hold).toBeGreaterThan(0)
+  expect(flareHoldMs(store.turnItems(), Date.now() + 10_000)).toBe(0)
+  // Only lessons flare — an ordinary status never holds the turn.
+  const plain = createTranscriptStore()
+  plain.activity({ kind: 'status', status: 'completed', title: '✦ memory · 9 lessons from earlier sessions' })
+  expect(flareHoldMs(plain.turnItems())).toBe(0)
 })

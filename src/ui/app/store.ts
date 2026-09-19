@@ -13,6 +13,7 @@ import type { ToolEvent } from '../../agentLoop.ts'
 import type { ProviderActivity } from '../../providers/types.ts'
 import { redactRecord, redactSecrets, redactText, relativizeProjectPaths } from '../redact.ts'
 import { isExploreTool } from './toolSummary.ts'
+import { FLARE_MS } from './motion.ts'
 
 export interface UserItem {
   id: string
@@ -47,6 +48,8 @@ export interface ToolItem {
   result?: string
   durationMs?: number
   parentId?: string
+  /** When the call finished — its dot lands bright and settles from here. */
+  endedAt?: number
 }
 /** A run of consecutive read-only lookups, rendered as one line. */
 export interface GroupItem {
@@ -59,6 +62,8 @@ export interface NoticeItem {
   /** `receipt`: the line that closes a turn — "Worked for 25s · edited 1 file". */
   kind: 'notice' | 'error' | 'shell' | 'receipt'
   text: string
+  /** When a lesson landed (`✦ learned: …`) — its mark flares once from here. */
+  at?: number
 }
 /** The session header, printed once at the top of scrollback. */
 export interface HeaderItem {
@@ -70,6 +75,9 @@ export interface HeaderItem {
   /** The working directory, `~`-relative when it can be. */
   location?: string
   lessons?: number
+  /** Of those, how many a randomized trial has proven to help — or to hurt. */
+  lessonsHelp?: number
+  lessonsHurt?: number
   /** "mercury-2.5 · Mercury" — what answers in this session. */
   model?: string
 }
@@ -157,6 +165,20 @@ function thinkingCut(text: string): number {
 }
 
 /** Activity text keeps its line structure — a plan or a check list flattened into one run-on line is unreadable. */
+/** A lesson elia just committed to memory — the one notice that flares. */
+export function isLearnedLine(text: string): boolean {
+  return text.startsWith('✦ learned:')
+}
+
+/** How much longer the newest flare in `items` has to run — the turn holds its close for it. */
+export function flareHoldMs(items: readonly Item[], now = Date.now()): number {
+  let hold = 0
+  for (const item of items) {
+    if (item.kind === 'notice' && item.at !== undefined) hold = Math.max(hold, item.at + FLARE_MS - now)
+  }
+  return Math.max(0, hold)
+}
+
 function activityText(activity: ProviderActivity): string {
   const raw = activity.detail ? `${activity.title}\n${activity.detail}` : activity.title
   const text = redactSecrets(relativizeProjectPaths(raw)).replace(/\r\n?/g, '\n').trim()
@@ -214,6 +236,9 @@ export function createTranscriptStore(): TranscriptStore {
     if (item.kind === 'tool') return item.status !== 'running'
     if (item.kind === 'group') return item.tools.every((tool) => tool.status !== 'running')
     if (item.kind === 'assistant' || item.kind === 'thinking') return !item.streaming
+    // A lesson's flare is still playing: printing it into scrollback now would
+    // freeze it mid-frame.
+    if (item.kind === 'notice' && item.at !== undefined) return Date.now() - item.at >= FLARE_MS
     return true // user / notice / error / shell / header never change after being added
   }
   const flushSettled = (): void => {
@@ -318,7 +343,8 @@ export function createTranscriptStore(): TranscriptStore {
       const safeResult = redactSecrets(event.result)
       const isMatch = (item: ToolItem): boolean =>
         event.id ? item.id === event.id : item.name === event.name && item.status === 'running'
-      const finish = (item: ToolItem): ToolItem => ({ ...item, status, result: safeResult, durationMs: event.durationMs })
+      const endedAt = Date.now()
+      const finish = (item: ToolItem): ToolItem => ({ ...item, status, result: safeResult, durationMs: event.durationMs, endedAt })
       let matched = false
       live = live.map((item) => {
         if (matched) return item
@@ -412,7 +438,7 @@ export function createTranscriptStore(): TranscriptStore {
         const oldest = recentActivityCounts.keys().next().value
         if (oldest !== undefined) recentActivityCounts.delete(oldest)
       }
-      live = [...live, { id: nextId(), kind: 'notice', text }]
+      live = [...live, isLearnedLine(text) ? { id: nextId(), kind: 'notice', text, at: Date.now() } : { id: nextId(), kind: 'notice', text }]
       changed()
     },
 

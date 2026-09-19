@@ -52,6 +52,8 @@ export interface ReasonOptions {
   forceHarnessId?: string
   libraryFile?: string
   onAttempt?: (record: AttemptRecord) => void
+  /** Each project check as an attempt queues, runs and lands it. */
+  onCheck?: (event: { command: string; state: 'queued' | 'running' | 'passed' | 'failed' }) => void
   signal?: AbortSignal
 }
 
@@ -85,19 +87,37 @@ export async function resolveVerifier(options: {
   synthesizeProbe?: ReasonOptions['synthesizeProbe']
   /** Threaded to the check commands so Esc can interrupt the part of a search that actually takes the time. */
   signal?: AbortSignal
+  onCheck?: ReasonOptions['onCheck']
 }): Promise<{ verifier: Verifier | ((all: Candidate[]) => Verifier); degraded: boolean }> {
-  const { kind, checks, signature, synthesizeProbe, signal } = options
-  const build = checks.build ? commandVerifier({ id: 'build', command: checks.build, timeoutMs: checks.timeoutMs, strength: 'structural', costHint: 'cheap', signal }) : undefined
-  const test = checks.test ? commandVerifier({ id: 'tests', command: checks.test, timeoutMs: checks.timeoutMs, signal }) : undefined
+  const { kind, checks, signature, synthesizeProbe, signal, onCheck } = options
+  const build = checks.build ? commandVerifier({ id: 'build', command: checks.build, timeoutMs: checks.timeoutMs, strength: 'structural', costHint: 'cheap', signal, onCheck }) : undefined
+  const test = checks.test ? commandVerifier({ id: 'tests', command: checks.test, timeoutMs: checks.timeoutMs, signal, onCheck }) : undefined
+  // Every attempt's checks are announced before the first runs, so a watcher
+  // sees the whole set — and knows the last attempt's ticks are now stale.
+  const announced = (verifier: Verifier, commands: (string | undefined)[]): Verifier => {
+    if (!onCheck) return verifier
+    return {
+      ...verifier,
+      run(candidate) {
+        for (const command of commands) {
+          if (!command) continue
+          try {
+            onCheck({ command, state: 'queued' })
+          } catch {}
+        }
+        return verifier.run(candidate)
+      },
+    }
+  }
 
   if (kind === 'project-tests' && test) {
-    return { verifier: build ? allOf('project checks', [build, test]) : test, degraded: false }
+    return { verifier: build ? announced(allOf('project checks', [build, test]), [checks.build, checks.test]) : announced(test, [checks.test]), degraded: false }
   }
-  if (kind === 'project-build' && build) return { verifier: build, degraded: false }
+  if (kind === 'project-build' && build) return { verifier: announced(build, [checks.build]), degraded: false }
 
   if (kind === 'synthesized-probe') {
     const probe = await synthesizeProbe?.(signature)
-    if (probe) return { verifier: build ? allOf('synthesized checks', [build, probe]) : probe, degraded: false }
+    if (probe) return { verifier: build ? announced(allOf('synthesized checks', [build, probe]), [checks.build]) : probe, degraded: false }
   }
 
   // Nothing executable is available. Agreement is what is left, and the caller
@@ -140,6 +160,7 @@ export async function reason(options: ReasonOptions): Promise<ReasonResult> {
     signature,
     synthesizeProbe: options.synthesizeProbe,
     signal: options.signal,
+    onCheck: options.onCheck,
   })
 
   const result = await solve({

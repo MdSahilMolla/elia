@@ -248,3 +248,20 @@ export function renderEfficacyLine(baselineCleanRate: number, path = EFFICACY_PA
     : ` Randomized trials: ${trials.length} judged, ${helps} proven to help, ${hurts} proven to hurt.`
   return `Lesson efficacy: ${judged} lesson(s) have enough exposures to judge, ${deadWeight} showing no lift.${randomized}`
 }
+
+/**
+ * Where the lessons in the store stand in their randomized trials: how many
+ * are proven to help, proven to hurt (these should already have been retired),
+ * or still unproven. Unproven is the honest default — a lesson is never
+ * counted as helping without a trial that says so.
+ */
+export function lessonStanding(keys: readonly string[], trials: Map<string, LessonTrial>): { helps: number; hurts: number; unproven: number } {
+  let helps = 0
+  let hurts = 0
+  for (const key of keys) {
+    const verdict = trials.get(key)?.verdict
+    if (verdict === 'helps') helps += 1
+    else if (verdict === 'hurts') hurts += 1
+  }
+  return { helps, hurts, unproven: keys.length - helps - hurts }
+}

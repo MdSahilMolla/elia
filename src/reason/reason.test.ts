@@ -184,3 +184,26 @@ test('a candidate with no working tree cannot pass a command check', async () =>
   expect(verdict.passed).toBe(false)
   expect(verdict.detail).toContain('no working tree')
 })
+
+test('each attempt announces its checks, then reports each one as it runs and lands', async () => {
+  const signature = taskSignature('fix the failing test', { hasExecutableCheck: true })
+  writeFileSync(join(dir, 'fail.ts'), 'process.exit(1)\n')
+  const events: string[] = []
+  const resolved = await resolveVerifier({
+    kind: 'project-tests',
+    checks: { build: 'bun --version', test: 'bun fail.ts' },
+    signature,
+    onCheck: (event) => events.push(`${event.command}:${event.state}`),
+  })
+  if (typeof resolved.verifier === 'function') throw new Error('expected a command verifier')
+  const verdict = await resolved.verifier.run({ id: 'c', approach: 'a', text: '', cwd: dir })
+  expect(verdict.passed).toBe(false)
+  expect(events).toEqual([
+    'bun --version:queued',
+    'bun fail.ts:queued',
+    'bun --version:running',
+    'bun --version:passed',
+    'bun fail.ts:running',
+    'bun fail.ts:failed',
+  ])
+})

@@ -115,3 +115,32 @@ export function easeToward(shown: number, target: number, elapsedMs = 60): numbe
   const remaining = (target - shown) * Math.exp(-Math.max(0, elapsedMs) / COUNT_EASE_MS)
   return Math.min(target, Math.max(shown + 1, Math.round(target - remaining)))
 }
+
+// ------------------------------------------------------------------- flare
+
+/**
+ * The spark catching once, for the moment elia commits a lesson to memory: a
+ * point flares into a star and settles on ✦ — the working spark's own frames,
+ * played a single time, not looped.
+ */
+export const FLARE_FRAMES = ['·', '✧', '✦', '✶', '✷', '✸', '✷', '✶', '✦'] as const
+export const FLARE_STEP_MS = 70
+export const FLARE_MS = FLARE_FRAMES.length * FLARE_STEP_MS
+
+/** The flare's glyph `sinceMs` after the lesson landed, or undefined once it has settled. */
+export function flareFrame(sinceMs: number): string | undefined {
+  if (sinceMs < 0 || sinceMs >= FLARE_MS) return undefined
+  return FLARE_FRAMES[Math.floor(sinceMs / FLARE_STEP_MS)]
+}
+
+/**
+ * `text` with one shimmer band crossing it exactly once over the flare, left
+ * to right — the shimmer's own curve, just timed to the flare instead of to
+ * its resting pace.
+ */
+export function flareRuns(text: string, sinceMs: number, base: string | undefined, highlight: string | undefined, enabled = true): ColorRun[] {
+  const progress = Math.min(1, Math.max(0, sinceMs / FLARE_MS))
+  if (progress >= 1) return [{ text, color: base }]
+  const travel = Array.from(text).length + SHIMMER_RADIUS * 2
+  return shimmerRuns(text, (progress * travel * 1000) / SHIMMER_CHARS_PER_SECOND, base, highlight, enabled)
+}

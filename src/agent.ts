@@ -194,7 +194,8 @@ async function runScopedTurn(
   // the plain terminal gets one line saying what was ticked.
   const planProgressed = (update: PlanProgressUpdate): void => {
     const title = planProgressTitle(update.items)
-    options.onActivity?.({ kind: 'plan', status: 'updated', title, detail: planChecklist(update.items) })
+    const evidence = Object.fromEntries(update.ticked.map((step, index) => [step, update.proofs[index] ?? '']))
+    options.onActivity?.({ kind: 'plan', status: 'updated', title, detail: planChecklist(update.items), evidence })
     // After the activity, so the Ink status line ends on the line that says what was ticked.
     if (!options.silent) writeNotice(`${title} · ${update.ticked.map((step) => `✓ ${step.length > 70 ? `${step.slice(0, 69)}…` : step}`).join(' · ')}`)
   }

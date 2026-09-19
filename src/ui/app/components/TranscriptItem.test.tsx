@@ -53,3 +53,31 @@ test('a shell escape drops the result framing and only reports an exit worth rea
   expect(frame).toContain('exit 2')
   expect(frame).not.toContain('stderr:')
 })
+
+test('a lesson that just landed flares in the live region, and prints settled once it is scrollback', async () => {
+  const item: Item = { id: 'l1', kind: 'notice', text: '✦ learned: run bun test from the package root', at: Date.now() }
+  const live = render(
+    <FrameWidth.Provider value={60}>
+      <TranscriptItemView item={item} expanded={false} live />
+    </FrameWidth.Provider>,
+  )
+  try {
+    const first = live.lastFrame() ?? ''
+    expect(first).toContain('learned: run bun test')
+    // Mid-flare the mark is one of the spark's frames — not yet the settled ✦.
+    expect(first.trimStart()[0]).not.toBe('✦')
+  } finally {
+    live.unmount()
+  }
+  // The same item committed to <Static> is drawn once, already settled.
+  expect(view(item).trimStart().startsWith('✦ learned: run bun test')).toBe(true)
+})
+
+test('the header says how many carried lessons are proven to help, and never claims more', () => {
+  const proven = view({ id: 'h', kind: 'header', version: '1.2.3', greeting: '', lessons: 24, lessonsHelp: 1 }, 100)
+  expect(proven).toContain('24 lessons carried from past runs · ✦ 1 proven to help · /lessons')
+  const unproven = view({ id: 'h', kind: 'header', version: '1.2.3', greeting: '', lessons: 24, lessonsHelp: 0 }, 100)
+  expect(unproven).not.toContain('proven')
+  const hurting = view({ id: 'h', kind: 'header', version: '1.2.3', greeting: '', lessons: 5, lessonsHurt: 2 }, 100)
+  expect(hurting).toContain('2 proven to hurt')
+})

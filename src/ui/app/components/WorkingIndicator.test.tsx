@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test'
 import { render } from 'ink-testing-library'
-import { fitDetails, WorkingIndicator, type TurnProgress } from './WorkingIndicator.tsx'
+import { checkMark, checksWidth, fitDetails, WorkingIndicator, type TurnProgress } from './WorkingIndicator.tsx'
 import { waitForFrame } from '../testFixtures.ts'
 
 const ref = (value: TurnProgress) => ({ current: value })
@@ -90,4 +90,29 @@ test('the spark moves between frames', async () => {
   } finally {
     unmount()
   }
+})
+
+test('verification checks land on the line as they finish', async () => {
+  const checks = [
+    { command: 'bunx tsc --noEmit', label: 'tsc', state: 'passed' as const },
+    { command: 'bun test', label: 'tests', state: 'failed' as const },
+    { command: 'bun run build', label: 'build', state: 'queued' as const },
+  ]
+  const { lastFrame, unmount } = render(<WorkingIndicator startedAt={Date.now()} label="Verifying" checks={checks} />)
+  try {
+    const frame = await waitForFrame(lastFrame, 'Verifying…')
+    expect(frame).toContain('tsc ✓')
+    expect(frame).toContain('tests ✗')
+    expect(frame).toContain('build ·')
+  } finally {
+    unmount()
+  }
+})
+
+test('the checks give way on a narrow line instead of wrapping it', () => {
+  const checks = [{ command: 'bun test', label: 'tests', state: 'running' as const }]
+  expect(checksWidth(checks)).toBe(Bun.stringWidth('  tests ⠋'))
+  expect(checksWidth([])).toBe(0)
+  expect(checkMark(checks[0]!, 0)).toBe('⠋')
+  expect(checkMark(checks[0]!, 0, true)).toBe('◐')
 })

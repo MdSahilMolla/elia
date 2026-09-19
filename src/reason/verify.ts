@@ -121,8 +121,15 @@ export function commandVerifier(options: {
    * command may not be interruptible. Press Ctrl+C twice to force-quit".
    */
   signal?: AbortSignal
+  /** Each run of the check as it starts and lands — the working line shows it. Never allowed to break the check. */
+  onCheck?: (event: { command: string; state: 'running' | 'passed' | 'failed' }) => void
 }): Verifier {
   const strength = options.strength ?? 'executed'
+  const report = (state: 'running' | 'passed' | 'failed'): void => {
+    try {
+      options.onCheck?.({ command: options.command, state })
+    } catch {}
+  }
   return {
     id: options.id ?? options.command,
     strength,
@@ -131,8 +138,10 @@ export function commandVerifier(options: {
       if (!candidate.cwd) {
         return { passed: false, strength, detail: 'no working tree to check', evidence: '', elapsedMs: 0 }
       }
+      report('running')
       const result = await runShell(options.command, options.timeoutMs ?? DEFAULT_TIMEOUT_MS, candidate.cwd, options.signal)
       const passed = result.exitCode === 0 && !result.timedOut
+      report(passed ? 'passed' : 'failed')
       const detail = result.timedOut
         ? `\`${options.command}\` timed out after ${result.elapsedMs}ms`
         : `\`${options.command}\` exited ${result.exitCode}`

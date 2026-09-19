@@ -123,6 +123,8 @@ export interface ProviderActivity {
   title: string
   detail?: string
   status?: 'started' | 'updated' | 'completed' | 'failed' | 'warning'
+  /** `plan` only: plan steps elia just ticked on evidence, each with what proved it. */
+  evidence?: Record<string, string>
 }
 
 export interface Provider {

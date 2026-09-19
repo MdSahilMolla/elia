@@ -243,3 +243,21 @@ test('an empty verification is unverified, not green', async () => {
   expect(outcome.results).toHaveLength(0)
   expect(outcome.inconclusive).toContain('no verification commands')
 })
+
+test('each check reports queued, then running, then how it landed — and a check after a failure never runs', async () => {
+  const events: string[] = []
+  const outcome = await runVerification(['exit 0', 'exit 3', 'exit 0 '], undefined, undefined, allowAllGovernor(), {
+    onCheck: (event) => events.push(`${event.command.trim()}:${event.state}`),
+  })
+  expect(outcome.passed).toBe(false)
+  expect(events).toEqual(['exit 0:queued', 'exit 3:queued', 'exit 0:queued', 'exit 0:running', 'exit 0:passed', 'exit 3:running', 'exit 3:failed'])
+})
+
+test('a watcher that throws cannot break the gate', async () => {
+  const outcome = await runVerification(['exit 0'], undefined, undefined, allowAllGovernor(), {
+    onCheck: () => {
+      throw new Error('ui went away')
+    },
+  })
+  expect(outcome.passed).toBe(true)
+})

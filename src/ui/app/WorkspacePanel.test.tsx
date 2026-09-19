@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test'
 import { render } from 'ink-testing-library'
-import { WorkspacePanel, runPlanFromWorkers } from './components/WorkspacePanel.tsx'
+import { WorkspacePanel, runPlanFromWorkers, stepEvidenceKey, waveProgress } from './components/WorkspacePanel.tsx'
 import type { TaskSession } from '../../taskSessions.ts'
 
 const agent = (over: Partial<TaskSession>): TaskSession => ({
@@ -157,4 +157,40 @@ test('ctrl+o expands a live subagent into its task and last tool calls (#1239)',
   expect(expanded).toContain('task: add the login form')
   expect(expanded).toContain('✓ read_file src/app.ts')
   expect(expanded).toContain('✗ run_command bun test')
+})
+
+test('a step proven by evidence says what proved it; a step the model only marked done does not', () => {
+  const plan = [
+    { content: 'Create `src/data.ts`', status: 'completed' as const },
+    { content: 'Write the README', status: 'completed' as const },
+    { content: 'Run the tests', status: 'in_progress' as const },
+  ]
+  const evidence = new Map([[stepEvidenceKey('Create src/data.ts'), { text: 'wrote data.ts', at: Date.now() - 60_000 }]])
+  const { lastFrame, unmount } = render(<WorkspacePanel plan={plan} agents={[]} evidence={evidence} />)
+  try {
+    const frame = lastFrame() ?? ''
+    expect(frame).toContain('Create `src/data.ts` · wrote data.ts')
+    expect(frame).toContain('Write the README')
+    expect(frame).not.toContain('Write the README ·')
+  } finally {
+    unmount()
+  }
+})
+
+test('a wave of the fleet shows how far through it is', () => {
+  const workers = [
+    agent({ id: 'a', role: 'builder', wave: 2, status: 'done', sessionId: 's' }),
+    agent({ id: 'b', role: 'builder', wave: 2, status: 'running', sessionId: 's' }),
+    agent({ id: 'c', role: 'builder', wave: 2, status: 'needs-review', sessionId: 's' }),
+    agent({ id: 'd', role: 'builder', wave: 1, status: 'done', sessionId: 's' }),
+  ]
+  expect(waveProgress(workers, 2)).toEqual({ done: 2, total: 3 })
+  // A wave of one gets no bar: its own row already says everything.
+  expect(waveProgress(workers, 1)).toBeUndefined()
+  const { lastFrame, unmount } = render(<WorkspacePanel plan={[]} agents={workers} sessionId="s" />)
+  try {
+    expect(lastFrame() ?? '').toMatch(/Subagents · 1 running · wave 2 {2}━+─* 2\/3/)
+  } finally {
+    unmount()
+  }
 })

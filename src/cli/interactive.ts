@@ -51,6 +51,8 @@ interface TurnUiHooks {
   onActivity?: (activity: ProviderActivity) => void
   onTool?: (event: ToolEvent) => void
   onToolStart?: (call: { id: string; name: string; input: Record<string, unknown> }) => void
+  /** Each verification check as it queues, runs and lands — the working line shows them. */
+  onCheck?: (event: import('../autonomy/verify.ts').CheckEvent) => void
   /** External cancellation (the Ink app's Esc handler). */
   signal?: AbortSignal
   /** Read-only "propose a plan first" turn. */
@@ -445,6 +447,7 @@ export async function runInteractive(): Promise<void> {
         checks: plan.checks,
         produce: search.produce,
         signal,
+        onCheck: uiHooks?.onCheck,
         onAttempt: (record) => {
           note(
             `${record.verdict.passed ? '✓' : '✗'} attempt "${record.candidate.approach}" — ${record.verdict.detail}`,
@@ -898,7 +901,7 @@ export async function runInteractive(): Promise<void> {
           const gateGovernor = createActionGovernor({ mode: approveAction ? 'supervised' : 'unattended', approve: approveAction })
           const [systemOne, firstOutcome] = await Promise.all([
             askSystemOne().catch(() => undefined),
-            runVerification(checks, root, controller.signal, gateGovernor),
+            runVerification(checks, root, controller.signal, gateGovernor, { onCheck: uiHooks?.onCheck }),
           ])
           let outcome = firstOutcome
           if (systemOne && !outcome.blocked && !outcome.inconclusive) {
@@ -917,7 +920,7 @@ export async function runInteractive(): Promise<void> {
               ),
             )
             await runModelTurn()
-            outcome = await runVerification(checks, root, controller.signal, gateGovernor)
+            outcome = await runVerification(checks, root, controller.signal, gateGovernor, { onCheck: uiHooks?.onCheck })
             sessionTranscript.notice(describeVerification(outcome))
           }
           // A check the governor would not run proved nothing either way, and no
@@ -2377,6 +2380,7 @@ export async function runInteractive(): Promise<void> {
             onActivity: hooks.onActivity,
             onTool: hooks.onTool,
             onToolStart: hooks.onToolStart,
+            onCheck: hooks.onCheck,
             signal: hooks.signal,
             drainSteering: hooks.drainSteering,
             approve: hooks.approve,

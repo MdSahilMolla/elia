@@ -1,6 +1,8 @@
 import { Box, Text } from 'ink'
 import type { Item } from '../store.ts'
-import { palette, glyphs } from '../theme.ts'
+import { blendable, palette, glyphs } from '../theme.ts'
+import { motionReduced, useAnimationClock } from '../animation.tsx'
+import { FLARE_MS, flareFrame, flareRuns, mixColor } from '../motion.ts'
 import { AssistantMessage } from './AssistantMessage.tsx'
 import { Thinking } from './Thinking.tsx'
 import { ExploreCard, ToolCard } from './ToolCard.tsx'
@@ -111,7 +113,40 @@ export function shellView(text: string): { command: string; output: string[]; ex
   return { command, output, exit }
 }
 
-export function TranscriptItemView({ item, expanded, gapAbove = false }: { item: Item; expanded: boolean; gapAbove?: boolean }) {
+/**
+ * A lesson landing: the ✦ catches — the working spark's frames, played once —
+ * while a single bright band crosses the lesson, then both settle into the
+ * ordinary learning line. Only ever mounted in the live region, and only
+ * while the flare has time left to run.
+ */
+function LearnedFlare({ text, at, marginTop }: { text: string; at: number; marginTop: number }) {
+  const now = useAnimationClock()
+  const width = useFrameWidth()
+  const since = now - at
+  const glyph = flareFrame(since) ?? glyphs.learn
+  const settle = Math.min(1, Math.max(0, since / FLARE_MS))
+  const runs = flareRuns(wrapPlain(text, width - 2), since, palette.brand, palette.brandShimmer, blendable)
+  return (
+    <Box marginTop={marginTop}>
+      <Box width={2} flexShrink={0}>
+        <Text color={mixColor(palette.brandShimmer, palette.brand, settle)} bold>
+          {glyph}
+        </Text>
+      </Box>
+      <Box flexGrow={1} flexShrink={1}>
+        <Text wrap="wrap">
+          {runs.map((run, index) => (
+            <Text key={index} color={run.color}>
+              {run.text}
+            </Text>
+          ))}
+        </Text>
+      </Box>
+    </Box>
+  )
+}
+
+export function TranscriptItemView({ item, expanded, gapAbove = false, live = false }: { item: Item; expanded: boolean; gapAbove?: boolean; live?: boolean }) {
   switch (item.kind) {
     case 'header': {
       const context = [item.model, item.location].filter(Boolean).join(' · ')
@@ -135,7 +170,15 @@ export function TranscriptItemView({ item, expanded, gapAbove = false }: { item:
           {item.lessons ? (
             <Text color={palette.muted} wrap="truncate-end">
               {'  '}
-              {item.lessons} lesson{item.lessons === 1 ? '' : 's'} carried from past runs · /lessons
+              {item.lessons} lesson{item.lessons === 1 ? '' : 's'} carried from past runs
+              {item.lessonsHelp ? (
+                <Text>
+                  {' · '}
+                  <Text color={palette.brand}>{glyphs.learn}</Text> {item.lessonsHelp} proven to help
+                </Text>
+              ) : null}
+              {item.lessonsHurt ? <Text color={palette.warning}> · {item.lessonsHurt} proven to hurt</Text> : null}
+              {' · /lessons'}
             </Text>
           ) : null}
         </Box>
@@ -154,7 +197,7 @@ export function TranscriptItemView({ item, expanded, gapAbove = false }: { item:
     case 'tool':
       return (
         <Box marginTop={1}>
-          <ToolCard tool={item} expanded={expanded} />
+          <ToolCard tool={item} expanded={expanded} live={live} />
         </Box>
       )
     case 'group':
@@ -190,6 +233,10 @@ export function TranscriptItemView({ item, expanded, gapAbove = false }: { item:
       // A learning receipt (✦) is elia committing something durable to memory —
       // full weight, so it doesn't read as just another grey status.
       if (item.text.startsWith(glyphs.learn)) {
+        const rest = item.text.slice(glyphs.learn.length).trimStart()
+        if (live && item.at !== undefined && !motionReduced && Date.now() - item.at < FLARE_MS) {
+          return <LearnedFlare text={rest} at={item.at} marginTop={gapAbove ? 1 : 0} />
+        }
         return (
           <Marked mark={glyphs.learn} color={palette.brand} marginTop={gapAbove ? 1 : 0}>
             {item.text.slice(glyphs.learn.length).trimStart()}

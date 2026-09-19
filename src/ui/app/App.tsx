@@ -3,7 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Box, Text, useApp, useInput, useStdout } from 'ink'
 import { setInkSink } from '../stream.ts'
 import type { SlashCommand } from '../slashPrompt.ts'
-import { createTranscriptStore, toolsOf, type TranscriptStore } from './store.ts'
+import { createTranscriptStore, flareHoldMs, toolsOf, type TranscriptStore } from './store.ts'
 import { useTranscript } from './useSyncStore.ts'
 import { Transcript } from './components/Transcript.tsx'
 import { useTerminalSize } from './useTerminalSize.ts'
@@ -17,14 +17,15 @@ import type { ApprovalResult } from '../../autonomy/governor.ts'
 import { Picker, type PickerRequest } from './components/Picker.tsx'
 import { TextPrompt, type TextPromptRequest } from './components/TextPrompt.tsx'
 import { WorkingIndicator, type TurnProgress } from './components/WorkingIndicator.tsx'
-import { ClockProvider } from './animation.tsx'
-import { RECEIPT_AFTER_MS, streamedTokens, tipFor, tipsEnabled, turnReceipt, turnVerb, workingLabel } from './working.ts'
-import { WorkspacePanel, runPlanFromWorkers, type RunStep } from './components/WorkspacePanel.tsx'
+import { ClockProvider, motionReduced } from './animation.tsx'
+import { RECEIPT_AFTER_MS, applyCheckEvent, streamedTokens, tipFor, tipsEnabled, turnReceipt, turnVerb, workingLabel, type CheckChip, type CheckState } from './working.ts'
+import { WorkspacePanel, runPlanFromWorkers, stepEvidenceKey, type RunStep, type StepProof } from './components/WorkspacePanel.tsx'
 import { isInternalNudge } from './phases.ts'
 import { HelpOverlay } from './components/HelpOverlay.tsx'
 import { ErrorBoundary } from './components/ErrorBoundary.tsx'
 import { activeTodoList, type TodoItem } from '../../autonomy/todoList.ts'
-import { loadLessons } from '../../autonomy/lessons.ts'
+import { lessonKey, loadLessons } from '../../autonomy/lessons.ts'
+import { lessonStanding, lessonTrials } from '../../autonomy/lessonEfficacy.ts'
 import { selfEditGuard } from '../../autonomy/selfEdit.ts'
 import { taskSessions, type TaskSession } from '../../taskSessions.ts'
 import type { PickerOption } from '../picker.ts'
@@ -44,6 +45,8 @@ export interface TurnHooks {
   onActivity(activity: import('../../providers/types.ts').ProviderActivity): void
   onTool(event: import('../../agentLoop.ts').ToolEvent): void
   onToolStart(call: { id: string; name: string; input: Record<string, unknown> }): void
+  /** Each verification check as it queues, runs and lands. */
+  onCheck?(event: { command: string; state: CheckState }): void
   approve(req: {
     title: string
     lines: string[]
@@ -172,11 +175,16 @@ export function App(props: AppProps) {
   // What earlier runs taught elia about this project — surfaced once, in the
   // header, so the operator can see what's being carried in. See
   // docs/terminal-ui-redesign-plan.md WS4.
-  const lessonCount = useMemo(() => {
+  // Next to the count, what the randomized trials say about them — the one
+  // number that separates a memory from a pile of notes.
+  const lessonTally = useMemo(() => {
     try {
-      return loadLessons().length
+      const lessons = loadLessons()
+      if (lessons.length === 0) return { count: 0, helps: 0, hurts: 0 }
+      const standing = lessonStanding(lessons.map((lesson) => lesson.key ?? lessonKey(lesson.text)), lessonTrials())
+      return { count: lessons.length, helps: standing.helps, hurts: standing.hurts }
     } catch {
-      return 0
+      return { count: 0, helps: 0, hurts: 0 }
     }
   }, [])
   // Where this session runs — the status row already carries repo ⎇ branch.
@@ -194,7 +202,9 @@ export function App(props: AppProps) {
       version: props.version,
       greeting: props.greeting,
       location,
-      lessons: lessonCount,
+      lessons: lessonTally.count,
+      lessonsHelp: lessonTally.helps,
+      lessonsHurt: lessonTally.hurts,
       model: routing === 'auto' ? `auto · ${named}` : named,
     })
   }
@@ -259,6 +269,9 @@ export function App(props: AppProps) {
   // layer last reported; running tools and the stream mode outrank it.
   const [status, setStatus] = useState('')
   const [runningTools, setRunningTools] = useState<{ id: string; name: string; activity: string }[]>([])
+  const [checks, setChecks] = useState<CheckChip[]>([])
+  // Plan steps elia ticked on evidence this turn, and what proved each.
+  const [planEvidence, setPlanEvidence] = useState<ReadonlyMap<string, StepProof>>(new Map())
   const [streamMode, setStreamMode] = useState<'thinking' | 'writing' | null>(null)
   // Tokens and the last sign of life change on every streamed chunk; the
   // indicator reads them each frame, so they live in a ref, not in state.
@@ -440,6 +453,8 @@ export function App(props: AppProps) {
       setBusy(true)
       setStatus('')
       setRunningTools([])
+      setChecks([])
+      setPlanEvidence(new Map())
       setStreamMode(null)
       progress.current = { tokens: 0, lastAt: startedAt }
       const outputBefore = sessionUsageSnapshot().usage.outputTokens
@@ -477,6 +492,14 @@ export function App(props: AppProps) {
           // clears whatever it was the end of.
           const underway = a.status === undefined || a.status === 'started' || a.status === 'updated'
           if (a.kind !== 'plan' && !isInternalNudge(a.title)) setStatus(underway ? a.title.replace(/^◆\s*/, '') : '')
+          if (a.kind === 'plan' && a.evidence && Object.keys(a.evidence).length > 0) {
+            const at = Date.now()
+            setPlanEvidence((known) => {
+              const next = new Map(known)
+              for (const [step, proof] of Object.entries(a.evidence!)) if (proof) next.set(stepEvidenceKey(step), { text: proof, at })
+              return next
+            })
+          }
           if (a.kind === 'plan') {
             const parsed = providerPlanItems(a.detail)
             if (parsed.length > 0) {
@@ -521,6 +544,10 @@ export function App(props: AppProps) {
           setRunningTools((running) => [...running, { id: c.id, name: c.name, activity: toolActivity(c) }])
           store.toolStart(c)
         },
+        onCheck: (event) => {
+          alive()
+          setChecks((chips) => applyCheckEvent(chips, event))
+        },
         approve: (req) =>
           new Promise<ApprovalResult>((resolve) =>
             setApproval({ ...req, resolve: (r) => { setApproval(null); resolve(r) } }),
@@ -547,6 +574,11 @@ export function App(props: AppProps) {
         store.error(`Error: ${error instanceof Error ? error.message : String(error)}`)
       } finally {
         abortRef.current = null
+        // A lesson that landed in the last moment of the turn is still
+        // flaring; let it finish before the receipt pushes it into scrollback.
+        // Well under a second, and only on a turn that learned something.
+        const flareHold = motionReduced || abortedRef.current ? 0 : flareHoldMs(store.turnItems())
+        if (flareHold > 0) await new Promise((resolve) => setTimeout(resolve, flareHold))
         // An escalated run's plan, read fresh from the workers as the turn ends.
         if (runStepsRef.current.length > 0) {
           turnPlan.current = runPlanFromWorkers(runStepsRef.current, taskSessions.list(), sessionIdRef.current)
@@ -574,6 +606,7 @@ export function App(props: AppProps) {
         setBusy(false)
         setStatus('')
         setRunningTools([])
+        setChecks([])
         setStreamMode(null)
         // A plan-mode turn just proposed — offer to run it.
         if (modeRef.current === 'plan') setPlanReady(true)
@@ -804,7 +837,13 @@ export function App(props: AppProps) {
   const planStep = visiblePlan.find((item) => item.status === 'in_progress')?.content
   const workingText = workingLabel({
     runningTools: runningTools.map((tool) => tool.activity),
-    activity: status,
+    // The chips name each check, so "Verifying — bunx tsc --noEmit, bun test"
+    // only needs to say it is verifying (and where).
+    // A check running with nothing else named is the work being verified —
+    // not "Thinking it through", which is what the search path left it at.
+    activity: checks.length > 0
+      ? status.startsWith('Verifying') ? status.replace(/^(Verifying.*?) — .*$/, '$1') : checks.some((chip) => chip.state === 'running') ? 'Verifying' : status
+      : status,
     thinking: streamMode === 'thinking',
     writing: streamMode === 'writing',
     planStep,
@@ -849,7 +888,7 @@ export function App(props: AppProps) {
           done" parked above the input only competes with it. */}
       {!modalOpen && (busy || planReady || visiblePlan.length > 0) && (
         <ErrorBoundary area="workspace panel" onError={boundaryError}>
-          <WorkspacePanel plan={visiblePlan} agents={agents} since={sessionStartedAt} sessionId={sessionId} expanded={expandedAll} />
+          <WorkspacePanel plan={visiblePlan} agents={agents} since={sessionStartedAt} sessionId={sessionId} expanded={expandedAll} evidence={planEvidence} />
         </ErrorBoundary>
       )}
       {previewUrl && !modalOpen && (
@@ -869,9 +908,10 @@ export function App(props: AppProps) {
           label={workingText}
           progress={progress}
           thinking={streamMode === 'thinking'}
-          waitingOnModel={runningTools.length === 0}
+          waitingOnModel={runningTools.length === 0 && !checks.some((chip) => chip.state === 'running')}
           steeringPending={steeringCount}
           tip={tip}
+          checks={checks}
         />
       )}
       {showHelp && <HelpOverlay onClose={() => setShowHelp(false)} />}
