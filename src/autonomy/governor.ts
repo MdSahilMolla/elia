@@ -850,7 +850,19 @@ export function blockedInUnattendedMode(command: string, cwd = process.cwd()): b
   return assessCommand(command, cwd).risk === 'critical'
 }
 
-function assessCommand(command: string, cwd: string): ActionAssessment {
+/**
+ * Classify a shell command by what it *does*, not where it runs.
+ *
+ * `_cwd` is deliberately unread. Every branch below is a pattern match on the
+ * command string — network egress, package installs, remote execution,
+ * irreversible side effects — and none of those change meaning with the
+ * working directory. Path scoping is a separate gate (workspace-path and
+ * protected-file checks); folding it in here would give one classifier two
+ * jobs and make each harder to reason about. The parameter stays so the
+ * signature matches `blockedInUnattendedMode`, which is exported for
+ * plan-time checking.
+ */
+function assessCommand(command: string, _cwd: string): ActionAssessment {
   if (!command.trim()) return assessment('critical', 'approve', 'shell command is empty or invalid', 'shell', [], false)
   // CR/LF anywhere means a chain or a pasted script, not one verified
   // invocation, and is rejected before any other gate can run. A harmless

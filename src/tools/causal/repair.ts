@@ -1,14 +1,14 @@
 // Repair planner: generate a minimal, low-risk repair plan from causal analysis.
 
 import type { RepairPlan, RepairPlanStep, RootCauseCandidate, SemanticDiff } from './types.ts'
-import { getFileAtHead } from './gitProvenance.ts'
+
 
 /** Generate a repair plan from a root-cause candidate. */
 export async function generateRepairPlan(
   candidate: RootCauseCandidate,
   semanticDiffs: SemanticDiff[],
   targetFile: string,
-  cwd: string,
+  _cwd: string,
 ): Promise<RepairPlan> {
   const steps: RepairPlanStep[] = []
   const alternatives: RepairPlan['alternatives'] = []

@@ -1,6 +1,6 @@
 // Verification orchestrator: run all available checks after a proposed fix.
 
-import type { VerificationCheck, VerificationStatus } from './types.ts'
+import type { VerificationCheck } from './types.ts'
 import { runShell } from '../../shell.ts'
 
 const VERIFY_TIMEOUT_MS = 120_000

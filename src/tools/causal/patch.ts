@@ -74,7 +74,7 @@ async function generateRevertPatch(
   )
 
   const diff = result.exitCode === 0 ? result.stdout : ''
-  const linesChanged = (diff.match(/^\+[^+]/gm)?.length ?? 0) + (diff.match(/^\-[^-]/gm)?.length ?? 0)
+  const linesChanged = (diff.match(/^\+[^+]/gm)?.length ?? 0) + (diff.match(/^-[^-]/gm)?.length ?? 0)
 
   return {
     filePath: targetFile,

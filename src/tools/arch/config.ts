@@ -7,7 +7,7 @@
 
 import { readFileSync } from 'node:fs'
 import { existsSync } from 'node:fs'
-import { join } from 'node:path'
+
 import { normalizePath } from './parser.ts'
 
 /** A named layer with path globs that place modules in it. */

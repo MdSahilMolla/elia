@@ -128,7 +128,7 @@ export async function buildReport(options: ArchReportOptions): Promise<ArchRepor
 
     const repairs = generateRepairPlans(graph, violations, config)
     const stats = graphStats(graph)
-    const cycles = graph.edges.length > 0 ? [...new Set(detected.violations.filter((v) => v.type === 'circular_dependency').map((v) => v.source))].length : 0
+    const cycles = graph.edges.length > 0 ? new Set(detected.violations.filter((v) => v.type === 'circular_dependency').map((v) => v.source)).size : 0
 
     const avg = health.distribution.average
     const summaryParts: string[] = [

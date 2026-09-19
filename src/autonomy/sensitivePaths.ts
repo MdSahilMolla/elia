@@ -1,4 +1,4 @@
-import { basename, relative, sep } from 'node:path'
+import { relative, sep } from 'node:path'
 
 const SENSITIVE_DIRECTORY_NAMES = new Set([
   '.aws',

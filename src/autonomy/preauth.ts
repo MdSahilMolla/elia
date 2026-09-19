@@ -128,7 +128,7 @@ function load(path: string): PreauthFile {
       file = {
         grants: (parsed as PreauthFile).grants
           .filter((g): g is PreauthGrant => {
-            if (!Boolean(g) || typeof g.intent !== 'string' || typeof g.repo !== 'string' || typeof g.branch !== 'string' || typeof g.grantedAt !== 'number' || typeof g.expiresAt !== 'number') return false
+            if (!g || typeof g.intent !== 'string' || typeof g.repo !== 'string' || typeof g.branch !== 'string' || typeof g.grantedAt !== 'number' || typeof g.expiresAt !== 'number') return false
             // A grant with no signature is not one the CLI produced — and a
             // malformed one grants nothing. Signing requires the per-user
             // secret, so a hand-written or repo-committed grant fails here.

@@ -9,7 +9,7 @@ export function editDistance(a: string, b: string): number {
   if (a.length === 0) return b.length
   if (b.length === 0) return a.length
   let prev = Array.from({ length: b.length + 1 }, (_, i) => i)
-  let curr = new Array<number>(b.length + 1)
+  let curr = Array.from({ length: b.length + 1 }, () => 0)
   for (let i = 1; i <= a.length; i += 1) {
     curr[0] = i
     for (let j = 1; j <= b.length; j += 1) {

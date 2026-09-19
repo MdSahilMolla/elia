@@ -41,10 +41,11 @@
   "scripts": {
     "dev": "bun run bin/elia.ts",
     "react": "bun run src/react_server.ts",
-    "test": "bun test --timeout=20000 src/",
+    "test": "bun test --timeout=20000",
     "typecheck": "tsc --noEmit",
+    "lint": "oxlint src/ bin/ scripts/",
     "security:scan": "bun run scripts/security-scan.ts",
-    "prepublishOnly": "bun run typecheck && bun test && bun run security:scan"
+    "prepublishOnly": "bun run typecheck && bun run lint && bun run test && bun run security:scan"
   },
   "keywords": [
     "ai",
@@ -74,6 +75,7 @@
     "@types/react": "^19.2.18",
     "cors": "^2.8.6",
     "ink-testing-library": "^4.0.0",
+    "oxlint": "1.83.0",
     "pptxgenjs": "4.0.1",
     "react-dom": "^19.3.0"
   }

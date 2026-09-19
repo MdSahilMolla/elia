@@ -1,6 +1,6 @@
 import { describe, expect, it, beforeAll, afterAll } from 'bun:test'
 import { runCrossProjectLearn, hashCode, getProjectFingerprint, loadStore, saveStore, scoreRelevance, validatePatternCategory, type Pattern } from './crossProjectLearn.ts'
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 

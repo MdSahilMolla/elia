@@ -119,7 +119,7 @@ describe('durable goal graph', () => {
     // A *different, still-alive* elia process (this test's own pid) holds a
     // valid lease: the caller must refuse to stamp over it and start a second
     // execution of the same durable action.
-    const options = graph.state().actions[0]
+    
     const graphPath = join(temporaryDirectories.at(-1)!, 'goal-graph.json')
     const snapshot = JSON.parse(readFileSync(graphPath, 'utf8'))
     const actionRecord = snapshot.actions.find((a: { id: string }) => a.id === action.action.id)

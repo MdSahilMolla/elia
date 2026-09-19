@@ -32,7 +32,7 @@ FILES['caller.ts'] = `import { hub } from './hub'\nexport const caller = hub\n`
 FILES['lonely.ts'] = `export const lonely = 1\n`
 
 describe('violations (inferred statistics)', () => {
-  let fixture: Fixture
+  let _fixture: Fixture
   let apiDispose: { api: API; snapshot: Snapshot } | undefined
   let program: Program
   const root = normalizePath(mkdtempSync(join(tmpdir(), 'arch-viol-stats')))
@@ -44,7 +44,7 @@ describe('violations (inferred statistics)', () => {
   }
 
   beforeAll(async () => {
-    fixture = createFixture(root, FILES, { includeBase: false, include: ['**/*.ts'] })
+    _fixture = createFixture(root, FILES, { includeBase: false, include: ['**/*.ts'] })
     const { api, snapshot, program: p } = await openProject(opts())
     apiDispose = { api, snapshot }
     program = p

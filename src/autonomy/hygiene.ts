@@ -74,7 +74,7 @@ const SCRATCH_EXT = /\.(?:log|tmp|bak|orig|rej|swp|swo)$/i
  * look perfectly ordinary — a run left `tmp/check.js` behind, and `check.js`
  * matches nothing suspicious until you notice where it lives.
  */
-const SCRATCH_DIR = /(?:^|[\/])(?:tmp|temp|scratch|junk|playground|sandbox)[\/]/i
+const SCRATCH_DIR = /(?:^|[/])(?:tmp|temp|scratch|junk|playground|sandbox)[/]/i
 
 // KNOWN_KEY_FORMATS (issuer-shaped credentials) is shared with the repo's own
 // CI secret scan — see src/secretFormats.ts.

@@ -1,5 +1,5 @@
 import { describe, expect, it, beforeAll, afterAll } from 'bun:test'
-import { runFederatedCollab, sanitizeInboundPattern, receiveFromInbox, loadStore, type FederatedPattern } from './federatedCollab.ts'
+import { runFederatedCollab, sanitizeInboundPattern, receiveFromInbox, loadStore } from './federatedCollab.ts'
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'

@@ -77,7 +77,8 @@ test('web_search normalizes Exa results and sends date/domain filters', async ()
   let request: RequestInit | undefined
   globalThis.fetch = (async (_url, init) => { request = init; return new Response(JSON.stringify({ results: [{ title: 'Primary source', url: 'https://example.gov/report', publishedDate: '2026-08-01T00:00:00Z', highlights: ['Material evidence'] }] }), { status: 200 }) }) as typeof fetch
   const result = await webSearchTool.execute({ query: 'trade disruption', includeDomains: ['example.gov'], startPublishedDate: '2026-01-01', count: 5 })
-  expect((request?.headers as Record<string, string>)['x-api-key']).toBe('exa-key')
+  expect(request).toBeDefined()
+  expect((request!.headers as Record<string, string>)['x-api-key']).toBe('exa-key')
   expect(String(request?.body)).toContain('example.gov')
   expect(result).toContain('Search provider: exa')
   expect(result).toContain('Material evidence')
@@ -89,7 +90,8 @@ test('web_search normalizes Serper organic results', async () => {
   globalThis.fetch = (async (url, init) => { calledUrl = String(url); request = init; return new Response(JSON.stringify({ organic: [{ title: 'Policy notice', link: 'https://example.gov/policy', snippet: 'Official notice', date: 'Aug 1, 2026' }] }), { status: 200 }) }) as typeof fetch
   const result = await webSearchTool.execute({ query: 'policy', country: 'us', language: 'en' })
   expect(calledUrl).toBe('https://google.serper.dev/search')
-  expect((request?.headers as Record<string, string>)['X-API-KEY']).toBe('serper-key')
+  expect(request).toBeDefined()
+  expect((request!.headers as Record<string, string>)['X-API-KEY']).toBe('serper-key')
   expect(result).toContain('Search provider: serper')
   expect(result).toContain('Policy notice')
 })

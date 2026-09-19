@@ -50,7 +50,7 @@ const RULE_FILES: Record<string, string> = {
 }
 
 describe('violations (configured architecture)', () => {
-  let fixture: Fixture
+  let _fixture: Fixture
   let apiDispose: { api: API; snapshot: Snapshot } | undefined
   let program: Program
   const root = normalizePath(mkdtempSync(join(tmpdir(), 'arch-viol-rules')))
@@ -67,7 +67,7 @@ describe('violations (configured architecture)', () => {
   }
 
   beforeAll(async () => {
-    fixture = createFixture(root, RULE_FILES, { includeBase: false })
+    _fixture = createFixture(root, RULE_FILES, { includeBase: false })
     writeFileSync(join(root, 'arch.json'), JSON.stringify(RULES))
     const { api, snapshot, program: p } = await openProject(opts())
     apiDispose = { api, snapshot }

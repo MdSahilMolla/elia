@@ -31,17 +31,6 @@ export interface DelegationToolOptions {
   runFleet?: typeof import('../autonomy/fleet.ts').runFleet
 }
 
-interface ChildAssignmentInput {
-  id: string
-  title: string
-  role: RoleName
-  prompt: string
-  files: string[]
-  dependsOn: string[]
-  acceptanceCriteria: string[]
-  verificationCommands: string[]
-  sideEffects: string[]
-}
 
 /**
  * Creates the only recursive delegation surface in Elia.

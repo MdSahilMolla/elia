@@ -177,7 +177,7 @@ export function moduleHealth(
   graph: DepGraph,
   moduleRel: string,
   violations: Violation[],
-  config: ArchitectureConfig = {},
+  _config: ArchitectureConfig = {},
 ): ModuleHealth | null {
   const node = [...graph.nodes.values()].find((n) => n.relativePath === moduleRel)
   if (!node) return null

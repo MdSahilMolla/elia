@@ -96,7 +96,7 @@ for (const file of readdirSync(dir).filter((name) => name.endsWith('.json') && !
       const tool = tools[index]!
       // Recordings redact tool-input paths; the live ToolEvent has them. A write's
       // result still says where it landed ("… at D:\…").
-      const input: Record<string, unknown> = { ...(tool.input ?? {}) }
+      const input: Record<string, unknown> = { ...tool.input }
       if (typeof input.path === 'string' && input.path.includes('[REDACTED]')) {
         const landed = / at ([A-Za-z]:[\\/][^\s`]+)/.exec(String(tool.result ?? ''))
         if (landed) input.path = landed[1]

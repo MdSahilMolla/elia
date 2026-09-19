@@ -11,8 +11,8 @@ interface PreviewRow extends DiffRow {
 
 function toRow(line: string): PreviewRow {
   const text = line.replace(/\t/g, '  ')
-  if (/^\+ /.test(text) || text === '+') return { kind: 'add', text: text.slice(2), raw: text }
-  if (/^- /.test(text) || text === '-') return { kind: 'del', text: text.slice(2), raw: text }
+  if (text.startsWith('+ ') || text === '+') return { kind: 'add', text: text.slice(2), raw: text }
+  if (text.startsWith('- ') || text === '-') return { kind: 'del', text: text.slice(2), raw: text }
   return { kind: 'ctx', text, raw: text }
 }
 

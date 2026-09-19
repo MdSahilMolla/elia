@@ -180,7 +180,7 @@ test('once mode never claims a second task after a TaskAssigned races the first 
 }, TIMEOUT)
 
 test('agent.control stop aborts the in-flight job and rejects a zombie heartbeat (regression)', async () => {
-  const { store, owner, created, server, startRuntime } = await fixture()
+  const { store, owner, created, startRuntime } = await fixture()
   let sawAbort = false
   const executor: AgentExecutor = async (job) => {
     await job.progress('working')

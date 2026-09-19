@@ -141,7 +141,7 @@ export function classifyEdgeCase(line: string, filePath: string): EdgeCase | nul
   return null
 }
 
-export function classifyExploitVector(line: string, filePath: string): ExploitVector | null {
+export function classifyExploitVector(line: string, _filePath: string): ExploitVector | null {
   const trimmed = line.trim()
 
   if (/req\.params|req\.query|req\.body/.test(trimmed) && !/sanitize|validate|escape/.test(trimmed)) {
@@ -220,7 +220,7 @@ export function adversarialAnalyze(diff: string, opts: { minSeverity?: Adversari
     else if (ec.severity === 'medium') riskScore += 5
     else riskScore += 1
   }
-  for (const ev of uniqueExploits) riskScore += 20
+  for (const _ev of uniqueExploits) riskScore += 20
   riskScore = Math.min(100, riskScore)
 
   const fileCount = blocks.length

@@ -50,9 +50,14 @@ export function assignLayers(graph: DepGraph, config: ArchitectureConfig): Map<s
   return layers
 }
 
-function layerIndex(layers: Map<string, string>, path: string): number {
-  return [...layers.values()].indexOf(layers.get(path) ?? '')
-}
+// A `layerIndex` helper used to sit here, unused. It was also wrong:
+// `layers` maps module path -> layer name, so `[...layers.values()]` is one
+// entry per module, and `.indexOf(name)` returned the position of the first
+// module in that layer rather than the layer's ordinal. Layer-ordering
+// violations (an upper layer importing a lower one) are therefore not
+// detected today. Restoring that check means deciding what defines the order
+// — config declaration order, or inference — which is a feature with its own
+// test, not a lint cleanup, so the broken helper is removed rather than wired.
 
 function severityFor(critical: boolean): Severity {
   return critical ? 'critical' : 'error'

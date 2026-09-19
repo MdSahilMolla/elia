@@ -100,7 +100,7 @@ export function shellView(text: string): { command: string; output: string[]; ex
       if (code[1] !== '0') exit = `exit ${code[1]}`
       continue
     }
-    if (/^timed out after /.test(line)) {
+    if (line.startsWith('timed out after ')) {
       exit = line
       continue
     }

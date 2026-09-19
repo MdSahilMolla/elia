@@ -32,7 +32,7 @@ export class McpHttpClient implements McpTransport {
       throw new Error(`connector "${config.name}" uses the legacy SSE transport, which elia does not support — ask the provider for a Streamable HTTP (\`/mcp\`) endpoint`)
     }
     this.url = config.url
-    this.headers = { ...(config.headers ?? {}) }
+    this.headers = { ...config.headers }
   }
 
   async connect(): Promise<void> {

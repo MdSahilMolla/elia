@@ -31,7 +31,7 @@ interface TurnUiHooks {
   onRunPlan?: (steps: { id: string; title: string }[]) => void
 }
 import { playIntro } from './ui/character.ts'
-import { ZERO_USAGE, addUsage, getSessionSummaryLine, recordTopLevelTurn, formatUsageLine, formatElapsed, sessionUsageSnapshot, setCurrentUsageModel, type SessionUsageSnapshot } from './usage.ts'
+import { ZERO_USAGE, addUsage, getSessionSummaryLine, recordTopLevelTurn, formatUsageLine, sessionUsageSnapshot, setCurrentUsageModel, type SessionUsageSnapshot } from './usage.ts'
 import { createSlashPrompt, type SlashCommand } from './ui/slashPrompt.ts'
 import { customCommandsAsSlashEntries, loadCustomCommands, resolveCustomCommand } from './commands/loader.ts'
 import { collectPromptInjects, fireLifecycleEvent } from './autonomy/lifecycleHooks.ts'

@@ -23,7 +23,7 @@ import { Orchestrator } from './orchestrator.ts'
 import { dispatchRpc, RpcError, type RpcContext } from './rpc.ts'
 import { isWorkspaceRpcRequest, WORKSPACE_PROTOCOL_VERSION, type WorkspaceServerMessage } from './protocol.ts'
 import { HEARTBEAT_INTERVAL_MS } from './types.ts'
-import type { PersistedEvent } from './events.ts'
+
 
 const MAX_MESSAGE_LENGTH = 200_000
 

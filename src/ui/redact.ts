@@ -16,7 +16,7 @@ const SECRET_KEY = /(api[_-]?key|token|secret|password|passwd|authorization|cook
 //  5. a `Bearer <token>` header
 //  6. a base64 blob that ends in `=`/`==` padding — a filesystem path does not
 const SECRET_VALUE =
-  /(\beyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\b|(?:sk|pk|rk|re|ey)[-_][A-Za-z0-9._\-]{8,}|(?:xox[baprs]-|gh[pousr]_|AIza|AKIA|ASIA)[A-Za-z0-9_\-/]{8,}|\b[a-z]{2,10}_[A-Za-z0-9]{16,}\b|Bearer\s+[A-Za-z0-9._\-/+=]{8,}|\b[A-Za-z0-9+/]{16,}={1,2})/g
+  /(\beyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\b|(?:sk|pk|rk|re|ey)[-_][A-Za-z0-9._-]{8,}|(?:xox[baprs]-|gh[pousr]_|AIza|AKIA|ASIA)[A-Za-z0-9_\-/]{8,}|\b[a-z]{2,10}_[A-Za-z0-9]{16,}\b|Bearer\s+[A-Za-z0-9._\-/+=]{8,}|\b[A-Za-z0-9+/]{16,}={1,2})/g
 
 // Shapeless opaque runs, checked separately because they carry no prefix to
 // vouch for them:

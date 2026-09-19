@@ -9,13 +9,13 @@ import type { Program } from 'typescript/unstable/async'
 import type { API, Snapshot } from 'typescript/unstable/async'
 
 describe('graph', () => {
-  let fixture: Fixture
+  let _fixture: Fixture
   let apiDispose: { api: API; snapshot: Snapshot } | undefined
   let program: Program
   const root = normalizePath(mkdtempSync(join(tmpdir(), 'arch-graph')))
 
   beforeAll(async () => {
-    fixture = createFixture(root)
+    _fixture = createFixture(root)
     const { api, snapshot, program: p } = await openProject({
       projectRoot: normalizePath(root),
       tsconfigPath: normalizePath(join(root, 'tsconfig.json')),

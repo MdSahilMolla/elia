@@ -150,7 +150,7 @@ export function inBackground(work: () => Promise<unknown>): void {
 }
 
 export async function settleSystemOne(): Promise<void> {
-  while (pending.size > 0) await Promise.all([...pending])
+  while (pending.size > 0) await Promise.all(pending)
 }
 
 export function resolvePrediction(id: string | undefined, actual: boolean, dir?: string): void {

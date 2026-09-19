@@ -40,7 +40,7 @@ function handle(message: { id?: number; method?: string; params?: Record<string,
   }
   if (message.method === 'textDocument/didChange') {
     const doc = message.params?.textDocument as { uri: string }
-    const change = (message.params?.contentChanges as { text: string }[])[0]
+    const change = (message.params?.contentChanges as { text: string }[] | undefined)?.[0]
     publishFor(doc.uri, change?.text ?? '')
     return
   }

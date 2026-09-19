@@ -1,9 +1,7 @@
 // Output formatting: produce explainable, structured reports.
 
 import type {
-  CausalDebugResult, CausalFixResult, RootCauseCandidate,
-  SemanticDiff, ProvenanceEntry, ReproductionResult, CounterfactualResult,
-  VerificationCheck, RiskAssessment, RepairPlan, GeneratedPatch, RegressionTest,
+  CausalDebugResult, CausalFixResult,
 } from './types.ts'
 
 /** Format the complete causal debug result. */

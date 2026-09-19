@@ -1,5 +1,5 @@
 export { ELIA_ROOT, paths, stateDir } from './statePaths.ts'
-import { ELIA_ROOT, paths, stateDir } from './statePaths.ts'
+import { paths } from './statePaths.ts'
 import {
   PROVIDER_PRESET_NAMES,
   providerPresetDefaultModel,

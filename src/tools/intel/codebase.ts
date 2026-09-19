@@ -395,7 +395,7 @@ function collectDependencies(rootResolved: string): CodebaseDependency[] {
     try {
       const text = readFileSync(cargo, 'utf-8')
       for (const section of text.split('\n')) {
-        const match = /^([A-Za-z0-9_\-]+)\s*=\s*\{?\s*version\s*=\s*["']([^"']+)["']/.exec(section.trim())
+        const match = /^([A-Za-z0-9_-]+)\s*=\s*\{?\s*version\s*=\s*["']([^"']+)["']/.exec(section.trim())
         if (match) deps.push({ name: match[1]!, version: match[2]!, kind: 'runtime', present: true })
       }
     } catch {

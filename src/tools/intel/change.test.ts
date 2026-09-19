@@ -2,7 +2,7 @@ import { describe, expect, it, beforeAll, afterAll } from 'bun:test'
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { analyzeFileFromDiff, parseGitNameStatus, buildChangeModel, type ChangedFile } from './change.ts'
+import { analyzeFileFromDiff, parseGitNameStatus, buildChangeModel } from './change.ts'
 
 describe('analyzeFileFromDiff', () => {
   it('counts additions and deletions, ignoring headers and context', () => {

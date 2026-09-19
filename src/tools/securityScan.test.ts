@@ -2,7 +2,7 @@ import { describe, expect, it, beforeAll, afterAll } from 'bun:test'
 import { runSecurityTool, validateScanInput, type SecurityToolContext } from './securityScan.ts'
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join, sep } from 'node:path'
+import { join } from 'node:path'
 
 describe('validateScanInput', () => {
   it('rejects empty or missing fields', () => {

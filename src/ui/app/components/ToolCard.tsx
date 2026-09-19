@@ -146,7 +146,7 @@ function seconds(ms: number | undefined): string {
 
 /** First meaningful line of a result — the one-line gist for tools with no custom summary. */
 function gist(result: string): string {
-  const line = result.split('\n').map((l) => l.trim()).find((l) => l && !/^```/.test(l)) ?? ''
+  const line = result.split('\n').map((l) => l.trim()).find((l) => l && !l.startsWith('```')) ?? ''
   return redactText(line, 160)
 }
 

@@ -1,5 +1,5 @@
 import { join } from 'node:path'
-import { config, paths, systemPromptForMode, tierConfig, turnContextPrompt } from '../config.ts'
+import { config, paths, systemPromptForMode, turnContextPrompt } from '../config.ts'
 import { withFileLockAsync } from '../fileLock.ts'
 import { lastAssistantText, runAgentLoop, type ConversationMessage, type ToolEvent } from '../agentLoop.ts'
 import { taskTool } from '../tools/task.ts'

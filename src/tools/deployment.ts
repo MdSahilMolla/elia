@@ -275,7 +275,7 @@ function netlifySiteId(_cwd: string): string | undefined {
 
 function deploymentUrl(provider: DeploymentProvider, stdout: string, stderr: string): string | undefined {
   if (provider === 'vercel') {
-    const candidate = [...stdout.split(/\s+/), ...stderr.split(/\s+/)].find((value) => /^https:\/\/[A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=%-]+$/.test(value) && (value.includes('vercel.') || value.includes('vercel.sh')))
+    const candidate = [...stdout.split(/\s+/), ...stderr.split(/\s+/)].find((value) => /^https:\/\/[A-Za-z0-9._~:/?#[\]@!$&'()*+,;=%-]+$/.test(value) && (value.includes('vercel.') || value.includes('vercel.sh')))
     return candidate?.replace(/[),.;]+$/, '')
   }
 
@@ -283,7 +283,7 @@ function deploymentUrl(provider: DeploymentProvider, stdout: string, stderr: str
   for (const key of ['deploy_url', 'url', 'ssl_url', 'site_url']) {
     if (typeof parsed?.[key] === 'string' && /^https?:\/\//.test(parsed[key])) return parsed[key]
   }
-  const candidate = [...stdout.split(/\s+/), ...stderr.split(/\s+/)].find((value) => /^https:\/\/[A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=%-]+$/.test(value) && value.includes('netlify.'))
+  const candidate = [...stdout.split(/\s+/), ...stderr.split(/\s+/)].find((value) => /^https:\/\/[A-Za-z0-9._~:/?#[\]@!$&'()*+,;=%-]+$/.test(value) && value.includes('netlify.'))
   return candidate?.replace(/[),.;]+$/, '')
 }
 

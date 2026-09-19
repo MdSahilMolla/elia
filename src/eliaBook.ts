@@ -426,7 +426,7 @@ function sessionProcedure(snapshot: EliaBookSessionSnapshot): { procedure: EliaB
       successes: [
         `${userPrompts.length} reusable session instruction(s) were captured.`,
         ...(assistantReplies.length > 0 ? [`Recorded result: ${cleanText(assistantReplies.at(-1), 500)}`] : []),
-        ...([...new Set(toolUses.map((block) => block.name))].length > 0
+        ...(new Set(toolUses.map((block) => block.name)).size > 0
           ? [`Tools used: ${[...new Set(toolUses.map((block) => block.name))].join(', ')}.`]
           : []),
       ],

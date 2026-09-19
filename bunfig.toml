@@ -2,3 +2,9 @@
 # Pin the terminal size before any test module loads, so Ink never shells out
 # to `tput` mid-render. See scripts/testPreload.ts for the full story.
 preload = ["./scripts/testPreload.ts"]
+
+# `bun test` discovers from the repo root, and elia builds throwaway projects
+# under workspace/ — some with deliberately-failing fixtures. A positional
+# filter does not exclude them: `bun test src/` is a substring match, and
+# `workspace/<proj>/src/x.test.js` contains "src/". Pin discovery to this tree.
+root = "src"

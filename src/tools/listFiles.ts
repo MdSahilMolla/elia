@@ -10,7 +10,7 @@ const MAX_GLOB_LENGTH = 2_000
 
 /** Rejects patterns whose scan root lies outside the workspace being searched. */
 function patternEscapesWorkspace(pattern: string): boolean {
-  if (/^[A-Za-z]:/.test(pattern) || /^[\\/]/.test(pattern) || /^~\//.test(pattern)) return true
+  if (/^[A-Za-z]:/.test(pattern) || /^[\\/]/.test(pattern) || pattern.startsWith('~/')) return true
   return pattern.split(/[\\/]/).some((segment) => segment === '..')
 }
 

@@ -476,7 +476,7 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
     const observed: { name: string; input: Record<string, unknown>; result: string }[] = []
     // Every outcome in the order the model issued the calls — the batch runs
     // concurrently, but "the earliest open step" must mean the model's order.
-    const outcomes: ToolOutcome[] = new Array(toolUseBlocks.length)
+    const outcomes: ToolOutcome[] = new Array<ToolOutcome>(toolUseBlocks.length)
 
     const toolResults = await runWithConcurrencyLimit(toolUseBlocks, toolBatchConcurrency(toolUseBlocks), async (block, blockIndex) => {
       const tool = toolsByName[block.name]
@@ -1123,7 +1123,7 @@ export async function runWithConcurrencyLimit<T, R>(
   limit: number,
   fn: (item: T, index: number) => Promise<R>,
 ): Promise<R[]> {
-  const results: R[] = new Array(items.length)
+  const results: R[] = new Array<R>(items.length)
   let cursor = 0
 
   async function worker(): Promise<void> {

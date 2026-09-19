@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { join } from 'node:path'
 import type { ToolEvent } from '../agentLoop.ts'
 import type { CriticVerdict, Proposal } from './types.ts'
 import { currentAgent } from './context.ts'

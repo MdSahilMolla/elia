@@ -12,7 +12,6 @@ import { listFilesTool } from '../../tools/listFiles.ts'
 import { grepTool } from '../../tools/grep.ts'
 import { writeFileTool } from '../../tools/writeFile.ts'
 import type { Tool } from '../../tools/types.ts'
-import { totalTokens } from '../../usage.ts'
 import { LATENCY_SCENARIOS, type LatencyScenario } from './scenarios.ts'
 import { createScriptedProvider, type ScriptedProviderOptions } from './scriptedProvider.ts'
 

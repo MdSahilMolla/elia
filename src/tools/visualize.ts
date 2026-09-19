@@ -59,7 +59,7 @@ export const visualizeTool: Tool = {
       await captureBeforeWrite(path)
       writeSecureFile(path, content)
     }
-    return [`Created ${visualization.type} visualization \"${terminalText(visualization.title)}\".`, `SVG: ${relative(cwd, svgPath).replace(/\\/g, '/')}`, `Markdown: ${relative(cwd, markdownPath).replace(/\\/g, '/')}`, '', terminal].join('\n')
+    return [`Created ${visualization.type} visualization "${terminalText(visualization.title)}".`, `SVG: ${relative(cwd, svgPath).replace(/\\/g, '/')}`, `Markdown: ${relative(cwd, markdownPath).replace(/\\/g, '/')}`, '', terminal].join('\n')
   },
 }
 

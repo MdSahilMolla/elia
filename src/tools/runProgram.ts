@@ -1,5 +1,5 @@
 import type { Tool } from './types.ts'
-import { DEFAULT_SHELL_TIMEOUT_MS, formatShellResult, runProcess } from '../shell.ts'
+import { formatShellResult, runProcess } from '../shell.ts'
 import { currentAgent } from '../autonomy/context.ts'
 import { commandMayReadSensitiveData } from '../autonomy/sensitivePaths.ts'
 import { defaultTimeoutForCommand, resolveRunCwd, workspaceScopedEnv } from './runCommand.ts'

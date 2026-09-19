@@ -144,9 +144,9 @@ export function testSourceSiblings(fromPath: string, cwd: string): string[] {
     candidates.push(`${dir}${base.replace(jsTest, '')}${ext}`)
   } else if (isJsTs) {
     candidates.push(`${dir}${base}.test${ext}`, `${dir}${base}.spec${ext}`)
-  } else if (isPy && /^test_/.test(base)) {
+  } else if (isPy && base.startsWith('test_')) {
     candidates.push(`${dir}${base.replace(/^test_/, '')}${ext}`)
-  } else if (isPy && /_test$/.test(base)) {
+  } else if (isPy && base.endsWith('_test')) {
     candidates.push(`${dir}${base.replace(/_test$/, '')}${ext}`)
   } else if (isPy) {
     candidates.push(`${dir}test_${base}${ext}`, `${dir}${base}_test${ext}`)

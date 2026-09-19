@@ -8,7 +8,7 @@ if (tracked.exitCode !== 0) throw new Error(new TextDecoder().decode(tracked.std
 // token is scan-only: generated app code legitimately builds `Bearer ${token}`.
 const suspicious: { name: string; pattern: RegExp }[] = [
   ...KNOWN_KEY_FORMATS,
-  { name: 'a literal bearer token', pattern: /\bBearer\s+[A-Za-z0-9._\-]{24,}\b/ },
+  { name: 'a literal bearer token', pattern: /\bBearer\s+[A-Za-z0-9._-]{24,}\b/ },
 ]
 // A line carrying this marker is a deliberate fake — a redaction test fixture,
 // a docs example — and is exempt. Same convention as detect-secrets.

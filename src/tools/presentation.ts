@@ -46,7 +46,7 @@ const NAVY = '121F34'
 const BLUE = '2E70BC'
 const TEAL = '269B91'
 const ORANGE = 'EB8F34'
-const RED = 'BE4545'
+
 const LIGHT = 'EFF4F8'
 const MID = '667484'
 const WHITE = 'FFFFFF'
@@ -63,9 +63,6 @@ function money(value: number): string {
   return `${sign}$${absolute.toFixed(0)}`
 }
 
-function pct(value: number): string {
-  return `${(value * 100).toFixed(1)}%`
-}
 
 function ensureParent(path: string): void {
   mkdirSync(dirname(path), { recursive: true })

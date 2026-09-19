@@ -14,8 +14,8 @@ test('renderDiff shows a line-number gutter and +/- markers without color', () =
   const diff = unifiedDiff('a\nb\nc\n', 'a\nB\nc\n', 'x.txt')
   const lines = renderDiff(diff, { color: false })
   expect(lines.some((line) => line.includes('@@'))).toBe(true)
-  expect(lines.some((line) => / - b$/.test(line))).toBe(true)
-  expect(lines.some((line) => / \+ B$/.test(line))).toBe(true)
+  expect(lines.some((line) => line.endsWith(' - b'))).toBe(true)
+  expect(lines.some((line) => line.endsWith(' + B'))).toBe(true)
 })
 
 test('renderDiff truncates at maxLines and appends an expand hint', () => {

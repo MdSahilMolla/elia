@@ -69,7 +69,7 @@ const SECURITY_IMPORT_HINTS = [
   'totp',
 ]
 
-const PROCESS_HINTS = /\b(exec|spawn|child_process|eval|Function|innerHTML|dangerouslySetInnerHTML)\b/
+
 
 /** Classify what a change touches, purely from the change model. */
 export function identifyChangeNature(change: ChangeModel): ChangeNature[] {
@@ -208,7 +208,7 @@ const UNREASONABLE = new Set(['causal_debug', 'arch_drift', 'temporal_analysis',
  */
 export function planAnalysis(trigger: AnalysisTrigger, context: PlanContext = {}): AnalysisPlan {
   const nature = context.change ? identifyChangeNature(context.change) : []
-  const steps: AnalysisStep[] = [...BASE_STEPS[trigger].map((s) => ({ ...s }))]
+  const steps: AnalysisStep[] = BASE_STEPS[trigger].map((s) => ({ ...s }))
 
   if (context.change) {
     for (const n of nature) {
@@ -276,7 +276,7 @@ export function prioritizeFindings(findings: AnalysisFinding[]): { actions: Prio
   const severityOrder: Record<AnalysisFinding['importance'], number> = { blocking: 0, important: 1, advisory: 2 }
 
   const sorted = [...findings].sort((a, b) => severityOrder[a.importance] - severityOrder[b.importance])
-  const evidencePresent = sorted.filter((f) => f.evidence.length > 0).length
+  
 
   const actions: PrioritizedAction[] = sorted.map((f) => ({
     action: f.finding,

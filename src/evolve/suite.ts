@@ -4,7 +4,7 @@ import { pathToFileURL } from 'node:url'
 import { runShell } from '../shell.ts'
 import { historyTasks } from './history/suite.ts'
 import { HARD_BENCH_TASKS } from './hardSuite.ts'
-import type { BenchCheck, BenchTask } from './task.ts'
+import type { BenchTask } from './task.ts'
 
 export type { BenchCheck, BenchTask } from './task.ts'
 

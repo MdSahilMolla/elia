@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test'
 import { parseDiff, classifyEdgeCase, classifyExploitVector, adversarialAnalyze, formatReport, assertSeverity, gitDiffForFile } from './adversarialVerify.ts'
-import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from 'node:fs'
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
