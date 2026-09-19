@@ -50,7 +50,34 @@ import { renderWorkspacePanel } from './ui/workspacePanel.ts'
 import { installShutdownHandlers, registerShutdownCleanup } from './ui/shutdown.ts'
 import { redactText } from './ui/redact.ts'
 import { loadUserConfig, userConfigPath, writeUserConfig } from './userConfig.ts'
-import { activeProviderNeedsSetup, removeProviderConfiguration, savedProviderNames, saveProviderConfiguration, type SavedProviderConfiguration } from './providerSettings.ts'
+import { removeProviderConfiguration, savedProviderNames } from './providerSettings.ts'
+import { args, flagValue, hasFlag, positionals, rawArgs, strictInteger, subcommand } from './cli/argv.ts'
+import { printHelp } from './cli/help.ts'
+import { ensureFirstRunProviderSetup, interactiveProviderSetup, prewarmActiveProvider, readSecretInput, readStdinText, runCodexLogin } from './cli/providerSetup.ts'
+
+// These three run before anything else in the process: they are the only flags
+// that must work when no provider is configured and no session exists. They
+// live here rather than beside printHelp because `--help` exiting the process
+// is a dispatcher decision, not a property of the help text — and because
+// `new URL('../package.json', import.meta.url)` below is resolved relative to
+// this file, so moving it one directory deeper silently reads a path that does
+// not exist.
+if (rawArgs.includes('--help') || rawArgs.includes('-h')) {
+  printHelp()
+  process.exit(0)
+}
+
+if (rawArgs.includes('--version') || rawArgs.includes('-v')) {
+  const pkg = JSON.parse(await Bun.file(new URL('../package.json', import.meta.url)).text())
+  console.log(pkg.version)
+  process.exit(0)
+}
+
+// `--profile-turns` is a session-wide diagnostic: every model round-trip records
+// its cache-read/write split and time-to-first-token, and a table prints at the
+// end. Distinct from `elia auto --profile <fast|balanced|thorough>`, which
+// selects a run profile. `ELIA_PROFILE=1` in the environment does the same.
+if (hasFlag('--profile-turns')) process.env.ELIA_PROFILE = '1'
 
 const REPL_COMMANDS: SlashCommand[] = [
   { name: '/model', description: 'switch model / provider' },
@@ -95,8 +122,6 @@ function allSlashCommands(): SlashCommand[] {
   return [...REPL_COMMANDS, ...customCommandsAsSlashEntries(loadCustomCommands())]
 }
 
-const rawArgs = process.argv.slice(2)
-
 /** Beta (experimental) modes — reached via `--beta <name>` on the CLI and `/betamode` in a session. */
 const BETA_MODES = ['sports', 'fitness'] as const
 
@@ -126,244 +151,6 @@ function requestedAgentMode(): AgentMode {
   return 'dev'
 }
 
-const SUBCOMMANDS = ['auto', 'agent', 'evolve', 'gap', 'values', 'distill', 'compounding', 'jev', 'bench', 'bench-latency', 'skills', 'runs', 'fork', 'resume', 'schedule', 'daemon', 'doctor', 'config', 'codex-login', 'control', 'bridge', 'workspace'] as const
-type Subcommand = (typeof SUBCOMMANDS)[number]
-
-function printHelp(): void {
-  console.log(`elia — a general-purpose autonomous agent for your terminal
-
-Usage:
-  elia                        Start an interactive session
-  elia "<prompt>"             Run a single prompt and exit
-  elia --continue, -c         Resume the most recent session in this directory
-  elia --resume <id>          Resume a specific session by id
-  elia --no-escalate          Never auto-route a big "build me an X" request through the autonomous pipeline
-  elia --self                 Started inside elia's own repository, change elia's source without asking
-                              (by default elia asks first there, for anything outside workspace/ and .elia/)
-
-Dev mode (default): elia is the general-purpose development mode for building,
-debugging, testing, refactoring, and operating software. A request that reads as
-a whole new project ("build an end-to-end X") is automatically planned and run
-through the autonomous pipeline — plan, parallel workers, review, verify, repair
-— instead of a single plain turn. Toggle with /auto on|off or --no-escalate.
-
-Execution policy (manual by default): before running a command, elia checks whether it looks
-risky (deletes, sends, spending, publishing, system changes, ...) — only
-risky commands get an "About to: ... run it?" prompt, safe ones just run.
-Once a command starts, safe and reversible work finishes end to end without
-interruptions; irreversible tool actions are separately governed. Pass --yolo/-y
-(or pick "Risk checks" in "/settings" during a session) to skip the pre-flight
-risk prompt while keeping that action governor active.
-
-Autonomous work:
-  elia auto "<goal>"                Plan the work, show you the plan, then execute it with a
-                                     fleet of sub-agents, verify it, repair what failed, and
-                                     record what it learned
-  elia auto "<goal>" --yolo         Same, without waiting for you to approve the plan
-  elia auto "<goal>" --autonomous   Self-supervised alias for --yolo; executes, verifies, repairs, and polishes
-  elia auto "<goal>" --unattended   Run safe, bounded work without routine prompts; critical actions still block
-  elia auto "<goal>" --no-polish     Skip the bounded final quality pass
-  elia auto "<goal>" --fast          Bounded fast path: no polish, one reviewer, one repair, no lesson pass
-  elia auto "<goal>" --thorough      Extra bounded review and repair depth for high-risk changes
-  elia auto "<goal>" --max-run-ms N  Abort the run after N milliseconds (also ELIA_MAX_RUN_MS)
-  elia auto "<goal>" --max-actions N  Bound governed tool requests for this run
-  elia auto "<goal>" --unattended --authorize <intent>[,<intent>...]
-                                     Pre-authorize specific critical intents (e.g.
-                                     deployment.production, github.pr_merge) for this run only, on
-                                     this branch, for a few hours — the one way past the "browser/
-                                     comms/deploy/PR-merge/codex_delegate always refuses unattended"
-                                     wall, without weakening it for anything not named
-  elia auto "<goal>" --variants N   Run N independent implementation attempts in parallel,
-                                     each in its own isolated git worktree, and keep only
-                                     the one that verification — not an LLM's opinion — likes
-                                     best. Costs roughly Nx the execute phase; default is 1
-                                     (today's single-attempt behavior, unchanged)
-
-Multi-agent:
-  elia agent "<request>"      Route the request to one or more specialist personas — Business,
-                              Data, Research, Cybersecurity, Automation, Communications, AI/ML,
-                              Sports, Fitness, Marketing, Finance, or Tech — and answer in their voice. Multi-domain
-                              requests get labeled "## X take" sections plus a combined recommendation.
-  elia agent "<request>" --dry-run  Show routing/persona plan without executing tools or side effects
-
-Office workflows:
-  Agent/autonomous requests can use spreadsheet to inspect, analyze, audit, or safely write
-  Excel workbooks; presentation creates an editable management .pptx plus analysis sidecar.
-
-Self-improvement:
-  elia bench                  Score the current elia against its synthetic benchmark suite
-  elia bench --history        Score it on tasks taken from this repository's own git history
-  elia bench --all            Score it on both suites
-  elia bench --harvest        Rebuild the history task set from git (no model calls)
-  elia bench --split held-out Score only the half whose failures the evolution loop never
-                              shows its proposer (--split shown for the other half)
-  elia bench swe --file <tasks.json> [--sample N] [--out results.json]
-                              Run a SWE-bench-Verified-shaped task file (see src/bench/swe/types.ts) —
-                              real checkout, real agent run, real test execution, scored resolved/
-                              unresolved. elia does not fetch or bundle the real dataset itself; point
-                              --file at a real export. Each instance is a real, billed agent run, so
-                              --sample (default 3) caps how many run, not the whole file.
-  elia bench-latency          Measure elia's own loop/startup/speculation overhead (deterministic,
-                              no API key); --update-baseline to record, --strict to fail on wall drift
-  elia evolve                 Improve elia's own source: hypothesise one change, build it
-                              in a sandbox, and promote it only if the benchmark agrees
-  elia evolve -n 3            Run three generations, each building on the last
-  elia evolve --dry-run       Evaluate candidates but never modify the live source
-
-Learned tools:
-  elia skills                 List the tools elia has written for itself
-  elia skills bundles         List declarative groups of loaded skills
-  elia skills candidates      Show repeated work that could become a new tool
-  elia skills synth           Write a tool for the strongest candidate
-  elia skills trust           Trust this project's .elia/skills so they load on startup
-  elia skills untrust         Revoke a prior trust decision for this project
-  elia skills status          Show whether this project's local skills are trusted
-
-Time travel:
-  elia runs                   List autonomous runs
-  elia runs <id>              Show one run's timeline and its forkable decision points
-  elia fork <id> --at <n> --with "<change>"
-                              Replay that run up to checkpoint <n> and re-plan from there
-  elia resume <id>            Continue a durable goal from its persisted graph and approvals
-
-Background autonomy:
-  elia schedule add --every 1h [--mode battmann] [--max-actions N] "<goal>"  Persist a recurring goal for the local daemon
-  elia schedule list                       Show scheduled goals and last outcomes
-  elia schedule pause|resume|remove <id>  Control a scheduled goal
-  elia schedule run <id>                   Run one scheduled goal immediately
-  elia daemon --once                       Run due schedules once and exit
-  elia daemon --poll-ms 30000             Keep checking due schedules in the foreground
-  elia doctor                              Check native-stack health: eliad daemon, C++ validator, Java bridge
-
-Editor / external integration:
-  elia bridge                              Start the local JSONL-over-stdio bridge (used by the Elia VS Code extension)
-  elia bridge --http [--port 4319] [--host 127.0.0.1]  Same bridge protocol over WebSocket instead of stdio,
-                                            for any external client — SDKs, other editors. Binds to
-                                            localhost only unless --host is set explicitly.
-
-  elia workspace serve                     Start the multi-user, multi-agent collaborative workspace server
-  elia workspace init --name <name>        Bootstrap a workspace and print its owner token
-  elia workspace status | feed [--follow]  Live counts, presence, and the shared activity stream
-  elia workspace --help                    All workspace commands (members, agents, messages, decisions)
-
-Provider setup:
-  First interactive run                    Ask for provider, hidden API key, and model
-  elia config                               Show provider readiness without printing keys
-  elia config set --provider nvidia        Store a provider API key in ~/.elia/config.env
-  elia config set --provider custom --base-url <url>
-                                           Configure any OpenAI-compatible endpoint
-  elia config remove --provider <name>     Remove that provider's saved API key
-  elia codex-login                         Sign in to the installed Codex CLI with ChatGPT
-  Use --api-key-env <NAME> or pipe a key with --api-key-stdin; never pass keys as arguments.
-  In a session, /settings → Provider API keys adds, updates, selects, or removes profiles.
-
-Supervisor controls:
-  elia control status                       Show durable runs and pending operator controls
-  elia control pause <run-id>               Request a safe pause of an active autonomous run
-  elia control stop <run-id>                Request a safe stop of an active autonomous run
-  elia resume <run-id>                      Resume only after reviewing the stopped run receipt
-  --supervised                             Require an interactive approval boundary for auto work
-
-Inside an interactive session:
-  /                            Type "/" to see available commands — up/down to highlight,
-                              tab to accept, enter to run, left/right to edit as usual
-  rewind                      List rewind points for this session
-  rewind <n>                  Restore conversation + files to just before turn <n>
-  /capabilities               List specialist capabilities, risk classes, and output contracts
-  /eliabook                   Open Save this session / Saved Elia Books
-  /eliabook save [book-id]    Save the complete current session as a reusable Book
-  /eliabook saved             Browse saved session playbooks
-  /eliabook create <run-id>   Create a Book from a complete autonomous-run recording
-  /eliabook run <book-id>     Run its active verified procedure in this session
-  /eliabook improve <book-id> <run-id>  Promote a measurably better verified run
-  /mode                       Pick a core mode with arrow keys: dev, cyber, battmann
-  /mode <name>                Switch directly, e.g. /mode cyber, /mode dev ("tech" is an alias for dev)
-  /betamode                   Pick an experimental mode or persona: sports, fitness, marketing,
-                              finance, business, data, research, cybersecurity, automation,
-                              communications, ai, production
-  /betamode <name>            Switch directly, e.g. /betamode sports
-  /settings                   Risk checks (auto/manual), model, reasoning effort, skills,
-                              and compact / clear the conversation
-  /compact [focus]            Summarise the conversation so far into one recallable episode and
-                              continue from the summary; optional focus, e.g. /compact the auth bug
-  /clear                      Start a fresh conversation; the previous one is saved and can be
-                              reopened with elia --resume <id>
-  /model                      Pick a provider/model or enable auto fallback
-  /model auto                 Keep the selected model primary; fail over to another ready provider
-  /model <provider>           Switch provider (e.g. /model groq), keeping its default model
-  /model <model-id>           Switch just the model id, keeping the current provider
-  /thinking                   Pick a reasoning effort with up/down or left/right, enter to switch
-  /thinking off|on            Turn reasoning off, or back on at its last budget
-  /thinking low|medium|high   Switch reasoning effort to a preset token budget
-  /thinking <n>               Switch reasoning to an exact token budget (Anthropic only)
-  /usage                      Live token consumption, context-window fill, and the limits in
-                              effect (context, reasoning, autonomous-run, provider/plan)
-
-  Other:
-  elia --dev                  Start explicitly in dev mode (the default)
-  elia --cyber                Start (or run a one-shot prompt) in cyber mode
-  elia --battmann             Start (or run a one-shot prompt) in Battmann mode — strategic
-                              intelligence across trade, geopolitics, financial markets,
-                              supply chain, policy, and commodities
-  elia --beta <mode>          Start in an experimental mode: sports, fitness
-                              (the old --sports / --fitness flags still work, deprecated)
-  elia --json                 Emit stable JSONL lifecycle events for automation
-  elia --plain                Disable color, animation, and in-place terminal redraws
-  elia --quiet                Print the final answer and essential failures only; keep TTY editing
-  elia --verbose              Include detailed progress output
-  ELIA_MAX_RUN_MS             Default wall-clock budget for autonomous runs; --max-run-ms overrides it
-  --max-actions <n>            Bound governed tool requests for one autonomous run
-  ELIA_TOOL_CONCURRENCY       Read-only tool batches can use up to 8; mutating batches stay capped at 4
-  ELIA_OTEL_ENDPOINT           OTLP/HTTP+JSON collector base URL — mirrors autonomous-run journal events
-                              to it as OTel logs (POST <endpoint>/v1/logs), purely additive; unset (the
-                              default) sends nothing
-  elia --help                 Show this help
-  elia --version              Print the version
-
-  UI output: --json/--jsonl emits machine-readable JSONL events; --plain disables color and redraws;
-  --quiet minimizes progress; --verbose includes additional progress detail. Errors go to stderr
-  in human modes. Sessions auto-save to .elia/sessions/. Configure a provider with elia config set
-  or via .env — see .env.example.
-
-  Diagnostics: --profile-turns (or ELIA_PROFILE=1) records every model call's
-  cache-read/write split and time-to-first-token and prints a table at the end —
-  use it to see how well the prompt cache is holding across a session.
-
-Set ELIA_FAST_PROVIDER/ELIA_FAST_MODEL to give elia a cheap fast tier for recon work; it
-routes investigation there and keeps the strong model for planning, building, and review.`)
-}
-
-if (rawArgs.includes('--help') || rawArgs.includes('-h')) {
-  printHelp()
-  process.exit(0)
-}
-
-if (rawArgs.includes('--version') || rawArgs.includes('-v')) {
-  const pkg = JSON.parse(await Bun.file(new URL('../package.json', import.meta.url)).text())
-  console.log(pkg.version)
-  process.exit(0)
-}
-
-const subcommand = SUBCOMMANDS.includes(rawArgs[0] as Subcommand) ? (rawArgs[0] as Subcommand) : undefined
-const args = subcommand ? rawArgs.slice(1) : rawArgs
-
-function hasFlag(...names: string[]): boolean {
-  return args.some((arg) => names.some((name) => arg === name || arg === `${name}=true`))
-}
-
-// `--profile-turns` is a session-wide diagnostic: every model round-trip records
-// its cache-read/write split and time-to-first-token, and a table prints at the
-// end. Distinct from `elia auto --profile <fast|balanced|thorough>`, which
-// selects a run profile. `ELIA_PROFILE=1` in the environment does the same.
-if (hasFlag('--profile-turns')) process.env.ELIA_PROFILE = '1'
-
-/**
- * Running elia from a filesystem root (`C:\`, `D:\`, `/`) is pathological: the
- * scratch `workspace/` resolves to `C:\workspace`, recursive searches descend
- * into `System Volume Information` / `$RECYCLE.BIN` and fail, and the model has
- * no project to orient against. Warn loudly rather than let a whole session go
- * sideways.
- */
 function warnIfAtFilesystemRoot(): void {
   const cwd = process.cwd()
   const { root } = pathModule.parse(cwd)
@@ -380,41 +167,6 @@ async function printTurnProfileReport(): Promise<void> {
   if (report && !machineReadable) process.stdout.write(`\n${dim(report)}\n`)
 }
 
-
-function flagValue(...names: string[]): string | undefined {
-  for (const name of names) {
-    const index = args.indexOf(name)
-    if (index !== -1) {
-      const value = args[index + 1]
-      return value === undefined || value.startsWith('--') ? '' : value
-    }
-    const inline = args.find((arg) => arg.startsWith(`${name}=`))
-    if (inline) return inline.slice(name.length + 1)
-  }
-  return undefined
-}
-
-function strictInteger(value: string | undefined): number | undefined {
-  if (value === undefined || !/^\d+$/.test(value)) return undefined
-  const parsed = Number(value)
-  return Number.isSafeInteger(parsed) ? parsed : undefined
-}
-
-/** Positional arguments, with flags and their values removed. */
-function positionals(valueFlags: string[] = []): string[] {
-  const result: string[] = []
-  for (let i = 0; i < args.length; i++) {
-    const arg = args[i]!
-    if (valueFlags.includes(arg)) {
-      i += 1
-      continue
-    }
-    if (valueFlags.some((flag) => arg.startsWith(`${flag}=`))) continue
-    if (arg.startsWith('-')) continue
-    result.push(arg)
-  }
-  return result
-}
 
 function userMessage(text: string, images: import('./attachments.ts').ImageAttachment[] = []): ConversationMessage {
   if (images.length === 0) return { role: 'user', content: [{ type: 'text', text }] }
@@ -1599,244 +1351,6 @@ async function runConfig(): Promise<void> {
   writeNotice(`Model: ${model ?? defaultModel ?? 'set by ELIA_MODEL'}`)
   if (knownBaseURL) writeNotice(`Endpoint: ${knownBaseURL}`)
   writeNotice('The API key was saved without displaying its value. Run `elia config` to inspect readiness.')
-}
-
-/**
- * Subscription authentication belongs to the official Codex CLI, not Elia's
- * OpenAI API adapter. Keeping it in the external client means Elia never reads
- * or persists a ChatGPT session token; the subscription provider invokes the
- * signed-in client only for its responses.
- */
-async function runCodexLogin(): Promise<boolean> {
-  const { codexAvailable } = await import('./tools/codex.ts')
-  if (!(await codexAvailable())) {
-    writeError('Codex CLI is not installed or not on PATH. Install @openai/codex, then run `elia codex-login` again.')
-    process.exitCode = 1
-    return false
-  }
-
-  writeNotice('Opening the Codex sign-in flow. Complete authentication in Codex; Elia never receives or stores your ChatGPT credentials.')
-  try {
-    const proc = Bun.spawn(['codex', 'login'], { stdin: 'inherit', stdout: 'inherit', stderr: 'inherit' })
-    const exitCode = await proc.exited
-    if (exitCode === 0) {
-      writeNotice('Codex sign-in finished. You can now select ChatGPT subscription (Codex) as Elia’s active model.')
-      return true
-    }
-    else {
-      writeError(`Codex sign-in ended with exit code ${exitCode}. Your existing Elia API-provider configuration was not changed.`)
-      process.exitCode = 1
-      return false
-    }
-  } catch (error) {
-    writeError(`Could not start Codex sign-in: ${error instanceof Error ? error.message : String(error)}`)
-    process.exitCode = 1
-    return false
-  }
-}
-
-async function readStdinText(): Promise<string> {
-  let text = ''
-  for await (const chunk of process.stdin) text += Buffer.from(chunk as Uint8Array).toString('utf8')
-  return text
-}
-
-async function readLineInput(prompt: string): Promise<string> {
-  if (!process.stdin.isTTY || !process.stdout.isTTY) return ''
-  const rl = readline.createInterface({ input: process.stdin, output: process.stdout })
-  try {
-    return (await rl.question(prompt)).trim()
-  } finally {
-    rl.close()
-  }
-}
-
-async function readSecretInput(prompt: string): Promise<string> {
-  const stdin = process.stdin
-  if (!stdin.isTTY || !stdin.setRawMode) return ''
-  process.stdout.write(prompt)
-  stdin.setRawMode(true)
-  stdin.resume()
-  stdin.setEncoding('utf8')
-  return await new Promise<string>((resolve) => {
-    let value = ''
-    const onData = (chunk: string) => {
-      for (const char of chunk) {
-        if (char === '\u0003') {
-          process.stdout.write('\n')
-          cleanup()
-          resolve('')
-          return
-        }
-        if (char === '\r' || char === '\n') {
-          process.stdout.write('\n')
-          cleanup()
-          resolve(value)
-          return
-        }
-        if (char === '\u007f' || char === '\b') {
-          value = value.slice(0, -1)
-          continue
-        }
-        value += char
-      }
-    }
-    const cleanup = () => {
-      stdin.off('data', onData)
-      stdin.setRawMode?.(false)
-      stdin.pause()
-    }
-    stdin.on('data', onData)
-  })
-}
-
-async function chooseProviderForSetup(title: string): Promise<string | undefined> {
-  const { PROVIDER_PRESET_NAMES, isProviderPresetConfigured, providerPresetDefaultModel } = await import('./providers/registry.ts')
-  const options = PROVIDER_PRESET_NAMES.map((provider) => ({
-    label: provider,
-    detail: `${isProviderPresetConfigured(provider) ? 'configured' : 'not configured'} · ${providerPresetDefaultModel(provider) ?? 'custom endpoint and model'}`,
-    value: provider,
-  }))
-  const result = await pick(title, options)
-  if (result.type === 'select') return result.value
-  if (result.type === 'cancel') return undefined
-  const entered = (await readLineInput(`Provider [${options[0]?.value ?? 'anthropic'}]: `)).toLowerCase()
-  const selected = entered || options[0]?.value
-  if (!selected || !PROVIDER_PRESET_NAMES.includes(selected)) {
-    writeError(`Unknown provider "${entered}". No credentials were changed.`)
-    return undefined
-  }
-  return selected
-}
-
-async function chooseModelForSetup(provider: string, suggestedModel?: string): Promise<string | undefined> {
-  const { listProviderModels, providerPresetDefaultModel } = await import('./providers/registry.ts')
-  const discovery = await listProviderModels(provider)
-  const defaultModel = suggestedModel ?? providerPresetDefaultModel(provider)
-  if (discovery.models.length > 0) {
-    const options = discovery.models.map((model) => ({
-      label: model.id === defaultModel ? `${model.id} (recommended)` : model.id,
-      detail: model.name ?? model.ownedBy ?? 'available model',
-      value: model.id,
-    }))
-    const result = await pick(`Select a model for ${provider}`, options, Math.max(0, options.findIndex((option) => option.value === defaultModel)))
-    if (result.type === 'select') return result.value
-    if (result.type === 'cancel') return undefined
-  }
-  if (discovery.error) writeNotice(`Model discovery unavailable: ${discovery.error}`)
-  if (!defaultModel) return readLineInput(`Enter the model id for ${provider}: `)
-  const entered = await readLineInput(`Model id [${defaultModel}]: `)
-  return entered || defaultModel
-}
-
-async function interactiveProviderSetup(reason: 'first-run' | 'settings'): Promise<SavedProviderConfiguration | undefined> {
-  const provider = await chooseProviderForSetup(reason === 'first-run' ? 'First-run provider setup' : 'Add or update provider')
-  if (!provider) {
-    writeNotice('Provider setup cancelled. No credentials were changed.')
-    return undefined
-  }
-  if (provider === 'codex') {
-    if (!(await runCodexLogin())) return undefined
-    const model = 'default'
-    const path = userConfigPath()
-    writeUserConfig({ ELIA_PROVIDER: provider, ELIA_MODEL: model, ELIA_BASE_URL: undefined }, path)
-    process.env.ELIA_PROVIDER = provider
-    process.env.ELIA_MODEL = model
-    delete process.env.ELIA_BASE_URL
-    return { provider, apiKeyEnv: 'managed by Codex', model, path }
-  }
-  const { providerPresetApiKeyEnv } = await import('./providers/registry.ts')
-  const apiKeyEnv = providerPresetApiKeyEnv(provider)
-  if (!apiKeyEnv) {
-    writeError(`Provider "${provider}" does not define an API key variable`)
-    return undefined
-  }
-  const baseURL = provider === 'custom' ? await readLineInput('Custom HTTPS base URL: ') : undefined
-  if (provider === 'custom' && !baseURL) {
-    writeNotice('Provider setup cancelled. A custom provider requires a base URL.')
-    return undefined
-  }
-  const apiKey = await readSecretInput(`Enter ${apiKeyEnv} (input hidden): `)
-  if (!apiKey) {
-    writeNotice('Provider setup cancelled. No credentials were changed.')
-    return undefined
-  }
-
-  const previousKey = process.env[apiKeyEnv]
-  const previousBaseURL = process.env.ELIA_BASE_URL
-  process.env[apiKeyEnv] = apiKey
-  if (baseURL) process.env.ELIA_BASE_URL = baseURL
-  let savedConfiguration: SavedProviderConfiguration | undefined
-  try {
-    const model = await chooseModelForSetup(provider)
-    if (!model) {
-      writeNotice('Provider setup cancelled. No credentials were changed.')
-      return undefined
-    }
-    savedConfiguration = saveProviderConfiguration({ provider, apiKey, model, baseURL })
-    writeNotice(`Saved ${provider} configuration to ${savedConfiguration.path}.`)
-    writeNotice(`Model: ${savedConfiguration.model}`)
-    writeNotice('The API key was saved without displaying its value.')
-    return savedConfiguration
-  } catch (error) {
-    writeError(`Provider setup failed: ${error instanceof Error ? error.message : String(error)}`)
-    return undefined
-  } finally {
-    if (!savedConfiguration) {
-      if (process.env[apiKeyEnv] === apiKey && previousKey !== undefined) process.env[apiKeyEnv] = previousKey
-      else if (previousKey === undefined && process.env[apiKeyEnv] === apiKey) delete process.env[apiKeyEnv]
-      if (baseURL && process.env.ELIA_BASE_URL === baseURL && previousBaseURL !== undefined) process.env.ELIA_BASE_URL = previousBaseURL
-      else if (baseURL && previousBaseURL === undefined && process.env.ELIA_BASE_URL === baseURL) delete process.env.ELIA_BASE_URL
-    }
-  }
-}
-
-async function ensureFirstRunProviderSetup(): Promise<boolean> {
-  if (!activeProviderNeedsSetup()) {
-    prewarmActiveProvider()
-    return true
-  }
-  if (!process.stdin.isTTY || !process.stdout.isTTY) {
-    writeError('No provider is configured. Run `elia config set --provider <name> --api-key-stdin --model <model-id>` from a secure shell, or run elia in an interactive terminal for first-run setup.')
-    process.exitCode = 1
-    return false
-  }
-  writeNotice('No complete provider configuration was found. Elia will ask for a provider, hidden API key, and model before starting.')
-  const ok = Boolean(await interactiveProviderSetup('first-run'))
-  if (ok) prewarmActiveProvider()
-  return ok
-}
-
-/**
- * Fire-and-forget: open a pooled connection to the active model host so the
- * first turn's request skips DNS + TLS + HTTP/2 setup on its critical path.
- * Runs while the user is still reading the intro or typing. Never throws.
- */
-/**
- * Open a pooled connection to every model host a run might touch — the deep
- * tier, the fast tier if it is a distinct provider, and any role override — so
- * the first request on each (an orientation scout is often the very first thing
- * a task does, on the fast tier) skips connection setup. `warmConnection`
- * dedupes per origin, so tiers that share a host cost one probe.
- */
-function prewarmActiveProvider(): void {
-  void Promise.all([import('./config.ts'), import('./autonomy/mode.ts')])
-    .then(([{ config, systemPromptForMode }, { activeMode }]) => {
-      // Give the deep tier the resolved session prompt so an agentic provider
-      // (the ChatGPT subscription) can pre-start its workspace thread, not just
-      // its connection. The fast tier / role overrides only need a connection.
-      const deepHint = { system: systemPromptForMode(activeMode()) }
-      const seen = new Set<import('./providers/types.ts').Provider>()
-      const warm = (provider?: { prewarm?: (hint?: { system?: string }) => void }, hint?: { system?: string }): void => {
-        if (!provider || seen.has(provider as import('./providers/types.ts').Provider)) return
-        seen.add(provider as import('./providers/types.ts').Provider)
-        provider.prewarm?.(hint)
-      }
-      warm(config.tiers.deep.provider, deepHint)
-      warm(config.tiers.fast.provider)
-      for (const route of Object.values(config.roleOverrides)) warm(route?.provider)
-    })
-    .catch(() => {})
 }
 
 async function runSchedule(): Promise<void> {
