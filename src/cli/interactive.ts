@@ -2319,7 +2319,7 @@ export async function runInteractive(): Promise<void> {
     installFastRendering()
     const { runInkRepl } = await import('../ui/app/index.tsx')
     const greeting = `${mode} mode`
-    const cliVersion = JSON.parse(await Bun.file(new URL('../package.json', import.meta.url)).text()).version as string
+    const cliVersion = JSON.parse(await Bun.file(new URL('../../package.json', import.meta.url)).text()).version as string
 
     await runInkRepl({
       sessionId,
