@@ -153,3 +153,125 @@ test('an autonomous run thinks out loud before it proposes a plan', async () => 
   // Streamed as it was written, not delivered in one block at the end.
   expect(seen.length).toBeGreaterThan(5)
 })
+
+/**
+ * A run that is actually approved.
+ *
+ * Every other test in this file stops at the gate — `approve` returns `reject`,
+ * and the comment on the one real run says so outright: "this covers orienting
+ * only, and nothing is ever built or committed". So of the seven phases in
+ * `runAutonomousTaskInternal`, execute, publish, polish, verify and learn —
+ * about 930 lines — have never been driven end to end by anything in the suite.
+ *
+ * That is the part of elia with the worst history. The debugging rounds that
+ * produced `agentBehaviour.test.ts` were nearly all failures past the gate:
+ * verification verdicts that were wrong, a repair loop that rebuilt a
+ * deliverable at a second path, runs that reported success with no evidence.
+ * Those are exactly the phases nothing was watching.
+ *
+ * This approves the plan and lets the run go. The scripted provider returns a
+ * plain "done." once its script is exhausted, so the workers finish without
+ * tool calls and the run reaches verification on its own. It is a
+ * characterization test: it pins what an approved run *does today* — which
+ * phases it enters, that verification really executes, that a result comes back
+ * whole — so that the 1,508-line function can be split into those phases
+ * without doing it blind.
+ */
+test('an approved run reaches execution and verification, and returns a whole result', async () => {
+  const { mkdtempSync, rmSync } = await import('node:fs')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+  const { config } = await import('../config.ts')
+  const { createScriptedProvider } = await import('../bench/latency/scriptedProvider.ts')
+  const { runAutonomousTask } = await import('./loop.ts')
+
+  const provider = createScriptedProvider([
+    { text: 'A single text file. Nothing to scaffold; I will write it and check it exists.' },
+    {
+      toolCalls: [
+        {
+          name: 'submit_proposal',
+          input: {
+            goal: 'write a greeting file',
+            understanding: 'Create greeting.txt containing a greeting.',
+            steps: [{ id: 's1', title: 'Write greeting.txt', instructions: 'Write greeting.txt', role: 'builder', files: ['greeting.txt'], dependsOn: [] }],
+            // A command that really runs, so the verify phase is exercised
+            // rather than skipped, and that passes on both CI platforms.
+            verification: ['echo ok'],
+            acceptanceCriteria: ['greeting.txt exists'],
+          },
+        },
+      ],
+    },
+  ])
+
+  // Pointing `config.provider` at the script is not enough, and finding that out
+  // is half of why this test is worth having: workers, the critic and the
+  // hygiene reviewer each resolve their own route through `tierConfig`, so the
+  // first version of this test quietly reached the network and billed a real
+  // mercury + groq run. Every tier and the fallback list have to be redirected
+  // or an 'offline' test is nothing of the sort.
+  const original = config.provider
+  const originalTiers = { fast: config.tiers.fast, deep: config.tiers.deep }
+  const originalFallbacks = config.fallbacks
+  const originalRouting = config.routingMode
+  const scriptedTier = (tier: typeof config.tiers.fast) => ({ ...tier, provider, providerName: 'scripted', model: 'scripted' })
+  // An explicit temp root, well outside the repo: a run commits, and an earlier
+  // test that wrote under the repo's own workspace/ once landed a commit in
+  // elia's production branch.
+  const workspace = mkdtempSync(join(tmpdir(), 'elia-approved-'))
+  const phases: string[] = []
+  try {
+    config.provider = provider
+    config.tiers.fast = scriptedTier(config.tiers.fast)
+    config.tiers.deep = scriptedTier(config.tiers.deep)
+    config.fallbacks = []
+    config.routingMode = 'selected'
+    const result = await runAutonomousTask({
+      goal: 'write a greeting file',
+      workspaceRoot: workspace,
+      approve: async () => ({ action: 'approve' as const }),
+      onPhase: (phase: string) => phases.push(phase),
+      profile: 'fast',
+      polish: false,
+      publish: false,
+      learn: false,
+      maxRepairAttempts: 0,
+      maxWallClockMs: 120_000,
+    } as Parameters<typeof runAutonomousTask>[0])
+
+    // Past the gate. Orienting and proposing are two calls; anything beyond
+    // that is workers, the critic and the reviewers, so this number is the
+    // proof that execution really ran *and* that it ran on the script rather
+    // than on someone's API key.
+    expect(provider.calls).toBeGreaterThan(2)
+    expect(result.outcome).not.toBe('rejected')
+
+    // Execute happened: the completion assessment counts the plan's steps.
+    expect(result.proposal?.steps?.length).toBe(1)
+    expect(result.completion.evidence.join(' ')).toContain('1 planned step')
+
+    // Verify happened, and the review gate reported rather than being skipped.
+    expect(result.verdict).toBeDefined()
+
+    // The result is whole — this is what the receipt and callers read.
+    expect(result.runId).toBeTruthy()
+    expect(result.actionBudget).toBeDefined()
+    expect(typeof result.elapsedMs).toBe('number')
+
+    // What today's behaviour actually is, pinned rather than endorsed: the
+    // script runs out, so the critic answers in prose instead of calling
+    // `submit_verdict`, and the run correctly refuses to call that a pass.
+    // If a refactor of the verify phase ever turns this into 'succeeded', it
+    // has removed a gate rather than moved one.
+    expect(result.outcome).toBe('needs-attention')
+    expect(result.completion.state).toBe('partial')
+  } finally {
+    config.provider = original
+    config.tiers.fast = originalTiers.fast
+    config.tiers.deep = originalTiers.deep
+    config.fallbacks = originalFallbacks
+    config.routingMode = originalRouting
+    rmSync(workspace, { recursive: true, force: true })
+  }
+}, 120_000)
