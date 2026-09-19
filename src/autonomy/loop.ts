@@ -37,7 +37,7 @@ import { commitAll, scaffoldProject, stageUntrackedForReview } from './scaffold.
 import { publishProject } from './publish.ts'
 import { emitEvent, machineReadable } from '../ui/runtime.ts'
 import { redactText } from '../ui/redact.ts'
-import { appendLessons, consumeHeldOutLessonKeys, consumeInjectedLessonKeys, createLessonsTool, renderLessons } from './lessons.ts'
+import { appendLessons, consumeHeldOutLessonKeys, consumeInjectedLessonKeys, createLessonsTool, renderLessons, retireLessons } from './lessons.ts'
 import { recordLessonExposure } from './lessonEfficacy.ts'
 import {
   createVerdictTool,
@@ -641,6 +641,23 @@ async function runAutonomousTaskInternal(options: AutonomousRunOptions): Promise
       clean: verificationPassed && contradictions.length === 0,
       heldOut: consumeHeldOutLessonKeys(),
     })
+    // This run just added a data point to the trial ledger, so re-judge it here.
+    //
+    // Retirement otherwise only happens inside `consolidateBrain`, which runs
+    // from the REPL, in dev mode, at most once a day. An `elia auto` user never
+    // reaches it, so a lesson measured as harmful keeps being injected into
+    // every planning briefing indefinitely. It is local arithmetic over two
+    // ledgers — no model, no network — so it belongs at the point the evidence
+    // changes rather than behind a daily interactive pass.
+    try {
+      const dropped = retireLessons()
+      if (dropped.retired.length > 0) {
+        journal.append('phase', { phase: 'learn', note: `retired ${dropped.retired.length} measured-harmful lesson(s)` })
+        writeSubStep(`↩ retired ${dropped.retired.length} lesson(s) that measured worse than going without`)
+      }
+    } catch {
+      // Never a reason to fail a run that has otherwise finished.
+    }
     if (contradictions.length > 0) {
       journal.append('phase', { phase: 'learn', note: `completion contradiction: ${contradictions.join('; ')}` })
       writeSubStep(`⚠ completion verdict "${completion.state}/${completion.confidence}" doesn't match the facts: ${contradictions.join('; ')}`)

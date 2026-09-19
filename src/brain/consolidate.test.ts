@@ -107,3 +107,49 @@ test('a provider failure is swallowed and changes nothing', async () => {
   expect(result.changed).toBe(false)
   expect(readFileSync(lessonsPath, 'utf8')).toContain('- a ')
 })
+
+/**
+ * A measured-harmful lesson goes even when the model call cannot be made.
+ *
+ * Retirement used to sit at the end of `consolidateBrain`, under a comment
+ * calling it "always run", behind the fast-tier call and three early returns —
+ * including `catch { return skip('consolidation model call failed') }`. So on a
+ * machine whose provider was out of credit it never ran at all, and three
+ * lessons that randomized trials had measured as *harmful* were still being
+ * injected into every planning briefing, one of them at a lift of -0.40.
+ *
+ * Merging near-duplicates needs a model. Deciding that a measured loser should
+ * stop riding along does not, and must not wait on one.
+ */
+test('retires a measured-harmful lesson even when the consolidation model call fails', async () => {
+  const { recordLessonExposure } = await import('../autonomy/lessonEfficacy.ts')
+  const efficacyPath = join(dir, 'efficacy.jsonl')
+  const outcomesPath = join(dir, 'outcomes.jsonl')
+
+  seedLessons(['this one makes runs worse', 'keep me one', 'keep me two'])
+  const harmful = loadLessons(lessonsPath)[0]!.key!
+
+  // A randomized trial with an unambiguous answer: every run that carried the
+  // lesson came out dirty, every run it was held out of came out clean.
+  for (let i = 0; i < 20; i += 1) {
+    recordLessonExposure(`shown-${i}`, [harmful], { verify: 'fail', clean: false, heldOut: [] }, efficacyPath)
+    recordLessonExposure(`held-${i}`, [], { verify: 'pass', clean: true, heldOut: [harmful] }, efficacyPath)
+  }
+
+  // The provider is gone — the case this test exists for.
+  config.tiers.fast.provider = {
+    async streamTurn() {
+      throw new Error('402 insufficient credit')
+    },
+  }
+
+  const result = await consolidateBrain({ lessonsPath, notesPath, consolidatedAtPath, efficacyPath, outcomesPath, force: true })
+
+  const remaining = loadLessons(lessonsPath).map((l) => l.text)
+  expect(remaining).not.toContain('this one makes runs worse')
+  expect(remaining).toHaveLength(2)
+  // And it reports what it did, rather than only that the model call failed.
+  expect(result.changed).toBe(true)
+  expect(result.lessonsRetired).toEqual(['this one makes runs worse'])
+  expect(result.reason).toContain('retired 1')
+})

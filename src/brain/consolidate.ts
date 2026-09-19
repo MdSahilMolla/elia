@@ -78,6 +78,8 @@ export interface ConsolidateOptions {
   lessonsPath?: string
   notesPath?: string
   consolidatedAtPath?: string
+  efficacyPath?: string
+  outcomesPath?: string
 }
 
 export async function consolidateBrain(options: ConsolidateOptions = {}): Promise<ConsolidationResult> {
@@ -85,9 +87,33 @@ export async function consolidateBrain(options: ConsolidateOptions = {}): Promis
   const notesPath = options.notesPath ?? paths.brainNotes
   const consolidatedAtPath = options.consolidatedAtPath ?? paths.brainConsolidatedAt
 
+  const lessonsBefore = loadLessons(lessonsPath).length
+
+  // Retirement runs first, and unconditionally.
+  //
+  // It used to sit at the end, under a comment calling it "always run", behind
+  // the model call and three early returns. It is the only pass that acts on
+  // *measured* effect — a lesson gets a randomized trial, and if runs carrying
+  // it come out worse than runs without it, it goes. That is arithmetic over two
+  // local ledgers and needs no model at all, but a failed fast-tier call returned
+  // before it, so on a machine whose provider is out of credit it never ran once.
+  // Three lessons measured as harmful were still being injected into every
+  // planning briefing, one of them at a lift of -0.40.
+  //
+  // Merging near-duplicates is what needs a model. Deciding that a measured
+  // loser should stop riding along does not, and must not wait on one.
+  const retired = retireLessons({ lessonsPath, efficacyPath: options.efficacyPath, outcomesPath: options.outcomesPath })
+
   const lessons = loadLessons(lessonsPath)
   const notes = loadNotes(notesPath)
-  const skip = (reason: string): ConsolidationResult => ({ changed: false, reason, lessonsBefore: lessons.length, lessonsAfter: lessons.length, notesRemoved: 0 })
+  const skip = (reason: string): ConsolidationResult => ({
+    changed: retired.retired.length > 0,
+    reason: retired.retired.length > 0 ? `retired ${retired.retired.length} measured-harmful lesson(s); ${reason}` : reason,
+    lessonsBefore,
+    lessonsAfter: lessons.length,
+    notesRemoved: 0,
+    lessonsRetired: retired.retired.length > 0 ? retired.retired : undefined,
+  })
 
   if (!shouldConsolidate(lessons.length, notes.length, options.force ?? false, consolidatedAtPath)) {
     return skip('nothing to consolidate yet')
@@ -138,12 +164,6 @@ export async function consolidateBrain(options: ConsolidateOptions = {}): Promis
   }
   if (notesRemoved > 0) rewriteNotes(keptNotes, notesPath)
 
-  // Deterministic second pass, always run: drop lessons that have ridden along
-  // in enough runs to judge and moved nothing against their own control group.
-  // The model pass above only merges/de-dupes on wording; this is the one that
-  // acts on measured effect.
-  const retired = retireLessons({ lessonsPath })
-
   markConsolidated(consolidatedAtPath)
 
   const lessonsAfterModel = lessonsChanged ? parsed.lessons.length : lessons.length
@@ -151,8 +171,8 @@ export async function consolidateBrain(options: ConsolidateOptions = {}): Promis
   return {
     changed,
     reason: changed ? 'consolidated' : 'already tidy',
-    lessonsBefore: lessons.length,
-    lessonsAfter: lessonsAfterModel - retired.retired.length,
+    lessonsBefore,
+    lessonsAfter: lessonsAfterModel,
     notesRemoved,
     lessonsRetired: retired.retired.length > 0 ? retired.retired : undefined,
   }
