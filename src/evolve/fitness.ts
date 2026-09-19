@@ -108,10 +108,35 @@ export interface MeasureOptions {
  * a regression, and one that happened to pass reads as a fix — which is how a
  * single-run benchmark sitting at 93% hands evolve its verdicts by luck. Repeats
  * turn each task into a pass rate.
+ *
+ * The default is 3, not 1, because `power.ts` can price the difference without
+ * spending anything. On the suite as it stands, with the sieve on (the shipped
+ * configuration, re-running ~4 tasks):
+ *
+ *   repeats  true gain .8   .4     .2     promotes a no-op   cost
+ *   1        99.0%          46.5%  25.4%  8.6%               16
+ *   3        100%           73.2%  28.9%  3.0%               48
+ *   5        100%           72.7%  21.0%  0.4%               80
+ *
+ * Three dominates one on every axis that matters and costs 48 task-runs a
+ * generation. The number that decides it is the last column but one: at one
+ * run per task, about one candidate in twelve that is *identical to the
+ * baseline* clears both the race and the confirmation pair. A loop built on the
+ * premise that promoted changes compound cannot promote noise at that rate —
+ * it is not improving slowly, it is drifting, and the drift compounds too.
+ *
+ * Five is not better than three: `REAL_CHANGE` is a fixed 0.5 of a task's pass
+ * rate, and more attempts pull a genuine-but-partial gain below that threshold,
+ * so small wins get *harder* to see. Raising repeats past three needs
+ * REAL_CHANGE to scale with it, which is a separate change with its own test.
+ *
+ * `ELIA_BENCH_REPEATS=1` restores the cheap single run for a throwaway sweep.
  */
+export const DEFAULT_BENCH_REPEATS = 3
+
 export function benchRepeats(env: Record<string, string | undefined> = process.env): number {
   const value = Number(env.ELIA_BENCH_REPEATS)
-  return Number.isInteger(value) && value >= 1 ? Math.min(value, 10) : 1
+  return Number.isInteger(value) && value >= 1 ? Math.min(value, 10) : DEFAULT_BENCH_REPEATS
 }
 
 /** Fold several attempts at one task into one outcome whose `passes/attempts` is its score. */

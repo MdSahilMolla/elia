@@ -17,10 +17,15 @@ const attempt = (passed: boolean, overrides: Partial<TaskOutcome> = {}): TaskOut
   ...overrides,
 })
 
-test('benchRepeats reads ELIA_BENCH_REPEATS, defaults to 1, and is capped', () => {
-  expect(benchRepeats({})).toBe(1)
-  expect(benchRepeats({ ELIA_BENCH_REPEATS: '3' })).toBe(3)
-  expect(benchRepeats({ ELIA_BENCH_REPEATS: '0' })).toBe(1)
+test('benchRepeats reads ELIA_BENCH_REPEATS, defaults to 3, and is capped', () => {
+  // Three is the measured default — see the table over benchRepeats. One run
+  // per task promotes a no-op candidate 8.6% of the time; three drops that to
+  // 3.0% and raises real-win detection at every effect size.
+  expect(benchRepeats({})).toBe(3)
+  expect(benchRepeats({ ELIA_BENCH_REPEATS: '1' })).toBe(1)
+  expect(benchRepeats({ ELIA_BENCH_REPEATS: '5' })).toBe(5)
+  // Not a usable count, so it falls back to the default rather than to 1.
+  expect(benchRepeats({ ELIA_BENCH_REPEATS: '0' })).toBe(3)
   expect(benchRepeats({ ELIA_BENCH_REPEATS: '99' })).toBe(10)
 })
 

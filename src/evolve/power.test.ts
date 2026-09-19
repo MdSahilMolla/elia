@@ -107,3 +107,38 @@ test('the report shows the sieve curve and warns when repeats fight REAL_CHANGE'
 test('an empty benchmark reports nothing rather than dividing by zero', () => {
   expect(renderGatePower([], 1)).toContain('no benchmark recorded yet')
 })
+
+/**
+ * The measurement behind `DEFAULT_BENCH_REPEATS`.
+ *
+ * The default moved from 1 to 3 on the strength of the table in fitness.ts, and
+ * a table in a comment rots. This re-derives the two claims that decided it, at
+ * the shipped sieve shape, so a change to the gate that quietly undoes either
+ * one fails here instead of silently restoring a loop that promotes noise.
+ */
+test('repeats=3 beats repeats=1 on both power and false promotion', () => {
+  const tasks = currentSuite()
+  const rerun = rerunSet(tasks, 4)
+  const at = (repeats: number, delta: number) =>
+    measurePower({ tasks, repeats, delta, trials: 2000, seed: 5, rerun })
+
+  const one = at(1, 0.4)
+  const three = at(3, 0.4)
+
+  // A real, moderate win is caught far more often.
+  expect(three.promoted).toBeGreaterThan(one.promoted)
+  // And the reason the default moved: a no-op candidate is promoted far less.
+  expect(one.falsePromoted).toBeGreaterThan(0.05)
+  expect(three.falsePromoted).toBeLessThan(0.05)
+})
+
+test('five repeats loses small wins that three catches', () => {
+  // REAL_CHANGE is a fixed 0.5 of a task's pass rate, so more attempts pull a
+  // genuine-but-partial gain under the threshold. This is why the default is
+  // 3 and not higher, and it must fail if REAL_CHANGE ever learns to scale.
+  const tasks = currentSuite()
+  const rerun = rerunSet(tasks, 4)
+  const three = measurePower({ tasks, repeats: 3, delta: 0.2, trials: 2000, seed: 5, rerun })
+  const five = measurePower({ tasks, repeats: 5, delta: 0.2, trials: 2000, seed: 5, rerun })
+  expect(five.promoted).toBeLessThan(three.promoted)
+})

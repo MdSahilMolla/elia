@@ -23,10 +23,30 @@ const REAL_CHANGE = 0.5
  * one number that matters: the smallest improvement the current benchmark can
  * carry to a promotion.
  *
- * What it found on the suite as it stands (54 tasks, ~93% pass rate, 4 failures):
+ * What it found when written, before the sieve and repeated-run scoring landed:
  * a candidate that genuinely fixed *every* remaining failure was promoted 13% of
- * the time, and a candidate identical to the baseline was promoted 2.5% of the
- * time. The gate is not too lax. It is close to blind.
+ * the time. That number is now historical, and leaving it here as current would
+ * point the next reader at a problem that has since been fixed.
+ *
+ * Re-measured on the suite as it stands (54 tasks, ~93% pass rate, 4 failures),
+ * with the sieve on as it ships:
+ *
+ *   repeats  true gain .8   .4     .2     promotes a no-op
+ *   1        99.0%          46.5%  25.4%  8.6%
+ *   3        100%           73.2%  28.9%  3.0%
+ *   5        100%           72.7%  21.0%  0.4%
+ *
+ * The gate is no longer blind to a large win; the sieve fixed that by keeping
+ * carried tasks from flipping. What remains is the other direction. At one run
+ * per task, about one candidate in twelve that is identical to the baseline
+ * clears both the race and the confirmation pair, and a self-improvement loop
+ * that promotes noise at that rate compounds the noise. `benchRepeats` now
+ * defaults to 3 for that reason, and the table above is its justification.
+ *
+ * The genuine remaining limit is small wins: a true gain of 0.2 is promoted less
+ * than a third of the time at any repeat count. That is a benchmark-headroom
+ * problem — 46 of 54 tasks sit at ~99% and cannot show improvement — not a gate
+ * problem, and it is what `hardSuite.ts` exists to address.
  */
 
 export interface PowerTask {
