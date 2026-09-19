@@ -5,9 +5,14 @@ import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { appendActionAudit, readActionLedger, writeRunReceipt } from './audit.ts'
 import type { ToolEvent } from '../agentLoop.ts'
+import { paths } from '../statePaths.ts'
 
 const runId = `audit-test-${Date.now().toString(36)}`
-const runDir = join(process.cwd(), '.elia', 'runs', runId)
+// Ask the system where runs live rather than re-deriving `<cwd>/.elia/runs`.
+// This test used to write its receipt into the developer's real run ledger —
+// and audit.ts re-derived the same path, so the two agreed by coincidence.
+// They now agree because both read `paths`, which the test preload redirects.
+const runDir = join(paths.runs, runId)
 
 describe('autonomy audit ledger and receipt', () => {
   test('writes a redacted action record and a human-readable receipt', async () => {
@@ -94,7 +99,7 @@ describe('autonomy audit ledger and receipt', () => {
         lastPhase: 'execute',
       },
     })
-    const dir = join(process.cwd(), '.elia', 'runs', deadRunId)
+    const dir = join(paths.runs, deadRunId)
     try {
       const receipt = JSON.parse(readFileSync(join(dir, 'receipt.json'), 'utf8')) as { outcome: string; interruption?: { reason: string; lastPhase?: string; stack?: string } }
       expect(receipt.outcome).toBe('interrupted')

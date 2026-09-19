@@ -3,6 +3,7 @@ import { join } from 'node:path'
 import { afterAll, expect, test } from 'bun:test'
 import { communicationTool } from './communication.ts'
 import { redactActionInput } from '../autonomy/governor.ts'
+import { paths } from '../statePaths.ts'
 
 // Adapters are small script files run as `bun <relative path>`: an inline
 // `bun -e "..."` survives neither cmd.exe's quoting nor its stdin piping, and a
@@ -34,7 +35,7 @@ test('communication drafts persist and remain unsent until explicitly approved',
     const noAdapter = await communicationTool.execute({ action: 'send', draftId })
     expect(noAdapter).toContain('no communication connector is configured')
   } finally {
-    rmSync(`${process.cwd()}/.elia/communications/${draftId}.json`, { force: true })
+    rmSync(join(paths.state, 'communications', `${draftId}.json`), { force: true })
   }
 })
 
@@ -53,7 +54,7 @@ test('send runs directly and records a connector receipt — approval is the act
   } finally {
     if (previous === undefined) delete process.env.ELIA_COMMUNICATION_BRIDGE_COMMAND
     else process.env.ELIA_COMMUNICATION_BRIDGE_COMMAND = previous
-    rmSync(`${process.cwd()}/.elia/communications/${draftId}.json`, { force: true })
+    rmSync(join(paths.state, 'communications', `${draftId}.json`), { force: true })
   }
 })
 
@@ -63,7 +64,7 @@ test('verify rescues an in-flight draft stuck as sending through the connector',
   const created = await communicationTool.execute({ action: 'draft', channel: 'message', recipient: '@ops', body: 'Check the release gate.' })
   const draftId = draftIdFrom(created)
   try {
-    const draftPath = join(process.cwd(), '.elia', 'communications', `${draftId}.json`)
+    const draftPath = join(paths.state, 'communications', `${draftId}.json`)
     const stored = JSON.parse(readFileSync(draftPath, 'utf8')) as { status: string }
     expect(stored.status).toBe('draft')
     writeFileSync(draftPath, JSON.stringify({ ...JSON.parse(readFileSync(draftPath, 'utf8')), status: 'sending' }))
@@ -74,7 +75,7 @@ test('verify rescues an in-flight draft stuck as sending through the connector',
   } finally {
     if (previous === undefined) delete process.env.ELIA_COMMUNICATION_BRIDGE_COMMAND
     else process.env.ELIA_COMMUNICATION_BRIDGE_COMMAND = previous
-    rmSync(`${process.cwd()}/.elia/communications/${draftId}.json`, { force: true })
+    rmSync(join(paths.state, 'communications', `${draftId}.json`), { force: true })
   }
 })
 
@@ -83,7 +84,7 @@ async function sendWithAdapter(command: string): Promise<{ sent: string; stored:
   process.env.ELIA_COMMUNICATION_BRIDGE_COMMAND = command
   const created = await communicationTool.execute({ action: 'draft', channel: 'message', recipient: '@ops', body: 'hello' })
   const draftId = draftIdFrom(created)
-  const draftPath = join(process.cwd(), '.elia', 'communications', `${draftId}.json`)
+  const draftPath = join(paths.state, 'communications', `${draftId}.json`)
   try {
     const sent = await communicationTool.execute({ action: 'send', draftId })
     return { sent, stored: JSON.parse(readFileSync(draftPath, 'utf8')) as { status: string; error?: string } }

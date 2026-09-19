@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { appendSecureFile, ensureSecureDirectory } from '../securePersistence.ts'
 import type { CompletionAssessment } from './outcome.ts'
+import { paths } from '../statePaths.ts'
 
 /**
  * "Is the completion assessor honest?" — measured, not assumed.
@@ -73,11 +74,24 @@ export function detectContradictions(state: CompletionAssessment['state'], confi
   return out
 }
 
-function logPath(cwd = process.cwd()): string {
-  return join(cwd, '.elia', 'runs', 'completion-calibration.ndjson')
+/**
+ * Where the calibration log lives.
+ *
+ * Defaults to the resolved state directory rather than re-deriving
+ * `<cwd>/.elia/runs`, so the test suite's redirect of `paths` actually takes
+ * effect — receipts written straight from `process.cwd()` are how this
+ * repository's own run ledger filled up with test artifacts. An explicit `cwd`
+ * still wins, because callers that pass one are naming a specific tree.
+ */
+function runsDirFor(cwd?: string): string {
+  return cwd ? join(cwd, '.elia', 'runs') : paths.runs
 }
 
-export function recordCompletion(runId: string, completion: CompletionAssessment, facts: CompletionFacts, cwd = process.cwd()): void {
+function logPath(cwd?: string): string {
+  return join(runsDirFor(cwd), 'completion-calibration.ndjson')
+}
+
+export function recordCompletion(runId: string, completion: CompletionAssessment, facts: CompletionFacts, cwd?: string): void {
   const entry: CalibrationEntry = {
     at: new Date().toISOString(),
     runId,
@@ -87,14 +101,14 @@ export function recordCompletion(runId: string, completion: CompletionAssessment
     contradictions: detectContradictions(completion.state, completion.confidence, facts),
   }
   try {
-    ensureSecureDirectory(join(cwd, '.elia', 'runs'))
+    ensureSecureDirectory(runsDirFor(cwd))
     appendSecureFile(logPath(cwd), `${JSON.stringify(entry)}\n`)
   } catch {
     // Calibration logging must never break a run's own completion path.
   }
 }
 
-export function readCalibrationLog(cwd = process.cwd()): CalibrationEntry[] {
+export function readCalibrationLog(cwd?: string): CalibrationEntry[] {
   const path = logPath(cwd)
   if (!existsSync(path)) return []
   const entries: CalibrationEntry[] = []

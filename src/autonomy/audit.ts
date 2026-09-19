@@ -10,6 +10,7 @@ import type { Usage } from '../providers/types.ts'
 import type { CompletionAssessment } from './outcome.ts'
 import { appendSecureFile, ensureSecureDirectory, writeSecureFile } from '../securePersistence.ts'
 import { withFileLock } from '../fileLock.ts'
+import { paths } from '../statePaths.ts'
 
 export interface ActionLedgerRecord {
   at: number
@@ -84,7 +85,7 @@ export function appendActionAudit(event: ToolEvent, runIdOverride?: string): voi
   }
 
   const runId = runIdOverride ?? identity.runId
-  const filePath = runId ? join(process.cwd(), '.elia', 'runs', runId, 'actions.ndjson') : join(process.cwd(), '.elia', 'action-ledger.ndjson')
+  const filePath = runId ? join(paths.runs, runId, 'actions.ndjson') : join(paths.state, 'action-ledger.ndjson')
   try {
     // Parallel fleet workers — and a second elia process on the same project —
     // append here concurrently. A large record is not guaranteed to land as one
@@ -103,7 +104,7 @@ export function appendActionAudit(event: ToolEvent, runIdOverride?: string): voi
 }
 
 export function readActionLedger(runId: string): ActionLedgerRecord[] {
-  const filePath = join(process.cwd(), '.elia', 'runs', runId, 'actions.ndjson')
+  const filePath = join(paths.runs, runId, 'actions.ndjson')
   try {
     return readFileSync(filePath, 'utf8')
       .split('\n')
@@ -191,7 +192,7 @@ export function writeRunReceipt(input: RunReceiptInput): void {
     },
   }
 
-  const dir = join(process.cwd(), '.elia', 'runs', input.runId)
+  const dir = join(paths.runs, input.runId)
   try {
     ensureSecureDirectory(dir)
     writeSecureFile(join(dir, 'receipt.json'), JSON.stringify(receipt, null, 2))
