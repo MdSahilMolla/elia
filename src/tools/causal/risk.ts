@@ -84,20 +84,50 @@ export function assessRisk(
   }
 }
 
-/** Generate a risk-based recommendation. */
+/**
+ * Generate a risk-based recommendation.
+ *
+ * The bucket alone is not the whole story, and the caller already computed two
+ * things that have to reach the reader:
+ *
+ * - `confidence` enters the score as one factor among six, so a weak hypothesis
+ *   about a small patch still lands in `low`: one file, one function and 40%
+ *   confidence sum to 24, a single point under the `medium` threshold. A small
+ *   diff is not evidence that it is the *right* diff, so a thin hypothesis is
+ *   called out whatever bucket the arithmetic produced.
+ * - `factors` records which of the six actually drove the score. "Elevated
+ *   risk" with no reason attached is not something a reader can act on; the
+ *   dominant contributor is.
+ */
+const LOW_CONFIDENCE = 0.6
+
 function generateRiskRecommendation(
   risk: RiskAssessment['overallRisk'],
   factors: RiskAssessment['factors'],
   confidence: number,
 ): string {
+  const parts: string[] = []
+
   if (risk === 'critical') {
-    return 'HIGH RISK: Do not auto-apply. Requires manual review. Consider breaking the fix into smaller, independently verifiable changes.'
+    parts.push('HIGH RISK: Do not auto-apply. Requires manual review. Consider breaking the fix into smaller, independently verifiable changes.')
+  } else if (risk === 'high') {
+    parts.push('Elevated risk. Apply with caution. Run full test suite before merging. Consider a code review.')
+  } else if (risk === 'medium') {
+    parts.push('Moderate risk. Apply with standard verification. Run existing tests to confirm no regressions.')
+  } else {
+    parts.push('Low risk. Safe to apply with standard verification.')
   }
-  if (risk === 'high') {
-    return 'Elevated risk. Apply with caution. Run full test suite before merging. Consider a code review.'
+
+  const dominant = factors
+    .filter((f) => f.contribution > 0)
+    .sort((a, b) => b.contribution - a.contribution)[0]
+  if (dominant) parts.push(`Largest contributor: ${dominant.description}.`)
+
+  if (confidence < LOW_CONFIDENCE) {
+    parts.push(
+      `Causal confidence is only ${Math.round(confidence * 100)}% — the change may be small, but the hypothesis it rests on is weak. Confirm the root cause before applying.`,
+    )
   }
-  if (risk === 'medium') {
-    return 'Moderate risk. Apply with standard verification. Run existing tests to confirm no regressions.'
-  }
-  return 'Low risk. Safe to apply with standard verification.'
+
+  return parts.join(' ')
 }

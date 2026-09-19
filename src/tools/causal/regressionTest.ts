@@ -2,8 +2,8 @@
 
 import type { RegressionTest, RootCauseCandidate, SemanticDiff } from './types.ts'
 import { runShell } from '../../shell.ts'
-import { existsSync, readFileSync, writeFileSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs'
-import { join, dirname, basename } from 'node:path'
+import { existsSync, readFileSync, writeFileSync, mkdtempSync, rmSync } from 'node:fs'
+import { join, basename } from 'node:path'
 import { tmpdir } from 'node:os'
 
 const TEST_TIMEOUT_MS = 30_000
@@ -145,25 +145,21 @@ export function generateTestCode(options: TestGenOptions): string {
       ? `import { ${importedName} } from './${moduleName}'`
       : null
 
-  const categories = relevantDiff?.categories ?? []
+  
   const invariant = generateInvariantDescription(candidate, relevantDiff)
 
   if (framework === 'bun:test') {
     return `import { ${describe}, ${it}, ${expect} } from 'bun:test'
 ${importLine ? importLine + '\n' : ''}
 ${describe}('${moduleName} regression test', () => {
-  ${it}('should ${invariant}', () => {
-    // Regression test for root cause: ${candidate.commitHash.slice(0, 8)}
-    // Confidence: ${Math.round(candidate.confidence * 100)}%
-    // This test captures the behavioral invariant that was broken.
-
-    // TODO: Add specific test assertions based on the failure
-    // Example:
-    // const result = ${importedName}(...)
-    // ${expect}(result).toBe(expectedValue)
-
-    ${expect}(true).toBe(true) // Placeholder — replace with actual test
-  })
+  // Regression test for root cause: ${candidate.commitHash.slice(0, 8)}
+  // Confidence: ${Math.round(candidate.confidence * 100)}%
+  // This test captures the behavioral invariant that was broken.
+  //
+  // Write the assertion, then drop the \`.todo\`:
+  //   const result = ${importedName}(...)
+  //   ${expect}(result).toBe(expectedValue)
+  ${it}.todo('should ${invariant}')
 })
 `
   }
@@ -172,13 +168,12 @@ ${describe}('${moduleName} regression test', () => {
     return `import { ${describe}, ${it}, ${expect} } from '${framework}'
 ${importLine ? importLine + '\n' : ''}
 ${describe}('${moduleName} regression test', () => {
-  ${it}('should ${invariant}', () => {
-    // Regression test for root cause: ${candidate.commitHash.slice(0, 8)}
-    // Confidence: ${Math.round(candidate.confidence * 100)}%
-
-    // TODO: Add specific test assertions
-    ${expect}(true).toBe(true)
-  })
+  // Regression test for root cause: ${candidate.commitHash.slice(0, 8)}
+  // Confidence: ${Math.round(candidate.confidence * 100)}%
+  //
+  // Write the assertion, then drop the \`.todo\`:
+  //   ${expect}(result).toBe(expectedValue)
+  ${it}.todo('should ${invariant}')
 })
 `
   }
@@ -187,10 +182,11 @@ ${describe}('${moduleName} regression test', () => {
   return `import { ${describe}, ${it}, ${expect} } from 'bun:test'
 ${importLine ? importLine + '\n' : ''}
 ${describe}('regression test', () => {
-  ${it}('should ${invariant}', () => {
-    // Regression test for: ${candidate.commitHash.slice(0, 8)}
-    ${expect}(true).toBe(true)
-  })
+  // Regression test for: ${candidate.commitHash.slice(0, 8)}
+  //
+  // Write the assertion, then drop the \`.todo\`:
+  //   ${expect}(result).toBe(expectedValue)
+  ${it}.todo('should ${invariant}')
 })
 `
 }

@@ -1,7 +1,7 @@
 // Multi-signal root-cause scoring with explainable confidence.
 
-import type { RootCauseCandidate, ScoringSignal, EvidenceKind, CausalGraph } from './types.ts'
-import { findCausalChain, outgoingEdges, incomingEdges } from './graph.ts'
+import type { RootCauseCandidate, ScoringSignal, CausalGraph } from './types.ts'
+import { incomingEdges } from './graph.ts'
 
 /** Signal weights — how much each evidence source contributes to the final score. */
 const SIGNAL_WEIGHTS = {
@@ -93,11 +93,23 @@ export function scoreSemanticRelevance(
   }
 }
 
-/** Compute temporal proximity score (0-1). Closer in time = higher score. */
+/**
+ * Compute temporal proximity score (0-1). Closer in time = higher score.
+ *
+ * Pure time decay, with no term for how busy the window is. A
+ * `totalCommitsInWindow` parameter used to sit here: declared, defaulted, and
+ * never read, while `findRootCause` passed it `history.length` and the tests
+ * passed it `5` — so every caller believed proximity was normalised by commit
+ * density and none of it was. Density plausibly *should* temper this signal,
+ * since in a busy week every candidate looks recent, but no intended formula
+ * was ever recorded, and inventing one here would mean tuning constants until
+ * the existing assertions went green. That is a fabricated signal, not a
+ * restored one. The parameter is gone; add density back as a deliberate
+ * change with a test that pins the intent.
+ */
 export function scoreTemporalProximity(
   commitDate: string,
   targetDate?: string,
-  totalCommitsInWindow = 1,
 ): ScoringSignal {
   if (!targetDate) {
     return { name: 'temporal_proximity', score: 0.5, weight: SIGNAL_WEIGHTS.temporal_proximity, reason: 'No target date for comparison', kind: 'evidence' }

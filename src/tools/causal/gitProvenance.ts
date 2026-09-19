@@ -1,6 +1,6 @@
 // Git provenance: trace code through renames, refactors, and history.
 
-import { runGit, type Worktree } from '../../autonomy/worktree.ts'
+import { runGit } from '../../autonomy/worktree.ts'
 import type { BlameEntry, CommitInfo, ProvenanceEntry } from './types.ts'
 
 const MAX_COMMITS = 200
@@ -60,7 +60,23 @@ export async function getBlame(
   ], cwd)
 
   if (result.exitCode !== 0) return []
-  return parseBlamePorcelain(result.stdout)
+
+  // Bound the blame we take in. `MAX_BLAME_LINES` was declared here from the
+  // start and never applied, so blaming a 50k-line file put 50k entries into
+  // the causal graph and, downstream, into model context. Cap it — but when
+  // the cap bites, say so rather than quietly returning a prefix: a truncated
+  // blame is partial evidence, and code that cannot tell "these are the
+  // authors" from "these are the first 500 authors" will draw confident
+  // conclusions from an arbitrary slice.
+  const entries = parseBlamePorcelain(result.stdout)
+  if (entries.length > MAX_BLAME_LINES) {
+    console.warn(
+      `[causal] blame for ${filePath} returned ${entries.length} lines; using the first ${MAX_BLAME_LINES}. ` +
+      'Scope the blame with lineStart/lineEnd if this file is central to the analysis.',
+    )
+    return entries.slice(0, MAX_BLAME_LINES)
+  }
+  return entries
 }
 
 /** Parse git log with detailed format. */

@@ -176,13 +176,13 @@ describe('causal scoring', () => {
   })
 
   it('scoreTemporalProximity favors recent commits', () => {
-    const recent = scoreTemporalProximity(new Date(Date.now() - 86_400_000).toISOString(), new Date().toISOString(), 5)
+    const recent = scoreTemporalProximity(new Date(Date.now() - 86_400_000).toISOString(), new Date().toISOString())
     expect(recent.score).toBeGreaterThan(0.8)
 
-    const old = scoreTemporalProximity('2020-01-01T00:00:00Z', new Date().toISOString(), 5)
+    const old = scoreTemporalProximity('2020-01-01T00:00:00Z', new Date().toISOString())
     expect(old.score).toBeLessThan(0.2)
 
-    const noTarget = scoreTemporalProximity('2020-01-01T00:00:00Z', undefined, 5)
+    const noTarget = scoreTemporalProximity('2020-01-01T00:00:00Z', undefined)
     expect(noTarget.score).toBe(0.5) // neutral fallback when no target date
   })
 

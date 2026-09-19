@@ -2,12 +2,11 @@
 // This is the shared internal engine used by all three tool APIs.
 
 import type {
-  CausalDebugResult, CausalFixResult, CausalGraph, RootCauseCandidate,
-  SemanticDiff, ProvenanceEntry, ReproductionResult, CounterfactualResult,
-  VerificationCheck, RiskAssessment, RepairPlan, GeneratedPatch, RegressionTest,
-  EvidenceEntry, ScoringSignal,
+  CausalDebugResult, CausalFixResult, RootCauseCandidate,
+  SemanticDiff, CounterfactualResult,
+  ScoringSignal,
 } from './types.ts'
-import { createGraph, addNode, addEdge, findNodesByCommit, findNodesByFile, findCausalChain } from './graph.ts'
+import { createGraph, addNode, addEdge, findNodesByCommit, findCausalChain } from './graph.ts'
 import { getBlame, getFileHistory, getCommitFiles, getFileAtHead, getFileAtCommit, traceFileRenames, isShallowRepo, hasDirtyWorkingTree } from './gitProvenance.ts'
 import { analyzeSemanticDiff } from './semanticDiff.ts'
 import {
@@ -16,7 +15,7 @@ import {
   scoreCodeOverlap, scoreRenameContinuity, scoreCounterfactual,
   rankCandidates,
 } from './scoring.ts'
-import { reproduceFromFile, deriveReproductionCommand } from './reproduction.ts'
+import { reproduceFromFile } from './reproduction.ts'
 import { performCounterfactual } from './counterfactual.ts'
 import { generateRepairPlan } from './repair.ts'
 import { generatePatch } from './patch.ts'
@@ -150,7 +149,7 @@ export async function runCausalDebug(options: EngineOptions): Promise<CausalDebu
           semanticDiffs.find((d) => d.commitHash.startsWith(commit.hash))?.categories ?? [],
           (semanticDiffs.find((d) => d.commitHash.startsWith(commit.hash))?.behavioralChanges.length ?? 0) > 0,
         ),
-        scoreTemporalProximity(commit.date, targetDate, history.length),
+        scoreTemporalProximity(commit.date, targetDate),
         scoreBehavioralChange(commit.message, semanticDiffs.find((d) => d.commitHash.startsWith(commit.hash))?.categories ?? []),
         scoreCallGraphRelevance(graph, commitNodeId, targetNodeId),
         scoreTestEvidence(commit.message, commit.filesChanged),
@@ -288,6 +287,11 @@ function buildChainSummary(
   if (candidate.causalChain.length > 2) {
     parts.push(`Chain: ${candidate.causalChain.length} node(s)`)
   }
+
+  // The search scope belongs in the summary: a 90%-confidence candidate drawn
+  // from 4 commits and one drawn from 400 are not the same claim, and the
+  // reader cannot tell them apart from the confidence number alone.
+  parts.push(`Searched ${history.length} commit(s) touching ${file}`)
 
   return parts.join(' | ')
 }

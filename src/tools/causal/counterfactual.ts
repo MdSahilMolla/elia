@@ -1,14 +1,13 @@
 // Counterfactual analysis: test whether removing a candidate change
 // eliminates the failure, using isolated git worktrees.
 
-import type { CounterfactualResult, ReproductionResult } from './types.ts'
+import type { CounterfactualResult } from './types.ts'
 import { runGit } from '../../autonomy/worktree.ts'
 import { reproduceFromFile } from './reproduction.ts'
 import { join } from 'node:path'
 import { paths } from '../../statePaths.ts'
 import { rm } from 'node:fs/promises'
 
-const COUNTERFACTUAL_TIMEOUT_MS = 60_000
 
 /** Perform counterfactual analysis in an isolated worktree. */
 export async function performCounterfactual(

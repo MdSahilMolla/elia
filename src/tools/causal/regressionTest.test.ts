@@ -81,3 +81,28 @@ test('generateRegressionTest embeds the detected export name into the generated 
     rmSync(dir, { recursive: true, force: true })
   }
 })
+/**
+ * A scaffold that passes is worse than no scaffold at all: it reports green in
+ * the user's suite while asserting nothing, so a regression this tool was run
+ * specifically to catch goes unnoticed and the coverage looks real. Every
+ * framework branch must emit a pending marker instead, so the file can never be
+ * mistaken for working coverage.
+ */
+describe('generated scaffolds never report green without an assertion', () => {
+  const conventions = { describe: 'describe', it: 'it', expect: 'expect' }
+
+  for (const framework of ['bun:test', 'jest', 'vitest', 'mocha'] as const) {
+    test(`${framework} emits a pending marker, not a passing assertion`, () => {
+      const code = generateTestCode({
+        framework,
+        conventions,
+        targetFile: 'src/scanner.ts',
+        candidate,
+        testFileExists: false,
+        exportStyle: { kind: 'named', moduleName: 'scanner', exportNames: ['analyzeThings'] },
+      })
+      expect(code).not.toContain('toBe(true)')
+      expect(code).toContain('.todo(')
+    })
+  }
+})
