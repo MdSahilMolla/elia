@@ -65,7 +65,7 @@ test('Google Gemini resolves through the OpenAI-compatible adapter', () => {
 })
 
 test('NVIDIA NIM has a documented default model and reports configuration from its key variable', () => {
-  expect(providerPresetDefaultModel('nvidia')).toBe('nvidia/llama-3.3-nemotron-super-49b-v1.5')
+  expect(providerPresetDefaultModel('nvidia')).toBe('nvidia/nemotron-3-super-120b-a12b')
 
   process.env.NVIDIA_API_KEY = 'test-nvidia-key'
   expect(isProviderPresetConfigured('nvidia')).toBe(true)
@@ -79,7 +79,7 @@ test('NVIDIA NIM resolves through the OpenAI-compatible adapter', () => {
   expect('error' in resolved).toBe(false)
   if ('error' in resolved) return
   expect(resolved.providerName).toBe('nvidia')
-  expect(resolved.model).toBe('nvidia/llama-3.3-nemotron-super-49b-v1.5')
+  expect(resolved.model).toBe('nvidia/nemotron-3-super-120b-a12b')
 })
 
 test('OpenRouter has a documented default model and reports configuration from its key variable', () => {

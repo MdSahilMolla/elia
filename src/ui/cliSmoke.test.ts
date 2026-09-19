@@ -168,7 +168,7 @@ test('config set stores a provider key without printing it', async () => {
   expect(result.stderr).not.toContain('setup-test-key')
   const stored = readFileSync(configPath, 'utf8')
   expect(stored).toContain('NVIDIA_API_KEY=setup-test-key')
-  expect(stored).toContain('ELIA_MODEL=nvidia/llama-3.3-nemotron-super-49b-v1.5')
+  expect(stored).toContain('ELIA_MODEL=nvidia/nemotron-3-super-120b-a12b')
 })
 
 test('invalid supervision settings fail before provider initialization', async () => {
