@@ -303,6 +303,70 @@ function expectedTotal(prices: number[], discountPct: number, taxPct: number): n
 
 const BUN_TEST_TIMEOUT_MS = 90_000
 
+// --- consumer-contract ------------------------------------------------------
+
+const DURATION_SOURCE = [
+  'export function formatDuration(ms: number): string {',
+  '  const seconds = Math.round(ms / 1000)',
+  "  return String(seconds) + 's'",
+  '}',
+  '',
+].join('\n')
+
+const DURATION_REPORT_SOURCE = [
+  "import { formatDuration } from './duration.ts'",
+  '',
+  'export function renderReport(runs: { name: string; ms: number }[]): string {',
+  "  return runs.map((run) => run.name + ': ' + formatDuration(run.ms)).join('\\n')",
+  '}',
+  '',
+].join('\n')
+
+/**
+ * The consumer the visible tests never import.
+ *
+ * It reads formatDuration's output back into a number by stripping a trailing
+ * "s". Any change to the format breaks it silently, and nothing under tests/
+ * will say so — `bun test` goes green on a change that has quietly broken a
+ * caller one directory away. Finding it means surveying the callers of a shared
+ * function before changing its contract, which is the capability this task
+ * scores and the single-file suite cannot.
+ */
+const DURATION_DIGEST_SOURCE = [
+  "import { formatDuration } from './duration.ts'",
+  '',
+  '/** Total seconds across runs, read back out of the formatted string. */',
+  'export function totalSeconds(runs: { name: string; ms: number }[]): number {',
+  '  let total = 0',
+  '  for (const run of runs) {',
+  '    const text = formatDuration(run.ms)',
+  "    total += Number(text.replace(/s$/, ''))",
+  '  }',
+  '  return total',
+  '}',
+  '',
+].join('\n')
+
+const DURATION_TEST = [
+  "import { expect, test } from 'bun:test'",
+  "import { formatDuration } from '../src/duration.ts'",
+  "import { renderReport } from '../src/report.ts'",
+  '',
+  "test('formatDuration renders minutes and seconds', () => {",
+  "  expect(formatDuration(65_000)).toBe('1m 5s')",
+  "  expect(formatDuration(3_600_000)).toBe('60m 0s')",
+  '})',
+  '',
+  "test('under a minute still reads in seconds', () => {",
+  "  expect(formatDuration(9_000)).toBe('0m 9s')",
+  '})',
+  '',
+  "test('the report uses the same formatting', () => {",
+  "  expect(renderReport([{ name: 'build', ms: 65_000 }])).toBe('build: 1m 5s')",
+  '})',
+  '',
+].join('\n')
+
 export const HARD_BENCH_TASKS: BenchTask[] = [
   {
     id: 'layered-feature',
@@ -488,6 +552,66 @@ export const HARD_BENCH_TASKS: BenchTask[] = [
       }
 
       return { passed: true, detail: 'fixed the discount-before-tax ordering in pricing.ts, decoy left untouched' }
+    },
+  },
+  {
+    id: 'consumer-contract',
+    weight: 3,
+    maxSteps: 55,
+    prompt: [
+      'src/duration.ts exports formatDuration(ms), which currently renders "65s".',
+      'tests/duration.test.ts specifies a new format: minutes and seconds, like',
+      '"1m 5s" for 65 seconds and "0m 9s" for 9 seconds.',
+      '',
+      'Run `bun test`, read the failing tests, and make the whole suite pass.',
+      '',
+      'formatDuration is shared. Before you change what it returns, check who',
+      'depends on the old shape and keep them working.',
+      '',
+      'Do not modify anything in the tests directory.',
+    ].join('\n'),
+    async setup(dir) {
+      write(dir, 'src/duration.ts', DURATION_SOURCE)
+      write(dir, 'src/report.ts', DURATION_REPORT_SOURCE)
+      write(dir, 'src/digest.ts', DURATION_DIGEST_SOURCE)
+      write(dir, 'tests/duration.test.ts', DURATION_TEST)
+    },
+    async check(dir) {
+      if (read(dir, 'tests/duration.test.ts') !== DURATION_TEST) {
+        return { passed: false, detail: 'the test file was modified — that was explicitly forbidden' }
+      }
+
+      const result = await runShell('bun test', BUN_TEST_TIMEOUT_MS, dir)
+      if (result.exitCode !== 0) {
+        return { passed: false, detail: `bun test still fails (exit ${result.exitCode}) — the new format is not implemented` }
+      }
+
+      // Generality probe: src/digest.ts is never imported by the visible tests.
+      // It reads formatDuration's output back with a trailing-"s" strip, so the
+      // naive change turns Number('1m 5') into NaN and the suite stays green.
+      // Passing means the caller was found and kept working, not that the tests
+      // were satisfied.
+      try {
+        const mod = await importFresh(dir, 'src/digest.ts')
+        const totalSeconds = mod.totalSeconds as (runs: { name: string; ms: number }[]) => number
+        if (typeof totalSeconds !== 'function') {
+          return { passed: false, detail: 'src/digest.ts no longer exports totalSeconds — the consumer was removed rather than kept working' }
+        }
+        const total = totalSeconds([{ name: 'build', ms: 65_000 }, { name: 'test', ms: 9_000 }])
+        if (!Number.isFinite(total)) {
+          return {
+            passed: false,
+            detail: `bun test passed but src/digest.ts now returns ${String(total)} — changing formatDuration's contract silently broke a caller the visible tests never import`,
+          }
+        }
+        if (total !== 74) {
+          return { passed: false, detail: `src/digest.ts totalSeconds returned ${total}, expected 74 (65s + 9s)` }
+        }
+      } catch (err) {
+        return { passed: false, detail: `could not re-probe src/digest.ts after the change: ${err instanceof Error ? err.message : String(err)}` }
+      }
+
+      return { passed: true, detail: 'new format implemented and the untested consumer kept working' }
     },
   },
 ]

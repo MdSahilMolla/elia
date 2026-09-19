@@ -293,3 +293,81 @@ test('every hard task carries a non-trivial step budget and weight', () => {
     expect(task.prompt).toContain('tests')
   }
 })
+
+/**
+ * consumer-contract exists to score one thing: does the agent look at who calls
+ * a shared function before changing what it returns?
+ *
+ * The suite was saturated — 50 of 54 tasks passing, every synthetic and hard
+ * task green — so a real improvement had almost nowhere to show up. This task
+ * adds headroom for a capability elia measurably lacks in production:
+ * `read_file`/`edit_file` field evidence shows it routinely acts on a file it
+ * has not surveyed. The visible tests go green on the naive change; only the
+ * untested consumer catches it.
+ *
+ * These checks matter more than usual here. A task that cannot tell the naive
+ * fix from the complete one adds noise to every future generation rather than
+ * signal.
+ */
+const NAIVE_DURATION = [
+  'export function formatDuration(ms: number): string {',
+  '  const seconds = Math.round(ms / 1000)',
+  '  const m = Math.floor(seconds / 60)',
+  '  const s = seconds % 60',
+  "  return String(m) + 'm ' + String(s) + 's'",
+  '}',
+].join('\n')
+
+const REPAIRED_DIGEST = [
+  "import { formatDuration } from './duration.ts'",
+  'export function totalSeconds(runs: { name: string; ms: number }[]): number {',
+  '  let total = 0',
+  '  for (const run of runs) {',
+  '    const text = formatDuration(run.ms)',
+  "    const parts = text.split('m ')",
+  "    total += Number(parts[0]) * 60 + Number(String(parts[1]).replace('s', ''))",
+  '  }',
+  '  return total',
+  '}',
+].join('\n')
+
+test('consumer-contract fails an untouched repo', async () => {
+  const task = taskById('consumer-contract')
+  const dir = tempDir('consumer-untouched')
+  await task.setup(dir)
+  const result = await task.check(dir)
+  expect(result.passed).toBe(false)
+}, 120_000)
+
+test('consumer-contract fails the naive fix that leaves the untested caller broken', async () => {
+  const task = taskById('consumer-contract')
+  const dir = tempDir('consumer-naive')
+  await task.setup(dir)
+  put(dir, 'src/duration.ts', NAIVE_DURATION)
+  const result = await task.check(dir)
+  // This is the whole point: `bun test` is green here.
+  expect(result.passed).toBe(false)
+  expect(result.detail).toContain('NaN')
+}, 120_000)
+
+test('consumer-contract passes when the caller is kept working too', async () => {
+  const task = taskById('consumer-contract')
+  const dir = tempDir('consumer-complete')
+  await task.setup(dir)
+  put(dir, 'src/duration.ts', NAIVE_DURATION)
+  put(dir, 'src/digest.ts', REPAIRED_DIGEST)
+  const result = await task.check(dir)
+  expect(result.passed).toBe(true)
+}, 120_000)
+
+test('consumer-contract refuses a run that edited the spec', async () => {
+  const task = taskById('consumer-contract')
+  const dir = tempDir('consumer-cheat')
+  await task.setup(dir)
+  put(dir, 'src/duration.ts', NAIVE_DURATION)
+  put(dir, 'src/digest.ts', REPAIRED_DIGEST)
+  put(dir, 'tests/duration.test.ts', 'import { test } from "bun:test"\ntest("x", () => {})\n')
+  const result = await task.check(dir)
+  expect(result.passed).toBe(false)
+  expect(result.detail).toContain('test file was modified')
+}, 120_000)
