@@ -367,6 +367,70 @@ const DURATION_TEST = [
   '',
 ].join('\n')
 
+// --- twin-validator ---------------------------------------------------------
+
+/**
+ * Two validators that are nearly the same text on purpose.
+ *
+ * `checkUsername` has the bug; `checkEmail` is correct and must stay that way.
+ * The two bodies differ only in the field name and the message, so an edit
+ * anchored on the shape of the code rather than on which function it is in will
+ * land in the wrong one — or, with a replace-all, in both. The visible tests
+ * only exercise usernames, so both mistakes leave `bun test` green.
+ */
+const TWIN_SOURCE = [
+  'export interface Problem { field: string; message: string }',
+  '',
+  'export function checkUsername(value: string): Problem[] {',
+  '  const problems: Problem[] = []',
+  '  const trimmed = value.trim()',
+  '  if (trimmed.length === 0) {',
+  "    problems.push({ field: 'username', message: 'username is required' })",
+  '    return problems',
+  '  }',
+  '  if (trimmed.length < 8) {',
+  "    problems.push({ field: 'username', message: 'username is too short' })",
+  '  }',
+  '  return problems',
+  '}',
+  '',
+  'export function checkEmail(value: string): Problem[] {',
+  '  const problems: Problem[] = []',
+  '  const trimmed = value.trim()',
+  '  if (trimmed.length === 0) {',
+  "    problems.push({ field: 'email', message: 'email is required' })",
+  '    return problems',
+  '  }',
+  '  if (trimmed.length < 8) {',
+  "    problems.push({ field: 'email', message: 'email is too short' })",
+  '  }',
+  '  return problems',
+  '}',
+  '',
+].join('\n')
+
+const TWIN_TEST = [
+  "import { expect, test } from 'bun:test'",
+  "import { checkUsername } from '../src/validate.ts'",
+  '',
+  "test('a three-character username is allowed', () => {",
+  "  expect(checkUsername('abc')).toEqual([])",
+  '})',
+  '',
+  "test('a two-character username is too short', () => {",
+  "  const problems = checkUsername('ab')",
+  '  expect(problems).toHaveLength(1)',
+  "  expect(problems[0]!.message).toBe('username is too short')",
+  '})',
+  '',
+  "test('an empty username is still required', () => {",
+  "  const problems = checkUsername('   ')",
+  '  expect(problems).toHaveLength(1)',
+  "  expect(problems[0]!.message).toBe('username is required')",
+  '})',
+  '',
+].join('\n')
+
 export const HARD_BENCH_TASKS: BenchTask[] = [
   {
     id: 'layered-feature',
@@ -612,6 +676,66 @@ export const HARD_BENCH_TASKS: BenchTask[] = [
       }
 
       return { passed: true, detail: 'new format implemented and the untested consumer kept working' }
+    },
+  },
+  {
+    id: 'twin-validator',
+    weight: 3,
+    maxSteps: 45,
+    prompt: [
+      'src/validate.ts exports two validators. tests/validate.test.ts specifies that',
+      'a three-character username is allowed; today it is rejected as too short.',
+      '',
+      'Run `bun test`, read the failing test, and make the whole suite pass.',
+      'Change only what the failing test requires.',
+      '',
+      'Do not modify anything in the tests directory.',
+    ].join('\n'),
+    async setup(dir) {
+      write(dir, 'src/validate.ts', TWIN_SOURCE)
+      write(dir, 'tests/validate.test.ts', TWIN_TEST)
+    },
+    async check(dir) {
+      if (read(dir, 'tests/validate.test.ts') !== TWIN_TEST) {
+        return { passed: false, detail: 'the test file was modified — that was explicitly forbidden' }
+      }
+
+      const result = await runShell('bun test', BUN_TEST_TIMEOUT_MS, dir)
+      if (result.exitCode !== 0) {
+        return { passed: false, detail: `bun test still fails (exit ${result.exitCode}) — the username rule was not corrected` }
+      }
+
+      // Generality probe: checkEmail is a near-textual twin of checkUsername and
+      // the visible tests never touch it. An edit anchored on the shape of the
+      // code rather than on which function it sits in lands in the wrong one, and
+      // a replace-all lands in both — either way `bun test` is green and an
+      // unrelated rule has quietly moved.
+      try {
+        const mod = await importFresh(dir, 'src/validate.ts')
+        const checkEmail = mod.checkEmail as (value: string) => { field: string; message: string }[]
+        const checkUsername = mod.checkUsername as (value: string) => { field: string; message: string }[]
+        if (typeof checkEmail !== 'function' || typeof checkUsername !== 'function') {
+          return { passed: false, detail: 'src/validate.ts no longer exports both checkUsername and checkEmail' }
+        }
+        if (checkUsername('abc').length !== 0) {
+          return { passed: false, detail: 'checkUsername still rejects a three-character name after the change' }
+        }
+        const shortEmail = checkEmail('abcdefg')
+        if (shortEmail.length !== 1 || shortEmail[0]?.message !== 'email is too short') {
+          return {
+            passed: false,
+            detail: 'bun test passed but checkEmail now accepts a 7-character value — the username fix was applied to its twin as well, moving a rule no test asked to change',
+          }
+        }
+        const emptyEmail = checkEmail('   ')
+        if (emptyEmail.length !== 1 || emptyEmail[0]?.message !== 'email is required') {
+          return { passed: false, detail: 'checkEmail no longer reports an empty value as required — its behaviour was altered' }
+        }
+      } catch (err) {
+        return { passed: false, detail: `could not re-probe src/validate.ts after the change: ${err instanceof Error ? err.message : String(err)}` }
+      }
+
+      return { passed: true, detail: 'username rule corrected without disturbing its near-identical twin' }
     },
   },
 ]

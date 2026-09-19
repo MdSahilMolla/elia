@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from 'bun:test'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { HARD_BENCH_TASKS } from './hardSuite.ts'
@@ -370,4 +370,54 @@ test('consumer-contract refuses a run that edited the spec', async () => {
   const result = await task.check(dir)
   expect(result.passed).toBe(false)
   expect(result.detail).toContain('test file was modified')
+}, 120_000)
+
+/**
+ * twin-validator scores edit precision when the surrounding text is not unique.
+ *
+ * `checkUsername` and `checkEmail` differ only in a field name and a message.
+ * The visible tests exercise usernames only, so an edit anchored on the shape of
+ * the code rather than on which function it sits in — or a replace-all — leaves
+ * `bun test` green while moving a rule nothing asked to change.
+ *
+ * This is the second most common failure shape in elia's own field evidence:
+ * `edit_file` missed its anchor on 16 of 262 calls. The single-file suite
+ * cannot score it, because in a single file there is nothing to confuse.
+ */
+const bothThresholds = (dir: string) => readFileSync(join(dir, 'src/validate.ts'), 'utf8')
+
+test('twin-validator fails an untouched repo', async () => {
+  const task = taskById('twin-validator')
+  const dir = tempDir('twin-untouched')
+  await task.setup(dir)
+  expect((await task.check(dir)).passed).toBe(false)
+}, 120_000)
+
+test('twin-validator fails a replace-all that moves both rules', async () => {
+  const task = taskById('twin-validator')
+  const dir = tempDir('twin-replaceall')
+  await task.setup(dir)
+  put(dir, 'src/validate.ts', bothThresholds(dir).split('< 8').join('< 3'))
+  const result = await task.check(dir)
+  // `bun test` is green here — only the untested twin catches it.
+  expect(result.passed).toBe(false)
+  expect(result.detail).toContain('checkEmail now accepts')
+}, 120_000)
+
+test('twin-validator fails an edit that landed in the wrong twin', async () => {
+  const task = taskById('twin-validator')
+  const dir = tempDir('twin-wrong')
+  await task.setup(dir)
+  const text = bothThresholds(dir)
+  const last = text.lastIndexOf('< 8')
+  put(dir, 'src/validate.ts', text.slice(0, last) + '< 3' + text.slice(last + 3))
+  expect((await task.check(dir)).passed).toBe(false)
+}, 120_000)
+
+test('twin-validator passes when only the named rule moves', async () => {
+  const task = taskById('twin-validator')
+  const dir = tempDir('twin-correct')
+  await task.setup(dir)
+  put(dir, 'src/validate.ts', bothThresholds(dir).replace('< 8', '< 3'))
+  expect((await task.check(dir)).passed).toBe(true)
 }, 120_000)
