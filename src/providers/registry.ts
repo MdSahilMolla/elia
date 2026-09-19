@@ -55,7 +55,14 @@ const PROVIDER_PRESETS: Record<string, ProviderPreset> = {
     kind: 'openai-compatible',
     apiKeyEnv: 'NVIDIA_API_KEY',
     baseURL: 'https://integrate.api.nvidia.com/v1',
-    defaultModel: 'nvidia/llama-3.3-nemotron-super-49b-v1.5',
+    // Probed live on 2026-09-20. The previous default,
+    // `nvidia/llama-3.3-nemotron-super-49b-v1.5`, reached end of life on
+    // 2026-08-26 and now answers 410 — which surfaced as a *benchmark task
+    // failure* during an `elia evolve` baseline, because `ELIA_ROUTING_MODE=auto`
+    // puts every preset in the fallback chain. Note that NVIDIA lists 82 models
+    // and most of them 404 on inference for a given account, so this was chosen
+    // by probing rather than by reading the catalogue.
+    defaultModel: 'nvidia/nemotron-3-super-120b-a12b',
   },
   mercury: {
     kind: 'openai-compatible',
