@@ -1,0 +1,252 @@
+/**
+ * The benchmark subcommands: `elia bench`, its `--harvest` and `--swe` modes,
+ * and the model-free `bench-latency`.
+ *
+ * One module because they share a subject rather than an implementation — a
+ * change to what a benchmark record holds touches all four, and nothing else.
+ */
+import { writeNotice, writeError, writeUsageLine } from '../ui/stream.ts'
+import { emitEvent, machineReadable } from '../ui/runtime.ts'
+import { flagValue, hasFlag, positionals, strictInteger } from './argv.ts'
+import { ensureFirstRunProviderSetup } from './providerSetup.ts'
+import { loadRuntimeSkills } from './runtime.ts'
+
+/**
+ * Rebuilds the history-derived task set from this repository's own git log.
+ *
+ * Runs no model and needs no API key: it only checks out past trees and runs
+ * their tests, twice per candidate, to prove each task fails before the real
+ * commit and passes after it.
+ */
+export async function runBenchHarvest(): Promise<void> {
+  const { harvest, writeTasksFile, TASKS_FILE } = await import('../evolve/history/harvest.ts')
+
+  const scan = strictInteger(flagValue('--scan') ?? '200') ?? 200
+  const limit = strictInteger(flagValue('--limit') ?? '12') ?? 12
+
+  writeNotice(
+    `Harvesting benchmark tasks from the last ${scan} commits. Each candidate is checked out and its tests run twice — this makes no model calls.`,
+  )
+  const result = await harvest({ scan, limit, onProgress: (message) => writeUsageLine(message) })
+
+  if (result.tasks.length === 0) {
+    writeNotice(`No task could be validated out of ${result.considered} candidates; leaving the existing set alone.`)
+    process.exitCode = 1
+    return
+  }
+
+  writeTasksFile(result.tasks)
+  writeNotice(
+    `Wrote ${result.tasks.length} validated tasks to ${TASKS_FILE} (${result.rejected.length} of ${result.considered} candidates could not be proven).`,
+  )
+}
+
+/**
+ * `elia bench swe --file <tasks.json> [--sample N] [--out <results.json>]`
+ *
+ * Runs a SWE-bench-Verified-shaped task file end to end (checkout, patch,
+ * real agent run, real test execution, score) — see bench/swe/harness.ts.
+ * elia does not fetch or bundle the real SWE-bench dataset itself (its size
+ * and distribution terms are the operator's call); point --file at a real
+ * export to run it for real. Each instance runs a real, billed agent loop,
+ * so --sample defaults to a small number rather than the whole file.
+ */
+export async function runBenchSwe(): Promise<void> {
+  const filePath = flagValue('--file')
+  if (!filePath) {
+    writeError('elia bench swe --file <tasks.json> — a SWE-bench-Verified-shaped task file (see src/bench/swe/types.ts for the schema)')
+    process.exitCode = 1
+    return
+  }
+  const { readFileSync, existsSync, mkdirSync } = await import('node:fs')
+  const { dirname } = await import('node:path')
+  if (!existsSync(filePath)) {
+    writeError(`No such file: ${filePath}`)
+    process.exitCode = 1
+    return
+  }
+  let instances: import('../bench/swe/types.ts').SweBenchInstance[]
+  try {
+    instances = JSON.parse(readFileSync(filePath, 'utf8'))
+    if (!Array.isArray(instances)) throw new Error('expected a JSON array of instances')
+  } catch (err) {
+    writeError(`Could not read ${filePath} as a SWE-bench task list: ${err instanceof Error ? err.message : String(err)}`)
+    process.exitCode = 1
+    return
+  }
+
+  const sampleRaw = flagValue('--sample')
+  const sample = sampleRaw === undefined ? 3 : strictInteger(sampleRaw)
+  if (sample === undefined || sample < 1) {
+    writeError(`--sample must be a positive integer, got "${sampleRaw}"`)
+    process.exitCode = 1
+    return
+  }
+  const selected = instances.slice(0, sample)
+  if (selected.length === 0) {
+    writeNotice(`${filePath} has no task instances.`)
+    return
+  }
+
+  if (!(await ensureFirstRunProviderSetup())) return
+  await loadRuntimeSkills()
+  writeNotice(
+    `Running ${selected.length} of ${instances.length} SWE-bench instance(s) from ${filePath} — each runs a real, billed agent loop against a real checkout. This is a sample run, not a full published score.`,
+  )
+
+  const { runSweBenchSuite } = await import('../bench/swe/harness.ts')
+  const summary = await runSweBenchSuite(selected, {
+    onInstanceDone: (result) => {
+      writeUsageLine(`  ${result.resolved ? '✓' : '✗'} ${result.instance_id}${result.agentError ? ` — ${result.agentError}` : ''}${result.keptDir ? ` (kept: ${result.keptDir})` : ''}`)
+    },
+  })
+
+  writeNotice(`Resolved ${summary.resolved}/${summary.total}.`)
+  const outPath = flagValue('--out')
+  if (outPath) {
+    mkdirSync(dirname(outPath), { recursive: true })
+    const { writeFileSync } = await import('node:fs')
+    writeFileSync(outPath, `${JSON.stringify(summary, null, 2)}\n`)
+    writeNotice(`Wrote results to ${outPath}`)
+  }
+  if (summary.resolved < summary.total) process.exitCode = 1
+}
+
+export async function runBench(): Promise<void> {
+  if (positionals(['--file', '--sample', '--out', '--split'])[0] === 'swe') return runBenchSwe()
+  if (hasFlag('--harvest')) return runBenchHarvest()
+
+  const { BENCH_TASKS, allBenchTasks } = await import('../evolve/suite.ts')
+  const { historyTasks } = await import('../evolve/history/suite.ts')
+
+  // Synthetic tasks stay the default: they are seconds each, and they are the
+  // set the evolution loop has always compared candidates on. The history tasks
+  // are real checkouts of this repository and cost minutes, so they are asked
+  // for explicitly.
+  const wholeSet = hasFlag('--all') ? allBenchTasks() : hasFlag('--history') ? historyTasks() : BENCH_TASKS
+  // --split: score one side of the held-out line on its own (see split.ts).
+  // The evolution loop hides the held-out half's failures from the proposer, so
+  // scoring it alone is how you see what it is hiding — and scoring the shown
+  // half alone is the number the proposer is briefed on.
+  const { splitTasks, renderSplit } = await import('../evolve/split.ts')
+  const half = (flagValue('--split') ?? '').toLowerCase()
+  const split = splitTasks(wholeSet)
+  if (half && !['train', 'shown', 'heldout', 'held-out', 'unseen', 'all'].includes(half)) {
+    writeError(`elia bench --split <shown|held-out|all> — "${half}" is not one of those`)
+    process.exitCode = 1
+    return
+  }
+  const shownHalf = half === 'train' || half === 'shown'
+  const heldOutHalf = half === 'heldout' || half === 'held-out' || half === 'unseen'
+  const tasks = shownHalf ? split.train : heldOutHalf ? split.heldOut : wholeSet
+  if (shownHalf || heldOutHalf) writeNotice(renderSplit(split))
+  // --lessons: every task gets this project's lessons, as a real turn would
+  // (history tasks only those older than their commit — see benchLessons.ts).
+  // Compare against a run without it to learn whether the store helps.
+  const withLessons = hasFlag('--lessons')
+  if (withLessons) {
+    const { BENCH_LESSONS_ENV } = await import('../evolve/benchLessons.ts')
+    const { paths } = await import('../statePaths.ts')
+    process.env[BENCH_LESSONS_ENV] = paths.lessons
+  }
+  if (tasks.length === 0) {
+    writeNotice('No tasks to run. `elia bench --harvest` builds the history-derived set.')
+    process.exitCode = 1
+    return
+  }
+
+  if (!(await ensureFirstRunProviderSetup())) return
+  await loadRuntimeSkills()
+  const { measureFitness, renderScorecard } = await import('../evolve/fitness.ts')
+  const { ELIA_ROOT } = await import('../config.ts')
+
+  writeNotice(`Scoring the current elia against ${tasks.length} benchmark tasks — this runs real agent loops.`)
+  const card = await measureFitness({
+    tasks,
+    sourceRoot: ELIA_ROOT,
+    onTaskDone: (outcome) =>
+      writeUsageLine(`  ${outcome.passed ? '✓' : '✗'} ${outcome.taskId} — ${outcome.error ?? outcome.detail}`),
+  })
+  const { recordBenchRun } = await import('../compounding/status.ts')
+  // The half is part of the set's name. A held-out-only run scores a different
+  // corpus, and recording it as a full run would move the headroom number in
+  // `elia compounding` on evidence that is not about the same tasks.
+  const setName = hasFlag('--all') ? 'all' : hasFlag('--history') ? 'history' : 'synthetic'
+  const halfName = shownHalf ? '/shown' : heldOutHalf ? '/held-out' : ''
+  recordBenchRun(card, `${setName}${halfName}${withLessons ? '+lessons' : ''}`)
+  if (machineReadable) emitEvent('benchmark_scorecard', { stage: 'current', scorecard: card })
+  else {
+    process.stdout.write(renderScorecard(card, 'elia'))
+    const { readLedger, renderLearningLine } = await import('../evolve/ledger.ts')
+    if (readLedger().length > 0) writeUsageLine(`  ${renderLearningLine()}`)
+  }
+  if (card.passRate < 1) process.exitCode = 1
+}
+
+export async function runBenchLatency(): Promise<void> {
+  // A bare `elia bench-latency --startup-probe` exists only so the harness can
+  // time process load + exit from the outside; do nothing and return.
+  if (hasFlag('--startup-probe') || process.env.ELIA_STARTUP_PROBE === '1') return
+
+  const { runLatencyHarness } = await import('../bench/latency/harness.ts')
+  const { renderLatencyReport, compareLatency } = await import('../bench/latency/report.ts')
+  const { readFileSync, writeFileSync, existsSync } = await import('node:fs')
+  const { join } = await import('node:path')
+  const { ELIA_ROOT } = await import('../config.ts')
+
+  const baselinePath = join(ELIA_ROOT, 'src', 'bench', 'latency', 'baseline.json')
+  const update = hasFlag('--update-baseline')
+  const strict = hasFlag('--strict')
+  const realistic = hasFlag('--realistic')
+  const live = hasFlag('--live')
+  const runs = strictInteger(flagValue('--runs') ?? (live ? '1' : '3')) ?? (live ? 1 : 3)
+  const only = flagValue('--only')?.split(',').map((id) => id.trim()).filter(Boolean)
+  const skipColdStart = hasFlag('--skip-cold-start')
+
+  if (live && !(await ensureFirstRunProviderSetup())) return
+
+  writeNotice(
+    live
+      ? "Running the latency scenarios against the real configured model — this makes real API calls."
+      : `Measuring elia's own loop, startup, and speculation overhead — deterministic scripted model${realistic ? ' with realistic pacing' : ''}, no API key needed.`,
+  )
+  const report = await runLatencyHarness({
+    runsPerScenario: runs,
+    only,
+    live,
+    skipColdStart: skipColdStart || live,
+    pacing: realistic ? { ttftMs: 400, tokenMs: 8 } : { ttftMs: 0, tokenMs: 0 },
+    onScenarioDone: (result) =>
+      writeUsageLine(
+        live
+          ? `  ${result.id} — ${result.roundTrips} trips, ${result.cachedToolCalls}/${result.toolCalls} reads pre-run, ${result.outputTokensMedian} out tok, ${result.tokensPerSecMedian} tok/s, ${result.wallMsMedian}ms`
+          : `  ${result.structuralOk ? '✓' : '✗'} ${result.id} — ${result.roundTrips} trips, ${result.cachedToolCalls}/${result.toolCalls} reads pre-run, ${result.wallMsMedian}ms wall`,
+      ),
+  })
+
+  const baseline = !live && existsSync(baselinePath) ? (JSON.parse(readFileSync(baselinePath, 'utf8')) as import('../bench/latency/harness.ts').LatencyReport) : undefined
+
+  if (machineReadable) {
+    emitEvent('latency_report', { report, comparison: baseline ? compareLatency(baseline, report, { strict }) : undefined })
+  } else {
+    process.stdout.write(renderLatencyReport(report, baseline))
+  }
+
+  if (live) return
+
+  if (update) {
+    writeFileSync(baselinePath, `${JSON.stringify(report, null, 2)}\n`)
+    writeNotice(`Baseline updated: ${baselinePath}`)
+    return
+  }
+
+  if (baseline) {
+    const comparison = compareLatency(baseline, report, { strict })
+    if (!comparison.ok) {
+      writeError(`Latency regressed:\n${comparison.regressions.map((line) => `  - ${line}`).join('\n')}`)
+      process.exitCode = 1
+    }
+  } else {
+    writeNotice('No baseline yet — run `elia bench-latency --update-baseline` to record one.')
+  }
+}

@@ -48,3 +48,25 @@ test('--version prints the package version and nothing else', async () => {
   expect(code).toBe(0)
   expect(out.trim()).toBe(pkg.version)
 }, 30_000)
+
+/**
+ * Every subcommand must reach a handler.
+ *
+ * `SUBCOMMANDS` is what the argument parser recognises; the switch in `main` is
+ * what actually runs something. Nothing ties the two together, so a name can be
+ * added to one and not the other — and the failure is silent, because an
+ * unmatched `subcommand` falls to `default` and opens the REPL. That is exactly
+ * how `--help` broke when it was split out: the flag was still recognised and
+ * quietly did the wrong thing.
+ *
+ * Spawning twenty-two processes to check this would be slow and most of them do
+ * real work, so this reads the dispatcher instead. Crude, and it catches the
+ * whole class.
+ */
+test('every recognised subcommand has a case in the dispatcher', async () => {
+  const { SUBCOMMANDS } = await import('./argv.ts')
+  const source = await Bun.file(fileURLToPath(new URL('../index.ts', import.meta.url))).text()
+  const dispatcher = source.slice(source.indexOf('async function main'))
+  const missing = SUBCOMMANDS.filter((name) => !dispatcher.includes(`case '${name}':`))
+  expect(missing).toEqual([])
+})
