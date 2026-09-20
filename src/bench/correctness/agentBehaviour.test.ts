@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test'
-import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 import { runAgentLoop, type RunAgentLoopResult, type ToolEvent } from '../../agentLoop.ts'
 import { withAgentIdentity } from '../../autonomy/context.ts'
 import { GoalGraphStore, withGoalGraph } from '../../autonomy/goalGraph.ts'
@@ -17,6 +18,8 @@ import { readFileTool } from '../../tools/readFile.ts'
 import { runCommandTool } from '../../tools/runCommand.ts'
 import type { Tool } from '../../tools/types.ts'
 import { writeFileTool } from '../../tools/writeFile.ts'
+import { githubTool } from '../../tools/github.ts'
+import { saveContribution, setContributionsPathForTests } from '../../github/contribute.ts'
 import { createScriptedProvider, type ScriptedTurn } from '../latency/scriptedProvider.ts'
 
 /**
@@ -61,7 +64,7 @@ interface Run {
 /** Drive the real loop with a scripted model, inside `dir`, and record everything the tools did. */
 async function run(
   turns: ScriptedTurn[],
-  options: { maxSteps?: number; usage?: Usage; model?: string; approve?: (request: ActionRequest) => boolean; graph?: GoalGraphStore } = {},
+  options: { maxSteps?: number; usage?: Usage; model?: string; approve?: (request: ActionRequest) => boolean; graph?: GoalGraphStore; tools?: Tool[] } = {},
 ): Promise<Run> {
   const provider = createScriptedProvider(turns, options.usage ? { usage: options.usage } : {})
   const events: ToolEvent[] = []
@@ -78,7 +81,7 @@ async function run(
     runAgentLoop({
       messages: [{ role: 'user', content: [{ type: 'text', text: 'do the task' }] }],
       systemPrompt: 'You are elia.',
-      tools: TOOLS,
+      tools: options.tools ?? TOOLS,
       provider,
       providerName: 'scripted',
       model: options.model ?? 'scripted-behaviour',
@@ -515,5 +518,90 @@ test("inside elia's own checkout with nobody to ask, elia's source is refused an
     expect(existsSync(join(dir, 'src', 'skills', 'ponytail.ts'))).toBe(true)
   } finally {
     disarmSelfEditGuard()
+  }
+})
+
+// --- Working on a repository that is not this project -------------------------
+//
+// Real git, real repositories, real github tool: the only thing scripted is the
+// model. These two scenarios are the 2026-09-20 session, replayed — a clone of
+// someone else's project sitting inside elia's checkout, and a commit that
+// swept it up under a message about the fix.
+
+/** A git repo at `at` with one commit, and a second repo cloned inside it. */
+function repoWithNestedClone(at: string, nested: string): void {
+  const git = (args: string[], cwd = at) => spawnSync('git', ['-c', 'user.email=t@t.local', '-c', 'user.name=t', ...args], { cwd, encoding: 'utf8', windowsHide: true })
+  const source = join(at, '..', `${basename(at)}-source`)
+  mkdirSync(source, { recursive: true })
+  writeFileSync(join(source, 'core.py'), 'def metavar():\n    return "TEXT"\n')
+  git(['init', '-q', '-b', 'main', '.'], source)
+  git(['add', '-A'], source)
+  git(['commit', '-q', '-m', 'upstream'], source)
+
+  writeFileSync(join(at, 'README.md'), '# the host project\n')
+  git(['init', '-q', '-b', 'main', '.'])
+  git(['add', '-A'])
+  git(['commit', '-q', '-m', 'host'])
+  git(['clone', '-q', source, join(at, nested)])
+}
+
+function gitIn(cwd: string, args: string[]): string {
+  const r = spawnSync('git', args, { cwd, encoding: 'utf8', windowsHide: true })
+  return `${r.stdout ?? ''}`.trim()
+}
+
+test("a clone of another project inside the tree is never committed into this one as a gitlink", async () => {
+  repoWithNestedClone(dir, 'click')
+  const { events } = await run(
+    [call('github', { action: 'commit', message: 'Fix issue #3652: add ellipsis for multiple=True', all: true }), done],
+    { tools: [...TOOLS, githubTool] },
+  )
+  expect(events[0]).toMatchObject({ name: 'github', isError: false })
+  expect(events[0]!.result).toContain('its own git repository, not part of this project')
+  // The commit happened, and the clone is not in it.
+  expect(gitIn(dir, ['show', '--stat', '--oneline', 'HEAD'])).not.toContain('click')
+  expect(gitIn(dir, ['status', '--porcelain'])).toContain('click')
+})
+
+test('a sweeping commit in this project is refused while the work belongs to a contribution elsewhere', async () => {
+  repoWithNestedClone(dir, 'click')
+  const state = join(dir, 'contributions.json')
+  setContributionsPathForTests(state)
+  try {
+    saveContribution({
+      slug: 'pallets/click',
+      forkSlug: 'octocat/click',
+      dir: join(dir, 'click'),
+      defaultBranch: 'main',
+      branch: 'fix/issue-3652',
+      status: 'branched',
+      startedAt: Date.now(),
+      updatedAt: Date.now(),
+    })
+    const before = gitIn(dir, ['rev-parse', 'HEAD'])
+    const { events } = await run(
+      [
+        // The fix is made in the clone, which is where the bug is.
+        call('read_file', { path: 'click/core.py' }),
+        call('edit_file', { path: 'click/core.py', old_string: 'return "TEXT"', new_string: 'return "TEXT..."' }),
+        // …and then committed in the wrong repository, the way it happened.
+        call('github', { action: 'commit', message: 'Fix issue #3652: add ellipsis for multiple=True', all: true }),
+        // Told what to do instead, the model commits inside the clone.
+        call('github', { action: 'commit', dir: join(dir, 'click'), message: 'Show ... for a repeatable option', paths: ['core.py'] }),
+        done,
+      ],
+      { tools: [...TOOLS, githubTool] },
+    )
+    expect(events[2]!.result).toContain('Refusing to commit everything')
+    expect(events[2]!.result).toContain('pallets/click')
+    // Nothing was committed here, and nothing was even staged.
+    expect(gitIn(dir, ['rev-parse', 'HEAD'])).toBe(before)
+    expect(gitIn(dir, ['diff', '--cached', '--name-only'])).toBe('')
+    // And the next call landed in the clone, which is the repository the work was in.
+    expect(events[3]!.result).toContain('in pallets/click')
+    expect(events[3]!.result).toContain('Not contributed yet')
+    expect(gitIn(join(dir, 'click'), ['log', '-1', '--pretty=%s'])).toBe('Show ... for a repeatable option')
+  } finally {
+    setContributionsPathForTests()
   }
 })

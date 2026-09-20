@@ -234,8 +234,20 @@ export function assessAction(request: ActionRequest, cwd = currentAgent().cwd ??
     if (action === 'status' || action === 'pr_view' || action === 'pr_list' || action === 'pr_checks' || action === 'pr_checks_log' || action === 'pr_reviews' || action === 'pr_unresolved_reviews' || action === 'issue_list' || action === 'issue_view') {
       return assessment('safe', 'allow', `github ${action} only reads local git and GitHub state`, `github.${action}`, resources, true)
     }
-    if (action === 'branch' || action === 'commit') {
+    if (action === 'contribute_status') {
+      return assessment('safe', 'allow', 'github contribute_status only reads elia’s own record of external contributions', 'github.contribute_status', resources, true)
+    }
+    if (action === 'branch' || action === 'commit' || action === 'sync') {
       return assessment('safe', 'allow', `github ${action} is a local, checkpointable change to version control`, `github.${action}`, resources, true)
+    }
+    // Starting a contribution forks the target repository, which creates a new
+    // repository under the user's own GitHub account and is visible to anyone
+    // looking at the source project's fork list. The clone that follows is
+    // local and harmless; the fork is the part that needs a person's yes, so
+    // the whole action is asked for once, naming the repository.
+    if (action === 'contribute') {
+      const ref = typeof input.ref === 'string' ? input.ref : typeof input.repo === 'string' ? input.repo : 'a repository'
+      return assessment('review', 'approve', `github contribute forks ${ref} to the user's GitHub account and clones it locally`, 'github.contribute', resources, true)
     }
     if (action === 'push') {
       return input.force === true
@@ -243,6 +255,15 @@ export function assessAction(request: ActionRequest, cwd = currentAgent().cwd ??
         : assessment('review', 'approve', 'github push publishes local commits to the origin remote', 'github.push', resources, true)
     }
     if (action === 'pr_create') {
+      // A PR into a repository this checkout does not belong to is a public act
+      // inside someone else's project: maintainers are notified, CI runs on
+      // their account, and closing it afterwards does not unsend any of that.
+      // It is a different thing from proposing a branch in the user's own repo,
+      // so it gets its own contract and its own approval rather than inheriting
+      // that one's standing yes.
+      if (typeof input.repo === 'string' && input.repo.trim()) {
+        return assessment('critical', 'approve', `github pr_create opens a public pull request on ${input.repo.trim()}, a repository outside this project`, 'github.pr_create.upstream', resources, false)
+      }
       return assessment('review', 'approve', 'github pr_create opens a pull request on the remote', 'github.pr_create', resources, true)
     }
     // Creating a repository publishes the whole project under a new name on the
@@ -570,7 +591,7 @@ export function assessAction(request: ActionRequest, cwd = currentAgent().cwd ??
  * project, and there one "yes" must never authorize the next one. That is the
  * distinction the old blanket refusal was protecting, and it is kept.
  */
-const SETTLEABLE_ONCE = new Set(['shell', 'shell.composed', 'shell.unknown', 'github.repo_create', SELF_EDIT_INTENT])
+const SETTLEABLE_ONCE = new Set(['shell', 'shell.composed', 'shell.unknown', 'github.repo_create', 'github.contribute', SELF_EDIT_INTENT])
 
 /**
  * Review-band intents that still publish to or mutate state beyond this project
@@ -587,6 +608,7 @@ const OUTBOUND_REVIEW_INTENTS = new Set([
   'github.pr_create',
   'github.issue_create',
   'github.milestone_create',
+  'github.contribute',
   'deployment.preview',
 ])
 
@@ -732,6 +754,13 @@ export function createActionGovernor(options: { mode?: GovernanceMode; approve?:
           raw = [program, ...args].join(' ')
         } else if (request.name === 'process' && request.input.action === 'start') {
           raw = typeof request.input.command === 'string' ? request.input.command : undefined
+        } else if (request.name === 'github') {
+          // Keyed by the repository, for the same reason the shell family is
+          // keyed by the command: a yes to forking one project is not a yes to
+          // forking the next one. Each repository is a separate account-visible
+          // act and asks for itself.
+          const ref = typeof request.input.ref === 'string' ? request.input.ref : typeof request.input.repo === 'string' ? request.input.repo : ''
+          raw = ref ? `github ${String(request.input.action)} ${ref}` : undefined
         }
         const normalized = raw?.trim().replace(/\s+/g, ' ')
         return normalized ? normalized : undefined

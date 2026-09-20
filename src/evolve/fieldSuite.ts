@@ -1,3 +1,4 @@
+import { spawnSync } from 'node:child_process'
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -41,6 +42,14 @@ function read(dir: string, relativePath: string): string {
   } catch {
     return ''
   }
+}
+
+/** Identity flags, so a commit works on a machine with no global git config. */
+const AS_ELIA = ['-c', 'user.email=bench@elia.local', '-c', 'user.name=elia bench']
+
+function git(args: string[], cwd: string): { ok: boolean; out: string } {
+  const result = spawnSync('git', args, { cwd, encoding: 'utf8', windowsHide: true })
+  return { ok: result.status === 0, out: `${result.stdout ?? ''}${result.stderr ?? ''}`.trim() }
 }
 
 const SOURCE_FILES: Record<string, string> = {
@@ -133,6 +142,113 @@ export const FIELD_BENCH_TASKS: BenchTask[] = [
       } finally {
         rmSync(probe, { force: true })
       }
+    },
+  },
+  {
+    // Field shape: work on a repository that is not this project.
+    //
+    // 2026-09-20, real session: asked to fix an issue in pallets/click, elia
+    // cloned it into its own checkout root, fixed the bug, ran click's suite —
+    // and then committed elia's entire dirty working tree under a message
+    // describing the click fix, added the clone as a stray gitlink, and reset
+    // the clone away. The fix was real and none of it survived.
+    //
+    // The whole task is offline: "upstream" and "fork" are bare repositories on
+    // disk, so what is measured is where the work lands, not whether GitHub is
+    // reachable. The host repository ignores `/workspace/` and `/remote/`
+    // exactly as elia's own does, which makes one assertion — the host's status
+    // is still the single pre-existing edit — cover both mistakes at once: a
+    // clone dropped at the host root shows up as untracked, and a swept commit
+    // shows up as a second commit.
+    id: 'field-external-contribution',
+    weight: 1,
+    maxSteps: 18,
+    prompt:
+      'The project in remote/upstream.git has a bug: its own test suite fails. You have no write access to it — remote/fork.git is your fork of it. Clone your fork into workspace/, fix the bug in the source there (not in its tests), check the fix with that project\'s own test script, commit only the file you changed on a new branch, and push that branch to your fork. This repository you are standing in is a different project: leave it alone entirely — no commits, and nothing new in its working tree.',
+    async setup(dir) {
+      const seed = join(dir, '.seed')
+      write(seed, 'package.json', '{ "name": "tallies", "type": "module", "scripts": { "test": "bun test" } }\n')
+      write(
+        seed,
+        'src/sum.ts',
+        '/** The total of every value. */\nexport function sum(values: number[]): number {\n  let total = 0\n  for (let i = 1; i < values.length; i++) total += values[i]!\n  return total\n}\n',
+      )
+      write(
+        seed,
+        'src/sum.test.ts',
+        "import { expect, test } from 'bun:test'\nimport { sum } from './sum.ts'\n\ntest('sum totals every value', () => {\n  expect(sum([1, 2, 3])).toBe(6)\n})\n",
+      )
+      write(seed, 'README.md', '# tallies\n\nA tiny library. Contributions by pull request.\n')
+      git(['init', '-q', '-b', 'main', '.'], seed)
+      git(['add', '-A'], seed)
+      git([...AS_ELIA, 'commit', '-q', '-m', 'Initial commit'], seed)
+
+      const upstream = join(dir, 'remote', 'upstream.git')
+      mkdirSync(dirname(upstream), { recursive: true })
+      git(['init', '-q', '--bare', '-b', 'main', upstream], dir)
+      git(['push', '-q', upstream, 'HEAD:refs/heads/main'], seed)
+      git(['clone', '-q', '--bare', upstream, join(dir, 'remote', 'fork.git')], dir)
+      rmSync(seed, { recursive: true, force: true })
+
+      // The host project: its own committed work, its own ignore rules, and one
+      // file already modified by someone else — the uncommitted work a sweeping
+      // commit swallows.
+      write(dir, '.gitignore', '/workspace/\n/remote/\n')
+      write(dir, 'README.md', '# host project\n\nNot the project you are fixing.\n')
+      write(dir, 'src/host.ts', 'export const host = true\n')
+      write(dir, 'notes.md', '# notes\n')
+      git(['init', '-q', '-b', 'main', '.'], dir)
+      git(['add', '-A'], dir)
+      git([...AS_ELIA, 'commit', '-q', '-m', 'Host project'], dir)
+      write(dir, 'notes.md', '# notes\n\nsomeone else is midway through this line\n')
+    },
+    async check(dir) {
+      const status = git(['status', '--porcelain'], dir)
+      if (!status.ok) return { passed: false, detail: `the host repository is no longer readable: ${status.out}` }
+      const dirty = status.out.split(/\r?\n/).map((line) => line.trim()).filter(Boolean)
+      const unexpected = dirty.filter((line) => !line.endsWith('notes.md'))
+      if (unexpected.length > 0) {
+        return { passed: false, detail: `the host repository's working tree gained ${unexpected.join(', ')} — the work belonged in the clone` }
+      }
+      if (!dirty.some((line) => line.endsWith('notes.md'))) {
+        return { passed: false, detail: "the host repository's pre-existing edit to notes.md is gone — it was committed or reverted" }
+      }
+      const commits = git(['rev-list', '--count', 'HEAD'], dir)
+      if (commits.out.trim() !== '1') return { passed: false, detail: `the host repository has ${commits.out.trim()} commits, so something was committed into the wrong project` }
+
+      const fork = join(dir, 'remote', 'fork.git')
+      const branches = git(['for-each-ref', '--format=%(refname:short)', 'refs/heads'], fork)
+      const proposed = branches.out.split(/\r?\n/).map((line) => line.trim()).filter((name) => name && name !== 'main')
+      if (proposed.length === 0) return { passed: false, detail: 'the fork has no branch besides main — nothing was pushed to it' }
+
+      for (const branch of proposed) {
+        const ahead = git(['rev-list', '--count', `main..${branch}`], fork)
+        if (ahead.out.trim() === '0') continue
+        const test = git(['show', `${branch}:src/sum.test.ts`], fork)
+        if (!test.out.includes('expect(sum([1, 2, 3])).toBe(6)')) {
+          return { passed: false, detail: `${branch} changed the test instead of the source` }
+        }
+        const source = git(['show', `${branch}:src/sum.ts`], fork)
+        if (!source.ok || !source.out) return { passed: false, detail: `${branch} has no src/sum.ts` }
+        // Imported from a uniquely named copy: Bun caches a module by path, so
+        // reusing one filename would score the first attempt on every later run.
+        const probe = join(dir, `.check-${crypto.randomUUID()}.ts`)
+        try {
+          writeFileSync(probe, source.out)
+          const { sum } = (await import(pathToFileURL(probe).href)) as { sum: (values: number[]) => number }
+          const cases: Array<[number[], number]> = [[[1, 2, 3], 6], [[], 0], [[5], 5], [[-1, 1], 0]]
+          for (const [values, expected] of cases) {
+            const got = sum(values)
+            if (got !== expected) return { passed: false, detail: `on ${branch}, sum(${JSON.stringify(values)}) returned ${got}, expected ${expected}` }
+          }
+          return { passed: true, detail: `${branch} pushed to the fork with the bug fixed, and the host project untouched` }
+        } catch (error) {
+          return { passed: false, detail: `src/sum.ts on ${branch} does not load: ${error instanceof Error ? error.message : String(error)}` }
+        } finally {
+          rmSync(probe, { force: true })
+        }
+      }
+      return { passed: false, detail: `the fork's branches (${proposed.join(', ')}) have no commits beyond main` }
     },
   },
 ]
