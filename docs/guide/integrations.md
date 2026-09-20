@@ -2,6 +2,36 @@
 
 [← Back to the README](../../README.md)
 
+## Contributing to a repository that isn't yours
+
+Fixing an issue in someone else's project — an upstream bug, a dependency, an issue you were pointed at — is one governed workflow, not a clone and a patch. It exists because the obvious way round fails in a specific and expensive manner: on 2026-09-20 Elia was asked to fix [pallets/click#3652](https://github.com/pallets/click/issues/3652), cloned the repo into its own checkout root, made a correct fix, ran click's test suite green — and then committed Elia's entire dirty working tree under a message describing the click fix, recorded the clone as a stray gitlink, and reset the clone away. The engineering was right and nothing survived it. Every step below is a guard against one part of that.
+
+```
+github issue_view  repo:"pallets/click" number:3652        # read the actual report
+github contribute  ref:"pallets/click#3652"                # fork → clone → branch
+   … reproduce, fix, and run that project's own checks, all with dir:/cwd: naming the clone …
+github commit      dir:"…/workspace/click" paths:[…] verified:"pytest tests/ — 2412 passed"
+github push        dir:"…/workspace/click"                 # to your fork, never upstream
+github pr_create   dir:"…/workspace/click" repo:"pallets/click" title:"…" body:"…"
+github contribute_status                                   # where every contribution stands
+```
+
+What `contribute` sets up, so that the later steps cannot go wrong:
+
+- **The clone lands under `workspace/`**, which Elia's own `.gitignore` excludes, and its path is added to the host repository's `.git/info/exclude` as well. A `git add -A` by any tool, in any repo the clone happens to sit inside, cannot pick it up.
+- **`origin` is your fork and `upstream` is the source**, with upstream's push URL set to a dead value. A push cannot reach a repository you don't own, however it is invoked. If you already have write access to the target, no fork is made and `origin` is the project itself.
+- **Every step is recorded** in `.elia/contributions.json` — clone, branch, commit, push, PR, merged — which is what makes "fixed it and reverted it" visible instead of invisible.
+
+The guards that sit on the ordinary actions:
+
+- `commit` prefers `paths:[…]`. With `all:true` it refuses outright while a contribution is open in another directory, and it always unstages files that look like secrets and nested clones staged as gitlinks (a real submodule, declared in `.gitmodules`, is kept).
+- `pr_create` inside a fork refuses until you name the upstream repo with `repo:`. Without it, `gh pr create` would open the request against your own fork's default branch: it prints a URL, and no maintainer ever sees it.
+- `verified:` records the check you actually ran; it is quoted in the pull request body, and `contribute_status` shows a contribution with no verification as exactly that.
+
+Governance: `contribute` is reviewable outbound work approved **per repository** — one yes to forking a project is not a yes to forking the next one. Opening a pull request on a repository outside this project is a separate **critical action** (`github.pr_create.upstream`): maintainers are notified and CI runs on their account, and closing the request afterwards does not unsend any of it. Unattended runs block it unless it was pre-authorized with `elia auto --authorize github.pr_create.upstream`.
+
+The pull request is the deliverable. `elia compounding` reports contributions beside the benchmark, because a maintainer merging a patch is the strongest check in Elia's records: an outside party with no stake in Elia looking good accepted the work. `field-external-contribution` in the benchmark scores the habit offline, with local bare repositories standing in for upstream and fork.
+
 ## End-to-end web deployment
 
 Elia’s Tech and Production workflows can carry a web project through inspect → implement → test → build → preview deploy → live verification. The governed `deployment` tool supports Vercel and Netlify when the project is already linked locally: `.vercel/project.json` for Vercel, or `.netlify/state.json`/`NETLIFY_SITE_ID` for Netlify. It uses the project’s declared build script, returns bounded provider output, extracts the deployment URL, and records a receipt in `.elia/deployments.jsonl`.

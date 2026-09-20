@@ -5,6 +5,7 @@ import { appendSecureFile } from '../securePersistence.ts'
 import { readTrajectories } from '../trajectory/record.ts'
 import { learningRate, readLedger, type GenerationRecord } from '../evolve/ledger.ts'
 import { lessonTrials } from '../autonomy/lessonEfficacy.ts'
+import { readContributions } from '../github/contribute.ts'
 import { recursionSignal, renderRecursion } from './recursion.ts'
 import { evidenceVelocity } from './velocity.ts'
 import type { Scorecard } from '../evolve/fitness.ts'
@@ -166,6 +167,14 @@ export function lessonStoreEffect(runs: BenchRecord[]): LessonStoreEffect | unde
   return undefined
 }
 
+/** Merged external pull requests, for stage 2's evidence line. Empty when there are none. */
+function mergedUpstreamNote(): string {
+  const merged = readContributions().filter((row) => row.status === 'merged')
+  if (merged.length === 0) return ''
+  const repos = [...new Set(merged.map((row) => row.slug))]
+  return `; ${merged.length} change(s) accepted upstream by maintainers of ${repos.slice(0, 3).join(', ')}${repos.length > 3 ? ` and ${repos.length - 3} more` : ''}`
+}
+
 export function compoundingStatus(): StageReport[] {
   const interactive = readTrajectories('interactive')
   const autonomous = readTrajectories('autonomous')
@@ -197,7 +206,13 @@ export function compoundingStatus(): StageReport[] {
       stage: 2,
       name: 'Check that experience',
       state: rows.length === 0 ? 'no evidence' : checked / rows.length >= 0.5 ? 'working' : 'partial',
-      evidence: `${checked} of ${rows.length} (${rows.length ? Math.round((checked / rows.length) * 100) : 0}%) passed a check that was not a model's opinion`,
+      // A maintainer merging a patch into a repository elia does not own is the
+      // hardest check in these records: an outside party with no stake in elia
+      // looking good accepted the work. It is reported, not counted — the state
+      // above stays earned by the turn-level checks, because a handful of merged
+      // pull requests must not be able to colour a rate computed over thousands
+      // of turns.
+      evidence: `${checked} of ${rows.length} (${rows.length ? Math.round((checked / rows.length) * 100) : 0}%) passed a check that was not a model's opinion${mergedUpstreamNote()}`,
       next: checked / Math.max(1, rows.length) < 0.5 ? 'more autonomous runs that land; `elia distill --dry-run` lists why runs do not qualify' : undefined,
     },
     {

@@ -160,6 +160,31 @@ export const FAILURE_SHAPES: readonly FailureShape[] = [
     label: 'a command exited non-zero or timed out — usually a check doing its job',
     benchTasks: [],
   },
+  // Working on a repository that is not this project. Read off the
+  // 2026-09-20 session that fixed a pallets/click issue and committed it into
+  // elia's own repo instead: the guards that now refuse that say these exact
+  // things, and `field-external-contribution` scores whether the habit is gone.
+  {
+    id: 'commit-swept-wrong-repo',
+    tool: 'github',
+    match: /Refusing to commit everything in .*an external contribution to/i,
+    label: 'github commit · swept a whole working tree while the work was in another repository',
+    benchTasks: ['field-external-contribution'],
+  },
+  {
+    id: 'nested-clone-staged',
+    tool: 'github',
+    match: /its own git repository, not part of this project/i,
+    label: 'github commit · staged a clone of another project as a stray gitlink',
+    benchTasks: ['field-external-contribution'],
+  },
+  {
+    id: 'pr-target-unnamed',
+    tool: 'github',
+    match: /is a clone of .*, which is not this project|opened against your own fork/i,
+    label: 'github pr_create · would have opened the pull request on the fork instead of upstream',
+    benchTasks: ['field-external-contribution'],
+  },
   // The two below are real and frequent, and the benchmark cannot score either:
   // no task in the suite fails because an argument was omitted or a path escaped
   // the workspace. They are rendered under the suppressed heading so a

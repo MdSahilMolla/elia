@@ -19,13 +19,17 @@ export interface ExecResult {
   missing: boolean
 }
 
-export type ExecFn = (bin: 'git' | 'gh', args: string[], cwd: string | undefined, signal?: AbortSignal) => Promise<ExecResult>
+export type ExecFn = (bin: 'git' | 'gh', args: string[], cwd: string | undefined, signal?: AbortSignal, timeoutMs?: number) => Promise<ExecResult>
 
 const MAX_OUTPUT = 100_000
 /** A `gh` call reaches the GitHub API; a `git push` reaches the remote. Bound the wait so a stuck network or a credential prompt can't hang a turn. */
 const DEFAULT_TIMEOUT_MS = 30_000
 
-const realExec: ExecFn = async (bin, args, cwd, signal) => {
+const realExec: ExecFn = async (bin, args, cwd, signal, timeoutMs) => {
+  // Cloning a real repository is minutes of network, not seconds of API call —
+  // the default bound is sized for the latter, so a caller that knows better
+  // says so rather than having a legitimate clone killed at 30s.
+  const limit = typeof timeoutMs === 'number' && timeoutMs > 0 ? timeoutMs : DEFAULT_TIMEOUT_MS
   if (!Bun.which(bin)) {
     return { ok: false, exitCode: 127, stdout: '', stderr: `${bin} is not installed or not on PATH`, missing: true }
   }
@@ -48,7 +52,7 @@ const realExec: ExecFn = async (bin, args, cwd, signal) => {
     const timer = setTimeout(() => {
       timedOut = true
       kill()
-    }, DEFAULT_TIMEOUT_MS)
+    }, limit)
     const onAbort = () => kill()
     if (signal) {
       if (signal.aborted) onAbort()
@@ -61,7 +65,7 @@ const realExec: ExecFn = async (bin, args, cwd, signal) => {
         proc.exited,
       ])
       if (timedOut) {
-        return { ok: false, exitCode: 124, stdout: stdout.trim(), stderr: `${bin} ${args[0] ?? ''} timed out after ${DEFAULT_TIMEOUT_MS}ms`, missing: false }
+        return { ok: false, exitCode: 124, stdout: stdout.trim(), stderr: `${bin} ${args[0] ?? ''} timed out after ${limit}ms`, missing: false }
       }
       return { ok: exitCode === 0, exitCode, stdout: stdout.trim(), stderr: stderr.trim(), missing: false }
     } finally {
@@ -75,8 +79,8 @@ const realExec: ExecFn = async (bin, args, cwd, signal) => {
 
 let execImpl: ExecFn = realExec
 
-export function execCapture(bin: 'git' | 'gh', args: string[], cwd?: string, signal?: AbortSignal): Promise<ExecResult> {
-  return execImpl(bin, args, cwd, signal)
+export function execCapture(bin: 'git' | 'gh', args: string[], cwd?: string, signal?: AbortSignal, timeoutMs?: number): Promise<ExecResult> {
+  return execImpl(bin, args, cwd, signal, timeoutMs)
 }
 
 /** Test-only: swap the executor for a stub. Pass nothing to restore the real one. */

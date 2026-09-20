@@ -1,12 +1,21 @@
 import { afterEach, expect, test } from 'bun:test'
+import { mkdirSync, mkdtempSync, realpathSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { dirname, join } from 'node:path'
 import { githubTool } from './github.ts'
+import { readContributions, saveContribution, setContributionsPathForTests } from '../github/contribute.ts'
 import { assessAction } from '../autonomy/governor.ts'
+import { withAgentIdentity } from '../autonomy/context.ts'
 import { setExecForTests, type ExecFn, type ExecResult } from '../github/exec.ts'
 import { resetGitHubContextCache } from '../github/context.ts'
 
 afterEach(() => {
   setExecForTests()
   resetGitHubContextCache()
+  // Left set, the next test's commit would be refused because the tool believes
+  // an external contribution is open — and worse, a real run would write into
+  // this checkout's own .elia record.
+  setContributionsPathForTests()
 })
 
 const ok = (stdout = ''): ExecResult => ({ ok: true, exitCode: 0, stdout, stderr: '', missing: false })
@@ -285,4 +294,170 @@ test('governor: read-only github actions are allowed, writes are governed', () =
   expect(assessAction({ name: 'github', input: { action: 'pr_create' } }).risk).toBe('review')
   expect(assessAction({ name: 'github', input: { action: 'pr_comment' } }).risk).toBe('critical')
   expect(assessAction({ name: 'github', input: { action: 'pr_merge' } }).risk).toBe('critical')
+})
+
+// --- working on a repository that is not this project ---
+
+function contributionState(): string {
+  // realpath: Windows hands back an 8.3 short path that never compares equal to
+  // the long one the tool resolves to.
+  return join(realpathSync.native(mkdtempSync(join(tmpdir(), 'elia-gh-'))), 'contributions.json')
+}
+
+test('commit with paths stages only those files', async () => {
+  const seen: string[][] = []
+  setExecForTests(async (bin, args) => {
+    seen.push(args)
+    const key = `${bin} ${args.join(' ')}`
+    if (key.startsWith('git diff --cached --name-only')) return ok('src/a.ts')
+    if (key.startsWith('git diff --cached --raw')) return ok(':100644 100644 aaa bbb M\tsrc/a.ts')
+    if (key.startsWith('git log -1')) return ok('abc123 Fix')
+    if (key.startsWith('git show --stat')) return ok('abc123 Fix\n src/a.ts | 2 +-')
+    return ok()
+  })
+  const out = await githubTool.execute({ action: 'commit', message: 'Fix', paths: ['src/a.ts'] })
+  expect(seen.some((args) => args.join(' ') === 'add -- src/a.ts')).toBe(true)
+  expect(seen.some((args) => args.join(' ') === 'add -A')).toBe(false)
+  expect(out).toContain('Committed abc123 Fix')
+})
+
+test('commit unstages a nested clone instead of committing it as a stray gitlink', async () => {
+  const resets: string[] = []
+  setExecForTests(async (bin, args) => {
+    const key = `${bin} ${args.join(' ')}`
+    if (key.startsWith('git reset')) {
+      resets.push(args.at(-1)!)
+      return ok()
+    }
+    // A gitlink for `click` beside a normal edit, and no .gitmodules to declare it.
+    if (key.startsWith('git diff --cached --raw')) return ok(':100644 100644 aaa bbb M\tsrc/a.ts\n:000000 160000 0000000 6aabf09 A\tclick')
+    if (key.startsWith('git config --file .gitmodules')) return err('no such file')
+    if (key.startsWith('git diff --cached --name-only')) return ok('src/a.ts')
+    if (key.startsWith('git log -1')) return ok('abc123 Fix')
+    if (key.startsWith('git show --stat')) return ok('abc123 Fix\n src/a.ts | 2 +-')
+    return ok()
+  })
+  const out = await githubTool.execute({ action: 'commit', message: 'Fix', all: true })
+  expect(resets).toEqual(['click'])
+  expect(out).toContain('its own git repository, not part of this project')
+})
+
+test('commit keeps a declared submodule, which is part of the project', async () => {
+  const resets: string[] = []
+  setExecForTests(async (bin, args) => {
+    const key = `${bin} ${args.join(' ')}`
+    if (key.startsWith('git reset')) {
+      resets.push(args.at(-1)!)
+      return ok()
+    }
+    if (key.startsWith('git diff --cached --raw')) return ok(':000000 160000 0000000 6aabf09 A\tvendor/lib')
+    if (key.startsWith('git config --file .gitmodules')) return ok('submodule.vendor/lib.path vendor/lib')
+    if (key.startsWith('git diff --cached --name-only')) return ok('vendor/lib')
+    if (key.startsWith('git log -1')) return ok('abc123 Bump')
+    if (key.startsWith('git show --stat')) return ok('abc123 Bump')
+    return ok()
+  })
+  await githubTool.execute({ action: 'commit', message: 'Bump', all: true })
+  expect(resets).toEqual([])
+})
+
+test('commit refuses to sweep a whole tree while a contribution is open in another repo', async () => {
+  const state = contributionState()
+  setContributionsPathForTests(state)
+  saveContribution({ slug: 'pallets/click', forkSlug: 'octocat/click', dir: join(realpathSync.native(tmpdir()), 'elia-clone', 'click'), defaultBranch: 'main', branch: 'fix/issue-3652', status: 'branched', startedAt: 1, updatedAt: 1 })
+  let staged = false
+  setExecForTests(async (_bin, args) => {
+    if (args[0] === 'add') staged = true
+    return ok()
+  })
+  const out = await githubTool.execute({ action: 'commit', message: 'Fix issue #3652', all: true })
+  expect(out).toContain('Refusing to commit everything')
+  expect(out).toContain('pallets/click')
+  expect(out).toContain('paths:[...]')
+  // Nothing was staged, so the index is exactly as it was found.
+  expect(staged).toBe(false)
+})
+
+test('a scoped commit in that same situation still works', async () => {
+  setContributionsPathForTests(contributionState())
+  saveContribution({ slug: 'pallets/click', dir: join(realpathSync.native(tmpdir()), 'elia-clone2', 'click'), defaultBranch: 'main', status: 'branched', startedAt: 1, updatedAt: 1 })
+  setExecForTests(async (bin, args) => {
+    const key = `${bin} ${args.join(' ')}`
+    if (key.startsWith('git diff --cached --name-only')) return ok('src/a.ts')
+    if (key.startsWith('git diff --cached --raw')) return ok(':100644 100644 aaa bbb M\tsrc/a.ts')
+    if (key.startsWith('git log -1')) return ok('abc123 Fix elia')
+    if (key.startsWith('git show --stat')) return ok('abc123 Fix elia\n src/a.ts | 1 +')
+    return ok()
+  })
+  expect(await githubTool.execute({ action: 'commit', message: 'Fix elia', paths: ['src/a.ts'] })).toContain('Committed abc123 Fix elia')
+})
+
+test('dir routes every git call into that checkout, and push reports the fork', async () => {
+  const state = contributionState()
+  const root = dirname(state)
+  mkdirSync(join(root, 'workspace', 'click'), { recursive: true })
+  const clone = realpathSync.native(join(root, 'workspace', 'click'))
+  setContributionsPathForTests(state)
+  saveContribution({ slug: 'pallets/click', forkSlug: 'octocat/click', dir: clone, defaultBranch: 'main', branch: 'fix/issue-3652', status: 'committed', startedAt: 1, updatedAt: 1 })
+
+  const cwds: (string | undefined)[] = []
+  setExecForTests(async (_bin, args, cwd) => {
+    cwds.push(cwd)
+    if (args.join(' ').startsWith('rev-parse --abbrev-ref HEAD')) return ok('fix/issue-3652')
+    return ok('branch pushed')
+  })
+  // The agent's root is the temp project here, the way it is elia's checkout in
+  // real use: `dir` names a clone inside it, never an arbitrary path on disk.
+  const out = await withAgentIdentity({ name: 'lead', role: 'lead', cwd: root }, () => githubTool.execute({ action: 'push', dir: clone }))
+  expect(cwds.every((dir) => dir === clone)).toBe(true)
+  expect(out).toContain('your fork octocat/click')
+  expect(out).toContain('github pr_create')
+  expect(readContributions(state)[0]!.status).toBe('pushed')
+})
+
+test('dir outside the directory elia is working in is refused, not followed', async () => {
+  setExecForTests(async () => ok())
+  const elsewhere = realpathSync.native(mkdtempSync(join(tmpdir(), 'elia-outside-')))
+  const out = await githubTool.execute({ action: 'push', dir: elsewhere })
+  expect(out).toContain('outside the directory elia is working in')
+})
+
+test('pr_create inside a fork refuses to open one until the upstream repo is named', async () => {
+  const state = contributionState()
+  const root = dirname(state)
+  mkdirSync(join(root, 'workspace', 'click'), { recursive: true })
+  const clone = realpathSync.native(join(root, 'workspace', 'click'))
+  setContributionsPathForTests(state)
+  saveContribution({ slug: 'pallets/click', forkSlug: 'octocat/click', dir: clone, defaultBranch: 'main', branch: 'fix/issue-3652', status: 'pushed', startedAt: 1, updatedAt: 1 })
+
+  let created = false
+  setExecForTests(async (bin, args) => {
+    if (bin === 'gh' && args[0] === 'pr' && args[1] === 'create') created = true
+    return ok()
+  })
+  const run = (input: Record<string, unknown>) => withAgentIdentity({ name: 'lead', role: 'lead', cwd: root }, () => githubTool.execute(input))
+  const out = await run({ action: 'pr_create', dir: clone, title: 'Add ellipsis' })
+  expect(created).toBe(false)
+  expect(out).toContain('repo:"pallets/click"')
+  expect(out).toContain('nobody upstream would see it')
+
+  const mismatch = await run({ action: 'pr_create', dir: clone, title: 'Add ellipsis', repo: 'someone/else' })
+  expect(created).toBe(false)
+  expect(mismatch).toContain('belongs to pallets/click')
+})
+
+test('governor: contributing and an upstream pull request each need their own yes', () => {
+  const contribute = assessAction({ name: 'github', input: { action: 'contribute', ref: 'pallets/click#3652' } })
+  expect(contribute.risk).toBe('review')
+  expect(contribute.decision).toBe('approve')
+  expect(contribute.reason).toContain('pallets/click#3652')
+
+  expect(assessAction({ name: 'github', input: { action: 'contribute_status' } }).decision).toBe('allow')
+  expect(assessAction({ name: 'github', input: { action: 'sync' } }).decision).toBe('allow')
+
+  // A pull request into someone else's project is not the same act as one into your own.
+  const upstream = assessAction({ name: 'github', input: { action: 'pr_create', repo: 'pallets/click', title: 'x' } })
+  expect(upstream.risk).toBe('critical')
+  expect(upstream.intent).toBe('github.pr_create.upstream')
+  expect(upstream.reason).toContain('pallets/click')
 })

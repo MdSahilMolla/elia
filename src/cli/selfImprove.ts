@@ -46,10 +46,23 @@ export async function runCompounding(): Promise<void> {
   const gatePower = lastBench ? renderGatePower(inferTasks(lastBench), benchRepeats(), 1, isAssumed(lastBench)) : undefined
   const practice = await import('../evolve/autoImprove.ts')
   const practiceLine = practice.renderPracticeStatus(practice.readAutoImproveState(), { now: Date.now(), enabled: practice.autoImproveEnabled() })
-  if (machineReadable) emitEvent('compounding_status', { stages, reasoning: library.records, coverage, velocity })
+  // Capability in the field, beside capability on the benchmark: what elia
+  // proposed to projects it does not own, and what was accepted. The benchmark
+  // can saturate; other people's repositories cannot.
+  const { readContributions, renderContributionEvidence } = await import('../github/contribute.ts')
+  const contributions = readContributions()
+  if (machineReadable) emitEvent('compounding_status', { stages, reasoning: library.records, coverage, velocity, contributions })
   else {
     writeUsageLine(
-      [renderCompoundingStatus(stages), practiceLine, renderVelocity(velocity), renderCoverage(coverage.lifetime, coverage.recent), gatePower, renderLibrary(library)]
+      [
+        renderCompoundingStatus(stages),
+        practiceLine,
+        renderContributionEvidence(contributions),
+        renderVelocity(velocity),
+        renderCoverage(coverage.lifetime, coverage.recent),
+        gatePower,
+        renderLibrary(library),
+      ]
         .filter(Boolean)
         .join('\n\n'),
     )
