@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Google</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: arial, sans-serif;
+            font-size: 13px;
+            color: #202124;
+        }
+
+        .header {
+            display: flex;
+            justify-content: flex-end;
+            align-items: center;
+            padding: 10px 20px;
+            gap: 15px;
+        }
+
+        .header a {
+            color: #202124;
+            text-decoration: none;
+        }
+
+        .header a:hover {
+            text-decoration: underline;
+        }
+
+        .apps-icon {
+            width: 24px;
+            height: 24px;
+            cursor: pointer;
+            opacity: 0.55;
+        }
+
+        .apps-icon:hover {
+            opacity: 1;
+        }
+
+        .avatar {
+            width: 32px;
+            height: 32px;
+            border-radius: 50%;
+            background: #4285f4;
+            color: white;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: bold;
+            cursor: pointer;
+        }
+
+        .main {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            margin-top: 100px;
+            padding: 0 20px;
+        }
+
+        .logo {
+            font-size: 92px;
+            font-weight: 500;
+            margin-bottom: 30px;
+            letter-spacing: -2px;
+        }
+
+        .logo span:nth-child(1) { color: #4285f4; }
+        .logo span:nth-child(2) { color: #ea4335; }
+        .logo span:nth-child(3) { color: #fbbc04; }
+        .logo span:nth-child(4) { color: #4285f4; }
+        .logo span:nth-child(5) { color: #34a853; }
+        .logo span:nth-child(6) { color: #ea4335; }
+
+        .search-box {
+            width: 100%;
+            max-width: 584px;
+            border: 1px solid #dfe1e5;
+            border-radius: 24px;
+            padding: 10px 15px;
+            display: flex;
+            align-items: center;
+            margin-bottom: 30px;
+            transition: box-shadow 0.2s;
+        }
+
+        .search-box:hover, .search-box:focus-within {
+            box-shadow: 0 1px 6px rgba(32,33,36,0.28);
+            border-color: rgba(223,225,229,0);
+        }
+
+        .search-box svg {
+            width: 20px;
+            height: 20px;
+            margin-right: 12px;
+            fill: #9aa0a6;
+        }
+
+        .search-box input {
+            flex: 1;
+            border: none;
+            outline: none;
+            font-size: 16px;
+            color: #202124;
+        }
+
+        .search-box input::placeholder {
+            color: #9aa0a6;
+        }
+
+        .search-icons {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .search-icons svg {
+            width: 24px;
+            height: 24px;
+            cursor: pointer;
+            fill: #9aa0a6;
+        }
+
+        .search-icons svg:hover {
+            fill: #5f6368;
+        }
+
+        .buttons {
+            display: flex;
+            gap: 12px;
+            margin-top: 20px;
+        }
+
+        .buttons button {
+            background: #f8f9fa;
+            border: 1px solid #f8f9fa;
+            border-radius: 4px;
+            color: #3c4043;
+            font-size: 14px;
+            padding: 0 16px;
+            height: 36px;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .buttons button:hover {
+            box-shadow: 0 1px 1px rgba(0,0,0,0.1);
+            background: #f8f9fa;
+            border: 1px solid #dadce0;
+            color: #202124;
+        }
+
+        .footer {
+            position: fixed;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            background: #f2f2f2;
+            border-top: 1px solid #dadce0;
+        }
+
+        .footer-top {
+            padding: 15px 30px;
+            color: #70757a;
+            font-size: 14px;
+        }
+
+        .footer-bottom {
+            display: flex;
+            justify-content: space-between;
+            padding: 15px 30px;
+            flex-wrap: wrap;
+        }
+
+        .footer-links {
+            display: flex;
+            gap: 30px;
+            flex-wrap: wrap;
+        }
+
+        .footer-links a {
+            color: #70757a;
+            text-decoration: none;
+            font-size: 14px;
+        }
+
+        .footer-links a:hover {
+            text-decoration: underline;
+        }
+
+        @media (max-width: 600px) {
+            .logo {
+                font-size: 60px;
+                margin-bottom: 20px;
+            }
+
+            .search-box {
+                max-width: 100%;
+                margin: 0 15px 20px;
+            }
+
+            .footer-bottom {
+                flex-direction: column;
+                gap: 15px;
+                align-items: center;
+            }
+
+            .footer-links {
+                gap: 20px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <a href="#">Gmail</a>
+        <a href="#">Images</a>
+        <div class="apps-icon">
+            <svg viewBox="0 0 24 24">
+                <path d="M4 8h4V4H4v4zm6 12h4v-4h-4v4zm-6 0h4v-4H4v4zm0-6h4v-4H4v4zm6 0h4v-4h-4v4zm6-10v4h4V4h-4zm-6 4h4V4h-4v4zm6 6h4v-4h-4v4zm0 6h4v-4h-4v4z"/>
+            </svg>
+        </div>
+        <div class="avatar">U</div>
+    </div>
+
+    <div class="main">
+        <div class="logo">
+            <span>G</span><span>o</span><span>o</span><span>g</span><span>l</span><span>e</span>
+        </div>
+
+        <div class="search-box" id="searchBox">
+            <svg viewBox="0 0 24 24">
+                <path d="M15.5 14h-.79l-.28-.27A6.471 6.471 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/>
+            </svg>
+            <input type="text" id="searchInput" placeholder="Search Google or type a URL">
+            <div class="search-icons">
+                <svg viewBox="0 0 24 24">
+                    <path d="M12 3a9 9 0 1 0 9 9 9.01 9.01 0 0 0-9-9zm0 16a7 7 0 1 1 7-7 7.01 7.01 0 0 1-7 7z"/>
+                    <path d="M17.65 17.65l3.63 3.64-1.41 1.41-3.64-3.63 1.42-1.42z"/>
+                </svg>
+                <svg viewBox="0 0 24 24">
+                    <path d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z"/>
+                </svg>
+            </div>
+        </div>
+
+        <div class="buttons">
+            <button onclick="search()">Google Search</button>
+            <button onclick="lucky()">I'm Feeling Lucky</button>
+        </div>
+    </div>
+
+    <div class="footer">
+        <div class="footer-top">Country Name</div>
+        <div class="footer-bottom">
+            <div class="footer-links">
+                <a href="#">About</a>
+                <a href="#">Advertising</a>
+                <a href="#">Business</a>
+                <a href="#">How Search works</a>
+            </div>
+            <div class="footer-links">
+                <a href="#">Privacy</a>
+                <a href="#">Terms</a>
+                <a href="#">Settings</a>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        function search() {
+            const query = document.getElementById('searchInput').value;
+            if (query.trim()) {
+                alert('Search query: ' + query);
+            } else {
+                alert('Please enter a search query');
+            }
+        }
+
+        function lucky() {
+            const query = document.getElementById('searchInput').value;
+            if (query.trim()) {
+                alert('Feeling lucky with: ' + query);
+            } else {
+                alert('Please enter a search query');
+            }
+        }
+
+        document.getElementById('searchInput').addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') {
+                search();
+            }
+        });
+    </script>
+</body>
+</html>

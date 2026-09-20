@@ -67,6 +67,9 @@ export interface GenerationRecord {
   model: string
   /** The furthest gate this generation got through (see strategy.ts FUNNEL); absent on older records. */
   funnel?: import('./strategy.ts').FunnelStage
+  /** Set when an unattended run committed its promotion to a branch instead of the live tree. */
+  branch?: string
+  commit?: string
   /** The search strategy that steered the proposal; absent on records from before strategies were state. */
   strategyId?: string
   /**

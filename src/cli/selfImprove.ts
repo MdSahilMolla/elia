@@ -44,10 +44,12 @@ export async function runCompounding(): Promise<void> {
   // have seen a win if one had been proposed, which is the other half of that.
   const lastBench = [...readBenchRuns()].reverse().find((run) => run.set === 'all')
   const gatePower = lastBench ? renderGatePower(inferTasks(lastBench), benchRepeats(), 1, isAssumed(lastBench)) : undefined
+  const practice = await import('../evolve/autoImprove.ts')
+  const practiceLine = practice.renderPracticeStatus(practice.readAutoImproveState(), { now: Date.now(), enabled: practice.autoImproveEnabled() })
   if (machineReadable) emitEvent('compounding_status', { stages, reasoning: library.records, coverage, velocity })
   else {
     writeUsageLine(
-      [renderCompoundingStatus(stages), renderVelocity(velocity), renderCoverage(coverage.lifetime, coverage.recent), gatePower, renderLibrary(library)]
+      [renderCompoundingStatus(stages), practiceLine, renderVelocity(velocity), renderCoverage(coverage.lifetime, coverage.recent), gatePower, renderLibrary(library)]
         .filter(Boolean)
         .join('\n\n'),
     )
@@ -125,6 +127,8 @@ export async function runEvolve(): Promise<void> {
     return
   }
 
+  if (hasFlag('--auto')) return runAutoPractice()
+
   if (!(await ensureFirstRunProviderSetup())) return
   await loadRuntimeSkills()
   const { evolve } = await import('../evolve/engine.ts')
@@ -166,6 +170,83 @@ export async function runEvolve(): Promise<void> {
   }
   const { renderLearningLine } = await import('../evolve/ledger.ts')
   writeUsageLine(`  ${renderLearningLine()}`)
+}
+
+/**
+ * `elia evolve --auto`: one unattended practice run, started in the background
+ * by an idle or closing REPL (evolve/autoImprove.ts). Never prompts, never
+ * touches the working tree — a promotion goes to its own branch — and records
+ * what came of it for the next session to say.
+ *
+ * The first run on a project has no full benchmark to focus from, so it runs
+ * one: that is what records the reach map the sieve needs and the failures the
+ * proposer studies, and without it every later verdict costs a full sweep.
+ */
+async function runAutoPractice(): Promise<void> {
+  const auto = await import('../evolve/autoImprove.ts')
+  const started = auto.readAutoImproveState()
+  // A session that launched this already claimed the slot with our pid; run
+  // by hand (`elia evolve --auto`), claim it here.
+  const claimed = started.pid === process.pid
+  auto.writeAutoImproveState({
+    ...started,
+    pid: process.pid,
+    startedAt: claimed && started.startedAt !== undefined ? started.startedAt : Date.now(),
+    finishedAt: undefined,
+    newTurns: claimed ? (started.newTurns ?? 0) : 0,
+    reported: false,
+  })
+  const finish = (outcome: import('../evolve/autoImprove.ts').AutoOutcome, detail: string, branch?: string): void => {
+    const blocked = outcome === 'blocked'
+    auto.writeAutoImproveState({
+      ...auto.readAutoImproveState(),
+      finishedAt: Date.now(),
+      outcome,
+      summary: auto.practiceSummary(outcome, detail, branch),
+      branch,
+      blockedUntil: blocked ? Date.now() + auto.BLOCKED_BACKOFF_MS : undefined,
+      reported: false,
+    })
+    writeUsageLine(`[${new Date().toISOString()}] practice ${outcome}: ${detail}`)
+  }
+
+  try {
+    await loadRuntimeSkills()
+    const { BENCH_TASKS, allBenchTasks } = await import('../evolve/suite.ts')
+    const { focusTaskIds, recordBenchRun } = await import('../compounding/status.ts')
+    const taskIds = focusTaskIds(BENCH_TASKS.map((task) => task.id), 8)
+
+    if (!taskIds) {
+      const { measureFitness } = await import('../evolve/fitness.ts')
+      const { ELIA_ROOT } = await import('../config.ts')
+      const card = await measureFitness({ tasks: allBenchTasks(), sourceRoot: ELIA_ROOT })
+      if (card.unmeasured.length > 0) {
+        const detail = `the benchmark could not measure ${card.unmeasured.length} task(s)`
+        finish(auto.looksBlocked(card.outcomes.map((outcome) => outcome.error ?? '').join('\n')) ? 'blocked' : 'failed', detail)
+        return
+      }
+      recordBenchRun(card, 'all')
+      finish('benchmarked', `scored itself on ${card.outcomes.length} benchmark tasks (${Math.round(card.passRate * 100)}%) — the next practice run can now try changes`)
+      return
+    }
+
+    const { evolve } = await import('../evolve/engine.ts')
+    const result = await evolve({ generations: 1, taskIds, promoteTo: 'branch' })
+    if (result.stoppedReason) {
+      finish(auto.looksBlocked(result.stoppedReason) ? 'blocked' : 'failed', result.stoppedReason)
+      return
+    }
+    const record = result.generations[0]
+    if (!record) {
+      finish('failed', 'no generation was recorded')
+      return
+    }
+    if (record.verdict === 'promoted') finish('promoted', `${record.hypothesis} (${record.reason})`, record.branch)
+    else finish(auto.looksBlocked(record.reason) ? 'blocked' : 'rejected', `tried "${record.hypothesis || 'a change'}": ${record.reason}`)
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error)
+    finish(auto.looksBlocked(detail) ? 'blocked' : 'failed', detail.split('\n')[0]!.slice(0, 300))
+  }
 }
 
 export async function runValues(): Promise<void> {

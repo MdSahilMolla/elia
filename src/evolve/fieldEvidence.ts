@@ -110,6 +110,56 @@ export const FAILURE_SHAPES: readonly FailureShape[] = [
     label: 'grep · the pattern was not a valid regular expression',
     benchTasks: ['find-symbol'],
   },
+  // Shell habits from a POSIX machine used on a Windows one — read off the
+  // ledger 2026-09-20. fieldSuite.ts has a task for each, with a step budget
+  // the habit wastes, so a fix can now be scored.
+  {
+    id: 'server-as-command',
+    tool: 'run_command',
+    match: /starts a server that never exits/i,
+    label: 'run_command · started a server that never exits instead of using the process tool',
+    // Unscoreable: the benchmark runs unattended, and its policy refuses to
+    // start any process — so a task for this measures the policy (fieldSuite.ts).
+    benchTasks: [],
+  },
+  {
+    id: 'cd-in-command',
+    tool: 'run_command',
+    match: /Do not use cd, chdir, pushd, or popd/i,
+    label: 'run_command · used cd inside the command instead of passing cwd',
+    benchTasks: ['field-subpackage-test'],
+  },
+  {
+    id: 'posix-on-windows',
+    tool: 'run_command',
+    match: /is a POSIX command and this shell is cmd\.exe|\b(?:ls|cd|which|cls|find|wc|grep|cat|rm) is not available in PATH|PowerShell cmdlet \(Verb-Noun\) is being piped|inline -c\/-e one-liner with backslash escapes/i,
+    label: 'run_command · a command for another shell (POSIX or PowerShell habits on cmd.exe)',
+    benchTasks: ['field-count-sources', 'field-subpackage-test'],
+  },
+  {
+    id: 'unknown-tool',
+    tool: '*',
+    match: /^Unknown tool: /i,
+    label: 'called a tool that does not exist',
+    benchTasks: [],
+  },
+  // Not elia's behaviour at all: a provider limit, a person saying no, or a
+  // policy refusing. Named so they stop hiding among the unexplained errors —
+  // and scored by nothing, because no change to elia should try to "fix" them.
+  {
+    id: 'environment-refusal',
+    tool: '*',
+    match: /rate limit|usage limit|Request too large|Action denied by the user|blocked by Elia.s unattended policy|no browser transport configured|Codex request cancelled|protected sensitive path/i,
+    label: 'the environment refused (provider limits, a person declining, or policy) — not a behaviour to change',
+    benchTasks: [],
+  },
+  {
+    id: 'command-failed',
+    tool: 'run_command',
+    match: /Action postcondition failed: command (?:did not return exit code 0|timed out)/i,
+    label: 'a command exited non-zero or timed out — usually a check doing its job',
+    benchTasks: [],
+  },
   // The two below are real and frequent, and the benchmark cannot score either:
   // no task in the suite fails because an argument was omitted or a path escaped
   // the workspace. They are rendered under the suppressed heading so a

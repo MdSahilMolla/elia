@@ -125,6 +125,8 @@ export interface AppProps {
   greeting: string
   /** CLI version, for the startup banner. */
   version: string
+  /** Said once under the header — what a background practice run came to. */
+  startupNotice?: string
 }
 
 /**
@@ -215,6 +217,7 @@ export function App(props: AppProps) {
   if (!storeRef.current) {
     storeRef.current = createTranscriptStore()
     printHeader(storeRef.current)
+    if (props.startupNotice) storeRef.current.notice(props.startupNotice)
   }
   const store = storeRef.current
   const snap = useTranscript(store)

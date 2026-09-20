@@ -4,6 +4,7 @@ import { pathToFileURL } from 'node:url'
 import { runShell } from '../shell.ts'
 import { historyTasks } from './history/suite.ts'
 import { HARD_BENCH_TASKS } from './hardSuite.ts'
+import { FIELD_BENCH_TASKS } from './fieldSuite.ts'
 import type { BenchTask } from './task.ts'
 
 export type { BenchCheck, BenchTask } from './task.ts'
@@ -635,7 +636,7 @@ test('inclusiveRange handles a single value', () => {
  * it is scored on, and sustained multi-file autonomy is the capability worth
  * pulling toward.
  */
-export const BENCH_TASKS: BenchTask[] = [...SYNTHETIC_BENCH_TASKS, ...HARD_BENCH_TASKS]
+export const BENCH_TASKS: BenchTask[] = [...SYNTHETIC_BENCH_TASKS, ...HARD_BENCH_TASKS, ...FIELD_BENCH_TASKS]
 
 /**
  * Every task elia can be measured on: the synthetic competency tasks above, plus

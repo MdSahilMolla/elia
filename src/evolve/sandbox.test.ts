@@ -5,7 +5,8 @@ import { join } from 'node:path'
 
 process.env.ANTHROPIC_API_KEY ??= 'test-key-for-sandbox-test'
 
-const { changedFiles, isImmutablePath, promote, rollback, violatedImmutables } = await import('./sandbox.ts')
+const { LiveTreeConflict, changedFiles, createSandbox, isImmutablePath, promote, promoteToBranch, rollback, violatedImmutables } = await import('./sandbox.ts')
+const { runGit } = await import('../autonomy/worktree.ts')
 
 function write(path: string, content: string): void {
   mkdirSync(join(path, '..'), { recursive: true })
@@ -127,5 +128,96 @@ test('the files that decide a verdict are off limits to the candidate that the v
   // them could be promoted for a change that nothing ever ran.
   for (const file of ['src/evolve/sieve.ts', 'src/evolve/reach.ts', 'src/evolve/reachRecorder.ts', 'src/evolve/baselineCache.ts']) {
     expect(isImmutablePath(file)).toBe(true)
+  }
+})
+
+test("edits made to the live tree while a generation runs are not the candidate's, and are never overwritten", () => {
+  const temp = mkdtempSync(join(tmpdir(), 'elia-sandbox-race-'))
+  const live = join(temp, 'live')
+  try {
+    write(join(live, 'src/agent.ts'), 'v1')
+    write(join(live, 'src/planner.ts'), 'plan v1')
+    write(join(live, 'package.json'), '{}')
+    write(join(live, 'tsconfig.json'), '{}')
+    const sandbox = createSandbox(1, live, join(temp, 'evolution'))
+
+    // The candidate changes the planner. Meanwhile someone edits agent.ts and
+    // adds a file of their own in the live tree.
+    write(join(sandbox.root, 'src/planner.ts'), 'plan v2')
+    write(join(live, 'src/agent.ts'), 'v1 + my edit')
+    write(join(live, 'src/mine.ts'), 'new work')
+
+    const changed = changedFiles(sandbox, live)
+    expect(changed).toEqual(['src/planner.ts'])
+    promote(sandbox, changed, live)
+    expect(readFileSync(join(live, 'src/agent.ts'), 'utf8')).toBe('v1 + my edit')
+    expect(readFileSync(join(live, 'src/mine.ts'), 'utf8')).toBe('new work')
+    expect(readFileSync(join(live, 'src/planner.ts'), 'utf8')).toBe('plan v2')
+
+    // Both sides changed the same file: refuse rather than pick a winner.
+    write(join(sandbox.root, 'src/agent.ts'), 'candidate edit')
+    expect(() => promote(sandbox, changedFiles(sandbox, live), live)).toThrow(LiveTreeConflict)
+    expect(readFileSync(join(live, 'src/agent.ts'), 'utf8')).toBe('v1 + my edit')
+  } finally {
+    rmSync(temp, { recursive: true, force: true })
+  }
+})
+
+test('an unattended promotion lands on its own branch and leaves the checkout untouched', async () => {
+  const temp = mkdtempSync(join(tmpdir(), 'elia-sandbox-branch-'))
+  const live = join(temp, 'live')
+  const git = (...args: string[]) => runGit(['-C', live, '-c', 'user.email=t@t', '-c', 'user.name=t', '-c', 'core.autocrlf=false', ...args])
+  try {
+    write(join(live, 'src/planner.ts'), 'plan v1\n')
+    write(join(live, 'src/old.ts'), 'remove me\n')
+    write(join(live, 'package.json'), '{}\n')
+    write(join(live, 'tsconfig.json'), '{}\n')
+    await runGit(['init', '-q', '-b', 'main', live])
+    await git('config', 'user.email', 't@t')
+    await git('config', 'user.name', 't')
+    await git('add', '-A')
+    await git('commit', '-qm', 'base')
+    const sandbox = createSandbox(2, live, join(temp, 'evolution'))
+    write(join(sandbox.root, 'src/planner.ts'), 'plan v2\n')
+    rmSync(join(sandbox.root, 'src/old.ts'))
+
+    const changed = changedFiles(sandbox, live)
+    await promoteToBranch(sandbox, changed, 'evolve/gen-2', 'evolve: better planner', live)
+
+    // The working tree, the index and the current branch did not move.
+    expect(readFileSync(join(live, 'src/planner.ts'), 'utf8')).toBe('plan v1\n')
+    expect(existsSync(join(live, 'src/old.ts'))).toBe(true)
+    expect((await git('status', '--porcelain')).stdout.trim()).toBe('')
+    expect((await git('branch', '--show-current')).stdout.trim()).toBe('main')
+    // The branch holds exactly the candidate's change.
+    expect((await git('show', 'evolve/gen-2:src/planner.ts')).stdout).toBe('plan v2\n')
+    expect((await git('diff', '--name-status', 'main', 'evolve/gen-2')).stdout.trim().split('\n').sort()).toEqual(['D\tsrc/old.ts', 'M\tsrc/planner.ts'])
+  } finally {
+    rmSync(temp, { recursive: true, force: true })
+  }
+})
+
+test('an unattended promotion refuses a file with uncommitted local edits rather than smuggle them onto the branch', async () => {
+  const temp = mkdtempSync(join(tmpdir(), 'elia-sandbox-dirty-'))
+  const live = join(temp, 'live')
+  const git = (...args: string[]) => runGit(['-C', live, '-c', 'core.autocrlf=false', ...args])
+  try {
+    write(join(live, 'src/planner.ts'), 'plan v1\n')
+    write(join(live, 'package.json'), '{}\n')
+    write(join(live, 'tsconfig.json'), '{}\n')
+    await runGit(['init', '-q', '-b', 'main', live])
+    await git('config', 'user.email', 't@t')
+    await git('config', 'user.name', 't')
+    await git('add', '-A')
+    await git('commit', '-qm', 'base')
+    // Uncommitted before the run started, so it is in the candidate's base too.
+    write(join(live, 'src/planner.ts'), 'plan v1 + local edit\n')
+    const sandbox = createSandbox(3, live, join(temp, 'evolution'))
+    write(join(sandbox.root, 'src/planner.ts'), 'plan v1 + local edit + candidate\n')
+
+    await expect(promoteToBranch(sandbox, changedFiles(sandbox, live), 'evolve/gen-3', 'x', live)).rejects.toThrow(LiveTreeConflict)
+    expect((await git('branch', '--list', 'evolve/*')).stdout.trim()).toBe('')
+  } finally {
+    rmSync(temp, { recursive: true, force: true })
   }
 })
