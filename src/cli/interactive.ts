@@ -2324,9 +2324,28 @@ export async function runInteractive(): Promise<void> {
     const greeting = `${mode} mode`
     const cliVersion = JSON.parse(await Bun.file(new URL('../../package.json', import.meta.url)).text()).version as string
 
+    // Practice while idle: after IDLE_MS with no turn, or when the session
+    // closes, one `elia evolve --auto` generation starts in the background
+    // (evolve/autoImprove.ts decides whether there is anything worth running).
+    const practice = await import('../evolve/autoImprove.ts')
+    const practiceHere = !process.env.ELIA_AUTO_IMPROVE_CHILD && practice.autoImproveEnabled()
+    let idleTimer: ReturnType<typeof setTimeout> | undefined
+    const armPractice = (): void => {
+      if (!practiceHere) return
+      if (idleTimer) clearTimeout(idleTimer)
+      idleTimer = setTimeout(() => void practice.maybeStartPractice().catch(() => false), practice.IDLE_MS)
+      idleTimer.unref?.()
+    }
+    const holdPractice = (): void => {
+      if (idleTimer) clearTimeout(idleTimer)
+      idleTimer = undefined
+    }
+    armPractice()
+
     await runInkRepl({
       sessionId,
       version: cliVersion,
+      startupNotice: practiceHere ? practice.takePracticeReport() : undefined,
       getEnv: () => ({ model: config.model, providerLabel: config.providerLabel, providerName: config.providerName, routing: config.routingMode }),
       commands: allSlashCommands(),
       initialReplMode: replMode,
@@ -2355,6 +2374,7 @@ export async function runInteractive(): Promise<void> {
       },
       handleSlash: handleSlashForInk,
       submitTurn: async (text, hooks) => {
+        holdPractice()
         const turnText = carriedShellContext.length > 0
           ? `${carriedShellContext.splice(0).join('\n\n')}\n\n${text}`
           : text
@@ -2388,8 +2408,12 @@ export async function runInteractive(): Promise<void> {
           },
         )
         await persistInteractiveSession()
+        if (practiceHere) practice.notePracticeTurn()
+        armPractice()
       },
     })
+    holdPractice()
+    if (practiceHere) await practice.maybeStartPractice().catch(() => false)
     prompt.close()
     return
   }

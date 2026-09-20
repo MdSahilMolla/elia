@@ -50,7 +50,9 @@ import {
   createSandbox,
   describeChanges,
   isImmutablePath,
+  LiveTreeConflict,
   promote,
+  promoteToBranch,
   removeSandbox,
   violatedImmutables,
   type Sandbox,
@@ -109,6 +111,13 @@ export interface EvolveOptions {
   dryRun?: boolean
   /** Score only these task ids (fixed for the whole run). Default: every task. */
   taskIds?: string[]
+  /**
+   * Where a promoted candidate goes. `live` (the default, and what a person at
+   * the keyboard asked for) copies it into the source tree; `branch` commits it
+   * to its own `evolve/…` branch for review and leaves the checkout alone — what
+   * an unattended run must do.
+   */
+  promoteTo?: 'live' | 'branch'
   signal?: AbortSignal
 }
 
@@ -561,7 +570,39 @@ async function attemptGeneration(
     return { ...base, verdict: 'rejected', reason: `dry run; would have been promoted (${confirmedReason})` }
   }
 
-  const backupDir = promote(sandbox, changed)
+  if (options.promoteTo === 'branch') {
+    const branch = `evolve/gen-${generation}-${new Date(startedAt).toISOString().slice(0, 10)}`
+    try {
+      const commit = await promoteToBranch(
+        sandbox,
+        changed,
+        branch,
+        `evolve(gen ${generation}): ${hypothesis.title}
+
+${confirmedReason}
+
+Proposed and proven by \`elia evolve\`; nothing was changed in the working tree.`,
+      )
+      removeSandbox(sandbox)
+      writePass(`promoted to branch ${branch}: ${confirmedReason}`)
+      return { ...base, funnel: 'promoted', verdict: 'promoted', reason: confirmedReason, branch, commit }
+    } catch (error) {
+      const reason = error instanceof LiveTreeConflict ? error.message : `could not commit the candidate: ${error instanceof Error ? error.message : String(error)}`
+      writeFail(`rejected: ${reason}`)
+      writeSubStep(`sandbox kept at ${sandbox.root} if you want to inspect it`)
+      return { ...base, verdict: 'rejected', reason }
+    }
+  }
+
+  let backupDir: string
+  try {
+    backupDir = promote(sandbox, changed)
+  } catch (error) {
+    if (!(error instanceof LiveTreeConflict)) throw error
+    writeFail(`rejected: ${error.message}`)
+    writeSubStep(`sandbox kept at ${sandbox.root} if you want to inspect it`)
+    return { ...base, verdict: 'rejected', reason: error.message }
+  }
   // The live tree now has the change and the backup holds what it replaced;
   // the full source copy has nothing left to offer, so don't keep it around.
   removeSandbox(sandbox)

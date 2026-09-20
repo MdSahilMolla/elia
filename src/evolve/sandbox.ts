@@ -1,4 +1,5 @@
-import { copyFileSync, cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs'
+import { copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join, relative } from 'node:path'
 import { ELIA_ROOT } from '../config.ts'
 import { EVOLUTION_DIR } from './ledger.ts'
@@ -35,6 +36,7 @@ const TRACKED_ROOT_FILES = ['package.json', 'tsconfig.json']
 export const IMMUTABLE_FILES = [
   'src/evolve/suite.ts',
   'src/evolve/hardSuite.ts',
+  'src/evolve/fieldSuite.ts',
   'src/evolve/fitness.ts',
   'src/evolve/engine.ts',
   'src/evolve/ledger.ts',
@@ -135,6 +137,31 @@ export interface Sandbox {
   root: string
   /** Where the live files that were overwritten are backed up, so promotion is reversible. */
   backupDir: string
+  /**
+   * Each tracked file's content hash as it was copied in — what the candidate
+   * started from. A generation runs for many minutes while people (and other
+   * sessions) keep editing the live tree; measuring "what the candidate
+   * changed" against the live tree *at promotion time* counted their edits as
+   * the candidate's, so promoting copied the stale sandbox version back over
+   * them, deleted files they had added, and blamed the candidate for touching
+   * an immutable file they had edited. Absent on a hand-built sandbox, which
+   * then compares against the live tree as before.
+   */
+  base?: ReadonlyMap<string, string>
+}
+
+function contentHash(path: string): string | undefined {
+  const content = readIfPresent(path)
+  return content === undefined ? undefined : String(Bun.hash(content))
+}
+
+function snapshotHashes(root: string): Map<string, string> {
+  const hashes = new Map<string, string>()
+  for (const relativePath of trackedFilesIn(root)) {
+    const hash = contentHash(join(root, relativePath))
+    if (hash !== undefined) hashes.set(relativePath, hash)
+  }
+  return hashes
 }
 
 /**
@@ -171,10 +198,10 @@ export function pruneSandboxes(keep = KEEP_SANDBOXES, dir = EVOLUTION_DIR): stri
   return removed
 }
 
-export function createSandbox(generation: number, liveRoot = ELIA_ROOT): Sandbox {
-  const root = join(EVOLUTION_DIR, `gen-${generation}`)
+export function createSandbox(generation: number, liveRoot = ELIA_ROOT, dir = EVOLUTION_DIR): Sandbox {
+  const root = join(dir, `gen-${generation}`)
   // Make room first, so the new one plus the kept ones stay within the cap.
-  pruneSandboxes(KEEP_SANDBOXES - 1)
+  pruneSandboxes(KEEP_SANDBOXES - 1, dir)
   rmSync(root, { recursive: true, force: true })
   mkdirSync(root, { recursive: true })
 
@@ -186,7 +213,7 @@ export function createSandbox(generation: number, liveRoot = ELIA_ROOT): Sandbox
     else copyFileSync(from, to)
   }
 
-  return { generation, root, backupDir: join(EVOLUTION_DIR, `gen-${generation}-backup`) }
+  return { generation, root, backupDir: join(dir, `gen-${generation}-backup`), base: snapshotHashes(root) }
 }
 
 export function removeSandbox(sandbox: Sandbox): void {
@@ -203,6 +230,17 @@ export function removeSandbox(sandbox: Sandbox): void {
 export function changedFiles(sandbox: Sandbox, liveRoot = ELIA_ROOT): string[] {
   const changed: string[] = []
 
+  // Against what the candidate started from, not the live tree as it is now.
+  if (sandbox.base) {
+    for (const relativePath of trackedFilesIn(sandbox.root)) {
+      if (contentHash(join(sandbox.root, relativePath)) !== sandbox.base.get(relativePath)) changed.push(relativePath)
+    }
+    for (const relativePath of sandbox.base.keys()) {
+      if (!existsSync(join(sandbox.root, relativePath))) changed.push(relativePath)
+    }
+    return [...new Set(changed)].sort()
+  }
+
   for (const relativePath of trackedFilesIn(sandbox.root)) {
     const candidate = readIfPresent(join(sandbox.root, relativePath))
     const live = readIfPresent(join(liveRoot, relativePath))
@@ -217,6 +255,20 @@ export function changedFiles(sandbox: Sandbox, liveRoot = ELIA_ROOT): string[] {
   return [...new Set(changed)].sort()
 }
 
+/** A promotion refused because the live tree moved under a file the candidate changed. */
+export class LiveTreeConflict extends Error {
+  constructor(readonly files: string[]) {
+    super(`the live tree changed ${files.join(', ')} while the generation ran — promoting would overwrite that work`)
+    this.name = 'LiveTreeConflict'
+  }
+}
+
+/** Changed files whose live copy no longer matches what the candidate started from. */
+export function liveConflicts(sandbox: Sandbox, changed: string[], liveRoot = ELIA_ROOT): string[] {
+  if (!sandbox.base) return []
+  return changed.filter((relativePath) => contentHash(join(liveRoot, relativePath)) !== sandbox.base!.get(relativePath))
+}
+
 /** Which of the changed files the candidate was forbidden from touching. */
 export function violatedImmutables(changed: string[]): string[] {
   return changed.filter(isImmutablePath)
@@ -227,6 +279,11 @@ export function violatedImmutables(changed: string[]): string[] {
  * Returns the backup directory so a promotion can be undone by copying it back.
  */
 export function promote(sandbox: Sandbox, changed: string[], liveRoot = ELIA_ROOT): string {
+  // Someone changed a file the candidate also changed: promoting would throw
+  // their work away. Refuse before touching anything.
+  const conflicts = liveConflicts(sandbox, changed, liveRoot)
+  if (conflicts.length > 0) throw new LiveTreeConflict(conflicts)
+
   rmSync(sandbox.backupDir, { recursive: true, force: true })
   mkdirSync(sandbox.backupDir, { recursive: true })
 
@@ -317,4 +374,59 @@ export function describeChanges(sandbox: Sandbox, changed: string[], liveRoot = 
 
 export function relativeToRoot(path: string, root = ELIA_ROOT): string {
   return relative(root, path).replace(/\\/g, '/')
+}
+
+/**
+ * Commits a passing candidate to its own branch instead of copying it into the
+ * live tree — what an unattended run does, so nobody finds their checkout
+ * changed under them. Built with git plumbing and a throwaway index: the
+ * working tree, the real index and the current branch are never touched.
+ *
+ * The branch is HEAD plus exactly the candidate's changes, so it refuses when a
+ * changed file has uncommitted edits in the live tree: the candidate was built
+ * on top of them, and committing its copy would smuggle those edits in too.
+ * Returns the new commit's sha.
+ */
+export async function promoteToBranch(
+  sandbox: Sandbox,
+  changed: string[],
+  branch: string,
+  message: string,
+  liveRoot = ELIA_ROOT,
+): Promise<string> {
+  const { runGit } = await import('../autonomy/worktree.ts')
+  const conflicts = liveConflicts(sandbox, changed, liveRoot)
+  if (conflicts.length > 0) throw new LiveTreeConflict(conflicts)
+
+  const git = async (args: string[], env?: Record<string, string>): Promise<string> => {
+    const result = await runGit(['-C', liveRoot, ...args], undefined, env)
+    if (result.exitCode !== 0) throw new Error(`git ${args[0]} failed: ${(result.stderr || result.stdout).trim()}`)
+    return result.stdout.trim()
+  }
+
+  const dirty = (await git(['status', '--porcelain=v1', '--untracked-files=all', '--', ...changed])).split('\n').filter(Boolean)
+  if (dirty.length > 0) throw new LiveTreeConflict(dirty.map((line) => line.slice(3)))
+
+  const head = await git(['rev-parse', 'HEAD'])
+  const indexDir = mkdtempSync(join(tmpdir(), 'elia-evolve-index-'))
+  const env = { GIT_INDEX_FILE: join(indexDir, 'index') }
+  try {
+    await git(['read-tree', head], env)
+    for (const relativePath of changed) {
+      const candidatePath = join(sandbox.root, relativePath)
+      if (existsSync(candidatePath)) {
+        // --path applies the repo's own filters (line endings), as `git add` would.
+        const blob = await git(['hash-object', '-w', `--path=${relativePath}`, candidatePath])
+        await git(['update-index', '--add', '--cacheinfo', `100644,${blob},${relativePath}`], env)
+      } else {
+        await git(['update-index', '--force-remove', '--', relativePath], env)
+      }
+    }
+    const tree = await git(['write-tree'], env)
+    const commit = await git(['commit-tree', tree, '-p', head, '-m', message])
+    await git(['update-ref', `refs/heads/${branch}`, commit])
+    return commit
+  } finally {
+    rmSync(indexDir, { recursive: true, force: true })
+  }
 }
