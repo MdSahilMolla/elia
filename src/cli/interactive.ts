@@ -15,6 +15,7 @@ import { colorizeDiffBlock } from '../ui/render.ts'
 import { approvalPreviewLines } from '../ui/approvalPreview.ts'
 import { ruleFor, ruleLabel } from '../autonomy/allowStore.ts'
 import { lastAssistantText } from '../agentLoop.ts'
+import { setProcessProvenance, eliaVersion } from '../provenance.ts'
 import { consumeLastPreviewedUrl } from '../tools/preview.ts'
 import type { SlashOutcome as InkSlashOutcome } from '../ui/app/index.tsx'
 import type { PackageKind } from '../marketplace/registry.ts'
@@ -119,6 +120,10 @@ export async function runInteractive(): Promise<void> {
   }
   let messages: ConversationMessage[] = []
   let sessionId = newSessionId()
+  // Every commit this session makes carries the run that wrote it
+  // (provenance.ts). One CLI process is one session, so this is set once
+  // instead of wrapping the whole loop in a scope.
+  setProcessProvenance({ sessionId, surface: 'interactive', model: config.model, version: eliaVersion() })
   let priorUsage: SessionUsageSnapshot = { usage: ZERO_USAGE, turns: 0, elapsedMs: 0 }
   // manual (default): a cheap risk check runs before each command — only
   // commands flagged risky (deletes, sends, spend, publishing, system
@@ -564,6 +569,8 @@ export async function runInteractive(): Promise<void> {
     writeSessionEnded(sessionStatus(false, 'Cleared — continued in a new session'))
 
     sessionId = newSessionId()
+    // /clear starts a new session; commits after it belong to that one.
+    setProcessProvenance({ sessionId, surface: 'interactive', model: config.model, version: eliaVersion() })
     messages.length = 0
     checkpoints.length = 0
     sessionTranscript.clear()

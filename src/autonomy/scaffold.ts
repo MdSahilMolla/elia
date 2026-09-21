@@ -11,6 +11,7 @@ import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { execCapture } from '../github/exec.ts'
 import { isSensitivePath } from './sensitivePaths.ts'
+import { signCommitMessage } from '../provenance.ts'
 import type { Proposal } from './types.ts'
 
 export interface ScaffoldOptions {
@@ -184,7 +185,7 @@ export async function commitAll(
   }
 
   const identity = await commitIdentity(cwd, signal)
-  const commit = await execCapture('git', [...identity, 'commit', '-m', message], cwd, signal)
+  const commit = await execCapture('git', [...identity, 'commit', '-m', signCommitMessage(message)], cwd, signal)
   if (!commit.ok) return { committed: false, excluded, warning: `git commit failed: ${commit.stderr || commit.stdout}` }
   return {
     committed: true,

@@ -421,6 +421,13 @@ async function runAutonomousTaskInternal(options: AutonomousRunOptions): Promise
   }, maxWallClockMs) : undefined
   const defaults = autonomyProfileDefaults(profile)
   const runId = options.runId ?? newRunId()
+  // Every commit this run makes carries it (provenance.ts), so the wave commits
+  // scaffold.ts writes can be traced back to the run that produced them rather
+  // than matched to it by timestamp. Imported here rather than at module load,
+  // like the rest of config's consumers.
+  const { setProcessProvenance, eliaVersion } = await import('../provenance.ts')
+  const { config: runConfig } = await import('../config.ts')
+  setProcessProvenance({ sessionId: runId, surface: 'auto', model: runConfig.model, version: eliaVersion() })
   const workspace = provisionTaskWorkspace({ runId, goal, workspaceRoot: options.workspaceRoot })
   const workspaceRoot = workspace.root
   // Past runs in this project that claimed more than they delivered → extra

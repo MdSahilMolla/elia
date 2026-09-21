@@ -15,6 +15,7 @@ import {
   sweepBlockedBy,
 } from '../github/contribute.ts'
 import { clampOutput } from '../shell.ts'
+import { signCommitMessage } from '../provenance.ts'
 
 /**
  * elia's hands on GitHub: branch, commit, push, open and inspect pull
@@ -260,7 +261,9 @@ Actions:
         const why = excluded.length > 0 ? ` Everything staged was left out: ${excluded.join('; ')}.` : ''
         return `Nothing staged to commit (working tree clean, or only untracked files — pass all:true, or name them in paths).${why}`
       }
-      const result = await git(['commit', '-m', message])
+      // Signed with the run that wrote it (provenance.ts). Unsigned outside a
+      // run, so a commit made by hand through this tool stays plain.
+      const result = await git(['commit', '-m', signCommitMessage(message)])
       if (!result.ok) return fail(result)
       const head = await git(['log', '-1', '--pretty=%h %s'])
       const stat = await git(['show', '--stat', '--oneline', 'HEAD'])
