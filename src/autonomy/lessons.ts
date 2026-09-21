@@ -3,7 +3,9 @@ import { dirname } from 'node:path'
 import { appendSecureFile, ensureSecureDirectory, hardenSecureFile, writeSecureFile } from '../securePersistence.ts'
 import { paths } from '../config.ts'
 import type { Tool } from '../tools/types.ts'
-import { exposedCorrs, lessonTrials, loadEfficacy, MIN_EXPOSURES } from './lessonEfficacy.ts'
+import { exposedCorrs, lessonTrials, loadEfficacy, MIN_EXPOSURES, type LessonTrial } from './lessonEfficacy.ts'
+import { certifyLessons, lessonArtifactId, lessonArtifacts, lessonLibraryPath, recordLessonReuse } from '../vde/lessonCertificates.ts'
+import { purgeArtifact, registerArtifact, retrievable } from '../vde/library.ts'
 import { rankBm25 } from '../bm25.ts'
 import { globalLessonsPath, partitionByScope } from './lessonScope.ts'
 import { competenceReport } from './outcomes.ts'
@@ -178,6 +180,14 @@ export function appendLessons(
   const fresh = cleaned.filter((lesson) => !seen.has(lesson.text.toLowerCase()))
   if (fresh.length === 0) return
 
+  // Every lesson enters the certified library with the checks its origin can
+  // claim; one that fails hygiene is written but quarantined, so it is on
+  // record and never injected. See vde/lessonCertificates.ts.
+  certifyLessons(
+    fresh.map((lesson) => ({ text: lesson.text, key: lessonKey(lesson.text), ...(lesson.source ? { source: lesson.source } : {}) })),
+    path,
+  )
+
   if (globalPath === path) {
     writeLessonBlock(fresh, path, PROJECT_HEADING)
     return
@@ -289,7 +299,17 @@ function inFileOrder(all: Lesson[], chosen: Set<Lesson>): Lesson[] {
  * and recall did not improve. BM25 is already how `recall` and `brain` search
  * rank; lessons were the one consumer that did not use it.
  */
-function selectLessons(all: Lesson[], query: string): Lesson[] {
+/**
+ * How much more a certified lesson's relevance counts than an uncertified one's
+ * when the two compete for the relevance-picked slots. This is σ in Theorem 1
+ * of the discovery-engine paper: without a reuse advantage for sound artifacts
+ * no leap size is safe, because nothing in retrieval pushes back against the
+ * unsound ones. Kept modest — a certified lesson on the wrong topic should still
+ * lose to an uncertified one on the right topic.
+ */
+export const CERTIFIED_REUSE_ADVANTAGE = 1.5
+
+function selectLessons(all: Lesson[], query: string, certified: ReadonlySet<string> = new Set()): Lesson[] {
   if (all.length <= MAX_INJECTED_LESSONS) return all
   const recent = all.slice(-RECENCY_FLOOR)
   const chosen = new Set(recent)
@@ -299,6 +319,12 @@ function selectLessons(all: Lesson[], query: string): Lesson[] {
   const older = all.slice(0, -RECENCY_FLOOR)
   const byId = new Map(older.map((lesson, index) => [String(index), lesson]))
   const ranked = rankBm25(older.map((lesson, index) => ({ id: String(index), text: lesson.text })), query)
+    .map((hit) => {
+      const lesson = byId.get(hit.id)
+      const boost = lesson && certified.has(lesson.key ?? lessonKey(lesson.text)) ? CERTIFIED_REUSE_ADVANTAGE : 1
+      return { ...hit, score: hit.score * boost }
+    })
+    .sort((a, b) => b.score - a.score)
   for (const hit of ranked) {
     if (chosen.size >= MAX_INJECTED_LESSONS) break
     const lesson = byId.get(hit.id)
@@ -334,7 +360,12 @@ export function renderLessonsWithKeys(
   globalPath = path === paths.lessons ? globalLessonsPath() : undefined,
   holdout: { rate: number; random?: () => number } = { rate: path === paths.lessons ? lessonHoldoutRate() : 0 },
 ): { text: string; keys: string[]; heldOut: string[] } {
-  const selected = selectLessons(loadLessons(path), query)
+  // Quarantined and purged lessons never reach a model; lessons that predate
+  // the certified library have no record and stay usable.
+  const certificates = lessonArtifacts(path)
+  const usable = loadLessons(path).filter((lesson) => retrievable(certificates.get(lesson.key ?? lessonKey(lesson.text))))
+  const certified = new Set([...certificates].filter(([, artifact]) => artifact.status === 'admitted').map(([key]) => key))
+  const selected = selectLessons(usable, query, certified)
   const random = holdout.random ?? Math.random
   const project: Lesson[] = []
   const heldOut: string[] = []
@@ -349,6 +380,7 @@ export function renderLessonsWithKeys(
   lastInjectedLessonKeys = lessons.map((lesson) => lesson.key ?? lessonKey(lesson.text))
   lastHeldOutLessonKeys = holdout.rate > 0 ? heldOut : undefined
   if (lessons.length === 0) return { text: '', keys: [], heldOut }
+  recordLessonReuse(lastInjectedLessonKeys, path)
   const text = `\n\n## What earlier runs learned about this project\n${lessons
     .map((lesson) => {
       const bits = [lesson.text]
@@ -415,6 +447,7 @@ export function retireLessons(
   const trials = lessonTrials(options.efficacyPath)
 
   const dead = new Set<string>()
+  const certificates = lessonArtifacts(lessonsPath)
   for (const lesson of lessons) {
     const key = lesson.key ?? lessonKey(lesson.text)
     // A randomized trial outranks the observational comparison below: once a
@@ -423,6 +456,12 @@ export function retireLessons(
     const trial = trials.get(key)
     if (trial) {
       if (trial.verdict === 'hurts') dead.add(key)
+      // A trial that proves a lesson helps is the independent check that
+      // admits it to the certified library — the audit half of §5.3.
+      if (trial.verdict === 'helps' && !certificates.get(key)?.checks.some((check) => check.family === 'trial')) {
+        if (!certificates.has(key)) certifyLessons([{ text: lesson.text, key, ...(lesson.source ? { source: lesson.source } : {}) }], lessonsPath)
+        certifyTrial(key, lesson, trial, lessonsPath)
+      }
       continue
     }
     const entry = counts.get(key)
@@ -448,7 +487,48 @@ export function retireLessons(
   const kept = lessons.filter((lesson) => !dead.has(lesson.key ?? lessonKey(lesson.text)))
   const retired = lessons.filter((lesson) => dead.has(lesson.key ?? lessonKey(lesson.text))).map((lesson) => lesson.text)
   rewriteLessons(kept, lessonsPath)
+  // A lesson retired for hurting is an unsound artifact the audit caught: the
+  // library's slip-rate estimate (ε) is built from exactly these.
+  for (const key of dead) {
+    try {
+      const lesson = lessons.find((candidate) => (candidate.key ?? lessonKey(candidate.text)) === key)
+      // A lesson older than the library gets its record first, so the slip it
+      // represents is counted rather than lost.
+      if (lesson && !certificates.has(key)) certifyLessons([{ text: lesson.text, key, ...(lesson.source ? { source: lesson.source } : {}) }], lessonsPath)
+      purgeArtifact(lessonArtifactId(key), 'retired: measured to hurt the runs that carried it', { audit: true, path: lessonLibraryPath(lessonsPath) })
+    } catch {
+      // The lesson is already gone from the store; the library record is evidence only.
+    }
+  }
   return { retired, kept: kept.length }
+}
+
+function certifyTrial(key: string, lesson: Lesson, trial: LessonTrial, lessonsPath: string): void {
+  try {
+    const path = lessonLibraryPath(lessonsPath)
+    const id = lessonArtifactId(key)
+    registerArtifact(
+      {
+        id,
+        kind: 'lesson',
+        summary: lesson.text,
+        source: lesson.source ?? 'unknown',
+        checks: [
+          {
+            verifier: 'randomized-trial',
+            tier: 'empirical',
+            family: 'trial',
+            passed: true,
+            at: Date.now(),
+            detail: `clean ${Math.round((trial.shown.clean / trial.shown.runs) * 100)}% shown vs ${Math.round((trial.heldOut.clean / trial.heldOut.runs) * 100)}% withheld`,
+          },
+        ],
+      },
+      path,
+    )
+  } catch {
+    // Certification is evidence; the lesson stays in the store either way.
+  }
 }
 
 function relativeAge(at: number): string {

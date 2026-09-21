@@ -2006,7 +2006,10 @@ Read the shared blackboard with \`board_read\` to see what the workers actually 
 
   const lessons = capture.taken()
   if (lessons.length > 0) {
-    appendLessons(lessons)
+    // The source is the evidence the certified library admits a lesson on: a
+    // run that succeeded under a mechanical or empirical check vouches for its
+    // lessons; one that stopped short vouches for nothing.
+    appendLessons(lessons.map((text) => ({ text, source: status === 'succeeded' ? `auto-${regime}` : 'auto-unresolved' })))
     journal.append('lesson', { lessons })
     for (const lesson of lessons) writeSubStep(`learned: ${lesson}`)
   } else if (deterministic.length === 0) {
