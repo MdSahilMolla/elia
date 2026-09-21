@@ -12,6 +12,7 @@ import { taskSessions } from './taskSessions.ts'
 import { tryListSkillBundles } from './skills/bundles.ts'
 import { listSkillFiles, listLoadedSkills, loadSkills } from './skills/loader.ts'
 import { newSessionId, loadSession, saveSession } from './session.ts'
+import { recordUsage } from './usage.ts'
 import { config } from './config.ts'
 import { deploymentTool } from './tools/deployment.ts'
 import { runShell, clampOutput } from './shell.ts'
@@ -117,6 +118,8 @@ export function createBridgeSession(options: BridgeSessionOptions): BridgeSessio
     if (!sessions.has(sessionId) && sessions.size >= MAX_SESSIONS) sessions.delete(sessions.keys().next().value as string)
     sessions.set(sessionId, existing)
     const messages = existing
+    // Where this turn starts, for the reflection below.
+    const turnStart = messages.length
     messages.push({ role: 'user', content: [{ type: 'text', text: userPrompt }] })
     const governanceMode = parseGovernanceMode(params.governanceMode) ?? 'unattended'
     const selectedSkills = parseStringArray(params.skillNames, 64, 100)
@@ -156,6 +159,26 @@ export function createBridgeSession(options: BridgeSessionOptions): BridgeSessio
       messages.push({ role: 'assistant', content: [{ type: 'text', text }] })
     }
     await saveSession(sessionId, messages, undefined, { providerName: config.providerName, model: config.model })
+    // A turn driven from the editor is still a person working, and it hits the
+    // same Windows-shell and missing-config friction the REPL does. The learning
+    // call lived only in the REPL's own loop, so everything done through this
+    // bridge was forgotten the moment it finished. Same gate, same source tags:
+    // a clean turn costs nothing.
+    try {
+      const { learnFromTurn } = await import('./autonomy/turnLearning.ts')
+      const learned = await learnFromTurn({
+        provider: config.tiers.fast.provider,
+        messages,
+        fromIndex: turnStart,
+        request: userPrompt,
+        outcome: { verify: 'none', repairAttempts: 0 },
+        cwd: process.cwd(),
+        signal: currentAgent().signal,
+      })
+      if (learned.usage) recordUsage(learned.usage, config.tiers.fast.model)
+    } catch {
+      // Learning is a bonus on a finished turn; never fail the editor's request.
+    }
     const output = { sessionId, text, usage: result.usage, steps: result.steps, stopReason: result.stopReason }
     event('chat_finished', { requestId: request.id, ...output })
     return output

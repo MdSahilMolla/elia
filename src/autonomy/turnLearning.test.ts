@@ -205,3 +205,49 @@ test('the blocker prompt asks for the constraint and forbids inventing a fix', (
   expect(prompt).toContain('linker link.exe not found')
   expect(prompt).toContain('do NOT state one')
 })
+
+// Workers do most of the hands-on work and used to take every hard-won fact
+// away with them: `learnFromTurn` ran only on the interactive REPL, so a builder
+// that found `ls` failing and `dir` working taught the next session nothing.
+// src/subagent.ts now runs the same gate over a worker's own conversation.
+test('a sub-agent records its friction under its own source, so it can be retired separately', async () => {
+  const path = lessonsFile()
+  const provider = reflectingProvider('{"lessons": ["On this Windows machine list directories with dir; ls is not available in cmd"]}')
+  const learned = await learnFromTurn({
+    provider,
+    messages: WINDOWS_TURN,
+    fromIndex: 1,
+    request: 'survey the project',
+    // What a finished worker passes: no verification gate of its own.
+    outcome: { verify: 'none', repairAttempts: 0 },
+    cwd: '/tmp',
+    lessonsPath: path,
+    sources: { repair: 'subagent', blocker: 'subagent-blocker' },
+  })
+
+  expect(learned.lessons.length).toBe(1)
+  const stored = readFileSync(path, 'utf8')
+  expect(stored).toContain('source=subagent')
+  expect(stored).not.toContain('source=interactive-auto')
+})
+
+test('a worker that finished with nothing going wrong costs no model call', async () => {
+  const provider = reflectingProvider('{"lessons": ["should never be asked"]}')
+  const clean: ChatMessage[] = [
+    { role: 'user', content: [text('survey the project')] },
+    { role: 'assistant', content: [call('a', 'read_file', { path: 'src/index.ts' })] },
+    { role: 'user', content: [result('a', 'ok')] },
+  ]
+  const learned = await learnFromTurn({
+    provider,
+    messages: clean,
+    fromIndex: 0,
+    request: 'survey the project',
+    outcome: { verify: 'none', repairAttempts: 0 },
+    cwd: '/tmp',
+    lessonsPath: lessonsFile(),
+    sources: { repair: 'subagent', blocker: 'subagent-blocker' },
+  })
+  expect(learned.lessons).toEqual([])
+  expect(provider.calls.length).toBe(0)
+})
