@@ -45,7 +45,7 @@ export async function runCompounding(): Promise<void> {
   const lastBench = [...readBenchRuns()].reverse().find((run) => run.set === 'all')
   const gatePower = lastBench ? renderGatePower(inferTasks(lastBench), benchRepeats(), 1, isAssumed(lastBench)) : undefined
   const practice = await import('../evolve/autoImprove.ts')
-  const practiceLine = practice.renderPracticeStatus(practice.readAutoImproveState(), { now: Date.now(), enabled: practice.autoImproveEnabled() })
+  const practiceLine = practice.renderPracticeStatus(practice.reapPractice(), { now: Date.now(), enabled: practice.autoImproveEnabled() })
   // Capability in the field, beside capability on the benchmark: what elia
   // proposed to projects it does not own, and what was accepted. The benchmark
   // can saturate; other people's repositories cannot.
@@ -209,7 +209,14 @@ async function runAutoPractice(): Promise<void> {
     newTurns: claimed ? (started.newTurns ?? 0) : 0,
     reported: false,
   })
+  // A run that is killed cannot write its own outcome, so it says it is alive as
+  // it goes and a later session reaps the silence (evolve/autoImprove.ts).
+  const stopHeartbeat = auto.startPracticeHeartbeat()
+  let finished = false
   const finish = (outcome: import('../evolve/autoImprove.ts').AutoOutcome, detail: string, branch?: string): void => {
+    if (finished) return
+    finished = true
+    stopHeartbeat()
     const blocked = outcome === 'blocked'
     auto.writeAutoImproveState({
       ...auto.readAutoImproveState(),
@@ -221,6 +228,15 @@ async function runAutoPractice(): Promise<void> {
       reported: false,
     })
     writeUsageLine(`[${new Date().toISOString()}] practice ${outcome}: ${detail}`)
+  }
+
+  // The signals that can be caught are worth a precise reason; the ones that
+  // cannot (SIGKILL, `taskkill /F`, a closing console) fall through to the reaper.
+  for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGBREAK'] as const) {
+    process.on(signal, () => {
+      finish('failed', `the practice run was stopped (${signal})`)
+      process.exit(1)
+    })
   }
 
   try {

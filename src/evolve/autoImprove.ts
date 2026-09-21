@@ -36,6 +36,14 @@ export const MIN_NEW_TURNS = 5
 export const MAX_RUN_MS = 8 * 60 * 60_000
 /** How long the REPL must sit untouched before practice starts in the background. */
 export const IDLE_MS = 10 * 60_000
+/** How often a running practice run says it is still alive. */
+export const HEARTBEAT_MS = 60_000
+/**
+ * Past this with no heartbeat, a run is taken to be dead even if something still
+ * holds its pid. Generous enough that a long benchmark task, a paused machine or
+ * a slow disk never looks like a crash.
+ */
+export const HEARTBEAT_STALE_MS = 15 * 60_000
 
 export type AutoOutcome = 'promoted' | 'rejected' | 'blocked' | 'failed' | 'benchmarked'
 
@@ -43,6 +51,13 @@ export interface AutoImproveState {
   pid?: number
   startedAt?: number
   finishedAt?: number
+  /**
+   * Last time the running process said it was alive. A practice run is killed,
+   * not stopped — `terminateProcessGroup` uses `taskkill /F`, a closing console
+   * takes the tree with it, and neither can be caught — so the only honest way
+   * to tell a working run from a dead one is that a working one keeps writing.
+   */
+  heartbeatAt?: number
   /** Turns finished in any project since the last run started — the new experience it would learn from. */
   newTurns?: number
   outcome?: AutoOutcome
@@ -86,14 +101,67 @@ export interface StartCheck {
   alive?: (pid: number) => boolean
 }
 
-/** Whether to start a practice run now, and if not, why not. Pure. */
-export function shouldStartPractice(state: AutoImproveState, check: StartCheck): { start: boolean; reason: string } {
+export type PracticePhase = 'never' | 'running' | 'crashed' | 'finished'
+
+/**
+ * What became of the last practice run. `crashed` is the case the loop was blind
+ * to: a run that is neither still going nor finished wrote no outcome at all, so
+ * before this it was reported as "running" forever and nobody was ever told the
+ * practice had died. Pure.
+ */
+export function practicePhase(state: AutoImproveState, check: StartCheck): PracticePhase {
   const alive = check.alive ?? isProcessAlive
-  if (check.enabled === false) return { start: false, reason: 'ELIA_AUTO_IMPROVE is off' }
+  if (state.startedAt === undefined) return 'never'
+  if (state.finishedAt !== undefined) return 'finished'
+  // No pid means no process to have died: a record from before this existed, or
+  // a half-written one. Inventing a crash from it would report a failure that
+  // never happened, so it is left alone.
+  if (state.pid === undefined) return 'running'
+  if (!alive(state.pid)) return 'crashed'
   // A pid is only trusted for a while: Windows reuses them, and a run that
   // crashed without writing finishedAt must not hold the slot forever.
-  const fresh = state.startedAt === undefined || check.now - state.startedAt < MAX_RUN_MS
-  if (state.pid !== undefined && state.finishedAt === undefined && fresh && alive(state.pid)) return { start: false, reason: 'a practice run is already going' }
+  if (check.now - state.startedAt >= MAX_RUN_MS) return 'crashed'
+  // Silence from a run that had been speaking: alive is someone else's process
+  // on a reused pid, or a run wedged past any useful point. A run that never
+  // beat at all predates the heartbeat and is judged on its pid alone.
+  if (state.heartbeatAt !== undefined && check.now - state.heartbeatAt >= HEARTBEAT_STALE_MS) return 'crashed'
+  return 'running'
+}
+
+/**
+ * The state to persist when a crash is newly noticed, or undefined when there is
+ * nothing to reap. Recording it is what stops the status lying and lets the next
+ * session say the practice died — the log is named because a killed run's only
+ * evidence is what it had already written there.
+ */
+export function reapCrashedRun(state: AutoImproveState, check: StartCheck): AutoImproveState | undefined {
+  if (practicePhase(state, check) !== 'crashed') return undefined
+  // How long it *worked*, from its last heartbeat — not how long it took someone
+  // to notice, which is the wrong number and the larger one.
+  const detail =
+    state.heartbeatAt !== undefined && state.startedAt !== undefined
+      ? `it ran for ${describeSpan(state.heartbeatAt - state.startedAt)} and then stopped without finishing`
+      : 'it stopped without finishing and never said how far it got'
+  return {
+    ...state,
+    finishedAt: check.now,
+    outcome: 'failed',
+    summary: practiceSummary('failed', detail),
+    reported: false,
+  }
+}
+
+function describeSpan(ms: number): string {
+  const minutes = Math.max(1, Math.round(ms / 60_000))
+  return minutes < 90 ? `${minutes} minute(s)` : `${Math.round(minutes / 60)} hour(s)`
+}
+
+/** Whether to start a practice run now, and if not, why not. Pure. */
+export function shouldStartPractice(state: AutoImproveState, check: StartCheck): { start: boolean; reason: string } {
+  if (check.enabled === false) return { start: false, reason: 'ELIA_AUTO_IMPROVE is off' }
+  // Only a run with a pid holds the slot; a record with no process behind it
+  // falls through to the cooldown like any other.
+  if (state.pid !== undefined && practicePhase(state, check) === 'running') return { start: false, reason: 'a practice run is already going' }
   if (state.blockedUntil !== undefined && check.now < state.blockedUntil) return { start: false, reason: 'the provider was out of credit or rate-limited last time' }
   if (state.startedAt !== undefined && check.now - state.startedAt < COOLDOWN_MS) return { start: false, reason: 'practised recently' }
   if (state.startedAt !== undefined && (state.newTurns ?? 0) < MIN_NEW_TURNS) return { start: false, reason: `nothing new to learn from since the last run (${state.newTurns ?? 0} of ${MIN_NEW_TURNS} turns)` }
@@ -159,12 +227,43 @@ export async function maybeStartPractice(options: { now?: number; statePath?: st
   }
 }
 
+/**
+ * Notices a practice run that died without recording anything and writes the
+ * crash down, so the status stops calling it "running" and the next session says
+ * it happened. Returns the current state either way.
+ */
+export function reapPractice(statePath = AUTO_IMPROVE_STATE, check?: Partial<StartCheck>): AutoImproveState {
+  const state = readAutoImproveState(statePath)
+  const reaped = reapCrashedRun(state, { now: check?.now ?? Date.now(), alive: check?.alive })
+  if (!reaped) return state
+  writeAutoImproveState(reaped, statePath)
+  return reaped
+}
+
 /** The line a session opens with after a practice run finished, once. Marks it reported. */
 export function takePracticeReport(statePath = AUTO_IMPROVE_STATE): string | undefined {
-  const state = readAutoImproveState(statePath)
+  const state = reapPractice(statePath)
   if (state.finishedAt === undefined || state.reported || !state.summary) return undefined
   writeAutoImproveState({ ...state, reported: true }, statePath)
   return state.summary
+}
+
+/**
+ * Keeps the state file saying "still alive" while a practice run works, and
+ * returns the stop function. Without this a killed run is indistinguishable
+ * from a working one until its pid is reused.
+ */
+export function startPracticeHeartbeat(statePath = AUTO_IMPROVE_STATE, everyMs = HEARTBEAT_MS): () => void {
+  const beat = () => {
+    const state = readAutoImproveState(statePath)
+    // Only ours to touch: if another run claimed the slot, stop writing.
+    if (state.pid !== process.pid || state.finishedAt !== undefined) return
+    writeAutoImproveState({ ...state, heartbeatAt: Date.now() }, statePath)
+  }
+  beat()
+  const timer = setInterval(beat, everyMs)
+  timer.unref?.()
+  return () => clearInterval(timer)
 }
 
 /**
@@ -189,9 +288,12 @@ export function practiceSummary(outcome: AutoOutcome, detail: string, branch?: s
 /** What `elia compounding` says about practice: the last run, and whether the next one would start now. */
 export function renderPracticeStatus(state: AutoImproveState, check: StartCheck): string {
   const lines = ['practice — elia runs one evolve generation by itself when idle (ELIA_AUTO_IMPROVE=off to stop)']
-  if (state.startedAt === undefined) lines.push('  never run yet')
-  else if (state.finishedAt === undefined) lines.push(`  running since ${new Date(state.startedAt).toISOString().slice(0, 16).replace('T', ' ')}`)
-  else lines.push(`  last: ${new Date(state.finishedAt).toISOString().slice(0, 16).replace('T', ' ')} — ${state.summary ?? state.outcome ?? 'finished'}`)
+  const phase = practicePhase(state, check)
+  const at = (ms: number) => new Date(ms).toISOString().slice(0, 16).replace('T', ' ')
+  if (phase === 'never') lines.push('  never run yet')
+  else if (phase === 'running') lines.push(`  running since ${at(state.startedAt!)}`)
+  else if (phase === 'crashed') lines.push(`  started ${at(state.startedAt!)} and stopped without finishing — see ${AUTO_IMPROVE_LOG}`)
+  else lines.push(`  last: ${at(state.finishedAt!)} — ${state.summary ?? state.outcome ?? 'finished'}`)
   const next = shouldStartPractice(state, check)
   lines.push(`  next: ${next.start ? 'will start the next time a session goes idle or closes' : `waiting — ${next.reason}`}`)
   return lines.join('\n')

@@ -5,15 +5,20 @@ import { join } from 'node:path'
 import {
   BLOCKED_BACKOFF_MS,
   COOLDOWN_MS,
+  HEARTBEAT_STALE_MS,
   MAX_RUN_MS,
   MIN_NEW_TURNS,
   autoImproveEnabled,
   looksBlocked,
   notePracticeTurn,
+  practicePhase,
   practiceSummary,
   readAutoImproveState,
+  reapCrashedRun,
+  reapPractice,
   renderPracticeStatus,
   shouldStartPractice,
+  startPracticeHeartbeat,
   takePracticeReport,
   writeAutoImproveState,
 } from './autoImprove.ts'
@@ -75,6 +80,82 @@ test('turns from any session count as new experience, and a finished run is repo
     expect(renderPracticeStatus(readAutoImproveState(path), { now: 3, alive: dead })).toContain('git merge evolve/gen-3-2026-09-20')
     expect(takePracticeReport(path)).toBe(summary)
     expect(takePracticeReport(path)).toBeUndefined()
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('a run that is killed is noticed, not reported as still running forever', () => {
+  // The real case this comes from: a practice run died four minutes in, wrote no
+  // outcome, and `elia compounding` said "running since ..." for hours afterwards
+  // while nothing was practising and nobody was told.
+  const started = now - 4 * 60_000
+  const killed = { pid: 9640, startedAt: started, heartbeatAt: started, newTurns: 0 }
+
+  expect(practicePhase(killed, { now, alive })).toBe('running')
+  expect(practicePhase(killed, { now, alive: dead })).toBe('crashed')
+  // Alive but silent for too long is a reused pid, not a working run.
+  expect(practicePhase({ ...killed, heartbeatAt: now - HEARTBEAT_STALE_MS - 1 }, { now, alive })).toBe('crashed')
+  // And a pid held past any plausible run length is not trusted either.
+  expect(practicePhase({ ...killed, startedAt: now - MAX_RUN_MS - 1, heartbeatAt: now }, { now, alive })).toBe('crashed')
+  expect(practicePhase({}, { now, alive: dead })).toBe('never')
+  expect(practicePhase({ startedAt: started, finishedAt: now - 1 }, { now, alive })).toBe('finished')
+
+  const reaped = reapCrashedRun(killed, { now, alive: dead })!
+  expect(reaped.outcome).toBe('failed')
+  expect(reaped.finishedAt).toBe(now)
+  expect(reaped.reported).toBe(false)
+  expect(reaped.summary).toContain('stopped without finishing')
+  // How long it worked, not how long it took to notice.
+  expect(reaped.summary).toContain('ran for 1 minute(s)')
+  expect(reapCrashedRun({ ...killed, heartbeatAt: started + 6 * 60_000 }, { now, alive: dead })!.summary).toContain('ran for 6 minute(s)')
+  expect(reapCrashedRun({ ...killed, heartbeatAt: undefined }, { now, alive: dead })!.summary).toContain('never said how far it got')
+  // Nothing to reap twice, nor while it is genuinely running.
+  expect(reapCrashedRun(reaped, { now, alive: dead })).toBeUndefined()
+  expect(reapCrashedRun(killed, { now, alive })).toBeUndefined()
+
+  // The status stops lying, and the crash is still held off by the cooldown so a
+  // run that dies on every attempt cannot spin.
+  const rendered = renderPracticeStatus(killed, { now, alive: dead })
+  expect(rendered).toContain('stopped without finishing')
+  expect(rendered).not.toContain('running since')
+  expect(shouldStartPractice(killed, { now, alive: dead }).reason).toBe('practised recently')
+})
+
+test('the next session is told a practice run died, exactly once', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'elia-practice-'))
+  const path = join(dir, 'state.json')
+  try {
+    writeAutoImproveState({ pid: 999_999, startedAt: Date.now() - 5 * 60_000, newTurns: 0 }, path)
+    const report = takePracticeReport(path)
+    expect(report).toContain("practice run failed")
+    expect(report).toContain('auto-improve.log')
+    expect(takePracticeReport(path)).toBeUndefined()
+    expect(readAutoImproveState(path).outcome).toBe('failed')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('a heartbeat marks the run alive, and stops when the slot is someone else', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'elia-practice-'))
+  const path = join(dir, 'state.json')
+  try {
+    writeAutoImproveState({ pid: process.pid, startedAt: Date.now() }, path)
+    const stop = startPracticeHeartbeat(path, 60_000)
+    stop()
+    const beat = readAutoImproveState(path).heartbeatAt
+    expect(beat).toBeGreaterThan(0)
+    // A finished run is not ours to keep touching.
+    writeAutoImproveState({ pid: process.pid, startedAt: 1, finishedAt: 2, heartbeatAt: 5 }, path)
+    startPracticeHeartbeat(path, 60_000)()
+    expect(readAutoImproveState(path).heartbeatAt).toBe(5)
+    // Nor is one another process claimed.
+    writeAutoImproveState({ pid: process.pid + 1, startedAt: 1, heartbeatAt: 7 }, path)
+    startPracticeHeartbeat(path, 60_000)()
+    expect(readAutoImproveState(path).heartbeatAt).toBe(7)
+    // Reaping persists the crash so later reads agree.
+    expect(reapPractice(path, { now: Date.now(), alive: dead }).outcome).toBe('failed')
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }

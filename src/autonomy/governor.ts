@@ -161,7 +161,36 @@ const SHELL_TOKEN_BREAK = /[;&|<>`$'"\\\r\n]/
 const COMMAND_NEWLINE = /[\r\n]/
 const DESTRUCTIVE_SHELL_VERBS = /\b(?:rm|mv|cp|mkdir|touch|chmod|chown|kill|shutdown|reboot|publish|push|apply|delete|destroy|install|add|upgrade|send|curl|wget|ssh|scp)\b/i
 const SHELL_SIDE_EFFECT = /[<>]/i
-const INTERNAL_SAFE_TOOLS = new Set(['flag_risk', 'submit_route', 'submit_proposal', 'submit_verdict', 'submit_acceptance', 'revise_plan', 'submit_assumptions', 'submit_lessons', 'delegate_tasks'])
+/**
+ * Tools that only hand a structured answer back to the harness that asked for
+ * it: they close over a local variable, return a string, and touch no file, no
+ * process and no network. They are named here because the fallthrough at the
+ * bottom of `assessAction` treats an unrecognised tool as critical — correct for
+ * anything that might reach a real system, and fatal for a reporter, which in an
+ * unattended run is refused outright and leaves the phase with no answer.
+ *
+ * That is not hypothetical. `submit_hypothesis` and `submit_strategy` were
+ * missing from this list, so every `elia evolve` proposer did its analysis, went
+ * to submit, and was blocked by elia's own unattended policy — which is why the
+ * self-improvement loop had proposed nothing in its entire history. The list
+ * must stay in step with `REPORTING_TOOLS` in autonomy/goalGraph.ts; the two are
+ * literals rather than one import because governor.ts sits under goalGraph.ts in
+ * the import graph, and governor.test.ts fails if they drift.
+ */
+const INTERNAL_SAFE_TOOLS = new Set([
+  'flag_risk',
+  'submit_route',
+  'submit_proposal',
+  'submit_verdict',
+  'submit_acceptance',
+  'revise_plan',
+  'submit_assumptions',
+  'submit_lessons',
+  'submit_hypothesis',
+  'submit_strategy',
+  'submit_fragment',
+  'delegate_tasks',
+])
 export const MAX_GOVERNED_ACTIONS = 10_000
 
 /**

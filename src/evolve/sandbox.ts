@@ -19,8 +19,32 @@ import { EVOLUTION_DIR } from './ledger.ts'
  * inherits the real dependency tree with no install, no symlink, and no junction.
  */
 
-/** Copied into every sandbox. Everything else (node_modules, .git, .evolution) is either inherited or irrelevant. */
-const COPIED_ENTRIES = ['src', 'package.json', 'tsconfig.json']
+/**
+ * Copied into every sandbox. Everything else (node_modules, .git, .evolution) is
+ * either inherited or irrelevant.
+ *
+ * Beyond the source itself, this is everything `bun run typecheck` and `bun test`
+ * need to mean the same thing here as in the live tree — because the gate runs
+ * exactly those two commands and rejects a candidate whose tests fail:
+ *   - `bunfig.toml` pins the test preload *and* `root = "src"`, which keeps the
+ *     deliberately-failing fixtures elia builds under `workspace/` out of
+ *     discovery;
+ *   - `scripts/` holds that preload, which pins the terminal size so Ink never
+ *     shells out mid-render;
+ *   - `values/` holds the Value Core the prompt is assembled from, which one
+ *     test asserts is present and active;
+ *   - `bin/` is the CLI entry point the smoke tests spawn;
+ *   - `extensions/` (183K, no dependencies of its own) holds the VS Code copy of
+ *     the bridge wire types, which one test reads to check the two copies have
+ *     not drifted — a check a candidate touching those types should still face.
+ * Without them the suite failed 21 tests in the sandbox and passed in the tree it
+ * was copied from, so every candidate was rejected for the sandbox's own shape.
+ * The first three are part of how a candidate is judged and are immutable to it
+ * (`IMMUTABLE_FILES`). `bin/` and `extensions/` are ordinary implementation it
+ * may improve, and nothing measures through them — the benchmark spawns
+ * `src/evolve/benchTask.ts`, not the CLI.
+ */
+const COPIED_ENTRIES = ['src', 'package.json', 'tsconfig.json', 'bunfig.toml', 'scripts', 'values', 'bin', 'extensions']
 const TRACKED_ROOT_FILES = ['package.json', 'tsconfig.json']
 
 /**
@@ -83,6 +107,15 @@ export const IMMUTABLE_FILES = [
   'package.json',
   'tsconfig.json',
   'src/**/*.test.ts',
+  // How the suite that gates promotion is run. `bunfig.toml` chooses the preload
+  // and pins discovery to `src`; `scripts/` holds that preload, the security
+  // scan and the benchmarks. A candidate that could edit either would not need
+  // to pass the tests — it could point discovery at an empty directory, or make
+  // the preload swallow what it does not like. These arrived in the sandbox only
+  // so `bun test` would mean the same thing there as in the live tree; they are
+  // named here so that is all they can do.
+  'bunfig.toml',
+  'scripts/**',
   // These files are the deterministic safety boundary. Candidates may improve
   // planning and execution, but may not weaken authorization, containment,
   // policy, redaction, or high-impact tool enforcement to manufacture a win.

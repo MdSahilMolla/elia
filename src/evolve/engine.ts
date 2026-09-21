@@ -259,10 +259,49 @@ async function runGeneration(
   split: TaskSplit,
 ): Promise<{ record: GenerationRecord; candidateCard?: Scorecard }> {
   let candidateCard: Scorecard | undefined
-  const record = await attemptGeneration(generation, baseline, options, tasks, evidence, baselineOutcomes, split, (card) => {
-    candidateCard = card
-  })
-  return { record, candidateCard }
+  // The record is built early and filled in as the attempt progresses, so a
+  // throw from anywhere inside it still has a funnel stage and a hypothesis to
+  // report. Without this the whole attempt vanished: a provider rate limit
+  // partway through the build left nothing in the ledger, and the next
+  // generation read a history in which that attempt had never happened.
+  let started: GenerationRecord | undefined
+  try {
+    const record = await attemptGeneration(
+      generation,
+      baseline,
+      options,
+      tasks,
+      evidence,
+      baselineOutcomes,
+      split,
+      (card) => {
+        candidateCard = card
+      },
+      (base) => {
+        started = base
+      },
+    )
+    return { record, candidateCard }
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error)
+    const record: GenerationRecord = {
+      ...(started ?? {
+        generation,
+        at: Date.now(),
+        strategyId: 'unknown',
+        hypothesis: '',
+        rationale: '',
+        targetFiles: [],
+        changedFiles: [],
+        baseline,
+        model: config.model,
+      }),
+      verdict: 'error',
+      reason: `the attempt could not finish: ${clampOutput(detail, 400)}`,
+    }
+    writeFail(`generation ${generation} could not finish: ${detail.split('\n')[0]!.slice(0, 200)}`)
+    return { record, candidateCard }
+  }
 }
 
 async function attemptGeneration(
@@ -274,6 +313,7 @@ async function attemptGeneration(
   baselineOutcomes: TaskOutcome[],
   split: TaskSplit,
   onCandidateCard: (card: Scorecard) => void,
+  onStarted: (base: GenerationRecord) => void,
 ): Promise<GenerationRecord> {
   const startedAt = Date.now()
   const strategy = pickStrategy()
@@ -290,6 +330,9 @@ async function attemptGeneration(
     reason: '',
     model: config.model,
   }
+  // Hand the caller the live record, so an attempt that throws is still
+  // reported at the stage it reached.
+  onStarted(base)
 
   writePhase('propose', `generation ${generation}`)
   const sandbox = createSandbox(generation)
