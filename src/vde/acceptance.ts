@@ -113,6 +113,21 @@ export function sealedCompare(baseline: Metrics, candidate: Metrics, options: Se
   }
 }
 
+/**
+ * The smallest gain the sealed gate could ever accept on `n` tasks at this
+ * comparison: `k/n`, where `k` tasks flipping from fail to pass with nothing
+ * else moving is the least evidence that clears the bar. Real runs are noisier,
+ * so this is a floor — if the benchmark's headroom is below it, no proposal
+ * can be promoted however good it is (rule R4).
+ */
+export function sealedMinimumGain(n: number, index: number, delta = 0.05): number {
+  const needed = 1 / spentLevel(index, delta)
+  for (let k = 1; k <= n; k++) {
+    if (eValue(Array.from({ length: k }, () => 1)) >= needed) return k / Math.max(1, n)
+  }
+  return Number.POSITIVE_INFINITY
+}
+
 export type GateMode = 'legacy' | 'sealed' | 'both'
 
 /**

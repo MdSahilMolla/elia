@@ -109,6 +109,19 @@ export function certifyLessons(lessons: readonly LessonToCertify[], lessonsPath:
   }
 }
 
+/**
+ * Certifies lessons that predate the library, so the audit covers the whole
+ * store: each gets the same hygiene check and origin evidence a new lesson
+ * would, and one that fails hygiene is quarantined from then on. Returns how
+ * many were newly certified.
+ */
+export function backfillLessons(lessons: readonly LessonToCertify[], lessonsPath: string): number {
+  const known = lessonArtifacts(lessonsPath)
+  const missing = lessons.filter((lesson) => !known.has(lesson.key))
+  certifyLessons(missing, lessonsPath)
+  return missing.length
+}
+
 /** Each key's library record, for retrieval to filter and rank by. */
 export function lessonArtifacts(lessonsPath: string): Map<string, Artifact> {
   const byKey = new Map<string, Artifact>()

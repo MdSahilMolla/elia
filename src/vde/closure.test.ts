@@ -24,6 +24,8 @@ test('habits that must never become tools automatically', () => {
   expect(encodingRefusal(habit('npm publish', 30))).toContain("person's decision")
   expect(encodingRefusal(habit('git diff', 53))).toBeUndefined()
   expect(encodingRefusal(habit('grep → read_file → edit_file', 49, 'sequence'))).toBeUndefined()
+  // The top habit in elia's real stats: a routine of "run whatever, then write".
+  expect(encodingRefusal(habit('run_command → run_command → write_file', 44, 'sequence'))).toContain('arbitrary shell')
   expect(roundTripsSaved(habit('grep → read_file → edit_file', 1, 'sequence'))).toBe(2)
 })
 

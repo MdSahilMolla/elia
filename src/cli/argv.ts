@@ -13,7 +13,7 @@
  */
 
 export const SUBCOMMANDS = [
-  'auto', 'agent', 'evolve', 'gap', 'values', 'distill', 'compounding', 'jev',
+  'auto', 'agent', 'evolve', 'gap', 'values', 'distill', 'compounding', 'jev', 'vde',
   'bench', 'bench-latency', 'skills', 'runs', 'fork', 'resume', 'schedule',
   'daemon', 'doctor', 'config', 'codex-login', 'control', 'bridge', 'workspace',
 ] as const

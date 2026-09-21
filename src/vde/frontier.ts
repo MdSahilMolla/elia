@@ -67,6 +67,8 @@ export interface FamilyEstimate {
   beta?: RateSource
   /** Proposition 1 at the point estimates. */
   precision?: number
+  /** Proposition 1 at the pessimistic and optimistic ends of the intervals. */
+  precisionRange?: [number, number]
   /** Log-odds distance from the frontier at the point estimates; positive is inside. */
   margin?: number
   /**
@@ -211,6 +213,10 @@ export function estimateFrontier(inputs: FrontierInputs, target = 0.5): Frontier
     if (p.mean !== undefined && alpha?.estimate.mean !== undefined) {
       const betaMean = beta?.estimate.mean ?? 0
       estimate.precision = resamplingPrecision(p.mean, alpha.estimate.mean, betaMean)
+      estimate.precisionRange = [
+        resamplingPrecision(p.lo, alpha.estimate.hi, beta?.estimate.hi ?? 0),
+        resamplingPrecision(p.hi, alpha.estimate.lo, beta?.estimate.lo ?? 0),
+      ]
       estimate.margin = frontierMargin(p.mean, Math.max(alpha.estimate.mean, 1e-6), betaMean, target)
       estimate.saturation = saturationSamples(p.mean, alpha.estimate.mean, betaMean)
     }
@@ -256,7 +262,7 @@ export function renderFrontier(report: FrontierReport): string {
   for (const family of report.families) {
     if (family.turns === 0) continue
     const status = family.status === 'inside' ? '✓ inside' : family.status === 'outside' ? '✗ outside' : family.status === 'uncertain' ? '? uncertain' : '· unmeasured'
-    const precision = family.precision === undefined ? '' : ` · Π ${pct(family.precision)}`
+    const precision = family.precisionRange ? ` · Π ${pct(family.precisionRange[0])}–${pct(family.precisionRange[1])}` : ''
     lines.push(
       `  ${family.family.padEnd(9)} ${status.padEnd(13)} p ${interval(family.p)}${precision} · ${family.unverified}/${family.turns} unverified`,
     )

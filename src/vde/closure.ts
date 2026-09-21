@@ -36,7 +36,12 @@ const NEVER_ENCODE_SUBCOMMANDS = /^(?:push|publish|deploy|release|reset|clean|rm
 
 /** Why a habit must not become a tool automatically, or `undefined` when it may. */
 export function encodingRefusal(candidate: Pick<SkillCandidate, 'kind' | 'pattern'>): string | undefined {
-  if (candidate.kind === 'sequence') return undefined
+  if (candidate.kind === 'sequence') {
+    // A routine with a shell step in it is a routine of "run whatever" — the
+    // tool would carry the command governor's whole job inside itself.
+    if (/\brun_command\b/.test(candidate.pattern)) return `\`${candidate.pattern}\` includes arbitrary shell; a tool for it would sidestep the command governor`
+    return undefined
+  }
   const [program = '', subcommand] = candidate.pattern.toLowerCase().split(/\s+/)
   if (!subcommand) return `a bare \`${program}\` is too general to encode — the tool would just run whatever it was given`
   if (NEVER_ENCODE_PROGRAMS.has(program)) return `\`${program}\` runs arbitrary code; a tool for it would sidestep the command governor`
