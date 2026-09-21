@@ -39,7 +39,11 @@ test("the sealed gate's floor on today's bench is above its headroom", () => {
 })
 
 test('R4: a benchmark too small to certify a gain blocks the meta-loop and asks for more tasks', () => {
-  const plan = recommend(state())
+  // Under the legacy gate evolve can still promote — R4 says what that is worth, not that it cannot.
+  const legacy = recommend(state()).find((rec) => rec.activity === 'meta')!
+  expect(legacy.viable).toBe(true)
+  expect(legacy.why).toContain('no stated error rate')
+  const plan = recommend(state({ bench: { tasks: 54, passRate: 0.93, minimumDetectable: sealedMinimumGain(54, 1), gate: 'sealed' } }))
   expect(plan.find((rec) => rec.activity === 'meta')!.viable).toBe(false)
   const harvest = plan.find((rec) => rec.activity === 'harvest')!
   expect(harvest.rule).toBe('R4')
@@ -63,6 +67,13 @@ test('R2 and R3: audit before growth when the library is at risk; compress when 
   expect(compress.rule).toBe('R3')
   expect(compress.why).toContain('git diff')
   expect(renderPlan(plan)).toContain('RESOURCE GOVERNOR')
+})
+
+test('an empty library gets an audit, which is what certifies the existing store', () => {
+  const empty = { ...healthy, total: 0, byStatus: { admitted: 0, probation: 0, quarantined: 0, purged: 0 } }
+  const audit = recommend(state({ library: empty })).find((rec) => rec.activity === 'audit')!
+  expect(audit.viable).toBe(true)
+  expect(audit.why).toContain('certifies what is already stored')
 })
 
 test('measured history reorders the plan once an activity has enough runs', () => {

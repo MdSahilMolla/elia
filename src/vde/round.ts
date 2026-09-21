@@ -8,7 +8,7 @@ import { libraryHealth, readLibrary, type LibraryHealth } from './library.ts'
 import { growthReport, readExposures, type GrowthReport } from './growth.ts'
 import { compressionQueue, type CompressionQueue } from './closure.ts'
 import { recommend, type Activity, type ActivityObservation, type BenchPower, type Recommendation } from './governor.ts'
-import { sealedMinimumGain } from './acceptance.ts'
+import { gateMode, sealedMinimumGain } from './acceptance.ts'
 
 /**
  * Algorithm 1 of the paper, one round: read where the engine stands, let the
@@ -61,6 +61,7 @@ export function gatherState(sources: StateSources): VdeState {
       tasks: sources.lastBench.tasks,
       passRate: sources.lastBench.passRate,
       minimumDetectable: sealedMinimumGain(sources.lastBench.tasks, sources.comparisons + 1),
+      gate: gateMode(),
     }
   }
   return state

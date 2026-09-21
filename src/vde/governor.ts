@@ -48,6 +48,8 @@ export interface BenchPower {
   passRate: number
   /** Smallest mean gain the sealed gate can certify on this many tasks. */
   minimumDetectable: number
+  /** Which gate decides promotions (`ELIA_EVOLVE_GATE`); R4 only binds the sealed one. */
+  gate?: 'legacy' | 'sealed' | 'both'
 }
 
 export interface GovernorState {
@@ -106,7 +108,11 @@ export function recommend(state: GovernorState, history: readonly ActivityObserv
   // R2 — near the error threshold, or with no reuse advantage, audit first.
   if (state.library.auditFirst) {
     set('audit', 0.95, 'R2', state.library.notes[0] ?? 'the library is near its error threshold')
-  } else if (state.library.total > 0) {
+  } else if (state.library.total === 0) {
+    // Nothing certified yet: the audit is what gives the existing store its
+    // certificates, so without this the library could never start.
+    set('audit', 0.6, 'R2', 'the library holds no certificates yet — the audit certifies what is already stored')
+  } else {
     set('audit', 0.3, 'R2', 'routine audit — cheap and keeps the slip-rate estimate current')
   }
 
@@ -126,7 +132,13 @@ export function recommend(state: GovernorState, history: readonly ActivityObserv
     const headroom = 1 - state.bench.passRate
     if (state.bench.minimumDetectable > headroom) {
       set('harvest', 0.85, 'R4', `the gate can certify gains of ~${Math.round(state.bench.minimumDetectable * 100)} pts but the benchmark has ${Math.round(headroom * 100)} pts of headroom — grow it before proposing`)
-      set('meta', 0.1, 'R4', 'blocked: no gain this benchmark can hold is certifiable', false)
+      if ((state.bench.gate ?? 'legacy') === 'legacy') {
+        // The legacy rule still decides, and it can promote here — but nothing
+        // bounds how often what it promotes is noise, which is what R4 is about.
+        set('meta', 0.25, 'R4', 'the legacy gate can still promote on this benchmark, but no gain it holds is certifiable — a promotion here has no stated error rate')
+      } else {
+        set('meta', 0.1, 'R4', 'blocked: the sealed gate decides, and no gain this benchmark can hold is certifiable', false)
+      }
     } else {
       set('meta', 0.6, 'R4', `the gate can certify ~${Math.round(state.bench.minimumDetectable * 100)}-pt gains within ${Math.round(headroom * 100)} pts of headroom`)
     }
