@@ -24,11 +24,16 @@ export function formatTokens(count: number): string {
 
 /**
  * Tokens in streamed text, estimated as the provider bills them — about four
- * characters each. Real usage only lands when a turn ends; this keeps the
- * counter moving while it streams.
+ * characters each. Real usage only lands when a model call ends; this keeps the
+ * counter moving until it does.
  */
 export function streamedTokens(text: string): number {
-  return text.length / 4
+  return charTokens(text.length)
+}
+
+/** The same estimate where only the size is known and not the text — a tool call's streamed arguments. */
+export function charTokens(chars: number): number {
+  return Math.max(0, chars) / 4
 }
 
 /**

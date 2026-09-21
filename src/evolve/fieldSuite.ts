@@ -26,6 +26,14 @@ import type { BenchTask } from './task.ts'
  * without weakening the policy. It stays unscored until the benchmark has a
  * sanctioned way to run a server.
  *
+ * `field-external-contribution` was silently in the same position and scored
+ * 0/3 for a year of generations: unattended mode refuses nearly all of git, so
+ * the clone it opens with was blocked before any of its own checks could have an
+ * opinion. benchPolicy.ts is the sanctioned way for that one — git, inside the
+ * task's own directory, reaching nothing outside it — and the task passes on a
+ * real run now. Any new task that needs an action from the critical band belongs
+ * there first, or it will read as elia failing when the policy declined.
+ *
  * Checks read files and never call a model. Immutable to the loop
  * (sandbox.ts IMMUTABLE_FILES), like every other file that decides a verdict.
  */

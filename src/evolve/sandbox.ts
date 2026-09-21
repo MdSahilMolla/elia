@@ -66,6 +66,10 @@ export const IMMUTABLE_FILES = [
   'src/evolve/ledger.ts',
   'src/evolve/sandbox.ts',
   'src/evolve/benchTask.ts',
+  // What a task is allowed to be approved for. A candidate that could widen
+  // this could approve its own way onto the network in the middle of being
+  // measured, which is the same class of hole as rewriting a task's check.
+  'src/evolve/benchPolicy.ts',
   'src/evolve/candidateTools.ts',
   // What the proposer is allowed to see about its own real-world behaviour.
   // engine.ts is immutable because hypothesisBrief() is the proposer's entire

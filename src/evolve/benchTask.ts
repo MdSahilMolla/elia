@@ -63,17 +63,36 @@ try {
   // Empty unless `elia bench --lessons` asked for project memory (benchLessons.ts).
   const { benchLessonBlock } = await import('./benchLessons.ts')
   const lessonBlock = await benchLessonBlock(taskId, task.prompt)
-  const result = await runAgentLoop({
-    messages: [{ role: 'user', content: [{ type: 'text', text: task.prompt }] }],
-    systemPrompt: `${DEV_SYSTEM_PROMPT}${lessonBlock}`,
-    tools,
-    useAnimation: false,
-    verbose: false,
-    cache,
-    prefetcher: createPrefetcher({ tools, cache }),
-    // A fixture-repo default; a task in a real repository asks for its own.
-    maxSteps: task.maxSteps ?? 30,
+
+  // The fixture's approval channel.
+  //
+  // Without one, every task ran under the default governor — unattended, no
+  // approver — which refuses the whole critical band outright. A task that ends
+  // in `git push` could then never pass, and the ledger recorded that as elia
+  // failing rather than the policy declining. benchPolicy.ts is the narrowest
+  // sanction that fixes it: git whose destination resolves inside this task's
+  // own temporary repository, and nothing else.
+  const { createActionGovernor, withActionGovernor } = await import('../autonomy/governor.ts')
+  const { createBenchApproval } = await import('./benchPolicy.ts')
+  const governor = createActionGovernor({
+    mode: 'unattended',
+    cwd: process.cwd(),
+    approve: createBenchApproval(process.cwd()),
   })
+
+  const result = await withActionGovernor(governor, () =>
+    runAgentLoop({
+      messages: [{ role: 'user', content: [{ type: 'text', text: task.prompt }] }],
+      systemPrompt: `${DEV_SYSTEM_PROMPT}${lessonBlock}`,
+      tools,
+      useAnimation: false,
+      verbose: false,
+      cache,
+      prefetcher: createPrefetcher({ tools, cache }),
+      // A fixture-repo default; a task in a real repository asks for its own.
+      maxSteps: task.maxSteps ?? 30,
+    }),
+  )
 
   emit({
     ok: true,
