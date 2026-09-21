@@ -1,5 +1,6 @@
 import { expect, test } from 'bun:test'
 import { render } from 'ink-testing-library'
+import { useInput } from 'ink'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -188,4 +189,136 @@ test('submitting a prompt appends it to persistent history', async () => {
     ;(paths as { promptHistory: string }).promptHistory = original
     rmSync(dir, { recursive: true, force: true })
   }
+})
+
+/**
+ * Ink hands this component every stdin chunk already buffered in one synchronous
+ * `readable` loop, so the tests below deliberately write back to back WITHOUT
+ * awaiting between writes — that is what a real burst looks like, and it is the
+ * shape the older single-`stdin.write` paste tests never exercised.
+ */
+function mountCapturing(onSubmit: (line: string) => void) {
+  return render(
+    <InputBox
+      commands={[]}
+      disabled={false}
+      placeholder="x"
+      onSubmit={onSubmit}
+      onInterrupt={noop}
+      onEof={noop}
+      onTabEmpty={noop}
+    />,
+  )
+}
+
+test('every backspace byte in one chunk deletes a character (holding the key)', async () => {
+  const { stdin, lastFrame } = mount([])
+  stdin.write('abcd')
+  await waitForFrame(lastFrame, 'abcd')
+  // Ink splits a held backspace into one event per byte, all dispatched before
+  // React re-renders: composing each edit on the rendered state deleted one.
+  stdin.write('\x7f\x7f\x7f')
+  const frame = await waitForFrame(lastFrame, /❯ a\b/)
+  expect(frame).toMatch(/❯ a\s/)
+  expect(frame).not.toContain('abc')
+})
+
+test('the Delete key removes the character under the caret, not behind it', async () => {
+  const { stdin, lastFrame } = mount([])
+  stdin.write('abc')
+  await waitForFrame(lastFrame, 'abc')
+  await typeKeys(stdin, [LEFT, LEFT]) // caret on "b"
+  stdin.write('\x1B[3~') // Delete
+  const frame = await waitForFrame(lastFrame, /❯ ac\b/)
+  expect(frame).toContain('ac')
+  expect(frame).not.toContain('abc')
+})
+
+test('a paste delivered as several stdin chunks in one tick keeps every chunk', async () => {
+  let submitted = ''
+  const full = ['line one', 'line two', 'line three', 'line four', 'line five'].join('\n')
+  const { stdin } = mountCapturing((line) => {
+    submitted = line
+  })
+  const cut = full.indexOf('line four')
+  // No await between the writes — Ink drains both chunks in a single loop.
+  stdin.write(full.slice(0, cut))
+  stdin.write(full.slice(cut))
+  await tick()
+  stdin.write('\r')
+  await tick()
+  expect(submitted).toBe(full)
+})
+
+test('a bracketed paste arrives whole and its CR line breaks are normalised', async () => {
+  let submitted = ''
+  const { stdin } = mountCapturing((line) => {
+    submitted = line
+  })
+  // Terminals frame the clipboard with ESC[200~/ESC[201~ and separate lines with
+  // CR. The frame can straddle chunk boundaries; Ink reassembles it.
+  stdin.write('\x1B[200~alpha\rbeta\r')
+  stdin.write('gamma\rdelta\x1B[201~')
+  await tick()
+  stdin.write('\r')
+  await tick()
+  expect(submitted).toBe('alpha\nbeta\ngamma\ndelta')
+})
+
+test('a large bracketed paste survives being split across many chunks', async () => {
+  let submitted = ''
+  const { stdin } = mountCapturing((line) => {
+    submitted = line
+  })
+  const body = Array.from({ length: 400 }, (_, i) => `line ${i} of a long pasted block`).join('\n')
+  const framed = `\x1B[200~${body}\x1B[201~`
+  for (let i = 0; i < framed.length; i += 997) stdin.write(framed.slice(i, i + 997))
+  await tick()
+  stdin.write('\r')
+  await tick()
+  expect(submitted).toBe(body)
+})
+
+test('a pasted newline does not submit the line the way Enter does', async () => {
+  const lines: string[] = []
+  const { stdin } = mountCapturing((line) => {
+    lines.push(line)
+  })
+  stdin.write('\x1B[200~first line\rsecond line\r\x1B[201~')
+  await tick()
+  expect(lines).toEqual([]) // still being composed — nothing sent yet
+  stdin.write('\r')
+  await tick()
+  expect(lines).toEqual(['first line\nsecond line'])
+})
+
+test('a disabled prompt hands pastes back to whatever overlay took over input', async () => {
+  // Ink routes a paste to the paste channel the moment anything listens there.
+  // While the prompt is disabled an overlay (TextPrompt, a searchable Picker)
+  // owns the keyboard, so InputBox must stand its paste listener down or the
+  // overlay never sees the text.
+  let overlayGot = ''
+  function Overlay() {
+    useInput((input) => {
+      overlayGot += input
+    })
+    return null
+  }
+  const { stdin } = render(
+    <>
+      <InputBox
+        commands={[]}
+        disabled
+        placeholder="x"
+        onSubmit={noop}
+        onInterrupt={noop}
+        onEof={noop}
+        onTabEmpty={noop}
+      />
+      <Overlay />
+    </>,
+  )
+  stdin.write('\x1B[200~pasted into the overlay\x1B[201~')
+  await tick()
+  expect(overlayGot).toContain('pasted into the overlay')
 })

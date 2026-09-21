@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Box, Text, useInput, type Key } from 'ink'
+import { Box, Text, useInput, usePaste, type Key } from 'ink'
 import { palette, glyphs } from '../theme.ts'
 import {
   applyKey,
@@ -20,8 +20,11 @@ function toKeyEvent(input: string, key: Key): { str: string | undefined; event: 
     ? 'return'
     : key.backspace
       ? 'backspace'
-      : key.delete
-        ? 'backspace'
+      : // Ink reports 0x08/0x7F as `backspace` and ESC[3~ as `delete`, so these are
+        // the two distinct keys — mapping both to 'backspace' left the Delete key
+        // eating the character *behind* the caret and forward-delete unreachable.
+        key.delete
+        ? 'delete'
         : key.leftArrow
           ? 'left'
           : key.rightArrow
@@ -95,6 +98,20 @@ export function InputBox(props: InputBoxProps) {
     const history = loadHistory()
     return { ...initialState(), history, historyIndex: history.length }
   })
+  // Ink drains every stdin chunk already buffered in ONE synchronous `readable`
+  // loop, so a burst — a held backspace (which Ink splits into one event per
+  // byte) or a paste the OS delivered in several chunks — runs this component's
+  // key handler several times before React re-renders. The `state` captured in
+  // that closure is stale for every event after the first, so each edit must be
+  // composed on this ref instead: writing `{...state}` per event made a burst
+  // collapse to whatever its *last* event computed, which dropped the opening
+  // chunks of a long paste and made holding backspace delete a single character.
+  // `commit` is the only writer, so the ref never drifts from the rendered state.
+  const stateRef = useRef(state)
+  const commit = (next: PromptState) => {
+    stateRef.current = next
+    setState(next)
+  }
   // Ctrl+R reverse-search overlay — its own query, independent of the buffer.
   const [search, setSearch] = useState<{ query: string; index: number } | null>(null)
   // A large multi-line paste is collapsed to a token in the buffer; the real
@@ -153,15 +170,69 @@ export function InputBox(props: InputBoxProps) {
   }
 
   const acceptFile = (path: string) => {
-    if (!mention) return
-    const before = state.buffer.slice(0, mention.start)
-    const after = state.buffer.slice(state.cursor)
+    // Re-derive the mention from the live buffer rather than trusting the one
+    // computed at render: after a burst the rendered `state` can lag, and
+    // splicing at a stale `mention.start` would cut the buffer in the wrong place.
+    const current = stateRef.current
+    const live = activeMention(current.buffer, current.cursor)
+    if (!live) return
+    const before = current.buffer.slice(0, live.start)
+    const after = current.buffer.slice(current.cursor)
     const insert = `@${path} `
     const buffer = before + insert + after
-    setState({ ...state, buffer, cursor: (before + insert).length, selectedIndex: 0 })
+    commit({ ...current, buffer, cursor: (before + insert).length, selectedIndex: 0 })
     setMentionSel(0)
-    setMentionDismissed(mention.query)
+    setMentionDismissed(live.query)
   }
+
+  /**
+   * Splices pasted text into the buffer at the caret. A multi-line paste
+   * collapses to a `⟦pasted N lines⟧` token so a 200-line block doesn't bury the
+   * prompt — the real text lives in `pastes` and is spliced back at submit.
+   * Anything that fits on one line goes in verbatim.
+   *
+   * Terminals send CR for line breaks inside a bracketed paste, so normalise
+   * first: without it a pasted block arrives as one `\r`-joined line and both
+   * the line count and the text sent to the model are wrong.
+   */
+  const insertPaste = (text: string) => {
+    const normalised = text.replace(/\r\n?/g, '\n')
+    if (!normalised) return
+    const current = stateRef.current
+    const insert = normalised.includes('\n')
+      ? (() => {
+          pasteCounter.current += 1
+          const token = `⟦pasted ${normalised.split('\n').length} lines #${pasteCounter.current}⟧`
+          pastes.set(token, normalised)
+          return token
+        })()
+      : normalised
+    const buffer = current.buffer.slice(0, current.cursor) + insert + current.buffer.slice(current.cursor)
+    commit({ ...current, buffer, cursor: current.cursor + insert.length, selectedIndex: 0 })
+  }
+
+  // Bracketed paste (`\x1b[?2004h`, which this hook enables for as long as it is
+  // mounted): the terminal frames the clipboard with ESC[200~/ESC[201~ and Ink
+  // reassembles it across stdin chunks, so a paste arrives whole and is never
+  // re-read as keystrokes. That is what stops a long paste being truncated and a
+  // pasted newline being mistaken for Enter — the fallback in `useInput` below
+  // only runs on terminals that ignore the mode.
+  // `isActive` matters as much as the handler: Ink routes a paste to the paste
+  // channel as soon as *anything* listens on it, so leaving this registered while
+  // the prompt is disabled would swallow text meant for whatever overlay took
+  // over input (TextPrompt and a searchable Picker both accept typed characters).
+  // Standing down hands pastes back to their `useInput` handlers untouched.
+  usePaste(
+    (text) => {
+      if (search) {
+        const flat = text.replace(/\s+/g, ' ').trim()
+        setSearch((s) => (s ? { query: s.query + flat, index: 0 } : s))
+        return
+      }
+      insertPaste(text)
+    },
+    { isActive: !props.disabled },
+  )
 
   useInput((input, key) => {
     if (props.disabled) return
@@ -177,7 +248,7 @@ export function InputBox(props: InputBoxProps) {
       if (key.return) {
         const pick = searchResults[search.index] ?? searchResults[0]
         setSearch(null)
-        if (pick) setState({ ...state, buffer: pick, cursor: pick.length, selectedIndex: 0 })
+        if (pick) commit({ ...stateRef.current, buffer: pick, cursor: pick.length, selectedIndex: 0 })
         return
       }
       if (key.ctrl && input === 'r') {
@@ -220,28 +291,29 @@ export function InputBox(props: InputBoxProps) {
       }
     }
 
-    if (key.tab && !key.shift && state.buffer.length === 0 && filteredCommands(state.buffer, props.commands).length === 0) {
+    // The live buffer, not the rendered one — see `stateRef` above.
+    const current = stateRef.current
+
+    if (key.tab && !key.shift && current.buffer.length === 0 && filteredCommands(current.buffer, props.commands).length === 0) {
       props.onTabEmpty()
       return
     }
-    if (input === '?' && !key.ctrl && !key.meta && state.buffer.length === 0) {
+    if (input === '?' && !key.ctrl && !key.meta && current.buffer.length === 0) {
       props.onHelp?.()
       return
     }
 
-    // --- Bracketed paste: a chunk with newlines arrives as one `input` ---
+    // --- Paste fallback for terminals that ignore bracketed paste mode ---
+    // With ESC[200~ framing a paste never reaches here (`usePaste` takes it on a
+    // separate channel). Without it the clipboard arrives as ordinary input, so
+    // a chunk carrying newlines is the only signal there is.
     if (input.length > 12 && /\r?\n/.test(input)) {
-      const lineCount = input.split(/\r?\n/).length
-      pasteCounter.current += 1
-      const token = `⟦pasted ${lineCount} lines #${pasteCounter.current}⟧`
-      pastes.set(token, input)
-      const buffer = state.buffer.slice(0, state.cursor) + token + state.buffer.slice(state.cursor)
-      setState({ ...state, buffer, cursor: state.cursor + token.length, selectedIndex: 0 })
+      insertPaste(input)
       return
     }
 
     const { str, event } = toKeyEvent(input, key)
-    const result = applyKey(state, str, event, props.commands)
+    const result = applyKey(current, str, event, props.commands)
     if (result.type === 'eof') {
       props.onEof()
       return
@@ -264,12 +336,12 @@ export function InputBox(props: InputBoxProps) {
       if (last >= 0 && history[last] === result.line && expanded !== result.line) {
         history = [...history.slice(0, last), expanded]
       }
-      setState({ ...result.state, history, historyIndex: history.length })
+      commit({ ...result.state, history, historyIndex: history.length })
       finishSubmit(expanded)
       return
     }
-    if (mentionDismissed && result.state.buffer !== state.buffer) setMentionDismissed('')
-    setState(result.state)
+    if (mentionDismissed && result.state.buffer !== current.buffer) setMentionDismissed('')
+    commit(result.state)
   })
 
   const menu = mentionOpen ? [] : filteredCommands(state.buffer, props.commands)
