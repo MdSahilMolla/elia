@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { formatAutonomousRunSummary } from './runSummary.ts'
+import { formatAutonomousRunCrash, formatAutonomousRunSummary } from './runSummary.ts'
 import type { AutonomousRunResult } from './loop.ts'
 
 function result(overrides: Partial<AutonomousRunResult>): AutonomousRunResult {
@@ -57,4 +57,24 @@ test('a run with no proposal (rejected before planning) has no files line at all
   const summary = formatAutonomousRunSummary('goal', result({ outcome: 'rejected', proposal: undefined }))
 
   expect(summary).not.toContain('Files this run')
+})
+
+// Session mubbhz5c-tnp9i0: the escalated run threw at the proposal gate having
+// touched nothing. Nothing was appended to the conversation, so the next turn
+// read as a build in progress and wrote 11 unverified pages into the repo root.
+test('a run that threw tells the next turn the build never started', () => {
+  const crash = formatAutonomousRunCrash('build a makhana shop', new Error('Service temporarily overloaded'))
+
+  expect(crash).toContain('failed to run')
+  expect(crash).toContain('Service temporarily overloaded')
+  expect(crash).toContain('no plan was approved and nothing was written')
+  // The specific wrong turn it has to head off.
+  expect(crash).toContain('Do not carry this build on in an ordinary reply')
+})
+
+test('a non-Error thrown value still produces a usable record', () => {
+  const crash = formatAutonomousRunCrash('build a shop', 'socket hang up')
+
+  expect(crash).toContain('socket hang up')
+  expect(crash).toContain('failed to run')
 })

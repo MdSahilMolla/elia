@@ -81,6 +81,19 @@ export function parseProposal(raw: unknown): { proposal: Proposal } | { error: s
   // only that the workers stopped. Weaker models omit this field even though the
   // schema requires it, so it is enforced here rather than assumed.
   const verification = asStringArray(input.verification)
+  // A type error reported as a content error is the expensive kind. Sent the
+  // generic "needs a command that will actually fail" below, a model rewrites
+  // its commands — cmd, PowerShell, `test -f`, a bun script — and every one is
+  // rejected identically, because none of them were ever parsed. Session
+  // mubbhz5c-tnp9i0 spent 11 attempts and the whole run budget that way.
+  if (verification.length === 0 && typeof input.verification === 'string' && input.verification.trim().length > 0) {
+    return {
+      error:
+        'proposal.verification must be an array of strings, one shell command per entry, but it arrived as a single string: ' +
+        `${truncateForError(input.verification)}. Send ["bun test", "bun run build"] instead. ` +
+        'Splitting that string here could cut a command at a comma it legitimately contains, so it is rejected rather than guessed.',
+    }
+  }
   if (verification.length > MAX_VERIFICATION_COMMANDS) return { error: `proposal.verification cannot contain more than ${MAX_VERIFICATION_COMMANDS} commands; choose the highest-value checks` }
   if (verification.length === 0) {
     return {
@@ -486,9 +499,64 @@ function asString(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim().length > 0 ? value.trim() : undefined
 }
 
+/**
+ * A list field, from a model that may have sent prose where an array belongs.
+ *
+ * Weaker models emit every array field as one string: acceptance criteria
+ * arrive as "- a
+- b", and `verification` as the bracket-joined "[cmd, cmd]".
+ * Returning [] for those silently empties the field, and for everything except
+ * `verification` that is invisible — nothing downstream requires them, so a run
+ * loses its acceptance criteria, and with them the render check that is the only
+ * gate a static HTML deliverable ever gets, while still reporting success.
+ *
+ * Bullet and newline lists split unambiguously, so they are coerced. A
+ * bracket-joined line does not: shell commands contain commas, and cutting one
+ * in the wrong place builds a gate that fails on every attempt however correct
+ * the work is. Those return [] for the caller to reject by name.
+ *
+ * Seen live, session mubbhz5c-tnp9i0: mercury-2.5 sent all six list fields as
+ * strings on all 11 attempts; the run then built 11 unverified pages.
+ */
 function asStringArray(value: unknown): string[] {
-  if (!Array.isArray(value)) return []
-  return value.filter((item): item is string => typeof item === 'string' && item.trim().length > 0).map((item) => item.trim())
+  if (Array.isArray(value)) return cleanStringList(value)
+  if (typeof value === 'string') return cleanStringList(splitListText(value))
+  return []
+}
+
+/** A model-sent value quoted back at it, short enough to keep the real instruction readable. */
+function truncateForError(value: string): string {
+  const flat = value.trim().replace(/\s+/g, ' ')
+  return flat.length > 120 ? `"${flat.slice(0, 120)}…"` : `"${flat}"`
+}
+
+function cleanStringList(items: unknown[]): string[] {
+  return items.filter((item): item is string => typeof item === 'string' && item.trim().length > 0).map((item) => item.trim())
+}
+
+/** Splits list text sent in place of an array, or returns [] when the split would be a guess. */
+function splitListText(value: string): string[] {
+  const trimmed = value.trim()
+  if (trimmed.length === 0) return []
+  if (trimmed.startsWith('[')) {
+    try {
+      const parsed: unknown = JSON.parse(trimmed)
+      if (Array.isArray(parsed)) return cleanStringList(parsed)
+    } catch {
+      // Not JSON, so a bracket-joined line the model wrote by hand.
+    }
+    if (!trimmed.endsWith(']')) return []
+    // One entry is still unambiguous; several separated by commas are not,
+    // because a command may contain a comma of its own.
+    const inner = trimmed.slice(1, -1).trim()
+    return inner.includes(',') ? [] : cleanStringList([inner])
+  }
+  return trimmed.split('\n').map(stripListMarker).filter((line) => line.length > 0)
+}
+
+/** Strips a leading "- ", "* ", "• " or "1. " a model used to write a list item. */
+function stripListMarker(line: string): string {
+  return line.trim().replace(/^(?:[-*•]|\d+[.)])\s+/, '').trim()
 }
 
 function uniqueStrings(values: string[]): string[] {

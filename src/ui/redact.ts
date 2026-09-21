@@ -14,7 +14,11 @@ const SECRET_KEY = /(api[_-]?key|token|secret|password|passwd|authorization|cook
 //     hardcoded list above (e.g. Stripe `whsec_…`) — lowercase prefix so it
 //     doesn't start swallowing ordinary CONSTANT_CASE identifiers.
 //  5. a `Bearer <token>` header
-//  6. a base64 blob that ends in `=`/`==` padding — a filesystem path does not
+//  6. a base64 blob that ends in `=`/`==` padding — a filesystem path does not.
+//     The padding alone is not enough to call something base64: an assignment
+//     written without spaces puts an `=` directly after the identifier, so this
+//     arm read `$errorActionPreference='Stop'` as a padded blob and rewrote it
+//     to `$[REDACTED]'Stop'`. `isFalseBase64Padding` below settles it on length.
 const SECRET_VALUE =
   /(\beyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\b|(?:sk|pk|rk|re|ey)[-_][A-Za-z0-9._-]{8,}|(?:xox[baprs]-|gh[pousr]_|AIza|AKIA|ASIA)[A-Za-z0-9_\-/]{8,}|\b[a-z]{2,10}_[A-Za-z0-9]{16,}\b|Bearer\s+[A-Za-z0-9._\-/+=]{8,}|\b[A-Za-z0-9+/]{16,}={1,2})/g
 
@@ -50,10 +54,36 @@ const SECRET_ASSIGNMENT = new RegExp(
   'gi',
 )
 
+/** An identifier the base64-padding arm claimed, e.g. `errorActionPreference=`. */
+const PADDED_BASE64 = /^[A-Za-z0-9+/]{16,}={1,2}$/
+
+/**
+ * Whether a match the padding arm claimed cannot actually be base64.
+ *
+ * Two things have to hold for it to be an encoding rather than an identifier
+ * that happens to be followed by `=`:
+ *
+ *  - Base64 encodes three bytes to four characters, so a blob that needed `=`
+ *    padding is a multiple of four characters long, padding included. That
+ *    rules out `errorActionPreference=` (22).
+ *  - It contains a digit. Length alone is a coincidence away from wrong —
+ *    `myVeryLongCamelCaseName=` is exactly 24 — and encoded random bytes carry
+ *    a digit with overwhelming probability at this length, the same reasoning
+ *    `isDigestOrIdentifier` above already applies to opaque runs.
+ *
+ * Seen live, session mubbhz5c-tnp9i0: every PowerShell verification command
+ * the model wrote was stored as `$[REDACTED]'Stop'`, so the record of the run
+ * no longer showed what had actually been proposed.
+ */
+function isFalseBase64Padding(match: string): boolean {
+  if (!PADDED_BASE64.test(match)) return false
+  return match.length % 4 !== 0 || !/\d/.test(match.replace(/=+$/, ''))
+}
+
 /** Redacts credential-like values without flattening or truncating the surrounding evidence. */
 export function redactSecrets(text: string): string {
   return text
-    .replace(SECRET_VALUE, '[REDACTED]')
+    .replace(SECRET_VALUE, (match) => (isFalseBase64Padding(match) ? match : '[REDACTED]'))
     .replace(OPAQUE_RUN, (run) => (isDigestOrIdentifier(run) ? run : '[REDACTED]'))
     .replace(SECRET_ASSIGNMENT, '[REDACTED]')
 }

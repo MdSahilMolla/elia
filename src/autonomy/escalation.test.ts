@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { classifyEscalation } from './escalation.ts'
+import { classifyEscalation, isContinuationRequest, routeTurn } from './escalation.ts'
 
 const escalates = [
   'create an end to end smart attendance tracking system',
@@ -90,4 +90,60 @@ test('an interrogative opener without a question mark is still a question', () =
 test('a normal typed build request is unaffected by the paste guard', () => {
   const decision = classifyEscalation('build me a full-stack app for tracking gym memberships with auth and payments')
   expect(decision.escalate).toBe(true)
+})
+
+// Session mubbhz5c-tnp9i0: the escalated run crashed at the proposal gate
+// having built nothing, and "continue" took the plain path — which wrote
+// eleven unverified files into the repository root.
+test('a bare continuation is recognised so a dead build can be picked up again', () => {
+  for (const text of ['continue', 'Continue.', 'go ahead', 'carry on', 'try again', 'retry', 'yes', 'ok', 'proceed', '  keep going  ']) {
+    expect(isContinuationRequest(text)).toBe(true)
+  }
+})
+
+test('a message carrying its own instruction is not a continuation', () => {
+  // Each of these must be answered on its own terms, not swapped for an
+  // earlier goal the person may well have abandoned.
+  for (const text of [
+    'continue building the admin panel',
+    'why did it fail?',
+    'ok now do the login page',
+    'yes but use Postgres',
+    'what is left to do',
+    '/settings',
+  ]) {
+    expect(isContinuationRequest(text)).toBe(false)
+  }
+})
+
+const held = { goal: 'build a makhana and dry fruits shop with admin and outlet logins', reason: 'building a new project' }
+
+test('a continuation picks up the held build, and runs its goal rather than the word', () => {
+  const route = routeTurn('continue', held)
+
+  expect(route.escalation.escalate).toBe(true)
+  // The whole point: "continue" is not the goal.
+  expect(route.resumedGoal).toBe(held.goal)
+})
+
+test('a question about the failure is answered, not swapped for the build', () => {
+  const route = routeTurn('why did it fail?', held)
+
+  expect(route.escalation.escalate).toBe(false)
+  expect(route.resumedGoal).toBeUndefined()
+})
+
+test('a different build request wins over the held one', () => {
+  const route = routeTurn('build me a full-stack invoicing system with auth and payments', held)
+
+  expect(route.escalation.escalate).toBe(true)
+  // Escalated on what was just asked for, not on the goal being held.
+  expect(route.resumedGoal).toBeUndefined()
+})
+
+test('a continuation with nothing held is just an ordinary turn', () => {
+  const route = routeTurn('continue')
+
+  expect(route.escalation.escalate).toBe(false)
+  expect(route.resumedGoal).toBeUndefined()
 })

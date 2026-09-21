@@ -142,3 +142,49 @@ export function classifyEscalation(rawText: string): EscalationDecision {
 
   return no('no strong new-project signal')
 }
+
+/**
+ * "Carry on with what you were doing" — a message that adds no instruction of
+ * its own.
+ *
+ * Deliberately a closed list rather than a classifier. It decides whether a
+ * build whose run died gets picked up again under the pipeline, and guessing
+ * wrong in the permissive direction means re-running a whole project build over
+ * someone who had moved on to another subject.
+ *
+ * Seen live, session mubbhz5c-tnp9i0: the escalated run crashed at the proposal
+ * gate having built nothing, and the next two messages were "/settings" and
+ * "continue". Neither reads as a new project, so both took the plain path — and
+ * the plain path wrote eleven unverified files into the repository root.
+ */
+const CONTINUATION =
+  /^\s*(?:please\s+)?(?:continue|carry\s+on|go\s+on|go\s+ahead|keep\s+going|resume|proceed|try\s+again|retry|again|do\s+it|yes|yep|yeah|ok(?:ay)?|sure)\b[\s.!]*$/i
+
+export function isContinuationRequest(rawText: string): boolean {
+  return CONTINUATION.test(rawText)
+}
+
+/** A build asked for whose run died before it built anything. */
+export interface HeldBuild {
+  goal: string
+  reason: string
+}
+
+/**
+ * How to route a turn, given a build still waiting to be run.
+ *
+ * Pure, and separate from the REPL, so the rule that decides whether a dead
+ * build is picked up again can be tested: the wiring around it lives inside
+ * `runInteractive`, which needs a terminal.
+ *
+ * A held build is only ever picked up by a message that carries no instruction
+ * of its own. Anything else — a question, a new subject, a different build — is
+ * routed on its own terms, and the caller drops the held goal rather than
+ * answering something the person has stopped asking for.
+ */
+export function routeTurn(userText: string, held?: HeldBuild): { escalation: EscalationDecision; resumedGoal?: string } {
+  if (held && isContinuationRequest(userText)) {
+    return { escalation: { escalate: true, reason: held.reason }, resumedGoal: held.goal }
+  }
+  return { escalation: classifyEscalation(userText) }
+}

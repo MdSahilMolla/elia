@@ -39,6 +39,25 @@ import { codexContextTokens } from '../../providers/codexSubscription.ts'
 import type { ChatMessage } from '../../providers/types.ts'
 import { onLiveOutput, sessionUsageSnapshot } from '../../usage.ts'
 
+/** `/attach` and its aliases stay real commands even though a POSIX image path also starts with "/". */
+const ATTACH_COMMAND = /^\/(?:attach|image|img)\b/
+
+/**
+ * Whether a line is a command rather than a prompt.
+ *
+ * Deliberately synchronous: a prompt has to reach `lastUserText` in the same
+ * tick that claimed the turn, or a second Enter pressed before `busy` has
+ * propagated slips past the duplicate check and is captured as steering, which
+ * the post-turn drain then sends as a whole extra turn.
+ */
+function isCommandLine(trimmed: string): boolean {
+  if (trimmed.startsWith('!')) return true
+  if (!trimmed.startsWith('/') && !trimmed.startsWith('@')) return false
+  // A bare image path pasted or dragged into the line is a prompt, not a
+  // command, even though a POSIX path starts with "/".
+  return ATTACH_COMMAND.test(trimmed) || !looksLikeImageAttachmentLine(trimmed)
+}
+
 export interface TurnHooks {
   onText(delta: string): void
   onThinking(delta: string): void
@@ -663,6 +682,101 @@ export function App(props: AppProps) {
   )
   executePlan.current = () => void runOne('Go ahead — execute the plan you just proposed. Make every change and verify it.')
 
+  /**
+   * Runs a line that is a command rather than a prompt — `!shell`, or a slash
+   * or `@` command together with its picker/prompt/confirm chain. Returns false
+   * when the line turns out not to be a command after all, so the caller sends
+   * it to the model instead.
+   *
+   * Shared with the post-turn queue drain below. A slash command typed while a
+   * turn is running has to wait, and the drain used to hand it straight to
+   * `runOne` — which sends the literal text to the model. Seen live, session
+   * mubbhz5c-tnp9i0: `/settings`, typed during a run and drained after it,
+   * arrived as a prompt reading "/settings", and the model answered it by
+   * carrying on with the build it had been planning.
+   */
+  const runCommandLine = useCallback(
+    async (trimmed: string): Promise<void> => {
+      if (trimmed.startsWith('!')) {
+        const command = trimmed.slice(1).trim()
+        if (command) {
+          try {
+            const output = await props.runShellLine(command)
+            store.shell(command, output)
+            store.commit()
+          } catch (error) {
+            store.error(`Error: ${error instanceof Error ? error.message : String(error)}`)
+            store.commit()
+          }
+        }
+        return
+      }
+
+      let outcome: SlashOutcome | string | void = await props.handleSlash(trimmed)
+      // An outcome step may chain another: a picker → another picker
+      // (/model → provider → model), a category picker → a search prompt →
+      // a results picker → a confirmed install.
+      for (let guard = 0; guard < 10; guard += 1) {
+        if (!outcome || typeof outcome === 'string' || !outcome.handled) break
+
+        if (outcome.runCommand) {
+          const { command, description }: SlashRunRequest = outcome.runCommand
+          const ok = await new Promise<boolean>((resolve) =>
+            setConfirm({ title: description, lines: [`Runs: ${command}`], resolve: (v) => { setConfirm(null); resolve(v) } }),
+          )
+          outcome = ok ? await props.runShellLine(command).then((out) => `${command}\n${out}`) : 'Cancelled.'
+          continue
+        }
+
+        if (outcome.prompt) {
+          const req: SlashPromptRequest = outcome.prompt
+          const value = await new Promise<string | null>((resolve) =>
+            setTextPrompt({ label: req.label, placeholder: req.placeholder, resolve: (v) => { setTextPrompt(null); resolve(v) } }),
+          )
+          outcome = value === null || value === '' ? undefined : await req.onSubmit(value)
+          continue
+        }
+
+        if (outcome.picker) {
+          const req: SlashPickerRequest = outcome.picker
+          const value = await new Promise<string | null>((resolve) =>
+            setPicker({
+              title: req.title,
+              options: req.options,
+              searchable: req.searchable,
+              initialIndex: req.initialIndex,
+              resolve: (v) => { setPicker(null); resolve(v) },
+            }),
+          )
+          outcome = await req.onSelect(value)
+          continue
+        }
+        break
+      }
+      const submitText = typeof outcome === 'object' && outcome ? outcome.submitText : undefined
+      const finalText = typeof outcome === 'string' ? outcome : outcome?.text
+      const cleared = typeof outcome === 'object' && outcome ? outcome.clear : undefined
+      if (cleared) {
+        // Erase the screen and scrollback like a fresh launch — Ink repaints
+        // its live frame underneath — then drop everything the old
+        // conversation put in the transcript and panels.
+        writeStdout('\x1b[2J\x1b[3J\x1b[H')
+        store.reset()
+        printHeader(store)
+        setTranscriptEpoch((n) => n + 1)
+        setPlan([])
+        setProviderPlan([])
+        setSessionId(cleared.sessionId)
+        lastUserText.current = ''
+      }
+      if (finalText) store.notice(finalText)
+      store.commit()
+      if (submitText) await runOne(submitText)
+    },
+    [props, store, runOne, writeStdout],
+  )
+
+
   const onSubmit = useCallback(
     async (line: string) => {
       const trimmed = line.trim()
@@ -704,88 +818,8 @@ export function App(props: AppProps) {
       // whichever branch it takes — completes.
       turnStartingRef.current = true
       try {
-        if (trimmed.startsWith('!')) {
-          const command = trimmed.slice(1).trim()
-          if (command) {
-            try {
-              const output = await props.runShellLine(command)
-              store.shell(command, output)
-              store.commit()
-            } catch (error) {
-              store.error(`Error: ${error instanceof Error ? error.message : String(error)}`)
-              store.commit()
-            }
-          }
-          return
-        }
-
-        // A bare image path pasted or dragged into the line falls through to a
-        // normal turn (where it's read, encoded, and stripped from the text) even
-        // though a POSIX path starts with "/". "/attach" stays a real command.
-        const isAttachCommand = /^\/(?:attach|image|img)\b/.test(trimmed)
-        const routeAsImagePrompt = !isAttachCommand && looksLikeImageAttachmentLine(trimmed)
-
-        if (!routeAsImagePrompt && (trimmed.startsWith('/') || trimmed.startsWith('@'))) {
-          let outcome: SlashOutcome | string | void = await props.handleSlash(trimmed)
-          // An outcome step may chain another: a picker → another picker
-          // (/model → provider → model), a category picker → a search prompt →
-          // a results picker → a confirmed install.
-          for (let guard = 0; guard < 10; guard += 1) {
-            if (!outcome || typeof outcome === 'string' || !outcome.handled) break
-
-            if (outcome.runCommand) {
-              const { command, description }: SlashRunRequest = outcome.runCommand
-              const ok = await new Promise<boolean>((resolve) =>
-                setConfirm({ title: description, lines: [`Runs: ${command}`], resolve: (v) => { setConfirm(null); resolve(v) } }),
-              )
-              outcome = ok ? await props.runShellLine(command).then((out) => `${command}\n${out}`) : 'Cancelled.'
-              continue
-            }
-
-            if (outcome.prompt) {
-              const req: SlashPromptRequest = outcome.prompt
-              const value = await new Promise<string | null>((resolve) =>
-                setTextPrompt({ label: req.label, placeholder: req.placeholder, resolve: (v) => { setTextPrompt(null); resolve(v) } }),
-              )
-              outcome = value === null || value === '' ? undefined : await req.onSubmit(value)
-              continue
-            }
-
-            if (outcome.picker) {
-              const req: SlashPickerRequest = outcome.picker
-              const value = await new Promise<string | null>((resolve) =>
-                setPicker({
-                  title: req.title,
-                  options: req.options,
-                  searchable: req.searchable,
-                  initialIndex: req.initialIndex,
-                  resolve: (v) => { setPicker(null); resolve(v) },
-                }),
-              )
-              outcome = await req.onSelect(value)
-              continue
-            }
-            break
-          }
-          const submitText = typeof outcome === 'object' && outcome ? outcome.submitText : undefined
-          const finalText = typeof outcome === 'string' ? outcome : outcome?.text
-          const cleared = typeof outcome === 'object' && outcome ? outcome.clear : undefined
-          if (cleared) {
-            // Erase the screen and scrollback like a fresh launch — Ink repaints
-            // its live frame underneath — then drop everything the old
-            // conversation put in the transcript and panels.
-            writeStdout('\x1b[2J\x1b[3J\x1b[H')
-            store.reset()
-            printHeader(store)
-            setTranscriptEpoch((n) => n + 1)
-            setPlan([])
-            setProviderPlan([])
-            setSessionId(cleared.sessionId)
-            lastUserText.current = ''
-          }
-          if (finalText) store.notice(finalText)
-          store.commit()
-          if (submitText) await runOne(submitText)
+        if (isCommandLine(trimmed)) {
+          await runCommandLine(trimmed)
           return
         }
 
@@ -845,7 +879,13 @@ export function App(props: AppProps) {
         while (queueRef.current.length > 0 && !abortedRef.current) {
           const next = shiftQueue()
           if (next === undefined) break
-          await runOne(next)
+          // Only slash and shell lines are ever queued (the busy branch above
+          // steers plain text instead), so they have to be dispatched as
+          // commands here. Handing them to `runOne` sent the literal text to
+          // the model — a queued `/settings` arrived as a prompt reading
+          // "/settings".
+          if (isCommandLine(next)) await runCommandLine(next)
+          else await runOne(next)
         }
 
         // Steering that landed in the gap after the loop's last fold-in check —

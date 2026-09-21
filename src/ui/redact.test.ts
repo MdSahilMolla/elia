@@ -82,3 +82,20 @@ test('rewrites an absolute project path to its repo-relative form', () => {
   expect(relativizeProjectPaths(`built ${abs} ok`, process.cwd())).toBe('built workspace/edcdemo ok')
   expect(redactText(`ls ${abs}`)).toBe('ls workspace/edcdemo')
 })
+
+// Session mubbhz5c-tnp9i0: every PowerShell verification command the model
+// proposed was stored as `$[REDACTED]'Stop'`, because the base64-padding arm
+// read the `=` of a space-free assignment as padding. The record of the run no
+// longer showed what had actually been proposed.
+test('an assignment written without spaces is not mistaken for base64 padding', () => {
+  expect(redactText("$errorActionPreference='Stop'")).toBe("$errorActionPreference='Stop'")
+  expect(redactText('myVeryLongCamelCaseName=2')).toBe('myVeryLongCamelCaseName=2')
+  expect(redactText('powershell -Command "$errorActionPreference=\'Stop\'"')).toContain('$errorActionPreference')
+})
+
+test('genuinely padded base64 and keyword assignments are still redacted', () => {
+  // Base64 is four characters per three bytes, so a padded blob is a multiple of four.
+  expect(redactText('QWxhZGRpbjpvcGVuIHNlc2FtZQ==')).toBe('[REDACTED]')
+  expect(redactText('export DATABASE_PASSWORD=hunter2')).toContain('[REDACTED]')
+  expect(redactText('export DATABASE_PASSWORD=hunter2')).not.toContain('hunter2')
+})
