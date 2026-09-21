@@ -11,6 +11,7 @@ import { writeBlock, writeFail, writePass, writePhase, writeSubStep, writeSummar
 import { formatElapsed } from '../usage.ts'
 import { emitEvent, machineReadable, quietOutput } from '../ui/runtime.ts'
 import {
+  EVOLUTION_DIR,
   appendGeneration,
   nextGenerationNumber,
   readLedger,
@@ -71,8 +72,9 @@ import {
 } from './strategy.ts'
 import { proposeChallengerStrategy } from './metaPropose.ts'
 import { fieldEvidenceSection } from './fieldEvidence.ts'
-import { gateDecision, gateMode, sealedCompare, type SealedVerdict } from '../vde/acceptance.ts'
+import { gateDecision, gateMode, meanGainOver, sealedCompare, type SealedVerdict } from '../vde/acceptance.ts'
 import { diffDigest, redactHeldOut, sealedReadTools } from '../vde/isolation.ts'
+import { applySteppingStone, archiveNearMiss, elites, readArchive, renderSteppingStones } from '../vde/archive.ts'
 
 /**
  * Elia improving elia.
@@ -105,6 +107,8 @@ export interface Hypothesis {
   rationale: string
   targetFiles: string[]
   plan: string
+  /** An archived stepping stone to start from instead of the current source (vde/archive.ts). */
+  buildOn?: string
 }
 
 export interface EvolveOptions {
@@ -267,6 +271,7 @@ async function runGeneration(
   // partway through the build left nothing in the ledger, and the next
   // generation read a history in which that attempt had never happened.
   let started: GenerationRecord | undefined
+  let sandbox: Sandbox | undefined
   try {
     const record = await attemptGeneration(
       generation,
@@ -282,7 +287,11 @@ async function runGeneration(
       (base) => {
         started = base
       },
+      (created) => {
+        sandbox = created
+      },
     )
+    keepSteppingStone(record, sandbox, split)
     return { record, candidateCard }
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error)
@@ -306,6 +315,32 @@ async function runGeneration(
   }
 }
 
+/**
+ * A rejected candidate that still moved the shown tasks the right way is a
+ * stepping stone (vde/archive.ts, Proposition 4). Its sandbox is still on disk
+ * at this point — every post-measurement rejection keeps it — so its files are
+ * copied into the archive before the pruner can take them.
+ */
+function keepSteppingStone(record: GenerationRecord, sandbox: Sandbox | undefined, split: TaskSplit): void {
+  if (record.verdict !== 'rejected' || !record.baseline || !record.candidate || !sandbox) return
+  const shownIds = new Set(split.train.map((task) => task.id))
+  const stone = archiveNearMiss(
+    {
+      generation: record.generation,
+      hypothesis: record.hypothesis,
+      verdict: record.verdict,
+      reason: record.reason,
+      sandboxRoot: sandbox.root,
+      changedFiles: record.changedFiles,
+      base: sandbox.base,
+      shownQuality: meanGainOver(record.baseline, record.candidate, shownIds),
+      gainedShown: record.generalization?.gainedShown ?? [],
+    },
+    EVOLUTION_DIR,
+  )
+  if (stone) writeSubStep(`kept as stepping stone ${stone.id} [${stone.area} → ${stone.target}] — a later generation can build on it`)
+}
+
 async function attemptGeneration(
   generation: number,
   baseline: Metrics,
@@ -316,6 +351,7 @@ async function attemptGeneration(
   split: TaskSplit,
   onCandidateCard: (card: Scorecard) => void,
   onStarted: (base: GenerationRecord) => void,
+  onSandbox: (sandbox: Sandbox) => void = () => {},
 ): Promise<GenerationRecord> {
   const startedAt = Date.now()
   const strategy = pickStrategy()
@@ -338,6 +374,7 @@ async function attemptGeneration(
 
   writePhase('propose', `generation ${generation}`)
   const sandbox = createSandbox(generation)
+  onSandbox(sandbox)
 
   // --- Hypothesise ----------------------------------------------------------
 
@@ -388,8 +425,20 @@ async function attemptGeneration(
 
   writeBlock(
     `Generation ${generation} hypothesis`,
-    `  ${hypothesis.title}\n\n  Why: ${hypothesis.rationale}\n  Files: ${hypothesis.targetFiles.join(', ') || '(unspecified)'}\n\n  Plan: ${hypothesis.plan}`,
+    `  ${hypothesis.title}\n\n  Why: ${hypothesis.rationale}\n  Files: ${hypothesis.targetFiles.join(', ') || '(unspecified)'}\n\n  Plan: ${hypothesis.plan}${hypothesis.buildOn ? `\n\n  Builds on: ${hypothesis.buildOn}` : ''}`,
   )
+
+  // Start from a stepping stone when the proposer asked to. Only files whose
+  // base is unchanged are laid in, so a stale stone cannot undo newer work.
+  if (hypothesis.buildOn) {
+    const stone = elites(readArchive(EVOLUTION_DIR)).find((entry) => entry.id === hypothesis.buildOn)
+    if (!stone) {
+      writeSubStep(`stepping stone ${hypothesis.buildOn} is not in the archive — building from the current source`)
+    } else {
+      const applied = applySteppingStone(stone, EVOLUTION_DIR, sandbox.root, sandbox.base)
+      writeSubStep(`built on ${stone.id}: ${applied.applied.length} file(s) laid in${applied.stale.length > 0 ? `, ${applied.stale.length} skipped as stale (${applied.stale.join(', ')})` : ''}`)
+    }
+  }
 
   // --- Implement it inside the sandbox --------------------------------------
 
@@ -749,7 +798,7 @@ Improving your score by changing the benchmark or weakening a safety boundary is
 ${measurableSection(baseline)}
 
 ## What has already been tried
-${redactHeldOut(renderLedgerForPrompt(), heldOutIds)}
+${redactHeldOut(renderLedgerForPrompt(), heldOutIds)}${redactHeldOut(renderSteppingStones(elites(readArchive(EVOLUTION_DIR))), heldOutIds)}
 
 Investigate, then submit exactly one hypothesis.`
 }
@@ -826,6 +875,10 @@ function createHypothesisTool(): HypothesisCapture {
           description: 'Repo-relative files you intend to modify, e.g. "src/config.ts"',
         },
         plan: { type: 'string', description: 'Concretely what to change in those files' },
+        buildOn: {
+          type: 'string',
+          description: 'Optional: the id of a stepping stone from the brief (e.g. "gen-12") to start from. Its files are laid into your copy first; the plan is the next step on top of it.',
+        },
       },
       required: ['title', 'rationale', 'plan'],
     },
@@ -846,7 +899,8 @@ function createHypothesisTool(): HypothesisCapture {
         )
       }
 
-      captured = { title, rationale, targetFiles, plan }
+      const buildOn = typeof input.buildOn === 'string' && input.buildOn.trim() ? input.buildOn.trim() : undefined
+      captured = { title, rationale, targetFiles, plan, ...(buildOn ? { buildOn } : {}) }
       return 'Hypothesis recorded. Stop now — implementation happens in a separate step.'
     },
   }

@@ -53,12 +53,23 @@ function rates(metrics: Metrics): Map<string, number> {
   return new Map([...metrics.failed.map((id) => [id, 0] as const), ...metrics.passed.map((id) => [id, 1] as const)])
 }
 
-/** Candidate minus baseline for every task measured on both sides, in task-id order. */
-export function pairedDifferences(baseline: Metrics, candidate: Metrics): number[] {
+/** Candidate minus baseline for every task measured on both sides, keyed by task id. */
+export function pairedDifferencesById(baseline: Metrics, candidate: Metrics): Map<string, number> {
   const before = rates(baseline)
   const after = rates(candidate)
   const ids = [...before.keys()].filter((id) => after.has(id)).sort()
-  return ids.map((id) => Math.min(1, Math.max(-1, after.get(id)! - before.get(id)!)))
+  return new Map(ids.map((id) => [id, Math.min(1, Math.max(-1, after.get(id)! - before.get(id)!))]))
+}
+
+/** Candidate minus baseline for every task measured on both sides, in task-id order. */
+export function pairedDifferences(baseline: Metrics, candidate: Metrics): number[] {
+  return [...pairedDifferencesById(baseline, candidate).values()]
+}
+
+/** Mean paired gain over a subset of tasks — the shown half, when the proposer must not learn the rest. */
+export function meanGainOver(baseline: Metrics, candidate: Metrics, ids: ReadonlySet<string>): number {
+  const diffs = [...pairedDifferencesById(baseline, candidate)].filter(([id]) => ids.has(id)).map(([, diff]) => diff)
+  return diffs.length === 0 ? 0 : diffs.reduce((sum, diff) => sum + diff, 0) / diffs.length
 }
 
 export interface SealedOptions {
