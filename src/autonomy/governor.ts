@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
+import { skillCapability } from '../skills/capabilities.ts'
 import { currentAgent, isPathWithinWorkspace } from './context.ts'
 import { commandMayReadSensitiveData } from './sensitivePaths.ts'
 import { pauseToolSpinner, resumeToolSpinner } from '../ui/stream.ts'
@@ -602,6 +603,25 @@ export function assessAction(request: ActionRequest, cwd = currentAgent().cwd ??
     return assessment('critical', 'approve', `${name} is proxied from a third-party MCP server with no built-in safety contract`, name, resources, false)
   }
 
+  // A loaded skill — a tool elia wrote for itself, or one the user dropped in
+  // `~/.elia/skills`. Classified once when it loads by reading its own source
+  // (skills/capabilities.ts), because otherwise every skill fell through to the
+  // unknown-tool branch below: an unattended run refused a read-only scanner
+  // outright, and a supervised one asked about it on every single call. That is
+  // why the skills subsystem could be complete and still unusable.
+  //
+  // Only a skill whose source shows no way to reach outside the process is
+  // allowed through unasked. Anything that shells out, writes or opens the
+  // network keeps the full critical treatment, and so does anything the scan
+  // could not read — it fails closed.
+  const capability = skillCapability(name)
+  if (capability === 'read-only') {
+    return assessment('safe', 'allow', `${name} is a loaded skill whose source only reads — no shell, no writes, no network`, name, resources, true)
+  }
+  if (capability === 'effectful') {
+    return assessment('critical', 'approve', `${name} is a loaded skill that can reach outside this process`, name, resources, false)
+  }
+
   return assessment('critical', 'approve', `unknown tool ${name} has no declared safety contract`, name, resources, false)
 }
 
@@ -805,7 +825,14 @@ export function createActionGovernor(options: { mode?: GovernanceMode; approve?:
           return {
             allowed: false,
             assessment: { ...assessment, decision: 'block' },
-            message: `Action denied earlier in this run for every "${assessment.intent}" action: ${assessment.reason}.`,
+            // Naming the right scope matters to the model reading this. The
+            // settleable families are keyed by the exact command, so telling it
+            // that "every shell.unknown action" is denied when one `mkdir` was
+            // refused reads as a closed door: an agent that believes the whole
+            // shell is gone stops trying the command that would have worked.
+            message: scopedCommand
+              ? `Action denied earlier in this run for this exact command (${scopedCommand}): ${assessment.reason}. Only that command is settled — a different one is still worth trying.`
+              : `Action denied earlier in this run for every "${assessment.intent}" action: ${assessment.reason}.`,
           }
         }
       }

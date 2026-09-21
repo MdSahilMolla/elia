@@ -18,7 +18,7 @@ import { Picker, type PickerRequest } from './components/Picker.tsx'
 import { TextPrompt, type TextPromptRequest } from './components/TextPrompt.tsx'
 import { WorkingIndicator, type TurnProgress } from './components/WorkingIndicator.tsx'
 import { ClockProvider, motionReduced } from './animation.tsx'
-import { RECEIPT_AFTER_MS, applyCheckEvent, streamedTokens, tipFor, tipsEnabled, turnReceipt, turnVerb, workingLabel, type CheckChip, type CheckState } from './working.ts'
+import { RECEIPT_AFTER_MS, applyCheckEvent, charTokens, streamedTokens, tipFor, tipsEnabled, turnReceipt, turnVerb, workingLabel, type CheckChip, type CheckState } from './working.ts'
 import { WorkspacePanel, runPlanFromWorkers, stepEvidenceKey, type RunStep, type StepProof } from './components/WorkspacePanel.tsx'
 import { isInternalNudge } from './phases.ts'
 import { HelpOverlay } from './components/HelpOverlay.tsx'
@@ -37,7 +37,7 @@ import { looksLikeImageAttachmentLine } from '../../attachments.ts'
 import { compactionThresholdFor, contextWindowFor } from '../../contextWindow.ts'
 import { codexContextTokens } from '../../providers/codexSubscription.ts'
 import type { ChatMessage } from '../../providers/types.ts'
-import { sessionUsageSnapshot } from '../../usage.ts'
+import { onLiveOutput, sessionUsageSnapshot } from '../../usage.ts'
 
 export interface TurnHooks {
   onText(delta: string): void
@@ -279,6 +279,47 @@ export function App(props: AppProps) {
   // Tokens and the last sign of life change on every streamed chunk; the
   // indicator reads them each frame, so they live in a ref, not in state.
   const progress = useRef<TurnProgress>({ tokens: 0, lastAt: 0 })
+  // What the turn has produced: `settled` is what finished model calls really
+  // reported, `streamed` the estimate for the call still under way. Counting
+  // only the text that reaches the screen leaves the line frozen through
+  // everything elia writes but does not show — a minute of silent reasoning,
+  // a large edit's arguments, a sub-agent's whole run.
+  const produced = useRef({ settled: 0, streamed: 0 })
+  // The shown count never walks backwards: an estimate that overshot the real
+  // usage would otherwise make the line count down when the call settles.
+  const countProduced = useCallback(() => {
+    progress.current.tokens = Math.max(progress.current.tokens, produced.current.settled + produced.current.streamed)
+  }, [])
+  // Where the session's output stood when this turn began, so the closing
+  // receipt reports the same span the working line counted.
+  const outputBefore = useRef(0)
+  /** A turn is starting — the line counts this one, not the last one's leftovers. */
+  const beginProgress = useCallback((startedAt: number) => {
+    produced.current = { settled: 0, streamed: 0 }
+    progress.current = { tokens: 0, lastAt: startedAt }
+    outputBefore.current = sessionUsageSnapshot().usage.outputTokens
+  }, [])
+  // When the risk pre-check has already put the working line up for a message,
+  // the turn that follows inherits its clock and its count: one Enter press is
+  // one line, not a count that climbs, drops to zero and starts over.
+  const carriedTurnStart = useRef<number | undefined>(undefined)
+  // Every model call under the turn reports what it produced as it lands — the
+  // lead's own steps, a sub-agent's, an escalated run's. A finished call is
+  // also a sign of life, however quiet it was.
+  useEffect(
+    () =>
+      onLiveOutput((event) => {
+        if (event.kind === 'settled') {
+          produced.current.settled += event.outputTokens
+          produced.current.streamed = 0
+        } else {
+          produced.current.streamed += charTokens(event.chars)
+        }
+        progress.current.lastAt = Date.now()
+        countProduced()
+      }),
+    [countProduced],
+  )
   const turnsRun = useRef(0)
   const [turnStartedAt, setTurnStartedAt] = useState(0)
   const [plan, setPlan] = useState<TodoItem[]>([])
@@ -451,7 +492,9 @@ export function App(props: AppProps) {
 
   const runOne = useCallback(
     async (text: string, opts?: { echo?: boolean }) => {
-      const startedAt = Date.now()
+      const carried = carriedTurnStart.current
+      carriedTurnStart.current = undefined
+      const startedAt = carried ?? Date.now()
       busyRef.current = true
       setBusy(true)
       setStatus('')
@@ -459,8 +502,7 @@ export function App(props: AppProps) {
       setChecks([])
       setPlanEvidence(new Map())
       setStreamMode(null)
-      progress.current = { tokens: 0, lastAt: startedAt }
-      const outputBefore = sessionUsageSnapshot().usage.outputTokens
+      if (carried === undefined) beginProgress(startedAt)
       abortedRef.current = false
       setTurnStartedAt(startedAt)
       // onSubmit echoes the message the instant Enter is pressed so it never
@@ -472,9 +514,11 @@ export function App(props: AppProps) {
       const controller = new AbortController()
       abortRef.current = controller
       // Every streamed chunk and every tool boundary is a sign of life.
-      const alive = (produced = '') => {
+      const alive = (chunk = '') => {
         progress.current.lastAt = Date.now()
-        if (produced) progress.current.tokens += streamedTokens(produced)
+        if (!chunk) return
+        produced.current.streamed += streamedTokens(chunk)
+        countProduced()
       }
       const hooks: TurnHooks = {
         onText: (d) => {
@@ -599,7 +643,7 @@ export function App(props: AppProps) {
         const elapsedMs = Date.now() - startedAt
         const rollup = tools.length > 2 || elapsedMs >= RECEIPT_AFTER_MS ? rollupLine(rollupTools(tools)) : ''
         if (elapsedMs >= RECEIPT_AFTER_MS || rollup) {
-          const reported = sessionUsageSnapshot().usage.outputTokens - outputBefore
+          const reported = sessionUsageSnapshot().usage.outputTokens - outputBefore.current
           store.receipt(turnReceipt({ elapsedMs, rollup, tokens: reported > 0 ? reported : Math.round(progress.current.tokens) }))
         }
         turnsRun.current += 1
@@ -615,7 +659,7 @@ export function App(props: AppProps) {
         if (modeRef.current === 'plan') setPlanReady(true)
       }
     },
-    [props, store],
+    [props, store, beginProgress, countProduced],
   )
   executePlan.current = () => void runOne('Go ahead — execute the plan you just proposed. Make every change and verify it.')
 
@@ -763,7 +807,13 @@ export function App(props: AppProps) {
         const live = props.getEnv()
         if (live.providerName !== 'codex' && mode === 'manual') {
           setBusy(true)
-          setTurnStartedAt(Date.now())
+          const checkedAt = Date.now()
+          setTurnStartedAt(checkedAt)
+          // The working line is up from here, so the turn starts here too —
+          // otherwise the pre-check sits under the last turn's leftover total
+          // and the classifier's own tokens vanish when the turn proper begins.
+          beginProgress(checkedAt)
+          carriedTurnStart.current = checkedAt
           setStatus('Checking the request')
           // A pre-check that fails is not a verdict. In manual mode every risky
           // action is still put to you one at a time by the approval menu, so an
@@ -775,6 +825,7 @@ export function App(props: AppProps) {
             setStatus('')
             const ok = await ask('This request looks risky', [reason ?? '', `About to: ${trimmed}`])
             if (!ok) {
+              carriedTurnStart.current = undefined
               store.notice('Skipped.')
               store.commit()
               return
@@ -810,9 +861,12 @@ export function App(props: AppProps) {
         }
       } finally {
         turnStartingRef.current = false
+        // Nothing ran after the pre-check (an error, a declined risk prompt):
+        // don't leave a stale start time for the next message to inherit.
+        carriedTurnStart.current = undefined
       }
     },
-    [busy, mode, props, store, runOne, exit, writeStdout],
+    [busy, mode, props, store, runOne, exit, writeStdout, beginProgress],
   )
 
   // In ChatGPT-subscription mode Elia's own `messages` array stays near-empty

@@ -13,7 +13,7 @@ import { unknownToolMessage } from './tools/toolNameSuggest.ts'
 import { endTextTurn, writeNotice, writeToolCall, writeToolResult } from './ui/stream.ts'
 import { startThinkingAnimation } from './ui/animator.ts'
 import { createStreamCursor } from './ui/streamCursor.ts'
-import { ZERO_USAGE, addUsage } from './usage.ts'
+import { ZERO_USAGE, addUsage, reportLiveOutput } from './usage.ts'
 import { spendState, spendStopPrompt } from './spendLimit.ts'
 import { SPECULABLE_TOOLS, type CacheStats, type ToolResultCache } from './speculation/cache.ts'
 import { readMemo } from './speculation/deterministicCache.ts'
@@ -823,6 +823,9 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
           try {
             const result = await streamProvider(route)
             totalUsage = addUsage(totalUsage, result.usage)
+            // What this call really cost, the moment it is known — the working
+            // line counts a long turn step by step instead of jumping at the end.
+            reportLiveOutput({ kind: 'settled', outputTokens: result.usage.outputTokens })
             providerHealth.delete(providerHealthKey(route))
             if (profilingEnabled()) {
               recordModelCall({
@@ -981,7 +984,13 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
             // of a mid-stream guess is one wasted read.
             onToolBlock: cache
               ? (block) => {
-                  if (block.type !== 'tool_use' || signal?.aborted) return
+                  if (block.type !== 'tool_use') return
+                  // A whole tool call's arguments just finished streaming. None
+                  // of it was shown — a large write_file is a long silence —
+                  // but the model wrote every character, so it counts as output
+                  // until this call's real usage arrives and replaces it.
+                  reportLiveOutput({ kind: 'streaming', chars: block.name.length + JSON.stringify(block.input ?? {}).length })
+                  if (signal?.aborted) return
                   if (!cache.canSpeculate(block.name)) return
                   const tool = toolsByName[block.name]
                   if (!tool) return

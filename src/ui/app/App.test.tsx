@@ -6,6 +6,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { eliaBookMenu, listEliaBooks } from '../../eliaBook.ts'
+import { reportLiveOutput } from '../../usage.ts'
 
 const SHIFT_TAB = '\x1b[Z'
 const settle = () => new Promise((resolve) => setTimeout(resolve, 30))
@@ -492,6 +493,103 @@ test('a /clear outcome wipes the transcript and continues as the new session', a
     // The screen-and-scrollback erase went to the terminal.
     expect(stdout.frames.some((f) => f.includes('\x1b[2J\x1b[3J\x1b[H'))).toBe(true)
     expect(frame.split('\x1b[2J\x1b[3J\x1b[H').at(-1)).not.toContain('Hello world')
+  } finally {
+    unmount()
+  }
+})
+
+test('the token count keeps moving through a turn that streams nothing', async () => {
+  let release!: () => void
+  const held = new Promise<void>((resolve) => { release = resolve })
+  const props = {
+    ...baseProps(),
+    submitTurn: async (_text: string, hooks: import('./App.tsx').TurnHooks) => {
+      hooks.onToolStart({ id: 'w', name: 'write_file', input: { path: 'src/parser.ts' } })
+      // A silent model call lands: nothing was shown, 1.2k tokens were written.
+      reportLiveOutput({ kind: 'settled', outputTokens: 1_200 })
+      await held
+    },
+  }
+  const { stdin, lastFrame, unmount } = render(<App {...props} />)
+  try {
+    await waitForFrame(lastFrame, READY)
+    await settle()
+    stdin.write('rewrite the parser')
+    await waitForFrame(lastFrame, 'rewrite the parser')
+    stdin.write('\r')
+    expect(await waitForFrame(lastFrame, '1.2k tokens', 5_000)).toContain('esc to interrupt')
+    // And it keeps climbing as the next call's arguments stream.
+    reportLiveOutput({ kind: 'streaming', chars: 4_000 })
+    await waitForFrame(lastFrame, '2.2k tokens', 5_000)
+    release()
+  } finally {
+    unmount()
+  }
+})
+
+test('a new turn counts its own tokens, not the ones before it', async () => {
+  let checks = 0
+  let release!: () => void
+  const held = new Promise<void>((resolve) => { release = resolve })
+  const props = {
+    ...baseProps(),
+    classifyRisk: async () => {
+      checks += 1
+      if (checks === 2) await held
+      return { risky: false }
+    },
+    submitTurn: async () => {
+      reportLiveOutput({ kind: 'settled', outputTokens: 900 })
+    },
+  }
+  const { stdin, lastFrame, unmount } = render(<App {...props} />)
+  try {
+    await waitForFrame(lastFrame, READY)
+    await settle()
+    stdin.write('first')
+    await waitForFrame(lastFrame, 'first')
+    stdin.write('\r')
+    await waitForFrame(lastFrame, READY)
+    await settle()
+    stdin.write('second')
+    await waitForFrame(lastFrame, 'second')
+    stdin.write('\r')
+    // The pre-check runs under the working line — with last turn's count wiped.
+    expect(await waitForFrame(lastFrame, 'Checking the request…')).not.toContain('tokens')
+    release()
+  } finally {
+    unmount()
+  }
+})
+
+test('the count carries from the risk pre-check into the turn it gated', async () => {
+  let release!: () => void
+  const held = new Promise<void>((resolve) => { release = resolve })
+  const props = {
+    ...baseProps(),
+    classifyRisk: async () => {
+      // The classifier is a model call of its own — real spend, on the line.
+      reportLiveOutput({ kind: 'settled', outputTokens: 140 })
+      return { risky: false }
+    },
+    submitTurn: async (_text: string, hooks: import('./App.tsx').TurnHooks) => {
+      hooks.onToolStart({ id: 'r', name: 'read_file', input: { path: 'src/store.ts' } })
+      await held
+    },
+  }
+  const { stdin, lastFrame, unmount } = render(<App {...props} />)
+  try {
+    await waitForFrame(lastFrame, READY)
+    await settle()
+    stdin.write('look at the store')
+    await waitForFrame(lastFrame, 'look at the store')
+    stdin.write('\r')
+    await waitForFrame(lastFrame, 'Reading store.ts…')
+    // One Enter press is one line: the turn keeps counting where the pre-check
+    // left off instead of dropping back to zero.
+    reportLiveOutput({ kind: 'settled', outputTokens: 60 })
+    await waitForFrame(lastFrame, '200 tokens', 5_000)
+    release()
   } finally {
     unmount()
   }

@@ -76,15 +76,30 @@ export async function runSkills(): Promise<void> {
       writeUsageLine(`  ${dataRows[i]}`)
       for (const example of candidate.examples) writeUsageLine(`         ${dim('e.g.')} ${example}`)
     })
-    writeNotice('Turn the strongest one into a real tool with: elia skills synth')
+    writeNotice('Turn one into a real tool with: elia skills synth [pattern]  (no pattern builds the top row)')
     return
   }
 
   if (action === 'synth') {
     const { synthesizeSkill } = await import('../skills/synthesize.ts')
-    const candidate = skillCandidates()[0]
-    if (!candidate) {
+    const candidates = skillCandidates()
+    if (candidates.length === 0) {
       writeNotice('No candidate has crossed the threshold yet.')
+      return
+    }
+    // `elia skills synth [pattern]`. Without a pattern this took the top
+    // candidate and nothing else, so whatever elia happened to repeat most
+    // decided what got built — here a bare `powershell`, i.e. a tool whose
+    // whole job would be to run arbitrary shell outside the command governor.
+    // The counts say what elia does often; they do not say what is worth
+    // encoding, and only a person can tell those apart.
+    const wanted = positionals()[1]
+    const candidate = wanted
+      ? candidates.find((c) => c.pattern === wanted) ?? candidates.find((c) => c.pattern.includes(wanted))
+      : candidates[0]
+    if (!candidate) {
+      writeError(`No candidate matches "${wanted}". Run "elia skills candidates" to see them.`)
+      process.exitCode = 1
       return
     }
 

@@ -1,4 +1,5 @@
-import { existsSync, mkdirSync, readdirSync, renameSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync } from 'node:fs'
+import { classifySkillSource, recordSkillCapability } from './capabilities.ts'
 import { dirname, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import type { Tool } from '../tools/types.ts'
@@ -112,6 +113,14 @@ function skillFilesIn(dir: string): string[] {
 /** Imports one skill file and checks it really is a usable Tool before it reaches the model. */
 export async function loadSkillFile(file: string): Promise<{ tool: Tool } | { reason: string }> {
   let module: Record<string, unknown>
+  // Read the text before importing it: what the module does decides whether the
+  // governor may call it without asking a person. See skills/capabilities.ts.
+  let source = ''
+  try {
+    source = readFileSync(file, 'utf8')
+  } catch {
+    // Left empty on purpose — classifySkillSource treats that as effectful.
+  }
   try {
     // A cache-busting query means a freshly synthesized skill can be loaded in the
     // same process that just wrote it, without a restart.
@@ -128,6 +137,7 @@ export async function loadSkillFile(file: string): Promise<{ tool: Tool } | { re
     return { reason: `invalid tool name "${candidate.name}" — use lower_snake_case, 3-48 characters` }
   }
 
+  recordSkillCapability(candidate.name, classifySkillSource(source).capability)
   return { tool: candidate }
 }
 

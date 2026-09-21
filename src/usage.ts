@@ -219,6 +219,43 @@ export function recordTopLevelTurn(elapsedMs: number): void {
   sessionElapsedMs += elapsedMs
 }
 
+// --- Live output, while the turn is still running ---
+// The session totals above only move when a whole turn or sub-agent run *ends*,
+// which is far too coarse for the working line: a two-minute turn spread over
+// six model calls would sit on one number the entire time and then jump at the
+// receipt. These events fire as it runs — one per finished model call carrying
+// the usage that call really reported, plus an estimate for output that has
+// streamed but not been billed yet — so the line counts what elia is producing
+// while it produces it. Nothing here records anything; it is display only.
+
+export type LiveOutput =
+  /** A model call finished and reported its real output tokens. Replaces the running estimate. */
+  | { kind: 'settled'; outputTokens: number }
+  /** Characters seen mid-call that no usage has covered yet — streamed tool arguments. */
+  | { kind: 'streaming'; chars: number }
+
+const liveListeners = new Set<(event: LiveOutput) => void>()
+
+/** Watch what the running turn produces. Returns the unsubscribe. */
+export function onLiveOutput(listener: (event: LiveOutput) => void): () => void {
+  liveListeners.add(listener)
+  return () => {
+    liveListeners.delete(listener)
+  }
+}
+
+/** Tell every watcher what just landed. A listener that throws must not take the turn down with it. */
+export function reportLiveOutput(event: LiveOutput): void {
+  if (liveListeners.size === 0) return
+  for (const listener of [...liveListeners]) {
+    try {
+      listener(event)
+    } catch (error) {
+      logSwallowedError('live output listener', error)
+    }
+  }
+}
+
 export interface SessionUsageSnapshot {
   usage: Usage
   turns: number

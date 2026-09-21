@@ -1,6 +1,6 @@
 import { BATTMANN_SUBAGENT_SYSTEM_PROMPT, CYBER_SUBAGENT_SYSTEM_PROMPT, FITNESS_SUBAGENT_SYSTEM_PROMPT, roleConfig, SPORTS_SUBAGENT_SYSTEM_PROMPT, SUBAGENT_SYSTEM_PROMPT, tierConfig, turnContextPrompt } from './config.ts'
 import { runAgentLoop, lastAssistantText, type ConversationMessage, type ToolEvent } from './agentLoop.ts'
-import type { Usage } from './providers/types.ts'
+import type { Provider, Usage } from './providers/types.ts'
 import type { Tool } from './tools/types.ts'
 import { battmannTools, businessTools } from './tools/registry.ts'
 import { toolsForRole, role as roleDefinition, promptForRole } from './autonomy/roles.ts'
@@ -92,6 +92,42 @@ export interface SubAgentResult {
  */
 function withGoalGraphIfAvailable<T>(graph: GoalGraphStore | undefined, fn: () => Promise<T>): Promise<T> {
   return graph ? withGoalGraph(graph, fn) : fn()
+}
+
+/**
+ * A worker's own take-away, on the same terms as an interactive turn's.
+ *
+ * The sub-agent has no verification gate of its own, so `verify` carries only
+ * whether it finished: a worker that completed is judged on whether some tool
+ * call failed and then worked (`repair`), and one that did not is judged on
+ * what it was still stuck on (`blocker`). Neither costs a model call unless
+ * that friction is actually there. Lessons carry their own `subagent` tags so
+ * `retireLessons` can prune them ahead of lessons a human-facing turn earned.
+ *
+ * Never throws and never fails the worker: learning is a bonus on finished work.
+ */
+async function learnFromSubAgentRun(
+  request: SubAgentRequest,
+  messages: ConversationMessage[],
+  finished: boolean,
+  provider: Provider,
+  cwd: string,
+): Promise<void> {
+  try {
+    const { learnFromTurn } = await import('./autonomy/turnLearning.ts')
+    await learnFromTurn({
+      provider,
+      messages,
+      fromIndex: 0,
+      request: request.prompt,
+      outcome: { verify: finished ? 'none' : 'fail', repairAttempts: 0 },
+      cwd,
+      signal: request.signal,
+      sources: { repair: 'subagent', blocker: 'subagent-blocker' },
+    })
+  } catch {
+    // A worker's result must not depend on whether it managed to reflect.
+  }
 }
 
 export async function runSubAgent(request: SubAgentRequest): Promise<SubAgentResult> {
@@ -210,6 +246,14 @@ export async function runSubAgent(request: SubAgentRequest): Promise<SubAgentRes
   )
 
   recordUsage(result.usage, tier.model)
+
+  // Workers do most of the hands-on work, and until now none of it taught
+  // anything: `learnFromTurn` ran only on the interactive REPL, so a builder
+  // that found `ls` failing and `dir` working, or a scout blocked by a missing
+  // preload, took that away with it when it exited. Same gate as the REPL uses
+  // — a failure that was mechanically put right, or a run that ended stuck —
+  // so a clean worker costs nothing and writes nothing.
+  await learnFromSubAgentRun(request, messages, result.stopReason === 'complete', tier.provider, cwd ?? process.cwd())
 
   return {
     name: request.name,

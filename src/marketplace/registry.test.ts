@@ -34,7 +34,12 @@ test('listInstalled reports package.json deps and skills', () => {
   process.chdir(dir)
   try {
     const items = listInstalled(dir)
-    expect(items.map((i) => i.name).sort()).toEqual(['greet', 'react', 'typescript'])
+    // Dependencies come from this temp project, so they are exact.
+    expect(items.filter((i) => i.kind !== 'skill').map((i) => i.name).sort()).toEqual(['react', 'typescript'])
+    // Skills are not: listInstalled also reports the user-level ones in
+    // ~/.elia/skills on purpose, so asserting the whole list equals ['greet', ...]
+    // only held while the developer running the suite had no skills installed.
+    expect(items.filter((i) => i.kind === 'skill').map((i) => i.name)).toContain('greet')
     expect(items.find((i) => i.name === 'greet')?.kind).toBe('skill')
   } finally {
     process.chdir(cwd)

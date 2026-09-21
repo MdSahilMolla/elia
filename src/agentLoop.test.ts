@@ -9,7 +9,8 @@ import { createActionGovernor, withActionGovernor } from './autonomy/governor.ts
 import { parseToolHooks, withToolHooks } from './autonomy/devHooks.ts'
 import { createTranscript, withSessionTranscript } from './ui/transcript.ts'
 import { withAgentIdentity } from './autonomy/context.ts'
-import { ZERO_USAGE } from './usage.ts'
+import { ZERO_USAGE, onLiveOutput, type LiveOutput } from './usage.ts'
+import { createToolResultCache } from './speculation/cache.ts'
 
 // config.ts resolves a provider at import time and fails fast without a key —
 // set a placeholder before importing so the module loads; we swap in a stub
@@ -988,5 +989,58 @@ test('a fallback naming the route already in use is not tried twice', async () =
     expect(calls).toBe(1)
   } finally {
     resetProviderHealthForTests()
+  }
+})
+
+test('a running turn reports what it produced call by call, not only at the end', async () => {
+  const seen: LiveOutput[] = []
+  const stop = onLiveOutput((event) => seen.push(event))
+  let call = 0
+  try {
+    await runAgentLoop({
+      messages: [], systemPrompt: 'test', providerName: 'anthropic', model: 'live-output-test', useAnimation: false, verbose: false,
+      // A real turn runs with the speculative read cache, which is what hands
+      // finished tool arguments up mid-stream.
+      cache: createToolResultCache(),
+      tools: [{ name: 'write_file', description: 'Test write', input_schema: { type: 'object', properties: {} }, async execute() { return 'written' } }],
+      provider: { async streamTurn(params) {
+        if (++call === 1) {
+          const input = { path: 'src/big.ts', contents: 'x'.repeat(400) }
+          // The arguments finish streaming well before the call does — that is
+          // the long silence the working line has to keep counting through.
+          params.onToolBlock?.({ type: 'tool_use', id: 'w1', name: 'write_file', input })
+          return { content: [{ type: 'tool_use', id: 'w1', name: 'write_file', input }], usage: { ...ZERO_USAGE, outputTokens: 120 } }
+        }
+        params.onText('done')
+        return { content: [{ type: 'text', text: 'done' }], usage: { ...ZERO_USAGE, outputTokens: 30 } }
+      } },
+    })
+  } finally {
+    stop()
+  }
+  const streamed = seen.filter((event) => event.kind === 'streaming')
+  expect(streamed).toHaveLength(1)
+  expect(streamed[0]).toMatchObject({ kind: 'streaming' })
+  expect((streamed[0] as { chars: number }).chars).toBeGreaterThan(400)
+  // The estimate lands first, then each call's real usage — in that order.
+  expect(seen.indexOf(streamed[0]!)).toBe(0)
+  expect(seen.filter((event) => event.kind === 'settled')).toEqual([
+    { kind: 'settled', outputTokens: 120 },
+    { kind: 'settled', outputTokens: 30 },
+  ])
+})
+
+test('nobody listening costs the turn nothing, and a listener that throws does not take it down', async () => {
+  const stop = onLiveOutput(() => {
+    throw new Error('listener exploded')
+  })
+  try {
+    const result = await runAgentLoop({
+      messages: [], systemPrompt: 'test', tools: [], providerName: 'anthropic', model: 'live-output-throw-test', useAnimation: false, verbose: false,
+      provider: { async streamTurn(params) { params.onText('fine'); return { content: [{ type: 'text', text: 'fine' }], usage: { ...ZERO_USAGE, outputTokens: 7 } } } },
+    })
+    expect(result.usage.outputTokens).toBe(7)
+  } finally {
+    stop()
   }
 })

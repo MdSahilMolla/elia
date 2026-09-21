@@ -310,6 +310,13 @@ export interface LearnFromTurnOptions {
   timeoutMs?: number
   /** Called only when there is something worth reflecting on, just before the model call — for a status line. */
   onReflecting?: () => void
+  /**
+   * What to record as each lesson's origin. Defaults to the interactive turn's
+   * tags. A caller elsewhere — a sub-agent, say — passes its own so that
+   * lesson-efficacy retirement can prune one origin ahead of another rather
+   * than treating every auto-written lesson as the same kind of evidence.
+   */
+  sources?: { repair: string; blocker: string }
 }
 
 export interface LearnedFromTurn {
@@ -348,7 +355,8 @@ export async function learnFromTurn(options: LearnFromTurnOptions): Promise<Lear
       // it enters with lower confidence and its own source — lesson-efficacy
       // retirement can then drop it ahead of lessons that were earned by a
       // failure actually being put right.
-      const source = mode === 'repair' ? 'interactive-auto' : 'interactive-blocker'
+      const tags = options.sources ?? { repair: 'interactive-auto', blocker: 'interactive-blocker' }
+      const source = mode === 'repair' ? tags.repair : tags.blocker
       const confidence = mode === 'repair' ? 0.7 : 0.4
       appendLessons(lessons.map((text) => ({ text, source, confidence })), options.lessonsPath)
     }

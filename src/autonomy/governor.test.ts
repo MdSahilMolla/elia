@@ -784,3 +784,41 @@ test('A2-04: supply-chain and remote-execution verbs get a specific non-settleab
     expect(['shell', 'shell.composed', 'shell.unknown']).not.toContain(intent)
   }
 })
+
+// Skills fell through to the unknown-tool branch, so a read-only scanner was
+// refused outright by an unattended run and prompted on every call otherwise.
+// That is why the whole skills subsystem could be complete and never used.
+test('a loaded skill is judged by what its source can do, and nothing else is', async () => {
+  const { recordSkillCapability, resetSkillCapabilities } = await import('../skills/capabilities.ts')
+  resetSkillCapabilities()
+  try {
+    // Not a loaded skill: still unknown, still critical.
+    expect(assessAction({ name: 'scan_control_bytes', input: {} }, '/repo').reason).toContain('unknown tool')
+
+    recordSkillCapability('scan_control_bytes', 'read-only')
+    const inert = assessAction({ name: 'scan_control_bytes', input: { path: 'src' } }, '/repo')
+    expect({ risk: inert.risk, decision: inert.decision }).toEqual({ risk: 'safe', decision: 'allow' })
+    expect(inert.reason).toContain('only reads')
+
+    recordSkillCapability('deploy_helper', 'effectful')
+    const effectful = assessAction({ name: 'deploy_helper', input: {} }, '/repo')
+    expect({ risk: effectful.risk, decision: effectful.decision }).toEqual({ risk: 'critical', decision: 'approve' })
+    expect(effectful.reversible).toBe(false)
+  } finally {
+    resetSkillCapabilities()
+  }
+})
+
+test('a skill cannot soften a built-in by taking its name', async () => {
+  const { recordSkillCapability, resetSkillCapabilities } = await import('../skills/capabilities.ts')
+  resetSkillCapabilities()
+  try {
+    recordSkillCapability('run_command', 'read-only')
+    // The built-in branches are matched first, so the shell is still the shell.
+    const result = assessAction({ name: 'run_command', input: { command: 'rm -rf /' } }, '/repo')
+    expect(result.risk).toBe('critical')
+    expect(result.reason).not.toContain('loaded skill')
+  } finally {
+    resetSkillCapabilities()
+  }
+})

@@ -8,7 +8,7 @@ import { useFrameWidth } from '../wrap.ts'
 
 /** What the running turn has produced so far — read on every frame, written without re-rendering the app. */
 export interface TurnProgress {
-  /** Estimated output tokens streamed this turn. */
+  /** Output tokens this turn has produced — real where a model call has reported, estimated in between. */
   tokens: number
   /** When the last sign of life arrived: a streamed token, a tool starting or finishing. */
   lastAt: number
