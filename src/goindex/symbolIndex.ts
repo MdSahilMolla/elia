@@ -1,5 +1,6 @@
 import { extname, join } from 'node:path'
-import { ELIA_ROOT } from '../statePaths.ts'
+import { existsSync } from 'node:fs'
+import { ELIA_ROOT, eliaRootsUpward } from '../statePaths.ts'
 
 /**
  * A structural, AST-backed symbol index — a different query shape from
@@ -108,10 +109,29 @@ async function ensureInitialized(): Promise<typeof ParserCtor> {
   return Parser
 }
 
+/**
+ * The prebuilt grammar for one language, searched from `ELIA_ROOT` upward.
+ *
+ * Root-only would be enough in a normal checkout and wrong in an evolution
+ * sandbox, which is a copy of `src/` under `.evolution/gen-N` with no
+ * `node_modules` of its own. There the grammars failed to load, every
+ * tree-sitter test in the suite threw, and the gate rejected the candidate for
+ * unit-test failures that were the sandbox's shape rather than anything the
+ * candidate did. Falling back to the root-relative path keeps the original
+ * error message when the grammar is genuinely absent.
+ */
+function resolveGrammarPath(wasmFile: string): string {
+  for (const root of eliaRootsUpward()) {
+    const candidate = join(root, 'node_modules', 'tree-sitter-wasms', 'out', wasmFile)
+    if (existsSync(candidate)) return candidate
+  }
+  return join(ELIA_ROOT, 'node_modules', 'tree-sitter-wasms', 'out', wasmFile)
+}
+
 async function loadLanguage(spec: LanguageSpec, Parser: typeof ParserCtor): Promise<LanguageInstance> {
   const cached = languageCache.get(spec.wasmFile)
   if (cached) return cached
-  const wasmPath = join(ELIA_ROOT, 'node_modules', 'tree-sitter-wasms', 'out', spec.wasmFile)
+  const wasmPath = resolveGrammarPath(spec.wasmFile)
   const language = await Parser.Language.load(wasmPath)
   languageCache.set(spec.wasmFile, language)
   return language

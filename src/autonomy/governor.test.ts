@@ -178,6 +178,28 @@ describe('autonomy governor', () => {
     expect([...READ_ONLY_ROLES].sort()).toEqual(readOnly)
   })
 
+  // The bug this pins: `submit_hypothesis` and `submit_strategy` were reporting
+  // tools everywhere except here, so they fell through to the unknown-tool
+  // branch — critical, approval required — and elia's own unattended policy
+  // refused them. Every `elia evolve` proposer reasoned its way to a change and
+  // was blocked at the moment it tried to say what the change was, which is why
+  // the self-improvement loop promoted nothing for its entire history.
+  test('every in-process reporting tool is governed as safe, so an unattended phase can answer', async () => {
+    const { REPORTING_TOOLS } = await import('./goalGraph.ts')
+    for (const name of REPORTING_TOOLS) {
+      const result = assessAction({ name, input: { title: 'x', rationale: 'y', plan: 'z' } }, '/repo')
+      expect({ name, risk: result.risk, decision: result.decision }).toEqual({ name, risk: 'safe', decision: 'allow' })
+    }
+  })
+
+  test('the proposer of a self-improvement can submit one unattended', () => {
+    for (const name of ['submit_hypothesis', 'submit_strategy']) {
+      const result = assessAction({ name, input: { strategy: 'prefer structural changes over prompt tweaks' } }, '/repo')
+      expect(result.decision).toBe('allow')
+      expect(result.risk).not.toBe('critical')
+    }
+  })
+
   // Seen live 2026-09-15 on Windows: `dir *.html *.css *.js` stopped a build
   // run behind an approval prompt that `ls *.html` never would have.
   test('the Windows spellings of ls / cat / grep are read-only too — and still fail closed when composed', () => {

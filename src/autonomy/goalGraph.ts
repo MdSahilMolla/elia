@@ -1048,6 +1048,7 @@ export const REPORTING_TOOLS = new Set([
   'submit_route',
   'submit_fragment',
   'submit_hypothesis',
+  'submit_strategy',
   'revise_plan',
 ])
 

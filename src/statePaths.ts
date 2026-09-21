@@ -6,6 +6,27 @@ import { fileURLToPath } from 'node:url'
 export const ELIA_ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
 
 /**
+ * `ELIA_ROOT` and every directory above it, nearest first.
+ *
+ * For finding installed assets — a wasm grammar, a native library — that live
+ * under a `node_modules` or `target` directory. An evolution sandbox is a copy
+ * of `src/` at `<live root>/.evolution/gen-N` with no `node_modules` of its own:
+ * imports still resolve, because Bun walks up for those, but a path *built* from
+ * `ELIA_ROOT` alone points inside the sandbox and finds nothing. Searching
+ * upward resolves identically in a normal checkout and correctly in a sandbox.
+ */
+export function eliaRootsUpward(from = ELIA_ROOT): string[] {
+  const roots: string[] = []
+  let dir = from
+  for (;;) {
+    roots.push(dir)
+    const parent = dirname(dir)
+    if (parent === dir) return roots
+    dir = parent
+  }
+}
+
+/**
  * `process.cwd()` with the casing the filesystem actually uses.
  *
  * Windows preserves whatever casing the shell was started with, so launching
