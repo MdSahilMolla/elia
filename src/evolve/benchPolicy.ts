@@ -55,13 +55,58 @@ import type { ActionApproval, ActionAssessment, ActionRequest } from '../autonom
 const APPROVABLE_INTENTS: ReadonlySet<string> = new Set(['shell', 'shell.unknown', 'github.push'])
 
 /**
- * A push that rewrites history: `--force`, `--force-with-lease`, `-f`, or a
- * `+refs/…` refspec. Refused even against a fixture, for the reason the governor
- * refuses it anywhere — the act is not reversible, so no task gets to practise
- * it. The rule is identical on both routes, so a candidate cannot reach through
- * `run_command` for something the `github` tool denies it.
+ * Flags that name a program for git to run on the other end of a transfer.
+ * Against a local repository git executes it here, which turns `git push` into
+ * "run this" — the one thing this channel exists to not be. Refused outright
+ * rather than stepped over, whatever the program is and wherever it sits.
  */
-const FORCED_PUSH = /(?:^|\s)(?:--force(?:-with-lease)?(?:=\S*)?|-f)(?:\s|$)|\s\+[^\s]*:/
+const EXEC_FLAGS: ReadonlySet<string> = new Set(['--receive-pack', '--upload-pack', '--exec'])
+
+/**
+ * Push flags whose separate value is not a remote. `--repo <name>` is absent on
+ * purpose: its value *is* the remote, so reading it as one is correct.
+ */
+const PUSH_FLAG_WITH_VALUE: ReadonlySet<string> = new Set(['-o', '--push-option'])
+
+/** The flag's name, with any inline `=value` removed. */
+function flagName(token: string): string {
+  return token.split('=')[0] ?? ''
+}
+
+/** Long flags that rewrite history. */
+const FORCING_LONG_FLAGS: ReadonlySet<string> = new Set(['--force', '--force-with-lease', '--force-if-includes'])
+
+/**
+ * Whether this push rewrites history: `--force`, `--force-with-lease`, a short
+ * flag cluster containing `f`, or a `+refs/…` refspec. Refused even against a
+ * fixture, for the reason the governor refuses it anywhere — the act is not
+ * reversible, so no task gets to practise it. The rule is identical on both
+ * routes, so a candidate cannot reach through `run_command` for something the
+ * `github` tool denies it.
+ *
+ * Clusters are why this reads tokens instead of matching the raw command. git's
+ * parse-options accepts combined short flags, so `-uf` is `--set-upstream
+ * --force` — and a pattern looking for a whitespace-delimited `-f` never sees
+ * it, which left the looser route open on exactly the act both routes name.
+ */
+function isForcedPush(tokens: readonly string[]): boolean {
+  for (const token of tokens) {
+    if (token.startsWith('--')) {
+      if (FORCING_LONG_FLAGS.has(flagName(token))) return true
+      continue
+    }
+    if (token.startsWith('-') && token.length > 1) {
+      // `-o` swallows the rest of its cluster as a value, so an `f` after one is
+      // that value rather than the force flag.
+      const cluster = token.slice(1)
+      const valueAt = cluster.indexOf('o')
+      if ((valueAt < 0 ? cluster : cluster.slice(0, valueAt)).includes('f')) return true
+      continue
+    }
+    if (token.startsWith('+') && token.includes(':')) return true
+  }
+  return false
+}
 
 /** Writes that land in the user's own config rather than in the fixture. */
 const OUT_OF_TREE_CONFIG = /^--(?:global|system)$/i
@@ -111,10 +156,20 @@ export function pushDestination(command: string, cwd: string): string | undefine
   const tokens = shellTokens(command)
   const pushAt = tokens.findIndex((token) => token === 'push')
   if (pushAt < 0) return undefined
-  // The first bare word after `push` is the remote; anything starting with `-`
-  // is a flag, and a flag that takes a value (`--repo <name>`) is not a form
-  // this approver recognises, so it falls through to the configured upstream.
-  const named = tokens.slice(pushAt + 1).find((token) => !token.startsWith('-'))
+  // The first bare word after `push` is the remote. Flags are stepped over, and
+  // the few taking a separate value have that value stepped over with them:
+  // without it `git push --receive-pack ./x origin` reads `./x` as the
+  // destination and vets somewhere the push was never going.
+  let named: string | undefined
+  for (let i = pushAt + 1; i < tokens.length; i += 1) {
+    const token = tokens[i] ?? ''
+    if (token.startsWith('-') && token.length > 1) {
+      if (PUSH_FLAG_WITH_VALUE.has(token)) i += 1
+      continue
+    }
+    named = token
+    break
+  }
   if (named) return resolveRemote(named, cwd)
   // A bare `git push` follows the current branch's upstream.
   const upstream = git(['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}'], cwd)
@@ -230,6 +285,7 @@ export function createBenchApproval(root: string): ActionApproval {
     // a temp directory would make this a hole rather than a channel.
     if (!/^git(\.exe)?$/i.test(tokens[0] ?? '')) return false
     if (tokens.some((token) => OUT_OF_TREE_CONFIG.test(token))) return false
+    if (tokens.some((token) => EXEC_FLAGS.has(flagName(token)))) return false
 
     const declared = stringInput(request, 'cwd')
     const base = declared ? resolve(root, declared) : root
@@ -239,7 +295,7 @@ export function createBenchApproval(root: string): ActionApproval {
     if (tokens.slice(1).some((token) => escapesFixture(token, root, cwd))) return false
 
     if (!tokens.includes('push')) return true
-    if (FORCED_PUSH.test(command)) return false
+    if (isForcedPush(tokens)) return false
     const destination = pushDestination(command, cwd)
     if (!destination || isNetwork(destination)) return false
     return within(root, destination)

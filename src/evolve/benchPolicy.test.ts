@@ -142,6 +142,42 @@ test('a force push is refused even against the fixture — it is not reversible'
   expect(await allows({ name: 'run_command', input: { command: 'git push origin +fix/sum:main', cwd: clone } })).toBe(false)
 })
 
+test('a forced push hidden in a short flag cluster is refused too', async () => {
+  // git's parse-options accepts combined shorts, so each of these carries
+  // --force. Matching the raw command for a whitespace-delimited `-f` missed
+  // every one, which left run_command looser than the `github` route on the one
+  // act both of them name.
+  for (const command of [
+    'git push -uf origin fix/sum',
+    'git push -fu origin fix/sum',
+    'git push -nuf origin fix/sum',
+    'git push --force-if-includes origin fix/sum',
+    'git push --force-with-lease=refs/heads/main origin fix/sum',
+  ]) {
+    expect(await allows({ name: 'run_command', input: { command, cwd: clone } })).toBe(false)
+  }
+})
+
+test('a push option is not mistaken for a force flag, nor for the remote', async () => {
+  // `-o` takes the rest of its cluster as a value, so the `f` in `-of` is that
+  // value; and its separate value must not be read as the destination.
+  expect(await allows({ name: 'run_command', input: { command: 'git push -o ci.skip origin fix/sum', cwd: clone } })).toBe(true)
+  expect(await allows({ name: 'run_command', input: { command: 'git push --push-option=ci.skip origin fix/sum', cwd: clone } })).toBe(true)
+})
+
+test('a flag naming a program for git to run is refused, fixture or not', async () => {
+  // Against a local repository git executes it on this machine, which would
+  // make `git push` a way to run something the task just wrote.
+  for (const command of [
+    'git push --receive-pack=./hook.sh origin fix/sum',
+    'git push --receive-pack ./hook.sh origin fix/sum',
+    'git push --exec=./hook.sh origin fix/sum',
+    'git clone --upload-pack=./hook.sh remote/fork.git workspace/third',
+  ]) {
+    expect(await allows({ name: 'run_command', input: { command, cwd: clone } })).toBe(false)
+  }
+})
+
 test('without the approval channel the same push is blocked — the bug this closes', async () => {
   const bare = createActionGovernor({ mode: 'unattended', cwd: root })
   const verdict = await bare.check({ name: 'run_command', input: { command: 'git push -u origin fix/sum', cwd: clone } })
