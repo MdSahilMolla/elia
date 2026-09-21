@@ -32,7 +32,7 @@ import { inferTaskKind, taskSessions } from '../taskSessions.ts'
 import { isAgentPersona, type AgentPersona } from '../agents/types.ts'
 import { CAPABILITIES } from '../capabilities.ts'
 import { type ActionApproval } from '../autonomy/governor.ts'
-import { classifyEscalation } from '../autonomy/escalation.ts'
+import { routeTurn } from '../autonomy/escalation.ts'
 import { emitEvent, interactiveTerminal, machineReadable, plainOutput, quietOutput } from '../ui/runtime.ts'
 import { renderWorkspacePanel } from '../ui/workspacePanel.ts'
 import { registerShutdownCleanup } from '../ui/shutdown.ts'
@@ -262,6 +262,17 @@ export async function runInteractive(): Promise<void> {
   // regardless of why the process is exiting (see ui/shutdown.ts).
   registerShutdownCleanup(() => writeSessionEnded(sessionStatus(false, 'Session ended')))
 
+  /**
+   * A build whose run died before it built anything.
+   *
+   * The goal was asked for and never answered, so "continue" has to mean the
+   * pipeline again, not a plain turn: a plain turn has no approved plan, no
+   * verification and no acceptance criteria, and writes into the session's
+   * working directory rather than the run's own workspace. Cleared as soon as
+   * it is picked up, so a provider that is simply down cannot loop.
+   */
+  let pendingBuild: { goal: string; reason: string } | undefined
+
   /** Snapshots messages + touched files around one turn, then records a rewind point. */
   /**
    * A request that reads as "build a whole new project" runs through the
@@ -375,7 +386,24 @@ export async function runInteractive(): Promise<void> {
       // The model gets the summary above; the person gets the outcome, not an
       // instruction addressed to the next turn.
       note(formatAutonomousRunReceipt(goal, result), undefined, 'completed')
+      pendingBuild = undefined
       return result.completion.state
+    } catch (error) {
+      // `messages` is only appended on the success path above, so a run that
+      // threw left the conversation holding the request and elia's own planning
+      // with no outcome at all — which the next turn read as a build already in
+      // progress and carried on ungoverned. Record the failure for the model
+      // before rethrowing; the turn-level handler still marks the turn failed.
+      const { formatAutonomousRunCrash } = await import('../autonomy/runSummary.ts')
+      const crash = formatAutonomousRunCrash(goal, error)
+      messages.push({ role: 'assistant', content: [{ type: 'text', text: crash }] })
+      sessionTranscript.notice(crash)
+      // Telling the model the run died is not enough on its own — it can read
+      // that and carry on building anyway. Holding the goal here is what makes
+      // "continue" mean the pipeline rather than a plain turn.
+      pendingBuild = { goal, reason }
+      note('The run failed before it could build anything — no plan was approved and nothing was written. Say "continue" to run it again.', undefined, 'completed')
+      throw error
     } finally {
       setReportSink(undefined)
       approvalRl?.close()
@@ -657,7 +685,15 @@ export async function runInteractive(): Promise<void> {
     messages.push(userMessage(userText, attachments))
     sessionTranscript.appendUser(userText)
 
-    const escalation = classifyEscalation(userText)
+    // A build whose run died is picked up again only by a message that carries
+    // no instruction of its own ("continue", "try again"). Anything else — a
+    // question, a new subject, a different build — is answered on its own
+    // terms, and drops the pending goal rather than talking past the person.
+    const { escalation, resumedGoal } = routeTurn(userText, pendingBuild)
+    // One shot: whether or not it was picked up, the held build does not
+    // survive this turn. A stale project build firing on a bare "ok" many
+    // turns later is the worse failure of the two.
+    pendingBuild = undefined
     let escalated = false
 
     // Decided before the turn runs, because it decides *how* the turn runs.
@@ -731,7 +767,8 @@ export async function runInteractive(): Promise<void> {
         await runPersonaTurn(messages, persona, skillNames, controller.signal, uiHooks)
       } else if (autoEscalate && mode === 'dev' && !uiHooks?.planMode && escalation.escalate) {
         escalated = true
-        const completionState = await runEscalatedTurn(userText, escalation.reason, approveAction, controller.signal, uiHooks)
+        // "continue" is not the goal — the build the dead run never finished is.
+        const completionState = await runEscalatedTurn(resumedGoal ?? userText, escalation.reason, approveAction, controller.signal, uiHooks)
         const { mapCompletionToVerify } = await import('../autonomy/outcome.ts')
         const mapped = mapCompletionToVerify(completionState)
         if (mapped.verify) verifyResult = mapped.verify
