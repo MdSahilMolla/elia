@@ -446,11 +446,37 @@ export async function runInteractive(): Promise<void> {
       run: subAgentRunner({ request: requestText, runId }),
     })
 
+    // With nothing executable in the project, the search writes its own check
+    // first — and only trusts it once it fails on the unchanged tree (§7.4,
+    // vde/probe.ts). Without this the "elia will write the check" promise fell
+    // back to attempts agreeing with each other.
+    const { createProbeSynthesizer, probeWriterPrompt, probeWriterTools } = await import('../vde/probe.ts')
+    const synthesizeProbe = createProbeSynthesizer({
+      request: requestText,
+      sourceRoot: process.cwd(),
+      signal,
+      write: async ({ request, probeDir, sourceRoot, signal: probeSignal }) => {
+        const { runSubAgent } = await import('../subagent.ts')
+        const { allWorkerTools } = await import('../tools/registry.ts')
+        note('writing the check before the attempts', 'no project tests cover this, so elia writes a probe and confirms it fails first')
+        await runSubAgent({
+          role: 'builder',
+          name: 'builder#probe',
+          runId,
+          prompt: probeWriterPrompt(request, probeDir),
+          ...(probeSignal ? { signal: probeSignal } : {}),
+          tools: probeWriterTools(allWorkerTools(), sourceRoot, probeDir),
+        })
+      },
+      onDecision: (admission) => note(admission.admitted ? 'check admitted' : 'check refused', admission.reason, admission.admitted ? 'completed' : 'warning'),
+    })
+
     try {
       const outcome = await reason({
         request: requestText,
         checks: plan.checks,
         produce: search.produce,
+        synthesizeProbe,
         signal,
         onCheck: uiHooks?.onCheck,
         onAttempt: (record) => {

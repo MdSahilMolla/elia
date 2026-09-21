@@ -1,8 +1,9 @@
-import { existsSync, mkdirSync, renameSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, renameSync, rmSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { runSubAgent } from '../subagent.ts'
 import { clampOutput, runShell } from '../shell.ts'
 import { registerSynthesizedTool } from '../tools/registry.ts'
+import { recordToolConstruction, type ToolConstruction } from '../vde/toolLog.ts'
 import { markResolved, type SkillCandidate } from './detector.ts'
 import { loadSkillFile, registerLoadedSkill } from './loader.ts'
 import { QUARANTINE_DIR, SKILL_SUFFIX, USER_SKILLS_DIR } from './paths.ts'
@@ -48,16 +49,28 @@ export async function synthesizeSkill(candidate: SkillCandidate): Promise<Synthe
     prompt: buildPrompt(candidate, skillFile, testFile),
   })
 
+  // Every attempt — built or not — goes into the closure log and the certified
+  // library: a working tool with the checks it passed, a failed one as a dead
+  // end. See vde/toolLog.ts.
+  const tokens = worker.usage.inputTokens + worker.usage.outputTokens
+  const bytes = existsSync(skillFile) ? statSync(skillFile).size : 0
+  const record = (ok: boolean, reason: string, extra: Partial<ToolConstruction> = {}) =>
+    recordToolConstruction({ pattern: candidate.pattern, ok, reason, tokens, bytes, ...extra })
+
   if (!existsSync(skillFile)) {
+    record(false, 'the builder produced no file')
     return { ok: false, detail: `builder did not create ${skillFile}. Its report: ${worker.report}` }
   }
 
   // Gate 1: the test the builder wrote has to pass. Run from elia's own root so
   // Bun resolves as it does in normal use.
+  let testPassed: boolean | undefined
   if (existsSync(testFile)) {
     const test = await runShell(`bun test "${testFile}"`, SKILL_TEST_TIMEOUT_MS)
+    testPassed = test.exitCode === 0
     if (test.exitCode !== 0) {
       quarantine(skillFile, testFile)
+      record(false, 'its own test failed', { testPassed: false })
       return {
         ok: false,
         detail: `the skill's own test failed, so it was quarantined:\n${clampOutput(test.stderr || test.stdout, 1500)}`,
@@ -69,12 +82,14 @@ export async function synthesizeSkill(candidate: SkillCandidate): Promise<Synthe
   const loaded = await loadSkillFile(skillFile)
   if ('reason' in loaded) {
     quarantine(skillFile, testFile)
+    record(false, `it did not load: ${loaded.reason}`, { ...(testPassed !== undefined ? { testPassed } : {}), loaded: false })
     return { ok: false, detail: `the skill did not load, so it was quarantined: ${loaded.reason}` }
   }
 
   registerSynthesizedTool(loaded.tool)
   registerLoadedSkill({ name: loaded.tool.name, file: skillFile, source: 'user' })
   markResolved(candidate.pattern)
+  record(true, 'built and gated', { toolName: loaded.tool.name, ...(testPassed !== undefined ? { testPassed } : {}), loaded: true })
 
   return {
     ok: true,
