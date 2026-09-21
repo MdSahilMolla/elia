@@ -82,6 +82,15 @@ test('a scope wins over the process default, and the default outlives it', async
   expect(activeProvenance()?.sessionId).toBe(RUN.sessionId)
 })
 
+test('every surface that runs a turn sets a fingerprint', async () => {
+  // The gap this closes: a fingerprint nothing sets is a fingerprint nothing
+  // carries. Each front end opts in where it learns its own session id.
+  const read = (path: string) => Bun.file(new URL(path, import.meta.url)).text()
+  expect(await read('./cli/interactive.ts')).toContain("surface: 'interactive'")
+  expect(await read('./autonomy/loop.ts')).toContain("surface: 'auto'")
+  expect(await read('./vscodeBridge.ts')).toContain("surface: 'vscode'")
+})
+
 test('the commit paths actually sign — the wiring, not just the helper', async () => {
   const githubTool = await Bun.file(new URL('./tools/github.ts', import.meta.url)).text()
   expect(githubTool).toContain("signCommitMessage(message)")

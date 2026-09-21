@@ -12,6 +12,7 @@ import { taskSessions } from './taskSessions.ts'
 import { tryListSkillBundles } from './skills/bundles.ts'
 import { listSkillFiles, listLoadedSkills, loadSkills } from './skills/loader.ts'
 import { newSessionId, loadSession, saveSession } from './session.ts'
+import { withProvenance, eliaVersion } from './provenance.ts'
 import { recordUsage } from './usage.ts'
 import { config } from './config.ts'
 import { deploymentTool } from './tools/deployment.ts'
@@ -127,33 +128,39 @@ export function createBridgeSession(options: BridgeSessionOptions): BridgeSessio
     let streamedThinking = ''
 
     event('chat_started', { requestId: request.id, sessionId, mode })
-    const result = await runTurn(messages, {
-      mode,
-      skillNames: selectedSkills,
-      governanceMode,
-      signal: currentAgent().signal,
-      silent: true,
-      onText: (delta) => {
-        streamedText += delta
-        event('assistant_delta', { requestId: request.id, sessionId, text: delta })
-      },
-      onThinking: (delta) => {
-        streamedThinking += delta
-        event('thinking_delta', { requestId: request.id, sessionId, text: delta })
-      },
-      onActivity: (activity) => event('provider_activity', {
-        requestId: request.id,
-        sessionId,
-        kind: activity.kind,
-        status: activity.status,
-        title: redactText(activity.title, 240),
-        detail: activity.detail ? redactText(activity.detail, 4_000) : undefined,
-      }),
-      approveAction: governanceMode === 'supervised'
-        ? async (assessment, action) => waitForApproval(request.id, 'action', { assessment, request: redactActionInput(action.name, action.input) })
-        : undefined,
-      onTool: (toolEvent) => event('tool_finished', { requestId: request.id, sessionId, ...safeToolEvent(toolEvent) }),
-    })
+    // One process serves many sessions here, so the fingerprint is scoped to
+    // the request rather than set on the process (provenance.ts).
+    const result = await withProvenance(
+      { sessionId, surface: 'vscode', model: config.model, version: eliaVersion() },
+      () =>
+        runTurn(messages, {
+          mode,
+          skillNames: selectedSkills,
+          governanceMode,
+          signal: currentAgent().signal,
+          silent: true,
+          onText: (delta) => {
+            streamedText += delta
+            event('assistant_delta', { requestId: request.id, sessionId, text: delta })
+          },
+          onThinking: (delta) => {
+            streamedThinking += delta
+            event('thinking_delta', { requestId: request.id, sessionId, text: delta })
+          },
+          onActivity: (activity) => event('provider_activity', {
+            requestId: request.id,
+            sessionId,
+            kind: activity.kind,
+            status: activity.status,
+            title: redactText(activity.title, 240),
+            detail: activity.detail ? redactText(activity.detail, 4_000) : undefined,
+          }),
+          approveAction: governanceMode === 'supervised'
+            ? async (assessment, action) => waitForApproval(request.id, 'action', { assessment, request: redactActionInput(action.name, action.input) })
+            : undefined,
+          onTool: (toolEvent) => event('tool_finished', { requestId: request.id, sessionId, ...safeToolEvent(toolEvent) }),
+        }),
+    )
     const text = streamedText || lastAssistantText(messages, streamedThinking || '[Elia stopped without a final answer.]')
     if (!messages.some((message) => message.role === 'assistant' && message.content.some((block) => block.type === 'text' && block.text === text))) {
       messages.push({ role: 'assistant', content: [{ type: 'text', text }] })
