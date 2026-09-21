@@ -40,6 +40,31 @@ export function formatAutonomousRunReceipt(goal: string, result: AutonomousRunRe
   return `${head}\n  ${shown}${touchedFiles.length > 6 ? ` +${touchedFiles.length - 6} more` : ''}`
 }
 
+/**
+ * What the next model turn is told when an escalated run *threw* — a provider
+ * outage, a context overflow, an abort partway through.
+ *
+ * `formatAutonomousRunSummary` only ever runs when the pipeline returns, so a
+ * crashed run appended nothing to the conversation at all. What the next turn
+ * then saw was the build request followed by elia's own planning and no
+ * outcome, which reads exactly like a build already in progress — so it carried
+ * on building in an ordinary reply, with no approved plan, no verification, no
+ * acceptance criteria, and writing into the session's working directory instead
+ * of the run's own workspace.
+ *
+ * Seen live, session mubbhz5c-tnp9i0: the run died at the proposal gate having
+ * touched nothing, and the very next turn wrote 11 unverified pages into the
+ * repository root.
+ */
+export function formatAutonomousRunCrash(goal: string, error: unknown): string {
+  const reason = redactText(error instanceof Error ? error.message : String(error), 200)
+  return `[autonomous run: failed to run] ${redactText(goal, 200)} · ${reason}\n`
+    + 'The governed build did not start: no plan was approved and nothing was written.\n'
+    + 'Do not carry this build on in an ordinary reply — a plain turn has no approved plan, no verification '
+    + 'and no acceptance criteria, and writes into the session working directory rather than the run workspace. '
+    + 'Say that the run failed and let the person decide whether to start it again.'
+}
+
 export function formatAutonomousRunSummary(goal: string, result: AutonomousRunResult): string {
   const touchedFiles = [...new Set(result.proposal?.steps.flatMap((step) => step.files) ?? [])]
   const filesLine = touchedFiles.length === 0 ? '' : (

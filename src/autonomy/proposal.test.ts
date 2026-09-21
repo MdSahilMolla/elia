@@ -171,10 +171,13 @@ test('a dependency cycle is rejected', () => {
 })
 
 test('non-string entries in the string lists are dropped', () => {
-  const proposal = expectOk({ ...minimal, risks: ['real risk', 42, null, '  '], assumptions: 'not an array' })
+  const proposal = expectOk({ ...minimal, risks: ['real risk', 42, null, '  '], assumptions: 42, outOfScope: 'a lone line' })
 
   expect(proposal.risks).toEqual(['real risk'])
+  // Nothing sensible to read out of a number, so the field stays empty.
   expect(proposal.assumptions).toEqual([])
+  // A lone line is a one-item list, not a mistake to swallow.
+  expect(proposal.outOfScope).toEqual(['a lone line'])
 })
 
 test('a non-object proposal is rejected rather than throwing', () => {
@@ -239,4 +242,49 @@ test('oversized plans are rejected with resumable split guidance', () => {
 test('verification command lists are bounded', () => {
   const verification = Array.from({ length: 17 }, (_, index) => `bun test --filter check-${index}`)
   expect(expectError({ ...minimal, verification })).toContain('highest-value checks')
+})
+
+// Session mubbhz5c-tnp9i0: mercury-2.5 sent every list field as a string on all
+// 11 attempts. `verification` was rejected with a message about command quality,
+// so the model rewrote its commands eleven times and never suspected the shape;
+// the other five fields were emptied in silence, which cost the run its
+// acceptance criteria and with them the only check a static page ever gets.
+test('a bullet list sent where an array belongs is coerced, not silently dropped', () => {
+  const proposal = expectOk({
+    ...minimal,
+    acceptanceCriteria: '- The folder "satvam" exists.\n- index.html includes the text "Satvam".',
+    assumptions: '- Only the frontend is in scope.',
+  })
+
+  expect(proposal.acceptanceCriteria).toEqual(['The folder "satvam" exists.', 'index.html includes the text "Satvam".'])
+  expect(proposal.assumptions).toEqual(['Only the frontend is in scope.'])
+})
+
+test('a JSON array sent as a string is parsed', () => {
+  const proposal = expectOk({ ...minimal, verification: '["bun test", "bun run build"]' })
+
+  expect(proposal.verification).toEqual(['bun test', 'bun run build'])
+})
+
+test('a single bracket-joined command is unambiguous and is coerced', () => {
+  const proposal = expectOk({ ...minimal, verification: '[bun satvam/verify.js]' })
+
+  expect(proposal.verification).toEqual(['bun satvam/verify.js'])
+})
+
+test('several bracket-joined commands are rejected by shape, not by command quality', () => {
+  const error = expectError({
+    ...minimal,
+    verification: '[if not exist satvam\index.html exit 1, if not exist satvam\style.css exit 1]',
+  })
+
+  // The old message sent the model off rewriting perfectly good commands.
+  expect(error).toContain('must be an array of strings')
+  expect(error).toContain('arrived as a single string')
+  expect(error).not.toContain('will actually fail if the work is wrong')
+})
+
+test('a genuinely absent verification still reports the original problem', () => {
+  expect(expectError({ ...minimal, verification: undefined })).toContain('at least one shell command')
+  expect(expectError({ ...minimal, verification: '   ' })).toContain('at least one shell command')
 })

@@ -594,3 +594,41 @@ test('the count carries from the risk pre-check into the turn it gated', async (
     unmount()
   }
 })
+
+// Session mubbhz5c-tnp9i0: `/settings` was typed while a run was in flight, so
+// it was queued. The drain handed it to `runOne`, which sent the literal text
+// to the model as a prompt — and the model, seeing a build request and no
+// outcome for it, carried on building.
+test('a slash command queued during a turn is dispatched, not sent to the model', async () => {
+  let slashCalls: string[] = []
+  let prompts: string[] = []
+  const props = {
+    ...baseProps(),
+    handleSlash: async (command: string) => {
+      slashCalls.push(command)
+      return { handled: true, text: 'Settings opened' }
+    },
+    submitTurn: async (text: string, _hooks: import('./App.tsx').TurnHooks) => {
+      prompts.push(text)
+      await new Promise((resolve) => setTimeout(resolve, 80))
+    },
+  }
+  const { stdin, lastFrame } = render(<App {...props} />)
+  await waitForFrame(lastFrame, READY)
+  await settle()
+  stdin.write('build the thing')
+  await waitForFrame(lastFrame, 'build the thing')
+  stdin.write('\r')
+  await waitForFrame(lastFrame, 'esc to interrupt')
+
+  stdin.write('/settings')
+  await waitForFrame(lastFrame, '/settings')
+  stdin.write('\r')
+  await waitForFrame(lastFrame, '1 queued')
+
+  await new Promise((resolve) => setTimeout(resolve, 400))
+
+  expect(slashCalls).toEqual(['/settings'])
+  // The whole point: it must not have become a prompt.
+  expect(prompts).toEqual(['build the thing'])
+})
