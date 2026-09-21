@@ -6,12 +6,16 @@ import type { CriticIssue, CriticVerdict } from './types.ts'
 import { currentAgent } from './context.ts'
 import { activeActionGovernor, blockedInUnattendedMode, type ActionGovernor } from './governor.ts'
 import { changedStaticPages } from './detectChecks.ts'
+import { detectMissingPackage, installCommandFor, isInstallCommand } from './autoInstall.ts'
 import { scanProjectFiles } from './hygiene.ts'
 import { ensurePreviewServer } from '../preview/server.ts'
 import { checkRendered, waitForHttp } from '../preview/readiness.ts'
 
 /** Verification commands are usually a test suite, which needs far longer than an ordinary tool call. */
 const VERIFY_TIMEOUT_MS = 300_000
+
+/** Same escape hatch the tool path uses — one switch turns auto-installing off everywhere. */
+const AUTO_INSTALL = process.env.ELIA_NO_AUTO_INSTALL !== '1'
 
 export interface VerificationOutcome {
   results: ShellResult[]
@@ -160,7 +164,35 @@ export async function runVerification(
     report(command, 'running')
     const probe = mayStartServer(command)
     const probeMs = options.serverProbeMs ?? SERVER_PROBE_MS
-    const result = await runShell(command, probe ? probeMs : VERIFY_TIMEOUT_MS, cwd, signal ?? currentAgent().signal)
+    let result = await runShell(command, probe ? probeMs : VERIFY_TIMEOUT_MS, cwd, signal ?? currentAgent().signal)
+
+    // A check that failed only because a dependency is not installed says
+    // nothing about the work. The tool path has installed and retried on this
+    // signal for a long time (`runCommand.ts`), but the verification gate went
+    // straight to `runShell` and so never did — the one place where a missing
+    // module is *least* likely to be a defect in the change. The run then
+    // reported a red gate, repaired code that was never broken, escalated once
+    // with "fix the environment first", and handed off; two of the twelve
+    // needs-attention runs in `.elia/runs` ended exactly there. Install it and
+    // re-run the check once, through the governor so a supervised run still
+    // asks.
+    if (AUTO_INSTALL && result.exitCode !== 0 && !result.timedOut && !isInstallCommand(command)) {
+      const missing = detectMissingPackage(`${result.stdout}\n${result.stderr}`)
+      if (missing) {
+        const installCmd = installCommandFor(missing, cwd ?? process.cwd())
+        const installGate = await (governor ?? activeActionGovernor()).check({ name: 'run_command', input: { command: installCmd } })
+        if (installGate.allowed) {
+          const installed = await runShell(installCmd, VERIFY_TIMEOUT_MS, cwd, signal ?? currentAgent().signal)
+          if (installed.exitCode === 0) {
+            const retry = await runShell(command, probe ? probeMs : VERIFY_TIMEOUT_MS, cwd, signal ?? currentAgent().signal)
+            // Keep the install visible in the record: a gate that only went
+            // green because elia changed the environment is a different fact
+            // from one that was green already.
+            result = { ...retry, stdout: `[auto-installed missing dependency: ${installCmd}]\n${retry.stdout}` }
+          }
+        }
+      }
+    }
     if (probe && result.timedOut) {
       // Still up long after a script would have finished: it started the app's
       // server. That is not a check any more than `npm run dev` is, so it is
@@ -226,6 +258,40 @@ export function isUnrunnableCommandFailure(result: ShellResult): boolean {
   // belongs in the same bucket as a command the shell rejected: the work is
   // unproven, not disproven. So does a test runner with no tests to run.
   return SHELL_REJECTED_COMMAND.test(result.stderr) || result.stderr.startsWith(SKIPPED_SERVER_PREFIX) || isNoTestsResult(result)
+}
+
+/**
+ * What a static-page render check is worth to this run's verification.
+ *
+ * `augment` — the declared commands passed, so the render is one more gate on
+ * top of them. `substitute` — nothing the plan declared produced a verdict, so
+ * the render is the only evidence there is and it *becomes* the verification.
+ * `none` — there is no page to render, or the declared checks genuinely failed
+ * and that failure is the real signal.
+ *
+ * The `substitute` case used to have a hole in it. The loop asked for the
+ * fallback only when at least one command had run and every one of them was
+ * unrunnable — but a plan whose checks are all refused at approval time
+ * reaches verification with an *empty* command list (`detectChecks` finds no
+ * manifest to infer from, which is the normal state of a freshly scaffolded
+ * static site). `runVerification([])` reports `passed: false` with zero
+ * results, so neither branch fired: the render check was skipped precisely
+ * when it was the only thing that could have proved anything. The run then
+ * repaired working code against a failure that was never about the code, and
+ * ended `needs-attention` asking a human to look at a page that rendered
+ * fine — observed on run 2026-09-15-cqd0-omdu (a tip calculator), and it is
+ * the same shape as the 6 of 7 rewrites in the run corpus that left the
+ * command list empty.
+ */
+export function staticRenderRole(
+  verification: Pick<VerificationOutcome, 'passed' | 'results'>,
+  hasRenderablePage: boolean,
+): 'none' | 'augment' | 'substitute' {
+  if (!hasRenderablePage) return 'none'
+  if (verification.passed) return 'augment'
+  // Nothing ran at all, or nothing that ran could produce a verdict.
+  if (verification.results.length === 0) return 'substitute'
+  return verification.results.every(isUnrunnableCommandFailure) ? 'substitute' : 'none'
 }
 
 /**

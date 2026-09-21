@@ -243,3 +243,35 @@ export function repeatedFailureLesson(input: {
     `The approach taken did not resolve this — a future run should diagnose this failure's root cause before committing to a plan.`
   )
 }
+
+/**
+ * Whether a gate that has spent its allowance has *earned* another repair pass.
+ *
+ * The repair budget was one-directional: `assessProgress` could cut a run short
+ * when it started thrashing, but nothing could extend it when the run was
+ * plainly working. So a run whose failures went 6 → 3 → 1 stopped at the
+ * counter and reported "this needs a human" — and the human's only move was to
+ * resume it and watch it close the last one. That is a hand-off the evidence
+ * did not call for.
+ *
+ * An extension is paid for strictly by evidence and stays bounded:
+ * `converging` is the one trend that qualifies (stalled and diverging runs are
+ * already stopped before this is asked), each gate can earn only
+ * `maxEarned` extra passes, and the run-wide ceiling is untouched — so the
+ * worst case is a fixed, small number of extra attempts on a run that was
+ * measurably closing failures the whole time.
+ */
+export function earnsExtraRepair(input: {
+  trend: ProgressTrend
+  repairsSpent: number
+  baseAllowance: number
+  earnedSoFar: number
+  maxEarned: number
+  totalRepairs: number
+  maxTotalRepairs: number
+}): boolean {
+  if (input.trend !== 'converging') return false
+  if (input.repairsSpent < input.baseAllowance + input.earnedSoFar) return false
+  if (input.earnedSoFar >= input.maxEarned) return false
+  return input.totalRepairs < input.maxTotalRepairs
+}

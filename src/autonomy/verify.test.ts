@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, expect, test } from 'bun:test'
-import { fallbackStaticPageVerification, hasBlockingIssues, isNoTestsResult, isUnrunnableCommandFailure, requireCriticVerdict, runVerification, unwinnableVerificationCommands } from './verify.ts'
+import { fallbackStaticPageVerification, hasBlockingIssues, isNoTestsResult, isUnrunnableCommandFailure, requireCriticVerdict, runVerification, staticRenderRole, unwinnableVerificationCommands } from './verify.ts'
 import { resetPreviewServerForTests } from '../preview/server.ts'
 
 afterEach(() => {
@@ -261,3 +261,148 @@ test('a watcher that throws cannot break the gate', async () => {
   })
   expect(outcome.passed).toBe(true)
 })
+
+test('a static page is rendered for evidence when no declared command could run', () => {
+  // `runVerification([])` — the shape a plan reaches verification with once its
+  // only declared check was refused and the project has no manifest to infer
+  // one from. Zero results, so the old "every result is unrunnable" guard was
+  // vacuously skipped and the page was never rendered (run 2026-09-15-cqd0-omdu).
+  expect(staticRenderRole({ passed: false, results: [] }, true)).toBe('substitute')
+})
+
+test('a static page render augments declared checks that did pass', () => {
+  const passed = { passed: true, results: [{ command: 'bun test', exitCode: 0, stdout: '', stderr: '', elapsedMs: 1, timedOut: false }] }
+  expect(staticRenderRole(passed, true)).toBe('augment')
+})
+
+test('a genuine verification failure is not papered over by a render check', () => {
+  const failed = {
+    passed: false,
+    results: [{ command: 'bun test', exitCode: 1, stdout: '', stderr: '2 failing', elapsedMs: 1, timedOut: false }],
+  }
+  expect(staticRenderRole(failed, true)).toBe('none')
+})
+
+test('unrunnable declared checks are substituted by the render check', () => {
+  const unrunnable = {
+    passed: false,
+    results: [{ command: 'Open index.html', exitCode: 1, stdout: '', stderr: "'Open' is not recognized as an internal or external command", elapsedMs: 1, timedOut: false }],
+  }
+  expect(staticRenderRole(unrunnable, true)).toBe('substitute')
+})
+
+test('no renderable page means no render check, whatever the verification said', () => {
+  expect(staticRenderRole({ passed: false, results: [] }, false)).toBe('none')
+  expect(staticRenderRole({ passed: true, results: [] }, false)).toBe('none')
+})
+
+// The tool path has installed-and-retried on "Cannot find module" for a long
+// time (`runCommand.ts`), but the verification gate called `runShell` directly
+// and never did — the one place a missing module is least likely to be a
+// defect in the change. The run reported a red gate, repaired code that was
+// never broken, and handed off; two of the twelve needs-attention runs in
+// `.elia/runs` ended on exactly that "environment problem, not a defect" stall.
+function recordingGovernor(allow: boolean, declared: string[]) {
+  // Anything the gate asks about that is *not* one of the declared checks is a
+  // command elia decided to run on its own — the install attempt under test.
+  const asked: string[] = []
+  return {
+    asked,
+    governor: {
+      mode: 'unattended' as const,
+      stats: () => ({ maxActions: 0, consumed: 0, exhausted: false, blockedByBudget: 0 }),
+      async check(request: { name: string; input: Record<string, unknown> }) {
+        const command = String(request.input.command ?? '')
+        if (declared.includes(command)) {
+          return { allowed: true, assessment: { risk: 'safe' as const, decision: 'allow' as const, reason: 'test', intent: 'run_command', resources: [], reversible: true } }
+        }
+        asked.push(command)
+        return { allowed: allow, assessment: { risk: 'review' as const, decision: (allow ? 'allow' : 'block') as 'allow' | 'block', reason: 'test', intent: 'run_command', resources: [], reversible: true } }
+      },
+    },
+  }
+}
+
+test('a check that fails only on a missing dependency asks to install it', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'elia-verify-autoinstall-'))
+  try {
+    writeFileSync(join(dir, 'check.ts'), 'console.error("Error: Cannot find module \'left-pad\'")\nprocess.exit(1)\n')
+    // Denied, so no package manager actually runs: what is under test is that
+    // the gate now reaches for the install at all.
+    const denied = recordingGovernor(false, ['bun check.ts'])
+    const outcome = await runVerification(['bun check.ts'], dir, undefined, denied.governor)
+
+    expect(denied.asked).toEqual(['npm install left-pad'])
+    // Denied install: the original failure stands, exactly as before.
+    expect(outcome.passed).toBe(false)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('an ordinary failing check is never mistaken for a missing dependency', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'elia-verify-real-failure-'))
+  try {
+    writeFileSync(join(dir, 'check.ts'), 'console.error("AssertionError: expected 3 to equal 4")\nprocess.exit(1)\n')
+    const denied = recordingGovernor(false, ['bun check.ts'])
+    const outcome = await runVerification(['bun check.ts'], dir, undefined, denied.governor)
+
+    expect(denied.asked).toEqual([])
+    expect(outcome.passed).toBe(false)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('a failing install command is not retried by installing again', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'elia-verify-install-loop-'))
+  try {
+    writeFileSync(join(dir, 'package.json'), '{ "name": "t" }')
+    const denied = recordingGovernor(false, ['npm install nope-does-not-exist-xyz'])
+    // The check *is* an install, and it failed reporting a missing module.
+    // Installing on top of a broken install is not the fix.
+    await runVerification(['npm install nope-does-not-exist-xyz'], dir, undefined, denied.governor)
+    expect(denied.asked).toEqual([])
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+}, 60_000)
+
+// End to end over the shape that stranded run 2026-09-15-cqd0-omdu (a tip
+// calculator): the plan's only declared check was refused at approval time and
+// `detectChecks` found no manifest to infer a replacement from, so
+// verification ran with an empty command list. The page was fine; nothing
+// looked at it, and the run ended `needs-attention` asking a human to.
+test('a page with no declared check left to run is still proved, not handed to a human', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'elia-verify-no-commands-'))
+  try {
+    writeFileSync(join(dir, 'index.html'), '<!DOCTYPE html><html><body><h1>Tip Calculator</h1><input id="bill"></body></html>')
+
+    const verification = await runVerification([], dir, undefined, allowAllGovernor())
+    // Nothing ran, so on its own this is unproven — the state the run used to end in.
+    expect(verification.passed).toBe(false)
+    expect(verification.results).toHaveLength(0)
+
+    // The page is the only evidence available, so it becomes the verification.
+    expect(staticRenderRole(verification, true)).toBe('substitute')
+    const rendered = await fallbackStaticPageVerification(['index.html'], dir)
+    expect(rendered?.passed).toBe(true)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+}, 30_000)
+
+test('a page that does not render is still a red gate, not a free pass', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'elia-verify-broken-page-'))
+  try {
+    // Declared by the plan, never written by the workers — the deliverable is missing.
+    writeFileSync(join(dir, 'unrelated.txt'), 'x')
+
+    const verification = await runVerification([], dir, undefined, allowAllGovernor())
+    expect(staticRenderRole(verification, true)).toBe('substitute')
+    const rendered = await fallbackStaticPageVerification(['index.html'], dir)
+    expect(rendered?.passed).toBe(false)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+}, 30_000)

@@ -45,13 +45,13 @@ import {
   describeVerification,
   fallbackStaticPageVerification,
   hasBlockingIssues,
-  isUnrunnableCommandFailure,
   mergeVerdicts,
   requireCriticVerdict,
   runVerification,
+  staticRenderRole,
   unwinnableVerificationCommands,
 } from './verify.ts'
-import { assessProgress, failureFingerprints, repeatedFailureLesson, type AttemptSnapshot } from './progress.ts'
+import { assessProgress, earnsExtraRepair, failureFingerprints, repeatedFailureLesson, type AttemptSnapshot } from './progress.ts'
 import { filesFromGitStatus, hygieneVerdict, scanProjectFiles, type HygieneInput } from './hygiene.ts'
 import { acceptanceVerdict, createAcceptanceTool } from './acceptance.ts'
 import { applyPlanRevisions, createPlanRevisionTool, MAX_PLAN_REVISIONS } from './replan.ts'
@@ -1483,6 +1483,16 @@ Read the changed files in full context. Improve only concrete issues directly re
   // hit, the run hands off regardless of which gate is open.
   const MAX_TOTAL_REPAIRS = maxRepairAttempts * 2 + 1
   let totalRepairs = 0
+  // Evidence could shorten the repair budget but never extend it: `assessProgress`
+  // stops a thrashing run early, while a run whose failures were measurably
+  // shrinking still stopped dead the moment a fixed counter ran out, and said
+  // "this needs a human". The human's move was to type `elia resume` and watch
+  // it finish. A gate that is still converging has earned the attempt the
+  // progress module itself says is warranted, so grant a bounded extension
+  // instead of handing off. Paid for by evidence, once per gate, and still
+  // under MAX_TOTAL_REPAIRS — a stalled or diverging gate earns nothing.
+  const MAX_EARNED_REPAIRS_PER_GATE = 2
+  const earnedRepairs: { build: number; review: number } = { build: 0, review: 0 }
   // Fingerprints of what was still failing after each verify+review pass, oldest
   // first — the input to the deterministic "are repairs actually converging?"
   // check that stops a thrashing run early instead of at the budget.
@@ -1527,26 +1537,31 @@ Read the changed files in full context. Improve only concrete issues directly re
     journal.append('phase', { phase: 'verify', attempt })
 
     const verification = await runVerification(proposal.verification, verificationRoot, runSignal, governor)
-    if (verification.passed && renderStaticPages) {
+    // Every declared check was rejected by the shell outright (e.g. "'Open'
+    // is not recognized"), or the plan arrived here with no runnable check at
+    // all — in both cases the command list says nothing about the work. Falling
+    // straight into repair means every attempt rewrites application code that
+    // was never broken, burns the whole budget, and still ends
+    // `needs-attention`. Seen live: run 2026-09-11-5q7z-abo2, where the built
+    // game worked (confirmed by playing it) but the plan's only "verification"
+    // was manual-testing prose, and run 2026-09-15-cqd0-omdu, where the list
+    // was empty. Substitute the interactive loop's own static-page render
+    // check, which is real evidence rather than an assumed pass.
+    const renderRole = staticRenderRole(verification, renderStaticPages)
+    if (renderRole !== 'none') {
       const rendered = await fallbackStaticPageVerification(deliveredFiles, verificationRoot, runSignal)
-      if (rendered) {
+      if (rendered && renderRole === 'augment') {
         verification.results.push(...rendered.results)
         verification.passed = rendered.passed
-      }
-    } else if (!verification.passed && verification.results.length > 0 && verification.results.every(isUnrunnableCommandFailure)) {
-      // Every declared check was rejected by the shell outright (e.g. "'Open'
-      // is not recognized") — the command was prose, not a real check, so its
-      // failure says nothing about the work. Falling straight into repair here
-      // means every attempt rewrites application code that was never broken,
-      // burns the whole budget, and still ends `needs-attention`. Seen live:
-      // run 2026-09-11-5q7z-abo2, where the built game worked (confirmed by
-      // playing it) but the plan's only "verification" was manual-testing
-      // prose. Substitute the interactive loop's own static-page render check.
-      const fallback = await fallbackStaticPageVerification(deliveredFiles, verificationRoot, runSignal)
-      if (fallback) {
-        writeSubStep('declared verification command(s) were not runnable shell commands — falling back to a static-page render check')
-        verification.passed = fallback.passed
-        verification.results = fallback.results
+      } else if (rendered) {
+        writeSubStep(
+          verification.results.length === 0
+            ? 'no declared verification command could run — proving this with a static-page render check instead'
+            : 'declared verification command(s) were not runnable shell commands — falling back to a static-page render check',
+        )
+        verification.passed = rendered.passed
+        verification.results = rendered.results
+        verification.inconclusive = undefined
       }
     }
     for (const result of verification.results) {
@@ -1763,7 +1778,7 @@ Judge what is there, not what the code looks like it would probably do. A criter
     // Show the repair trajectory so a long repair phase reads as progress, not a hang.
     if (progressHistory.length > 1 && progress.trend !== 'resolved') {
       const counts = progressHistory.map((snap) => snap.failures.length).join(' → ')
-      writeSubStep(`repair ${gate} ${repairsSpent}/${maxRepairAttempts} · failures ${counts} · ${progress.trend}`)
+      writeSubStep(`repair ${gate} ${repairsSpent}/${maxRepairAttempts + earnedRepairs[gate]} · failures ${counts} · ${progress.trend}`)
     }
     if (progress.recommendation === 'stop' && (progress.trend === 'stalled' || progress.trend === 'diverging')) {
       // Command output and review prose are kept apart on purpose: a security
@@ -1773,7 +1788,7 @@ Judge what is there, not what the code looks like it would probably do. A criter
       const reviewText = describeIssues(verdict?.issues ?? [])
       const stuck = classifyStuck({ failureText, reviewText, agentReport: lastRepairReport, trend: progress.trend })
       const canEscalate =
-        repairsSpent < maxRepairAttempts &&
+        repairsSpent < maxRepairAttempts + earnedRepairs[gate] &&
         (stuck.recovery === 'replan' || stuck.recovery === 'fix-environment') &&
         !escalationsUsed.has(stuck.recovery)
 
@@ -1818,8 +1833,30 @@ Judge what is there, not what the code looks like it would probably do. A criter
       }
     }
 
-    if (repairsSpent >= maxRepairAttempts || totalRepairs >= MAX_TOTAL_REPAIRS) {
-      const why = repairsSpent >= maxRepairAttempts ? `${gate} gate exhausted` : `repair ceiling reached (${totalRepairs})`
+    // The gate ran out of its allowance while the failures were still measurably
+    // shrinking. `assessProgress` has already ruled out thrashing to get here
+    // (a stalled or diverging trend takes the branch above), so the counter is
+    // the only thing standing between this run and a finish it was on track
+    // for. Buy one more attempt with that evidence rather than handing a
+    // converging run to a human whose only move is to resume it.
+    if (earnsExtraRepair({
+      trend: progress.trend,
+      repairsSpent,
+      baseAllowance: maxRepairAttempts,
+      earnedSoFar: earnedRepairs[gate],
+      maxEarned: MAX_EARNED_REPAIRS_PER_GATE,
+      totalRepairs,
+      maxTotalRepairs: MAX_TOTAL_REPAIRS,
+    })) {
+      earnedRepairs[gate] += 1
+      writeSubStep(`${gate} gate budget spent, but failures are still closing (${progress.reason}) — earned attempt ${earnedRepairs[gate]} of ${MAX_EARNED_REPAIRS_PER_GATE}.`)
+      journal.append('phase', { phase: 'reflect', attempt, note: `earned repair ${earnedRepairs[gate]}/${MAX_EARNED_REPAIRS_PER_GATE} on the ${gate} gate: ${progress.trend} (${progress.reason})` })
+    }
+
+    // The allowance the earned attempts above may just have raised.
+    const gateAllowance = maxRepairAttempts + earnedRepairs[gate]
+    if (repairsSpent >= gateAllowance || totalRepairs >= MAX_TOTAL_REPAIRS) {
+      const why = repairsSpent >= gateAllowance ? `${gate} gate exhausted` : `repair ceiling reached (${totalRepairs})`
       writeSubStep(`Stopping after ${attempt} repair attempt${attempt === 1 ? '' : 's'} (${why}) — this needs a human.`)
       // Only draw the lesson when the trajectory actually stalled/regressed — a
       // run that was still converging when the budget ran out has no dead
@@ -1837,8 +1874,8 @@ Judge what is there, not what the code looks like it would probably do. A criter
     if (verification.passed) reviewRepairs += 1
     else buildRepairs += 1
     const gateAttempt = verification.passed ? reviewRepairs : buildRepairs
-    taskSessions.update(parentTask.id, { status: 'running', action: 'Repairing', detail: `Addressing ${gate} failures (${gate} attempt ${gateAttempt} of ${maxRepairAttempts})` })
-    writePhase('reflect', `${gate} attempt ${gateAttempt} of ${maxRepairAttempts}`)
+    taskSessions.update(parentTask.id, { status: 'running', action: 'Repairing', detail: `Addressing ${gate} failures (${gate} attempt ${gateAttempt} of ${gateAllowance})` })
+    writePhase('reflect', `${gate} attempt ${gateAttempt} of ${gateAllowance}`)
     journal.append('phase', { phase: 'reflect', attempt, gate, gateAttempt })
 
     const problem = verification.passed

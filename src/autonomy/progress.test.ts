@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { assessProgress, errorSignature, failureFingerprints, repeatedFailureLesson, type AttemptSnapshot } from './progress.ts'
+import { assessProgress, earnsExtraRepair, errorSignature, failureFingerprints, repeatedFailureLesson, type AttemptSnapshot } from './progress.ts'
 import type { VerificationOutcome } from './verify.ts'
 import type { CriticVerdict } from './types.ts'
 
@@ -162,4 +162,41 @@ test('repeatedFailureLesson handles a recurring review finding', () => {
 test('repeatedFailureLesson returns undefined when nothing recurred or only one attempt was made', () => {
   expect(repeatedFailureLesson({ goal: 'g', gate: 'build', repeated: [], attempts: 3 })).toBeUndefined()
   expect(repeatedFailureLesson({ goal: 'g', gate: 'build', repeated: ['verify:x::y'], attempts: 1 })).toBeUndefined()
+})
+
+// The repair budget used to be one-directional: evidence could stop a run
+// early but never keep a working one going. A run closing failures 6 → 3 → 1
+// hit the counter and reported "this needs a human", whose only move was to
+// resume it.
+
+test('a converging gate earns another attempt when its allowance runs out', () => {
+  expect(earnsExtraRepair({
+    trend: 'converging', repairsSpent: 2, baseAllowance: 2, earnedSoFar: 0, maxEarned: 2, totalRepairs: 2, maxTotalRepairs: 5,
+  })).toBe(true)
+})
+
+test('a stalled or diverging gate earns nothing', () => {
+  for (const trend of ['stalled', 'diverging'] as const) {
+    expect(earnsExtraRepair({
+      trend, repairsSpent: 2, baseAllowance: 2, earnedSoFar: 0, maxEarned: 2, totalRepairs: 2, maxTotalRepairs: 5,
+    })).toBe(false)
+  }
+})
+
+test('earned attempts are bounded per gate', () => {
+  expect(earnsExtraRepair({
+    trend: 'converging', repairsSpent: 4, baseAllowance: 2, earnedSoFar: 2, maxEarned: 2, totalRepairs: 4, maxTotalRepairs: 9,
+  })).toBe(false)
+})
+
+test('the run-wide repair ceiling still ends the run', () => {
+  expect(earnsExtraRepair({
+    trend: 'converging', repairsSpent: 2, baseAllowance: 2, earnedSoFar: 0, maxEarned: 2, totalRepairs: 5, maxTotalRepairs: 5,
+  })).toBe(false)
+})
+
+test('a gate with allowance left does not need to earn anything', () => {
+  expect(earnsExtraRepair({
+    trend: 'converging', repairsSpent: 1, baseAllowance: 2, earnedSoFar: 0, maxEarned: 2, totalRepairs: 1, maxTotalRepairs: 5,
+  })).toBe(false)
 })
