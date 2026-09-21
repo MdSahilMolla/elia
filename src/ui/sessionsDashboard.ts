@@ -2,7 +2,8 @@ import { box, terminalWidth } from './layout.ts'
 import type { KeyEvent } from './picker.ts'
 import { interactiveTerminal, plainOutput } from './runtime.ts'
 import { gracefulShutdown, registerShutdownCleanup } from './shutdown.ts'
-import { listKnownSessions, type KnownSession, type SessionLiveStatus } from '../sessionRegistry.ts'
+import { listKnownSessions } from '../sessionRegistry.ts'
+import { describeSession, listSessionSummaries, relativeTime, sessionDetail, type SessionSummary } from '../sessionCatalog.ts'
 import { moveTaskSelection } from './taskDashboard.ts'
 import { bold, cyan, dim, gold, green, red, reverse } from './theme.ts'
 
@@ -10,16 +11,23 @@ const PAGE_SIZE = 10
 const POLL_MS = 1000
 
 /**
- * `/sessions` — every other elia process running in this project, discovered
- * from their heartbeat files (sessionRegistry.ts), not from anything this
- * process itself is doing. Polled rather than event-driven, since sibling
- * processes' writes aren't visible any other way from here.
+ * `/sessions` — every conversation in this project, whether or not a process
+ * still has it open, newest first. Enter resumes the selected one.
+ *
+ * The list of conversations is read once when the panel opens; the live column
+ * (which of them another elia is holding, and what it is doing) is polled from
+ * the heartbeat files, since a sibling process's writes are not visible any
+ * other way from here. Only the poll repeats — re-parsing every conversation
+ * once a second to learn nothing new is not worth it.
+ *
+ * Resolves with the session id to resume, or undefined if the panel was just
+ * closed.
  */
-export function openSessionsDashboard(selfId: string | undefined, dir?: string): Promise<void> {
-  const initial = listKnownSessions(dir)
+export async function openSessionsDashboard(selfId: string | undefined, statusDir?: string): Promise<string | undefined> {
+  const initial = await listSessionSummaries({ statusDir })
   if (!interactiveTerminal) {
     writePlainSessionsList(initial, selfId)
-    return Promise.resolve()
+    return undefined
   }
 
   const stdin = process.stdin
@@ -31,6 +39,7 @@ export function openSessionsDashboard(selfId: string | undefined, dir?: string):
   let viewportStart = 0
   let rendered = 0
   let closed = false
+  let chosen: string | undefined
   let resolveClosed: (() => void) | undefined
 
   function adjustViewport(): void {
@@ -53,11 +62,11 @@ export function openSessionsDashboard(selfId: string | undefined, dir?: string):
           const label = index === selected ? reverse(renderSessionLine(session, selfId, width - 4)) : renderSessionLine(session, selfId, width - 4)
           return `${marker} ${label}`
         })
-      : ['  No other elia sessions found in this project yet.']
+      : ['  No saved conversations in this project yet.']
     const detailLines = selectedSession ? sessionDetailLines(selectedSession, selfId) : ['Select a session to see its details.']
     const range = current.length > 0 ? `showing ${viewportStart + 1}–${Math.min(current.length, viewportStart + visible.length)} of ${current.length}` : 'no sessions'
     const lines = [
-      `${bold('elia sessions')} ${dim('(↑/↓ move · pgup/pgdn page · q/esc close)')}`,
+      `${bold('elia sessions')} ${dim('(↑/↓ move · pgup/pgdn page · enter resume · q/esc close)')}`,
       ...listLines,
       dim(range),
       '',
@@ -67,9 +76,16 @@ export function openSessionsDashboard(selfId: string | undefined, dir?: string):
     rendered = lines.length
   }
 
+  /** Re-reads only the heartbeats and folds their live status back onto the list. */
   function refresh(): void {
     if (closed) return
-    current = listKnownSessions(dir)
+    const beats = new Map(listKnownSessions(statusDir).map((beat) => [beat.sessionId, beat]))
+    current = current.map((session) => {
+      const beat = beats.get(session.id)
+      if (!beat) return session
+      const live = !beat.endedAt && (beat.liveStatus === 'running' || beat.liveStatus === 'idle')
+      return { ...session, status: beat.liveStatus, lastAction: beat.lastAction, pid: beat.pid, heldByLiveProcess: live && session.heldByLiveProcess }
+    })
     if (selected >= current.length) selected = Math.max(0, current.length - 1)
     render()
   }
@@ -102,6 +118,13 @@ export function openSessionsDashboard(selfId: string | undefined, dir?: string):
       return
     }
     if (current.length === 0) return
+    if (key.name === 'return') {
+      const session = current[selected]
+      // A session with nothing saved yet has no conversation to hand back.
+      if (session?.hasConversation) chosen = session.id
+      close()
+      return
+    }
     const next = moveTaskSelection(selected, current.length, key)
     if (next !== selected) selected = next
     render()
@@ -113,58 +136,54 @@ export function openSessionsDashboard(selfId: string | undefined, dir?: string):
   const timer = setInterval(refresh, POLL_MS)
   render()
 
-  return new Promise<void>((resolve) => {
+  await new Promise<void>((resolve) => {
     resolveClosed = resolve
   })
+  return chosen
 }
 
-function renderSessionLine(session: KnownSession, selfId: string | undefined, maxWidth: number): string {
-  const self = session.sessionId === selfId ? cyan(' (this session)') : ''
-  const line = `${statusGlyph(session.liveStatus)} ${truncate(session.sessionId, 18).padEnd(18)} ${cyan(session.mode.padEnd(9))} ${truncate(session.model, 18).padEnd(18)} ${truncate(session.lastAction || session.liveStatus, 24)}${self}`
+function renderSessionLine(session: SessionSummary, selfId: string | undefined, maxWidth: number): string {
+  const self = session.id === selfId ? cyan(' (this session)') : ''
+  const line = `${statusGlyph(session)} ${truncate(session.id, 18).padEnd(18)} ${cyan(relativeTime(session.updatedAt).padEnd(9))} ${truncate(session.model ?? '—', 18).padEnd(18)} ${describeSession(session, 34)}${self}`
   return truncate(line, Math.max(20, maxWidth))
 }
 
-function sessionDetailLines(session: KnownSession, selfId: string | undefined): string[] {
+function sessionDetailLines(session: SessionSummary, selfId: string | undefined): string[] {
   return [
-    `${bold('Session')}  ${session.sessionId}${session.sessionId === selfId ? dim(' (this session)') : ''}`,
-    `${bold('State')}    ${statusGlyph(session.liveStatus)} ${session.liveStatus}`,
-    `${bold('Mode')}     ${session.mode}`,
-    `${bold('Model')}    ${session.providerLabel} · ${session.model}`,
+    `${bold('Session')}  ${session.id}${session.id === selfId ? dim(' (this session)') : ''}`,
+    `${bold('State')}    ${statusGlyph(session)} ${session.heldByLiveProcess ? `open in pid ${session.pid}` : session.status}`,
+    `${bold('Started')}  ${describeSession(session, 70)}`,
+    `${bold('Model')}    ${session.providerName ? `${session.providerName} · ` : ''}${session.model ?? 'unknown'}`,
     `${bold('Doing')}    ${truncate(session.lastAction || '—', 70)}`,
-    `${bold('Tasks')}    ${session.taskSummary || '—'}`,
-    `${bold('Messages')} ${session.messageCount}`,
-    `${bold('Started')}  ${relativeTime(session.startedAt)}`,
+    `${bold('Turns')}    ${session.turns} (${session.messages} messages)`,
     `${bold('Updated')}  ${relativeTime(session.updatedAt)}`,
-    `${bold('Resume')}   elia --resume ${session.sessionId}`,
+    session.id === selfId
+      ? dim('This is the conversation you are in.')
+      : session.hasConversation
+        ? `${bold('Resume')}   enter — or elia --resume ${session.id}`
+        : dim('Nothing saved in this session yet, so there is nothing to resume.'),
   ]
 }
 
-function writePlainSessionsList(sessions: KnownSession[], selfId: string | undefined): void {
+function writePlainSessionsList(sessions: SessionSummary[], selfId: string | undefined): void {
   if (sessions.length === 0) {
-    process.stdout.write('No other elia sessions found in this project yet.\n')
+    process.stdout.write('No saved conversations in this project yet.\n')
     return
   }
-  const lines = sessions.map((session) => `[${session.liveStatus}] ${session.sessionId}${session.sessionId === selfId ? ' (this session)' : ''} — ${session.mode} · ${session.model} — ${session.lastAction || session.liveStatus}`)
+  const lines = sessions.map(
+    (session) =>
+      `[${session.heldByLiveProcess ? 'open' : session.status}] ${session.id}${session.id === selfId ? ' (this session)' : ''} — ${sessionDetail(session)} — ${describeSession(session, 48)}`,
+  )
   process.stdout.write(`${box(lines, { title: 'elia sessions' })}\n`)
 }
 
-function statusGlyph(status: SessionLiveStatus): string {
+function statusGlyph(session: SessionSummary): string {
+  const status = session.heldByLiveProcess ? (session.status === 'running' ? 'running' : 'idle') : session.status
   if (plainOutput) return `[${status}]`
   if (status === 'running') return gold('•')
   if (status === 'idle') return green('·')
-  if (status === 'ended') return dim('✓')
+  if (status === 'saved' || status === 'ended') return dim('✓')
   return red('✗')
-}
-
-function relativeTime(ms: number): string {
-  const deltaS = Math.max(0, Math.round((Date.now() - ms) / 1000))
-  if (deltaS < 5) return 'just now'
-  if (deltaS < 60) return `${deltaS}s ago`
-  const deltaM = Math.round(deltaS / 60)
-  if (deltaM < 60) return `${deltaM}m ago`
-  const deltaH = Math.round(deltaM / 60)
-  if (deltaH < 24) return `${deltaH}h ago`
-  return `${Math.round(deltaH / 24)}d ago`
 }
 
 function truncate(text: string, max: number): string {

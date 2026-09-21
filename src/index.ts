@@ -14,7 +14,7 @@ import { runBench, runBenchLatency } from './cli/bench.ts'
 import { runCompounding, runDistill, runEvolve, runGap, runJev, runValues } from './cli/selfImprove.ts'
 import { runConfig, runControl, runSkills } from './cli/settings.ts'
 import { runDaemon, runDoctor, runSchedule } from './cli/ops.ts'
-import { runFork, runResume, runRuns } from './cli/sessions.ts'
+import { runFork, runResume, runRuns, runSessionsList } from './cli/sessions.ts'
 import { runAgentCommand, runAuto } from './cli/agent.ts'
 
 // These three run before anything else in the process: they are the only flags
@@ -82,6 +82,8 @@ async function main() {
       return runSkills()
     case 'runs':
       return runRuns()
+    case 'sessions':
+      return runSessionsList()
     case 'fork':
       return runFork()
     case 'resume':

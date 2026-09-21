@@ -14,7 +14,8 @@ Usage:
   elia                        Start an interactive session
   elia "<prompt>"             Run a single prompt and exit
   elia --continue, -c         Resume the most recent session in this directory
-  elia --resume <id>          Resume a specific session by id
+  elia --resume [id]          Reopen a past conversation — with no id, pick one from the list
+  elia sessions [--all]       List the conversations saved here: id, when, and what each started with
   elia --no-escalate          Never auto-route a big "build me an X" request through the autonomous pipeline
   elia --self                 Started inside elia's own repository, change elia's source without asking
                               (by default elia asks first there, for anything outside workspace/ and .elia/)
@@ -171,6 +172,9 @@ Inside an interactive session:
                               continue from the summary; optional focus, e.g. /compact the auth bug
   /clear                      Start a fresh conversation; the previous one is saved and can be
                               reopened with elia --resume <id>
+  /resume [id]                Switch to another conversation from this project without restarting;
+                              the one you leave is saved first, so /resume <its id> goes back
+  /sessions                   Every conversation here, live or saved — enter resumes the selected one
   /model                      Pick a provider/model or enable auto fallback
   /model auto                 Keep the selected model primary; fail over to another ready provider
   /model <provider>           Switch provider (e.g. /model groq), keeping its default model

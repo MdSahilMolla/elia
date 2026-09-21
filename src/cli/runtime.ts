@@ -31,6 +31,7 @@ const REPL_COMMANDS: SlashCommand[] = [
   { name: '/rewind', description: 'restore an earlier checkpoint' },
   { name: '/compact', description: 'summarise the conversation to free context · /compact [focus]' },
   { name: '/clear', description: 'start a fresh conversation (the old one stays resumable)' },
+  { name: '/resume', description: 'switch to another conversation here · /resume [id]' },
   { name: '/settings', description: 'model, effort, risk checks, compact, clear' },
   { name: '/mcp', description: 'MCP servers — add, test, reload, remove' },
   { name: '/connector', description: 'hosted MCP connectors — add, test, remove' },

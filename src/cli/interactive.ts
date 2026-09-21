@@ -68,11 +68,21 @@ interface TurnUiHooks {
 
 export async function runInteractive(): Promise<void> {
   const continueFlag = hasFlag('--continue', '-c')
-  const resumeId = flagValue('--resume')
-  if (hasFlag('--resume') && !resumeId) {
-    writeError('--resume requires a session id.')
-    process.exitCode = 1
-    return
+  // `--resume` on its own offers the list; `--resume <id>` (or an unambiguous
+  // prefix) goes straight there. Resolved before anything else starts, because
+  // an unresolvable one should fail here rather than after the provider check,
+  // the MCP handshake and the intro animation.
+  let resumeId: string | undefined
+  let resumeHeldByPid: number | undefined
+  if (hasFlag('--resume') || flagValue('--resume') !== undefined) {
+    const { chooseSessionToResume } = await import('./sessions.ts')
+    const target = await chooseSessionToResume(flagValue('--resume'))
+    if (!target) {
+      process.exitCode = 1
+      return
+    }
+    resumeId = target.id
+    resumeHeldByPid = target.heldByPid
   }
 
   // Start connecting to MCP servers now, before the first-run check, the intro
@@ -125,6 +135,8 @@ export async function runInteractive(): Promise<void> {
   // instead of wrapping the whole loop in a scope.
   setProcessProvenance({ sessionId, surface: 'interactive', model: config.model, version: eliaVersion() })
   let priorUsage: SessionUsageSnapshot = { usage: ZERO_USAGE, turns: 0, elapsedMs: 0 }
+  /** Where the current conversation begins in this process's own usage counters — see cumulativeSessionUsage. */
+  let usageBaseline: SessionUsageSnapshot = { usage: ZERO_USAGE, turns: 0, elapsedMs: 0 }
   // manual (default): a cheap risk check runs before each command — only
   // commands flagged risky (deletes, sends, spend, publishing, system
   // changes, ...) get an "About to: ... run it?" prompt; everything else just
@@ -170,7 +182,24 @@ export async function runInteractive(): Promise<void> {
       sessionTranscript.restore(loaded.recording ?? transcriptFromMessages(loaded.messages))
       if (!loaded.recording) sessionTranscript.notice('Legacy session: only previously retained messages are available; earlier discarded activity cannot be recovered.')
       if (loaded.usage) priorUsage = loaded.usage
-      writeNotice(`Resumed session ${sessionId} (${messages.length} messages)`)
+
+      // Both processes save the whole conversation after every turn, so the
+      // second one to write wins and the other's turns are gone. Continue from
+      // the same history under a new id instead: nothing is lost on either side,
+      // and the one still running keeps its own file.
+      const holder = resumeHeldByPid ?? (continueFlag ? (await import('../sessionCatalog.ts')).sessionHolder(loaded.id)?.pid : undefined)
+      if (holder !== undefined) {
+        const copyOf = loaded.id
+        sessionId = newSessionId()
+        priorUsage = { usage: ZERO_USAGE, turns: 0, elapsedMs: 0 }
+        writeNotice(
+          `Session ${copyOf} is open in another elia (pid ${holder}), so this one continues its ${messages.length} messages as a separate session ${sessionId}. ` +
+            'Both keep their own history; neither overwrites the other.',
+        )
+      } else {
+        writeNotice(`Resumed session ${sessionId} (${messages.length} messages)`)
+      }
+
       if (loaded.providerName && (loaded.providerName !== config.providerName || loaded.model !== config.model)) {
         writeNotice(
           `This session was created on ${loaded.providerName} (${loaded.model ?? 'unknown model'}); ` +
@@ -226,8 +255,27 @@ export async function runInteractive(): Promise<void> {
     writeSessionHeartbeat(sessionStatus(busy, lastAction))
   }
 
+  /**
+   * What this process has spent *on the session it is in now*.
+   *
+   * The usage counters are per-process and never reset, so after `/clear` or
+   * `/resume` swaps the conversation underneath them their running total still
+   * includes the previous one. `usageBaseline` marks where the current session
+   * started in that total; everything before it belongs to a conversation that
+   * has already been saved with its own figures.
+   */
   function cumulativeSessionUsage(): SessionUsageSnapshot {
-    const snapshot = sessionUsageSnapshot()
+    const live = sessionUsageSnapshot()
+    const snapshot: SessionUsageSnapshot = {
+      usage: {
+        inputTokens: live.usage.inputTokens - usageBaseline.usage.inputTokens,
+        outputTokens: live.usage.outputTokens - usageBaseline.usage.outputTokens,
+        cacheReadTokens: live.usage.cacheReadTokens - usageBaseline.usage.cacheReadTokens,
+        cacheWriteTokens: live.usage.cacheWriteTokens - usageBaseline.usage.cacheWriteTokens,
+      },
+      turns: live.turns - usageBaseline.turns,
+      elapsedMs: live.elapsedMs - usageBaseline.elapsedMs,
+    }
     return { usage: addUsage(priorUsage.usage, snapshot.usage), turns: priorUsage.turns + snapshot.turns, elapsedMs: priorUsage.elapsedMs + snapshot.elapsedMs }
   }
 
@@ -635,11 +683,91 @@ export async function runInteractive(): Promise<void> {
     const { resetActiveTodoList } = await import('../autonomy/todoList.ts')
     resetActiveTodoList()
     resetProviderConversations()
+    usageBaseline = sessionUsageSnapshot()
     pushHeartbeat(false, 'Idle at prompt')
 
     return hadConversation
       ? `Started a fresh conversation. The previous one is saved — elia --resume ${previousId} reopens it.`
       : 'Started a fresh conversation.'
+  }
+
+  /**
+   * `/resume <id>` — leave this conversation for another one without restarting.
+   *
+   * The same swap `--resume` does at launch, done in place: this conversation is
+   * saved under its own id first, so switching is always reversible, and the
+   * rewind points, usage figures and transcript that come back are the target's
+   * own. A session another live elia is holding is opened as a copy under a new
+   * id rather than shared, for the reason in the CLI path above.
+   */
+  async function resumeIntoSession(targetId: string): Promise<{ text: string; sessionId?: string }> {
+    if (targetId === sessionId) return { text: 'Already in that conversation.' }
+    const loaded = await loadSession(targetId)
+    if (!loaded) return { text: `No saved conversation with id "${targetId}" in this directory. See them with /sessions.` }
+
+    const { sessionHolder, relativeTime } = await import('../sessionCatalog.ts')
+    const holder = sessionHolder(targetId)
+    const leaving = sessionId
+    const hadConversation = messages.length > 0
+    if (hadConversation) await persistInteractiveSession()
+    writeSessionEnded(sessionStatus(false, `Switched to session ${targetId}`))
+
+    sessionId = holder ? newSessionId() : loaded.id
+    messages.length = 0
+    messages.push(...loaded.messages)
+    checkpoints.length = 0
+    checkpoints.push(...(await loadCheckpoints(sessionId)))
+    sessionTranscript.restore(loaded.recording ?? transcriptFromMessages(loaded.messages))
+    priorUsage = holder ? { usage: ZERO_USAGE, turns: 0, elapsedMs: 0 } : loaded.usage ?? { usage: ZERO_USAGE, turns: 0, elapsedMs: 0 }
+    usageBaseline = sessionUsageSnapshot()
+    pendingAttachments.length = 0
+    carriedShellContext.length = 0
+    taskSessions.setActiveSession(sessionId)
+    setActiveLedgerSession(undefined)
+    const { resetActiveTodoList } = await import('../autonomy/todoList.ts')
+    resetActiveTodoList()
+    resetProviderConversations()
+    // Writes the new id's file immediately, so a copy exists on disk from the
+    // moment it is offered rather than only after the first turn.
+    await persistInteractiveSession()
+    pushHeartbeat(false, 'Idle at prompt')
+
+    const turns = loaded.messages.filter((message) => message.role === 'user').length
+    const header = holder
+      ? `${targetId} is open in another elia (pid ${holder.pid}), so its ${loaded.messages.length} messages continue here as a separate session ${sessionId}.`
+      : `Resumed ${sessionId} — ${turns} turn${turns === 1 ? '' : 's'}, last active ${relativeTime(loaded.updatedAt)}${loaded.model ? ` on ${loaded.model}` : ''}.`
+    const provider = loaded.providerName && (loaded.providerName !== config.providerName || loaded.model !== config.model)
+      ? `\nIt was built on ${loaded.providerName} (${loaded.model ?? 'unknown model'}); it continues here on ${config.providerLabel}.`
+      : ''
+    const back = hadConversation ? `\nThe conversation you left is saved — /resume ${leaving} goes back.` : ''
+    return { text: `${header}${provider}${back}${renderResumedContext()}`, sessionId }
+  }
+
+  /** The tail of a resumed conversation, so the switch lands somewhere recognisable. */
+  function renderResumedContext(limit = 4): string {
+    const lines = sessionTranscript
+      .items()
+      .filter((item): item is import('../ui/transcript.ts').TranscriptUserItem | import('../ui/transcript.ts').TranscriptAssistantItem =>
+        item.kind === 'user' || item.kind === 'assistant')
+      .slice(-limit)
+      .map((item) => {
+        const text = item.text.replace(/\s+/g, ' ').trim()
+        const clipped = text.length > 110 ? `${text.slice(0, 109)}…` : text
+        return `  ${item.kind === 'user' ? '›' : '·'} ${clipped}`
+      })
+    return lines.length > 0 ? `\n\nwhere it left off:\n${lines.join('\n')}` : ''
+  }
+
+  /**
+   * The `/resume` picker's options: every conversation here except this one,
+   * newest first. Shared by the Ink and readline REPLs.
+   */
+  async function resumablePickerOptions(): Promise<{ label: string; detail: string; value: string }[]> {
+    const { describeSession, listSessionSummaries, sessionDetail } = await import('../sessionCatalog.ts')
+    const sessions = await listSessionSummaries()
+    return sessions
+      .filter((session) => session.id !== sessionId && session.hasConversation)
+      .map((session) => ({ label: describeSession(session, 64), detail: sessionDetail(session), value: session.id }))
   }
 
   async function runCheckpointedTurn(userText: string, approveAction?: ActionApproval, skillNames = selectedSkillNames, uiHooks?: TurnUiHooks): Promise<void> {
@@ -1783,6 +1911,24 @@ export async function runInteractive(): Promise<void> {
     return text
   }
 
+  /** `/resume [id]` for the plain readline REPL — the same switch, with its own picker. */
+  async function resumeClassicSession(asked: string | undefined): Promise<string> {
+    if (asked) {
+      const { listSessionIds, resolveSessionId } = await import('../sessionCatalog.ts')
+      const lookup = resolveSessionId(asked, listSessionIds())
+      if (lookup.kind === 'ambiguous') return `"${asked}" matches ${lookup.ids.length} sessions: ${lookup.ids.slice(0, 6).join(', ')}. Use more of the id.`
+      if (lookup.kind === 'missing') return `No saved conversation starting with "${asked}" in this directory.`
+      return (await resumeIntoSession(lookup.id)).text
+    }
+    const options = await resumablePickerOptions()
+    if (options.length === 0) return 'No other saved conversations in this directory yet.'
+    const { pick } = await import('../ui/picker.ts')
+    const chosen = await pick('Resume a conversation', options, 0, { searchable: true })
+    if (chosen.type === 'cancel') return 'Cancelled.'
+    if (chosen.type === 'unavailable') return `This terminal cannot draw the picker. Name one instead: /resume <id> — see them with /sessions.`
+    return (await resumeIntoSession(chosen.value)).text
+  }
+
   /** Run a read-only command and return its stdout, or '' if it fails / isn't installed. */
   async function runShellQuiet(command: string): Promise<string> {
     try {
@@ -1925,6 +2071,36 @@ export async function runInteractive(): Promise<void> {
       return { handled: true, text, clear: { sessionId } }
     }
 
+    const resumeMatch = /^\/resume(?:\s+(.+))?$/.exec(trimmed)
+    if (resumeMatch) {
+      // Switching wipes the screen the way /clear does — the frame below the
+      // header belongs to the conversation being left — and the outcome's own
+      // text then reprints where the resumed one left off.
+      const switchTo = async (id: string): Promise<InkSlashOutcome> => {
+        const result = await resumeIntoSession(id)
+        return result.sessionId ? { handled: true, text: result.text, clear: { sessionId: result.sessionId } } : done(result.text)
+      }
+      const asked = resumeMatch[1]?.trim()
+      if (asked) {
+        const { listSessionIds, resolveSessionId } = await import('../sessionCatalog.ts')
+        const lookup = resolveSessionId(asked, listSessionIds())
+        if (lookup.kind === 'found') return switchTo(lookup.id)
+        if (lookup.kind === 'ambiguous') return done(`"${asked}" matches ${lookup.ids.length} sessions: ${lookup.ids.slice(0, 6).join(', ')}. Use more of the id.`)
+        return done(`No saved conversation starting with "${asked}" in this directory.`)
+      }
+      const options = await resumablePickerOptions()
+      if (options.length === 0) return done('No other saved conversations in this directory yet.')
+      return {
+        handled: true,
+        picker: {
+          title: 'Resume a conversation',
+          options,
+          searchable: true,
+          onSelect: (value) => (value ? switchTo(value) : undefined),
+        },
+      }
+    }
+
     if (trimmed === '/settings') {
       return {
         handled: true,
@@ -2049,14 +2225,29 @@ export async function runInteractive(): Promise<void> {
     }
 
     if (trimmed === '/sessions' || trimmed === '/session') {
-      const { listKnownSessions } = await import('../sessionRegistry.ts')
-      const others = listKnownSessions().filter((s) => s.sessionId !== sessionId)
+      // Every conversation in this project, not only the ones a live process is
+      // currently holding — the ones worth reopening are usually the ones
+      // nothing is holding. Selecting one switches into it.
+      const { describeSession, listSessionSummaries, sessionDetail } = await import('../sessionCatalog.ts')
+      const others = (await listSessionSummaries()).filter((session) => session.id !== sessionId)
       if (others.length === 0) return done('No other elia sessions in this project.')
-      return done(
-        others
-          .map((s) => `${s.sessionId} · ${s.model} · ${s.busy ? 'working' : 'idle'} · ${s.lastAction}`)
-          .join('\n'),
-      )
+      return {
+        handled: true,
+        picker: {
+          title: 'Sessions here — enter to resume one',
+          options: others.map((session) => ({
+            label: describeSession(session, 64),
+            detail: `${session.heldByLiveProcess ? `open · ${session.lastAction || 'working'} · ` : ''}${sessionDetail(session)}`,
+            value: session.id,
+          })),
+          searchable: true,
+          onSelect: async (value) => {
+            if (!value) return undefined
+            const result = await resumeIntoSession(value)
+            return result.sessionId ? { handled: true, text: result.text, clear: { sessionId: result.sessionId } } : result.text
+          },
+        },
+      }
     }
 
     if (trimmed === '/eliaspace') {
@@ -2645,6 +2836,11 @@ export async function runInteractive(): Promise<void> {
       writeNotice(await clearClassicScreen())
       continue
     }
+    const resumeClassic = /^\/resume(?:\s+(.+))?$/.exec(trimmed)
+    if (resumeClassic) {
+      writeNotice(await resumeClassicSession(resumeClassic[1]?.trim()))
+      continue
+    }
     const whyClassic = /^\/why(?:\s+(.+))?$/.exec(trimmed)
     if (whyClassic) {
       const { explainRationale } = await import('../autonomy/rationale.ts')
@@ -2761,7 +2957,9 @@ export async function runInteractive(): Promise<void> {
     if (trimmed === '/sessions' || trimmed === '/session') {
       const { openSessionsDashboard } = await import('../ui/sessionsDashboard.ts')
       pushHeartbeat(false, 'Browsing /sessions')
-      await openSessionsDashboard(sessionId)
+      const chosen = await openSessionsDashboard(sessionId)
+      if (chosen && chosen !== sessionId) writeNotice((await resumeIntoSession(chosen)).text)
+      else pushHeartbeat(false, 'Idle at prompt')
       continue
     }
 

@@ -78,6 +78,8 @@ You can also sign in with a ChatGPT subscription through the official Codex CLI.
 elia                                   # interactive session
 elia "summarize this project"          # one-shot prompt
 elia --continue                        # resume the last session in this folder
+elia sessions                          # every conversation saved here, and what each one started with
+elia --resume                          # pick one of them to reopen (or --resume <id> to go straight there)
 
 elia auto "add rate limiting to the API client"      # plan → approve → build → verify → review → learn
 elia auto "fix the race in the queue" --variants 3   # three independent attempts; the verified one wins

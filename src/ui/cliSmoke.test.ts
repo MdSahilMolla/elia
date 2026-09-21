@@ -135,6 +135,53 @@ test('provider-independent validation does not initialize a model', async () => 
   }
 })
 
+test('sessions are listable and resumable by id without a provider', async () => {
+  const withoutProvider = {
+    ELIA_PROVIDER: undefined,
+    ELIA_MODEL: undefined,
+    ELIA_API_KEY: undefined,
+    ANTHROPIC_API_KEY: undefined,
+    OPENAI_API_KEY: undefined,
+    NVIDIA_API_KEY: undefined,
+    GEMINI_API_KEY: undefined,
+  }
+  const project = mkdtempSync(join(tmpdir(), 'elia-cli-sessions-'))
+  try {
+    const { saveSession } = await import('../session.ts')
+    await saveSession(
+      'aa11bb22-cc33',
+      [
+        { role: 'user', content: [{ type: 'text', text: 'rename the billing column' }] },
+        { role: 'assistant', content: [{ type: 'text', text: 'done' }] },
+      ],
+      join(project, '.elia', 'sessions'),
+    )
+
+    const [listed, bare, unknown] = await Promise.all([
+      runCli(['sessions', '--plain'], withoutProvider, project),
+      runCli(['--resume', '--plain'], withoutProvider, project),
+      runCli(['--resume', 'no-such-id', '--plain'], withoutProvider, project),
+    ])
+
+    // The listing is what makes an id available to copy in the first place.
+    expect(listed.code).toBe(0)
+    expect(listed.stdout).toContain('aa11bb22-cc33')
+    expect(listed.stdout).toContain('rename the billing column')
+
+    // Without a terminal there is no picker to draw, so both failures name what
+    // is available rather than silently starting an unrelated fresh session.
+    expect(bare.code).toBe(1)
+    expect(bare.stderr).toContain('--resume requires a session id')
+    expect(bare.stderr).toContain('aa11bb22-cc33')
+    expect(unknown.code).toBe(1)
+    expect(unknown.stderr).toContain('No saved conversation with id "no-such-id"')
+
+    for (const result of [listed, bare, unknown]) expect(result.stderr).not.toContain('No API key found')
+  } finally {
+    rmSync(project, { recursive: true, force: true })
+  }
+})
+
 test('agent dry-run routes locally without a provider credential', async () => {
   const result = await runCli(['agent', 'Fix a TypeScript parser bug', '--dry-run', '--plain'], {
     ELIA_PROVIDER: undefined,

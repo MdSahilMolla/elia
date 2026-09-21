@@ -1,9 +1,16 @@
 /**
- * Past work: `runs`, `resume` and `fork`.
+ * Past work: `sessions`, `runs`, `resume` and `fork`.
  *
- * All three read the session and run ledgers and hand you back into something
- * that already happened, which is why they share a module and their listing
- * and lookup conventions.
+ * All of these read the session and run ledgers and hand you back into
+ * something that already happened, which is why they share a module and their
+ * listing and lookup conventions.
+ *
+ * Two different things are called "resume" here, and they stay distinct:
+ * `elia resume <runId>` continues an autonomous *run* from its goal graph,
+ * while `elia --resume <sessionId>` reopens a *conversation*. The run keeps the
+ * subcommand because it restarts work on its own; the conversation is a flag
+ * because it only decides which history the session you are about to start
+ * begins from.
  */
 import * as readline from 'node:readline/promises'
 import { writeNotice, writeError, writeUsageLine } from '../ui/stream.ts'
@@ -15,6 +22,107 @@ import { registerShutdownCleanup } from '../ui/shutdown.ts'
 import { flagValue, hasFlag, positionals, strictInteger } from './argv.ts'
 import { ensureFirstRunProviderSetup } from './providerSetup.ts'
 import { actionApprovalPrompt, createInteractiveApprover, loadRuntimeSkills } from './runtime.ts'
+
+/**
+ * `elia sessions` — the conversations saved in this directory, newest first,
+ * each with the prompt that started it so you can tell them apart, and marked
+ * when another elia still has it open.
+ */
+export async function runSessionsList(): Promise<void> {
+  const { DEFAULT_CATALOG_LIMIT, describeSession, listSessionSummaries, relativeTime } = await import('../sessionCatalog.ts')
+  const limit = hasFlag('--all') ? 0 : strictInteger(flagValue('--limit')) ?? DEFAULT_CATALOG_LIMIT
+  const sessions = await listSessionSummaries({ limit })
+
+  if (machineReadable) {
+    emitEvent('sessions', { sessions })
+    return
+  }
+  if (sessions.length === 0) {
+    writeNotice('No saved conversations in this directory yet. Start one with: elia')
+    return
+  }
+
+  // Four columns, not six: the table shrinks every column proportionally to fit
+  // the terminal, and the whole point of this listing is an id you can copy —
+  // one that wrapped across two lines would defeat it. Model and live detail
+  // are in `elia --resume`'s picker, where there is room for them.
+  for (const line of table(
+    [{ header: 'id' }, { header: 'when' }, { header: 'turns', align: 'right' }, { header: 'started with' }],
+    sessions.map((session) => [
+      session.id,
+      session.heldByLiveProcess ? 'open now' : relativeTime(session.updatedAt),
+      String(session.turns),
+      describeSession(session, 40),
+    ]),
+  )) {
+    writeUsageLine(`  ${line}`)
+  }
+  writeNotice('Reopen one with: elia --resume <id> · or pick from the list with: elia --resume · continue the newest with: elia -c')
+}
+
+/** What `--resume`/`--continue` settled on, and whether something else is already in there. */
+export interface ResumeTarget {
+  id: string
+  /** Another live elia has this conversation open; writing to it from here would overwrite its turns. */
+  heldByPid?: number
+}
+
+/**
+ * Turns `--resume [id]` into a session to open.
+ *
+ * With an id (or an unambiguous prefix of one) it resolves that; with nothing
+ * it offers the list, because the ids are timestamp-random and nobody types
+ * one from memory. Where no picker can be drawn — a pipe, `--plain`, a script
+ * — it prints the candidates and fails rather than silently starting a fresh
+ * session the caller did not ask for.
+ *
+ * Runs before any provider is initialized: choosing which history to open has
+ * nothing to do with having an API key.
+ */
+export async function chooseSessionToResume(query: string | undefined): Promise<ResumeTarget | undefined> {
+  const { DEFAULT_CATALOG_LIMIT, describeSession, listSessionIds, listSessionSummaries, resolveSessionId, sessionDetail, sessionHolder } =
+    await import('../sessionCatalog.ts')
+  const asked = query?.trim() ?? ''
+
+  if (asked) {
+    const lookup = resolveSessionId(asked, listSessionIds())
+    if (lookup.kind === 'found') return { id: lookup.id, heldByPid: sessionHolder(lookup.id)?.pid }
+    if (lookup.kind === 'ambiguous') {
+      writeError(`"${asked}" matches ${lookup.ids.length} sessions: ${lookup.ids.slice(0, 6).join(', ')}${lookup.ids.length > 6 ? ', …' : ''}. Use more of the id.`)
+      return undefined
+    }
+    writeError(`No saved conversation with id "${asked}" in this directory. See them with: elia sessions`)
+    return undefined
+  }
+
+  const sessions = await listSessionSummaries({ limit: DEFAULT_CATALOG_LIMIT })
+  if (sessions.length === 0) {
+    writeError('--resume requires a session id, and this directory has no saved conversations yet.')
+    return undefined
+  }
+
+  const { pick } = await import('../ui/picker.ts')
+  const chosen = await pick(
+    'Resume a conversation',
+    sessions.map((session) => ({ label: describeSession(session, 64), detail: sessionDetail(session), value: session.id })),
+    0,
+    { searchable: true },
+  )
+
+  if (chosen.type === 'select') return { id: chosen.value, heldByPid: sessionHolder(chosen.value)?.pid }
+  if (chosen.type === 'cancel') {
+    writeNotice('Cancelled.')
+    return undefined
+  }
+
+  // No terminal to draw a picker in. Say what is available so the caller can
+  // name one, and keep the message the scripted form has always failed with.
+  writeError('--resume requires a session id here (no interactive terminal to choose from). Recent sessions:')
+  for (const session of sessions.slice(0, 10)) {
+    writeError(`  ${session.id}  ${sessionDetail(session)}  ${describeSession(session, 48)}`)
+  }
+  return undefined
+}
 
 export async function runRuns(): Promise<void> {
   const { listRuns } = await import('../autonomy/journal.ts')

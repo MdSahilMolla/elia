@@ -8,7 +8,9 @@
 elia                    # interactive session
 elia "list the files in this directory"   # one-shot prompt
 elia --continue         # resume the most recent session in this directory
-elia --resume <id>      # resume a specific session
+elia --resume <id>      # resume a specific session (an unambiguous id prefix works too)
+elia --resume           # choose one from a list of the conversations saved here
+elia sessions           # print that list: id, when, and the prompt each one started with
 
 elia auto "<goal>"                # plan, delegate to a fleet, verify, repair, and learn — end to end
 elia auto "<goal>" --fast         # bounded fast path for simple work: one reviewer, one repair, no polish/lessons
