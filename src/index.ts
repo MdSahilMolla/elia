@@ -70,6 +70,10 @@ async function main() {
       return runCompounding()
     case 'jev':
       return runJev()
+    case 'vde': {
+      const { runVde } = await import('./cli/vde.ts')
+      return runVde()
+    }
     case 'bench':
       return runBench()
     case 'bench-latency':

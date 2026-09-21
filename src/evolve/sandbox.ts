@@ -108,6 +108,12 @@ export const IMMUTABLE_FILES = [
   'src/evolve/strategy.ts',
   'src/evolve/benchLessons.ts',
   'src/evolve/metaPropose.ts',
+  // The Verified Discovery Engine: the sealed gate, the isolation checks, the
+  // certified library and its auditor, the frontier measurements and the
+  // resource governor. "The meta-loop must never modify the resource governor,
+  // the evaluator, the auditor or its own permissions" (§14 of the paper this
+  // directory implements) — a candidate that could would be grading itself.
+  'src/vde/**',
   'package.json',
   'tsconfig.json',
   'src/**/*.test.ts',

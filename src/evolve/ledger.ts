@@ -92,6 +92,24 @@ export interface GenerationRecord {
    * promotion worth standing on.
    */
   generalization?: import('./split.ts').GeneralizationRecord
+  /**
+   * The paper's sealed verdict on the same measurement (vde/acceptance.ts):
+   * an anytime-valid e-value against "nothing improved", with the level this
+   * comparison spent from the loop's lifetime budget. Recorded on every
+   * measured generation whichever gate decided, so the two can be compared.
+   */
+  sealed?: {
+    bit: 'accept' | 'reject'
+    eValue: number
+    needed: number
+    meanDiff: number
+    n: number
+    minimumDetectable: number
+    /** Which gate made the promotion decision: `legacy`, `sealed` or `both`. */
+    mode: string
+  }
+  /** Content hash of the changed files the verdict was about (isolation requirement I3). */
+  diffDigest?: string
 }
 
 export interface EvidenceCost {

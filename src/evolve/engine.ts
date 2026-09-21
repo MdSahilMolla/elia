@@ -11,6 +11,7 @@ import { writeBlock, writeFail, writePass, writePhase, writeSubStep, writeSummar
 import { formatElapsed } from '../usage.ts'
 import { emitEvent, machineReadable, quietOutput } from '../ui/runtime.ts'
 import {
+  EVOLUTION_DIR,
   appendGeneration,
   nextGenerationNumber,
   readLedger,
@@ -71,6 +72,9 @@ import {
 } from './strategy.ts'
 import { proposeChallengerStrategy } from './metaPropose.ts'
 import { fieldEvidenceSection } from './fieldEvidence.ts'
+import { gateDecision, gateMode, meanGainOver, sealedCompare, type SealedVerdict } from '../vde/acceptance.ts'
+import { diffDigest, redactHeldOut, sealedReadTools } from '../vde/isolation.ts'
+import { applySteppingStone, archiveNearMiss, elites, readArchive, renderSteppingStones } from '../vde/archive.ts'
 
 /**
  * Elia improving elia.
@@ -103,6 +107,8 @@ export interface Hypothesis {
   rationale: string
   targetFiles: string[]
   plan: string
+  /** An archived stepping stone to start from instead of the current source (vde/archive.ts). */
+  buildOn?: string
 }
 
 export interface EvolveOptions {
@@ -265,6 +271,7 @@ async function runGeneration(
   // partway through the build left nothing in the ledger, and the next
   // generation read a history in which that attempt had never happened.
   let started: GenerationRecord | undefined
+  let sandbox: Sandbox | undefined
   try {
     const record = await attemptGeneration(
       generation,
@@ -280,7 +287,11 @@ async function runGeneration(
       (base) => {
         started = base
       },
+      (created) => {
+        sandbox = created
+      },
     )
+    keepSteppingStone(record, sandbox, split)
     return { record, candidateCard }
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error)
@@ -304,6 +315,32 @@ async function runGeneration(
   }
 }
 
+/**
+ * A rejected candidate that still moved the shown tasks the right way is a
+ * stepping stone (vde/archive.ts, Proposition 4). Its sandbox is still on disk
+ * at this point — every post-measurement rejection keeps it — so its files are
+ * copied into the archive before the pruner can take them.
+ */
+function keepSteppingStone(record: GenerationRecord, sandbox: Sandbox | undefined, split: TaskSplit): void {
+  if (record.verdict !== 'rejected' || !record.baseline || !record.candidate || !sandbox) return
+  const shownIds = new Set(split.train.map((task) => task.id))
+  const stone = archiveNearMiss(
+    {
+      generation: record.generation,
+      hypothesis: record.hypothesis,
+      verdict: record.verdict,
+      reason: record.reason,
+      sandboxRoot: sandbox.root,
+      changedFiles: record.changedFiles,
+      base: sandbox.base,
+      shownQuality: meanGainOver(record.baseline, record.candidate, shownIds),
+      gainedShown: record.generalization?.gainedShown ?? [],
+    },
+    EVOLUTION_DIR,
+  )
+  if (stone) writeSubStep(`kept as stepping stone ${stone.id} [${stone.area} → ${stone.target}] — a later generation can build on it`)
+}
+
 async function attemptGeneration(
   generation: number,
   baseline: Metrics,
@@ -314,6 +351,7 @@ async function attemptGeneration(
   split: TaskSplit,
   onCandidateCard: (card: Scorecard) => void,
   onStarted: (base: GenerationRecord) => void,
+  onSandbox: (sandbox: Sandbox) => void = () => {},
 ): Promise<GenerationRecord> {
   const startedAt = Date.now()
   const strategy = pickStrategy()
@@ -336,18 +374,30 @@ async function attemptGeneration(
 
   writePhase('propose', `generation ${generation}`)
   const sandbox = createSandbox(generation)
+  onSandbox(sandbox)
 
   // --- Hypothesise ----------------------------------------------------------
 
   const capture = createHypothesisTool()
-  const readOnly = allWorkerTools().filter((tool) => ['read_file', 'list_files', 'grep'].includes(tool.name))
 
   // The proposer is briefed on the shown half only. `baseline` itself stays
   // whole — it is what the candidate is compared against, and thinning that
   // would change the verdict rather than the prompt.
   const shownBaseline = blindMetrics(baseline, split, halfMetrics(baselineOutcomes, split.train).passRate)
+  const shownEvidence = blindEvidence(evidence, split)
+  // And it reads only what it was briefed on: its own source copy and the kept
+  // runs of the failures it was shown. With unrestricted reads the ledger and
+  // bench history — which list every held-out result — were one read_file
+  // away, which is the per-task channel isolation requirement I2 closes.
+  const readOnly = sealedReadTools(
+    allWorkerTools().filter((tool) => ['read_file', 'list_files', 'grep'].includes(tool.name)),
+    [sandbox.root, ...shownEvidence.flatMap((outcome) => (outcome.keptDir ? [outcome.keptDir] : []))],
+  )
   const messages: ConversationMessage[] = [
-    { role: 'user', content: [{ type: 'text', text: hypothesisBrief(sandbox, shownBaseline, blindEvidence(evidence, split)) }] },
+    {
+      role: 'user',
+      content: [{ type: 'text', text: hypothesisBrief(sandbox, shownBaseline, shownEvidence, split.split ? split.heldOut.map((task) => task.id) : []) }],
+    },
   ]
 
   await runAgentLoop({
@@ -375,8 +425,20 @@ async function attemptGeneration(
 
   writeBlock(
     `Generation ${generation} hypothesis`,
-    `  ${hypothesis.title}\n\n  Why: ${hypothesis.rationale}\n  Files: ${hypothesis.targetFiles.join(', ') || '(unspecified)'}\n\n  Plan: ${hypothesis.plan}`,
+    `  ${hypothesis.title}\n\n  Why: ${hypothesis.rationale}\n  Files: ${hypothesis.targetFiles.join(', ') || '(unspecified)'}\n\n  Plan: ${hypothesis.plan}${hypothesis.buildOn ? `\n\n  Builds on: ${hypothesis.buildOn}` : ''}`,
   )
+
+  // Start from a stepping stone when the proposer asked to. Only files whose
+  // base is unchanged are laid in, so a stale stone cannot undo newer work.
+  if (hypothesis.buildOn) {
+    const stone = elites(readArchive(EVOLUTION_DIR)).find((entry) => entry.id === hypothesis.buildOn)
+    if (!stone) {
+      writeSubStep(`stepping stone ${hypothesis.buildOn} is not in the archive — building from the current source`)
+    } else {
+      const applied = applySteppingStone(stone, EVOLUTION_DIR, sandbox.root, sandbox.base)
+      writeSubStep(`built on ${stone.id}: ${applied.applied.length} file(s) laid in${applied.stale.length > 0 ? `, ${applied.stale.length} skipped as stale (${applied.stale.join(', ')})` : ''}`)
+    }
+  }
 
   // --- Implement it inside the sandbox --------------------------------------
 
@@ -395,6 +457,7 @@ async function attemptGeneration(
 
   const changed = changedFiles(sandbox)
   base.changedFiles = changed
+  if (changed.length > 0) base.diffDigest = diffDigest(sandbox.root, changed)
 
   if (changed.length === 0) {
     return { ...base, reason: 'the builder changed nothing' }
@@ -519,10 +582,22 @@ async function attemptGeneration(
   })
   writeSubStep(renderGeneralization(base.generalization))
   onCandidateCard(candidateCard)
-  if (!comparison.better) {
-    writeFail(`rejected: ${comparison.reason}`)
+
+  // The paper's sealed verdict on the same measurement: an anytime-valid test
+  // with a lifetime false-acceptance budget (vde/acceptance.ts). Recorded on
+  // every measured generation; `ELIA_EVOLVE_GATE` decides whether it, the
+  // legacy rule, or both make the call.
+  const gate = gateMode()
+  const comparisonIndex = readLedger().filter((record) => record.candidate).length + 1
+  const sealed = sealedCompare(baseline, candidate, { index: comparisonIndex })
+  base.sealed = sealedRecord(sealed, gate)
+  writeSubStep(`sealed gate (${gate === 'legacy' ? 'recorded only' : 'deciding'}): ${sealed.bit} — ${sealed.reason}`)
+  const decisionReason = gate === 'sealed' ? sealed.reason : comparison.reason
+  if (!gateDecision(gate, comparison.better, sealed)) {
+    const reason = gate === 'both' && comparison.better ? sealed.reason : decisionReason
+    writeFail(`rejected: ${reason}`)
     writeSubStep(`sandbox kept at ${sandbox.root} if you want to look`)
-    return { ...base, verdict: 'rejected', reason: comparison.reason }
+    return { ...base, verdict: 'rejected', reason }
   }
 
   base.funnel = 'better'
@@ -537,9 +612,13 @@ async function attemptGeneration(
   const confirmationBaseline = toMetrics(confirmationBaselineCard)
   const confirmationCandidate = toMetrics(confirmationCandidateCard)
   const confirmation = compareScorecards(confirmationBaseline, confirmationCandidate)
+  // Same comparison, same spent level: requiring both measurements to clear it
+  // can only lower the false-acceptance rate.
+  const sealedConfirmation = sealedCompare(confirmationBaseline, confirmationCandidate, { index: comparisonIndex })
 
-  if (!confirmation.better) {
-    const reason = `provisional improvement did not reproduce: ${confirmation.reason}`
+  if (!gateDecision(gate, confirmation.better, sealedConfirmation)) {
+    const why = gate === 'sealed' || (gate === 'both' && confirmation.better) ? sealedConfirmation.reason : confirmation.reason
+    const reason = `provisional improvement did not reproduce: ${why}`
     writeFail(`rejected: ${reason}`)
     writeSubStep(`sandbox kept at ${sandbox.root} if you want to inspect it`)
     return { ...base, baseline: confirmationBaseline, candidate: confirmationCandidate, verdict: 'rejected', reason }
@@ -605,7 +684,7 @@ async function attemptGeneration(
   recordProbeRun(candidateProbes, `evolve-gen-${generation}`)
   base.funnel = 'guarded'
 
-  const confirmedReason = `${comparison.reason}; confirmed independently (${confirmation.reason}); verifier and values held`
+  const confirmedReason = `${decisionReason}; confirmed independently (${gate === 'sealed' ? sealedConfirmation.reason : confirmation.reason}); verifier and values held`
 
   if (options.dryRun) {
     writePass(`would promote: ${confirmedReason}`)
@@ -695,7 +774,7 @@ This is your best evidence. A task in the hist-* family is a real commit from el
 ${lines.join('\n')}${more}`
 }
 
-export function hypothesisBrief(sandbox: Sandbox, baseline: Metrics, evidence: TaskOutcome[] = []): string {
+export function hypothesisBrief(sandbox: Sandbox, baseline: Metrics, evidence: TaskOutcome[] = [], heldOutIds: string[] = []): string {
   const failing = baseline.failed.length > 0 ? baseline.failed.join(', ') : '(none — everything currently passes)'
 
   return `## Your own source
@@ -719,7 +798,7 @@ Improving your score by changing the benchmark or weakening a safety boundary is
 ${measurableSection(baseline)}
 
 ## What has already been tried
-${renderLedgerForPrompt()}
+${redactHeldOut(renderLedgerForPrompt(), heldOutIds)}${redactHeldOut(renderSteppingStones(elites(readArchive(EVOLUTION_DIR))), heldOutIds)}
 
 Investigate, then submit exactly one hypothesis.`
 }
@@ -796,6 +875,10 @@ function createHypothesisTool(): HypothesisCapture {
           description: 'Repo-relative files you intend to modify, e.g. "src/config.ts"',
         },
         plan: { type: 'string', description: 'Concretely what to change in those files' },
+        buildOn: {
+          type: 'string',
+          description: 'Optional: the id of a stepping stone from the brief (e.g. "gen-12") to start from. Its files are laid into your copy first; the plan is the next step on top of it.',
+        },
       },
       required: ['title', 'rationale', 'plan'],
     },
@@ -816,7 +899,8 @@ function createHypothesisTool(): HypothesisCapture {
         )
       }
 
-      captured = { title, rationale, targetFiles, plan }
+      const buildOn = typeof input.buildOn === 'string' && input.buildOn.trim() ? input.buildOn.trim() : undefined
+      captured = { title, rationale, targetFiles, plan, ...(buildOn ? { buildOn } : {}) }
       return 'Hypothesis recorded. Stop now — implementation happens in a separate step.'
     },
   }
@@ -828,6 +912,18 @@ function createHypothesisTool(): HypothesisCapture {
       captured = undefined
       return hypothesis
     },
+  }
+}
+
+function sealedRecord(verdict: SealedVerdict, mode: string): NonNullable<GenerationRecord['sealed']> {
+  return {
+    bit: verdict.bit,
+    eValue: verdict.eValue,
+    needed: verdict.needed,
+    meanDiff: verdict.meanDiff,
+    n: verdict.n,
+    minimumDetectable: verdict.minimumDetectable,
+    mode,
   }
 }
 

@@ -1,6 +1,7 @@
 import type { ChatMessage, ContentBlock, Provider, Usage } from '../providers/types.ts'
 import { appendLessons, loadLessons } from './lessons.ts'
 import type { VerifyResult } from './outcomes.ts'
+import { lessonHygieneProblem } from '../vde/lessonCertificates.ts'
 
 /**
  * What elia brings into a turn from earlier sessions, and what it takes away.
@@ -229,23 +230,6 @@ export function blockerPrompt(request: string, evidence: TurnEvidence, known: st
   return lines.join('\n')
 }
 
-const GENERIC_ADVICE = /\b(?:carefully|double[-\s]?check|be careful|pay attention|make sure to test|always test|best practice|good practice)\b/i
-
-/**
- * A lesson that tells the next run to paper over something missing — "create a
- * placeholder file if the import does not exist", "mkdir the folder first so
- * `dir` stops failing". The reflection model reaches for these whenever a read
- * came back "not found", and every later prompt then carries an instruction to
- * fabricate. Seen live: one such lesson was in context when a run asked to
- * "install ponytail skill" searched twice, found nothing, and wrote a stub whose
- * only content logged "Ponytail skill installed", plus a barrel to export it.
- * A missing thing is a finding to report, never a gap to fill.
- */
-const FABRICATES_MISSING = [
-  /\b(?:placeholder|stub|dummy|empty module|fake)\b/i,
-  /\bcreate\b.*?\b(?:if|when|so that|to avoid)\b.*?\b(?:missing|absent|does not exist|doesn't exist|not found|not exist)\b/i,
-]
-
 const STOPWORDS = new Set([
   'a', 'an', 'the', 'on', 'in', 'of', 'to', 'for', 'with', 'from', 'into', 'at', 'by', 'as', 'and', 'or', 'not', 'no',
   'use', 'using', 'instead', 'always', 'never', 'must', 'should', 'be', 'is', 'are', 'it', 'its', 'this', 'that', 'these',
@@ -288,8 +272,9 @@ export function parseLessons(reply: string, known: string[]): string[] {
   for (const entry of raw) {
     if (typeof entry !== 'string') continue
     const lesson = entry.replace(/\s+/g, ' ').trim()
-    if (lesson.length < 20 || lesson.length > 280 || GENERIC_ADVICE.test(lesson)) continue
-    if (FABRICATES_MISSING.some((pattern) => pattern.test(lesson))) continue
+    // The same hygiene check the certified library admits every lesson by —
+    // generic advice, and instructions to fabricate what is missing, never land.
+    if (lesson.length < 20 || lesson.length > 280 || lessonHygieneProblem(lesson)) continue
     if ([...known, ...kept].some((existing) => similarity(existing, lesson) >= 0.7)) continue
     kept.push(lesson)
     if (kept.length === 2) break
