@@ -94,6 +94,17 @@ test('backspace deletes at the caret, not the end', async () => {
   expect(frame).not.toContain('axbc')
 })
 
+test('the delete key removes the char at the caret, not before it', async () => {
+  const { stdin, lastFrame } = mount([])
+  stdin.write('abxc')
+  await waitForFrame(lastFrame, 'abxc')
+  await typeKeys(stdin, [LEFT, LEFT]) // caret between "b" and "x"
+  stdin.write('\u001b[3~') // delete → removes "x", not "b"
+  const frame = await waitForFrame(lastFrame, /❯ abc\b/)
+  expect(frame).toContain('abc')
+  expect(frame).not.toContain('abxc')
+})
+
 test('the prompt carries no [mode] chip — the status row names the mode', async () => {
   const { lastFrame } = render(
     <InputBox commands={[]} disabled={false} placeholder="describe it" mode="plan" onSubmit={noop} onInterrupt={noop} onEof={noop} onTabEmpty={noop} />,

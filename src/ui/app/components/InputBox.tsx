@@ -21,7 +21,7 @@ function toKeyEvent(input: string, key: Key): { str: string | undefined; event: 
     : key.backspace
       ? 'backspace'
       : key.delete
-        ? 'backspace'
+        ? 'delete'
         : key.leftArrow
           ? 'left'
           : key.rightArrow
