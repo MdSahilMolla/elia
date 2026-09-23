@@ -32,7 +32,7 @@ import { paths } from '../src/statePaths.ts'
 process.env.COLUMNS ??= '100'
 process.env.LINES ??= '24'
 
-// A provider that fails on its side is asked again after 2s, 8s and 30s
+// A provider that fails on its side is asked again after 2s, 8s, 30s, 60s and 120s
 // (agentLoop.ts). Tests that provoke those failures on purpose should see the
 // retries, not sit through them.
 process.env.ELIA_TRANSIENT_RETRY_DELAYS_MS ??= '0,0,0'

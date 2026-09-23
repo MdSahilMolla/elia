@@ -61,13 +61,16 @@ const PROVIDER_HEALTH_COOLDOWN_MS = 30_000
 
 /**
  * How long to wait before asking the same route again after a server-side
- * hiccup (`isTransientServerError`) — about 40s in all. The generic backoff
- * gave an overloaded provider 250ms and then 500ms to recover, so one overload
- * anywhere in a ten-minute unattended run ended the run.
+ * hiccup (`isTransientServerError`) — about 3.7 minutes in all. The generic
+ * backoff gave an overloaded provider 250ms and then 500ms to recover, so one
+ * overload anywhere in a ten-minute unattended run ended the run; 40s was
+ * still too short — a Kanban run that had streamed its answer (so could not
+ * switch provider) died on mercury staying overloaded past the third wait.
+ * Esc cuts any wait short.
  * `ELIA_TRANSIENT_RETRY_DELAYS_MS` (comma-separated) overrides it; the test
  * preload sets zeros so provider-failure tests do not sit in real waits.
  */
-const DEFAULT_TRANSIENT_RETRY_DELAYS_MS = [2_000, 8_000, 30_000]
+const DEFAULT_TRANSIENT_RETRY_DELAYS_MS = [2_000, 8_000, 30_000, 60_000, 120_000]
 
 function transientRetryDelaysMs(): number[] {
   return delaysFromEnv('ELIA_TRANSIENT_RETRY_DELAYS_MS', DEFAULT_TRANSIENT_RETRY_DELAYS_MS)
