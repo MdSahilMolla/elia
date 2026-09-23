@@ -560,6 +560,95 @@ test('a model that keeps garbling its tool calls gives up after the attempt limi
   expect(calls).toBe(3)
 })
 
+// mercury reports overload as an SSE error chunk, after text has streamed. Run
+// 2026-09-21-jynj-3z2u died on it eight minutes into proposing its plan.
+const OVERLOADED = 'Service temporarily overloaded'
+
+test('a provider overloaded mid-stream is asked again, even after text streamed', async () => {
+  config.routingMode = 'selected'
+  let calls = 0
+  config.provider = {
+    async streamTurn({ onText }) {
+      calls += 1
+      onText('Planning the API. ')
+      if (calls < 3) throw new Error(OVERLOADED)
+      return {
+        content: [{ type: 'text', text: 'Planning the API. Done.' }] as ContentBlock[],
+        usage: { inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 },
+      }
+    },
+  }
+
+  const messages: ConversationMessage[] = [{ role: 'user', content: [{ type: 'text', text: 'go' }] }]
+  const result = await runAgentLoop({ messages, systemPrompt: 'test', tools: [], useAnimation: false, verbose: false, onText: () => {} })
+
+  expect(result.stopReason).toBe('complete')
+  expect(calls).toBe(3)
+  expect(messages.filter((m) => m.role === 'assistant')).toHaveLength(1)
+})
+
+test('an overloaded provider is not asked again once it has acted', async () => {
+  config.routingMode = 'selected'
+  let calls = 0
+  config.provider = {
+    async streamTurn({ onActivity }) {
+      calls += 1
+      onActivity?.({ kind: 'command', title: 'bun install', status: 'completed' })
+      throw new Error(OVERLOADED)
+    },
+  }
+
+  const messages: ConversationMessage[] = [{ role: 'user', content: [{ type: 'text', text: 'go' }] }]
+  await expect(
+    runAgentLoop({ messages, systemPrompt: 'test', tools: [], useAnimation: false, verbose: false, onActivity: () => {} }),
+  ).rejects.toThrow(OVERLOADED)
+  expect(calls).toBe(1)
+})
+
+test('a provider that stays overloaded gives up once the waits run out', async () => {
+  config.routingMode = 'selected'
+  let calls = 0
+  config.provider = {
+    async streamTurn() {
+      calls += 1
+      throw new Error(OVERLOADED)
+    },
+  }
+
+  const messages: ConversationMessage[] = [{ role: 'user', content: [{ type: 'text', text: 'go' }] }]
+  await expect(
+    runAgentLoop({ messages, systemPrompt: 'test', tools: [], useAnimation: false, verbose: false }),
+  ).rejects.toThrow(OVERLOADED)
+  // The first attempt plus one per configured wait.
+  expect(calls).toBe(4)
+})
+
+test('stopping the turn cuts a wait for an overloaded provider short', async () => {
+  config.routingMode = 'selected'
+  const previous = process.env.ELIA_TRANSIENT_RETRY_DELAYS_MS
+  process.env.ELIA_TRANSIENT_RETRY_DELAYS_MS = '60000'
+  const controller = new AbortController()
+  let calls = 0
+  config.provider = {
+    async streamTurn() {
+      calls += 1
+      throw new Error(OVERLOADED)
+    },
+  }
+  try {
+    const startedAt = Date.now()
+    const pending = runAgentLoop({ messages: [{ role: 'user', content: [{ type: 'text', text: 'go' }] }], systemPrompt: 'test', tools: [], useAnimation: false, verbose: false, signal: controller.signal })
+    await Bun.sleep(20)
+    controller.abort()
+    await expect(pending).resolves.toMatchObject({ stopReason: 'aborted' })
+    expect(Date.now() - startedAt).toBeLessThan(5_000)
+    expect(calls).toBe(1)
+  } finally {
+    if (previous === undefined) delete process.env.ELIA_TRANSIENT_RETRY_DELAYS_MS
+    else process.env.ELIA_TRANSIENT_RETRY_DELAYS_MS = previous
+  }
+})
+
 test('runAgentLoop does not retry permanent provider errors', async () => {
   config.routingMode = 'selected'
   let calls = 0

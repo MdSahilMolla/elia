@@ -2,7 +2,7 @@ import { availableParallelism, cpus } from 'node:os'
 import { autoFallbacksFor, config } from './config.ts'
 import { beginCompaction, shrinkForOversizedRequest, type PendingCompaction } from './compaction.ts'
 import { compactionThresholdFor } from './contextWindow.ts'
-import { isCapacityError, isMalformedToolCallError, isRequestTooLargeError } from './providerErrors.ts'
+import { isCapacityError, isMalformedToolCallError, isRequestTooLargeError, isTransientServerError } from './providerErrors.ts'
 import { createPlanlessWorkTracker, createRedundantReadTracker, isLoneBatchableRead, serialReadNudge } from './autonomy/toolBatchingNudge.ts'
 import { createReadAhead } from './autonomy/readAhead.ts'
 import { createPlanProgressTracker, planBelongsToRequest, type PlanProgressUpdate, type ToolOutcome } from './autonomy/planProgress.ts'
@@ -58,6 +58,36 @@ function detectCoreCount(): number {
 export const DEFAULT_PARALLEL_TOOLS = Math.max(MAX_PARALLEL_WRITE_TOOLS, Math.min(MAX_SAFE_PARALLEL_TOOLS, detectCoreCount() - 1))
 const MAX_PROVIDER_ATTEMPTS = 3
 const PROVIDER_HEALTH_COOLDOWN_MS = 30_000
+
+/**
+ * How long to wait before asking the same route again after a server-side
+ * hiccup (`isTransientServerError`) — about 40s in all. The generic backoff
+ * gave an overloaded provider 250ms and then 500ms to recover, so one overload
+ * anywhere in a ten-minute unattended run ended the run.
+ * `ELIA_TRANSIENT_RETRY_DELAYS_MS` (comma-separated) overrides it; the test
+ * preload sets zeros so provider-failure tests do not sit in real waits.
+ */
+const DEFAULT_TRANSIENT_RETRY_DELAYS_MS = [2_000, 8_000, 30_000]
+
+function transientRetryDelaysMs(): number[] {
+  const raw = process.env.ELIA_TRANSIENT_RETRY_DELAYS_MS?.trim()
+  if (!raw) return DEFAULT_TRANSIENT_RETRY_DELAYS_MS
+  const delays = raw.split(',').map((part) => Number(part.trim()))
+  return delays.every((delay) => Number.isFinite(delay) && delay >= 0) ? delays : DEFAULT_TRANSIENT_RETRY_DELAYS_MS
+}
+
+function sleepUnlessAborted(ms: number, signal?: AbortSignal): Promise<void> {
+  if (ms <= 0 || signal?.aborted) return Promise.resolve()
+  return new Promise((resolve) => {
+    const done = () => {
+      clearTimeout(timer)
+      signal?.removeEventListener('abort', done)
+      resolve()
+    }
+    const timer = setTimeout(done, ms)
+    signal?.addEventListener('abort', done, { once: true })
+  })
+}
 const providerHealth = new Map<string, { failures: number; cooldownUntil: number; lastError?: string }>()
 
 /**
@@ -866,6 +896,26 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
               const key = providerHealthKey(route)
               const previous = providerHealth.get(key)
               providerHealth.set(key, { failures: (previous?.failures ?? 0) + 1, cooldownUntil: Date.now() + PROVIDER_HEALTH_COOLDOWN_MS, lastError: error instanceof Error ? error.message : String(error) })
+            }
+            // A server-side hiccup: wait, then ask the same route again — even
+            // after text has streamed, for the same reason as a garbled tool
+            // call above, and never after the provider acted. Only on the last
+            // route, or once output has been shown; before that, the next route
+            // is the faster answer.
+            const failure = error instanceof Error ? error.message : String(error)
+            const transientDelays = transientRetryDelaysMs()
+            if (
+              isTransientServerError(failure)
+              && !emittedActions
+              && !signal?.aborted
+              && attempt <= transientDelays.length
+              && (emittedOutput || !activeRoutes[routeIndex + 1])
+            ) {
+              const delayMs = transientDelays[attempt - 1]!
+              if (verbose) writeNotice(`provider ${route.label ?? `${route.providerName} (${route.model})`} failed on its side (${failure.slice(0, 80)}); asking again in ${Math.ceil(delayMs / 1000)}s`)
+              await sleepUnlessAborted(delayMs, signal)
+              if (signal?.aborted) throw error
+              continue
             }
             // Retrying after output was emitted would duplicate a partial answer in
             // the terminal. Only route before any output has been emitted.

@@ -88,6 +88,27 @@ export function isMalformedToolCallError(message: string): boolean {
 }
 
 /**
+ * The provider's side had a hiccup — it is overloaded, it answered with a 5xx,
+ * the connection dropped, or the stream went silent. Nothing is wrong with the
+ * request, and the same route usually answers a few seconds later.
+ *
+ * mercury-2.5 reports overload mid-stream: "Service temporarily overloaded"
+ * arrives as an SSE error chunk, often after text has streamed, and the route
+ * loop never asked again once output had been shown. Run 2026-09-21-jynj-3z2u
+ * died on it while proposing its plan, eight minutes in.
+ *
+ * A capacity failure is a different family with its own delays
+ * (`capacityRetryDelayMs`), and a refused connection or a failed DNS lookup is
+ * a configuration problem, not a hiccup — neither is matched here.
+ */
+export function isTransientServerError(message: string): boolean {
+  return !isCapacityError(message) && TRANSIENT_SERVER_ERROR.test(message)
+}
+
+const TRANSIENT_SERVER_ERROR =
+  /overloaded|temporarily unavailable|service unavailable|server had an error|internal server error|bad gateway|gateway time-?out|\b(?:500|502|503|504|529)\b|ECONNRESET|socket hang up|connection (?:was )?(?:closed|reset|terminated)|response stalled/i
+
+/**
  * How long to wait before re-attempting a capacity failure.
  *
  * A per-minute token cap ("tokens per minute (TPM): Limit 8000") clears on a

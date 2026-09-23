@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { capacityRetryDelayMs, isCapacityError, isRequestTooLargeError } from './providerErrors.ts'
+import { capacityRetryDelayMs, isCapacityError, isRequestTooLargeError, isTransientServerError } from './providerErrors.ts'
 
 /**
  * The exact message that took two steps out of run 2026-09-13-l0av-rnq0. Every
@@ -61,4 +61,23 @@ test('unrelated failures are not capacity errors', () => {
 // `413` as a substring of a larger number is not an HTTP status.
 test('a bare number containing 413 is not a capacity error', () => {
   expect(isCapacityError('read 84132 bytes from offset 4413299')).toBe(false)
+})
+
+test('a hiccup on the provider side is transient; a capacity cap or a bad setup is not', () => {
+  for (const message of [
+    'Service temporarily overloaded',
+    '529 {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}',
+    '503 Service Unavailable',
+    'The server had an error while processing your request.',
+    'read ECONNRESET',
+    'response stalled: nothing arrived for 120s (timed out)',
+  ]) expect(isTransientServerError(message)).toBe(true)
+  for (const message of [
+    GROQ_413,
+    '429 Too Many Requests',
+    'connect ECONNREFUSED 127.0.0.1:11434',
+    '401 invalid api key',
+    '404 model not found',
+    'Failed to parse tool call arguments as JSON',
+  ]) expect(isTransientServerError(message)).toBe(false)
 })
