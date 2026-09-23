@@ -12,32 +12,43 @@ import { ensureFirstRunProviderSetup } from './providerSetup.ts'
 import { loadRuntimeSkills } from './runtime.ts'
 
 /**
- * Rebuilds the history-derived task set from this repository's own git log.
+ * Grows the history-derived task set from this repository's own git log.
  *
  * Runs no model and needs no API key: it only checks out past trees and runs
  * their tests, twice per candidate, to prove each task fails before the real
- * commit and passes after it.
+ * commit and passes after it. Commits already in the tracked set are not
+ * re-proven, and what is found is added to it; `--replace` rebuilds the set
+ * from this scan alone.
  */
 export async function runBenchHarvest(): Promise<void> {
-  const { harvest, writeTasksFile, TASKS_FILE } = await import('../evolve/history/harvest.ts')
+  const { harvest, mergeTasks, writeTasksFile, TASKS_FILE } = await import('../evolve/history/harvest.ts')
+  const { readTrackedSpecs } = await import('../evolve/history/suite.ts')
 
   const scan = strictInteger(flagValue('--scan') ?? '200') ?? 200
   const limit = strictInteger(flagValue('--limit') ?? '12') ?? 12
+  const replace = hasFlag('--replace')
+  const existing = replace ? [] : readTrackedSpecs(TASKS_FILE)
 
   writeNotice(
     `Harvesting benchmark tasks from the last ${scan} commits. Each candidate is checked out and its tests run twice — this makes no model calls.`,
   )
-  const result = await harvest({ scan, limit, onProgress: (message) => writeUsageLine(message) })
+  const result = await harvest({
+    scan,
+    limit,
+    skip: new Set(existing.map((task) => task.sha)),
+    onProgress: (message) => writeUsageLine(message),
+  })
 
   if (result.tasks.length === 0) {
-    writeNotice(`No task could be validated out of ${result.considered} candidates; leaving the existing set alone.`)
+    writeNotice(`No new task could be validated out of ${result.considered} candidates; leaving the existing set alone.`)
     process.exitCode = 1
     return
   }
 
-  writeTasksFile(result.tasks)
+  const tasks = mergeTasks(existing, result.tasks)
+  writeTasksFile(tasks)
   writeNotice(
-    `Wrote ${result.tasks.length} validated tasks to ${TASKS_FILE} (${result.rejected.length} of ${result.considered} candidates could not be proven).`,
+    `Wrote ${tasks.length} validated tasks to ${TASKS_FILE} (${tasks.length - existing.length} new; ${result.rejected.length} of ${result.considered} candidates could not be proven).`,
   )
 }
 
@@ -167,6 +178,15 @@ export async function runBench(): Promise<void> {
     onTaskDone: (outcome) =>
       writeUsageLine(`  ${outcome.passed ? '✓' : '✗'} ${outcome.taskId} — ${outcome.error ?? outcome.detail}`),
   })
+  // A plain bench of the live tree is exactly the baseline `elia evolve` opens
+  // by measuring, so remember it there: otherwise the next evolve pays for the
+  // same few hundred agent runs again before it has a hypothesis. The lesson
+  // store changes what the agent sees, so those runs are not that baseline.
+  if (!withLessons) {
+    const { baselineCacheEnabled, rememberBaselines } = await import('../evolve/baselineCache.ts')
+    const { config } = await import('../config.ts')
+    if (baselineCacheEnabled()) rememberBaselines(card.outcomes, ELIA_ROOT, config.model)
+  }
   const { recordBenchRun } = await import('../compounding/status.ts')
   // The half is part of the set's name. A held-out-only run scores a different
   // corpus, and recording it as a full run would move the headroom number in

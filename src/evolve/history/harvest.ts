@@ -224,6 +224,20 @@ export function writeTasksFile(tasks: HistoryTaskSpec[], file = TASKS_FILE): voi
 }
 
 /**
+ * The tracked set after a harvest: what was already proven, then what is new.
+ *
+ * A harvest scans a recent window and stops at `limit`, so replacing the
+ * tracked set with its result quietly throws away every older proven task —
+ * 40 became 12 the one time it was run that way, and the gate's power went
+ * with them. A task already in the set keeps its place; a new one with the
+ * same id adds nothing.
+ */
+export function mergeTasks(existing: readonly HistoryTaskSpec[], fresh: readonly HistoryTaskSpec[]): HistoryTaskSpec[] {
+  const known = new Set(existing.map((task) => task.id))
+  return [...existing, ...fresh.filter((task) => !known.has(task.id))]
+}
+
+/**
  * Tasks harvested after the tracked set was written.
  *
  * `elia bench --harvest` rewrites the tracked `tasks.json`, which is a change a

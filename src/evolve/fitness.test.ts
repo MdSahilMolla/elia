@@ -195,7 +195,7 @@ const { retryDelayMs, benchConcurrency } = await import('./fitness.ts')
 
 test('a rate limit is waited out across minutes; other blips get one quick retry; permanent errors none', () => {
   const limited = { error: '429 Rate limit reached: input token limit exceeded', steps: 12 }
-  expect([1, 2, 3, 4].map((attempt) => retryDelayMs(limited, attempt))).toEqual([30_000, 60_000, 120_000, undefined])
+  expect([1, 2, 3, 4, 5, 6].map((attempt) => retryDelayMs(limited, attempt))).toEqual([30_000, 60_000, 120_000, 240_000, 240_000, undefined])
   const blip = { error: 'fetch failed', steps: 3 }
   expect([1, 2].map((attempt) => retryDelayMs(blip, attempt))).toEqual([2000, undefined])
   expect(retryDelayMs({ error: '402 requires more credits', steps: 0 }, 1)).toBeUndefined()
@@ -207,4 +207,11 @@ test('benchConcurrency reads ELIA_BENCH_CONCURRENCY and defaults to 2', () => {
   expect(benchConcurrency({ ELIA_BENCH_CONCURRENCY: '1' })).toBe(1)
   expect(benchConcurrency({ ELIA_BENCH_CONCURRENCY: '0' })).toBe(2)
   expect(benchConcurrency({ ELIA_BENCH_CONCURRENCY: 'x' })).toBe(2)
+})
+
+test('a benchmark task never falls back to another provider', async () => {
+  const { benchTaskEnv } = await import('./fitness.ts')
+  const env = benchTaskEnv({ ELIA_ROUTING_MODE: 'auto', ELIA_PROVIDER: 'mercury' }, '/tmp/x.reach')
+  expect(env.ELIA_ROUTING_MODE).toBe('selected')
+  expect(env.ELIA_PROVIDER).toBe('mercury')
 })

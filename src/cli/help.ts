@@ -73,7 +73,8 @@ Self-improvement:
   elia bench                  Score the current elia against its synthetic benchmark suite
   elia bench --history        Score it on tasks taken from this repository's own git history
   elia bench --all            Score it on both suites
-  elia bench --harvest        Rebuild the history task set from git (no model calls)
+  elia bench --harvest        Add newly proven git-history tasks to the tracked set (no model calls;
+                              --replace rebuilds it from this scan alone)
   elia bench --split held-out Score only the half whose failures the evolution loop never
                               shows its proposer (--split shown for the other half)
   elia bench swe --file <tasks.json> [--sample N] [--out results.json]

@@ -35,7 +35,7 @@ export function loadTaskSpecs(file = TASKS_FILE): HistoryTaskSpec[] {
   return cached
 }
 
-function readTrackedSpecs(file: string): HistoryTaskSpec[] {
+export function readTrackedSpecs(file: string): HistoryTaskSpec[] {
   if (!existsSync(file)) return []
   try {
     const parsed: unknown = JSON.parse(readFileSync(file, 'utf8'))

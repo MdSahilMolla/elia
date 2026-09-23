@@ -278,8 +278,24 @@ const RATE_LIMITED = /\b429\b|rate.?limit/i
  */
 export function retryDelayMs(outcome: Pick<TaskOutcome, 'error' | 'steps'>, attempt: number): number | undefined {
   if (!isInfrastructureFailure(outcome) || PERMANENT_INFRASTRUCTURE_ERROR.test(outcome.error ?? '')) return undefined
-  if (RATE_LIMITED.test(outcome.error ?? '')) return attempt <= 3 ? 30_000 * 2 ** (attempt - 1) : undefined
+  // Five waits, 30s doubling to a 4-minute cap (about 11 minutes in all): three
+  // (3.5 minutes) still left mercury's quota window closed while a second task
+  // shared it, and one unmeasured task voids a whole evolve comparison.
+  if (RATE_LIMITED.test(outcome.error ?? '')) return attempt <= 5 ? Math.min(30_000 * 2 ** (attempt - 1), 240_000) : undefined
   return attempt <= 1 ? 2000 * attempt : undefined
+}
+
+/**
+ * The environment a benchmark task runs in, pinned to the selected provider.
+ *
+ * With `ELIA_ROUTING_MODE=auto` a task whose model was out of quota quietly
+ * finished on whichever fallback answered, so one scorecard mixed models under
+ * a single model's name — and a candidate could win or lose on which fallback
+ * it happened to get. A provider that cannot answer is an unmeasured task,
+ * never a different one.
+ */
+export function benchTaskEnv(env: Record<string, string | undefined>, reachOut: string): Record<string, string | undefined> {
+  return { ...env, [REACH_OUT_ENV]: reachOut, ELIA_ROUTING_MODE: 'selected' }
 }
 
 async function runTaskWithRetry(task: BenchTask, sourceRoot: string): Promise<TaskOutcome> {
@@ -330,7 +346,7 @@ async function runOneTask(task: BenchTask, sourceRoot: string): Promise<TaskOutc
       cwd: dir,
       stdout: 'pipe',
       stderr: 'pipe',
-      env: { ...process.env, [REACH_OUT_ENV]: reachOut },
+      env: benchTaskEnv(process.env, reachOut),
     })
 
     let timedOut = false

@@ -771,5 +771,366 @@
       "passingAfter": 3
     },
     "weight": 2
+  },
+  {
+    "id": "hist-67bae42",
+    "sha": "67bae42869723139a1bf20baeb9f8adf0f5f063f",
+    "parent": "d9e7bd4e5fbdbd0f4b1a455f13302a6d28aacbe6",
+    "subject": "fix(cli): a turn that crashes or is stopped can be rewound, and says what it left",
+    "testFiles": [
+      "src/autonomy/interruptedTurn.test.ts"
+    ],
+    "sourceFiles": [
+      "src/autonomy/interruptedTurn.ts",
+      "src/cli/interactive.ts"
+    ],
+    "verifyCommand": "bun test --timeout=20000 src/autonomy/interruptedTurn.test.ts",
+    "evidence": {
+      "failingBefore": 1,
+      "passingAfter": 5
+    },
+    "weight": 2
+  },
+  {
+    "id": "hist-dd3edc7",
+    "sha": "dd3edc758facb6bf3b9997eec66e0c13ca3ca1cc",
+    "parent": "1dde465505b359c81b475c9de8a1736312f025ed",
+    "subject": "fix(autonomy): three ways a working run still ended needs-attention",
+    "testFiles": [
+      "src/autonomy/progress.test.ts",
+      "src/autonomy/verify.test.ts"
+    ],
+    "sourceFiles": [
+      "src/autonomy/loop.ts",
+      "src/autonomy/progress.ts",
+      "src/autonomy/verify.ts"
+    ],
+    "verifyCommand": "bun test --timeout=20000 src/autonomy/progress.test.ts src/autonomy/verify.test.ts",
+    "evidence": {
+      "failingBefore": 2,
+      "passingAfter": 54
+    },
+    "weight": 2
+  },
+  {
+    "id": "hist-32f9a85",
+    "sha": "32f9a85878af1e4131ea55c92e8ffbde080c6815",
+    "parent": "2633e0d43a455be8ba87019740c50b3dfdf74f10",
+    "subject": "fix(ui): a long paste kept only its last chunk, and Delete acted as Backspace",
+    "testFiles": [
+      "src/ui/app/components/InputBox.test.tsx"
+    ],
+    "sourceFiles": [
+      "src/ui/app/components/InputBox.tsx"
+    ],
+    "verifyCommand": "bun test --timeout=20000 src/ui/app/components/InputBox.test.tsx",
+    "evidence": {
+      "failingBefore": 5,
+      "passingAfter": 18
+    },
+    "weight": 2
+  },
+  {
+    "id": "hist-aa071b3",
+    "sha": "aa071b3ce06344186376c5b08449210a38dcf4c0",
+    "parent": "85ce77def280de7cbe7f0821399d661f7ee18281",
+    "subject": "docs(vde): the Verified Discovery Engine guide; the governor starts an empty library",
+    "testFiles": [
+      "src/vde/governor.test.ts"
+    ],
+    "sourceFiles": [
+      "src/vde/governor.ts",
+      "src/vde/round.ts"
+    ],
+    "verifyCommand": "bun test --timeout=20000 src/vde/governor.test.ts",
+    "evidence": {
+      "failingBefore": 2,
+      "passingAfter": 7
+    },
+    "weight": 2
+  },
+  {
+    "id": "hist-956df31",
+    "sha": "956df310ee4c59bebd48b784e4b5672036853cb3",
+    "parent": "94b57fac64f79c5116b25368ced82691cb8e4b65",
+    "subject": "feat(vde): a quality-diversity archive of stepping stones for evolve",
+    "testFiles": [
+      "src/vde/archive.test.ts"
+    ],
+    "sourceFiles": [
+      "src/evolve/engine.ts",
+      "src/vde/acceptance.ts",
+      "src/vde/archive.ts"
+    ],
+    "verifyCommand": "bun test --timeout=20000 src/vde/archive.test.ts",
+    "evidence": {
+      "failingBefore": 1,
+      "passingAfter": 4
+    },
+    "weight": 2
+  },
+  {
+    "id": "hist-dee6838",
+    "sha": "dee6838da8b042e88ee9bdf6cdf2f9749da92571",
+    "parent": "f0467ecdc640c8b033a094221588ab9a868d6dd5",
+    "subject": "feat(autonomy): \"continue\" after a dead run means the pipeline, not a plain turn",
+    "testFiles": [
+      "src/autonomy/escalation.test.ts"
+    ],
+    "sourceFiles": [
+      "src/autonomy/escalation.ts"
+    ],
+    "verifyCommand": "bun test --timeout=20000 src/autonomy/escalation.test.ts",
+    "evidence": {
+      "failingBefore": 1,
+      "passingAfter": 14
+    },
+    "weight": 2
+  },
+  {
+    "id": "hist-2633e0d",
+    "sha": "2633e0d43a455be8ba87019740c50b3dfdf74f10",
+    "parent": "67940b64b23e9797362ff9a12600e36d094764d6",
+    "subject": "feat(provenance): the VS Code bridge signs its commits too",
+    "testFiles": [
+      "src/provenance.test.ts"
+    ],
+    "sourceFiles": [
+      "src/vscodeBridge.ts"
+    ],
+    "verifyCommand": "bun test --timeout=20000 src/provenance.test.ts",
+    "evidence": {
+      "failingBefore": 1,
+      "passingAfter": 12
+    },
+    "weight": 2
+  },
+  {
+    "id": "hist-dd708ca",
+    "sha": "dd708ca08701862a52879b515da695783b34e19b",
+    "parent": "1f259855e790a06cd38dcab704c1405620ba387c",
+    "subject": "fix(evolve): the self-improvement loop could never propose, or pass its own gate",
+    "testFiles": [
+      "src/evolve/autoImprove.test.ts"
+    ],
+    "sourceFiles": [
+      "src/cli/selfImprove.ts",
+      "src/evolve/autoImprove.ts"
+    ],
+    "verifyCommand": "bun test --timeout=20000 src/evolve/autoImprove.test.ts",
+    "evidence": {
+      "failingBefore": 1,
+      "passingAfter": 8
+    },
+    "weight": 2
+  },
+  {
+    "id": "hist-f9aa2df",
+    "sha": "f9aa2df3d8a9313b62649f10ca5fdc42bbf25464",
+    "parent": "76a0e50eefbbcb1a6efaacf854beb522fd640ce5",
+    "subject": "feat(bench): score edit precision when the surrounding text is not unique",
+    "testFiles": [
+      "src/evolve/hardSuite.test.ts"
+    ],
+    "sourceFiles": [
+      "src/evolve/hardSuite.ts"
+    ],
+    "verifyCommand": "bun test --timeout=20000 src/evolve/hardSuite.test.ts",
+    "evidence": {
+      "failingBefore": 4,
+      "passingAfter": 21
+    },
+    "weight": 2
+  },
+  {
+    "id": "hist-6359ed6",
+    "sha": "6359ed6747e2feb338a474eb7cc6300786f7b37d",
+    "parent": "1cc3f8acf704034f69d2f371e8109bd97db87660",
+    "subject": "feat(bench): a task the benchmark had no room to measure",
+    "testFiles": [
+      "src/evolve/hardSuite.test.ts"
+    ],
+    "sourceFiles": [
+      "src/evolve/hardSuite.ts"
+    ],
+    "verifyCommand": "bun test --timeout=20000 src/evolve/hardSuite.test.ts",
+    "evidence": {
+      "failingBefore": 4,
+      "passingAfter": 17
+    },
+    "weight": 2
+  },
+  {
+    "id": "hist-c343fea",
+    "sha": "c343feae6b08794fab9395ea4cd2474f9bfcc6ca",
+    "parent": "8986b4c4262d1a69a19f95959a6863b6eeb8ffdf",
+    "subject": "fix(brain): lessons measured as harmful were still being injected",
+    "testFiles": [
+      "src/brain/consolidate.test.ts"
+    ],
+    "sourceFiles": [
+      "src/autonomy/loop.ts",
+      "src/brain/consolidate.ts"
+    ],
+    "verifyCommand": "bun test --timeout=20000 src/brain/consolidate.test.ts",
+    "evidence": {
+      "failingBefore": 1,
+      "passingAfter": 7
+    },
+    "weight": 2
+  },
+  {
+    "id": "hist-692f69f",
+    "sha": "692f69f20a522d9f82cb399e5873bb00877ac467",
+    "parent": "f5f97b1392282fa627fb0f25073b00500d0f21ce",
+    "subject": "fix(evolve): the gate promoted a no-op candidate one time in twelve",
+    "testFiles": [
+      "src/evolve/power.test.ts",
+      "src/evolve/repeats.test.ts"
+    ],
+    "sourceFiles": [
+      "src/evolve/fitness.ts",
+      "src/evolve/power.ts"
+    ],
+    "verifyCommand": "bun test --timeout=20000 src/evolve/power.test.ts src/evolve/repeats.test.ts",
+    "evidence": {
+      "failingBefore": 1,
+      "passingAfter": 22
+    },
+    "weight": 2
+  },
+  {
+    "id": "hist-2238040",
+    "sha": "223804041f33c57f2160419f04de479b3971ac01",
+    "parent": "c6ed398da6f600abbc247d3c22ab4b4680883b87",
+    "subject": "fix(evolve): the power model must carry what the sieve carries",
+    "testFiles": [
+      "src/evolve/power.test.ts"
+    ],
+    "sourceFiles": [
+      "src/evolve/power.ts"
+    ],
+    "verifyCommand": "bun test --timeout=20000 src/evolve/power.test.ts",
+    "evidence": {
+      "failingBefore": 4,
+      "passingAfter": 15
+    },
+    "weight": 2
+  },
+  {
+    "id": "hist-c6ed398",
+    "sha": "c6ed398da6f600abbc247d3c22ab4b4680883b87",
+    "parent": "2b01979176e8f1f287959253a70e24ee128cda3c",
+    "subject": "feat(evolve): measure whether the gate could see a win at all",
+    "testFiles": [
+      "src/evolve/power.test.ts"
+    ],
+    "sourceFiles": [
+      "src/evolve/power.ts",
+      "src/index.ts"
+    ],
+    "verifyCommand": "bun test --timeout=20000 src/evolve/power.test.ts",
+    "evidence": {
+      "failingBefore": 1,
+      "passingAfter": 12
+    },
+    "weight": 2
+  },
+  {
+    "id": "hist-2b01979",
+    "sha": "2b01979176e8f1f287959253a70e24ee128cda3c",
+    "parent": "953e918daee06c7c4e98ceb0ad3ff277102a852e",
+    "subject": "fix(compounding): a lifetime figure reads every record, not the last 200",
+    "testFiles": [
+      "src/autonomy/outcomes.test.ts"
+    ],
+    "sourceFiles": [
+      "src/autonomy/outcomes.ts"
+    ],
+    "verifyCommand": "bun test --timeout=20000 src/autonomy/outcomes.test.ts",
+    "evidence": {
+      "failingBefore": 1,
+      "passingAfter": 13
+    },
+    "weight": 2
+  },
+  {
+    "id": "hist-3022789",
+    "sha": "3022789e5982668092a123b1f50887e00a219669",
+    "parent": "a31ee7611129458c432f9fd5cf98ee5694095f60",
+    "subject": "fix(autonomy): lessons and plans never tell a run to create what it could not find",
+    "testFiles": [
+      "src/autonomy/turnLearning.test.ts",
+      "src/autonomy/upfrontPlan.test.ts"
+    ],
+    "sourceFiles": [
+      "src/autonomy/turnLearning.ts",
+      "src/autonomy/upfrontPlan.ts"
+    ],
+    "verifyCommand": "bun test --timeout=20000 src/autonomy/turnLearning.test.ts src/autonomy/upfrontPlan.test.ts",
+    "evidence": {
+      "failingBefore": 3,
+      "passingAfter": 31
+    },
+    "weight": 2
+  },
+  {
+    "id": "hist-01b83c7",
+    "sha": "01b83c74666f7f01eeab131fcdbacf6011f55dfe",
+    "parent": "ff8e84d058808915d71bd4e969905e102ee3b938",
+    "subject": "perf(ui): measure text natively and load React's production build in the live REPL",
+    "testFiles": [
+      "src/ui/app/fastRender.test.ts"
+    ],
+    "sourceFiles": [
+      "src/index.ts",
+      "src/ui/app/fastRender.ts"
+    ],
+    "verifyCommand": "bun test --timeout=20000 src/ui/app/fastRender.test.ts",
+    "evidence": {
+      "failingBefore": 1,
+      "passingAfter": 5
+    },
+    "weight": 2
+  },
+  {
+    "id": "hist-1b91c13",
+    "sha": "1b91c1355f70ced056d6af3e36e9146ac22f9d74",
+    "parent": "97392e1b27cba0b782bdb7146ca1e651ca3d4e63",
+    "subject": "feat(evolve): score each benchmark task over repeated runs, so noise is not a verdict",
+    "testFiles": [
+      "src/evolve/repeats.test.ts"
+    ],
+    "sourceFiles": [
+      "src/distill/export.ts",
+      "src/evolve/fitness.ts",
+      "src/evolve/ledger.ts"
+    ],
+    "verifyCommand": "bun test --timeout=20000 src/evolve/repeats.test.ts",
+    "evidence": {
+      "failingBefore": 4,
+      "passingAfter": 5
+    },
+    "weight": 2
+  },
+  {
+    "id": "hist-2c90f72",
+    "sha": "2c90f7296d36d9ef0e89a7327970c8e560ba3a8c",
+    "parent": "24adc4850572625bd9a73a698ee25d01dcc7ac5e",
+    "subject": "fix(autonomy): close unattended supply-chain/remote-exec and forged-preauth gaps",
+    "testFiles": [
+      "src/autonomy/governor.test.ts",
+      "src/autonomy/preauth.test.ts"
+    ],
+    "sourceFiles": [
+      "src/autonomy/governor.ts",
+      "src/autonomy/preauth.ts"
+    ],
+    "verifyCommand": "bun test --timeout=20000 src/autonomy/governor.test.ts src/autonomy/preauth.test.ts",
+    "evidence": {
+      "failingBefore": 11,
+      "passingAfter": 60
+    },
+    "weight": 2
   }
 ]

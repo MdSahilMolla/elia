@@ -2,7 +2,7 @@ import { afterEach, beforeEach, expect, test } from 'bun:test'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { growHarvest, harvestedFileFor, readHarvested, TASKS_FILE, type HarvestOptions, type HarvestResult } from './harvest.ts'
+import { growHarvest, harvestedFileFor, mergeTasks, readHarvested, TASKS_FILE, type HarvestOptions, type HarvestResult } from './harvest.ts'
 import { loadTaskSpecs, resetTaskSpecCache } from './suite.ts'
 import type { HistoryTaskSpec } from './types.ts'
 
@@ -121,4 +121,10 @@ test('the benchmark loads the tracked tasks plus the harvested ones, without dup
     else process.env.ELIA_HARVESTED_TASKS = previous
     resetTaskSpecCache()
   }
+})
+
+test('a harvest adds to the tracked set instead of replacing it', () => {
+  const existing = [spec('aaa1111'), spec('bbb2222')]
+  const merged = mergeTasks(existing, [spec('bbb2222'), spec('ccc3333')])
+  expect(merged.map((task) => task.id)).toEqual(['hist-aaa1111', 'hist-bbb2222', 'hist-ccc3333'])
 })
