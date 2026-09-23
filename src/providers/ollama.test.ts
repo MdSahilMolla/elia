@@ -2,15 +2,24 @@ import { afterEach, beforeEach, expect, test } from 'bun:test'
 import { clearDeclaredContextWindows, compactionThresholdFor, contextWindowFor } from '../contextWindow.ts'
 import { estimateCostUsd } from '../usage.ts'
 import { classifyProbeError, probeModel } from './probe.ts'
+import { withActiveMode } from '../autonomy/mode.ts'
 import {
+  acquireOllamaSlot,
   assertOllamaHost,
   chooseNumCtx,
   createOllamaProvider,
   DEFAULT_NUM_CTX,
   describeOllamaModel,
   detectOllama,
+  kvBytesPerToken,
+  LOCAL_MODEL_OMITTED_TOOLS,
+  MAX_AUTO_NUM_CTX,
+  memoryFitNumCtx,
   ollamaHost,
+  ollamaKeepAlive,
   ollamaModelWarning,
+  ollamaOmittedTools,
+  ollamaParallelSlots,
   parseShow,
   rankOllamaModels,
   resetOllamaDetection,
@@ -30,7 +39,7 @@ interface FakeModel {
 
 let server: ReturnType<typeof Bun.serve> | undefined
 let requests: Array<{ path: string; body: Record<string, unknown> }>
-const ENV_KEYS = ['OLLAMA_HOST', 'OLLAMA_API_KEY', 'ELIA_OLLAMA_NUM_CTX', 'ELIA_OLLAMA_DETECT', 'ELIA_STREAM_IDLE_MS'] as const
+const ENV_KEYS = ['OLLAMA_HOST', 'OLLAMA_API_KEY', 'ELIA_OLLAMA_NUM_CTX', 'ELIA_OLLAMA_DETECT', 'ELIA_STREAM_IDLE_MS', 'ELIA_OLLAMA_KEEP_ALIVE', 'ELIA_OLLAMA_TOOLS', 'OLLAMA_NUM_PARALLEL'] as const
 let savedEnv: Record<string, string | undefined>
 
 beforeEach(() => {
@@ -275,4 +284,106 @@ test('/api/show is read for capabilities and the context length, whatever the ar
   })
   // An older server reports no capabilities: unknown, not "no tools".
   expect(parseShow({ model_info: {} })).toEqual({})
+})
+
+const GIB = 1024 ** 3
+
+test('the KV cost of a token is read off the attention shape, counting only the layers that have attention', () => {
+  // qwen3.5:9b as Ollama reports it: attention on every fourth of 32 layers, 4 KV heads of 256.
+  const qwen35 = {
+    'general.architecture': 'qwen35',
+    'qwen35.block_count': 32,
+    'qwen35.attention.head_count': 16,
+    'qwen35.attention.key_length': 256,
+    'qwen35.attention.value_length': 256,
+    'qwen35.embedding_length': 4096,
+    'qwen35.full_attention_interval': 4,
+    'qwen35.attention.head_count_kv': Array.from({ length: 32 }, (_, layer) => (layer % 4 === 3 ? 4 : 0)),
+  }
+  expect(kvBytesPerToken(qwen35)).toBe(8 * 4 * 512 * 2)
+  // llama3.1:8b: 32 layers, 8 KV heads, head size from the embedding.
+  expect(kvBytesPerToken({ 'general.architecture': 'llama', 'llama.block_count': 32, 'llama.attention.head_count': 32, 'llama.attention.head_count_kv': 8, 'llama.embedding_length': 4096 })).toBe(32 * 8 * 256 * 2)
+  expect(kvBytesPerToken({ 'general.architecture': 'llama', 'llama.block_count': 32 })).toBeUndefined()
+  expect(parseShow({ model_info: qwen35 }).kvBytesPerToken).toBe(32_768)
+})
+
+test('the window grows to what unified memory holds beside the model, and never shrinks below the default', () => {
+  const qwen = { kvBytesPerToken: 32_768, modelBytes: 6.6e9, unifiedMemory: true }
+  // 16 GB: two thirds for the GPU, less the model and 2 GB of buffers, leaves ~2 GB of KV.
+  const fit16 = memoryFitNumCtx({ ...qwen, totalMemoryBytes: 16 * GIB })!
+  expect(fit16).toBeGreaterThan(DEFAULT_NUM_CTX)
+  expect(fit16 % 8_192).toBe(0)
+  expect(fit16 * 32_768 + 6.6e9 + 2 * GIB).toBeLessThanOrEqual(16 * GIB * 0.66)
+  expect(chooseNumCtx(262_144, {}, fit16)).toBe(fit16)
+  // Plenty of memory: capped, and never past the model's own maximum.
+  expect(chooseNumCtx(262_144, {}, memoryFitNumCtx({ ...qwen, totalMemoryBytes: 64 * GIB }))).toBe(MAX_AUTO_NUM_CTX)
+  expect(chooseNumCtx(40_960, {}, memoryFitNumCtx({ ...qwen, totalMemoryBytes: 64 * GIB }))).toBe(40_960)
+  // Tight memory keeps today's default rather than starving the prompt.
+  expect(chooseNumCtx(262_144, {}, memoryFitNumCtx({ ...qwen, totalMemoryBytes: 8 * GIB }))).toBe(DEFAULT_NUM_CTX)
+  // Unknowns assume nothing: a discrete GPU, an unreported shape, an unknown size.
+  expect(memoryFitNumCtx({ ...qwen, totalMemoryBytes: 64 * GIB, unifiedMemory: false })).toBeUndefined()
+  expect(memoryFitNumCtx({ ...qwen, totalMemoryBytes: 64 * GIB, kvBytesPerToken: undefined })).toBeUndefined()
+  expect(memoryFitNumCtx({ ...qwen, totalMemoryBytes: 64 * GIB, modelBytes: undefined })).toBeUndefined()
+  // The override still wins.
+  expect(chooseNumCtx(262_144, { ELIA_OLLAMA_NUM_CTX: '16384' }, fit16)).toBe(16_384)
+})
+
+test('the model stays loaded between turns, for 30 minutes unless told otherwise', async () => {
+  expect(ollamaKeepAlive({})).toBe('30m')
+  expect(ollamaKeepAlive({ ELIA_OLLAMA_KEEP_ALIVE: '2h' })).toBe('2h')
+  expect(ollamaKeepAlive({ ELIA_OLLAMA_KEEP_ALIVE: '-1' })).toBe(-1)
+  const host = startFake([{ name: 'qwen3:8b', capabilities: ['completion', 'tools'], contextLength: 40_960 }])
+  await createOllamaProvider('qwen3:8b', host).streamTurn(streamParams().params)
+  expect(requests.find((request) => request.path === '/api/chat')!.body.keep_alive).toBe('30m')
+})
+
+test('requests to one server take turns, and time spent queued is not a stall', async () => {
+  expect(ollamaParallelSlots({})).toBe(1)
+  expect(ollamaParallelSlots({ OLLAMA_NUM_PARALLEL: '3' })).toBe(3)
+  let inFlight = 0
+  let peak = 0
+  server = Bun.serve({
+    port: 0,
+    hostname: '127.0.0.1',
+    async fetch(request) {
+      const path = new URL(request.url).pathname
+      if (path === '/api/show') return Response.json({ capabilities: ['completion', 'tools'], model_info: {} })
+      if (path !== '/api/chat') return new Response('not found', { status: 404 })
+      inFlight++
+      peak = Math.max(peak, inFlight)
+      await Bun.sleep(150)
+      inFlight--
+      return new Response(`${JSON.stringify({ message: { role: 'assistant', content: 'ok' }, done: true })}\n`)
+    },
+  })
+  // Each request takes 150ms; a stall timer shorter than two of them must not fire on the queued one.
+  process.env.ELIA_STREAM_IDLE_MS = '250'
+  const provider = createOllamaProvider('qwen3:8b', `http://127.0.0.1:${server.port}`)
+  const results = await Promise.all([1, 2, 3].map(() => provider.streamTurn(streamParams().params)))
+  expect(results.map((result) => (result.content[0] as { text: string }).text)).toEqual(['ok', 'ok', 'ok'])
+  expect(peak).toBe(1)
+})
+
+test('a request waiting for a slot can be cancelled, and gives its place up', async () => {
+  const host = 'http://slot-test'
+  const releaseFirst = await acquireOllamaSlot(host, 1)
+  const controller = new AbortController()
+  const waiting = acquireOllamaSlot(host, 1, controller.signal)
+  controller.abort(new Error('stopped'))
+  await expect(waiting).rejects.toThrow('stopped')
+  releaseFirst()
+  // The slot is free again, not held by the cancelled waiter.
+  const again = await acquireOllamaSlot(host, 1)
+  again()
+})
+
+test('in dev mode a local model is offered the core tools, not the specialist ones', async () => {
+  await withActiveMode('dev', async () => {
+    expect(ollamaOmittedTools({}).has('github')).toBe(true)
+    for (const core of ['read_file', 'write_file', 'edit_file', 'grep', 'list_files', 'run_command', 'todo_write', 'brain', 'web_search']) expect(ollamaOmittedTools({}).has(core)).toBe(false)
+    expect(ollamaOmittedTools({ ELIA_OLLAMA_TOOLS: 'full' }).size).toBe(0)
+  })
+  // Other modes are built on their specialist tools.
+  await withActiveMode('fitness', async () => expect(ollamaOmittedTools({}).size).toBe(0))
+  expect(LOCAL_MODEL_OMITTED_TOOLS.has('read_file')).toBe(false)
 })

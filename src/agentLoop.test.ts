@@ -1215,3 +1215,23 @@ test('nobody listening costs the turn nothing, and a listener that throws does n
     stop()
   }
 })
+
+test('a provider that omits tools is not offered them, and the model is told which are missing', async () => {
+  const seen: { tools: string[]; dynamic?: string }[] = []
+  const tool = (name: string): Tool => ({ name, description: name, input_schema: { type: 'object', properties: {} }, async execute() { return '' } })
+  await runAgentLoop({
+    messages: [], systemPrompt: 'test', systemDynamicPrompt: 'Today is today.', providerName: 'ollama', model: 'omit-tools-test', useAnimation: false, verbose: false,
+    tools: [tool('read_file'), tool('github'), tool('grep')],
+    provider: {
+      omitTools: () => new Set(['github']),
+      async streamTurn(params) {
+        seen.push({ tools: params.tools.map((definition) => definition.name), dynamic: params.systemDynamic })
+        params.onText('done')
+        return { content: [{ type: 'text', text: 'done' }], usage: ZERO_USAGE }
+      },
+    },
+  })
+  expect(seen[0]!.tools).toEqual(['read_file', 'grep'])
+  expect(seen[0]!.dynamic).toStartWith('Today is today.')
+  expect(seen[0]!.dynamic).toContain('Not available this session: github.')
+})

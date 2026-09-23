@@ -239,3 +239,17 @@ test('the schedule does not depend on the order the planner listed steps', () =>
   expect(ordering([tests, source, manifest])).toBe('pkg -> src -> tests')
   expect(ordering([manifest, source, tests])).toBe('pkg -> src -> tests')
 })
+
+test('fleetConcurrency gives a local Ollama server only the requests it runs at once', () => {
+  const saved = process.env.OLLAMA_NUM_PARALLEL
+  delete process.env.OLLAMA_NUM_PARALLEL
+  try {
+    expect(fleetConcurrency(['ollama', 'ollama', 'ollama'])).toBe(1)
+    expect(fleetConcurrency(['ollama', 'anthropic'])).toBe(5)
+    process.env.OLLAMA_NUM_PARALLEL = '2'
+    expect(fleetConcurrency(['ollama'])).toBe(2)
+  } finally {
+    if (saved === undefined) delete process.env.OLLAMA_NUM_PARALLEL
+    else process.env.OLLAMA_NUM_PARALLEL = saved
+  }
+})

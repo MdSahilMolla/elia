@@ -284,8 +284,8 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
   const {
     messages,
     systemPrompt,
-    systemDynamicPrompt,
-    tools,
+    systemDynamicPrompt: requestedDynamicPrompt,
+    tools: requestedTools,
     onText,
     onThinking,
     onActivity,
@@ -365,6 +365,15 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
       'elia: run directive applied',
       false,
     )
+
+  // A provider whose model reads a long prompt slowly (a local one) may decline
+  // tools it would rarely use. The model is told which, so it does not reach for them.
+  const omittedTools = provider?.omitTools?.()
+  const withheld = omittedTools?.size ? requestedTools.filter((tool) => omittedTools.has(tool.name)).map((tool) => tool.name) : []
+  const tools = withheld.length > 0 ? requestedTools.filter((tool) => !omittedTools?.has(tool.name)) : requestedTools
+  const systemDynamicPrompt = withheld.length > 0
+    ? [requestedDynamicPrompt, `This model runs with a reduced tool set to keep its prompt short. Not available this session: ${withheld.join(', ')}. Do their work with the tools you have (e.g. \`gh\` through run_command).`].filter(Boolean).join('\n\n')
+    : requestedDynamicPrompt
 
   const toolDefinitions = tools.map((tool) => ({
     name: tool.name,

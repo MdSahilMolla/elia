@@ -1,4 +1,6 @@
+import { totalmem } from 'node:os'
 import { validateNetworkUrl } from '../networkPolicy.ts'
+import { activeMode } from '../autonomy/mode.ts'
 import { declareContextWindow } from '../contextWindow.ts'
 import { declareLocalModel } from '../usage.ts'
 import { streamIdleMs } from './openaiCompatible.ts'
@@ -16,11 +18,17 @@ import type { ChatMessage, ContentBlock, Provider, StreamTurnParams, ThinkingOpt
  * an error. The model never sees its instructions or its tools.
  *
  * `/api/chat` takes `options.num_ctx` per request, so this adapter sets a window
- * that holds the prompt — the model's own maximum, capped at
- * `DEFAULT_NUM_CTX` because a larger window costs memory on the user's machine
- * — and declares it to `contextWindow.ts`, so compaction plans for the window
- * that is really there. The same `num_ctx` goes on every request: Ollama
- * reloads the model when it changes.
+ * that holds the prompt — as much of the model's maximum as this machine's
+ * memory holds (`memoryFitNumCtx`), never less than `DEFAULT_NUM_CTX` — and
+ * declares it to `contextWindow.ts`, so compaction plans for the window that is
+ * really there. The same `num_ctx` goes on every request: Ollama reloads the
+ * model when it changes.
+ *
+ * A local model is slow to read a long prompt, so in dev mode it is not offered
+ * the specialist tools (`LOCAL_MODEL_OMITTED_TOOLS`): their definitions were
+ * three quarters of every request. One server runs one request at a time, so
+ * requests to it queue here (`OLLAMA_NUM_PARALLEL` slots) rather than inside
+ * Ollama, where a queued request would look like a stalled one.
  *
  * No API key is needed. `OLLAMA_API_KEY`, when set, is sent as a bearer token
  * for a hosted or authenticated server. Plain HTTP is allowed only to this
@@ -31,6 +39,9 @@ export const OLLAMA_DEFAULT_HOST = 'http://127.0.0.1:11434'
 
 /** The window elia asks for when the model allows it. Holds the ~17k fixed prompt with room for a working conversation. */
 export const DEFAULT_NUM_CTX = 32_768
+
+/** The most `memoryFitNumCtx` asks for: past this, a long conversation is re-read slower than it is worth on local hardware. */
+export const MAX_AUTO_NUM_CTX = 131_072
 
 /** Below this the fixed prompt alone does not fit; such a model cannot run elia's tools. */
 export const MIN_USABLE_CONTEXT = 24_576
@@ -81,6 +92,8 @@ export interface OllamaModel {
   capabilities?: string[]
   /** The model's own maximum context, from `/api/show`. */
   contextLength?: number
+  /** Bytes of f16 KV cache one token of context costs, from the attention shape `/api/show` reports. */
+  kvBytesPerToken?: number
 }
 
 export interface OllamaDetection {
@@ -155,21 +168,52 @@ export function parseTags(payload: unknown): OllamaModel[] {
   return models.sort((a, b) => a.name.localeCompare(b.name))
 }
 
-/** `/api/show` into capabilities and the model's maximum context (`<arch>.context_length` in `model_info`). */
-export function parseShow(payload: unknown): Pick<OllamaModel, 'capabilities' | 'contextLength'> {
+/**
+ * KV cache per token: K and V, f16, for every attention layer's KV heads.
+ * `head_count_kv` is a number, or a per-layer array in which a hybrid model
+ * (qwen3.5: attention every fourth layer) gives its non-attention layers 0.
+ * Undefined when the shape is not reported — then nothing is assumed.
+ */
+export function kvBytesPerToken(info: Record<string, unknown>): number | undefined {
+  const arch = typeof info['general.architecture'] === 'string' ? info['general.architecture'] : undefined
+  if (!arch) return undefined
+  const num = (key: string) => (typeof info[`${arch}.${key}`] === 'number' ? (info[`${arch}.${key}`] as number) : undefined)
+  const blocks = num('block_count')
+  const heads = num('attention.head_count')
+  const embedding = num('embedding_length')
+  const headDim = heads && embedding ? embedding / heads : undefined
+  const keyLength = num('attention.key_length') ?? headDim
+  const valueLength = num('attention.value_length') ?? headDim
+  if (!blocks || !keyLength || !valueLength) return undefined
+  const rawKv = info[`${arch}.attention.head_count_kv`]
+  let kvHeads: number | undefined
+  if (Array.isArray(rawKv)) kvHeads = rawKv.reduce((sum: number, value) => sum + (typeof value === 'number' ? value : 0), 0)
+  else if (typeof rawKv === 'number') {
+    const interval = num('full_attention_interval')
+    kvHeads = rawKv * (interval && interval > 1 ? Math.ceil(blocks / interval) : blocks)
+  }
+  if (!kvHeads) return undefined
+  return kvHeads * (keyLength + valueLength) * 2
+}
+
+/** `/api/show` into capabilities, the model's maximum context (`<arch>.context_length` in `model_info`) and its KV cost per token. */
+export function parseShow(payload: unknown): Pick<OllamaModel, 'capabilities' | 'contextLength' | 'kvBytesPerToken'> {
   if (!payload || typeof payload !== 'object') return {}
   const body = payload as { capabilities?: unknown; model_info?: unknown }
   const capabilities = Array.isArray(body.capabilities) ? body.capabilities.filter((value): value is string => typeof value === 'string') : undefined
   let contextLength: number | undefined
+  let kvBytes: number | undefined
   if (body.model_info && typeof body.model_info === 'object') {
-    for (const [key, value] of Object.entries(body.model_info as Record<string, unknown>)) {
+    const info = body.model_info as Record<string, unknown>
+    for (const [key, value] of Object.entries(info)) {
       if (key.endsWith('.context_length') && typeof value === 'number' && value > 0) contextLength = value
     }
+    kvBytes = kvBytesPerToken(info)
   }
-  return { ...(capabilities ? { capabilities } : {}), ...(contextLength ? { contextLength } : {}) }
+  return { ...(capabilities ? { capabilities } : {}), ...(contextLength ? { contextLength } : {}), ...(kvBytes ? { kvBytesPerToken: kvBytes } : {}) }
 }
 
-export async function showOllamaModel(model: string, options: { host?: string; apiKey?: string; timeoutMs?: number } = {}): Promise<Pick<OllamaModel, 'capabilities' | 'contextLength'>> {
+export async function showOllamaModel(model: string, options: { host?: string; apiKey?: string; timeoutMs?: number } = {}): Promise<Pick<OllamaModel, 'capabilities' | 'contextLength' | 'kvBytesPerToken'>> {
   const host = options.host ?? ollamaHost()
   const payload = await getJson(`${host}/api/show`, {
     method: 'POST',
@@ -298,11 +342,115 @@ export function numCtxOverride(env: Record<string, string | undefined> = process
   return Number.isFinite(value) && value >= 2_048 ? value : undefined
 }
 
-/** The window to run `contextLength`-limited model at: the override, else the model's maximum capped at DEFAULT_NUM_CTX. */
-export function chooseNumCtx(contextLength: number | undefined, env: Record<string, string | undefined> = process.env): number {
+const GIB = 1024 ** 3
+
+export interface MemoryFitInput {
+  kvBytesPerToken?: number
+  /** The model's size on disk, which is about what its weights take loaded. */
+  modelBytes?: number
+  totalMemoryBytes: number
+  /** Apple silicon: the GPU draws on system memory, so its size is known here. */
+  unifiedMemory: boolean
+}
+
+/**
+ * The largest window this machine's memory holds beside the model, in steps of
+ * 8k tokens, or undefined when that cannot be worked out. Only on unified
+ * memory, where Metal lets the GPU use about two thirds of RAM (three quarters
+ * from 36 GB); a discrete GPU's free VRAM is not visible from here. 2 GB stays
+ * free for Ollama's compute buffers, so a fit never spills layers to the CPU.
+ */
+export function memoryFitNumCtx(input: MemoryFitInput): number | undefined {
+  if (!input.unifiedMemory || !input.kvBytesPerToken || !input.modelBytes) return undefined
+  const gpuShare = input.totalMemoryBytes >= 36 * GIB ? 0.75 : 0.66
+  const free = input.totalMemoryBytes * gpuShare - input.modelBytes - 2 * GIB
+  if (free <= 0) return undefined
+  return Math.floor(free / input.kvBytesPerToken / 8_192) * 8_192
+}
+
+/**
+ * The window to run a `contextLength`-limited model at: the override, else what
+ * memory holds (`fitted`, between DEFAULT_NUM_CTX and MAX_AUTO_NUM_CTX), else
+ * DEFAULT_NUM_CTX — never more than the model's own maximum.
+ */
+export function chooseNumCtx(contextLength: number | undefined, env: Record<string, string | undefined> = process.env, fitted?: number): number {
   const override = numCtxOverride(env)
   if (override !== undefined) return override
-  return contextLength !== undefined ? Math.min(contextLength, DEFAULT_NUM_CTX) : DEFAULT_NUM_CTX
+  const cap = fitted !== undefined ? Math.min(MAX_AUTO_NUM_CTX, Math.max(DEFAULT_NUM_CTX, fitted)) : DEFAULT_NUM_CTX
+  return contextLength !== undefined ? Math.min(contextLength, cap) : cap
+}
+
+/**
+ * How long Ollama keeps the model loaded after a request: `ELIA_OLLAMA_KEEP_ALIVE`,
+ * else 30 minutes. Ollama's own 5 minutes is shorter than a person reading a
+ * diff, and reloading a model costs seconds to minutes. A bare number is seconds
+ * (`-1` keeps it loaded, `0` unloads it), as Ollama reads it.
+ */
+export function ollamaKeepAlive(env: Record<string, string | undefined> = process.env): string | number {
+  const raw = env.ELIA_OLLAMA_KEEP_ALIVE?.trim()
+  if (!raw) return '30m'
+  return /^-?\d+$/.test(raw) ? Number.parseInt(raw, 10) : raw
+}
+
+/** Requests one Ollama server runs at once: its `OLLAMA_NUM_PARALLEL` when set here too, else 1. */
+export function ollamaParallelSlots(env: Record<string, string | undefined> = process.env): number {
+  const value = Number.parseInt(env.OLLAMA_NUM_PARALLEL?.trim() ?? '', 10)
+  return Number.isFinite(value) && value >= 1 ? value : 1
+}
+
+/**
+ * Specialist tools a local model is not offered in dev mode. Their definitions
+ * were ~12k of the ~17k tokens of tools on every request, which a local model
+ * reads at a few hundred tokens a second. The core — files, search, shell,
+ * processes, plan, memory, web — stays, and a call to an omitted tool is
+ * answered with the tools that exist. `ELIA_OLLAMA_TOOLS=full` offers them all.
+ */
+export const LOCAL_MODEL_OMITTED_TOOLS: ReadonlySet<string> = new Set([
+  'github', 'task', 'preview', 'codex_delegate', 'communication', 'deployment', 'finance', 'paper', 'visualize',
+  'data_science', 'fitness', 'sports', 'federated_collab', 'codebase_memory', 'arch_drift', 'cross_project_learn',
+  'causal_debug', 'causal_fix', 'causal_verify', 'multi_modal_review', 'adversarial_verify', 'self_healing_monitor',
+  'spec_verify', 'predictive_impact', 'temporal_analysis', 'dependency_audit', 'production_readiness', 'provision_environment',
+])
+
+/** What a local model is not offered right now: nothing outside dev mode, whose other modes are built on these tools. */
+export function ollamaOmittedTools(env: Record<string, string | undefined> = process.env): ReadonlySet<string> {
+  const setting = env.ELIA_OLLAMA_TOOLS?.trim().toLowerCase()
+  if (setting === 'full' || setting === 'all') return new Set()
+  return activeMode() === 'dev' ? LOCAL_MODEL_OMITTED_TOOLS : new Set()
+}
+
+const slotsByHost = new Map<string, { active: number; waiting: Array<() => void> }>()
+
+/** Waits for one of `limit` request slots on `host`; resolves to its release. Rejects if `signal` aborts while waiting. */
+export async function acquireOllamaSlot(host: string, limit: number, signal?: AbortSignal): Promise<() => void> {
+  let slots = slotsByHost.get(host)
+  if (!slots) slotsByHost.set(host, (slots = { active: 0, waiting: [] }))
+  const state = slots
+  if (state.active >= limit) {
+    signal?.throwIfAborted()
+    await new Promise<void>((resolve, reject) => {
+      const wake = () => {
+        signal?.removeEventListener('abort', onAbort)
+        resolve()
+      }
+      const onAbort = () => {
+        state.waiting.splice(state.waiting.indexOf(wake), 1)
+        reject(signal?.reason ?? new Error('aborted'))
+      }
+      state.waiting.push(wake)
+      signal?.addEventListener('abort', onAbort, { once: true })
+    })
+  }
+  // A woken waiter inherits the releasing request's slot; only a fresh one takes a new one.
+  else state.active++
+  let released = false
+  return () => {
+    if (released) return
+    released = true
+    const next = state.waiting.shift()
+    if (next) next()
+    else state.active--
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -395,18 +543,38 @@ export function createOllamaProvider(model: string, host: string = ollamaHost(),
   const headers = { 'Content-Type': 'application/json', ...authHeaders(options.apiKey) }
   let numCtx = options.numCtx ?? chooseNumCtx(undefined)
   let capabilities: string[] | undefined
+  const keepAlive = ollamaKeepAlive()
+  const local = isLoopback(base)
   // Compaction must plan for this window from the first turn; `/api/show` may lower it.
   declareContextWindow(model, numCtx)
   // Running on this machine: no API price, so $0 rather than "cost unknown" — unless the
   // server is remote, where someone may well be paying for it.
-  if (isLoopback(base)) declareLocalModel(model)
+  if (local) declareLocalModel(model)
+
+  /** The model's size on disk, for the memory fit; only a server on this machine shares its memory. */
+  const modelBytes = async (): Promise<number | undefined> => {
+    if (!local) return undefined
+    const known = cachedOllamaDetection()?.models.find((entry) => entry.name === model)?.sizeBytes
+    if (known) return known
+    try {
+      return parseTags(await getJson(`${base}/api/tags`, { headers, timeoutMs: 5_000 })).find((entry) => entry.name === model)?.sizeBytes
+    } catch {
+      return undefined
+    }
+  }
 
   let info: Promise<void> | undefined
   const ensureInfo = () => {
-    info ??= showOllamaModel(model, { host: base, apiKey: options.apiKey, timeoutMs: 10_000 })
-      .then((shown) => {
+    info ??= Promise.all([showOllamaModel(model, { host: base, apiKey: options.apiKey, timeoutMs: 10_000 }), modelBytes()])
+      .then(([shown, bytes]) => {
         capabilities = shown.capabilities
-        if (options.numCtx === undefined) numCtx = chooseNumCtx(shown.contextLength)
+        const fitted = memoryFitNumCtx({
+          kvBytesPerToken: shown.kvBytesPerToken,
+          modelBytes: bytes,
+          totalMemoryBytes: totalmem(),
+          unifiedMemory: local && process.platform === 'darwin' && process.arch === 'arm64',
+        })
+        if (options.numCtx === undefined) numCtx = chooseNumCtx(shown.contextLength, process.env, fitted)
         declareContextWindow(model, numCtx)
       })
       .catch(() => {
@@ -437,12 +605,14 @@ export function createOllamaProvider(model: string, host: string = ollamaHost(),
   }
 
   return {
+    omitTools: () => ollamaOmittedTools(),
+
     prewarm() {
       // Loading a model from disk takes seconds to minutes; an empty chat loads
       // it (with the same num_ctx, or the first real request would reload it)
       // while the person is still typing. Failures are the first request's to report.
       void ensureInfo()
-        .then(() => fetch(`${base}/api/chat`, { method: 'POST', headers, body: JSON.stringify({ model, messages: [], options: { num_ctx: numCtx } }) }))
+        .then(() => fetch(`${base}/api/chat`, { method: 'POST', headers, body: JSON.stringify({ model, messages: [], options: { num_ctx: numCtx }, keep_alive: keepAlive }) }))
         .then((response) => response.body?.cancel())
         .catch(() => {})
     },
@@ -450,6 +620,8 @@ export function createOllamaProvider(model: string, host: string = ollamaHost(),
     async streamTurn({ system, systemDynamic, messages, tools, onText, onThinking, onToolBlock, signal }: StreamTurnParams) {
       await ensureInfo()
       const fullSystem = systemDynamic && systemDynamic.trim() ? `${system}\n\n${systemDynamic}` : system
+      // Before the stall clock starts: time spent queued behind another request is not a stall.
+      const release = await acquireOllamaSlot(base, ollamaParallelSlots(), signal)
       const idleMs = ollamaIdleMs()
       const stall = new AbortController()
       let idleTimer: ReturnType<typeof setTimeout> | undefined
@@ -502,6 +674,7 @@ export function createOllamaProvider(model: string, host: string = ollamaHost(),
             ...(tools.length > 0 ? { tools: toOllamaTools(tools) } : {}),
             stream: true,
             options: { num_ctx: numCtx },
+            keep_alive: keepAlive,
             ...thinkField(),
           },
           requestSignal,
@@ -531,6 +704,7 @@ export function createOllamaProvider(model: string, host: string = ollamaHost(),
         throw error
       } finally {
         if (idleTimer) clearTimeout(idleTimer)
+        release()
       }
 
       const content: ContentBlock[] = []

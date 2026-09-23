@@ -147,4 +147,10 @@ export interface Provider {
    * messages instead of the provider's stale copy.
    */
   resetConversation?(): void
+  /**
+   * Optional: names of tools this provider's model should not be offered right
+   * now, because every definition costs it prompt it reads slowly (a local
+   * model). The agent loop leaves them out and tells the model which.
+   */
+  omitTools?(): ReadonlySet<string>
 }

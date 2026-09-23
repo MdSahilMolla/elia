@@ -6,6 +6,7 @@ import { inkOwnsScreen } from '../ui/stream.ts'
 import { reportSinkActive } from '../ui/report.ts'
 import { ZERO_USAGE, addUsage } from '../usage.ts'
 import { routeForAssignment } from '../config.ts'
+import { ollamaParallelSlots } from '../providers/ollama.ts'
 import { role as roleDefinition, toolsForRole } from './roles.ts'
 import type { Usage } from '../providers/types.ts'
 import type { Journal } from './journal.ts'
@@ -318,10 +319,17 @@ export async function runFleet(options: FleetRunOptions): Promise<FleetResult> {
  * genuinely distinct providers (a scout on Groq, a critic on Claude, ...) has N
  * separate rate-limit budgets, so it can safely run wider without any one of
  * them being hammered harder than a single-provider fleet already is.
+ *
+ * A local Ollama server is not a rate limit but one GPU that runs its
+ * `OLLAMA_NUM_PARALLEL` requests at a time, so it adds only that many. Workers
+ * beyond it would queue on the server with their prompts evicting each other's
+ * cache, where one after another each keeps its own.
  */
 export function fleetConcurrency(providerNames: string[]): number {
-  const distinctProviders = new Set(providerNames).size || 1
-  return Math.min(MAX_FLEET_CONCURRENCY, DEFAULT_FLEET_CONCURRENCY * distinctProviders)
+  const distinct = [...new Set(providerNames)]
+  if (distinct.length === 0) return DEFAULT_FLEET_CONCURRENCY
+  const slots = distinct.reduce((total, name) => total + (name === 'ollama' ? ollamaParallelSlots() : DEFAULT_FLEET_CONCURRENCY), 0)
+  return Math.min(MAX_FLEET_CONCURRENCY, slots)
 }
 
 /**
