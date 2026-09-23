@@ -1,14 +1,19 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test'
+import { spawnSync } from 'node:child_process'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { runGit } from '../../autonomy/worktree.ts'
 import { applyPatch, checkoutFromLocalGitDir } from './repo.ts'
-import { runSweBenchInstance, runSweBenchSuite, runTests, type AgentRunner, type InstanceCheckout } from './harness.ts'
+import { hostPython, runSweBenchInstance, runSweBenchSuite, runTests, type AgentRunner, type InstanceCheckout } from './harness.ts'
 import type { SweBenchInstance } from './types.ts'
 
 let srcRepo: string
 const dirsToClean: string[] = []
+
+/** These tests score a real pytest run; a machine without pytest cannot say anything about them. */
+const hasPytest = spawnSync(hostPython('python'), ['-m', 'pytest', '--version'], { encoding: 'utf8' }).status === 0
+const withPytest = test.skipIf(!hasPytest)
 
 async function git(args: string[], cwd: string): Promise<void> {
   const result = await runGit(args, cwd)
@@ -73,7 +78,7 @@ const fixesTheBug: AgentRunner = async (dir) => {
   return { steps: 3 }
 }
 
-test('runTests reports PASSED/FAILED per test id against a real pytest run', async () => {
+withPytest('runTests reports PASSED/FAILED per test id against a real pytest run', async () => {
   const dir = await fixtureCheckout()(instanceFor())
   const instance = instanceFor()
   const before = await runTests(dir, instance.FAIL_TO_PASS, instance)
@@ -84,7 +89,7 @@ test('runTests reports PASSED/FAILED per test id against a real pytest run', asy
   expect(after.get('test_add.py::test_add')).toBe('PASSED')
 }, 20_000)
 
-test('runSweBenchInstance: resolved when the agent fix makes FAIL_TO_PASS pass without breaking PASS_TO_PASS', async () => {
+withPytest('runSweBenchInstance: resolved when the agent fix makes FAIL_TO_PASS pass without breaking PASS_TO_PASS', async () => {
   const result = await runSweBenchInstance(instanceFor(), { checkout: fixtureCheckout(), runAgent: fixesTheBug })
   expect(result.resolved).toBe(true)
   expect(result.failToPass['test_add.py::test_add']).toBe('PASSED')
@@ -93,7 +98,7 @@ test('runSweBenchInstance: resolved when the agent fix makes FAIL_TO_PASS pass w
   expect(result.keptDir).toBeUndefined() // a resolved instance's checkout is cleaned up, not kept
 }, 20_000)
 
-test('runSweBenchInstance: unresolved when the agent makes no change, and the checkout is kept for inspection', async () => {
+withPytest('runSweBenchInstance: unresolved when the agent makes no change, and the checkout is kept for inspection', async () => {
   const result = await runSweBenchInstance(instanceFor(), { checkout: fixtureCheckout(), runAgent: doesNothing })
   expect(result.resolved).toBe(false)
   expect(result.failToPass['test_add.py::test_add']).toBe('FAILED')
@@ -101,7 +106,7 @@ test('runSweBenchInstance: unresolved when the agent makes no change, and the ch
   expect(result.keptDir).toBeDefined()
 }, 20_000)
 
-test('runSweBenchInstance: a test id absent from the run output scores MISSING, not silently PASSED', async () => {
+withPytest('runSweBenchInstance: a test id absent from the run output scores MISSING, not silently PASSED', async () => {
   const instance = instanceFor({ FAIL_TO_PASS: ['test_add.py::test_add', 'test_add.py::test_does_not_exist'] })
   const result = await runSweBenchInstance(instance, { checkout: fixtureCheckout(), runAgent: fixesTheBug })
   expect(result.failToPass['test_add.py::test_does_not_exist']).toBe('MISSING')
@@ -124,7 +129,7 @@ test('runSweBenchInstance: a checkout failure is recorded as an unresolved resul
   expect(result.agentError).toContain('simulated checkout failure')
 })
 
-test('runSweBenchSuite aggregates total/resolved across instances and reports each via onInstanceDone', async () => {
+withPytest('runSweBenchSuite aggregates total/resolved across instances and reports each via onInstanceDone', async () => {
   const seen: string[] = []
   const summary = await runSweBenchSuite([instanceFor({ instance_id: 'a' }), instanceFor({ instance_id: 'b' })], {
     checkout: fixtureCheckout(),
@@ -141,4 +146,12 @@ test('runSweBenchSuite stops early when the signal is already aborted', async ()
   controller.abort()
   const summary = await runSweBenchSuite([instanceFor({ instance_id: 'a' })], { checkout: fixtureCheckout(), runAgent: doesNothing, signal: controller.signal })
   expect(summary.total).toBe(0)
+})
+
+test('a host with only python3 runs the tests with python3, and nothing else is renamed', () => {
+  const only3 = (name: string) => (name === 'python3' ? '/usr/bin/python3' : null)
+  expect(hostPython('python', only3)).toBe('python3')
+  expect(hostPython('python', (name) => `/usr/bin/${name}`)).toBe('python')
+  expect(hostPython('python', () => null)).toBe('python')
+  expect(hostPython('pytest', only3)).toBe('pytest')
 })

@@ -847,3 +847,15 @@ test('a skill cannot soften a built-in by taking its name', async () => {
     resetSkillCapabilities()
   }
 })
+
+test('mkdir of plain relative paths is a reversible workspace write; anything that could leave the workspace stays critical', async () => {
+  for (const command of ['mkdir build', 'mkdir -p workspace/app/src', 'mkdir -pv a b/c', 'mkdir ./out', 'mkdir .cache']) {
+    expect(assessAction({ name: 'run_command', input: { command } }), command).toMatchObject({ risk: 'review', reversible: true })
+  }
+  for (const command of ['mkdir /etc/evil', 'mkdir ../outside', 'mkdir a/../../outside', 'mkdir ~/x', 'mkdir -m 777 x', 'mkdir "$(whoami)"', 'mkdir x; rm -rf y', 'mkdir', 'mkdir -p']) {
+    expect(assessAction({ name: 'run_command', input: { command } }).risk, command).toBe('critical')
+  }
+  const governor = createActionGovernor({ mode: 'unattended', cwd: process.cwd() })
+  expect((await governor.check({ name: 'run_command', input: { command: 'mkdir -p workspace' } })).allowed).toBe(true)
+  expect((await governor.check({ name: 'run_command', input: { command: 'mkdir ../outside' } })).allowed).toBe(false)
+})

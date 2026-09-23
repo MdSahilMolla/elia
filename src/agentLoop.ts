@@ -10,6 +10,8 @@ import { activeTodoList } from './autonomy/todoList.ts'
 import type { ChatMessage, ContentBlock, Provider, ProviderActivity, Usage } from './providers/types.ts'
 import type { Tool } from './tools/types.ts'
 import { unknownToolMessage } from './tools/toolNameSuggest.ts'
+import { normalizeRunCommandInput } from './tools/runCommand.ts'
+import { redactText } from './ui/redact.ts'
 import { endTextTurn, writeNotice, writeToolCall, writeToolResult } from './ui/stream.ts'
 import { startThinkingAnimation } from './ui/animator.ts'
 import { createStreamCursor } from './ui/streamCursor.ts'
@@ -506,6 +508,9 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
     const toolUseBlocks = content.filter(
       (block): block is Extract<ContentBlock, { type: 'tool_use' }> => block.type === 'tool_use',
     )
+    // Before anything sees the call — concurrency, hooks, the governor, the
+    // tool, the transcript — so all of them judge the same command.
+    for (const block of toolUseBlocks) if (block.name === 'run_command') block.input = normalizeRunCommandInput(block.input)
 
     if (toolUseBlocks.length === 0) {
       // The model is ready to stop — but if the operator sent steering during
@@ -983,8 +988,11 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
               const nextRoute = activeRoutes[routeIndex + 1]
               if (nextRoute) {
                 if (verbose) {
+                  // With the reason: five providers "unavailable" in a row is a
+                  // network blip, a spent key or a request too big for all of
+                  // them, and afterwards nothing else says which.
                   writeNotice(
-                    `provider ${route.label ?? `${route.providerName} (${route.model})`} unavailable; trying ${nextRoute.label ?? `${nextRoute.providerName} (${nextRoute.model})`}`,
+                    `provider ${route.label ?? `${route.providerName} (${route.model})`} unavailable (${redactText(failure.split('\n')[0] ?? '', 120)}); trying ${nextRoute.label ?? `${nextRoute.providerName} (${nextRoute.model})`}`,
                   )
                 }
                 break

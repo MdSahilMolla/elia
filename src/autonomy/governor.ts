@@ -1009,7 +1009,30 @@ function assessCommand(command: string, _cwd: string): ActionAssessment {
   if (READ_ONLY_COMMAND.test(command) && !SED_AWK_INPLACE_EDIT.test(command) && !DESTRUCTIVE_SHELL_VERBS.test(command)) {
     return assessment('safe', 'allow', 'shell command matches the restricted read-only command policy', 'shell.read-only', [], !SHELL_SIDE_EFFECT.test(command))
   }
+  if (isWorkspaceMkdir(command)) {
+    return assessment('review', 'approve', 'mkdir creates directories under the directory it runs in', 'shell', [], true)
+  }
   return assessment('critical', 'approve', 'shell command is not in the restricted read-only policy and may cause an unreviewed side effect', 'shell.unknown', [], false)
+}
+
+/**
+ * `mkdir` of plain relative paths: no absolute path, no `~`, no `..` segment, no
+ * option but `-p`/`-v`. It creates directories under the directory it runs in,
+ * which run_command keeps inside the workspace, and write_file can already
+ * create any directory there. Classed critical, it was refused in every
+ * unattended run, and models spent steps working around it with placeholder
+ * files. Control syntax never reaches here: it is refused at the top.
+ */
+function isWorkspaceMkdir(command: string): boolean {
+  const tokens = command.trim().split(/\s+/)
+  if (tokens[0] !== 'mkdir') return false
+  let paths = 0
+  for (const token of tokens.slice(1)) {
+    if (/^-[pv]+$/.test(token)) continue
+    if (!/^[A-Za-z0-9_.][A-Za-z0-9_./-]*$/.test(token) || token.split('/').includes('..')) return false
+    paths += 1
+  }
+  return paths > 0
 }
 
 function assessment(

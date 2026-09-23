@@ -74,6 +74,16 @@ const runElia: AgentRunner = async (dir, problemStatement, maxSteps) => {
   }
 }
 
+/**
+ * `python` as the host names it. SWE-bench's images have `python`; macOS and
+ * several Linux distributions ship only `python3`, where the bare name is not
+ * found and every test id scores MISSING. Only the bare name is rewritten.
+ */
+export function hostPython(executable: string, which: (name: string) => string | null = Bun.which): string {
+  if (executable !== 'python' || which('python')) return executable
+  return which('python3') ? 'python3' : executable
+}
+
 /** Exported for tests — the real scoring step, worth exercising directly rather than only through the full runSweBenchInstance pipeline. */
 export async function runTests(dir: string, testIds: string[], instance: SweBenchInstance): Promise<Map<string, TestOutcome>> {
   if (testIds.length === 0) return new Map()
@@ -81,7 +91,8 @@ export async function runTests(dir: string, testIds: string[], instance: SweBenc
   if (instance.dockerImage && containerSandboxConfigured()) {
     result = await runShellInContainer(pytestShellCommand(testIds, instance.testCommand), TEST_TIMEOUT_MS, dir)
   } else {
-    const { executable, args } = pytestInvocation(testIds, instance.testCommand)
+    const { executable: named, args } = pytestInvocation(testIds, instance.testCommand)
+    const executable = hostPython(named)
     // PYTHONDONTWRITEBYTECODE: runTests is called twice against the same
     // checkout across an agent fix (before/after) — without this, a stale
     // __pycache__/*.pyc from the pre-fix run can be reused if the source

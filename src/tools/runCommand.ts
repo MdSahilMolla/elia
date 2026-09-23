@@ -182,6 +182,38 @@ export function workspaceScopedEnv(cwd: string): Record<string, string> | undefi
   return base
 }
 
+/** A directory `cd` can be read as without any doubt about what the shell will do: no quotes, `$`, `~`, globs or spaces. */
+const CD_THEN = /^\s*cd\s+([A-Za-z0-9_./-]+)\s*&&\s*(\S[\s\S]*?)\s*$/
+const TRAILING_STDERR_REDIRECT = /\s+2>(?:&1|\/dev\/null)\s*$/
+
+/**
+ * `cd <dir> && <command>` is how models write "run this in that directory",
+ * whatever this tool's description says, and it is exactly this tool's own
+ * `cwd`. It is rewritten into that form before anything judges it, so the
+ * governor assesses the command that really runs, in the directory it really
+ * runs in — where every path check on `cwd` applies — instead of refusing the
+ * pair as a composed script, which cost unattended runs a step or two each time.
+ * A trailing `2>&1` or `2>/dev/null` only reshapes output this tool already
+ * returns separately, and is dropped. Anything else — a directory with quotes,
+ * `$` or spaces, a `;`, a pipe — stays in the command, for the governor to
+ * judge as the composed command it is.
+ */
+export function normalizeRunCommandInput(input: Record<string, unknown>): Record<string, unknown> {
+  if (typeof input.command !== 'string') return input
+  let command = input.command
+  let cwd = typeof input.cwd === 'string' ? input.cwd.trim() : ''
+  for (let hops = 0; hops < 4; hops++) {
+    const match = CD_THEN.exec(command)
+    if (!match) break
+    const dir = match[1]!
+    cwd = isAbsolute(dir) || !cwd ? dir : join(cwd, dir)
+    command = match[2]!
+  }
+  command = command.replace(TRAILING_STDERR_REDIRECT, '')
+  if (command === input.command) return input
+  return { ...input, command, ...(cwd ? { cwd } : {}) }
+}
+
 export const runCommandTool: Tool = {
   name: 'run_command',
   description: `Run a shell command and return its stdout, stderr, and exit code. Defaults to a 60 second timeout, or ${LONG_RUNNING_TIMEOUT_MS / 1000} seconds for a recognized install, build, or test command; pass timeoutMs to set it explicitly.

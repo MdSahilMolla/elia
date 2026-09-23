@@ -33,7 +33,7 @@
  */
 import { spawnSync } from 'node:child_process'
 import { existsSync, realpathSync } from 'node:fs'
-import { isAbsolute, relative, resolve } from 'node:path'
+import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import type { ActionApproval, ActionAssessment, ActionRequest } from '../autonomy/governor.ts'
 
 /**
@@ -119,12 +119,26 @@ function isNetwork(target: string): boolean {
   return NETWORK_REMOTE.test(target) || SCP_REMOTE.test(target)
 }
 
-/** 8.3 short names and symlinks make two spellings of one directory; compare the resolved form. */
+/**
+ * 8.3 short names and symlinks make two spellings of one directory; compare the
+ * resolved form. A path that does not exist yet — a branch name like `fix/sum`,
+ * a clone target — resolves through its deepest existing ancestor. Falling back
+ * to the unresolved spelling instead put it on the other side of a symlinked
+ * ancestor from the root: macOS's temp dir is `/var/…`, really `/private/var/…`,
+ * so every such path read as outside the fixture and git's first steps were refused.
+ */
 function real(path: string): string {
-  try {
-    return realpathSync.native(path)
-  } catch {
-    return resolve(path)
+  const missing: string[] = []
+  let current = resolve(path)
+  for (;;) {
+    try {
+      return join(realpathSync.native(current), ...missing)
+    } catch {
+      const parent = dirname(current)
+      if (parent === current) return resolve(path)
+      missing.unshift(basename(current))
+      current = parent
+    }
   }
 }
 
@@ -153,7 +167,10 @@ function git(args: string[], cwd: string): string | undefined {
  * the whole point of this check is that the approval names a real place.
  */
 export function pushDestination(command: string, cwd: string): string | undefined {
-  const tokens = shellTokens(command)
+  return pushDestinationOf(shellTokens(command), cwd)
+}
+
+function pushDestinationOf(tokens: readonly string[], cwd: string): string | undefined {
   const pushAt = tokens.findIndex((token) => token === 'push')
   if (pushAt < 0) return undefined
   // The first bare word after `push` is the remote. Flags are stepped over, and
@@ -274,12 +291,24 @@ export function createBenchApproval(root: string): ActionApproval {
     if (assessment.resources.some((resource) => resource && !within(root, resolve(root, resource)))) return false
 
     if (request.name === 'github') return approveGithubPush(root, request)
-    if (request.name !== 'run_command') return false
 
-    const command = stringInput(request, 'command')
-    if (!command) return false
+    // The same git, by either route: a shell line, or `run_program`'s argv,
+    // which needs no tokenising. Refusing the structured route while allowing
+    // the shell one pushed models back onto the shell for no safety gain.
+    let tokens: string[]
+    if (request.name === 'run_command') {
+      const command = stringInput(request, 'command')
+      if (!command) return false
+      tokens = shellTokens(command)
+    } else if (request.name === 'run_program') {
+      const program = stringInput(request, 'program')
+      const args = request.input.args ?? []
+      if (!program || !Array.isArray(args) || !args.every((arg) => typeof arg === 'string')) return false
+      tokens = [program, ...(args as string[])]
+    } else {
+      return false
+    }
 
-    const tokens = shellTokens(command)
     // Only git. The approvable intents also hold `rm -rf`, `npm publish` and
     // every unrecognised command; approving those because they happen to run in
     // a temp directory would make this a hole rather than a channel.
@@ -296,7 +325,7 @@ export function createBenchApproval(root: string): ActionApproval {
 
     if (!tokens.includes('push')) return true
     if (isForcedPush(tokens)) return false
-    const destination = pushDestination(command, cwd)
+    const destination = pushDestinationOf(tokens, cwd)
     if (!destination || isNetwork(destination)) return false
     return within(root, destination)
   }

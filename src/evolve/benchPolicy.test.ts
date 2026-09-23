@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, expect, test } from 'bun:test'
 import { spawnSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -201,4 +201,32 @@ test('the channel is wired into the task entrypoint and closed to candidates', a
   const entrypoint = await Bun.file(new URL('./benchTask.ts', import.meta.url)).text()
   expect(entrypoint).toContain('createBenchApproval')
   expect(entrypoint).toContain('withActionGovernor')
+})
+
+test('a root reached through a symlink still approves paths that do not exist yet', async () => {
+  // macOS's temp dir is /var/…, really /private/var/…. A path that does not
+  // exist yet (a new branch, a clone target) used to keep the unresolved
+  // spelling while the root was resolved, so it read as outside the fixture.
+  const link = join(mkdtempSync(join(tmpdir(), 'elia-bench-link-')), 'fixture')
+  symlinkSync(root, link, process.platform === 'win32' ? 'junction' : 'dir')
+  try {
+    const governor = createActionGovernor({ mode: 'unattended', cwd: link, approve: createBenchApproval(link) })
+    const linkedClone = join(link, 'workspace', 'tallies')
+    for (const command of ['git checkout -b fix/linked', 'git push -u origin fix/linked']) {
+      expect((await governor.check({ name: 'run_command', input: { command, cwd: linkedClone } })).allowed).toBe(true)
+    }
+    expect((await governor.check({ name: 'run_command', input: { command: `git clone "${outside}" workspace/escape`, cwd: link } })).allowed).toBe(false)
+  } finally {
+    rmSync(join(link, '..'), { recursive: true, force: true })
+  }
+})
+
+test('git through run_program is judged exactly like git through run_command', async () => {
+  const program = (args: string[], cwd = clone) => allows({ name: 'run_program', input: { program: 'git', args, cwd } })
+  expect(await program(['checkout', '-b', 'fix/sum'])).toBe(true)
+  expect(await program(['push', '-u', 'origin', 'fix/sum'])).toBe(true)
+  expect(await program(['push', '--force', 'origin', 'fix/sum'])).toBe(false)
+  expect(await program(['push', 'https://github.com/someone/real.git', 'main'])).toBe(false)
+  expect(await program(['reset', '--hard'], outside)).toBe(false)
+  expect(await allows({ name: 'run_program', input: { program: 'rm', args: ['-rf', 'workspace'], cwd: root } })).toBe(false)
 })

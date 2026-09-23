@@ -1235,3 +1235,27 @@ test('a provider that omits tools is not offered them, and the model is told whi
   expect(seen[0]!.dynamic).toStartWith('Today is today.')
   expect(seen[0]!.dynamic).toContain('Not available this session: github.')
 })
+
+test('falling back to the next provider says why the last one failed, without leaking a key', async () => {
+  resetProviderHealthForTests()
+  const secret = 'sk-ant-api03-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'
+  const spent = { async streamTurn(): Promise<never> { throw new Error(`402 This request requires more credits (key ${secret})`) } }
+  const works = { async streamTurn(params: { onText: (delta: string) => void }) { params.onText('ok'); return { content: [{ type: 'text', text: 'ok' }] as ContentBlock[], usage: ZERO_USAGE } } }
+  const written: string[] = []
+  const originalWrite = process.stdout.write.bind(process.stdout)
+  process.stdout.write = ((chunk: string | Uint8Array) => { written.push(String(chunk)); return true }) as typeof process.stdout.write
+  try {
+    await runAgentLoop({
+      messages: [{ role: 'user', content: [{ type: 'text', text: 'go' }] }],
+      systemPrompt: 'test', tools: [], useAnimation: false, verbose: true,
+      provider: spent, providerName: 'spent-net', model: 'm',
+      fallbacks: [{ provider: works, providerName: 'works-net', model: 'm' }],
+    })
+  } finally {
+    process.stdout.write = originalWrite
+  }
+  const notice = written.join('').split('\n').find((line) => line.includes('unavailable'))
+  expect(notice).toContain('requires more credits')
+  expect(notice).toContain('trying works-net')
+  expect(written.join('')).not.toContain(secret)
+})

@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { mkdtempSync, readFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { logSwallowedError } from './diagnostics.ts'
@@ -30,5 +30,11 @@ test('accepts a non-Error value without throwing', () => {
 })
 
 test('never throws even when the log path is unwritable', () => {
-  expect(() => logSwallowedError('x', new Error('y'), undefined, join('Z:', 'no-such-drive', 'diagnostics.ndjson'))).not.toThrow()
+  // A regular file as a parent directory is unwritable everywhere. `Z:/…` was
+  // only unwritable on Windows; elsewhere it is a relative path, and each run
+  // wrote Z:/no-such-drive/ into whatever directory the suite ran from.
+  const blocker = join(mkdtempSync(join(tmpdir(), 'elia-diagnostics-')), 'not-a-directory')
+  writeFileSync(blocker, 'x')
+  expect(() => logSwallowedError('x', new Error('y'), undefined, join(blocker, 'nested', 'diagnostics.ndjson'))).not.toThrow()
+  expect(readFileSync(blocker, 'utf8')).toBe('x')
 })
