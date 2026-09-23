@@ -112,6 +112,13 @@ async function launchOwnedBrowser(): Promise<OwnedBrowserInstance> {
     ],
     { stdin: 'ignore', stdout: 'ignore', stderr: 'ignore' },
   )
+  // Chrome must never be the reason elia stays up. A scribe in an `elia auto`
+  // run opened the README in this browser, and the finished run then sat idle
+  // with eight chrome.exe children for as long as nobody killed it — its
+  // shutdown cleanup is an 'exit' hook, and the live child kept 'exit' from
+  // ever coming. Unref'd, the process ends when its work does, and that same
+  // hook takes the browser down with it.
+  proc.unref()
   const cdpOrigin = `http://127.0.0.1:${port}`
   try {
     await waitForCdpReady(cdpOrigin, 15_000)

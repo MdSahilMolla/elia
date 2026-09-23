@@ -62,6 +62,15 @@ export function ensurePreviewServer(root: string = paths.workspace): PreviewServ
     }, RELOAD_DEBOUNCE_MS)
   })
 
+  // The preview serves for as long as something else keeps elia running — the
+  // REPL's own stdin, the VS Code bridge — but it must never be the reason a
+  // process stays up. `elia auto` on a static site runs its render check
+  // through this server, and run 2026-09-23 (a portfolio site) printed "Run
+  // complete" and then sat idle for good on the listening socket, so a script
+  // or CI job waiting on it would never return.
+  server.unref()
+  watcher.unref()
+
   singleton = { baseUrl: `http://127.0.0.1:${server.port}`, root: resolvedRoot }
   singletonCleanup = () => {
     clearTimeout(debounceTimer)

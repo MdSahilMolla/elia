@@ -1,4 +1,9 @@
 import { afterEach, expect, test } from 'bun:test'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
+import { findChromePath } from '../preview/launchChrome.ts'
 import { ownedBrowserEndpoint, ownedBrowserRequested, resetOwnedBrowserForTests, useOwnedBrowserByDefault } from './browserOwned.ts'
 
 const originalMode = process.env.ELIA_BROWSER
@@ -69,3 +74,36 @@ test('ELIA_BROWSER=owned still asks for it explicitly', () => {
   // rather than being silently skipped.
   expect(useOwnedBrowserByDefault({ ELIA_BROWSER: 'owned' }, noChromium)).toBe(true)
 })
+
+// A scribe in an `elia auto` run opened a file in this browser, and the finished
+// run then never exited: the Chrome child kept the process alive, and its
+// cleanup is an 'exit' hook that could therefore never fire. Only visible from
+// outside the process, so this takes a real child with no process.exit of its own.
+test.skipIf(!findChromePath())('the owned browser never keeps a finished process alive, and goes down with it', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'elia-owned-browser-exit-'))
+  try {
+    const script = join(dir, 'child.ts')
+    const browserModule = pathToFileURL(join(import.meta.dir, 'browserOwned.ts')).href
+    const shutdownModule = pathToFileURL(join(import.meta.dir, '..', 'ui', 'shutdown.ts')).href
+    writeFileSync(
+      script,
+      [
+        `const { installShutdownHandlers } = await import(${JSON.stringify(shutdownModule)})`,
+        `const { ownedBrowserEndpoint } = await import(${JSON.stringify(browserModule)})`,
+        `installShutdownHandlers()`,
+        `console.log('ORIGIN ' + await ownedBrowserEndpoint())`,
+      ].join('\n'),
+    )
+    const child = Bun.spawn([process.execPath, script], { cwd: dir, stdout: 'pipe', stderr: 'pipe' })
+    const exited = await Promise.race([child.exited.then(() => true), Bun.sleep(30_000).then(() => false)])
+    if (!exited) child.kill()
+    const origin = /ORIGIN (\S+)/.exec(await new Response(child.stdout).text())?.[1]
+    expect(origin).toBeDefined()
+    expect(exited).toBe(true)
+    // The exit hook took the browser down: nothing answers on its DevTools port.
+    const stillUp = await fetch(`${origin}/json/version`, { signal: AbortSignal.timeout(2_000) }).then(() => true, () => false)
+    expect(stillUp).toBe(false)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+}, 60_000)

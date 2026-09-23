@@ -2,6 +2,7 @@ import { afterAll, afterEach, beforeAll, expect, test } from 'bun:test'
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { ensurePreviewServer, injectReloadScript, resetPreviewServerForTests, resolveWithinRoot } from './server.ts'
 
 let testDir: string
@@ -160,3 +161,32 @@ test('server refuses to serve a file reached through an escaping symlink', async
     rmSync(outside, { recursive: true, force: true })
   }
 })
+
+// `elia auto` on a static site proves the page through this server, and one
+// such run printed "Run complete" and then never exited — the listening socket
+// and the file watcher held it open. A process can only be seen to end from
+// outside it, so this takes a real child with no process.exit of its own.
+test('a preview server never keeps a finished process alive', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'elia-preview-exit-'))
+  try {
+    writeFileSync(join(dir, 'index.html'), '<h1>hi</h1>')
+    const script = join(dir, 'child.ts')
+    const serverModule = pathToFileURL(join(import.meta.dir, 'server.ts')).href
+    writeFileSync(
+      script,
+      [
+        `const { ensurePreviewServer } = await import(${JSON.stringify(serverModule)})`,
+        `const server = ensurePreviewServer(${JSON.stringify(dir)})`,
+        `const response = await fetch(server.baseUrl + '/index.html')`,
+        `console.log('SERVED ' + response.status)`,
+      ].join('\n'),
+    )
+    const child = Bun.spawn([process.execPath, script], { cwd: dir, stdout: 'pipe', stderr: 'pipe' })
+    const exited = await Promise.race([child.exited.then(() => true), Bun.sleep(15_000).then(() => false)])
+    if (!exited) child.kill()
+    expect(await new Response(child.stdout).text()).toContain('SERVED 200')
+    expect(exited).toBe(true)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+}, 30_000)
