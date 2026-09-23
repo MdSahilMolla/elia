@@ -10,7 +10,7 @@
 import * as readline from 'node:readline/promises'
 import { writeNotice, writeError } from '../ui/stream.ts'
 import { pick } from '../ui/picker.ts'
-import { userConfigPath, writeUserConfig } from '../userConfig.ts'
+import { readUserConfigValues, userConfigPath, writeUserConfig } from '../userConfig.ts'
 import { activeProviderNeedsSetup, saveProviderConfiguration, type SavedProviderConfiguration } from '../providerSettings.ts'
 
 /**
@@ -103,10 +103,14 @@ export async function readSecretInput(prompt: string): Promise<string> {
 }
 
 export async function chooseProviderForSetup(title: string): Promise<string | undefined> {
-  const { PROVIDER_PRESET_NAMES, isProviderPresetConfigured, providerPresetDefaultModel } = await import('../providers/registry.ts')
-  const options = PROVIDER_PRESET_NAMES.map((provider) => ({
+  const { PROVIDER_PRESET_NAMES, providerPresetDefaultModel, providerReadiness } = await import('../providers/registry.ts')
+  const { detectOllama } = await import('../providers/ollama.ts')
+  // A running Ollama with models is the one choice that needs no key, so it leads.
+  const ollama = await detectOllama()
+  const names = ollama.running && ollama.models.length > 0 ? ['ollama', ...PROVIDER_PRESET_NAMES.filter((name) => name !== 'ollama')] : PROVIDER_PRESET_NAMES
+  const options = names.map((provider) => ({
     label: provider,
-    detail: `${isProviderPresetConfigured(provider) ? 'configured' : 'not configured'} · ${providerPresetDefaultModel(provider) ?? 'custom endpoint and model'}`,
+    detail: `${providerReadiness(provider)} · ${provider === 'ollama' ? 'models on this machine' : (providerPresetDefaultModel(provider) ?? 'custom endpoint and model')}`,
     value: provider,
   }))
   const result = await pick(title, options)
@@ -128,14 +132,21 @@ export async function chooseModelForSetup(provider: string, suggestedModel?: str
   if (discovery.models.length > 0) {
     const options = discovery.models.map((model) => ({
       label: model.id === defaultModel ? `${model.id} (recommended)` : model.id,
-      detail: model.name ?? model.ownedBy ?? 'available model',
+      detail: model.detail ?? model.name ?? model.ownedBy ?? 'available model',
       value: model.id,
     }))
-    const result = await pick(`Select a model for ${provider}`, options, Math.max(0, options.findIndex((option) => option.value === defaultModel)))
-    if (result.type === 'select') return result.value
+    const title = provider === 'ollama' ? `Which Ollama model should elia run? (${options.length} on this machine)` : `Select a model for ${provider}`
+    const result = await pick(title, options, Math.max(0, options.findIndex((option) => option.value === defaultModel)))
+    if (result.type === 'select') {
+      const warning = discovery.models.find((model) => model.id === result.value)?.warning
+      if (warning) writeNotice(warning)
+      return result.value
+    }
     if (result.type === 'cancel') return undefined
   }
-  if (discovery.error) writeNotice(`Model discovery unavailable: ${discovery.error}`)
+  if (discovery.error) writeNotice(provider === 'ollama' ? discovery.error : `Model discovery unavailable: ${discovery.error}`)
+  // Ollama can only run a model that is already pulled; typing another name would fail at the first turn.
+  if (provider === 'ollama' && discovery.models.length === 0) return undefined
   if (!defaultModel) return readLineInput(`Enter the model id for ${provider}: `)
   const entered = await readLineInput(`Model id [${defaultModel}]: `)
   return entered || defaultModel
@@ -156,6 +167,21 @@ export async function interactiveProviderSetup(reason: 'first-run' | 'settings')
     process.env.ELIA_MODEL = model
     delete process.env.ELIA_BASE_URL
     return { provider, apiKeyEnv: 'managed by Codex', model, path }
+  }
+  if (provider === 'ollama') {
+    const model = await chooseModelForSetup('ollama')
+    if (!model) {
+      writeNotice('Provider setup cancelled. No settings were changed.')
+      return undefined
+    }
+    try {
+      const saved = saveProviderConfiguration({ provider, apiKey: '', model })
+      writeNotice(`Saved: elia will run ${model} on Ollama (${saved.path}). No API key needed. /model ollama switches models any time.`)
+      return saved
+    } catch (error) {
+      writeError(`Provider setup failed: ${error instanceof Error ? error.message : String(error)}`)
+      return undefined
+    }
   }
   const { providerPresetApiKeyEnv } = await import('../providers/registry.ts')
   const apiKeyEnv = providerPresetApiKeyEnv(provider)
@@ -203,20 +229,136 @@ export async function interactiveProviderSetup(reason: 'first-run' | 'settings')
   }
 }
 
-export async function ensureFirstRunProviderSetup(): Promise<boolean> {
+/**
+ * Makes a provider saved during startup the one this session uses.
+ *
+ * `config.ts` resolves its provider when it loads, which is before any setup
+ * runs, so a provider chosen at first run used to be saved for the next launch
+ * and leave this one unconfigured. The routing mode the person set is kept.
+ */
+async function activateSaved(saved: { provider: string; model: string }): Promise<boolean> {
+  const { config, switchModel } = await import('../config.ts')
+  const routingMode = config.routingMode
+  const result = switchModel({ providerName: saved.provider, model: saved.model })
+  config.routingMode = routingMode
+  if (!result.ok) writeError(`Saved ${saved.provider}, but could not start it in this session: ${result.error}`)
+  return result.ok
+}
+
+/** Set in the user config once elia has offered a running Ollama, so it asks once rather than every launch. */
+export const OLLAMA_OFFERED_KEY = 'ELIA_OLLAMA_OFFERED'
+
+export type OllamaStartupAction =
+  | { kind: 'none' }
+  /** Ollama is the provider but is not answering: say so before the first turn fails. */
+  | { kind: 'not-running'; message: string }
+  /** Ollama is the provider and the chosen model is missing, or none was chosen: ask which to run. */
+  | { kind: 'choose'; reason: string }
+  /** Another provider is set and Ollama is running with models it has not been offered: offer them once. */
+  | { kind: 'offer' }
+
+/** What startup should do about Ollama. Pure — the detection is done by the caller. */
+export function ollamaStartupAction(input: {
+  provider: string
+  model?: string
+  detection: { running: boolean; models: { name: string }[]; error?: string }
+  offered: boolean
+}): OllamaStartupAction {
+  const { provider, model, detection } = input
+  if (provider === 'ollama') {
+    if (!detection.running) return { kind: 'not-running', message: detection.error ?? 'Ollama is not running' }
+    if (detection.models.length === 0) return { kind: 'not-running', message: detection.error ?? 'Ollama has no models pulled' }
+    if (!model) return { kind: 'choose', reason: 'No Ollama model is chosen yet.' }
+    // `ollama pull qwen3` lists as `qwen3:latest`; either spelling names it.
+    const present = detection.models.some((candidate) => candidate.name === model || candidate.name === `${model}:latest`)
+    if (!present) return { kind: 'choose', reason: `${model} is not among the models Ollama has on this machine.` }
+    return { kind: 'none' }
+  }
+  if (input.offered || !detection.running || detection.models.length === 0) return { kind: 'none' }
+  return { kind: 'offer' }
+}
+
+/**
+ * The interactive REPL's startup check for Ollama: warns when it is the provider
+ * but not answering, asks which model to run when the chosen one is gone, and
+ * — once — offers the local models to someone using a hosted provider.
+ * `ELIA_OLLAMA_DETECT=off` skips it.
+ */
+export async function reviewOllamaAtStartup(): Promise<void> {
+  if (!process.stdin.isTTY || !process.stdout.isTTY) return
+  const { detectOllama } = await import('../providers/ollama.ts')
+  const provider = (process.env.ELIA_PROVIDER ?? 'anthropic').trim().toLowerCase()
+  const offered = Boolean(process.env[OLLAMA_OFFERED_KEY] ?? readUserConfigValues()[OLLAMA_OFFERED_KEY])
+  if (provider !== 'ollama' && offered) return
+  const detection = await detectOllama()
+  const action = ollamaStartupAction({ provider, model: process.env.ELIA_MODEL?.trim() || undefined, detection, offered })
+  if (action.kind === 'none') return
+  if (action.kind === 'not-running') {
+    writeNotice(`${action.message}. elia is set to use Ollama, so requests will fail until it is — or pick another provider with /model.`)
+    return
+  }
+  if (action.kind === 'choose') {
+    writeNotice(action.reason)
+    const model = await chooseModelForSetup('ollama')
+    if (!model) return
+    const saved = saveProviderConfiguration({ provider: 'ollama', apiKey: '', model })
+    if (await activateSaved(saved)) writeNotice(`elia will run ${model} on Ollama.`)
+    return
+  }
+  // The offer: keep what is set, or run a local model instead. Asked once either way.
+  writeUserConfig({ [OLLAMA_OFFERED_KEY]: '1' })
+  process.env[OLLAMA_OFFERED_KEY] = '1'
+  const { listProviderModels } = await import('../providers/registry.ts')
+  const discovery = await listProviderModels('ollama')
+  if (discovery.models.length === 0) return
+  const current = `${provider}${process.env.ELIA_MODEL ? ` · ${process.env.ELIA_MODEL}` : ''}`
+  const options = [
+    { label: `Keep ${current}`, detail: 'use /model ollama to switch any time', value: '' },
+    ...discovery.models.map((model) => ({ label: model.id, detail: model.detail ?? 'local model', value: model.id })),
+  ]
+  const result = await pick(`Ollama is running on this machine with ${discovery.models.length} model${discovery.models.length === 1 ? '' : 's'}. Run one of them instead? (asked once)`, options, 0)
+  if (result.type !== 'select' || !result.value) return
+  const warning = discovery.models.find((model) => model.id === result.value)?.warning
+  if (warning) writeNotice(warning)
+  const saved = saveProviderConfiguration({ provider: 'ollama', apiKey: '', model: result.value })
+  if (await activateSaved(saved)) writeNotice(`Switched to ${result.value} on Ollama. /model switches back.`)
+}
+
+export async function ensureFirstRunProviderSetup(options: { interactive?: boolean } = {}): Promise<boolean> {
   if (!activeProviderNeedsSetup()) {
+    if (options.interactive) await reviewOllamaAtStartup().catch(() => {})
     prewarmActiveProvider()
     return true
   }
+  const { detectOllama } = await import('../providers/ollama.ts')
+  const ollama = await detectOllama()
+  const ollamaReady = ollama.running && ollama.models.length > 0
   if (!process.stdin.isTTY || !process.stdout.isTTY) {
-    writeError('No provider is configured. Run `elia config set --provider <name> --api-key-stdin --model <model-id>` from a secure shell, or run elia in an interactive terminal for first-run setup.')
+    writeError(
+      'No provider is configured. Run `elia config set --provider <name> --api-key-stdin --model <model-id>` from a secure shell, or run elia in an interactive terminal for first-run setup.' +
+        (ollamaReady ? ` Ollama is running here: \`elia config set --provider ollama --model ${ollama.models[0]!.name}\` needs no key.` : ''),
+    )
     process.exitCode = 1
     return false
   }
-  writeNotice('No complete provider configuration was found. Elia will ask for a provider, hidden API key, and model before starting.')
-  const ok = Boolean(await interactiveProviderSetup('first-run'))
-  if (ok) prewarmActiveProvider()
-  return ok
+  let saved: SavedProviderConfiguration | undefined
+  if ((process.env.ELIA_PROVIDER ?? '').trim().toLowerCase() === 'ollama') {
+    // Ollama is already the provider; only the model is missing.
+    const model = ollamaReady ? await chooseModelForSetup('ollama') : undefined
+    if (!ollamaReady) writeError(ollama.error ?? 'Ollama is not available.')
+    if (model) saved = saveProviderConfiguration({ provider: 'ollama', apiKey: '', model })
+  } else {
+    writeNotice(
+      ollamaReady
+        ? `No provider is configured yet. Ollama is running on this machine with ${ollama.models.length} model${ollama.models.length === 1 ? '' : 's'} — choose "ollama" to run one with no API key, or pick a hosted provider.`
+        : 'No complete provider configuration was found. Elia will ask for a provider, hidden API key, and model before starting.',
+    )
+    saved = await interactiveProviderSetup('first-run')
+  }
+  if (!saved) return false
+  if (!(await activateSaved(saved))) return false
+  prewarmActiveProvider()
+  return true
 }
 
 /**

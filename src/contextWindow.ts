@@ -89,8 +89,39 @@ export function normalizeModelId(model: string): string {
   return slash === -1 ? trimmed : trimmed.slice(slash + 1)
 }
 
+/**
+ * Windows a provider has declared for a model it is actually running.
+ *
+ * The table says what a model family *can* hold. A local server decides what it
+ * *does* hold: Ollama runs a model with whatever `num_ctx` the request sets, and
+ * silently drops the start of anything longer. A `qwen3` the table credits with
+ * 128k, run at 32k, would otherwise be allowed ~77k tokens of conversation and
+ * lose its system prompt long before compaction started.
+ */
+const declaredWindows = new Map<string, number>()
+
+/** Records the window `model` is really being run with. The newest declaration wins. */
+export function declareContextWindow(model: string, window: number): void {
+  if (Number.isFinite(window) && window > 0) declaredWindows.set(model, Math.floor(window))
+}
+
+/** Test-only: forgets every declared window. */
+export function clearDeclaredContextWindows(): void {
+  declaredWindows.clear()
+}
+
+/**
+ * Tokens a declared window must keep free of conversation: the system prompt and
+ * tool definitions (~17k in dev mode) plus room for the next response. The
+ * usable-fraction rule assumes a window large enough that 40% covers them; a
+ * declared window is often small enough that it does not.
+ */
+export const DECLARED_WINDOW_RESERVE = 20_000
+
 /** The context window elia will assume for `model`. */
 export function contextWindowFor(model: string): number {
+  const declared = declaredWindows.get(model)
+  if (declared !== undefined) return declared
   const id = normalizeModelId(model)
   for (const entry of KNOWN_WINDOWS) {
     if (entry.pattern.test(id)) return entry.window
@@ -146,6 +177,14 @@ export function compactionThresholdFor(model: string, env: NodeJS.ProcessEnv = p
     // would recreate the very overflow this override is set to prevent.
     const floor = Math.max(MIN_COMPACTION_THRESHOLD, override)
     return Math.min(MAX_COMPACTION_THRESHOLD, floor, Math.max(MIN_COMPACTION_THRESHOLD, Math.floor(floor * USABLE_FRACTION)))
+  }
+  const declared = declaredWindows.get(model)
+  if (declared !== undefined) {
+    // A declared window is a fact about the server, like an override, so the
+    // 30,000 floor for unknown models does not apply — and the fixed prompt has
+    // to fit beside the conversation, not in the 40% headroom.
+    const budget = Math.min(Math.floor(declared * USABLE_FRACTION), declared - DECLARED_WINDOW_RESERVE)
+    return Math.min(MAX_COMPACTION_THRESHOLD, Math.max(MIN_COMPACTION_THRESHOLD, budget))
   }
   const derived = Math.floor(contextWindowFor(model) * USABLE_FRACTION)
   const floor = Math.floor(DEFAULT_CONTEXT_WINDOW * USABLE_FRACTION)

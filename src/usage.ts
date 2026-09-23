@@ -123,10 +123,21 @@ function sanitizeTokenCount(field: keyof Usage, value: number): number {
   return 0
 }
 
+/**
+ * Models running on the person's own machine (Ollama). They have no API price,
+ * so they cost $0 rather than "unknown" — which also keeps a spend ceiling from
+ * reporting itself unenforceable for them. A `.elia/pricing.json` entry still wins.
+ */
+const localModels = new Set<string>()
+
+export function declareLocalModel(model: string): void {
+  localModels.add(model)
+}
+
 /** Undefined when the model isn't in the pricing table — callers should show "unknown", never a fabricated number. */
 export function estimateCostUsd(model: string, usage: Usage, cwd = process.cwd()): number | undefined {
   const pricing = loadCustomPricing(cwd)[model] ?? PRICING[model]
-  if (!pricing) return undefined
+  if (!pricing) return localModels.has(model) ? 0 : undefined
 
   const inputTokens = sanitizeTokenCount('inputTokens', usage.inputTokens)
   const outputTokens = sanitizeTokenCount('outputTokens', usage.outputTokens)

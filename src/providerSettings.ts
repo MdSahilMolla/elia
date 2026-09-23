@@ -1,4 +1,4 @@
-import { isProviderPresetConfigured, providerPresetApiKeyEnv, providerPresetBaseURL, providerPresetDefaultModel, PROVIDER_PRESET_NAMES } from './providers/registry.ts'
+import { isProviderPresetConfigured, providerPresetApiKeyEnv, providerPresetBaseURL, providerPresetDefaultModel, providerPresetKeyOptional, PROVIDER_PRESET_NAMES } from './providers/registry.ts'
 import { assertProviderEndpoint, validateNetworkUrl } from './networkPolicy.ts'
 import { removeUserConfig, readUserConfigValues, userConfigPath, writeUserConfig } from './userConfig.ts'
 
@@ -22,6 +22,8 @@ export function savedProviderNames(filePath = userConfigPath()): string[] {
   const stored = readUserConfigValues(filePath)
   return PROVIDER_PRESET_NAMES.filter((provider) => {
     const apiKeyEnv = providerPresetApiKeyEnv(provider)
+    // A keyless provider is saved when it is the chosen one.
+    if (providerPresetKeyOptional(provider)) return stored.ELIA_PROVIDER?.toLowerCase() === provider || (apiKeyEnv !== undefined && stored[apiKeyEnv] !== undefined)
     return apiKeyEnv !== undefined && stored[apiKeyEnv] !== undefined
   })
 }
@@ -29,6 +31,8 @@ export function savedProviderNames(filePath = userConfigPath()): string[] {
 export function activeProviderNeedsSetup(env: NodeJS.ProcessEnv = process.env): boolean {
   const provider = (env.ELIA_PROVIDER ?? 'anthropic').trim().toLowerCase()
   if (provider === 'codex') return !isProviderPresetConfigured('codex')
+  // No key to ask for — only which local model to run.
+  if (provider === 'ollama') return !env.ELIA_MODEL?.trim()
   const keyEnv = providerPresetApiKeyEnv(provider)
   if (!keyEnv || !env[keyEnv]?.trim()) return true
   if (provider === 'custom' && !env.ELIA_BASE_URL?.trim()) return true
@@ -42,10 +46,24 @@ export function saveProviderConfiguration(input: SaveProviderConfigurationInput)
   const apiKeyEnv = providerPresetApiKeyEnv(provider)
   if (!apiKeyEnv) throw new Error(`Provider "${provider}" does not define an API key variable`)
   const apiKey = input.apiKey.trim()
-  if (!apiKey) throw new Error('API key cannot be empty')
+  const keyOptional = providerPresetKeyOptional(provider)
+  if (!apiKey && !keyOptional) throw new Error('API key cannot be empty')
 
   const model = input.model?.trim() || providerPresetDefaultModel(provider)
   if (!model) throw new Error(`Provider "${provider}" requires a model id`)
+  if (provider === 'ollama') {
+    // Ollama's address is its own OLLAMA_HOST; a key only when the server asks for one.
+    const host = input.baseURL?.trim()
+    if (host) validateNetworkUrl(host, { allowExplicitLocal: true, requireHttps: true })
+    const path = input.filePath ?? userConfigPath()
+    writeUserConfig({ ELIA_PROVIDER: provider, ELIA_MODEL: model, ELIA_BASE_URL: undefined, ...(apiKey ? { [apiKeyEnv]: apiKey } : {}), ...(host ? { OLLAMA_HOST: host } : {}) }, path)
+    process.env.ELIA_PROVIDER = provider
+    process.env.ELIA_MODEL = model
+    delete process.env.ELIA_BASE_URL
+    if (apiKey) process.env[apiKeyEnv] = apiKey
+    if (host) process.env.OLLAMA_HOST = host
+    return { provider, apiKeyEnv, model, ...(host ? { baseURL: host } : {}), path }
+  }
   const baseURL = input.baseURL?.trim() || (provider === 'custom' ? undefined : providerPresetBaseURL(provider))
   if (provider === 'custom' && !baseURL) throw new Error('Custom providers require a base URL')
   if (baseURL) validateNetworkUrl(baseURL, { allowExplicitLocal: process.env.ELIA_ALLOW_INSECURE_LOCAL_ENDPOINT === '1', requireHttps: true })

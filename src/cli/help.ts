@@ -134,8 +134,11 @@ Editor / external integration:
 
 Provider setup:
   First interactive run                    Ask for provider, hidden API key, and model
+                                           (a running Ollama is found and offered — no key needed)
   elia config                               Show provider readiness without printing keys
   elia config set --provider nvidia        Store a provider API key in ~/.elia/config.env
+  elia config set --provider ollama --model <name>
+                                           Run one of your local Ollama models (no key)
   elia config set --provider custom --base-url <url>
                                            Configure any OpenAI-compatible endpoint
   elia config remove --provider <name>     Remove that provider's saved API key

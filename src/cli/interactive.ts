@@ -92,7 +92,7 @@ export async function runInteractive(): Promise<void> {
   // point it has been running concurrently with all of the above.
   void (await import('../mcp/registry.ts')).beginMcpLoad()
 
-  if (!(await ensureFirstRunProviderSetup())) return
+  if (!(await ensureFirstRunProviderSetup({ interactive: true }))) return
   warnIfAtFilesystemRoot()
   // The live REPL routes late notices into the transcript (setInkSink), so MCP
   // can finish connecting in the background instead of gating the prompt.
@@ -101,7 +101,10 @@ export async function runInteractive(): Promise<void> {
   const { config, describeThinking, describeReviewers, getThinking, switchModel, switchThinking, THINKING_EFFORT_BUDGETS, DEFAULT_THINKING_BUDGET } =
     await import('../config.ts')
   setCurrentUsageModel(config.model)
-  const { PROVIDER_PRESET_NAMES, isProviderPresetConfigured, providerPresetDefaultModel, listProviderModels } = await import('../providers/registry.ts')
+  const { PROVIDER_PRESET_NAMES, isProviderPresetConfigured, providerPresetDefaultModel, providerReadiness, listProviderModels } = await import('../providers/registry.ts')
+  const { detectOllama } = await import('../providers/ollama.ts')
+  /** The picker's right-hand column for a provider: readiness, then its default model. */
+  const providerDetail = (name: string) => `${providerReadiness(name)} · ${providerPresetDefaultModel(name) ?? (name === 'ollama' ? 'models on this machine' : 'custom')}`
   const { newSessionId, loadSession, loadLatestSession, saveSession } = await import('../session.ts')
   const { createFileTracker, setActiveTracker, loadCheckpoints, saveCheckpoints, restoreCheckpoint, renderCheckpointList, snapshotMessages, messagesForRestore } =
     await import('../checkpoint.ts')
@@ -1461,9 +1464,12 @@ export async function runInteractive(): Promise<void> {
       // working one, and every restart then came back on it.
       if (providerName !== 'auto' && !options.anyway) {
         const chosen = { providerName: config.providerName, model: config.model }
-        writeNotice(`Checking that ${result.label} answers…`)
+        // A local model is read from disk into memory on its first request, which
+        // can take minutes for a large one — that is loading, not failing to answer.
+        const local = config.providerName === 'ollama'
+        writeNotice(local ? `Loading ${config.model} in Ollama and checking it answers (the first load can take a minute)…` : `Checking that ${result.label} answers…`)
         const { describeProbeFailure, probeModel } = await import('../providers/probe.ts')
-        const probe = await probeModel(config.provider)
+        const probe = await probeModel(config.provider, local ? { timeoutMs: 300_000 } : {})
         if (!probe.ok) {
           const failure = describeProbeFailure(result.label, probe)
           const anyway = `/model ${chosen.providerName} ${chosen.model} --anyway`
@@ -1528,6 +1534,11 @@ export async function runInteractive(): Promise<void> {
       const discovery = await listProviderModels(providerName)
       const fallbackModel = providerName === config.providerName ? config.model : providerPresetDefaultModel(providerName)
       if (discovery.models.length === 0) {
+        if (providerName === 'ollama') {
+          // Only a pulled model can run; there is no default to fall back to.
+          writeNotice(discovery.error ?? 'Ollama has no models on this machine — pull one first, e.g. `ollama pull qwen3`.')
+          return
+        }
         if (discovery.error) writeNotice(`Could not list ${providerName} models: ${discovery.error}`)
         if (fallbackModel) await applyModelChoice(providerName, fallbackModel, { anyway })
         else writeNotice(`No model list or default model is available for ${providerName}. Use /model ${providerName} <model-id>.`)
@@ -1538,11 +1549,13 @@ export async function runInteractive(): Promise<void> {
         : discovery.models.find((model) => model.isDefault)?.id ?? fallbackModel
       const modelOptions = discovery.models.map((model) => ({
         label: model.id === currentModel ? `${model.id} (current)` : model.id,
-        detail: model.name ?? model.ownedBy ?? 'available model',
+        detail: model.detail ?? model.name ?? model.ownedBy ?? 'available model',
         value: model.id,
       }))
       const result = await pick(`Models for ${providerName} (${modelOptions.length})`, modelOptions, Math.max(0, modelOptions.findIndex((option) => option.value === currentModel)))
       if (result.type === 'select') {
+        const warning = discovery.models.find((model) => model.id === result.value)?.warning
+        if (warning) writeNotice(warning)
         if (providerName === 'codex') activateCodexSubscription(result.value)
         else await applyModelChoice(providerName, result.value, { anyway })
       }
@@ -1550,6 +1563,7 @@ export async function runInteractive(): Promise<void> {
     }
 
     if (args.length === 0) {
+      await detectOllama()
       const selectableProviderNames = PROVIDER_PRESET_NAMES.filter((name) => name !== 'codex')
       const currentIndex = config.routingMode === 'auto'
         ? 0
@@ -1572,7 +1586,7 @@ export async function runInteractive(): Promise<void> {
         },
         ...selectableProviderNames.map((name) => ({
         label: name !== config.providerName ? name : autoRouting ? `${name} (leading auto)` : `${name} (current)`,
-        detail: `${isProviderPresetConfigured(name) ? 'ready' : 'no key set'} · ${providerPresetDefaultModel(name) ?? 'custom'}`,
+        detail: providerDetail(name),
           value: name,
         })),
       ]
@@ -1590,7 +1604,7 @@ export async function runInteractive(): Promise<void> {
           [config.routingMode === 'auto' ? `${gold('●')} auto` : '  auto', 'transparent fallback', dim(config.providerLabel)],
           ...PROVIDER_PRESET_NAMES.map((name) => [
             name === config.providerName && config.routingMode !== 'auto' ? `${gold('●')} ${name}` : `  ${name}`,
-            isProviderPresetConfigured(name) ? 'ready' : dim('no key set'),
+            isProviderPresetConfigured(name) ? providerReadiness(name) : dim(providerReadiness(name)),
             dim(providerPresetDefaultModel(name) ?? ''),
           ]),
         ]
@@ -1950,6 +1964,7 @@ export async function runInteractive(): Promise<void> {
     // --- arrow-key pickers, now native to the Ink UI ---
 
     if (trimmed === '/model' || trimmed === '/provider') {
+      await detectOllama()
       const selectable = PROVIDER_PRESET_NAMES.filter((n) => n !== 'codex')
       const auto = config.routingMode === 'auto'
       const options = [
@@ -1966,7 +1981,7 @@ export async function runInteractive(): Promise<void> {
         { label: 'ChatGPT subscription (Codex)', detail: 'use your signed-in ChatGPT plan', value: 'codex' },
         ...selectable.map((name) => ({
           label: name !== config.providerName ? name : auto ? `${name} (leading auto)` : `${name} (current)`,
-          detail: `${isProviderPresetConfigured(name) ? 'ready' : 'no key set'} · ${providerPresetDefaultModel(name) ?? 'custom'}`,
+          detail: providerDetail(name),
           value: name,
         })),
       ]
@@ -1983,6 +1998,7 @@ export async function runInteractive(): Promise<void> {
             }
             const discovery = await listProviderModels(provider)
             if (discovery.models.length === 0) {
+              if (provider === 'ollama') return discovery.error ?? 'Ollama has no models on this machine — pull one first, e.g. `ollama pull qwen3`.'
               const fallback = provider === config.providerName ? config.model : providerPresetDefaultModel(provider)
               if (provider === 'codex') activateCodexSubscription(fallback ?? 'default')
               else if (fallback) await applyModelChoice(provider, fallback)
@@ -1998,11 +2014,13 @@ export async function runInteractive(): Promise<void> {
                 initialIndex: Math.max(0, discovery.models.findIndex((m) => m.id === current)),
                 options: discovery.models.map((m) => ({
                   label: m.id === current ? `${m.id} (current)` : m.id,
-                  detail: m.name ?? m.ownedBy ?? 'available model',
+                  detail: m.detail ?? m.name ?? m.ownedBy ?? 'available model',
                   value: m.id,
                 })),
                 onSelect: async (modelId) => {
                   if (!modelId) return
+                  const warning = discovery.models.find((m) => m.id === modelId)?.warning
+                  if (warning) writeNotice(warning)
                   if (provider === 'codex') activateCodexSubscription(modelId)
                   else await applyModelChoice(provider, modelId)
                 },

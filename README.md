@@ -4,7 +4,7 @@
 
 Our focus is **recursive intelligence compounding**. Every verified task becomes material for elia to improve itself, and each improvement should make the next one easier to find. This happens in the harness around the model, not through fine-tuning, so it works with any model elia runs on.
 
-It's built on [Bun](https://bun.sh), works with many LLM providers (Anthropic, OpenAI, Gemini, Groq, Mistral, NVIDIA NIM, OpenRouter, Inception Mercury, or any OpenAI-compatible endpoint), and is developed by **[Custumizer](https://linkedin.com/company/custumizer)**.
+It's built on [Bun](https://bun.sh), works with many LLM providers (Anthropic, OpenAI, Gemini, Groq, Mistral, NVIDIA NIM, OpenRouter, Inception Mercury, local models through Ollama, or any OpenAI-compatible endpoint), and is developed by **[Custumizer](https://linkedin.com/company/custumizer)**.
 
 ```bash
 bunx elia-ai
@@ -68,7 +68,10 @@ If nothing is configured, the first interactive run walks you through setup. Key
 | NVIDIA NIM | `nvidia` | `NVIDIA_API_KEY` | `nvidia/llama-3.3-nemotron-super-49b-v1.5` |
 | OpenRouter | `openrouter` | `OPENROUTER_API_KEY` | `openrouter/auto` |
 | Inception (Mercury) | `mercury` | `INCEPTION_API_KEY` | `mercury-2.5` |
+| Ollama (local models) | `ollama` | none needed | none: elia asks which of your models to run |
 | Any OpenAI-compatible endpoint | `custom` | `ELIA_API_KEY` | none, so set `ELIA_MODEL` |
+
+**Local models with Ollama.** If Ollama is running, elia finds it. On first run it lists `ollama` first and asks which of your pulled models to run. If you already use a hosted provider, it offers your local models once. `/model ollama` switches any time. Pick a model marked **tools**: elia works by calling tools, and a model without tool calling can only chat. See the [configuration guide](docs/guide/configuration.md#local-models-with-ollama) for the context window, `OLLAMA_HOST`, and remote servers.
 
 You can also sign in with a ChatGPT subscription through the official Codex CLI. Other options are covered in the [configuration guide](docs/guide/configuration.md): overriding the model, a cheap "fast tier" for scouting, per-role providers, and automatic fallback.
 

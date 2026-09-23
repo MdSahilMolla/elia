@@ -47,9 +47,26 @@ Edit `.env` to pick a provider and set its key. `ELIA_PROVIDER` defaults to `ant
 | Google Gemini | `google` | `GEMINI_API_KEY` | `gemini-3.7-flash` |
 | NVIDIA NIM | `nvidia` | `NVIDIA_API_KEY` | `nvidia/llama-3.3-nemotron-super-49b-v1.5` |
 | Inception (Mercury) | `mercury` | `INCEPTION_API_KEY` | `mercury-2.5` |
+| Ollama (local models) | `ollama` | none needed (`OLLAMA_API_KEY` only if your server asks for one) | none — elia asks which of your models to run |
 | Any other OpenAI-compatible endpoint | `custom` | `ELIA_API_KEY` | none — set `ELIA_MODEL` |
 
 Any provider's model can be overridden with `ELIA_MODEL`. `openrouter` uses OpenRouter's OpenAI-compatible endpoint and its `openrouter/auto` router by default; set `ELIA_MODEL` to pin a specific OpenRouter model. `mistral` uses Mistral's OpenAI-compatible endpoint and `mistral-large-latest` by default; set `ELIA_MODEL` to choose another Mistral model. `google` uses Google's OpenAI-compatible Gemini endpoint and `gemini-3.7-flash` by default; set `ELIA_MODEL` to choose another compatible Gemini model. `nvidia` uses NVIDIA's hosted NIM OpenAI-compatible endpoint and `nvidia/llama-3.3-nemotron-super-49b-v1.5` by default; set `ELIA_MODEL` to choose another available NIM model. `custom` (and any provider, if you need to point at a proxy or self-hosted gateway) also honors `ELIA_BASE_URL`; configure it with `elia config set --provider custom --base-url <url> --model <model-id>`.
+
+## Local models with Ollama
+
+elia talks to [Ollama](https://ollama.com) through its native API. No API key or `.env` edit is needed.
+
+```bash
+ollama pull qwen3                                   # any model that supports tools
+elia                                                # finds Ollama and asks which model to run
+elia config set --provider ollama --model qwen3:8b  # or set it without the prompt
+```
+
+- **Detection.** When elia starts in a terminal, it checks for Ollama. With no provider configured, `ollama` is listed first and elia asks which of your pulled models to run. If you already use a hosted provider, elia offers your local models once, and `/model ollama` switches any time. If Ollama is your provider but isn't running, or the model you chose is no longer pulled, elia says so at startup and asks again. `ELIA_OLLAMA_DETECT=off` turns detection off.
+- **Tool calling.** elia works by calling tools (reading, editing, running commands). The model picker marks each model with what Ollama reports it can do. Models without **tools** are listed last and flagged, because they can talk but can't act.
+- **Context window.** elia sends about 17k tokens of instructions and tool definitions before your first message. Ollama's default window is 4k on machines with under 24 GB of VRAM, and its OpenAI-compatible `/v1` endpoint can't change it per request, so pointing the `custom` provider at Ollama loses most of the prompt without an error. The `ollama` provider sets `num_ctx` on every request instead: the model's own maximum, capped at 32,768. It also tells elia's compaction that window, so the conversation is summarized before Ollama would cut it. Set `ELIA_OLLAMA_NUM_CTX` to change the window. A larger window uses more memory. Models whose maximum is under 24k are flagged as too small for elia.
+- **Where it runs.** elia reads `OLLAMA_HOST` the way Ollama does (default `127.0.0.1:11434`). Plain HTTP is allowed only on this machine. A remote Ollama must be served over HTTPS (for example behind a reverse proxy). `OLLAMA_API_KEY` is sent as a bearer token if set. For an Ollama on another machine without TLS, use an SSH tunnel to a local port.
+- **Speed.** A local model loads from disk on its first request, which can take a minute for a large one. elia allows for that: `/model` waits up to five minutes for the first answer, and a response may stay silent for up to ten minutes (`ELIA_STREAM_IDLE_MS` overrides it). Ollama is never used as an automatic fallback, because it has no default model to fall back to.
 
 ## Automatic provider fallback
 

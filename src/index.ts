@@ -1,11 +1,12 @@
 #!/usr/bin/env bun
+// First, before any import that resolves the provider — see bootstrapEnv.ts.
+import './bootstrapEnv.ts'
 import { writeError } from './ui/stream.ts'
 
 import { updateTerminalTaskTitle } from './ui/taskDashboard.ts'
 import { taskSessions } from './taskSessions.ts'
 import { emitEvent, machineReadable, plainOutput } from './ui/runtime.ts'
 import { installShutdownHandlers } from './ui/shutdown.ts'
-import { loadUserConfig } from './userConfig.ts'
 import { args, flagValue, hasFlag, rawArgs, strictInteger, subcommand } from './cli/argv.ts'
 import { printHelp } from './cli/help.ts'
 import { runCodexLogin } from './cli/providerSetup.ts'
@@ -121,10 +122,6 @@ async function main() {
       return runInteractive()
   }
 }
-
-// Load ~/.elia/config.env before any command imports provider configuration. Explicit
-// project/process environment values already present in process.env take precedence.
-loadUserConfig()
 
 // Sweep temp files orphaned by earlier crashed writes. Only temps whose owning
 // process is gone are removed, so a concurrently running elia is never touched.

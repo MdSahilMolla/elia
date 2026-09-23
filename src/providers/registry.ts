@@ -1,12 +1,15 @@
 import { createAnthropicProvider } from './anthropic.ts'
 import { codexSubscriptionConfigured, createCodexSubscriptionProvider, listCodexSubscriptionModels } from './codexSubscription.ts'
 import { createOpenAICompatibleProvider } from './openaiCompatible.ts'
+import { assertOllamaHost, cachedOllamaDetection, createOllamaProvider, describeOllamaModel, detectOllama, ollamaHost, ollamaModelWarning, rankOllamaModels } from './ollama.ts'
 import { assertProviderEndpoint, publicFetch, validateNetworkUrl } from '../networkPolicy.ts'
 import type { Provider, ThinkingOption } from './types.ts'
 
 interface ProviderPreset {
-  kind: 'anthropic' | 'openai-compatible' | 'codex-subscription'
+  kind: 'anthropic' | 'openai-compatible' | 'codex-subscription' | 'ollama'
   apiKeyEnv?: string
+  /** The key is optional: a local server needs none, and `apiKeyEnv` is only for one that asks. */
+  keyOptional?: boolean
   baseURL?: string
   defaultModel?: string
 }
@@ -69,6 +72,14 @@ const PROVIDER_PRESETS: Record<string, ProviderPreset> = {
     apiKeyEnv: 'INCEPTION_API_KEY',
     baseURL: 'https://api.inceptionlabs.ai/v1',
     defaultModel: 'mercury-2.5',
+  },
+  // Local models. No default model — only the person knows which of their
+  // pulled models to run — and no key unless the server asks for one. The
+  // address comes from OLLAMA_HOST, the variable Ollama itself reads.
+  ollama: {
+    kind: 'ollama',
+    apiKeyEnv: 'OLLAMA_API_KEY',
+    keyOptional: true,
   },
   custom: {
     kind: 'openai-compatible',
@@ -153,8 +164,36 @@ export function isProviderPresetConfigured(providerName: string): boolean {
   const preset = PROVIDER_PRESETS[normalizeProviderName(providerName)]
   if (!preset) return false
   if (preset.kind === 'codex-subscription') return codexSubscriptionConfigured()
+  if (preset.kind === 'ollama') {
+    // Ready means a server answered with a model to run — not a key, which it does not need.
+    const detection = cachedOllamaDetection()
+    if (detection) return detection.running && detection.models.length > 0
+    return normalizeProviderName(process.env.ELIA_PROVIDER ?? '') === 'ollama' && Boolean(process.env.ELIA_MODEL?.trim())
+  }
   if (!preset.apiKeyEnv) return false
   return Boolean(presetApiKey(normalizeProviderName(providerName), preset))
+}
+
+/**
+ * The status a provider picker shows beside a preset: whether it can be used
+ * right now, and if not, what is missing. Ollama is judged by the last
+ * detection, since it has no key to look for.
+ */
+export function providerReadiness(providerName: string): string {
+  const name = normalizeProviderName(providerName)
+  if (PROVIDER_PRESETS[name]?.kind === 'ollama') {
+    const detection = cachedOllamaDetection()
+    if (!detection) return isProviderPresetConfigured(name) ? 'ready' : 'local models'
+    if (!detection.running) return 'not running'
+    if (detection.models.length === 0) return 'running, no models pulled'
+    return `running · ${detection.models.length} local model${detection.models.length === 1 ? '' : 's'} · no key needed`
+  }
+  return isProviderPresetConfigured(name) ? 'ready' : 'no key set'
+}
+
+/** True for a preset whose API key may be left unset (a local server). */
+export function providerPresetKeyOptional(providerName: string): boolean {
+  return Boolean(PROVIDER_PRESETS[normalizeProviderName(providerName)]?.keyOptional)
 }
 
 export function providerPresetDefaultModel(providerName: string): string | undefined {
@@ -174,6 +213,10 @@ export interface AvailableModel {
   name?: string
   ownedBy?: string
   isDefault?: boolean
+  /** A line for the picker, when the provider knows more than a name (size, tool calling, context). */
+  detail?: string
+  /** Why this model is a poor fit for elia, shown before it is switched to. */
+  warning?: string
 }
 
 export interface ModelDiscoveryResult {
@@ -195,6 +238,15 @@ export async function listProviderModels(providerNameInput: string): Promise<Mod
   if (preset.kind === 'codex-subscription') {
     const discovery = await listCodexSubscriptionModels()
     return { providerName, models: discovery.models.map(({ id, name, description, isDefault }) => ({ id, name, ownedBy: description, isDefault })), error: discovery.error }
+  }
+  if (preset.kind === 'ollama') {
+    // What is pulled on this machine, best-suited to elia first, each with what it can do.
+    const detection = await detectOllama({ details: true })
+    const models = rankOllamaModels(detection.models).map((model) => {
+      const warning = ollamaModelWarning(model)
+      return { id: model.name, detail: describeOllamaModel(model), ...(warning ? { warning } : {}) }
+    })
+    return { providerName, models, ...(detection.error ? { error: detection.error } : {}) }
   }
   if (!preset.apiKeyEnv) return { providerName, models: [], error: `No authentication method configured for ${providerName}` }
 
@@ -281,6 +333,18 @@ export function tryResolveProvider(request: ProviderRequest = {}): ResolvedProvi
     if (!codexSubscriptionConfigured()) return { error: 'Codex is not signed in. Select Settings > Provider connections > ChatGPT subscription (Codex) and complete sign-in first.' }
     const model = request.model ?? ambient.ELIA_MODEL ?? preset.defaultModel ?? 'default'
     return { provider: createCodexSubscriptionProvider(model), providerName, model }
+  }
+  if (preset.kind === 'ollama') {
+    const model = request.model ?? ambient.ELIA_MODEL
+    if (!model) return { error: 'No Ollama model chosen. Start elia in a terminal to pick one of your local models, or run `/model ollama`.' }
+    const host = request.baseURL ?? ollamaHost()
+    try {
+      assertOllamaHost(host)
+    } catch (error) {
+      return { error: `Ollama at ${host}: ${error instanceof Error ? error.message : String(error)}. Plain HTTP is allowed only on this machine (127.0.0.1); use HTTPS for a remote server.` }
+    }
+    const apiKey = (request.apiKeyEnv ? process.env[request.apiKeyEnv] : undefined) ?? process.env.OLLAMA_API_KEY
+    return { provider: createOllamaProvider(model, host, { ...(request.thinking ? { thinking: request.thinking } : {}), ...(apiKey ? { apiKey } : {}) }), providerName, model }
   }
   if (!preset.apiKeyEnv) return { error: `Provider "${providerName}" has no authentication method configured.` }
 

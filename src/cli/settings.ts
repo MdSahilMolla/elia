@@ -10,7 +10,7 @@ import { dim } from '../ui/theme.ts'
 import { table } from '../ui/layout.ts'
 import { redactText } from '../ui/redact.ts'
 import { userConfigPath, writeUserConfig } from '../userConfig.ts'
-import { removeProviderConfiguration } from '../providerSettings.ts'
+import { removeProviderConfiguration, saveProviderConfiguration } from '../providerSettings.ts'
 import { flagValue, hasFlag, positionals } from './argv.ts'
 import { readSecretInput, readStdinText } from './providerSetup.ts'
 
@@ -195,17 +195,21 @@ export async function runControl(): Promise<void> {
 }
 
 export async function runConfig(): Promise<void> {
-  const { PROVIDER_PRESET_NAMES, isProviderPresetConfigured, providerPresetApiKeyEnv, providerPresetBaseURL, providerPresetDefaultModel } =
+  const { PROVIDER_PRESET_NAMES, isProviderPresetConfigured, providerPresetApiKeyEnv, providerPresetBaseURL, providerPresetDefaultModel, providerPresetKeyOptional, providerReadiness } =
     await import('../providers/registry.ts')
   const action = positionals()[0] ?? 'status'
   const configPath = userConfigPath()
 
   if (action === 'status') {
     const active = process.env.ELIA_PROVIDER ?? 'anthropic'
+    // Ollama has no key to look for; whether it is answering is what "configured" means for it.
+    const { detectOllama } = await import('../providers/ollama.ts')
+    await detectOllama()
     writeNotice(`User config: ${configPath}`)
     for (const provider of PROVIDER_PRESET_NAMES) {
       const marker = provider === active ? ' (active)' : ''
-      writeUsageLine(`  ${provider}${marker}: ${isProviderPresetConfigured(provider) ? 'configured' : 'not configured'}`)
+      const status = provider === 'ollama' ? providerReadiness(provider) : isProviderPresetConfigured(provider) ? 'configured' : 'not configured'
+      writeUsageLine(`  ${provider}${marker}: ${status}`)
     }
     writeNotice('API key values are never displayed. Use: elia config set --provider <name>')
     return
@@ -263,6 +267,25 @@ export async function runConfig(): Promise<void> {
   if (sourceKeyEnv !== undefined && hasFlag('--api-key-stdin')) {
     writeError('Choose either --api-key-env or --api-key-stdin, not both')
     process.exitCode = 1
+    return
+  }
+
+  // A local provider (Ollama) needs a model and no key, unless one is given for a server that asks for it.
+  if (providerPresetKeyOptional(provider) && sourceKeyEnv === undefined && !hasFlag('--api-key-stdin')) {
+    if (!modelFlag) {
+      writeError(`${provider} needs --model <name> — one of the models \`ollama list\` shows`)
+      process.exitCode = 1
+      return
+    }
+    try {
+      const saved = saveProviderConfiguration({ provider, apiKey: '', model: modelFlag, ...(baseURLFlag ? { baseURL: baseURLFlag } : {}) })
+      writeNotice(`Saved ${provider} configuration to ${saved.path}.`)
+      writeNotice(`Model: ${saved.model}${saved.baseURL ? ` · OLLAMA_HOST ${saved.baseURL}` : ''}`)
+      writeNotice('No API key is needed.')
+    } catch (error) {
+      writeError(error instanceof Error ? error.message : String(error))
+      process.exitCode = 1
+    }
     return
   }
 
