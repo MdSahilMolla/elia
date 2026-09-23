@@ -127,7 +127,7 @@ const REVIEW_COMMAND = /\bgit\s+commit\b/i
 // and a bare `tsc --noEmit` were not, so an unattended Vite app could never be
 // built: its run spent every repair on a blocked build. Installing packages
 // stays critical (CODE_EXEC_COMMAND, matched first); only `--authorize` lifts it.
-const READ_ONLY_COMMAND = /^(?:command\s+)?(?:pwd|ls|find|grep|rg|git\s+(?:status|diff|log|show|branch)|gh\s+pr\s+(?:view|list|checks|status|diff)|(?:bun|npm|pnpm|yarn)\s+(?:test|run\s+(?:test|typecheck|type-check|tsc|check-types|lint|format\s+--check|check|build))|(?:npx\s+(?:--no-install\s+)?)?tsc\s+--noEmit|cargo\s+(?:check|test|clippy)|go\s+(?:build|test|vet)\b[^\n]*|mvn\s+(?:-[^\s]+\s+)*(?:compile|test-compile|test)\b[^\n]*|(?:\.\/)?gradlew(?:\.bat)?\s+(?:build|test|check|compileJava|compileTestJava)\b[^\n]*|gradle\s+(?:build|test|check|compileJava|compileTestJava)\b[^\n]*|ctest\b[^\n]*|pytest\b[^\n]*|mypy\b[^\n]*|node\s+--version|bun\s+--version|npm\s+--version|printf|echo|cat|head|tail|sed|awk|dir|type|findstr)\b/i
+const READ_ONLY_COMMAND = /^(?:command\s+)?(?:pwd|ls|find|grep|rg|git\s+(?:status|diff|log|show|branch)|gh\s+pr\s+(?:view|list|checks|status|diff)|(?:bun|npm|pnpm|yarn)\s+(?:test|run\s+(?:test|typecheck|type-check|tsc|check-types|lint|format\s+--check|check|build))|(?:npx\s+(?:--no-install\s+)?)?tsc\s+--noEmit|cargo\s+(?:check|test|clippy)|go\s+(?:build|test|vet)\b[^\n]*|mvn\s+(?:-[^\s]+\s+)*(?:compile|test-compile|test)\b[^\n]*|(?:\.\/)?gradlew(?:\.bat)?\s+(?:build|test|check|compileJava|compileTestJava)\b[^\n]*|gradle\s+(?:build|test|check|compileJava|compileTestJava)\b[^\n]*|ctest\b[^\n]*|(?:(?:python3?|py)(?:\.exe)?\s+-m\s+)?(?:pytest|mypy)\b[^\n]*|(?:python3?|py)(?:\.exe)?\s+-m\s+unittest\b[^\n]*|node\s+--version|bun\s+--version|npm\s+--version|printf|echo|cat|head|tail|sed|awk|dir|type|findstr)\b/i
 // `sed`/`awk` are allowed above only for their plain print-to-stdout form.
 // Both also support in-place file rewriting (`sed -i`, `sed --in-place`,
 // `awk -i inplace`) which overwrites the target file — a write, not a read.
@@ -350,7 +350,11 @@ export function assessAction(request: ActionRequest, cwd = currentAgent().cwd ??
 
   if (name === 'browser') {
     const action = typeof input.action === 'string' ? input.action : 'unknown'
-    if (['status', 'navigate', 'refresh', 'back', 'forward', 'snapshot', 'extract', 'scroll', 'wait', 'wait_for'].includes(action)) {
+    // `console` and `network` read back what the page already logged — the same
+    // kind of read as `snapshot`. Classed as page-changing, each was refused in
+    // unattended runs, left a pending approval, and held a finished, verified
+    // invoice fix at `blocked` on two log reads its orientation scout had tried.
+    if (['status', 'navigate', 'refresh', 'back', 'forward', 'snapshot', 'extract', 'console', 'network', 'scroll', 'wait', 'wait_for'].includes(action)) {
       return assessment('safe', 'allow', `browser ${action} is observational or navigation-only`, `browser.${action}`, resources, true)
     }
     return assessment('critical', 'approve', `browser ${action} changes page state and needs an authorization record`, `browser.${action}`, resources, false)

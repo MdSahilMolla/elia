@@ -33,17 +33,22 @@ export interface AcceptanceCapture {
  * behind a green suite that tested a second, unused implementation. With no
  * list of its own, a run is held to the user's request in their own words, not
  * to the planner's restatement of it, which can drop half the ask.
+ *
+ * A plan that did declare criteria is held to the request as well. Its list is
+ * the same restatement: a todo API's plan wrote "201 with {id, title,
+ * done:false}" for a request that said ids are numbers starting at 1, the
+ * reviewer checked the list, and a run with UUID ids reported every criterion met.
  */
 export function acceptanceCriteriaFor(declared: string[] | undefined, userGoal: string): string[] {
-  if (declared && declared.length > 0) return declared
   const ask = userGoal.trim().replace(/\s+/g, ' ')
-  if (!ask) return []
+  const own = declared ?? []
+  if (!ask) return own
   const quoted = ask.length > MAX_ASK_CHARS ? `${ask.slice(0, MAX_ASK_CHARS)}…` : ask
-  return [`Everything the user asked for is delivered and works as asked, requirement by requirement: "${quoted}"`]
+  return [...own, `Everything the user asked for is delivered and works as asked, requirement by requirement: "${quoted}"`]
 }
 
-/** Long enough for any ordinary request; short enough that a reviewer copies it back verbatim. */
-const MAX_ASK_CHARS = 600
+/** Long enough for a detailed spec, which puts its exact shapes and edge cases late; short enough to copy back verbatim. */
+const MAX_ASK_CHARS = 1500
 
 /**
  * Reported through a tool rather than in prose, for the same reason the critic's

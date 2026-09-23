@@ -105,6 +105,19 @@ export function isTransientServerError(message: string): boolean {
   return !isCapacityError(message) && TRANSIENT_SERVER_ERROR.test(message)
 }
 
+/**
+ * The request never reached the provider: DNS, a refused or dropped socket, no
+ * route to the host. One provider failing this way is often its own endpoint
+ * (a local server that is down), so on its own it is not a hiccup. Every
+ * provider failing this way at once is this machine's network.
+ */
+export function isConnectionError(message: string): boolean {
+  return CONNECTION_ERROR.test(message)
+}
+
+const CONNECTION_ERROR =
+  /connection error|fetch failed|unable to connect|ECONNREFUSED|ECONNRESET|ENOTFOUND|EAI_AGAIN|ETIMEDOUT|ENETUNREACH|EHOSTUNREACH|network (?:error|is unreachable)|socket connection was closed unexpectedly/i
+
 const TRANSIENT_SERVER_ERROR =
   /overloaded|temporarily unavailable|service unavailable|server had an error|internal server error|bad gateway|gateway time-?out|\b(?:500|502|503|504|529)\b|ECONNRESET|socket hang up|connection (?:was )?(?:closed|reset|terminated)|response stalled/i
 

@@ -649,6 +649,88 @@ test('stopping the turn cuts a wait for an overloaded provider short', async () 
   }
 })
 
+// Two battery runs 23 minutes in died when every provider failed to connect
+// within a second, then the network came back.
+const CONNECTION_ERROR = 'Connection error.'
+
+test('when no provider can be reached, the chain is walked again after a wait', async () => {
+  config.routingMode = 'selected'
+  let calls = 0
+  config.provider = {
+    async streamTurn() {
+      calls += 1
+      if (calls <= 3) throw new Error(CONNECTION_ERROR)
+      return {
+        content: [{ type: 'text', text: 'back online' }] as ContentBlock[],
+        usage: { inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 },
+      }
+    },
+  }
+
+  const result = await runAgentLoop({ messages: [{ role: 'user', content: [{ type: 'text', text: 'go' }] }], systemPrompt: 'test', tools: [], useAnimation: false, verbose: false })
+  expect(result.stopReason).toBe('complete')
+  // The route's three attempts, then one more after the outage wait.
+  expect(calls).toBe(4)
+})
+
+test('a network that stays down still ends the turn once the waits run out', async () => {
+  config.routingMode = 'selected'
+  let calls = 0
+  config.provider = {
+    async streamTurn() {
+      calls += 1
+      throw new Error(CONNECTION_ERROR)
+    },
+  }
+
+  await expect(
+    runAgentLoop({ messages: [{ role: 'user', content: [{ type: 'text', text: 'go' }] }], systemPrompt: 'test', tools: [], useAnimation: false, verbose: false }),
+  ).rejects.toThrow(CONNECTION_ERROR)
+  // Two passes of three attempts: the preload configures one outage wait.
+  expect(calls).toBe(6)
+})
+
+test('an out-of-credit fallback does not stop the wait for an unreachable primary', async () => {
+  resetProviderHealthForTests()
+  let primaryCalls = 0
+  let fallbackCalls = 0
+  const primary = {
+    async streamTurn() {
+      primaryCalls += 1
+      // With fallbacks to try, a failed connection moves on at once: one call per pass.
+      if (primaryCalls <= 1) throw new Error(CONNECTION_ERROR)
+      return { content: [{ type: 'text', text: 'ok' }] as ContentBlock[], usage: { inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 } }
+    },
+  }
+  const broke = { async streamTurn(): Promise<never> { fallbackCalls += 1; throw new Error('402 This request requires more credits') } }
+  const brokeToo = { async streamTurn(): Promise<never> { throw new Error(CONNECTION_ERROR) } }
+
+  const result = await runAgentLoop({
+    messages: [{ role: 'user', content: [{ type: 'text', text: 'go' }] }],
+    systemPrompt: 'test', tools: [], useAnimation: false, verbose: false,
+    provider: primary, providerName: 'primary-net', model: 'm',
+    fallbacks: [{ provider: broke, providerName: 'broke-net', model: 'm' }, { provider: brokeToo, providerName: 'down-net', model: 'm' }],
+  })
+  expect(result.stopReason).toBe('complete')
+  expect(primaryCalls).toBe(2)
+  expect(fallbackCalls).toBeGreaterThan(0)
+})
+
+test('a primary that is refused for another reason is not waited for', async () => {
+  resetProviderHealthForTests()
+  let calls = 0
+  const refused = { async streamTurn(): Promise<never> { calls += 1; throw new Error('401 invalid api key') } }
+  const down = { async streamTurn(): Promise<never> { throw new Error(CONNECTION_ERROR) } }
+  await expect(runAgentLoop({
+    messages: [{ role: 'user', content: [{ type: 'text', text: 'go' }] }],
+    systemPrompt: 'test', tools: [], useAnimation: false, verbose: false,
+    provider: refused, providerName: 'refused-net', model: 'm',
+    fallbacks: [{ provider: down, providerName: 'down2-net', model: 'm' }],
+  })).rejects.toThrow()
+  // One pass only: no outage wait re-walked the chain.
+  expect(calls).toBeLessThanOrEqual(3)
+})
+
 test('runAgentLoop does not retry permanent provider errors', async () => {
   config.routingMode = 'selected'
   let calls = 0

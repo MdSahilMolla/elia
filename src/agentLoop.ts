@@ -2,7 +2,7 @@ import { availableParallelism, cpus } from 'node:os'
 import { autoFallbacksFor, config } from './config.ts'
 import { beginCompaction, shrinkForOversizedRequest, type PendingCompaction } from './compaction.ts'
 import { compactionThresholdFor } from './contextWindow.ts'
-import { isCapacityError, isMalformedToolCallError, isRequestTooLargeError, isTransientServerError } from './providerErrors.ts'
+import { isCapacityError, isConnectionError, isMalformedToolCallError, isRequestTooLargeError, isTransientServerError } from './providerErrors.ts'
 import { createPlanlessWorkTracker, createRedundantReadTracker, isLoneBatchableRead, serialReadNudge } from './autonomy/toolBatchingNudge.ts'
 import { createReadAhead } from './autonomy/readAhead.ts'
 import { createPlanProgressTracker, planBelongsToRequest, type PlanProgressUpdate, type ToolOutcome } from './autonomy/planProgress.ts'
@@ -70,10 +70,29 @@ const PROVIDER_HEALTH_COOLDOWN_MS = 30_000
 const DEFAULT_TRANSIENT_RETRY_DELAYS_MS = [2_000, 8_000, 30_000]
 
 function transientRetryDelaysMs(): number[] {
-  const raw = process.env.ELIA_TRANSIENT_RETRY_DELAYS_MS?.trim()
-  if (!raw) return DEFAULT_TRANSIENT_RETRY_DELAYS_MS
+  return delaysFromEnv('ELIA_TRANSIENT_RETRY_DELAYS_MS', DEFAULT_TRANSIENT_RETRY_DELAYS_MS)
+}
+
+/**
+ * How long to wait, in turn, before walking the whole route chain again when
+ * every route failed to connect — about four minutes in all. A connection
+ * error from one provider moves on to the next; the same error from all of
+ * them is this machine's network, and ending the run was the only answer: two
+ * battery runs 23 minutes into their work died on one "Connection error." after
+ * every provider's route had been tried inside a second.
+ * `ELIA_OUTAGE_RETRY_DELAYS_MS` overrides it, like the transient delays.
+ */
+const DEFAULT_OUTAGE_RETRY_DELAYS_MS = [5_000, 15_000, 30_000, 60_000, 120_000]
+
+function outageRetryDelaysMs(): number[] {
+  return delaysFromEnv('ELIA_OUTAGE_RETRY_DELAYS_MS', DEFAULT_OUTAGE_RETRY_DELAYS_MS)
+}
+
+function delaysFromEnv(name: string, fallback: number[]): number[] {
+  const raw = process.env[name]?.trim()
+  if (!raw) return fallback
   const delays = raw.split(',').map((part) => Number(part.trim()))
-  return delays.every((delay) => Number.isFinite(delay) && delay >= 0) ? delays : DEFAULT_TRANSIENT_RETRY_DELAYS_MS
+  return delays.every((delay) => Number.isFinite(delay) && delay >= 0) ? delays : fallback
 }
 
 function sleepUnlessAborted(ms: number, signal?: AbortSignal): Promise<void> {
@@ -845,114 +864,137 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
     }
     try {
       let lastError: unknown
-      for (let routeIndex = 0; routeIndex < activeRoutes.length; routeIndex += 1) {
-        const route = activeRoutes[routeIndex]!
-        for (let attempt = 1; ; attempt++) {
-          const callStartedAt = Date.now()
-          firstOutputAt = undefined
-          try {
-            const result = await streamProvider(route)
-            totalUsage = addUsage(totalUsage, result.usage)
-            // What this call really cost, the moment it is known — the working
-            // line counts a long turn step by step instead of jumping at the end.
-            reportLiveOutput({ kind: 'settled', outputTokens: result.usage.outputTokens })
-            providerHealth.delete(providerHealthKey(route))
-            if (profilingEnabled()) {
-              recordModelCall({
-                callIndex: steps,
-                actor: currentAgent().name,
-                wallMs: Date.now() - callStartedAt,
-                ttftMs: firstOutputAt ? firstOutputAt - callStartedAt : undefined,
-                inputTokens: result.usage.inputTokens,
-                cacheReadTokens: result.usage.cacheReadTokens,
-                cacheWriteTokens: result.usage.cacheWriteTokens,
-                outputTokens: result.usage.outputTokens,
-                toolCalls: result.content.filter((block) => block.type === 'tool_use').length,
-                systemChars: systemPrompt.length,
-                dynamicSystemChars: systemDynamicPrompt?.length ?? 0,
-                toolDefs: toolDefinitions.length,
-                messageCount: messages.length,
-              })
-            }
-            return result.content
-          } catch (error) {
-            lastError = error
-            // Ask the same model again, even after text has streamed: the
-            // failed attempt's text never reached `messages`, so the only cost
-            // is seeing it twice, against losing the turn — or, in a sub-agent,
-            // the whole run. Not after an action, and not a provider-health
-            // failure: the route is fine, the sample was not.
-            if (
-              isMalformedToolCallError(error instanceof Error ? error.message : String(error))
-              && !emittedActions
-              && !signal?.aborted
-              && attempt < MAX_PROVIDER_ATTEMPTS
-            ) {
-              if (verbose) writeNotice('the model sent a tool call that was not valid JSON; asking it again')
-              continue
-            }
-            const unusable = isUnusableRouteError(error)
-            if (unusable || isFallbackableProviderError(error)) {
-              const key = providerHealthKey(route)
-              const previous = providerHealth.get(key)
-              providerHealth.set(key, { failures: (previous?.failures ?? 0) + 1, cooldownUntil: Date.now() + PROVIDER_HEALTH_COOLDOWN_MS, lastError: error instanceof Error ? error.message : String(error) })
-            }
-            // A server-side hiccup: wait, then ask the same route again — even
-            // after text has streamed, for the same reason as a garbled tool
-            // call above, and never after the provider acted. Only on the last
-            // route, or once output has been shown; before that, the next route
-            // is the faster answer.
-            const failure = error instanceof Error ? error.message : String(error)
-            const transientDelays = transientRetryDelaysMs()
-            if (
-              isTransientServerError(failure)
-              && !emittedActions
-              && !signal?.aborted
-              && attempt <= transientDelays.length
-              && (emittedOutput || !activeRoutes[routeIndex + 1])
-            ) {
-              const delayMs = transientDelays[attempt - 1]!
-              if (verbose) writeNotice(`provider ${route.label ?? `${route.providerName} (${route.model})`} failed on its side (${failure.slice(0, 80)}); asking again in ${Math.ceil(delayMs / 1000)}s`)
-              await sleepUnlessAborted(delayMs, signal)
-              if (signal?.aborted) throw error
-              continue
-            }
-            // Retrying after output was emitted would duplicate a partial answer in
-            // the terminal. Only route before any output has been emitted.
-            if (emittedOutput || !(unusable || isFallbackableProviderError(error))) throw error
-            if (signal?.aborted) throw error
-
-            // The request was rejected for its *size*. Neither routing nor
-            // waiting addresses that — only sending less does, and the retry
-            // used to re-send byte-for-byte what had just been refused. Shrink
-            // first, and retry this same route while there is still something
-            // to cut; a 42k-token request against an 8k cap is not a failure
-            // the next provider will answer either.
-            if (
-              attempt < MAX_PROVIDER_ATTEMPTS
-              && isRequestTooLargeError(error instanceof Error ? error.message : String(error))
-              && shrinkForOversizedRequest(messages)
-            ) {
-              if (verbose) writeNotice('request was over the provider limit; trimmed oversized tool output and retrying smaller')
-              continue
-            }
-
-            const nextRoute = activeRoutes[routeIndex + 1]
-            if (nextRoute) {
-              if (verbose) {
-                writeNotice(
-                  `provider ${route.label ?? `${route.providerName} (${route.model})`} unavailable; trying ${nextRoute.label ?? `${nextRoute.providerName} (${nextRoute.model})`}`,
-                )
+      const outageDelays = outageRetryDelaysMs()
+      for (let outageWait = 0; ; outageWait += 1) {
+        // Routes in this pass that failed to connect at all. Waiting is worth it
+        // when the preferred route is one of them and so is another (or it is
+        // the only one): that is the network, not one endpoint. Routes that
+        // failed otherwise — out of credit, no key — do not veto it; they would
+        // not have answered anyway.
+        const unreachable = new Set<number>()
+        const networkMayRecover = () =>
+          unreachable.has(0) && (activeRoutes.length === 1 || unreachable.size >= 2)
+          && !emittedOutput && !emittedActions && !signal?.aborted && outageWait < outageDelays.length
+        for (let routeIndex = 0; routeIndex < activeRoutes.length; routeIndex += 1) {
+          const route = activeRoutes[routeIndex]!
+          for (let attempt = 1; ; attempt++) {
+            const callStartedAt = Date.now()
+            firstOutputAt = undefined
+            try {
+              const result = await streamProvider(route)
+              totalUsage = addUsage(totalUsage, result.usage)
+              // What this call really cost, the moment it is known — the working
+              // line counts a long turn step by step instead of jumping at the end.
+              reportLiveOutput({ kind: 'settled', outputTokens: result.usage.outputTokens })
+              providerHealth.delete(providerHealthKey(route))
+              if (profilingEnabled()) {
+                recordModelCall({
+                  callIndex: steps,
+                  actor: currentAgent().name,
+                  wallMs: Date.now() - callStartedAt,
+                  ttftMs: firstOutputAt ? firstOutputAt - callStartedAt : undefined,
+                  inputTokens: result.usage.inputTokens,
+                  cacheReadTokens: result.usage.cacheReadTokens,
+                  cacheWriteTokens: result.usage.cacheWriteTokens,
+                  outputTokens: result.usage.outputTokens,
+                  toolCalls: result.content.filter((block) => block.type === 'tool_use').length,
+                  systemChars: systemPrompt.length,
+                  dynamicSystemChars: systemDynamicPrompt?.length ?? 0,
+                  toolDefs: toolDefinitions.length,
+                  messageCount: messages.length,
+                })
               }
-              break
-            }
+              return result.content
+            } catch (error) {
+              lastError = error
+              if (isConnectionError(error instanceof Error ? error.message : String(error))) unreachable.add(routeIndex)
+              // Ask the same model again, even after text has streamed: the
+              // failed attempt's text never reached `messages`, so the only cost
+              // is seeing it twice, against losing the turn — or, in a sub-agent,
+              // the whole run. Not after an action, and not a provider-health
+              // failure: the route is fine, the sample was not.
+              if (
+                isMalformedToolCallError(error instanceof Error ? error.message : String(error))
+                && !emittedActions
+                && !signal?.aborted
+                && attempt < MAX_PROVIDER_ATTEMPTS
+              ) {
+                if (verbose) writeNotice('the model sent a tool call that was not valid JSON; asking it again')
+                continue
+              }
+              const unusable = isUnusableRouteError(error)
+              if (unusable || isFallbackableProviderError(error)) {
+                const key = providerHealthKey(route)
+                const previous = providerHealth.get(key)
+                providerHealth.set(key, { failures: (previous?.failures ?? 0) + 1, cooldownUntil: Date.now() + PROVIDER_HEALTH_COOLDOWN_MS, lastError: error instanceof Error ? error.message : String(error) })
+              }
+              // A server-side hiccup: wait, then ask the same route again — even
+              // after text has streamed, for the same reason as a garbled tool
+              // call above, and never after the provider acted. Only on the last
+              // route, or once output has been shown; before that, the next route
+              // is the faster answer.
+              const failure = error instanceof Error ? error.message : String(error)
+              const transientDelays = transientRetryDelaysMs()
+              if (
+                isTransientServerError(failure)
+                && !emittedActions
+                && !signal?.aborted
+                && attempt <= transientDelays.length
+                && (emittedOutput || !activeRoutes[routeIndex + 1])
+              ) {
+                const delayMs = transientDelays[attempt - 1]!
+                if (verbose) writeNotice(`provider ${route.label ?? `${route.providerName} (${route.model})`} failed on its side (${failure.slice(0, 80)}); asking again in ${Math.ceil(delayMs / 1000)}s`)
+                await sleepUnlessAborted(delayMs, signal)
+                if (signal?.aborted) throw error
+                continue
+              }
+              // Retrying after output was emitted would duplicate a partial answer in
+              // the terminal. Only route before any output has been emitted.
+              if (emittedOutput || !(unusable || isFallbackableProviderError(error))) throw error
+              if (signal?.aborted) throw error
 
-            if (unusable || attempt >= MAX_PROVIDER_ATTEMPTS) throw error
-            await Bun.sleep(250 * 2 ** (attempt - 1))
+              // The request was rejected for its *size*. Neither routing nor
+              // waiting addresses that — only sending less does, and the retry
+              // used to re-send byte-for-byte what had just been refused. Shrink
+              // first, and retry this same route while there is still something
+              // to cut; a 42k-token request against an 8k cap is not a failure
+              // the next provider will answer either.
+              if (
+                attempt < MAX_PROVIDER_ATTEMPTS
+                && isRequestTooLargeError(error instanceof Error ? error.message : String(error))
+                && shrinkForOversizedRequest(messages)
+              ) {
+                if (verbose) writeNotice('request was over the provider limit; trimmed oversized tool output and retrying smaller')
+                continue
+              }
+
+              const nextRoute = activeRoutes[routeIndex + 1]
+              if (nextRoute) {
+                if (verbose) {
+                  writeNotice(
+                    `provider ${route.label ?? `${route.providerName} (${route.model})`} unavailable; trying ${nextRoute.label ?? `${nextRoute.providerName} (${nextRoute.model})`}`,
+                  )
+                }
+                break
+              }
+
+              if (unusable || attempt >= MAX_PROVIDER_ATTEMPTS) {
+                if (networkMayRecover()) break
+                throw error
+              }
+              await Bun.sleep(250 * 2 ** (attempt - 1))
+            }
           }
         }
+        if (!networkMayRecover()) throw lastError instanceof Error ? lastError : new Error(String(lastError))
+        // Every route failed to connect: wait for the network, then start again
+        // from the preferred route, which the cooldowns set above would skip.
+        const delayMs = outageDelays[outageWait]!
+        writeNotice(`no provider could be reached (${String(lastError instanceof Error ? lastError.message : lastError).slice(0, 60)}) — the network may be down; trying again in ${Math.ceil(delayMs / 1000)}s`)
+        await sleepUnlessAborted(delayMs, signal)
+        if (signal?.aborted) throw lastError instanceof Error ? lastError : new Error(String(lastError))
+        for (const route of activeRoutes) providerHealth.delete(providerHealthKey(route))
       }
-      throw lastError instanceof Error ? lastError : new Error(String(lastError))
     } finally {
       stopAnimation()
       cursor?.stop()

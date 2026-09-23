@@ -183,6 +183,8 @@ Verify claims instead of trusting them — read the actual code path an attacker
 
 An attacker is someone other than the person running the program. For a local tool — a CLI, a script, a library — its own operator's command-line arguments, environment variables, config files and local files are not attacker input: "set TODO_FILE=/etc/passwd" or "print ANSI escapes in your own task title" only lets a user do what their shell already lets them do. Raise it only where input crosses a trust boundary: network requests, uploaded or downloaded content, other users' data, or a privilege the operator does not already have.
 
+The request defines the design. Something it did not ask for — authentication on an API it describes as open, rate limiting, TLS, an access-control layer — is not a vulnerability in this change: do not demand it, because adding it breaks what was asked (a todo API given an unrequested X-API-Key check no longer met its own spec). Report the weaknesses in what was built, not the features that were not.
+
 Every issue you raise must come with a concrete exploit scenario: the input or request that triggers it, and what an attacker gains. If you cannot describe how it is exploited, it is not a security issue — drop it (raise it to the critic instead if it's a quality issue). Do not pad the list. An empty list is a valid and useful answer.`,
   },
 

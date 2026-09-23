@@ -90,9 +90,16 @@ test('a plan with no acceptance criteria is held to the user’s own request, no
   expect(acceptanceVerdict(criteria, [{ criterion: criteria[0]!, met: true, evidence: 'csvstat.cli prints top 3 per text column' }]).verdict).toBe('approve')
 })
 
-test('a plan’s own criteria are used as written, and a very long request is clamped', () => {
-  expect(acceptanceCriteriaFor(['bun test passes'], 'anything')).toEqual(['bun test passes'])
+test('a plan’s own criteria are kept and the request itself is added, since the plan’s list can drop half of it', () => {
+  // The real run: the plan's criterion lost "ids are numbers starting at 1",
+  // and a build with UUID ids met every criterion on the list.
+  const ask = 'POST /todos returns 201 {"id": number, "title", "done": false} (ids start at 1 after reset and increase)'
+  const criteria = acceptanceCriteriaFor(['POST /todos with title returns 201 with {id, title, done:false}'], ask)
+  expect(criteria).toHaveLength(2)
+  expect(criteria[0]).toBe('POST /todos with title returns 201 with {id, title, done:false}')
+  expect(criteria[1]).toContain('ids start at 1 after reset')
   const long = acceptanceCriteriaFor(undefined, 'build a thing '.repeat(200))[0]!
-  expect(long.length).toBeLessThan(800)
+  expect(long.length).toBeLessThan(1_700)
   expect(acceptanceCriteriaFor(undefined, '   ')).toEqual([])
+  expect(acceptanceCriteriaFor(['bun test passes'], '   ')).toEqual(['bun test passes'])
 })

@@ -36,6 +36,9 @@ process.env.LINES ??= '24'
 // (agentLoop.ts). Tests that provoke those failures on purpose should see the
 // retries, not sit through them.
 process.env.ELIA_TRANSIENT_RETRY_DELAYS_MS ??= '0,0,0'
+// Same for a pass where no provider could be reached at all: one immediate
+// re-walk of the chain, so a test that means every route to fail still fails.
+process.env.ELIA_OUTAGE_RETRY_DELAYS_MS ??= '0'
 
 /**
  * Tests run from the repo root, so `paths` points at the developer's own

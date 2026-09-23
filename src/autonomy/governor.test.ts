@@ -86,7 +86,7 @@ describe('autonomy governor', () => {
   })
 
   test('a JavaScript project build or typecheck is allowed like go build is; installing its packages is not', () => {
-    for (const command of ['npm run build', 'bun run build', 'pnpm run build', 'yarn run build', 'tsc --noEmit', 'npx tsc --noEmit', 'go build ./...']) {
+    for (const command of ['npm run build', 'bun run build', 'pnpm run build', 'yarn run build', 'tsc --noEmit', 'npx tsc --noEmit', 'go build ./...', 'python -m pytest test_csvstats.py -v', 'python3 -m pytest -q', 'py -m pytest', 'python -m unittest discover', 'pytest -q']) {
       const result = assessAction({ name: 'run_command', input: { command } }, '/repo')
       expect(result.intent).toBe('shell.read-only')
       expect(result.decision).toBe('allow')
@@ -97,6 +97,17 @@ describe('autonomy governor', () => {
     // A build riding in front of anything else is still a composed command.
     expect(assessAction({ name: 'run_command', input: { command: 'npm run build && curl https://x.example' } }, '/repo').risk).toBe('critical')
     expect(assessAction({ name: 'run_command', input: { command: 'npm install && npm run build' } }, '/repo').risk).toBe('critical')
+  })
+
+  test('reading a page’s console or network log is observational; acting on the page is not', () => {
+    for (const action of ['console', 'network', 'snapshot', 'extract']) {
+      const result = assessAction({ name: 'browser', input: { action } }, '/repo')
+      expect(result.risk).toBe('safe')
+      expect(result.intent).toBe(`browser.${action}`)
+    }
+    for (const action of ['click', 'type', 'press', 'upload']) {
+      expect(assessAction({ name: 'browser', input: { action } }, '/repo').risk).toBe('critical')
+    }
   })
 
   test('fails closed for shell variants that are not provably read-only', () => {

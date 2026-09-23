@@ -1732,21 +1732,22 @@ This reviewer session is intentionally read-only. The current diff, status, and 
       const criteria = acceptanceCriteriaFor(proposal.acceptanceCriteria, goal)
       let acceptance: CriticVerdict = acceptanceVerdict([], undefined)
       if (criteria.length > 0) {
-        const acceptanceCapture = createAcceptanceTool(criteria)
-        const acceptanceResult = await runSubAgent({
-          role: 'critic',
-          name: 'acceptance#1',
-          runId,
-          governor,
-          graph,
-          nodeId: 'review:acceptance',
-          briefing,
-          cwd: workspaceRoot,
-          tools: [...allWorkerTools().filter((tool) => REVIEWER_TOOL_NAMES.has(tool.name)), acceptanceCapture.tool],
-          signal: runSignal,
-          requiredTool: 'submit_acceptance',
-          finishAfterTool: 'submit_acceptance',
-          prompt: `${reviewContext}
+        const acceptanceSession = async (session: number) => {
+          const acceptanceCapture = createAcceptanceTool(criteria)
+          const acceptanceResult = await runSubAgent({
+            role: 'critic',
+            name: 'acceptance#1',
+            runId,
+            governor,
+            graph,
+            nodeId: session === 1 ? 'review:acceptance' : 'review:acceptance:retry',
+            briefing,
+            cwd: workspaceRoot,
+            tools: [...allWorkerTools().filter((tool) => REVIEWER_TOOL_NAMES.has(tool.name)), acceptanceCapture.tool],
+            signal: runSignal,
+            requiredTool: 'submit_acceptance',
+            finishAfterTool: 'submit_acceptance',
+            prompt: `${reviewContext}
 
 ## The acceptance criteria this run declared
 
@@ -1755,10 +1756,20 @@ ${criteria.map((criterion, index) => `${index + 1}. ${criterion}`).join('\n')}
 Read the delivered code and tests and decide, for each criterion above, whether the work actually meets it. This session is read-only: do not run commands, modify files, or delegate.
 
 Judge what is there, not what the code looks like it would probably do. A criterion about behaviour is met when a test exercises that behaviour and passes, or when the code path plainly implements it — not when a function with a matching name exists. Say what the evidence is, and when a criterion is not met, say exactly what is missing. Finish by calling submit_acceptance with one entry per criterion.`,
-        })
-        track(acceptanceResult.usage)
-        const reported = acceptanceCapture.taken()
-        if (!reported) writeBlock('Acceptance check (unstructured)', acceptanceResult.report)
+          })
+          track(acceptanceResult.usage)
+          return { reported: acceptanceCapture.taken(), report: acceptanceResult.report }
+        }
+        // Same second chance as the other reviewers: a check that never reported
+        // says nothing about the work (a Go CLI that met its spec ended
+        // needs-attention on "submit_acceptance was never called").
+        let checked = await acceptanceSession(1)
+        if (!checked.reported && !runSignal?.aborted) {
+          writeSubStep('acceptance#1 ended without reporting — asking once more in a fresh session')
+          checked = await acceptanceSession(2)
+        }
+        const reported = checked.reported
+        if (!reported) writeBlock('Acceptance check (unstructured)', checked.report)
         acceptance = acceptanceVerdict(criteria, reported)
         writeSubStep(acceptance.summary)
         journal.append('verdict', { reviewer: 'acceptance', criteria, reported: reported ?? null })

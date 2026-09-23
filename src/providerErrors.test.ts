@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { capacityRetryDelayMs, isCapacityError, isRequestTooLargeError, isTransientServerError } from './providerErrors.ts'
+import { capacityRetryDelayMs, isCapacityError, isConnectionError, isRequestTooLargeError, isTransientServerError } from './providerErrors.ts'
 
 /**
  * The exact message that took two steps out of run 2026-09-13-l0av-rnq0. Every
@@ -80,4 +80,13 @@ test('a hiccup on the provider side is transient; a capacity cap or a bad setup 
     '404 model not found',
     'Failed to parse tool call arguments as JSON',
   ]) expect(isTransientServerError(message)).toBe(false)
+})
+
+test('a request that never reached the provider is a connection error; a provider refusing it is not', () => {
+  for (const message of ['Connection error.', 'fetch failed', 'connect ECONNREFUSED 127.0.0.1:11434', 'getaddrinfo ENOTFOUND api.inceptionlabs.ai', 'getaddrinfo EAI_AGAIN api.groq.com', 'The socket connection was closed unexpectedly']) {
+    expect(isConnectionError(message)).toBe(true)
+  }
+  for (const message of ['401 invalid api key', '402 This request requires more credits', 'Service temporarily overloaded', '429 Too Many Requests']) {
+    expect(isConnectionError(message)).toBe(false)
+  }
 })
