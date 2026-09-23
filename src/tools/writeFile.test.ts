@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test'
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, realpathSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { withAgentIdentity } from '../autonomy/context.ts'
@@ -10,7 +10,7 @@ import { MAX_WRITE_BYTES, writeFileTool } from './writeFile.ts'
 let dir: string
 
 beforeEach(() => {
-  dir = mkdtempSync(join(tmpdir(), 'elia-write-'))
+  dir = realpathSync(mkdtempSync(join(tmpdir(), 'elia-write-')))
   resetFileAccess()
 })
 

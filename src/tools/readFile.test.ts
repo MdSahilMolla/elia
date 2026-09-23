@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, expect, test } from 'bun:test'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync, realpathSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { withAgentIdentity } from '../autonomy/context.ts'
@@ -10,7 +10,7 @@ let dir: string
 const bigPath = () => join(dir, 'big.log')
 
 beforeAll(() => {
-  dir = mkdtempSync(join(tmpdir(), 'elia-readfile-'))
+  dir = realpathSync(mkdtempSync(join(tmpdir(), 'elia-readfile-')))
   // ~8 MB: 200k lines of ~40 bytes, well over the 5 MB whole-file limit.
   const lines: string[] = []
   for (let i = 1; i <= 200_000; i++) lines.push(`line ${i} ${'x'.repeat(28)}`)

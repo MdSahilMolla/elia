@@ -101,7 +101,13 @@ test.skipIf(!findChromePath())('the owned browser never keeps a finished process
     expect(origin).toBeDefined()
     expect(exited).toBe(true)
     // The exit hook took the browser down: nothing answers on its DevTools port.
-    const stillUp = await fetch(`${origin}/json/version`, { signal: AbortSignal.timeout(2_000) }).then(() => true, () => false)
+    // SIGTERM lets Chrome shut down gracefully, which takes a moment after the
+    // child is gone (about a second on macOS), so poll rather than ask once.
+    let stillUp = true
+    for (let attempt = 0; attempt < 20 && stillUp; attempt++) {
+      stillUp = await fetch(`${origin}/json/version`, { signal: AbortSignal.timeout(1_000) }).then(() => true, () => false)
+      if (stillUp) await Bun.sleep(250)
+    }
     expect(stillUp).toBe(false)
   } finally {
     rmSync(dir, { recursive: true, force: true })

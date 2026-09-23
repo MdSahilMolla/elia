@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync, realpathSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { contractForAction, evaluatePostconditions, evaluatePreconditions } from './actionContract.ts'
@@ -110,7 +110,7 @@ describe('action contracts', () => {
   })
 
   test('verifies a workspace artifact after a write', () => {
-    const cwd = mkdtempSync(join(tmpdir(), 'elia-contract-'))
+    const cwd = realpathSync(mkdtempSync(join(tmpdir(), 'elia-contract-')))
     mkdirSync(join(cwd, 'out'))
     const target = join(cwd, 'out', 'report.txt')
     const contract = contractForAction({ name: 'write_file', input: { path: 'out/report.txt' } }, cwd, 'run:file:1')

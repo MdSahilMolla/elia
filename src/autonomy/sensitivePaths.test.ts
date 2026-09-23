@@ -52,16 +52,22 @@ test('NTFS alternate data streams cannot smuggle a sensitive file past the class
   // strips the stream tail before matching (POSIX filenames legitimately may
   // contain a colon, so the stream suffix logic is win32-only — restore
   // platform afterwards so the other cases still exercise their own branch).
-  for (const path of [
-    '.env::$DATA',
-    '.env:secret',
-    'config\\.env::$DATA',
-    '.env::$DATA:alternate',
-    '.ssh\\id_rsa:$DATA',
-    '.aws\\credentials:zone.identifier',
-    'C:\\Users\\me\\.env::$DATA',
-  ]) {
-    expect(isSensitivePath(path), path).toBe(true)
+  const previous = process.platform
+  try {
+    Object.defineProperty(process, 'platform', { value: 'win32' })
+    for (const path of [
+      '.env::$DATA',
+      '.env:secret',
+      'config\\.env::$DATA',
+      '.env::$DATA:alternate',
+      '.ssh\\id_rsa:$DATA',
+      '.aws\\credentials:zone.identifier',
+      'C:\\Users\\me\\.env::$DATA',
+    ]) {
+      expect(isSensitivePath(path), path).toBe(true)
+    }
+  } finally {
+    Object.defineProperty(process, 'platform', { value: previous })
   }
 })
 

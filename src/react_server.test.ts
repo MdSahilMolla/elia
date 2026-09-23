@@ -1,11 +1,11 @@
 import { expect, test } from 'bun:test'
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync, realpathSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { resolveReactStaticPath, startReactServer } from './react_server.ts'
 
 test('React static path resolution rejects traversal, malformed encoding, and sensitive files', () => {
-  const root = mkdtempSync(join(tmpdir(), 'elia-react-root-'))
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'elia-react-root-')))
   const outside = mkdtempSync(join(tmpdir(), 'elia-react-outside-'))
   mkdirSync(join(root, 'assets'), { recursive: true })
   writeFileSync(join(root, 'index.html'), '<!doctype html>')

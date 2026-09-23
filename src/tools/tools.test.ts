@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, expect, spyOn, test } from 'bun:test'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync, realpathSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { delimiter, join } from 'node:path'
 import { withAgentIdentity } from '../autonomy/context.ts'
@@ -28,7 +28,7 @@ const toolsByName = {
 let testDir: string
 
 beforeAll(() => {
-  testDir = mkdtempSync(join(tmpdir(), 'elia-test-'))
+  testDir = realpathSync(mkdtempSync(join(tmpdir(), 'elia-test-')))
 })
 
 afterAll(() => {

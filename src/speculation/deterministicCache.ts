@@ -126,11 +126,15 @@ function create(): DeterministicReadCache {
       bucket.add(key)
     },
 
-    invalidatePath(resolvedPath) {
-      const bucket = keysByPath.get(resolvedPath)
+    invalidatePath(path) {
+      // Entries are keyed by the canonical path, so a caller holding a
+      // symlinked spelling (macOS `/var` for `/private/var`) must not miss
+      // them — a missed invalidation serves a read from before the write.
+      const resolved = resolvedPathOf({ path }) ?? path
+      const bucket = keysByPath.get(resolved)
       if (!bucket) return
       for (const key of bucket) entries.delete(key)
-      keysByPath.delete(resolvedPath)
+      keysByPath.delete(resolved)
     },
 
     clear() {
