@@ -1,14 +1,13 @@
 import { existsSync, readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { appendSecureFile, ensureSecureDirectory } from '../securePersistence.ts'
-import { stateDir } from '../statePaths.ts'
 import type { SkillCandidate } from '../skills/detector.ts'
 import { estimateFrontier, type FrontierInputs, type FrontierReport } from './frontier.ts'
-import { libraryHealth, readLibrary, type LibraryHealth } from './library.ts'
+import { compoundingStateDir, libraryHealth, readLibrary, type LibraryHealth } from '../autonomy/certifiedLibrary.ts'
 import { growthReport, readExposures, type GrowthReport } from './growth.ts'
-import { compressionQueue, type CompressionQueue } from './closure.ts'
-import { recommend, type Activity, type ActivityObservation, type BenchPower, type Recommendation } from './governor.ts'
-import { gateMode, sealedMinimumGain } from './acceptance.ts'
+import { compressionQueue, type CompressionQueue } from '../skills/closure.ts'
+import { recommend, type Activity, type ActivityObservation, type BenchPower, type Recommendation } from './resourceGovernor.ts'
+import { gateMode, sealedMinimumGain } from '../evolve/acceptance.ts'
 
 /**
  * Algorithm 1 of the paper, one round: read where the engine stands, let the
@@ -30,7 +29,7 @@ import { gateMode, sealedMinimumGain } from './acceptance.ts'
  * schedule gets to use up on its own.
  */
 
-export interface VdeState {
+export interface EngineState {
   frontier: FrontierReport
   library: LibraryHealth
   growth: GrowthReport
@@ -43,14 +42,15 @@ export interface StateSources {
   libraryFile?: string
   exposuresFile: string
   candidates: readonly SkillCandidate[]
-  lastBench?: { tasks: number; passRate: number }
+  /** `tasks` counts tasks added since the run (`unbenched`), which a generation will compare on too. */
+  lastBench?: { tasks: number; passRate: number; unbenched?: number }
   /** How many comparisons the evolve loop has made, for the gate's spent level. */
   comparisons: number
 }
 
-export function gatherState(sources: StateSources): VdeState {
+export function gatherState(sources: StateSources): EngineState {
   const artifacts = readLibrary(...(sources.libraryFile ? [sources.libraryFile] : []))
-  const state: VdeState = {
+  const state: EngineState = {
     frontier: estimateFrontier(sources.frontier),
     library: libraryHealth(artifacts),
     growth: growthReport(readExposures(sources.exposuresFile)),
@@ -62,6 +62,7 @@ export function gatherState(sources: StateSources): VdeState {
       passRate: sources.lastBench.passRate,
       minimumDetectable: sealedMinimumGain(sources.lastBench.tasks, sources.comparisons + 1),
       gate: gateMode(),
+      ...(sources.lastBench.unbenched ? { unbenched: sources.lastBench.unbenched } : {}),
     }
   }
   return state
@@ -75,12 +76,12 @@ export interface ActivityResult {
   cost: number
 }
 
-export type ActivityRunner = (state: VdeState) => Promise<ActivityResult>
+export type ActivityRunner = (state: EngineState) => Promise<ActivityResult>
 
 export interface RoundOptions {
-  state: VdeState
-  /** Recomputes the state after an activity, so ΔΦ is measured rather than assumed. */
-  regather: () => VdeState
+  state: EngineState
+  /** Recomputes the state after an activity — from fresh sources — so ΔΦ is measured rather than assumed. */
+  regather: () => EngineState | Promise<EngineState>
   runners: Partial<Record<Activity, ActivityRunner>>
   /** Activities that spend model credit. They run only when `spend` is set. */
   paid: ReadonlySet<Activity>
@@ -96,7 +97,7 @@ export interface RoundResult {
   skipped: Array<{ activity: Activity; reason: string }>
 }
 
-export function activityLogPath(dir = join(stateDir, 'vde')): string {
+export function activityLogPath(dir = compoundingStateDir()): string {
   return join(dir, 'activities.jsonl')
 }
 
@@ -129,7 +130,8 @@ export async function runRound(options: RoundOptions): Promise<RoundResult> {
     }
     const runner = options.runners[rec.activity]
     if (!runner) {
-      skipped.push({ activity: rec.activity, reason: 'no automatic runner — this one needs a person or a task' })
+      const reason = rec.activity === 'solve' ? "solving is the person's own requests — elia does it on every turn, not in the background" : 'no automatic runner — this one needs a person or a task'
+      skipped.push({ activity: rec.activity, reason })
       continue
     }
     if (options.paid.has(rec.activity) && !options.spend) {
@@ -142,7 +144,7 @@ export async function runRound(options: RoundOptions): Promise<RoundResult> {
       skipped.push({ activity: rec.activity, reason: result.detail })
       continue
     }
-    const after = options.regather().frontier.mass ?? 0
+    const after = (await options.regather()).frontier.mass ?? 0
     const deltaPhi = after - before
     try {
       const path = options.logFile ?? activityLogPath()

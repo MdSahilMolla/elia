@@ -3,7 +3,7 @@ import { join } from 'node:path'
 import type { BenchCheck, BenchTask } from '../suite.ts'
 import { contentHash, materializeTask } from './materialize.ts'
 import { runVerify } from './verifyRun.ts'
-import { TASKS_FILE } from './harvest.ts'
+import { harvestedFileFor, readHarvested, TASKS_FILE } from './harvest.ts'
 import type { HistoryTaskSpec } from './types.ts'
 
 /**
@@ -25,20 +25,27 @@ let cached: HistoryTaskSpec[] | undefined
 
 export function loadTaskSpecs(file = TASKS_FILE): HistoryTaskSpec[] {
   if (cached) return cached
-  if (!existsSync(file)) {
-    cached = []
-    return cached
-  }
+  const tracked = readTrackedSpecs(file)
+  // Tasks the governor harvested since the tracked set was written (see
+  // `growHarvest`). Only alongside the tracked set itself: a caller that points
+  // at its own file gets exactly that file.
+  const harvested = file === TASKS_FILE ? readHarvested(harvestedFileFor()).tasks : []
+  const known = new Set(tracked.map((spec) => spec.id))
+  cached = [...tracked, ...harvested.filter((spec) => !known.has(spec.id))]
+  return cached
+}
+
+function readTrackedSpecs(file: string): HistoryTaskSpec[] {
+  if (!existsSync(file)) return []
   try {
     const parsed: unknown = JSON.parse(readFileSync(file, 'utf8'))
-    cached = Array.isArray(parsed) ? (parsed as HistoryTaskSpec[]) : []
+    return Array.isArray(parsed) ? (parsed as HistoryTaskSpec[]) : []
   } catch {
     // A corrupt or non-array tasks file must not take the whole benchmark
     // down — report "no tasks" so the operator sees an empty run instead of a
     // crash, and can regenerate or repair the file.
-    cached = []
+    return []
   }
-  return cached
 }
 
 /** Test-only: drops the memoized specs so a test can point the loader elsewhere. */

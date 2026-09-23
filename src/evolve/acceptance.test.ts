@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import type { Metrics } from '../evolve/ledger.ts'
+import type { Metrics } from './ledger.ts'
 import { gateDecision, gateMode, pairedDifferences, sealedCompare } from './acceptance.ts'
 
 function metrics(passed: string[], failed: string[], taskRates?: Record<string, number>): Metrics {

@@ -1,7 +1,7 @@
 import type { ChatMessage, ContentBlock, Provider, Usage } from '../providers/types.ts'
 import { appendLessons, loadLessons } from './lessons.ts'
 import type { VerifyResult } from './outcomes.ts'
-import { lessonHygieneProblem } from '../vde/lessonCertificates.ts'
+import { lessonHygieneProblem } from './lessonCertificates.ts'
 
 /**
  * What elia brings into a turn from earlier sessions, and what it takes away.

@@ -72,9 +72,9 @@ import {
 } from './strategy.ts'
 import { proposeChallengerStrategy } from './metaPropose.ts'
 import { fieldEvidenceSection } from './fieldEvidence.ts'
-import { gateDecision, gateMode, meanGainOver, sealedCompare, type SealedVerdict } from '../vde/acceptance.ts'
-import { diffDigest, redactHeldOut, sealedReadTools } from '../vde/isolation.ts'
-import { applySteppingStone, archiveNearMiss, elites, readArchive, renderSteppingStones } from '../vde/archive.ts'
+import { gateDecision, gateMode, meanGainOver, sealedCompare, type SealedVerdict } from './acceptance.ts'
+import { diffDigest, redactHeldOut, sealedReadTools } from './isolation.ts'
+import { applySteppingStone, archiveNearMiss, elites, readArchive, renderSteppingStones } from './archive.ts'
 
 /**
  * Elia improving elia.
@@ -107,7 +107,7 @@ export interface Hypothesis {
   rationale: string
   targetFiles: string[]
   plan: string
-  /** An archived stepping stone to start from instead of the current source (vde/archive.ts). */
+  /** An archived stepping stone to start from instead of the current source (archive.ts). */
   buildOn?: string
 }
 
@@ -317,7 +317,7 @@ async function runGeneration(
 
 /**
  * A rejected candidate that still moved the shown tasks the right way is a
- * stepping stone (vde/archive.ts, Proposition 4). Its sandbox is still on disk
+ * stepping stone (archive.ts, Proposition 4). Its sandbox is still on disk
  * at this point — every post-measurement rejection keeps it — so its files are
  * copied into the archive before the pruner can take them.
  */
@@ -584,7 +584,7 @@ async function attemptGeneration(
   onCandidateCard(candidateCard)
 
   // The paper's sealed verdict on the same measurement: an anytime-valid test
-  // with a lifetime false-acceptance budget (vde/acceptance.ts). Recorded on
+  // with a lifetime false-acceptance budget (acceptance.ts). Recorded on
   // every measured generation; `ELIA_EVOLVE_GATE` decides whether it, the
   // legacy rule, or both make the call.
   const gate = gateMode()

@@ -21,8 +21,19 @@ import { loadRuntimeSkills } from './runtime.ts'
  * what each turn's search learned about how to attack work of that shape — so
  * both channels are read off the same command rather than one of them being
  * invisible until someone goes looking for a JSON file.
+ *
+ * With a subcommand it measures elia against the theory the loop rests on —
+ * `frontier`, `round`, `simulate`, `predict` (cli/compoundingEngine.ts).
  */
 export async function runCompounding(): Promise<void> {
+  const action = positionals()[0]
+  if (action !== undefined) {
+    const { COMPOUNDING_ACTIONS, runCompoundingAction } = await import('./compoundingEngine.ts')
+    if (await runCompoundingAction(action)) return
+    writeError(`unknown compounding action "${action}". Try: elia compounding [${COMPOUNDING_ACTIONS.join('|')}]`)
+    process.exitCode = 1
+    return
+  }
   const { compoundingStatus, renderCompoundingStatus } = await import('../compounding/status.ts')
   const { evidenceVelocity, renderVelocity } = await import('../compounding/velocity.ts')
   const { readLedger } = await import('../evolve/ledger.ts')
@@ -157,15 +168,15 @@ export async function runEvolve(): Promise<void> {
       process.exitCode = 1
       return
     }
-    const { BENCH_TASKS } = await import('../evolve/suite.ts')
+    const { BENCH_TASKS, allBenchTasks } = await import('../evolve/suite.ts')
     const { focusTaskIds } = await import('../compounding/status.ts')
-    taskIds = focusTaskIds(BENCH_TASKS.map((task) => task.id), focus)
+    taskIds = focusTaskIds(BENCH_TASKS.map((task) => task.id), focus, undefined, allBenchTasks().map((task) => task.id))
     if (!taskIds) {
       writeError('--focus needs a complete `elia bench --all` run to focus from (none recorded with every task measured).')
       process.exitCode = 1
       return
     }
-    writeNotice(`Focused on ${taskIds.length} task(s): the built-in set, the last full run's failures, and ${focus} passing history task(s).`)
+    writeNotice(`Focused on ${taskIds.length} task(s): the built-in set, the last full run's failures, any task harvested since it, and ${focus} passing history task(s).`)
   }
   const result = await evolve({ generations, dryRun: hasFlag('--dry-run'), taskIds })
   if (result.stoppedReason) {
@@ -194,6 +205,8 @@ export async function runEvolve(): Promise<void> {
  * The first run on a project has no full benchmark to focus from, so it runs
  * one: that is what records the reach map the sieve needs and the failures the
  * proposer studies, and without it every later verdict costs a full sweep.
+ * After that, each run is one round of the resource governor (compounding/round.ts),
+ * of which an evolve generation is one possible choice.
  */
 async function runAutoPractice(): Promise<void> {
   const auto = await import('../evolve/autoImprove.ts')
@@ -243,7 +256,7 @@ async function runAutoPractice(): Promise<void> {
     await loadRuntimeSkills()
     const { BENCH_TASKS, allBenchTasks } = await import('../evolve/suite.ts')
     const { focusTaskIds, recordBenchRun } = await import('../compounding/status.ts')
-    const taskIds = focusTaskIds(BENCH_TASKS.map((task) => task.id), 8)
+    const taskIds = focusTaskIds(BENCH_TASKS.map((task) => task.id), 8, undefined, allBenchTasks().map((task) => task.id))
 
     if (!taskIds) {
       const { measureFitness } = await import('../evolve/fitness.ts')
@@ -259,19 +272,45 @@ async function runAutoPractice(): Promise<void> {
       return
     }
 
-    const { evolve } = await import('../evolve/engine.ts')
-    const result = await evolve({ generations: 1, taskIds, promoteTo: 'branch' })
-    if (result.stoppedReason) {
-      finish(auto.looksBlocked(result.stoppedReason) ? 'blocked' : 'failed', result.stoppedReason)
-      return
-    }
-    const record = result.generations[0]
-    if (!record) {
-      finish('failed', 'no generation was recorded')
-      return
-    }
-    if (record.verdict === 'promoted') finish('promoted', `${record.hypothesis} (${record.reason})`, record.branch)
-    else finish(auto.looksBlocked(record.reason) ? 'blocked' : 'rejected', `tried "${record.hypothesis || 'a change'}": ${record.reason}`)
+    // What the idle compute goes to is the resource governor's call (§10), not
+    // always a generation: while the benchmark cannot tell a gain from noise it
+    // grows the benchmark, builds a tool or audits first. `meta` below is the
+    // generation practice always ran, promoted to its own branch as before.
+    const { gatherState, readActivityLog, runRound } = await import('../compounding/round.ts')
+    const { createRunners, gatherSources, PAID_ACTIVITIES } = await import('../compounding/runners.ts')
+    const { ACTIVITY_LABEL } = await import('../compounding/resourceGovernor.ts')
+    const history = readActivityLog()
+    let generation: import('../evolve/ledger.ts').GenerationRecord | undefined
+    let stoppedReason: string | undefined
+    const round = await runRound({
+      state: gatherState(await gatherSources()),
+      regather: async () => gatherState(await gatherSources()),
+      // Practice already spent credit on every run; the governor only decides on what.
+      spend: true,
+      paid: PAID_ACTIVITIES,
+      history,
+      runners: createRunners({
+        spend: true,
+        history,
+        onProgress: (message) => writeUsageLine(`[${new Date().toISOString()}] ${message}`),
+        meta: async () => {
+          const { evolve } = await import('../evolve/engine.ts')
+          const result = await evolve({ generations: 1, taskIds, promoteTo: 'branch' })
+          stoppedReason = result.stoppedReason
+          generation = result.generations[0]
+          const detail = generation ? `${generation.verdict}: ${generation.reason.split('\n')[0]}` : (stoppedReason ?? 'no generation was recorded')
+          return { ran: Boolean(generation || stoppedReason), cost: 5, detail }
+        },
+      }),
+    })
+    for (const entry of round.skipped) writeUsageLine(`[${new Date().toISOString()}] governor skipped ${entry.activity}: ${entry.reason}`)
+    const verdict = auto.governedOutcome({
+      ...(round.ran ? { ran: { activity: round.ran.activity, label: ACTIVITY_LABEL[round.ran.activity], detail: round.ran.result.detail } } : {}),
+      skipped: round.skipped,
+      ...(generation ? { generation } : {}),
+      ...(stoppedReason ? { stoppedReason } : {}),
+    })
+    finish(verdict.outcome, verdict.detail, verdict.branch)
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error)
     finish(auto.looksBlocked(detail) ? 'blocked' : 'failed', detail.split('\n')[0]!.slice(0, 300))

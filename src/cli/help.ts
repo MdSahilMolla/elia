@@ -88,11 +88,13 @@ Self-improvement:
                               in a sandbox, and promote it only if the benchmark agrees
   elia evolve -n 3            Run three generations, each building on the last
   elia evolve --dry-run       Evaluate candidates but never modify the live source
-  elia vde                    Where the Verified Discovery Engine stands: verification frontier,
-                              certified library, growth, isolation, and the governor's plan
-  elia vde round [--spend]    Run the governor's top activity (audit is free; others need --spend)
-  elia vde simulate           Reproduce the paper's simulations (zero spend)
-  elia vde predict            The paper's falsifiable predictions P1–P8 and elia's evidence on each
+  elia compounding            Where each stage of the self-improvement loop stands
+  elia compounding frontier   The verification frontier, certified library, growth, isolation,
+                              and the resource governor's plan
+  elia compounding round [--spend]
+                              Run the governor's top activity (no model calls without --spend)
+  elia compounding simulate   Reproduce the paper's simulations (zero spend)
+  elia compounding predict    The paper's falsifiable predictions P1–P8 and elia's evidence on each
 
 Learned tools:
   elia skills                 List the tools elia has written for itself

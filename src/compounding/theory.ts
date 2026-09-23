@@ -2,9 +2,10 @@
  * The mathematics of "Amplification Without Distillation", as functions.
  *
  * The working paper argues that a frozen model can be amplified without any
- * weight update, and that verification rather than the model sets how far. Every
- * other module in `src/vde/` turns one of its results into machinery; this one
- * holds the results themselves, so the machinery and its tests share one
+ * weight update, and that verification rather than the model sets how far. The
+ * frontier, the certified library, the sealed gate, the resource governor and
+ * the rest each turn one of its results into machinery; this module holds the
+ * results themselves, so the machinery and its tests share one
  * definition of each quantity instead of re-deriving it inline.
  *
  * Notation follows the paper: `p` is the generator's per-sample success rate on a

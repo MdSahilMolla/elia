@@ -9,6 +9,7 @@ import {
   MAX_RUN_MS,
   MIN_NEW_TURNS,
   autoImproveEnabled,
+  governedOutcome,
   looksBlocked,
   notePracticeTurn,
   practicePhase,
@@ -159,4 +160,26 @@ test('a heartbeat marks the run alive, and stops when the slot is someone else',
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
+})
+
+test('a governed practice run reports a generation the way practice always did', () => {
+  const meta = { activity: 'meta', label: 'improve the scaffold', detail: '' }
+  expect(governedOutcome({ ran: meta, skipped: [], generation: { verdict: 'promoted', hypothesis: 'shorter briefs', reason: '+2 tasks', branch: 'evolve/gen-9' } })).toEqual({
+    outcome: 'promoted',
+    detail: 'shorter briefs (+2 tasks)',
+    branch: 'evolve/gen-9',
+  })
+  expect(governedOutcome({ ran: meta, skipped: [], generation: { verdict: 'rejected', hypothesis: 'x', reason: 'regressed hist-a' } }).outcome).toBe('rejected')
+  expect(governedOutcome({ ran: meta, skipped: [], stoppedReason: '402 Payment Required' }).outcome).toBe('blocked')
+  expect(governedOutcome({ ran: meta, skipped: [] }).outcome).toBe('failed')
+})
+
+test('a governed practice run that chose another activity says what it did, or that nothing was worth doing', () => {
+  const harvested = governedOutcome({ ran: { activity: 'harvest', label: 'grow the benchmark', detail: 'proved 3 new benchmark task(s)' }, skipped: [] })
+  expect(harvested.outcome).toBe('practised')
+  expect(practiceSummary(harvested.outcome, harvested.detail)).toBe('elia practised while you were away: grow the benchmark — proved 3 new benchmark task(s)')
+
+  const idle = governedOutcome({ skipped: [{ activity: 'harvest', reason: 'every recent commit has already been tried' }] })
+  expect(idle.outcome).toBe('practised')
+  expect(idle.detail).toBe('nothing was worth running (harvest: every recent commit has already been tried)')
 })

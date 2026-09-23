@@ -127,12 +127,18 @@ export function benchStage(runs: BenchRecord[]): StageReport {
  * fail (the headroom), and the first `passingHistory` history tasks it saw pass
  * (so a candidate cannot buy a fix by breaking real work). Undefined when there
  * is no complete full run to focus from.
+ *
+ * `allIds`, when given, adds every task that run never saw — tasks harvested
+ * since. Nothing is known about them yet, so they are the likeliest headroom,
+ * and a generation measures both sides of them anyway.
  */
-export function focusTaskIds(builtInIds: string[], passingHistory: number, runs = readBenchRuns()): string[] | undefined {
+export function focusTaskIds(builtInIds: string[], passingHistory: number, runs = readBenchRuns(), allIds: readonly string[] = []): string[] | undefined {
   const last = [...runs].reverse().find((run) => run.set === 'all' && run.unmeasured === 0 && run.failed && run.passed)
   if (!last) return undefined
-  const history = (ids: string[]) => ids.filter((id) => !builtInIds.includes(id))
-  return [...new Set([...builtInIds, ...history(last.failed!), ...history(last.passed!).slice(0, passingHistory)])]
+  const history = (ids: readonly string[]) => ids.filter((id) => !builtInIds.includes(id))
+  const seen = new Set([...last.failed!, ...last.passed!])
+  const unseen = history(allIds).filter((id) => !seen.has(id))
+  return [...new Set([...builtInIds, ...history(last.failed!), ...unseen, ...history(last.passed!).slice(0, passingHistory)])]
 }
 
 export interface LessonStoreEffect {

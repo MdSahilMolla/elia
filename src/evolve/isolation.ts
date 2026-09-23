@@ -12,8 +12,9 @@ import type { Tool } from '../tools/types.ts'
  * checking code. Only structure removes the channel. The four requirements:
  *
  * - I1 — evaluator code, data and logs live where the scaffold cannot write.
- *   `IMMUTABLE_FILES` in evolve/sandbox.ts; `src/vde/**` joins it, because the
- *   gate, the auditor and the governor are the paper's "never modify" list (§14).
+ *   `IMMUTABLE_FILES` in evolve/sandbox.ts; the sealed gate, the certified
+ *   library and its auditor, and the resource governor join it, because they
+ *   are the paper's "never modify" list (§14).
  * - I2 — the scaffold sees thresholded outcomes, never per-task held-out results
  *   or evaluator internals. `split.ts` already withheld held-out failures from
  *   the brief, but two channels stayed open: the proposer's read tools could
@@ -109,12 +110,15 @@ export const EVALUATOR_FILES = [
   'src/evolve/split.ts',
   'src/evolve/sieve.ts',
   'src/evolve/ledger.ts',
-  'src/vde/acceptance.ts',
-  'src/vde/isolation.ts',
-  'src/vde/library.ts',
-  'src/vde/lessonCertificates.ts',
-  'src/vde/governor.ts',
-  'src/vde/frontier.ts',
+  // The task data: what each history task asks for, and which tasks exist.
+  'src/evolve/history/suite.ts',
+  'src/evolve/history/tasks.json',
+  'src/evolve/acceptance.ts',
+  'src/evolve/isolation.ts',
+  'src/autonomy/certifiedLibrary.ts',
+  'src/autonomy/lessonCertificates.ts',
+  'src/compounding/resourceGovernor.ts',
+  'src/compounding/frontier.ts',
 ]
 
 /**

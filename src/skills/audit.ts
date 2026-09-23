@@ -1,6 +1,6 @@
 import { existsSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
-import { purgeArtifact, readLibrary, recordCheck, registerArtifact } from './library.ts'
+import { purgeArtifact, readLibrary, recordCheck, registerArtifact } from '../autonomy/certifiedLibrary.ts'
 
 /**
  * The auditor of §5.3, for tools: re-check what was admitted, purge what no

@@ -1,9 +1,9 @@
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync, renameSync, rmdirSync, rmSync } from 'node:fs'
 import { dirname, join } from 'node:path'
-import { appendSecureFile, ensureSecureDirectory, hardenSecureFile } from '../securePersistence.ts'
+import { appendSecureFile, ensureSecureDirectory, hardenSecureFile, writeSecureFile } from '../securePersistence.ts'
 import { stateDir } from '../statePaths.ts'
-import { errorThreshold, soundFraction } from './theory.ts'
-import { wilson, type RateEstimate } from './stats.ts'
+import { errorThreshold, soundFraction } from '../compounding/theory.ts'
+import { wilson, type RateEstimate } from '../compounding/stats.ts'
 
 /**
  * The library of §2 and §5: what elia keeps outside its weights, with a
@@ -94,7 +94,42 @@ type LibraryEvent =
   | { type: 'purge'; at: number; id: string; reason: string; audit: boolean }
   | { type: 'reuse'; at: number; ids: string[] }
 
-export function libraryPath(dir = join(stateDir, 'vde')): string {
+/**
+ * Where the library, the resource governor's activity log and the tool-build log
+ * live: `<state>/compounding/`.
+ *
+ * They used to live under `<state>/vde/`. Each call moves across whatever is
+ * still there, so no certificate or observation is lost — including lines an
+ * older elia process appended after the first move. Every file here is an
+ * append-only log folded on read, so when both copies exist the old lines go
+ * first. A file another process holds open stays behind until a later call.
+ */
+export function compoundingStateDir(base = stateDir): string {
+  const dir = join(base, 'compounding')
+  const legacy = join(base, 'vde')
+  if (existsSync(legacy)) {
+    try {
+      ensureSecureDirectory(dir)
+      for (const name of readdirSync(legacy)) {
+        const from = join(legacy, name)
+        const to = join(dir, name)
+        if (!existsSync(to)) {
+          renameSync(from, to)
+          continue
+        }
+        const older = readFileSync(from, 'utf8')
+        writeSecureFile(to, `${older}${older.length > 0 && !older.endsWith('\n') ? '\n' : ''}${readFileSync(to, 'utf8')}`)
+        rmSync(from)
+      }
+      if (readdirSync(legacy).length === 0) rmdirSync(legacy)
+    } catch {
+      // Locked or half-moved: what is here is read now, the rest on a later call.
+    }
+  }
+  return dir
+}
+
+export function libraryPath(dir = compoundingStateDir()): string {
   return join(dir, 'library.jsonl')
 }
 

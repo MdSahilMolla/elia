@@ -1,8 +1,9 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
+  compoundingStateDir,
   independentPasses,
   libraryHealth,
   purgeArtifact,
@@ -13,12 +14,12 @@ import {
   retrievable,
   statusFor,
   type Check,
-} from './library.ts'
+} from './certifiedLibrary.ts'
 
 let dir: string
 let path: string
 beforeEach(() => {
-  dir = mkdtempSync(join(tmpdir(), 'elia-vde-library-'))
+  dir = mkdtempSync(join(tmpdir(), 'elia-library-'))
   path = join(dir, 'library.jsonl')
 })
 afterEach(() => rmSync(dir, { recursive: true, force: true }))
@@ -86,4 +87,25 @@ test('health: σ ≤ 1 means only audits keep the library sound (R2)', () => {
   expect(health.slip.trials).toBe(2) // u1 audited and kept, u2 audited and purged
   expect(health.slip.successes).toBe(1)
   expect(health.threshold).toBeGreaterThan(0)
+})
+
+test('state kept under the old vde/ directory moves to compounding/ without losing a line', () => {
+  const legacy = join(dir, 'vde')
+  mkdirSync(legacy)
+  writeFileSync(join(legacy, 'library.jsonl'), 'old library\n')
+  writeFileSync(join(legacy, 'activities.jsonl'), 'old activity')
+  // An older elia process can still append to the old place after the first
+  // move; both copies are append-only logs, so they merge with the old lines first.
+  mkdirSync(join(dir, 'compounding'))
+  writeFileSync(join(dir, 'compounding', 'activities.jsonl'), 'new activity\n')
+
+  const moved = compoundingStateDir(dir)
+  expect(moved).toBe(join(dir, 'compounding'))
+  expect(readFileSync(join(moved, 'library.jsonl'), 'utf8')).toBe('old library\n')
+  expect(readFileSync(join(moved, 'activities.jsonl'), 'utf8')).toBe('old activity\nnew activity\n')
+  expect(existsSync(legacy)).toBe(false)
+
+  // Nothing left to move is a no-op.
+  expect(compoundingStateDir(dir)).toBe(moved)
+  expect(readFileSync(join(moved, 'activities.jsonl'), 'utf8')).toBe('old activity\nnew activity\n')
 })

@@ -3,14 +3,14 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { admitProbe, createProbeSynthesizer, parseBunSummary, PROBE_FILE } from './probe.ts'
-import { readLibrary } from './library.ts'
-import type { TaskSignature } from '../reason/signature.ts'
+import { readLibrary } from '../autonomy/certifiedLibrary.ts'
+import type { TaskSignature } from './signature.ts'
 
 let dir: string
 let project: string
 let fixed: string
 beforeEach(() => {
-  dir = mkdtempSync(join(tmpdir(), 'elia-vde-probe-'))
+  dir = mkdtempSync(join(tmpdir(), 'elia-probe-'))
   project = join(dir, 'project')
   fixed = join(dir, 'fixed')
   for (const root of [project, fixed]) mkdirSync(join(root, 'src'), { recursive: true })

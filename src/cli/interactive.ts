@@ -524,9 +524,9 @@ export async function runInteractive(): Promise<void> {
 
     // With nothing executable in the project, the search writes its own check
     // first — and only trusts it once it fails on the unchanged tree (§7.4,
-    // vde/probe.ts). Without this the "elia will write the check" promise fell
+    // reason/probe.ts). Without this the "elia will write the check" promise fell
     // back to attempts agreeing with each other.
-    const { createProbeSynthesizer, probeWriterPrompt, probeWriterTools } = await import('../vde/probe.ts')
+    const { createProbeSynthesizer, probeWriterPrompt, probeWriterTools } = await import('../reason/probe.ts')
     const synthesizeProbe = createProbeSynthesizer({
       request: requestText,
       sourceRoot: process.cwd(),

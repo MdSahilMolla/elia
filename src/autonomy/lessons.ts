@@ -4,8 +4,8 @@ import { appendSecureFile, ensureSecureDirectory, hardenSecureFile, writeSecureF
 import { paths } from '../config.ts'
 import type { Tool } from '../tools/types.ts'
 import { exposedCorrs, lessonTrials, loadEfficacy, MIN_EXPOSURES, type LessonTrial } from './lessonEfficacy.ts'
-import { certifyLessons, lessonArtifactId, lessonArtifacts, lessonLibraryPath, recordLessonReuse } from '../vde/lessonCertificates.ts'
-import { purgeArtifact, registerArtifact, retrievable } from '../vde/library.ts'
+import { certifyLessons, lessonArtifactId, lessonArtifacts, lessonLibraryPath, recordLessonReuse } from './lessonCertificates.ts'
+import { purgeArtifact, registerArtifact, retrievable } from './certifiedLibrary.ts'
 import { rankBm25 } from '../bm25.ts'
 import { globalLessonsPath, partitionByScope } from './lessonScope.ts'
 import { competenceReport } from './outcomes.ts'
@@ -182,7 +182,7 @@ export function appendLessons(
 
   // Every lesson enters the certified library with the checks its origin can
   // claim; one that fails hygiene is written but quarantined, so it is on
-  // record and never injected. See vde/lessonCertificates.ts.
+  // record and never injected. See lessonCertificates.ts.
   certifyLessons(
     fresh.map((lesson) => ({ text: lesson.text, key: lessonKey(lesson.text), ...(lesson.source ? { source: lesson.source } : {}) })),
     path,

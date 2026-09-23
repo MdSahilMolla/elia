@@ -103,8 +103,16 @@ export interface FrontierReport {
    * inside. `undefined` when no family could be placed.
    */
   mass?: number
-  /** Share of file-changing turns that ran no verification at all. */
+  /** Share of file-changing turns that ran no verification at all, over every recorded turn. */
   unverifiedShare: RateEstimate
+  /**
+   * The same share over the most recent `RECENT_CHECKABLE_TURNS` file-changing
+   * turns that touched something a check could read — not prose alone. This is
+   * the number rule R1 acts on: §13 says what has no fast check cannot be
+   * certified, so a docs-only turn is not a verifier elia failed to build, and
+   * an all-time share could never show a fix to the gate made last week.
+   */
+  checkableUnverified: RateEstimate
 }
 
 export interface FrontierInputs {
@@ -114,6 +122,18 @@ export interface FrontierInputs {
 }
 
 const FAMILIES: Domain[] = ['code', 'backend', 'tests', 'config', 'frontend', 'docs']
+
+/** How many recent checkable turns rule R1 judges verifier coverage on. */
+export const RECENT_CHECKABLE_TURNS = 60
+
+/** Whether any executable check could have read what this turn changed. Prose alone has no fast verifier. */
+export function isCheckable(outcome: Pick<TurnOutcome, 'domains'>): boolean {
+  return outcome.domains.some((domain) => domain !== 'docs')
+}
+
+function isUnverified(outcome: Pick<TurnOutcome, 'verify'>): boolean {
+  return outcome.verify === 'none' || outcome.verify === 'skipped'
+}
 
 export function verifierRates(gap: GapVector | undefined, calibration: readonly CalibrationEntry[]): VerifierRates {
   const rates: VerifierRates = {}
@@ -189,7 +209,8 @@ function classify(p: RateEstimate, alpha: RateSource | undefined, beta: RateSour
 export function estimateFrontier(inputs: FrontierInputs, target = 0.5): FrontierReport {
   const verifiers = verifierRates(inputs.gap, inputs.calibration)
   const changing = inputs.outcomes.filter((outcome) => outcome.filesChanged > 0 && !outcome.aborted)
-  const unverifiedTotal = changing.filter((outcome) => outcome.verify === 'none' || outcome.verify === 'skipped').length
+  const unverifiedTotal = changing.filter(isUnverified).length
+  const recentCheckable = changing.filter(isCheckable).slice(-RECENT_CHECKABLE_TURNS)
 
   const families: FamilyEstimate[] = FAMILIES.map((family) => {
     const regime = FAMILY_REGIME[family]
@@ -233,6 +254,7 @@ export function estimateFrontier(inputs: FrontierInputs, target = 0.5): Frontier
     verifiers,
     ...(placedWeight > 0 ? { mass: insideWeight / placedWeight } : {}),
     unverifiedShare: wilson(unverifiedTotal, changing.length),
+    checkableUnverified: wilson(recentCheckable.filter(isUnverified).length, recentCheckable.length),
   }
 }
 
@@ -270,5 +292,6 @@ export function renderFrontier(report: FrontierReport): string {
   lines.push('')
   lines.push(`  frontier mass Φ ${report.mass === undefined ? 'unknown (no family could be placed)' : pct(report.mass)}`)
   lines.push(`  file-changing turns with no verification at all: ${interval(report.unverifiedShare)} — outside every frontier`)
+  lines.push(`  of the last ${RECENT_CHECKABLE_TURNS} a check could have read (not prose alone): ${interval(report.checkableUnverified)} unverified — what rule R1 acts on`)
   return lines.join('\n')
 }

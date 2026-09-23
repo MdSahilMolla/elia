@@ -131,6 +131,32 @@ test('the files that decide a verdict are off limits to the candidate that the v
   }
 })
 
+test('a candidate cannot rewrite what its own history tasks ask for, or which tasks exist', () => {
+  // The benchmark spawns the candidate's benchTask.ts, which reads the prompt
+  // and the task list from the candidate's copy of these files.
+  for (const file of ['src/evolve/history/suite.ts', 'src/evolve/history/tasks.json', 'src/evolve/history/harvest.ts', 'src/evolve/history/materialize.ts']) {
+    expect(isImmutablePath(file)).toBe(true)
+  }
+  expect(violatedImmutables(['src/evolve/history/suite.ts', 'src/agent.ts'])).toEqual(['src/evolve/history/suite.ts'])
+})
+
+test('the sealed gate, the certified library, the resource governor and the maths they share stay out of reach', () => {
+  // These once sat together under one immutable glob. Spread across elia's own
+  // folders, each is named — and a new one missing from the list fails here.
+  const governed = [
+    'src/evolve/acceptance.ts', 'src/evolve/isolation.ts', 'src/evolve/archive.ts',
+    'src/autonomy/certifiedLibrary.ts', 'src/autonomy/lessonCertificates.ts',
+    'src/compounding/theory.ts', 'src/compounding/stats.ts', 'src/compounding/frontier.ts', 'src/compounding/growth.ts',
+    'src/compounding/resourceGovernor.ts', 'src/compounding/round.ts', 'src/compounding/runners.ts', 'src/compounding/sim.ts', 'src/compounding/predictions.ts',
+    'src/skills/audit.ts', 'src/skills/closure.ts', 'src/skills/toolLog.ts', 'src/reason/probe.ts',
+  ]
+  expect(governed.filter((file) => !isImmutablePath(file))).toEqual([])
+  // Their neighbours are still ordinary implementation a candidate may improve.
+  for (const file of ['src/compounding/status.ts', 'src/skills/synthesize.ts', 'src/autonomy/lessons.ts', 'src/reason/reason.ts']) {
+    expect(isImmutablePath(file)).toBe(false)
+  }
+})
+
 test("edits made to the live tree while a generation runs are not the candidate's, and are never overwritten", () => {
   const temp = mkdtempSync(join(tmpdir(), 'elia-sandbox-race-'))
   const live = join(temp, 'live')

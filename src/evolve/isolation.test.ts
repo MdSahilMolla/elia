@@ -7,11 +7,11 @@ import type { Tool } from '../tools/types.ts'
 process.env.ANTHROPIC_API_KEY ??= 'test-key-for-isolation-test'
 
 const { diffDigest, EVALUATOR_FILES, isolationChecks, redactHeldOut, sealedReadTools } = await import('./isolation.ts')
-const { isImmutablePath } = await import('../evolve/sandbox.ts')
+const { isImmutablePath } = await import('./sandbox.ts')
 
 let dir: string
 beforeEach(() => {
-  dir = mkdtempSync(join(tmpdir(), 'elia-vde-isolation-'))
+  dir = mkdtempSync(join(tmpdir(), 'elia-isolation-'))
 })
 afterEach(() => rmSync(dir, { recursive: true, force: true }))
 
@@ -65,7 +65,7 @@ test('I3: the diff digest is about content, and a deletion is not an empty file'
 test('I1: every evaluator, auditor and governor file is immutable to evolve candidates', () => {
   const mutable = EVALUATOR_FILES.filter((file) => !isImmutablePath(file))
   expect(mutable).toEqual([])
-  expect(isImmutablePath('src/vde/acceptance.ts')).toBe(true)
+  expect(isImmutablePath('src/evolve/acceptance.ts')).toBe(true)
   const checks = isolationChecks(isImmutablePath, false)
   expect(checks.find((check) => check.id === 'I1')!.ok).toBe(true)
   expect(checks.find((check) => check.id === 'I3')!.ok).toBe(false)

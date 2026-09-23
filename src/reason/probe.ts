@@ -3,10 +3,10 @@ import { tmpdir } from 'node:os'
 import { isAbsolute, join, relative, resolve } from 'node:path'
 import { runShell, type ShellResult } from '../shell.ts'
 import type { Tool } from '../tools/types.ts'
-import type { TaskSignature } from '../reason/signature.ts'
-import type { Verifier } from '../reason/verify.ts'
-import { registerArtifact, type Check } from './library.ts'
-import { sealedReadTools } from './isolation.ts'
+import type { TaskSignature } from './signature.ts'
+import type { Verifier } from './verify.ts'
+import { registerArtifact, type Check } from '../autonomy/certifiedLibrary.ts'
+import { sealedReadTools } from '../evolve/isolation.ts'
 
 /**
  * Verification first (§7.4): when a task has no check, build the check before

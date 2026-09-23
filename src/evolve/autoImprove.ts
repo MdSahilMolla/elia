@@ -3,8 +3,14 @@
 // `elia evolve` is the loop that changes elia itself, and for a month it ran
 // only when someone typed it — which was twice. This is what runs it instead:
 // when the REPL goes idle (or closes) and there is something new to learn
-// from, one generation starts in a detached background process, and the next
+// from, a practice run starts in a detached background process, and the next
 // session opens by saying what came of it.
+//
+// What the run does is the resource governor's call (compounding/resourceGovernor.ts): an evolve
+// generation when the benchmark can tell a gain from noise, otherwise whatever
+// moves that forward first — prove new benchmark tasks, build a tool for a
+// repeated habit, audit the library. Always running a generation spent credit
+// on a comparison the governor itself said could not certify anything.
 //
 // It stays out of the way by construction, not by a spending cap:
 //   - one run at a time, across every elia process (a pid in the state file);
@@ -45,7 +51,8 @@ export const HEARTBEAT_MS = 60_000
  */
 export const HEARTBEAT_STALE_MS = 15 * 60_000
 
-export type AutoOutcome = 'promoted' | 'rejected' | 'blocked' | 'failed' | 'benchmarked'
+/** `practised`: the resource governor chose something other than an evolve generation, and it ran (or nothing was worth running). */
+export type AutoOutcome = 'promoted' | 'rejected' | 'blocked' | 'failed' | 'benchmarked' | 'practised'
 
 export interface AutoImproveState {
   pid?: number
@@ -266,6 +273,33 @@ export function startPracticeHeartbeat(statePath = AUTO_IMPROVE_STATE, everyMs =
   return () => clearInterval(timer)
 }
 
+/** What one governed practice run did: the round's choice, and the generation if the choice was `meta`. */
+export interface GovernedPractice {
+  ran?: { activity: string; label: string; detail: string }
+  skipped: ReadonlyArray<{ activity: string; reason: string }>
+  generation?: { verdict: string; hypothesis?: string; reason: string; branch?: string }
+  stoppedReason?: string
+}
+
+/**
+ * How a governed practice run is reported. An evolve generation keeps the
+ * outcomes practice always had — promoted, rejected, blocked; any other
+ * activity is `practised`, with what it did; a round where nothing was worth
+ * running says so, and why, rather than inventing progress. Pure.
+ */
+export function governedOutcome(practice: GovernedPractice): { outcome: AutoOutcome; detail: string; branch?: string } {
+  if (practice.ran?.activity === 'meta') {
+    if (practice.stoppedReason) return { outcome: looksBlocked(practice.stoppedReason) ? 'blocked' : 'failed', detail: practice.stoppedReason }
+    const record = practice.generation
+    if (!record) return { outcome: 'failed', detail: 'no generation was recorded' }
+    if (record.verdict === 'promoted') return { outcome: 'promoted', detail: `${record.hypothesis} (${record.reason})`, ...(record.branch ? { branch: record.branch } : {}) }
+    return { outcome: looksBlocked(record.reason) ? 'blocked' : 'rejected', detail: `tried "${record.hypothesis || 'a change'}": ${record.reason}` }
+  }
+  if (practice.ran) return { outcome: 'practised', detail: `${practice.ran.label} — ${practice.ran.detail}` }
+  const first = practice.skipped[0]
+  return { outcome: 'practised', detail: `nothing was worth running${first ? ` (${first.activity}: ${first.reason})` : ''}` }
+}
+
 /**
  * The summary line for a finished run. A promotion says where the change is and
  * how to take it; everything else says plainly that nothing changed.
@@ -275,6 +309,7 @@ export function practiceSummary(outcome: AutoOutcome, detail: string, branch?: s
     case 'promoted':
       return `✦ elia improved itself while you were away — ${detail}. It is on branch ${branch}; take it with \`git merge ${branch}\``
     case 'benchmarked':
+    case 'practised':
       return `elia practised while you were away: ${detail}`
     case 'rejected':
       return `elia practised while you were away and kept nothing — ${detail}`
@@ -287,7 +322,7 @@ export function practiceSummary(outcome: AutoOutcome, detail: string, branch?: s
 
 /** What `elia compounding` says about practice: the last run, and whether the next one would start now. */
 export function renderPracticeStatus(state: AutoImproveState, check: StartCheck): string {
-  const lines = ['practice — elia runs one evolve generation by itself when idle (ELIA_AUTO_IMPROVE=off to stop)']
+  const lines = ['practice — when idle, elia runs the one activity its resource governor ranks first: grow the benchmark, build a tool, audit, or an evolve generation (ELIA_AUTO_IMPROVE=off to stop)']
   const phase = practicePhase(state, check)
   const at = (ms: number) => new Date(ms).toISOString().slice(0, 16).replace('T', ' ')
   if (phase === 'never') lines.push('  never run yet')

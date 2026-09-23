@@ -3,11 +3,11 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { FrontierReport } from './frontier.ts'
-import type { LibraryHealth } from './library.ts'
+import type { LibraryHealth } from '../autonomy/certifiedLibrary.ts'
 import type { GrowthReport } from './growth.ts'
-import { recommend, renderPlan, type GovernorState } from './governor.ts'
-import { readActivityLog, runRound, type VdeState } from './round.ts'
-import { sealedMinimumGain } from './acceptance.ts'
+import { recommend, renderPlan, type GovernorState } from './resourceGovernor.ts'
+import { readActivityLog, runRound, type EngineState } from './round.ts'
+import { sealedMinimumGain } from '../evolve/acceptance.ts'
 import { wilson } from './stats.ts'
 
 function frontier(overrides: Partial<FrontierReport> = {}): FrontierReport {
@@ -20,6 +20,7 @@ function frontier(overrides: Partial<FrontierReport> = {}): FrontierReport {
     verifiers: {},
     mass: 1,
     unverifiedShare: wilson(7, 50),
+    checkableUnverified: wilson(5, 45),
     ...overrides,
   }
 }
@@ -59,6 +60,17 @@ test('R1: a family outside the frontier makes verifier synthesis the first thing
   expect(plan[0]!.rule).toBe('R1')
 })
 
+test('R1 acts on recent checkable turns, not on prose or on history the gate has since fixed', () => {
+  const big = { tasks: 500, passRate: 0.5, minimumDetectable: 0.02 }
+  // A third of all turns ever were unverified, but recent checkable work is covered: no R1 alarm.
+  const fixed = recommend(state({ frontier: frontier({ unverifiedShare: wilson(46, 137), checkableUnverified: wilson(6, 60) }), bench: big }))
+  expect(fixed.find((rec) => rec.activity === 'verify')).toBeUndefined()
+  // Recent checkable work going unverified is the alarm.
+  const gap = recommend(state({ frontier: frontier({ checkableUnverified: wilson(24, 60) }), bench: big }))
+  expect(gap[0]!.activity).toBe('verify')
+  expect(gap[0]!.why).toContain('40% of recent checkable')
+})
+
 test('R2 and R3: audit before growth when the library is at risk; compress when lessons do not help', () => {
   const risky = { ...healthy, auditFirst: true, notes: ['σ = 1.00: retrieval does not favour certified artifacts'] }
   const plan = recommend(state({ library: risky }))
@@ -84,9 +96,9 @@ test('measured history reorders the plan once an activity has enough runs', () =
 })
 
 test('a round runs the best free activity, never a paid one without --spend, and logs ΔΦ', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'elia-vde-round-'))
+  const dir = mkdtempSync(join(tmpdir(), 'elia-round-'))
   try {
-    const s = state({ library: { ...healthy, auditFirst: true, notes: ['near L*'] } }) as VdeState
+    const s = state({ library: { ...healthy, auditFirst: true, notes: ['near L*'] } }) as EngineState
     const calls: string[] = []
     const result = await runRound({
       state: s,
@@ -110,7 +122,7 @@ test('a round runs the best free activity, never a paid one without --spend, and
     expect(readActivityLog(join(dir, 'activities.jsonl'))).toHaveLength(1)
 
     // With the audit off the table, a paid activity is skipped, not run.
-    const unpaid = await runRound({ state: state() as VdeState, regather: () => s, runners: { compress: async () => ({ ran: true, detail: '', cost: 1 }) }, paid: new Set(['compress']), spend: false, logFile: join(dir, 'b.jsonl') })
+    const unpaid = await runRound({ state: state() as EngineState, regather: () => s, runners: { compress: async () => ({ ran: true, detail: '', cost: 1 }) }, paid: new Set(['compress']), spend: false, logFile: join(dir, 'b.jsonl') })
     expect(unpaid.ran).toBeUndefined()
     expect(unpaid.skipped.find((entry) => entry.activity === 'compress')!.reason).toContain('--spend')
   } finally {

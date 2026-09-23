@@ -1,5 +1,5 @@
-import { dirname, join } from 'node:path'
-import { readLibrary, recordReuse, registerArtifact, type Artifact, type Check } from './library.ts'
+import { dirname } from 'node:path'
+import { compoundingStateDir, libraryPath, readLibrary, recordReuse, registerArtifact, type Artifact, type Check } from './certifiedLibrary.ts'
 
 /**
  * Lessons, admitted the way §5 says library artifacts must be.
@@ -60,7 +60,7 @@ export function lessonArtifactId(key: string): string {
 
 /** The library lives beside the lessons file it certifies, so a test's lessons never reach the real one. */
 export function lessonLibraryPath(lessonsPath: string): string {
-  return join(dirname(lessonsPath), 'vde', 'library.jsonl')
+  return libraryPath(compoundingStateDir(dirname(lessonsPath)))
 }
 
 /** The check a lesson's origin can honestly claim, if any. Unknown and opinion-only origins claim none. */

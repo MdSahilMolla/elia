@@ -3,7 +3,7 @@ import { join } from 'node:path'
 import { runSubAgent } from '../subagent.ts'
 import { clampOutput, runShell } from '../shell.ts'
 import { registerSynthesizedTool } from '../tools/registry.ts'
-import { recordToolConstruction, type ToolConstruction } from '../vde/toolLog.ts'
+import { recordToolConstruction, type ToolConstruction } from './toolLog.ts'
 import { markResolved, type SkillCandidate } from './detector.ts'
 import { loadSkillFile, registerLoadedSkill } from './loader.ts'
 import { QUARANTINE_DIR, SKILL_SUFFIX, USER_SKILLS_DIR } from './paths.ts'
@@ -51,7 +51,7 @@ export async function synthesizeSkill(candidate: SkillCandidate): Promise<Synthe
 
   // Every attempt — built or not — goes into the closure log and the certified
   // library: a working tool with the checks it passed, a failed one as a dead
-  // end. See vde/toolLog.ts.
+  // end. See toolLog.ts.
   const tokens = worker.usage.inputTokens + worker.usage.outputTokens
   const bytes = existsSync(skillFile) ? statSync(skillFile).size : 0
   const record = (ok: boolean, reason: string, extra: Partial<ToolConstruction> = {}) =>

@@ -5,14 +5,14 @@ import { join } from 'node:path'
 
 process.env.ANTHROPIC_API_KEY ??= 'test-key-for-lesson-certificates-test'
 
-const { appendLessons, lessonKey, loadLessons, renderLessonsWithKeys } = await import('../autonomy/lessons.ts')
+const { appendLessons, lessonKey, loadLessons, renderLessonsWithKeys } = await import('./lessons.ts')
 const { evidenceForSource, lessonArtifacts, lessonHygieneProblem, lessonLibraryPath } = await import('./lessonCertificates.ts')
-const { readLibrary } = await import('./library.ts')
+const { readLibrary } = await import('./certifiedLibrary.ts')
 
 let dir: string
 let lessonsPath: string
 beforeEach(() => {
-  dir = mkdtempSync(join(tmpdir(), 'elia-vde-lessons-'))
+  dir = mkdtempSync(join(tmpdir(), 'elia-lessons-'))
   lessonsPath = join(dir, 'lessons.md')
 })
 afterEach(() => rmSync(dir, { recursive: true, force: true }))

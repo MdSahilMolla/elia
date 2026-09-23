@@ -21,6 +21,8 @@ Each stage feeds the next. `elia compounding` reads elia's own ledgers and repor
 
 ```bash
 elia compounding                 # where each stage stands, with evidence and the next step
+elia compounding frontier        # the verification frontier and the resource governor's plan (see discovery.md)
+elia compounding round           # run the governor's top activity; --spend lets it call a model
 elia bench --all                 # score on synthetic + git-history tasks
 elia bench --all --lessons       # the same, with the lesson store on, to measure whether memory helps
 elia bench --harvest             # rebuild the history task set from git (no model calls)

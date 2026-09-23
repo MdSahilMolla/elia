@@ -2,7 +2,7 @@ import { seededRandom } from './stats.ts'
 
 /**
  * The paper's §11 simulations, ported from its appendix so they run inside elia
- * with no Python — `elia vde simulate` prints them, and the tests pin the
+ * with no Python — `elia compounding simulate` prints them, and the tests pin the
  * thresholds they reproduce. They test the mathematics, not live models.
  *
  * One addition the paper's §11.4 was missing: the naive gate at the *large*

@@ -30,6 +30,12 @@ test('focus keeps every built-in task, every failed history task, and N passing 
   expect(focusTaskIds(['precise-edit', 'find-symbol'], 2, runs)).toEqual(['precise-edit', 'find-symbol', 'hist-a', 'hist-b', 'hist-c', 'hist-d'])
 })
 
+test('focus adds tasks harvested since the last full run, which nothing has measured yet', () => {
+  const runs = [run({ failed: ['hist-a'], passed: ['hist-c', 'hist-d'] })]
+  const all = ['precise-edit', 'hist-a', 'hist-c', 'hist-d', 'hist-new']
+  expect(focusTaskIds(['precise-edit'], 1, runs, all)).toEqual(['precise-edit', 'hist-a', 'hist-new', 'hist-c'])
+})
+
 test('focus refuses without a complete full run that recorded its tasks', () => {
   expect(focusTaskIds(['x'], 2, [])).toBeUndefined()
   expect(focusTaskIds(['x'], 2, [run()])).toBeUndefined()

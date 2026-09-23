@@ -1,9 +1,8 @@
 import { existsSync, readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { appendSecureFile, ensureSecureDirectory } from '../securePersistence.ts'
-import { stateDir } from '../statePaths.ts'
-import { registerArtifact, type Check } from './library.ts'
-import { olsSlope } from './stats.ts'
+import { compoundingStateDir, registerArtifact, type Check } from '../autonomy/certifiedLibrary.ts'
+import { olsSlope } from '../compounding/stats.ts'
 
 /**
  * Every attempt to build a tool, kept — §7's tool closure and Conjecture 1.
@@ -36,7 +35,7 @@ export interface ToolConstruction {
   loaded?: boolean
 }
 
-export function closureLogPath(dir = join(stateDir, 'vde')): string {
+export function closureLogPath(dir = compoundingStateDir()): string {
   return join(dir, 'closure.jsonl')
 }
 

@@ -94,7 +94,7 @@ Inside a session, `/model` switches models, `/plan <goal>` starts a planned run,
 | Guide | What's in it |
 |---|---|
 | **[Recursive intelligence compounding](docs/guide/compounding.md)** | The six stages, the commands, the guards, and where each stage stands today |
-| [The Verified Discovery Engine](docs/guide/vde.md) | `elia vde`: the verification frontier, the certified library, the sealed gate, isolation and the resource governor |
+| [Amplification without distillation](docs/guide/discovery.md) | `elia compounding frontier`: the verification frontier, the certified library, the sealed gate, isolation and the resource governor |
 | [Using the terminal](docs/guide/terminal.md) | All commands and flags, the terminal UI, images, LSP diagnostics, cost display |
 | [Autonomous work](docs/guide/autonomy.md) | How `elia auto` works, roles, delegation, best-of-N, forking, durable runs, schedules and the daemon |
 | [Configuration](docs/guide/configuration.md) | Providers, the Codex subscription, fallback, fast tier, per-role providers |

@@ -1,7 +1,7 @@
 import type { GenerationRecord } from '../evolve/ledger.ts'
-import type { Artifact } from './library.ts'
+import type { Artifact } from '../autonomy/certifiedLibrary.ts'
 import type { GrowthReport } from './growth.ts'
-import { bootstrappingFit, type ClosureRecord } from './toolLog.ts'
+import { bootstrappingFit, type ClosureRecord } from '../skills/toolLog.ts'
 
 /**
  * The paper's eight falsifiable predictions, §12, and where elia stands on each.
@@ -46,7 +46,7 @@ export function predictions(inputs: PredictionInputs): Prediction[] {
     {
       id: 'P1',
       claim: 'Resampling precision plateaus at p(1−β)/(p(1−β)+(1−p)α), computed from separately measured p, α, β',
-      instrument: '`elia bench` with repeats on tasks with hidden tests, against `elia vde` frontier estimates',
+      instrument: '`elia bench` with repeats on tasks with hidden tests, against `elia compounding frontier` estimates',
       status: 'untested',
       evidence: 'no run has compared a measured plateau with the computed one',
     },
@@ -100,7 +100,7 @@ export function predictions(inputs: PredictionInputs): Prediction[] {
       claim: 'When the evaluator is reachable, measured and true gains diverge even under valid statistics; isolation removes it',
       instrument: 'isolation I1–I4 plus a sandboxed meta-loop with a planted, reachable channel',
       status: 'untested',
-      evidence: 'simulated only (elia vde simulate, scenario D); the live loop is isolated, so it cannot show the divergence without a deliberately planted channel',
+      evidence: 'simulated only (elia compounding simulate, scenario D); the live loop is isolated, so it cannot show the divergence without a deliberately planted channel',
     },
     {
       id: 'C1',

@@ -3,11 +3,11 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { auditSkills } from './audit.ts'
-import { libraryHealth, readLibrary } from './library.ts'
+import { libraryHealth, readLibrary } from '../autonomy/certifiedLibrary.ts'
 
 let dir: string
 beforeEach(() => {
-  dir = mkdtempSync(join(tmpdir(), 'elia-vde-audit-'))
+  dir = mkdtempSync(join(tmpdir(), 'elia-audit-'))
 })
 afterEach(() => rmSync(dir, { recursive: true, force: true }))
 

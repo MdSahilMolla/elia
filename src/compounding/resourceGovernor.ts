@@ -1,7 +1,7 @@
 import type { FrontierReport } from './frontier.ts'
-import type { LibraryHealth } from './library.ts'
+import type { LibraryHealth } from '../autonomy/certifiedLibrary.ts'
 import type { GrowthReport } from './growth.ts'
-import type { CompressionQueue } from './closure.ts'
+import type { CompressionQueue } from '../skills/closure.ts'
 
 /**
  * The resource governor of §10: spend the next unit of compute where it moves
@@ -50,6 +50,8 @@ export interface BenchPower {
   minimumDetectable: number
   /** Which gate decides promotions (`ELIA_EVOLVE_GATE`); R4 only binds the sealed one. */
   gate?: 'legacy' | 'sealed' | 'both'
+  /** Of `tasks`, how many were added (harvested, or new to the suite) after the last full run and have no score yet. */
+  unbenched?: number
 }
 
 export interface GovernorState {
@@ -65,6 +67,8 @@ export interface ActivityObservation {
   /** Change in frontier mass Φ the activity produced. */
   deltaPhi: number
   cost: number
+  /** When it ran. Absent only in hand-built histories. */
+  at?: number
 }
 
 export interface Recommendation {
@@ -93,12 +97,15 @@ export function recommend(state: GovernorState, history: readonly ActivityObserv
   // R1 — a valuable family outside the frontier (α > p) is a verifier problem,
   // not a solving problem: Proposition 1 says solving cannot raise precision.
   const outside = state.frontier.families.filter((family) => family.status === 'outside' && family.turns > 0)
-  const unverified = state.frontier.unverifiedShare
+  // Judged on recent work a check could have read: prose has no fast verifier
+  // (§13), and an all-time share would still be blaming the gate for turns it
+  // has since learned to check.
+  const unverified = state.frontier.checkableUnverified
   if (outside.length > 0) {
     set('verify', 0.9, 'R1', `${outside.map((family) => family.family).join(', ')} sit outside the frontier — only a better verifier moves them`)
   }
   if (unverified.mean !== undefined && unverified.mean > 0.25) {
-    set('verify', 0.85, 'R1', `${Math.round(unverified.mean * 100)}% of file-changing turns ran no check at all — for them α is effectively 1`)
+    set('verify', 0.85, 'R1', `${Math.round(unverified.mean * 100)}% of recent checkable file-changing turns ran no check at all — for them α is effectively 1`)
   }
   const unmeasured = state.frontier.families.filter((family) => family.status === 'unmeasured' && family.turns > 0)
   if (state.frontier.mass === undefined || unmeasured.length > 0) {

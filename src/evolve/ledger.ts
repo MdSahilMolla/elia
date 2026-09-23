@@ -93,7 +93,7 @@ export interface GenerationRecord {
    */
   generalization?: import('./split.ts').GeneralizationRecord
   /**
-   * The paper's sealed verdict on the same measurement (vde/acceptance.ts):
+   * The paper's sealed verdict on the same measurement (acceptance.ts):
    * an anytime-valid e-value against "nothing improved", with the level this
    * comparison spent from the loop's lifetime budget. Recorded on every
    * measured generation whichever gate decided, so the two can be compared.

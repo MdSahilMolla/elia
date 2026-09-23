@@ -8,7 +8,7 @@ let dir: string
 let evolution: string
 let sandbox: string
 beforeEach(() => {
-  dir = mkdtempSync(join(tmpdir(), 'elia-vde-archive-'))
+  dir = mkdtempSync(join(tmpdir(), 'elia-archive-'))
   evolution = join(dir, '.evolution')
   sandbox = join(dir, 'gen-7')
   mkdirSync(join(sandbox, 'src', 'autonomy'), { recursive: true })

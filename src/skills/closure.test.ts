@@ -2,16 +2,16 @@ import { afterEach, beforeEach, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import type { SkillCandidate } from '../skills/detector.ts'
+import type { SkillCandidate } from './detector.ts'
 import { compressionQueue, compressOnce, encodingRefusal, roundTripsSaved } from './closure.ts'
-import { lessonElasticity } from './growth.ts'
-import { readLibrary } from './library.ts'
+import { lessonElasticity } from '../compounding/growth.ts'
+import { readLibrary } from '../autonomy/certifiedLibrary.ts'
 import { bootstrappingFit, readClosureLog, recordToolConstruction, type ClosureRecord } from './toolLog.ts'
-import { seededRandom } from './stats.ts'
+import { seededRandom } from '../compounding/stats.ts'
 
 let dir: string
 beforeEach(() => {
-  dir = mkdtempSync(join(tmpdir(), 'elia-vde-closure-'))
+  dir = mkdtempSync(join(tmpdir(), 'elia-closure-'))
 })
 afterEach(() => rmSync(dir, { recursive: true, force: true }))
 
@@ -23,20 +23,33 @@ test('habits that must never become tools automatically', () => {
   expect(encodingRefusal(habit('git push', 30))).toContain("person's decision")
   expect(encodingRefusal(habit('npm publish', 30))).toContain("person's decision")
   expect(encodingRefusal(habit('git diff', 53))).toBeUndefined()
-  expect(encodingRefusal(habit('grep → read_file → edit_file', 49, 'sequence'))).toBeUndefined()
+  // A read-only lookup can come back in one call; an edit is the model's decision about what it read.
+  expect(encodingRefusal(habit('grep → read_file → read_file', 49, 'sequence'))).toBeUndefined()
+  expect(encodingRefusal(habit('grep → read_file → edit_file', 49, 'sequence'))).toContain('ordinary editing')
+  // The governor once recommended building a tool for this, elia's top "safe" habit.
+  expect(encodingRefusal(habit('read_file → edit_file → edit_file', 28, 'sequence'))).toContain('ordinary editing')
   // The top habit in elia's real stats: a routine of "run whatever, then write".
   expect(encodingRefusal(habit('run_command → run_command → write_file', 44, 'sequence'))).toContain('arbitrary shell')
   expect(roundTripsSaved(habit('grep → read_file → edit_file', 1, 'sequence'))).toBe(2)
+})
+
+test("script runners and installers are the command governor's call, not a tool's", () => {
+  expect(encodingRefusal(habit('npm run', 26))).toContain('whatever script')
+  expect(encodingRefusal(habit('uv run', 23))).toContain('whatever script')
+  expect(encodingRefusal(habit('npx vite', 10))).toContain('arbitrary code')
+  expect(encodingRefusal(habit('npm install', 29))).toContain('registry')
+  expect(encodingRefusal(habit('pip install', 12))).toContain('registry')
+  expect(encodingRefusal(habit('npm test', 13))).toBeUndefined()
 })
 
 test('the queue ranks by round-trips saved and skips recorded dead ends', () => {
   const library = join(dir, 'library.jsonl')
   recordToolConstruction({ pattern: 'git log', ok: false, reason: 'test failed', tokens: 900, bytes: 400 }, { logPath: join(dir, 'closure.jsonl'), libraryFile: library })
   const queue = compressionQueue(
-    [habit('powershell', 105), habit('git diff', 53), habit('grep → read_file → edit_file', 49, 'sequence'), habit('git log', 80)],
+    [habit('powershell', 105), habit('git diff', 53), habit('grep → read_file → read_file', 49, 'sequence'), habit('git log', 80)],
     readLibrary(library),
   )
-  expect(queue.queued.map((entry) => entry.candidate.pattern)).toEqual(['grep → read_file → edit_file', 'git diff'])
+  expect(queue.queued.map((entry) => entry.candidate.pattern)).toEqual(['grep → read_file → read_file', 'git diff'])
   expect(queue.refused.map((entry) => entry.pattern).sort()).toEqual(['git log', 'powershell'])
 })
 

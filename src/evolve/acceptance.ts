@@ -1,6 +1,6 @@
-import type { Metrics } from '../evolve/ledger.ts'
-import { bernsteinBar, minimumDetectableEffect } from './theory.ts'
-import { eValue, spentLevel, summarize } from './stats.ts'
+import type { Metrics } from './ledger.ts'
+import { bernsteinBar, minimumDetectableEffect } from '../compounding/theory.ts'
+import { eValue, spentLevel, summarize } from '../compounding/stats.ts'
 
 /**
  * The sealed evaluator of §8 and Algorithm 2: one bit, earned statistically.

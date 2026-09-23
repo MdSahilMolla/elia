@@ -101,6 +101,13 @@ export const IMMUTABLE_FILES = [
   // generalisation label in the ledger would keep printing, and would mean
   // nothing — the failure mode this whole file list exists to prevent.
   'src/evolve/split.ts',
+  // The history-derived tasks: their specs, and the prompt each one is given.
+  // The benchmark spawns the *candidate's* benchTask.ts, which reads both from
+  // the candidate's own copy — so a candidate that could edit them could hand
+  // itself the commit subject `promptFor` deliberately withholds, or drop the
+  // tasks it fails, and every score would rise with nothing improved (§8.3,
+  // Proposition 6: a gain in measurement, not in utility).
+  'src/evolve/history/**',
   'src/evolve/reachRecorder.ts',
   'src/evolve/baselineCache.ts',
   // How search strategies are trialled and adopted. The strategy itself is
@@ -108,12 +115,31 @@ export const IMMUTABLE_FILES = [
   'src/evolve/strategy.ts',
   'src/evolve/benchLessons.ts',
   'src/evolve/metaPropose.ts',
-  // The Verified Discovery Engine: the sealed gate, the isolation checks, the
-  // certified library and its auditor, the frontier measurements and the
-  // resource governor. "The meta-loop must never modify the resource governor,
-  // the evaluator, the auditor or its own permissions" (§14 of the paper this
-  // directory implements) — a candidate that could would be grading itself.
-  'src/vde/**',
+  // The sealed gate, the isolation checks, the certified library and its
+  // auditor, the frontier measurements and the resource governor with the
+  // runners it acts through. "The meta-loop must never modify the resource
+  // governor, the evaluator, the auditor or its own permissions" (§14 of
+  // Amplification Without Distillation) — a candidate that could would be
+  // grading itself. The theory, statistics, simulations and predictions they
+  // compute with are here too: a changed formula is a changed verdict.
+  'src/evolve/acceptance.ts',
+  'src/evolve/isolation.ts',
+  'src/evolve/archive.ts',
+  'src/autonomy/certifiedLibrary.ts',
+  'src/autonomy/lessonCertificates.ts',
+  'src/compounding/theory.ts',
+  'src/compounding/stats.ts',
+  'src/compounding/frontier.ts',
+  'src/compounding/growth.ts',
+  'src/compounding/resourceGovernor.ts',
+  'src/compounding/round.ts',
+  'src/compounding/runners.ts',
+  'src/compounding/sim.ts',
+  'src/compounding/predictions.ts',
+  'src/skills/audit.ts',
+  'src/skills/closure.ts',
+  'src/skills/toolLog.ts',
+  'src/reason/probe.ts',
   'package.json',
   'tsconfig.json',
   'src/**/*.test.ts',

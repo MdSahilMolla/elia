@@ -77,6 +77,21 @@ test('turns with no verification are counted as outside every frontier', () => {
   expect(report.families.find((family) => family.family === 'frontend')!.unverified).toBe(1)
 })
 
+test('R1 judges recent checkable turns: prose-only turns and old history do not count', () => {
+  const old = Array.from({ length: 80 }, () => turn(['code'], 'none'))
+  const recent = Array.from({ length: 60 }, (_, index) => turn(['code'], index < 6 ? 'none' : 'pass'))
+  const prose = Array.from({ length: 10 }, () => turn(['docs'], 'none'))
+  const report = estimateFrontier({ outcomes: [...old, ...recent, ...prose], calibration: [] })
+  // All-time, every unverified turn still counts…
+  expect(report.unverifiedShare.successes).toBe(96)
+  // …but R1 sees the last 60 checkable turns, and docs-only turns are not among them.
+  expect(report.checkableUnverified.trials).toBe(60)
+  expect(report.checkableUnverified.successes).toBe(6)
+  expect(renderFrontier(report)).toContain('what rule R1 acts on')
+  // A turn that touched code and docs is still checkable.
+  expect(estimateFrontier({ outcomes: [turn(['docs', 'code'], 'none')], calibration: [] }).checkableUnverified.successes).toBe(1)
+})
+
 test('the completion assessor gives an on-distribution α', () => {
   const rates = verifierRates(undefined, [claim(true), claim(false), claim(true)])
   expect(rates.assessor!.onDistribution).toBe(true)

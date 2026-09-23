@@ -1,6 +1,6 @@
-import type { SkillCandidate } from '../skills/detector.ts'
-import type { SynthesisResult } from '../skills/synthesize.ts'
-import type { Artifact } from './library.ts'
+import type { SkillCandidate } from './detector.ts'
+import type { SynthesisResult } from './synthesize.ts'
+import type { Artifact } from '../autonomy/certifiedLibrary.ts'
 
 /**
  * Compression, §6.3: a frozen model learns by compressing.
@@ -29,10 +29,21 @@ import type { Artifact } from './library.ts'
 const NEVER_ENCODE_PROGRAMS = new Set([
   'powershell', 'pwsh', 'cmd', 'bash', 'sh', 'zsh', 'fish', 'node', 'bun', 'deno', 'python', 'python3', 'py', 'ruby', 'perl', 'php',
   'eval', 'exec', 'sudo', 'su', 'ssh', 'scp', 'curl', 'wget', 'rm', 'del', 'rmdir', 'mv', 'dd', 'format', 'shutdown', 'reboot',
+  'npx', 'bunx', 'pnpx',
 ])
 
 /** Subcommands that change the world outside the working tree, or cannot be undone. */
 const NEVER_ENCODE_SUBCOMMANDS = /^(?:push|publish|deploy|release|reset|clean|rm|remove|delete|drop|destroy|uninstall|login|logout|merge|rebase|force)$/i
+
+/** Subcommands that run whatever script or package they are handed: `npm run`, `uv run`, `pnpm dlx`. */
+const RUNS_ANYTHING_SUBCOMMANDS = /^(?:run|run-script|exec|x|dlx|eval|script)$/i
+
+/** Subcommands that pull code from a registry. Which package to trust is the command governor's call, per use. */
+const INSTALLS_SUBCOMMANDS = /^(?:install|i|ci|add|update|upgrade|up|get|sync)$/i
+
+/** The model's own workspace primitives, and the ones among them that change a file. */
+const WORKSPACE_PRIMITIVES = new Set(['read_file', 'edit_file', 'write_file', 'delete_file', 'list_files', 'grep', 'find_symbol', 'todo_write'])
+const WRITING_PRIMITIVES = new Set(['edit_file', 'write_file', 'delete_file'])
 
 /** Why a habit must not become a tool automatically, or `undefined` when it may. */
 export function encodingRefusal(candidate: Pick<SkillCandidate, 'kind' | 'pattern'>): string | undefined {
@@ -40,12 +51,22 @@ export function encodingRefusal(candidate: Pick<SkillCandidate, 'kind' | 'patter
     // A routine with a shell step in it is a routine of "run whatever" — the
     // tool would carry the command governor's whole job inside itself.
     if (/\brun_command\b/.test(candidate.pattern)) return `\`${candidate.pattern}\` includes arbitrary shell; a tool for it would sidestep the command governor`
+    // Read, then edit, then edit is what editing looks like, not a procedure:
+    // what each edit writes is the model's decision about what it just read, so
+    // a tool would take those decisions as input and save no round-trip. A
+    // read-only routine is different — one lookup can return all of it.
+    const steps = candidate.pattern.split('→').map((step) => step.trim())
+    if (steps.every((step) => WORKSPACE_PRIMITIVES.has(step)) && steps.some((step) => WRITING_PRIMITIVES.has(step))) {
+      return `\`${candidate.pattern}\` is ordinary editing — each write depends on what was just read, so a tool would save no round-trips`
+    }
     return undefined
   }
   const [program = '', subcommand] = candidate.pattern.toLowerCase().split(/\s+/)
   if (!subcommand) return `a bare \`${program}\` is too general to encode — the tool would just run whatever it was given`
   if (NEVER_ENCODE_PROGRAMS.has(program)) return `\`${program}\` runs arbitrary code; a tool for it would sidestep the command governor`
   if (NEVER_ENCODE_SUBCOMMANDS.test(subcommand)) return `\`${candidate.pattern}\` changes things outside the tree or cannot be undone; that stays a person's decision`
+  if (RUNS_ANYTHING_SUBCOMMANDS.test(subcommand)) return `\`${candidate.pattern}\` runs whatever script it is handed; a tool for it would sidestep the command governor`
+  if (INSTALLS_SUBCOMMANDS.test(subcommand)) return `\`${candidate.pattern}\` pulls packages from a registry; which package to trust stays the command governor's call`
   return undefined
 }
 

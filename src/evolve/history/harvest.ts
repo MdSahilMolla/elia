@@ -1,6 +1,7 @@
-import { rmSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { basename, dirname, join } from 'node:path'
 import { ELIA_ROOT } from '../../statePaths.ts'
+import { ensureSecureDirectory, writeSecureFile } from '../../securePersistence.ts'
 import { runGit } from '../../autonomy/worktree.ts'
 import { fileAtCommit, makeTaskDir, materializeTask, writeFileInDir } from './materialize.ts'
 import { runVerify } from './verifyRun.ts'
@@ -31,6 +32,8 @@ export interface HarvestOptions {
   /** Upper bound on test files a commit may touch. */
   maxTestFiles?: number
   repoRoot?: string
+  /** Commits not to validate: already tasks, or already refused. Proving one costs two test runs. */
+  skip?: ReadonlySet<string>
   onProgress?: (message: string) => void
 }
 
@@ -194,8 +197,9 @@ export async function harvest(options: HarvestOptions = {}): Promise<HarvestResu
   const shape = { maxSourceFiles: options.maxSourceFiles ?? 3, maxTestFiles: options.maxTestFiles ?? 2 }
   const report = options.onProgress ?? (() => {})
 
-  const candidates = await listCandidates(scan, shape, repoRoot)
-  report(`${candidates.length} candidate commits in the last ${scan}`)
+  const skip = options.skip ?? new Set<string>()
+  const candidates = (await listCandidates(scan, shape, repoRoot)).filter((candidate) => !skip.has(candidate.sha))
+  report(`${candidates.length} candidate commits in the last ${scan}${skip.size > 0 ? ` not already tried` : ''}`)
 
   const tasks: HistoryTaskSpec[] = []
   const rejected: RejectedCandidate[] = []
@@ -217,4 +221,99 @@ export async function harvest(options: HarvestOptions = {}): Promise<HarvestResu
 
 export function writeTasksFile(tasks: HistoryTaskSpec[], file = TASKS_FILE): void {
   writeFileSync(file, `${JSON.stringify(tasks, null, 2)}\n`)
+}
+
+/**
+ * Tasks harvested after the tracked set was written.
+ *
+ * `elia bench --harvest` rewrites the tracked `tasks.json`, which is a change a
+ * person commits. The resource governor also grows the benchmark by itself —
+ * rule R4: a held-out set too small to certify a gain makes every evolve
+ * generation a coin nobody can read — and it does so from a background process
+ * that shares a checkout with other work. So what it finds goes here, in
+ * elia's own state beside the evolution ledger, never the working tree, and the
+ * loader merges it in.
+ */
+export const HARVESTED_FILE = join(ELIA_ROOT, '.evolution', 'harvested-tasks.json')
+
+export interface HarvestedTasks {
+  tasks: HistoryTaskSpec[]
+  /** Commits already tried and refused, so a later harvest does not pay again to prove the same thing. */
+  rejected: Array<{ sha: string; reason: string; at: number }>
+}
+
+/**
+ * The harvested-tasks file the benchmark should read, or undefined for none.
+ *
+ * An evolve sandbox is a copy of `src/` at `<live>/.evolution/gen-N`, and the
+ * benchmark runs the candidate's own copy of the task loader — so the file is
+ * looked for beside the sandbox too. Without that, a candidate would be
+ * measured on fewer tasks than the baseline it is compared with. Under
+ * `bun test` the benchmark is exactly the tracked set, so a machine that has
+ * harvested sees the same tasks as CI.
+ */
+export function harvestedFileFor(root = ELIA_ROOT, env: Record<string, string | undefined> = process.env): string | undefined {
+  const override = env.ELIA_HARVESTED_TASKS?.trim()
+  if (override) return override === 'off' ? undefined : override
+  if (env.NODE_ENV === 'test') return undefined
+  const own = join(root, '.evolution', 'harvested-tasks.json')
+  if (existsSync(own)) return own
+  const parent = dirname(root)
+  if (basename(parent) === '.evolution') {
+    const live = join(parent, 'harvested-tasks.json')
+    if (existsSync(live)) return live
+  }
+  return undefined
+}
+
+export function readHarvested(file: string | undefined): HarvestedTasks {
+  if (!file || !existsSync(file)) return { tasks: [], rejected: [] }
+  try {
+    const parsed = JSON.parse(readFileSync(file, 'utf8')) as Partial<HarvestedTasks>
+    return {
+      tasks: Array.isArray(parsed.tasks) ? parsed.tasks.filter((task) => typeof task?.id === 'string' && typeof task.sha === 'string') : [],
+      rejected: Array.isArray(parsed.rejected) ? parsed.rejected.filter((entry) => typeof entry?.sha === 'string') : [],
+    }
+  } catch {
+    // A corrupt file adds no tasks; the tracked set still runs.
+    return { tasks: [], rejected: [] }
+  }
+}
+
+export interface GrowResult {
+  added: HistoryTaskSpec[]
+  refused: number
+  considered: number
+  /** Tasks in the harvested file after this run. */
+  harvested: number
+}
+
+/**
+ * Validates commits nobody has tried yet and appends the ones that prove out.
+ * Never rewrites the tracked set, never re-proves a known task, and never
+ * re-tries a commit that was refused for a reason that will not change. A
+ * timeout is not such a reason, so it is not remembered.
+ */
+export async function growHarvest(
+  options: HarvestOptions & { tracked: readonly HistoryTaskSpec[]; file?: string; now?: number; run?: typeof harvest },
+): Promise<GrowResult> {
+  const file = options.file ?? HARVESTED_FILE
+  const existing = readHarvested(file)
+  const skip = new Set([
+    ...options.tracked.map((task) => task.sha),
+    ...existing.tasks.map((task) => task.sha),
+    ...existing.rejected.map((entry) => entry.sha),
+  ])
+  const result = await (options.run ?? harvest)({ ...options, skip })
+  const at = options.now ?? Date.now()
+  const lasting = result.rejected.filter((entry) => !/timed out/i.test(entry.reason))
+  if (result.tasks.length > 0 || lasting.length > 0) {
+    const next: HarvestedTasks = {
+      tasks: [...existing.tasks, ...result.tasks],
+      rejected: [...existing.rejected, ...lasting.map((entry) => ({ sha: entry.sha, reason: entry.reason, at }))],
+    }
+    ensureSecureDirectory(dirname(file))
+    writeSecureFile(file, `${JSON.stringify(next, null, 2)}\n`)
+  }
+  return { added: result.tasks, refused: result.rejected.length, considered: result.considered, harvested: existing.tasks.length + result.tasks.length }
 }
