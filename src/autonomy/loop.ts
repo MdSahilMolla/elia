@@ -45,6 +45,7 @@ import {
   describeVerification,
   fallbackStaticPageVerification,
   hasBlockingIssues,
+  isNoTestsResult,
   mergeVerdicts,
   requireCriticVerdict,
   runVerification,
@@ -53,7 +54,7 @@ import {
 } from './verify.ts'
 import { assessProgress, earnsExtraRepair, failureFingerprints, repeatedFailureLesson, type AttemptSnapshot } from './progress.ts'
 import { filesFromGitStatus, hygieneVerdict, scanProjectFiles, type HygieneInput } from './hygiene.ts'
-import { acceptanceVerdict, createAcceptanceTool } from './acceptance.ts'
+import { acceptanceCriteriaFor, acceptanceVerdict, createAcceptanceTool } from './acceptance.ts'
 import { applyPlanRevisions, createPlanRevisionTool, MAX_PLAN_REVISIONS } from './replan.ts'
 import { assumptionOutcome, auditPlanFeasibility, createAssumptionTool } from './assumptions.ts'
 import { isSensitivePath } from './sensitivePaths.ts'
@@ -67,7 +68,7 @@ import type { CriticVerdict, Proposal } from './types.ts'
 import { appendActionAudit, readActionLedger, writeRunReceipt } from './audit.ts'
 import { buildReviewDiffSection } from './reviewContext.ts'
 import { createActionGovernor, withActionGovernor, type ActionApproval, type ActionGovernor, type ActionGovernorStats, type GovernanceMode } from './governor.ts'
-import { GoalGraphStore, withGoalGraph, type GoalGraphStore as GoalGraphStoreType } from './goalGraph.ts'
+import { GoalGraphStore, outstandingActions, withGoalGraph, type GoalGraphStore as GoalGraphStoreType } from './goalGraph.ts'
 import { assessCompletion, type CompletionAssessment } from './outcome.ts'
 import { inferTaskKind, taskSessions } from '../taskSessions.ts'
 import { clearRunControl, readRunControl, type SupervisorControlRequest } from './control.ts'
@@ -635,7 +636,12 @@ async function runAutonomousTaskInternal(options: AutonomousRunOptions): Promise
       reviewPassed,
       completedSteps: completion.completedSteps,
       totalSteps: completion.totalSteps,
-      unresolvedActions: graph.state().actions.filter((action) => action.state !== 'completed').length,
+      // What is still owed, by the rule the completion gate uses — not every
+      // attempt that did not succeed. The raw count put "reported verified with
+      // 9 unresolved durable action(s)" on a verified run whose only unfinished
+      // actions were attempts its steps had routed around, and each such false
+      // contradiction also marked that run unclean for the lesson ledger below.
+      unresolvedActions: outstandingActions(graph.state()).length,
       pendingApprovals: completion.pendingApprovals,
       blockedByBudget: actionBudget.blockedByBudget,
       regime: verificationRegime,
@@ -1566,7 +1572,8 @@ Read the changed files in full context. Improve only concrete issues directly re
     }
     for (const result of verification.results) {
       const label = `$ ${result.command}`
-      if (result.exitCode === 0 && !result.timedOut) writePass(label)
+      if (isNoTestsResult(result)) writeSubStep(`${label} — ran no tests, so it proves nothing`)
+      else if (result.exitCode === 0 && !result.timedOut) writePass(label)
       else writeFail(`${label} — ${result.timedOut ? 'timed out' : `exit ${result.exitCode}`}`)
     }
     verificationPassed = verification.passed
@@ -1581,6 +1588,7 @@ Read the changed files in full context. Improve only concrete issues directly re
     }
     const verificationData = {
       passed: verification.passed,
+      ...(verification.inconclusive ? { inconclusive: verification.inconclusive } : {}),
       results: verification.results.map((result) => ({
         command: result.command,
         exitCode: result.exitCode,
@@ -1704,7 +1712,7 @@ This reviewer session is intentionally read-only. The current diff, status, and 
       // could pass all of them while quietly not doing the thing it said it
       // would. Narrower than the other reviewers on purpose: a fixed list of
       // questions the run set itself, which is what makes the answers checkable.
-      const criteria = proposal.acceptanceCriteria ?? []
+      const criteria = acceptanceCriteriaFor(proposal.acceptanceCriteria, goal)
       let acceptance: CriticVerdict = acceptanceVerdict([], undefined)
       if (criteria.length > 0) {
         const acceptanceCapture = createAcceptanceTool(criteria)

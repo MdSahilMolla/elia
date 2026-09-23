@@ -85,6 +85,13 @@ export interface ApprovalRecord {
   status: 'pending' | 'approved' | 'denied'
   request?: Record<string, unknown>
   reason?: string
+  /**
+   * For an action approval, the governor's intent for the refused action
+   * (`shell.code-exec`, `deployment.production`, …) — what kind of effect it
+   * would have had. `outstandingActions` reads it to tell an environment step
+   * that a finished step no longer needs from an outward act nobody answered.
+   */
+  intent?: string
   at: number
   resolvedAt?: number
   /**
@@ -495,7 +502,7 @@ export class GoalGraphStore {
     })
   }
 
-  requestApproval(kind: ApprovalRecord['kind'], subject: string, request?: Record<string, unknown>, reason?: string, mode?: GovernanceMode): ApprovalRecord {
+  requestApproval(kind: ApprovalRecord['kind'], subject: string, request?: Record<string, unknown>, reason?: string, mode?: GovernanceMode, intent?: string): ApprovalRecord {
     return this.mutate(() => {
     const existing = this.snapshot.approvals.find((approval) => approval.kind === kind && approval.subject === subject)
     if (existing) {
@@ -518,6 +525,7 @@ export class GoalGraphStore {
       status: 'pending',
       request,
       reason,
+      ...(intent ? { intent } : {}),
       at: Date.now(),
       mode,
     }
@@ -925,13 +933,54 @@ export function outstandingActions(snapshot: GoalGraphSnapshot): DurableActionRe
     // act on, and pushed runs to `needs-attention` on work that was done. In
     // run 2026-09-13-l0av-rnq0, five of the twenty were exactly this.
     //
-    // `human-review` is deliberately excluded: that state means a person was
-    // asked to decide, and a step completing around it does not answer them.
+    // `human-review` means a person was asked to decide, and a step completing
+    // around it does not answer them — when the question was about an outward
+    // act. A refused deploy, push or send that a worker then "finished" without
+    // is exactly the overclaim this ledger exists to stop. A refused *local*
+    // environment step is different: `pip install -e .` would have changed only
+    // this machine, it never ran, and the step that wanted it finished anyway.
+    // Run 2026-09-23-krum-r1ir (a Python CLI) ended needs-attention with all 5
+    // steps done, 23 tests green and review passed, held by three such installs.
+    // Those stop counting once their step completes; `declinedLocalActions`
+    // keeps them on the receipt. Anything else — including an approval recorded
+    // before intents were, with none to read — stays outstanding.
+    if (action.state === 'human-review') {
+      const owner = snapshot.nodes.find((node) => node.id === action.nodeId)
+      if (!owner || owner.id === snapshot.rootId || owner.status !== 'completed') return true
+      return !LOCAL_ONLY_INTENTS.has(actionApproval(snapshot, action)?.intent ?? '')
+    }
     if (action.state !== 'failed' && action.state !== 'retryable' && action.state !== 'blocked') return true
     const owner = snapshot.nodes.find((node) => node.id === action.nodeId)
     if (!owner || owner.id === snapshot.rootId) return false
     return owner.status !== 'completed'
   })
+}
+
+/**
+ * Governor intents whose effect stays on this machine. Only a package install
+ * (`shell.code-exec`): the governor matches it start-anchored and only after
+ * rejecting shell control syntax, so nothing can ride along behind it. Not
+ * `shell.composed` — `vercel --yes --prod 2>&1` is composed, and it deploys —
+ * nor `shell.unknown`, which is whatever the governor could not name. An
+ * allowlist, so any other intent, and any added later, stays outstanding.
+ */
+const LOCAL_ONLY_INTENTS = new Set(['shell.code-exec'])
+
+function actionApproval(snapshot: GoalGraphSnapshot, action: DurableActionRecord): ApprovalRecord | undefined {
+  return snapshot.approvals.find((approval) => approval.kind === 'action' && approval.subject === action.idempotencyKey)
+}
+
+/**
+ * Local environment actions a person was asked about, that never ran, and that
+ * their step finished without — no longer blocking (`outstandingActions`), but
+ * still something the user may want to do themselves.
+ */
+export function declinedLocalActions(snapshot: GoalGraphSnapshot): ApprovalRecord[] {
+  const outstanding = new Set(outstandingActions(snapshot).map((action) => action.idempotencyKey))
+  return snapshot.actions
+    .filter((action) => action.state === 'human-review' && !outstanding.has(action.idempotencyKey))
+    .map((action) => actionApproval(snapshot, action))
+    .filter((approval): approval is ApprovalRecord => approval?.status === 'pending')
 }
 
 /**

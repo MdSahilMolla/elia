@@ -620,7 +620,7 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
                 // commands its step had already worked around.
                 const awaitsPerson = gate.assessment.risk === 'critical' && !gate.noApprover
                 if (reservation && awaitsPerson) {
-                  activeGoalGraph()?.requestApproval('action', reservation.action.idempotencyKey, { name: block.name, input: redactActionInput(block.name, block.input) }, gate.assessment.reason, activeActionGovernor().mode)
+                  activeGoalGraph()?.requestApproval('action', reservation.action.idempotencyKey, { name: block.name, input: redactActionInput(block.name, block.input) }, gate.assessment.reason, activeActionGovernor().mode, gate.assessment.intent)
                 }
                 if (reservation) activeGoalGraph()?.blockAction(reservation.action.id, resultText, awaitsPerson, precondition, undefined, contract)
               } else {

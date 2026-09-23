@@ -50,8 +50,27 @@ export interface CheckEvent {
 /** A test runner that ran and found nothing to test — Bun, Jest, Vitest, Mocha, pytest. */
 const NO_TESTS_COLLECTED = /\b0 test files matching\b|\bno tests? (?:were )?found\b|\bno test files found\b|\bno tests ran\b|\bcollected 0 items\b/i
 
+/**
+ * A test runner that exited 0 having run nothing. Bun does this for a test file
+ * with no `test()` calls in it: run 2026-09-20-gp6s-q6lh's `bun test` covered a
+ * file of `console.assert`s — "Ran 0 tests across 1 file", exit 0 — and the gate
+ * counted it as a passing test run. Mocha, `node --test`, cargo and go have the
+ * same shape. Cargo and go print one line per test binary / package, so they
+ * count as empty only when every one of them ran nothing.
+ */
+function ranZeroTests(output: string): boolean {
+  if (/\bRan 0 tests? across\b/.test(output)) return true
+  if (/^\s*(?:#|ℹ)\s*tests 0\s*$/m.test(output)) return true
+  if (/^\s*0 passing\b/m.test(output)) return true
+  const cargo = [...output.matchAll(/^running (\d+) tests?\s*$/gm)]
+  if (cargo.length > 0 && cargo.every((match) => match[1] === '0')) return true
+  return /\[no test files\]/.test(output) && !/^(?:ok|FAIL|---)\s/m.test(output)
+}
+
 export function isNoTestsResult(result: ShellResult): boolean {
-  return !result.timedOut && result.exitCode !== 0 && NO_TESTS_COLLECTED.test(`${result.stdout}\n${result.stderr}`)
+  if (result.timedOut) return false
+  const output = `${result.stdout}\n${result.stderr}`
+  return result.exitCode !== 0 ? NO_TESTS_COLLECTED.test(output) : ranZeroTests(output)
 }
 
 /**
@@ -224,7 +243,7 @@ export async function runVerification(
 
   const empty = results.filter(isNoTestsResult).map((result) => result.command)
   const inconclusive = empty.length > 0 ? `${empty.join(', ')} found no tests to run` : undefined
-  const provedSomething = results.some((result) => result.exitCode === 0 && !result.timedOut && !result.command.startsWith('[skipped]'))
+  const provedSomething = results.some((result) => result.exitCode === 0 && !result.timedOut && !result.command.startsWith('[skipped]') && !isNoTestsResult(result))
   // Nothing ran but servers: the same outcome as a plan of nothing but dev
   // servers (above), so the caller's fallback for unrunnable checks applies.
   // A pass here would be "verified" having verified nothing.
@@ -253,11 +272,14 @@ const SHELL_REJECTED_COMMAND = /is not recognized as an internal or external com
 export const SKIPPED_SERVER_PREFIX = 'not a runnable check'
 
 export function isUnrunnableCommandFailure(result: ShellResult): boolean {
-  if (result.timedOut || result.exitCode === 0) return false
+  if (result.timedOut) return false
+  // A test runner with no tests to run proved nothing, whatever it exited with.
+  if (isNoTestsResult(result)) return true
+  if (result.exitCode === 0) return false
   // A dev server elia refused to run never produced a verdict either, so it
   // belongs in the same bucket as a command the shell rejected: the work is
-  // unproven, not disproven. So does a test runner with no tests to run.
-  return SHELL_REJECTED_COMMAND.test(result.stderr) || result.stderr.startsWith(SKIPPED_SERVER_PREFIX) || isNoTestsResult(result)
+  // unproven, not disproven.
+  return SHELL_REJECTED_COMMAND.test(result.stderr) || result.stderr.startsWith(SKIPPED_SERVER_PREFIX)
 }
 
 /**

@@ -110,6 +110,49 @@ test('a test runner with nothing to run is unproven, not failed', () => {
   expect(isNoTestsResult({ command: 'bun test', exitCode: 1, stdout: '', stderr: '3 tests failed', elapsedMs: 90, timedOut: false })).toBe(false)
 })
 
+// Run 2026-09-20-gp6s-q6lh was "verified" by a `bun test` over a file of
+// console.asserts: "Ran 0 tests across 1 file", exit 0. Every runner below
+// exits 0 having run nothing.
+test('a runner that exits 0 having run no tests is unproven, not a pass', () => {
+  const zero = (command: string, stdout: string, stderr = '') => ({ command, exitCode: 0, stdout, stderr, elapsedMs: 60, timedOut: false })
+  const empty = [
+    zero('bun test', 'bun test v1.3.14 (0d9b296a)\nAll tests passed!', 'index.test.ts:\n\n 0 pass\n 0 fail\nRan 0 tests across 1 file. [61.00ms]'),
+    zero('node --test', 'TAP version 13\n1..0\n# tests 0\n# pass 0\n# fail 0'),
+    zero('npx mocha', '\n\n  0 passing (2ms)\n'),
+    zero('cargo test', '   Compiling kit v0.1.0\nrunning 0 tests\n\ntest result: ok. 0 passed; 0 failed\n\n   Doc-tests kit\n\nrunning 0 tests\n'),
+    zero('go test ./...', '?   \texample.com/kit\t[no test files]\n'),
+  ]
+  for (const result of empty) {
+    expect(isNoTestsResult(result)).toBe(true)
+    expect(isUnrunnableCommandFailure(result)).toBe(true)
+  }
+  const real = [
+    zero('bun test', '', ' 4 pass\n 0 fail\nRan 4 tests across 1 file. [80.00ms]'),
+    zero('node --test', '# tests 3\n# pass 3\n# fail 0'),
+    zero('npx mocha', '  3 passing (4ms)'),
+    zero('cargo test', 'running 5 tests\n\ntest result: ok. 5 passed\n\n   Doc-tests kit\n\nrunning 0 tests\n'),
+    zero('go test ./...', '?   \texample.com/kit/cmd\t[no test files]\nok  \texample.com/kit\t0.012s\n'),
+  ]
+  for (const result of real) {
+    expect(isNoTestsResult(result)).toBe(false)
+    expect(isUnrunnableCommandFailure(result)).toBe(false)
+  }
+})
+
+test('a test file with no tests in it does not carry the gate', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'elia-verify-zero-tests-'))
+  try {
+    writeFileSync(join(dir, 'package.json'), '{ "name": "t" }')
+    writeFileSync(join(dir, 'index.test.ts'), 'console.assert(1 + 1 === 2, "math")\nconsole.log("All tests passed!")\n')
+    const alone = await runVerification(['bun test'], dir, undefined, allowAllGovernor())
+    expect(alone.passed).toBe(false)
+    expect(alone.inconclusive).toContain('bun test found no tests')
+    expect(staticRenderRole(alone, true)).toBe('substitute')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test('the gate reports an empty test suite as inconclusive instead of failing — and a real check beside it still counts', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'elia-verify-no-tests-'))
   try {

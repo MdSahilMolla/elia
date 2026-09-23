@@ -98,6 +98,48 @@ test('completion does not verify while a durable action remains unresolved', () 
   expect(result.blockers).toContain('1 durable action(s) remain unresolved.')
 })
 
+// Run 2026-09-23-krum-r1ir, a Python CLI: all 5 steps done, 23 tests green,
+// review passed — and needs-attention, held by three refused `pip install`s the
+// steps had finished without. A refused deploy in the same place must still hold.
+function withRefusal(stepStatus: 'completed' | 'ready', command: string, intent: string): GoalGraphSnapshot {
+  const snapshot = graph([stepStatus])
+  snapshot.actions.push({
+    id: 'action:refused', nodeId: 'step:1', idempotencyKey: 'refused-key', tool: 'run_command', inputDigest: 'digest',
+    state: 'human-review', attempts: 1, createdAt: 0, updatedAt: 0,
+  })
+  snapshot.approvals.push({
+    id: 'approval:action:refused', kind: 'action', subject: 'refused-key', status: 'pending',
+    request: { name: 'run_command', input: { command } }, reason: 'refused unattended', intent, at: 0, mode: 'unattended',
+  })
+  return snapshot
+}
+
+test('a refused package install that a finished step did without is a follow-up, not a blocker', () => {
+  const result = assessCompletion({ outcome: 'completed', graph: withRefusal('completed', 'pip install -e .', 'shell.code-exec'), verificationPassed: true, reviewPassed: true, planApproved: true })
+  expect(result.state).toBe('verified')
+  expect(result.blockers).toHaveLength(0)
+  expect(result.pendingApprovals).toBe(0)
+  expect(result.nextActions.some((action) => action.includes('`pip install -e .`'))).toBe(true)
+})
+
+test('a refused outward act still holds the run, however the step finished', () => {
+  for (const [command, intent] of [['vercel --prod', 'shell'], ['vercel --yes --prod 2>&1', 'shell.composed'], ['git push origin main', 'shell.unknown']]) {
+    const result = assessCompletion({ outcome: 'completed', graph: withRefusal('completed', command!, intent!), verificationPassed: true, reviewPassed: true, planApproved: true })
+    expect(result.state).toBe('blocked')
+    expect(result.pendingApprovals).toBe(1)
+  }
+  // An approval from before intents were recorded has nothing to read, so it holds too.
+  const legacy = withRefusal('completed', 'pip install -e .', 'shell.code-exec')
+  delete legacy.approvals[1]!.intent
+  expect(assessCompletion({ outcome: 'completed', graph: legacy, verificationPassed: true, reviewPassed: true, planApproved: true }).state).toBe('blocked')
+})
+
+test('a refused install still counts while the step that wanted it is unfinished', () => {
+  const result = assessCompletion({ outcome: 'needs-attention', graph: withRefusal('ready', 'pip install -e .', 'shell.code-exec'), verificationPassed: false, reviewPassed: false, planApproved: true })
+  expect(result.blockers).toContain('1 durable action(s) remain unresolved.')
+  expect(result.pendingApprovals).toBe(1)
+})
+
 test('completion distinguishes partial progress from proven completion', () => {
   const result = assessCompletion({ outcome: 'completed', graph: graph(['completed', 'ready']), verificationPassed: true, reviewPassed: false, planApproved: true })
   expect(result.state).toBe('partial')

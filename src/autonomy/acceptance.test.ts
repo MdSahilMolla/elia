@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { acceptanceVerdict, createAcceptanceTool, describeAcceptance, type CriterionVerdict } from './acceptance.ts'
+import { acceptanceCriteriaFor, acceptanceVerdict, createAcceptanceTool, describeAcceptance, type CriterionVerdict } from './acceptance.ts'
 
 const criteria = ['One user cannot read another user’s expenses', 'bun test passes', 'package.json lists only the dependencies actually used']
 
@@ -74,4 +74,25 @@ test('the receipt rendering marks each criterion and its evidence', () => {
   const rendered = describeAcceptance([met('a', 'test x passes'), { criterion: 'b', met: false, evidence: 'not implemented' }])
   expect(rendered).toContain('✓ a — test x passes')
   expect(rendered).toContain('✗ b — not implemented')
+})
+
+// Three of four real runs on 2026-09-23 planned without acceptance criteria, and
+// the acceptance reviewer approved each one without looking. One of them shipped
+// a CSV tool that never printed the "3 most common values" the user asked for.
+test('a plan with no acceptance criteria is held to the user’s own request, not waved through', () => {
+  const ask = 'Create a Python command-line tool named csvstat that prints the 3 most common values for text columns, with an optional --json flag.'
+  const criteria = acceptanceCriteriaFor([], ask)
+  expect(criteria).toHaveLength(1)
+  expect(criteria[0]).toContain(ask)
+  // Unreported is unmet, exactly as for a criterion the plan wrote itself.
+  expect(acceptanceVerdict(criteria, undefined).verdict).toBe('revise')
+  expect(acceptanceVerdict(criteria, [{ criterion: criteria[0]!, met: false, evidence: 'the CLI prints only the mode' }]).verdict).toBe('revise')
+  expect(acceptanceVerdict(criteria, [{ criterion: criteria[0]!, met: true, evidence: 'csvstat.cli prints top 3 per text column' }]).verdict).toBe('approve')
+})
+
+test('a plan’s own criteria are used as written, and a very long request is clamped', () => {
+  expect(acceptanceCriteriaFor(['bun test passes'], 'anything')).toEqual(['bun test passes'])
+  const long = acceptanceCriteriaFor(undefined, 'build a thing '.repeat(200))[0]!
+  expect(long.length).toBeLessThan(800)
+  expect(acceptanceCriteriaFor(undefined, '   ')).toEqual([])
 })

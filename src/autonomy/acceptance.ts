@@ -25,6 +25,27 @@ export interface AcceptanceCapture {
 }
 
 /**
+ * The questions the acceptance reviewer answers. A plan that declared none was
+ * approved outright ("nothing to check them against"), so the one reviewer
+ * whose job is "did this do what was asked" never looked. Three of four real
+ * runs on 2026-09-23 planned without criteria, and one shipped a CSV tool
+ * whose command never printed the "3 most common values" the user asked for —
+ * behind a green suite that tested a second, unused implementation. With no
+ * list of its own, a run is held to the user's request in their own words, not
+ * to the planner's restatement of it, which can drop half the ask.
+ */
+export function acceptanceCriteriaFor(declared: string[] | undefined, userGoal: string): string[] {
+  if (declared && declared.length > 0) return declared
+  const ask = userGoal.trim().replace(/\s+/g, ' ')
+  if (!ask) return []
+  const quoted = ask.length > MAX_ASK_CHARS ? `${ask.slice(0, MAX_ASK_CHARS)}…` : ask
+  return [`Everything the user asked for is delivered and works as asked, requirement by requirement: "${quoted}"`]
+}
+
+/** Long enough for any ordinary request; short enough that a reviewer copies it back verbatim. */
+const MAX_ASK_CHARS = 600
+
+/**
  * Reported through a tool rather than in prose, for the same reason the critic's
  * verdict is: it decides whether the run may claim completion, and "did the
  * model mean yes" is not something to infer from a paragraph.

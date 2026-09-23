@@ -1,4 +1,10 @@
-import { outstandingActions, pendingApprovals as approvalsAwaitingAPerson, type GoalGraphSnapshot } from './goalGraph.ts'
+import { declinedLocalActions, outstandingActions, pendingApprovals as approvalsAwaitingAPerson, type GoalGraphSnapshot } from './goalGraph.ts'
+
+function describeRequest(request: Record<string, unknown> | undefined): string {
+  const input = request?.input as Record<string, unknown> | undefined
+  if (typeof input?.command === 'string') return `\`${input.command}\``
+  return typeof request?.name === 'string' ? request.name : 'an action'
+}
 
 export type CompletionState = 'verified' | 'partial' | 'blocked' | 'failed' | 'aborted'
 export type CompletionConfidence = 'high' | 'medium' | 'low'
@@ -112,6 +118,11 @@ export function assessCompletion(input: CompletionInput): CompletionAssessment {
     confidence = 'low'
     nextActions.push('Inspect the first failure and environment prerequisites before retrying.')
   }
+
+  // No longer blockers (`outstandingActions`), but nobody has said yes to them
+  // either: name each one so the user can still choose to run it.
+  const declined = new Set((input.graph ? declinedLocalActions(input.graph) : []).map((approval) => describeRequest(approval.request)))
+  for (const request of declined) nextActions.push(`elia was not allowed to run ${request} unattended and finished without it; run it yourself if you still want it.`)
 
   return {
     state,
