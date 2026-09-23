@@ -1294,6 +1294,31 @@ export async function runInteractive(): Promise<void> {
       unregisterControls()
       unregisterShutdown()
       setActiveTracker(undefined)
+      // A turn that threw or was stopped never reached the verify gate, so its
+      // writes went unchecked and unmentioned. Say what it left, and how to undo
+      // it — the rewind point below is recorded for every ending, not just success.
+      const endStatus = taskSessions.get(task.id)?.status
+      if (endStatus === 'failed' || endStatus === 'paused') {
+        try {
+          const touched = Object.keys(tracker.snapshot())
+          const { parseChangedFiles } = await import('../reason/structural.ts')
+          const { describeInterruptedTurn } = await import('../autonomy/interruptedTurn.ts')
+          const line = describeInterruptedTurn({
+            ending: endStatus === 'failed' ? 'failed' : 'stopped',
+            touched,
+            rewindIndex: checkpoints.length,
+            structural: touched.length > 0 ? parseChangedFiles(touched) : undefined,
+            cwd: process.cwd(),
+          })
+          if (line) {
+            sessionTranscript.notice(line)
+            if (uiHooks) uiHooks.onActivity?.({ kind: 'status', status: 'warning', title: line })
+            else writeNotice(`▸ ${line}`)
+          }
+        } catch {
+          // Reporting what a dead turn left must never replace the error that killed it.
+        }
+      }
       sessionTranscript.notice(`Turn outcome: ${taskSessions.get(task.id)?.status ?? 'unknown'}; verification: ${verifyResult}; touched files: ${Object.keys(tracker.snapshot()).join(', ') || 'none'}`)
       sessionTranscript.endTurn()
       pushHeartbeat(false, taskSessions.get(task.id)?.action ?? 'Idle at prompt')
@@ -1361,15 +1386,23 @@ export async function runInteractive(): Promise<void> {
           // Trajectory capture is best-effort; recordTrajectory also guards itself.
         }
       }
+      // Every ending gets a rewind point. It used to be recorded after this
+      // try/finally, so a turn that threw or was stopped — the ones most likely
+      // to leave files half-written — was the one `/rewind` could not undo.
+      checkpoints.push({
+        turn: checkpoints.length,
+        at: Date.now(),
+        label: userText.length > 60 ? `${userText.slice(0, 59)}…` : userText,
+        messagesBefore,
+        files: tracker.snapshot(),
+      })
+      try {
+        await saveCheckpoints(sessionId, checkpoints)
+      } catch (error) {
+        // Never let a failed save replace the error that ended the turn.
+        if (endStatus !== 'failed') throw error
+      }
     }
-    checkpoints.push({
-      turn: checkpoints.length,
-      at: Date.now(),
-      label: userText.length > 60 ? `${userText.slice(0, 59)}…` : userText,
-      messagesBefore,
-      files: tracker.snapshot(),
-    })
-    await saveCheckpoints(sessionId, checkpoints)
   }
 
   if (oneShotPrompt) {
