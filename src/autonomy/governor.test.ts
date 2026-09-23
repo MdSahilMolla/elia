@@ -85,6 +85,20 @@ describe('autonomy governor', () => {
     expect(assessAction({ name: 'run_program', input: { program: 'git', args: ['push', '--force', 'origin', 'main'] } }, '/repo').risk).toBe('critical')
   })
 
+  test('a JavaScript project build or typecheck is allowed like go build is; installing its packages is not', () => {
+    for (const command of ['npm run build', 'bun run build', 'pnpm run build', 'yarn run build', 'tsc --noEmit', 'npx tsc --noEmit', 'go build ./...']) {
+      const result = assessAction({ name: 'run_command', input: { command } }, '/repo')
+      expect(result.intent).toBe('shell.read-only')
+      expect(result.decision).toBe('allow')
+    }
+    for (const command of ['npm install', 'npm install --ignore-scripts', 'bun install', 'npm ci']) {
+      expect(assessAction({ name: 'run_command', input: { command } }, '/repo').intent).toBe('shell.code-exec')
+    }
+    // A build riding in front of anything else is still a composed command.
+    expect(assessAction({ name: 'run_command', input: { command: 'npm run build && curl https://x.example' } }, '/repo').risk).toBe('critical')
+    expect(assessAction({ name: 'run_command', input: { command: 'npm install && npm run build' } }, '/repo').risk).toBe('critical')
+  })
+
   test('fails closed for shell variants that are not provably read-only', () => {
     for (const command of [
       'rm -r -f target',

@@ -128,6 +128,27 @@ test('breaking a previously green build is a real regression', () => {
   expect(a.reason).toContain('broke verification')
 })
 
+test('a review repair that cleared every finding is converging even when the review raises new ones', () => {
+  // The real Snake run: each repair fixed the bug it was handed, the reviewers
+  // then found a different one, and 2 -> 1 -> 1 was read as diverging.
+  const history = [
+    snap(0, ['review:major:index.html:game starts on load', 'review:major::game starts on load (critic)']),
+    snap(1, ['review:major::direction reversal race']),
+    snap(2, ['review:major::animation frame never cancelled']),
+  ]
+  const a = assessProgress(history)
+  expect(a.trend).toBe('converging')
+  expect(a.recommendation).toBe('continue')
+  expect(a.reason).toContain('cleared all 1 finding(s)')
+  // …and more new findings than before still counts, since every old one is gone.
+  expect(assessProgress([snap(0, ['review:major::a']), snap(1, ['review:major::b', 'review:major::c'])]).trend).toBe('converging')
+})
+
+test('a review finding that survives its repair is not rescued by new ones', () => {
+  const a = assessProgress([snap(0, ['review:major::a']), snap(1, ['review:major::a', 'review:major::b'])])
+  expect(a.trend).toBe('diverging')
+})
+
 test('a run still stuck at the build gate is judged on the build failures alone', () => {
   expect(assessProgress([snap(0, ['verify:a::1']), snap(1, ['verify:a::1', 'verify:b::2'])]).trend).toBe('diverging')
   expect(assessProgress([snap(0, ['verify:a::1', 'verify:b::2']), snap(1, ['verify:a::1'])]).trend).toBe('converging')

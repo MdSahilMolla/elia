@@ -1,7 +1,7 @@
 import { existsSync } from 'node:fs'
 import { basename, relative, resolve, sep } from 'node:path'
 import type { Tool } from '../tools/types.ts'
-import { clampOutput, isLongRunningServerCommand, mayStartServer, runShell, startsWithForeignShellCommand, type ShellResult } from '../shell.ts'
+import { clampOutput, failureHint, isLongRunningServerCommand, mayStartServer, runShell, startsWithForeignShellCommand, type ShellResult } from '../shell.ts'
 import type { CriticIssue, CriticVerdict } from './types.ts'
 import { currentAgent } from './context.ts'
 import { activeActionGovernor, blockedInUnattendedMode, type ActionGovernor } from './governor.ts'
@@ -383,10 +383,12 @@ export function describeVerification(outcome: VerificationOutcome): string {
     .map((result) => {
       const status = result.timedOut ? 'TIMED OUT' : result.exitCode === 0 ? 'passed' : `FAILED (exit ${result.exitCode})`
       if (result.exitCode === 0 && !result.timedOut) return `$ ${result.command} — ${status}`
+      const hint = result.timedOut ? undefined : failureHint(result.stdout, result.stderr)
       return [
         `$ ${result.command} — ${status}`,
         result.stdout ? clampOutput(result.stdout) : '',
         result.stderr ? clampOutput(result.stderr) : '',
+        hint ? `hint: ${hint}` : '',
       ]
         .filter(Boolean)
         .join('\n')

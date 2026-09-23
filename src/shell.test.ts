@@ -234,3 +234,16 @@ test('an app entrypoint may start a server, and is not a dev server by name alon
     expect(mayStartServer(command)).toBe(false)
   }
 })
+
+test('a go test binary that died without naming a test gets a hint; a normal failure does not', async () => {
+  const { failureHint, formatShellResult } = await import('./shell.ts')
+  // The exact output a Go CLI run spent every repair attempt on.
+  const silent = 'exit status 1\nFAIL\twordfreq\t0.733s\nFAIL\n'
+  expect(failureHint(silent)).toContain('os.Exit')
+  expect(failureHint(silent)).toContain('go test -v')
+  const verbose = '=== RUN   TestCountWords\n--- PASS: TestCountWords (0.00s)\n=== RUN   TestMainArgumentParsing/no_args\nexit status 1\nFAIL\twordfreq\t0.609s\n'
+  expect(failureHint(verbose)).toContain('TestMainArgumentParsing/no_args')
+  expect(failureHint('--- FAIL: TestX (0.00s)\n    x_test.go:9: got 1\nFAIL\nexit status 1\nFAIL\tpkg\t0.1s\n')).toBeUndefined()
+  expect(formatShellResult({ command: 'go test ./...', exitCode: 1, stdout: silent, stderr: '', elapsedMs: 1, timedOut: false })).toContain('hint: the Go test binary exited')
+  expect(formatShellResult({ command: 'go test ./...', exitCode: 0, stdout: 'ok\twordfreq\t0.2s\n', stderr: '', elapsedMs: 1, timedOut: false })).not.toContain('hint:')
+})

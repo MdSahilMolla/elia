@@ -318,13 +318,34 @@ export function terminateProcessGroup(proc: Bun.Subprocess): void {
 
 /** Formats a result the way a model reads it best: status first, then the output that explains it. */
 export function formatShellResult(result: ShellResult): string {
+  const hint = result.exitCode !== 0 && !result.timedOut ? failureHint(result.stdout, result.stderr) : undefined
   return [
     result.timedOut ? `timed out after ${result.elapsedMs}ms (killed)` : `exit code: ${result.exitCode}`,
     result.stdout ? `stdout:\n${result.stdout}` : '',
     result.stderr ? `stderr:\n${result.stderr}` : '',
+    hint ? `hint: ${hint}` : '',
   ]
     .filter(Boolean)
     .join('\n')
+}
+
+/**
+ * What a failure means when its output hides the cause from anyone who has not
+ * seen it before.
+ *
+ * `go test` whose test binary dies — a test calls main(), which calls os.Exit —
+ * prints only "exit status 1 / FAIL <pkg>" with no test named. A Go CLI run in
+ * the battery spent every repair attempt on exactly that output, then recorded
+ * a lesson blaming the unattended policy for it.
+ */
+export function failureHint(stdout: string, stderr = ''): string | undefined {
+  const output = `${stdout}\n${stderr}`
+  if (/^FAIL\s+\S+\s+[\d.]+s\s*$/m.test(output) && /exit status \d+/.test(output) && !/--- FAIL:/.test(output) && !/^panic:/m.test(output)) {
+    const started = [...output.matchAll(/^=== RUN\s+(\S+)/gm)].map((m) => m[1]!)
+    const last = started.at(-1)
+    return `the Go test binary exited before reporting any result — a test${last ? ` (the last one started was ${last})` : ''}, or code it calls such as main(), ran os.Exit or log.Fatal, which ends \`go test\` itself.${last ? '' : ' Run `go test -v` to see which test was running.'} Move that logic into a function that returns an error or exit code, test that function, and let only main() call os.Exit.`
+  }
+  return undefined
 }
 
 /** Trims long output to a head/tail window — the interesting parts of a failing build are at both ends. */

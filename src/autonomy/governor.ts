@@ -122,7 +122,12 @@ const REMOTE_FETCH_COMMAND = /^(?:\S+=\S+\s+)*(?:command\s+)?(?:curl|wget)\b/i
 // each deployment/PR verb is classified critical (CRITICAL_COMMAND) instead
 // of riding the unattended review-band auto-allow.
 const REVIEW_COMMAND = /\bgit\s+commit\b/i
-const READ_ONLY_COMMAND = /^(?:command\s+)?(?:pwd|ls|find|grep|rg|git\s+(?:status|diff|log|show|branch)|gh\s+pr\s+(?:view|list|checks|status|diff)|(?:bun|npm|pnpm|yarn)\s+(?:test|run\s+(?:test|typecheck|type-check|tsc|check-types|lint|format\s+--check|check))|npx\s+(?:--no-install\s+)?tsc\s+--noEmit|cargo\s+(?:check|test|clippy)|go\s+(?:build|test|vet)\b[^\n]*|mvn\s+(?:-[^\s]+\s+)*(?:compile|test-compile|test)\b[^\n]*|(?:\.\/)?gradlew(?:\.bat)?\s+(?:build|test|check|compileJava|compileTestJava)\b[^\n]*|gradle\s+(?:build|test|check|compileJava|compileTestJava)\b[^\n]*|ctest\b[^\n]*|pytest\b[^\n]*|mypy\b[^\n]*|node\s+--version|bun\s+--version|npm\s+--version|printf|echo|cat|head|tail|sed|awk|dir|type|findstr)\b/i
+// Checks and builds that run the project's own code and write only inside it.
+// `go build`, `cargo check` and `gradlew build` were here while `npm run build`
+// and a bare `tsc --noEmit` were not, so an unattended Vite app could never be
+// built: its run spent every repair on a blocked build. Installing packages
+// stays critical (CODE_EXEC_COMMAND, matched first); only `--authorize` lifts it.
+const READ_ONLY_COMMAND = /^(?:command\s+)?(?:pwd|ls|find|grep|rg|git\s+(?:status|diff|log|show|branch)|gh\s+pr\s+(?:view|list|checks|status|diff)|(?:bun|npm|pnpm|yarn)\s+(?:test|run\s+(?:test|typecheck|type-check|tsc|check-types|lint|format\s+--check|check|build))|(?:npx\s+(?:--no-install\s+)?)?tsc\s+--noEmit|cargo\s+(?:check|test|clippy)|go\s+(?:build|test|vet)\b[^\n]*|mvn\s+(?:-[^\s]+\s+)*(?:compile|test-compile|test)\b[^\n]*|(?:\.\/)?gradlew(?:\.bat)?\s+(?:build|test|check|compileJava|compileTestJava)\b[^\n]*|gradle\s+(?:build|test|check|compileJava|compileTestJava)\b[^\n]*|ctest\b[^\n]*|pytest\b[^\n]*|mypy\b[^\n]*|node\s+--version|bun\s+--version|npm\s+--version|printf|echo|cat|head|tail|sed|awk|dir|type|findstr)\b/i
 // `sed`/`awk` are allowed above only for their plain print-to-stdout form.
 // Both also support in-place file rewriting (`sed -i`, `sed --in-place`,
 // `awk -i inplace`) which overwrites the target file — a write, not a read.

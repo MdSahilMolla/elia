@@ -171,6 +171,21 @@ export function assessProgress(history: AttemptSnapshot[]): ProgressAssessment {
     }
   }
 
+  // The build is green, the repair cleared every finding it was handed, and the
+  // reviewers — who read the change afresh each pass — raised something new.
+  // That is a repair that worked, not one breaking as much as it fixes. Read as
+  // "diverging", it stopped a real Snake run after two rounds that each fixed a
+  // genuine bug (auto-start on load, then a reversal race), handing over a game
+  // one fix from done. Stays bounded: earned passes and the run ceiling still apply.
+  if (latestVerify.length === 0 && repeated.length === 0 && previous.failures.length > 0) {
+    return {
+      trend: 'converging',
+      recommendation: 'continue',
+      reason: `repair attempt ${latest.attempt} cleared all ${previous.failures.length} finding(s) from attempt ${previous.attempt}; the review then raised ${latest.failures.length} different one(s): ${short(latest.failures)}`,
+      repeated,
+    }
+  }
+
   // More failures than before, or the same count with fresh failures introduced
   // — the repair is breaking as much as it fixes.
   if (latest.failures.length > previous.failures.length || (isNew.length > 0 && latest.failures.length >= previous.failures.length)) {

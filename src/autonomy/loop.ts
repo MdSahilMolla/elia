@@ -1671,36 +1671,53 @@ Read the changed files in full for context beyond the diff above — a diff hide
         }
       }
 
-      const reviewResults = await Promise.all(
-        reviewers.map(async (reviewer) => {
-          const verdictCapture = createVerdictTool()
-          const reviewerTools = allWorkerTools().filter((tool) => REVIEWER_TOOL_NAMES.has(tool.name))
-          const result = await runSubAgent({
-            role: reviewer.role,
-            name: reviewer.name,
-            runId,
-            governor,
-            graph,
-            nodeId: `review:${reviewer.name}`,
-            briefing,
-            cwd: workspaceRoot,
-            tools: [...reviewerTools, verdictCapture.tool],
-            signal: runSignal,
-            requiredTool: 'submit_verdict',
-            finishAfterTool: 'submit_verdict',
+      // One reviewer session. Each gets its own verdict tool instance since they
+      // run concurrently and must not share captured state.
+      const reviewSession = async (reviewer: (typeof reviewers)[number], session: number) => {
+        const verdictCapture = createVerdictTool()
+        const reviewerTools = allWorkerTools().filter((tool) => REVIEWER_TOOL_NAMES.has(tool.name))
+        const result = await runSubAgent({
+          role: reviewer.role,
+          name: reviewer.name,
+          runId,
+          governor,
+          graph,
+          nodeId: session === 1 ? `review:${reviewer.name}` : `review:${reviewer.name}:retry`,
+          briefing,
+          cwd: workspaceRoot,
+          tools: [...reviewerTools, verdictCapture.tool],
+          signal: runSignal,
+          requiredTool: 'submit_verdict',
+          finishAfterTool: 'submit_verdict',
 
-            prompt: `${reviewContext}
+          prompt: `${reviewContext}
 
 This reviewer session is intentionally read-only. The current diff, status, and verification evidence are already supplied above. Do not run shell commands, use network tools, modify files, delegate work, or treat a claimed result as stronger than the supplied evidence. Read only the files needed to validate the claims, then ${reviewer.focus} Finish by calling submit_verdict.`,
-          })
+        })
+        return { verdict: verdictCapture.taken(), report: result.report, usage: result.usage }
+      }
 
-          const submittedVerdict = verdictCapture.taken()
-          if (!submittedVerdict) {
+      const reviewResults = await Promise.all(
+        reviewers.map(async (reviewer) => {
+          let outcome = await reviewSession(reviewer, 1)
+          let usage = outcome.usage
+          // A reviewer that ends without a verdict says nothing about the code,
+          // but it fails the gate closed — and in a repair loop it fails it the
+          // same way every pass, so the run stalls on the reviewer, not the
+          // change (a durations library that passed verification and 5 of 5
+          // acceptance criteria ended needs-attention on exactly that). One
+          // fresh session gets a second chance; a second silence still fails closed.
+          if (!outcome.verdict && !runSignal?.aborted) {
+            writeSubStep(`${reviewer.name} ended without a verdict — asking once more in a fresh session`)
+            outcome = await reviewSession(reviewer, 2)
+            usage = addUsage(usage, outcome.usage)
+          }
+          if (!outcome.verdict) {
             // Prose cannot drive a safety gate. Preserve it for diagnosis, then send
             // the structured fail-closed verdict through the normal repair path.
-            writeBlock(`Review (unstructured) — ${reviewer.name}`, result.report)
+            writeBlock(`Review (unstructured) — ${reviewer.name}`, outcome.report)
           }
-          return { reviewer: reviewer.name, usage: result.usage, verdict: requireCriticVerdict(submittedVerdict, reviewer.name) }
+          return { reviewer: reviewer.name, usage, verdict: requireCriticVerdict(outcome.verdict, reviewer.name) }
         }),
       )
 
