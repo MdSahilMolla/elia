@@ -109,8 +109,18 @@ export interface StrategyTrial {
   verdict: 'no challenger' | 'running' | 'adopt' | 'reject'
 }
 
+/**
+ * Generations that reached a verdict. One that errored — the network dropped,
+ * a stream came back truncated — is evidence about the provider, not the
+ * strategy: the first run here wrote itself a new strategy after two outages
+ * and a rejection, and the strategy it wrote was built on those outages.
+ */
+function judged(records: GenerationRecord[]): GenerationRecord[] {
+  return records.filter((record) => record.verdict !== 'error')
+}
+
 function arm(id: string, records: GenerationRecord[]): StrategyArm {
-  const mine = records.filter((record) => (record.strategyId ?? DEFAULT_STRATEGY_ID) === id)
+  const mine = judged(records).filter((record) => (record.strategyId ?? DEFAULT_STRATEGY_ID) === id)
   return {
     id,
     generations: mine.length,
@@ -163,7 +173,7 @@ export function settleStrategyTrial(records: GenerationRecord[], paths = strateg
 /** When the search should write itself a challenger: none on trial, and the last few generations banked nothing. */
 export function shouldProposeChallenger(records: GenerationRecord[], paths = strategyPaths(), window = 3): boolean {
   if (challengerStrategy(paths)) return false
-  const recent = [...records].sort((a, b) => a.generation - b.generation).slice(-window)
+  const recent = judged(records).sort((a, b) => a.generation - b.generation).slice(-window)
   return recent.length === window && recent.every((record) => record.verdict !== 'promoted')
 }
 

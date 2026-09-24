@@ -108,3 +108,10 @@ test('a promotion outweighs depth, and records from before the coin are not in t
   expect(trial.incumbent.generations).toBe(MIN_TRIAL_GENERATIONS)
   expect(trial.verdict).toBe('adopt')
 })
+
+test('a generation that errored is not a strategy failing', () => {
+  // Two outages and one rejection wrote the first run here a new strategy,
+  // and the strategy it wrote was built on the outages.
+  expect(shouldProposeChallenger([gen(), gen({ verdict: 'error' }), gen({ verdict: 'error' })], paths)).toBe(false)
+  expect(shouldProposeChallenger([gen(), gen({ verdict: 'error' }), gen(), gen()], paths)).toBe(true)
+})
