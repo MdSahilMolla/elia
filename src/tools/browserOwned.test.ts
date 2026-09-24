@@ -25,9 +25,12 @@ test('ownedBrowserRequested is false unless ELIA_BROWSER is exactly "owned"', ()
   expect(ownedBrowserRequested()).toBe(true)
 })
 
-// This machine has a real Chrome install (verified before writing this test),
-// so the launch path below is exercised for real — not just its error path.
-test('ownedBrowserEndpoint launches a real headless browser and its DevTools endpoint answers /json/version', async () => {
+// Real Chrome is installed on machines that exercise the launch path below for
+// real — but a machine without Chrome must skip, not fail, the suite.
+const hasChrome = () => Boolean(findChromePath())
+const withChrome = hasChrome() ? test : test.skip
+
+withChrome('ownedBrowserEndpoint launches a real headless browser and its DevTools endpoint answers /json/version', async () => {
   const origin = await ownedBrowserEndpoint()
   expect(origin).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/)
   const response = await fetch(`${origin}/json/version`)
@@ -37,13 +40,13 @@ test('ownedBrowserEndpoint launches a real headless browser and its DevTools end
   expect(String(info.Browser)).toMatch(/Chrome|Chromium|Edge|Brave/i)
 }, 20_000)
 
-test('ownedBrowserEndpoint reuses the same instance across calls instead of launching a second browser', async () => {
+withChrome('ownedBrowserEndpoint reuses the same instance across calls instead of launching a second browser', async () => {
   const first = await ownedBrowserEndpoint()
   const second = await ownedBrowserEndpoint()
   expect(second).toBe(first)
 }, 20_000)
 
-test('two concurrent callers during first launch both get the same instance, not two separate browsers', async () => {
+withChrome('two concurrent callers during first launch both get the same instance, not two separate browsers', async () => {
   const [a, b] = await Promise.all([ownedBrowserEndpoint(), ownedBrowserEndpoint()])
   expect(a).toBe(b)
 }, 20_000)

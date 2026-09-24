@@ -62,6 +62,38 @@ Neither shortcut can promote anything. A provisional winner still has to reprodu
 
 Turn it all off with `ELIA_SIEVE=off`, which is also the control arm for measuring what it is worth.
 
+### The same verdicts, sooner
+
+The sieve and the cache cut *how much* a verdict costs. The rest of a
+generation's wall clock came from phases that were independent but run one after
+the other. Two of them now run concurrently, and neither changed what is
+measured or how the answer is decided:
+
+- **The guards.** The generator–verifier gap (`elia gap --critic`) and the value
+  probes are each measured on both trees; the two trees run in parallel. Both
+  checks still have to pass, and a tree that cannot be measured still rejects.
+- **The gate.** `bun run typecheck` and `bun test` are independent and now run in
+  parallel inside the sandbox, with the same timeout and the same
+  typecheck-first verdict order. A test file that fails is still re-run on its
+  own before it rejects, so a timeout caused only by the shared CPU does not
+  turn a candidate away.
+
+The benchmark sweeps are deliberately left alone. `ELIA_BENCH_CONCURRENCY`
+(default `2`) is how many agent loops run against the provider at once, and the
+confirmation pair's two sweeps still run one after the other so that number
+means what it says — a provider with a per-minute input-token cap needs `1`
+(the history tasks send hundreds of thousands of tokens each), and two sweeps at
+once would split its quota and leave tasks unmeasured. On a provider with room
+to spare, raise `ELIA_BENCH_CONCURRENCY`; every sweep speeds up together.
+
+`ELIA_HARVEST_SCAN` and `ELIA_HARVEST_LIMIT` bound the commits scanned and the
+tasks proved in one `harvest` round, since proving a commit is two test runs in
+a fresh checkout and the first pass over a deep history is the loop's most
+expensive no-model step.
+
+None of this touches the arithmetic: `compareScorecards`, the sealed gate and the
+immutable-file guard are unchanged, and a tie is still a rejection.
+
 ### The number that shows it compounding
 
 `elia compounding` now reports **evidence velocity**: task runs and tokens per verdict, and whether that price is falling. It is the one figure here that can show a loop compounding without a weight changing anywhere — cheaper verdicts mean more generations per budget, more generations mean more promotions, and a promotion that lands in the search itself makes the next verdict cheaper again.

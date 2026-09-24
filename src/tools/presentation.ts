@@ -9,8 +9,107 @@ import type { Tool } from './types.ts'
 import { MAX_SHELL_OUTPUT_LENGTH, readBoundedOutput } from '../shell.ts'
 
 const require = createRequire(import.meta.url)
-const pptxgen = require('../vendor/pptxgen.cjs.js') as any
-type PresentationSlide = any
+
+interface PresentationFill {
+  color: string
+}
+
+interface PresentationLine {
+  color: string
+  width: number
+}
+
+interface PresentationTextOptions {
+  x: number
+  y: number
+  w: number
+  h: number
+  fontFace: string
+  fontSize: number
+  color: string
+  bold?: boolean
+  margin?: number
+  fit?: string
+  align?: string
+  breakLine?: boolean
+  valign?: string
+}
+
+interface PresentationShapeOptions {
+  x: number
+  y: number
+  w: number
+  h: number
+  line: PresentationLine
+  rectRadius?: number
+  fill?: PresentationFill
+}
+
+interface PresentationTableCell {
+  text: string
+  options: { bold?: boolean; color: string; fill?: string }
+}
+
+interface PresentationTableOptions {
+  x: number
+  y: number
+  w: number
+  h: number
+  fontFace: string
+  fontSize: number
+  color: string
+  border: { type: string; color: string; pt: number }
+  fill: string
+  margin: number
+  rowH: number
+  autoFit: boolean
+}
+
+interface PresentationChartSeries {
+  name: string
+  labels: string[]
+  values: number[]
+}
+
+interface PresentationChartOptions {
+  x: number
+  y: number
+  w: number
+  h: number
+  catAxisLabelFontFace: string
+  valAxisLabelFontFace: string
+  chartColors: string[]
+  showLegend: boolean
+  showTitle: boolean
+  showValue: boolean
+  valAxisMinVal: number
+  showCatName: boolean
+}
+
+interface PresentationSlide {
+  background: PresentationFill
+  addText(text: string, options: PresentationTextOptions): void
+  addShape(shape: string, options: PresentationShapeOptions): void
+  addTable(data: PresentationTableCell[][], options: PresentationTableOptions): void
+  addChart(chartType: string, data: PresentationChartSeries[], options: PresentationChartOptions): void
+}
+
+interface Presentation {
+  layout: string
+  author: string
+  subject: string
+  title: string
+  company: string
+  addSlide(): PresentationSlide
+  ChartType: { bar: string }
+  writeFile(options: { fileName: string }): Promise<unknown>
+}
+
+interface PptxGenConstructor {
+  new (): Presentation
+}
+
+const pptxgen = require('../vendor/pptxgen.cjs.js') as PptxGenConstructor
 
 type PresentationAction = 'from_workbook' | 'verify'
 
@@ -51,8 +150,8 @@ const LIGHT = 'EFF4F8'
 const MID = '667484'
 const WHITE = 'FFFFFF'
 const FONT = 'Aptos'
-const SHAPE_LINE = 'line' as any
-const SHAPE_ROUND_RECT = 'roundRect' as any
+const SHAPE_LINE = 'line'
+const SHAPE_ROUND_RECT = 'roundRect'
 const MAX_GROUPS = 12
 
 function money(value: number): string {
@@ -94,7 +193,7 @@ function addKpi(slide: PresentationSlide, x: number, label: string, value: strin
 
 function addTable(slide: PresentationSlide, headers: string[], rows: string[][], x: number, y: number, w: number, h: number): void {
   const data = [headers.map((text) => ({ text, options: { bold: true, color: WHITE, fill: NAVY } })), ...rows.map((row) => row.map((text) => ({ text, options: { color: NAVY } })))]
-  slide.addTable(data as any, {
+  slide.addTable(data, {
     x, y, w, h,
     fontFace: FONT,
     fontSize: 9,
@@ -104,7 +203,7 @@ function addTable(slide: PresentationSlide, headers: string[], rows: string[][],
     margin: 0.06,
     rowH: h / Math.max(data.length, 1),
     autoFit: false,
-  } as any)
+  })
 }
 
 async function makeDeck(analysis: AnalysisResult, audit: AuditResult, request: PresentationRequest, outputPath: string): Promise<void> {
@@ -139,7 +238,7 @@ async function makeDeck(analysis: AnalysisResult, audit: AuditResult, request: P
   const takeaway = top && low
     ? `${top.group} is the largest contributor at ${money(top.sum)}, while ${low.group} is the smallest at ${money(low.sum)}. Use the grouped view to focus management attention where scale and outcome diverge.`
     : 'The workbook has been summarized, but no categorical grouping was available for a comparative management view.'
-  slide.addText(`Management takeaway:\n${takeaway}`, { x: 0.8, y: 3.5, w: 11.5, h: 1.35, fontFace: FONT, fontSize: 17, bold: true, color: NAVY, margin: 0.04, breakLine: false, fit: 'shrink', valign: 'mid' } as any)
+  slide.addText(`Management takeaway:\n${takeaway}`, { x: 0.8, y: 3.5, w: 11.5, h: 1.35, fontFace: FONT, fontSize: 17, bold: true, color: NAVY, margin: 0.04, breakLine: false, fit: 'shrink', valign: 'mid' })
   slide.addText(`Audit status: ${auditSheet?.status ?? 'review'}  •  Formula cells: ${auditSheet?.formulaCells ?? 0}  •  Duplicate keys: ${auditSheet?.duplicateKeys ?? 'not checked'}`, { x: 0.8, y: 5.55, w: 11.5, h: 0.25, fontFace: FONT, fontSize: 10, color: MID, margin: 0, fit: 'shrink' })
   addFooter(slide, 2)
 
@@ -148,7 +247,7 @@ async function makeDeck(analysis: AnalysisResult, audit: AuditResult, request: P
   if (groups.length > 0) {
     slide.addChart(pptx.ChartType.bar, [{ name: sheet.selectedMeasure ?? 'Measure', labels: groups.map((item) => item.group), values: groups.map((item) => item.sum) }], {
       x: 0.7, y: 1.55, w: 7.3, h: 4.6, catAxisLabelFontFace: FONT, valAxisLabelFontFace: FONT, chartColors: [BLUE], showLegend: false, showTitle: false, showValue: false, valAxisMinVal: 0, showCatName: false,
-    } as any)
+    })
     const rows = groups.slice(0, 8).map((item) => [item.group, item.count.toLocaleString(), money(item.sum)])
     addTable(slide, [sheet.selectedGroupBy ?? 'Group', 'Records', sheet.selectedMeasure ?? 'Measure'], rows, 8.25, 1.7, 4.35, 3.9)
   } else {
@@ -161,7 +260,7 @@ async function makeDeck(analysis: AnalysisResult, audit: AuditResult, request: P
   const auditRows = audit.sheets.map((item) => [item.sheet, item.rows.toLocaleString(), item.formulaCells.toString(), item.duplicateKeys === undefined ? 'not checked' : item.duplicateKeys.toString(), item.status])
   addTable(slide, ['Sheet', 'Rows', 'Formula cells', 'Duplicate keys', 'Status'], auditRows, 0.75, 1.7, 11.8, Math.min(3.5, 0.45 + auditRows.length * 0.45))
   slide.addText('Recommended operator checks', { x: 0.85, y: 5.15, w: 4.0, h: 0.3, fontFace: FONT, fontSize: 16, bold: true, color: NAVY, margin: 0, fit: 'shrink' })
-  slide.addText('• Reconcile key totals to the source system\n• Review duplicate-key and blank-value findings\n• Inspect formula cells before publishing decisions\n• Keep the source workbook unchanged and use a generated output copy', { x: 0.85, y: 5.55, w: 11.2, h: 0.95, fontFace: FONT, fontSize: 13, color: NAVY, margin: 0.02, fit: 'shrink' } as any)
+  slide.addText('• Reconcile key totals to the source system\n• Review duplicate-key and blank-value findings\n• Inspect formula cells before publishing decisions\n• Keep the source workbook unchanged and use a generated output copy', { x: 0.85, y: 5.55, w: 11.2, h: 0.95, fontFace: FONT, fontSize: 13, color: NAVY, margin: 0.02, fit: 'shrink' })
   addFooter(slide, 4)
 
   slide = pptx.addSlide(); slide.background = { color: WHITE }
@@ -173,7 +272,7 @@ async function makeDeck(analysis: AnalysisResult, audit: AuditResult, request: P
     ['4', 'Repeat this analysis on the next reporting period', 'Analyst', 'Next period'],
   ]
   addTable(slide, ['#', 'Action', 'Owner', 'Timing'], actionRows, 0.75, 1.75, 11.8, 2.4)
-  slide.addText('Decision requested: approve the focused diagnostic and assign owners before the next operating review.', { x: 0.85, y: 5.05, w: 11.4, h: 0.75, fontFace: FONT, fontSize: 17, bold: true, color: BLUE, margin: 0.02, fit: 'shrink' } as any)
+  slide.addText('Decision requested: approve the focused diagnostic and assign owners before the next operating review.', { x: 0.85, y: 5.05, w: 11.4, h: 0.75, fontFace: FONT, fontSize: 17, bold: true, color: BLUE, margin: 0.02, fit: 'shrink' })
   addFooter(slide, 5)
 
   await pptx.writeFile({ fileName: outputPath })

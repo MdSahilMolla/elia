@@ -52,7 +52,7 @@ export function thinkingParamsFor(
       max_tokens: MAX_TOKENS,
       // `display` defaults to "omitted" on these models, which streams thinking
       // blocks with empty text — elia shows reasoning, so ask for the summary.
-      thinking: { type: 'adaptive', display: 'summarized' } as Anthropic.ThinkingConfigParam,
+      thinking: { type: 'adaptive', display: 'summarized' } satisfies Anthropic.ThinkingConfigParam,
       output_config: { effort: effortForBudget(thinkingBudget) },
     }
   }
@@ -180,7 +180,7 @@ export function buildAnthropicRequest(parts: AnthropicRequestParts): Anthropic.M
       tools.map((tool) => ({
         name: tool.name,
         description: tool.description,
-        input_schema: tool.input_schema as Anthropic.Tool.InputSchema,
+        input_schema: tool.input_schema satisfies Anthropic.Tool.InputSchema,
       })),
     ),
   }

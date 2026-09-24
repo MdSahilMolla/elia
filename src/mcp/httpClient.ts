@@ -1,9 +1,24 @@
 import type { McpServerConfig } from './config.ts'
 import type { McpTransport } from './transport.ts'
 import { isJsonRpcResponse, MCP_CLIENT_INFO, MCP_PROTOCOL_VERSION, type JsonRpcResponse, type McpToolCallResult, type McpToolsListResult } from './protocol.ts'
+import { CircuitBreaker } from './circuit.ts'
+import { MCP_CALL_TIMEOUT_MS, MCP_CONNECT_TIMEOUT_MS } from './timeouts.ts'
 
-const CONNECT_TIMEOUT_MS = 20_000
-const CALL_TIMEOUT_MS = 120_000
+const CONNECT_TIMEOUT_MS = MCP_CONNECT_TIMEOUT_MS
+const CALL_TIMEOUT_MS = MCP_CALL_TIMEOUT_MS
+
+/**
+ * A request never reached the server (network error, connection refused,
+ * local timeout) — as opposed to an HTTP round-trip that completed with an
+ * error (401, 500, a JSON-RPC error object), which proves the server is
+ * alive and must not count toward the circuit.
+ */
+class TransportFailure extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'TransportFailure'
+  }
+}
 
 /**
  * One live connection to a **remote** MCP server (a "connector") over the MCP
@@ -24,9 +39,11 @@ export class McpHttpClient implements McpTransport {
   private nextId = 1
   private sessionId: string | undefined
   private closed = false
+  private readonly breaker: CircuitBreaker
 
   constructor(private readonly config: McpServerConfig) {
     this.name = config.name
+    this.breaker = new CircuitBreaker(config.name)
     if (!config.url) throw new Error(`connector "${config.name}" has no url`)
     if (config.transport === 'sse') {
       throw new Error(`connector "${config.name}" uses the legacy SSE transport, which elia does not support — ask the provider for a Streamable HTTP (\`/mcp\`) endpoint`)
@@ -77,15 +94,30 @@ export class McpHttpClient implements McpTransport {
 
   private async rpc(method: string, params: unknown, timeoutMs: number, timeoutMessage: string): Promise<unknown> {
     if (this.closed) throw new Error(`connector "${this.name}" is closed`)
+    if (this.breaker.isOpen()) throw new Error(`connector "${this.name}" is open-circuited after repeated failures`)
     const id = this.nextId++
     const body = JSON.stringify({ jsonrpc: '2.0', id, method, params })
+    try {
+      const result = await this.requestOnce(method, id, body, timeoutMs, timeoutMessage)
+      this.breaker.recordSuccess()
+      return result
+    } catch (error) {
+      // Only a failure to reach the server counts against the circuit; an
+      // error *response* (401, 500, JSON-RPC error object) proves the server
+      // is talking and heals it.
+      if (error instanceof TransportFailure) this.breaker.recordFailure()
+      else this.breaker.recordSuccess()
+      throw error
+    }
+  }
 
+  private async requestOnce(method: string, id: number, body: string, timeoutMs: number, timeoutMessage: string): Promise<unknown> {
     let response: Response
     try {
       response = await fetch(this.url, { method: 'POST', headers: this.buildHeaders(), body, signal: AbortSignal.timeout(timeoutMs) })
     } catch (err) {
-      if (err instanceof Error && err.name === 'TimeoutError') throw new Error(timeoutMessage)
-      throw new Error(`connector "${this.name}" request failed: ${err instanceof Error ? err.message : String(err)}`)
+      if (err instanceof Error && err.name === 'TimeoutError') throw new TransportFailure(timeoutMessage)
+      throw new TransportFailure(`connector "${this.name}" request failed: ${err instanceof Error ? err.message : String(err)}`)
     }
 
     const handedSession = response.headers.get('mcp-session-id')

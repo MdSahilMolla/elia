@@ -375,12 +375,20 @@ export async function runVscodeBridge(): Promise<void> {
     // Skill discovery remains best-effort; the bridge can still serve built-ins.
   }
 
+  // Exit callbacks chained to the next stdout write's completion callback so
+  // `process.exit` never races an in-flight frame (which process.exit does not
+  // flush). The shutdown `{status:'stopping'}` reply is written before
+  // onShutdown fires, so its drain callback is what triggers the exit.
+  const deferredExits: Array<() => void> = []
   const output = (message: BridgeResponse | BridgeEvent): void => {
-    process.stdout.write(encodeBridgeMessage(message))
+    process.stdout.write(encodeBridgeMessage(message), () => {
+      const next = deferredExits.shift()
+      next?.()
+    })
   }
   const reject = (error: string): void => output({ type: 'response', id: 'unknown', ok: false, error })
 
-  const session = createBridgeSession({ output, onShutdown: () => process.exit(0) })
+  const session = createBridgeSession({ output, onShutdown: () => deferredExits.push(() => process.exit(0)) })
 
   const input = readline.createInterface({ input: process.stdin, crlfDelay: Infinity })
   for await (const line of input) {

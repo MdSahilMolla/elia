@@ -7,6 +7,7 @@ import { ensureSecureDirectory, hardenSecureFile, writeSecureBunFile } from './s
 import { clearAllCaches } from './cacheRegistry.ts'
 import { withFileLockAsync } from './fileLock.ts'
 import { assertSelfEditAllowed } from './autonomy/selfEdit.ts'
+import { logSwallowedError } from './diagnostics.ts'
 
 /**
  * Per-turn checkpoints for the interactive session: enough to put both the
@@ -85,11 +86,23 @@ function shareRepeatedMessages(checkpoints: Checkpoint[]): Checkpoint[] {
 
 export function createFileTracker(): FileTracker {
   const captured: FileSnapshot = {}
+  // One read per path, shared. A second capture of a file still being read
+  // waits for that read instead of returning at once — its caller writes the
+  // file next, and would otherwise land before the original is in. A read that
+  // fails is forgotten, so the next capture tries again.
+  const reads = new Map<string, Promise<void>>()
   return {
-    async capture(path) {
-      if (path in captured) return
-      const file = Bun.file(path)
-      captured[path] = (await file.exists()) ? await file.text() : null
+    capture(path) {
+      let read = reads.get(path)
+      if (!read) {
+        read = (async () => {
+          const file = Bun.file(path)
+          captured[path] = (await file.exists()) ? await file.text() : null
+        })()
+        read.catch(() => reads.delete(path))
+        reads.set(path, read)
+      }
+      return read
     },
     snapshot() {
       return { ...captured }
@@ -133,7 +146,8 @@ export async function loadCheckpoints(sessionId: string, dir: string = SESSIONS_
   hardenSecureFile(path)
   try {
     return shareRepeatedMessages((await file.json()) as Checkpoint[])
-  } catch {
+  } catch (error) {
+    logSwallowedError('checkpoint.load.corrupt', error, { path })
     return []
   }
 }

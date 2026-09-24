@@ -9,7 +9,7 @@ import { runSubAgent } from '../subagent.ts'
 import { runShell, clampOutput } from '../shell.ts'
 import { ZERO_USAGE, addUsage, formatElapsed, recordUsage } from '../usage.ts'
 import type { Usage } from '../providers/types.ts'
-import { writeText, writeThinking } from '../ui/stream.ts'
+import { writeNotice, writeText, writeThinking } from '../ui/stream.ts'
 import { reportSinkActive, writeBlock, writeFail, writePass, writePhase, writeSubStep, writeSummary } from '../ui/report.ts'
 import { draftRunThinking, upfrontPlanEnabled } from './upfrontPlan.ts'
 
@@ -71,7 +71,7 @@ import { createActionGovernor, withActionGovernor, type ActionApproval, type Act
 import { GoalGraphStore, outstandingActions, withGoalGraph, type GoalGraphStore as GoalGraphStoreType } from './goalGraph.ts'
 import { assessCompletion, type CompletionAssessment } from './outcome.ts'
 import { inferTaskKind, taskSessions } from '../taskSessions.ts'
-import { clearRunControl, readRunControl, type SupervisorControlRequest } from './control.ts'
+import { clearRunControl, readRunControl, takeRunControlCorruption, type SupervisorControlRequest } from './control.ts'
 import { provisionTaskWorkspace, taskWorkspaceLabel, type TaskWorkspace } from './taskWorkspace.ts'
 import { jevEnabled } from '../providers/jev.ts'
 import { inBackground, predict, resolvePrediction, settleSystemOne } from '../reason/systemOne.ts'
@@ -475,6 +475,7 @@ async function runAutonomousTaskInternal(options: AutonomousRunOptions): Promise
 
   let supervisorTimer: ReturnType<typeof setInterval> | undefined
   let supervisorRequest: SupervisorControlRequest | undefined
+  let controlCorruptionSurfaced = false
   const journal = createJournal(runId, goal)
   if (workspace.repositoryWarning) {
     writeSubStep(`⚠ ${workspace.repositoryWarning}`)
@@ -482,6 +483,11 @@ async function runAutonomousTaskInternal(options: AutonomousRunOptions): Promise
   }
   supervisorTimer = setInterval(() => {
     const request = readRunControl(runId)
+    const corrupt = takeRunControlCorruption(runId)
+    if (corrupt && !controlCorruptionSurfaced) {
+      controlCorruptionSurfaced = true
+      writeNotice(`run control file ${corrupt.path} is corrupt — previous pause/stop may not apply; fix or delete it and place a fresh request`)
+    }
     if (!request || supervisorRequest) return
     supervisorRequest = request
     journal.append('phase', { phase: 'supervisor-control', action: request.action, requestedAt: request.requestedAt })
@@ -494,6 +500,7 @@ async function runAutonomousTaskInternal(options: AutonomousRunOptions): Promise
     runController.abort()
   }, 250)
   const graph = GoalGraphStore.open({ runId, goal, dir: journal.dir })
+  if (graph.openTornSnapshot) writeNotice(`this run's goal graph was unreadable and starts over from the goal; the old file is kept at ${graph.openTornSnapshot.path}`)
   const board = createBlackboard(`${journal.dir}/board.json`)
   // Per run, like the blackboard: a resumed run should not inherit a stale plan.
   setActiveTodoList(createTodoList(`${journal.dir}/todo.json`))
