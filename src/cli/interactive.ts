@@ -28,6 +28,9 @@ import { confirmOnce } from '../ui/confirm.ts'
 import { gold, dim } from '../ui/theme.ts'
 import { box, table } from '../ui/layout.ts'
 import { pick } from '../ui/picker.ts'
+import { formatQuickchatResult } from '../quickchat/present.ts'
+import type { ParsedQuickchatCommand } from '../quickchat/quickchat.ts'
+import type { SessionHandle } from '../session/types.ts'
 import { openTaskDashboard, renderTaskSummary } from '../ui/taskDashboard.ts'
 import { inferTaskKind, taskSessions } from '../taskSessions.ts'
 import { isAgentPersona, type AgentPersona } from '../agents/types.ts'
@@ -1989,6 +1992,50 @@ export async function runInteractive(): Promise<void> {
     }
   }
 
+  // Lazy, in-process handle for this REPL so `/quickchat` can ask about the
+  // live conversation. Registered on first use — creating it up front would add
+  // bus noise to every startup even when nobody runs quickchat.
+  let registeredQuickchatHandle: SessionHandle | undefined
+  async function registerQuickchatSession(): Promise<SessionHandle | undefined> {
+    if (registeredQuickchatHandle) return registeredQuickchatHandle
+    try {
+      const { getSessionBus } = await import('../session/bus.ts')
+      const bus = getSessionBus()
+      const existing = bus.resolve(sessionId)
+      if (existing) {
+        registeredQuickchatHandle = existing
+        return existing
+      }
+      const { makeSessionName } = await import('../session/types.ts')
+      const handle = bus.create(makeSessionName('main'))
+      bus.setActiveSession(handle.id)
+      registeredQuickchatHandle = handle
+      return handle
+    } catch {
+      return undefined
+    }
+  }
+
+  // Answers the slow quickchat kinds in the background and streams the result
+  // into the Ink overlay panel; the active session is never awaited on it.
+  async function runQuickchatOverlay(input: string, session: SessionHandle, parsed: ParsedQuickchatCommand): Promise<void> {
+    const [{ handleQuickchatCommand }, { quickchatStore }] = await Promise.all([
+      import('../quickchat/quickchat.ts'),
+      import('../ui/app/quickchatOverlayStore.ts'),
+    ])
+    const question = parsed.kind === 'session-ask' ? parsed.question : parsed.kind === 'ask' ? parsed.question : 'Risk review of this session'
+    const label = parsed.kind === 'session-ask' ? parsed.targetSession : session.name
+    quickchatStore.open(question, label)
+    try {
+      const result = await handleQuickchatCommand(input, session)
+      const text = formatQuickchatResult(result.result)
+      if (text) quickchatStore.appendText(text)
+    } catch (error) {
+      quickchatStore.appendText(`quickchat failed: ${error instanceof Error ? error.message : String(error)}`)
+    }
+    // The overlay stays open until Escape or the store's idle timeout.
+  }
+
   async function handleSlashForInk(input: string): Promise<InkSlashOutcome> {
     const trimmed = input.trim()
     const done = (text?: string): InkSlashOutcome => ({ handled: true, text })
@@ -2617,6 +2664,24 @@ export async function runInteractive(): Promise<void> {
       return done(selfEdit.describeSelfEdit())
     }
 
+    const quickchatMatch = /^\/quickchat(?:\s+(.*))?$/.exec(trimmed)
+    if (quickchatMatch) {
+      const session = await registerQuickchatSession()
+      if (!session) {
+        return done('No session is registered for quickchat here. Start one with: elia sessions new --name <name>')
+      }
+      const { parseQuickchatCommand } = await import('../quickchat/quickchat.ts')
+      const parsed = parseQuickchatCommand(trimmed)
+      const answeredInOverlay = parsed.kind === 'ask' || parsed.kind === 'session-ask' || parsed.kind === 'risk'
+      if (answeredInOverlay) {
+        void runQuickchatOverlay(trimmed, session, parsed).catch(() => undefined)
+        return done('Answering in the quickchat overlay — it never blocks this session. (Escape closes it; idle closes it in 60s.)')
+      }
+      const { handleQuickchatCommand } = await import('../quickchat/quickchat.ts')
+      const result = await handleQuickchatCommand(trimmed, session)
+      return done(result.handled ? formatQuickchatResult(result.result) : 'quickchat did not handle that input.')
+    }
+
     const custom = resolveCustomCommand(trimmed)
     if (custom) return { handled: true, submitText: custom.expanded }
 
@@ -3161,6 +3226,19 @@ export async function runInteractive(): Promise<void> {
       writeNotice(
         `Rewound to before turn ${n} ("${checkpoint.label}") — restored ${result.restored} file(s), removed ${result.deleted} file(s) created since.`,
       )
+      continue
+    }
+
+    const quickchatClassic = /^\/quickchat(?:\s+(.*))?$/.exec(trimmed)
+    if (quickchatClassic) {
+      const session = await registerQuickchatSession()
+      if (!session) {
+        writeNotice('No session is registered for quickchat here. Start one with: elia sessions new --name <name>')
+        continue
+      }
+      const { handleQuickchatCommand } = await import('../quickchat/quickchat.ts')
+      const result = await handleQuickchatCommand(trimmed, session)
+      if (result.handled) writeNotice(formatQuickchatResult(result.result))
       continue
     }
 

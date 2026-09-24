@@ -1,6 +1,7 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { skillCapability } from '../skills/capabilities.ts'
-import { currentAgent, isPathWithinWorkspace } from './context.ts'
+import { currentAgent, isPathWithinWorkspace, resolveWorkspacePath } from './context.ts'
+import { assertWriteWithinSessionScope, currentSessionScope } from '../session/scope.ts'
 import { commandMayReadSensitiveData } from './sensitivePaths.ts'
 import { pauseToolSpinner, resumeToolSpinner } from '../ui/stream.ts'
 import { applyPolicy } from './policy.ts'
@@ -670,6 +671,28 @@ const OUTBOUND_REVIEW_INTENTS = new Set([
   'deployment.preview',
 ])
 
+/**
+ * Session-isolated runs (a session agent in its own worktree) must never write
+ * outside that worktree, even if its cwd were misconfigured. This is a
+ * defensive boundary on the file-writing tools: it only activates when a
+ * session scope is present and returns a block reason for anything that
+ * resolves outside the scope's worktree.
+ */
+function sessionScopeWriteBlock(request: ActionRequest): string | undefined {
+  const scope = currentSessionScope()
+  if (!scope) return undefined
+  const path = request.input.path
+  if (!SESSION_SCOPE_FILE_WRITES.has(request.name) || typeof path !== 'string') return undefined
+  try {
+    assertWriteWithinSessionScope(resolveWorkspacePath(path))
+    return undefined
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error)
+  }
+}
+
+const SESSION_SCOPE_FILE_WRITES = new Set(['write_file', 'edit_file', 'lsp_refactor', 'delete_file'])
+
 export function createActionGovernor(options: { mode?: GovernanceMode; approve?: ActionApproval; cwd?: string; maxActions?: number } = {}): ActionGovernor {
   const mode = options.mode ?? 'unattended'
   const cwd = options.cwd ?? process.cwd()
@@ -701,6 +724,21 @@ export function createActionGovernor(options: { mode?: GovernanceMode; approve?:
       : `${request.name}:${assessment.intent}`
 
   const decide = async (request: ActionRequest): Promise<ActionGateResult> => {
+      const scopeBlock = sessionScopeWriteBlock(request)
+      if (scopeBlock !== undefined) {
+        return {
+          allowed: false,
+          assessment: {
+            risk: 'critical',
+            decision: 'block',
+            reason: `file write is outside the session worktree: ${scopeBlock}`,
+            intent: 'session-scope',
+            resources: typeof request.input.path === 'string' ? [request.input.path] : [],
+            reversible: false,
+          },
+          message: `Path blocked by session worktree scope: ${scopeBlock}`,
+        }
+      }
       const baseAssessment = assessAction(request, options.cwd)
       // A checked-in .elia/policy.json can only tighten this: block the action
       // outright, or raise its decision from allow to approve. Applied before

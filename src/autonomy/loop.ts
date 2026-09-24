@@ -65,6 +65,7 @@ import { deriveReward, recordTrajectory, refSystemPrompt } from '../trajectory/r
 import { ELIA_ROOT } from '../statePaths.ts'
 import { reliabilitySignal } from './reliability.ts'
 import type { CriticVerdict, Proposal } from './types.ts'
+import type { SessionId } from '../session/types.ts'
 import { appendActionAudit, readActionLedger, writeRunReceipt } from './audit.ts'
 import { buildReviewDiffSection } from './reviewContext.ts'
 import { createActionGovernor, withActionGovernor, type ActionApproval, type ActionGovernor, type ActionGovernorStats, type GovernanceMode } from './governor.ts'
@@ -146,6 +147,11 @@ export interface AutonomousRunOptions {
    * `elia auto` leaves it unset and `writeThinking` streams to stdout.
    */
   onThinking?: (delta: string) => void
+  /**
+   * When set, every LLM/usage recording emitted inside this run is tagged with
+   * the session id so the session's cost roll-ups include the run's spending.
+   */
+  sessionId?: SessionId
 }
 
 export type AutonomyProfile = 'fast' | 'balanced' | 'thorough'
@@ -364,20 +370,29 @@ function finalizeDeadRun(reason: string, error?: unknown): void {
 export function runAutonomousTask(options: AutonomousRunOptions): Promise<AutonomousRunResult> {
   const mode = options.mode ?? activeMode()
   const hooks = mode === 'dev' ? loadDevelopmentToolHooks() : []
-  return withActiveMode(mode, () =>
-    withToolHooks(hooks, () =>
-      withRunLock(async () => {
-        try {
-          const result = await runAutonomousTaskInternal(options)
-          await settleSystemOne()
-          return result
-        } catch (error) {
-          finalizeDeadRun('the run threw and did not reach its own ending', error)
-          throw error
-        }
-      }),
-    ),
-  )
+  const run = (): Promise<AutonomousRunResult> =>
+    withActiveMode(mode, () =>
+      withToolHooks(hooks, () =>
+        withRunLock(async () => {
+          try {
+            const result = await runAutonomousTaskInternal(options)
+            await settleSystemOne()
+            return result
+          } catch (error) {
+            finalizeDeadRun('the run threw and did not reach its own ending', error)
+            throw error
+          }
+        }),
+      ),
+    )
+  const sessionId = options.sessionId
+  if (sessionId === undefined) return run()
+  // Cost-tag the whole run under the owning session (pulled in lazily so the
+  // core autonomy path never loads the session layer on its own).
+  return (async () => {
+    const { withSessionCostTracking } = await import('../session/integration.ts')
+    return withSessionCostTracking(run, sessionId)
+  })()
 }
 
 async function withRunLock<T>(fn: () => Promise<T>): Promise<T> {
