@@ -17,6 +17,7 @@
 
 import { buildQuickchatContext, estimateTokens } from './context-builder.ts'
 import { appendToSessionLog, createOverlay, QUICKCHAT_TIMEOUT_MS, type QuickchatOverlay } from './overlay.ts'
+import type { Provider } from '../providers/types.ts'
 import type {
   DelegationMode,
   DelegationRecord,
@@ -30,6 +31,38 @@ import type {
 } from '../session/types.ts'
 
 export type FastResponder = (ctx: QuickchatContext, question: string, signal: AbortSignal) => Promise<string>
+
+export interface FastTier {
+  provider: Provider
+  providerName: string
+  model: string
+  label: string
+}
+
+/** A /quickchat agent-loop call: one question, no tools, at most one step. */
+export interface FastLoopCall {
+  messages: Array<{ role: 'user'; content: Array<{ type: 'text'; text: string }> }>
+  systemPrompt: string
+  tools: readonly unknown[]
+  useAnimation: boolean
+  verbose: boolean
+  maxSteps: number
+  provider: Provider
+  providerName: string
+  model: string
+  signal?: AbortSignal
+}
+
+/**
+ * Test-only seam. Routes the default fast-tier call through an in-process
+ * runner instead of the real `runAgentLoop`. Swapping this never touches the
+ * shared module registry, so co-resident suites that import `agentLoop.ts` for
+ * real keep their real imports.
+ */
+let __fastLoopOverride: ((opts: FastLoopCall) => Promise<unknown>) | undefined
+export function setFastLoopOverrideForTests(runner: ((opts: FastLoopCall) => Promise<unknown>) | undefined): void {
+  __fastLoopOverride = runner
+}
 
 export interface RunQuickchatOptions {
   /** A session id or (unambiguous) session name. */
@@ -129,6 +162,15 @@ function readableQuickchatError(error: unknown): string {
 }
 
 /**
+ * Picks the tier a quickchat call goes to: always `config.tiers.fast`, never
+ * the primary model. When no distinct fast tier is configured the config layer
+ * aliases `fast` onto `deep`, so this mirrors that one-for-one.
+ */
+export function selectFastTier(config: { tiers: { fast: FastTier; deep?: FastTier } }): FastTier {
+  return config.tiers.fast
+}
+
+/**
  * The default fast-tier call path. Builds a Provider from `config.tiers.fast`
  * and runs ONE tool-less model call through the agent loop (`tools: []`,
  * `maxSteps: 1`, no animation, no verbosity, honouring the abort signal).
@@ -141,11 +183,12 @@ export async function resolveFastResponder(): Promise<FastResponder> {
     import('../config.ts'),
     import('../agentLoop.ts'),
   ])
-  const tier = config.tiers.fast
+  const tier = selectFastTier(config)
+  const runLoop = (__fastLoopOverride ?? runAgentLoop) as (opts: FastLoopCall) => Promise<unknown>
   return async (ctx, question, signal): Promise<string> => {
     const messages = [{ role: 'user' as const, content: [{ type: 'text' as const, text: buildQuickchatPrompt(ctx, question) }] }]
     try {
-      await runAgentLoop({
+      await runLoop({
         messages,
         systemPrompt: QUICKCHAT_SYSTEM_PROMPT,
         tools: [],
