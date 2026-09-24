@@ -8,6 +8,7 @@ import type { Metrics } from './ledger.ts'
 import { bold, dim, green, red } from '../ui/theme.ts'
 import { table } from '../ui/layout.ts'
 import { MAX_SHELL_OUTPUT_LENGTH, readBoundedOutput, terminateProcessGroup } from '../shell.ts'
+import { registerShutdownCleanup } from '../ui/shutdown.ts'
 import { ELIA_ROOT } from '../statePaths.ts'
 import { REACH_OUT_ENV, absorbReachFile } from './reach.ts'
 import { MODEL_SILENCE_MS, TRACE_OUT_ENV, readTrace, renderTrace, waitingOnModel } from './trace.ts'
@@ -183,6 +184,20 @@ export function aggregateAttempts(attempts: TaskOutcome[]): TaskOutcome {
 /** A task's score: its pass fraction when repeated, else 1 or 0. */
 function taskScore(outcome: TaskOutcome): number {
   return outcome.attempts ? (outcome.passes ?? 0) / outcome.attempts : outcome.passed ? 1 : 0
+}
+
+/**
+ * Ends a task's agent process if this one is stopped first.
+ *
+ * A signal stops `elia bench` or `elia evolve` through `process.exit`, which
+ * runs no pending `finally` — so the task processes they had spawned carried
+ * on running their agent loops, spending the provider's quota, with nobody
+ * left to read the result. Stopping a sweep left two of them going, still
+ * competing with whatever measured next. Returns the unregister, for when the
+ * task ends on its own.
+ */
+export function killOnShutdown(proc: Bun.Subprocess): () => void {
+  return registerShutdownCleanup(() => terminateProcessGroup(proc))
 }
 
 export async function measureFitness(options: MeasureOptions): Promise<Scorecard> {
@@ -410,6 +425,7 @@ async function runOneTask(task: BenchTask, sourceRoot: string): Promise<TaskOutc
       stderr: 'pipe',
       env: benchTaskEnv(process.env, reachOut, traceOut),
     })
+    const releaseOnShutdown = killOnShutdown(proc)
 
     let timedOut = false
     const taskTimeoutMs = timeoutFor(task)
@@ -430,6 +446,7 @@ async function runOneTask(task: BenchTask, sourceRoot: string): Promise<TaskOutc
       completed = true
     } finally {
       clearTimeout(timeout)
+      releaseOnShutdown()
       if (!completed) terminateProcessGroup(proc)
     }
 

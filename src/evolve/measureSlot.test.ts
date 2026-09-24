@@ -2,6 +2,7 @@ import { afterEach, expect, test } from 'bun:test'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { hostname, tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
+import { isProcessAlive } from '../fileLock.ts'
 import { claimMeasureSlot, describeHolder, MAX_HOLD_MS, measuringNow, type SlotHolder } from './measureSlot.ts'
 
 const dirs: string[] = []
@@ -103,4 +104,29 @@ test('a measurement stopped with SIGTERM gives the slot back through the shared 
   child.kill('SIGTERM')
   await child.exited
   expect(existsSync(path)).toBe(false)
+})
+
+test("a stopped measurement takes its task processes with it instead of leaving them spending quota", async () => {
+  // What `elia bench` does when it is sent SIGTERM mid-task: the shutdown
+  // handlers run, and every task process it spawned has to go too.
+  const script = [
+    "process.env.ANTHROPIC_API_KEY ??= 'test-key'",
+    `const { installShutdownHandlers } = await import(${JSON.stringify(join(import.meta.dir, '..', 'ui', 'shutdown.ts'))})`,
+    `const { killOnShutdown } = await import(${JSON.stringify(join(import.meta.dir, 'fitness.ts'))})`,
+    'installShutdownHandlers()',
+    "const task = Bun.spawn(['sleep', '60'])",
+    'killOnShutdown(task)',
+    'console.log(task.pid)',
+    'setInterval(() => {}, 1000)',
+  ].join('\n')
+  const parent = Bun.spawn([process.execPath, '-e', script], { stdout: 'pipe', stderr: 'pipe' })
+  const taskPid = Number(new TextDecoder().decode((await parent.stdout.getReader().read()).value).trim())
+  expect(taskPid).toBeGreaterThan(0)
+  expect(isProcessAlive(taskPid)).toBe(true)
+
+  parent.kill('SIGTERM')
+  await parent.exited
+  const deadline = Date.now() + 3_000
+  while (isProcessAlive(taskPid) && Date.now() < deadline) await Bun.sleep(50)
+  expect(isProcessAlive(taskPid)).toBe(false)
 })
