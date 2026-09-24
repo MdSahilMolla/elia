@@ -161,6 +161,21 @@ export async function runEvolve(): Promise<void> {
   // still the same fixed set for the baseline and every candidate.
   let taskIds: string[] | undefined
   const focusRaw = flagValue('--focus')
+  if (hasFlag('--builtin') && focusRaw !== undefined) {
+    writeError('--builtin and --focus each choose the task set; pass one.')
+    process.exitCode = 1
+    return
+  }
+  // --builtin: the fixed built-in suite alone — seconds a task, no git-history
+  // checkouts, and no full sweep needed first. A full `--all` sweep is hours on
+  // a free tier; this turns the loop while that is still out of reach. Every
+  // baseline and candidate in the run is scored on the same set, and the split
+  // still holds part of it back from the proposer.
+  if (hasFlag('--builtin')) {
+    const { BENCH_TASKS } = await import('../evolve/suite.ts')
+    taskIds = BENCH_TASKS.map((task) => task.id)
+    writeNotice(`Scoring on the ${taskIds.length} built-in task(s) only — no history tasks, so a change that only affects those will not be seen.`)
+  }
   if (focusRaw !== undefined) {
     const focus = strictInteger(focusRaw)
     if (focus === undefined || focus < 0) {

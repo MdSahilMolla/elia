@@ -91,6 +91,7 @@ Self-improvement:
                               in a sandbox, and promote it only if the benchmark agrees
   elia evolve -n 3            Run three generations, each building on the last
   elia evolve --dry-run       Evaluate candidates but never modify the live source
+  elia evolve --builtin       Score only on the built-in suite (minutes, not hours; no full sweep needed)
   elia compounding            Where each stage of the self-improvement loop stands
   elia compounding frontier   The verification frontier, certified library, growth, isolation,
                               and the resource governor's plan
