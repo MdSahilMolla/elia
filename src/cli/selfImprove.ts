@@ -161,6 +161,21 @@ export async function runEvolve(): Promise<void> {
   // still the same fixed set for the baseline and every candidate.
   let taskIds: string[] | undefined
   const focusRaw = flagValue('--focus')
+  if (hasFlag('--builtin') && focusRaw !== undefined) {
+    writeError('--builtin and --focus each choose the task set; pass one.')
+    process.exitCode = 1
+    return
+  }
+  // --builtin: the fixed built-in suite alone — seconds a task, no git-history
+  // checkouts, and no full sweep needed first. A full `--all` sweep is hours on
+  // a free tier; this turns the loop while that is still out of reach. Every
+  // baseline and candidate in the run is scored on the same set, and the split
+  // still holds part of it back from the proposer.
+  if (hasFlag('--builtin')) {
+    const { BENCH_TASKS } = await import('../evolve/suite.ts')
+    taskIds = BENCH_TASKS.map((task) => task.id)
+    writeNotice(`Scoring on the ${taskIds.length} built-in task(s) only — no history tasks, so a change that only affects those will not be seen.`)
+  }
   if (focusRaw !== undefined) {
     const focus = strictInteger(focusRaw)
     if (focus === undefined || focus < 0) {
@@ -169,16 +184,45 @@ export async function runEvolve(): Promise<void> {
       return
     }
     const { BENCH_TASKS, allBenchTasks } = await import('../evolve/suite.ts')
-    const { focusTaskIds } = await import('../compounding/status.ts')
-    taskIds = focusTaskIds(BENCH_TASKS.map((task) => task.id), focus, undefined, allBenchTasks().map((task) => task.id))
-    if (!taskIds) {
-      writeError('--focus needs a complete `elia bench --all` run to focus from (none recorded with every task measured).')
-      process.exitCode = 1
-      return
+    const { focusFromMeasured, focusTaskIds } = await import('../compounding/status.ts')
+    const builtInIds = BENCH_TASKS.map((task) => task.id)
+    const allIds = allBenchTasks().map((task) => task.id)
+    taskIds = focusTaskIds(builtInIds, focus, undefined, allIds)
+    if (taskIds) {
+      writeNotice(`Focused on ${taskIds.length} task(s): the built-in set, the last full run's failures, any task harvested since it, and ${focus} passing history task(s).`)
+    } else {
+      // No complete sweep yet: focus on what `elia bench --all` has measured of
+      // this exact tree so far, rather than waiting a day for the rest.
+      const { lookupBaselines } = await import('../evolve/baselineCache.ts')
+      const { ELIA_ROOT, config } = await import('../config.ts')
+      const { hits } = lookupBaselines(allIds, ELIA_ROOT, config.model)
+      taskIds = focusFromMeasured(builtInIds, focus, hits)
+      if (!taskIds) {
+        writeError('--focus needs history tasks to focus on: run `elia bench --all` (it keeps each result as it lands, so it can be stopped once some history tasks are in).')
+        process.exitCode = 1
+        return
+      }
+      const history = hits.filter((outcome) => !builtInIds.includes(outcome.taskId))
+      const failing = history.filter((outcome) => !outcome.passed).length
+      writeNotice(
+        `No complete \`elia bench --all\` yet, so focusing on what it has measured of this tree: ${history.length} of ${allIds.length - builtInIds.length} history task(s), ${failing} failing. ${taskIds.length} task(s) in all: the built-in set, those failures, and up to ${focus} passing history task(s).`,
+      )
     }
-    writeNotice(`Focused on ${taskIds.length} task(s): the built-in set, the last full run's failures, any task harvested since it, and ${focus} passing history task(s).`)
   }
-  const result = await evolve({ generations, dryRun: hasFlag('--dry-run'), taskIds })
+  // One measurement per checkout at a time — see measureSlot.ts.
+  const { claimMeasureSlot, describeHolder } = await import('../evolve/measureSlot.ts')
+  const slot = claimMeasureSlot(`elia ${process.argv.slice(2).join(' ')}`)
+  if (!slot.ok) {
+    writeError(describeHolder(slot.holder))
+    process.exitCode = 1
+    return
+  }
+  let result: Awaited<ReturnType<typeof evolve>>
+  try {
+    result = await evolve({ generations, dryRun: hasFlag('--dry-run'), taskIds })
+  } finally {
+    slot.release()
+  }
   if (result.stoppedReason) {
     writeError(`No generation was attempted: ${result.stoppedReason}`)
     process.exitCode = 1
@@ -252,6 +296,15 @@ async function runAutoPractice(): Promise<void> {
     })
   }
 
+  // A bench or evolve someone started by hand already holds the checkout.
+  // Practising beside it would score both wrong, so this run gives way.
+  const { claimMeasureSlot } = await import('../evolve/measureSlot.ts')
+  const slot = claimMeasureSlot('elia evolve --auto (practice)')
+  if (!slot.ok) {
+    finish('practised', `skipped — \`${slot.holder.command}\` was already measuring in this checkout`)
+    return
+  }
+
   try {
     await loadRuntimeSkills()
     const { BENCH_TASKS, allBenchTasks } = await import('../evolve/suite.ts')
@@ -259,9 +312,11 @@ async function runAutoPractice(): Promise<void> {
     const taskIds = focusTaskIds(BENCH_TASKS.map((task) => task.id), 8, undefined, allBenchTasks().map((task) => task.id))
 
     if (!taskIds) {
-      const { measureFitness } = await import('../evolve/fitness.ts')
-      const { ELIA_ROOT } = await import('../config.ts')
-      const card = await measureFitness({ tasks: allBenchTasks(), sourceRoot: ELIA_ROOT })
+      // Kept task by task and reused next time: a practice run is stopped
+      // whenever the machine sleeps, and the sweep has to survive that.
+      const { measureLiveTree } = await import('../evolve/baselineCache.ts')
+      const { ELIA_ROOT, config } = await import('../config.ts')
+      const { card } = await measureLiveTree({ tasks: allBenchTasks(), sourceRoot: ELIA_ROOT, model: config.model })
       if (card.unmeasured.length > 0) {
         const detail = `the benchmark could not measure ${card.unmeasured.length} task(s)`
         finish(auto.looksBlocked(card.outcomes.map((outcome) => outcome.error ?? '').join('\n')) ? 'blocked' : 'failed', detail)
@@ -314,6 +369,8 @@ async function runAutoPractice(): Promise<void> {
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error)
     finish(auto.looksBlocked(detail) ? 'blocked' : 'failed', detail.split('\n')[0]!.slice(0, 300))
+  } finally {
+    slot.release()
   }
 }
 

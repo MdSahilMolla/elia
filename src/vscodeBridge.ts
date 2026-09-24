@@ -181,6 +181,8 @@ export function createBridgeSession(options: BridgeSessionOptions): BridgeSessio
         outcome: { verify: 'none', repairAttempts: 0 },
         cwd: process.cwd(),
         signal: currentAgent().signal,
+        // What was typed, not the editor context appended to it.
+        userWords: prompt,
       })
       if (learned.usage) recordUsage(learned.usage, config.tiers.fast.model)
     } catch {

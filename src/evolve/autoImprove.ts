@@ -28,6 +28,7 @@ import { ELIA_ROOT } from '../config.ts'
 import { isProcessAlive } from '../fileLock.ts'
 import { writeSecureFile } from '../securePersistence.ts'
 import { EVOLUTION_DIR } from './ledger.ts'
+import { measuringNow } from './measureSlot.ts'
 
 export const AUTO_IMPROVE_STATE = join(EVOLUTION_DIR, 'auto-improve.json')
 export const AUTO_IMPROVE_LOG = join(EVOLUTION_DIR, 'auto-improve.log')
@@ -206,6 +207,10 @@ export async function maybeStartPractice(options: { now?: number; statePath?: st
   const now = options.now ?? Date.now()
   const decision = shouldStartPractice(state, { now, enabled: autoImproveEnabled() })
   if (!decision.start || !canPractice()) return false
+  // A bench or evolve already measuring in elia's checkout: starting now would
+  // only spawn a run that gives way at once (see measureSlot.ts), and spend the
+  // cooldown on nothing.
+  if (measuringNow(join(ELIA_ROOT, '.elia', 'bench', 'measuring.json'))) return false
 
   const entry = join(ELIA_ROOT, 'bin', 'elia.ts')
   let log: number | undefined

@@ -141,6 +141,34 @@ export function focusTaskIds(builtInIds: string[], passingHistory: number, runs 
   return [...new Set([...builtInIds, ...history(last.failed!), ...unseen, ...history(last.passed!).slice(0, passingHistory)])]
 }
 
+/**
+ * The same focus, from a full sweep that has not finished: the built-in tasks,
+ * every history task measured so far that failed, and the first
+ * `passingHistory` measured ones that passed. Undefined until at least one
+ * history task has been measured.
+ *
+ * A full sweep is 59 history tasks of up to three 13-minute attempts each —
+ * most of a day at the two-at-a-time a free tier allows, and more than one
+ * day's quota — and without this nothing could focus until all of it was in.
+ * The loop needs failures to study and passing tasks to guard, not the whole
+ * set: the focus set is fixed before the baseline is taken, so every candidate
+ * is compared on exactly the tasks the baseline was, however the set was
+ * chosen. Tasks not measured yet are left out rather than added as "unseen"
+ * the way `focusTaskIds` adds newly harvested ones — here that would be most of
+ * the suite.
+ */
+export function focusFromMeasured(
+  builtInIds: string[],
+  passingHistory: number,
+  measured: ReadonlyArray<{ taskId: string; passed: boolean }>,
+): string[] | undefined {
+  const history = measured.filter((outcome) => !builtInIds.includes(outcome.taskId))
+  if (history.length === 0) return undefined
+  const failed = history.filter((outcome) => !outcome.passed).map((outcome) => outcome.taskId)
+  const passed = history.filter((outcome) => outcome.passed).map((outcome) => outcome.taskId)
+  return [...new Set([...builtInIds, ...failed, ...passed.slice(0, passingHistory)])]
+}
+
 export interface LessonStoreEffect {
   set: string
   without: number

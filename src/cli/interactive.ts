@@ -1263,6 +1263,8 @@ export async function runInteractive(): Promise<void> {
           outcome: { verify: verifyResult, repairAttempts },
           cwd: process.cwd(),
           signal: controller.signal,
+          // Output of a `!cmd` run is carried into the request; it is not the user's words.
+          userWords: requestText.replace(/<local-command>[\s\S]*?<\/output>/g, ''),
           onReflecting: () => uiHooks?.onActivity?.({ kind: 'status', status: 'updated', title: 'Learning from this turn' }),
         })
         if (learned.usage) {

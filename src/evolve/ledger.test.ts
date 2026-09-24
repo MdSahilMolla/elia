@@ -89,3 +89,21 @@ test('learningRate handles empty and single-record ledgers without dividing by z
   expect(one.trend).toBe('unknown')
   expect(Number.isFinite(one.fitnessPerWallClockHour)).toBe(true)
 })
+
+test('a note added to a verdict is shown beside it, and errored generations are not a stall', async () => {
+  const { learningRate, renderLedgerForPrompt } = await import('./ledger.ts')
+  const { mkdtempSync, writeFileSync, rmSync } = await import('node:fs')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+  const dir = mkdtempSync(join(tmpdir(), 'elia-ledger-note-'))
+  try {
+    const record = { generation: 9, at: 1, hypothesis: 'shorter read_file', rationale: '', targetFiles: [], changedFiles: [], verdict: 'rejected', reason: 'regressed on x', model: 'm', note: 'that gate rejected on noise' }
+    writeFileSync(join(dir, 'ledger.jsonl'), `${JSON.stringify(record)}\n`)
+    const rendered = renderLedgerForPrompt(join(dir, 'ledger.jsonl'))
+    expect(rendered).toContain('regressed on x\n  NOTE: that gate rejected on noise')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+  const errored = (generation: number) => ({ generation, at: generation, hypothesis: '', rationale: '', targetFiles: [], changedFiles: [], verdict: 'error' as const, reason: 'Connection error.', model: 'm' })
+  expect(learningRate([errored(1), errored(2), errored(3)]).trend).toBe('unknown')
+})

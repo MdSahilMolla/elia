@@ -2,7 +2,7 @@ import { existsSync, readFileSync } from 'node:fs'
 import { writeSecureFile } from '../securePersistence.ts'
 import { paths, tierConfig } from '../config.ts'
 import type { ContentBlock } from '../providers/types.ts'
-import { loadLessons, retireLessons, rewriteLessons, type Lesson } from '../autonomy/lessons.ts'
+import { isUserStated, loadLessons, retireLessons, rewriteLessons, type Lesson } from '../autonomy/lessons.ts'
 import { loadNotes, rewriteNotes } from './notes.ts'
 
 /**
@@ -104,13 +104,17 @@ export async function consolidateBrain(options: ConsolidateOptions = {}): Promis
   // loser should stop riding along does not, and must not wait on one.
   const retired = retireLessons({ lessonsPath, efficacyPath: options.efficacyPath, outcomesPath: options.outcomesPath })
 
-  const lessons = loadLessons(lessonsPath)
+  // Rules the user set are not the model's to merge or reword: they pass
+  // through the rewrite exactly as stated. See isUserStated.
+  const all = loadLessons(lessonsPath)
+  const stated = all.filter(isUserStated)
+  const lessons = all.filter((lesson) => !isUserStated(lesson))
   const notes = loadNotes(notesPath)
   const skip = (reason: string): ConsolidationResult => ({
     changed: retired.retired.length > 0,
     reason: retired.retired.length > 0 ? `retired ${retired.retired.length} measured-harmful lesson(s); ${reason}` : reason,
     lessonsBefore,
-    lessonsAfter: lessons.length,
+    lessonsAfter: all.length,
     notesRemoved: 0,
     lessonsRetired: retired.retired.length > 0 ? retired.retired : undefined,
   })
@@ -156,17 +160,19 @@ export async function consolidateBrain(options: ConsolidateOptions = {}): Promis
   if (lessonsChanged) {
     const now = Date.now()
     const byText = new Map(lessons.map((l) => [l.text.toLowerCase(), l]))
-    const rewritten: Lesson[] = parsed.lessons.map((textLine) => ({
-      text: textLine,
-      at: byText.get(textLine.toLowerCase())?.at || now,
-    }))
-    rewriteLessons(rewritten, lessonsPath)
+    // A lesson the model kept word for word keeps its origin and confidence
+    // too; they used to be dropped here, and retirement prunes by origin.
+    const rewritten: Lesson[] = parsed.lessons.map((textLine) => {
+      const kept = byText.get(textLine.toLowerCase())
+      return { text: textLine, at: kept?.at || now, source: kept?.source, confidence: kept?.confidence }
+    })
+    rewriteLessons([...rewritten, ...stated], lessonsPath)
   }
   if (notesRemoved > 0) rewriteNotes(keptNotes, notesPath)
 
   markConsolidated(consolidatedAtPath)
 
-  const lessonsAfterModel = lessonsChanged ? parsed.lessons.length : lessons.length
+  const lessonsAfterModel = (lessonsChanged ? parsed.lessons.length : lessons.length) + stated.length
   const changed = lessonsChanged || notesRemoved > 0 || retired.retired.length > 0
   return {
     changed,

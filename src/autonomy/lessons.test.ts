@@ -383,3 +383,30 @@ test('retireLessons follows a randomized trial over the observational comparison
   for (let i = 0; i < 20; i += 1) recordLessonExposure(`s-${i}`, [key!], { verify: 'fail', clean: i % 4 === 0, heldOut: [] }, efficacyPath)
   expect(retireLessons({ lessonsPath: path, efficacyPath, outcomesPath }).retired).toEqual([])
 })
+
+test("a rule the user set is injected on every turn, under its own heading, and never withheld for a trial", () => {
+  appendLessons([{ text: 'Ask before pushing to any remote branch', source: 'user-correction', confidence: 0.9 }], path)
+  // Enough learned lessons that relevance ranking has to choose among them.
+  appendLessons(Array.from({ length: 30 }, (_, i) => ({ text: `the service ${i} fixture lives in fixtures/service-${i}.json`, source: 'interactive-auto' })), path)
+
+  // Every learned lesson is withheld, and the query shares no word with the rule.
+  const rendered = renderLessonsWithKeys('fix the flaky parser test', path, undefined, { rate: 1, random: () => 0 })
+  expect(rendered.text).toContain('## Rules the user has set for this project\nThe user asked for these directly. Follow them over any learned lesson below.\n- Ask before pushing to any remote branch')
+  expect(rendered.text).not.toContain('## What earlier runs learned')
+  expect(rendered.heldOut.length).toBe(24)
+  expect(rendered.keys).toEqual([loadLessons(path)[0]!.key!])
+  consumeInjectedLessonKeys()
+})
+
+test('retireLessons never retires a rule the user set, however the runs carrying it went', () => {
+  appendLessons(['filler one', 'filler two'], path)
+  appendLessons([{ text: 'Ask before pushing to any remote branch', source: 'user-correction' }], path)
+  const efficacyPath = join(dir, 'efficacy.jsonl')
+  const outcomesPath = join(dir, 'outcomes.jsonl')
+  const key = loadLessons(path).find((l) => l.source === 'user-correction')!.key!
+  for (let i = 0; i < 20; i += 1) appendTurn(outcomesPath, `ctrl-${i}`, true)
+  for (let i = 0; i < MIN_EXPOSURES; i += 1) recordLessonExposure(`run-${i}`, [key], { verify: 'fail', clean: false }, efficacyPath)
+
+  expect(retireLessons({ lessonsPath: path, efficacyPath, outcomesPath }).retired).toEqual([])
+  expect(loadLessons(path).map((l) => l.text)).toContain('Ask before pushing to any remote branch')
+})

@@ -215,3 +215,83 @@ test('a benchmark task never falls back to another provider', async () => {
   expect(env.ELIA_ROUTING_MODE).toBe('selected')
   expect(env.ELIA_PROVIDER).toBe('mercury')
 })
+
+const { measureFitness, outOfCredit } = await import('./fitness.ts')
+
+test('only an account out of credit counts as out of credit, not a rate limit', () => {
+  const base = { unmeasured: true as const }
+  expect(outOfCredit({ ...base, error: '402 {"error":{"code":"free_tier_quota_exceeded"}}' })).toBe(true)
+  expect(outOfCredit({ ...base, error: 'This request requires more credits' })).toBe(true)
+  expect(outOfCredit({ ...base, error: '429 rate limit exceeded' })).toBe(false)
+  expect(outOfCredit({ ...base, error: 'stale task: bunfig.toml preloads "@x/y"' })).toBe(false)
+  // A task the agent got wrong is never a reason to stop the sweep.
+  expect(outOfCredit({ error: '402 Payment Required' })).toBe(false)
+})
+
+test('once the provider is out of credit the rest of the sweep is not run, and none of it scores', async () => {
+  const tasks = ['t1', 't2', 't3'].map((id) => ({ id, weight: 1 })) as unknown as import('./task.ts').BenchTask[]
+  const ran: string[] = []
+  const card = await measureFitness({
+    sourceRoot: '/nowhere',
+    tasks,
+    concurrency: 1,
+    repeats: 3,
+    runTask: async (task) => {
+      ran.push(task.id)
+      const base = { taskId: task.id, weight: 1, detail: '', steps: 0, elapsedMs: 1, totalTokens: 0 }
+      return task.id === 't1' ? { ...base, passed: true, steps: 3 } : { ...base, passed: false, error: '402 requires more credits', unmeasured: true }
+    },
+  })
+  // t2's first attempt found the empty account; its other two and all of t3 never ran.
+  expect(ran).toEqual(['t1', 't1', 't1', 't2'])
+  expect(card.unmeasured).toEqual(['t2', 't3'])
+  expect(card.outcomes.find((outcome) => outcome.taskId === 't3')!.error).toContain('out of credit')
+  expect(card.passRate).toBe(1)
+})
+
+test('a repeated task carries the trace of the attempt it reports as failing', async () => {
+  const { aggregateAttempts, benchTaskEnv } = await import('./fitness.ts')
+  const base = { taskId: 't', weight: 1, detail: '', steps: 3, elapsedMs: 1, totalTokens: 1 }
+  const outcome = aggregateAttempts([
+    { ...base, passed: true, trace: 'a pass never has one' },
+    { ...base, passed: false, detail: 'wrong', trace: '1. edit_file … → ERROR' },
+    { ...base, passed: true },
+  ])
+  expect(outcome.trace).toBe('1. edit_file … → ERROR')
+  expect(aggregateAttempts([{ ...base, passed: true }, { ...base, passed: true }]).trace).toBeUndefined()
+  expect(benchTaskEnv({}, '/tmp/x.reach', '/tmp/x.trace').ELIA_BENCH_TRACE_OUT).toBe('/tmp/x.trace')
+  expect(benchTaskEnv({}, '/tmp/x.reach').ELIA_BENCH_TRACE_OUT).toBeUndefined()
+})
+
+test('a provider that stopped answering is infrastructure, although it also says "timed out"', async () => {
+  const { isInfrastructureFailure, retryDelayMs } = await import('./fitness.ts')
+  const loopGaveUp = { error: 'response stalled: nothing arrived for 120s (timed out)', steps: 3 }
+  const harnessStopped = { error: 'provider stalled: the model sent nothing for 60s or more before the task was stopped at 300000ms', steps: 0 }
+  expect(isInfrastructureFailure(loopGaveUp)).toBe(true)
+  expect(isInfrastructureFailure(harnessStopped)).toBe(true)
+  // The agent's own hang still scores.
+  expect(isInfrastructureFailure({ error: 'timed out after 300000ms', steps: 0 })).toBe(false)
+  expect([1, 2, 3, 4].map((attempt) => retryDelayMs(harnessStopped, attempt))).toEqual([30_000, 60_000, 120_000, undefined])
+})
+
+test('a pass rate up by less than noise is a tie, so a real saving can still win on it', () => {
+  // Generation 1's shape: one flaky task up a third, another down a third, and
+  // 8% fewer tokens — turned away before efficiency was ever looked at.
+  const baseline = metrics({ passRate: 0.96, passed: ['a', 'b'], failed: [], taskRates: { a: 2 / 3, b: 2 / 3 }, totalTokens: 100_000, totalElapsedMs: 60_000 })
+  const cheaper = metrics({ passRate: 0.97, passed: ['a'], failed: ['b'], taskRates: { a: 1, b: 1 / 3 }, totalTokens: 91_000, totalElapsedMs: 60_000 })
+  const result = compareScorecards(baseline, cheaper)
+  expect(result.better).toBe(true)
+  expect(result.reason).toContain('9% fewer tokens')
+  // No saving: still no promotion, and the reason says why.
+  const same = compareScorecards(baseline, { ...cheaper, totalTokens: 100_000 })
+  expect(same.better).toBe(false)
+  expect(same.reason).toContain('no task improved by more than run-to-run noise')
+  // A pass rate that fell is still refused whatever it saved.
+  expect(compareScorecards(baseline, { ...cheaper, passRate: 0.95 }).better).toBe(false)
+})
+
+test('a truncated stream or a dropped connection says nothing about the agent', async () => {
+  const { isInfrastructureFailure } = await import('./fitness.ts')
+  expect(isInfrastructureFailure({ error: 'missing finish_reason for choice 0', steps: 6 })).toBe(true)
+  expect(isInfrastructureFailure({ error: 'Connection error.', steps: 4 })).toBe(true)
+})

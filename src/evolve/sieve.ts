@@ -86,6 +86,8 @@ export interface RaceReport {
   skipped: string[]
   /** The task that settled an early verdict, when one did. */
   settledBy?: string
+  /** The baseline as compared, when a retest pooled rows into it (settleRegressions). */
+  baseline?: Metrics
   tokens: number
   elapsedMs: number
 }
@@ -101,6 +103,104 @@ export function regressionsIn(baseline: Metrics, outcomes: TaskOutcome[]): strin
     .filter((outcome) => !outcome.unmeasured)
     .filter((outcome) => (before[outcome.taskId] ?? 0) - rateOf(outcome) >= REAL_CHANGE)
     .map((outcome) => outcome.taskId)
+}
+
+/**
+ * Two measurements of one task, as one: attempts and passes summed, costs
+ * summed, and unmeasured if either side was.
+ */
+export function poolRows(first: TaskOutcome, second: TaskOutcome): TaskOutcome {
+  const attempts = (first.attempts ?? 1) + (second.attempts ?? 1)
+  const passes = (first.attempts ? (first.passes ?? 0) : first.passed ? 1 : 0) + (second.attempts ? (second.passes ?? 0) : second.passed ? 1 : 0)
+  const { keptDir: _keptDir, trace: _trace, error: _error, ...rest } = first
+  const failing = [second, first].find((row) => !row.passed)
+  const pooled: TaskOutcome = {
+    ...rest,
+    passed: passes * 2 >= attempts,
+    attempts,
+    passes,
+    detail: `${passes}/${attempts} attempts passed (pooled over a retest)`,
+    steps: Math.round((first.steps * (first.attempts ?? 1) + second.steps * (second.attempts ?? 1)) / attempts),
+    elapsedMs: first.elapsedMs + second.elapsedMs,
+    totalTokens: first.totalTokens + second.totalTokens,
+  }
+  delete pooled.unmeasured
+  if (failing?.error) pooled.error = failing.error
+  if (failing?.trace) pooled.trace = failing.trace
+  if (failing?.keptDir) pooled.keptDir = failing.keptDir
+  if (first.unmeasured || second.unmeasured) pooled.unmeasured = true
+  return pooled
+}
+
+export interface SettledRegressions {
+  /** Tasks that still regress with both sides pooled, or could not be re-measured. */
+  confirmed: string[]
+  candidateRows: TaskOutcome[]
+  baselineRows: TaskOutcome[]
+}
+
+/**
+ * A regression has to happen again before it rejects.
+ *
+ * Every task is a handful of attempts on each side, and the baseline side is
+ * often a row cached from one earlier sweep, so a coin-flip task hands whichever
+ * candidate draws low a "regression". The first run here showed it:
+ * field-external-contribution scored 0/3, 2/3, 1/3 and 0/3 across sweeps of
+ * unchanged code, and vetoed a candidate that shortened read_file's
+ * description — a change that cannot reach a git task — because the baseline
+ * row happened to hold 2/3.
+ *
+ * So each apparent regression is measured again on both trees, fresh, and the
+ * two sides are judged on their pooled attempts. A task a candidate really
+ * breaks fails again; one that cannot be re-measured stays a regression. The
+ * pooled rows replace the originals on both sides, so whatever is compared next
+ * compares like with like.
+ */
+export async function settleRegressions(options: {
+  regressed: string[]
+  tasks: BenchTask[]
+  candidateRoot: string
+  liveRoot?: string
+  candidateRows: TaskOutcome[]
+  baselineRows: TaskOutcome[]
+  repeats?: number
+  measure?: (options: MeasureOptions) => Promise<Scorecard>
+}): Promise<SettledRegressions> {
+  const measure = options.measure ?? measureFitness
+  const liveRoot = options.liveRoot ?? ELIA_ROOT
+  const candidate = new Map(options.candidateRows.map((row) => [row.taskId, row] as const))
+  const baseline = new Map(options.baselineRows.map((row) => [row.taskId, row] as const))
+  const confirmed: string[] = []
+  for (const id of options.regressed) {
+    const task = options.tasks.find((entry) => entry.id === id)
+    const before = baseline.get(id)
+    const after = candidate.get(id)
+    if (!task || !before || !after) {
+      confirmed.push(id)
+      continue
+    }
+    const repeats = options.repeats === undefined ? {} : { repeats: options.repeats }
+    const [again, baselineAgain] = await Promise.all([
+      measure({ sourceRoot: options.candidateRoot, tasks: [task], concurrency: 1, ...repeats }),
+      measure({ sourceRoot: liveRoot, tasks: [task], concurrency: 1, ...repeats }),
+    ])
+    const afterMore = again.outcomes[0]
+    const beforeMore = baselineAgain.outcomes[0]
+    if (!afterMore || !beforeMore || afterMore.unmeasured || beforeMore.unmeasured) {
+      confirmed.push(id)
+      continue
+    }
+    const pooledAfter = poolRows(after, afterMore)
+    const pooledBefore = poolRows(before, beforeMore)
+    candidate.set(id, pooledAfter)
+    baseline.set(id, pooledBefore)
+    if (rateOf(pooledBefore) - rateOf(pooledAfter) >= REAL_CHANGE) confirmed.push(id)
+  }
+  return {
+    confirmed,
+    candidateRows: options.candidateRows.map((row) => candidate.get(row.taskId) ?? row),
+    baselineRows: options.baselineRows.map((row) => baseline.get(row.taskId) ?? row),
+  }
 }
 
 function baselineRates(baseline: Metrics): Record<string, number> {
@@ -245,9 +345,14 @@ export async function raceCandidate(options: RaceOptions): Promise<RaceReport> {
     options.baselineOutcomes,
   )
 
-  const measured: TaskOutcome[] = []
+  let measured: TaskOutcome[] = []
   let settledBy: string | undefined
   let settledReason: string | undefined
+  // Retests pool rows into both sides; from then on the race is judged against
+  // the pooled baseline, so the two sides stay like for like.
+  let baseline = options.baseline
+  let baselineRows = options.baselineOutcomes
+  let retested = false
 
   for (let index = 0; index < ordered.length; index += concurrency) {
     if (options.signal?.aborted) break
@@ -270,11 +375,26 @@ export async function raceCandidate(options: RaceOptions): Promise<RaceReport> {
       break
     }
 
-    const regressions = regressionsIn(options.baseline, card.outcomes)
-    if (regressions.length > 0) {
-      settledBy = regressions[0]
-      settledReason = `regressed on ${regressions.join(', ')} — a task that passed before now fails${options.baseline.taskRates ? ' (by at least half its attempts)' : ''}`
-      break
+    const apparent = regressionsIn(baseline, card.outcomes)
+    if (apparent.length > 0) {
+      const settled = await settleRegressions({
+        regressed: apparent,
+        tasks: options.tasks,
+        candidateRoot: options.sourceRoot,
+        candidateRows: measured,
+        baselineRows,
+        measure,
+        ...(options.repeats === undefined ? {} : { repeats: options.repeats }),
+      })
+      measured = settled.candidateRows
+      baselineRows = settled.baselineRows
+      baseline = baselineFromRows(options.baseline, options.tasks, baselineRows)
+      retested = true
+      if (settled.confirmed.length > 0) {
+        settledBy = settled.confirmed[0]
+        settledReason = `regressed on ${settled.confirmed.join(', ')} — a task that passed before now fails${options.baseline.taskRates ? ' (by at least half its attempts, and again with both sides re-run)' : ''}`
+        break
+      }
     }
   }
 
@@ -297,11 +417,11 @@ export async function raceCandidate(options: RaceOptions): Promise<RaceReport> {
     options.sourceRoot,
     options.tasks,
     outcomes,
-    partial ? scaledWallClock(options.baseline, totalElapsedMs) : Date.now() - startedAt,
+    partial ? scaledWallClock(baseline, totalElapsedMs) : Date.now() - startedAt,
   )
   const comparison: Comparison = settledReason
     ? { better: false, reason: settledReason }
-    : compareScorecards(options.baseline, toMetrics(card))
+    : compareScorecards(baseline, toMetrics(card))
 
   return {
     card,
@@ -310,9 +430,20 @@ export async function raceCandidate(options: RaceOptions): Promise<RaceReport> {
     carried,
     skipped,
     ...(settledBy ? { settledBy } : {}),
+    ...(retested ? { baseline } : {}),
     tokens: measured.reduce((sum, outcome) => sum + outcome.totalTokens, 0),
     elapsedMs: Date.now() - startedAt,
   }
+}
+
+/**
+ * The baseline's metrics rebuilt from its rows after a retest pooled some of
+ * them, by the same arithmetic every card uses. Its wall clock scales with the
+ * summed task time, as a partial card's does.
+ */
+export function baselineFromRows(original: Metrics, tasks: BenchTask[], rows: TaskOutcome[]): Metrics {
+  const total = rows.reduce((sum, row) => sum + row.elapsedMs, 0)
+  return toMetrics(cardFromOutcomes(ELIA_ROOT, tasks, rows, scaledWallClock(original, total)))
 }
 
 /** One line for the operator: what the race cost against what the sweep would have. */

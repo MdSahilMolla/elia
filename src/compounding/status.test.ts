@@ -42,6 +42,23 @@ test('focus refuses without a complete full run that recorded its tasks', () => 
   expect(focusTaskIds(['x'], 2, [run({ unmeasured: 1, failed: [], passed: [] })])).toBeUndefined()
 })
 
+const { focusFromMeasured } = await import('./status.ts')
+
+test('before a full sweep finishes, focus comes from the history tasks it has measured so far', () => {
+  const measured = [
+    { taskId: 'precise-edit', passed: true },
+    { taskId: 'implement-to-spec', passed: false },
+    { taskId: 'hist-a', passed: true },
+    { taskId: 'hist-b', passed: false },
+    { taskId: 'hist-c', passed: true },
+    { taskId: 'hist-d', passed: true },
+  ]
+  expect(focusFromMeasured(['precise-edit', 'implement-to-spec'], 2, measured)).toEqual(['precise-edit', 'implement-to-spec', 'hist-b', 'hist-a', 'hist-c'])
+  // Built-in failures are already in the set; they do not stand in for history evidence.
+  expect(focusFromMeasured(['precise-edit', 'implement-to-spec'], 2, measured.slice(0, 2))).toBeUndefined()
+  expect(focusFromMeasured(['x'], 2, [])).toBeUndefined()
+})
+
 const { lessonStoreEffect } = await import('./status.ts')
 
 test('the lesson store effect pairs the latest complete runs of the same set', () => {

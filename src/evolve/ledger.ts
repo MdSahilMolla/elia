@@ -53,6 +53,12 @@ export type Verdict = 'promoted' | 'rejected' | 'error'
 export interface GenerationRecord {
   generation: number
   at: number
+  /**
+   * A later correction to how this verdict should be read, added by hand and
+   * shown beside it wherever the proposer reads the ledger. The verdict and
+   * reason stay exactly as recorded.
+   */
+  note?: string
   /** The one change this generation tried, in its own words. */
   hypothesis: string
   rationale: string
@@ -214,7 +220,7 @@ export function renderLedgerForPrompt(path = LEDGER_PATH): string {
   sections.push(
     rejected.length > 0
       ? `### Tried and rejected (do NOT propose these again unless you have a concretely different approach)\n${rejected
-          .map((record) => `- gen ${record.generation}: ${record.hypothesis} → ${record.verdict}: ${record.reason}`)
+          .map((record) => `- gen ${record.generation}: ${record.hypothesis} → ${record.verdict}: ${record.reason}${record.note ? `\n  NOTE: ${record.note}` : ''}`)
           .join('\n')}`
       : '### Tried and rejected\n(nothing yet)',
   )
@@ -280,7 +286,9 @@ function realizedGain(record: GenerationRecord): number {
 }
 
 export function learningRate(records: GenerationRecord[], window = LEARNING_WINDOW): LearningSignal {
-  const ordered = [...records].sort((a, b) => a.generation - b.generation)
+  // A generation that errored — a dropped network, a truncated stream — never
+  // reached a verdict, so it says nothing about whether the search is stalling.
+  const ordered = [...records].filter((r) => r.verdict !== 'error').sort((a, b) => a.generation - b.generation)
   const promotions = ordered.filter((r) => r.verdict === 'promoted').length
   const recent = ordered.slice(-window)
   const prior = ordered.slice(-window * 2, -window)

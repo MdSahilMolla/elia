@@ -8,8 +8,10 @@ import type { Metrics } from './ledger.ts'
 import { bold, dim, green, red } from '../ui/theme.ts'
 import { table } from '../ui/layout.ts'
 import { MAX_SHELL_OUTPUT_LENGTH, readBoundedOutput, terminateProcessGroup } from '../shell.ts'
+import { registerShutdownCleanup } from '../ui/shutdown.ts'
 import { ELIA_ROOT } from '../statePaths.ts'
 import { REACH_OUT_ENV, absorbReachFile } from './reach.ts'
+import { MODEL_SILENCE_MS, TRACE_OUT_ENV, readTrace, renderTrace, waitingOnModel } from './trace.ts'
 
 /**
  * Runs the benchmark suite against a given copy of elia's source and scores it.
@@ -59,6 +61,12 @@ export interface TaskOutcome {
   model?: string
   /** Kept on failure so the run can be inspected afterwards. */
   keptDir?: string
+  /**
+   * What the agent did on a failing attempt, one line per step (trace.ts).
+   * Unlike `keptDir` it survives the baseline cache, so the proposer still has
+   * it when the failure it is studying was not re-run.
+   */
+  trace?: string
   /** Execution stop classification returned by the child loop. */
   stopReason?: string
   /**
@@ -100,6 +108,8 @@ export interface MeasureOptions {
   /** Runs per task; the task's score is the fraction that passed. Default ELIA_BENCH_REPEATS, else 1. */
   repeats?: number
   onTaskDone?: (outcome: TaskOutcome) => void
+  /** Runs one attempt of one task, retries included. Tests stand in for the real agent here. */
+  runTask?: (task: BenchTask, sourceRoot: string) => Promise<TaskOutcome>
 }
 
 /**
@@ -162,9 +172,11 @@ export function aggregateAttempts(attempts: TaskOutcome[]): TaskOutcome {
   }
   delete aggregated.error
   delete aggregated.keptDir
+  delete aggregated.trace
   delete aggregated.unmeasured
   if (failing?.error) aggregated.error = failing.error
   if (failing?.keptDir) aggregated.keptDir = failing.keptDir
+  if (failing?.trace) aggregated.trace = failing.trace
   if (unmeasured) aggregated.unmeasured = true
   return aggregated
 }
@@ -174,17 +186,45 @@ function taskScore(outcome: TaskOutcome): number {
   return outcome.attempts ? (outcome.passes ?? 0) / outcome.attempts : outcome.passed ? 1 : 0
 }
 
+/**
+ * Ends a task's agent process if this one is stopped first.
+ *
+ * A signal stops `elia bench` or `elia evolve` through `process.exit`, which
+ * runs no pending `finally` — so the task processes they had spawned carried
+ * on running their agent loops, spending the provider's quota, with nobody
+ * left to read the result. Stopping a sweep left two of them going, still
+ * competing with whatever measured next. Returns the unregister, for when the
+ * task ends on its own.
+ */
+export function killOnShutdown(proc: Bun.Subprocess): () => void {
+  return registerShutdownCleanup(() => terminateProcessGroup(proc))
+}
+
 export async function measureFitness(options: MeasureOptions): Promise<Scorecard> {
   const tasks = options.tasks ?? BENCH_TASKS
   const startedAt = Date.now()
 
   const repeats = options.repeats ?? benchRepeats()
+  const runTask = options.runTask ?? runTaskWithRetry
+  // Once the provider says the account is out of credit, every task after it
+  // would set up its repository, fail the same way, and do it `repeats` times.
+  // Those tasks are left unmeasured without running; the baseline cache keeps
+  // what did run, so the next sweep starts from here.
+  let exhausted: string | undefined
   const outcomes = await runWithConcurrencyLimit(
     tasks,
     options.concurrency ?? benchConcurrency(),
     async (task) => {
       const attempts: TaskOutcome[] = []
-      for (let attempt = 0; attempt < repeats; attempt++) attempts.push(await runTaskWithRetry(task, options.sourceRoot))
+      for (let attempt = 0; attempt < repeats; attempt++) {
+        if (exhausted !== undefined) {
+          attempts.push(notRun(task, exhausted))
+          break
+        }
+        const result = await runTask(task, options.sourceRoot)
+        attempts.push(result)
+        if (outOfCredit(result)) exhausted ??= result.error
+      }
       const outcome = aggregateAttempts(attempts)
       options.onTaskDone?.(outcome)
       return outcome
@@ -247,7 +287,7 @@ export function cardFromOutcomes(sourceRoot: string, tasks: BenchTask[], outcome
  * result into every future generation. So an infrastructure failure is retried; a
  * wrong answer never is.
  */
-const INFRASTRUCTURE_ERROR = /server had an error|rate.?limit|overloaded|ECONNRESET|ETIMEDOUT|fetch failed|502|503|529/i
+const INFRASTRUCTURE_ERROR = /server had an error|rate.?limit|overloaded|ECONNRESET|ETIMEDOUT|fetch failed|502|503|529|missing finish_reason|connection error/i
 
 /**
  * Errors no retry will fix inside one benchmark run: the account is out of
@@ -256,8 +296,37 @@ const INFRASTRUCTURE_ERROR = /server had an error|rate.?limit|overloaded|ECONNRE
  */
 const PERMANENT_INFRASTRUCTURE_ERROR = /\b402\b|requires more credits|free tier limit|insufficient.?(credit|quota|funds)|quota exceeded|preload not found|stale task/i
 
+/** The account itself is out of credit — unlike a rate limit, waiting inside this run will not bring it back. */
+const OUT_OF_CREDIT = /\b402\b|requires more credits|free.?tier.?(?:limit|quota)|insufficient.?(?:credit|quota|funds)/i
+
+export function outOfCredit(outcome: Pick<TaskOutcome, 'error' | 'unmeasured'>): boolean {
+  return Boolean(outcome.unmeasured && outcome.error && OUT_OF_CREDIT.test(outcome.error))
+}
+
+function notRun(task: BenchTask, why: string): TaskOutcome {
+  return {
+    taskId: task.id,
+    weight: task.weight,
+    passed: false,
+    detail: 'not run',
+    steps: 0,
+    elapsedMs: 0,
+    totalTokens: 0,
+    error: `not run: the provider is out of credit (${why.slice(0, 200)})`,
+    unmeasured: true,
+  }
+}
+
+/**
+ * The model stopped sending — reported by the loop's own idle check, or found by
+ * the harness in the trace of a run it had to stop (trace.ts `waitingOnModel`).
+ * Both messages say "timed out" too, which is why this is asked first.
+ */
+const PROVIDER_STALLED = /response stalled|provider stalled/i
+
 export function isInfrastructureFailure(outcome: Pick<TaskOutcome, 'error' | 'steps'>): boolean {
   if (!outcome.error) return false
+  if (PROVIDER_STALLED.test(outcome.error)) return true
   // A hang is the candidate's own fault and must be allowed to score as a failure,
   // even though it also reports zero steps.
   if (/timed out/i.test(outcome.error)) return false
@@ -282,6 +351,10 @@ export function retryDelayMs(outcome: Pick<TaskOutcome, 'error' | 'steps'>, atte
   // (3.5 minutes) still left mercury's quota window closed while a second task
   // shared it, and one unmeasured task voids a whole evolve comparison.
   if (RATE_LIMITED.test(outcome.error ?? '')) return attempt <= 5 ? Math.min(30_000 * 2 ** (attempt - 1), 240_000) : undefined
+  // A stalling provider stalls for minutes (the one seen went quiet for about
+  // thirteen), and each stalled attempt has already spent its whole timeout
+  // finding out — so three spaced waits, not five, then unmeasured.
+  if (PROVIDER_STALLED.test(outcome.error ?? '')) return attempt <= 3 ? 30_000 * 2 ** (attempt - 1) : undefined
   return attempt <= 1 ? 2000 * attempt : undefined
 }
 
@@ -294,8 +367,8 @@ export function retryDelayMs(outcome: Pick<TaskOutcome, 'error' | 'steps'>, atte
  * it happened to get. A provider that cannot answer is an unmeasured task,
  * never a different one.
  */
-export function benchTaskEnv(env: Record<string, string | undefined>, reachOut: string): Record<string, string | undefined> {
-  return { ...env, [REACH_OUT_ENV]: reachOut, ELIA_ROUTING_MODE: 'selected' }
+export function benchTaskEnv(env: Record<string, string | undefined>, reachOut: string, traceOut?: string): Record<string, string | undefined> {
+  return { ...env, [REACH_OUT_ENV]: reachOut, ...(traceOut ? { [TRACE_OUT_ENV]: traceOut } : {}), ELIA_ROUTING_MODE: 'selected' }
 }
 
 async function runTaskWithRetry(task: BenchTask, sourceRoot: string): Promise<TaskOutcome> {
@@ -342,12 +415,17 @@ async function runOneTask(task: BenchTask, sourceRoot: string): Promise<TaskOutc
     // the thing that watches which of its files ran. The output goes beside the
     // task's repository, never inside it, so no check ever sees it.
     const reachOut = `${dir}.reach`
+    // The agent's steps, for the proposer if this attempt fails (trace.ts).
+    // Beside the repository for the same reason.
+    const traceOut = `${dir}.trace`
+    const spawnedAt = Date.now()
     const proc = Bun.spawn(['bun', 'run', '--preload', join(ELIA_ROOT, 'src', 'evolve', 'reachRecorder.ts'), entry, task.id], {
       cwd: dir,
       stdout: 'pipe',
       stderr: 'pipe',
-      env: benchTaskEnv(process.env, reachOut),
+      env: benchTaskEnv(process.env, reachOut, traceOut),
     })
+    const releaseOnShutdown = killOnShutdown(proc)
 
     let timedOut = false
     const taskTimeoutMs = timeoutFor(task)
@@ -368,6 +446,7 @@ async function runOneTask(task: BenchTask, sourceRoot: string): Promise<TaskOutc
       completed = true
     } finally {
       clearTimeout(timeout)
+      releaseOnShutdown()
       if (!completed) terminateProcessGroup(proc)
     }
 
@@ -382,9 +461,18 @@ async function runOneTask(task: BenchTask, sourceRoot: string): Promise<TaskOutc
     // `reach.ts` cannot be safe in, so it is refused at the source.
     if (run && !run.error && !timedOut) absorbReachFile(task.id, reachOut, sourceRoot)
     rmSync(reachOut, { force: true })
+    const events = readTrace(traceOut)
+    rmSync(traceOut, { force: true })
+    const rendered = renderTrace(events)
+    const trace = rendered ? { trace: rendered } : {}
 
     if (timedOut) {
-      return { ...base, error: `timed out after ${taskTimeoutMs}ms`, detail: 'agent did not finish', keptDir: dir }
+      // Stopped while the model had been silent for a minute or more: the
+      // provider's stall, retried and never scored (trace.ts).
+      const error = waitingOnModel(events, spawnedAt, Date.now())
+        ? `provider stalled: the model sent nothing for ${Math.round(MODEL_SILENCE_MS / 1000)}s or more before the task was stopped at ${taskTimeoutMs}ms`
+        : `timed out after ${taskTimeoutMs}ms`
+      return { ...base, error, detail: 'agent did not finish', keptDir: dir, ...trace }
     }
     if (!run) {
       return {
@@ -392,6 +480,7 @@ async function runOneTask(task: BenchTask, sourceRoot: string): Promise<TaskOutc
         error: `no result from agent process: ${(stderr || stdout).slice(-400).trim() || 'no output'}`,
         detail: 'agent process produced no parsable result',
         keptDir: dir,
+        ...trace,
       }
     }
 
@@ -413,10 +502,11 @@ async function runOneTask(task: BenchTask, sourceRoot: string): Promise<TaskOutc
 
     // A passing task's temp dir is disposable; a failing one is evidence.
     if (check.passed) rmSync(dir, { recursive: true, force: true })
-    else outcome.keptDir = dir
+    else Object.assign(outcome, { keptDir: dir }, trace)
 
     return outcome
   } catch (err) {
+    rmSync(`${dir}.trace`, { force: true })
     return {
       ...base,
       error: err instanceof Error ? err.message : String(err),
@@ -538,15 +628,21 @@ export function compareScorecards(baseline: Metrics, candidate: Metrics): Compar
     }
   }
 
-  if (candidate.passRate > baseline.passRate + 1e-9) {
-    return { better: false, reason: `pass rate ${pct(baseline.passRate)} → ${pct(candidate.passRate)}, but no task improved by more than run-to-run noise` }
-  }
-
   if (candidate.passRate < baseline.passRate) {
     return { better: false, reason: `pass rate fell ${pct(baseline.passRate)} → ${pct(candidate.passRate)}` }
   }
 
   // Tied on correctness — allow a clear efficiency win, and nothing less.
+  //
+  // A pass rate that rose without any task moving past noise is a tie too.
+  // This used to be a rejection of its own, before efficiency was looked at,
+  // so a candidate that happened to score a hair *better* was held to a
+  // stricter bar than one that scored the same: generation 1 of the first run
+  // on this machine ran 8% fewer tokens and 15% less agent time, and was
+  // turned away because one flaky task went 2/3 → 3/3 while another went
+  // 2/3 → 1/3. Whether such a saving is real is the confirmation pair's to
+  // decide, not luck in the pass rate's last digit.
+  const noiseRise = candidate.passRate > baseline.passRate + 1e-9 ? ', no task improved by more than run-to-run noise' : ''
   const tokenDelta = relativeChange(baseline.totalTokens, candidate.totalTokens)
   // Wall clock is the user-visible metric for parallel autonomous work. Older
   // ledger records do not have it, so they safely fall back to summed task time.
@@ -554,16 +650,19 @@ export function compareScorecards(baseline: Metrics, candidate: Metrics): Compar
   const candidateTime = candidate.wallClockMs ?? candidate.totalElapsedMs
   const timeDelta = relativeChange(baselineTime, candidateTime)
 
+  const sameRate = noiseRise ? `pass rate ${pct(baseline.passRate)} → ${pct(candidate.passRate)}${noiseRise}` : 'same pass rate'
   if (tokenDelta <= -EFFICIENCY_MARGIN && timeDelta < EFFICIENCY_MARGIN) {
-    return { better: true, reason: `same pass rate, ${pct(-tokenDelta)} fewer tokens` }
+    return { better: true, reason: `${sameRate}, ${pct(-tokenDelta)} fewer tokens` }
   }
   if (timeDelta <= -EFFICIENCY_MARGIN && tokenDelta < EFFICIENCY_MARGIN) {
-    return { better: true, reason: `same pass rate, ${pct(-timeDelta)} faster` }
+    return { better: true, reason: `${sameRate}, ${pct(-timeDelta)} faster` }
   }
 
   return {
     better: false,
-    reason: `no measurable improvement (pass rate unchanged at ${pct(candidate.passRate)}, tokens ${signed(tokenDelta)}, time ${signed(timeDelta)})`,
+    reason: noiseRise
+      ? `no measurable improvement (${sameRate}; tokens ${signed(tokenDelta)}, time ${signed(timeDelta)})`
+      : `no measurable improvement (pass rate unchanged at ${pct(candidate.passRate)}, tokens ${signed(tokenDelta)}, time ${signed(timeDelta)})`,
   }
 }
 

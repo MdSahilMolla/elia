@@ -33,13 +33,14 @@ export function funnelScore(record: Pick<GenerationRecord, 'funnel' | 'verdict'>
   return (FUNNEL.indexOf(record.funnel) + 1) / FUNNEL.length
 }
 
-export const DEFAULT_STRATEGY_ID = 'default-v1'
+export const DEFAULT_STRATEGY_ID = 'default-v2'
 
 export const DEFAULT_STRATEGY = `- Start from the evidence. A task that FAILED tells you far more than any amount of reading — go and understand why it failed before proposing anything.
 - Change one thing. A hypothesis touching four files cannot be attributed when the score moves, and it will not be promoted if any part of it regresses.
 - Prefer changes to how you *decide* over changes to how you *execute*: the system prompt, the role prompts, the planner's guidance, the tool descriptions the model reads, the loop's policy on when to batch or delegate. These compound, because they also improve the next attempt at improving yourself.
 - Tool descriptions are prompt, not documentation. A tool the model misuses is usually a tool whose description does not say when to reach for it.
-- Do not propose speculative rewrites, new abstractions for their own sake, or "clean up X". If you cannot name the benchmark task that gets better and say how, it is not a hypothesis.`
+- When every task you are shown passes, a fix has nothing to fix: cost is the only way left to win. Start from what every step of every task pays for ("Where the tokens go" in your brief) and make it smaller without losing anything. Totals swing by about 8% between runs of the same code, and a win has to clear 5% twice, so a saving that is not well above 10% will read as noise — and a change that adds text every call must send moves the wrong way.
+- Do not propose speculative rewrites, new abstractions for their own sake, or "clean up X". If you cannot name the benchmark task that gets better — or the cost every task pays that gets smaller — and say how, it is not a hypothesis.`
 
 export interface Strategy {
   id: string
@@ -108,8 +109,18 @@ export interface StrategyTrial {
   verdict: 'no challenger' | 'running' | 'adopt' | 'reject'
 }
 
+/**
+ * Generations that reached a verdict. One that errored — the network dropped,
+ * a stream came back truncated — is evidence about the provider, not the
+ * strategy: the first run here wrote itself a new strategy after two outages
+ * and a rejection, and the strategy it wrote was built on those outages.
+ */
+function judged(records: GenerationRecord[]): GenerationRecord[] {
+  return records.filter((record) => record.verdict !== 'error')
+}
+
 function arm(id: string, records: GenerationRecord[]): StrategyArm {
-  const mine = records.filter((record) => (record.strategyId ?? DEFAULT_STRATEGY_ID) === id)
+  const mine = judged(records).filter((record) => (record.strategyId ?? DEFAULT_STRATEGY_ID) === id)
   return {
     id,
     generations: mine.length,
@@ -162,7 +173,7 @@ export function settleStrategyTrial(records: GenerationRecord[], paths = strateg
 /** When the search should write itself a challenger: none on trial, and the last few generations banked nothing. */
 export function shouldProposeChallenger(records: GenerationRecord[], paths = strategyPaths(), window = 3): boolean {
   if (challengerStrategy(paths)) return false
-  const recent = [...records].sort((a, b) => a.generation - b.generation).slice(-window)
+  const recent = judged(records).sort((a, b) => a.generation - b.generation).slice(-window)
   return recent.length === window && recent.every((record) => record.verdict !== 'promoted')
 }
 

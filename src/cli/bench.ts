@@ -166,26 +166,51 @@ export async function runBench(): Promise<void> {
     return
   }
 
+  // One measurement per checkout at a time — see measureSlot.ts.
+  const { claimMeasureSlot, describeHolder } = await import('../evolve/measureSlot.ts')
+  const slot = claimMeasureSlot(`elia ${process.argv.slice(2).join(' ')}`)
+  if (!slot.ok) {
+    writeError(describeHolder(slot.holder))
+    process.exitCode = 1
+    return
+  }
+  try {
+    await scoreLiveTree(tasks, withLessons, shownHalf, heldOutHalf)
+  } finally {
+    slot.release()
+  }
+}
+
+async function scoreLiveTree(
+  tasks: import('../evolve/suite.ts').BenchTask[],
+  withLessons: boolean,
+  shownHalf: boolean,
+  heldOutHalf: boolean,
+): Promise<void> {
   if (!(await ensureFirstRunProviderSetup())) return
   await loadRuntimeSkills()
   const { measureFitness, renderScorecard } = await import('../evolve/fitness.ts')
-  const { ELIA_ROOT } = await import('../config.ts')
+  const { ELIA_ROOT, config } = await import('../config.ts')
 
   writeNotice(`Scoring the current elia against ${tasks.length} benchmark tasks — this runs real agent loops.`)
-  const card = await measureFitness({
-    tasks,
-    sourceRoot: ELIA_ROOT,
-    onTaskDone: (outcome) =>
-      writeUsageLine(`  ${outcome.passed ? '✓' : '✗'} ${outcome.taskId} — ${outcome.error ?? outcome.detail}`),
-  })
+  const onTaskDone = (outcome: import('../evolve/fitness.ts').TaskOutcome) =>
+    writeUsageLine(`  ${outcome.passed ? '✓' : '✗'} ${outcome.taskId} — ${outcome.error ?? outcome.detail}`)
   // A plain bench of the live tree is exactly the baseline `elia evolve` opens
-  // by measuring, so remember it there: otherwise the next evolve pays for the
-  // same few hundred agent runs again before it has a hypothesis. The lesson
-  // store changes what the agent sees, so those runs are not that baseline.
-  if (!withLessons) {
-    const { baselineCacheEnabled, rememberBaselines } = await import('../evolve/baselineCache.ts')
-    const { config } = await import('../config.ts')
-    if (baselineCacheEnabled()) rememberBaselines(card.outcomes, ELIA_ROOT, config.model)
+  // by measuring, so it shares that baseline: each result is kept as it lands,
+  // and a task whose code and model have not changed since it was scored is not
+  // paid for twice. That is what lets a sweep larger than one quota window
+  // finish — run it again and it picks up where it stopped. `--fresh` re-runs
+  // everything. The lesson store changes what the agent sees, so those runs are
+  // neither served from that baseline nor written into it.
+  let card: import('../evolve/fitness.ts').Scorecard
+  if (withLessons) card = await measureFitness({ tasks, sourceRoot: ELIA_ROOT, onTaskDone })
+  else {
+    const { measureLiveTree } = await import('../evolve/baselineCache.ts')
+    const measured = await measureLiveTree({ tasks, sourceRoot: ELIA_ROOT, model: config.model, onTaskDone, reuse: !hasFlag('--fresh') })
+    card = measured.card
+    if (measured.reused > 0) {
+      writeNotice(`${measured.reused} of ${tasks.length} task(s) were reused: same code, same model, scored in the last week. \`--fresh\` re-runs them.`)
+    }
   }
   const { recordBenchRun } = await import('../compounding/status.ts')
   // The half is part of the set's name. A held-out-only run scores a different

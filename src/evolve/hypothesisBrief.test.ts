@@ -85,3 +85,47 @@ test('the brief never throws when every log is missing', () => {
   expect(() => hypothesisBrief(SANDBOX, METRICS)).not.toThrow()
   expect(empty).toBeTruthy()
 })
+
+test('the proposer sees what the agent did on a failing task, and only for the first few', async () => {
+  const { renderFailureEvidence } = await import('./engine.ts')
+  const failing = (id: string) => ({ taskId: id, weight: 1, passed: false, detail: 'nothing was pushed', steps: 19, elapsedMs: 1, totalTokens: 1, stopReason: 'step-budget', trace: `1. run_command {"command":"git clone"} → ok: ${id}` })
+  const brief = renderFailureEvidence(['a', 'b', 'c', 'd', 'e'].map(failing))
+  expect(brief).toContain('- a (19 steps, stopped: step-budget): nothing was pushed')
+  expect(brief).toContain('    1. run_command {"command":"git clone"} → ok: a')
+  expect(brief).toContain('→ ok: d')
+  // Every proposer step re-sends the brief; a fifth trace is paid for thirty times.
+  expect(brief).not.toContain('→ ok: e')
+  expect(brief).toContain('- e (19 steps')
+})
+
+test('the proposer is told the rule it is judged by, and that efficiency is all that is left when everything shown passes', async () => {
+  const { winningRuleSection } = await import('./engine.ts')
+  const saturated = winningRuleSection({ ...METRICS, passed: ['a', 'b'], failed: [], taskRates: { a: 1, b: 1 } })
+  expect(saturated).toContain('at least 5% fewer tokens')
+  expect(saturated).toContain('efficiency is the way to win')
+  // With a failure on show, a fix is still the obvious route, so no steer.
+  expect(winningRuleSection({ ...METRICS, taskRates: { a: 1, b: 2 / 3 } })).not.toContain('efficiency is the way to win')
+})
+
+test('the proposer sees what every model call pays for, and that dropping a tool is not a saving', async () => {
+  const { tokenCostSection } = await import('./engine.ts')
+  const tool = (name: string, description: string) => ({ name, description, input_schema: { type: 'object' as const, properties: {} } })
+  const owners = { small: 'src/tools/small.ts', huge: 'src/tools/huge.ts', github: 'src/tools/github.ts' }
+  const section = tokenCostSection('p'.repeat(4_000), [tool('small', 'x'), tool('huge', 'y'.repeat(4_000)), tool('github', 'z')], owners)
+  expect(section).toContain('about 1000 tokens')
+  expect(section).toContain('definitions of 3 tools')
+  // Editable ones are listed with their file, largest first; a locked one is named as locked.
+  expect(section).toContain('huge ~1020 (src/tools/huge.ts)')
+  expect(section.indexOf('huge ~')).toBeLessThan(section.indexOf('small ~'))
+  expect(section).toContain('Locked (safety boundaries you may not edit): github.')
+  expect(section).toContain('Removing a tool, or putting it out of reach, is not')
+})
+
+test('a tool is placed where it is defined, not where it is mentioned', async () => {
+  const { toolOwners } = await import('./engine.ts')
+  const owners = toolOwners(join(import.meta.dir, '..', '..'))
+  // preview.ts asks the governor about run_command before runCommand.ts, in
+  // alphabetical order, defines it; the locked file is the right answer.
+  expect(owners.run_command).toBe('src/tools/runCommand.ts')
+  expect(owners.read_file).toBe('src/tools/readFile.ts')
+})

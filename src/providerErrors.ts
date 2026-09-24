@@ -118,8 +118,11 @@ export function isConnectionError(message: string): boolean {
 const CONNECTION_ERROR =
   /connection error|fetch failed|unable to connect|ECONNREFUSED|ECONNRESET|ENOTFOUND|EAI_AGAIN|ETIMEDOUT|ENETUNREACH|EHOSTUNREACH|network (?:error|is unreachable)|socket connection was closed unexpectedly/i
 
+// `missing finish_reason` is the OpenAI SDK's word for a stream that closed
+// before its last chunk: mercury did it mid-build and ended an evolve
+// generation outright, where asking again would have answered.
 const TRANSIENT_SERVER_ERROR =
-  /overloaded|temporarily unavailable|service unavailable|server had an error|internal server error|bad gateway|gateway time-?out|\b(?:500|502|503|504|529)\b|ECONNRESET|socket hang up|connection (?:was )?(?:closed|reset|terminated)|response stalled/i
+  /overloaded|temporarily unavailable|service unavailable|server had an error|internal server error|bad gateway|gateway time-?out|\b(?:500|502|503|504|529)\b|ECONNRESET|socket hang up|connection (?:was )?(?:closed|reset|terminated)|response stalled|missing finish_reason/i
 
 /**
  * How long to wait before re-attempting a capacity failure.

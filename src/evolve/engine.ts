@@ -1,6 +1,6 @@
-import { readFileSync } from 'node:fs'
+import { readFileSync, readdirSync, statSync } from 'node:fs'
 import { join } from 'node:path'
-import { ELIA_ROOT, config } from '../config.ts'
+import { DEV_SYSTEM_PROMPT, ELIA_ROOT, config } from '../config.ts'
 import { runAgentLoop, type ConversationMessage } from '../agentLoop.ts'
 import { runSubAgent } from '../subagent.ts'
 import { allWorkerTools } from '../tools/registry.ts'
@@ -32,7 +32,7 @@ import {
   type Scorecard,
   type TaskOutcome,
 } from './fitness.ts'
-import { raceCandidate, renderRace, sieveEnabled } from './sieve.ts'
+import { raceCandidate, regressionsIn, renderRace, settleRegressions, sieveEnabled } from './sieve.ts'
 import {
   blindEvidence,
   blindMetrics,
@@ -44,7 +44,7 @@ import {
   type TaskSplit,
 } from './split.ts'
 import { hasReachEvidence, measurableAreas } from './reach.ts'
-import { baselineCacheEnabled, lookupBaselines, rememberBaselines } from './baselineCache.ts'
+import { measureLiveTree } from './baselineCache.ts'
 import {
   IMMUTABLE_FILES,
   changedFiles,
@@ -59,9 +59,10 @@ import {
   type Sandbox,
 } from './sandbox.ts'
 import { candidateTools } from './candidateTools.ts'
-import { gapVectorIn, valueProbesIn } from './measureTree.ts'
+import { gapVectorIn, toolNamesIn, valueProbesIn } from './measureTree.ts'
+import { removedTools } from './toolSurface.ts'
 import { checkGapNotRegressed } from '../gap/guard.ts'
-import { checkValueDrift, recordProbeRun } from '../values/drift.ts'
+import { checkValueDrift, confirmValueDrift, recordProbeRun } from '../values/drift.ts'
 import { allBenchTasks, type BenchTask } from './suite.ts'
 import {
   incumbentStrategy,
@@ -100,7 +101,14 @@ import { applySteppingStone, archiveNearMiss, elites, readArchive, renderSteppin
  */
 
 const HYPOTHESIS_MAX_STEPS = 30
-const GATE_TIMEOUT_MS = 300_000
+/** Further runs of a candidate's value probes before a one-sample drift rejects it. */
+const VALUE_RETESTS = 2
+/**
+ * Typecheck and unit tests in the sandbox. The suite takes about 90s on an idle
+ * machine and took 239s with a benchmark running beside it; practice runs in
+ * the background while someone works, so a busy machine is the normal case.
+ */
+const GATE_TIMEOUT_MS = 600_000
 
 export interface Hypothesis {
   title: string
@@ -230,29 +238,11 @@ export async function evolve(options: EvolveOptions = {}): Promise<EvolveResult>
  * by default and `ELIA_BASELINE_CACHE=off` goes back to measuring every time.
  */
 async function measureBaseline(tasks: BenchTask[]): Promise<Scorecard> {
-  const startedAt = Date.now()
   const report = (outcome: TaskOutcome) =>
     outcome.passed ? writePass(`${outcome.taskId} — ${outcome.detail}`) : writeFail(`${outcome.taskId} — ${outcome.error ?? outcome.detail}`)
-
-  if (!baselineCacheEnabled()) {
-    return measureFitness({ sourceRoot: ELIA_ROOT, tasks, onTaskDone: report })
-  }
-
-  const { hits, misses } = lookupBaselines(tasks.map((task) => task.id), ELIA_ROOT, config.model)
-  if (hits.length > 0) writeSubStep(`${hits.length} of ${tasks.length} baseline task(s) unchanged since they were last scored — reused`)
-  for (const hit of hits) report(hit)
-
-  const toMeasure = tasks.filter((task) => misses.includes(task.id))
-  const measured = toMeasure.length > 0 ? await measureFitness({ sourceRoot: ELIA_ROOT, tasks: toMeasure, onTaskDone: report }) : undefined
-  if (measured) rememberBaselines(measured.outcomes, ELIA_ROOT, config.model)
-
-  const outcomes = [...hits, ...(measured?.outcomes ?? [])]
-  // A card made partly of remembered rows cannot report the wall clock it did
-  // not spend, and the whole point is that it did not spend it. The summed task
-  // durations are what the tasks cost when they last ran, which is the honest
-  // stand-in and the number `compareScorecards` falls back to.
-  const wallClockMs = hits.length === 0 ? Date.now() - startedAt : outcomes.reduce((sum, outcome) => sum + outcome.elapsedMs, 0)
-  return cardFromOutcomes(ELIA_ROOT, tasks, outcomes, wallClockMs)
+  const { card, reused } = await measureLiveTree({ tasks, sourceRoot: ELIA_ROOT, model: config.model, onTaskDone: report })
+  if (reused > 0) writeSubStep(`${reused} of ${tasks.length} baseline task(s) unchanged since they were last scored — reused`)
+  return card
 }
 
 async function runGeneration(
@@ -409,6 +399,8 @@ async function attemptGeneration(
     verbose: true,
     maxSteps: HYPOTHESIS_MAX_STEPS,
     signal: options.signal,
+    // One hypothesis is the whole output; nothing after it is used.
+    finishAfterTool: 'submit_hypothesis',
   })
 
   const hypothesis = capture.taken()
@@ -500,15 +492,43 @@ async function attemptGeneration(
   base.funnel = 'compiled'
 
   if (unitTests.exitCode !== 0) {
-    writeFail('unit tests failed')
-    return {
-      ...base,
-      verdict: 'rejected',
-      reason: `unit tests fail:\n${clampOutput(unitTests.stderr || unitTests.stdout, 800)}`,
+    // A failing file has to fail again on its own before it rejects. Generation
+    // 7 of the first run here — shorter descriptions for three tools — was
+    // turned away by presentation.test.ts, which the change never touched,
+    // timing out at 151s on a machine running a benchmark beside it. A file
+    // the candidate really broke fails again; a list that cannot be read, or a
+    // retry that fails, keeps the rejection.
+    const files = failingTestFiles(`${unitTests.stdout}\n${unitTests.stderr}`)
+    const retry = files.length > 0 ? await runShell(`bun test ${files.map((file) => `'${file}'`).join(' ')}`, GATE_TIMEOUT_MS, sandbox.root) : undefined
+    if (retry?.exitCode !== 0) {
+      writeFail('unit tests failed')
+      const output = retry ? `${retry.stderr || retry.stdout}` : `${unitTests.stderr || unitTests.stdout}`
+      return {
+        ...base,
+        verdict: 'rejected',
+        reason: `unit tests fail${retry ? ' (and again when re-run on their own)' : ''}:\n${clampOutput(output, 800)}`,
+      }
     }
+    writeSubStep(`${files.join(', ')} failed in the full run and passed on their own — a flake, not this change`)
   }
   writePass('unit tests')
   base.funnel = 'tested'
+
+  // Cheaper by owning fewer tools is not cheaper: no benchmark task calls most
+  // of them, so the loss would never show up in a score (toolSurface.ts).
+  // Checked before the benchmark, so a candidate that does it costs no runs.
+  const [liveSurface, candidateSurface] = await Promise.all([toolNamesIn(ELIA_ROOT, options.signal), toolNamesIn(sandbox.root, options.signal)])
+  if (!liveSurface || !candidateSurface) {
+    const reason = 'could not read the tools each tree gives its agent — refusing to measure a candidate that may have dropped some'
+    writeFail(`rejected: ${reason}`)
+    return { ...base, verdict: 'rejected', reason }
+  }
+  const dropped = removedTools(liveSurface, candidateSurface)
+  if (dropped.length > 0) {
+    const reason = `removed tools the agent is given (${dropped.join(', ')}) — a capability no benchmark task uses is still a capability; describe a tool in fewer tokens instead of taking it away`
+    writeFail(`rejected: ${reason}`)
+    return { ...base, verdict: 'rejected', reason }
+  }
 
   // --- Measure the candidate, using the candidate ---------------------------
 
@@ -521,6 +541,9 @@ async function attemptGeneration(
   let comparison: Comparison
   let evidenceCost: EvidenceCost | undefined
   let ranTaskIds: string[] = []
+  // The baseline as the race compared it: pooled, when a retest settled an
+  // apparent regression (sieve.ts), so the recorded verdicts use the same numbers.
+  let comparedBaseline = baseline
   const onBenchTask = (outcome: TaskOutcome) =>
     outcome.passed ? writePass(`${outcome.taskId} — ${outcome.detail}`) : writeFail(`${outcome.taskId} — ${outcome.error ?? outcome.detail}`)
 
@@ -538,6 +561,7 @@ async function attemptGeneration(
       })
       candidateCard = race.card
       comparison = race.comparison
+      if (race.baseline) comparedBaseline = race.baseline
       ranTaskIds = race.ran
       evidenceCost = {
         tasksRun: race.ran.length,
@@ -591,7 +615,7 @@ async function attemptGeneration(
   // legacy rule, or both make the call.
   const gate = gateMode()
   const comparisonIndex = readLedger().filter((record) => record.candidate).length + 1
-  const sealed = sealedCompare(baseline, candidate, { index: comparisonIndex })
+  const sealed = sealedCompare(comparedBaseline, candidate, { index: comparisonIndex })
   base.sealed = sealedRecord(sealed, gate)
   writeSubStep(`sealed gate (${gate === 'legacy' ? 'recorded only' : 'deciding'}): ${sealed.bit} — ${sealed.reason}`)
   const decisionReason = gate === 'sealed' ? sealed.reason : comparison.reason
@@ -609,12 +633,28 @@ async function attemptGeneration(
   // winner must reproduce its result independently before it can touch live code.
   // Reverse the order on confirmation to avoid consistently favoring the second run.
   writeSubStep('provisional win — running an independent confirmation pair')
-  // The two sweeps are independent full measurements — run them concurrently and
+// The two sweeps are independent full measurements — run them concurrently and
   // keep the binding order, so the fairness note above still holds.
-  const [confirmationCandidateCard, confirmationBaselineCard] = await Promise.all([
+  let [confirmationCandidateCard, confirmationBaselineCard] = await Promise.all([
     measureFitness({ sourceRoot: sandbox.root, tasks }),
     measureFitness({ sourceRoot: ELIA_ROOT, tasks }),
   ])
+  // Two fresh sweeps of a coin-flip task disagree by half their attempts about
+  // one time in nine; an apparent regression is re-run on both trees and the
+  // pair judged on pooled attempts (sieve.ts settleRegressions).
+  const apparent = regressionsIn(toMetrics(confirmationBaselineCard), confirmationCandidateCard.outcomes)
+  if (apparent.length > 0) {
+    writeSubStep(`${apparent.join(', ')} fell on the confirmation run — re-running it on both trees before it counts`)
+    const settled = await settleRegressions({
+      regressed: apparent,
+      tasks,
+      candidateRoot: sandbox.root,
+      candidateRows: confirmationCandidateCard.outcomes,
+      baselineRows: confirmationBaselineCard.outcomes,
+    })
+    confirmationCandidateCard = cardFromOutcomes(sandbox.root, tasks, settled.candidateRows, confirmationCandidateCard.wallClockMs)
+    confirmationBaselineCard = cardFromOutcomes(ELIA_ROOT, tasks, settled.baselineRows, confirmationBaselineCard.wallClockMs)
+  }
   const confirmationBaseline = toMetrics(confirmationBaselineCard)
   const confirmationCandidate = toMetrics(confirmationCandidateCard)
   const confirmation = compareScorecards(confirmationBaseline, confirmationCandidate)
@@ -687,7 +727,21 @@ async function attemptGeneration(
     writeSubStep(`sandbox kept at ${sandbox.root} if you want to inspect it`)
     return { ...base, verdict: 'rejected', reason }
   }
-  const valueGuard = checkValueDrift(baselineProbes, candidateProbes)
+  let valueGuard = checkValueDrift(baselineProbes, candidateProbes)
+  if (!valueGuard.ok) {
+    // One judged sample per probe flips on identical code, so a drift has to
+    // happen again before it rejects (values/drift.ts confirmValueDrift). A
+    // retest that cannot run leaves the first verdict standing.
+    writeSubStep(`value drift on one sample (${valueGuard.regressions.join('; ')}) — asking the candidate ${VALUE_RETESTS} more times before it counts`)
+    const retests: NonNullable<Awaited<ReturnType<typeof valueProbesIn>>>[] = []
+    for (let index = 0; index < VALUE_RETESTS; index++) {
+      const retest = await valueProbesIn(sandbox.root, { signal: options.signal })
+      if (!retest) break
+      retests.push(retest)
+    }
+    if (retests.length === VALUE_RETESTS) valueGuard = confirmValueDrift(baselineProbes, candidateProbes, retests)
+    if (valueGuard.ok) writeSubStep('the drift did not happen again — noise, not a change in values')
+  }
   if (!valueGuard.ok) {
     const reason = `value drift: ${valueGuard.regressions.join('; ')}`
     writeFail(`rejected: ${reason}`)
@@ -773,12 +827,17 @@ Be honest about mechanism. "Improve the prompt to be clearer" is not a hypothesi
 
 /** How many failing tasks' details go into the brief — enough to pick from, not a transcript dump. */
 const MAX_EVIDENCE_TASKS = 8
+/** Traces are the long part of the brief, and every proposer step re-sends it. */
+const MAX_TRACED_TASKS = 4
 
 export function renderFailureEvidence(evidence: TaskOutcome[]): string {
   if (evidence.length === 0) return ''
-  const lines = evidence.slice(0, MAX_EVIDENCE_TASKS).map((outcome) => {
+  const lines = evidence.slice(0, MAX_EVIDENCE_TASKS).map((outcome, index) => {
     const bits = [`- ${outcome.taskId} (${outcome.steps} steps${outcome.stopReason ? `, stopped: ${outcome.stopReason}` : ''}): ${outcome.error ?? outcome.detail}`]
     if (outcome.keptDir) bits.push(`  its final state is kept at ${outcome.keptDir} — read it to see what the agent actually did`)
+    if (outcome.trace && index < MAX_TRACED_TASKS) {
+      bits.push(`  what the agent did on a failing attempt:\n${outcome.trace.split('\n').map((line) => `    ${line}`).join('\n')}`)
+    }
     return bits.join('\n')
   })
   const more = evidence.length > MAX_EVIDENCE_TASKS ? `\n(${evidence.length - MAX_EVIDENCE_TASKS} more not shown)` : ''
@@ -802,6 +861,8 @@ Passing: ${baseline.passed.join(', ') || '(none)'}
 FAILING: ${failing}
 Observed model steps: ${baseline.steps ? Object.entries(baseline.steps).map(([id, steps]) => `${id}=${steps}`).join(', ') : '(not recorded)'}
 Cost of one full run: ${baseline.totalTokens} tokens, ${Math.round(baseline.totalElapsedMs / 1000)}s of agent time.${renderFailureEvidence(evidence)}${fieldEvidenceSection()}
+${winningRuleSection(baseline)}
+${tokenCostSection()}
 
 ## What you may not change
 These files define how you are judged or enforce deterministic safety boundaries, and editing them is an automatic rejection:
@@ -814,6 +875,113 @@ ${measurableSection(baseline)}
 ${redactHeldOut(renderLedgerForPrompt(), heldOutIds)}${redactHeldOut(renderSteppingStones(elites(readArchive(EVOLUTION_DIR))), heldOutIds)}
 
 Investigate, then submit exactly one hypothesis.`
+}
+
+/**
+ * The test files `bun test` reported a failure in: each file's results follow
+ * a `path.test.ts:` line, and a failure is a `(fail)` line under it. Paths are
+ * kept only when they look like a test file inside the tree, since they go
+ * back onto a command line.
+ */
+export function failingTestFiles(output: string): string[] {
+  const files = new Set<string>()
+  let current: string | undefined
+  for (const line of output.split(/\r?\n/)) {
+    const header = /^([\w./@-]+\.test\.[cm]?[jt]sx?):\s*$/.exec(line.trim())
+    if (header) current = header[1]
+    else if (line.trim().startsWith('(fail)') && current && !current.startsWith('/') && !current.includes('..')) files.add(current)
+  }
+  return [...files].sort()
+}
+
+/**
+ * The rule a candidate is judged by, stated where the proposer reads it.
+ *
+ * The brief used to point at suite.ts for what "better" means, but the tasks
+ * only say what passes; the rule that turns two scorecards into a verdict is
+ * `compareScorecards`, which the proposer was never shown. The first run on
+ * this machine had every shown task passing, so the one way left to win was
+ * efficiency — and both of its proposals added text to the system prompt,
+ * which every model call pays for.
+ */
+export function winningRuleSection(baseline: Metrics): string {
+  const rates: Record<string, number> = baseline.taskRates ?? Object.fromEntries([...baseline.passed.map((id) => [id, 1]), ...baseline.failed.map((id) => [id, 0])])
+  const headroom = Object.values(rates).some((rate) => rate < 1)
+  return `
+## How a candidate wins
+Each task runs several times; its score is the fraction that passed, and it only counts as moving when that changes by at least half its attempts.
+- Any task that falls by that much rejects the candidate, whatever else improved.
+- A task that rises by that much, with no regression, wins.
+- Otherwise the pass rate is a tie, and the candidate wins only by using at least 5% fewer tokens (without taking 5% longer), or at least 5% less time (without using 5% more tokens).
+- A provisional win is measured again, in full, on both trees; it must win again.
+${headroom ? '' : '\nEvery task you are shown passes every attempt, so a tie is the best a correctness change can do here: efficiency is the way to win.\n'}`
+}
+
+/**
+ * What every model call pays before the conversation starts, measured from this
+ * tree's own prompt and tool definitions (about four characters to a token).
+ *
+ * Measured on 2026-09-24: about 3.6k tokens of system prompt and 14k of
+ * definitions for 50 tools went out on every step of every task — about 80% of
+ * a step's input, for tools like github, browser and finance that no coding
+ * task calls. The proposer could not see that, and aimed elsewhere.
+ */
+export function tokenCostSection(
+  prompt = DEV_SYSTEM_PROMPT,
+  tools: Pick<Tool, 'name' | 'description' | 'input_schema'>[] = allWorkerTools(),
+  owners: Record<string, string> = toolOwners(ELIA_ROOT),
+): string {
+  const tokens = (chars: number) => Math.round(chars / 4)
+  const sizes = tools.map((tool) => {
+    const file = owners[tool.name]
+    return { name: tool.name, file, locked: file ? isImmutablePath(file) : false, chars: JSON.stringify({ name: tool.name, description: tool.description, input_schema: tool.input_schema }).length }
+  })
+  const toolChars = sizes.reduce((sum, tool) => sum + tool.chars, 0)
+  const editable = sizes.filter((tool) => tool.file && !tool.locked)
+  const editableChars = editable.reduce((sum, tool) => sum + tool.chars, 0)
+  const largest = [...editable].sort((a, b) => b.chars - a.chars).slice(0, 10)
+  const locked = sizes.filter((tool) => tool.locked).map((tool) => tool.name)
+  const share = Math.round((toolChars / (toolChars + prompt.length)) * 100)
+  return `
+## Where the tokens go
+Every model call sends, before any conversation: the system prompt (src/config.ts DEV_SYSTEM_PROMPT, about ${tokens(prompt.length)} tokens) and the definitions of ${tools.length} tools (about ${tokens(toolChars)} tokens, ${share}% of that fixed cost). A task takes several calls, so this is paid again on every step.
+Of those definitions, about ${tokens(editableChars)} tokens are in files you may change. Largest of those: ${largest.map((tool) => `${tool.name} ~${tokens(tool.chars)} (${tool.file})`).join(', ')}.${locked.length > 0 ? `
+Locked (safety boundaries you may not edit): ${locked.join(', ')}.` : ''}
+A definition is its description and its input schema, property descriptions included. One tool's worth is about one percent of a call; a saving the benchmark can see has to be several times that.
+Making elia cheaper is a real improvement. Removing a tool, or putting it out of reach, is not: it is a capability loss the benchmark cannot see, and it is not an acceptable way to win. Every tool must stay usable by a task that needs it.`
+}
+
+/**
+ * Which source file defines each tool: the first file under src/ with a
+ * `name: '…'` literal followed by its `description`. A heuristic, good enough to tell the
+ * proposer which definitions it may edit; a tool it cannot place is simply not
+ * listed as editable.
+ */
+export function toolOwners(root: string): Record<string, string> {
+  const owners: Record<string, string> = {}
+  const walk = (relative: string): void => {
+    let entries: string[]
+    try {
+      entries = readdirSync(join(root, relative))
+    } catch {
+      return
+    }
+    for (const entry of entries.sort()) {
+      const path = `${relative}/${entry}`
+      try {
+        if (statSync(join(root, path)).isDirectory()) walk(path)
+        else if (path.endsWith('.ts') && !path.endsWith('.test.ts')) {
+          // A definition, not a mention: the name is followed by its description.
+          for (const match of readFileSync(join(root, path), 'utf8').matchAll(/\bname:\s*['"]([a-z][a-z0-9_]*)['"],?\s*description\s*:/g)) owners[match[1]!] ??= path
+        }
+      } catch {
+        // An unreadable file owns nothing.
+      }
+    }
+  }
+  walk('src/tools')
+  walk('src')
+  return owners
 }
 
 /**

@@ -153,3 +153,37 @@ test('retires a measured-harmful lesson even when the consolidation model call f
   expect(result.lessonsRetired).toEqual(['this one makes runs worse'])
   expect(result.reason).toContain('retired 1')
 })
+
+test("the model never sees a rule the user set, it survives verbatim, and kept lessons keep their origin", async () => {
+  writeFileSync(
+    lessonsPath,
+    [
+      '# Lessons',
+      '',
+      '- run the tests with bun, not node <!-- 2026-01-01T00:00:00Z source=interactive-auto confidence=0.70 -->',
+      '- the test runner is bun <!-- 2026-01-02T00:00:00Z source=interactive-auto -->',
+      '- the http client lives in src/http.ts <!-- 2026-01-03T00:00:00Z source=subagent confidence=0.70 -->',
+      '- Never push to a remote without asking first <!-- 2026-01-04T00:00:00Z source=user-correction confidence=0.90 -->',
+      '',
+    ].join('\n'),
+  )
+  let sent = ''
+  config.tiers.fast.provider = {
+    async streamTurn({ messages, onText }) {
+      sent = (messages[0]!.content[0] as { text: string }).text
+      const response = JSON.stringify({ lessons: ['Run tests with bun, not node', 'the http client lives in src/http.ts'], removeNotes: [] })
+      onText(response)
+      return { content: [{ type: 'text', text: response }] as ContentBlock[], usage: { inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 } }
+    },
+  }
+
+  const result = await consolidateBrain({ ...opts(), force: true })
+  expect(sent).not.toContain('Never push')
+  expect(result.lessonsBefore).toBe(4)
+  expect(result.lessonsAfter).toBe(3)
+  const after = loadLessons(lessonsPath)
+  expect(after.map((l) => l.text)).toEqual(['Run tests with bun, not node', 'the http client lives in src/http.ts', 'Never push to a remote without asking first'])
+  expect(after[1]).toMatchObject({ source: 'subagent', confidence: 0.7 })
+  expect(after[2]).toMatchObject({ source: 'user-correction', confidence: 0.9 })
+  expect(after[2]!.at).toBe(Date.parse('2026-01-04T00:00:00Z'))
+})
