@@ -398,6 +398,8 @@ async function attemptGeneration(
     verbose: true,
     maxSteps: HYPOTHESIS_MAX_STEPS,
     signal: options.signal,
+    // One hypothesis is the whole output; nothing after it is used.
+    finishAfterTool: 'submit_hypothesis',
   })
 
   const hypothesis = capture.taken()

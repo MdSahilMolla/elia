@@ -69,7 +69,9 @@ export async function proposeChallengerStrategy(generation: number, signal?: Abo
   const readOnly = allWorkerTools().filter((tool) => ['read_file', 'list_files', 'grep'].includes(tool.name))
   const messages: ConversationMessage[] = [{ role: 'user', content: [{ type: 'text', text: brief(incumbentStrategy()) }] }]
   try {
-    await runAgentLoop({ messages, systemPrompt: META_PROMPT, tools: [...readOnly, submit], onText: writeText, useAnimation: true, verbose: true, maxSteps: META_MAX_STEPS, signal })
+    // Ends on the first accepted strategy: the first run here asked for one and
+    // got thirteen submissions, each overwriting the last and each paid for.
+    await runAgentLoop({ messages, systemPrompt: META_PROMPT, tools: [...readOnly, submit], onText: writeText, useAnimation: true, verbose: true, maxSteps: META_MAX_STEPS, signal, finishAfterTool: 'submit_strategy' })
   } catch (err) {
     writeSubStep(`could not write a new strategy: ${err instanceof Error ? err.message : String(err)}`)
     return undefined
