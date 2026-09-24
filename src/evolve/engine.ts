@@ -632,13 +632,15 @@ async function attemptGeneration(
   // can manufacture an efficiency "win" from sampling variance, so a provisional
   // winner must reproduce its result independently before it can touch live code.
   // Reverse the order on confirmation to avoid consistently favoring the second run.
+  //
+  // One sweep after the other, not both at once: `ELIA_BENCH_CONCURRENCY` is how
+  // many agent loops run against the provider at a time, and two concurrent
+  // sweeps double it behind the person's back — a per-minute token cap set to 1
+  // would see 2, and the split quota leaves tasks unmeasured (measureSlot.ts).
+  // Raising ELIA_BENCH_CONCURRENCY is the way to spend more of the provider.
   writeSubStep('provisional win — running an independent confirmation pair')
-// The two sweeps are independent full measurements — run them concurrently and
-  // keep the binding order, so the fairness note above still holds.
-  let [confirmationCandidateCard, confirmationBaselineCard] = await Promise.all([
-    measureFitness({ sourceRoot: sandbox.root, tasks }),
-    measureFitness({ sourceRoot: ELIA_ROOT, tasks }),
-  ])
+  let confirmationCandidateCard = await measureFitness({ sourceRoot: sandbox.root, tasks })
+  let confirmationBaselineCard = await measureFitness({ sourceRoot: ELIA_ROOT, tasks })
   // Two fresh sweeps of a coin-flip task disagree by half their attempts about
   // one time in nine; an apparent regression is re-run on both trees and the
   // pair judged on pooled attempts (sieve.ts settleRegressions).
