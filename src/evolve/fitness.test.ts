@@ -273,3 +273,19 @@ test('a provider that stopped answering is infrastructure, although it also says
   expect(isInfrastructureFailure({ error: 'timed out after 300000ms', steps: 0 })).toBe(false)
   expect([1, 2, 3, 4].map((attempt) => retryDelayMs(harnessStopped, attempt))).toEqual([30_000, 60_000, 120_000, undefined])
 })
+
+test('a pass rate up by less than noise is a tie, so a real saving can still win on it', () => {
+  // Generation 1's shape: one flaky task up a third, another down a third, and
+  // 8% fewer tokens — turned away before efficiency was ever looked at.
+  const baseline = metrics({ passRate: 0.96, passed: ['a', 'b'], failed: [], taskRates: { a: 2 / 3, b: 2 / 3 }, totalTokens: 100_000, totalElapsedMs: 60_000 })
+  const cheaper = metrics({ passRate: 0.97, passed: ['a'], failed: ['b'], taskRates: { a: 1, b: 1 / 3 }, totalTokens: 91_000, totalElapsedMs: 60_000 })
+  const result = compareScorecards(baseline, cheaper)
+  expect(result.better).toBe(true)
+  expect(result.reason).toContain('9% fewer tokens')
+  // No saving: still no promotion, and the reason says why.
+  const same = compareScorecards(baseline, { ...cheaper, totalTokens: 100_000 })
+  expect(same.better).toBe(false)
+  expect(same.reason).toContain('no task improved by more than run-to-run noise')
+  // A pass rate that fell is still refused whatever it saved.
+  expect(compareScorecards(baseline, { ...cheaper, passRate: 0.95 }).better).toBe(false)
+})

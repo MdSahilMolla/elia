@@ -611,15 +611,21 @@ export function compareScorecards(baseline: Metrics, candidate: Metrics): Compar
     }
   }
 
-  if (candidate.passRate > baseline.passRate + 1e-9) {
-    return { better: false, reason: `pass rate ${pct(baseline.passRate)} → ${pct(candidate.passRate)}, but no task improved by more than run-to-run noise` }
-  }
-
   if (candidate.passRate < baseline.passRate) {
     return { better: false, reason: `pass rate fell ${pct(baseline.passRate)} → ${pct(candidate.passRate)}` }
   }
 
   // Tied on correctness — allow a clear efficiency win, and nothing less.
+  //
+  // A pass rate that rose without any task moving past noise is a tie too.
+  // This used to be a rejection of its own, before efficiency was looked at,
+  // so a candidate that happened to score a hair *better* was held to a
+  // stricter bar than one that scored the same: generation 1 of the first run
+  // on this machine ran 8% fewer tokens and 15% less agent time, and was
+  // turned away because one flaky task went 2/3 → 3/3 while another went
+  // 2/3 → 1/3. Whether such a saving is real is the confirmation pair's to
+  // decide, not luck in the pass rate's last digit.
+  const noiseRise = candidate.passRate > baseline.passRate + 1e-9 ? ', no task improved by more than run-to-run noise' : ''
   const tokenDelta = relativeChange(baseline.totalTokens, candidate.totalTokens)
   // Wall clock is the user-visible metric for parallel autonomous work. Older
   // ledger records do not have it, so they safely fall back to summed task time.
@@ -627,16 +633,19 @@ export function compareScorecards(baseline: Metrics, candidate: Metrics): Compar
   const candidateTime = candidate.wallClockMs ?? candidate.totalElapsedMs
   const timeDelta = relativeChange(baselineTime, candidateTime)
 
+  const sameRate = noiseRise ? `pass rate ${pct(baseline.passRate)} → ${pct(candidate.passRate)}${noiseRise}` : 'same pass rate'
   if (tokenDelta <= -EFFICIENCY_MARGIN && timeDelta < EFFICIENCY_MARGIN) {
-    return { better: true, reason: `same pass rate, ${pct(-tokenDelta)} fewer tokens` }
+    return { better: true, reason: `${sameRate}, ${pct(-tokenDelta)} fewer tokens` }
   }
   if (timeDelta <= -EFFICIENCY_MARGIN && tokenDelta < EFFICIENCY_MARGIN) {
-    return { better: true, reason: `same pass rate, ${pct(-timeDelta)} faster` }
+    return { better: true, reason: `${sameRate}, ${pct(-timeDelta)} faster` }
   }
 
   return {
     better: false,
-    reason: `no measurable improvement (pass rate unchanged at ${pct(candidate.passRate)}, tokens ${signed(tokenDelta)}, time ${signed(timeDelta)})`,
+    reason: noiseRise
+      ? `no measurable improvement (${sameRate}; tokens ${signed(tokenDelta)}, time ${signed(timeDelta)})`
+      : `no measurable improvement (pass rate unchanged at ${pct(candidate.passRate)}, tokens ${signed(tokenDelta)}, time ${signed(timeDelta)})`,
   }
 }
 
