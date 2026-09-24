@@ -68,6 +68,31 @@ export function gamma(value: number): number {
 }
 `
 
+/**
+ * Where two versions of a file first part ways, for a failure message.
+ *
+ * `precise-edit` is judged byte-for-byte, so a run that sets every limit right
+ * and reformats one line fails — and the limits alone cannot say why. Quoted
+ * with JSON escapes so a tab, a `\r` or trailing spaces are visible, and clipped
+ * so one long line cannot swamp the detail the proposer is briefed on.
+ */
+export function firstDifference(expected: string, found: string, clip = 80): string {
+  if (expected === found) return 'no difference'
+  const quote = (line: string) => JSON.stringify(line.length > clip ? `${line.slice(0, clip)}…` : line)
+  const expectedLines = expected.split('\n')
+  const foundLines = found.split('\n')
+  if (expectedLines.length !== foundLines.length && expected.replace(/\n+$/, '') === found.replace(/\n+$/, '')) {
+    return 'only the trailing newline differs'
+  }
+  for (let index = 0; index < Math.max(expectedLines.length, foundLines.length); index++) {
+    const want = expectedLines[index]
+    const got = foundLines[index]
+    if (want === got) continue
+    return `line ${index + 1}: expected ${want === undefined ? '(end of file)' : quote(want)}, found ${got === undefined ? '(end of file)' : quote(got)}`
+  }
+  return 'no difference'
+}
+
 const RENAME_UTILS = `export function computeTotal(items: number[]): number {
   return items.reduce((sum, item) => sum + item, 0)
 }
@@ -268,6 +293,13 @@ const SYNTHETIC_BENCH_TASKS: BenchTask[] = [
       if (content === expected) return { passed: true, detail: 'only beta changed, byte-for-byte' }
 
       const limits = [...content.matchAll(/const limit = (\d+)/g)].map((match) => match[1])
+      // The right limits in the wrong bytes: say so, or the detail reads like a pass.
+      if (limits.join(',') === '100,250,100') {
+        return {
+          passed: false,
+          detail: `limits are right [100,250,100], but the file is not byte-for-byte what was asked — ${firstDifference(expected, content)}`,
+        }
+      }
       return {
         passed: false,
         detail: `expected limits [100,250,100], found [${limits.join(',')}]${content === PRECISE_EDIT_SOURCE ? ' (file unchanged)' : ''}`,
