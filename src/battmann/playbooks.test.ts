@@ -44,6 +44,16 @@ function serveAll(options: { gdeltDown?: boolean } = {}): void {
       const rows = [row(0, 5e9), row(156, 2e9), row(490, 1.4e9), row(410, 8e8)]
       return json({ data: partner === null ? rows : rows.filter((item) => String(item.partnerCode) === partner) })
     }
+    if (url.hostname === 'api.imf.org') {
+      const codes = url.pathname.split('/').at(-1)!.split('.')[1]!.split('+')
+      const obs = Array.from({ length: 36 }, (_, index) => { const date = new Date(Date.UTC(2023, 8 + index, 1)); return `<Obs TIME_PERIOD="${date.getUTCFullYear()}-M${String(date.getUTCMonth() + 1).padStart(2, '0')}" OBS_VALUE="${100 + index}"/>` }).join('')
+      return new Response(`<message:StructureSpecificData><message:DataSet UPDATE_DATE="2026-09-08T18:42:56Z">${codes.map((code) => `<Series COUNTRY="G001" INDICATOR="${code}" DATA_TRANSFORMATION="USD" FREQUENCY="M">${obs}</Series>`).join('')}</message:DataSet></message:StructureSpecificData>`, { status: 200 })
+    }
+    if (url.hostname === 'wits.worldbank.org') {
+      if (url.pathname.includes('/country/ALL')) return new Response('<wits:country countrycode="356" isreporter="1" ispartner="1" isgroup="No"><wits:iso3Code>IND</wits:iso3Code></wits:country>', { status: 200 })
+      const products = url.pathname.split('/product/')[1]!.split('/')[0]!.split(';')
+      return json({ dataSets: [{ series: Object.fromEntries(products.map((_, index) => [`0:0:${index}:0:0`, { observations: { 0: [index * 5, 0, null, 0] } }])) }], structure: { dimensions: { series: [{ id: 'FREQ', values: [{ id: 'A' }] }, { id: 'REPORTER', values: [{ id: '356' }] }, { id: 'PARTNER', values: [{ id: '000' }] }, { id: 'PRODUCTCODE', values: products.map((id) => ({ id })) }, { id: 'DATATYPE', values: [{ id: 'Reported' }] }] }, attributes: { observation: [{ id: 'NOMENCODE', values: [{ id: 'H6' }] }, { id: 'EXCLUDEDFROM', values: [] }, { id: 'TARIFFTYPE', values: [{ name: 'Most Favoured Nation Tariff' }] }] } } })
+    }
     if (options.gdeltDown) return new Response('Please limit requests to one every 5 seconds', { status: 429 })
     return json({ timeline: [{ data: [{ date: '20260901T000000Z', value: 10, norm: 1000 }] }] })
   }

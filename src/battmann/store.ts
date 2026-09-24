@@ -5,7 +5,7 @@ import { dirname, extname } from 'node:path'
 import { currentAgent, resolveWorkspacePath } from '../autonomy/context.ts'
 import { ensureSecureDirectory, hardenSecureFile } from '../securePersistence.ts'
 import { describeFeedResult, feedRequestKey, type FeedRequest, type FeedResult } from './feeds.ts'
-import { describeRule, forecastCutoff, validateResolutionRule, type Baseline, type Evaluation, type ResolutionRule } from './resolution.ts'
+import { describeRule, forecastCutoff, ruleSeriesKey, validateResolutionRule, type Baseline, type Evaluation, type ResolutionRule } from './resolution.ts'
 
 const DEFAULT_STORE_PATH = '.elia/battmann.sqlite'
 const ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$/
@@ -599,17 +599,22 @@ function submitForecast(input: Row): Row {
     const question = db.query('SELECT * FROM questions WHERE id = ?').get(questionId) as Row | null
     if (!question) throw new Error(`unknown question id: ${questionId}`)
     if (question.status !== 'open') throw new Error(`question ${questionId} is not open`)
-    const asOf = observedDate(input.asOf, 'asOf')
+    // Certified questions are scored on physical time: the clock stamps the forecast (a supplied asOf cannot
+    // backdate it), and nothing is accepted after the forecasting cutoff.
+    const certified = Boolean(question.resolution_rule_json)
+    const clock = new Date().toISOString()
+    if (certified && clock > String(question.horizon)) throw new Error(`question ${questionId} closed for forecasting at ${question.horizon}`)
+    const asOf = certified ? clock : observedDate(input.asOf, 'asOf')
     if (asOf < String(question.opened_at) || asOf > String(question.horizon)) throw new Error('forecast asOf must be between question openedAt and horizon')
-    const forecaster = requiredText(input.forecaster, 'forecaster', 200)
+    const forecaster = optionalText(input.forecaster, 'forecaster', 200) ?? 'elia'
     if (/^baseline/i.test(forecaster)) throw new Error('the "baseline" forecaster is reserved for the statistical baseline elia computes itself')
-    if (question.resolution_rule_json) {
-      // Certified questions are scored on physical time: no forecast after the cutoff, and none backdated.
-      const now = Date.now()
-      if (now > Date.parse(String(question.horizon))) throw new Error(`question ${questionId} closed for forecasting at ${question.horizon}`)
-      if (Math.abs(now - Date.parse(asOf)) > 60 * 60_000) throw new Error('a forecast on a rule-resolved question must be logged as of now; set asOf to the current time')
+    let evidenceIds = stringArray(input.evidenceIds, 'evidenceIds', 100).map((id, index) => identifier(id, `evidenceIds[${index}]`))
+    let evidenceAttached: string | undefined
+    if (!evidenceIds.length && certified) {
+      // A certified question's own feed series is always evidence for a forecast on it.
+      const latest = db.query('SELECT evidence_id FROM indicator_readings WHERE indicator_id = ? AND evidence_id IS NOT NULL ORDER BY observed_at DESC LIMIT 1').get(ruleSeriesKey(JSON.parse(String(question.resolution_rule_json)) as ResolutionRule)) as Row | null
+      if (latest) evidenceIds = [evidenceAttached = String(latest.evidence_id)]
     }
-    const evidenceIds = stringArray(input.evidenceIds, 'evidenceIds', 100).map((id, index) => identifier(id, `evidenceIds[${index}]`))
     assertEvidence(db, evidenceIds, asOf)
     const previous = db.query('SELECT id, revision FROM forecast_revisions WHERE question_id = ? ORDER BY revision DESC LIMIT 1').get(questionId) as Row | null
     const revision = previous ? Number(previous.revision) + 1 : 1
@@ -620,7 +625,10 @@ function submitForecast(input: Row): Row {
     db.query('INSERT INTO forecast_revisions (id, question_id, revision, probability, prior_probability, as_of, method, model, forecaster, rationale, evidence_ids_json, forecast_class, parent_revision_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(
       forecastId, questionId, revision, value, prior, asOf, requiredText(input.method, 'method', 500), optionalText(input.model, 'model', 300) ?? null, forecaster, requiredText(input.rationale, 'rationale', 10_000), JSON.stringify([...new Set(evidenceIds)]), forecastClass, previous ? String(previous.id) : null, new Date().toISOString(),
     )
-    return { status: 'recorded', storePath: path, forecastId, questionId, revision, probability: value, forecastClass, parentRevisionId: previous?.id ?? null }
+    return {
+      status: 'recorded', storePath: path, forecastId, questionId, revision, probability: value, forecastClass, parentRevisionId: previous?.id ?? null, asOf, forecaster,
+      ...(certified ? { asOfSetBy: 'clock' } : {}), ...(evidenceAttached ? { evidenceAttached: `${evidenceAttached} (the question's own feed series)` } : {}),
+    }
   }))
 }
 
@@ -1750,6 +1758,21 @@ function supplierConcentration(db: Database, indicators: Row[], asOf: string): R
   return result
 }
 
+function supplierConcentrationAction(input: Row): Row {
+  const opened = openStore(input, false)
+  if (!opened) return { storePath: storePath(input), groups: [] }
+  try {
+    const asOf = input.asOf === undefined ? new Date().toISOString() : isoDate(input.asOf, 'asOf')
+    const indicators = (opened.db.query('SELECT * FROM indicators ORDER BY name').all() as Row[]).filter((row) => withinClearance(row, clearanceRank(input)))
+    const groups = supplierConcentration(opened.db, indicators, asOf)
+    return {
+      storePath: opened.path, asOf, groups,
+      ...(groups.length ? {} : { hint: 'No per-partner trade series stored yet; ingest_feed comtrade with partner ALL records one series per partner.' }),
+      method: 'Latest period with a world total; share = partner value / world value; HHI = sum of squared percentage shares over all recorded partners (0-10,000).',
+    }
+  } finally { opened.db.close() }
+}
+
 /** One read that assembles every panel of the intelligence dashboard as of a cutoff, honouring clearance. */
 export function loadBattmannDashboardData(input: Row): Row {
   const asOf = input.asOf === undefined ? new Date().toISOString() : observedDate(input.asOf, 'asOf')
@@ -1900,6 +1923,11 @@ export function recordFeedResult(input: Row, result: FeedResult, options: { subs
   }))
 }
 
+/** Records only the evidence row for a fetched result, so a model can cite what it looked at. */
+export function recordFeedEvidence(input: Row, result: FeedResult): { evidenceId: string; reused: boolean } {
+  return withStore(input, true, (db) => transaction(db, () => feedEvidence(db, result)))
+}
+
 export function recordFeedFailure(input: Row, request: FeedRequest, error: string): void {
   withStore(input, true, (db) => {
     db.query("UPDATE feed_subscriptions SET last_run_at = ?, last_status = 'error', last_detail = ? WHERE id = ?").run(new Date().toISOString(), error.slice(0, 500), feedRequestKey(request))
@@ -2001,7 +2029,7 @@ export const BATTMANN_STORE_ACTIONS = [
   'register_dataset', 'list_datasets', 'dataset_lineage', 'define_action', 'propose_action', 'decide_action_proposal', 'list_action_proposals',
   'register_geo_event', 'geo_query', 'situation_snapshot',
   'define_deployment_target', 'stage_deployment', 'deployment_status', 'audit_trail',
-  'define_indicator', 'record_indicator_reading', 'list_indicators', 'indicator_series', 'list_feeds',
+  'define_indicator', 'record_indicator_reading', 'list_indicators', 'indicator_series', 'list_feeds', 'supplier_concentration',
 ] as const
 
 /**
@@ -2068,6 +2096,7 @@ export function executeBattmannStoreAction(input: Row): string {
     list_indicators: listIndicators,
     indicator_series: indicatorSeries,
     list_feeds: listFeedSubscriptions,
+    supplier_concentration: supplierConcentrationAction,
   }
   const handler = handlers[action]
   if (!handler) throw new Error(`unsupported Battmann store action: ${action}`)

@@ -2,7 +2,7 @@ import { extname } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { resolveWorkspacePath } from '../autonomy/context.ts'
 import { captureBeforeWrite } from '../checkpoint.ts'
-import { BATTMANN_STORE_ACTIONS, executeBattmannStoreAction, loadBattmannDashboardData, loadBattmannReportData, recordFeedResult } from '../battmann/store.ts'
+import { BATTMANN_STORE_ACTIONS, executeBattmannStoreAction, loadBattmannDashboardData, loadBattmannReportData, recordFeedEvidence, recordFeedResult } from '../battmann/store.ts'
 import { describeFeedResult, fetchFeed, leadingSeries, normalizeFeedRequest, type FeedResult } from '../battmann/feeds.ts'
 import { clampClearance, clearanceRank, modelBoundary } from '../battmann/modelBoundary.ts'
 import { openRuleQuestion, resolveDue } from '../battmann/monitor.ts'
@@ -607,11 +607,58 @@ export const FEED_ACTIONS = ['feed_query', 'ingest_feed', 'resolve_due'] as cons
 const UNCLAMPED_ACTIONS = new Set(['stage_deployment', 'define_deployment_target', 'deployment_status', 'audit_trail'])
 
 /**
+ * The fields each commonly used action takes, returned with any failure of that action. Models read errors far
+ * more reliably than a hundred-property schema, and a live run spent most of its budget guessing these shapes.
+ */
+const ACTION_USAGE: Record<string, string> = {
+  register_evidence: 'register_evidence takes flat fields: title, url, publishedAt (ISO date), retrievedAt (ISO date, not in the future), excerpt, independenceGroup, reliability (0-1); optional evidenceId, publisher, sourceType (primary | secondary | dataset | model), securityClassification. Figures from feed_query or ingest_feed already have an evidenceId; cite that instead of re-registering them.',
+  register_claim: 'register_claim takes: statement, classification (observed_fact | reproducible_calculation | model_estimate | judgement), confidence (low | medium | high), asOf, evidenceLinks [{ evidenceId, relation: supports | contradicts | context, supportingExcerpt }]; optional claimId, securityClassification.',
+  review_claim: 'review_claim takes: claimId, verdict (supported | contradicted | unclear), reviewer, reviewedAt, notes; optional reviewId.',
+  submit_forecast: 'submit_forecast takes: questionId, probability (0.001-0.999), method, rationale; evidenceIds [ids] (on a certified question the question\'s own feed evidence is attached if you give none); optional forecaster (default elia), forecastClass (live | backtest), priorProbability. On a certified question asOf is set by the clock.',
+  create_question: 'create_question takes: question, and either resolutionRule { source, observation, comparator, threshold } (certified, resolved by code) or resolutionCriteria + openedAt + horizon; optional questionId, domain, tags.',
+  risk_assessment: 'risk_assessment takes: subject, asOf, factors [{ id, summary, sourceUrl, sourceDate, direction: aggravating | mitigating, magnitude (0.001-1), reliability (0-1), independenceGroup, momentum: rising | stable | falling }]; optional priorRisk (1-99, default 50).',
+  consequence_chain: 'consequence_chain takes: trigger, asOf, nodes [{ id, parentId (null for first-order), statement, mechanism, conditionalProbability (0.001-0.999), lagDays, basis, sourceUrl? }].',
+  alternatives: 'alternatives takes: subject, asOf, criteria [{ id, name, weight (0-1), direction: higher-better | lower-better }], candidates [{ id, name, sourceUrl, sourceDate, reliability, scores: { <criterionId>: 0-100 } }]; optional incumbentId.',
+  exposure_assessment: 'exposure_assessment takes: subject, asOf, baseValue, exposures [{ id, channel, factor, sourceUrl, sourceDate, notional, shockPct (0.0001-1), reliability, independenceGroup, sensitivity? }]; optional currency.',
+  report_from_store: 'report_from_store takes: title, executiveSummary, author, asOf, outputPath (ending .md, e.g. .elia/artifacts/brief.md); optional reportStatus (draft | final; final needs reviewer and supported reviews), questionIds, documentClassification.',
+  dashboard: 'dashboard takes: outputPath (ending .html, e.g. .elia/artifacts/battmann-dashboard.html); optional title, asOf.',
+  feed_query: 'feed_query takes: feed plus its parameters — fx { quote | quotes, base?, start?, end? }; worldbank { country, indicator }; imf { country, indicator }; comtrade { reporter, hs, partner?, flow?, frequency?, periods? }; gdelt { query, start?, end? }; commodity { commodity | commodities, unit?, start? }; tariff { reporter, hs | products (six-digit), partner?, years? }. Data already recorded is faster to read with indicator_series or supplier_concentration.',
+  upsert_object: 'upsert_object takes: objectType, name, validFrom, confidence (low | medium | high), evidenceIds; optional objectId, properties, validTo, latitude, longitude, securityClassification.',
+  link_objects: 'link_objects takes: fromId, toId, linkType, validFrom, confidence, evidenceIds; optional linkId, properties, validTo, securityClassification.',
+}
+ACTION_USAGE.ingest_feed = ACTION_USAGE.feed_query!.replace('feed_query takes', 'ingest_feed takes')
+
+/** Nested objects models tend to wrap an action's fields in; their fields are lifted to the top level. */
+const WRAPPER_KEYS = ['evidence', 'claim', 'forecast', 'question', 'object', 'link', 'scenario', 'review', 'report', 'params', 'data']
+
+function liftWrappedFields(input: Record<string, unknown>): Record<string, unknown> {
+  let lifted = input
+  for (const key of WRAPPER_KEYS) {
+    const value = lifted[key]
+    if (!value || typeof value !== 'object' || Array.isArray(value)) continue
+    const { [key]: _wrapper, ...rest } = lifted
+    lifted = { ...(value as Record<string, unknown>), ...rest }
+  }
+  return lifted
+}
+
+/**
  * Runs one tool call inside the model boundary (battmann/modelBoundary.ts): while any model route is a cloud
  * model, reads are clamped to the cloud ceiling and a write labelled above it is refused, because whatever a
  * cloud model composed has already left this machine.
  */
-async function withModelBoundary(input: Record<string, unknown>, run: (bounded: Record<string, unknown>) => string | Promise<string>): Promise<string> {
+async function withModelBoundary(raw: Record<string, unknown>, run: (bounded: Record<string, unknown>) => string | Promise<string>): Promise<string> {
+  const input = liftWrappedFields(raw)
+  try {
+    return await boundedRun(input, run)
+  } catch (error) {
+    const usage = ACTION_USAGE[String(input.action)]
+    const message = error instanceof Error ? error.message : String(error)
+    throw new Error(usage && !message.includes(usage) ? `${message}\n${usage}` : message)
+  }
+}
+
+async function boundedRun(input: Record<string, unknown>, run: (bounded: Record<string, unknown>) => string | Promise<string>): Promise<string> {
   const boundary = modelBoundary()
   if (boundary.allLocal || UNCLAMPED_ACTIONS.has(String(input.action))) return run(input)
   const label = input.securityClassification
@@ -655,7 +702,10 @@ function compactFeedResult(result: FeedResult): Record<string, unknown> {
 
 async function feedQuery(input: Record<string, unknown>): Promise<string> {
   const result = await fetchFeed(normalizeFeedRequest(input))
-  return JSON.stringify({ action: 'feed_query', recorded: false, ...compactFeedResult(result), summaryText: describeFeedResult(result) }, null, 2)
+  // The fetched response is recorded as one evidence row so it can be cited; readings and a subscription are
+  // only recorded by ingest_feed.
+  const { evidenceId } = recordFeedEvidence(input, result)
+  return JSON.stringify({ action: 'feed_query', evidenceId, recorded: 'evidence only (use ingest_feed to record readings and subscribe)', ...compactFeedResult(result), summaryText: describeFeedResult(result) }, null, 2)
 }
 
 async function ingestFeed(input: Record<string, unknown>): Promise<string> {
@@ -663,7 +713,7 @@ async function ingestFeed(input: Record<string, unknown>): Promise<string> {
   const recorded = recordFeedResult(input, result, { subscribe: input.subscribe !== false }) as { series: { indicatorId: string; newReadings: number; upstreamRevisionCount: number }[] } & Record<string, unknown>
   const shownIds = new Set(leadingSeries(result).shown.map((series) => series.key))
   const summary = { ...recorded, series: recorded.series.filter((item) => shownIds.has(item.indicatorId)), newReadings: recorded.series.reduce((sum, item) => sum + item.newReadings, 0), upstreamRevisions: recorded.series.reduce((sum, item) => sum + item.upstreamRevisionCount, 0) }
-  return JSON.stringify({ action: 'ingest_feed', ...compactFeedResult(result), recorded: summary }, null, 2)
+  return JSON.stringify({ action: 'ingest_feed', evidenceId: recorded.evidenceId, ...compactFeedResult(result), recorded: summary }, null, 2)
 }
 
 async function resolveDueAction(input: Record<string, unknown>): Promise<string> {
@@ -672,7 +722,7 @@ async function resolveDueAction(input: Record<string, unknown>): Promise<string>
 
 export const battmannTool: Tool = {
   name: 'battmann',
-  description: 'Battmann strategic-intelligence system of record. Real data: feed_query fetches, and ingest_feed fetches and records, figures from public sources by code — fx (ECB reference rates), worldbank (World Development Indicators), imf (IMF World Economic Outlook, projections labelled), comtrade (UN Comtrade trade flows by partner and HS code), gdelt (GDELT news volume) — each stamped with the request URL, retrieval time and a hash of the raw response; prefer these over figures copied from web pages. create_question with a resolutionRule makes a question resolved by code from a feed (resolve_due), scored in the certified track record against an automatic statistical baseline; a model cannot resolve or void it. forecast provides transparent evidence updating, ensemble combines independent forecasts without rewarding correlated duplicates, and backtest scores supplied rows. risk_assessment turns dated, sourced, weighted factors into a 0-100 score with per-factor contribution and a direction of travel; consequence_chain annotates a tree of first-, second-, and third-order consequences with path probability and the weakest link. exposure_assessment aggregates sourced financial exposures into a diversified scenario loss with an HHI concentration score. define_indicator/record_indicator_reading/indicator_series keep a dated indicator ledger with trend and z-score. alternatives ranks sourced substitutes across weighted criteria. dashboard renders the whole store — alerts, probabilities beside the baseline, scenarios, indicators with their provenance, feeds, the geospatial picture, pending proposals, and the certified track record — as HTML, JSON, and Markdown. The versioned ledger actions enforce temporal evidence availability; scorecard and run_benchmark measure calibration and held-out chronological skill. Ontology, scenario, decision, and outcome actions build an evidence-linked decision graph; object_detail, list_objects, find_path, and explain_causality read and trace it. register_dataset/dataset_lineage keep a hash-chained provenance graph; define_action/propose_action/decide_action_proposal record intents and human decisions (a proposal executes nothing). register_geo_event/geo_query/situation_snapshot give a geolocated picture built from registered events. define_deployment_target/stage_deployment produce constraint-checked, versioned bundles without transmitting them. Every write appends to a tamper-evident audit_trail. Records carry a securityClassification; while any model route is a cloud model, reads are clamped to the cloud ceiling (internal by default) and writes above it are refused. report_from_store creates governed Markdown, JSON, and printable HTML from a cutoff-safe stored evidence base.',
+  description: 'Battmann strategic-intelligence system of record. Real data: feed_query fetches figures from public sources by code and returns a citable evidenceId; ingest_feed also records the readings and subscribes — fx (ECB reference rates), worldbank (World Development Indicators), imf (IMF World Economic Outlook, projections labelled), comtrade (UN Comtrade trade flows by partner and HS code), gdelt (GDELT news volume), commodity (IMF monthly commodity prices: oil, gas, metals, food), tariff (WITS/UNCTAD TRAINS applied tariffs by six-digit HS code) — each stamped with the request URL, retrieval time and a hash of the raw response; prefer these over figures copied from web pages. Read what is already recorded with indicator_series, and supplier concentration (the share each partner has of a trade flow, with HHI) with supplier_concentration. create_question with a resolutionRule makes a question resolved by code from a feed (resolve_due), scored in the certified track record against an automatic statistical baseline; a model cannot resolve or void it. forecast provides transparent evidence updating, ensemble combines independent forecasts without rewarding correlated duplicates, and backtest scores supplied rows. risk_assessment turns dated, sourced, weighted factors into a 0-100 score with per-factor contribution and a direction of travel; consequence_chain annotates a tree of first-, second-, and third-order consequences with path probability and the weakest link. exposure_assessment aggregates sourced financial exposures into a diversified scenario loss with an HHI concentration score. define_indicator/record_indicator_reading/indicator_series keep a dated indicator ledger with trend and z-score. alternatives ranks sourced substitutes across weighted criteria. dashboard renders the whole store — alerts, probabilities beside the baseline, scenarios, indicators with their provenance, feeds, the geospatial picture, pending proposals, and the certified track record — as HTML, JSON, and Markdown. The versioned ledger actions enforce temporal evidence availability; scorecard and run_benchmark measure calibration and held-out chronological skill. Ontology, scenario, decision, and outcome actions build an evidence-linked decision graph; object_detail, list_objects, find_path, and explain_causality read and trace it. register_dataset/dataset_lineage keep a hash-chained provenance graph; define_action/propose_action/decide_action_proposal record intents and human decisions (a proposal executes nothing). register_geo_event/geo_query/situation_snapshot give a geolocated picture built from registered events. define_deployment_target/stage_deployment produce constraint-checked, versioned bundles without transmitting them. Every write appends to a tamper-evident audit_trail. Records carry a securityClassification; while any model route is a cloud model, reads are clamped to the cloud ceiling (internal by default) and writes above it are refused. report_from_store creates governed Markdown, JSON, and printable HTML from a cutoff-safe stored evidence base.',
   input_schema: {
     type: 'object',
     properties: {
@@ -685,12 +735,14 @@ export const battmannTool: Tool = {
       start: { type: 'string', description: 'fx/gdelt window start, YYYY-MM-DD (fx defaults to a year back, gdelt to 30 days, within its 90-day range).' }, end: { type: 'string', description: 'fx/gdelt window end, YYYY-MM-DD, default today.' },
       country: { type: 'string', description: 'worldbank: ISO2/ISO3 country; imf: ISO3.' }, indicator: { type: 'string', description: 'worldbank indicator id (e.g. NY.GDP.MKTP.KD.ZG, TM.VAL.MRCH.CD.WT) or IMF DataMapper id (e.g. NGDP_RPCH, PCPIPCH).' }, startYear: { type: 'number' }, endYear: { type: 'number' },
       reporter: { type: 'string', description: 'comtrade: reporting country, ISO3 (e.g. IND).' }, partner: { type: 'string', description: 'comtrade: ALL (per-partner breakdown, default), WLD (world total), or a partner ISO3; TWN reads Comtrade\'s "Other Asia, nes".' }, hs: { type: 'string', description: 'comtrade: HS code of 2, 4 or 6 digits (e.g. 8542 integrated circuits, 8541 semiconductor devices) or TOTAL.' }, flow: { type: 'string', description: 'comtrade: import (default) or export.' }, periods: { type: 'array', description: 'comtrade: up to six periods, all annual (2025) or all monthly (202606), matching frequency.' },
-      query: { type: 'string', description: 'gdelt: a GDELT DOC query, e.g. (taiwan OR china) semiconductor export controls.' }, subscribe: { type: 'boolean', description: 'ingest_feed: keep this feed refreshed by `elia battmann refresh` (default true).' },
+      query: { type: 'string', description: 'gdelt: a GDELT DOC query, e.g. (taiwan OR china) semiconductor export controls.' },
+      commodity: { type: 'string', description: 'commodity: an IMF PCPS code — POILAPSP crude oil, PNGASJP Asian LNG, PCOPP copper, PALUM aluminium, PTIN tin, PNICK nickel, PWHEAMT wheat, PALLFNF all-commodities index.' }, commodities: { type: 'array', description: 'commodity: up to ten IMF PCPS codes.' },
+      products: { type: 'array', description: 'tariff: up to ten six-digit HS codes, e.g. 854231 processors, 854142 solar cells.' }, years: { type: 'array', description: 'tariff: up to five years (tariff schedules lag about two years).' }, subscribe: { type: 'boolean', description: 'ingest_feed: keep this feed refreshed by `elia battmann refresh` (default true).' },
       priorProbability: { type: 'number' }, probability: { type: 'number' }, signals: { type: 'array' }, components: { type: 'array' },
       subject: { type: 'string' }, priorRisk: { type: 'number', description: 'Neutral/base risk on a 0-100 scale before factors are applied; defaults to 50.' }, factors: { type: 'array' }, trigger: { type: 'string' }, nodes: { type: 'array' },
       baseValue: { type: 'number', description: 'exposure_assessment: the value at risk that losses are measured against.' }, currency: { type: 'string' }, exposures: { type: 'array' },
       criteria: { type: 'array', description: 'alternatives: [{ id, name, weight, direction: higher-better|lower-better }].' }, candidates: { type: 'array', description: 'alternatives: [{ id, name, sourceUrl, sourceDate, reliability, scores: { <criterionId>: 0-100 } }].' }, incumbentId: { type: 'string' },
-      indicatorId: { type: 'string' }, unit: { type: 'string' }, frequency: { type: 'string', description: 'indicator cadence: daily, weekly, monthly, quarterly, annual, or irregular.' }, higherIs: { type: 'string', description: 'define_indicator: whether a higher reading is risk-on, risk-off, or neutral.' }, sourceName: { type: 'string' }, value: { type: 'number' }, forecasts: { type: 'array' }, forecastId: { type: 'string' }, forecastClass: { type: 'string', description: 'live for predictions physically logged before resolution; backtest for historical replay that cannot support a live superiority claim.' }, evidenceIds: { type: 'array' }, method: { type: 'string' }, model: { type: 'string' }, forecaster: { type: 'string' }, rationale: { type: 'string' },
+      indicatorId: { type: 'string' }, unit: { type: 'string', description: 'define_indicator: the unit; commodity feed: USD (prices, default) or IX (index).' }, frequency: { type: 'string', description: 'indicator cadence: daily, weekly, monthly, quarterly, annual, or irregular.' }, higherIs: { type: 'string', description: 'define_indicator: whether a higher reading is risk-on, risk-off, or neutral.' }, sourceName: { type: 'string' }, value: { type: 'number' }, forecasts: { type: 'array' }, forecastId: { type: 'string' }, forecastClass: { type: 'string', description: 'live for predictions physically logged before resolution; backtest for historical replay that cannot support a live superiority claim.' }, evidenceIds: { type: 'array' }, method: { type: 'string' }, model: { type: 'string' }, forecaster: { type: 'string' }, rationale: { type: 'string' },
       evidenceId: { type: 'string' }, title: { type: 'string' }, url: { type: 'string' }, publisher: { type: 'string' }, sourceType: { type: 'string' }, publishedAt: { type: 'string' }, retrievedAt: { type: 'string' }, excerpt: { type: 'string' }, independenceGroup: { type: 'string' }, reliability: { type: 'number' },
       claimId: { type: 'string' }, statement: { type: 'string' }, classification: { type: 'string' }, confidence: { type: 'string' }, evidenceLinks: { type: 'array' }, reviewId: { type: 'string' }, verdict: { type: 'string' }, reviewer: { type: 'string' }, reviewedAt: { type: 'string' }, notes: { type: 'string' },
       resolutionId: { type: 'string' }, resolutionStatus: { type: 'string' }, outcome: { type: 'number' }, resolvedAt: { type: 'string' }, resolutionSourceUrl: { type: 'string' }, resolver: { type: 'string' }, status: { type: 'string' },

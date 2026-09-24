@@ -1,4 +1,4 @@
-import { normalizeFeedRequest, periodEnd, type FeedRequest, type FeedResult, type FeedSeries } from './feeds.ts'
+import { gdeltSeriesKey, normalizeFeedRequest, periodEnd, type FeedRequest, type FeedResult, type FeedSeries } from './feeds.ts'
 
 /**
  * Machine-checkable resolution rules. A question that carries one is resolved by code from a feed — never by a
@@ -25,6 +25,7 @@ export type RuleSource =
   | { feed: 'worldbank'; country: string; indicator: string }
   | { feed: 'comtrade'; reporter: string; partner: string; hs: string; flow: 'import' | 'export'; frequency: 'annual' | 'monthly' }
   | { feed: 'gdelt'; query: string; measure: 'count' | 'share' }
+  | { feed: 'commodity'; commodity: string; unit: 'USD' | 'IX' }
 
 type Raw = Record<string, unknown>
 const DAY_MS = 86_400_000
@@ -69,8 +70,14 @@ export function validateResolutionRule(raw: unknown, now: Date = new Date()): Re
     if (!('start' in window)) throw new Error('a gdelt rule observes a window: observation { start, end, aggregate }')
     if (Date.parse(window.end) - Date.parse(window.start) > 60 * DAY_MS) throw new Error('a gdelt window may span at most 60 days, so it can be read back within GDELT\'s 90-day range')
     observation = window
+  } else if (sourceRaw.feed === 'commodity') {
+    const probe = normalizeFeedRequest({ feed: 'commodity', commodity: sourceRaw.commodity, unit: sourceRaw.unit }, now) as Extract<FeedRequest, { feed: 'commodity' }>
+    source = { feed: 'commodity', commodity: probe.commodities[0]!, unit: probe.unit }
+    const period = String(observationRaw.period ?? '')
+    if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(period)) throw new Error('a commodity rule observes one month\'s average: observation.period like "2026-11"')
+    observation = { period }
   } else {
-    throw new Error('resolutionRule.source.feed must be fx, worldbank, comtrade, or gdelt (IMF values are projections and cannot resolve a question)')
+    throw new Error('resolutionRule.source.feed must be fx, worldbank, comtrade, commodity, or gdelt (IMF WEO values are projections and cannot resolve a question)')
   }
   const result: ResolutionRule = { source, observation, comparator, threshold: rule.threshold }
   if (Date.parse(forecastCutoff(result)) <= now.getTime()) throw new Error(`forecasting on this outcome closed at ${forecastCutoff(result)}; a resolution rule must be about a period that is not yet observable`)
@@ -110,6 +117,8 @@ export function forecastCutoff(rule: ResolutionRule): string {
   if ('start' in rule.observation) return `${rule.observation.start}T00:00:00.000Z`
   const { period } = rule.observation
   if (/^\d{4}-\d{2}-\d{2}$/.test(period)) return `${period}T00:00:00.000Z`
+  // A monthly average of daily market prices is partly observable from its first trading day.
+  if (rule.source.feed === 'commodity') return `${period}-01T00:00:00.000Z`
   return new Date(Date.parse(periodEnd(period)) + DAY_MS).toISOString()
 }
 
@@ -118,7 +127,8 @@ export function describeRule(rule: ResolutionRule): string {
   const source = rule.source.feed === 'fx' ? `the ECB ${rule.source.base}/${rule.source.quote} reference rate`
     : rule.source.feed === 'worldbank' ? `World Bank indicator ${rule.source.indicator} for ${rule.source.country}`
       : rule.source.feed === 'comtrade' ? `UN Comtrade ${rule.source.reporter} ${rule.source.flow}s of HS ${rule.source.hs} ${rule.source.flow === 'import' ? 'from' : 'to'} ${rule.source.partner} (${rule.source.frequency}, USD)`
-        : `GDELT daily ${rule.source.measure === 'share' ? 'coverage share' : 'article count'} for "${rule.source.query}"`
+        : rule.source.feed === 'commodity' ? `the IMF monthly average for commodity ${rule.source.commodity} (${rule.source.unit})`
+          : `GDELT daily ${rule.source.measure === 'share' ? 'coverage share' : 'article count'} for "${rule.source.query}"`
   return `Resolves YES if ${target} of ${source} is ${rule.comparator} ${rule.threshold}, as fetched by code from the source; otherwise NO.`
 }
 
@@ -135,6 +145,10 @@ export function resolutionRequest(rule: ResolutionRule, now: Date): { request: F
     const period = Number((rule.observation as { period: string }).period)
     return { request: normalizeFeedRequest({ feed: 'worldbank', country: s.country, indicator: s.indicator, startYear: period, endYear: period }, now) }
   }
+  if (s.feed === 'commodity') {
+    const period = (rule.observation as { period: string }).period
+    return { request: normalizeFeedRequest({ feed: 'commodity', commodity: s.commodity, unit: s.unit, start: period }, now) }
+  }
   if (s.feed === 'comtrade') return { request: normalizeFeedRequest({ feed: 'comtrade', reporter: s.reporter, partner: s.partner, hs: s.hs, flow: s.flow, frequency: s.frequency, periods: [(rule.observation as { period: string }).period] }, now) }
   const window = rule.observation as { start: string; end: string }
   return { request: normalizeFeedRequest({ feed: 'gdelt', query: s.query, start: window.start, end: window.end }, now) }
@@ -144,12 +158,18 @@ export type Evaluation =
   | { status: 'resolved'; outcome: 0 | 1; observedValue: number; observedPeriod: string; detail: string }
   | { status: 'pending'; reason: string }
 
-export function ruleSeries(rule: ResolutionRule, result: FeedResult): FeedSeries | undefined {
+/** The indicator id the rule's series is recorded under in the store. */
+export function ruleSeriesKey(rule: ResolutionRule): string {
   const s = rule.source
-  if (s.feed === 'fx') return result.series.find((series) => series.key === `fx:${s.base}:${s.quote}`)
-  if (s.feed === 'worldbank') return result.series.find((series) => series.key === `wb:${s.country}:${s.indicator}`)
-  if (s.feed === 'comtrade') return result.series.find((series) => series.key === `comtrade:${s.reporter}:${s.flow}:${s.hs}:${s.partner}:${s.frequency}`)
-  return result.series.find((series) => series.key.endsWith(`:${s.measure}`))
+  if (s.feed === 'fx') return `fx:${s.base}:${s.quote}`
+  if (s.feed === 'worldbank') return `wb:${s.country}:${s.indicator}`
+  if (s.feed === 'comtrade') return `comtrade:${s.reporter}:${s.flow}:${s.hs}:${s.partner}:${s.frequency}`
+  if (s.feed === 'commodity') return `commodity:${s.commodity}:${s.unit}`
+  return gdeltSeriesKey(s.query, s.measure)
+}
+
+export function ruleSeries(rule: ResolutionRule, result: FeedResult): FeedSeries | undefined {
+  return result.series.find((series) => series.key === ruleSeriesKey(rule))
 }
 
 /** Decides a rule from a feed result. Never guesses: anything short of the observed value is pending. */

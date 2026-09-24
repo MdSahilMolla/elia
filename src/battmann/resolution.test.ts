@@ -17,7 +17,7 @@ const fxRule = (period: string, threshold = 96.5) => validateResolutionRule({ so
 test('rules are validated, normalised, and must be about a period not yet observable', () => {
   expect(fxRule('2026-10-30')).toEqual({ source: { feed: 'fx', base: 'USD', quote: 'INR' }, observation: { period: '2026-10-30' }, comparator: '>', threshold: 96.5 })
   expect(() => fxRule('2026-09-20')).toThrow('closed')
-  expect(() => validateResolutionRule({ source: { feed: 'imf', country: 'IND', indicator: 'NGDP_RPCH' }, observation: { period: '2027' }, comparator: '>', threshold: 6 }, NOW)).toThrow('IMF values are projections')
+  expect(() => validateResolutionRule({ source: { feed: 'imf', country: 'IND', indicator: 'NGDP_RPCH' }, observation: { period: '2027' }, comparator: '>', threshold: 6 }, NOW)).toThrow('IMF WEO values are projections')
   expect(() => validateResolutionRule({ source: { feed: 'comtrade', reporter: 'IND', partner: 'ALL', hs: '8542', flow: 'import', frequency: 'annual' }, observation: { period: '2026' }, comparator: '>', threshold: 1 }, NOW)).toThrow('one partner')
   expect(() => validateResolutionRule({ source: { feed: 'fx', base: 'USD', quote: 'INR' }, observation: { period: '2026-10-30' }, comparator: '==', threshold: 1 }, NOW)).toThrow('comparator')
   // An annual total stays forecastable until the year ends; a daily value only until its day starts.

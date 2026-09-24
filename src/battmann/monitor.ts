@@ -1,5 +1,5 @@
 import { feedNow, fetchFeed, normalizeFeedRequest, type FeedFrequency, type FeedRequest, type FeedResult, type FeedSeries } from './feeds.ts'
-import { baselineForecast, evaluateRule, resolutionRequest, type ResolutionRule } from './resolution.ts'
+import { baselineForecast, evaluateRule, resolutionRequest, ruleSeriesKey, type ResolutionRule } from './resolution.ts'
 import {
   executeBattmannStoreAction, listFeedSubscriptions, openRuleQuestions, readIndicatorReadings, recordBaselineForecast,
   recordFeedFailure, recordFeedResolution, recordFeedResult,
@@ -41,6 +41,15 @@ export function rollForward(request: FeedRequest, now: Date = feedNow()): FeedRe
         return `${date.getUTCFullYear()}${String(date.getUTCMonth() + 1).padStart(2, '0')}`
       })
       return { ...request, periods: months }
+    }
+    case 'commodity': {
+      // Monthly series are small, so the window may grow, up to five years back.
+      const floor = dayOf(new Date(Date.UTC(now.getUTCFullYear() - 5, now.getUTCMonth(), 1))).slice(0, 7)
+      return { ...request, start: request.start < floor ? floor : request.start }
+    }
+    case 'tariff': {
+      const latest = now.getUTCFullYear() - 2
+      return { ...request, years: Array.from({ length: request.years.length }, (_, index) => latest - request.years.length + 1 + index) }
     }
   }
 }
@@ -105,11 +114,12 @@ interface HistorySpec { key: string; frequency: FeedFrequency; request: FeedRequ
 function historySpec(rule: ResolutionRule, now: Date): HistorySpec | null {
   if ('start' in rule.observation) return null
   const s = rule.source
+  const key = ruleSeriesKey(rule)
   const today = dayOf(now)
-  if (s.feed === 'fx') return { key: `fx:${s.base}:${s.quote}`, frequency: 'daily', minimum: 60, request: normalizeFeedRequest({ feed: 'fx', base: s.base, quote: s.quote, start: dayOf(new Date(now.getTime() - 400 * DAY_MS)), end: today }, now) }
-  if (s.feed === 'worldbank') return { key: `wb:${s.country}:${s.indicator}`, frequency: 'annual', minimum: 5, request: normalizeFeedRequest({ feed: 'worldbank', country: s.country, indicator: s.indicator, startYear: now.getUTCFullYear() - 30, endYear: now.getUTCFullYear() }, now) }
+  if (s.feed === 'fx') return { key, frequency: 'daily', minimum: 60, request: normalizeFeedRequest({ feed: 'fx', base: s.base, quote: s.quote, start: dayOf(new Date(now.getTime() - 400 * DAY_MS)), end: today }, now) }
+  if (s.feed === 'worldbank') return { key, frequency: 'annual', minimum: 5, request: normalizeFeedRequest({ feed: 'worldbank', country: s.country, indicator: s.indicator, startYear: now.getUTCFullYear() - 30, endYear: now.getUTCFullYear() }, now) }
+  if (s.feed === 'commodity') return { key, frequency: 'monthly', minimum: 12, request: normalizeFeedRequest({ feed: 'commodity', commodities: [s.commodity], unit: s.unit, start: dayOf(new Date(now.getTime() - 36 * 31 * DAY_MS)).slice(0, 7) }, now) }
   if (s.feed === 'comtrade') {
-    const key = `comtrade:${s.reporter}:${s.flow}:${s.hs}:${s.partner}:${s.frequency}`
     if (s.frequency === 'monthly') return { key, frequency: 'monthly', minimum: 8, request: null }
     const latest = now.getUTCFullYear() - 1
     return { key, frequency: 'annual', minimum: 5, request: normalizeFeedRequest({ feed: 'comtrade', reporter: s.reporter, partner: s.partner, hs: s.hs, flow: s.flow, frequency: 'annual', periods: Array.from({ length: 6 }, (_, index) => String(latest - 5 + index)) }, now) }
@@ -117,16 +127,17 @@ function historySpec(rule: ResolutionRule, now: Date): HistorySpec | null {
   return null
 }
 
-function periodLabel(observedAt: string, frequency: FeedFrequency): string {
+function periodLabel(observedAt: string, frequency: FeedFrequency, key: string): string {
   if (frequency === 'daily') return observedAt.slice(0, 10)
   if (frequency === 'annual') return observedAt.slice(0, 4)
-  return `${observedAt.slice(0, 4)}${observedAt.slice(5, 7)}`
+  // Commodity months are labelled 2026-08, Comtrade months 202608, matching each rule's own period format.
+  return key.startsWith('commodity:') ? observedAt.slice(0, 7) : `${observedAt.slice(0, 4)}${observedAt.slice(5, 7)}`
 }
 
 function storedSeries(input: Row, spec: HistorySpec): { series: FeedSeries; latestEvidenceId: string | null } {
   const readings = readIndicatorReadings(input, spec.key)
   return {
-    series: { key: spec.key, name: spec.key, unit: '', frequency: spec.frequency, higherIs: 'neutral', observations: readings.map((reading) => ({ period: periodLabel(reading.observedAt, spec.frequency), observedAt: reading.observedAt, value: reading.value, status: 'actual' as const })) },
+    series: { key: spec.key, name: spec.key, unit: '', frequency: spec.frequency, higherIs: 'neutral', observations: readings.map((reading) => ({ period: periodLabel(reading.observedAt, spec.frequency, spec.key), observedAt: reading.observedAt, value: reading.value, status: 'actual' as const })) },
     latestEvidenceId: readings.at(-1)?.evidenceId ?? null,
   }
 }

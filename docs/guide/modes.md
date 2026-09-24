@@ -54,6 +54,10 @@ Figures come from code, not from the model. The `battmann` tool's `feed_query` a
 | `imf` | IMF DataMapper (World Economic Outlook) | WEO indicators; values for the current year and later are labelled projections and never recorded as readings | none |
 | `comtrade` | UN Comtrade | Trade value by reporter, partner and HS code, annual or monthly, with each partner's share of the world total. Taiwan appears as "Other Asia, nes" (partner 490), shown as `TWN` | none for the public preview (one period per call, 500 rows); `COMTRADE_API_KEY` for the full API |
 | `gdelt` | GDELT DOC 2.0 API | Daily worldwide news volume and coverage share for a query, last 90 days. This measures attention, not events | none (GDELT allows one request per 5 seconds) |
+| `commodity` | IMF Primary Commodity Price System (SDMX) | Monthly average prices or indices: crude oil (`POILAPSP`), Asian LNG (`PNGASJP`), copper (`PCOPP`), aluminium (`PALUM`), tin (`PTIN`), wheat, and others | none |
+| `tariff` | World Bank WITS (UNCTAD TRAINS) | Applied tariffs by six-digit HS code: the simple average of reported ad valorem rates, MFN or for a partner. Schedules lag about two years, and a missing year is reported, not guessed | none |
+
+`feed_query` records the fetched response as one evidence row and returns its `evidenceId`, so whatever the model looked at can be cited. `ingest_feed` also records every reading and subscribes. Data already recorded is faster to read with `indicator_series`. `supplier_concentration` reads the latest partner shares and HHI of every trade flow recorded by partner.
 
 Hosts are fixed in code (`src/battmann/feeds.ts`). The model supplies validated parameters only, never a URL. Redirects are refused, responses are size-bounded, and API keys travel in headers, never in a recorded URL. A recorded figure carries its request URL, retrieval time and the SHA-256 of the raw response bytes, and its evidence row is marked `provenance: feed`. The dashboard marks each indicator as `feed` or `agent` accordingly.
 
@@ -64,10 +68,10 @@ The store is append-only. Re-pulling a feed adds only new observations. If the s
 A forecast only means something if it is scored against an outcome, and against something simpler than itself. A question created with a `resolutionRule` works like this:
 
 - **Resolved by code.** The rule names a feed series, the period or window that decides it, a comparator and a threshold. `resolve_due` (or `elia battmann refresh`) reads the value back from the source once it is published and records the resolution with `provenance: feed`. It never resolves early, and a missing value stays pending. The model cannot resolve or void such a question; only a person can void one, with `elia battmann void`.
-- **Timestamped by the clock.** A certified question opens when it is recorded. Its forecasting cutoff comes from the rule: the start of a daily observation, or the end of an annual or monthly period. Forecasts after the cutoff, or backdated ones, are refused, and only forecasts physically recorded before the cutoff are scored.
+- **Timestamped by the clock.** A certified question opens when it is recorded. Its forecasting cutoff comes from the rule: the start of a daily observation or of a month of commodity prices (both partly observable from their first day), or the end of an annual or monthly trade or indicator period. The clock stamps every forecast on it, so a supplied `asOf` cannot backdate one, and nothing is accepted after the cutoff. A forecast that cites no evidence gets the question's own feed series attached.
 - **Scored against a baseline.** When the question opens, elia logs a statistical baseline as its own forecaster (`baseline`). For daily rates it uses a driftless random walk with volatility measured from recent returns. For annual and monthly totals it uses the empirical distribution of the series' own changes. Only elia can write the baseline; `scorecard` and `elia battmann record` report Battmann's Brier score, the baseline's, and skill against the baseline on the same questions. Below 30 matched questions the comparison is flagged as not yet meaningful.
 
-IMF values cannot resolve a question, because the current-year figures are projections that later editions revise.
+Rules can read `fx`, `worldbank`, `comtrade`, `commodity` (one month's average) and `gdelt` (a window). IMF WEO values cannot resolve a question, because the current-year figures are projections that later editions revise.
 
 ### Operating it from the command line
 
@@ -82,7 +86,15 @@ elia battmann record                       # the certified track record
 elia battmann dashboard                    # .elia/artifacts/battmann-dashboard.{html,json,md}
 ```
 
-`elia battmann brief india-semiconductors` seeds the playbook if needed, then starts the Battmann agent on the configured model to write the brief. The agent re-confirms the situation from recent reporting, forecasts every open certified question, scores supply-disruption risk, traces consequences, ranks alternative suppliers from the Comtrade shares, and writes a draft report and the dashboard. The `india-semiconductors` playbook follows the Government of India monitoring its semiconductor imports. It subscribes Comtrade imports of integrated circuits (HS 8542) by partner for five years and by month, discrete semiconductors (HS 8541), USD against INR/CNY/KRW/JPY, World Bank and IMF indicators, and GDELT coverage of Taiwan and export controls. It opens certified questions whose thresholds sit near the latest fetched values.
+`elia battmann brief india-semiconductors` seeds the playbook if needed, then starts the Battmann agent on the configured model to write the brief. The agent re-confirms the situation from recent reporting, forecasts every open certified question, scores supply-disruption risk, traces consequences, ranks alternative suppliers from the Comtrade shares, and writes a draft report and the dashboard. The `india-semiconductors` playbook follows the Government of India monitoring its semiconductor imports. It subscribes these feeds:
+- Comtrade imports of integrated circuits (HS 8542) by partner for five years and by month, and of discrete semiconductors (HS 8541).
+- USD against INR, CNY, KRW and JPY.
+- World Bank and IMF indicators.
+- GDELT coverage of Taiwan and of export controls.
+- IMF prices for oil, LNG, copper, aluminium and tin.
+- India's applied tariffs on processors, memory, other ICs, and solar cells and modules.
+
+It opens certified questions whose thresholds sit near the latest fetched values.
 
 `watch` runs only while its process does. For unattended monitoring, schedule `elia battmann refresh` with cron or launchd. Agent-driven work can recur with `elia schedule add --mode battmann --every 6h "re-forecast the open certified questions"`.
 

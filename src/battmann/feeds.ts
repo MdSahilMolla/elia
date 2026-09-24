@@ -11,7 +11,7 @@ import { readBoundedBytes } from '../tools/webFetch.ts'
  * model-chosen URL is ever requested. API keys travel in headers and never appear in a recorded URL.
  */
 
-export const FEED_NAMES = ['fx', 'worldbank', 'imf', 'comtrade', 'gdelt'] as const
+export const FEED_NAMES = ['fx', 'worldbank', 'imf', 'comtrade', 'gdelt', 'commodity', 'tariff'] as const
 export type FeedName = (typeof FEED_NAMES)[number]
 export type FeedFrequency = 'daily' | 'monthly' | 'quarterly' | 'annual'
 export type HigherIs = 'risk-on' | 'risk-off' | 'neutral'
@@ -21,7 +21,9 @@ export interface WorldBankRequest { feed: 'worldbank'; country: string; indicato
 export interface ImfRequest { feed: 'imf'; country: string; indicator: string }
 export interface ComtradeRequest { feed: 'comtrade'; reporter: string; partner: string; hs: string; flow: 'import' | 'export'; frequency: 'annual' | 'monthly'; periods: string[] }
 export interface GdeltRequest { feed: 'gdelt'; query: string; start: string; end: string }
-export type FeedRequest = FxRequest | WorldBankRequest | ImfRequest | ComtradeRequest | GdeltRequest
+export interface CommodityRequest { feed: 'commodity'; commodities: string[]; unit: 'USD' | 'IX'; start: string }
+export interface TariffRequest { feed: 'tariff'; reporter: string; partner: string; products: string[]; years: number[] }
+export type FeedRequest = FxRequest | WorldBankRequest | ImfRequest | ComtradeRequest | GdeltRequest | CommodityRequest | TariffRequest
 
 export interface FeedObservation { period: string; observedAt: string; value: number; status: 'actual' | 'projection' }
 export interface FeedSeries { key: string; name: string; unit: string; frequency: FeedFrequency; higherIs: HigherIs; observations: FeedObservation[] }
@@ -51,11 +53,13 @@ const HOSTS = {
   imf: 'www.imf.org',
   comtrade: 'comtradeapi.un.org',
   gdelt: 'api.gdeltproject.org',
+  commodity: 'api.imf.org',
+  tariff: 'wits.worldbank.org',
 } as const
 
-const RELIABILITY: Record<FeedName, number> = { fx: 0.98, worldbank: 0.95, imf: 0.9, comtrade: 0.9, gdelt: 0.6 }
+const RELIABILITY: Record<FeedName, number> = { fx: 0.98, worldbank: 0.95, imf: 0.9, comtrade: 0.9, gdelt: 0.6, commodity: 0.95, tariff: 0.9 }
 const MIN_INTERVAL_MS: Record<string, number> = { [HOSTS.gdelt]: 5_500, [HOSTS.comtrade]: 1_500 }
-const TIMEOUT_MS: Record<string, number> = { [HOSTS.comtrade]: 90_000, [HOSTS.gdelt]: 45_000 }
+const TIMEOUT_MS: Record<string, number> = { [HOSTS.comtrade]: 90_000, [HOSTS.gdelt]: 45_000, [HOSTS.tariff]: 90_000, [HOSTS.commodity]: 60_000 }
 const MAX_RESPONSE_BYTES = 12 * 1024 * 1024
 const DAY_MS = 86_400_000
 
@@ -68,8 +72,18 @@ export const feedNow = (): Date => (feedTestHooks.now ? feedTestHooks.now() : ne
 const lastRequestAt = new Map<string, number>()
 
 interface Fetched { json: unknown; bytes: Uint8Array; url: string }
+interface FetchedText { text: string; bytes: Uint8Array; url: string }
 
 async function getJson(url: URL, options: { headers?: Record<string, string>; retries?: number } = {}): Promise<Fetched> {
+  const fetched = await getText(url, options)
+  try {
+    return { json: JSON.parse(fetched.text), bytes: fetched.bytes, url: fetched.url }
+  } catch {
+    throw new Error(`${url.hostname} returned a non-JSON response: ${fetched.text.slice(0, 200).replace(/\s+/g, ' ')}`)
+  }
+}
+
+async function getText(url: URL, options: { headers?: Record<string, string>; retries?: number; accept?: string } = {}): Promise<FetchedText> {
   if (!(Object.values(HOSTS) as string[]).includes(url.hostname) || url.protocol !== 'https:') throw new Error(`feed host is not allowed: ${url.origin}`)
   const minInterval = MIN_INTERVAL_MS[url.hostname] ?? 0
   const retries = options.retries ?? 2
@@ -79,7 +93,7 @@ async function getJson(url: URL, options: { headers?: Record<string, string>; re
     if (minInterval && waited < minInterval) await sleep(minInterval - waited)
     if (attempt > 0) await sleep(url.hostname === HOSTS.gdelt ? 6_000 * attempt : 2_000 * attempt)
     lastRequestAt.set(url.hostname, Date.now())
-    const headers = { accept: 'application/json', 'user-agent': 'elia-battmann (+https://github.com/MdSahilMolla/elia)', ...options.headers }
+    const headers = { accept: options.accept ?? 'application/json', 'user-agent': 'elia-battmann (+https://github.com/MdSahilMolla/elia)', ...options.headers }
     let response: Response
     try {
       response = feedTestHooks.fetch
@@ -98,11 +112,7 @@ async function getJson(url: URL, options: { headers?: Record<string, string>; re
       continue
     }
     if (response.status >= 400) throw new Error(`${url.hostname} returned HTTP ${response.status}: ${body.slice(0, 200)}`)
-    try {
-      return { json: JSON.parse(body), bytes, url: url.toString() }
-    } catch {
-      throw new Error(`${url.hostname} returned a non-JSON response: ${body.slice(0, 200).replace(/\s+/g, ' ')}`)
-    }
+    return { text: body, bytes, url: url.toString() }
   }
   throw new Error(`${url.hostname} did not return data after ${retries + 1} attempts: ${lastProblem}`)
 }
@@ -198,6 +208,29 @@ export function normalizeFeedRequest(raw: Raw, now: Date = feedNow()): FeedReque
     if (start > end) throw new Error('start must not be after end')
     if (start < addDays(today, -90)) throw new Error('the GDELT DOC API only covers the last 90 days; start must be within that window')
     return { feed, query, start, end: end > today ? today : end }
+  }
+  if (feed === 'commodity') {
+    const list = Array.isArray(raw.commodities) ? raw.commodities : raw.commodity === undefined ? [] : [raw.commodity]
+    const commodities = list.map((value, index) => str(typeof value === 'string' ? value.toUpperCase() : value, `commodities[${index}]`, /^P[A-Z0-9]{2,15}$/, 'an IMF PCPS commodity code such as POILAPSP (crude oil), PCOPP (copper) or PTIN (tin)'))
+    if (!commodities.length || commodities.length > 10) throw new Error('commodity needs one to ten codes (commodity or commodities)')
+    const unit = raw.unit === undefined || raw.unit === 'USD' ? 'USD' : raw.unit === 'IX' ? 'IX' : undefined
+    if (!unit) throw new Error('unit must be USD (prices) or IX (index)')
+    const start = raw.start === undefined ? dayOf(new Date(now.getTime() - 36 * 31 * DAY_MS)).slice(0, 7) : str(String(raw.start).slice(0, 7), 'start', /^\d{4}-(0[1-9]|1[0-2])$/, 'a month like 2023-09')
+    return { feed, commodities: [...new Set(commodities)].sort(), unit, start }
+  }
+  if (feed === 'tariff') {
+    const productList = Array.isArray(raw.products) ? raw.products : raw.hs === undefined ? [] : [raw.hs]
+    const products = productList.map((value, index) => str(String(value), `products[${index}]`, /^\d{6}$/, 'a six-digit HS code such as 854231'))
+    if (!products.length || products.length > 10) throw new Error('tariff needs one to ten six-digit HS codes (hs or products)')
+    const yearList = Array.isArray(raw.years) ? raw.years : raw.year === undefined ? [now.getUTCFullYear() - 3, now.getUTCFullYear() - 2] : [raw.year]
+    const years = yearList.map((value, index) => year(value, `years[${index}]`))
+    if (years.length > 5) throw new Error('tariff takes at most five years per request')
+    return {
+      feed,
+      reporter: str(raw.reporter, 'reporter', /^[A-Za-z]{3}$/, 'an ISO 3166 alpha-3 country code').toUpperCase(),
+      partner: str(raw.partner ?? 'WLD', 'partner', /^[A-Za-z]{3}$/, 'WLD (the MFN rate applied to all) or an ISO alpha-3 partner code').toUpperCase(),
+      products: [...new Set(products)].sort(), years: [...new Set(years)].sort(),
+    }
   }
   throw new Error(`feed must be one of: ${FEED_NAMES.join(', ')}`)
 }
@@ -429,6 +462,12 @@ async function fetchComtrade(request: ComtradeRequest, now: Date): Promise<FeedR
   }
 }
 
+/** The indicator id a GDELT query's series is recorded under: a readable slug plus a short hash of the query. */
+export function gdeltSeriesKey(query: string, measure: 'count' | 'share'): string {
+  const slug = query.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 48) || 'query'
+  return `gdelt:${slug}-${createHash('sha256').update(query).digest('hex').slice(0, 6)}:${measure}`
+}
+
 async function fetchGdelt(request: GdeltRequest, now: Date): Promise<FeedResult> {
   const url = new URL(`https://${HOSTS.gdelt}/api/v2/doc/doc`)
   url.searchParams.set('query', request.query)
@@ -450,15 +489,13 @@ async function fetchGdelt(request: GdeltRequest, now: Date): Promise<FeedResult>
     byDay.set(label, entry)
   }
   const days = [...byDay.keys()].sort()
-  const slug = request.query.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 48) || 'query'
-  const tag = createHash('sha256').update(request.query).digest('hex').slice(0, 6)
   const series: FeedSeries[] = [{
-    key: `gdelt:${slug}-${tag}:count`, name: `News articles matching "${request.query}" (GDELT)`, unit: 'articles per day', frequency: 'daily', higherIs: 'risk-off',
+    key: gdeltSeriesKey(request.query, 'count'), name: `News articles matching "${request.query}" (GDELT)`, unit: 'articles per day', frequency: 'daily', higherIs: 'risk-off',
     observations: days.map((day) => observation(day, byDay.get(day)!.count, now)),
   }]
   if (days.some((day) => byDay.get(day)!.norm > 0)) {
     series.push({
-      key: `gdelt:${slug}-${tag}:share`, name: `Share of monitored news coverage matching "${request.query}" (GDELT)`, unit: 'percent of monitored articles', frequency: 'daily', higherIs: 'risk-off',
+      key: gdeltSeriesKey(request.query, 'share'), name: `Share of monitored news coverage matching "${request.query}" (GDELT)`, unit: 'percent of monitored articles', frequency: 'daily', higherIs: 'risk-off',
       observations: days.filter((day) => byDay.get(day)!.norm > 0).map((day) => observation(day, Number(((byDay.get(day)!.count / byDay.get(day)!.norm) * 100).toFixed(6)), now)),
     })
   }
@@ -474,6 +511,137 @@ async function fetchGdelt(request: GdeltRequest, now: Date): Promise<FeedResult>
   }
 }
 
+
+/** Names for the IMF Primary Commodity Price System codes Battmann uses most; others show as their code. */
+const COMMODITY_NAMES: Record<string, string> = {
+  POILAPSP: 'Crude oil, average of Brent, Dubai and WTI', POILBRE: 'Crude oil, Brent', POILWTI: 'Crude oil, WTI', POILDUB: 'Crude oil, Dubai',
+  PNGASEU: 'Natural gas, Europe (TTF)', PNGASJP: 'LNG, Asia (Japan)', PNGASUS: 'Natural gas, US (Henry Hub)', PCOALAU: 'Coal, Australia',
+  PCOPP: 'Copper', PALUM: 'Aluminium', PNICK: 'Nickel', PTIN: 'Tin', PZINC: 'Zinc', PLEAD: 'Lead', PIORECR: 'Iron ore', PGOLD: 'Gold', PSILVER: 'Silver',
+  PWHEAMT: 'Wheat', PMAIZMT: 'Maize', PRICENPQ: 'Rice', PSOYB: 'Soybeans', PSUGAISA: 'Sugar',
+  PALLFNF: 'All commodities index', PNFUEL: 'Non-fuel commodities index', PMETA: 'Metals index', PNRG: 'Energy index', PFOOD: 'Food index',
+}
+
+function xmlAttribute(tag: string, name: string): string | undefined {
+  return new RegExp(`\\b${name}="([^"]*)"`).exec(tag)?.[1]
+}
+
+async function fetchCommodity(request: CommodityRequest, now: Date): Promise<FeedResult> {
+  const url = new URL(`https://${HOSTS.commodity}/external/sdmx/2.1/data/IMF.RES,PCPS/G001.${request.commodities.join('+')}.${request.unit}.M`)
+  url.searchParams.set('startPeriod', request.start)
+  const fetched = await getText(url, { accept: 'application/xml' })
+  if (!fetched.text.includes('StructureSpecificData')) throw new Error(`IMF returned an unexpected response: ${fetched.text.slice(0, 200).replace(/\s+/g, ' ')}`)
+  const updated = xmlAttribute(/<message:DataSet [^>]*>/.exec(fetched.text)?.[0] ?? '', 'UPDATE_DATE')
+  const series: FeedSeries[] = []
+  for (const block of fetched.text.split('<Series ').slice(1)) {
+    const code = xmlAttribute(block.slice(0, block.indexOf('>')), 'INDICATOR')
+    if (!code) continue
+    const observations = [...block.matchAll(/<Obs [^>]*>/g)].flatMap(([tag]) => {
+      const period = /^(\d{4})-M(\d{2})$/.exec(xmlAttribute(tag, 'TIME_PERIOD') ?? '')
+      const value = Number(xmlAttribute(tag, 'OBS_VALUE'))
+      return period && Number.isFinite(value) ? [observation(`${period[1]}-${period[2]}`, value, now)] : []
+    }).sort((a, b) => a.observedAt.localeCompare(b.observedAt))
+    series.push({
+      key: `commodity:${code}:${request.unit}`, name: `${COMMODITY_NAMES[code] ?? code} (IMF, monthly ${request.unit === 'USD' ? 'price' : 'index'})`,
+      unit: request.unit === 'USD' ? 'USD (IMF quotation unit)' : 'index, 2016 = 100', frequency: 'monthly', higherIs: 'neutral', observations,
+    })
+  }
+  const missing = request.commodities.filter((code) => !series.some((item) => item.key === `commodity:${code}:${request.unit}`))
+  if (!series.length) throw new Error(`IMF has no ${request.unit} series for ${request.commodities.join(', ')}; check the codes (e.g. POILAPSP, PCOPP, PTIN)`)
+  return {
+    feed: 'commodity', request, publisher: 'International Monetary Fund, Primary Commodity Price System',
+    title: `Commodity prices: ${series.map((item) => COMMODITY_NAMES[item.key.split(':')[1]!] ?? item.key.split(':')[1]).join(', ')}, from ${request.start}`,
+    sourceUrls: [fetched.url], retrievedAt: now.toISOString(),
+    sourceUpdatedAt: updated && Number.isFinite(Date.parse(updated)) ? new Date(updated).toISOString() : null,
+    responseSha256: sha256([fetched.bytes]), reliability: RELIABILITY.commodity, series,
+    notes: [
+      'Monthly averages of daily benchmark prices, in the unit the IMF quotes each commodity in (for example USD per barrel, USD per metric ton).',
+      ...(missing.length ? [`No series returned for ${missing.join(', ')}.`] : []),
+    ],
+  }
+}
+
+let witsCountries: Promise<Map<string, string>> | undefined
+
+/** WITS identifies countries by ISO numeric code; its own country list maps ISO3 to it. */
+async function witsCountryCode(iso3: string): Promise<string> {
+  if (iso3 === 'WLD') return '000'
+  witsCountries ??= getText(new URL(`https://${HOSTS.tariff}/API/V1/wits/datasource/trn/country/ALL`), { accept: 'application/xml' }).then(({ text }) => {
+    const map = new Map<string, string>()
+    for (const match of text.matchAll(/<wits:country countrycode="([^"]+)"[^>]*isreporter="1"[^>]*>\s*<wits:iso3Code>([A-Z0-9]{3})<\/wits:iso3Code>/g)) map.set(match[2]!, match[1]!)
+    return map
+  })
+  const map = await witsCountries.catch((error: unknown) => {
+    witsCountries = undefined
+    throw error
+  })
+  const code = map.get(iso3)
+  if (!code) throw new Error(`WITS has no tariff reporter with ISO code ${iso3}`)
+  return code
+}
+
+async function fetchTariff(request: TariffRequest, now: Date): Promise<FeedResult> {
+  const reporter = await witsCountryCode(request.reporter)
+  const partner = await witsCountryCode(request.partner).catch(() => { throw new Error(`WITS has no partner with ISO code ${request.partner}; use WLD for the MFN rate`) })
+  const byProduct = new Map<string, FeedObservation[]>()
+  const detail = new Map<string, string>()
+  const urls: string[] = []
+  const chunks: Uint8Array[] = []
+  const missingYears: number[] = []
+  for (const yearValue of request.years) {
+    const url = new URL(`https://${HOSTS.tariff}/API/V1/SDMX/V21/datasource/TRN/reporter/${reporter}/partner/${partner}/product/${request.products.join(';')}/year/${yearValue}/datatype/reported`)
+    url.searchParams.set('format', 'JSON')
+    let fetched: FetchedText
+    try {
+      fetched = await getText(url)
+    } catch (error) {
+      if (/NoRecordsFound|HTTP 404/.test(error instanceof Error ? error.message : String(error))) { missingYears.push(yearValue); continue }
+      throw error
+    }
+    if (fetched.text.includes('NoRecordsFound')) { missingYears.push(yearValue); continue }
+    urls.push(fetched.url)
+    chunks.push(fetched.bytes)
+    const body = JSON.parse(fetched.text) as { dataSets?: { series?: Record<string, { observations?: Record<string, (number | null)[]> }> }[]; structure?: { dimensions?: { series?: { id: string; values: { id: string }[] }[] }; attributes?: { observation?: { id: string; values: { name?: string; id?: string }[] }[] } } }
+    const dimensions = body.structure?.dimensions?.series ?? []
+    const productValues = dimensions.find((dimension) => dimension.id === 'PRODUCTCODE')?.values ?? []
+    const entries = Object.entries(body.dataSets?.[0]?.series ?? {})
+    // WITS keys do not always put the product index at the position the structure declares, so use the one
+    // position whose index actually varies across series (only the product does); with one series, any works.
+    const keyLength = entries[0]?.[0].split(':').length ?? 0
+    const spread = Array.from({ length: keyLength }, (_, position) => new Set(entries.map(([key]) => key.split(':')[position])).size)
+    const declared = dimensions.findIndex((dimension) => dimension.id === 'PRODUCTCODE')
+    const productPosition = Math.max(...spread, 0) > 1 ? spread.indexOf(Math.max(...spread)) : declared
+    const attributes = body.structure?.attributes?.observation ?? []
+    const typeIndex = attributes.findIndex((attribute) => attribute.id === 'TARIFFTYPE')
+    for (const [key, series] of entries) {
+      const product = productValues[Number(key.split(':')[productPosition])]?.id
+      const values = series.observations?.['0']
+      if (!product || !values || typeof values[0] !== 'number') continue
+      const list = byProduct.get(product) ?? []
+      if (list.some((item) => item.period === String(yearValue))) continue
+      list.push(observation(String(yearValue), values[0], now))
+      byProduct.set(product, list)
+      const typeValue = typeIndex >= 0 ? values[typeIndex + 1] : null
+      if (typeof typeValue === 'number') detail.set(product, attributes[typeIndex]!.values[typeValue]?.name ?? '')
+    }
+  }
+  if (!urls.length) throw new Error(`WITS has no ${request.reporter} tariff data for ${request.years.join(', ')}; tariff schedules are published with a lag of about two years`)
+  const series: FeedSeries[] = [...byProduct.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([product, observations]) => ({
+    key: `tariff:${request.reporter}:${request.partner}:${product}`,
+    name: `${request.reporter} tariff on HS ${product}${request.partner === 'WLD' ? '' : ` from ${request.partner}`} (${detail.get(product) || 'simple average of reported rates'})`,
+    unit: '% ad valorem', frequency: 'annual', higherIs: 'risk-off', observations: observations.sort((a, b) => a.observedAt.localeCompare(b.observedAt)),
+  }))
+  return {
+    feed: 'tariff', request, publisher: 'World Bank WITS, UNCTAD TRAINS tariff data',
+    title: `${request.reporter} tariffs on HS ${request.products.join(', ')}, ${request.years.join(', ')}`,
+    sourceUrls: urls, retrievedAt: now.toISOString(), sourceUpdatedAt: null,
+    responseSha256: sha256(chunks), reliability: RELIABILITY.tariff, series,
+    notes: [
+      'Simple average of the reported ad valorem rates across the national tariff lines in each HS code; specific duties, surcharges and trade remedies are not included.',
+      ...(missingYears.length ? [`No tariff data yet for ${missingYears.join(', ')}.`] : []),
+    ],
+  }
+}
+
 /** Fetches one feed request. Throws with a plain explanation when the source is unreachable or rejects it. */
 export async function fetchFeed(request: FeedRequest): Promise<FeedResult> {
   const now = feedNow()
@@ -483,6 +651,8 @@ export async function fetchFeed(request: FeedRequest): Promise<FeedResult> {
     case 'imf': return fetchImf(request, now)
     case 'comtrade': return fetchComtrade(request, now)
     case 'gdelt': return fetchGdelt(request, now)
+    case 'commodity': return fetchCommodity(request, now)
+    case 'tariff': return fetchTariff(request, now)
   }
 }
 
@@ -490,6 +660,7 @@ export async function fetchFeed(request: FeedRequest): Promise<FeedResult> {
 export function resetFeedCaches(): void {
   imfCatalogue = undefined
   comtradeReference = undefined
+  witsCountries = undefined
   lastRequestAt.clear()
 }
 

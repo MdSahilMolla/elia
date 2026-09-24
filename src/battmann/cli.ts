@@ -12,7 +12,7 @@ import { executeBattmannStoreAction, listFeedSubscriptions, recordFeedResult, vo
  */
 
 type Row = Record<string, unknown>
-const VALUE_FLAGS = ['--store', '--out', '--every', '--base', '--start', '--end', '--from', '--partner', '--flow', '--periods', '--days', '--by']
+const VALUE_FLAGS = ['--store', '--out', '--every', '--base', '--start', '--end', '--from', '--partner', '--flow', '--periods', '--days', '--by', '--years']
 const DEFAULT_DASHBOARD = '.elia/artifacts/battmann-dashboard.html'
 
 const USAGE = `Usage: elia battmann <command>
@@ -25,6 +25,8 @@ const USAGE = `Usage: elia battmann <command>
       imf <COUNTRY> <INDICATOR>
       comtrade <REPORTER> <HS> [--partner ALL|WLD|ISO3] [--flow import|export] [--periods 2024,2025]
       gdelt "<query>" [--days 30]
+      commodity <CODE…> [--start YYYY-MM] [--index]       IMF codes: POILAPSP, PCOPP, PTIN, PALUM, PNGASJP…
+      tariff <REPORTER> <HS6…> [--partner WLD] [--years 2022,2023]
   refresh                       One monitoring pass: refresh feeds, resolve due questions, update baselines, rebuild the dashboard
   watch --every 6h              Repeat refresh on an interval while this process runs
   record                        The certified track record: resolved-by-code questions, Battmann vs the baseline
@@ -150,6 +152,8 @@ function pullRequest(rest: string[]): Row {
   if (feed === 'worldbank') return { feed, country: values[0], indicator: values[1], ...(flagValue('--from') ? { startYear: Number(flagValue('--from')) } : {}) }
   if (feed === 'imf') return { feed, country: values[0], indicator: values[1] }
   if (feed === 'comtrade') return { feed, reporter: values[0], hs: values[1], partner: flagValue('--partner') ?? 'ALL', flow: flagValue('--flow') ?? 'import', ...(flagValue('--periods') ? { periods: flagValue('--periods')!.split(','), frequency: flagValue('--periods')!.split(',')[0]!.length === 6 ? 'monthly' : 'annual' } : {}) }
+  if (feed === 'commodity') return { feed, commodities: values, unit: hasFlag('--index') ? 'IX' : 'USD', ...(flagValue('--start') ? { start: flagValue('--start') } : {}) }
+  if (feed === 'tariff') return { feed, reporter: values[0], products: values.slice(1), partner: flagValue('--partner') ?? 'WLD', ...(flagValue('--years') ? { years: flagValue('--years')!.split(',').map(Number) } : {}) }
   const days = Number(flagValue('--days') ?? 30)
   return { feed, query: values.join(' '), start: new Date(Date.now() - days * 86_400_000).toISOString().slice(0, 10) }
 }

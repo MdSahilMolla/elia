@@ -53,6 +53,10 @@ const INDIA_SEMICONDUCTORS: Playbook = {
       { feed: 'imf', country: 'TWN', indicator: 'NGDP_RPCH' },
       { feed: 'gdelt', query: '(taiwan OR "taiwan strait") semiconductor' },
       { feed: 'gdelt', query: 'semiconductor "export controls"' },
+      // Inputs to chips and to the cost of moving them: energy, copper, aluminium, and tin for solder.
+      { feed: 'commodity', commodities: ['POILAPSP', 'PNGASJP', 'PCOPP', 'PALUM', 'PTIN'] },
+      // India's applied tariffs: processors, memory, other ICs, solar cells and modules.
+      { feed: 'tariff', reporter: 'IND', products: ['854231', '854232', '854239', '854142', '854143'], years: [now.getUTCFullYear() - 4, now.getUTCFullYear() - 3, now.getUTCFullYear() - 2] },
     ]
   },
   questions: (latest, now) => {
@@ -92,6 +96,22 @@ const INDIA_SEMICONDUCTORS: Playbook = {
     trade('CHN', 'China', 0.1)
     trade('TWN', 'Taiwan ("Other Asia, nes")', 0.1)
     trade('KOR', 'South Korea', 0.1)
+    // A commodity month is forecastable until it starts, so ask about the month after next.
+    const target = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 2, 1))
+    const targetMonth = `${target.getUTCFullYear()}-${String(target.getUTCMonth() + 1).padStart(2, '0')}`
+    const commodity = (code: string, label: string, move: number, unit: string) => {
+      const value = latest(`commodity:${code}:USD`)
+      if (value === undefined) return
+      const threshold = Math.round(value * (1 + move))
+      questions.push({
+        questionId: `ind-semis:${code.toLowerCase()}-${targetMonth}`,
+        question: `Will the IMF's ${targetMonth} average ${label} price be above ${threshold} ${unit}?`,
+        domain: 'commodity', tags: ['india-semiconductors', 'commodity'],
+        resolutionRule: { source: { feed: 'commodity', commodity: code, unit: 'USD' }, observation: { period: targetMonth }, comparator: '>', threshold },
+      })
+    }
+    commodity('PCOPP', 'copper', 0.02, 'USD/t')
+    commodity('POILAPSP', 'crude oil (APSP)', 0, 'USD/bbl')
     const growth = latest('wb:IND:NY.GDP.MKTP.KD.ZG')
     if (growth !== undefined) questions.push({
       questionId: `ind-semis:gdp-growth-${year}`,
@@ -103,13 +123,17 @@ const INDIA_SEMICONDUCTORS: Playbook = {
   },
   brief: `Write the India semiconductor supply-risk brief: the Government of India is monitoring its semiconductor imports and wants to prepare before a disruption, not after.
 
-The Battmann store already holds code-fetched data for this (provenance "feed"): UN Comtrade India imports of integrated circuits (HS 8542) by partner for five years and by month, discrete semiconductors (HS 8541), USD against INR/CNY/KRW/JPY, World Bank and IMF indicators, GDELT news-volume series where GDELT was reachable, and open certified questions each paired with a statistical baseline.
+The Battmann store already holds the data, fetched by code (provenance "feed"). Read it; do not re-fetch it:
+- battmann supplier_concentration: who India's chip imports depend on, with shares and HHI (HS 8542 integrated circuits, HS 8541 discrete devices and solar cells).
+- battmann indicator_series with indicatorId, for example comtrade:IND:import:8542:WLD:annual, comtrade:IND:import:8542:WLD:monthly, fx:USD:INR, fx:USD:CNY, fx:USD:KRW, commodity:PCOPP:USD, commodity:PTIN:USD, commodity:POILAPSP:USD, tariff:IND:WLD:854142, tariff:IND:WLD:854231, wb:IND:NY.GDP.MKTP.KD.ZG. list_indicators shows every id, including the GDELT news-volume series. Every reading carries an evidenceId you can cite.
+- battmann list_questions: the open certified questions, each with a statistical baseline.
 
-1. Read the picture: battmann list_feeds, list_indicators, list_questions, and indicator_series or feed_query for the series you use. Use the Comtrade partner breakdown for concentration (who supplies what share).
-2. Re-confirm the current situation from recent primary reporting (last 30 days): export controls on chips and tools, the Taiwan Strait, shipping disruptions, memory and chip prices, and India's own semiconductor programme. Register what you rely on with register_evidence.
-3. Submit a live forecast on every open certified question (submit_forecast, forecastClass live, asOf now), citing feed evidence and your own. Where you differ from the baseline, say why in the rationale.
-4. Build the analysis with the deterministic tools: risk_assessment for a supply-disruption risk score from dated factors; consequence_chain for second- and third-order effects on Indian industries; alternatives to rank alternative supplier countries using the Comtrade values and shares.
-5. Register the key judgements as claims, then write report_from_store (draft) to .elia/artifacts/india-semiconductors.md and the dashboard to .elia/artifacts/battmann-dashboard.html.
+Steps:
+1. Read supplier_concentration, list_questions, and the indicator_series you will cite.
+2. Re-confirm the current situation from reporting in the last 30 days (web_search with recencyDays 30, then web_fetch the primary source): chip and tool export controls, the Taiwan Strait, shipping, memory and chip prices, and India's semiconductor programme. Record each source you rely on with register_evidence, using flat fields: title, url, publishedAt, retrievedAt, excerpt, independenceGroup, reliability.
+3. Forecast every open certified question with submit_forecast { questionId, probability, method, rationale, evidenceIds }. The clock sets asOf. Say where and why you differ from the baseline.
+4. Analyse with the deterministic tools: risk_assessment for a supply-disruption risk score from dated factors, consequence_chain for second- and third-order effects on Indian industries, and alternatives to rank alternative supplier countries from the concentration figures.
+5. Record three to six key judgements with register_claim. Then write report_from_store { title, executiveSummary, author: "elia battmann", asOf: <now>, outputPath: ".elia/artifacts/india-semiconductors.md" } and dashboard { outputPath: ".elia/artifacts/battmann-dashboard.html" }.
 
 Label every number as feed data, calculation, model estimate, or judgement, with its date. Never invent a figure; if something is missing, say so.`,
 }
@@ -171,5 +195,7 @@ export function describeRequest(request: FeedRequest): string {
     case 'imf': return `IMF ${request.indicator} for ${request.country}`
     case 'comtrade': return `UN Comtrade ${request.reporter} ${request.flow}s HS ${request.hs} (${request.partner}, ${request.periods.join(',')})`
     case 'gdelt': return `GDELT "${request.query}"`
+    case 'commodity': return `IMF commodity prices ${request.commodities.join(',')}`
+    case 'tariff': return `WITS tariffs ${request.reporter} on HS ${request.products.join(',')} (${request.years.join(',')})`
   }
 }

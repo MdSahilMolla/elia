@@ -39,7 +39,12 @@ workspace), a REPL redesign, and a broad reliability/perf pass.
   code: while any model route is a cloud model, the tool withholds records
   above the cloud ceiling and refuses to write them, and the store file is a
   protected path. `elia battmann seed|brief india-semiconductors` is the first
-  playbook. The defence primitives (`posture_assessment`, `effector_pairing`)
+  playbook. Commodity prices (IMF PCPS) and applied tariffs (WITS) followed,
+  along with `supplier_concentration`. A live agent run showed the tool had
+  to be easier for models to use, so `feed_query` now returns a citable
+  evidence id, nested fields are lifted, a failed call returns the fields
+  that action takes, and certified forecasts are stamped by the clock with
+  their feed evidence attached. The defence primitives (`posture_assessment`, `effector_pairing`)
   and the Palantir-pillar naming were removed.
 - **cyber mode** — evidence-gated findings, scoped `http_probe`, and a
   `.elia/policy.json` governor policy.

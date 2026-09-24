@@ -64,11 +64,13 @@ test('a rule question is baselined at opening, protected from the model, and res
   const series = await run({ action: 'indicator_series', indicatorId: 'fx:USD:INR' })
   const evidenceId = series.readings.at(-1).evidenceId
   const forecast = { action: 'submit_forecast', questionId: 'usd-inr', probability: 0.8, method: 'judgement', forecaster: 'battmann', rationale: 'Rupee weakness persists.', evidenceIds: [evidenceId] }
-  await expect(run({ ...forecast, forecaster: 'baseline-v2', asOf: new Date().toISOString() })).rejects.toThrow('reserved')
-  // Backdating is refused: before the question opened by the opening check, afterwards by the as-of-now check.
-  await expect(run({ ...forecast, asOf: new Date(Date.now() - 2 * DAY).toISOString() })).rejects.toThrow(/as of now|between question openedAt/)
-  const logged = await run({ ...forecast, asOf: new Date().toISOString() })
-  expect(logged.revision).toBe(2)
+  await expect(run({ ...forecast, forecaster: 'baseline-v2' })).rejects.toThrow('reserved')
+  // The clock stamps a certified forecast: a backdated asOf is simply not used.
+  const backdated = await run({ ...forecast, probability: 0.7, asOf: new Date(Date.now() - 2 * DAY).toISOString() })
+  expect(backdated.asOfSetBy).toBe('clock')
+  expect(Math.abs(Date.parse(backdated.asOf) - Date.now())).toBeLessThan(60_000)
+  const logged = await run(forecast)
+  expect(logged.revision).toBe(3)
 
   // Before the day, nothing resolves; the monitor never guesses.
   const early = await run({ action: 'resolve_due' })
