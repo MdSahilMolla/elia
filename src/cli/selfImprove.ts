@@ -193,7 +193,20 @@ export async function runEvolve(): Promise<void> {
     }
     writeNotice(`Focused on ${taskIds.length} task(s): the built-in set, the last full run's failures, any task harvested since it, and ${focus} passing history task(s).`)
   }
-  const result = await evolve({ generations, dryRun: hasFlag('--dry-run'), taskIds })
+  // One measurement per checkout at a time — see measureSlot.ts.
+  const { claimMeasureSlot, describeHolder } = await import('../evolve/measureSlot.ts')
+  const slot = claimMeasureSlot(`elia ${process.argv.slice(2).join(' ')}`)
+  if (!slot.ok) {
+    writeError(describeHolder(slot.holder))
+    process.exitCode = 1
+    return
+  }
+  let result: Awaited<ReturnType<typeof evolve>>
+  try {
+    result = await evolve({ generations, dryRun: hasFlag('--dry-run'), taskIds })
+  } finally {
+    slot.release()
+  }
   if (result.stoppedReason) {
     writeError(`No generation was attempted: ${result.stoppedReason}`)
     process.exitCode = 1
@@ -267,6 +280,15 @@ async function runAutoPractice(): Promise<void> {
     })
   }
 
+  // A bench or evolve someone started by hand already holds the checkout.
+  // Practising beside it would score both wrong, so this run gives way.
+  const { claimMeasureSlot } = await import('../evolve/measureSlot.ts')
+  const slot = claimMeasureSlot('elia evolve --auto (practice)')
+  if (!slot.ok) {
+    finish('practised', `skipped — \`${slot.holder.command}\` was already measuring in this checkout`)
+    return
+  }
+
   try {
     await loadRuntimeSkills()
     const { BENCH_TASKS, allBenchTasks } = await import('../evolve/suite.ts')
@@ -331,6 +353,8 @@ async function runAutoPractice(): Promise<void> {
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error)
     finish(auto.looksBlocked(detail) ? 'blocked' : 'failed', detail.split('\n')[0]!.slice(0, 300))
+  } finally {
+    slot.release()
   }
 }
 

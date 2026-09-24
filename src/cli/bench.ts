@@ -166,6 +166,27 @@ export async function runBench(): Promise<void> {
     return
   }
 
+  // One measurement per checkout at a time — see measureSlot.ts.
+  const { claimMeasureSlot, describeHolder } = await import('../evolve/measureSlot.ts')
+  const slot = claimMeasureSlot(`elia ${process.argv.slice(2).join(' ')}`)
+  if (!slot.ok) {
+    writeError(describeHolder(slot.holder))
+    process.exitCode = 1
+    return
+  }
+  try {
+    await scoreLiveTree(tasks, withLessons, shownHalf, heldOutHalf)
+  } finally {
+    slot.release()
+  }
+}
+
+async function scoreLiveTree(
+  tasks: import('../evolve/suite.ts').BenchTask[],
+  withLessons: boolean,
+  shownHalf: boolean,
+  heldOutHalf: boolean,
+): Promise<void> {
   if (!(await ensureFirstRunProviderSetup())) return
   await loadRuntimeSkills()
   const { measureFitness, renderScorecard } = await import('../evolve/fitness.ts')
