@@ -76,6 +76,8 @@ export function evidenceForSource(source: string | undefined, at = Date.now()): 
       return { verifier: 'repaired-check', tier: 'exact', family: 'execution', passed: true, at, detail: 'a failing check was put right' }
     case 'user':
       return { verifier: 'human', tier: 'critic', family: 'human', passed: true, at }
+    case 'user-correction':
+      return { verifier: 'human', tier: 'critic', family: 'human', passed: true, at, detail: "distilled from the user's own correction" }
     default:
       return undefined
   }

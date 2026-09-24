@@ -43,6 +43,28 @@ export function lessonKey(text: string): string {
 
 const MAX_INJECTED_LESSONS = 25
 
+/**
+ * Origins that mean the user said it: `user-correction` is written by
+ * turnLearning from the user's own correction, `user` by a model recording
+ * something it was told.
+ *
+ * Every other lesson is elia's own inference and has to earn its place — it is
+ * withheld from a random slice of briefings so a trial can measure it, retired
+ * when it measurably hurts, and reworded or merged by consolidation. None of
+ * that fits a rule the user stated. Withholding it means elia disobeys the user
+ * at random; retiring it on the clean-run rate judges a preference by a number
+ * that cannot see it; and a model rewording it is how "never push without
+ * asking" becomes a weaker sentence nobody agreed to.
+ */
+const USER_STATED_SOURCES = new Set(['user', 'user-correction'])
+
+export function isUserStated(lesson: { source?: string }): boolean {
+  return lesson.source !== undefined && USER_STATED_SOURCES.has(lesson.source)
+}
+
+/** User-stated lessons are always injected, the newest this many; they come out of the same budget as the rest. */
+const MAX_INJECTED_USER_STATED = 8
+
 const PROJECT_HEADING = '# Lessons\n\nThings elia learned about this project, carried into future runs.\n\n'
 const GLOBAL_HEADING = '# Lessons about this machine\n\nEnvironment facts elia learned that hold across every project here.\n\n'
 
@@ -309,12 +331,12 @@ function inFileOrder(all: Lesson[], chosen: Set<Lesson>): Lesson[] {
  */
 export const CERTIFIED_REUSE_ADVANTAGE = 1.5
 
-function selectLessons(all: Lesson[], query: string, certified: ReadonlySet<string> = new Set()): Lesson[] {
-  if (all.length <= MAX_INJECTED_LESSONS) return all
+function selectLessons(all: Lesson[], query: string, certified: ReadonlySet<string> = new Set(), max = MAX_INJECTED_LESSONS): Lesson[] {
+  if (all.length <= max) return all
   const recent = all.slice(-RECENCY_FLOOR)
   const chosen = new Set(recent)
-  const budget = MAX_INJECTED_LESSONS - chosen.size
-  if (budget <= 0 || !query.trim()) return inFileOrder(all, new Set(all.slice(-MAX_INJECTED_LESSONS)))
+  const budget = max - chosen.size
+  if (budget <= 0 || !query.trim()) return inFileOrder(all, new Set(all.slice(-max)))
 
   const older = all.slice(0, -RECENCY_FLOOR)
   const byId = new Map(older.map((lesson, index) => [String(index), lesson]))
@@ -326,14 +348,14 @@ function selectLessons(all: Lesson[], query: string, certified: ReadonlySet<stri
     })
     .sort((a, b) => b.score - a.score)
   for (const hit of ranked) {
-    if (chosen.size >= MAX_INJECTED_LESSONS) break
+    if (chosen.size >= max) break
     const lesson = byId.get(hit.id)
     if (lesson) chosen.add(lesson)
   }
   // Nothing matched the query — fall back to recency for the remaining budget
   // rather than injecting fewer lessons than the budget allows.
-  if (chosen.size < MAX_INJECTED_LESSONS) {
-    for (const lesson of older.slice(-(MAX_INJECTED_LESSONS - chosen.size))) chosen.add(lesson)
+  if (chosen.size < max) {
+    for (const lesson of older.slice(-(max - chosen.size))) chosen.add(lesson)
   }
   return inFileOrder(all, chosen)
 }
@@ -365,7 +387,12 @@ export function renderLessonsWithKeys(
   const certificates = lessonArtifacts(path)
   const usable = loadLessons(path).filter((lesson) => retrievable(certificates.get(lesson.key ?? lessonKey(lesson.text))))
   const certified = new Set([...certificates].filter(([, artifact]) => artifact.status === 'admitted').map(([key]) => key))
-  const selected = selectLessons(usable, query, certified)
+  // What the user said goes in on every turn, whatever the turn is about and
+  // however old it is: "never push without asking" shares no words with "fix
+  // the login bug", so relevance ranking would drop it exactly when it matters.
+  const stated = usable.filter(isUserStated).slice(-MAX_INJECTED_USER_STATED)
+  const learned = usable.filter((lesson) => !isUserStated(lesson))
+  const selected = selectLessons(learned, query, certified, MAX_INJECTED_LESSONS - stated.length)
   const random = holdout.random ?? Math.random
   const project: Lesson[] = []
   const heldOut: string[] = []
@@ -377,18 +404,23 @@ export function renderLessonsWithKeys(
   // Machine facts first: they constrain how a command can be run at all, which
   // is worth knowing before anything specific to this repository.
   const lessons = [...global, ...project]
-  lastInjectedLessonKeys = lessons.map((lesson) => lesson.key ?? lessonKey(lesson.text))
+  lastInjectedLessonKeys = [...stated, ...lessons].map((lesson) => lesson.key ?? lessonKey(lesson.text))
   lastHeldOutLessonKeys = holdout.rate > 0 ? heldOut : undefined
-  if (lessons.length === 0) return { text: '', keys: [], heldOut }
+  if (lastInjectedLessonKeys.length === 0) return { text: '', keys: [], heldOut }
   recordLessonReuse(lastInjectedLessonKeys, path)
-  const text = `\n\n## What earlier runs learned about this project\n${lessons
-    .map((lesson) => {
-      const bits = [lesson.text]
-      if (lesson.source) bits.push(`(source: ${lesson.source})`)
-      if (typeof lesson.confidence === 'number') bits.push(`(confidence: ${lesson.confidence.toFixed(2)})`)
-      return `- ${bits.join(' ')}`
-    })
-    .join('\n')}`
+  const listing = (items: Lesson[]) =>
+    items
+      .map((lesson) => {
+        const bits = [lesson.text]
+        if (lesson.source) bits.push(`(source: ${lesson.source})`)
+        if (typeof lesson.confidence === 'number') bits.push(`(confidence: ${lesson.confidence.toFixed(2)})`)
+        return `- ${bits.join(' ')}`
+      })
+      .join('\n')
+  const text = [
+    stated.length > 0 ? `\n\n## Rules the user has set for this project\nThe user asked for these directly. Follow them over any learned lesson below.\n${stated.map((lesson) => `- ${lesson.text}`).join('\n')}` : '',
+    lessons.length > 0 ? `\n\n## What earlier runs learned about this project\n${listing(lessons)}` : '',
+  ].join('')
   return { text, keys: lastInjectedLessonKeys, heldOut }
 }
 
@@ -449,6 +481,9 @@ export function retireLessons(
   const dead = new Set<string>()
   const certificates = lessonArtifacts(lessonsPath)
   for (const lesson of lessons) {
+    // A rule the user set is not on trial: whether runs carrying it come out
+    // clean says nothing about whether the user still wants it.
+    if (isUserStated(lesson)) continue
     const key = lesson.key ?? lessonKey(lesson.text)
     // A randomized trial outranks the observational comparison below: once a
     // lesson has one, its verdict is the only one that says what the lesson

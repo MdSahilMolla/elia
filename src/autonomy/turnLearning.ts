@@ -1,4 +1,6 @@
 import type { ChatMessage, ContentBlock, Provider, Usage } from '../providers/types.ts'
+import { redactSecrets } from '../ui/redact.ts'
+import { addUsage } from '../usage.ts'
 import { appendLessons, loadLessons } from './lessons.ts'
 import type { VerifyResult } from './outcomes.ts'
 import { lessonHygieneProblem } from './lessonCertificates.ts'
@@ -302,6 +304,12 @@ export interface LearnFromTurnOptions {
    * than treating every auto-written lesson as the same kind of evidence.
    */
   sources?: { repair: string; blocker: string }
+  /**
+   * What a person typed this turn — without pasted editor context or command
+   * output — so a correction in it can set a standing rule. Absent for a
+   * sub-agent, whose request is another model's prompt.
+   */
+  userWords?: string
 }
 
 export interface LearnedFromTurn {
@@ -309,33 +317,147 @@ export interface LearnedFromTurn {
   usage?: Usage
 }
 
+// --- Learning from the user: a correction becomes a standing rule -------------
+
 /**
- * Turns a mechanically resolved failure into at most two durable lessons,
- * written to `.elia/lessons.md` (source `interactive-auto`) where every later
- * turn's prompt picks them up — and where lesson-efficacy tracking can retire
- * them if they do not help. Never throws; learning is a bonus on a finished turn.
+ * Past this length a message is a task description, not a correction: a spec
+ * that says "never use any" is about the code being written, not about elia.
+ */
+const MAX_CORRECTION_LENGTH = 1_500
+
+/**
+ * The phrasings of a correction meant to outlast the turn — "stop adding
+ * comments", "we use bun here", "from now on ask before pushing", "too
+ * verbose". Deterministic and deliberately wide: a message that matches costs
+ * one fast-tier call, which returns nothing when the message only steered this
+ * one task. A correction that is missed is repeated by the user in every
+ * session from then on.
+ */
+const STANDING_CORRECTION = new RegExp(
+  [
+    /\b(?:from now on|going forward|in (?:the )?future|next time|every time|each time|whenever you)\b/,
+    /\b(?:i|we)(?:'ve| have)? (?:already )?(?:told|asked) you\b|\bhow many times\b|\bnever again\b|\b(?:don'?t|do not) ever\b/,
+    /\b(?:remember|keep in mind) (?:that|this|to)\b/,
+    /\b(?:i|we) (?:prefer|would rather|'d rather|hate (?:it )?when|don'?t like (?:it )?when|want you to (?:always|never))\b/,
+    /\b(?:always|never) (?:use|run|call|write|add|put|commit|push|ask|reply|answer|explain|format|include|touch|edit|delete|remove|install|create|open|mock|skip)\b/,
+    /\b(?:stop|quit) (?:using|running|adding|writing|creating|putting|explaining|summari[sz]ing|formatting|asking|touching|committing|pushing|installing|apologi[sz]ing|repeating|guessing|mocking|skipping|ignoring|changing|editing|deleting|removing)\b/,
+    /\b(?:please )?(?:don'?t|do not) (?:use|add|commit|push|install|mock|reformat)\b/,
+    /\b(?:we|i|this (?:repo|repository|project|codebase|team)) (?:use|uses|only use|don'?t use|doesn'?t use|never use)\b/,
+    /\buse\b[^.?!\n]{1,40}\binstead\b|\binstead of\b[^.?!\n]{1,40}\buse\b/,
+    /\btoo (?:verbose|long|wordy|chatty)\b|\b(?:be|keep it) (?:brief|short|concise|terse)\b/,
+  ]
+    .map((pattern) => pattern.source)
+    .join('|'),
+  'i',
+)
+
+/** Whether a user's message reads as a correction meant to hold beyond this turn. */
+export function isStandingCorrection(message: string): boolean {
+  const text = message.trim()
+  return text.length > 0 && text.length <= MAX_CORRECTION_LENGTH && STANDING_CORRECTION.test(text)
+}
+
+/** What elia said just before the turn that starts at `fromIndex` — what a correction is usually about. */
+function previousReply(messages: ChatMessage[], fromIndex: number): string | undefined {
+  for (let index = fromIndex - 1; index >= 0; index -= 1) {
+    const message = messages[index]
+    if (message?.role !== 'assistant') continue
+    const text = message.content.flatMap((block) => (block.type === 'text' ? [block.text] : [])).join(' ')
+    if (text.trim()) return clip(redactSecrets(text), 600)
+  }
+  return undefined
+}
+
+/**
+ * Asks for the rule a correction sets, not an account of it. The user's words
+ * are the evidence, so this is the one lesson prompt that needs no tool output
+ * — and the one where saying nothing is the right answer most often: most
+ * matching messages only steer the task in hand.
+ */
+export function correctionPrompt(request: string, previous: string | undefined, known: string[]): string {
+  const lines = ['The user just said this to elia, the coding agent working in this project:', `> ${clip(redactSecrets(request), 800)}`]
+  if (previous) lines.push('', 'It was in reply to this from elia:', `> ${previous}`)
+  if (known.length > 0) {
+    lines.push('', 'Already known about this project (do not repeat or rephrase these):', ...known.map((lesson) => `- ${lesson}`))
+  }
+  lines.push(
+    '',
+    "If the user is setting a rule for how elia should work from now on — a tool or command to use or avoid, a convention to follow, how to format a reply or how long to make it, something to always ask before doing — write it as at most 2 rules a future session must follow, so the user never has to say it again. One imperative sentence each, with the user's reason as a short clause only if they gave one. State the rule itself: no quotes, no \"the user said\", no account of this conversation, and nothing the user did not ask for.",
+    'Return an empty list when the message only steers this one task ("not that file, the other one", "try again"), disputes a fact rather than setting a rule, or leaves unclear what the rule would be. A wrong rule is followed on every future turn; a missing one costs the user one sentence.',
+    '',
+    'Reply with JSON only: {"lessons": ["..."]}',
+  )
+  return lines.join('\n')
+}
+
+const REFLECTION_SYSTEM = "You are elia's long-term memory for one software project. You distil hard-won, durable facts from real tool output. Reply with JSON only."
+const CORRECTION_SYSTEM = "You are elia's long-term memory for one software project. You turn a user's correction into a standing rule elia follows in every later session. Reply with JSON only."
+
+/** One lesson-writing call. Never throws: a failed call learns nothing. */
+async function distil(options: LearnFromTurnOptions, system: string, prompt: string, known: string[], signal: AbortSignal): Promise<LearnedFromTurn> {
+  try {
+    const result = await options.provider.streamTurn({
+      cwd: options.cwd,
+      system,
+      messages: [{ role: 'user', content: [{ type: 'text', text: prompt }] }],
+      tools: [],
+      onText: () => {},
+      signal,
+      reasoningEffort: 'low',
+    })
+    const reply = result.content.flatMap((block) => (block.type === 'text' ? [block.text] : [])).join('')
+    return { lessons: parseLessons(reply, known), usage: result.usage }
+  } catch {
+    return { lessons: [] }
+  }
+}
+
+/**
+ * Turns what a finished turn can teach into at most a few durable lessons,
+ * written to `.elia/lessons.md` where every later turn's prompt picks them up.
+ *
+ * Two sources. A mechanically resolved failure (source `interactive-auto`, or
+ * `interactive-blocker` for one never resolved), which lesson-efficacy tracking
+ * can retire if it does not help. And a correction in what the person typed
+ * (`userWords`) that sets a standing rule (source
+ * `user-correction`), which is injected on every turn and never retired — see
+ * `isUserStated`. Never throws; learning is a bonus on a finished turn.
  */
 export async function learnFromTurn(options: LearnFromTurnOptions): Promise<LearnedFromTurn> {
   const evidence = turnEvidence(options.messages, options.fromIndex)
   const mode = learningMode(evidence, options.outcome)
-  if (!mode) return { lessons: [] }
+  const userWords = options.userWords ?? ''
+  const correction = isStandingCorrection(userWords)
+  if (!mode && !correction) return { lessons: [] }
   const known = loadLessons(options.lessonsPath).map((lesson) => lesson.text)
   const timeout = AbortSignal.timeout(options.timeoutMs ?? 20_000)
+  const signal = options.signal ? AbortSignal.any([options.signal, timeout]) : timeout
   options.onReflecting?.()
-  try {
-    const prompt = mode === 'repair' ? reflectionPrompt(options.request, evidence, known) : blockerPrompt(options.request, evidence, known)
-    const result = await options.provider.streamTurn({
-      cwd: options.cwd,
-      system: "You are elia's long-term memory for one software project. You distil hard-won, durable facts from real tool output. Reply with JSON only.",
-      messages: [{ role: 'user', content: [{ type: 'text', text: prompt }] }],
-      tools: [],
-      onText: () => {},
-      signal: options.signal ? AbortSignal.any([options.signal, timeout]) : timeout,
-      reasoningEffort: 'low',
-    })
-    const reply = result.content.flatMap((block) => (block.type === 'text' ? [block.text] : [])).join('')
-    const lessons = parseLessons(reply, known)
-    if (lessons.length > 0) {
+
+  const learned: string[] = []
+  let usage: Usage | undefined
+  const tally = (spent: Usage | undefined) => {
+    if (spent) usage = usage ? addUsage(usage, spent) : spent
+  }
+
+  // The user's rule first: it is the stronger evidence, and a failure lesson
+  // that restates it is then deduplicated against it rather than the reverse.
+  if (correction) {
+    const rules = await distil(options, CORRECTION_SYSTEM, correctionPrompt(userWords, previousReply(options.messages, options.fromIndex), known), known, signal)
+    tally(rules.usage)
+    // A rule is injected into every later prompt, so one that carries a
+    // credential ("remember the staging password is …") is never kept.
+    const kept = rules.lessons.filter((rule) => redactSecrets(rule) === rule)
+    if (kept.length > 0) appendLessons(kept.map((text) => ({ text, source: 'user-correction', confidence: 0.9 })), options.lessonsPath)
+    learned.push(...kept)
+  }
+
+  if (mode) {
+    const already = [...known, ...learned]
+    const prompt = mode === 'repair' ? reflectionPrompt(options.request, evidence, already) : blockerPrompt(options.request, evidence, already)
+    const facts = await distil(options, REFLECTION_SYSTEM, prompt, already, signal)
+    tally(facts.usage)
+    if (facts.lessons.length > 0) {
       // A blocker lesson records an unverified constraint, not a proven fix, so
       // it enters with lower confidence and its own source — lesson-efficacy
       // retirement can then drop it ahead of lessons that were earned by a
@@ -343,10 +465,9 @@ export async function learnFromTurn(options: LearnFromTurnOptions): Promise<Lear
       const tags = options.sources ?? { repair: 'interactive-auto', blocker: 'interactive-blocker' }
       const source = mode === 'repair' ? tags.repair : tags.blocker
       const confidence = mode === 'repair' ? 0.7 : 0.4
-      appendLessons(lessons.map((text) => ({ text, source, confidence })), options.lessonsPath)
+      appendLessons(facts.lessons.map((text) => ({ text, source, confidence })), options.lessonsPath)
     }
-    return { lessons, usage: result.usage }
-  } catch {
-    return { lessons: [] }
+    learned.push(...facts.lessons)
   }
+  return { lessons: learned, usage }
 }

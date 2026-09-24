@@ -24,7 +24,7 @@ Most agents are exactly as good on their thousandth task as on their first. elia
 2. **Check** it against something that isn't a model's opinion: tests, builds, exit codes.
 3. **Change** elia itself. `elia evolve` builds one hypothesis in a sandbox, and `elia distill` turns verified traces into role instructions.
 4. **Prove** the change on a benchmark drawn partly from real git history, with no model in the scoring path.
-5. **Measure memory.** Lessons are kept for measured benefit, tested with and without and in randomized holdouts.
+5. **Measure memory.** Lessons elia infers are kept for measured benefit, tested with and without and in randomized holdouts. Rules you set by correcting it are never withheld, retired or reworded.
 6. **Compound.** The agent that proposes and builds improvements is elia itself. A promoted change to its loop, roles, tools or prompts improves the improver too, and its search strategy is replaced when it stalls.
 
 The guards are enforced in code. The verifier must not get worse. The benchmark, the gate and elia's Value Core are off limits to the loop. Wins must repeat. Run `elia compounding` to see where each stage stands, computed from elia's own ledgers. **Today:** stages 1, 2 and 4 are working or partial; no generation has been promoted yet, so compounding itself is still unproven. See the [compounding guide](docs/guide/compounding.md).
@@ -33,7 +33,7 @@ The guards are enforced in code. The verifier must not get worse. The benchmark,
 
 - **It works a task like an engineer.** Before it changes anything, elia looks around the project and proposes a plan. The plan lists the steps and the exact commands that will prove the work is correct. Once you approve, a fleet of specialised sub-agents (scouts, builders, frontend and backend workers, testers) carries out the plan in parallel. Reviewers then check the result: a critic, a security reviewer and a bug hunter. If something fails, elia repairs it and records what it learned for the next run.
 - **Every action goes through a gate.** A code-based *autonomy governor*, not a prompt, checks each tool call before it runs. Safe work goes ahead. Irreversible actions need your explicit approval: deleting, pushing, publishing, sending messages, deploying to production. That includes unattended runs. Each autonomous run leaves a redacted action ledger and a human-readable receipt. elia doesn't count a run as "done" just because the model said so; the run needs evidence first.
-- **It remembers.** Lessons, past sessions and project notes carry across runs. elia notices routines it keeps repeating and can turn them into tested tools of its own.
+- **It remembers.** Lessons, past sessions and project notes carry across runs. When you correct it ("stop adding comments", "we use bun here"), it keeps that as a rule for every later session in the project. elia notices routines it keeps repeating and can turn them into tested tools of its own.
 
 It isn't only for code. Specialist modes cover research, data analysis, finance, spreadsheets and presentations, authorized security testing, and strategic intelligence (Battmann). Each mode has its own tools and safety rules.
 

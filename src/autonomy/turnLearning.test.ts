@@ -2,7 +2,7 @@ import { afterEach, expect, test } from 'bun:test'
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { blockerPrompt, learnFromTurn, learningMode, memoryReceipt, parseLessons, similarity, turnEvidence, worthLearningFrom } from './turnLearning.ts'
+import { blockerPrompt, correctionPrompt, isStandingCorrection, learnFromTurn, learningMode, memoryReceipt, parseLessons, similarity, turnEvidence, worthLearningFrom } from './turnLearning.ts'
 import type { ChatMessage, Provider, StreamTurnParams } from '../providers/types.ts'
 
 const dirs: string[] = []
@@ -251,3 +251,130 @@ test('a worker that finished with nothing going wrong costs no model call', asyn
   expect(learned.lessons).toEqual([])
   expect(provider.calls.length).toBe(0)
 })
+
+// --- A correction from the user becomes a standing rule -----------------------
+
+test('a correction meant to outlast the turn is recognised; a task, a question or a pasted spec is not', () => {
+  for (const message of [
+    'stop adding comments to every line',
+    'we use bun here, not npm',
+    'from now on run the typecheck before you say it is done',
+    'I told you to ask before pushing',
+    'too verbose, just give me the command',
+    'use pnpm instead of npm',
+    'never commit straight to main',
+    "please don't add emojis to commit messages",
+    'remember that the dev server is on port 4000',
+  ]) {
+    expect(isStandingCorrection(message)).toBe(true)
+  }
+  for (const message of [
+    'fix the login bug on the settings page',
+    'why does the build fail?',
+    'add a parser that should never return null',
+    "you're wrong, the file exists",
+    'can you use the helper in utils to parse this',
+    '',
+  ]) {
+    expect(isStandingCorrection(message)).toBe(false)
+  }
+  // A long pasted spec that happens to say "always use" is about the code, not about elia.
+  expect(isStandingCorrection(`always use strict mode. ${'The module parses the config. '.repeat(60)}`)).toBe(false)
+})
+
+const CLEAN_TURN: ChatMessage[] = [
+  { role: 'user', content: [text('summarise the diff')] },
+  { role: 'assistant', content: [text('Here is a detailed, sectioned walkthrough of every hunk, with background on each module...')] },
+  { role: 'user', content: [text('too verbose. from now on keep diff summaries to three bullets')] },
+  { role: 'assistant', content: [text('- a\n- b\n- c')] },
+]
+
+test("a user's correction becomes a rule stored as theirs, with what it was a reply to", async () => {
+  const path = lessonsFile()
+  const provider = reflectingProvider('{"lessons": ["Keep diff summaries to three bullet points at most"]}')
+  const learned = await learnFromTurn({
+    provider,
+    messages: CLEAN_TURN,
+    fromIndex: 2,
+    request: 'too verbose. from now on keep diff summaries to three bullets',
+    userWords: 'too verbose. from now on keep diff summaries to three bullets',
+    outcome: { verify: 'none', repairAttempts: 0 },
+    cwd: '/tmp',
+    lessonsPath: path,
+  })
+
+  expect(learned.lessons).toEqual(['Keep diff summaries to three bullet points at most'])
+  expect(provider.calls).toHaveLength(1)
+  const prompt = (provider.calls[0]!.messages[0]!.content[0] as { text: string }).text
+  expect(prompt).toContain('> too verbose. from now on keep diff summaries to three bullets')
+  expect(prompt).toContain('It was in reply to this from elia:')
+  expect(prompt).toContain('sectioned walkthrough')
+  const stored = readFileSync(path, 'utf8')
+  expect(stored).toContain('source=user-correction')
+  expect(stored).toContain('confidence=0.90')
+})
+
+test("a sub-agent's request is another model's words, so it sets no rule", async () => {
+  const provider = reflectingProvider('{"lessons": ["should never be asked"]}')
+  const learned = await learnFromTurn({
+    provider,
+    messages: CLEAN_TURN,
+    fromIndex: 2,
+    request: 'from now on keep diff summaries to three bullets',
+    outcome: { verify: 'none', repairAttempts: 0 },
+    cwd: '/tmp',
+    lessonsPath: lessonsFile(),
+    sources: { repair: 'subagent', blocker: 'subagent-blocker' },
+  })
+  expect(learned.lessons).toEqual([])
+  expect(provider.calls).toHaveLength(0)
+})
+
+test('a rule that would carry a credential into every prompt is never kept, and the prompt never sees it', async () => {
+  const path = lessonsFile()
+  const secret = 'sk-live-4f9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c'
+  const provider = reflectingProvider(`{"lessons": ["Use the staging API key ${secret} for every request"]}`)
+  const words = `remember that the staging key is ${secret}`
+  const learned = await learnFromTurn({ provider, messages: CLEAN_TURN, fromIndex: 2, request: words, userWords: words, outcome: { verify: 'none', repairAttempts: 0 }, cwd: '/tmp', lessonsPath: path })
+  expect(learned.lessons).toEqual([])
+  const prompt = (provider.calls[0]!.messages[0]!.content[0] as { text: string }).text
+  expect(prompt).not.toContain(secret)
+  expect(loadLessonsText(path)).not.toContain(secret)
+})
+
+test('a correction and a repaired failure in one turn both teach, and both calls are paid for', async () => {
+  const path = lessonsFile()
+  const replies = ['{"lessons": ["Use dir rather than ls to list directories in this project"]}', '{"lessons": ["On this Windows machine list directories with dir; ls is not available in cmd"]}']
+  const calls: StreamTurnParams[] = []
+  const provider: Provider = {
+    async streamTurn(params) {
+      calls.push(params)
+      return { content: [text(replies[calls.length - 1] ?? '{"lessons": []}')], usage: { inputTokens: 50, outputTokens: 20, cacheReadTokens: 0, cacheWriteTokens: 0 } }
+    },
+  }
+  const words = 'stop using ls, this is windows'
+  const learned = await learnFromTurn({ provider, messages: WINDOWS_TURN, fromIndex: 1, request: words, userWords: words, outcome: { verify: 'none', repairAttempts: 0 }, cwd: '/tmp', lessonsPath: path })
+  expect(calls).toHaveLength(2)
+  expect(calls[0]!.system).toContain("turn a user's correction into a standing rule")
+  // The failure pass is told about the rule just learned, so it does not write it twice.
+  expect((calls[1]!.messages[0]!.content[0] as { text: string }).text).toContain('- Use dir rather than ls to list directories in this project')
+  expect(learned.usage?.inputTokens).toBe(100)
+  expect(learned.lessons[0]).toBe('Use dir rather than ls to list directories in this project')
+  const stored = readFileSync(path, 'utf8')
+  expect(stored).toContain('source=user-correction')
+})
+
+test('the correction prompt asks for the rule itself and allows saying nothing', () => {
+  const prompt = correctionPrompt('stop adding comments', 'I added comments explaining each line.', ['Tests run with bun'])
+  expect(prompt).toContain('no quotes, no "the user said"')
+  expect(prompt).toContain('Return an empty list when the message only steers this one task')
+  expect(prompt).toContain('- Tests run with bun')
+})
+
+function loadLessonsText(path: string): string {
+  try {
+    return readFileSync(path, 'utf8')
+  } catch {
+    return ''
+  }
+}
