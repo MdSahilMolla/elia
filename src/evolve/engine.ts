@@ -102,7 +102,12 @@ import { applySteppingStone, archiveNearMiss, elites, readArchive, renderSteppin
 const HYPOTHESIS_MAX_STEPS = 30
 /** Further runs of a candidate's value probes before a one-sample drift rejects it. */
 const VALUE_RETESTS = 2
-const GATE_TIMEOUT_MS = 300_000
+/**
+ * Typecheck and unit tests in the sandbox. The suite takes about 90s on an idle
+ * machine and took 239s with a benchmark running beside it; practice runs in
+ * the background while someone works, so a busy machine is the normal case.
+ */
+const GATE_TIMEOUT_MS = 600_000
 
 export interface Hypothesis {
   title: string
@@ -482,12 +487,24 @@ async function attemptGeneration(
 
   const unitTests = await runShell('bun test', GATE_TIMEOUT_MS, sandbox.root)
   if (unitTests.exitCode !== 0) {
-    writeFail('unit tests failed')
-    return {
-      ...base,
-      verdict: 'rejected',
-      reason: `unit tests fail:\n${clampOutput(unitTests.stderr || unitTests.stdout, 800)}`,
+    // A failing file has to fail again on its own before it rejects. Generation
+    // 7 of the first run here — shorter descriptions for three tools — was
+    // turned away by presentation.test.ts, which the change never touched,
+    // timing out at 151s on a machine running a benchmark beside it. A file
+    // the candidate really broke fails again; a list that cannot be read, or a
+    // retry that fails, keeps the rejection.
+    const files = failingTestFiles(`${unitTests.stdout}\n${unitTests.stderr}`)
+    const retry = files.length > 0 ? await runShell(`bun test ${files.map((file) => `'${file}'`).join(' ')}`, GATE_TIMEOUT_MS, sandbox.root) : undefined
+    if (retry?.exitCode !== 0) {
+      writeFail('unit tests failed')
+      const output = retry ? `${retry.stderr || retry.stdout}` : `${unitTests.stderr || unitTests.stdout}`
+      return {
+        ...base,
+        verdict: 'rejected',
+        reason: `unit tests fail${retry ? ' (and again when re-run on their own)' : ''}:\n${clampOutput(output, 800)}`,
+      }
     }
+    writeSubStep(`${files.join(', ')} failed in the full run and passed on their own — a flake, not this change`)
   }
   writePass('unit tests')
   base.funnel = 'tested'
@@ -822,6 +839,23 @@ ${measurableSection(baseline)}
 ${redactHeldOut(renderLedgerForPrompt(), heldOutIds)}${redactHeldOut(renderSteppingStones(elites(readArchive(EVOLUTION_DIR))), heldOutIds)}
 
 Investigate, then submit exactly one hypothesis.`
+}
+
+/**
+ * The test files `bun test` reported a failure in: each file's results follow
+ * a `path.test.ts:` line, and a failure is a `(fail)` line under it. Paths are
+ * kept only when they look like a test file inside the tree, since they go
+ * back onto a command line.
+ */
+export function failingTestFiles(output: string): string[] {
+  const files = new Set<string>()
+  let current: string | undefined
+  for (const line of output.split(/\r?\n/)) {
+    const header = /^([\w./@-]+\.test\.[cm]?[jt]sx?):\s*$/.exec(line.trim())
+    if (header) current = header[1]
+    else if (line.trim().startsWith('(fail)') && current && !current.startsWith('/') && !current.includes('..')) files.add(current)
+  }
+  return [...files].sort()
 }
 
 /**
