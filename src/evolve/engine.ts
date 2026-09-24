@@ -32,7 +32,7 @@ import {
   type Scorecard,
   type TaskOutcome,
 } from './fitness.ts'
-import { raceCandidate, regressionsIn, renderRace, settleRegressions, sieveEnabled } from './sieve.ts'
+import { onTaskTime, raceCandidate, regressionsIn, remeasureDropped, renderRace, settleRegressions, sieveEnabled } from './sieve.ts'
 import {
   blindEvidence,
   blindMetrics,
@@ -633,6 +633,18 @@ async function attemptGeneration(
   writeSubStep('provisional win — running an independent confirmation pair')
   let confirmationCandidateCard = await measureFitness({ sourceRoot: sandbox.root, tasks })
   let confirmationBaselineCard = await measureFitness({ sourceRoot: ELIA_ROOT, tasks })
+  // A task the provider dropped, on either side, gets one more turn on that
+  // side before anything is compared: one dropped task here used to reject a
+  // provisional winner outright, the most expensive generation there is to
+  // lose. Before the regression retest below, so it sees full rows.
+  const candidateAgain = await remeasureDropped({ card: confirmationCandidateCard, tasks, sourceRoot: sandbox.root })
+  const baselineAgain = await remeasureDropped({ card: confirmationBaselineCard, tasks, sourceRoot: ELIA_ROOT })
+  const droppedOnConfirmation = [...new Set([...candidateAgain.retried, ...baselineAgain.retried])]
+  if (droppedOnConfirmation.length > 0) {
+    writeSubStep(`${droppedOnConfirmation.join(', ')} dropped by the provider on the confirmation run — measured once more on that side`)
+    confirmationCandidateCard = onTaskTime(sandbox.root, tasks, candidateAgain.card)
+    confirmationBaselineCard = onTaskTime(ELIA_ROOT, tasks, baselineAgain.card)
+  }
   // Two fresh sweeps of a coin-flip task disagree by half their attempts about
   // one time in nine; an apparent regression is re-run on both trees and the
   // pair judged on pooled attempts (sieve.ts settleRegressions).

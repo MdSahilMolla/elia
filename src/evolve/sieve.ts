@@ -463,6 +463,42 @@ export async function raceCandidate(options: RaceOptions): Promise<RaceReport> {
 }
 
 /**
+ * A whole card with every row the provider dropped measured once more on the
+ * same tree — the confirmation pair's version of the race's second turn. The
+ * new row replaces the dropped one rather than pooling with it: a dropped
+ * attempt has no verdict to pool. A row still unmeasured stays unmeasured, and
+ * the comparison refuses it exactly as before.
+ */
+export async function remeasureDropped(options: {
+  card: Scorecard
+  tasks: BenchTask[]
+  sourceRoot: string
+  repeats?: number
+  measure?: (options: MeasureOptions) => Promise<Scorecard>
+}): Promise<{ card: Scorecard; retried: string[] }> {
+  const retried = options.card.outcomes.filter(mightMeasureLater).map((outcome) => outcome.taskId)
+  if (retried.length === 0) return { card: options.card, retried }
+  const measure = options.measure ?? measureFitness
+  const again = await measure({
+    sourceRoot: options.sourceRoot,
+    tasks: options.tasks.filter((task) => retried.includes(task.id)),
+    ...(options.repeats === undefined ? {} : { repeats: options.repeats }),
+  })
+  const replacement = new Map(again.outcomes.map((outcome) => [outcome.taskId, outcome] as const))
+  const rows = options.card.outcomes.map((outcome) => replacement.get(outcome.taskId) ?? outcome)
+  return { card: cardFromOutcomes(options.sourceRoot, options.tasks, rows, options.card.wallClockMs), retried }
+}
+
+/**
+ * A card clocked by its tasks' summed time instead of the sweep's elapsed time.
+ * A side that waited out a provider outage ran longer than its tasks did, so
+ * when either side of a pair was re-measured, both are compared on this.
+ */
+export function onTaskTime(sourceRoot: string, tasks: BenchTask[], card: Scorecard): Scorecard {
+  return cardFromOutcomes(sourceRoot, tasks, card.outcomes, card.outcomes.reduce((sum, outcome) => sum + outcome.elapsedMs, 0))
+}
+
+/**
  * The baseline's metrics rebuilt from its rows after a retest pooled some of
  * them, by the same arithmetic every card uses. Its wall clock scales with the
  * summed task time, as a partial card's does.
