@@ -3,7 +3,8 @@ import { dirname, join } from 'node:path'
 import { stateDir } from '../statePaths.ts'
 import { ensureSecureDirectory, hardenSecureFile, writeSecureFile } from '../securePersistence.ts'
 import { readReach, type ReachMap } from './reach.ts'
-import type { TaskOutcome } from './fitness.ts'
+import { cardFromOutcomes, measureFitness, type MeasureOptions, type Scorecard, type TaskOutcome } from './fitness.ts'
+import type { BenchTask } from './suite.ts'
 
 /**
  * The baseline, remembered between runs.
@@ -176,4 +177,68 @@ export function rememberBaselines(
   }
 
   if (changed) writeBaselineCache(cache, path)
+}
+
+export interface LiveTreeMeasure {
+  card: Scorecard
+  /** How many of the card's rows were served from cache rather than run. */
+  reused: number
+}
+
+/**
+ * Score the live tree, reusing any task whose own code and model are unchanged
+ * since it was last scored, and remembering each new result the moment it lands.
+ *
+ * The second half is what lets a full sweep finish at all on a quota. A sweep is
+ * a few hundred agent runs; a free tier runs out partway through, and a practice
+ * run is stopped when the machine sleeps. When results were only written at the
+ * end, the first attempt on this machine got through half the tasks and kept
+ * none of them — so the next attempt started from zero and ran into the same
+ * wall. Kept one at a time, each attempt picks up where the last one stopped.
+ *
+ * `reuse: false` re-measures every task and still remembers what it finds.
+ * With the cache switched off this is `measureFitness`, nothing more.
+ */
+export async function measureLiveTree(options: {
+  tasks: BenchTask[]
+  sourceRoot: string
+  model: string
+  onTaskDone?: (outcome: TaskOutcome) => void
+  reuse?: boolean
+  map?: ReachMap
+  path?: string
+  measure?: (options: MeasureOptions) => Promise<Scorecard>
+}): Promise<LiveTreeMeasure> {
+  const { tasks, sourceRoot, model } = options
+  const measure = options.measure ?? measureFitness
+  const report = options.onTaskDone ?? (() => {})
+  if (!baselineCacheEnabled()) return { card: await measure({ sourceRoot, tasks, onTaskDone: report }), reused: 0 }
+
+  const startedAt = Date.now()
+  const ids = tasks.map((task) => task.id)
+  const { hits, misses } = options.reuse === false
+    ? { hits: [], misses: ids }
+    : lookupBaselines(ids, sourceRoot, model, { map: options.map, cache: readBaselineCache(options.path) })
+  for (const hit of hits) report(hit)
+
+  const toMeasure = tasks.filter((task) => misses.includes(task.id))
+  const measured = toMeasure.length > 0
+    ? await measure({
+        sourceRoot,
+        tasks: toMeasure,
+        onTaskDone: (outcome) => {
+          rememberBaselines([outcome], sourceRoot, model, { map: options.map, path: options.path })
+          report(outcome)
+        },
+      })
+    : undefined
+
+  const byId = new Map([...hits, ...(measured?.outcomes ?? [])].map((outcome) => [outcome.taskId, outcome]))
+  const outcomes = ids.flatMap((id) => byId.get(id) ?? [])
+  // A card made partly of remembered rows cannot report the wall clock it did
+  // not spend, and the whole point is that it did not spend it. The summed task
+  // durations are what the tasks cost when they last ran, which is the honest
+  // stand-in and the number `compareScorecards` falls back to.
+  const wallClockMs = hits.length === 0 ? Date.now() - startedAt : outcomes.reduce((sum, outcome) => sum + outcome.elapsedMs, 0)
+  return { card: cardFromOutcomes(sourceRoot, tasks, outcomes, wallClockMs), reused: hits.length }
 }

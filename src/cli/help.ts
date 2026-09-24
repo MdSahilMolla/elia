@@ -72,7 +72,9 @@ Office workflows:
 Self-improvement:
   elia bench                  Score the current elia against its synthetic benchmark suite
   elia bench --history        Score it on tasks taken from this repository's own git history
-  elia bench --all            Score it on both suites
+  elia bench --all            Score it on both suites (results are kept as they land, and a task
+                              whose code and model are unchanged since last week is reused, so an
+                              interrupted run picks up where it stopped; --fresh re-runs them all)
   elia bench --harvest        Add newly proven git-history tasks to the tracked set (no model calls;
                               --replace rebuilds it from this scan alone)
   elia bench --split held-out Score only the half whose failures the evolution loop never

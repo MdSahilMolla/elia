@@ -23,7 +23,6 @@ import {
 import {
   REAL_CHANGE,
   benchConcurrency,
-  cardFromOutcomes,
   compareScorecards,
   measureFitness,
   renderScorecard,
@@ -44,7 +43,7 @@ import {
   type TaskSplit,
 } from './split.ts'
 import { hasReachEvidence, measurableAreas } from './reach.ts'
-import { baselineCacheEnabled, lookupBaselines, rememberBaselines } from './baselineCache.ts'
+import { measureLiveTree } from './baselineCache.ts'
 import {
   IMMUTABLE_FILES,
   changedFiles,
@@ -230,29 +229,11 @@ export async function evolve(options: EvolveOptions = {}): Promise<EvolveResult>
  * by default and `ELIA_BASELINE_CACHE=off` goes back to measuring every time.
  */
 async function measureBaseline(tasks: BenchTask[]): Promise<Scorecard> {
-  const startedAt = Date.now()
   const report = (outcome: TaskOutcome) =>
     outcome.passed ? writePass(`${outcome.taskId} — ${outcome.detail}`) : writeFail(`${outcome.taskId} — ${outcome.error ?? outcome.detail}`)
-
-  if (!baselineCacheEnabled()) {
-    return measureFitness({ sourceRoot: ELIA_ROOT, tasks, onTaskDone: report })
-  }
-
-  const { hits, misses } = lookupBaselines(tasks.map((task) => task.id), ELIA_ROOT, config.model)
-  if (hits.length > 0) writeSubStep(`${hits.length} of ${tasks.length} baseline task(s) unchanged since they were last scored — reused`)
-  for (const hit of hits) report(hit)
-
-  const toMeasure = tasks.filter((task) => misses.includes(task.id))
-  const measured = toMeasure.length > 0 ? await measureFitness({ sourceRoot: ELIA_ROOT, tasks: toMeasure, onTaskDone: report }) : undefined
-  if (measured) rememberBaselines(measured.outcomes, ELIA_ROOT, config.model)
-
-  const outcomes = [...hits, ...(measured?.outcomes ?? [])]
-  // A card made partly of remembered rows cannot report the wall clock it did
-  // not spend, and the whole point is that it did not spend it. The summed task
-  // durations are what the tasks cost when they last ran, which is the honest
-  // stand-in and the number `compareScorecards` falls back to.
-  const wallClockMs = hits.length === 0 ? Date.now() - startedAt : outcomes.reduce((sum, outcome) => sum + outcome.elapsedMs, 0)
-  return cardFromOutcomes(ELIA_ROOT, tasks, outcomes, wallClockMs)
+  const { card, reused } = await measureLiveTree({ tasks, sourceRoot: ELIA_ROOT, model: config.model, onTaskDone: report })
+  if (reused > 0) writeSubStep(`${reused} of ${tasks.length} baseline task(s) unchanged since they were last scored — reused`)
+  return card
 }
 
 async function runGeneration(
@@ -760,12 +741,17 @@ Be honest about mechanism. "Improve the prompt to be clearer" is not a hypothesi
 
 /** How many failing tasks' details go into the brief — enough to pick from, not a transcript dump. */
 const MAX_EVIDENCE_TASKS = 8
+/** Traces are the long part of the brief, and every proposer step re-sends it. */
+const MAX_TRACED_TASKS = 4
 
 export function renderFailureEvidence(evidence: TaskOutcome[]): string {
   if (evidence.length === 0) return ''
-  const lines = evidence.slice(0, MAX_EVIDENCE_TASKS).map((outcome) => {
+  const lines = evidence.slice(0, MAX_EVIDENCE_TASKS).map((outcome, index) => {
     const bits = [`- ${outcome.taskId} (${outcome.steps} steps${outcome.stopReason ? `, stopped: ${outcome.stopReason}` : ''}): ${outcome.error ?? outcome.detail}`]
     if (outcome.keptDir) bits.push(`  its final state is kept at ${outcome.keptDir} — read it to see what the agent actually did`)
+    if (outcome.trace && index < MAX_TRACED_TASKS) {
+      bits.push(`  what the agent did on a failing attempt:\n${outcome.trace.split('\n').map((line) => `    ${line}`).join('\n')}`)
+    }
     return bits.join('\n')
   })
   const more = evidence.length > MAX_EVIDENCE_TASKS ? `\n(${evidence.length - MAX_EVIDENCE_TASKS} more not shown)` : ''

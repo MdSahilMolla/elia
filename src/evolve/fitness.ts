@@ -10,6 +10,7 @@ import { table } from '../ui/layout.ts'
 import { MAX_SHELL_OUTPUT_LENGTH, readBoundedOutput, terminateProcessGroup } from '../shell.ts'
 import { ELIA_ROOT } from '../statePaths.ts'
 import { REACH_OUT_ENV, absorbReachFile } from './reach.ts'
+import { TRACE_OUT_ENV, readTrace, renderTrace } from './trace.ts'
 
 /**
  * Runs the benchmark suite against a given copy of elia's source and scores it.
@@ -59,6 +60,12 @@ export interface TaskOutcome {
   model?: string
   /** Kept on failure so the run can be inspected afterwards. */
   keptDir?: string
+  /**
+   * What the agent did on a failing attempt, one line per step (trace.ts).
+   * Unlike `keptDir` it survives the baseline cache, so the proposer still has
+   * it when the failure it is studying was not re-run.
+   */
+  trace?: string
   /** Execution stop classification returned by the child loop. */
   stopReason?: string
   /**
@@ -100,6 +107,8 @@ export interface MeasureOptions {
   /** Runs per task; the task's score is the fraction that passed. Default ELIA_BENCH_REPEATS, else 1. */
   repeats?: number
   onTaskDone?: (outcome: TaskOutcome) => void
+  /** Runs one attempt of one task, retries included. Tests stand in for the real agent here. */
+  runTask?: (task: BenchTask, sourceRoot: string) => Promise<TaskOutcome>
 }
 
 /**
@@ -162,9 +171,11 @@ export function aggregateAttempts(attempts: TaskOutcome[]): TaskOutcome {
   }
   delete aggregated.error
   delete aggregated.keptDir
+  delete aggregated.trace
   delete aggregated.unmeasured
   if (failing?.error) aggregated.error = failing.error
   if (failing?.keptDir) aggregated.keptDir = failing.keptDir
+  if (failing?.trace) aggregated.trace = failing.trace
   if (unmeasured) aggregated.unmeasured = true
   return aggregated
 }
@@ -179,12 +190,26 @@ export async function measureFitness(options: MeasureOptions): Promise<Scorecard
   const startedAt = Date.now()
 
   const repeats = options.repeats ?? benchRepeats()
+  const runTask = options.runTask ?? runTaskWithRetry
+  // Once the provider says the account is out of credit, every task after it
+  // would set up its repository, fail the same way, and do it `repeats` times.
+  // Those tasks are left unmeasured without running; the baseline cache keeps
+  // what did run, so the next sweep starts from here.
+  let exhausted: string | undefined
   const outcomes = await runWithConcurrencyLimit(
     tasks,
     options.concurrency ?? benchConcurrency(),
     async (task) => {
       const attempts: TaskOutcome[] = []
-      for (let attempt = 0; attempt < repeats; attempt++) attempts.push(await runTaskWithRetry(task, options.sourceRoot))
+      for (let attempt = 0; attempt < repeats; attempt++) {
+        if (exhausted !== undefined) {
+          attempts.push(notRun(task, exhausted))
+          break
+        }
+        const result = await runTask(task, options.sourceRoot)
+        attempts.push(result)
+        if (outOfCredit(result)) exhausted ??= result.error
+      }
       const outcome = aggregateAttempts(attempts)
       options.onTaskDone?.(outcome)
       return outcome
@@ -256,6 +281,27 @@ const INFRASTRUCTURE_ERROR = /server had an error|rate.?limit|overloaded|ECONNRE
  */
 const PERMANENT_INFRASTRUCTURE_ERROR = /\b402\b|requires more credits|free tier limit|insufficient.?(credit|quota|funds)|quota exceeded|preload not found|stale task/i
 
+/** The account itself is out of credit — unlike a rate limit, waiting inside this run will not bring it back. */
+const OUT_OF_CREDIT = /\b402\b|requires more credits|free.?tier.?(?:limit|quota)|insufficient.?(?:credit|quota|funds)/i
+
+export function outOfCredit(outcome: Pick<TaskOutcome, 'error' | 'unmeasured'>): boolean {
+  return Boolean(outcome.unmeasured && outcome.error && OUT_OF_CREDIT.test(outcome.error))
+}
+
+function notRun(task: BenchTask, why: string): TaskOutcome {
+  return {
+    taskId: task.id,
+    weight: task.weight,
+    passed: false,
+    detail: 'not run',
+    steps: 0,
+    elapsedMs: 0,
+    totalTokens: 0,
+    error: `not run: the provider is out of credit (${why.slice(0, 200)})`,
+    unmeasured: true,
+  }
+}
+
 export function isInfrastructureFailure(outcome: Pick<TaskOutcome, 'error' | 'steps'>): boolean {
   if (!outcome.error) return false
   // A hang is the candidate's own fault and must be allowed to score as a failure,
@@ -294,8 +340,8 @@ export function retryDelayMs(outcome: Pick<TaskOutcome, 'error' | 'steps'>, atte
  * it happened to get. A provider that cannot answer is an unmeasured task,
  * never a different one.
  */
-export function benchTaskEnv(env: Record<string, string | undefined>, reachOut: string): Record<string, string | undefined> {
-  return { ...env, [REACH_OUT_ENV]: reachOut, ELIA_ROUTING_MODE: 'selected' }
+export function benchTaskEnv(env: Record<string, string | undefined>, reachOut: string, traceOut?: string): Record<string, string | undefined> {
+  return { ...env, [REACH_OUT_ENV]: reachOut, ...(traceOut ? { [TRACE_OUT_ENV]: traceOut } : {}), ELIA_ROUTING_MODE: 'selected' }
 }
 
 async function runTaskWithRetry(task: BenchTask, sourceRoot: string): Promise<TaskOutcome> {
@@ -342,11 +388,14 @@ async function runOneTask(task: BenchTask, sourceRoot: string): Promise<TaskOutc
     // the thing that watches which of its files ran. The output goes beside the
     // task's repository, never inside it, so no check ever sees it.
     const reachOut = `${dir}.reach`
+    // The agent's steps, for the proposer if this attempt fails (trace.ts).
+    // Beside the repository for the same reason.
+    const traceOut = `${dir}.trace`
     const proc = Bun.spawn(['bun', 'run', '--preload', join(ELIA_ROOT, 'src', 'evolve', 'reachRecorder.ts'), entry, task.id], {
       cwd: dir,
       stdout: 'pipe',
       stderr: 'pipe',
-      env: benchTaskEnv(process.env, reachOut),
+      env: benchTaskEnv(process.env, reachOut, traceOut),
     })
 
     let timedOut = false
@@ -382,9 +431,12 @@ async function runOneTask(task: BenchTask, sourceRoot: string): Promise<TaskOutc
     // `reach.ts` cannot be safe in, so it is refused at the source.
     if (run && !run.error && !timedOut) absorbReachFile(task.id, reachOut, sourceRoot)
     rmSync(reachOut, { force: true })
+    const rendered = renderTrace(readTrace(traceOut))
+    rmSync(traceOut, { force: true })
+    const trace = rendered ? { trace: rendered } : {}
 
     if (timedOut) {
-      return { ...base, error: `timed out after ${taskTimeoutMs}ms`, detail: 'agent did not finish', keptDir: dir }
+      return { ...base, error: `timed out after ${taskTimeoutMs}ms`, detail: 'agent did not finish', keptDir: dir, ...trace }
     }
     if (!run) {
       return {
@@ -392,6 +444,7 @@ async function runOneTask(task: BenchTask, sourceRoot: string): Promise<TaskOutc
         error: `no result from agent process: ${(stderr || stdout).slice(-400).trim() || 'no output'}`,
         detail: 'agent process produced no parsable result',
         keptDir: dir,
+        ...trace,
       }
     }
 
@@ -413,10 +466,11 @@ async function runOneTask(task: BenchTask, sourceRoot: string): Promise<TaskOutc
 
     // A passing task's temp dir is disposable; a failing one is evidence.
     if (check.passed) rmSync(dir, { recursive: true, force: true })
-    else outcome.keptDir = dir
+    else Object.assign(outcome, { keptDir: dir }, trace)
 
     return outcome
   } catch (err) {
+    rmSync(`${dir}.trace`, { force: true })
     return {
       ...base,
       error: err instanceof Error ? err.message : String(err),

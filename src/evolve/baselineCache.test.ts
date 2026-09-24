@@ -5,9 +5,11 @@ import { join } from 'node:path'
 
 process.env.ANTHROPIC_API_KEY ??= 'test-key-for-baseline-cache-test'
 
-const { MAX_AGE_MS, baselineCacheEnabled, fingerprint, lookupBaselines, readBaselineCache, rememberBaselines } = await import('./baselineCache.ts')
+const { MAX_AGE_MS, baselineCacheEnabled, fingerprint, lookupBaselines, measureLiveTree, readBaselineCache, rememberBaselines } = await import('./baselineCache.ts')
+const { cardFromOutcomes } = await import('./fitness.ts')
 import type { ReachMap } from './reach.ts'
-import type { TaskOutcome } from './fitness.ts'
+import type { MeasureOptions, Scorecard, TaskOutcome } from './fitness.ts'
+import type { BenchTask } from './task.ts'
 
 let dir: string
 let root: string
@@ -126,4 +128,80 @@ test('a file edited and put back is a hit again — the key is the contents', ()
   expect(lookupBaselines(['t1'], root, 'm', { map: MAP, cache: readBaselineCache(path) }).hits).toEqual([])
   writeFileSync(join(root, 'src', 'a.ts'), original)
   expect(lookupBaselines(['t1'], root, 'm', { map: MAP, cache: readBaselineCache(path) }).hits.length).toBe(1)
+})
+
+const TASKS = [{ id: 't1', weight: 1 }, { id: 't2', weight: 1 }] as BenchTask[]
+
+/** Stands in for `measureFitness`: runs the given tasks in order, or stops dead after `stopAfter` of them. */
+function fakeMeasure(ran: string[], stopAfter = Infinity) {
+  return async (options: MeasureOptions): Promise<Scorecard> => {
+    const outcomes: TaskOutcome[] = []
+    for (const task of options.tasks ?? []) {
+      if (outcomes.length >= stopAfter) throw new Error('quota ran out')
+      ran.push(task.id)
+      const result = outcome(task.id)
+      outcomes.push(result)
+      options.onTaskDone?.(result)
+    }
+    return cardFromOutcomes(options.sourceRoot, options.tasks ?? [], outcomes, 1)
+  }
+}
+
+test('a sweep that dies partway keeps what it measured, and the next one only runs the rest', async () => {
+  // The first full benchmark on this machine got through half its tasks before
+  // the provider's quota ended it, and kept none of them: results were only
+  // written once the whole sweep returned, so every attempt restarted at zero.
+  const first: string[] = []
+  await expect(measureLiveTree({ tasks: TASKS, sourceRoot: root, model: 'm', map: MAP, path, measure: fakeMeasure(first, 1) })).rejects.toThrow('quota')
+  expect(first).toEqual(['t1'])
+  expect(Object.keys(readBaselineCache(path))).toEqual(['t1'])
+
+  const second: string[] = []
+  const { card, reused } = await measureLiveTree({ tasks: TASKS, sourceRoot: root, model: 'm', map: MAP, path, measure: fakeMeasure(second) })
+  expect(second).toEqual(['t2'])
+  expect(reused).toBe(1)
+  expect(card.outcomes.map((row) => row.taskId)).toEqual(['t1', 't2'])
+  expect(card.unmeasured).toEqual([])
+  expect(card.passRate).toBe(1)
+})
+
+test('reuse can be refused, and what is re-measured is still remembered', async () => {
+  rememberBaselines([outcome('t1', { passed: false, detail: 'old' })], root, 'm', { map: MAP, path })
+  const ran: string[] = []
+  const { reused } = await measureLiveTree({ tasks: TASKS, sourceRoot: root, model: 'm', map: MAP, path, reuse: false, measure: fakeMeasure(ran) })
+  expect(ran).toEqual(['t1', 't2'])
+  expect(reused).toBe(0)
+  expect(readBaselineCache(path).t1!.outcome.passed).toBe(true)
+})
+
+test('another model reuses nothing from this one', async () => {
+  await measureLiveTree({ tasks: TASKS, sourceRoot: root, model: 'm', map: MAP, path, measure: fakeMeasure([]) })
+  const ran: string[] = []
+  const { reused } = await measureLiveTree({ tasks: TASKS, sourceRoot: root, model: 'other', map: MAP, path, measure: fakeMeasure(ran) })
+  expect(reused).toBe(0)
+  expect(ran).toEqual(['t1', 't2'])
+})
+
+test('with the cache off it only measures, and writes nothing', async () => {
+  const before = process.env.ELIA_BASELINE_CACHE
+  process.env.ELIA_BASELINE_CACHE = 'off'
+  try {
+    const ran: string[] = []
+    const { reused } = await measureLiveTree({ tasks: TASKS, sourceRoot: root, model: 'm', map: MAP, path, measure: fakeMeasure(ran) })
+    expect(ran).toEqual(['t1', 't2'])
+    expect(reused).toBe(0)
+    expect(readBaselineCache(path)).toEqual({})
+  } finally {
+    if (before === undefined) delete process.env.ELIA_BASELINE_CACHE
+    else process.env.ELIA_BASELINE_CACHE = before
+  }
+})
+
+test('a failure served from cache still carries what the agent did', () => {
+  // Its directory is gone by then — it lived in the temp dir, and its path is
+  // not kept — so the trace is the only evidence the proposer has left.
+  rememberBaselines([outcome('t1', { passed: false, keptDir: '/tmp/gone', trace: '1. run_command … → ok' })], root, 'm', { map: MAP, path })
+  const [hit] = lookupBaselines(['t1'], root, 'm', { map: MAP, cache: readBaselineCache(path) }).hits
+  expect(hit!.keptDir).toBeUndefined()
+  expect(hit!.trace).toBe('1. run_command … → ok')
 })

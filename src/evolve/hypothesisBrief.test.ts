@@ -85,3 +85,15 @@ test('the brief never throws when every log is missing', () => {
   expect(() => hypothesisBrief(SANDBOX, METRICS)).not.toThrow()
   expect(empty).toBeTruthy()
 })
+
+test('the proposer sees what the agent did on a failing task, and only for the first few', async () => {
+  const { renderFailureEvidence } = await import('./engine.ts')
+  const failing = (id: string) => ({ taskId: id, weight: 1, passed: false, detail: 'nothing was pushed', steps: 19, elapsedMs: 1, totalTokens: 1, stopReason: 'step-budget', trace: `1. run_command {"command":"git clone"} → ok: ${id}` })
+  const brief = renderFailureEvidence(['a', 'b', 'c', 'd', 'e'].map(failing))
+  expect(brief).toContain('- a (19 steps, stopped: step-budget): nothing was pushed')
+  expect(brief).toContain('    1. run_command {"command":"git clone"} → ok: a')
+  expect(brief).toContain('→ ok: d')
+  // Every proposer step re-sends the brief; a fifth trace is paid for thirty times.
+  expect(brief).not.toContain('→ ok: e')
+  expect(brief).toContain('- e (19 steps')
+})

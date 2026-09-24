@@ -259,9 +259,11 @@ async function runAutoPractice(): Promise<void> {
     const taskIds = focusTaskIds(BENCH_TASKS.map((task) => task.id), 8, undefined, allBenchTasks().map((task) => task.id))
 
     if (!taskIds) {
-      const { measureFitness } = await import('../evolve/fitness.ts')
-      const { ELIA_ROOT } = await import('../config.ts')
-      const card = await measureFitness({ tasks: allBenchTasks(), sourceRoot: ELIA_ROOT })
+      // Kept task by task and reused next time: a practice run is stopped
+      // whenever the machine sleeps, and the sweep has to survive that.
+      const { measureLiveTree } = await import('../evolve/baselineCache.ts')
+      const { ELIA_ROOT, config } = await import('../config.ts')
+      const { card } = await measureLiveTree({ tasks: allBenchTasks(), sourceRoot: ELIA_ROOT, model: config.model })
       if (card.unmeasured.length > 0) {
         const detail = `the benchmark could not measure ${card.unmeasured.length} task(s)`
         finish(auto.looksBlocked(card.outcomes.map((outcome) => outcome.error ?? '').join('\n')) ? 'blocked' : 'failed', detail)

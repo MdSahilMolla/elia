@@ -82,6 +82,9 @@ export const IMMUTABLE_FILES = [
   // without being able to see the damage. The same attack is already fixtured
   // one layer down, in gap/critic.test.ts.
   'src/evolve/fieldEvidence.ts',
+  // The traces of failing tasks that the proposer is shown, for the same reason:
+  // choosing what a later generation sees is choosing how it searches.
+  'src/evolve/trace.ts',
   // How a candidate gets measured by its own code. If a candidate could rewrite
   // this, it could route the gap and value checks back at the live tree and make
   // them pass by construction — the exact bug those checks were just fixed for.

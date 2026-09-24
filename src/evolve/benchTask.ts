@@ -80,6 +80,29 @@ try {
     approve: createBenchApproval(process.cwd()),
   })
 
+  // What the agent did, step by step. The proposer is asked to diagnose the
+  // failures, and a final directory plus one line of check output cannot say
+  // where eighteen steps went. Written beside the task's repository, never in
+  // it, so no check sees it; one line per event as it happens, so a run killed
+  // at its timeout still leaves one. Redacted and clipped here, before anything
+  // reaches the disk.
+  const traceOut = process.env.ELIA_BENCH_TRACE_OUT
+  const { redactText } = await import('../ui/redact.ts')
+  const { appendFileSync } = await import('node:fs')
+  let said = ''
+  const trace = (event: Record<string, unknown>) => {
+    if (!traceOut) return
+    try {
+      appendFileSync(traceOut, `${JSON.stringify(event)}\n`)
+    } catch {
+      // A lost trace costs the proposer a clue, not the task its result.
+    }
+  }
+  const flushSaid = () => {
+    if (said.trim()) trace({ say: redactText(said, 240) })
+    said = ''
+  }
+
   const result = await withActionGovernor(governor, () =>
     runAgentLoop({
       messages: [{ role: 'user', content: [{ type: 'text', text: task.prompt }] }],
@@ -91,8 +114,26 @@ try {
       prefetcher: createPrefetcher({ tools, cache }),
       // A fixture-repo default; a task in a real repository asks for its own.
       maxSteps: task.maxSteps ?? 30,
+      ...(traceOut
+        ? {
+            onText: (delta: string) => {
+              said += delta
+            },
+            onTool: (event: import('../agentLoop.ts').ToolEvent) => {
+              flushSaid()
+              trace({
+                tool: event.name,
+                input: redactText(JSON.stringify(event.input), 240),
+                ok: !event.isError,
+                result: redactText(event.result, 240),
+                ...(event.assessment && event.assessment.decision !== 'allow' ? { decision: event.assessment.decision } : {}),
+              })
+            },
+          }
+        : {}),
     }),
   )
+  flushSaid()
 
   emit({
     ok: true,

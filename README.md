@@ -65,7 +65,7 @@ If nothing is configured, the first interactive run walks you through setup. Key
 | Google Gemini | `google` | `GEMINI_API_KEY` | `gemini-3.7-flash` |
 | Groq | `groq` | `GROQ_API_KEY` | `openai/gpt-oss-120b` |
 | Mistral AI | `mistral` | `MISTRAL_API_KEY` | `mistral-large-latest` |
-| NVIDIA NIM | `nvidia` | `NVIDIA_API_KEY` | `nvidia/llama-3.3-nemotron-super-49b-v1.5` |
+| NVIDIA NIM | `nvidia` | `NVIDIA_API_KEY` | `nvidia/nemotron-3-super-120b-a12b` |
 | OpenRouter | `openrouter` | `OPENROUTER_API_KEY` | `openrouter/auto` |
 | Inception (Mercury) | `mercury` | `INCEPTION_API_KEY` | `mercury-2.5` |
 | Ollama (local models) | `ollama` | none needed | none: elia asks which of your models to run |
