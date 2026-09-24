@@ -86,3 +86,6 @@ meat-awareness/
 
 # --- Playwright MCP browser-tool session logs and page snapshots ---
 .playwright-mcp/
+
+# --- Local team records (never push to GitHub) ---
+/team-records/
