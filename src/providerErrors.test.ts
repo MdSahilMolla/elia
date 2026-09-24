@@ -90,3 +90,8 @@ test('a request that never reached the provider is a connection error; a provide
     expect(isConnectionError(message)).toBe(false)
   }
 })
+
+test('a stream that closed before its last chunk is asked again, not the end of the turn', () => {
+  // The OpenAI SDK's words for it; mercury ended an evolve generation this way.
+  expect(isTransientServerError('missing finish_reason for choice 0')).toBe(true)
+})

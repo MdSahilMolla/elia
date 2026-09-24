@@ -289,3 +289,9 @@ test('a pass rate up by less than noise is a tie, so a real saving can still win
   // A pass rate that fell is still refused whatever it saved.
   expect(compareScorecards(baseline, { ...cheaper, passRate: 0.95 }).better).toBe(false)
 })
+
+test('a truncated stream or a dropped connection says nothing about the agent', async () => {
+  const { isInfrastructureFailure } = await import('./fitness.ts')
+  expect(isInfrastructureFailure({ error: 'missing finish_reason for choice 0', steps: 6 })).toBe(true)
+  expect(isInfrastructureFailure({ error: 'Connection error.', steps: 4 })).toBe(true)
+})

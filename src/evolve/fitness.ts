@@ -272,7 +272,7 @@ export function cardFromOutcomes(sourceRoot: string, tasks: BenchTask[], outcome
  * result into every future generation. So an infrastructure failure is retried; a
  * wrong answer never is.
  */
-const INFRASTRUCTURE_ERROR = /server had an error|rate.?limit|overloaded|ECONNRESET|ETIMEDOUT|fetch failed|502|503|529/i
+const INFRASTRUCTURE_ERROR = /server had an error|rate.?limit|overloaded|ECONNRESET|ETIMEDOUT|fetch failed|502|503|529|missing finish_reason|connection error/i
 
 /**
  * Errors no retry will fix inside one benchmark run: the account is out of
