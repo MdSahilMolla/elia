@@ -2,7 +2,7 @@ import { afterEach, beforeEach, expect, test } from 'bun:test'
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { TRACE_OUT_ENV, readTrace, renderTrace, type TraceEvent } from './trace.ts'
+import { MODEL_SILENCE_MS, TRACE_OUT_ENV, readTrace, renderTrace, waitingOnModel, type TraceEvent } from './trace.ts'
 
 let dir: string
 beforeEach(() => {
@@ -50,4 +50,36 @@ test('a long run keeps its opening and its end, and says how much of the middle 
 
 test('an empty run renders as nothing, so no empty section reaches the brief', () => {
   expect(renderTrace([])).toBe('')
+})
+
+test('a run stopped while its own command was still running was not waiting on the model', () => {
+  const events: TraceEvent[] = [{ start: 'run_command', id: 'a', at: 1_000 }]
+  expect(waitingOnModel(events, 0, 1_000 + 10 * MODEL_SILENCE_MS)).toBe(false)
+})
+
+test('a run stopped after a minute with nothing from the model was waiting on the model', () => {
+  // The precise-edit attempt that did the whole task, then never got its final answer.
+  const events: TraceEvent[] = [
+    { start: 'edit_file', id: 'a', at: 1_000 },
+    { tool: 'edit_file', id: 'a', ok: true, result: 'Edited', at: 2_000 },
+  ]
+  expect(waitingOnModel(events, 0, 2_000 + MODEL_SILENCE_MS)).toBe(true)
+  expect(waitingOnModel(events, 0, 2_000 + MODEL_SILENCE_MS - 1)).toBe(false)
+  // A first call that never answered leaves no events at all.
+  expect(waitingOnModel([], 0, MODEL_SILENCE_MS)).toBe(true)
+})
+
+test('a model still streaming when the run was stopped is not a stall — a runaway answer is the agent\'s', () => {
+  const events: TraceEvent[] = [{ beat: true, at: 5 * MODEL_SILENCE_MS }]
+  expect(waitingOnModel(events, 0, 5 * MODEL_SILENCE_MS + 1_000)).toBe(false)
+})
+
+test('the rendering drops bookkeeping but keeps the command a run was stuck in', () => {
+  const rendered = renderTrace([
+    { start: 'read_file', id: 'a', at: 1 },
+    { beat: true, at: 2 },
+    { tool: 'read_file', id: 'a', input: '{}', ok: true, result: 'x', at: 3 },
+    { start: 'run_command', id: 'b', at: 4 },
+  ])
+  expect(rendered.split('\n')).toEqual(['1. read_file {} → ok: x', '2. run_command started and never finished'])
 })

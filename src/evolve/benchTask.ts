@@ -86,14 +86,19 @@ try {
   // it, so no check sees it; one line per event as it happens, so a run killed
   // at its timeout still leaves one. Redacted and clipped here, before anything
   // reaches the disk.
+  //
+  // Timestamped, with tool starts and a beat while the model streams, so that a
+  // run killed at its timeout says what it was waiting on: its own command, or
+  // a model that had stopped answering (trace.ts `waitingOnModel`).
   const traceOut = process.env.ELIA_BENCH_TRACE_OUT
   const { redactText } = await import('../ui/redact.ts')
   const { appendFileSync } = await import('node:fs')
   let said = ''
+  let lastBeat = 0
   const trace = (event: Record<string, unknown>) => {
     if (!traceOut) return
     try {
-      appendFileSync(traceOut, `${JSON.stringify(event)}\n`)
+      appendFileSync(traceOut, `${JSON.stringify({ ...event, at: Date.now() })}\n`)
     } catch {
       // A lost trace costs the proposer a clue, not the task its result.
     }
@@ -101,6 +106,11 @@ try {
   const flushSaid = () => {
     if (said.trim()) trace({ say: redactText(said, 240) })
     said = ''
+  }
+  const beat = () => {
+    if (Date.now() - lastBeat < 5_000) return
+    lastBeat = Date.now()
+    trace({ beat: true })
   }
 
   const result = await withActionGovernor(governor, () =>
@@ -118,10 +128,17 @@ try {
         ? {
             onText: (delta: string) => {
               said += delta
+              beat()
+            },
+            onThinking: beat,
+            onToolStart: (call: { id: string; name: string }) => {
+              flushSaid()
+              trace({ start: call.name, id: call.id })
             },
             onTool: (event: import('../agentLoop.ts').ToolEvent) => {
               flushSaid()
               trace({
+                ...(event.id ? { id: event.id } : {}),
                 tool: event.name,
                 input: redactText(JSON.stringify(event.input), 240),
                 ok: !event.isError,

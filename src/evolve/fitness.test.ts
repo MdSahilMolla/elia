@@ -262,3 +262,14 @@ test('a repeated task carries the trace of the attempt it reports as failing', a
   expect(benchTaskEnv({}, '/tmp/x.reach', '/tmp/x.trace').ELIA_BENCH_TRACE_OUT).toBe('/tmp/x.trace')
   expect(benchTaskEnv({}, '/tmp/x.reach').ELIA_BENCH_TRACE_OUT).toBeUndefined()
 })
+
+test('a provider that stopped answering is infrastructure, although it also says "timed out"', async () => {
+  const { isInfrastructureFailure, retryDelayMs } = await import('./fitness.ts')
+  const loopGaveUp = { error: 'response stalled: nothing arrived for 120s (timed out)', steps: 3 }
+  const harnessStopped = { error: 'provider stalled: the model sent nothing for 60s or more before the task was stopped at 300000ms', steps: 0 }
+  expect(isInfrastructureFailure(loopGaveUp)).toBe(true)
+  expect(isInfrastructureFailure(harnessStopped)).toBe(true)
+  // The agent's own hang still scores.
+  expect(isInfrastructureFailure({ error: 'timed out after 300000ms', steps: 0 })).toBe(false)
+  expect([1, 2, 3, 4].map((attempt) => retryDelayMs(harnessStopped, attempt))).toEqual([30_000, 60_000, 120_000, undefined])
+})

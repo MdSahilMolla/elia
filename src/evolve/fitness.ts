@@ -10,7 +10,7 @@ import { table } from '../ui/layout.ts'
 import { MAX_SHELL_OUTPUT_LENGTH, readBoundedOutput, terminateProcessGroup } from '../shell.ts'
 import { ELIA_ROOT } from '../statePaths.ts'
 import { REACH_OUT_ENV, absorbReachFile } from './reach.ts'
-import { TRACE_OUT_ENV, readTrace, renderTrace } from './trace.ts'
+import { MODEL_SILENCE_MS, TRACE_OUT_ENV, readTrace, renderTrace, waitingOnModel } from './trace.ts'
 
 /**
  * Runs the benchmark suite against a given copy of elia's source and scores it.
@@ -302,8 +302,16 @@ function notRun(task: BenchTask, why: string): TaskOutcome {
   }
 }
 
+/**
+ * The model stopped sending — reported by the loop's own idle check, or found by
+ * the harness in the trace of a run it had to stop (trace.ts `waitingOnModel`).
+ * Both messages say "timed out" too, which is why this is asked first.
+ */
+const PROVIDER_STALLED = /response stalled|provider stalled/i
+
 export function isInfrastructureFailure(outcome: Pick<TaskOutcome, 'error' | 'steps'>): boolean {
   if (!outcome.error) return false
+  if (PROVIDER_STALLED.test(outcome.error)) return true
   // A hang is the candidate's own fault and must be allowed to score as a failure,
   // even though it also reports zero steps.
   if (/timed out/i.test(outcome.error)) return false
@@ -328,6 +336,10 @@ export function retryDelayMs(outcome: Pick<TaskOutcome, 'error' | 'steps'>, atte
   // (3.5 minutes) still left mercury's quota window closed while a second task
   // shared it, and one unmeasured task voids a whole evolve comparison.
   if (RATE_LIMITED.test(outcome.error ?? '')) return attempt <= 5 ? Math.min(30_000 * 2 ** (attempt - 1), 240_000) : undefined
+  // A stalling provider stalls for minutes (the one seen went quiet for about
+  // thirteen), and each stalled attempt has already spent its whole timeout
+  // finding out — so three spaced waits, not five, then unmeasured.
+  if (PROVIDER_STALLED.test(outcome.error ?? '')) return attempt <= 3 ? 30_000 * 2 ** (attempt - 1) : undefined
   return attempt <= 1 ? 2000 * attempt : undefined
 }
 
@@ -391,6 +403,7 @@ async function runOneTask(task: BenchTask, sourceRoot: string): Promise<TaskOutc
     // The agent's steps, for the proposer if this attempt fails (trace.ts).
     // Beside the repository for the same reason.
     const traceOut = `${dir}.trace`
+    const spawnedAt = Date.now()
     const proc = Bun.spawn(['bun', 'run', '--preload', join(ELIA_ROOT, 'src', 'evolve', 'reachRecorder.ts'), entry, task.id], {
       cwd: dir,
       stdout: 'pipe',
@@ -431,12 +444,18 @@ async function runOneTask(task: BenchTask, sourceRoot: string): Promise<TaskOutc
     // `reach.ts` cannot be safe in, so it is refused at the source.
     if (run && !run.error && !timedOut) absorbReachFile(task.id, reachOut, sourceRoot)
     rmSync(reachOut, { force: true })
-    const rendered = renderTrace(readTrace(traceOut))
+    const events = readTrace(traceOut)
     rmSync(traceOut, { force: true })
+    const rendered = renderTrace(events)
     const trace = rendered ? { trace: rendered } : {}
 
     if (timedOut) {
-      return { ...base, error: `timed out after ${taskTimeoutMs}ms`, detail: 'agent did not finish', keptDir: dir, ...trace }
+      // Stopped while the model had been silent for a minute or more: the
+      // provider's stall, retried and never scored (trace.ts).
+      const error = waitingOnModel(events, spawnedAt, Date.now())
+        ? `provider stalled: the model sent nothing for ${Math.round(MODEL_SILENCE_MS / 1000)}s or more before the task was stopped at ${taskTimeoutMs}ms`
+        : `timed out after ${taskTimeoutMs}ms`
+      return { ...base, error, detail: 'agent did not finish', keptDir: dir, ...trace }
     }
     if (!run) {
       return {
