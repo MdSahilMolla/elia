@@ -98,7 +98,7 @@ export class McpHttpClient implements McpTransport {
     const id = this.nextId++
     const body = JSON.stringify({ jsonrpc: '2.0', id, method, params })
     try {
-      const result = await this.requestOnce(id, body, timeoutMs, timeoutMessage)
+      const result = await this.requestOnce(method, id, body, timeoutMs, timeoutMessage)
       this.breaker.recordSuccess()
       return result
     } catch (error) {
@@ -111,7 +111,7 @@ export class McpHttpClient implements McpTransport {
     }
   }
 
-  private async requestOnce(id: number, body: string, timeoutMs: number, timeoutMessage: string): Promise<unknown> {
+  private async requestOnce(method: string, id: number, body: string, timeoutMs: number, timeoutMessage: string): Promise<unknown> {
     let response: Response
     try {
       response = await fetch(this.url, { method: 'POST', headers: this.buildHeaders(), body, signal: AbortSignal.timeout(timeoutMs) })
@@ -133,7 +133,7 @@ export class McpHttpClient implements McpTransport {
     const message = contentType.includes('text/event-stream') ? extractSseResponse(raw, id) : parseJsonResponse(raw, id)
     if (!message) {
       // A notification (e.g. notifications/initialized) legitimately gets an empty 202 — only real requests demand a body.
-      throw new Error(`connector "${this.name}" sent no JSON-RPC response for request ${id}`)
+      throw new Error(`connector "${this.name}" sent no JSON-RPC response for ${method}`)
     }
     if ('error' in message) throw new Error(`${message.error.message} (${message.error.code})`)
     return message.result
