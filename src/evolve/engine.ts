@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs'
+import { readFileSync, readdirSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { DEV_SYSTEM_PROMPT, ELIA_ROOT, config } from '../config.ts'
 import { runAgentLoop, type ConversationMessage } from '../agentLoop.ts'
@@ -892,17 +892,62 @@ ${headroom ? '' : '\nEvery task you are shown passes every attempt, so a tie is 
  * a step's input, for tools like github, browser and finance that no coding
  * task calls. The proposer could not see that, and aimed elsewhere.
  */
-export function tokenCostSection(prompt = DEV_SYSTEM_PROMPT, tools: Pick<Tool, 'name' | 'description' | 'input_schema'>[] = allWorkerTools()): string {
+export function tokenCostSection(
+  prompt = DEV_SYSTEM_PROMPT,
+  tools: Pick<Tool, 'name' | 'description' | 'input_schema'>[] = allWorkerTools(),
+  owners: Record<string, string> = toolOwners(ELIA_ROOT),
+): string {
   const tokens = (chars: number) => Math.round(chars / 4)
-  const sizes = tools.map((tool) => ({ name: tool.name, chars: JSON.stringify({ name: tool.name, description: tool.description, input_schema: tool.input_schema }).length }))
+  const sizes = tools.map((tool) => {
+    const file = owners[tool.name]
+    return { name: tool.name, file, locked: file ? isImmutablePath(file) : false, chars: JSON.stringify({ name: tool.name, description: tool.description, input_schema: tool.input_schema }).length }
+  })
   const toolChars = sizes.reduce((sum, tool) => sum + tool.chars, 0)
-  const largest = [...sizes].sort((a, b) => b.chars - a.chars).slice(0, 8)
+  const editable = sizes.filter((tool) => tool.file && !tool.locked)
+  const editableChars = editable.reduce((sum, tool) => sum + tool.chars, 0)
+  const largest = [...editable].sort((a, b) => b.chars - a.chars).slice(0, 10)
+  const locked = sizes.filter((tool) => tool.locked).map((tool) => tool.name)
   const share = Math.round((toolChars / (toolChars + prompt.length)) * 100)
   return `
 ## Where the tokens go
 Every model call sends, before any conversation: the system prompt (src/config.ts DEV_SYSTEM_PROMPT, about ${tokens(prompt.length)} tokens) and the definitions of ${tools.length} tools (about ${tokens(toolChars)} tokens, ${share}% of that fixed cost). A task takes several calls, so this is paid again on every step.
-Largest tool definitions: ${largest.map((tool) => `${tool.name} ~${tokens(tool.chars)}`).join(', ')}.
+Of those definitions, about ${tokens(editableChars)} tokens are in files you may change. Largest of those: ${largest.map((tool) => `${tool.name} ~${tokens(tool.chars)} (${tool.file})`).join(', ')}.${locked.length > 0 ? `
+Locked (safety boundaries you may not edit): ${locked.join(', ')}.` : ''}
+A definition is its description and its input schema, property descriptions included. One tool's worth is about one percent of a call; a saving the benchmark can see has to be several times that.
 Making elia cheaper is a real improvement. Removing a tool, or putting it out of reach, is not: it is a capability loss the benchmark cannot see, and it is not an acceptable way to win. Every tool must stay usable by a task that needs it.`
+}
+
+/**
+ * Which source file defines each tool: the first file under src/ with a
+ * `name: '…'` literal followed by its `description`. A heuristic, good enough to tell the
+ * proposer which definitions it may edit; a tool it cannot place is simply not
+ * listed as editable.
+ */
+export function toolOwners(root: string): Record<string, string> {
+  const owners: Record<string, string> = {}
+  const walk = (relative: string): void => {
+    let entries: string[]
+    try {
+      entries = readdirSync(join(root, relative))
+    } catch {
+      return
+    }
+    for (const entry of entries.sort()) {
+      const path = `${relative}/${entry}`
+      try {
+        if (statSync(join(root, path)).isDirectory()) walk(path)
+        else if (path.endsWith('.ts') && !path.endsWith('.test.ts')) {
+          // A definition, not a mention: the name is followed by its description.
+          for (const match of readFileSync(join(root, path), 'utf8').matchAll(/\bname:\s*['"]([a-z][a-z0-9_]*)['"],?\s*description\s*:/g)) owners[match[1]!] ??= path
+        }
+      } catch {
+        // An unreadable file owns nothing.
+      }
+    }
+  }
+  walk('src/tools')
+  walk('src')
+  return owners
 }
 
 /**

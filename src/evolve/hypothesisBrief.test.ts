@@ -110,9 +110,22 @@ test('the proposer is told the rule it is judged by, and that efficiency is all 
 test('the proposer sees what every model call pays for, and that dropping a tool is not a saving', async () => {
   const { tokenCostSection } = await import('./engine.ts')
   const tool = (name: string, description: string) => ({ name, description, input_schema: { type: 'object' as const, properties: {} } })
-  const section = tokenCostSection('p'.repeat(4_000), [tool('small', 'x'), tool('huge', 'y'.repeat(4_000))])
+  const owners = { small: 'src/tools/small.ts', huge: 'src/tools/huge.ts', github: 'src/tools/github.ts' }
+  const section = tokenCostSection('p'.repeat(4_000), [tool('small', 'x'), tool('huge', 'y'.repeat(4_000)), tool('github', 'z')], owners)
   expect(section).toContain('about 1000 tokens')
-  expect(section).toContain('definitions of 2 tools')
+  expect(section).toContain('definitions of 3 tools')
+  // Editable ones are listed with their file, largest first; a locked one is named as locked.
+  expect(section).toContain('huge ~1020 (src/tools/huge.ts)')
   expect(section.indexOf('huge ~')).toBeLessThan(section.indexOf('small ~'))
+  expect(section).toContain('Locked (safety boundaries you may not edit): github.')
   expect(section).toContain('Removing a tool, or putting it out of reach, is not')
+})
+
+test('a tool is placed where it is defined, not where it is mentioned', async () => {
+  const { toolOwners } = await import('./engine.ts')
+  const owners = toolOwners(join(import.meta.dir, '..', '..'))
+  // preview.ts asks the governor about run_command before runCommand.ts, in
+  // alphabetical order, defines it; the locked file is the right answer.
+  expect(owners.run_command).toBe('src/tools/runCommand.ts')
+  expect(owners.read_file).toBe('src/tools/readFile.ts')
 })
