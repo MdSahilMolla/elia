@@ -1,5 +1,6 @@
 import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { wilson } from '../compounding/stats.ts'
 import { withFileLock } from '../fileLock.ts'
 import { writeSecureFile } from '../securePersistence.ts'
 import { stateDir } from '../statePaths.ts'
@@ -25,6 +26,10 @@ import { stateDir } from '../statePaths.ts'
  *    cannot see that. This is the same correction the evolve suite just made
  *    when it started scoring each task over repeated runs so noise is not a
  *    verdict; the reasoning layer should not have to learn it separately.
+ * 3. Exploration stops only on evidence. A harness keeps its occasional turn
+ *    for as long as its upper bound says it could still beat the leader, and
+ *    loses it once the data rules that out — a bandit that eliminates arms by
+ *    confidence rather than by the order they happened to be tried in.
  */
 
 export interface HarnessOutcome {
@@ -58,6 +63,13 @@ export interface Library {
 
 /** Below this, a record has not earned the right to displace the default. */
 export const MIN_OBSERVATIONS = 5
+
+/**
+ * Runs after which a challenger is no longer explored even if its interval
+ * still overlaps the leader's. By then the two are within noise of each other,
+ * and the tie-break on attempts is the better judge of which to spend on.
+ */
+export const EXPLORATION_CAP = 30
 
 const EMPTY: Library = { version: 1, records: [] }
 
@@ -124,14 +136,12 @@ export function recordOutcome(outcome: HarnessOutcome, path = libraryPath()): Li
  * place instead of being crowned by its first lucky run.
  */
 export function successLowerBound(record: Pick<HarnessRecord, 'runs' | 'verifiedRuns'>): number {
-  if (record.runs === 0) return 0
-  const z = 1.96
-  const n = record.runs
-  const phat = record.verifiedRuns / n
-  const denominator = 1 + (z * z) / n
-  const centre = phat + (z * z) / (2 * n)
-  const margin = z * Math.sqrt((phat * (1 - phat)) / n + (z * z) / (4 * n * n))
-  return Math.max(0, (centre - margin) / denominator)
+  return wilson(record.verifiedRuns, record.runs).lo
+}
+
+/** The upper end of the same interval: how good this record could still turn out to be. */
+export function successUpperBound(record: Pick<HarnessRecord, 'runs' | 'verifiedRuns'>): number {
+  return wilson(record.verifiedRuns, record.runs).hi
 }
 
 /** Mean attempts a record spent, for breaking ties towards the cheaper harness. */
@@ -170,20 +180,37 @@ export function chooseHarness(signature: string, candidates: string[], library: 
     }
   }
 
-  // One slot in every few goes to whatever is least observed, so a harness that
-  // started badly is not written off forever on the strength of its first runs.
-  if (unobserved.length > 0) {
-    const totalRuns = records.reduce((sum, record) => sum + record.runs, 0)
-    if (totalRuns % 4 === 3) {
-      return { harnessId: unobserved[0], reason: `trying ${unobserved[0]} for ${signature}, which has no runs yet`, exploring: true }
-    }
-  }
-
   const best = [...seasoned].sort((a, b) => {
     const bound = successLowerBound(b) - successLowerBound(a)
     if (Math.abs(bound) > 1e-9) return bound
     return meanAttempts(a) - meanAttempts(b)
   })[0]!
+
+  // One slot in every few goes to a challenger: a harness with no runs, or one
+  // whose interval still reaches above the leader's floor. Only the unobserved
+  // used to qualify, so a harness with one to four unlucky runs was never tried
+  // again once another was seasoned — written off on the order it was tried in,
+  // not on evidence. A challenger whose upper bound falls below the leader's
+  // lower bound is ruled out and stops costing attempts.
+  const floor = successLowerBound(best)
+  const challengers = [
+    ...unobserved.map((harnessId) => ({ harnessId, runs: 0 })),
+    ...records
+      .filter((record) => record !== best && record.runs < EXPLORATION_CAP && successUpperBound(record) > floor)
+      .sort((a, b) => a.runs - b.runs),
+  ]
+  const totalRuns = records.reduce((sum, record) => sum + record.runs, 0)
+  if (challengers.length > 0 && totalRuns % 4 === 3) {
+    const next = challengers[0]!
+    return {
+      harnessId: next.harnessId,
+      reason:
+        next.runs === 0
+          ? `trying ${next.harnessId} for ${signature}, which has no runs yet`
+          : `trying ${next.harnessId} again for ${signature}: ${next.runs} run(s) is too few to rule out beating ${best.harnessId}`,
+      exploring: true,
+    }
+  }
 
   return {
     harnessId: best.harnessId,
