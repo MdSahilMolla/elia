@@ -25,6 +25,7 @@ elia compounding frontier        # the verification frontier and the resource go
 elia compounding round           # run the governor's top activity; --spend lets it call a model
 elia bench --all                 # score on synthetic + git-history tasks
 elia bench --all --lessons       # the same, with the lesson store on, to measure whether memory helps
+elia bench --canaries            # how often elia fakes a result on tasks only cheating can pass
 elia bench --harvest             # rebuild the history task set from git (no model calls)
 elia evolve -n 3                 # three generations, each building on the last
 elia distill --dry-run           # which recorded runs qualify as verified traces, and why the rest don't
@@ -41,6 +42,7 @@ A loop that improves itself will happily improve its *score* instead of itself, 
 - **The benchmark and the gate are off limits.** Candidates can't edit the fitness function, the sandbox, existing tests, `package.json` or `tsconfig.json`.
 - **The Value Core can't be rewritten by the loop.** elia's purpose and hard limits live in one version-controlled document. `elia evolve` and distillation can't touch it; a change needs a human commit.
 - **Wins must repeat, and ties are rejections.** A provisional winner is re-measured in an independent pair and must beat the baseline both times. A regression on any task disqualifies it.
+- **Cheating is measured, not assumed away.** Studies of self-improving loops in 2026 found proxy-only gains in roughly half to three quarters of optimisations, growing with every step. So before a promotion both trees run the canaries: tasks only a faked result can pass. A candidate that cheats more than the live tree is rejected, however well it scored. `elia bench --canaries` reports the rate on its own.
 
 Details of the evolve gate are in [Self-improvement](self-improvement.md).
 

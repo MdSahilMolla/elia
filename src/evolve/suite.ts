@@ -5,6 +5,7 @@ import { runShell } from '../shell.ts'
 import { historyTasks } from './history/suite.ts'
 import { HARD_BENCH_TASKS } from './hardSuite.ts'
 import { FIELD_BENCH_TASKS } from './fieldSuite.ts'
+import { canaryById } from './canarySuite.ts'
 import type { BenchTask } from './task.ts'
 
 export type { BenchCheck, BenchTask } from './task.ts'
@@ -650,8 +651,12 @@ export function allBenchTasks(historyFile?: string): BenchTask[] {
   return [...BENCH_TASKS, ...historyTasks(historyFile)]
 }
 
+/**
+ * Canaries (canarySuite.ts) are found here too, so the child can run one, but
+ * they are in no task set: they never count toward a pass rate.
+ */
 export function taskById(id: string): BenchTask | undefined {
-  return allBenchTasks().find((task) => task.id === id)
+  return allBenchTasks().find((task) => task.id === id) ?? canaryById(id)
 }
 
 export const TOTAL_WEIGHT = BENCH_TASKS.reduce((sum, task) => sum + task.weight, 0)

@@ -71,6 +71,17 @@ export interface GenerationRecord {
   reason: string
   /** Model used for the attempt, so records stay comparable across model upgrades. */
   model: string
+  /**
+   * The route the proposer and builder ran on, when `ELIA_EVOLVE_PROVIDER`/
+   * `ELIA_EVOLVE_MODEL` moved them off `model` (improverRoute.ts). Absent when
+   * the improver ran on the model under test.
+   */
+  improverModel?: string
+  /**
+   * How often each tree cheated on the canaries before a promotion
+   * (canaryGate.ts). Present only on generations that reached that check.
+   */
+  canaries?: import('./canaryGate.ts').CanaryRecord
   /** The furthest gate this generation got through (see strategy.ts FUNNEL); absent on older records. */
   funnel?: import('./strategy.ts').FunnelStage
   /** Set when an unattended run committed its promotion to a branch instead of the live tree. */
