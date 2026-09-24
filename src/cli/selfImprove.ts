@@ -184,14 +184,30 @@ export async function runEvolve(): Promise<void> {
       return
     }
     const { BENCH_TASKS, allBenchTasks } = await import('../evolve/suite.ts')
-    const { focusTaskIds } = await import('../compounding/status.ts')
-    taskIds = focusTaskIds(BENCH_TASKS.map((task) => task.id), focus, undefined, allBenchTasks().map((task) => task.id))
-    if (!taskIds) {
-      writeError('--focus needs a complete `elia bench --all` run to focus from (none recorded with every task measured).')
-      process.exitCode = 1
-      return
+    const { focusFromMeasured, focusTaskIds } = await import('../compounding/status.ts')
+    const builtInIds = BENCH_TASKS.map((task) => task.id)
+    const allIds = allBenchTasks().map((task) => task.id)
+    taskIds = focusTaskIds(builtInIds, focus, undefined, allIds)
+    if (taskIds) {
+      writeNotice(`Focused on ${taskIds.length} task(s): the built-in set, the last full run's failures, any task harvested since it, and ${focus} passing history task(s).`)
+    } else {
+      // No complete sweep yet: focus on what `elia bench --all` has measured of
+      // this exact tree so far, rather than waiting a day for the rest.
+      const { lookupBaselines } = await import('../evolve/baselineCache.ts')
+      const { ELIA_ROOT, config } = await import('../config.ts')
+      const { hits } = lookupBaselines(allIds, ELIA_ROOT, config.model)
+      taskIds = focusFromMeasured(builtInIds, focus, hits)
+      if (!taskIds) {
+        writeError('--focus needs history tasks to focus on: run `elia bench --all` (it keeps each result as it lands, so it can be stopped once some history tasks are in).')
+        process.exitCode = 1
+        return
+      }
+      const history = hits.filter((outcome) => !builtInIds.includes(outcome.taskId))
+      const failing = history.filter((outcome) => !outcome.passed).length
+      writeNotice(
+        `No complete \`elia bench --all\` yet, so focusing on what it has measured of this tree: ${history.length} of ${allIds.length - builtInIds.length} history task(s), ${failing} failing. ${taskIds.length} task(s) in all: the built-in set, those failures, and up to ${focus} passing history task(s).`,
+      )
     }
-    writeNotice(`Focused on ${taskIds.length} task(s): the built-in set, the last full run's failures, any task harvested since it, and ${focus} passing history task(s).`)
   }
   // One measurement per checkout at a time — see measureSlot.ts.
   const { claimMeasureSlot, describeHolder } = await import('../evolve/measureSlot.ts')
