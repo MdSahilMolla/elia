@@ -70,6 +70,26 @@ test('purging follows provenance: descendants of an unsound artifact go too', ()
   expect(retrievable(library.get('root'))).toBe(false)
 })
 
+test('an audit purge does not count quarantined descendants as slips', () => {
+  registerArtifact({ id: 'root', kind: 'skill', summary: 'r', source: 's', checks: [pass('lint'), pass('execution')] }, path)
+  registerArtifact({ id: 'child', kind: 'skill', summary: 'c', source: 's', deps: ['root'], checks: [pass('lint')] }, path)
+  // A descendant that was already quarantined before the audit was never admitted,
+  // so the provenance cascade purges it without it counting in the slip rate.
+  registerArtifact({ id: 'quar', kind: 'skill', summary: 'q', source: 's', deps: ['root'], checks: [{ ...pass('lint'), passed: false }] }, path)
+  registerArtifact({ id: 'kept', kind: 'lesson', summary: 'k', source: 's', checks: [pass('lint')] }, path)
+  recordCheck('kept', { ...pass('trial', 'randomized-trial'), tier: 'empirical' }, path)
+
+  purgeArtifact('root', 'audit says unsound', { audit: true, path })
+
+  const library = readLibrary(path)
+  expect(library.get('root')!.purgedByAudit).toBe(true)
+  expect(library.get('child')!.purgedByAudit).toBe(true)
+  expect(library.get('quar')!.purgedByAudit).toBeUndefined()
+  const health = libraryHealth(library)
+  expect(health.slip.trials).toBe(3) // kept, root, child — never quar
+  expect(health.slip.successes).toBe(2)
+})
+
 test('health: σ ≤ 1 means only audits keep the library sound (R2)', () => {
   for (const id of ['c1', 'c2']) registerArtifact({ id, kind: 'lesson', summary: id, source: 's', checks: [pass('lint'), pass('execution')] }, path)
   for (const id of ['u1', 'u2', 'u3']) registerArtifact({ id, kind: 'lesson', summary: id, source: 's', checks: [pass('lint')] }, path)

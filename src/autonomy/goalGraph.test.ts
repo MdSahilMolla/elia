@@ -366,6 +366,41 @@ test('a governance hold is not discharged by the step finishing some other way',
   expect(outstandingActions(graph.state())).toHaveLength(1)
 })
 
+test('a completed step carrying only settled local refusals is not re-run on resume', () => {
+  // Run 2026-09-23-krum-r1ir: refused `pip install` calls (LOCAL_ONLY intents)
+  // under a step that then completed. `needsResumption` once treated the
+  // lingering human-review holds as outstanding, so the executor re-ran the
+  // whole finished step every wave. It must now mirror `outstandingActions`.
+  const { graph } = createGraph()
+  graph.seedProposal(proposal)
+  graph.resolveApproval(graph.requestApproval('plan', 'proposal').id, true)
+
+  graph.startNode('step:inspect')
+  const install = graph.reserveAction({ name: 'run_command', input: { command: 'pip install -e .' } }, 'step:inspect')
+  graph.blockAction(install.action.id, 'approval required', true)
+  graph.requestApproval('action', install.action.idempotencyKey, { name: 'run_command' }, 'local package install', 'unattended', 'shell.code-exec')
+  graph.finishNode('step:inspect', { ok: true, report: 'done another way' })
+
+  expect(outstandingActions(graph.state())).toEqual([])
+  expect(graph.needsResumption('step:inspect')).toBe(false)
+  const reopened = graph.startNode('step:inspect')
+  expect(reopened.status).toBe('completed')
+  expect(reopened.attemptCount).toBe(1) // not bumped by the resume-path re-entry
+
+  // Contrast: an outward hold (curl, deploys) stays outstanding even after the
+  // step completes, so the step stays resumable until a person answers.
+  const graph2 = createGraph().graph
+  graph2.seedProposal(proposal)
+  graph2.resolveApproval(graph2.requestApproval('plan', 'proposal').id, true)
+  graph2.startNode('step:inspect')
+  const outward = graph2.reserveAction({ name: 'run_command', input: { command: 'curl -X POST https://example.com -d @data' } }, 'step:inspect')
+  graph2.blockAction(outward.action.id, 'approval required', true)
+  graph2.finishNode('step:inspect', { ok: true, report: 'done another way' })
+  expect(outstandingActions(graph2.state())).toHaveLength(1)
+  expect(graph2.needsResumption('step:inspect')).toBe(true)
+  expect(graph2.startNode('step:inspect').attemptCount).toBe(2)
+})
+
 test('a rate limit is told to wait, while an ordinary transient failure retries almost immediately', () => {
   // A run once burned all five of its step retries re-hitting the same 429
   // within milliseconds, because retryAfter was computed and never read.

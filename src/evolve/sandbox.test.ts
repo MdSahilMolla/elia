@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -184,6 +184,35 @@ test("edits made to the live tree while a generation runs are not the candidate'
     write(join(sandbox.root, 'src/agent.ts'), 'candidate edit')
     expect(() => promote(sandbox, changedFiles(sandbox, live), live)).toThrow(LiveTreeConflict)
     expect(readFileSync(join(live, 'src/agent.ts'), 'utf8')).toBe('v1 + my edit')
+  } finally {
+    rmSync(temp, { recursive: true, force: true })
+  }
+})
+
+test('sandbox pruning is generation-scoped and never removes a sibling in-flight copy', () => {
+  const temp = mkdtempSync(join(tmpdir(), 'elia-sandbox-generationscope-'))
+  const live = join(temp, 'live')
+  const evolution = join(temp, 'evolution')
+  try {
+    // gen-1..8 exist. gen-8 is a sibling that is still being *measured*, so its
+    // copy was touched long ago and has the oldest mtime of the set — exactly
+    // the shape that made the old mtime-based prune delete it.
+    for (let generation = 1; generation <= 8; generation++) {
+      const dir = join(evolution, `gen-${generation}`)
+      mkdirSync(join(dir, 'src'), { recursive: true })
+      const at = new Date(Date.now() - generation * 60_000)
+      utimesSync(dir, at, at)
+    }
+    write(join(live, 'package.json'), '{}')
+    write(join(live, 'tsconfig.json'), '{}')
+
+    const sandbox = createSandbox(9, live, evolution) // O(1) -> gen-9 + keep 4 of <9
+
+    // The four newest claimed copies survive even though their mtimes are the
+    // oldest (gen-8 least-recently touched); only gen-1..4 are pruned.
+    for (const kept of [5, 6, 7, 8]) expect(existsSync(join(evolution, `gen-${kept}`))).toBe(true)
+    expect(existsSync(sandbox.root)).toBe(true)
+    for (const pruned of [1, 2, 3, 4]) expect(existsSync(join(evolution, `gen-${pruned}`))).toBe(false)
   } finally {
     rmSync(temp, { recursive: true, force: true })
   }

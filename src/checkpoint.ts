@@ -7,6 +7,7 @@ import { ensureSecureDirectory, hardenSecureFile, writeSecureBunFile } from './s
 import { clearAllCaches } from './cacheRegistry.ts'
 import { withFileLockAsync } from './fileLock.ts'
 import { assertSelfEditAllowed } from './autonomy/selfEdit.ts'
+import { logSwallowedError } from './diagnostics.ts'
 
 /**
  * Per-turn checkpoints for the interactive session: enough to put both the
@@ -85,9 +86,11 @@ function shareRepeatedMessages(checkpoints: Checkpoint[]): Checkpoint[] {
 
 export function createFileTracker(): FileTracker {
   const captured: FileSnapshot = {}
+  const claimed = new Set<string>()
   return {
     async capture(path) {
-      if (path in captured) return
+      if (claimed.has(path)) return
+      claimed.add(path)
       const file = Bun.file(path)
       captured[path] = (await file.exists()) ? await file.text() : null
     },
@@ -133,7 +136,8 @@ export async function loadCheckpoints(sessionId: string, dir: string = SESSIONS_
   hardenSecureFile(path)
   try {
     return shareRepeatedMessages((await file.json()) as Checkpoint[])
-  } catch {
+  } catch (error) {
+    logSwallowedError('checkpoint.load.corrupt', error, { path })
     return []
   }
 }

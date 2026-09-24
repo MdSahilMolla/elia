@@ -189,10 +189,21 @@ export function readLibrary(path = libraryPath()): Map<string, Artifact> {
     } else if (event.type === 'purge') {
       const artifact = artifacts.get(event.id)
       if (artifact) {
+        if (event.audit) {
+          // An audit purge only records a slip if the artifact still stood on
+          // what it carried in — a quarantined descendant swept by the
+          // provenance cascade was caught at admission, never sold as sound, so
+          // it must not count in ε. Judge it on its pre-audit evidence: discount
+          // the audit's own freshly-recorded failing checks (family `audit`),
+          // which are what quarantine the very tools this audit is re-checking.
+          // `randomized-trial` and every other failing check is pre-existing
+          // evidence and stays; `retireLessons` never even records one.
+          const carriedIn = statusFor({ ...artifact, checks: artifact.checks.filter((check) => !(check.family.startsWith('audit') && !check.passed)) })
+          if (carriedIn.status !== 'quarantined') artifact.purgedByAudit = true
+        }
         artifact.status = 'purged'
         artifact.reason = event.reason
         artifact.updatedAt = event.at
-        if (event.audit) artifact.purgedByAudit = true
       }
     } else if (event.type === 'reuse') {
       for (const id of event.ids) {

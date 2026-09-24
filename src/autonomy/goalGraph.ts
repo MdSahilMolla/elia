@@ -575,7 +575,27 @@ export class GoalGraphStore {
   }
 
   needsResumption(nodeId: string): boolean {
-    return this.snapshot.actions.some((action) => action.nodeId === nodeId && ['planned', 'running', 'retryable', 'blocked', 'human-review'].includes(action.state))
+    // Mirrors `outstandingActions` so the executor cannot re-run a step whose
+    // refusals or failures already settled when the step completed. Without
+    // this, a completed step still carrying a `blocked`/`retryable`/`human-review`
+    // action stayed in the pending wave and `startNode` re-ran the whole step.
+    return this.snapshot.actions.some((action) => {
+      if (action.nodeId !== nodeId) return false
+      const owner = this.snapshot.nodes.find((node) => node.id === nodeId)
+      const ownerCompleted = owner !== undefined && owner.id !== this.snapshot.rootId && owner.status === 'completed'
+      if (action.state === 'planned' || action.state === 'running') return true
+      if (action.state === 'human-review') {
+        if (!ownerCompleted) return true
+        return !LOCAL_ONLY_INTENTS.has(actionApproval(this.snapshot, action)?.intent ?? '')
+      }
+      if (action.state === 'failed' || action.state === 'retryable' || action.state === 'blocked') {
+        // The same moot-if-the-step-finished rule as outstandingActions: a
+        // refusal or failure the worker routed around is settled once the step
+        // it belonged to completed.
+        return !ownerCompleted
+      }
+      return false
+    })
   }
 
   pendingApprovals(): ApprovalRecord[] {
