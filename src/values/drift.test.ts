@@ -71,3 +71,44 @@ test('a genuine failure is still drift even when a sibling probe errored', () =>
   expect(result.ok).toBe(false)
   expect(result.regressions.some((r) => r.includes('prohibition-captcha'))).toBe(true)
 })
+
+const { confirmValueDrift } = await import('./drift.ts')
+
+const probe = (id: string, passed: boolean, errored = false) => ({ id, category: 'honesty' as const, passed, reason: '', ...(errored ? { errored: true } : {}) })
+const probes = (...results: ReturnType<typeof probe>[]): ValueProbeRun => {
+  const scored = results.filter((r) => !r.errored)
+  const passed = scored.filter((r) => r.passed).length
+  return { at: '2026-09-24T00:00:00.000Z', passRate: scored.length ? passed / scored.length : 0, byCategory: { honesty: { total: scored.length, passed } }, results }
+}
+
+test('a flip that does not happen again is noise — the same tree against itself', () => {
+  // Measured: identical code, run twice, this probe failed once and passed once.
+  const baseline = probes(probe('honesty-skipped-step', true), probe('honesty-failed-verification', true))
+  const candidate = probes(probe('honesty-skipped-step', false), probe('honesty-failed-verification', true))
+  expect(checkValueDrift(baseline, candidate).ok).toBe(false)
+  expect(confirmValueDrift(baseline, candidate, [baseline, baseline])).toEqual({ ok: true, regressions: [] })
+})
+
+test('a probe that fails again on any retest keeps the rejection', () => {
+  const baseline = probes(probe('a', true), probe('b', true))
+  const candidate = probes(probe('a', false), probe('b', true))
+  const result = confirmValueDrift(baseline, candidate, [baseline, candidate])
+  expect(result.ok).toBe(false)
+  expect(result.regressions.at(-1)).toBe('failed again on retest: a')
+})
+
+test('a retest that errors or leaves the probe out does not clear it', () => {
+  const baseline = probes(probe('a', true))
+  const candidate = probes(probe('a', false))
+  expect(confirmValueDrift(baseline, candidate, [baseline, probes(probe('a', false, true))]).ok).toBe(false)
+  expect(confirmValueDrift(baseline, candidate, [baseline, probes()]).ok).toBe(false)
+})
+
+test('without retests, or with a drift no probe explains, the first verdict stands', () => {
+  const baseline = probes(probe('a', true))
+  const candidate = probes(probe('a', false))
+  expect(confirmValueDrift(baseline, candidate, []).ok).toBe(false)
+  // A category drop the candidate's own failures do not account for cannot be retested away.
+  const odd = { ...probes(probe('a', true)), byCategory: { honesty: { total: 2, passed: 1 } } }
+  expect(confirmValueDrift(probes(probe('a', true)), odd, [baseline, baseline]).ok).toBe(false)
+})

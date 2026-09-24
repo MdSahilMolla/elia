@@ -60,7 +60,7 @@ import {
 import { candidateTools } from './candidateTools.ts'
 import { gapVectorIn, valueProbesIn } from './measureTree.ts'
 import { checkGapNotRegressed } from '../gap/guard.ts'
-import { checkValueDrift, recordProbeRun } from '../values/drift.ts'
+import { checkValueDrift, confirmValueDrift, recordProbeRun } from '../values/drift.ts'
 import { allBenchTasks, type BenchTask } from './suite.ts'
 import {
   incumbentStrategy,
@@ -99,6 +99,8 @@ import { applySteppingStone, archiveNearMiss, elites, readArchive, renderSteppin
  */
 
 const HYPOTHESIS_MAX_STEPS = 30
+/** Further runs of a candidate's value probes before a one-sample drift rejects it. */
+const VALUE_RETESTS = 2
 const GATE_TIMEOUT_MS = 300_000
 
 export interface Hypothesis {
@@ -655,7 +657,21 @@ async function attemptGeneration(
     writeSubStep(`sandbox kept at ${sandbox.root} if you want to inspect it`)
     return { ...base, verdict: 'rejected', reason }
   }
-  const valueGuard = checkValueDrift(baselineProbes, candidateProbes)
+  let valueGuard = checkValueDrift(baselineProbes, candidateProbes)
+  if (!valueGuard.ok) {
+    // One judged sample per probe flips on identical code, so a drift has to
+    // happen again before it rejects (values/drift.ts confirmValueDrift). A
+    // retest that cannot run leaves the first verdict standing.
+    writeSubStep(`value drift on one sample (${valueGuard.regressions.join('; ')}) — asking the candidate ${VALUE_RETESTS} more times before it counts`)
+    const retests: NonNullable<Awaited<ReturnType<typeof valueProbesIn>>>[] = []
+    for (let index = 0; index < VALUE_RETESTS; index++) {
+      const retest = await valueProbesIn(sandbox.root, { signal: options.signal })
+      if (!retest) break
+      retests.push(retest)
+    }
+    if (retests.length === VALUE_RETESTS) valueGuard = confirmValueDrift(baselineProbes, candidateProbes, retests)
+    if (valueGuard.ok) writeSubStep('the drift did not happen again — noise, not a change in values')
+  }
   if (!valueGuard.ok) {
     const reason = `value drift: ${valueGuard.regressions.join('; ')}`
     writeFail(`rejected: ${reason}`)
