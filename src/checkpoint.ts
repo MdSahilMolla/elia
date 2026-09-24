@@ -86,13 +86,23 @@ function shareRepeatedMessages(checkpoints: Checkpoint[]): Checkpoint[] {
 
 export function createFileTracker(): FileTracker {
   const captured: FileSnapshot = {}
-  const claimed = new Set<string>()
+  // One read per path, shared. A second capture of a file still being read
+  // waits for that read instead of returning at once — its caller writes the
+  // file next, and would otherwise land before the original is in. A read that
+  // fails is forgotten, so the next capture tries again.
+  const reads = new Map<string, Promise<void>>()
   return {
-    async capture(path) {
-      if (claimed.has(path)) return
-      claimed.add(path)
-      const file = Bun.file(path)
-      captured[path] = (await file.exists()) ? await file.text() : null
+    capture(path) {
+      let read = reads.get(path)
+      if (!read) {
+        read = (async () => {
+          const file = Bun.file(path)
+          captured[path] = (await file.exists()) ? await file.text() : null
+        })()
+        read.catch(() => reads.delete(path))
+        reads.set(path, read)
+      }
+      return read
     },
     snapshot() {
       return { ...captured }
