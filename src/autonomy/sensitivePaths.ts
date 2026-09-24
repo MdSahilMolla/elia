@@ -35,6 +35,9 @@ const SENSITIVE_FILE_NAMES = new Set([
 
 const SENSITIVE_FILE_PATTERNS = [
   /^\.env(?:\..+)?$/i,
+  // The Battmann intelligence store: its records reach a model only through the battmann tool, which applies
+  // the classification boundary (battmann/modelBoundary.ts). Reading the file directly would bypass it.
+  /battmann[^/\\]*\.sqlite(?:-wal|-shm|-journal)?$/i,
   /^(?:credentials?|secrets?|tokens?|passwords?)(?:\.[^.]+)*$/i,
   /^id_(?:rsa|dsa|ecdsa|ed25519)(?:\.pub)?$/i,
   /\.(?:pem|key|p12|pfx)$/i,
@@ -85,7 +88,7 @@ export function assertSafeFileAccess(path: string): void {
  * Shared by every "does this command disclose a protected path" check below.
  */
 const SENSITIVE_PATH_MENTION =
-  /\.env(?:\.[A-Za-z0-9._-]+)?\b|\.npmrc\b|\.pypirc\b|\.netrc\b|\.(?:pem|key|p12|pfx)\b|\.git-credentials\b|\.aws(?:[\\/]|\b)|\.azure(?:[\\/]|\b)|\.docker(?:[\\/]|\b)|\.kube(?:[\\/]|\b)|\.gnupg(?:[\\/]|\b)|\.config[\\/]gcloud(?:[\\/]|\b)|\.ssh(?:[\\/]|\b)|\bid_(?:rsa|dsa|ecdsa|ed25519)(?:\.pub)?\b|\b(?:credentials?|secrets?|tokens?|passwords?|shadow|passwd|cookies|login data|local state|web data|environ|sudoers|sshd_config)\b/i
+  /\.env(?:\.[A-Za-z0-9._-]+)?\b|\.npmrc\b|\.pypirc\b|\.netrc\b|\.(?:pem|key|p12|pfx)\b|\.git-credentials\b|\.aws(?:[\\/]|\b)|\.azure(?:[\\/]|\b)|\.docker(?:[\\/]|\b)|\.kube(?:[\\/]|\b)|\.gnupg(?:[\\/]|\b)|\.config[\\/]gcloud(?:[\\/]|\b)|\.ssh(?:[\\/]|\b)|\bid_(?:rsa|dsa|ecdsa|ed25519)(?:\.pub)?\b|\b(?:credentials?|secrets?|tokens?|passwords?|shadow|passwd|cookies|login data|local state|web data|environ|sudoers|sshd_config)\b|battmann[\w.-]*\.sqlite/i
 
 /** Conservative shell check for common commands that would disclose protected local files. */
 export function commandMayReadSensitiveData(command: string): boolean {
@@ -99,7 +102,7 @@ export function commandMayReadSensitiveData(command: string): boolean {
   // `import-clixml`, `get-filehash`) are listed explicitly because none of
   // them contain a bare `cat`/`type`/`grep` token for the word-boundary test
   // below to trip over.
-  if (!/\b(?:cat|type|less|more|head|tail|sed|awk|grep|rg|cut|strings|xxd|od|base64|openssl|certutil|print|source|get-content|select-string|import-csv|import-clixml|get-filehash|gc\b|git\s+(?:show|log|diff)|\.\s*)\b/i.test(command)) return false
+  if (!/\b(?:cat|type|less|more|head|tail|sed|awk|grep|rg|cut|strings|xxd|od|base64|openssl|certutil|print|source|sqlite3|get-content|select-string|import-csv|import-clixml|get-filehash|gc\b|git\s+(?:show|log|diff)|\.\s*)\b/i.test(command)) return false
   return SENSITIVE_PATH_MENTION.test(command)
 }
 

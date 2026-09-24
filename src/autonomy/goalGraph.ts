@@ -614,12 +614,16 @@ export class GoalGraphStore {
         if (!ownerCompleted) return true
         return !LOCAL_ONLY_INTENTS.has(actionApproval(this.snapshot, action)?.intent ?? '')
       }
-      if (action.state === 'failed' || action.state === 'retryable' || action.state === 'blocked') {
+      if (action.state === 'retryable' || action.state === 'blocked') {
         // The same moot-if-the-step-finished rule as outstandingActions: a
-        // refusal or failure the worker routed around is settled once the step
-        // it belonged to completed.
+        // refusal the worker routed around is settled once the step it
+        // belonged to completed.
         return !ownerCompleted
       }
+      // A `failed` action never asks for resumption. `startNode` reads this to
+      // decide whether a failed or blocked step may run again without a person,
+      // and nearly every failed step carries a failed action — counting it let
+      // a fatal failure re-run on resume instead of stopping for review.
       return false
     })
   }

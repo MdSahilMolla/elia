@@ -14,7 +14,12 @@ export interface SupervisorControlRequest {
 
 const RUN_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/
 
-let controlCorruption: { runId: string; path: string } | undefined
+/**
+ * Control files found corrupt, by run, until that run's supervisor takes the
+ * note. Keyed so a corrupt file read for another run (`elia control status` reads
+ * every run's) is never reported as this run's.
+ */
+const controlCorruption = new Map<string, string>()
 
 export function runControlPath(runId: string, runsRoot = paths.runs): string {
   assertRunId(runId)
@@ -39,16 +44,17 @@ export function readRunControl(runId: string, runsRoot = paths.runs): Supervisor
     if (parsed.version !== 1 || (parsed.action !== 'pause' && parsed.action !== 'stop') || typeof parsed.requestedAt !== 'number' || !Number.isFinite(parsed.requestedAt)) return undefined
     return { version: 1, action: parsed.action, requestedAt: parsed.requestedAt }
   } catch (error) {
-    controlCorruption = { runId, path }
+    controlCorruption.set(runId, path)
     logSwallowedError('control.read.corrupt', error, { runId, path })
     return undefined
   }
 }
 
-export function takeRunControlCorruption(): { runId: string; path: string } | undefined {
-  const note = controlCorruption
-  controlCorruption = undefined
-  return note
+export function takeRunControlCorruption(runId: string): { runId: string; path: string } | undefined {
+  const path = controlCorruption.get(runId)
+  if (path === undefined) return undefined
+  controlCorruption.delete(runId)
+  return { runId, path }
 }
 
 export function clearRunControl(runId: string, runsRoot = paths.runs): void {

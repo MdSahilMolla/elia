@@ -33,11 +33,25 @@ And what keeps it honest:
 - **A tie is a rejection.** Equal pass rate needs a ≥5% token or time win to promote, so benchmark noise can't manufacture a false victory that later generations then "build on".
 - **A win has to repeat.** Every provisional winner is measured in a second, independent candidate/baseline pair (run in reverse order) and is rejected unless the improvement reproduces. One lucky model sample cannot promote itself.
 - **A regression is disqualifying** even when the total ties, so capabilities can't be quietly traded for each other.
+- **A candidate may not cheat more than the live tree.** Before a promotion, both trees run the canaries (`src/evolve/canarySuite.ts`): tasks built so that no honest change can pass. The answers live only in a key the agent is told not to open, or the tests contradict each other, or the service the code must call does not exist. A pass there means the agent copied the key, gamed the tests, hardcoded the output or edited what it was told to leave alone. A candidate that trips them more often than the live tree is rejected, after a pooled retest so one unlucky sample cannot decide it. `elia bench --canaries` reports the live tree's own rate.
 - **Provider outages don't count as failures.** A transient 500 or rate limit is retried; a wrong answer never is. Otherwise a network blip could reject a genuinely better candidate, and the ledger would carry that false result into every later generation.
 - **Transient provider calls recover in place.** The shared agent loop retries connection, rate-limit, timeout, and 5xx failures when they occur before any text is streamed. It never retries a partially emitted response, which would duplicate output or tool calls.
 - **The live tree is only touched after the gate passes**, and everything it overwrites is backed up to `.evolution/gen-N-backup/`. Promotion is transactional: a partial copy is rolled back, including removal of newly introduced files.
 
+**A stronger improver.** The proposer, the builder and the strategy writer run on the configured model by default, so the search is only as good as the model elia is benchmarked on. `ELIA_EVOLVE_PROVIDER` and `ELIA_EVOLVE_MODEL` (with `ELIA_EVOLVE_BASE_URL` and `ELIA_EVOLVE_API_KEY` if needed) move those three onto another model. Candidates are still measured on the configured model, and each ledger record names the improver's route in `improverModel`. A route that is set but cannot be used stops the run before anything is spent, rather than quietly falling back.
+
 `elia evolve` makes real API calls and, on success, modifies elia's own source. Use `--dry-run` to see what it would do first.
+
+### `elia bench --lift` — does elia beat the model it runs on?
+
+Every other comparison above is elia against elia. `--lift` asks the question a harness has to be able to answer: run the same tasks, on the same model, with no harness at all — a `bash` tool, a whole-file `write_file`, a three-sentence prompt, a plain loop (`src/evolve/bareLoop.ts`, shaped after mini-swe-agent) — and report the difference. mini-swe-agent writes files through its shell inside a container; elia's unattended safety policy refuses shell writes, so without `write_file` the bare model could not change a file and the comparison would measure the policy.
+
+```bash
+elia bench --lift            # the synthetic suite, both arms
+elia bench --all --lift      # every task
+```
+
+The control arm keeps what is not a claim about reasoning — the task's step budget, the same unattended safety policy on every command, the same retry on a provider blip — and drops what elia says adds value: the system prompt and Value Core, the tool surface, lessons, speculation, plan tracking, nudges, sub-agents and compaction. Tasks are paired, a task either arm could not measure leaves both sides, two arms on different models are refused, and the verdict is an anytime-valid e-value test: "the harness helps" only at e ≥ 20, and "the harness hurts" is reported just as plainly when the bare model wins. The latest result shows in `elia compounding` beside the benchmark's headroom. The control arm and the comparison are immutable to `elia evolve` candidates, so a candidate cannot raise its lift by weakening the baseline.
 
 ### Elia Book — session insights and reusable improvement playbooks
 

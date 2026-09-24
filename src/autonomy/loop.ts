@@ -497,12 +497,12 @@ async function runAutonomousTaskInternal(options: AutonomousRunOptions): Promise
     journal.append('phase', { phase: 'orient', note: workspace.repositoryWarning })
   }
   supervisorTimer = setInterval(() => {
-    const corrupt = takeRunControlCorruption()
+    const request = readRunControl(runId)
+    const corrupt = takeRunControlCorruption(runId)
     if (corrupt && !controlCorruptionSurfaced) {
       controlCorruptionSurfaced = true
       writeNotice(`run control file ${corrupt.path} is corrupt — previous pause/stop may not apply; fix or delete it and place a fresh request`)
     }
-    const request = readRunControl(runId)
     if (!request || supervisorRequest) return
     supervisorRequest = request
     journal.append('phase', { phase: 'supervisor-control', action: request.action, requestedAt: request.requestedAt })
@@ -515,6 +515,7 @@ async function runAutonomousTaskInternal(options: AutonomousRunOptions): Promise
     runController.abort()
   }, 250)
   const graph = GoalGraphStore.open({ runId, goal, dir: journal.dir })
+  if (graph.openTornSnapshot) writeNotice(`this run's goal graph was unreadable and starts over from the goal; the old file is kept at ${graph.openTornSnapshot.path}`)
   const board = createBlackboard(`${journal.dir}/board.json`)
   // Per run, like the blackboard: a resumed run should not inherit a stale plan.
   setActiveTodoList(createTodoList(`${journal.dir}/todo.json`))

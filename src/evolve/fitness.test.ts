@@ -202,11 +202,11 @@ test('a rate limit is waited out across minutes; other blips get one quick retry
   expect(retryDelayMs({ steps: 9 }, 1)).toBeUndefined()
 })
 
-test('benchConcurrency reads ELIA_BENCH_CONCURRENCY and defaults to 4', () => {
-  expect(benchConcurrency({})).toBe(4)
+test('benchConcurrency reads ELIA_BENCH_CONCURRENCY and defaults to 2', () => {
+  expect(benchConcurrency({})).toBe(2)
   expect(benchConcurrency({ ELIA_BENCH_CONCURRENCY: '1' })).toBe(1)
-  expect(benchConcurrency({ ELIA_BENCH_CONCURRENCY: '0' })).toBe(4)
-  expect(benchConcurrency({ ELIA_BENCH_CONCURRENCY: 'x' })).toBe(4)
+  expect(benchConcurrency({ ELIA_BENCH_CONCURRENCY: '0' })).toBe(2)
+  expect(benchConcurrency({ ELIA_BENCH_CONCURRENCY: 'x' })).toBe(2)
 })
 
 test('a benchmark task never falls back to another provider', async () => {

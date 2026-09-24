@@ -29,8 +29,23 @@ workspace), a REPL redesign, and a broad reliability/perf pass.
   default surface.
 - **`provision_environment`** tool; orient now assesses declared vs. available
   environment and past runs' honesty feeds the next run's orient.
-- **Battmann mode** — four-pillar build-out with finance/defense primitives and
-  a dashboard; every turn anchored to the wall-clock date.
+- **Battmann mode** — every turn anchored to the wall-clock date, with a
+  dashboard. **Real data feeds** (ECB rates, World Bank, IMF WEO, UN Comtrade,
+  GDELT) are fetched by code with the raw response hashed, recorded
+  append-only, and refreshed by `elia battmann refresh`. The **certified track
+  record** covers questions with a `resolutionRule`: they are resolved by code
+  from a feed, timestamped by the clock, and scored against an automatic
+  statistical baseline. The **classification boundary** is now enforced in
+  code: while any model route is a cloud model, the tool withholds records
+  above the cloud ceiling and refuses to write them, and the store file is a
+  protected path. `elia battmann seed|brief india-semiconductors` is the first
+  playbook. Commodity prices (IMF PCPS) and applied tariffs (WITS) followed,
+  along with `supplier_concentration`. A live agent run showed the tool had
+  to be easier for models to use, so `feed_query` now returns a citable
+  evidence id, nested fields are lifted, a failed call returns the fields
+  that action takes, and certified forecasts are stamped by the clock with
+  their feed evidence attached. The defence primitives (`posture_assessment`, `effector_pairing`)
+  and the Palantir-pillar naming were removed.
 - **cyber mode** — evidence-gated findings, scoped `http_probe`, and a
   `.elia/policy.json` governor policy.
 - A repo-history benchmark that can actually be failed, plus a latency benchmark.
@@ -54,9 +69,9 @@ workspace), a REPL redesign, and a broad reliability/perf pass.
 - Planner gets the speculative cache + heuristic prefetch and deterministically
   finishes reading a just-searched worklist.
 - **Compounding is faster.** The evolve promotion path runs its independent
-  phases concurrently — the confirmation pair, the two-tree verifier-gap and
-  value-probe checks, and the sandbox typecheck/tests — and the benchmark pool
-  default rises to `ELIA_BENCH_CONCURRENCY=4`. Same verdicts, less wall clock.
+  phases concurrently — the two-tree verifier-gap and value-probe checks, and
+  the sandbox typecheck/tests. Same verdicts, less wall clock. Benchmark sweeps
+  still keep to `ELIA_BENCH_CONCURRENCY` (default 2).
   `ELIA_HARVEST_SCAN`/`ELIA_HARVEST_LIMIT` now bound a harvest round.
 - `evolve` scores candidates on the long-horizon hard suite too.
 - `edit_file` / `write_file` diffs render inline with workspace-relative paths.

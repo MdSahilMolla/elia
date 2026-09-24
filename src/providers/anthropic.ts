@@ -16,22 +16,6 @@ const EPHEMERAL_CACHE_1H: Anthropic.CacheControlEphemeral = { type: 'ephemeral',
 // (billed by actual usage, not the cap) so large refactors don't get truncated.
 const MAX_TOKENS = 32_000
 
-// Compile-time probes, never read at runtime: each literal below replicates an
-// exact request payload and is checked with `satisfies` against the installed
-// @anthropic-ai/sdk types. elia used to force these shapes into place with `as`
-// casts, which let a Dependabot bump that renamed or dropped a field compile
-// silently and then 400 on the first real request. These fail `bun run typecheck`
-// loudly the moment the SDK's shape drifts from what the request actually sends.
-const _adaptiveThinkingParamProbe = {
-  type: 'adaptive',
-  display: 'summarized',
-} satisfies Anthropic.ThinkingConfigParam
-const _toolInputSchemaProbe = {
-  type: 'object',
-  properties: { path: { type: 'string' } },
-  required: ['path'],
-} satisfies Anthropic.Tool.InputSchema
-
 /**
  * Models that take *adaptive* thinking rather than a fixed token budget.
  *

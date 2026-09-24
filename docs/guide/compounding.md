@@ -25,6 +25,7 @@ elia compounding frontier        # the verification frontier and the resource go
 elia compounding round           # run the governor's top activity; --spend lets it call a model
 elia bench --all                 # score on synthetic + git-history tasks
 elia bench --all --lessons       # the same, with the lesson store on, to measure whether memory helps
+elia bench --canaries            # how often elia fakes a result on tasks only cheating can pass
 elia bench --harvest             # rebuild the history task set from git (no model calls)
 elia evolve -n 3                 # three generations, each building on the last
 elia distill --dry-run           # which recorded runs qualify as verified traces, and why the rest don't
@@ -41,6 +42,7 @@ A loop that improves itself will happily improve its *score* instead of itself, 
 - **The benchmark and the gate are off limits.** Candidates can't edit the fitness function, the sandbox, existing tests, `package.json` or `tsconfig.json`.
 - **The Value Core can't be rewritten by the loop.** elia's purpose and hard limits live in one version-controlled document. `elia evolve` and distillation can't touch it; a change needs a human commit.
 - **Wins must repeat, and ties are rejections.** A provisional winner is re-measured in an independent pair and must beat the baseline both times. A regression on any task disqualifies it.
+- **Cheating is measured, not assumed away.** Studies of self-improving loops in 2026 found proxy-only gains in roughly half to three quarters of optimisations, growing with every step. So before a promotion both trees run the canaries: tasks only a faked result can pass. A candidate that cheats more than the live tree is rejected, however well it scored. `elia bench --canaries` reports the rate on its own.
 
 Details of the evolve gate are in [Self-improvement](self-improvement.md).
 
@@ -66,22 +68,25 @@ Turn it all off with `ELIA_SIEVE=off`, which is also the control arm for measuri
 
 The sieve and the cache cut *how much* a verdict costs. The rest of a
 generation's wall clock came from phases that were independent but run one after
-the other. Four of them now run concurrently, and none of them changed what is
+the other. Two of them now run concurrently, and neither changed what is
 measured or how the answer is decided:
 
-- **The confirmation pair.** A provisional winner is still re-measured on two
-  full sweeps — the candidate's tree and the live tree — but they now run at the
-  same time (`Promise.all`), halving the most expensive phase of a promotion.
 - **The guards.** The generator–verifier gap (`elia gap --critic`) and the value
   probes are each measured on both trees; the two trees run in parallel. Both
   checks still have to pass, and a tree that cannot be measured still rejects.
 - **The gate.** `bun run typecheck` and `bun test` are independent and now run in
   parallel inside the sandbox, with the same timeout and the same
-  typecheck-first verdict order.
-- **The benchmark pool.** `ELIA_BENCH_CONCURRENCY` now defaults to `4` (was
-  `2`), so every sweep — baseline, race, confirmation — uses more of the
-  provider's capacity. Set it to `1` on a provider with a per-minute input-token
-  cap (the history tasks send hundreds of thousands of tokens each).
+  typecheck-first verdict order. A test file that fails is still re-run on its
+  own before it rejects, so a timeout caused only by the shared CPU does not
+  turn a candidate away.
+
+The benchmark sweeps are deliberately left alone. `ELIA_BENCH_CONCURRENCY`
+(default `2`) is how many agent loops run against the provider at once, and the
+confirmation pair's two sweeps still run one after the other so that number
+means what it says — a provider with a per-minute input-token cap needs `1`
+(the history tasks send hundreds of thousands of tokens each), and two sweeps at
+once would split its quota and leave tasks unmeasured. On a provider with room
+to spare, raise `ELIA_BENCH_CONCURRENCY`; every sweep speeds up together.
 
 `ELIA_HARVEST_SCAN` and `ELIA_HARVEST_LIMIT` bound the commits scanned and the
 tasks proved in one `harvest` round, since proving a commit is two test runs in

@@ -77,8 +77,12 @@ Self-improvement:
                               interrupted run picks up where it stopped; --fresh re-runs them all)
   elia bench --harvest        Add newly proven git-history tasks to the tracked set (no model calls;
                               --replace rebuilds it from this scan alone)
+  elia bench --lift           Also score the same tasks on the same model with no harness (a shell
+                              and a file writer), and report whether elia beats it — with the evidence
   elia bench --split held-out Score only the half whose failures the evolution loop never
                               shows its proposer (--split shown for the other half)
+  elia bench --canaries       Run the canaries, tasks only a faked result can pass, and report
+                              how often the current elia cheated on them
   elia bench swe --file <tasks.json> [--sample N] [--out results.json]
                               Run a SWE-bench-Verified-shaped task file (see src/bench/swe/types.ts) —
                               real checkout, real agent run, real test execution, scored resolved/
@@ -92,6 +96,8 @@ Self-improvement:
   elia evolve -n 3            Run three generations, each building on the last
   elia evolve --dry-run       Evaluate candidates but never modify the live source
   elia evolve --builtin       Score only on the built-in suite (minutes, not hours; no full sweep needed)
+                              ELIA_EVOLVE_PROVIDER / ELIA_EVOLVE_MODEL run the proposer and builder
+                              on a stronger model; candidates are still measured on the configured one
   elia compounding            Where each stage of the self-improvement loop stands
   elia compounding frontier   The verification frontier, certified library, growth, isolation,
                               and the resource governor's plan
@@ -132,6 +138,14 @@ Background autonomy:
   elia schedule run <id>                   Run one scheduled goal immediately
   elia daemon --once                       Run due schedules once and exit
   elia daemon --poll-ms 30000             Keep checking due schedules in the foreground
+
+Battmann intelligence (no model involved unless noted):
+  elia battmann seed india-semiconductors  Subscribe real data feeds and open certified questions
+  elia battmann brief india-semiconductors Seed if needed, then have the Battmann agent write the brief
+  elia battmann pull <feed> <args…>        Fetch fx, worldbank, imf, comtrade or gdelt data by code
+  elia battmann refresh                    Refresh feeds, resolve due questions, rebuild the dashboard
+  elia battmann watch --every 6h           Repeat refresh while this process runs
+  elia battmann record                     Certified track record: Battmann vs a statistical baseline
   elia doctor                              Check native-stack health: eliad daemon, C++ validator, Java bridge
 
 Editor / external integration:

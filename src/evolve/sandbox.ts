@@ -61,11 +61,21 @@ export const IMMUTABLE_FILES = [
   'src/evolve/suite.ts',
   'src/evolve/hardSuite.ts',
   'src/evolve/fieldSuite.ts',
+  // The tasks that can only be passed by cheating, and the gate that runs them.
+  // A candidate that could edit either could make its own cheating invisible.
+  'src/evolve/canarySuite.ts',
+  'src/evolve/canaryGate.ts',
   'src/evolve/fitness.ts',
   'src/evolve/engine.ts',
   'src/evolve/ledger.ts',
   'src/evolve/sandbox.ts',
   'src/evolve/benchTask.ts',
+  // The control arm of `elia bench --lift` and the arithmetic that compares the
+  // two. A candidate able to weaken the bare model's loop, or to reweigh the
+  // comparison, could report a larger lift without getting any better.
+  'src/evolve/bareTask.ts',
+  'src/evolve/bareLoop.ts',
+  'src/evolve/lift.ts',
   // What a task is allowed to be approved for. A candidate that could widen
   // this could approve its own way onto the network in the middle of being
   // measured, which is the same class of hole as rewriting a task's check.
@@ -121,6 +131,9 @@ export const IMMUTABLE_FILES = [
   'src/evolve/strategy.ts',
   'src/evolve/benchLessons.ts',
   'src/evolve/metaPropose.ts',
+  // Which model does the proposing. A candidate that could edit this could
+  // move every later generation's search onto a model of its choosing.
+  'src/evolve/improverRoute.ts',
   // The sealed gate, the isolation checks, the certified library and its
   // auditor, the frontier measurements and the resource governor with the
   // runners it acts through. "The meta-loop must never modify the resource

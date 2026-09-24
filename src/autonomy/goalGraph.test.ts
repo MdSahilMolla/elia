@@ -480,6 +480,26 @@ test('a completed step carrying only settled local refusals is not re-run on res
   expect(graph2.startNode('step:inspect').attemptCount).toBe(2)
 })
 
+test('a step that failed fatally still stops for review on resume, whatever became of its actions', () => {
+  // `startNode` lets a failed step run again without a person only when
+  // `needsResumption` says so. A failed step nearly always carries a failed
+  // action; counting that as "needs resumption" re-ran fatal failures.
+  const { graph } = createGraph()
+  graph.seedProposal(proposal)
+  graph.resolveApproval(graph.requestApproval('plan', 'proposal').id, true)
+
+  graph.startNode('step:inspect')
+  const write = graph.reserveAction({ name: 'write_file', input: { path: 'src/a.ts' } }, 'step:inspect')
+  graph.startAction(write.action.id)
+  graph.finishAction(write.action.id, { ok: false, error: 'invariant violated: schema mismatch' })
+  graph.finishNode('step:inspect', { ok: false, error: 'invariant violated: schema mismatch' })
+
+  expect(graph.node('step:inspect')?.status).toBe('failed')
+  expect(graph.state().actions[0]?.state).toBe('failed')
+  expect(graph.needsResumption('step:inspect')).toBe(false)
+  expect(() => graph.startNode('step:inspect')).toThrow('requires human review')
+})
+
 test('a rate limit is told to wait, while an ordinary transient failure retries almost immediately', () => {
   // A run once burned all five of its step retries re-hitting the same 429
   // within milliseconds, because retryAfter was computed and never read.

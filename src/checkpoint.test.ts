@@ -103,6 +103,20 @@ test('FileTracker captures a file exactly once even when captures race', async (
   expect(tracker.snapshot()[path]).toBe('before')
 })
 
+test('FileTracker makes a second capture wait for the first read, so the write after it cannot be what gets snapshotted', async () => {
+  const path = join(testDir, 'race-write.txt')
+  await Bun.write(path, 'before')
+
+  const tracker = createFileTracker()
+  const first = tracker.capture(path)
+  // A second tool reaching the same file: once its capture returns it writes.
+  await tracker.capture(path)
+  await Bun.write(path, 'after')
+  await first
+
+  expect(tracker.snapshot()[path]).toBe('before')
+})
+
 test('captureBeforeWrite is a no-op with no active tracker', async () => {
   await expect(captureBeforeWrite(join(testDir, 'unused.txt'))).resolves.toBeUndefined()
 })
