@@ -869,6 +869,7 @@ ${IMMUTABLE_FILES.map((file) => `- ${file}`).join('\n')}
 
 Improving your score by changing the benchmark or weakening a safety boundary is not improvement. Do not attempt it.
 ${measurableSection(baseline)}
+${EXECUTED_SECTION}
 
 ## What has already been tried
 ${redactHeldOut(renderLedgerForPrompt(), heldOutIds)}${redactHeldOut(renderSteppingStones(elites(readArchive(EVOLUTION_DIR))), heldOutIds)}
@@ -1002,6 +1003,22 @@ ${areas.map((area) => `- ${area}`).join('\n')}
 
 A change confined to anything else cannot move a score — it will be measured as inert and rejected without a task being run. If you want to improve something the benchmark cannot see, say so in your rationale and propose it anyway; it will be rejected, but the ledger will carry the reason.`
 }
+
+/**
+ * What a benchmark task executes, as opposed to what it loads.
+ *
+ * `measurableSection` lists the areas every task loads, and a task loads
+ * nearly the whole tree, so it cannot say which of that code runs. Generation
+ * 15 put its fix in the builder prompt in src/autonomy/loop.ts — loaded by
+ * every task, run by none — and its apparent gain was two unlucky baseline
+ * rows. Read from src/evolve/benchTask.ts, which candidates cannot edit; the
+ * brief test reads that file too, so the two cannot drift apart unnoticed.
+ */
+export const EXECUTED_SECTION = `
+## What a benchmark task runs
+Loaded is not executed. Each task runs exactly one agent loop: \`runAgentLoop\` (src/agentLoop.ts) with \`DEV_SYSTEM_PROMPT\` (src/config.ts) as its system prompt, the tools from \`allWorkerTools()\` (src/tools/registry.ts) plus the \`task\` tool, under an unattended action governor whose one approval is git inside the task's own temporary repository (src/evolve/benchPolicy.ts). See src/evolve/benchTask.ts.
+
+It never runs \`elia auto\`'s autonomous pipeline: not the planner, not the critic, review or repair passes, and none of the prompts in src/autonomy/loop.ts. A sub-agent's role prompt (src/autonomy/roles.ts, through src/subagent.ts) runs only when the agent itself calls the \`task\` tool, which these tasks rarely do. A change confined to code a task never executes cannot move a score: it will measure as noise, and noise is rejected.`
 
 function implementationBrief(sandbox: Sandbox, hypothesis: Hypothesis): string {
   return `Implement this one change to elia's own source, in the copy at ${sandbox.root}.
