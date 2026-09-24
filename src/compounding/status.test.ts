@@ -70,3 +70,11 @@ test('the lesson store effect pairs the latest complete runs of the same set', (
   expect(lessonStoreEffect(runs)).toEqual({ set: 'all', without: 0.5, with: 0.75, gained: ['c', 'd'], lost: ['b'] })
   expect(lessonStoreEffect(runs.slice(0, 1))).toBeUndefined()
 })
+
+test('the benchmark stage reports the harness lift beside its headroom, without letting it move the state', () => {
+  const lift = { at: 0, set: 'all', model: 'm', tasks: 19, eliaRate: 0.9, bareRate: 0.6, lift: 0.3, wins: 9, losses: 1, ties: 9, eHelps: 40, eHurts: 0.1, verdict: 'helps' as const }
+  const withLift = benchStage([run({ passRate: 0.6 })], [lift])
+  expect(withLift.state).toBe(benchStage([run({ passRate: 0.6 })]).state)
+  expect(withLift.evidence).toContain('harness lift +30 points, proven')
+  expect(benchStage([run({ passRate: 0.6 })]).evidence).toContain('never measured')
+})

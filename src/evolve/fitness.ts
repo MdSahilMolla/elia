@@ -110,7 +110,14 @@ export interface MeasureOptions {
   onTaskDone?: (outcome: TaskOutcome) => void
   /** Runs one attempt of one task, retries included. Tests stand in for the real agent here. */
   runTask?: (task: BenchTask, sourceRoot: string) => Promise<TaskOutcome>
+  /**
+   * Who attempts the tasks: elia (the default), or the same model with no
+   * harness at all — the control arm of `elia bench --lift` (bareLoop.ts).
+   */
+  arm?: BenchArm
 }
+
+export type BenchArm = 'elia' | 'bare'
 
 /**
  * How many times each task runs. One run of a model-driven task is a coin with
@@ -205,7 +212,8 @@ export async function measureFitness(options: MeasureOptions): Promise<Scorecard
   const startedAt = Date.now()
 
   const repeats = options.repeats ?? benchRepeats()
-  const runTask = options.runTask ?? runTaskWithRetry
+  const arm = options.arm ?? 'elia'
+  const runTask = options.runTask ?? ((task: BenchTask, root: string) => runTaskWithRetry(task, root, arm))
   // Once the provider says the account is out of credit, every task after it
   // would set up its repository, fail the same way, and do it `repeats` times.
   // Those tasks are left unmeasured without running; the baseline cache keeps
@@ -371,15 +379,15 @@ export function benchTaskEnv(env: Record<string, string | undefined>, reachOut: 
   return { ...env, [REACH_OUT_ENV]: reachOut, ...(traceOut ? { [TRACE_OUT_ENV]: traceOut } : {}), ELIA_ROUTING_MODE: 'selected' }
 }
 
-async function runTaskWithRetry(task: BenchTask, sourceRoot: string): Promise<TaskOutcome> {
-  let last = await runOneTask(task, sourceRoot)
+async function runTaskWithRetry(task: BenchTask, sourceRoot: string, arm: BenchArm = 'elia'): Promise<TaskOutcome> {
+  let last = await runOneTask(task, sourceRoot, arm)
 
   for (let attempt = 1; ; attempt++) {
     const delay = retryDelayMs(last, attempt)
     if (delay === undefined) break
     if (last.keptDir) rmSync(last.keptDir, { recursive: true, force: true })
     await new Promise((resolve) => setTimeout(resolve, delay))
-    last = await runOneTask(task, sourceRoot)
+    last = await runOneTask(task, sourceRoot, arm)
   }
 
   return markUnmeasured(last)
@@ -391,7 +399,7 @@ export function markUnmeasured(outcome: TaskOutcome): TaskOutcome {
   return { ...outcome, unmeasured: true }
 }
 
-async function runOneTask(task: BenchTask, sourceRoot: string): Promise<TaskOutcome> {
+async function runOneTask(task: BenchTask, sourceRoot: string, arm: BenchArm): Promise<TaskOutcome> {
   const dir = mkdtempSync(join(tmpdir(), `elia-bench-${task.id}-`))
   const base: TaskOutcome = {
     taskId: task.id,
@@ -406,7 +414,7 @@ async function runOneTask(task: BenchTask, sourceRoot: string): Promise<TaskOutc
   try {
     await task.setup(dir)
 
-    const entry = join(sourceRoot, 'src', 'evolve', 'benchTask.ts')
+    const entry = join(sourceRoot, 'src', 'evolve', arm === 'bare' ? 'bareTask.ts' : 'benchTask.ts')
 
     // Ride along on a run that is happening anyway and record which of the
     // tree's modules this task loads, so the next candidate can skip the tasks
@@ -419,7 +427,11 @@ async function runOneTask(task: BenchTask, sourceRoot: string): Promise<TaskOutc
     // Beside the repository for the same reason.
     const traceOut = `${dir}.trace`
     const spawnedAt = Date.now()
-    const proc = Bun.spawn(['bun', 'run', '--preload', join(ELIA_ROOT, 'src', 'evolve', 'reachRecorder.ts'), entry, task.id], {
+    // The bare arm loads none of the agent, so what it loads says nothing about
+    // which of elia's files a task can reach — and recording it would shrink the
+    // task's footprint, the one direction reach.ts cannot afford.
+    const recordReach = arm === 'elia'
+    const proc = Bun.spawn(['bun', 'run', ...(recordReach ? ['--preload', join(ELIA_ROOT, 'src', 'evolve', 'reachRecorder.ts')] : []), entry, task.id], {
       cwd: dir,
       stdout: 'pipe',
       stderr: 'pipe',
@@ -459,7 +471,7 @@ async function runOneTask(task: BenchTask, sourceRoot: string): Promise<TaskOutc
     // footprint is what makes a task look unreachable when it is not, and
     // under-recording is the one direction
     // `reach.ts` cannot be safe in, so it is refused at the source.
-    if (run && !run.error && !timedOut) absorbReachFile(task.id, reachOut, sourceRoot)
+    if (recordReach && run && !run.error && !timedOut) absorbReachFile(task.id, reachOut, sourceRoot)
     rmSync(reachOut, { force: true })
     const events = readTrace(traceOut)
     rmSync(traceOut, { force: true })

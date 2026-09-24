@@ -70,6 +70,12 @@ export const IMMUTABLE_FILES = [
   'src/evolve/ledger.ts',
   'src/evolve/sandbox.ts',
   'src/evolve/benchTask.ts',
+  // The control arm of `elia bench --lift` and the arithmetic that compares the
+  // two. A candidate able to weaken the bare model's loop, or to reweigh the
+  // comparison, could report a larger lift without getting any better.
+  'src/evolve/bareTask.ts',
+  'src/evolve/bareLoop.ts',
+  'src/evolve/lift.ts',
   // What a task is allowed to be approved for. A candidate that could widen
   // this could approve its own way onto the network in the middle of being
   // measured, which is the same class of hole as rewriting a task's check.

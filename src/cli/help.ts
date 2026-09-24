@@ -77,6 +77,8 @@ Self-improvement:
                               interrupted run picks up where it stopped; --fresh re-runs them all)
   elia bench --harvest        Add newly proven git-history tasks to the tracked set (no model calls;
                               --replace rebuilds it from this scan alone)
+  elia bench --lift           Also score the same tasks on the same model with no harness (a shell
+                              and a file writer), and report whether elia beats it — with the evidence
   elia bench --split held-out Score only the half whose failures the evolution loop never
                               shows its proposer (--split shown for the other half)
   elia bench --canaries       Run the canaries, tasks only a faked result can pass, and report

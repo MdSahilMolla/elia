@@ -42,6 +42,17 @@ And what keeps it honest:
 
 `elia evolve` makes real API calls and, on success, modifies elia's own source. Use `--dry-run` to see what it would do first.
 
+### `elia bench --lift` — does elia beat the model it runs on?
+
+Every other comparison above is elia against elia. `--lift` asks the question a harness has to be able to answer: run the same tasks, on the same model, with no harness at all — a `bash` tool, a whole-file `write_file`, a three-sentence prompt, a plain loop (`src/evolve/bareLoop.ts`, shaped after mini-swe-agent) — and report the difference. mini-swe-agent writes files through its shell inside a container; elia's unattended safety policy refuses shell writes, so without `write_file` the bare model could not change a file and the comparison would measure the policy.
+
+```bash
+elia bench --lift            # the synthetic suite, both arms
+elia bench --all --lift      # every task
+```
+
+The control arm keeps what is not a claim about reasoning — the task's step budget, the same unattended safety policy on every command, the same retry on a provider blip — and drops what elia says adds value: the system prompt and Value Core, the tool surface, lessons, speculation, plan tracking, nudges, sub-agents and compaction. Tasks are paired, a task either arm could not measure leaves both sides, two arms on different models are refused, and the verdict is an anytime-valid e-value test: "the harness helps" only at e ≥ 20, and "the harness hurts" is reported just as plainly when the bare model wins. The latest result shows in `elia compounding` beside the benchmark's headroom. The control arm and the comparison are immutable to `elia evolve` candidates, so a candidate cannot raise its lift by weakening the baseline.
+
 ### Elia Book — session insights and reusable improvement playbooks
 
 Open `/eliabook` during any interactive session to choose **Save this session**

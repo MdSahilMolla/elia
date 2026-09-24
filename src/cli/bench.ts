@@ -217,7 +217,7 @@ export async function runBench(): Promise<void> {
     return
   }
   try {
-    await scoreLiveTree(tasks, withLessons, shownHalf, heldOutHalf)
+    await scoreLiveTree(tasks, withLessons, shownHalf, heldOutHalf, hasFlag('--lift'))
   } finally {
     slot.release()
   }
@@ -228,6 +228,7 @@ async function scoreLiveTree(
   withLessons: boolean,
   shownHalf: boolean,
   heldOutHalf: boolean,
+  lift: boolean,
 ): Promise<void> {
   if (!(await ensureFirstRunProviderSetup())) return
   await loadRuntimeSkills()
@@ -260,7 +261,8 @@ async function scoreLiveTree(
   // `elia compounding` on evidence that is not about the same tasks.
   const setName = hasFlag('--all') ? 'all' : hasFlag('--history') ? 'history' : 'synthetic'
   const halfName = shownHalf ? '/shown' : heldOutHalf ? '/held-out' : ''
-  recordBenchRun(card, `${setName}${halfName}${withLessons ? '+lessons' : ''}`)
+  const set = `${setName}${halfName}${withLessons ? '+lessons' : ''}`
+  recordBenchRun(card, set)
   if (machineReadable) emitEvent('benchmark_scorecard', { stage: 'current', scorecard: card })
   else {
     process.stdout.write(renderScorecard(card, 'elia'))
@@ -268,6 +270,33 @@ async function scoreLiveTree(
     if (readLedger().length > 0) writeUsageLine(`  ${renderLearningLine()}`)
   }
   if (card.passRate < 1) process.exitCode = 1
+  if (lift) await measureLift(tasks, card, set)
+}
+
+/**
+ * `--lift`: the same tasks on the same model with no harness, so the gap is
+ * what elia adds (evolve/bareLoop.ts, evolve/lift.ts). Always measured fresh —
+ * the baseline cache holds elia's runs, and a bare run is not one of them.
+ */
+async function measureLift(
+  tasks: import('../evolve/suite.ts').BenchTask[],
+  card: import('../evolve/fitness.ts').Scorecard,
+  set: string,
+): Promise<void> {
+  const { measureFitness } = await import('../evolve/fitness.ts')
+  const { ELIA_ROOT, config } = await import('../config.ts')
+  const { compareLift, recordLiftRun, renderLift } = await import('../evolve/lift.ts')
+  writeNotice(`Now the same ${tasks.length} task(s) on ${config.model} with no harness — a shell, a file writer, a three-sentence prompt — so the difference is what elia adds.`)
+  const bare = await measureFitness({
+    tasks,
+    sourceRoot: ELIA_ROOT,
+    arm: 'bare',
+    onTaskDone: (outcome) => writeUsageLine(`  ${outcome.passed ? '✓' : outcome.unmeasured ? '?' : '✗'} bare ${outcome.taskId} — ${outcome.error ?? outcome.detail}`),
+  })
+  const report = compareLift(card, bare)
+  recordLiftRun(report, set)
+  if (machineReadable) emitEvent('harness_lift', { report })
+  else process.stdout.write(renderLift(report))
 }
 
 export async function runBenchLatency(): Promise<void> {
