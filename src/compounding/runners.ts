@@ -34,6 +34,19 @@ export const LADDER_STALE_MS = 7 * 24 * 60 * 60_000
 export const HARVEST_SCAN = 400
 export const HARVEST_LIMIT = 6
 
+/**
+ * `ELIA_HARVEST_SCAN`/`ELIA_HARVEST_LIMIT` bound the commits scanned and the
+ * tasks proved in one harvest run. Scanning git history and proving a commit is
+ * two test runs in a fresh checkout, so the first run on a deep history is the
+ * loop's most expensive no-model step — a person with a slow disk or a quota to
+ * protect can cap it this way. Same parsing rule as `benchRepeats`: a positive
+ * integer, else the shipped default.
+ */
+export function envPositiveInt(name: string, fallback: number): number {
+  const value = Number(process.env[name])
+  return Number.isInteger(value) && value >= 1 ? value : fallback
+}
+
 /** When an activity last ran, from the activity log. */
 export function lastRunAt(history: readonly ActivityObservation[], activity: Activity): number | undefined {
   let latest: number | undefined
@@ -126,8 +139,10 @@ export function createRunners(options: RunnerOptions): Partial<Record<Activity, 
     harvest: async (): Promise<ActivityResult> => {
       const { growHarvest } = await import('../evolve/history/harvest.ts')
       const { loadTaskSpecs, resetTaskSpecCache } = await import('../evolve/history/suite.ts')
-      progress(`proving new benchmark tasks from the last ${HARVEST_SCAN} commits (no model calls)…`)
-      const grown = await growHarvest({ tracked: loadTaskSpecs(), scan: HARVEST_SCAN, limit: HARVEST_LIMIT, onProgress: progress })
+      const scan = envPositiveInt('ELIA_HARVEST_SCAN', HARVEST_SCAN)
+      const limit = envPositiveInt('ELIA_HARVEST_LIMIT', HARVEST_LIMIT)
+      progress(`proving new benchmark tasks from the last ${scan} commits (no model calls)…`)
+      const grown = await growHarvest({ tracked: loadTaskSpecs(), scan, limit, onProgress: progress })
       resetTaskSpecCache()
       if (grown.added.length === 0) {
         return {

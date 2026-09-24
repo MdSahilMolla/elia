@@ -36,13 +36,13 @@ function timeoutFor(task: BenchTask): number {
 }
 /**
  * Parallel tasks are faster, but provider rate limits turn a high number into
- * retries and noise. `ELIA_BENCH_CONCURRENCY` overrides it — a provider with a
- * per-minute input-token cap (mercury's free tier) needs 1 for the history
- * tasks, which send hundreds of thousands of tokens each.
+ * retries and noise. The default is 4; `ELIA_BENCH_CONCURRENCY` overrides it —
+ * a provider with a per-minute input-token cap (mercury's free tier) needs 1
+ * for the history tasks, which send hundreds of thousands of tokens each.
  */
 export function benchConcurrency(env: Record<string, string | undefined> = process.env): number {
   const value = Number(env.ELIA_BENCH_CONCURRENCY)
-  return Number.isInteger(value) && value >= 1 ? value : 2
+  return Number.isInteger(value) && value >= 1 ? value : 4
 }
 
 export interface TaskOutcome {

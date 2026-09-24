@@ -53,6 +53,11 @@ workspace), a REPL redesign, and a broad reliability/perf pass.
   timing in the profiler, and auto-captured lessons on repeated repair failure.
 - Planner gets the speculative cache + heuristic prefetch and deterministically
   finishes reading a just-searched worklist.
+- **Compounding is faster.** The evolve promotion path runs its independent
+  phases concurrently — the confirmation pair, the two-tree verifier-gap and
+  value-probe checks, and the sandbox typecheck/tests — and the benchmark pool
+  default rises to `ELIA_BENCH_CONCURRENCY=4`. Same verdicts, less wall clock.
+  `ELIA_HARVEST_SCAN`/`ELIA_HARVEST_LIMIT` now bound a harvest round.
 - `evolve` scores candidates on the long-horizon hard suite too.
 - `edit_file` / `write_file` diffs render inline with workspace-relative paths.
 - ChatGPT/Codex-subscription path: lower latency, compact terminal

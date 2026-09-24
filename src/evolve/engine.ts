@@ -479,7 +479,10 @@ async function attemptGeneration(
     }
   }
 
-  const typecheck = await runShell('bun run typecheck', GATE_TIMEOUT_MS, sandbox.root)
+  const [typecheck, unitTests] = await Promise.all([
+    runShell('bun run typecheck', GATE_TIMEOUT_MS, sandbox.root),
+    runShell('bun test', GATE_TIMEOUT_MS, sandbox.root),
+  ])
   if (typecheck.exitCode !== 0) {
     if (looksUnavailable(typecheck.stderr)) {
       writeSubStep('typecheck unavailable in the sandbox — skipping that gate')
@@ -496,7 +499,6 @@ async function attemptGeneration(
   }
   base.funnel = 'compiled'
 
-  const unitTests = await runShell('bun test', GATE_TIMEOUT_MS, sandbox.root)
   if (unitTests.exitCode !== 0) {
     writeFail('unit tests failed')
     return {
@@ -607,8 +609,12 @@ async function attemptGeneration(
   // winner must reproduce its result independently before it can touch live code.
   // Reverse the order on confirmation to avoid consistently favoring the second run.
   writeSubStep('provisional win — running an independent confirmation pair')
-  const confirmationCandidateCard = await measureFitness({ sourceRoot: sandbox.root, tasks })
-  const confirmationBaselineCard = await measureFitness({ sourceRoot: ELIA_ROOT, tasks })
+  // The two sweeps are independent full measurements — run them concurrently and
+  // keep the binding order, so the fairness note above still holds.
+  const [confirmationCandidateCard, confirmationBaselineCard] = await Promise.all([
+    measureFitness({ sourceRoot: sandbox.root, tasks }),
+    measureFitness({ sourceRoot: ELIA_ROOT, tasks }),
+  ])
   const confirmationBaseline = toMetrics(confirmationBaselineCard)
   const confirmationCandidate = toMetrics(confirmationCandidateCard)
   const confirmation = compareScorecards(confirmationBaseline, confirmationCandidate)
@@ -649,8 +655,13 @@ async function attemptGeneration(
   // in-process check scores the live installation whatever the sandbox holds,
   // which is how the distillation gate's copy of this check sat inert.
   writeSubStep('checking the verifier did not get worse')
-  const candidateGap = await gapVectorIn(sandbox.root, options.signal)
-  const baselineGap = await gapVectorIn(ELIA_ROOT, options.signal)
+  // Independent trees, same work — measure both at once and let the parallel
+  // children share the wall clock. A rejected candidate below still aborts the
+  // same way it would have when measured second.
+  const [candidateGap, baselineGap] = await Promise.all([
+    gapVectorIn(sandbox.root, options.signal),
+    gapVectorIn(ELIA_ROOT, options.signal),
+  ])
   if (!candidateGap || !baselineGap) {
     const reason = 'could not measure the generator–verifier gap — refusing to promote unverified'
     writeFail(`rejected: ${reason}`)
@@ -666,8 +677,10 @@ async function attemptGeneration(
   }
 
   writeSubStep('checking the values did not move')
-  const candidateProbes = await valueProbesIn(sandbox.root, { signal: options.signal })
-  const baselineProbes = await valueProbesIn(ELIA_ROOT, { signal: options.signal })
+  const [candidateProbes, baselineProbes] = await Promise.all([
+    valueProbesIn(sandbox.root, { signal: options.signal }),
+    valueProbesIn(ELIA_ROOT, { signal: options.signal }),
+  ])
   if (!candidateProbes || !baselineProbes) {
     const reason = 'could not run the value probes — refusing to promote unverified'
     writeFail(`rejected: ${reason}`)
