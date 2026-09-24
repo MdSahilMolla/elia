@@ -303,6 +303,17 @@ export function outOfCredit(outcome: Pick<TaskOutcome, 'error' | 'unmeasured'>):
   return Boolean(outcome.unmeasured && outcome.error && OUT_OF_CREDIT.test(outcome.error))
 }
 
+/**
+ * An unmeasured task that a later try, minutes from now, might still measure:
+ * the provider dropped the connection or went quiet. Not one whose account is
+ * out of credit or whose task cannot start — no wait inside this run fixes those.
+ */
+export function mightMeasureLater(outcome: Pick<TaskOutcome, 'error' | 'unmeasured'>): boolean {
+  if (!outcome.unmeasured) return false
+  const error = outcome.error ?? ''
+  return !outOfCredit(outcome) && !PERMANENT_INFRASTRUCTURE_ERROR.test(error) && !/out of credit/i.test(error)
+}
+
 function notRun(task: BenchTask, why: string): TaskOutcome {
   return {
     taskId: task.id,

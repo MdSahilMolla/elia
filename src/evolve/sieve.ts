@@ -6,6 +6,7 @@ import {
   cardFromOutcomes,
   compareScorecards,
   measureFitness,
+  mightMeasureLater,
   toMetrics,
   type Comparison,
   type MeasureOptions,
@@ -354,9 +355,23 @@ export async function raceCandidate(options: RaceOptions): Promise<RaceReport> {
   let baselineRows = options.baselineOutcomes
   let retested = false
 
-  for (let index = 0; index < ordered.length; index += concurrency) {
+  // A task the provider could not answer for goes to the back of the queue and
+  // is measured once more after everything else, instead of settling the race
+  // on the spot. `runTaskWithRetry` already retried it, but within seconds or a
+  // few minutes, inside the same outage; minutes of other tasks later the
+  // provider has usually come back. Generation 15 had run 24 of 26 tasks when
+  // one history task hit "Connection error." and another a stalled provider,
+  // and the whole generation was thrown away. The verdict does not change: a
+  // task still unmeasured on its second turn refuses the comparison exactly as
+  // before, and a regression anywhere still settles the race early.
+  const queue = [...ordered]
+  const retriedLater = new Set<string>()
+  // Tokens spent on a first turn that a second one replaced — still spent.
+  let replacedTokens = 0
+
+  for (let index = 0; index < queue.length; index += concurrency) {
     if (options.signal?.aborted) break
-    const wave = ordered.slice(index, index + concurrency)
+    const wave = queue.slice(index, index + concurrency)
     const card = await measure({
       sourceRoot: options.sourceRoot,
       tasks: wave,
@@ -364,15 +379,22 @@ export async function raceCandidate(options: RaceOptions): Promise<RaceReport> {
       ...(options.repeats === undefined ? {} : { repeats: options.repeats }),
       ...(options.onTaskDone ? { onTaskDone: options.onTaskDone } : {}),
     })
-    measured.push(...card.outcomes)
+    const rerun = new Set(wave.map((task) => task.id))
+    replacedTokens += measured.filter((outcome) => rerun.has(outcome.taskId)).reduce((sum, outcome) => sum + outcome.totalTokens, 0)
+    measured = [...measured.filter((outcome) => !rerun.has(outcome.taskId)), ...card.outcomes]
 
     // `compareScorecards` refuses an incomplete measurement before it looks at
-    // anything else, so one unmeasured task is already the whole answer.
-    const unmeasured = card.outcomes.filter((outcome) => outcome.unmeasured).map((outcome) => outcome.taskId)
-    if (unmeasured.length > 0) {
-      settledBy = unmeasured[0]
-      settledReason = `could not measure ${unmeasured.join(', ')} — refusing to compare an incomplete benchmark`
+    // anything else, so a task that stays unmeasured is the whole answer.
+    const unmeasured = card.outcomes.filter((outcome) => outcome.unmeasured)
+    const final = unmeasured.filter((outcome) => retriedLater.has(outcome.taskId) || !mightMeasureLater(outcome)).map((outcome) => outcome.taskId)
+    if (final.length > 0) {
+      settledBy = final[0]
+      settledReason = `could not measure ${final.join(', ')} — refusing to compare an incomplete benchmark`
       break
+    }
+    for (const outcome of unmeasured) {
+      retriedLater.add(outcome.taskId)
+      queue.push(byId.get(outcome.taskId)!)
     }
 
     const apparent = regressionsIn(baseline, card.outcomes)
@@ -412,7 +434,11 @@ export async function raceCandidate(options: RaceOptions): Promise<RaceReport> {
   ]
 
   const totalElapsedMs = outcomes.reduce((sum, outcome) => sum + outcome.elapsedMs, 0)
-  const partial = carried.length > 0 || skipped.length > 0
+  // A task measured a second time made the race longer than a sweep of this
+  // candidate would have been, so its elapsed clock would charge the candidate
+  // for the provider's outage. Its rows replaced the dropped ones, so the
+  // scaled estimate below counts each task once.
+  const partial = carried.length > 0 || skipped.length > 0 || retriedLater.size > 0
   const card = cardFromOutcomes(
     options.sourceRoot,
     options.tasks,
@@ -431,7 +457,7 @@ export async function raceCandidate(options: RaceOptions): Promise<RaceReport> {
     skipped,
     ...(settledBy ? { settledBy } : {}),
     ...(retested ? { baseline } : {}),
-    tokens: measured.reduce((sum, outcome) => sum + outcome.totalTokens, 0),
+    tokens: replacedTokens + measured.reduce((sum, outcome) => sum + outcome.totalTokens, 0),
     elapsedMs: Date.now() - startedAt,
   }
 }

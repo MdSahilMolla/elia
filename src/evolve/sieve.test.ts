@@ -131,11 +131,11 @@ test('a regression settles the verdict without running the rest — and settles 
   expect(report.comparison.reason).toBe(fullSweep.reason)
 })
 
-test('a task that could not be measured settles it too, the same way', async () => {
+test('a task still unmeasured on its second turn settles it too, the same way', async () => {
   const baselineOutcomes = FIVE.map((id) => outcome(id, true))
   const baseline = metricsFrom(baselineOutcomes)
   const reach: ReachMap = Object.fromEntries(FIVE.map((id) => [id, { modules: ['src/agentLoop.ts'], runs: 1, at: 0 }]))
-  const { ran, measure } = scripted({ a: outcome('a', false, { unmeasured: true }) })
+  const { ran, measure } = scripted({ a: outcome('a', false, { unmeasured: true, error: 'Connection error.' }) })
 
   const report = await raceCandidate({
     sourceRoot: '/sandbox',
@@ -149,7 +149,54 @@ test('a task that could not be measured settles it too, the same way', async () 
 
   expect(report.comparison.better).toBe(false)
   expect(report.comparison.reason).toContain('could not measure a')
+  // Once in turn, once more after everything else.
+  expect(ran).toEqual(['a', 'b', 'c', 'd', 'e', 'a'])
+})
+
+test('a task the provider dropped once is measured again after the rest, and the full measurement decides', async () => {
+  const baselineOutcomes = FIVE.map((id) => outcome(id, true))
+  const baseline = metricsFrom(baselineOutcomes)
+  const reach: ReachMap = Object.fromEntries(FIVE.map((id) => [id, { modules: ['src/agentLoop.ts'], runs: 1, at: 0 }]))
+  const ran: string[] = []
+  const measure = async ({ tasks }: { sourceRoot: string; tasks?: BenchTask[] }): Promise<Scorecard> => {
+    const requested = tasks ?? []
+    const rows = requested.map((t) => {
+      ran.push(t.id)
+      // The provider drops task a's connection the first time only.
+      return t.id === 'a' && ran.filter((id) => id === 'a').length === 1
+        ? outcome('a', false, { unmeasured: true, error: 'Connection error.', totalTokens: 400 })
+        : outcome(t.id, true)
+    })
+    return cardFromOutcomes('/sandbox', requested, rows, 100)
+  }
+
+  const report = await raceCandidate({ sourceRoot: '/sandbox', tasks: FIVE.map(task), baseline, baselineOutcomes, changedFiles: ['src/agentLoop.ts'], measure, reach })
+  const fullSweep = compareScorecards(baseline, metricsFrom(FIVE.map((id) => outcome(id, true))))
+
+  expect(ran).toEqual(['a', 'b', 'c', 'd', 'e', 'a'])
+  expect(report.card.unmeasured).toEqual([])
+  expect(report.comparison).toEqual(fullSweep)
+  // The dropped first turn was still paid for.
+  expect(report.tokens).toBe(400 + 5 * 1000)
+})
+
+test('an account out of credit settles at once: no wait inside this run brings it back', async () => {
+  const baselineOutcomes = FIVE.map((id) => outcome(id, true))
+  const reach: ReachMap = Object.fromEntries(FIVE.map((id) => [id, { modules: ['src/agentLoop.ts'], runs: 1, at: 0 }]))
+  const { ran, measure } = scripted({ a: outcome('a', false, { unmeasured: true, error: '402 This request requires more credits' }) })
+  const report = await raceCandidate({ sourceRoot: '/sandbox', tasks: FIVE.map(task), baseline: metricsFrom(baselineOutcomes), baselineOutcomes, changedFiles: ['src/agentLoop.ts'], measure, reach })
+  expect(report.comparison.reason).toContain('could not measure a')
   expect(ran).toEqual(['a'])
+})
+
+test('a regression found while a dropped task waits for its second turn still settles the race early', async () => {
+  const baselineOutcomes = FIVE.map((id) => outcome(id, true))
+  const reach: ReachMap = Object.fromEntries(FIVE.map((id) => [id, { modules: ['src/agentLoop.ts'], runs: 1, at: 0 }]))
+  const { ran, measure } = scripted({ a: outcome('a', false, { unmeasured: true, error: 'Connection error.' }), b: outcome('b', false) })
+  const report = await raceCandidate({ sourceRoot: '/sandbox', tasks: FIVE.map(task), baseline: metricsFrom(baselineOutcomes), baselineOutcomes, changedFiles: ['src/agentLoop.ts'], measure, reach })
+  expect(report.settledBy).toBe('b')
+  expect(report.comparison.reason).toContain('regressed on b')
+  expect(ran.filter((id) => id === 'a')).toHaveLength(1)
 })
 
 test('a candidate that regresses nowhere and fixes a failure is better, on the tasks that can move', async () => {
