@@ -27,14 +27,18 @@ function metricsFrom(outcomes: TaskOutcome[]): Metrics {
  * about which tasks get run and what verdict comes out, so the runs themselves
  * only need to be consistent.
  */
-function scripted(script: Record<string, TaskOutcome>) {
+function scripted(script: Record<string, TaskOutcome>, live: Record<string, TaskOutcome> = {}) {
+  // Candidate runs are what the tests count; a retest also re-runs the live
+  // tree, which answers as the baseline did unless told otherwise.
   const ran: string[] = []
+  const liveRan: string[] = []
   const measure = async ({ sourceRoot, tasks }: { sourceRoot: string; tasks?: BenchTask[] }): Promise<Scorecard> => {
     const requested = tasks ?? []
-    for (const t of requested) ran.push(t.id)
-    return cardFromOutcomes(sourceRoot, requested, requested.map((t) => script[t.id] ?? outcome(t.id, true)), 100)
+    const isCandidate = sourceRoot === '/sandbox'
+    for (const t of requested) (isCandidate ? ran : liveRan).push(t.id)
+    return cardFromOutcomes(sourceRoot, requested, requested.map((t) => (isCandidate ? script[t.id] : live[t.id]) ?? outcome(t.id, true)), 100)
   }
-  return { ran, measure }
+  return { ran, liveRan, measure }
 }
 
 const FIVE = ['a', 'b', 'c', 'd', 'e']
@@ -98,7 +102,7 @@ test('a regression settles the verdict without running the rest — and settles 
   const baseline = metricsFrom(baselineOutcomes)
   const reach: ReachMap = Object.fromEntries(FIVE.map((id) => [id, { modules: ['src/agentLoop.ts'], runs: 1, at: 0 }]))
   const script = { c: outcome('c', false) }
-  const { ran, measure } = scripted(script)
+  const { ran, liveRan, measure } = scripted(script)
 
   const report = await raceCandidate({
     sourceRoot: '/sandbox',
@@ -112,8 +116,11 @@ test('a regression settles the verdict without running the rest — and settles 
 
   expect(report.comparison.better).toBe(false)
   expect(report.settledBy).toBe('c')
-  expect(ran.length).toBeLessThan(FIVE.length)
+  expect(new Set(ran).size).toBeLessThan(FIVE.length)
   expect(report.skipped.length).toBeGreaterThan(0)
+  // It happened again, on both sides, before it counted.
+  expect(ran.filter((id) => id === 'c')).toHaveLength(2)
+  expect(liveRan).toEqual(['c'])
 
   // The claim that matters: racing changed what was paid for, not the answer.
   const fullSweep = compareScorecards(
@@ -342,4 +349,49 @@ test('a partial card is timed by scaling the baseline, not by how long the race 
   expect(scaledWallClock(baseline, 5000)).toBe(2000)
   // A baseline with no timings at all cannot scale anything; say so by not trying.
   expect(scaledWallClock({ passRate: 1, passed: [], failed: [], totalTokens: 0, totalElapsedMs: 0 }, 42)).toBe(42)
+})
+
+
+const rows = (id: string, passes: number, over: Partial<TaskOutcome> = {}) => outcome(id, passes * 2 >= 3, { attempts: 3, passes, ...over })
+
+test('an apparent regression that does not happen again is noise, and the race goes on', async () => {
+  // field-external-contribution's shape: the baseline row happened to hold 2/3,
+  // the candidate drew 0/3, and the retest looks like everything else.
+  const baselineOutcomes = FIVE.map((id) => (id === 'c' ? rows('c', 2) : rows(id, 3)))
+  const reach: ReachMap = Object.fromEntries(FIVE.map((id) => [id, { modules: ['src/agentLoop.ts'], runs: 1, at: 0 }]))
+  let calls = 0
+  const measure = async ({ sourceRoot, tasks }: { sourceRoot: string; tasks?: BenchTask[] }): Promise<Scorecard> => {
+    const requested = tasks ?? []
+    const out = requested.map((t) => {
+      if (t.id !== 'c') return rows(t.id, 3)
+      if (sourceRoot !== '/sandbox') return rows('c', 2)
+      return rows('c', calls++ === 0 ? 0 : 2)
+    })
+    return cardFromOutcomes(sourceRoot, requested, out, 100)
+  }
+  const report = await raceCandidate({ sourceRoot: '/sandbox', tasks: FIVE.map(task), baseline: metricsFrom(baselineOutcomes), baselineOutcomes, changedFiles: ['src/agentLoop.ts'], measure, reach })
+  expect(report.settledBy).toBeUndefined()
+  expect(report.skipped).toEqual([])
+  expect(report.ran.sort()).toEqual(FIVE)
+  // Both sides are compared pooled: 2/6 against 4/6, not 0/3 against 2/3.
+  const c = report.card.outcomes.find((row) => row.taskId === 'c')!
+  expect([c.passes, c.attempts]).toEqual([2, 6])
+  expect(report.baseline!.taskRates!.c).toBeCloseTo(4 / 6)
+})
+
+test('a candidate that really breaks a task breaks it again, and is still refused', async () => {
+  const baselineOutcomes = FIVE.map((id) => rows(id, 3))
+  const reach: ReachMap = Object.fromEntries(FIVE.map((id) => [id, { modules: ['src/agentLoop.ts'], runs: 1, at: 0 }]))
+  const { measure } = scripted({ c: rows('c', 0) }, Object.fromEntries(FIVE.map((id) => [id, rows(id, 3)])))
+  const report = await raceCandidate({ sourceRoot: '/sandbox', tasks: FIVE.map(task), baseline: metricsFrom(baselineOutcomes), baselineOutcomes, changedFiles: ['src/agentLoop.ts'], measure, reach })
+  expect(report.settledBy).toBe('c')
+  expect(report.comparison.reason).toContain('and again with both sides re-run')
+})
+
+test('a regression whose retest cannot be measured stays a regression', async () => {
+  const { settleRegressions } = await import('./sieve.ts')
+  const measure = async ({ sourceRoot, tasks }: { sourceRoot: string; tasks?: BenchTask[] }): Promise<Scorecard> =>
+    cardFromOutcomes(sourceRoot, tasks ?? [], (tasks ?? []).map((t) => rows(t.id, 3, { unmeasured: true, error: '429' })), 1)
+  const settled = await settleRegressions({ regressed: ['c'], tasks: FIVE.map(task), candidateRoot: '/sandbox', candidateRows: [rows('c', 0)], baselineRows: [rows('c', 3)], measure })
+  expect(settled.confirmed).toEqual(['c'])
 })

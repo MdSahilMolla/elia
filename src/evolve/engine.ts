@@ -23,6 +23,7 @@ import {
 import {
   REAL_CHANGE,
   benchConcurrency,
+  cardFromOutcomes,
   compareScorecards,
   measureFitness,
   renderScorecard,
@@ -31,7 +32,7 @@ import {
   type Scorecard,
   type TaskOutcome,
 } from './fitness.ts'
-import { raceCandidate, renderRace, sieveEnabled } from './sieve.ts'
+import { raceCandidate, regressionsIn, renderRace, settleRegressions, sieveEnabled } from './sieve.ts'
 import {
   blindEvidence,
   blindMetrics,
@@ -538,6 +539,9 @@ async function attemptGeneration(
   let comparison: Comparison
   let evidenceCost: EvidenceCost | undefined
   let ranTaskIds: string[] = []
+  // The baseline as the race compared it: pooled, when a retest settled an
+  // apparent regression (sieve.ts), so the recorded verdicts use the same numbers.
+  let comparedBaseline = baseline
   const onBenchTask = (outcome: TaskOutcome) =>
     outcome.passed ? writePass(`${outcome.taskId} — ${outcome.detail}`) : writeFail(`${outcome.taskId} — ${outcome.error ?? outcome.detail}`)
 
@@ -555,6 +559,7 @@ async function attemptGeneration(
       })
       candidateCard = race.card
       comparison = race.comparison
+      if (race.baseline) comparedBaseline = race.baseline
       ranTaskIds = race.ran
       evidenceCost = {
         tasksRun: race.ran.length,
@@ -608,7 +613,7 @@ async function attemptGeneration(
   // legacy rule, or both make the call.
   const gate = gateMode()
   const comparisonIndex = readLedger().filter((record) => record.candidate).length + 1
-  const sealed = sealedCompare(baseline, candidate, { index: comparisonIndex })
+  const sealed = sealedCompare(comparedBaseline, candidate, { index: comparisonIndex })
   base.sealed = sealedRecord(sealed, gate)
   writeSubStep(`sealed gate (${gate === 'legacy' ? 'recorded only' : 'deciding'}): ${sealed.bit} — ${sealed.reason}`)
   const decisionReason = gate === 'sealed' ? sealed.reason : comparison.reason
@@ -626,8 +631,24 @@ async function attemptGeneration(
   // winner must reproduce its result independently before it can touch live code.
   // Reverse the order on confirmation to avoid consistently favoring the second run.
   writeSubStep('provisional win — running an independent confirmation pair')
-  const confirmationCandidateCard = await measureFitness({ sourceRoot: sandbox.root, tasks })
-  const confirmationBaselineCard = await measureFitness({ sourceRoot: ELIA_ROOT, tasks })
+  let confirmationCandidateCard = await measureFitness({ sourceRoot: sandbox.root, tasks })
+  let confirmationBaselineCard = await measureFitness({ sourceRoot: ELIA_ROOT, tasks })
+  // Two fresh sweeps of a coin-flip task disagree by half their attempts about
+  // one time in nine; an apparent regression is re-run on both trees and the
+  // pair judged on pooled attempts (sieve.ts settleRegressions).
+  const apparent = regressionsIn(toMetrics(confirmationBaselineCard), confirmationCandidateCard.outcomes)
+  if (apparent.length > 0) {
+    writeSubStep(`${apparent.join(', ')} fell on the confirmation run — re-running it on both trees before it counts`)
+    const settled = await settleRegressions({
+      regressed: apparent,
+      tasks,
+      candidateRoot: sandbox.root,
+      candidateRows: confirmationCandidateCard.outcomes,
+      baselineRows: confirmationBaselineCard.outcomes,
+    })
+    confirmationCandidateCard = cardFromOutcomes(sandbox.root, tasks, settled.candidateRows, confirmationCandidateCard.wallClockMs)
+    confirmationBaselineCard = cardFromOutcomes(ELIA_ROOT, tasks, settled.baselineRows, confirmationBaselineCard.wallClockMs)
+  }
   const confirmationBaseline = toMetrics(confirmationBaselineCard)
   const confirmationCandidate = toMetrics(confirmationCandidateCard)
   const confirmation = compareScorecards(confirmationBaseline, confirmationCandidate)
