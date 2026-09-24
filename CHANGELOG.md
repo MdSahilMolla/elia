@@ -29,8 +29,18 @@ workspace), a REPL redesign, and a broad reliability/perf pass.
   default surface.
 - **`provision_environment`** tool; orient now assesses declared vs. available
   environment and past runs' honesty feeds the next run's orient.
-- **Battmann mode** — four-pillar build-out with finance/defense primitives and
-  a dashboard; every turn anchored to the wall-clock date.
+- **Battmann mode** — every turn anchored to the wall-clock date, with a
+  dashboard. **Real data feeds** (ECB rates, World Bank, IMF WEO, UN Comtrade,
+  GDELT) are fetched by code with the raw response hashed, recorded
+  append-only, and refreshed by `elia battmann refresh`. The **certified track
+  record** covers questions with a `resolutionRule`: they are resolved by code
+  from a feed, timestamped by the clock, and scored against an automatic
+  statistical baseline. The **classification boundary** is now enforced in
+  code: while any model route is a cloud model, the tool withholds records
+  above the cloud ceiling and refuses to write them, and the store file is a
+  protected path. `elia battmann seed|brief india-semiconductors` is the first
+  playbook. The defence primitives (`posture_assessment`, `effector_pairing`)
+  and the Palantir-pillar naming were removed.
 - **cyber mode** — evidence-gated findings, scoped `http_probe`, and a
   `.elia/policy.json` governor policy.
 - A repo-history benchmark that can actually be failed, plus a latency benchmark.

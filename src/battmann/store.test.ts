@@ -1,10 +1,14 @@
-import { expect, test } from 'bun:test'
+import { afterAll, beforeAll, expect, test } from 'bun:test'
 import { Database } from 'bun:sqlite'
 import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { withAgentIdentity } from '../autonomy/context.ts'
 import { battmannTool } from '../tools/battmann.ts'
+import { modelBoundaryTestHooks } from './modelBoundary.ts'
+
+beforeAll(() => { modelBoundaryTestHooks.override = { ceiling: 'restricted', allLocal: true, cloudRoutes: [] } })
+afterAll(() => { modelBoundaryTestHooks.override = undefined })
 
 // Regression coverage for two verified security findings in src/battmann/store.ts:
 //  1. objectDetail must not return an ontology-object revision whose validity window has already closed.

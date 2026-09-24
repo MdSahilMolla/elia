@@ -123,6 +123,14 @@ Background autonomy:
   elia schedule run <id>                   Run one scheduled goal immediately
   elia daemon --once                       Run due schedules once and exit
   elia daemon --poll-ms 30000             Keep checking due schedules in the foreground
+
+Battmann intelligence (no model involved unless noted):
+  elia battmann seed india-semiconductors  Subscribe real data feeds and open certified questions
+  elia battmann brief india-semiconductors Seed if needed, then have the Battmann agent write the brief
+  elia battmann pull <feed> <args…>        Fetch fx, worldbank, imf, comtrade or gdelt data by code
+  elia battmann refresh                    Refresh feeds, resolve due questions, rebuild the dashboard
+  elia battmann watch --every 6h           Repeat refresh while this process runs
+  elia battmann record                     Certified track record: Battmann vs a statistical baseline
   elia doctor                              Check native-stack health: eliad daemon, C++ validator, Java bridge
 
 Editor / external integration:

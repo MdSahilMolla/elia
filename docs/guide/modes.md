@@ -39,37 +39,82 @@ Fitness mode supports sustainable goal setting, workout organization, strength a
 
 ## Battmann strategic-intelligence mode
 
-Start with `elia --battmann`, switch with `/mode battmann`, or run governed autonomy with `elia auto --battmann "<goal>"`. Battmann produces evidence-backed strategic briefs across trade, geopolitics, financial markets, supply chains, policy, and commodities. Every turn is anchored to the real wall-clock date, so "what happens next" questions re-confirm the current situation from recent primary reporting before analysis rather than answering from a stale mental model; `web_search` takes `recencyDays` for a clock-derived freshness window, and each brief states the as-of date of its newest source. Its workspace-local SQLite system of record defaults to `.elia/battmann.sqlite` and preserves evidence, claim-level excerpts and reviews, resolvable questions, immutable forecast revisions, accepted/disputed resolution events, versioned ontology objects, links, scenarios, decisions, outcomes, benchmark runs, datasets with lineage, action proposals, geolocated events, deployment stages, and a hash-chained audit log.
+Start with `elia --battmann`, switch with `/mode battmann`, or run governed autonomy with `elia auto --battmann "<goal>"`. Battmann produces evidence-backed strategic briefs across trade, geopolitics, financial markets, supply chains, policy, and commodities, for the question every brief answers: what is happening, why, what may happen next, how likely it is, and what needs attention. Every turn is anchored to the real wall-clock date, so "what happens next" questions re-confirm the current situation from recent primary reporting first; each brief states the as-of date of its newest source.
 
-The deterministic `battmann` tool supports dependence-aware evidence updates and ensembles, Brier score/log loss/calibration diagnostics, chronological domain/base-rate benchmarks, and as-of-safe reports. Observed ledger timestamps cannot be future-dated; future forecast and scenario horizons remain valid. Live scoring excludes forecasts not physically recorded before accepted resolution; historical replays must use `forecastClass: "backtest"` and cannot support a live-superiority claim. A final system-backed report fails closed until every included claim has a supported review; draft reports surface unresolved reviews. `report_from_store` writes Markdown, machine-readable JSON, and printable HTML. Use an output such as `.elia/artifacts/risk-brief.md` to expose all three companions in Elia's artifact panel.
+Battmann's store is a workspace-local SQLite file (`.elia/battmann.sqlite` by default). It holds evidence, claims and reviews, resolvable questions with immutable forecast revisions, indicator readings, an evidence-linked ontology, scenarios, decisions and outcomes, datasets with lineage, action proposals, geolocated events, deployment bundles, and a hash-chained audit log.
 
-Four analytic primitives turn the ledger into decision support without ever inventing a number:
+### Real data feeds
 
-- **`risk_assessment`** — a 0-100 score from dated, sourced, weighted factors. Correlated factors are averaged within an independence group so repeated coverage of one driver does not compound the score; the output carries each factor's contribution, a confidence level, a leave-one-group-out sensitivity, and a direction of travel from the supplied factor momentum.
-- **`consequence_chain`** — annotates a tree of first-, second-, and third-order consequences. Each edge carries `P(effect | cause)`; the tool returns the path probability to every node, the dominant path, the weakest link, and the deep low-probability tail risks.
-- **`find_path` / `object_detail` / `list_objects`** — traverse the evidence-linked ontology built with `upsert_object`/`link_objects`. `find_path` enumerates the bounded dependency paths between two entities (a chokepoint two hops from the client, a tier-2 supplier owned by a sanctioned entity), respecting each link's validity window.
-- **`explain_causality`** — a deterministic provenance trace: the upstream contribution paths behind a target entity's risk, scored by link confidence and per-hop decay, with the weakest edge and the evidence gaps on each path named explicitly. It is a static structural trace, not a dynamical propagation model.
+Figures come from code, not from the model. The `battmann` tool's `feed_query` action fetches data from public sources, and `ingest_feed` fetches it and records it. `elia battmann pull` does the same from the command line:
 
-The mode is shaped like Palantir's four pillars, at CLI scale:
+| Feed | Source | What it gives | Key |
+|---|---|---|---|
+| `fx` | ECB euro reference rates, via Frankfurter | Daily exchange rates on business days; USD-based rates are cross rates of the ECB's EUR rates | none |
+| `worldbank` | World Bank World Development Indicators API | Any WDI indicator by country and year | none |
+| `imf` | IMF DataMapper (World Economic Outlook) | WEO indicators; values for the current year and later are labelled projections and never recorded as readings | none |
+| `comtrade` | UN Comtrade | Trade value by reporter, partner and HS code, annual or monthly, with each partner's share of the world total. Taiwan appears as "Other Asia, nes" (partner 490), shown as `TWN` | none for the public preview (one period per call, 500 rows); `COMTRADE_API_KEY` for the full API |
+| `gdelt` | GDELT DOC 2.0 API | Daily worldwide news volume and coverage share for a query, last 90 days. This measures attention, not events | none (GDELT allows one request per 5 seconds) |
 
-- **Foundry** — the evidence-linked ontology, plus `register_dataset` / `dataset_lineage` for a hash-chained provenance graph, and a writeback engine (`define_action` → `propose_action` → `decide_action_proposal`). A proposal records an intent and executes nothing; the human decision is a separate signed record and any real side effect is still governed at the tool boundary.
-- **Gotham / Maven** — `register_geo_event`, `geo_query` (radius search around a coordinate or a geolocated object), and `situation_snapshot` (a categorised common operating picture with the objects under active geo-pressure). Built only from registered events — there are no live sensor feeds.
-- **AIP** — the agent is the reasoning layer, calling the deterministic tools rather than computing numbers itself. Every record carries a `securityClassification` (`public`/`internal`/`confidential`/`restricted`); a read that passes a lower `clearance` withholds classified records and redacts paths through them in `find_path` and `explain_causality`.
-- **Apollo** — `define_deployment_target` and `stage_deployment` produce constraint-checked, versioned manifests under `.elia/artifacts/deploy/` (classification ≤ target maximum, required formats present, SHA-256 per file). Transmitting a bundle is a separate step that needs explicit approval.
+Hosts are fixed in code (`src/battmann/feeds.ts`). The model supplies validated parameters only, never a URL. Redirects are refused, responses are size-bounded, and API keys travel in headers, never in a recorded URL. A recorded figure carries its request URL, retrieval time and the SHA-256 of the raw response bytes, and its evidence row is marked `provenance: feed`. The dashboard marks each indicator as `feed` or `agent` accordingly.
 
-Every write to the store appends to a tamper-evident `audit_trail` — an actor-stamped SHA-256 hash chain that `audit_trail` re-verifies on read.
+The store is append-only. Re-pulling a feed adds only new observations. If the source has since revised a value, the pull reports it and keeps what was recorded. Every `ingest_feed` subscribes the request, and `elia battmann refresh` re-pulls every subscription with its window rolled forward to today.
 
-Two domains get dedicated primitives:
+### The certified track record
 
-- **Financial / economic** — `exposure_assessment` aggregates sourced FX / rate / commodity / credit / geographic exposures into a diversified scenario loss: exposures in one independence group add, groups combine by root-sum-of-squares, and an HHI reports concentration. It is a deterministic scenario loss, not a value-at-risk. `define_indicator` / `record_indicator_reading` / `indicator_series` keep a dated macro-indicator ledger with change, trend, and a z-score against the indicator's own history. (The general [`finance`](../../src/tools/finance.ts) tool remains for corporate DCF and runway.)
-- **Defence / security** — `posture_assessment` computes a sourced correlation-of-forces balance between two actors per capability category (a quality-weighted bean-count, explicitly not an operational outcome model); `effector_pairing` runs a deterministic priority-ordered threat-to-effector assignment and names the coverage gaps.
-- **Alternatives** — `alternatives` ranks sourced substitutes (suppliers, routes, sources) across weighted, min-max-normalised criteria, with a per-criterion breakdown, an incumbent comparison, and a drop-one-criterion stability check.
+A forecast only means something if it is scored against an outcome, and against something simpler than itself. A question created with a `resolutionRule` works like this:
 
-`dashboard` renders the entire store as one picture — a derived alert strip (rising forecasts, high-severity events, indicator outliers, live scenarios, review backlog), open questions with their latest probability and revision trend, scenarios, macro indicators with trend and z-score, the geospatial common operating picture, pending action proposals, and the forecast track record — written to `.elia/artifacts/` as **HTML, JSON, and Markdown** so it opens in Elia's workspace panel. It is refreshed on demand from stored, dated, sourced records; it is not a live feed.
+- **Resolved by code.** The rule names a feed series, the period or window that decides it, a comparator and a threshold. `resolve_due` (or `elia battmann refresh`) reads the value back from the source once it is published and records the resolution with `provenance: feed`. It never resolves early, and a missing value stays pending. The model cannot resolve or void such a question; only a person can void one, with `elia battmann void`.
+- **Timestamped by the clock.** A certified question opens when it is recorded. Its forecasting cutoff comes from the rule: the start of a daily observation, or the end of an annual or monthly period. Forecasts after the cutoff, or backdated ones, are refused, and only forecasts physically recorded before the cutoff are scored.
+- **Scored against a baseline.** When the question opens, elia logs a statistical baseline as its own forecaster (`baseline`). For daily rates it uses a driftless random walk with volatility measured from recent returns. For annual and monthly totals it uses the empirical distribution of the series' own changes. Only elia can write the baseline; `scorecard` and `elia battmann record` report Battmann's Brier score, the baseline's, and skill against the baseline on the same questions. Below 30 matched questions the comparison is flagged as not yet meaningful.
 
-These controls make forecasts reproducible and harder to contaminate; they do not establish that Battmann is universally more accurate than external forecasting systems. That requires a large independently resolved live sample, a frozen evaluation protocol, competitive baselines, and external review. SQLite is a local single-workspace store; the classification labels and clearance filter are workspace-level metadata, not enterprise access control, and the deployment actions stage bundles without transmitting them.
+IMF values cannot resolve a question, because the current-year figures are projections that later editions revise.
 
-Recurring intelligence runs preserve the mode: `elia schedule add --mode battmann --every 6h "refresh the supply-chain risk brief"`. The daemon is local and runs only while its host is online.
+### Operating it from the command line
+
+These commands run without a model:
+
+```bash
+elia battmann seed india-semiconductors    # subscribe the playbook's feeds and open its certified questions
+elia battmann pull comtrade IND 8542 --periods 2024,2025
+elia battmann refresh                      # refresh feeds, resolve due questions, update baselines, rebuild the dashboard
+elia battmann watch --every 6h             # repeat refresh while this process runs
+elia battmann record                       # the certified track record
+elia battmann dashboard                    # .elia/artifacts/battmann-dashboard.{html,json,md}
+```
+
+`elia battmann brief india-semiconductors` seeds the playbook if needed, then starts the Battmann agent on the configured model to write the brief. The agent re-confirms the situation from recent reporting, forecasts every open certified question, scores supply-disruption risk, traces consequences, ranks alternative suppliers from the Comtrade shares, and writes a draft report and the dashboard. The `india-semiconductors` playbook follows the Government of India monitoring its semiconductor imports. It subscribes Comtrade imports of integrated circuits (HS 8542) by partner for five years and by month, discrete semiconductors (HS 8541), USD against INR/CNY/KRW/JPY, World Bank and IMF indicators, and GDELT coverage of Taiwan and export controls. It opens certified questions whose thresholds sit near the latest fetched values.
+
+`watch` runs only while its process does. For unattended monitoring, schedule `elia battmann refresh` with cron or launchd. Agent-driven work can recur with `elia schedule add --mode battmann --every 6h "re-forecast the open certified questions"`.
+
+### Analysis tools
+
+Four analytic primitives turn the ledger into decision support without inventing a number:
+
+- **`risk_assessment`**: a 0-100 score from dated, sourced, weighted factors. Correlated factors are averaged within an independence group, so repeated coverage of one driver does not compound the score. The output carries each factor's contribution, a confidence level, a leave-one-group-out sensitivity, and a direction of travel from the supplied factor momentum.
+- **`consequence_chain`**: annotates a tree of first-, second- and third-order consequences. Each edge carries `P(effect | cause)`; the tool returns the path probability to every node, the dominant path, the weakest link, and the deep low-probability tail risks.
+- **`find_path` / `object_detail` / `list_objects`**: traverse the evidence-linked ontology built with `upsert_object` and `link_objects`, for example a chokepoint two hops from the client, or a tier-2 supplier owned by a sanctioned entity.
+- **`explain_causality`**: a deterministic provenance trace of the upstream paths behind a target entity's risk, scored by link confidence and per-hop decay, naming the weakest edge and the evidence gaps. It is a static structural trace, not a dynamical model.
+
+For finance, `exposure_assessment` aggregates sourced FX, rate, commodity, credit and geographic exposures into a diversified scenario loss with an HHI concentration score. It is a deterministic scenario loss, not a value-at-risk. `define_indicator` / `record_indicator_reading` / `indicator_series` keep a dated indicator ledger (feeds write into the same ledger) with change, trend and a z-score against the indicator's own history. `alternatives` ranks sourced substitutes (suppliers, routes, sources) across weighted, min-max-normalised criteria, with a drop-one-criterion stability check.
+
+The ledger also carries `register_dataset` / `dataset_lineage`, a hash-chained provenance graph. `define_action` → `propose_action` → `decide_action_proposal` records an intent and a separate human decision, and executes nothing. `register_geo_event` / `geo_query` / `situation_snapshot` give a geolocated picture built only from registered events; there are no live sensor feeds. `define_deployment_target` / `stage_deployment` produce constraint-checked, versioned bundles under `.elia/artifacts/deploy/` without transmitting them. Every write appends to the tamper-evident `audit_trail`, which re-verifies its hash chain on read.
+
+`dashboard` renders the store as one page, written to `.elia/artifacts/` as HTML, JSON and Markdown. It shows alerts (rising forecasts, indicator outliers, failing feeds, review backlog), open questions with Battmann's probability beside the baseline's, indicators with their source and date, feed health, the certified track record, scenarios, the geospatial picture and pending proposals. It is regenerated on demand and by `refresh`, not streamed. `report_from_store` writes a governed Markdown, JSON and printable-HTML report; a final report fails closed until every included claim has a supported review.
+
+### Classification boundary
+
+Records carry a `securityClassification` (`public`, `internal`, `confidential`, `restricted`), and the boundary is enforced in code (`src/battmann/modelBoundary.ts`):
+
+- If every model route this session can use runs on this machine (the deep and fast tiers, role overrides, and auto fallbacks), the tool carries every record. A local route is Ollama on loopback, or a `custom` endpoint on loopback.
+- If any route is a cloud model, reads through the `battmann` tool are clamped to the cloud ceiling, and writing a record labelled above it is refused, because content a cloud model composed has already left the machine. The ceiling is `internal` by default; set `ELIA_BATTMANN_CLOUD_CLEARANCE=public` or `confidential` to change it. `restricted` never goes to a cloud model.
+- The store file is a protected path. `read_file`, search and shell reads such as `sqlite3` or `strings` on `battmann*.sqlite` are treated like `.env`, so the tool is the only way a model reaches the records. A custom `storePath` must keep "battmann" in its file name for that reason.
+- `elia battmann …` commands run without a model, so their dashboard shows every record.
+
+What this does not cover: files the agent reads with other tools. A confidential spreadsheet read with `read_spreadsheet` in a cloud session goes to that cloud model. Keep such material out of cloud sessions, or run Battmann on a local model.
+
+### Limits
+
+These controls make forecasts reproducible and hard to flatter. They do not show that Battmann forecasts better than anyone else. That needs a large independently resolved live sample, which the certified record accumulates over time, plus competitive baselines and external review. The store is a local, single-workspace SQLite file, not enterprise access control. `watch` and the scheduler are local processes, not hosted 24/7 monitoring. The sources' own terms apply to what you do with their data; check UN Comtrade's, GDELT's and the others' terms before commercial redistribution.
 
 ## Cybersecurity mode
 

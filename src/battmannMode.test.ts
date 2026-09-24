@@ -88,7 +88,7 @@ test('battmann research tools stay inside the existing approval boundaries', () 
 })
 
 test('the analytic and read battmann actions assess as safe workspace-local reads', () => {
-  for (const action of ['risk_assessment', 'consequence_chain', 'exposure_assessment', 'posture_assessment', 'effector_pairing', 'alternatives', 'object_detail', 'list_objects', 'find_path', 'explain_causality', 'list_datasets', 'dataset_lineage', 'list_action_proposals', 'geo_query', 'situation_snapshot', 'deployment_status', 'audit_trail', 'list_indicators', 'indicator_series']) {
+  for (const action of ['risk_assessment', 'consequence_chain', 'exposure_assessment', 'alternatives', 'feed_query', 'list_feeds', 'object_detail', 'list_objects', 'find_path', 'explain_causality', 'list_datasets', 'dataset_lineage', 'list_action_proposals', 'geo_query', 'situation_snapshot', 'deployment_status', 'audit_trail', 'list_indicators', 'indicator_series']) {
     const result = assessAction({ name: 'battmann', input: { action } })
     expect(result.decision).toBe('allow')
     expect(result.risk).toBe('safe')

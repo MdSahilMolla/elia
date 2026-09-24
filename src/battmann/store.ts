@@ -4,6 +4,8 @@ import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'no
 import { dirname, extname } from 'node:path'
 import { currentAgent, resolveWorkspacePath } from '../autonomy/context.ts'
 import { ensureSecureDirectory, hardenSecureFile } from '../securePersistence.ts'
+import { describeFeedResult, feedRequestKey, type FeedRequest, type FeedResult } from './feeds.ts'
+import { describeRule, forecastCutoff, validateResolutionRule, type Baseline, type Evaluation, type ResolutionRule } from './resolution.ts'
 
 const DEFAULT_STORE_PATH = '.elia/battmann.sqlite'
 const ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$/
@@ -174,7 +176,10 @@ function auditTargetOf(result: unknown): string | null {
 let pendingAudit: { action: string; input: Row; recorded: boolean } | undefined
 
 function storePath(input: Row): string {
-  return resolveWorkspacePath(optionalText(input.storePath, 'storePath', 1_000) ?? DEFAULT_STORE_PATH)
+  const path = optionalText(input.storePath, 'storePath', 1_000) ?? DEFAULT_STORE_PATH
+  // The name is what marks the file as protected from direct reads (autonomy/sensitivePaths.ts).
+  if (!/battmann[^/\\]*\.sqlite$/i.test(path)) throw new Error('storePath must be a .sqlite file whose name contains "battmann", e.g. .elia/battmann-acme.sqlite')
+  return resolveWorkspacePath(path)
 }
 
 function openStore(input: Row, create: boolean): { db: Database; path: string } | undefined {
@@ -460,7 +465,23 @@ function migrate(db: Database): void {
   addColumn('ontology_links', 'security_classification', "TEXT NOT NULL DEFAULT 'internal'")
   addColumn('ontology_objects', 'latitude', 'REAL')
   addColumn('ontology_objects', 'longitude', 'REAL')
-  db.exec('PRAGMA user_version = 5;')
+  // Provenance separates figures fetched by code from a feed (with the raw response hash) from anything an
+  // agent typed in; only feed-resolved questions count toward the certified track record.
+  addColumn('evidence', 'provenance', "TEXT NOT NULL DEFAULT 'agent'")
+  addColumn('evidence', 'response_hash', 'TEXT')
+  addColumn('questions', 'resolution_rule_json', 'TEXT')
+  addColumn('resolution_events', 'provenance', "TEXT NOT NULL DEFAULT 'agent'")
+  addColumn('resolution_events', 'observed_value', 'REAL')
+  db.exec(`CREATE TABLE IF NOT EXISTS feed_subscriptions (
+    id TEXT PRIMARY KEY,
+    feed TEXT NOT NULL,
+    request_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    last_run_at TEXT,
+    last_status TEXT,
+    last_detail TEXT
+  )`)
+  db.exec('PRAGMA user_version = 6;')
 }
 
 function withStore<T>(input: Row, create: boolean, operation: (db: Database, path: string) => T): T {
@@ -502,14 +523,23 @@ function currentObject(db: Database, id: string): Row | null {
 function createQuestion(input: Row): Row {
   return withStore(input, true, (db, path) => transaction(db, () => {
     const id = identifier(input.questionId, 'questionId')
-    const openedAt = observedDate(input.openedAt ?? input.asOf, 'openedAt')
-    const horizon = isoDate(input.horizon, 'horizon')
+    // A rule makes the question machine-resolvable: code reads the outcome from a feed, and the rule fixes the
+    // forecasting cutoff, so the horizon defaults to it and may never run past it. A certified question opens
+    // when it is recorded; it cannot be backdated.
+    const rule = input.resolutionRule === undefined || input.resolutionRule === null ? undefined : validateResolutionRule(input.resolutionRule)
+    const openedAt = rule ? new Date().toISOString() : observedDate(input.openedAt ?? input.asOf, 'openedAt')
+    const cutoff = rule ? forecastCutoff(rule) : undefined
+    const horizon = input.horizon === undefined && cutoff ? cutoff : isoDate(input.horizon, 'horizon')
+    if (cutoff && horizon > cutoff) throw new Error(`horizon ${horizon} is after the rule's forecasting cutoff ${cutoff}, when the outcome starts to be observable`)
     if (horizon <= openedAt) throw new Error('horizon must be after openedAt')
+    const criteria = rule
+      ? [optionalText(input.resolutionCriteria, 'resolutionCriteria'), describeRule(rule)].filter(Boolean).join(' ')
+      : requiredText(input.resolutionCriteria, 'resolutionCriteria')
     const createdAt = new Date().toISOString()
-    db.query('INSERT INTO questions (id, question, domain, resolution_criteria, opened_at, horizon, tags_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(
-      id, requiredText(input.question, 'question'), requiredText(input.domain ?? 'strategic-intelligence', 'domain', 100), requiredText(input.resolutionCriteria, 'resolutionCriteria'), openedAt, horizon, JSON.stringify(stringArray(input.tags, 'tags', 30)), createdAt,
+    db.query('INSERT INTO questions (id, question, domain, resolution_criteria, opened_at, horizon, tags_json, resolution_rule_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)').run(
+      id, requiredText(input.question, 'question'), requiredText(input.domain ?? 'strategic-intelligence', 'domain', 100), criteria, openedAt, horizon, JSON.stringify(stringArray(input.tags, 'tags', 30)), rule ? JSON.stringify(rule) : null, createdAt,
     )
-    return { status: 'created', storePath: path, questionId: id, openedAt, horizon }
+    return { status: 'created', storePath: path, questionId: id, openedAt, horizon, ...(rule ? { resolutionRule: rule, resolvedBy: `code, from the ${rule.source.feed} feed` } : {}) }
   }))
 }
 
@@ -571,6 +601,14 @@ function submitForecast(input: Row): Row {
     if (question.status !== 'open') throw new Error(`question ${questionId} is not open`)
     const asOf = observedDate(input.asOf, 'asOf')
     if (asOf < String(question.opened_at) || asOf > String(question.horizon)) throw new Error('forecast asOf must be between question openedAt and horizon')
+    const forecaster = requiredText(input.forecaster, 'forecaster', 200)
+    if (/^baseline/i.test(forecaster)) throw new Error('the "baseline" forecaster is reserved for the statistical baseline elia computes itself')
+    if (question.resolution_rule_json) {
+      // Certified questions are scored on physical time: no forecast after the cutoff, and none backdated.
+      const now = Date.now()
+      if (now > Date.parse(String(question.horizon))) throw new Error(`question ${questionId} closed for forecasting at ${question.horizon}`)
+      if (Math.abs(now - Date.parse(asOf)) > 60 * 60_000) throw new Error('a forecast on a rule-resolved question must be logged as of now; set asOf to the current time')
+    }
     const evidenceIds = stringArray(input.evidenceIds, 'evidenceIds', 100).map((id, index) => identifier(id, `evidenceIds[${index}]`))
     assertEvidence(db, evidenceIds, asOf)
     const previous = db.query('SELECT id, revision FROM forecast_revisions WHERE question_id = ? ORDER BY revision DESC LIMIT 1').get(questionId) as Row | null
@@ -580,7 +618,7 @@ function submitForecast(input: Row): Row {
     const prior = input.priorProbability === undefined ? null : probability(input.priorProbability, 'priorProbability')
     const forecastClass = oneOf(input.forecastClass ?? 'live', 'forecastClass', ['live', 'backtest'] as const)
     db.query('INSERT INTO forecast_revisions (id, question_id, revision, probability, prior_probability, as_of, method, model, forecaster, rationale, evidence_ids_json, forecast_class, parent_revision_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(
-      forecastId, questionId, revision, value, prior, asOf, requiredText(input.method, 'method', 500), optionalText(input.model, 'model', 300) ?? null, requiredText(input.forecaster, 'forecaster', 200), requiredText(input.rationale, 'rationale', 10_000), JSON.stringify([...new Set(evidenceIds)]), forecastClass, previous ? String(previous.id) : null, new Date().toISOString(),
+      forecastId, questionId, revision, value, prior, asOf, requiredText(input.method, 'method', 500), optionalText(input.model, 'model', 300) ?? null, forecaster, requiredText(input.rationale, 'rationale', 10_000), JSON.stringify([...new Set(evidenceIds)]), forecastClass, previous ? String(previous.id) : null, new Date().toISOString(),
     )
     return { status: 'recorded', storePath: path, forecastId, questionId, revision, probability: value, forecastClass, parentRevisionId: previous?.id ?? null }
   }))
@@ -592,6 +630,7 @@ function resolveQuestion(input: Row): Row {
     const question = db.query('SELECT * FROM questions WHERE id = ?').get(questionId) as Row | null
     if (!question) throw new Error(`unknown question id: ${questionId}`)
     const status = oneOf(input.resolutionStatus ?? 'accepted', 'resolutionStatus', ['accepted', 'disputed', 'void'] as const)
+    if (question.resolution_rule_json && status !== 'disputed') throw new Error(`question ${questionId} is resolved by code from its feed (resolve_due); only a human can void it, with \`elia battmann void\``)
     if (status !== 'disputed' && question.status !== 'open') throw new Error(`question ${questionId} already has a terminal resolution`)
     const outcome = status === 'accepted' ? boundedNumber(input.outcome, 'outcome', 0, 1) : null
     if (outcome !== null && outcome !== 0 && outcome !== 1) throw new Error('outcome must be 0 or 1')
@@ -629,26 +668,58 @@ function listQuestions(input: Row): Row {
 }
 
 function hydrateQuestion(row: Row): Row {
-  return { id: row.id, question: row.question, domain: row.domain, resolutionCriteria: row.resolution_criteria, openedAt: row.opened_at, horizon: row.horizon, status: row.status, outcome: row.outcome, resolvedAt: row.resolved_at, tags: parseJson(row.tags_json, []) }
+  return { id: row.id, question: row.question, domain: row.domain, resolutionCriteria: row.resolution_criteria, openedAt: row.opened_at, horizon: row.horizon, status: row.status, outcome: row.outcome, resolvedAt: row.resolved_at, tags: parseJson(row.tags_json, []), resolutionRule: parseJson(row.resolution_rule_json, null) }
 }
 
 function hydrateForecast(row: Row): Row {
   return { id: row.id, questionId: row.question_id, revision: row.revision, probability: row.probability, priorProbability: row.prior_probability, asOf: row.as_of, method: row.method, model: row.model, forecaster: row.forecaster, rationale: row.rationale, evidenceIds: parseJson(row.evidence_ids_json, []), forecastClass: row.forecast_class ?? 'live', parentRevisionId: row.parent_revision_id, recordedAt: row.created_at }
 }
 
-interface ScoredForecast { questionId: string; probability: number; outcome: number; asOf: string; domain: string; resolvedAt: string; recordedAt: string; forecastClass: 'live' | 'backtest' }
+interface ScoredForecast { questionId: string; probability: number; outcome: number; asOf: string; domain: string; resolvedAt: string; recordedAt: string; forecastClass: 'live' | 'backtest'; certified: boolean }
 
-function resolvedLatestForecasts(db: Database, forecastClass: 'live' | 'backtest' = 'live'): ScoredForecast[] {
+/** The statistical baseline's forecasts share the revision chain but are scored apart from the system's. */
+const BASELINE_FORECASTER = 'baseline'
+
+function resolvedLatestForecasts(db: Database, forecastClass: 'live' | 'backtest' = 'live', who: 'system' | 'baseline' = 'system'): ScoredForecast[] {
   const questions = db.query("SELECT * FROM questions WHERE status = 'resolved' ORDER BY id").all() as Row[]
   const rows: ScoredForecast[] = []
+  const forecasterClause = who === 'baseline' ? 'forecaster = ?' : 'forecaster <> ?'
   for (const question of questions) {
+    // A question resolved by code from its feed is certified; its forecasts must also have been physically
+    // recorded before the forecasting cutoff (the horizon), not merely before resolution.
+    const certified = Boolean(db.query("SELECT 1 FROM resolution_events WHERE question_id = ? AND status = 'accepted' AND provenance = 'feed'").get(String(question.id)))
     const resolutionTime = String(question.resolved_at ?? question.horizon)
+    const recordedBy = certified ? String(question.horizon) : resolutionTime
     const forecast = (forecastClass === 'live'
-      ? db.query('SELECT probability, as_of, created_at, forecast_class FROM forecast_revisions WHERE question_id = ? AND as_of <= ? AND created_at <= ? AND forecast_class = ? ORDER BY as_of DESC, revision DESC LIMIT 1').get(String(question.id), resolutionTime, resolutionTime, forecastClass)
-      : db.query('SELECT probability, as_of, created_at, forecast_class FROM forecast_revisions WHERE question_id = ? AND as_of <= ? AND forecast_class = ? ORDER BY as_of DESC, revision DESC LIMIT 1').get(String(question.id), resolutionTime, forecastClass)) as Row | null
-    if (forecast) rows.push({ questionId: String(question.id), probability: Number(forecast.probability), outcome: Number(question.outcome), asOf: String(forecast.as_of), domain: String(question.domain), resolvedAt: String(question.resolved_at), recordedAt: String(forecast.created_at), forecastClass })
+      ? db.query(`SELECT probability, as_of, created_at, forecast_class FROM forecast_revisions WHERE question_id = ? AND as_of <= ? AND created_at <= ? AND forecast_class = ? AND ${forecasterClause} ORDER BY as_of DESC, revision DESC LIMIT 1`).get(String(question.id), resolutionTime, recordedBy, forecastClass, BASELINE_FORECASTER)
+      : db.query(`SELECT probability, as_of, created_at, forecast_class FROM forecast_revisions WHERE question_id = ? AND as_of <= ? AND forecast_class = ? AND ${forecasterClause} ORDER BY as_of DESC, revision DESC LIMIT 1`).get(String(question.id), resolutionTime, forecastClass, BASELINE_FORECASTER)) as Row | null
+    if (forecast) rows.push({ questionId: String(question.id), probability: Number(forecast.probability), outcome: Number(question.outcome), asOf: String(forecast.as_of), domain: String(question.domain), resolvedAt: String(question.resolved_at), recordedAt: String(forecast.created_at), forecastClass, certified })
   }
   return rows
+}
+
+/**
+ * The certified track record: questions resolved by code from a feed, scored for the system and for the
+ * statistical baseline on exactly the same questions. Skill is only claimed relative to that baseline.
+ */
+function certifiedRecord(db: Database): Row {
+  const system = resolvedLatestForecasts(db).filter((row) => row.certified)
+  const baseline = resolvedLatestForecasts(db, 'live', 'baseline').filter((row) => row.certified)
+  const matchedIds = new Set(system.map((row) => row.questionId).filter((id) => baseline.some((row) => row.questionId === id)))
+  const matchedSystem = scoreRows(system.filter((row) => matchedIds.has(row.questionId)))
+  const matchedBaseline = scoreRows(baseline.filter((row) => matchedIds.has(row.questionId)))
+  const systemBrier = matchedSystem.brierScore as number | null
+  const baselineBrier = matchedBaseline.brierScore as number | null
+  const openRuleQuestions = Number((db.query("SELECT COUNT(*) AS count FROM questions WHERE status = 'open' AND resolution_rule_json IS NOT NULL").get() as Row).count)
+  return {
+    definition: 'Questions resolved by code from a data feed, never by a model; forecasts count only if physically recorded before the forecasting cutoff.',
+    openRuleQuestions,
+    system: scoreRows(system),
+    baseline: scoreRows(baseline),
+    matchedQuestions: matchedIds.size,
+    skillVsBaseline: systemBrier !== null && baselineBrier !== null && baselineBrier > 0 ? Number((1 - systemBrier / baselineBrier).toFixed(6)) : null,
+    skillNote: matchedIds.size < 30 ? 'Fewer than 30 matched certified questions: the comparison with the baseline is not yet meaningful.' : undefined,
+  }
 }
 
 function scoreRows(rows: ScoredForecast[]): Row {
@@ -697,7 +768,7 @@ function scorecard(input: Row): Row {
   try {
     const rows = resolvedLatestForecasts(opened.db)
     const domains = [...new Set(rows.map((row) => row.domain))]
-    return { storePath: opened.path, scoringPolicy: 'Latest forecast whose declared asOf and physical recordedAt are both at or before accepted resolution time; forecasts after the horizon are rejected at write time.', ...scoreRows(rows), byDomain: domains.map((domain) => ({ domain, ...scoreRows(rows.filter((row) => row.domain === domain)) })) }
+    return { storePath: opened.path, scoringPolicy: 'Latest forecast whose declared asOf and physical recordedAt are both at or before accepted resolution time; forecasts after the horizon are rejected at write time. The statistical baseline is scored separately.', ...scoreRows(rows), byDomain: domains.map((domain) => ({ domain, ...scoreRows(rows.filter((row) => row.domain === domain)) })), certified: certifiedRecord(opened.db) }
   } finally { opened.db.close() }
 }
 
@@ -984,7 +1055,7 @@ function explainCausality(input: Row): Row {
 }
 
 // ---------------------------------------------------------------------------
-// Foundry — datasets, lineage, and the governed action (Kinetic) engine
+// Datasets, lineage, and the governed action engine
 // ---------------------------------------------------------------------------
 
 function registerDataset(input: Row): Row {
@@ -1117,7 +1188,7 @@ function listActionProposals(input: Row): Row {
 }
 
 // ---------------------------------------------------------------------------
-// Gotham / Maven — geolocated events, radius queries, a common operating picture
+// Geolocated events, radius queries, a common operating picture
 // ---------------------------------------------------------------------------
 
 function registerGeoEvent(input: Row): Row {
@@ -1211,7 +1282,7 @@ function situationSnapshot(input: Row): Row {
 }
 
 // ---------------------------------------------------------------------------
-// Apollo — constraint-checked deployment of the intelligence product
+// Constraint-checked deployment of the intelligence product
 // ---------------------------------------------------------------------------
 
 function defineDeploymentTarget(input: Row): Row {
@@ -1575,9 +1646,12 @@ function workspaceSnapshot(input: Row): Row {
   try {
     const count = (table: string) => Number((opened.db.query(`SELECT COUNT(*) AS count FROM ${table}`).get() as Row).count)
     const openQuestions = opened.db.query("SELECT * FROM questions WHERE status = 'open' ORDER BY horizon LIMIT 50").all() as Row[]
-    const claims = opened.db.query(`SELECT c.id, c.statement, c.confidence,
+    const rank = clearanceRank(input)
+    const claims = (opened.db.query(`SELECT c.id, c.statement, c.confidence, c.security_classification,
       (SELECT verdict FROM claim_reviews r WHERE r.claim_id = c.id ORDER BY reviewed_at DESC LIMIT 1) AS latest_review
-      FROM claims c ORDER BY c.created_at DESC LIMIT 50`).all() as Row[]
+      FROM claims c ORDER BY c.created_at DESC LIMIT 50`).all() as Row[])
+      .filter((row) => withinClearance(row, rank))
+      .map(({ security_classification: _classification, ...row }) => row)
     return {
       storePath: opened.path,
       schemaVersion: Number((opened.db.query('PRAGMA user_version').get() as Row).user_version),
@@ -1598,18 +1672,19 @@ export function loadBattmannReportData(input: Row): Row {
     const selectedQuestions = questionRows.filter((question) => !requestedQuestionIds.length || requestedQuestionIds.includes(String(question.id)))
     for (const id of requestedQuestionIds) if (!selectedQuestions.some((question) => String(question.id) === id)) throw new Error(`unknown or not-yet-open question id at report asOf: ${id}`)
     const questions = selectedQuestions.map((question) => {
-      const latestForecast = db.query('SELECT * FROM forecast_revisions WHERE question_id = ? AND as_of <= ? ORDER BY as_of DESC, revision DESC LIMIT 1').get(String(question.id), asOf) as Row | null
+      const latestForecast = db.query('SELECT * FROM forecast_revisions WHERE question_id = ? AND as_of <= ? AND forecaster <> ? ORDER BY as_of DESC, revision DESC LIMIT 1').get(String(question.id), asOf, BASELINE_FORECASTER) as Row | null
       const resolution = db.query("SELECT * FROM resolution_events WHERE question_id = ? AND status IN ('accepted','void') AND resolved_at <= ? ORDER BY resolved_at DESC LIMIT 1").get(String(question.id), asOf) as Row | null
       return { ...hydrateQuestion(question), status: resolution ? resolution.status === 'accepted' ? 'resolved' : 'void' : 'open', outcome: resolution?.outcome ?? null, resolvedAt: resolution?.resolved_at ?? null, latestForecast: latestForecast ? hydrateForecast(latestForecast) : null }
     })
-    const claimRows = db.query('SELECT * FROM claims WHERE as_of <= ? ORDER BY created_at').all(asOf) as Row[]
+    const rank = clearanceRank(input)
+    const claimRows = (db.query('SELECT * FROM claims WHERE as_of <= ? ORDER BY created_at').all(asOf) as Row[]).filter((row) => withinClearance(row, rank))
     const claims = claimRows.map((claim) => {
-      const links = db.query(`SELECT ce.evidence_id, ce.relation, ce.supporting_excerpt, e.title, e.url, e.publisher, e.source_type, e.published_at, e.retrieved_at, e.content_hash, e.independence_group, e.reliability
-        FROM claim_evidence ce JOIN evidence e ON e.id = ce.evidence_id WHERE ce.claim_id = ? AND e.published_at <= ? AND e.retrieved_at <= ? ORDER BY ce.evidence_id`).all(String(claim.id), asOf, asOf) as Row[]
+      const links = (db.query(`SELECT ce.evidence_id, ce.relation, ce.supporting_excerpt, e.title, e.url, e.publisher, e.source_type, e.published_at, e.retrieved_at, e.content_hash, e.independence_group, e.reliability, e.security_classification
+        FROM claim_evidence ce JOIN evidence e ON e.id = ce.evidence_id WHERE ce.claim_id = ? AND e.published_at <= ? AND e.retrieved_at <= ? ORDER BY ce.evidence_id`).all(String(claim.id), asOf, asOf) as Row[]).filter((row) => withinClearance(row, rank))
       const review = db.query('SELECT verdict, reviewer, reviewed_at, notes FROM claim_reviews WHERE claim_id = ? AND reviewed_at <= ? ORDER BY reviewed_at DESC LIMIT 1').get(String(claim.id), asOf) as Row | null
       return { id: claim.id, statement: claim.statement, classification: claim.classification, confidence: claim.confidence, asOf: claim.as_of, evidence: links.map((link) => ({ evidenceId: link.evidence_id, relation: link.relation, supportingExcerpt: link.supporting_excerpt })), review: review ? { verdict: review.verdict, reviewer: review.reviewer, reviewedAt: review.reviewed_at, notes: review.notes } : { verdict: 'unreviewed' } }
     })
-    const evidence = db.query('SELECT * FROM evidence WHERE published_at <= ? AND retrieved_at <= ? ORDER BY published_at, id').all(asOf, asOf) as Row[]
+    const evidence = (db.query('SELECT * FROM evidence WHERE published_at <= ? AND retrieved_at <= ? ORDER BY published_at, id').all(asOf, asOf) as Row[]).filter((row) => withinClearance(row, rank))
     const scenarios = (db.query('SELECT * FROM scenarios WHERE base_as_of <= ? ORDER BY horizon').all(asOf) as Row[]).map((row) => ({ id: row.id, title: row.title, baseAsOf: row.base_as_of, horizon: row.horizon, probability: row.probability, assumptions: parseJson(row.assumptions_json, []), questionIds: parseJson(row.question_ids_json, []), evidenceIds: parseJson(row.evidence_ids_json, []), indicators: parseJson(row.indicators_json, []), status: row.status }))
     const decisions = (db.query('SELECT * FROM decisions WHERE decided_at <= ? ORDER BY decided_at').all(asOf) as Row[]).map((row) => ({ id: row.id, scenarioId: row.scenario_id, title: row.title, options: parseJson(row.options_json, []), chosenOption: row.chosen_option, rationale: row.rationale, status: row.status, approvedBy: row.approved_by, decidedAt: row.decided_at }))
     const outcomes = (db.query('SELECT * FROM outcomes WHERE observed_at <= ? ORDER BY observed_at').all(asOf) as Row[]).map((row) => ({ id: row.id, decisionId: row.decision_id, observedAt: row.observed_at, summary: row.summary, metrics: parseJson(row.metrics_json, {}), evidenceIds: parseJson(row.evidence_ids_json, []) }))
@@ -1625,7 +1700,7 @@ export function loadBattmannReportData(input: Row): Row {
       asOf,
       questions,
       claims,
-      evidence: evidence.map((row) => ({ id: row.id, title: row.title, url: row.url, publisher: row.publisher, sourceType: row.source_type, publishedAt: row.published_at, retrievedAt: row.retrieved_at, excerpt: row.excerpt, contentHash: row.content_hash, independenceGroup: row.independence_group, reliability: row.reliability })),
+      evidence: evidence.map((row) => ({ id: row.id, title: row.title, url: row.url, publisher: row.publisher, sourceType: row.source_type, publishedAt: row.published_at, retrievedAt: row.retrieved_at, excerpt: row.excerpt, contentHash: row.content_hash, independenceGroup: row.independence_group, reliability: row.reliability, provenance: row.provenance ?? 'agent', responseHash: row.response_hash ?? null })),
       scenarios,
       decisions,
       outcomes,
@@ -1636,6 +1711,45 @@ export function loadBattmannReportData(input: Row): Row {
   })
 }
 
+const COMTRADE_PARTNER_SERIES = /^comtrade:([^:]+):([^:]+):([^:]+):([^:]+):([^:]+)$/
+const MIN_OUTLIER_HISTORY = 8
+
+/**
+ * For every Comtrade flow recorded by partner, the latest period's top suppliers with their share of the
+ * world total and the Herfindahl-Hirschman index over all partners: the dependence picture a buyer needs.
+ */
+function supplierConcentration(db: Database, indicators: Row[], asOf: string): Row[] {
+  const groups = new Map<string, { world?: Row; partners: Row[] }>()
+  for (const indicator of indicators) {
+    const match = COMTRADE_PARTNER_SERIES.exec(String(indicator.id))
+    if (!match) continue
+    const key = `comtrade:${match[1]}:${match[2]}:${match[3]}:*:${match[5]}`
+    const group = groups.get(key) ?? { partners: [] }
+    if (match[4] === 'WLD') group.world = indicator
+    else group.partners.push(indicator)
+    groups.set(key, group)
+  }
+  const latestAt = (id: string, at?: string) => db.query(`SELECT observed_at, value FROM indicator_readings WHERE indicator_id = ? AND observed_at <= ?${at ? ' AND observed_at = ?' : ''} ORDER BY observed_at DESC LIMIT 1`).get(...(at ? [id, asOf, at] : [id, asOf])) as Row | null
+  const result: Row[] = []
+  for (const [key, group] of groups) {
+    if (!group.world || group.partners.length < 2) continue
+    const world = latestAt(String(group.world.id))
+    if (!world || !(Number(world.value) > 0)) continue
+    const total = Number(world.value)
+    const partners = group.partners.flatMap((indicator) => {
+      const reading = latestAt(String(indicator.id), String(world.observed_at))
+      return reading ? [{ id: String(indicator.id), name: String(indicator.name).replace(/^.* (?:from|to) /, '').replace(/ \((?:annual|monthly)\)$/, ''), value: Number(reading.value), share: round(Number(reading.value) / total, 4) }] : []
+    }).sort((a, b) => b.value - a.value)
+    const hhi = Math.round(partners.reduce((sum, partner) => sum + (partner.share * 100) ** 2, 0))
+    result.push({
+      group: key, title: String(group.world.name).replace(/ (?:from|to) the world/, ''), period: String(world.observed_at).slice(0, String(group.world.id).endsWith(':annual') ? 4 : 7), total,
+      topPartners: partners.slice(0, 8), partnerCount: partners.length, topThreeShare: round(partners.slice(0, 3).reduce((sum, partner) => sum + partner.share, 0), 4), hhi,
+      hhiBand: hhi >= 2500 ? 'highly concentrated' : hhi >= 1500 ? 'moderately concentrated' : 'unconcentrated',
+    })
+  }
+  return result
+}
+
 /** One read that assembles every panel of the intelligence dashboard as of a cutoff, honouring clearance. */
 export function loadBattmannDashboardData(input: Row): Row {
   const asOf = input.asOf === undefined ? new Date().toISOString() : observedDate(input.asOf, 'asOf')
@@ -1643,10 +1757,11 @@ export function loadBattmannDashboardData(input: Row): Row {
   return withStore(input, false, (db, path) => {
     const nameOf = (id: string) => { const row = currentObject(db, id); return row ? String(row.name) : id }
     const questions = (db.query("SELECT * FROM questions WHERE status = 'open' AND opened_at <= ? ORDER BY horizon").all(asOf) as Row[]).map((question) => {
-      const revisions = db.query('SELECT probability, as_of FROM forecast_revisions WHERE question_id = ? AND as_of <= ? ORDER BY as_of DESC, revision DESC LIMIT 2').all(String(question.id), asOf) as Row[]
+      const revisions = db.query('SELECT probability, as_of FROM forecast_revisions WHERE question_id = ? AND as_of <= ? AND forecaster <> ? ORDER BY as_of DESC, revision DESC LIMIT 2').all(String(question.id), asOf, BASELINE_FORECASTER) as Row[]
+      const baseline = db.query('SELECT probability FROM forecast_revisions WHERE question_id = ? AND as_of <= ? AND forecaster = ? ORDER BY as_of DESC, revision DESC LIMIT 1').get(String(question.id), asOf, BASELINE_FORECASTER) as Row | null
       const latest = revisions[0] ? Number(revisions[0].probability) : null
       const prior = revisions[1] ? Number(revisions[1].probability) : null
-      return { id: question.id, question: question.question, domain: question.domain, horizon: question.horizon, probability: latest, previousProbability: prior, delta: latest !== null && prior !== null ? round(latest - prior) : null, latestForecastAsOf: revisions[0]?.as_of ?? null }
+      return { id: question.id, question: question.question, domain: question.domain, horizon: question.horizon, probability: latest, previousProbability: prior, delta: latest !== null && prior !== null ? round(latest - prior) : null, latestForecastAsOf: revisions[0]?.as_of ?? null, baselineProbability: baseline ? Number(baseline.probability) : null, certified: Boolean(question.resolution_rule_json) }
     })
     const scenarios = (db.query('SELECT * FROM scenarios WHERE base_as_of <= ? ORDER BY probability DESC').all(asOf) as Row[]).map((row) => ({ id: row.id, title: row.title, probability: Number(row.probability), horizon: row.horizon, status: row.status }))
     const geoRows = (db.query('SELECT * FROM geo_events WHERE occurred_at <= ? ORDER BY occurred_at DESC').all(asOf) as Row[]).filter((row) => withinClearance(row, rank))
@@ -1663,15 +1778,22 @@ export function loadBattmannDashboardData(input: Row): Row {
       pressured.set(objectId, entry)
     }
     const objectsUnderPressure = [...pressured.values()].sort((a, b) => b.maxSeverity - a.maxSeverity).map((entry) => ({ ...entry, name: nameOf(entry.objectId) }))
-    const indicators = (db.query('SELECT * FROM indicators ORDER BY name').all() as Row[]).filter((row) => withinClearance(row, rank)).map((indicator) => {
+    const allIndicators = (db.query('SELECT * FROM indicators ORDER BY name').all() as Row[]).filter((row) => withinClearance(row, rank))
+    // A Comtrade pull by partner writes one series per partner; those are summarised as supplier concentration
+    // below rather than listed one by one, and only the world total stays in the indicator table.
+    const partnerSeries = allIndicators.filter((row) => COMTRADE_PARTNER_SERIES.test(String(row.id)) && !String(row.id).includes(':WLD:'))
+    const concentration = supplierConcentration(db, allIndicators, asOf)
+    const indicators = allIndicators.filter((row) => !partnerSeries.includes(row)).map((indicator) => {
       const readings = (db.query('SELECT value FROM indicator_readings WHERE indicator_id = ? AND observed_at <= ? ORDER BY observed_at').all(String(indicator.id), asOf) as Row[]).map((row) => Number(row.value))
-      if (!readings.length) return { id: indicator.id, name: indicator.name, unit: indicator.unit, higherIs: indicator.higher_is, latest: null, zScore: null, trend: 'flat' }
+      const fromFeed = Boolean(db.query("SELECT 1 FROM indicator_readings r JOIN evidence e ON e.id = r.evidence_id WHERE r.indicator_id = ? AND e.provenance = 'feed' LIMIT 1").get(String(indicator.id)))
+      const latestReading = db.query('SELECT observed_at FROM indicator_readings WHERE indicator_id = ? AND observed_at <= ? ORDER BY observed_at DESC LIMIT 1').get(String(indicator.id), asOf) as Row | null
+      if (!readings.length) return { id: indicator.id, name: indicator.name, unit: indicator.unit, higherIs: indicator.higher_is, latest: null, zScore: null, trend: 'flat', provenance: fromFeed ? 'feed' : 'agent', latestObservedAt: null, readingCount: 0 }
       const mean = readings.reduce((sum, value) => sum + value, 0) / readings.length
       const stdev = readings.length > 1 ? Math.sqrt(readings.reduce((sum, value) => sum + (value - mean) ** 2, 0) / (readings.length - 1)) : 0
       const latest = readings[readings.length - 1]!
       const tail = readings.slice(-3)
       const trendSign = tail.length >= 2 ? Math.sign(tail[tail.length - 1]! - tail[0]!) : 0
-      return { id: indicator.id, name: indicator.name, unit: indicator.unit, higherIs: indicator.higher_is, latest, zScore: stdev > 0 ? round((latest - mean) / stdev) : 0, trend: trendSign > 0 ? 'rising' : trendSign < 0 ? 'falling' : 'flat' }
+      return { id: indicator.id, name: indicator.name, unit: indicator.unit, higherIs: indicator.higher_is, latest, zScore: stdev > 0 ? round((latest - mean) / stdev) : 0, trend: trendSign > 0 ? 'rising' : trendSign < 0 ? 'falling' : 'flat', provenance: fromFeed ? 'feed' : 'agent', latestObservedAt: latestReading?.observed_at ?? null, readingCount: readings.length }
     })
     const pendingProposals = (db.query("SELECT p.id, p.rationale, p.proposed_by, t.name AS action_type_name FROM action_proposals p JOIN action_types t ON t.id = p.action_type_id WHERE p.status = 'pending' ORDER BY p.created_at").all() as Row[])
       .map((row) => ({ id: row.id, actionType: row.action_type_name, proposedBy: row.proposed_by, rationale: row.rationale }))
@@ -1680,18 +1802,195 @@ export function loadBattmannDashboardData(input: Row): Row {
     const alerts: { severity: 'high' | 'medium'; kind: string; detail: string }[] = []
     for (const question of questions) if (question.delta !== null && question.delta >= 0.15) alerts.push({ severity: 'high', kind: 'forecast-rising', detail: `"${question.question}" rose ${Math.round(question.delta * 100)} points to ${Math.round((question.probability ?? 0) * 100)}%` })
     for (const event of topGeoEvents) if (event.severity >= 70) alerts.push({ severity: event.severity >= 85 ? 'high' : 'medium', kind: 'geo-event', detail: `${event.title} (${event.category}, severity ${event.severity})` })
-    for (const indicator of indicators) if (indicator.zScore !== null && Math.abs(indicator.zScore) >= 1.5) alerts.push({ severity: 'medium', kind: 'indicator-outlier', detail: `${indicator.name} at z=${indicator.zScore} (${indicator.trend})` })
+    // A z-score over a handful of points is noise, so only series with real history can raise an outlier alert.
+    const outliers = indicators.filter((indicator) => indicator.zScore !== null && indicator.readingCount >= MIN_OUTLIER_HISTORY && Math.abs(indicator.zScore) >= 1.5)
+      .sort((a, b) => Math.abs(b.zScore!) - Math.abs(a.zScore!)).slice(0, 6)
+    for (const indicator of outliers) alerts.push({ severity: 'medium', kind: 'indicator-outlier', detail: `${indicator.name} at z=${indicator.zScore} against its own ${indicator.readingCount}-reading history (${indicator.trend})` })
     for (const scenario of scenarios) if (scenario.status === 'active' && scenario.probability >= 0.5) alerts.push({ severity: 'medium', kind: 'scenario', detail: `${scenario.title} at ${Math.round(scenario.probability * 100)}%` })
     if (unreviewedClaims > 0) alerts.push({ severity: 'medium', kind: 'review-backlog', detail: `${unreviewedClaims} claim(s) without a supported review` })
     const counts = Object.fromEntries(['questions', 'evidence', 'claims', 'forecast_revisions', 'ontology_objects', 'ontology_links', 'scenarios', 'decisions', 'geo_events', 'indicators', 'datasets'].map((table) => [table, Number((db.query(`SELECT COUNT(*) AS count FROM ${table}`).get() as Row).count)]))
+    const feeds = (db.query('SELECT * FROM feed_subscriptions ORDER BY feed, id').all() as Row[]).map((row) => ({ id: row.id, feed: row.feed, request: parseJson(row.request_json, {}), lastRunAt: row.last_run_at, lastStatus: row.last_status, lastDetail: row.last_detail }))
+    for (const feed of feeds) if (feed.lastStatus === 'error') alerts.push({ severity: 'medium', kind: 'feed-failing', detail: `${String(feed.feed)} feed ${String(feed.id)} failed at ${String(feed.lastRunAt)}: ${String(feed.lastDetail ?? '')}`.slice(0, 300) })
     return {
       storePath: path, asOf, clearance: rank === null ? null : String(input.clearance),
       counts, questions, scenarios,
       geo: { categories: geoCategories, topEvents: topGeoEvents, objectsUnderPressure },
-      indicators, pendingProposals, scorecard, unreviewedClaims,
+      indicators, concentration, partnerSeriesSummarised: partnerSeries.length, pendingProposals, scorecard, unreviewedClaims, feeds, certified: certifiedRecord(db),
       alerts: [...alerts].sort((a, b) => (a.severity === b.severity ? 0 : a.severity === 'high' ? -1 : 1)),
     }
   })
+}
+
+// ---------------------------------------------------------------------------
+// Feeds — readings fetched by code, stamped with provenance, and questions resolved by code
+// ---------------------------------------------------------------------------
+//
+// These are exported for the tool and the CLI, never dispatched from model input: a model supplies feed
+// parameters, and only code-fetched values reach these writers. Each created row gets its own audit entry so
+// the audit reconciliation can match every evidence, indicator and reading id.
+
+const FEED_EVIDENCE_CLASSIFICATION = 'public'
+
+function feedEvidence(db: Database, result: FeedResult): { evidenceId: string; reused: boolean } {
+  const evidenceId = `feed:${result.feed}:${result.responseSha256.slice(0, 24)}`
+  if (db.query('SELECT id FROM evidence WHERE id = ?').get(evidenceId)) return { evidenceId, reused: true }
+  const excerpt = describeFeedResult(result)
+  const publishedAt = result.sourceUpdatedAt && result.sourceUpdatedAt <= result.retrievedAt ? result.sourceUpdatedAt : result.retrievedAt
+  db.query('INSERT INTO evidence (id, title, url, publisher, source_type, published_at, retrieved_at, excerpt, content_hash, independence_group, reliability, security_classification, provenance, response_hash, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(
+    evidenceId, result.title.slice(0, 500), httpUrl(result.sourceUrls[0], 'sourceUrl'), result.publisher.slice(0, 300), 'dataset', publishedAt, result.retrievedAt, excerpt,
+    createHash('sha256').update(excerpt).digest('hex'), `feed:${result.feed}`, result.reliability, FEED_EVIDENCE_CLASSIFICATION, 'feed', result.responseSha256, new Date().toISOString(),
+  )
+  appendAudit(db, 'ingest_feed', evidenceId, { feed: result.feed, sourceUrls: result.sourceUrls, responseSha256: result.responseSha256 })
+  return { evidenceId, reused: false }
+}
+
+/** Records a feed result: one evidence row, an indicator per series, and a reading per new observation. Append-only. */
+export function recordFeedResult(input: Row, result: FeedResult, options: { subscribe?: boolean } = {}): Row {
+  return withStore(input, true, (db, path) => transaction(db, () => {
+    const { evidenceId, reused } = feedEvidence(db, result)
+    const now = Date.now()
+    const series = result.series.map((item) => {
+      const indicatorId = ID_PATTERN.test(item.key) ? item.key : `feed:${createHash('sha256').update(item.key).digest('hex').slice(0, 32)}`
+      if (!db.query('SELECT id FROM indicators WHERE id = ?').get(indicatorId)) {
+        db.query('INSERT INTO indicators (id, name, unit, frequency, higher_is, source_name, security_classification, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(
+          indicatorId, item.name.slice(0, 300), item.unit.slice(0, 60), item.frequency, item.higherIs, result.publisher.slice(0, 200), FEED_EVIDENCE_CLASSIFICATION, new Date().toISOString(),
+        )
+        appendAudit(db, 'ingest_feed', indicatorId, { feed: result.feed, seriesKey: item.key })
+      }
+      let added = 0
+      let unchanged = 0
+      const upstreamRevisions: Row[] = []
+      for (const obs of item.observations) {
+        if (obs.status !== 'actual' || Date.parse(obs.observedAt) > now) continue
+        const existing = db.query('SELECT value FROM indicator_readings WHERE indicator_id = ? AND observed_at = ?').get(indicatorId, obs.observedAt) as Row | null
+        if (existing) {
+          const stored = Number(existing.value)
+          if (Math.abs(stored - obs.value) > 1e-9 * Math.max(1, Math.abs(obs.value))) upstreamRevisions.push({ period: obs.period, stored, source: obs.value })
+          else unchanged += 1
+          continue
+        }
+        const naturalId = `${indicatorId}:${obs.period}`
+        const readingId = ID_PATTERN.test(naturalId) ? naturalId : randomUUID()
+        db.query('INSERT INTO indicator_readings (id, indicator_id, observed_at, value, source_url, evidence_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)').run(
+          readingId, indicatorId, obs.observedAt, obs.value, result.sourceUrls[0]!, evidenceId, new Date().toISOString(),
+        )
+        appendAudit(db, 'ingest_feed', readingId, { indicatorId, observedAt: obs.observedAt, value: obs.value, evidenceId })
+        added += 1
+      }
+      const actual = item.observations.filter((obs) => obs.status === 'actual')
+      const latest = actual[actual.length - 1]
+      return {
+        indicatorId, name: item.name, unit: item.unit, newReadings: added, unchanged,
+        // Append-only: a value the source has since revised is reported, never overwritten.
+        upstreamRevisions: upstreamRevisions.slice(0, 10), upstreamRevisionCount: upstreamRevisions.length,
+        latest: latest ? { period: latest.period, value: latest.value } : null,
+        projections: item.observations.filter((obs) => obs.status === 'projection').map((obs) => ({ period: obs.period, value: obs.value })).slice(0, 8),
+      }
+    })
+    let subscriptionId: string | null = null
+    if (options.subscribe) {
+      subscriptionId = feedRequestKey(result.request)
+      if (!db.query('SELECT id FROM feed_subscriptions WHERE id = ?').get(subscriptionId)) {
+        db.query('INSERT INTO feed_subscriptions (id, feed, request_json, created_at) VALUES (?, ?, ?, ?)').run(subscriptionId, result.feed, JSON.stringify(result.request), new Date().toISOString())
+        appendAudit(db, 'subscribe_feed', subscriptionId, { feed: result.feed, request: result.request })
+      }
+      db.query("UPDATE feed_subscriptions SET last_run_at = ?, last_status = 'ok', last_detail = ? WHERE id = ?").run(result.retrievedAt, `${series.reduce((sum, item) => sum + item.newReadings, 0)} new reading(s)`, subscriptionId)
+    }
+    return { storePath: path, evidenceId, reusedEvidence: reused, provenance: 'feed', subscriptionId, series }
+  }))
+}
+
+export function recordFeedFailure(input: Row, request: FeedRequest, error: string): void {
+  withStore(input, true, (db) => {
+    db.query("UPDATE feed_subscriptions SET last_run_at = ?, last_status = 'error', last_detail = ? WHERE id = ?").run(new Date().toISOString(), error.slice(0, 500), feedRequestKey(request))
+  })
+}
+
+export function listFeedSubscriptions(input: Row): Row {
+  const opened = openStore(input, false)
+  if (!opened) return { storePath: storePath(input), subscriptions: [] }
+  try {
+    const subscriptions = (opened.db.query('SELECT * FROM feed_subscriptions ORDER BY feed, id').all() as Row[])
+      .map((row) => ({ id: row.id, feed: row.feed, request: parseJson(row.request_json, {}), createdAt: row.created_at, lastRunAt: row.last_run_at, lastStatus: row.last_status, lastDetail: row.last_detail }))
+    return { storePath: opened.path, subscriptions }
+  } finally { opened.db.close() }
+}
+
+/** Open questions that carry a resolution rule, for resolve_due and baseline refreshes. */
+export function openRuleQuestions(input: Row): { id: string; question: string; horizon: string; openedAt: string; rule: ResolutionRule }[] {
+  const opened = openStore(input, false)
+  if (!opened) return []
+  try {
+    return (opened.db.query("SELECT id, question, horizon, opened_at, resolution_rule_json FROM questions WHERE status = 'open' AND resolution_rule_json IS NOT NULL ORDER BY horizon").all() as Row[])
+      .map((row) => ({ id: String(row.id), question: String(row.question), horizon: String(row.horizon), openedAt: String(row.opened_at), rule: JSON.parse(String(row.resolution_rule_json)) as ResolutionRule }))
+  } finally { opened.db.close() }
+}
+
+/** Accepts a code-evaluated resolution. Only this path can resolve a rule question. */
+export function recordFeedResolution(input: Row, questionId: string, evaluation: Extract<Evaluation, { status: 'resolved' }>, result: FeedResult): Row {
+  return withStore(input, true, (db, path) => transaction(db, () => {
+    const question = db.query('SELECT * FROM questions WHERE id = ?').get(questionId) as Row | null
+    if (!question) throw new Error(`unknown question id: ${questionId}`)
+    if (question.status !== 'open') throw new Error(`question ${questionId} is already ${question.status}`)
+    if (!question.resolution_rule_json) throw new Error(`question ${questionId} has no resolution rule`)
+    const { evidenceId } = feedEvidence(db, result)
+    const rule = JSON.parse(String(question.resolution_rule_json)) as ResolutionRule
+    const resolvedAt = new Date().toISOString()
+    const resolutionId = randomUUID()
+    db.query("INSERT INTO resolution_events (id, question_id, status, outcome, resolved_at, source_url, resolver, rationale, provenance, observed_value) VALUES (?, ?, 'accepted', ?, ?, ?, ?, ?, 'feed', ?)").run(
+      resolutionId, questionId, evaluation.outcome, resolvedAt, result.sourceUrls[0]!, `feed:${result.feed}`,
+      `${evaluation.detail}: observed ${evaluation.observedValue} ${rule.comparator} ${rule.threshold} is ${evaluation.outcome ? 'true' : 'false'}. ${describeRule(rule)} Evidence ${evidenceId}.`, evaluation.observedValue,
+    )
+    db.query("UPDATE questions SET status = 'resolved', outcome = ?, resolved_at = ? WHERE id = ?").run(evaluation.outcome, resolvedAt, questionId)
+    appendAudit(db, 'resolve_due', questionId, { resolutionId, outcome: evaluation.outcome, observedValue: evaluation.observedValue, evidenceId })
+    return { storePath: path, questionId, resolutionId, outcome: evaluation.outcome, observedValue: evaluation.observedValue, observedPeriod: evaluation.observedPeriod, evidenceId }
+  }))
+}
+
+/** A human voids a rule question (the source was discontinued, the rule was wrong). Never exposed to a model. */
+export function voidRuleQuestion(input: Row, questionId: string, reason: string, resolver: string): Row {
+  return withStore(input, true, (db, path) => transaction(db, () => {
+    const question = db.query('SELECT * FROM questions WHERE id = ?').get(questionId) as Row | null
+    if (!question) throw new Error(`unknown question id: ${questionId}`)
+    if (question.status !== 'open') throw new Error(`question ${questionId} is already ${question.status}`)
+    const resolvedAt = new Date().toISOString()
+    const resolutionId = randomUUID()
+    db.query("INSERT INTO resolution_events (id, question_id, status, outcome, resolved_at, source_url, resolver, rationale, provenance) VALUES (?, ?, 'void', NULL, ?, ?, ?, ?, 'human')").run(
+      resolutionId, questionId, resolvedAt, 'human void (elia battmann void)', requiredText(resolver, 'resolver', 200), requiredText(reason, 'reason', 5_000),
+    )
+    db.query("UPDATE questions SET status = 'void', outcome = NULL, resolved_at = ? WHERE id = ?").run(resolvedAt, questionId)
+    appendAudit(db, 'void_question', questionId, { resolutionId, reason })
+    return { storePath: path, questionId, resolutionId, status: 'void' }
+  }))
+}
+
+/** Logs the statistical baseline as its own forecaster, skipping a revision that would not change it. */
+export function recordBaselineForecast(input: Row, questionId: string, baseline: Baseline, evidenceId: string): Row {
+  return withStore(input, true, (db, path) => transaction(db, () => {
+    const question = db.query('SELECT * FROM questions WHERE id = ?').get(questionId) as Row | null
+    if (!question || question.status !== 'open') return { storePath: path, questionId, recorded: false, reason: 'question is not open' }
+    const now = new Date().toISOString()
+    if (now > String(question.horizon)) return { storePath: path, questionId, recorded: false, reason: 'forecasting has closed' }
+    const previousBaseline = db.query('SELECT probability FROM forecast_revisions WHERE question_id = ? AND forecaster = ? ORDER BY revision DESC LIMIT 1').get(questionId, BASELINE_FORECASTER) as Row | null
+    if (previousBaseline && Math.abs(Number(previousBaseline.probability) - baseline.probability) < 0.0005) return { storePath: path, questionId, recorded: false, reason: 'baseline unchanged', probability: baseline.probability }
+    const previous = db.query('SELECT id, revision FROM forecast_revisions WHERE question_id = ? ORDER BY revision DESC LIMIT 1').get(questionId) as Row | null
+    const forecastId = randomUUID()
+    db.query("INSERT INTO forecast_revisions (id, question_id, revision, probability, prior_probability, as_of, method, model, forecaster, rationale, evidence_ids_json, forecast_class, parent_revision_id, created_at) VALUES (?, ?, ?, ?, NULL, ?, ?, NULL, ?, ?, ?, 'live', ?, ?)").run(
+      forecastId, questionId, previous ? Number(previous.revision) + 1 : 1, baseline.probability, now > String(question.opened_at) ? now : String(question.opened_at), baseline.method, BASELINE_FORECASTER, baseline.rationale, JSON.stringify([evidenceId]), previous ? String(previous.id) : null, now,
+    )
+    appendAudit(db, 'baseline_forecast', forecastId, { questionId, probability: baseline.probability, method: baseline.method })
+    return { storePath: path, questionId, recorded: true, forecastId, probability: baseline.probability, method: baseline.method }
+  }))
+}
+
+/** Stored readings of one indicator, oldest first. Feed indicators are public data, so no clearance applies. */
+export function readIndicatorReadings(input: Row, indicatorId: string): { observedAt: string; value: number; evidenceId: string | null }[] {
+  const opened = openStore(input, false)
+  if (!opened) return []
+  try {
+    return (opened.db.query('SELECT observed_at, value, evidence_id FROM indicator_readings WHERE indicator_id = ? ORDER BY observed_at').all(indicatorId) as Row[])
+      .map((row) => ({ observedAt: String(row.observed_at), value: Number(row.value), evidenceId: row.evidence_id === null ? null : String(row.evidence_id) }))
+  } finally { opened.db.close() }
 }
 
 export const BATTMANN_STORE_ACTIONS = [
@@ -1702,7 +2001,7 @@ export const BATTMANN_STORE_ACTIONS = [
   'register_dataset', 'list_datasets', 'dataset_lineage', 'define_action', 'propose_action', 'decide_action_proposal', 'list_action_proposals',
   'register_geo_event', 'geo_query', 'situation_snapshot',
   'define_deployment_target', 'stage_deployment', 'deployment_status', 'audit_trail',
-  'define_indicator', 'record_indicator_reading', 'list_indicators', 'indicator_series',
+  'define_indicator', 'record_indicator_reading', 'list_indicators', 'indicator_series', 'list_feeds',
 ] as const
 
 /**
@@ -1768,6 +2067,7 @@ export function executeBattmannStoreAction(input: Row): string {
     record_indicator_reading: recordIndicatorReading,
     list_indicators: listIndicators,
     indicator_series: indicatorSeries,
+    list_feeds: listFeedSubscriptions,
   }
   const handler = handlers[action]
   if (!handler) throw new Error(`unsupported Battmann store action: ${action}`)

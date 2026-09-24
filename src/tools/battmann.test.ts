@@ -1,9 +1,15 @@
-import { expect, test } from 'bun:test'
+import { afterAll, beforeAll, expect, test } from 'bun:test'
 import { existsSync, mkdtempSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { withAgentIdentity } from '../autonomy/context.ts'
-import { assessPosture, backtestForecasts, battmannTool, buildConsequenceChain, calculateEnsemble, calculateExposureAssessment, calculateForecast, calculateRiskAssessment, pairEffectors, rankAlternatives } from './battmann.ts'
+import { backtestForecasts, battmannTool, buildConsequenceChain, calculateEnsemble, calculateExposureAssessment, calculateForecast, calculateRiskAssessment, rankAlternatives } from './battmann.ts'
+import { modelBoundaryTestHooks } from '../battmann/modelBoundary.ts'
+
+// These tests exercise the store's own behaviour, including restricted records, so they run as if every model
+// route were local. modelBoundary.test.ts covers the cloud case.
+beforeAll(() => { modelBoundaryTestHooks.override = { ceiling: 'restricted', allLocal: true, cloudRoutes: [] } })
+afterAll(() => { modelBoundaryTestHooks.override = undefined })
 
 test('forecast uses dependence groups instead of double-counting repeated coverage', () => {
   const result = JSON.parse(calculateForecast({
@@ -105,21 +111,6 @@ test('exposure_assessment diversifies across independence groups and scores conc
   expect(result.sensitivity).toHaveLength(2)
 })
 
-test('posture_assessment produces a per-category correlation-of-forces ratio and flags one-sided gaps', () => {
-  const result = JSON.parse(assessPosture({
-    theatre: 'Eastern approaches', asOf: '2026-09-01', sideA: 'Blue', sideB: 'Red',
-    capabilities: [
-      { id: 'a-air', category: 'air', side: 'A', metric: '4th-gen+ aircraft', count: 120, qualityFactor: 1.2, sourceUrl: 'https://mil.example/a', sourceDate: '2026-08-01', reliability: 0.8 },
-      { id: 'b-air', category: 'air', side: 'B', metric: '4th-gen+ aircraft', count: 90, qualityFactor: 1, sourceUrl: 'https://mil.example/b', sourceDate: '2026-08-01', reliability: 0.7 },
-      { id: 'a-isr', category: 'ISR', side: 'A', metric: 'wide-area sensors', count: 10, qualityFactor: 1, sourceUrl: 'https://mil.example/c', sourceDate: '2026-08-01', reliability: 0.6 },
-    ],
-  }))
-  expect(result.overall.balance).toBe('Blue advantage')
-  const air = result.categories.find((category: { category: string }) => category.category === 'air')
-  expect(air.ratio).toBeCloseTo(1.6, 1)
-  expect(result.gaps.some((gap: string) => gap.startsWith('ISR'))).toBe(true)
-})
-
 test('alternatives ranks candidates on weighted normalised criteria and checks stability', () => {
   const result = JSON.parse(rankAlternatives({
     subject: 'Advanced logic chip sourcing', asOf: '2026-09-01', incumbentId: 'tw',
@@ -144,24 +135,6 @@ test('alternatives ranks candidates on weighted normalised criteria and checks s
 
 test('alternatives rejects an unknown criterion score and a lone candidate', () => {
   expect(() => rankAlternatives({ subject: 'x', asOf: '2026-09-01', criteria: [{ id: 'a', name: 'A', weight: 0.5, direction: 'higher-better' }, { id: 'b', name: 'B', weight: 0.5, direction: 'higher-better' }], candidates: [{ id: 'c1', name: 'C1', sourceUrl: 'https://e.example', sourceDate: '2026-08-01', reliability: 0.8, scores: { a: 1, b: 2, c: 3 } }, { id: 'c2', name: 'C2', sourceUrl: 'https://e.example', sourceDate: '2026-08-01', reliability: 0.8, scores: { a: 1, b: 2 } }] })).toThrow('not a declared criterion')
-})
-
-test('effector_pairing assigns by priority and reports saturation gaps', () => {
-  const result = JSON.parse(pairEffectors({
-    asOf: '2026-09-01',
-    threats: [
-      { id: 't1', name: 'Inbound salvo', priority: 90, requiredCapability: 'air-defence', sourceUrl: 'https://ops.example/t1', sourceDate: '2026-08-31' },
-      { id: 't2', name: 'Secondary raid', priority: 70, requiredCapability: 'air-defence', sourceUrl: 'https://ops.example/t2', sourceDate: '2026-08-31' },
-      { id: 't3', name: 'Cyber intrusion', priority: 60, requiredCapability: 'cyber', sourceUrl: 'https://ops.example/t3', sourceDate: '2026-08-31' },
-    ],
-    effectors: [
-      { id: 'e1', name: 'SAM battery', capabilities: ['air-defence'], capacity: 1, readiness: 0.9 },
-    ],
-  }))
-  expect(result.assignments).toHaveLength(1)
-  expect(result.assignments[0].threatId).toBe('t1')
-  expect(result.unassignedThreats.find((threat: { threatId: string }) => threat.threatId === 't2').reason).toContain('capacity')
-  expect(result.unassignedThreats.find((threat: { threatId: string }) => threat.threatId === 't3').reason).toContain('required capability')
 })
 
 test('report writes validated industry Markdown and JSON sidecar', async () => {
@@ -343,8 +316,8 @@ test('find_path rejects identical endpoints and unknown objects', async () => {
   await expect(run({ action: 'find_path', fromId: 'only', toId: 'ghost' })).rejects.toThrow('unknown ontology object')
 })
 
-test('Foundry: datasets keep a hash-chained lineage and the action engine gates a writeback', async () => {
-  const cwd = mkdtempSync(join(tmpdir(), 'elia-battmann-foundry-'))
+test('datasets keep a hash-chained lineage and the action engine gates a writeback', async () => {
+  const cwd = mkdtempSync(join(tmpdir(), 'elia-battmann-datasets-'))
   const run = (input: Record<string, unknown>) => withAgentIdentity({ name: 'test', role: 'lead', cwd }, () => battmannTool.execute(input))
   await run({ action: 'register_dataset', datasetId: 'raw', name: 'UN Comtrade extract', sourceType: 'external-feed', uri: 'https://comtrade.example/2026', rowCount: 5000, contentHash: 'sha256:aaa', asOf: '2026-01-02' })
   await run({ action: 'register_dataset', datasetId: 'clean', name: 'Normalised trade flows', sourceType: 'derived', contentHash: 'sha256:bbb', parentDatasetId: 'raw', transform: 'dropped null reporters, converted to USD', asOf: '2026-01-03' })
@@ -384,7 +357,7 @@ test('macro-indicator ledger records dated readings and reports trend, change, a
   expect(list.indicators[0].readingCount).toBe(4)
 })
 
-test('Gotham: geo_query finds events by radius and situation_snapshot summarises the picture', async () => {
+test('geo_query finds events by radius and situation_snapshot summarises the picture', async () => {
   const cwd = mkdtempSync(join(tmpdir(), 'elia-battmann-geo-'))
   const run = (input: Record<string, unknown>) => withAgentIdentity({ name: 'test', role: 'lead', cwd }, () => battmannTool.execute(input))
   await run({ action: 'register_evidence', evidenceId: 'e1', title: 'Report', url: 'https://osint.example/r', sourceType: 'primary', publishedAt: '2026-01-01', retrievedAt: '2026-01-01', excerpt: 'Incident report.', independenceGroup: 'osint', reliability: 0.8 })
@@ -434,8 +407,8 @@ test('dashboard renders HTML, JSON, and Markdown artifacts with a derived alert 
   expect(snapshot.indicators[0].trend).toBe('rising')
 })
 
-test('Apollo: stage_deployment refuses an over-classified report and versions the manifest', async () => {
-  const cwd = mkdtempSync(join(tmpdir(), 'elia-battmann-apollo-'))
+test('stage_deployment refuses an over-classified report and versions the manifest', async () => {
+  const cwd = mkdtempSync(join(tmpdir(), 'elia-battmann-deploy-'))
   const run = (input: Record<string, unknown>) => withAgentIdentity({ name: 'test', role: 'lead', cwd }, () => battmannTool.execute(input))
   await run({ action: 'register_evidence', evidenceId: 'e1', title: 'Filing', url: 'https://reg.example/f', sourceType: 'primary', publishedAt: '2026-01-01', retrievedAt: '2026-01-01', excerpt: 'Of record.', independenceGroup: 'reg', reliability: 0.9 })
   await run({ action: 'register_claim', claimId: 'c1', statement: 'A fact.', classification: 'observed_fact', confidence: 'high', asOf: '2026-01-02', evidenceLinks: [{ evidenceId: 'e1', relation: 'supports', supportingExcerpt: 'Of record.' }] })
@@ -455,8 +428,8 @@ test('Apollo: stage_deployment refuses an over-classified report and versions th
   expect(status.targets.find((t: { id: string }) => t.id === 't-gov').latestVersion).toBe(2)
 })
 
-test('AIP: clearance withholds classified links from traversal and the audit chain verifies', async () => {
-  const cwd = mkdtempSync(join(tmpdir(), 'elia-battmann-aip-'))
+test('clearance withholds classified links from traversal and the audit chain verifies', async () => {
+  const cwd = mkdtempSync(join(tmpdir(), 'elia-battmann-clearance-'))
   const run = (input: Record<string, unknown>) => withAgentIdentity({ name: 'test', role: 'lead', cwd }, () => battmannTool.execute(input))
   await run({ action: 'register_evidence', evidenceId: 'e1', title: 'Filing', url: 'https://reg.example/f', sourceType: 'primary', publishedAt: '2026-01-01', retrievedAt: '2026-01-01', excerpt: 'Of record.', independenceGroup: 'reg', reliability: 0.9 })
   await run({ action: 'upsert_object', objectId: 'client', objectType: 'organization', name: 'Client', validFrom: '2026-01-01', confidence: 'high', evidenceIds: ['e1'] })

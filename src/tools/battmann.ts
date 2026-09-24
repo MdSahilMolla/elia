@@ -2,7 +2,10 @@ import { extname } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { resolveWorkspacePath } from '../autonomy/context.ts'
 import { captureBeforeWrite } from '../checkpoint.ts'
-import { BATTMANN_STORE_ACTIONS, executeBattmannStoreAction, loadBattmannDashboardData, loadBattmannReportData } from '../battmann/store.ts'
+import { BATTMANN_STORE_ACTIONS, executeBattmannStoreAction, loadBattmannDashboardData, loadBattmannReportData, recordFeedResult } from '../battmann/store.ts'
+import { describeFeedResult, fetchFeed, leadingSeries, normalizeFeedRequest, type FeedResult } from '../battmann/feeds.ts'
+import { clampClearance, clearanceRank, modelBoundary } from '../battmann/modelBoundary.ts'
+import { openRuleQuestion, resolveDue } from '../battmann/monitor.ts'
 import { atomicWrite } from './atomicWrite.ts'
 import type { Tool } from './types.ts'
 
@@ -277,54 +280,6 @@ export function calculateExposureAssessment(input: Record<string, unknown>): str
   }, null, 2)
 }
 
-interface Capability { id: string; category: string; side: 'A' | 'B'; metric: string; count: number; qualityFactor: number; sourceUrl: string; sourceDate: string; reliability: number }
-
-export function assessPosture(input: Record<string, unknown>): string {
-  const theatre = text(input.theatre, 'theatre')
-  const asOf = date(input.asOf, 'asOf')
-  const sideA = text(input.sideA, 'sideA', 200)
-  const sideB = text(input.sideB, 'sideB', 200)
-  if (sideA === sideB) throw new Error('sideA and sideB must differ')
-  const capabilities: Capability[] = list(input.capabilities, 'capabilities').map((item, index) => {
-    const sourceDate = date(item.sourceDate, `capabilities[${index}].sourceDate`)
-    if (sourceDate > asOf) throw new Error(`capabilities[${index}].sourceDate cannot be after asOf`)
-    const side = text(item.side, `capabilities[${index}].side`, 1)
-    if (side !== 'A' && side !== 'B') throw new Error(`capabilities[${index}].side must be A or B`)
-    return {
-      id: text(item.id, `capabilities[${index}].id`, 100), category: text(item.category, `capabilities[${index}].category`, 60), side: side as 'A' | 'B',
-      metric: text(item.metric, `capabilities[${index}].metric`, 200), count: number(item.count, `capabilities[${index}].count`, 0, 1e9),
-      qualityFactor: item.qualityFactor === undefined ? 1 : number(item.qualityFactor, `capabilities[${index}].qualityFactor`, 0.1, 3),
-      sourceUrl: url(item.sourceUrl, `capabilities[${index}].sourceUrl`), sourceDate, reliability: number(item.reliability, `capabilities[${index}].reliability`, 0, 1),
-    }
-  })
-  if (!capabilities.length) throw new Error('capabilities must contain at least one sourced line item')
-  if (new Set(capabilities.map((capability) => capability.id)).size !== capabilities.length) throw new Error('capability ids must be unique')
-  const effective = (capability: Capability) => capability.count * capability.qualityFactor
-  const label = (ratio: number | null) => ratio === null ? 'undetermined' : ratio > 1.5 ? `${sideA} advantage` : ratio < 0.667 ? `${sideB} advantage` : 'rough parity'
-  const categories = [...new Set(capabilities.map((capability) => capability.category))].map((category) => {
-    const inCategory = capabilities.filter((capability) => capability.category === category)
-    const a = inCategory.filter((capability) => capability.side === 'A').reduce((sum, capability) => sum + effective(capability), 0)
-    const b = inCategory.filter((capability) => capability.side === 'B').reduce((sum, capability) => sum + effective(capability), 0)
-    const ratio = a > 0 && b > 0 ? a / b : null
-    return { category, effectiveA: round(a, 2), effectiveB: round(b, 2), ratio: ratio === null ? null : round(ratio), balance: label(ratio), oneSided: a === 0 || b === 0 }
-  })
-  const totalA = capabilities.filter((capability) => capability.side === 'A').reduce((sum, capability) => sum + effective(capability), 0)
-  const totalB = capabilities.filter((capability) => capability.side === 'B').reduce((sum, capability) => sum + effective(capability), 0)
-  const overallRatio = totalA > 0 && totalB > 0 ? totalA / totalB : null
-  const meanReliability = capabilities.reduce((sum, capability) => sum + capability.reliability, 0) / capabilities.length
-  const distinctCategories = new Set(capabilities.map((capability) => capability.category)).size
-  const confidence: Confidence = distinctCategories >= 4 && meanReliability >= 0.75 ? 'high' : distinctCategories >= 2 && meanReliability >= 0.5 ? 'medium' : 'low'
-  return JSON.stringify({
-    action: 'posture_assessment', theatre, asOf, sideA, sideB,
-    overall: { effectiveA: round(totalA, 2), effectiveB: round(totalB, 2), ratio: overallRatio === null ? null : round(overallRatio), balance: label(overallRatio) },
-    categories, confidence, meanReliability: round(meanReliability),
-    gaps: categories.filter((category) => category.oneSided).map((category) => `${category.category}: only one side has sourced data`),
-    capabilities,
-    methodology: 'Effective strength per line item = count x qualityFactor. Category and overall ratios divide side A effective strength by side B. Balance bands: >1.5 A advantage, 0.67-1.5 parity, <0.67 B advantage.',
-    limitations: ['A weighted bean-count is not an operational outcome: it ignores doctrine, terrain, logistics, alliances, morale, and initiative.', 'qualityFactor is a coarse analyst multiplier, not a validated capability index.', 'One-sided categories are reported as gaps, not as zeroes.'],
-  }, null, 2)
-}
-
 interface Criterion { id: string; name: string; weight: number; direction: 'higher-better' | 'lower-better' }
 interface Candidate { id: string; name: string; sourceUrl: string; sourceDate: string; reliability: number; note: string | null; scores: Record<string, number> }
 
@@ -395,49 +350,6 @@ export function rankAlternatives(input: Record<string, unknown>): string {
     meanReliability: round(meanReliability),
     methodology: 'Each criterion is min-max normalised across the candidates (lower-better criteria are inverted), then combined as a weighted mean. Scores are 0-100 analyst inputs; weights are analyst inputs.',
     limitations: ['A multi-criteria score compresses incommensurable factors into one number; read the per-criterion breakdown, not just the rank.', 'Min-max normalisation is sensitive to the candidate set: adding or removing an option rescales every score.', 'This ranks known candidates on supplied criteria; it does not discover options or price switching costs.'],
-  }, null, 2)
-}
-
-interface Threat { id: string; name: string; priority: number; requiredCapability: string; sourceUrl: string; sourceDate: string }
-interface Effector { id: string; name: string; capabilities: string[]; capacity: number; readiness: number }
-
-export function pairEffectors(input: Record<string, unknown>): string {
-  const asOf = date(input.asOf, 'asOf')
-  const threats: Threat[] = list(input.threats, 'threats').map((item, index) => {
-    const sourceDate = date(item.sourceDate, `threats[${index}].sourceDate`)
-    if (sourceDate > asOf) throw new Error(`threats[${index}].sourceDate cannot be after asOf`)
-    return { id: text(item.id, `threats[${index}].id`, 100), name: text(item.name, `threats[${index}].name`, 200), priority: number(item.priority, `threats[${index}].priority`, 1, 100), requiredCapability: text(item.requiredCapability, `threats[${index}].requiredCapability`, 100), sourceUrl: url(item.sourceUrl, `threats[${index}].sourceUrl`), sourceDate }
-  })
-  const effectors: Effector[] = list(input.effectors, 'effectors').map((item, index) => ({
-    id: text(item.id, `effectors[${index}].id`, 100), name: text(item.name, `effectors[${index}].name`, 200),
-    capabilities: (Array.isArray(item.capabilities) ? item.capabilities : []).map((value, valueIndex) => text(value, `effectors[${index}].capabilities[${valueIndex}]`, 100)),
-    capacity: number(item.capacity, `effectors[${index}].capacity`, 1, 10_000), readiness: item.readiness === undefined ? 1 : number(item.readiness, `effectors[${index}].readiness`, 0, 1),
-  }))
-  if (!threats.length || !effectors.length) throw new Error('threats and effectors must both be non-empty')
-  if (new Set(threats.map((threat) => threat.id)).size !== threats.length) throw new Error('threat ids must be unique')
-  if (new Set(effectors.map((effector) => effector.id)).size !== effectors.length) throw new Error('effector ids must be unique')
-  if (!effectors.every((effector) => Number.isInteger(effector.capacity))) throw new Error('effector capacity must be an integer')
-  const remaining = new Map(effectors.map((effector) => [effector.id, effector.capacity]))
-  const assignments: { threatId: string; threatName: string; priority: number; effectorId: string; effectorName: string; readiness: number }[] = []
-  const unassigned: { threatId: string; threatName: string; priority: number; reason: string }[] = []
-  for (const threat of [...threats].sort((a, b) => b.priority - a.priority || a.id.localeCompare(b.id))) {
-    const capable = effectors.filter((effector) => effector.capabilities.includes(threat.requiredCapability))
-    if (!capable.length) { unassigned.push({ threatId: threat.id, threatName: threat.name, priority: threat.priority, reason: 'no effector carries the required capability' }); continue }
-    const available = capable.filter((effector) => (remaining.get(effector.id) ?? 0) > 0).sort((a, b) => b.readiness - a.readiness || a.id.localeCompare(b.id))
-    if (!available.length) { unassigned.push({ threatId: threat.id, threatName: threat.name, priority: threat.priority, reason: 'every capable effector is at capacity' }); continue }
-    const chosen = available[0]!
-    remaining.set(chosen.id, (remaining.get(chosen.id) ?? 0) - 1)
-    assignments.push({ threatId: threat.id, threatName: threat.name, priority: threat.priority, effectorId: chosen.id, effectorName: chosen.name, readiness: chosen.readiness })
-  }
-  const coveredPriority = assignments.reduce((sum, item) => sum + item.priority, 0)
-  const totalPriority = threats.reduce((sum, threat) => sum + threat.priority, 0)
-  return JSON.stringify({
-    action: 'effector_pairing', asOf, threatCount: threats.length, effectorCount: effectors.length,
-    assignments, unassignedThreats: unassigned,
-    priorityCoverage: totalPriority > 0 ? round(coveredPriority / totalPriority) : null,
-    effectorUtilization: effectors.map((effector) => ({ effectorId: effector.id, name: effector.name, used: effector.capacity - (remaining.get(effector.id) ?? 0), capacity: effector.capacity })),
-    methodology: 'Threats are serviced in priority order; each takes the highest-readiness capable effector with remaining capacity (ties broken by id). This is a deterministic greedy assignment, not a global optimum.',
-    limitations: ['Greedy priority order can strand a high-value pairing that a global optimiser would keep; it is a planning aid, not a fire-control solution.', 'Capability matching is exact-tag: it models neither partial suitability nor engagement geometry, timing, or probability of kill.'],
   }, null, 2)
 }
 
@@ -574,20 +486,25 @@ async function createStoreReport(input: Record<string, unknown>): Promise<string
 interface DashboardData {
   storePath: string; asOf: string; clearance: string | null
   counts: Record<string, number>
-  questions: Array<{ id: string; question: string; domain: string; horizon: string; probability: number | null; previousProbability: number | null; delta: number | null; latestForecastAsOf: string | null }>
+  questions: Array<{ id: string; question: string; domain: string; horizon: string; probability: number | null; previousProbability: number | null; delta: number | null; latestForecastAsOf: string | null; baselineProbability: number | null; certified: boolean }>
   scenarios: Array<{ id: string; title: string; probability: number; horizon: string; status: string }>
   geo: { categories: Array<{ category: string; count: number; maxSeverity: number; mostRecent: string | null }>; topEvents: Array<{ id: string; title: string; category: string; severity: number; occurredAt: string }>; objectsUnderPressure: Array<{ objectId: string; name: string; events: number; maxSeverity: number }> }
-  indicators: Array<{ id: string; name: string; unit: string; higherIs: string; latest: number | null; zScore: number | null; trend: string }>
+  indicators: Array<{ id: string; name: string; unit: string; higherIs: string; latest: number | null; zScore: number | null; trend: string; provenance: string; latestObservedAt: string | null }>
   pendingProposals: Array<{ id: string; actionType: string; proposedBy: string; rationale: string }>
   scorecard: { sampleSize?: number; brierScore?: number | null; brierSkillScore?: number | null; warning?: string }
   unreviewedClaims: number
   alerts: Array<{ severity: 'high' | 'medium'; kind: string; detail: string }>
+  feeds: Array<{ id: string; feed: string; lastRunAt: string | null; lastStatus: string | null; lastDetail: string | null }>
+  concentration: Array<{ title: string; period: string; total: number; topPartners: Array<{ name: string; value: number; share: number }>; partnerCount: number; topThreeShare: number; hhi: number; hhiBand: string }>
+  partnerSeriesSummarised: number
+  certified: { openRuleQuestions: number; system: { sampleSize?: number; brierScore?: number | null }; baseline: { sampleSize?: number; brierScore?: number | null }; matchedQuestions: number; skillVsBaseline: number | null; skillNote?: string }
 }
 
+const compact = (value: number) => (Math.abs(value) >= 1e9 ? `${(value / 1e9).toFixed(2)}B` : Math.abs(value) >= 1e6 ? `${(value / 1e6).toFixed(2)}M` : String(Number(value.toFixed(4))))
 const trendGlyph = (trend: string) => (trend === 'rising' ? '&#9650;' : trend === 'falling' ? '&#9660;' : '&#8213;')
 const pct = (value: number | null) => (value === null ? '&mdash;' : `${(value * 100).toFixed(0)}%`)
 
-async function createDashboard(input: Record<string, unknown>): Promise<string> {
+export async function createDashboard(input: Record<string, unknown>): Promise<string> {
   const title = input.title === undefined ? 'Battmann Intelligence Dashboard' : text(input.title, 'title', 300)
   const outputPath = text(input.outputPath, 'outputPath', 1_000)
   if (extname(outputPath).toLowerCase() !== '.html') throw new Error('outputPath must end in .html')
@@ -601,14 +518,19 @@ async function createDashboard(input: Record<string, unknown>): Promise<string> 
     ? data.alerts.map((alert) => `<li class="alert ${alert.severity}"><span class="tag">${alert.severity}</span><span class="kind">${html(alert.kind)}</span> ${html(alert.detail)}</li>`).join('')
     : '<li class="alert none">No active alerts at this cutoff.</li>'
   const questionRows = data.questions.length
-    ? data.questions.map((question) => `<tr><td>${html(question.question)}</td><td>${html(question.domain)}</td><td class="num"><span class="prob" style="--p:${Math.round((question.probability ?? 0) * 100)}%">${pct(question.probability)}</span></td><td class="num ${question.delta !== null && question.delta > 0 ? 'up' : question.delta !== null && question.delta < 0 ? 'down' : ''}">${question.delta === null ? '&mdash;' : `${question.delta > 0 ? '+' : ''}${(question.delta * 100).toFixed(0)} pt`}</td><td>${html(question.horizon)}</td></tr>`).join('')
-    : '<tr><td colspan="5">No open questions.</td></tr>'
+    ? data.questions.map((question) => `<tr><td>${html(question.question)}${question.certified ? ' <span class="cert" title="Resolved by code from a data feed">certified</span>' : ''}</td><td>${html(question.domain)}</td><td class="num"><span class="prob" style="--p:${Math.round((question.probability ?? 0) * 100)}%">${pct(question.probability)}</span></td><td class="num">${pct(question.baselineProbability)}</td><td class="num ${question.delta !== null && question.delta > 0 ? 'up' : question.delta !== null && question.delta < 0 ? 'down' : ''}">${question.delta === null ? '&mdash;' : `${question.delta > 0 ? '+' : ''}${(question.delta * 100).toFixed(0)} pt`}</td><td>${html(question.horizon)}</td></tr>`).join('')
+    : '<tr><td colspan="6">No open questions.</td></tr>'
   const scenarioRows = data.scenarios.length
     ? data.scenarios.map((scenario) => `<tr><td>${html(scenario.title)}</td><td class="num">${(scenario.probability * 100).toFixed(0)}%</td><td>${html(scenario.status)}</td><td>${html(scenario.horizon)}</td></tr>`).join('')
     : '<tr><td colspan="4">No scenarios.</td></tr>'
   const indicatorRows = data.indicators.length
-    ? data.indicators.map((indicator) => `<tr><td>${html(indicator.name)}</td><td class="num">${indicator.latest === null ? '&mdash;' : `${indicator.latest} ${html(indicator.unit)}`}</td><td class="num">${indicator.zScore === null ? '&mdash;' : indicator.zScore}</td><td class="trend">${trendGlyph(indicator.trend)} ${html(indicator.trend)}</td></tr>`).join('')
-    : '<tr><td colspan="4">No indicators.</td></tr>'
+    ? data.indicators.map((indicator) => `<tr><td>${html(indicator.name)}</td><td class="num">${indicator.latest === null ? '&mdash;' : `${compact(indicator.latest)} ${html(indicator.unit)}`}</td><td>${html(indicator.latestObservedAt ? indicator.latestObservedAt.slice(0, 10) : '—')}</td><td class="num">${indicator.zScore === null ? '&mdash;' : indicator.zScore}</td><td class="trend">${trendGlyph(indicator.trend)} ${html(indicator.trend)}</td><td>${indicator.provenance === 'feed' ? '<span class="cert" title="Fetched by code; raw response hash recorded">feed</span>' : 'agent'}</td></tr>`).join('')
+    : '<tr><td colspan="6">No indicators.</td></tr>'
+  const feedRows = data.feeds.length
+    ? data.feeds.map((feed) => `<tr><td>${html(feed.feed)}</td><td>${html(feed.id)}</td><td>${html(feed.lastRunAt ?? '—')}</td><td class="${feed.lastStatus === 'error' ? 'up' : ''}">${html(feed.lastStatus ?? 'never run')}</td><td>${html(feed.lastDetail ?? '')}</td></tr>`).join('')
+    : '<tr><td colspan="5">No feed subscriptions. Pull one with the battmann ingest_feed action or `elia battmann pull`.</td></tr>'
+  const record = data.certified
+  const concentrationCards = data.concentration.map((group) => `<div class="conc"><h3>${html(group.title)} &middot; ${html(group.period)}</h3><p class="meta">Total ${compact(group.total)} USD &middot; ${group.partnerCount} partners &middot; top three ${(group.topThreeShare * 100).toFixed(1)}% &middot; HHI ${group.hhi} (${html(group.hhiBand)})</p><table><tbody>${group.topPartners.map((partner) => `<tr><td>${html(partner.name)}</td><td class="num">${compact(partner.value)}</td><td class="num"><span class="prob" style="--p:${Math.round(partner.share * 100)}%">${(partner.share * 100).toFixed(1)}%</span></td></tr>`).join('')}</tbody></table></div>`).join('')
   const geoCatRows = data.geo.categories.length
     ? data.geo.categories.map((category) => `<tr><td>${html(category.category)}</td><td class="num">${category.count}</td><td class="num">${category.maxSeverity}</td><td>${html(String(category.mostRecent ?? '—'))}</td></tr>`).join('')
     : '<tr><td colspan="4">No geolocated events.</td></tr>'
@@ -633,34 +555,42 @@ ul.alerts{list-style:none;margin:0;padding:0}ul.alerts li{padding:8px 10px;borde
 .alert.high{background:#fdecea;border-left:4px solid #b3261e}.alert.medium{background:#fff6e5;border-left:4px solid #b26a00}.alert.none,.alert{border-left:4px solid #c7ced9}
 .alert .tag{display:inline-block;font-size:10px;text-transform:uppercase;background:#16202e;color:#fff;border-radius:3px;padding:1px 5px;margin-right:6px}.alert .kind{font-weight:600;margin-right:6px}
 ul.plain{margin:0;padding-left:18px}.trend{white-space:nowrap}.warn{color:#b26a00;margin-top:8px}
+.concs{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:16px}.conc h3{font-size:13px;margin:0 0 2px}.conc .meta{font-size:12px;color:#5a6675;margin:0 0 6px}h2 .sub{text-transform:none;letter-spacing:0;font-weight:400}
+.cert{display:inline-block;font-size:10px;text-transform:uppercase;letter-spacing:.04em;background:#e3f1e8;color:#0a5c2f;border-radius:3px;padding:1px 5px;vertical-align:1px}
 @media(max-width:820px){main{grid-template-columns:1fr}}
 </style></head><body>
 <header><h1>${html(title)}</h1><div class="meta">As of ${html(data.asOf)} &middot; generated ${html(generatedAt)} &middot; store ${html(data.storePath)}${data.clearance ? ` &middot; clearance ${html(data.clearance)}` : ''}</div></header>
 <main>
 <section class="card wide"><h2>Alerts &mdash; what needs attention</h2><ul class="alerts">${alertRows}</ul></section>
 <section class="card wide"><h2>Coverage</h2><div class="kpis">${Object.entries(data.counts).map(([table, count]) => `<div class="kpi"><b>${count}</b>${html(table.replace(/_/g, ' '))}</div>`).join('')}<div class="kpi"><b>${score.sampleSize ?? 0}</b>resolved forecasts</div><div class="kpi"><b>${score.brierScore ?? '&mdash;'}</b>Brier score</div><div class="kpi"><b>${score.brierSkillScore ?? '&mdash;'}</b>Brier skill</div></div>${score.warning ? `<div class="warn">${html(score.warning)}</div>` : ''}</section>
-<section class="card"><h2>Open questions &amp; live probability</h2><table><thead><tr><th>Question</th><th>Domain</th><th>Prob.</th><th>7-rev &Delta;</th><th>Horizon</th></tr></thead><tbody>${questionRows}</tbody></table></section>
+<section class="card"><h2>Open questions &amp; live probability</h2><table><thead><tr><th>Question</th><th>Domain</th><th>Battmann</th><th>Baseline</th><th>Last &Delta;</th><th>Forecasts close</th></tr></thead><tbody>${questionRows}</tbody></table></section>
 <section class="card"><h2>Scenarios</h2><table><thead><tr><th>Scenario</th><th>Prob.</th><th>Status</th><th>Horizon</th></tr></thead><tbody>${scenarioRows}</tbody></table></section>
-<section class="card"><h2>Macro indicators</h2><table><thead><tr><th>Indicator</th><th>Latest</th><th>z</th><th>Trend</th></tr></thead><tbody>${indicatorRows}</tbody></table></section>
+${concentrationCards ? `<section class="card wide"><h2>Supplier concentration &mdash; who the imports depend on (UN Comtrade)</h2><div class="concs">${concentrationCards}</div></section>` : ''}
+<section class="card"><h2>Indicators${data.partnerSeriesSummarised ? ` <span class="sub">(${data.partnerSeriesSummarised} per-partner trade series summarised above)</span>` : ''}</h2><table><thead><tr><th>Indicator</th><th>Latest</th><th>As of</th><th>z</th><th>Trend</th><th>Source</th></tr></thead><tbody>${indicatorRows}</tbody></table></section>
 <section class="card"><h2>Geospatial picture</h2><table><thead><tr><th>Category</th><th>Events</th><th>Max sev.</th><th>Most recent</th></tr></thead><tbody>${geoCatRows}</tbody></table><h2 style="margin-top:14px">Entities under pressure</h2><ul class="plain">${pressureRows}</ul></section>
+<section class="card wide"><h2>Certified track record &mdash; resolved by code, scored against a statistical baseline</h2><div class="kpis"><div class="kpi"><b>${record.openRuleQuestions}</b>open certified questions</div><div class="kpi"><b>${record.system.sampleSize ?? 0}</b>resolved</div><div class="kpi"><b>${record.system.brierScore ?? '&mdash;'}</b>Battmann Brier</div><div class="kpi"><b>${record.baseline.brierScore ?? '&mdash;'}</b>baseline Brier</div><div class="kpi"><b>${record.skillVsBaseline ?? '&mdash;'}</b>skill vs baseline (${record.matchedQuestions} matched)</div></div>${record.skillNote ? `<div class="warn">${html(record.skillNote)}</div>` : ''}</section>
+<section class="card wide"><h2>Data feeds</h2><table><thead><tr><th>Feed</th><th>Subscription</th><th>Last run</th><th>Status</th><th>Detail</th></tr></thead><tbody>${feedRows}</tbody></table></section>
 <section class="card wide"><h2>Pending action proposals (human decision required)</h2><ul class="plain">${proposalRows}</ul></section>
 </main>
-<footer style="max-width:1200px;margin:0 auto;padding:0 20px 24px;color:#5a6675;font-size:12px">Battmann surfaces intelligence; humans decide. Every figure here is a stored, dated, sourced record or a deterministic calculation over one &mdash; not a live feed. Classification labels and clearance are workspace metadata, not access control.</footer>
+<footer style="max-width:1200px;margin:0 auto;padding:0 20px 24px;color:#5a6675;font-size:12px">Battmann surfaces intelligence; humans decide. Every figure here is a stored, dated, sourced record or a deterministic calculation over one. Figures marked <i>feed</i> were fetched by code from the named source with the raw response hashed; the page is regenerated by <code>elia battmann refresh</code>, not streamed.</footer>
 </body></html>`
 
   const markdown = [
     `# ${title}`, '', `**As of:** ${data.asOf}  `, `**Generated:** ${generatedAt}  `, `**Store:** ${data.storePath}${data.clearance ? `  \n**Clearance:** ${data.clearance}` : ''}`, '',
     '## Alerts', '', ...(data.alerts.length ? data.alerts.map((alert) => `- **[${alert.severity}] ${alert.kind}** &mdash; ${alert.detail}`) : ['- No active alerts at this cutoff.']), '',
-    '## Open questions', '', '| Question | Domain | Probability | Latest revision change | Horizon |', '|---|---|---:|---:|---|',
-    ...(data.questions.length ? data.questions.map((question) => `| ${md(question.question)} | ${md(question.domain)} | ${pct(question.probability).replace('&mdash;', '—')} | ${question.delta === null ? '—' : `${question.delta > 0 ? '+' : ''}${(question.delta * 100).toFixed(0)} pt`} | ${question.horizon} |`) : ['| — | — | — | — | — |']), '',
+    '## Open questions', '', '| Question | Domain | Battmann | Baseline | Latest revision change | Forecasts close |', '|---|---|---:|---:|---:|---|',
+    ...(data.questions.length ? data.questions.map((question) => `| ${md(question.question)}${question.certified ? ' (certified)' : ''} | ${md(question.domain)} | ${pct(question.probability).replace('&mdash;', '—')} | ${pct(question.baselineProbability).replace('&mdash;', '—')} | ${question.delta === null ? '—' : `${question.delta > 0 ? '+' : ''}${(question.delta * 100).toFixed(0)} pt`} | ${question.horizon} |`) : ['| — | — | — | — | — |']), '',
     '## Scenarios', '', '| Scenario | Probability | Status | Horizon |', '|---|---:|---|---|',
     ...(data.scenarios.length ? data.scenarios.map((scenario) => `| ${md(scenario.title)} | ${(scenario.probability * 100).toFixed(0)}% | ${scenario.status} | ${scenario.horizon} |`) : ['| — | — | — | — |']), '',
-    '## Macro indicators', '', '| Indicator | Latest | z-score | Trend |', '|---|---:|---:|---|',
-    ...(data.indicators.length ? data.indicators.map((indicator) => `| ${md(indicator.name)} | ${indicator.latest === null ? '—' : `${indicator.latest} ${indicator.unit}`} | ${indicator.zScore ?? '—'} | ${indicator.trend} |`) : ['| — | — | — | — |']), '',
+    ...(data.concentration.length ? ['## Supplier concentration (UN Comtrade)', '', ...data.concentration.flatMap((group) => [`### ${md(group.title)}, ${group.period}`, '', `Total ${compact(group.total)} USD; ${group.partnerCount} partners; top three ${(group.topThreeShare * 100).toFixed(1)}%; HHI ${group.hhi} (${group.hhiBand}).`, '', '| Partner | Value (USD) | Share |', '|---|---:|---:|', ...group.topPartners.map((partner) => `| ${md(partner.name)} | ${compact(partner.value)} | ${(partner.share * 100).toFixed(1)}% |`), ''])] : []),
+    '## Indicators', '', '| Indicator | Latest | As of | z-score | Trend | Source |', '|---|---:|---|---:|---|---|',
+    ...(data.indicators.length ? data.indicators.map((indicator) => `| ${md(indicator.name)} | ${indicator.latest === null ? '—' : `${compact(indicator.latest)} ${indicator.unit}`} | ${indicator.latestObservedAt?.slice(0, 10) ?? '—'} | ${indicator.zScore ?? '—'} | ${indicator.trend} | ${indicator.provenance} |`) : ['| — | — | — | — | — | — |']), '',
     '## Geospatial picture', '', ...(data.geo.categories.length ? data.geo.categories.map((category) => `- **${md(category.category)}** — ${category.count} event(s), peak severity ${category.maxSeverity}`) : ['- No geolocated events.']), '',
     '### Entities under pressure', '', ...(data.geo.objectsUnderPressure.length ? data.geo.objectsUnderPressure.map((object) => `- ${md(object.name)} — ${object.events} event(s), peak severity ${object.maxSeverity}`) : ['- None.']), '',
     '## Pending action proposals', '', ...(data.pendingProposals.length ? data.pendingProposals.map((proposal) => `- **${md(proposal.actionType)}** by ${md(proposal.proposedBy)} — ${md(proposal.rationale)}`) : ['- None.']), '',
     '## Forecast track record', '', `- Resolved sample: ${score.sampleSize ?? 0}`, `- Brier score: ${score.brierScore ?? 'not available'}`, `- Brier skill: ${score.brierSkillScore ?? 'not available'}`, ...(score.warning ? [`- ${score.warning}`] : []), '',
+    '### Certified (resolved by code from a feed)', '', `- Open certified questions: ${record.openRuleQuestions}`, `- Resolved: ${record.system.sampleSize ?? 0}`, `- Battmann Brier: ${record.system.brierScore ?? 'not available'}; baseline Brier: ${record.baseline.brierScore ?? 'not available'}`, `- Skill vs baseline on ${record.matchedQuestions} matched question(s): ${record.skillVsBaseline ?? 'not available'}`, ...(record.skillNote ? [`- ${record.skillNote}`] : []), '',
+    '## Data feeds', '', ...(data.feeds.length ? data.feeds.map((feed) => `- **${feed.feed}** ${feed.id} — ${feed.lastStatus ?? 'never run'} at ${feed.lastRunAt ?? '—'}${feed.lastDetail ? ` (${md(feed.lastDetail)})` : ''}`) : ['- No feed subscriptions.']), '',
     '_Battmann surfaces intelligence; humans decide. Every figure is a stored, dated, sourced record or a deterministic calculation over one._', '',
   ].join('\n')
 
@@ -669,19 +599,96 @@ ul.plain{margin:0;padding-left:18px}.trend{white-space:nowrap}.warn{color:#b26a0
   return JSON.stringify({ status: 'created', dashboardPath: htmlPath, jsonPath, mdPath, asOf: data.asOf, alerts: data.alerts.length, openQuestions: data.questions.length, indicators: data.indicators.length }, null, 2)
 }
 
+const CALCULATION_ACTIONS = ['forecast', 'ensemble', 'backtest', 'risk_assessment', 'consequence_chain', 'exposure_assessment', 'alternatives'] as const
+const ARTIFACT_ACTIONS = ['report', 'report_from_store', 'dashboard'] as const
+export const FEED_ACTIONS = ['feed_query', 'ingest_feed', 'resolve_due'] as const
+
+/** Deployment actions gate on the true content classification, so they must see every record. */
+const UNCLAMPED_ACTIONS = new Set(['stage_deployment', 'define_deployment_target', 'deployment_status', 'audit_trail'])
+
+/**
+ * Runs one tool call inside the model boundary (battmann/modelBoundary.ts): while any model route is a cloud
+ * model, reads are clamped to the cloud ceiling and a write labelled above it is refused, because whatever a
+ * cloud model composed has already left this machine.
+ */
+async function withModelBoundary(input: Record<string, unknown>, run: (bounded: Record<string, unknown>) => string | Promise<string>): Promise<string> {
+  const boundary = modelBoundary()
+  if (boundary.allLocal || UNCLAMPED_ACTIONS.has(String(input.action))) return run(input)
+  const label = input.securityClassification
+  if (label !== undefined && label !== null && clearanceRank(label) > clearanceRank(boundary.ceiling)) {
+    throw new Error(`refusing to record ${String(label)} content: this session can reach a cloud model (${boundary.cloudRoutes.slice(0, 3).join(', ')}), which only ${boundary.ceiling} content may enter. Run Battmann on a local model (Ollama) to handle ${String(label)} material, or record it as ${boundary.ceiling} if that is its true level.`)
+  }
+  return run({ ...input, clearance: clampClearance(input.clearance, boundary.ceiling) })
+}
+
+const SERIES_TAIL = 24
+
+/** A feed result sized for a model's context: the latest observations, summary statistics, and provenance. */
+function compactFeedResult(result: FeedResult): Record<string, unknown> {
+  const { shown, omitted } = leadingSeries(result)
+  return {
+    feed: result.feed, title: result.title, publisher: result.publisher, retrievedAt: result.retrievedAt, sourceUpdatedAt: result.sourceUpdatedAt,
+    sourceUrls: result.sourceUrls, responseSha256: result.responseSha256, reliability: result.reliability, request: result.request,
+    seriesCount: result.series.length,
+    ...(omitted ? { omittedSeries: `${omitted} smaller series are recorded but not shown; read one with indicator_series` } : {}),
+    series: shown.map((series) => {
+      const actual = series.observations.filter((item) => item.status === 'actual')
+      const values = actual.map((item) => item.value)
+      const first = actual[0]
+      const last = actual[actual.length - 1]
+      return {
+        key: series.key, name: series.name, unit: series.unit, frequency: series.frequency, observationCount: actual.length,
+        window: first && last ? { from: first.period, to: last.period } : null,
+        summary: values.length ? {
+          latest: { period: last!.period, value: last!.value }, min: Math.min(...values), max: Math.max(...values),
+          mean: Number((values.reduce((sum, value) => sum + value, 0) / values.length).toFixed(6)),
+          changeOverWindow: values.length > 1 ? { absolute: Number((last!.value - first!.value).toFixed(6)), percent: first!.value !== 0 ? Number(((last!.value - first!.value) / Math.abs(first!.value) * 100).toFixed(4)) : null } : null,
+        } : null,
+        latestObservations: actual.slice(-SERIES_TAIL).map((item) => ({ period: item.period, value: item.value })),
+        projections: series.observations.filter((item) => item.status === 'projection').map((item) => ({ period: item.period, value: item.value })),
+      }
+    }),
+    breakdown: result.breakdown,
+    notes: result.notes,
+  }
+}
+
+async function feedQuery(input: Record<string, unknown>): Promise<string> {
+  const result = await fetchFeed(normalizeFeedRequest(input))
+  return JSON.stringify({ action: 'feed_query', recorded: false, ...compactFeedResult(result), summaryText: describeFeedResult(result) }, null, 2)
+}
+
+async function ingestFeed(input: Record<string, unknown>): Promise<string> {
+  const result = await fetchFeed(normalizeFeedRequest(input))
+  const recorded = recordFeedResult(input, result, { subscribe: input.subscribe !== false }) as { series: { indicatorId: string; newReadings: number; upstreamRevisionCount: number }[] } & Record<string, unknown>
+  const shownIds = new Set(leadingSeries(result).shown.map((series) => series.key))
+  const summary = { ...recorded, series: recorded.series.filter((item) => shownIds.has(item.indicatorId)), newReadings: recorded.series.reduce((sum, item) => sum + item.newReadings, 0), upstreamRevisions: recorded.series.reduce((sum, item) => sum + item.upstreamRevisionCount, 0) }
+  return JSON.stringify({ action: 'ingest_feed', ...compactFeedResult(result), recorded: summary }, null, 2)
+}
+
+async function resolveDueAction(input: Record<string, unknown>): Promise<string> {
+  return JSON.stringify({ action: 'resolve_due', ...(await resolveDue(input)) }, null, 2)
+}
+
 export const battmannTool: Tool = {
   name: 'battmann',
-  description: 'Battmann strategic-intelligence system of record. forecast provides transparent evidence updating, ensemble combines independent forecasts without rewarding correlated duplicates, and backtest scores supplied rows. risk_assessment turns dated, sourced, weighted factors into a 0-100 score with per-factor contribution and a direction of travel; consequence_chain annotates a tree of first-, second-, and third-order consequences with path probability and the weakest link. exposure_assessment aggregates sourced financial exposures into a diversified scenario loss with an HHI concentration score; posture_assessment computes a sourced correlation-of-forces balance between two actors; effector_pairing runs a deterministic threat-to-effector assignment. define_indicator/record_indicator_reading/indicator_series keep a dated macro-indicator ledger with trend and z-score. alternatives ranks sourced substitutes across weighted criteria. dashboard renders the whole store — alerts, live probabilities, scenarios, indicators, the geospatial picture, pending proposals, and the track record — as HTML, JSON, and Markdown artifacts for the workspace panel. The versioned ledger actions enforce temporal evidence availability; scorecard and run_benchmark measure calibration and held-out chronological skill. Ontology, scenario, decision, and outcome actions build an evidence-linked decision graph; object_detail, list_objects, find_path, and explain_causality read and trace it. register_dataset/dataset_lineage keep a hash-chained provenance graph; define_action/propose_action/decide_action_proposal are the governed writeback engine (a proposal executes nothing). register_geo_event/geo_query/situation_snapshot give a geolocated common operating picture. define_deployment_target/stage_deployment produce constraint-checked, versioned deployment manifests. Every write appends to a tamper-evident audit_trail, and records carry a securityClassification that reads filter by clearance. report_from_store creates governed Markdown, JSON, and printable HTML from a cutoff-safe stored evidence base.',
+  description: 'Battmann strategic-intelligence system of record. Real data: feed_query fetches, and ingest_feed fetches and records, figures from public sources by code — fx (ECB reference rates), worldbank (World Development Indicators), imf (IMF World Economic Outlook, projections labelled), comtrade (UN Comtrade trade flows by partner and HS code), gdelt (GDELT news volume) — each stamped with the request URL, retrieval time and a hash of the raw response; prefer these over figures copied from web pages. create_question with a resolutionRule makes a question resolved by code from a feed (resolve_due), scored in the certified track record against an automatic statistical baseline; a model cannot resolve or void it. forecast provides transparent evidence updating, ensemble combines independent forecasts without rewarding correlated duplicates, and backtest scores supplied rows. risk_assessment turns dated, sourced, weighted factors into a 0-100 score with per-factor contribution and a direction of travel; consequence_chain annotates a tree of first-, second-, and third-order consequences with path probability and the weakest link. exposure_assessment aggregates sourced financial exposures into a diversified scenario loss with an HHI concentration score. define_indicator/record_indicator_reading/indicator_series keep a dated indicator ledger with trend and z-score. alternatives ranks sourced substitutes across weighted criteria. dashboard renders the whole store — alerts, probabilities beside the baseline, scenarios, indicators with their provenance, feeds, the geospatial picture, pending proposals, and the certified track record — as HTML, JSON, and Markdown. The versioned ledger actions enforce temporal evidence availability; scorecard and run_benchmark measure calibration and held-out chronological skill. Ontology, scenario, decision, and outcome actions build an evidence-linked decision graph; object_detail, list_objects, find_path, and explain_causality read and trace it. register_dataset/dataset_lineage keep a hash-chained provenance graph; define_action/propose_action/decide_action_proposal record intents and human decisions (a proposal executes nothing). register_geo_event/geo_query/situation_snapshot give a geolocated picture built from registered events. define_deployment_target/stage_deployment produce constraint-checked, versioned bundles without transmitting them. Every write appends to a tamper-evident audit_trail. Records carry a securityClassification; while any model route is a cloud model, reads are clamped to the cloud ceiling (internal by default) and writes above it are refused. report_from_store creates governed Markdown, JSON, and printable HTML from a cutoff-safe stored evidence base.',
   input_schema: {
     type: 'object',
     properties: {
-      action: { type: 'string', enum: ['forecast', 'ensemble', 'backtest', 'risk_assessment', 'consequence_chain', 'exposure_assessment', 'posture_assessment', 'effector_pairing', 'alternatives', 'report', 'report_from_store', 'dashboard', ...BATTMANN_STORE_ACTIONS] },
+      action: { type: 'string', enum: [...CALCULATION_ACTIONS, ...ARTIFACT_ACTIONS, ...FEED_ACTIONS, ...BATTMANN_STORE_ACTIONS] },
       storePath: { type: 'string', description: 'Optional workspace-relative SQLite path; defaults to .elia/battmann.sqlite.' },
       questionId: { type: 'string' }, question: { type: 'string' }, domain: { type: 'string' }, openedAt: { type: 'string' }, asOf: { type: 'string' }, horizon: { type: 'string' }, resolutionCriteria: { type: 'string' }, tags: { type: 'array' },
+      resolutionRule: { type: 'object', description: 'create_question: makes the question resolved by code from a feed and counted in the certified track record. { source: { feed: fx, base, quote } | { feed: worldbank, country, indicator } | { feed: comtrade, reporter, partner (ISO3 or WLD), hs, flow, frequency } | { feed: gdelt, query, measure: count|share }, observation: { period: "2026-10-30" | "2026" | "202612" } or, for daily series, { start, end, aggregate: max|min|mean }, comparator: > >= < <=, threshold }. The horizon defaults to the forecasting cutoff; a statistical baseline is logged automatically.' },
+      feed: { type: 'string', description: 'feed_query/ingest_feed: fx (ECB reference rates), worldbank (World Development Indicators), imf (IMF WEO via DataMapper), comtrade (UN Comtrade trade flows), or gdelt (GDELT news volume).' },
+      base: { type: 'string', description: 'fx: base currency, default USD.' }, quote: { type: 'string', description: 'fx: one quote currency, e.g. INR.' }, quotes: { type: 'array', description: 'fx: up to ten quote currencies.' },
+      start: { type: 'string', description: 'fx/gdelt window start, YYYY-MM-DD (fx defaults to a year back, gdelt to 30 days, within its 90-day range).' }, end: { type: 'string', description: 'fx/gdelt window end, YYYY-MM-DD, default today.' },
+      country: { type: 'string', description: 'worldbank: ISO2/ISO3 country; imf: ISO3.' }, indicator: { type: 'string', description: 'worldbank indicator id (e.g. NY.GDP.MKTP.KD.ZG, TM.VAL.MRCH.CD.WT) or IMF DataMapper id (e.g. NGDP_RPCH, PCPIPCH).' }, startYear: { type: 'number' }, endYear: { type: 'number' },
+      reporter: { type: 'string', description: 'comtrade: reporting country, ISO3 (e.g. IND).' }, partner: { type: 'string', description: 'comtrade: ALL (per-partner breakdown, default), WLD (world total), or a partner ISO3; TWN reads Comtrade\'s "Other Asia, nes".' }, hs: { type: 'string', description: 'comtrade: HS code of 2, 4 or 6 digits (e.g. 8542 integrated circuits, 8541 semiconductor devices) or TOTAL.' }, flow: { type: 'string', description: 'comtrade: import (default) or export.' }, periods: { type: 'array', description: 'comtrade: up to six periods, all annual (2025) or all monthly (202606), matching frequency.' },
+      query: { type: 'string', description: 'gdelt: a GDELT DOC query, e.g. (taiwan OR china) semiconductor export controls.' }, subscribe: { type: 'boolean', description: 'ingest_feed: keep this feed refreshed by `elia battmann refresh` (default true).' },
       priorProbability: { type: 'number' }, probability: { type: 'number' }, signals: { type: 'array' }, components: { type: 'array' },
       subject: { type: 'string' }, priorRisk: { type: 'number', description: 'Neutral/base risk on a 0-100 scale before factors are applied; defaults to 50.' }, factors: { type: 'array' }, trigger: { type: 'string' }, nodes: { type: 'array' },
       baseValue: { type: 'number', description: 'exposure_assessment: the value at risk that losses are measured against.' }, currency: { type: 'string' }, exposures: { type: 'array' },
-      theatre: { type: 'string' }, sideA: { type: 'string' }, sideB: { type: 'string' }, capabilities: { type: 'array' }, threats: { type: 'array' }, effectors: { type: 'array' },
       criteria: { type: 'array', description: 'alternatives: [{ id, name, weight, direction: higher-better|lower-better }].' }, candidates: { type: 'array', description: 'alternatives: [{ id, name, sourceUrl, sourceDate, reliability, scores: { <criterionId>: 0-100 } }].' }, incumbentId: { type: 'string' },
       indicatorId: { type: 'string' }, unit: { type: 'string' }, frequency: { type: 'string', description: 'indicator cadence: daily, weekly, monthly, quarterly, annual, or irregular.' }, higherIs: { type: 'string', description: 'define_indicator: whether a higher reading is risk-on, risk-off, or neutral.' }, sourceName: { type: 'string' }, value: { type: 'number' }, forecasts: { type: 'array' }, forecastId: { type: 'string' }, forecastClass: { type: 'string', description: 'live for predictions physically logged before resolution; backtest for historical replay that cannot support a live superiority claim.' }, evidenceIds: { type: 'array' }, method: { type: 'string' }, model: { type: 'string' }, forecaster: { type: 'string' }, rationale: { type: 'string' },
       evidenceId: { type: 'string' }, title: { type: 'string' }, url: { type: 'string' }, publisher: { type: 'string' }, sourceType: { type: 'string' }, publishedAt: { type: 'string' }, retrievedAt: { type: 'string' }, excerpt: { type: 'string' }, independenceGroup: { type: 'string' }, reliability: { type: 'number' },
@@ -702,19 +709,24 @@ export const battmannTool: Tool = {
     required: ['action'],
   },
   async execute(input) {
-    if (input.action === 'forecast') return calculateForecast(input)
-    if (input.action === 'ensemble') return calculateEnsemble(input)
-    if (input.action === 'backtest') return backtestForecasts(input)
-    if (input.action === 'risk_assessment') return calculateRiskAssessment(input)
-    if (input.action === 'consequence_chain') return buildConsequenceChain(input)
-    if (input.action === 'exposure_assessment') return calculateExposureAssessment(input)
-    if (input.action === 'posture_assessment') return assessPosture(input)
-    if (input.action === 'effector_pairing') return pairEffectors(input)
-    if (input.action === 'alternatives') return rankAlternatives(input)
-    if (input.action === 'dashboard') return createDashboard(input)
-    if (input.action === 'report') return createReport(input)
-    if (input.action === 'report_from_store') return createStoreReport(input)
-    if (typeof input.action === 'string' && (BATTMANN_STORE_ACTIONS as readonly string[]).includes(input.action)) return executeBattmannStoreAction(input)
-    throw new Error(`action must be forecast, ensemble, backtest, risk_assessment, consequence_chain, exposure_assessment, posture_assessment, effector_pairing, alternatives, report, report_from_store, dashboard, or one of: ${BATTMANN_STORE_ACTIONS.join(', ')}`)
+    return withModelBoundary(input, (bounded) => {
+      const action = bounded.action
+      if (action === 'forecast') return calculateForecast(bounded)
+      if (action === 'ensemble') return calculateEnsemble(bounded)
+      if (action === 'backtest') return backtestForecasts(bounded)
+      if (action === 'risk_assessment') return calculateRiskAssessment(bounded)
+      if (action === 'consequence_chain') return buildConsequenceChain(bounded)
+      if (action === 'exposure_assessment') return calculateExposureAssessment(bounded)
+      if (action === 'alternatives') return rankAlternatives(bounded)
+      if (action === 'dashboard') return createDashboard(bounded)
+      if (action === 'report') return createReport(bounded)
+      if (action === 'report_from_store') return createStoreReport(bounded)
+      if (action === 'feed_query') return feedQuery(bounded)
+      if (action === 'ingest_feed') return ingestFeed(bounded)
+      if (action === 'resolve_due') return resolveDueAction(bounded)
+      if (action === 'create_question' && bounded.resolutionRule !== undefined && bounded.resolutionRule !== null) return openRuleQuestion(bounded).then((result) => JSON.stringify({ action, ...result }, null, 2))
+      if (typeof action === 'string' && (BATTMANN_STORE_ACTIONS as readonly string[]).includes(action)) return executeBattmannStoreAction(bounded)
+      throw new Error(`action must be one of: ${[...CALCULATION_ACTIONS, ...ARTIFACT_ACTIONS, ...FEED_ACTIONS, ...BATTMANN_STORE_ACTIONS].join(', ')}`)
+    })
   },
 }

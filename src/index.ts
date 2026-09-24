@@ -102,6 +102,10 @@ async function main() {
       const { runWorkspace } = await import('./workspace/cli.ts')
       return runWorkspace(args)
     }
+    case 'battmann': {
+      const { runBattmann } = await import('./battmann/cli.ts')
+      return runBattmann()
+    }
     case 'bridge': {
       if (hasFlag('--http')) {
         const portRaw = flagValue('--port') ?? '4319'
