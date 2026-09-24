@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { ELIA_ROOT, config } from '../config.ts'
+import { DEV_SYSTEM_PROMPT, ELIA_ROOT, config } from '../config.ts'
 import { runAgentLoop, type ConversationMessage } from '../agentLoop.ts'
 import { runSubAgent } from '../subagent.ts'
 import { allWorkerTools } from '../tools/registry.ts'
@@ -791,6 +791,8 @@ Passing: ${baseline.passed.join(', ') || '(none)'}
 FAILING: ${failing}
 Observed model steps: ${baseline.steps ? Object.entries(baseline.steps).map(([id, steps]) => `${id}=${steps}`).join(', ') : '(not recorded)'}
 Cost of one full run: ${baseline.totalTokens} tokens, ${Math.round(baseline.totalElapsedMs / 1000)}s of agent time.${renderFailureEvidence(evidence)}${fieldEvidenceSection()}
+${winningRuleSection(baseline)}
+${tokenCostSection()}
 
 ## What you may not change
 These files define how you are judged or enforce deterministic safety boundaries, and editing them is an automatic rejection:
@@ -803,6 +805,51 @@ ${measurableSection(baseline)}
 ${redactHeldOut(renderLedgerForPrompt(), heldOutIds)}${redactHeldOut(renderSteppingStones(elites(readArchive(EVOLUTION_DIR))), heldOutIds)}
 
 Investigate, then submit exactly one hypothesis.`
+}
+
+/**
+ * The rule a candidate is judged by, stated where the proposer reads it.
+ *
+ * The brief used to point at suite.ts for what "better" means, but the tasks
+ * only say what passes; the rule that turns two scorecards into a verdict is
+ * `compareScorecards`, which the proposer was never shown. The first run on
+ * this machine had every shown task passing, so the one way left to win was
+ * efficiency — and both of its proposals added text to the system prompt,
+ * which every model call pays for.
+ */
+export function winningRuleSection(baseline: Metrics): string {
+  const rates: Record<string, number> = baseline.taskRates ?? Object.fromEntries([...baseline.passed.map((id) => [id, 1]), ...baseline.failed.map((id) => [id, 0])])
+  const headroom = Object.values(rates).some((rate) => rate < 1)
+  return `
+## How a candidate wins
+Each task runs several times; its score is the fraction that passed, and it only counts as moving when that changes by at least half its attempts.
+- Any task that falls by that much rejects the candidate, whatever else improved.
+- A task that rises by that much, with no regression, wins.
+- Otherwise the pass rate is a tie, and the candidate wins only by using at least 5% fewer tokens (without taking 5% longer), or at least 5% less time (without using 5% more tokens).
+- A provisional win is measured again, in full, on both trees; it must win again.
+${headroom ? '' : '\nEvery task you are shown passes every attempt, so a tie is the best a correctness change can do here: efficiency is the way to win.\n'}`
+}
+
+/**
+ * What every model call pays before the conversation starts, measured from this
+ * tree's own prompt and tool definitions (about four characters to a token).
+ *
+ * Measured on 2026-09-24: about 3.6k tokens of system prompt and 14k of
+ * definitions for 50 tools went out on every step of every task — about 80% of
+ * a step's input, for tools like github, browser and finance that no coding
+ * task calls. The proposer could not see that, and aimed elsewhere.
+ */
+export function tokenCostSection(prompt = DEV_SYSTEM_PROMPT, tools: Pick<Tool, 'name' | 'description' | 'input_schema'>[] = allWorkerTools()): string {
+  const tokens = (chars: number) => Math.round(chars / 4)
+  const sizes = tools.map((tool) => ({ name: tool.name, chars: JSON.stringify({ name: tool.name, description: tool.description, input_schema: tool.input_schema }).length }))
+  const toolChars = sizes.reduce((sum, tool) => sum + tool.chars, 0)
+  const largest = [...sizes].sort((a, b) => b.chars - a.chars).slice(0, 8)
+  const share = Math.round((toolChars / (toolChars + prompt.length)) * 100)
+  return `
+## Where the tokens go
+Every model call sends, before any conversation: the system prompt (src/config.ts DEV_SYSTEM_PROMPT, about ${tokens(prompt.length)} tokens) and the definitions of ${tools.length} tools (about ${tokens(toolChars)} tokens, ${share}% of that fixed cost). A task takes several calls, so this is paid again on every step.
+Largest tool definitions: ${largest.map((tool) => `${tool.name} ~${tokens(tool.chars)}`).join(', ')}.
+Making elia cheaper is a real improvement. Removing a tool, or putting it out of reach, is not: it is a capability loss the benchmark cannot see, and it is not an acceptable way to win. Every tool must stay usable by a task that needs it.`
 }
 
 /**

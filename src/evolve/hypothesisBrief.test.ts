@@ -97,3 +97,22 @@ test('the proposer sees what the agent did on a failing task, and only for the f
   expect(brief).not.toContain('→ ok: e')
   expect(brief).toContain('- e (19 steps')
 })
+
+test('the proposer is told the rule it is judged by, and that efficiency is all that is left when everything shown passes', async () => {
+  const { winningRuleSection } = await import('./engine.ts')
+  const saturated = winningRuleSection({ ...METRICS, passed: ['a', 'b'], failed: [], taskRates: { a: 1, b: 1 } })
+  expect(saturated).toContain('at least 5% fewer tokens')
+  expect(saturated).toContain('efficiency is the way to win')
+  // With a failure on show, a fix is still the obvious route, so no steer.
+  expect(winningRuleSection({ ...METRICS, taskRates: { a: 1, b: 2 / 3 } })).not.toContain('efficiency is the way to win')
+})
+
+test('the proposer sees what every model call pays for, and that dropping a tool is not a saving', async () => {
+  const { tokenCostSection } = await import('./engine.ts')
+  const tool = (name: string, description: string) => ({ name, description, input_schema: { type: 'object' as const, properties: {} } })
+  const section = tokenCostSection('p'.repeat(4_000), [tool('small', 'x'), tool('huge', 'y'.repeat(4_000))])
+  expect(section).toContain('about 1000 tokens')
+  expect(section).toContain('definitions of 2 tools')
+  expect(section.indexOf('huge ~')).toBeLessThan(section.indexOf('small ~'))
+  expect(section).toContain('Removing a tool, or putting it out of reach, is not')
+})
