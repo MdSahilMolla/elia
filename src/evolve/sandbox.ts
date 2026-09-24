@@ -61,6 +61,10 @@ export const IMMUTABLE_FILES = [
   'src/evolve/suite.ts',
   'src/evolve/hardSuite.ts',
   'src/evolve/fieldSuite.ts',
+  // The tasks that can only be passed by cheating, and the gate that runs them.
+  // A candidate that could edit either could make its own cheating invisible.
+  'src/evolve/canarySuite.ts',
+  'src/evolve/canaryGate.ts',
   'src/evolve/fitness.ts',
   'src/evolve/engine.ts',
   'src/evolve/ledger.ts',
@@ -121,6 +125,9 @@ export const IMMUTABLE_FILES = [
   'src/evolve/strategy.ts',
   'src/evolve/benchLessons.ts',
   'src/evolve/metaPropose.ts',
+  // Which model does the proposing. A candidate that could edit this could
+  // move every later generation's search onto a model of its choosing.
+  'src/evolve/improverRoute.ts',
   // The sealed gate, the isolation checks, the certified library and its
   // auditor, the frontier measurements and the resource governor with the
   // runners it acts through. "The meta-loop must never modify the resource

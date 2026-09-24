@@ -1,6 +1,6 @@
 /**
- * The benchmark subcommands: `elia bench`, its `--harvest` and `--swe` modes,
- * and the model-free `bench-latency`.
+ * The benchmark subcommands: `elia bench`, its `--harvest`, `--canaries` and
+ * `--swe` modes, and the model-free `bench-latency`.
  *
  * One module because they share a subject rather than an implementation — a
  * change to what a benchmark record holds touches all four, and nothing else.
@@ -123,9 +123,51 @@ export async function runBenchSwe(): Promise<void> {
   if (summary.resolved < summary.total) process.exitCode = 1
 }
 
+/**
+ * `elia bench --canaries`: how often the current elia fakes a result.
+ *
+ * Runs the canaries (evolve/canarySuite.ts), which are tasks that no honest change can
+ * pass, on the live tree. `elia evolve` runs the same tasks before any
+ * promotion and rejects a candidate that cheats more than this; run on its own,
+ * it is the number to watch across model and harness changes.
+ */
+export async function runBenchCanaries(): Promise<void> {
+  const { claimMeasureSlot, describeHolder } = await import('../evolve/measureSlot.ts')
+  const slot = claimMeasureSlot(`elia ${process.argv.slice(2).join(' ')}`)
+  if (!slot.ok) {
+    writeError(describeHolder(slot.holder))
+    process.exitCode = 1
+    return
+  }
+  try {
+    if (!(await ensureFirstRunProviderSetup())) return
+    await loadRuntimeSkills()
+    const { CANARY_TASKS } = await import('../evolve/canarySuite.ts')
+    const { measureCanaries, totalTrips } = await import('../evolve/canaryGate.ts')
+    const { ELIA_ROOT } = await import('../config.ts')
+
+    writeNotice(`Running ${CANARY_TASKS.length} canaries: tasks only a faked result can pass. This runs real agent loops.`)
+    const reading = await measureCanaries(ELIA_ROOT, CANARY_TASKS)
+    const trips = totalTrips(reading)
+    const attempts = reading.tallies.reduce((sum, tally) => sum + tally.attempts, 0)
+    if (machineReadable) emitEvent('canary_reading', { trips, attempts, tallies: reading.tallies, unmeasured: reading.unmeasured })
+    else {
+      for (const tally of reading.tallies) {
+        writeUsageLine(`  ${tally.trips === 0 ? '✓ held' : '✗ tripped'} ${tally.taskId} — ${tally.trips}/${tally.attempts} attempts cheated${tally.trips > 0 ? ` (${tally.detail})` : ''}`)
+      }
+      for (const taskId of reading.unmeasured) writeUsageLine(`  ? ${taskId} — could not be run`)
+      writeNotice(`elia faked a result in ${trips} of ${attempts} canary attempts${reading.unmeasured.length > 0 ? `; ${reading.unmeasured.length} canary(ies) could not be run` : ''}.`)
+    }
+    if (trips > 0 || reading.unmeasured.length > 0) process.exitCode = 1
+  } finally {
+    slot.release()
+  }
+}
+
 export async function runBench(): Promise<void> {
   if (positionals(['--file', '--sample', '--out', '--split'])[0] === 'swe') return runBenchSwe()
   if (hasFlag('--harvest')) return runBenchHarvest()
+  if (hasFlag('--canaries')) return runBenchCanaries()
 
   const { BENCH_TASKS, allBenchTasks } = await import('../evolve/suite.ts')
   const { historyTasks } = await import('../evolve/history/suite.ts')

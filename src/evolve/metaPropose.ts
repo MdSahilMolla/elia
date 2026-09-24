@@ -5,6 +5,7 @@ import { writeText } from '../ui/stream.ts'
 import { writePhase, writeSubStep } from '../ui/report.ts'
 import { learningRate, readLedger, renderLedgerForPrompt } from './ledger.ts'
 import { incumbentStrategy, renderFunnelForPrompt, writeChallenger, type Strategy } from './strategy.ts'
+import { improverLoopRoute, improverRoute } from './improverRoute.ts'
 
 /**
  * The step where the improver rewrites how it improves.
@@ -71,7 +72,7 @@ export async function proposeChallengerStrategy(generation: number, signal?: Abo
   try {
     // Ends on the first accepted strategy: the first run here asked for one and
     // got thirteen submissions, each overwriting the last and each paid for.
-    await runAgentLoop({ messages, systemPrompt: META_PROMPT, tools: [...readOnly, submit], onText: writeText, useAnimation: true, verbose: true, maxSteps: META_MAX_STEPS, signal, finishAfterTool: 'submit_strategy' })
+    await runAgentLoop({ ...improverLoopRoute(improverRoute()), messages, systemPrompt: META_PROMPT, tools: [...readOnly, submit], onText: writeText, useAnimation: true, verbose: true, maxSteps: META_MAX_STEPS, signal, finishAfterTool: 'submit_strategy' })
   } catch (err) {
     writeSubStep(`could not write a new strategy: ${err instanceof Error ? err.message : String(err)}`)
     return undefined

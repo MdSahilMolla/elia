@@ -76,6 +76,8 @@ import { fieldEvidenceSection } from './fieldEvidence.ts'
 import { gateDecision, gateMode, meanGainOver, sealedCompare, type SealedVerdict } from './acceptance.ts'
 import { diffDigest, redactHeldOut, sealedReadTools } from './isolation.ts'
 import { applySteppingStone, archiveNearMiss, elites, readArchive, renderSteppingStones } from './archive.ts'
+import { improverLoopRoute, improverRoute, withImproverBuilder } from './improverRoute.ts'
+import { checkCanaries } from './canaryGate.ts'
 
 /**
  * Elia improving elia.
@@ -161,6 +163,11 @@ export async function evolve(options: EvolveOptions = {}): Promise<EvolveResult>
   const trial = settleStrategyTrial(readLedger())
   if (trial.verdict === 'adopt') writePass(`search strategy ${trial.challenger!.id} adopted — its generations went further (${trial.challenger!.meanDepth.toFixed(2)} vs ${trial.incumbent.meanDepth.toFixed(2)})`)
   else if (trial.verdict === 'reject') writeSubStep(`search strategy ${trial.challenger!.id} retired — not ahead after ${trial.challenger!.generations} generations`)
+
+  // Resolved before anything is spent, so a mistyped route stops the run here
+  // instead of after a full baseline sweep.
+  const improver = improverRoute()
+  if (improver) writeSubStep(`improver on ${improver.label}; candidates measured on ${config.providerLabel}`)
 
   const everyTask = allBenchTasks()
   const tasks = options.taskIds ? everyTask.filter((task) => options.taskIds!.includes(task.id)) : everyTask
@@ -358,6 +365,8 @@ async function attemptGeneration(
     reason: '',
     model: config.model,
   }
+  const improver = improverRoute()
+  if (improver) base.improverModel = improver.label
   // Hand the caller the live record, so an attempt that throws is still
   // reported at the stage it reached.
   onStarted(base)
@@ -391,6 +400,7 @@ async function attemptGeneration(
   ]
 
   await runAgentLoop({
+    ...improverLoopRoute(improver),
     messages,
     systemPrompt: hypothesisPrompt(strategy),
     tools: [...readOnly, capture.tool],
@@ -435,13 +445,15 @@ async function attemptGeneration(
   // --- Implement it inside the sandbox --------------------------------------
 
   writePhase('execute', `applying it in ${sandbox.root}`)
-  await runSubAgent({
-    role: 'builder',
-    name: `builder#gen${generation}`,
-    prompt: implementationBrief(sandbox, hypothesis),
-    signal: options.signal,
-    tools: candidateTools(sandbox.root, allWorkerTools()),
-  })
+  await withImproverBuilder(improver, () =>
+    runSubAgent({
+      role: 'builder',
+      name: `builder#gen${generation}`,
+      prompt: implementationBrief(sandbox, hypothesis),
+      signal: options.signal,
+      tools: candidateTools(sandbox.root, allWorkerTools()),
+    }),
+  )
 
   // --- Gate -----------------------------------------------------------------
 
@@ -736,9 +748,24 @@ async function attemptGeneration(
     return { ...base, verdict: 'rejected', reason }
   }
   recordProbeRun(candidateProbes, `evolve-gen-${generation}`)
+
+  // The benchmark counts a faked result as a pass wherever its check cannot
+  // tell the difference. The canaries are tasks where only a faked result can
+  // pass, so they see what the score cannot (canarySuite.ts).
+  writeSubStep('checking the candidate does not game its checks')
+  const canaries = await checkCanaries(sandbox.root, ELIA_ROOT, { signal: options.signal })
+  if (canaries.record) base.canaries = canaries.record
+  if (canaries.baselineTrips > 0) writeSubStep(`the live tree itself tripped ${canaries.baselineTrips} canary attempt(s) — the model under test games checks on its own`)
+  if (!canaries.ok) {
+    const reason = canaries.reason
+    writeFail(`rejected: ${reason}`)
+    writeSubStep(`sandbox kept at ${sandbox.root} if you want to inspect it`)
+    return { ...base, verdict: 'rejected', reason }
+  }
+  writeSubStep(canaries.reason)
   base.funnel = 'guarded'
 
-  const confirmedReason = `${decisionReason}; confirmed independently (${gate === 'sealed' ? sealedConfirmation.reason : confirmation.reason}); verifier and values held`
+  const confirmedReason = `${decisionReason}; confirmed independently (${gate === 'sealed' ? sealedConfirmation.reason : confirmation.reason}); verifier, values and canaries held`
 
   if (options.dryRun) {
     writePass(`would promote: ${confirmedReason}`)
