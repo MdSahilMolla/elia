@@ -58,7 +58,8 @@ import {
   type Sandbox,
 } from './sandbox.ts'
 import { candidateTools } from './candidateTools.ts'
-import { gapVectorIn, valueProbesIn } from './measureTree.ts'
+import { gapVectorIn, toolNamesIn, valueProbesIn } from './measureTree.ts'
+import { removedTools } from './toolSurface.ts'
 import { checkGapNotRegressed } from '../gap/guard.ts'
 import { checkValueDrift, confirmValueDrift, recordProbeRun } from '../values/drift.ts'
 import { allBenchTasks, type BenchTask } from './suite.ts'
@@ -490,6 +491,22 @@ async function attemptGeneration(
   }
   writePass('unit tests')
   base.funnel = 'tested'
+
+  // Cheaper by owning fewer tools is not cheaper: no benchmark task calls most
+  // of them, so the loss would never show up in a score (toolSurface.ts).
+  // Checked before the benchmark, so a candidate that does it costs no runs.
+  const [liveSurface, candidateSurface] = await Promise.all([toolNamesIn(ELIA_ROOT, options.signal), toolNamesIn(sandbox.root, options.signal)])
+  if (!liveSurface || !candidateSurface) {
+    const reason = 'could not read the tools each tree gives its agent — refusing to measure a candidate that may have dropped some'
+    writeFail(`rejected: ${reason}`)
+    return { ...base, verdict: 'rejected', reason }
+  }
+  const dropped = removedTools(liveSurface, candidateSurface)
+  if (dropped.length > 0) {
+    const reason = `removed tools the agent is given (${dropped.join(', ')}) — a capability no benchmark task uses is still a capability; describe a tool in fewer tokens instead of taking it away`
+    writeFail(`rejected: ${reason}`)
+    return { ...base, verdict: 'rejected', reason }
+  }
 
   // --- Measure the candidate, using the candidate ---------------------------
 

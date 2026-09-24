@@ -89,6 +89,9 @@ export const IMMUTABLE_FILES = [
   // this, it could route the gap and value checks back at the live tree and make
   // them pass by construction — the exact bug those checks were just fixed for.
   'src/evolve/measureTree.ts',
+  // Which tools each tree gives its agent: a candidate that could edit this
+  // could report the live list while shipping a shorter one (toolSurface.ts).
+  'src/evolve/toolSurface.ts',
   // Which tasks a candidate is measured on, and when the measuring stops. These
   // decide the verdict just as much as fitness.ts computes it: a candidate that
   // could rewrite the sieve could mark every task unreachable and be promoted

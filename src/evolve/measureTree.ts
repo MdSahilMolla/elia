@@ -47,6 +47,12 @@ export async function valueProbesIn(
   return spawnJson<ValueProbeRun>(join(root, 'src', 'values', 'measure.ts'), args, options.signal)
 }
 
+/** The names of the tools `root`'s own registry gives its agent (toolSurface.ts). */
+export async function toolNamesIn(root: string, signal?: AbortSignal): Promise<string[] | undefined> {
+  const surface = await spawnJson<{ tools?: unknown }>(join(root, 'src', 'evolve', 'toolSurface.ts'), [], signal)
+  return Array.isArray(surface?.tools) && surface.tools.every((name) => typeof name === 'string') ? (surface.tools as string[]) : undefined
+}
+
 async function spawnJson<T>(entry: string, args: string[], signal?: AbortSignal): Promise<T | undefined> {
   const proc = Bun.spawn(['bun', 'run', entry, ...args], {
     cwd: ELIA_ROOT,
