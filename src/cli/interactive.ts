@@ -827,6 +827,7 @@ export async function runInteractive(): Promise<void> {
     // verify:"none"/clean regardless of what actually happened.
     let escalatedAborted = false
     let repairAttempts = 0
+    let grounding: import('../trajectory/record.ts').TrajectoryGrounding | undefined
     const unregisterControls = taskSessions.registerControls(task.id, {
       cancel: () => {
         stopRequested = true
@@ -1144,6 +1145,33 @@ export async function runInteractive(): Promise<void> {
         }
       }
 
+      // Grounding: an answer that cites a file or line that does not exist is
+      // sent back once to look it up (reason/grounding.ts). Checking costs no
+      // model call; the repair turn is spent only when a citation is provably
+      // wrong, and a clean check is never recorded as a pass.
+      if (!persona && !escalated && !searched && autoVerify && !uiHooks?.planMode && !controller.signal.aborted) {
+        const { checkGrounding, describeGrounding, extractCitations, groundingBriefing } = await import('../reason/grounding.ts')
+        const ground = () => checkGrounding(extractCitations(lastAssistantText(messages, '')), process.cwd(), { touched: Object.keys(tracker.snapshot()) })
+        const first = ground()
+        grounding = { checked: first.checked, ungrounded: first.ungrounded.length }
+        if (first.ungrounded.length > 0) {
+          const summary = `The answer cites locations that do not exist — checking them (${describeGrounding(first)})`
+          uiHooks?.onActivity?.({ kind: 'status', status: 'warning', title: summary })
+          if (!uiHooks) writeNotice(`▸ ${summary}`)
+          sessionTranscript.notice(summary)
+          messages.push(userMessage(groundingBriefing(first)))
+          await runModelTurn()
+          const after = ground()
+          grounding.afterRepair = after.ungrounded.length
+          if (after.ungrounded.length > 0) {
+            const line = `⚠ ${describeGrounding(after)} — still, after one correction`
+            uiHooks?.onActivity?.({ kind: 'status', status: 'warning', title: line })
+            if (!uiHooks) writeNotice(line)
+            sessionTranscript.notice(line)
+          }
+        }
+      }
+
       // Auto-preview: a turn that just scaffolded a static site under workspace/
       // should offer the live URL without the user asking — this also covers
       // ChatGPT-subscription turns, whose file writes never reach the `preview`
@@ -1375,6 +1403,7 @@ export async function runInteractive(): Promise<void> {
             touched,
             verify: verifyResult,
             cwdIsEliaRoot: process.cwd() === ELIA_ROOT,
+            ...(grounding ? { grounding } : {}),
             reward: deriveReward({
               toolErrors: toolErrorCount,
               editRetries: editRetryCount,

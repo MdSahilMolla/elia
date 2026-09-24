@@ -66,6 +66,19 @@ export interface TrajectoryRow {
   /** True when elia was working on its own checkout — these rows are safe to mint benchmark tasks from. */
   cwdIsEliaRoot: boolean
   reward: TrajectoryReward
+  /**
+   * The answer's citations checked against the checkout (reason/grounding.ts):
+   * how many were checked, how many did not exist, and how many still did not
+   * after the one repair turn. Absent when nothing was cited or it did not run.
+   */
+  grounding?: TrajectoryGrounding
+}
+
+export interface TrajectoryGrounding {
+  checked: number
+  ungrounded: number
+  /** Present only when a repair turn ran. */
+  afterRepair?: number
 }
 
 export interface RewardSignals {
@@ -168,6 +181,7 @@ export interface TrajectoryInput {
   contradictions?: string[]
   cwdIsEliaRoot: boolean
   reward: TrajectoryReward
+  grounding?: TrajectoryGrounding
 }
 
 /** Append one row for a completed turn/run. Never throws. `baseDir` is for tests. */
@@ -187,6 +201,7 @@ export function recordTrajectory(input: TrajectoryInput, baseDir = paths.traject
       contradictions: input.contradictions && input.contradictions.length > 0 ? input.contradictions : undefined,
       cwdIsEliaRoot: input.cwdIsEliaRoot,
       reward: input.reward,
+      ...(input.grounding && input.grounding.checked > 0 ? { grounding: input.grounding } : {}),
     }
 
     let line = JSON.stringify(row)
