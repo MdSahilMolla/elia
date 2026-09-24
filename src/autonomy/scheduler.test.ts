@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { formatScheduleInterval, MIN_SCHEDULE_INTERVAL_MS, parseScheduleInterval, ScheduleStore } from './scheduler.ts'
@@ -77,4 +77,36 @@ test('persists Battmann mode for recurring intelligence runs', () => {
   const store = ScheduleStore.open(path)
   store.create({ title: 'Risk watch', goal: 'Refresh the risk brief', intervalMs: MIN_SCHEDULE_INTERVAL_MS, mode: 'battmann', now: 1_000 })
   expect(ScheduleStore.open(path).list()[0]?.mode).toBe('battmann')
+})
+
+test('quarantines a corrupt schedules file instead of overwriting the only copy on the next persist', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'elia-schedule-'))
+  const path = join(dir, 'schedules.json')
+  const corruptBytes = Buffer.from('<not-json>\u0000{schedules truncated', 'utf8')
+  writeFileSync(path, corruptBytes)
+
+  const store = ScheduleStore.open(path)
+  expect(store.list()).toHaveLength(0)
+  expect(existsSync(path)).toBe(false)
+
+  const quarantine = readdirSync(dir).filter((name) => name.startsWith('schedules.json.corrupt-'))
+  expect(quarantine).toHaveLength(1)
+  expect(readFileSync(join(dir, quarantine[0]!))).toEqual(corruptBytes)
+
+  store.create({ title: 'Bounce back', goal: 'Keep working after corruption', intervalMs: MIN_SCHEDULE_INTERVAL_MS, now: 1_000 })
+  store.remove(store.list()[0]!.id)
+
+  expect(readdirSync(dir).filter((name) => name.startsWith('schedules.json.corrupt-'))).toHaveLength(1)
+  expect(readFileSync(join(dir, quarantine[0]!))).toEqual(corruptBytes)
+})
+
+test('loads a valid schedules file without quarantining anything', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'elia-schedule-'))
+  const path = join(dir, 'schedules.json')
+  writeFileSync(path, JSON.stringify({ version: 2, schedules: [{ id: 'ok', goal: 'valid schedule', intervalMs: MIN_SCHEDULE_INTERVAL_MS }] }))
+
+  const store = ScheduleStore.open(path)
+  expect(store.list()).toHaveLength(1)
+  expect(store.list()[0]?.id).toBe('ok')
+  expect(readdirSync(dir).some((name) => name.startsWith('schedules.json.corrupt-'))).toBe(false)
 })

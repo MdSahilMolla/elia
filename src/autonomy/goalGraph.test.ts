@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, setSystemTime, test } from 'bun:test'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { ACTION_APPROVAL_TTL_MS, EXECUTION_LEASE_TTL_MS, GoalGraphStore, actionKey, classifyFailure, isReportingTool, outstandingActions, readGoalGraphSnapshot, type GoalGraphOptions } from './goalGraph.ts'
@@ -177,6 +177,85 @@ describe('durable goal graph', () => {
     // Well past the grace: reclaimed even though the pid is alive (wedged worker).
     expect(graph.reconcileStaleLeases(Date.now() + EXECUTION_LEASE_TTL_MS * 4).nodes).toEqual(['step:inspect'])
     expect(graph.node('step:inspect')?.status).toBe('waiting-retry')
+  })
+
+  test('reserveAction does not reclaim an expired lease held by a live owner inside the grace window', () => {
+    const { graph } = createGraph()
+    graph.seedProposal(proposal)
+    const request = { name: 'run_command', input: { command: 'deploy --once' } }
+    const reserved = graph.reserveAction(request, 'step:build')
+    expect(reserved.decision).toBe('execute')
+    graph.startAction(reserved.action.id)
+
+    // A different, still-alive elia process (this test's own pid) holds a lease
+    // that just expired. Reclaiming it now would hand a second worker `execute`
+    // while the first is merely stalled past the TTL — the duplicate-outward-act
+    // bug this guard exists for.
+    const snapshot = JSON.parse(readFileSync(graph.path, 'utf8'))
+    const record = snapshot.actions.find((a: { id: string }) => a.id === reserved.action.id)
+    record.leaseOwner = `${process.pid}:foreign-worker`
+    record.leaseExpiresAt = Date.now() - 1_000
+    writeFileSync(graph.path, JSON.stringify(snapshot))
+
+    const again = graph.reserveAction(request, 'step:build')
+    expect(again.decision).toBe('human-review')
+    expect(again.action.state).toBe('running')
+    expect(again.action.leaseOwner).toBe(`${process.pid}:foreign-worker`)
+    expect(again.action.leaseExpiresAt).toBeLessThanOrEqual(Date.now())
+  })
+
+  test('reserveAction reclaims an expired lease from a dead owner, or a live owner past the grace window', () => {
+    const { graph } = createGraph()
+    graph.seedProposal(proposal)
+    const request = { name: 'run_command', input: { command: 'deploy --once' } }
+    const reserved = graph.reserveAction(request, 'step:build')
+    graph.startAction(reserved.action.id)
+
+    // Dead owner pid: expiry alone is enough to reclaim.
+    let snapshot = JSON.parse(readFileSync(graph.path, 'utf8'))
+    let record = snapshot.actions.find((a: { id: string }) => a.id === reserved.action.id)
+    record.leaseOwner = '2147483647:ghost'
+    record.leaseExpiresAt = Date.now() - 5_000
+    writeFileSync(graph.path, JSON.stringify(snapshot))
+
+    let again = graph.reserveAction(request, 'step:build')
+    expect(again.decision).toBe('execute')
+    expect(again.action.state).toBe('retryable')
+    expect(again.action.leaseOwner).toBeUndefined()
+
+    // Live owner, but well past LEASE_LIVE_OWNER_GRACE_MS (3× the TTL): reclaimed.
+    snapshot = JSON.parse(readFileSync(graph.path, 'utf8'))
+    record = snapshot.actions.find((a: { id: string }) => a.id === reserved.action.id)
+    record.state = 'running'
+    record.leaseOwner = `${process.pid}:wedged-worker`
+    record.leaseExpiresAt = Date.now() - EXECUTION_LEASE_TTL_MS * 4
+    writeFileSync(graph.path, JSON.stringify(snapshot))
+
+    again = graph.reserveAction(request, 'step:build')
+    expect(again.decision).toBe('execute')
+    expect(again.action.state).toBe('retryable')
+    expect(again.action.leaseOwner).toBeUndefined()
+  })
+
+  test('reserveAction reclaims an expired EXECUTION_OWNER lease with no live-owner grace', () => {
+    const { graph } = createGraph()
+    graph.seedProposal(proposal)
+    const request = { name: 'run_command', input: { command: 'deploy --once' } }
+    const reserved = graph.reserveAction(request, 'step:build')
+    graph.startAction(reserved.action.id)
+
+    // EXECUTION_OWNER carries this process's own pid — alive — yet it is exempt
+    // from the grace window (mirrors isLeaseGenuinelyStale), so an expired
+    // lease is reclaimed immediately.
+    const snapshot = JSON.parse(readFileSync(graph.path, 'utf8'))
+    const record = snapshot.actions.find((a: { id: string }) => a.id === reserved.action.id)
+    expect(record.leaseOwner.split(':')[0]).toBe(String(process.pid))
+    record.leaseExpiresAt = Date.now() - 1
+    writeFileSync(graph.path, JSON.stringify(snapshot))
+
+    const again = graph.reserveAction(request, 'step:build')
+    expect(again.decision).toBe('execute')
+    expect(again.action.state).toBe('retryable')
   })
 
   test('classifies transient, authorization, environment, and human-review failures', () => {
@@ -437,6 +516,47 @@ describe('corrupt durable state does not crash and is not confused with "no stat
     }).not.toThrow()
     expect(graph!.state().runId).toBe('test-run')
     expect(graph!.state().nodes).toHaveLength(1)
+  })
+
+  test('a torn goal-graph.json is quarantined, not overwritten by the fresh-root persist', () => {
+    const directory = mkdtempSync(join(tmpdir(), 'elia-goal-'))
+    temporaryDirectories.push(directory)
+    // Cut off mid-write: the only copy of the recoverable records.
+    const corruptBytes = '{ "runId": "test-run", "nodes": [ cut off mid-write'
+    const graphPath = join(directory, 'goal-graph.json')
+    writeFileSync(graphPath, corruptBytes)
+
+    const store = GoalGraphStore.open({ runId: 'test-run', goal: 'recover from a torn snapshot', dir: directory })
+    expect(store.state().runId).toBe('test-run')
+    expect(store.state().nodes).toHaveLength(1)
+    expect(store.openTornSnapshot?.path.startsWith(join(directory, 'goal-graph.json.corrupt-'))).toBe(true)
+    // The corrupt bytes no longer live at goal-graph.json (open replaced it with
+    // a fresh snapshot at the same path)...
+    expect(readFileSync(graphPath, 'utf8')).not.toBe(corruptBytes)
+    expect((JSON.parse(readFileSync(graphPath, 'utf8')) as { runId: string }).runId).toBe('test-run')
+    // ...and the exact original bytes survive aside, untouched by that persist.
+    const quarantined = readdirSync(directory).filter((name) => name.startsWith('goal-graph.json.corrupt-'))
+    expect(quarantined).toHaveLength(1)
+    const quarantinePath = join(directory, quarantined[0]!)
+    expect(readFileSync(quarantinePath, 'utf8')).toBe(corruptBytes)
+
+    // A later persist must not clobber the quarantine either.
+    store.reserveAction({ name: 'run_command', input: { command: 'echo still here' } })
+    expect(readFileSync(quarantinePath, 'utf8')).toBe(corruptBytes)
+    expect(readdirSync(directory).filter((name) => name.startsWith('goal-graph.json.corrupt-'))).toHaveLength(1)
+  })
+
+  test('a valid goal-graph.json opens normally with no quarantine file', () => {
+    const directory = mkdtempSync(join(tmpdir(), 'elia-goal-'))
+    temporaryDirectories.push(directory)
+    const options = { runId: 'test-run', goal: 'valid snapshot', dir: directory }
+    const first = GoalGraphStore.open(options)
+    first.reserveAction({ name: 'run_command', input: { command: 'bun test' } }, 'goal:root')
+
+    const reopened = GoalGraphStore.open(options)
+    expect(reopened.state().actions).toHaveLength(1)
+    expect(reopened.openTornSnapshot).toBeUndefined()
+    expect(readdirSync(directory).filter((name) => name.includes('.corrupt-'))).toEqual([])
   })
 })
 

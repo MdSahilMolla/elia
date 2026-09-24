@@ -2,7 +2,7 @@ import { availableParallelism, cpus } from 'node:os'
 import { autoFallbacksFor, config } from './config.ts'
 import { beginCompaction, shrinkForOversizedRequest, type PendingCompaction } from './compaction.ts'
 import { compactionThresholdFor } from './contextWindow.ts'
-import { isCapacityError, isConnectionError, isMalformedToolCallError, isRequestTooLargeError, isTransientServerError } from './providerErrors.ts'
+import { isCapacityError, isConnectionError, isMalformedToolCallError, isRequestTooLargeError, isTransientServerError, retryBackoffMs } from './providerErrors.ts'
 import { createPlanlessWorkTracker, createRedundantReadTracker, isLoneBatchableRead, serialReadNudge } from './autonomy/toolBatchingNudge.ts'
 import { createReadAhead } from './autonomy/readAhead.ts'
 import { createPlanProgressTracker, planBelongsToRequest, type PlanProgressUpdate, type ToolOutcome } from './autonomy/planProgress.ts'
@@ -1004,7 +1004,7 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
                 if (networkMayRecover()) break
                 throw error
               }
-              await Bun.sleep(250 * 2 ** (attempt - 1))
+              await sleepUnlessAborted(retryBackoffMs(failure, attempt), signal)
             }
           }
         }

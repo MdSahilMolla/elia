@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readFileSync, renameSync } from 'node:fs'
 import { join } from 'node:path'
 import { AsyncLocalStorage } from 'node:async_hooks'
 import type { Proposal } from './types.ts'
@@ -32,6 +32,21 @@ function leaseOwnerAlive(leaseOwner: string | undefined): boolean {
 
 /** Grace past lease expiry before a lease held by a still-live worker is reclaimed. */
 const LEASE_LIVE_OWNER_GRACE_MS = EXECUTION_LEASE_TTL_MS * 3
+
+/**
+ * A lease past its TTL but whose owner process (from a different elia process)
+ * is still alive is not yet stale: it may be a worker that stalled past the
+ * TTL, and reclaiming it now would run a second attempt alongside the first.
+ * Only reclaim once the owner is gone, or a long grace elapses. EXECUTION_OWNER
+ * is exempt from the grace — it names this process's own lease.
+ */
+function isLeaseGenuinelyStale(leaseOwner: string | undefined, expiresAt: number, now: number): boolean {
+  if (expiresAt > now) return false
+  if (leaseOwner && leaseOwner !== EXECUTION_OWNER && leaseOwnerAlive(leaseOwner)) {
+    return now - expiresAt > LEASE_LIVE_OWNER_GRACE_MS
+  }
+  return true
+}
 
 export type GoalNodeKind = 'goal' | 'step' | 'delegation'
 export type GoalNodeStatus = 'pending' | 'ready' | 'running' | 'waiting-approval' | 'waiting-retry' | 'completed' | 'failed' | 'blocked'
@@ -183,6 +198,8 @@ export class GoalGraphStore {
   private snapshot: GoalGraphSnapshot
   private lastLeaseRecovery = { nodes: 0, actions: 0 }
   private mutating = 0
+  /** Set when open quarantined a torn goal-graph.json instead of overwriting it. */
+  openTornSnapshot?: { path: string }
 
   private constructor(private readonly options: GoalGraphOptions, snapshot: GoalGraphSnapshot) {
     this.path = join(options.dir, 'goal-graph.json')
@@ -225,6 +242,7 @@ export class GoalGraphStore {
   static open(options: GoalGraphOptions): GoalGraphStore {
     ensureSecureDirectory(options.dir)
     const path = join(options.dir, 'goal-graph.json')
+    let openTornSnapshot: { path: string } | undefined
     if (existsSync(path)) {
       hardenSecureFile(path)
       try {
@@ -238,11 +256,18 @@ export class GoalGraphStore {
       } catch (error) {
         // A torn graph is replaced by a fresh, valid snapshot — but that means
         // every completed step/action recorded in the corrupt file is silently
-        // discarded and `elia resume` restarts from a bare root node with no
-        // indication anything went wrong. Log it: this is real state loss on
-        // the resume path, not a benign concurrent-write race (that case is
-        // `reloadFromDisk`, which correctly keeps the in-memory snapshot).
+        // discarded and `elia resume` restarts from a bare root node. Log it
+        // (real state loss, not the benign concurrent-write race that
+        // `reloadFromDisk` handles) and quarantine the corrupt bytes: the
+        // fresh-root persist() below would otherwise overwrite the only copy.
         logSwallowedError('goalGraph.open.tornSnapshot', error, { path, runId: options.runId })
+        try {
+          const quarantinePath = `${path}.corrupt-${Date.now()}`
+          renameSync(path, quarantinePath)
+          openTornSnapshot = { path: quarantinePath }
+        } catch {
+          // Quarantine is best-effort: a failed rename still falls through to a fresh root.
+        }
       }
     }
 
@@ -276,6 +301,7 @@ export class GoalGraphStore {
       updatedAt: now,
     })
     store.persist()
+    store.openTornSnapshot = openTornSnapshot
     return store
   }
 
@@ -681,7 +707,7 @@ export class GoalGraphStore {
     const idempotencyKey = actionKey(this.snapshot.runId, nodeId, request)
     const existing = this.snapshot.actions.find((action) => action.idempotencyKey === idempotencyKey)
     if (existing) {
-      if (existing.state === 'running' && existing.leaseExpiresAt && existing.leaseExpiresAt <= Date.now()) {
+      if (existing.state === 'running' && existing.leaseExpiresAt && isLeaseGenuinelyStale(existing.leaseOwner, existing.leaseExpiresAt, Date.now())) {
         existing.state = 'retryable'
         existing.error = classifyFailure('stale action execution lease recovered')
         existing.leaseOwner = undefined
@@ -807,19 +833,8 @@ export class GoalGraphStore {
     return this.mutate(() => {
     const nodes: string[] = []
     const actions: string[] = []
-    // A lease past its TTL but whose owner process (from a different elia
-    // process) is still alive is not yet stale: it may be a worker that stalled
-    // past the TTL, and reclaiming it now would run a second attempt alongside
-    // the first. Only reclaim once the owner is gone, or a long grace elapses.
-    const genuinelyStale = (leaseOwner: string | undefined, expiresAt: number): boolean => {
-      if (expiresAt > now) return false
-      if (leaseOwner && leaseOwner !== EXECUTION_OWNER && leaseOwnerAlive(leaseOwner)) {
-        return now - expiresAt > LEASE_LIVE_OWNER_GRACE_MS
-      }
-      return true
-    }
     for (const node of this.snapshot.nodes) {
-      if (node.status === 'running' && node.leaseExpiresAt && genuinelyStale(node.leaseOwner, node.leaseExpiresAt)) {
+      if (node.status === 'running' && node.leaseExpiresAt && isLeaseGenuinelyStale(node.leaseOwner, node.leaseExpiresAt, now)) {
         node.status = node.attemptCount < node.maxAttempts ? 'waiting-retry' : 'blocked'
         node.lastError = classifyFailure('stale execution lease recovered after process interruption')
         node.leaseOwner = undefined
@@ -829,7 +844,7 @@ export class GoalGraphStore {
       }
     }
     for (const action of this.snapshot.actions) {
-      if (action.state === 'running' && action.leaseExpiresAt && genuinelyStale(action.leaseOwner, action.leaseExpiresAt)) {
+      if (action.state === 'running' && action.leaseExpiresAt && isLeaseGenuinelyStale(action.leaseOwner, action.leaseExpiresAt, now)) {
         action.state = action.attempts < 2 ? 'retryable' : 'human-review'
         action.error = classifyFailure('stale action execution lease recovered after process interruption')
         action.leaseOwner = undefined
