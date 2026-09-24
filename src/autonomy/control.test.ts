@@ -33,8 +33,16 @@ test('corrupt control file is reported once via takeRunControlCorruption', () =>
   const { root, runId } = fixture()
   writeFileSync(runControlPath(runId, root), '{not json')
   expect(readRunControl(runId, root)).toBeUndefined()
-  expect(takeRunControlCorruption()).toEqual({ runId, path: runControlPath(runId, root) })
-  expect(takeRunControlCorruption()).toBeUndefined()
+  expect(takeRunControlCorruption(runId)).toEqual({ runId, path: runControlPath(runId, root) })
+  expect(takeRunControlCorruption(runId)).toBeUndefined()
+})
+
+test('a corrupt control file is reported to its own run only', () => {
+  const { root, runId } = fixture()
+  writeFileSync(runControlPath(runId, root), '{not json')
+  expect(readRunControl(runId, root)).toBeUndefined()
+  expect(takeRunControlCorruption('some-other-run')).toBeUndefined()
+  expect(takeRunControlCorruption(runId)?.path).toBe(runControlPath(runId, root))
 })
 
 test('valid pause request leaves no corruption note', () => {
@@ -42,18 +50,18 @@ test('valid pause request leaves no corruption note', () => {
   expect(requestRunControl(runId, 'pause', root)).toBe(true)
   const request = readRunControl(runId, root)
   expect(request?.action).toBe('pause')
-  expect(takeRunControlCorruption()).toBeUndefined()
+  expect(takeRunControlCorruption(runId)).toBeUndefined()
 })
 
 test('absent control file leaves no corruption note', () => {
   const { root, runId } = fixture()
   expect(readRunControl(runId, root)).toBeUndefined()
-  expect(takeRunControlCorruption()).toBeUndefined()
+  expect(takeRunControlCorruption(runId)).toBeUndefined()
 })
 
 test('unknown-format control file is not corruption', () => {
   const { root, runId } = fixture()
   writeFileSync(runControlPath(runId, root), '{"version": 2, "action": "pause"}')
   expect(readRunControl(runId, root)).toBeUndefined()
-  expect(takeRunControlCorruption()).toBeUndefined()
+  expect(takeRunControlCorruption(runId)).toBeUndefined()
 })
