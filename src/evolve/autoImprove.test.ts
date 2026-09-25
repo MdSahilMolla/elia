@@ -2,6 +2,7 @@ import { expect, test } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { withFileLockAsync } from '../fileLock.ts'
 import {
   BLOCKED_BACKOFF_MS,
   COOLDOWN_MS,
@@ -11,6 +12,7 @@ import {
   autoImproveEnabled,
   governedOutcome,
   looksBlocked,
+  maybeStartPractice,
   notePracticeTurn,
   practicePhase,
   practiceSummary,
@@ -22,6 +24,7 @@ import {
   startPracticeHeartbeat,
   takePracticeReport,
   writeAutoImproveState,
+  type PracticeSpawn,
 } from './autoImprove.ts'
 
 const now = 10 * COOLDOWN_MS
@@ -182,4 +185,54 @@ test('a governed practice run that chose another activity says what it did, or t
   const idle = governedOutcome({ skipped: [{ activity: 'harvest', reason: 'every recent commit has already been tried' }] })
   expect(idle.outcome).toBe('practised')
   expect(idle.detail).toBe('nothing was worth running (harvest: every recent commit has already been tried)')
+})
+
+test('#1250: the decide→spawn→claim runs under a file lock, so a mid-claim session cannot start a second run', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'elia-practice-lock-'))
+  const path = join(dir, 'state.json')
+  const attempted: Array<readonly string[]> = []
+  const fake: PracticeSpawn = (_command, args) => {
+    attempted.push(args)
+    return { pid: 41_000, unref() {} }
+  }
+  const prior = process.env.ELIA_AUTO_IMPROVE
+  try {
+    process.env.ELIA_AUTO_IMPROVE = 'on'
+    // Another session is between its read and its claim, holding the lock.
+    await withFileLockAsync(`${path}.lock`, async () => {
+      const started = await maybeStartPractice({ statePath: path, now, lockTimeoutMs: 250, spawn: fake })
+      expect(started).toBe(false)
+      expect(attempted).toHaveLength(0)
+    })
+    // Lock released: this session claims once, and a same-instant repeat declines.
+    expect(await maybeStartPractice({ statePath: path, now, spawn: fake })).toBe(true)
+    const claimed = readAutoImproveState(path)
+    expect(claimed.pid).toBe(41_000)
+    expect(claimed.startedAt).toBe(now)
+    expect(claimed.newTurns).toBe(0)
+    expect(await maybeStartPractice({ statePath: path, now, spawn: fake })).toBe(false)
+    expect(attempted).toHaveLength(1)
+  } finally {
+    if (prior === undefined) delete process.env.ELIA_AUTO_IMPROVE
+    else process.env.ELIA_AUTO_IMPROVE = prior
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('#1250: a counted turn re-reads under the lock, so it never clobbers a claim written in between', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'elia-practice-turn-'))
+  const path = join(dir, 'state.json')
+  try {
+    writeAutoImproveState({ startedAt: 1, newTurns: 0 }, path)
+    notePracticeTurn(path)
+    // A run starts (claimed by a session) between two counted turns.
+    writeAutoImproveState({ ...readAutoImproveState(path), pid: 30_000, startedAt: now }, path)
+    notePracticeTurn(path)
+    const state = readAutoImproveState(path)
+    expect(state.newTurns).toBe(2)
+    expect(state.pid).toBe(30_000)
+    expect(state.startedAt).toBe(now)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
 })
