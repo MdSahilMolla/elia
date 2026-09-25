@@ -171,6 +171,20 @@ export function selectFastTier(config: { tiers: { fast: FastTier; deep?: FastTie
 }
 
 /**
+ * When no distinct fast tier is configured, `config.tiers.fast` is the same
+ * object reference as `config.tiers.deep` (see `resolveFastTier`): quickchat
+ * answers with the primary model then, so it must say so instead of pretending
+ * it used a cheap tier.
+ */
+export function fastTierNote(config: { tiers: { fast: FastTier; deep?: FastTier }; cascadeEnabled?: boolean }): string | undefined {
+  const aliased = config.cascadeEnabled === false || config.tiers.fast.label === config.tiers.deep?.label
+  if (!aliased) return undefined
+  return `Note: no distinct fast tier is configured, so this quickchat used the deep tier (${
+    config.tiers.fast.label
+  }). Set ELIA_FAST_PROVIDER/ELIA_FAST_MODEL for a dedicated fast tier.`
+}
+
+/**
  * The default fast-tier call path. Builds a Provider from `config.tiers.fast`
  * and runs ONE tool-less model call through the agent loop (`tools: []`,
  * `maxSteps: 1`, no animation, no verbosity, honouring the abort signal).
@@ -184,6 +198,7 @@ export async function resolveFastResponder(): Promise<FastResponder> {
     import('../agentLoop.ts'),
   ])
   const tier = selectFastTier(config)
+  const note = fastTierNote(config)
   const runLoop = (__fastLoopOverride ?? runAgentLoop) as (opts: FastLoopCall) => Promise<unknown>
   return async (ctx, question, signal): Promise<string> => {
     const messages = [{ role: 'user' as const, content: [{ type: 'text' as const, text: buildQuickchatPrompt(ctx, question) }] }]
@@ -200,7 +215,9 @@ export async function resolveFastResponder(): Promise<FastResponder> {
         model: tier.model,
         signal,
       })
-      return lastAssistantText(messages, '')
+      const outcome = lastAssistantText(messages, '')
+      if (note === undefined) return outcome
+      return outcome.length > 0 ? `${outcome}\n\n${note}` : note
     } catch (error) {
       if (signal.aborted) return 'quickchat cancelled'
       const message = error instanceof Error ? error.message : String(error)

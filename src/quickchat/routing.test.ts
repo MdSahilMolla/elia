@@ -34,12 +34,14 @@ beforeAll(() => {
 let runQuickchat: typeof import('./quickchat.ts').runQuickchat
 let resolveFastResponder: typeof import('./quickchat.ts').resolveFastResponder
 let selectFastTier: typeof import('./quickchat.ts').selectFastTier
+let fastTierNote: typeof import('./quickchat.ts').fastTierNote
 
 beforeAll(async () => {
   const mod = await import('./quickchat.ts')
   runQuickchat = mod.runQuickchat
   resolveFastResponder = mod.resolveFastResponder
   selectFastTier = mod.selectFastTier
+  fastTierNote = mod.fastTierNote
 })
 
 const FIXTURE_CONTEXT: QuickchatContext = {
@@ -80,6 +82,17 @@ test('selectFastTier without a distinct fast tier mirrors the config fallback on
   expect(tier).toBe(aliased)
   expect(tier.providerName).toBe('deep-provider')
   expect(tier.model).toBe('deep-model')
+})
+
+test('fastTierNote flags an aliased fast tier and stays quiet for a distinct one', () => {
+  const distinct = { tiers: { deep: DEEP_TIER, fast: FAST_TIER }, cascadeEnabled: true }
+  expect(fastTierNote(distinct)).toBeUndefined()
+
+  const aliased = { tiers: { deep: DEEP_TIER, fast: DEEP_TIER }, cascadeEnabled: false }
+  const note = fastTierNote(aliased)
+  expect(note).toContain('no distinct fast tier is configured')
+  expect(note).toContain(DEEP_TIER.label)
+  expect(note).toContain('ELIA_FAST_PROVIDER')
 })
 
 test('resolveFastResponder sends one tool-less maxSteps-1 call to the fast tier, honouring the abort signal', async () => {
