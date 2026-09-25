@@ -4,6 +4,7 @@ import { paths } from '../statePaths.ts'
 import type { ConversationMessage } from '../agentLoop.ts'
 import { appendSecureFile, ensureSecureDirectory, hardenSecureFile, writeSecureFile } from '../securePersistence.ts'
 import { withFileLock } from '../fileLock.ts'
+import { redactArchiveValue } from '../ui/redact.ts'
 import { otelExportEvent, otelFlush } from './otel.ts'
 
 /**
@@ -78,7 +79,11 @@ export function createJournal(runId: string, goal: string): Journal {
       // daemon child) cannot write events with overlapping seq numbers.
       return withFileLock(lockPath, () => {
         const nextSeq = Math.max(seq, readEvents(runId).reduce((highest, event) => Math.max(highest, event.seq + 1), 0))
-        const event: JournalEvent = { seq: nextSeq, at: Date.now(), kind, data }
+        // Secret values land at rest (events.ndjson, receipts, checkpoints), so
+        // payloads are value-scanned once here — the same redaction the OTel
+        // exporter applies to its own copy — and the redacted event is what is
+        // recorded in memory, written to disk, and passed to the exporter.
+        const event: JournalEvent = { seq: nextSeq, at: Date.now(), kind, data: redactArchiveValue(data) as Record<string, unknown> }
         seq = nextSeq + 1
         recorded.push(event)
         try {
@@ -101,7 +106,7 @@ export function createJournal(runId: string, goal: string): Journal {
         try {
           writeSecureFile(
             join(dir, 'checkpoints', `${id}.json`),
-            JSON.stringify({ id, label, at: Date.now(), messages }),
+            JSON.stringify({ id, label, at: Date.now(), messages: redactArchiveValue(messages) }),
           )
           journal.append('checkpoint', { id, label, messageCount: messages.length })
         } catch {
