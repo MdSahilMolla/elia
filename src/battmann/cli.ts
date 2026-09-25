@@ -30,7 +30,8 @@ const USAGE = `Usage: elia battmann <command>
   refresh                       One monitoring pass: refresh feeds, resolve due questions, update baselines, rebuild the dashboard
   cycle <playbook>              refresh, then re-run the brief when the agent's forecasts are older than --reforecast-days (7)
   autorun install|status|uninstall <playbook> [--at 22:00]
-                                Run \`cycle\` daily from this workspace (macOS launchd; prints a crontab line elsewhere)
+                                Run \`cycle\` daily from this workspace (launchd on macOS, crontab on Linux,
+                                Task Scheduler on Windows)
   watch --every 6h              Repeat refresh on an interval while this process runs
   record                        The certified track record: resolved-by-code questions, Battmann vs the baseline
   feeds                         Feed subscriptions and their last run
@@ -54,7 +55,7 @@ const errorText = (error: unknown) => (error instanceof Error ? error.message : 
 export async function runBattmann(): Promise<void> {
   const args = positionals(VALUE_FLAGS)
   const command = args[0]
-  if (!command || command === 'help') {
+  if (!command || command === 'help' || hasFlag('--help', '-h')) {
     writeUsageLine(USAGE)
     return
   }
@@ -161,7 +162,9 @@ async function dispatch(command: string, rest: string[]): Promise<void> {
     writeNotice(`Voided ${questionId}; it no longer counts toward any track record (resolution ${String(result.resolutionId)}).`)
     return
   }
-  throw new Error(`Unknown battmann command "${command}".\n${USAGE}`)
+  // The first line says what went wrong; the full usage is one command away,
+  // and dumping it into stderr buried the one line that mattered.
+  throw new Error(`Unknown battmann command "${command}". Commands: seed, brief, pull, refresh, cycle, autorun, watch, record, feeds, dashboard, void — elia battmann --help for details.`)
 }
 
 function pullRequest(rest: string[]): Row {

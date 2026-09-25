@@ -1,5 +1,5 @@
 /**
- * `elia --help`, and the per-topic help behind `--help <topic>`.
+ * `elia --help`, and the per-command help behind `elia <command> --help`.
  *
  * Lifted out of index.ts whole: it is 200-odd lines of prose that changes
  * whenever a flag does, and it shares nothing with the dispatcher but the
@@ -7,8 +7,40 @@
  * that decides what runs.
  */
 
-export function printHelp(): void {
-  console.log(`elia — a general-purpose autonomous agent for your terminal
+/** `elia --help`, or just the lines about one command for `elia <command> --help`. */
+export function printHelp(topic?: string): void {
+  const section = topic ? helpFor(topic) : undefined
+  console.log(section ?? HELP)
+}
+
+/**
+ * The usage lines for one command, cut from the full help so the two can never
+ * disagree: every `elia <command> …` line and the description lines under it.
+ * `elia workspace --help`, `elia auto --help` and the rest used to print the
+ * whole 200-line help, because `--help` was answered before the command was
+ * even looked at.
+ */
+export function helpFor(topic: string): string | undefined {
+  const lines = HELP.split('\n')
+  const kept: string[] = []
+  const command = new RegExp(`^(\\s*)elia ${topic.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?=\\s|$)`)
+  for (let i = 0; i < lines.length; i += 1) {
+    const match = command.exec(lines[i]!)
+    if (!match) continue
+    const indent = match[1]!.length
+    kept.push(lines[i]!)
+    // The description wraps onto deeper-indented lines that are not commands.
+    while (i + 1 < lines.length && /^\s+\S/.test(lines[i + 1]!) && /^\s*/.exec(lines[i + 1]!)![0].length > indent + 4 && !/^\s*elia\s/.test(lines[i + 1]!)) {
+      kept.push(lines[i + 1]!)
+      i += 1
+    }
+  }
+  if (kept.length === 0) return undefined
+  const margin = Math.min(...kept.map((line) => /^\s*/.exec(line)![0].length))
+  return [`Usage: elia ${topic}`, '', ...kept.map((line) => `  ${line.slice(margin)}`), '', 'Everything elia can do: elia --help'].join('\n')
+}
+
+const HELP = `elia — a general-purpose autonomous agent for your terminal
 
 Usage:
   elia                        Start an interactive session
@@ -35,24 +67,24 @@ interruptions; irreversible tool actions are separately governed. Pass --yolo/-y
 risk prompt while keeping that action governor active.
 
 Autonomous work:
-  elia auto "<goal>"                Plan the work, show you the plan, then execute it with a
+  elia auto "<goal>"                 Plan the work, show you the plan, then execute it with a
                                      fleet of sub-agents, verify it, repair what failed, and
                                      record what it learned
-  elia auto "<goal>" --yolo         Same, without waiting for you to approve the plan
-  elia auto "<goal>" --autonomous   Self-supervised alias for --yolo; executes, verifies, repairs, and polishes
-  elia auto "<goal>" --unattended   Run safe, bounded work without routine prompts; critical actions still block
+  elia auto "<goal>" --yolo          Same, without waiting for you to approve the plan
+  elia auto "<goal>" --autonomous    Self-supervised alias for --yolo; executes, verifies, repairs, and polishes
+  elia auto "<goal>" --unattended    Run safe, bounded work without routine prompts; critical actions still block
   elia auto "<goal>" --no-polish     Skip the bounded final quality pass
   elia auto "<goal>" --fast          Bounded fast path: no polish, one reviewer, one repair, no lesson pass
   elia auto "<goal>" --thorough      Extra bounded review and repair depth for high-risk changes
   elia auto "<goal>" --max-run-ms N  Abort the run after N milliseconds (also ELIA_MAX_RUN_MS)
-  elia auto "<goal>" --max-actions N  Bound governed tool requests for this run
+  elia auto "<goal>" --max-actions N Bound governed tool requests for this run
   elia auto "<goal>" --unattended --authorize <intent>[,<intent>...]
                                      Pre-authorize specific critical intents (e.g.
                                      deployment.production, github.pr_merge) for this run only, on
                                      this branch, for a few hours — the one way past the "browser/
                                      comms/deploy/PR-merge/codex_delegate always refuses unattended"
                                      wall, without weakening it for anything not named
-  elia auto "<goal>" --variants N   Run N independent implementation attempts in parallel,
+  elia auto "<goal>" --variants N    Run N independent implementation attempts in parallel,
                                      each in its own isolated git worktree, and keep only
                                      the one that verification — not an LLM's opinion — likes
                                      best. Costs roughly Nx the execute phase; default is 1
@@ -89,8 +121,12 @@ Self-improvement:
                               unresolved. elia does not fetch or bundle the real dataset itself; point
                               --file at a real export. Each instance is a real, billed agent run, so
                               --sample (default 3) caps how many run, not the whole file.
+  elia bench --answers        Score question answering, with the independent answer check on and off
+  elia bench --lessons        Give every task this project's lessons, as a real turn would — compare
+                              against a run without it to learn whether the lesson store helps
   elia bench-latency          Measure elia's own loop/startup/speculation overhead (deterministic,
-                              no API key); --update-baseline to record, --strict to fail on wall drift
+                              no API key); --update-baseline to record, --strict to fail on wall drift,
+                              --realistic for realistic turn shapes
   elia evolve                 Improve elia's own source: hypothesise one change, build it
                               in a sandbox, and promote it only if the benchmark agrees
   elia evolve -n 3            Run three generations, each building on the last
@@ -99,6 +135,16 @@ Self-improvement:
   elia evolve --builtin       Score only on the built-in suite (minutes, not hours; no full sweep needed)
                               ELIA_EVOLVE_PROVIDER / ELIA_EVOLVE_MODEL run the proposer and builder
                               on a stronger model; candidates are still measured on the configured one
+  elia evolve --explain       Show the field evidence the proposer is given (no model call, writes nothing)
+  elia evolve --auto          One governed practice run, the same one elia starts when it is idle
+  elia gap [history] [--check] Score the verification ladder on planted defects (free, no model);
+                              --check fails when the gap regressed against the last recorded score
+  elia values [show|probe]    Show the Value Core, or probe that the role prompts still honour it
+  elia distill [run|traces|export]
+                              Turn verified runs into prompt fragments (dry run; --promote keeps the
+                              ones that pass every gate); traces lists what qualifies
+  elia jev [status|ping|bench]  How Jev, the optional independent judge, scores against elia's own
+                              decisions (needs ELIA_JEV_API_KEY)
   elia compounding            Where each stage of the self-improvement loop stands
   elia compounding frontier   The verification frontier, certified library, growth, isolation,
                               and the resource governor's plan
@@ -145,9 +191,13 @@ Battmann intelligence (no model involved unless noted):
   elia battmann brief india-semiconductors Seed if needed, then have the Battmann agent write the brief
   elia battmann pull <feed> <args…>        Fetch fx, worldbank, imf, comtrade or gdelt data by code
   elia battmann refresh                    Refresh feeds, resolve due questions, rebuild the dashboard
+  elia battmann cycle <playbook>           Refresh, then re-run the brief when its forecasts have gone stale
+  elia battmann autorun install <playbook> Run cycle daily (launchd on macOS, crontab on Linux, Task Scheduler
+                                           on Windows); status and uninstall too
   elia battmann watch --every 6h           Repeat refresh while this process runs
   elia battmann record                     Certified track record: Battmann vs a statistical baseline
-  elia doctor                              Check native-stack health: eliad daemon, C++ validator, Java bridge
+  elia battmann feeds | dashboard | void   Feed status, write the dashboard, void a question (a person only)
+  elia battmann --help                     Every battmann command and feed
 
 Editor / external integration:
   elia bridge                              Start the local JSONL-over-stdio bridge (used by the Elia VS Code extension)
@@ -163,7 +213,7 @@ Editor / external integration:
 Provider setup:
   First interactive run                    Ask for provider, hidden API key, and model
                                            (a running Ollama is found and offered — no key needed)
-  elia config                               Show provider readiness without printing keys
+  elia config                              Show provider readiness without printing keys
   elia config set --provider nvidia        Store a provider API key in ~/.elia/config.env
   elia config set --provider ollama --model <name>
                                            Run one of your local Ollama models (no key)
@@ -175,17 +225,31 @@ Provider setup:
   In a session, /settings → Provider API keys adds, updates, selects, or removes profiles.
 
 Supervisor controls:
-  elia control status                       Show durable runs and pending operator controls
-  elia control pause <run-id>               Request a safe pause of an active autonomous run
-  elia control stop <run-id>                Request a safe stop of an active autonomous run
-  elia resume <run-id>                      Resume only after reviewing the stopped run receipt
-  --supervised                             Require an interactive approval boundary for auto work
+  elia control status                      Show durable runs and pending operator controls
+  elia control pause <run-id>              Request a safe pause of an active autonomous run
+  elia control stop <run-id>               Request a safe stop of an active autonomous run
+                                           (review the stopped run's receipt, then: elia resume <run-id>)
+  elia auto "<goal>" --supervised          Require an interactive approval boundary for auto work
+  elia doctor                              Check native-stack health: eliad daemon, C++ validator, Java bridge
 
 Inside an interactive session:
-  /                            Type "/" to see available commands — up/down to highlight,
+  /                           Type "/" to see available commands — up/down to highlight,
                               tab to accept, enter to run, left/right to edit as usual
-  rewind                      List rewind points for this session
-  rewind <n>                  Restore conversation + files to just before turn <n>
+  /help                       Every command, with one line each; ? shows the keyboard shortcuts
+  !<command>                  Run a shell command yourself; its output lands in the transcript
+  @<path>                     Attach a file to your message
+  /plan <goal>                Research and propose a plan before touching anything (shift+tab
+                              toggles plan mode); enter runs the plan, esc keeps planning
+  /rewind                     List rewind points for this session
+  /rewind <n>                 Restore conversation + files to just before turn <n>
+  /quickchat <question>       Ask about this session without interrupting it (also: status, summary,
+                              diff, risk, delegate "<task>")
+  /sessions new <name>        A parallel session in its own git worktree (ctrl+n); ctrl+tab switches
+                              which session /quickchat and delegation target
+  /task                       Browse this session's tasks and subagents
+  /status | /cost | /usage    Session and plan · token and cost breakdown · live context and limits
+  /export                     Save the conversation to Markdown
+  /mcp                        MCP servers — add, test, reload, remove
   /capabilities               List specialist capabilities, risk classes, and output contracts
   /eliabook                   Open Save this session / Saved Elia Books
   /eliabook save [book-id]    Save the complete current session as a reusable Book
@@ -215,7 +279,7 @@ Inside an interactive session:
   /usage                      Live token consumption, context-window fill, and the limits in
                               effect (context, reasoning, autonomous-run, provider/plan)
 
-  Other:
+Other flags:
   elia --dev                  Start explicitly in dev mode (the default)
   elia --cyber                Start (or run a one-shot prompt) in cyber mode
   elia --battmann             Start (or run a one-shot prompt) in Battmann mode — strategic
@@ -228,12 +292,11 @@ Inside an interactive session:
   elia --quiet                Print the final answer and essential failures only; keep TTY editing
   elia --verbose              Include detailed progress output
   ELIA_MAX_RUN_MS             Default wall-clock budget for autonomous runs; --max-run-ms overrides it
-  --max-actions <n>            Bound governed tool requests for one autonomous run
   ELIA_TOOL_CONCURRENCY       Read-only tool batches can use up to 8; mutating batches stay capped at 4
-  ELIA_OTEL_ENDPOINT           OTLP/HTTP+JSON collector base URL — mirrors autonomous-run journal events
+  ELIA_OTEL_ENDPOINT          OTLP/HTTP+JSON collector base URL — mirrors autonomous-run journal events
                               to it as OTel logs (POST <endpoint>/v1/logs), purely additive; unset (the
                               default) sends nothing
-  elia --help                 Show this help
+  elia --help                 Show this help; elia <command> --help shows just that command
   elia --version              Print the version
 
   UI output: --json/--jsonl emits machine-readable JSONL events; --plain disables color and redraws;
@@ -246,5 +309,4 @@ Inside an interactive session:
   use it to see how well the prompt cache is holding across a session.
 
 Set ELIA_FAST_PROVIDER/ELIA_FAST_MODEL to give elia a cheap fast tier for recon work; it
-routes investigation there and keeps the strong model for planning, building, and review.`)
-}
+routes investigation there and keeps the strong model for planning, building, and review.`
