@@ -275,7 +275,7 @@ test('a single bracket-joined command is unambiguous and is coerced', () => {
 test('several bracket-joined commands are rejected by shape, not by command quality', () => {
   const error = expectError({
     ...minimal,
-    verification: '[if not exist satvam\index.html exit 1, if not exist satvam\style.css exit 1]',
+    verification: '[if not exist satvam\\index.html exit 1, if not exist satvam\\style.css exit 1]',
   })
 
   // The old message sent the model off rewriting perfectly good commands.

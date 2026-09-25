@@ -1580,8 +1580,13 @@ export async function runInteractive(): Promise<void> {
       try {
         await saveCheckpoints(sessionId, checkpoints)
       } catch (error) {
-        // Never let a failed save replace the error that ended the turn.
-        if (endStatus !== 'failed') throw error
+        // A rewind point that could not be saved costs `/rewind` for this
+        // turn, not the turn itself — and a throw from this `finally` would
+        // replace whatever ended the turn. Say so instead.
+        const line = `Could not save this turn's rewind point — /rewind will not undo it (${error instanceof Error ? error.message : String(error)})`
+        sessionTranscript.notice(line)
+        if (uiHooks) uiHooks.onActivity?.({ kind: 'status', status: 'warning', title: line })
+        else writeNotice(`▸ ${line}`)
       }
     }
   }
