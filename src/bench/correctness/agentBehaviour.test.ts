@@ -369,7 +369,10 @@ test('a refusal with nobody to ask is recorded as a policy block, not a decision
   // run at needs-attention with its checks green and its review approving.
   const { pendingApprovals } = await import('../../autonomy/goalGraph.ts')
   const graph = GoalGraphStore.open({ runId: 'no-approver', goal: 'build without asking', dir: join(dir, '.graph') })
-  const { events } = await run([call('run_command', { command: 'rm -rf dist' }), done], { graph })
+  // `git push` is critical across platforms (unlike `rm -rf`, which is blocked
+  // by a cmd.exe precondition before the approval question on Windows), so the
+  // refusal is the unattended-policy one: nobody to ask.
+  const { events } = await run([call('run_command', { command: 'git push origin main' }), done], { graph })
   expect(events[0]!.isError).toBe(true)
   expect(events[0]!.result).toContain('nobody to ask')
   const snapshot = graph.state()

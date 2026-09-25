@@ -2,6 +2,7 @@ import type { Tool } from './types.ts'
 import { readBoundedOutput } from '../shell.ts'
 import { publicFetch } from '../networkPolicy.ts'
 import { looksLikePdf, pdfToText, thinExtractionReason } from './pdfText.ts'
+import { rememberFetchedPage } from './fetchedPages.ts'
 
 const FETCH_TIMEOUT_MS = 15_000
 const MAX_CHARS = 100_000
@@ -115,6 +116,7 @@ export const webFetchTool: Tool = {
             : body
       }
 
+      rememberFetchedPage([raw, url.toString()], text)
       if (offset >= text.length && text.length > 0) {
         return `[offset ${offset} is past the end of this page — it is ${text.length} characters]`
       }

@@ -2,7 +2,7 @@ import { availableParallelism, cpus } from 'node:os'
 import { autoFallbacksFor, config } from './config.ts'
 import { beginCompaction, shrinkForOversizedRequest, type PendingCompaction } from './compaction.ts'
 import { compactionThresholdFor } from './contextWindow.ts'
-import { isCapacityError, isConnectionError, isMalformedToolCallError, isRequestTooLargeError, isTransientServerError } from './providerErrors.ts'
+import { isCapacityError, isConnectionError, isMalformedToolCallError, isRequestTooLargeError, isTransientServerError, retryBackoffMs } from './providerErrors.ts'
 import { createPlanlessWorkTracker, createRedundantReadTracker, isLoneBatchableRead, serialReadNudge } from './autonomy/toolBatchingNudge.ts'
 import { createReadAhead } from './autonomy/readAhead.ts'
 import { createPlanProgressTracker, planBelongsToRequest, type PlanProgressUpdate, type ToolOutcome } from './autonomy/planProgress.ts'
@@ -143,6 +143,8 @@ export interface ToolEvent {
   cached: boolean
   /** Deterministic pre-execution governance assessment, when available. */
   assessment?: ActionAssessment
+  /** True when the tool acted through an external agent outside elia's governor. */
+  ungoverned?: boolean
   /** Durable action identity, when the loop is running inside a goal graph. */
   actionId?: string
   idempotencyKey?: string
@@ -734,7 +736,7 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
 
       const durationMs = Date.now() - startedAt
       if (verbose) writeToolResult(block.name, resultText, isError, cached)
-      onTool?.({ id: block.id, name: block.name, input: block.input, result: resultText, isError, durationMs, cached, assessment, actionId: reservation?.action.id, idempotencyKey: reservation?.action.idempotencyKey, replayed, failureClass })
+      onTool?.({ id: block.id, name: block.name, input: block.input, result: resultText, isError, durationMs, cached, assessment, ungoverned: tool.ungoverned, actionId: reservation?.action.id, idempotencyKey: reservation?.action.idempotencyKey, replayed, failureClass })
       outcomes[blockIndex] = { name: block.name, input: block.input, result: resultText, isError }
       if (!isError) observed.push({ name: block.name, input: block.input, result: resultText })
       // A *failed* command is where stack traces and compiler errors live — the
@@ -1002,7 +1004,7 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
                 if (networkMayRecover()) break
                 throw error
               }
-              await Bun.sleep(250 * 2 ** (attempt - 1))
+              await sleepUnlessAborted(retryBackoffMs(failure, attempt), signal)
             }
           }
         }

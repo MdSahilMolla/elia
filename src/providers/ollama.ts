@@ -692,12 +692,32 @@ export function createOllamaProvider(model: string, host: string = ollamaHost(),
           while (newline >= 0) {
             const line = pending.slice(0, newline).trim()
             pending = pending.slice(newline + 1)
-            if (line) handle(JSON.parse(line) as Record<string, unknown>)
+            if (line) {
+              let chunk: unknown
+              try {
+                chunk = JSON.parse(line)
+              } catch {
+                // A torn or non-JSON line must not kill an otherwise-finished
+                // turn; every other streaming adapter skips the bad line.
+                continue
+              }
+              handle(chunk as Record<string, unknown>)
+            }
             newline = pending.indexOf('\n')
           }
         }
         const last = (pending + decoder.decode()).trim()
-        if (last) handle(JSON.parse(last) as Record<string, unknown>)
+        if (last) {
+          let chunk: unknown
+          try {
+            chunk = JSON.parse(last)
+          } catch {
+            // Same guard as the per-line parse above: the flushed tail of a
+            // streamed response may be torn mid-write.
+            chunk = undefined
+          }
+          if (chunk !== undefined) handle(chunk as Record<string, unknown>)
+        }
       } catch (error) {
         // Worded to read as a timeout, which is what routes to the next provider.
         if (stall.signal.aborted && !signal?.aborted) throw new Error(`response stalled: nothing arrived from Ollama for ${Math.round(idleMs / 1000)}s (timed out)`)

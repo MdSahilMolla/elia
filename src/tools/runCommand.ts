@@ -206,7 +206,12 @@ export function normalizeRunCommandInput(input: Record<string, unknown>): Record
     const match = CD_THEN.exec(command)
     if (!match) break
     const dir = match[1]!
-    cwd = isAbsolute(dir) || !cwd ? dir : join(cwd, dir)
+    // A composed cwd is normalized to forward slashes whichever platform runs
+    // this: cmd.exe and PowerShell both accept `/`, and the tool's inputs —
+    // including paths echoed back from `cd` — are otherwise inconsistent between
+    // platforms (a `cd workspace/fork && …` input once surfaced a backslash
+    // cwd on Windows).
+    cwd = isAbsolute(dir) || !cwd ? dir : join(cwd, dir).replace(/\\/g, '/')
     command = match[2]!
   }
   command = command.replace(TRAILING_STDERR_REDIRECT, '')

@@ -2,7 +2,7 @@ import { afterEach, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { allBenchTasks, BENCH_TASKS, taskById } from './suite.ts'
+import { allBenchTasks, BENCH_TASKS, firstDifference, taskById } from './suite.ts'
 import { resetTaskSpecCache } from './history/suite.ts'
 import type { HistoryTaskSpec } from './history/types.ts'
 
@@ -293,4 +293,59 @@ test('parallel-scan: setup writes ten independent config files', async () => {
   await task.setup(dir)
   const { readdirSync } = await import('node:fs')
   expect(readdirSync(join(dir, 'config')).length).toBe(10)
+})
+
+const SOLVED_LIMITS = `export function alpha(value: number): number {
+  const limit = 100
+  return Math.min(value, limit)
+}
+
+export function beta(value: number): number {
+  const limit = 250
+  return Math.min(value, limit)
+}
+
+export function gamma(value: number): number {
+  const limit = 100
+  return Math.min(value, limit)
+}
+`
+
+async function checkPreciseEdit(content: string) {
+  const task = taskById('precise-edit')!
+  const dir = tempDir('precise-edit')
+  await task.setup(dir)
+  writeFileSync(join(dir, 'src', 'limits.ts'), content)
+  return task.check(dir)
+}
+
+test('precise-edit: the exact edit passes, and an untouched file still says so', async () => {
+  expect(await checkPreciseEdit(SOLVED_LIMITS)).toEqual({ passed: true, detail: 'only beta changed, byte-for-byte' })
+  const unchanged = await checkPreciseEdit(SOLVED_LIMITS.replace('const limit = 250', 'const limit = 100'))
+  expect(unchanged).toEqual({ passed: false, detail: 'expected limits [100,250,100], found [100,100,100] (file unchanged)' })
+})
+
+test('precise-edit: the right limits in reformatted bytes fail, and the detail names the first line that differs', async () => {
+  // A whole-file rewrite that re-indented alpha with a tab: every limit is
+  // right, and the detail used to read "expected [100,250,100], found [100,250,100]".
+  const result = await checkPreciseEdit(SOLVED_LIMITS.replace('  const limit = 100\n  return Math.min(value, limit)\n}\n\nexport function beta', '\tconst limit = 100\n  return Math.min(value, limit)\n}\n\nexport function beta'))
+  expect(result.passed).toBe(false)
+  expect(result.detail).toBe('limits are right [100,250,100], but the file is not byte-for-byte what was asked — line 2: expected "  const limit = 100", found "\\tconst limit = 100"')
+})
+
+test('precise-edit: a CRLF rewrite and a lost trailing newline are named, not hidden', async () => {
+  const crlf = await checkPreciseEdit(SOLVED_LIMITS.replace(/\n/g, '\r\n'))
+  expect(crlf.passed).toBe(false)
+  expect(crlf.detail).toContain('line 1: expected "export function alpha(value: number): number {", found "export function alpha(value: number): number {\\r"')
+
+  const noNewline = await checkPreciseEdit(SOLVED_LIMITS.trimEnd())
+  expect(noNewline.passed).toBe(false)
+  expect(noNewline.detail).toBe('limits are right [100,250,100], but the file is not byte-for-byte what was asked — only the trailing newline differs')
+})
+
+test('firstDifference clips a long line and reports a file that ends early', () => {
+  const long = 'x'.repeat(200)
+  expect(firstDifference('a\nb\n', `a\n${long}\n`)).toBe(`line 2: expected "b", found "${'x'.repeat(80)}…"`)
+  expect(firstDifference('a\nb\nc', 'a\nb')).toBe('line 3: expected "c", found (end of file)')
+  expect(firstDifference('same', 'same')).toBe('no difference')
 })

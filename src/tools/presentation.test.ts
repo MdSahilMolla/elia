@@ -2,7 +2,7 @@ import { afterAll, beforeAll, expect, test } from 'bun:test'
 import { existsSync, mkdirSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import ExcelJS from 'exceljs'
-import { presentationTool } from './presentation.ts'
+import { makeDeck, presentationTool } from './presentation.ts'
 
 let testDir: string
 let workbookPath: string
@@ -42,4 +42,36 @@ test('presentation creates an editable management deck and analysis sidecar from
 
 test('presentation rejects output paths outside the current repository', async () => {
   await expect(presentationTool.execute({ action: 'from_workbook', path: workbookPath, outputPath: '/tmp/outside.pptx' })).rejects.toThrow('escapes the active workspace')
+})
+
+test('makeDeck builds a typed deck from synthetic analysis and audit data', async () => {
+  const outputPath = join(testDir, 'synthetic-review.pptx')
+  await makeDeck(
+    {
+      action: 'analyze',
+      sheets: [{
+        sheet: 'Sales',
+        rows: 3,
+        columns: ['Region', 'Sales', 'Profit'],
+        numericColumns: ['Sales', 'Profit'],
+        selectedMeasure: 'Sales',
+        selectedGroupBy: 'Region',
+        summary: { column: 'Sales', count: 3, sum: 2100, average: 700, min: 400, max: 1000 },
+        groups: [
+          { group: 'East', count: 1, sum: 1000 },
+          { group: 'West', count: 1, sum: 700 },
+          { group: 'North', count: 1, sum: 400 },
+        ],
+        formulaCells: 0,
+      }],
+    },
+    { action: 'audit', sheets: [{ sheet: 'Sales', rows: 3, columns: 4, formulaCells: 0, duplicateKeys: 0, status: 'pass' }] },
+    { action: 'from_workbook', path: workbookPath, outputPath, sheet: 'Sales', groupBy: 'Region', measure: 'Sales' },
+    outputPath,
+  )
+  expect(existsSync(outputPath)).toBe(true)
+  expect((await Bun.file(outputPath).arrayBuffer()).byteLength).toBeGreaterThan(10_000)
+  const verified = JSON.parse(await presentationTool.execute({ action: 'verify', path: outputPath })) as { validPackage: boolean; slides: number }
+  expect(verified.validPackage).toBe(true)
+  expect(verified.slides).toBe(5)
 })

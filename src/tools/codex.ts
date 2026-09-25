@@ -42,7 +42,8 @@ export function resetCodexAvailabilityForTests(): void {
 export const codexTool: Tool = {
   name: 'codex_delegate',
   description:
-    "Delegates a coding task to the real, separately-installed OpenAI Codex CLI, running under the user's own codex login and its own sandbox — not a wrapper around OpenAI's API. Use for a second, independent agent's take on something, or when the user explicitly asks to use Codex. Codex acts autonomously in the given directory (can read, write, and run shell commands under its workspace-write sandbox) and this tool returns its final answer.",
+    "Delegates a coding task to the real, separately-installed OpenAI Codex CLI, running under the user's own codex login and its own sandbox — not a wrapper around OpenAI's API. Use for a second, independent agent's take on something, or when the user explicitly asks to use Codex. Codex acts autonomously in the given directory (can read, write, and run shell commands under its workspace-write sandbox) and this tool returns its final answer. Note: actions codex takes happen inside codex's own governance, which elia cannot observe — they are not governed by elia's autonomy policy.",
+  ungoverned: true,
   input_schema: {
     type: 'object',
     properties: {

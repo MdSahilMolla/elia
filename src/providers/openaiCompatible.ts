@@ -146,7 +146,7 @@ export function createOpenAICompatibleProvider(
           } catch {
             return
           }
-          if (input && typeof input === 'object') {
+          if (input && typeof input === 'object' && !Array.isArray(input)) {
             emittedContent = true
             onToolBlock({ type: 'tool_use', id: `stream_${event.index}`, name: event.name, input })
           }

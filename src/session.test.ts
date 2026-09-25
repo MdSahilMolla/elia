@@ -46,6 +46,30 @@ test('loadSession returns undefined for an unknown id', async () => {
   expect(loaded).toBeUndefined()
 })
 
+test('overlapping concurrent saves for the same session cannot lose the newest state', async () => {
+  // Two turns land back-to-back: the first snapshot is large (a long transcript
+  // that takes longer to write), the second is the authoritative tail. Saves are
+  // serialized per session id, so the file must hold the last call's state no
+  // matter which physical write finishes first.
+  const bigHistory: ConversationMessage[] = Array.from({ length: 2000 }, (_, index) => ({
+    role: 'user',
+    content: [{ type: 'text', text: `msg ${index}` }],
+  }))
+  const first = saveSession('race', bigHistory, testDir)
+  const second = saveSession('race', sampleMessages, testDir)
+  await Promise.all([first, second])
+  const loaded = await loadSession('race', testDir)
+  expect(loaded?.messages).toEqual(sampleMessages)
+})
+
+test('concurrent saves to different sessions both persist', async () => {
+  const a = saveSession('alpha', sampleMessages, testDir)
+  const b = saveSession('beta', sampleMessages, testDir)
+  await Promise.all([a, b])
+  expect((await loadSession('alpha', testDir))?.id).toBe('alpha')
+  expect((await loadSession('beta', testDir))?.id).toBe('beta')
+})
+
 test('loadLatestSession picks the most recently saved session', async () => {
   await saveSession('older', sampleMessages, testDir)
   await new Promise((resolve) => setTimeout(resolve, 5))

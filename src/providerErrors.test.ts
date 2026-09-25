@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { capacityRetryDelayMs, isCapacityError, isConnectionError, isRequestTooLargeError, isTransientServerError } from './providerErrors.ts'
+import { capacityRetryDelayMs, isCapacityError, isConnectionError, isRequestTooLargeError, isTransientServerError, retryBackoffMs } from './providerErrors.ts'
 
 /**
  * The exact message that took two steps out of run 2026-09-13-l0av-rnq0. Every
@@ -94,4 +94,28 @@ test('a request that never reached the provider is a connection error; a provide
 test('a stream that closed before its last chunk is asked again, not the end of the turn', () => {
   // The OpenAI SDK's words for it; mercury ended an evolve generation this way.
   expect(isTransientServerError('missing finish_reason for choice 0')).toBe(true)
+})
+
+// The capacity/TPM rung of the retry ladder used to sleep 250·2ⁿ regardless of
+// the provider's suggested window, so a minute-boundary cap killed live runs.
+test('retryBackoffMs prefers the capacity window over binary backoff', () => {
+  expect(retryBackoffMs(GROQ_413, 1)).toBe(60_000)
+  expect(retryBackoffMs(GROQ_413, 3)).toBe(60_000)
+  expect(retryBackoffMs('429 too many requests', 1)).toBe(30_000)
+  expect(retryBackoffMs('Error code: 429 - rate_limit_exceeded', 2)).toBe(30_000)
+})
+
+test('retryBackoffMs keeps the binary fallback for non-capacity failures', () => {
+  expect(retryBackoffMs('401 invalid api key', 1)).toBe(250)
+  expect(retryBackoffMs('401 invalid api key', 4)).toBe(2000)
+})
+
+test('retryBackoffMs never returns NaN or a negative delay', () => {
+  for (const text of [GROQ_413, '429 too many requests', '401 invalid api key', '']) {
+    for (let attempt = 1; attempt <= 6; attempt++) {
+      const delay = retryBackoffMs(text, attempt)
+      expect(Number.isFinite(delay)).toBe(true)
+      expect(delay).toBeGreaterThanOrEqual(0)
+    }
+  }
 })

@@ -61,11 +61,21 @@ export const IMMUTABLE_FILES = [
   'src/evolve/suite.ts',
   'src/evolve/hardSuite.ts',
   'src/evolve/fieldSuite.ts',
+  // The tasks that can only be passed by cheating, and the gate that runs them.
+  // A candidate that could edit either could make its own cheating invisible.
+  'src/evolve/canarySuite.ts',
+  'src/evolve/canaryGate.ts',
   'src/evolve/fitness.ts',
   'src/evolve/engine.ts',
   'src/evolve/ledger.ts',
   'src/evolve/sandbox.ts',
   'src/evolve/benchTask.ts',
+  // The control arm of `elia bench --lift` and the arithmetic that compares the
+  // two. A candidate able to weaken the bare model's loop, or to reweigh the
+  // comparison, could report a larger lift without getting any better.
+  'src/evolve/bareTask.ts',
+  'src/evolve/bareLoop.ts',
+  'src/evolve/lift.ts',
   // What a task is allowed to be approved for. A candidate that could widen
   // this could approve its own way onto the network in the middle of being
   // measured, which is the same class of hole as rewriting a task's check.
@@ -121,6 +131,9 @@ export const IMMUTABLE_FILES = [
   'src/evolve/strategy.ts',
   'src/evolve/benchLessons.ts',
   'src/evolve/metaPropose.ts',
+  // Which model does the proposing. A candidate that could edit this could
+  // move every later generation's search onto a model of its choosing.
+  'src/evolve/improverRoute.ts',
   // The sealed gate, the isolation checks, the certified library and its
   // auditor, the frontier measurements and the resource governor with the
   // runners it acts through. "The meta-loop must never modify the resource
@@ -248,21 +261,36 @@ function snapshotHashes(root: string): Map<string, string> {
  */
 export const KEEP_SANDBOXES = 5
 
-/** Delete all but the `keep` most recent `gen-N/` sandbox copies. Returns what was removed. */
-export function pruneSandboxes(keep = KEEP_SANDBOXES, dir = EVOLUTION_DIR): string[] {
-  let entries: Array<{ path: string; mtimeMs: number }>
+/**
+ * Delete all but the `keep` most recent `gen-N/` sandbox copies. Returns what
+ * was removed.
+ *
+ * Pruning is generation-scoped: only copies numerically older than
+ * `currentGeneration` (the generation the caller just claimed) are eligible,
+ * and "most recent" is decided by the generation number, never by mtime.
+ * Generation numbers are claimed under a file lock and are unique and
+ * monotonic, so a numerically lower copy is older no matter when it was last
+ * touched. Sorting on mtime let a stale copy (oldest mtime) be `rmSync`'d
+ * while a sibling `elia evolve` was still measuring it — mtime changes on
+ * every read anyway, so the deletion order was never deterministic.
+ */
+export function pruneSandboxes(keep = KEEP_SANDBOXES, dir = EVOLUTION_DIR, currentGeneration = Number.POSITIVE_INFINITY): string[] {
+  let entries: Array<{ path: string; generation: number }>
   try {
     entries = readdirSync(dir)
-      .filter((name) => /^gen-\d+$/.test(name))
+      .filter((name) => /^gen-(\d+)$/.test(name))
       .map((name) => {
-        const path = join(dir, name)
-        return { path, mtimeMs: statSync(path).mtimeMs }
+        const match = /^gen-(\d+)$/.exec(name)!
+        return { path: join(dir, name), generation: Number.parseInt(match[1]!, 10) }
       })
   } catch {
     return []
   }
   const removed: string[] = []
-  for (const { path } of entries.sort((a, b) => b.mtimeMs - a.mtimeMs).slice(Math.max(0, keep))) {
+  for (const { path } of entries
+    .filter((entry) => entry.generation < currentGeneration)
+    .sort((a, b) => b.generation - a.generation)
+    .slice(Math.max(0, keep))) {
     try {
       rmSync(path, { recursive: true, force: true })
       removed.push(path)
@@ -276,7 +304,10 @@ export function pruneSandboxes(keep = KEEP_SANDBOXES, dir = EVOLUTION_DIR): stri
 export function createSandbox(generation: number, liveRoot = ELIA_ROOT, dir = EVOLUTION_DIR): Sandbox {
   const root = join(dir, `gen-${generation}`)
   // Make room first, so the new one plus the kept ones stay within the cap.
-  pruneSandboxes(KEEP_SANDBOXES - 1, dir)
+  // Prune only generations older than the one just claimed: a sibling evolve
+  // process's live sandbox carries a generation number inside the keep window,
+  // and must survive this prune regardless of its mtime.
+  pruneSandboxes(KEEP_SANDBOXES - 1, dir, generation)
   rmSync(root, { recursive: true, force: true })
   mkdirSync(root, { recursive: true })
 

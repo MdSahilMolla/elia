@@ -28,8 +28,11 @@ export function newSessionId(): string {
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
 }
 
+/** One pending write per session id. Later saves queue behind earlier saves of the same session. */
+const sessionWriteChains = new Map<string, Promise<void>>()
+
 /** Persists a session. Failures are logged as a notice and never throw — a save error shouldn't kill the session. */
-export async function saveSession(
+export function saveSession(
   id: string,
   messages: ConversationMessage[],
   dir: string = SESSIONS_DIR,
@@ -38,15 +41,28 @@ export async function saveSession(
   const session: StoredSession = { id, updatedAt: Date.now(), messages, ...extra }
   if (!isSafeSessionId(id)) {
     writeError('Warning: failed to save session: invalid session id')
-    return
+    return Promise.resolve()
   }
-  try {
-    const path = join(dir, `${id}.json`)
-    ensureSecureDirectory(dir)
-    await writeSecureBunFile(path, JSON.stringify(session))
-  } catch (err) {
-    writeError(`Warning: failed to save session: ${err instanceof Error ? err.message : String(err)}`)
-  }
+  // Serialize writes per session id so a slower older snapshot can never land
+  // after a newer one and regress the file: each save runs only after the
+  // previous save of the same session finished, in call order, so the last
+  // call is always the last write. Calls for different sessions stay parallel.
+  const prior = sessionWriteChains.get(id) ?? Promise.resolve()
+  const write = prior.then(async () => {
+    try {
+      const path = join(dir, `${id}.json`)
+      ensureSecureDirectory(dir)
+      await writeSecureBunFile(path, JSON.stringify(session))
+    } catch (err) {
+      writeError(`Warning: failed to save session: ${err instanceof Error ? err.message : String(err)}`)
+    }
+  }).finally(() => {
+    // Drop the tracker only if ours is still the tail, so a save queued while
+    // this one ran is not left without its own chain head.
+    if (sessionWriteChains.get(id) === write) sessionWriteChains.delete(id)
+  })
+  sessionWriteChains.set(id, write)
+  return write
 }
 
 export async function loadSession(id: string, dir: string = SESSIONS_DIR): Promise<StoredSession | undefined> {

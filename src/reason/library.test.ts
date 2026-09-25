@@ -110,3 +110,37 @@ test('the rendered library marks the records that are not yet worth trusting', (
   expect(rendered).toContain('single 3/10')
   expect(renderLibrary(libraryOf([]))).toContain('empty')
 })
+
+const { EXPLORATION_CAP, successUpperBound } = await import('./library.ts')
+
+test('a harness with a few unlucky runs keeps its exploration turn while it could still win', () => {
+  // single has run twice; wide is seasoned. Before, only harnesses with no runs
+  // at all were ever explored, so single was locked out on two data points.
+  const library = libraryOf([record('wide', 9, 8), record('single', 2, 1)])
+  const choice = chooseHarness('repair/checked/single', ['single', 'wide'], library)
+
+  expect(choice.harnessId).toBe('single')
+  expect(choice.exploring).toBe(true)
+  expect(choice.reason).toContain('too few to rule out beating wide')
+})
+
+test('a harness the evidence rules out stops being explored', () => {
+  // 2/10 cannot plausibly beat 21/21: its upper bound is below wide's lower bound.
+  expect(successUpperBound({ runs: 10, verifiedRuns: 2 })).toBeLessThan(successLowerBound({ runs: 21, verifiedRuns: 21 }))
+  const library = libraryOf([record('wide', 21, 21), record('single', 10, 2)])
+  const choice = chooseHarness('repair/checked/single', ['single', 'wide'], library)
+
+  expect(choice.harnessId).toBe('wide')
+  expect(choice.exploring).toBe(false)
+})
+
+test('two harnesses within noise of each other after many runs are left to the tie-break', () => {
+  const library = libraryOf([record('wide', 41, 31, 82), record('deep', EXPLORATION_CAP, 22, 120)])
+  // 71 runs is an exploration slot, and deep's interval still overlaps wide's —
+  // but deep has had its share of runs.
+  expect((41 + EXPLORATION_CAP) % 4).toBe(3)
+  expect(successUpperBound({ runs: EXPLORATION_CAP, verifiedRuns: 22 })).toBeGreaterThan(successLowerBound({ runs: 41, verifiedRuns: 31 }))
+  const choice = chooseHarness('repair/checked/single', ['wide', 'deep'], library)
+  expect(choice.harnessId).toBe('wide')
+  expect(choice.exploring).toBe(false)
+})

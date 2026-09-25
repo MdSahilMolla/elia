@@ -132,6 +132,22 @@ test('echoes the Mcp-Session-Id handed back on initialize', async () => {
   }
 })
 
+test('HTTP error responses (401, 500, JSON-RPC error) do not open the circuit — only transport failures do', async () => {
+  const url = startFixture({ requireAuth: 'Bearer secret' })
+  const client = new McpHttpClient({ name: 'fx', url })
+  try {
+    const internals = client as unknown as { breaker: { isOpen(): boolean } }
+    for (let attempt = 0; attempt < 5; attempt++) {
+      await expect(client.callTool('ping', {})).rejects.toThrow(/401/)
+    }
+    // Every attempt completed an HTTP round-trip, so the server is provably
+    // alive and the breaker must stay closed despite repeated errors.
+    expect(internals.breaker.isOpen()).toBe(false)
+  } finally {
+    await client.closeAndWait()
+  }
+})
+
 test('refuses a legacy SSE-transport connector up front', () => {
   expect(() => new McpHttpClient({ name: 'fx', url: 'https://e.com/sse', transport: 'sse' })).toThrow(/legacy SSE/)
 })

@@ -172,6 +172,7 @@ export async function runResume(): Promise<void> {
   if (!(await ensureFirstRunProviderSetup())) return
   const { GoalGraphStore } = await import('../autonomy/goalGraph.ts')
   const graph = GoalGraphStore.open({ runId, goal, dir: runDir(runId) })
+  if (graph.openTornSnapshot) writeNotice(`Run ${runId}'s goal graph was unreadable, so completed steps are not remembered and the run starts over from its goal. The old file is kept at ${graph.openTornSnapshot.path}.`)
   const recovery = graph.leaseRecoverySummary()
   if (recovery.nodes || recovery.actions) writeNotice(`Recovered stale execution leases: ${recovery.nodes} node(s), ${recovery.actions} action(s).`)
   const pending = graph.pendingApprovals()

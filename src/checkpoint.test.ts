@@ -92,6 +92,31 @@ test('FileTracker records null for a file that did not exist yet', async () => {
   expect(tracker.snapshot()[path]).toBeNull()
 })
 
+test('FileTracker captures a file exactly once even when captures race', async () => {
+  const path = join(testDir, 'race.txt')
+  await Bun.write(path, 'before')
+
+  const tracker = createFileTracker()
+  await Promise.all([tracker.capture(path), tracker.capture(path)])
+  await Bun.write(path, 'after')
+
+  expect(tracker.snapshot()[path]).toBe('before')
+})
+
+test('FileTracker makes a second capture wait for the first read, so the write after it cannot be what gets snapshotted', async () => {
+  const path = join(testDir, 'race-write.txt')
+  await Bun.write(path, 'before')
+
+  const tracker = createFileTracker()
+  const first = tracker.capture(path)
+  // A second tool reaching the same file: once its capture returns it writes.
+  await tracker.capture(path)
+  await Bun.write(path, 'after')
+  await first
+
+  expect(tracker.snapshot()[path]).toBe('before')
+})
+
 test('captureBeforeWrite is a no-op with no active tracker', async () => {
   await expect(captureBeforeWrite(join(testDir, 'unused.txt'))).resolves.toBeUndefined()
 })

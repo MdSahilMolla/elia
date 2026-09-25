@@ -1,5 +1,6 @@
-import { existsSync, readFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { existsSync, readFileSync, renameSync } from 'node:fs'
+import { basename, dirname, join } from 'node:path'
+import { logSwallowedError } from '../diagnostics.ts'
 import { redactText } from '../ui/redact.ts'
 import type { AutonomyProfile, AutonomousRunResult } from './loop.ts'
 import { ensureSecureDirectory, hardenSecureFile, writeSecureFile } from '../securePersistence.ts'
@@ -102,8 +103,19 @@ export class ScheduleStore {
           leaseOwnerPid: Number.isFinite(raw.leaseOwnerPid) ? raw.leaseOwnerPid : undefined,
         })
       }
-    } catch {
-      // Corrupt schedules are ignored so they cannot prevent Elia from starting.
+    } catch (error) {
+      logSwallowedError('scheduler.load.corrupt', error, { path })
+      // Keep the corrupt bytes as evidence instead of letting the next
+      // persist() overwrite the only copy; degrade to the old empty-store
+      // behavior if the quarantine rename itself fails.
+      try {
+        renameSync(
+          path,
+          join(dirname(path), `${basename(path)}.corrupt-${new Date().toISOString().replace(/[:.]/g, '-')}`),
+        )
+      } catch {
+        // Quarantine failed; treat the file as an empty store as before.
+      }
     }
     if (recoverExpired) store.recoverExpired()
     return store

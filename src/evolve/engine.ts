@@ -76,6 +76,8 @@ import { fieldEvidenceSection } from './fieldEvidence.ts'
 import { gateDecision, gateMode, meanGainOver, sealedCompare, type SealedVerdict } from './acceptance.ts'
 import { diffDigest, redactHeldOut, sealedReadTools } from './isolation.ts'
 import { applySteppingStone, archiveNearMiss, elites, readArchive, renderSteppingStones } from './archive.ts'
+import { improverLoopRoute, improverRoute, withImproverBuilder } from './improverRoute.ts'
+import { checkCanaries } from './canaryGate.ts'
 
 /**
  * Elia improving elia.
@@ -161,6 +163,11 @@ export async function evolve(options: EvolveOptions = {}): Promise<EvolveResult>
   const trial = settleStrategyTrial(readLedger())
   if (trial.verdict === 'adopt') writePass(`search strategy ${trial.challenger!.id} adopted — its generations went further (${trial.challenger!.meanDepth.toFixed(2)} vs ${trial.incumbent.meanDepth.toFixed(2)})`)
   else if (trial.verdict === 'reject') writeSubStep(`search strategy ${trial.challenger!.id} retired — not ahead after ${trial.challenger!.generations} generations`)
+
+  // Resolved before anything is spent, so a mistyped route stops the run here
+  // instead of after a full baseline sweep.
+  const improver = improverRoute()
+  if (improver) writeSubStep(`improver on ${improver.label}; candidates measured on ${config.providerLabel}`)
 
   const everyTask = allBenchTasks()
   const tasks = options.taskIds ? everyTask.filter((task) => options.taskIds!.includes(task.id)) : everyTask
@@ -358,6 +365,8 @@ async function attemptGeneration(
     reason: '',
     model: config.model,
   }
+  const improver = improverRoute()
+  if (improver) base.improverModel = improver.label
   // Hand the caller the live record, so an attempt that throws is still
   // reported at the stage it reached.
   onStarted(base)
@@ -391,6 +400,7 @@ async function attemptGeneration(
   ]
 
   await runAgentLoop({
+    ...improverLoopRoute(improver),
     messages,
     systemPrompt: hypothesisPrompt(strategy),
     tools: [...readOnly, capture.tool],
@@ -435,13 +445,15 @@ async function attemptGeneration(
   // --- Implement it inside the sandbox --------------------------------------
 
   writePhase('execute', `applying it in ${sandbox.root}`)
-  await runSubAgent({
-    role: 'builder',
-    name: `builder#gen${generation}`,
-    prompt: implementationBrief(sandbox, hypothesis),
-    signal: options.signal,
-    tools: candidateTools(sandbox.root, allWorkerTools()),
-  })
+  await withImproverBuilder(improver, () =>
+    runSubAgent({
+      role: 'builder',
+      name: `builder#gen${generation}`,
+      prompt: implementationBrief(sandbox, hypothesis),
+      signal: options.signal,
+      tools: candidateTools(sandbox.root, allWorkerTools()),
+    }),
+  )
 
   // --- Gate -----------------------------------------------------------------
 
@@ -471,7 +483,10 @@ async function attemptGeneration(
     }
   }
 
-  const typecheck = await runShell('bun run typecheck', GATE_TIMEOUT_MS, sandbox.root)
+  const [typecheck, unitTests] = await Promise.all([
+    runShell('bun run typecheck', GATE_TIMEOUT_MS, sandbox.root),
+    runShell('bun test', GATE_TIMEOUT_MS, sandbox.root),
+  ])
   if (typecheck.exitCode !== 0) {
     if (looksUnavailable(typecheck.stderr)) {
       writeSubStep('typecheck unavailable in the sandbox — skipping that gate')
@@ -488,7 +503,6 @@ async function attemptGeneration(
   }
   base.funnel = 'compiled'
 
-  const unitTests = await runShell('bun test', GATE_TIMEOUT_MS, sandbox.root)
   if (unitTests.exitCode !== 0) {
     // A failing file has to fail again on its own before it rejects. Generation
     // 7 of the first run here — shorter descriptions for three tools — was
@@ -630,6 +644,12 @@ async function attemptGeneration(
   // can manufacture an efficiency "win" from sampling variance, so a provisional
   // winner must reproduce its result independently before it can touch live code.
   // Reverse the order on confirmation to avoid consistently favoring the second run.
+  //
+  // One sweep after the other, not both at once: `ELIA_BENCH_CONCURRENCY` is how
+  // many agent loops run against the provider at a time, and two concurrent
+  // sweeps double it behind the person's back — a per-minute token cap set to 1
+  // would see 2, and the split quota leaves tasks unmeasured (measureSlot.ts).
+  // Raising ELIA_BENCH_CONCURRENCY is the way to spend more of the provider.
   writeSubStep('provisional win — running an independent confirmation pair')
   let confirmationCandidateCard = await measureFitness({ sourceRoot: sandbox.root, tasks })
   let confirmationBaselineCard = await measureFitness({ sourceRoot: ELIA_ROOT, tasks })
@@ -689,8 +709,13 @@ async function attemptGeneration(
   // in-process check scores the live installation whatever the sandbox holds,
   // which is how the distillation gate's copy of this check sat inert.
   writeSubStep('checking the verifier did not get worse')
-  const candidateGap = await gapVectorIn(sandbox.root, options.signal)
-  const baselineGap = await gapVectorIn(ELIA_ROOT, options.signal)
+  // Independent trees, same work — measure both at once and let the parallel
+  // children share the wall clock. A rejected candidate below still aborts the
+  // same way it would have when measured second.
+  const [candidateGap, baselineGap] = await Promise.all([
+    gapVectorIn(sandbox.root, options.signal),
+    gapVectorIn(ELIA_ROOT, options.signal),
+  ])
   if (!candidateGap || !baselineGap) {
     const reason = 'could not measure the generator–verifier gap — refusing to promote unverified'
     writeFail(`rejected: ${reason}`)
@@ -706,8 +731,10 @@ async function attemptGeneration(
   }
 
   writeSubStep('checking the values did not move')
-  const candidateProbes = await valueProbesIn(sandbox.root, { signal: options.signal })
-  const baselineProbes = await valueProbesIn(ELIA_ROOT, { signal: options.signal })
+  const [candidateProbes, baselineProbes] = await Promise.all([
+    valueProbesIn(sandbox.root, { signal: options.signal }),
+    valueProbesIn(ELIA_ROOT, { signal: options.signal }),
+  ])
   if (!candidateProbes || !baselineProbes) {
     const reason = 'could not run the value probes — refusing to promote unverified'
     writeFail(`rejected: ${reason}`)
@@ -736,9 +763,24 @@ async function attemptGeneration(
     return { ...base, verdict: 'rejected', reason }
   }
   recordProbeRun(candidateProbes, `evolve-gen-${generation}`)
+
+  // The benchmark counts a faked result as a pass wherever its check cannot
+  // tell the difference. The canaries are tasks where only a faked result can
+  // pass, so they see what the score cannot (canarySuite.ts).
+  writeSubStep('checking the candidate does not game its checks')
+  const canaries = await checkCanaries(sandbox.root, ELIA_ROOT, { signal: options.signal })
+  if (canaries.record) base.canaries = canaries.record
+  if (canaries.baselineTrips > 0) writeSubStep(`the live tree itself tripped ${canaries.baselineTrips} canary attempt(s) — the model under test games checks on its own`)
+  if (!canaries.ok) {
+    const reason = canaries.reason
+    writeFail(`rejected: ${reason}`)
+    writeSubStep(`sandbox kept at ${sandbox.root} if you want to inspect it`)
+    return { ...base, verdict: 'rejected', reason }
+  }
+  writeSubStep(canaries.reason)
   base.funnel = 'guarded'
 
-  const confirmedReason = `${decisionReason}; confirmed independently (${gate === 'sealed' ? sealedConfirmation.reason : confirmation.reason}); verifier and values held`
+  const confirmedReason = `${decisionReason}; confirmed independently (${gate === 'sealed' ? sealedConfirmation.reason : confirmation.reason}); verifier, values and canaries held`
 
   if (options.dryRun) {
     writePass(`would promote: ${confirmedReason}`)

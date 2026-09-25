@@ -8,6 +8,7 @@ import { lessonTrials } from '../autonomy/lessonEfficacy.ts'
 import { readContributions } from '../github/contribute.ts'
 import { recursionSignal, renderRecursion } from './recursion.ts'
 import { evidenceVelocity } from './velocity.ts'
+import { liftEvidence, readLiftRuns, type LiftRecord } from '../evolve/lift.ts'
 import type { Scorecard } from '../evolve/fitness.ts'
 
 /**
@@ -105,7 +106,15 @@ function generalizationNote(ledger: GenerationRecord[]): string {
 /** A benchmark this close to perfect can only reward cheaper, not better. */
 const SATURATED = 0.95
 
-export function benchStage(runs: BenchRecord[]): StageReport {
+export function benchStage(runs: BenchRecord[], lift: LiftRecord[] = []): StageReport {
+  const stage = benchStageWithoutLift(runs)
+  // Whether the harness beats the model it runs on is reported beside the
+  // headroom, never folded into the state: a benchmark with room to improve
+  // is the stage's question, and a lift is a different claim about it.
+  return { ...stage, evidence: `${stage.evidence}; ${liftEvidence(lift)}` }
+}
+
+function benchStageWithoutLift(runs: BenchRecord[]): StageReport {
   const name = 'Benchmark with room to improve'
   const last = [...runs].reverse().find((run) => run.set === 'all')
   if (!last) {
@@ -258,7 +267,7 @@ export function compoundingStatus(): StageReport[] {
         : `${ledger.length} evolve generation(s), ${promoted} promoted; last ${new Date(lastGen!.at).toISOString().slice(0, 10)} (${lastGen!.verdict})${generalizationNote(ledger)}`,
       next: promoted === 0 ? 'once stage 4 is measured cleanly: `elia evolve --generations 3`' : undefined,
     },
-    benchStage(benchRuns),
+    benchStage(benchRuns, readLiftRuns()),
     {
       stage: 5,
       name: 'Know which lessons help',

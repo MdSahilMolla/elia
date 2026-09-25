@@ -140,3 +140,12 @@ export function capacityRetryDelayMs(message: string): number {
   if (isRequestTooLargeError(message) && !/\b429\b|rate[_ -]?limit|too many requests|quota exceeded/i.test(message)) return 0
   return 30_000
 }
+
+/**
+ * Delay before re-attempting a failed provider call: the capacity window when
+ * the failure signals a cap (0 from `capacityRetryDelayMs` means "no window"),
+ * otherwise the flat binary backoff the generic path has always used.
+ */
+export function retryBackoffMs(failureText: string, attempt: number): number {
+  return capacityRetryDelayMs(failureText) || 250 * 2 ** (attempt - 1)
+}

@@ -108,6 +108,28 @@ test('a server that crashes rejects pending calls immediately (not after the ful
   }
 })
 
+test('a server that never answers trips the circuit, so the next call fails fast instead of pinning', async () => {
+  const client = new McpClient(echoConfig())
+  try {
+    await client.connect()
+    const internals = client as unknown as {
+      request(method: string, params: unknown, timeoutMs?: number, timeoutMessage?: string): Promise<unknown>
+      breaker: { isOpen(): boolean }
+    }
+    for (let attempt = 0; attempt < 3; attempt++) {
+      await expect(internals.request('test/hang', {}, 25, 'never answered')).rejects.toThrow('never answered')
+    }
+    expect(internals.breaker.isOpen()).toBe(true)
+    const startedAt = Date.now()
+    const error = await internals.request('test/hang', {}, 60_000, 'should not pin for the full timeout').catch((err: unknown) => err)
+    expect(error).toBeInstanceOf(Error)
+    expect((error as Error).message).toContain('open-circuited')
+    expect(Date.now() - startedAt).toBeLessThan(1_000)
+  } finally {
+    await client.closeAndWait()
+  }
+})
+
 test('close() rejects any still-pending call instead of hanging', async () => {
   const client = new McpClient(echoConfig())
   await client.connect()

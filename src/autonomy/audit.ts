@@ -34,6 +34,8 @@ export interface ActionLedgerRecord {
   idempotencyKey?: string
   replayed?: boolean
   failureClass?: string
+  /** Run through an external agent's own sandbox, not elia's governor. */
+  ungoverned?: boolean
 }
 
 export interface RunReceiptInput {
@@ -89,6 +91,7 @@ export function appendActionAudit(event: ToolEvent, runIdOverride?: string): voi
     idempotencyKey: event.idempotencyKey,
     replayed: event.replayed,
     failureClass: event.failureClass,
+    ungoverned: event.ungoverned,
   }
 
   const runId = runIdOverride ?? identity.runId

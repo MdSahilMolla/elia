@@ -2,14 +2,16 @@ import type { PipedSubprocess } from 'bun'
 import type { McpServerConfig } from './config.ts'
 import type { McpTransport } from './transport.ts'
 import { isJsonRpcResponse, MCP_CLIENT_INFO, MCP_PROTOCOL_VERSION, type JsonRpcResponse, type McpToolCallResult, type McpToolsListResult } from './protocol.ts'
+import { CircuitBreaker } from './circuit.ts'
+import { MCP_CALL_TIMEOUT_MS, MCP_CONNECT_TIMEOUT_MS } from './timeouts.ts'
 import { terminateProcessGroup } from '../shell.ts'
 import { logSwallowedError } from '../diagnostics.ts'
 
 // npx-backed browser servers can cold-start slowly on Windows while the package
 // runner validates its cache. Keep the boundary finite, but allow one full
 // startup/list-tools window before declaring an otherwise healthy MCP missing.
-const CONNECT_TIMEOUT_MS = 30_000
-const CALL_TIMEOUT_MS = 120_000
+const CONNECT_TIMEOUT_MS = MCP_CONNECT_TIMEOUT_MS
+const CALL_TIMEOUT_MS = MCP_CALL_TIMEOUT_MS
 const MAX_STDERR_TAIL = 4_000
 
 interface Pending {
@@ -41,9 +43,11 @@ export class McpClient implements McpTransport {
   private readLoop: Promise<void> | undefined
   private stderrLoop: Promise<void> | undefined
   private stderrTail = ''
+  private readonly breaker: CircuitBreaker
 
   constructor(private readonly config: McpServerConfig) {
     this.name = config.name
+    this.breaker = new CircuitBreaker(config.name)
   }
 
   async connect(): Promise<void> {
@@ -138,6 +142,10 @@ export class McpClient implements McpTransport {
     const timeout = new Promise<never>((_, reject) => {
       timer = setTimeout(() => {
         onTimeout?.()
+        // A request the server simply never answers counts against the circuit:
+        // three of those in a row open the breaker so the next call fails fast
+        // instead of pinning for another full timeout.
+        this.breaker.recordFailure()
         reject(new Error(message))
       }, ms)
     })
@@ -153,6 +161,9 @@ export class McpClient implements McpTransport {
    * real caller below passes both. */
   private request(method: string, params: unknown, timeoutMs?: number, timeoutMessage?: string): Promise<unknown> {
     if (this.closed || !this.proc) return Promise.reject(new Error(`MCP server "${this.name}" is not connected`))
+    // Open circuit: the server has already failed the last `threshold` calls;
+    // reject immediately instead of committing the call to another full timeout.
+    if (this.breaker.isOpen()) return Promise.reject(new Error(`MCP server "${this.name}" is open-circuited after repeated failures`))
     const id = this.nextId++
     const line = `${JSON.stringify({ jsonrpc: '2.0', id, method, params })}\n`
     const promise = new Promise<unknown>((resolve, reject) => {
@@ -172,6 +183,7 @@ export class McpClient implements McpTransport {
       // after spawn) — reject this call instead of letting a raw EPIPE escape
       // as an unhandled error.
       this.pending.delete(id)
+      this.breaker.recordFailure()
       return Promise.reject(err instanceof Error ? err : new Error(String(err)))
     }
     if (timeoutMs === undefined) return promise
@@ -269,6 +281,9 @@ export class McpClient implements McpTransport {
     const pending = this.pending.get(message.id)
     if (!pending) return
     this.pending.delete(message.id)
+    // A live round-trip answers the circuit — even an application-level error
+    // response proves the server is talking.
+    this.breaker.recordSuccess()
     pending.resolve(message)
   }
 }
