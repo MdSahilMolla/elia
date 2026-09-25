@@ -38,6 +38,10 @@ import { compactionThresholdFor, contextWindowFor } from '../../contextWindow.ts
 import { codexContextTokens } from '../../providers/codexSubscription.ts'
 import type { ChatMessage } from '../../providers/types.ts'
 import { onLiveOutput, sessionUsageSnapshot } from '../../usage.ts'
+import { SessionBar } from './SessionBar.tsx'
+import { QuickchatOverlay } from './QuickchatOverlay.tsx'
+import { SessionShortcuts } from './SessionShortcuts.tsx'
+import { quickchatStore } from './quickchatOverlayStore.ts'
 
 /** `/attach` and its aliases stay real commands even though a POSIX image path also starts with "/". */
 const ATTACH_COMMAND = /^\/(?:attach|image|img)\b/
@@ -146,6 +150,8 @@ export interface AppProps {
   version: string
   /** Said once under the header — what a background practice run came to. */
   startupNotice?: string
+  /** ctrl+shift+n spawn hook; absent in builds without session spawning. */
+  onSpawnSession?: () => void
 }
 
 /**
@@ -454,6 +460,8 @@ export function App(props: AppProps) {
     if (key.ctrl && input === 'o' && !modalOrOverlayOpen) setExpandedAll((v) => !v)
     // While the approval menu owns the screen, let it handle Esc (go back / no).
     if (approval) return
+    // A visible quickchat panel eats Esc itself — no normal typing Esc reaches it.
+    if (quickchatStore.handleEscape('esc').consumed) return
     if (key.escape) {
       // Staged, so one stray Esc never wipes work: a running turn stops first
       // (queued/steering messages are kept); then the queue; and pending
@@ -959,6 +967,12 @@ export function App(props: AppProps) {
     store.error(`UI: the ${area} failed to render — ${error.message}`)
   }, [store])
 
+  // Session-bar auto-focus and session-cycle notices land in the same banner
+  // line the running turn already uses.
+  const noticeAutoFocus = useCallback((text: string) => {
+    store.notice(text)
+  }, [store])
+
   // Never let a row reach the terminal's last column. A line that fills it
   // exactly leaves the cursor in the "pending wrap" state, which Windows
   // consoles resolve differently from how Ink counts rows — the next repaint
@@ -969,6 +983,12 @@ export function App(props: AppProps) {
     <ClockProvider>
     <FrameWidth.Provider value={frameWidth}>
     <Box flexDirection="column" width={frameWidth}>
+      <SessionBar
+        onAutoFocus={noticeAutoFocus}
+        activeRunning={busy}
+        suppressed={modalOpen || showHelp}
+      />
+      <QuickchatOverlay />
       <ErrorBoundary area="transcript" onError={boundaryError}>
         <Transcript
           key={transcriptEpoch}
@@ -1069,6 +1089,11 @@ export function App(props: AppProps) {
         </ErrorBoundary>
         )}
       </Box>
+      <SessionShortcuts
+        disabled={modalOpen || showHelp || inputMenuOpen}
+        onSpawnSession={props.onSpawnSession ?? (() => store.notice("Session spawning isn't wired up in this build — ctrl+shift+n no-op."))}
+        onCycle={(handle) => store.notice(`Focused session ${handle.name}`)}
+      />
     </Box>
     </FrameWidth.Provider>
     </ClockProvider>

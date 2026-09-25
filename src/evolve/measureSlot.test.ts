@@ -83,50 +83,62 @@ test('the refusal says who is measuring, for how long, and why waiting matters',
   expect(line).toContain('split the provider')
 })
 
-test('a measurement stopped with SIGTERM gives the slot back through the shared shutdown path', async () => {
-  const path = slotPath()
-  // What `elia bench` / `elia evolve` do: index.ts installs the shutdown
-  // handlers, then the command claims the slot and measures for a long time.
-  const script = [
-    `import { installShutdownHandlers } from ${JSON.stringify(join(import.meta.dir, '..', 'ui', 'shutdown.ts'))}`,
-    `import { claimMeasureSlot } from ${JSON.stringify(join(import.meta.dir, 'measureSlot.ts'))}`,
-    'installShutdownHandlers()',
-    `const slot = claimMeasureSlot('elia bench --all', ${JSON.stringify(path)})`,
-    "console.log(slot.ok ? 'claimed' : 'refused')",
-    'setInterval(() => {}, 1000)',
-  ].join('\n')
-  const child = Bun.spawn([process.execPath, '-e', script], { stdout: 'pipe', stderr: 'pipe' })
-  const reader = child.stdout.getReader()
-  const first = new TextDecoder().decode((await reader.read()).value)
-  expect(first.trim()).toBe('claimed')
-  expect(measuringNow(path)?.pid).toBe(child.pid)
+test.skipIf(process.platform === 'win32')(
+  'a measurement stopped with SIGTERM gives the slot back through the shared shutdown path',
+  // Windows skips this: Bun hard-terminates children without delivering
+  // SIGTERM or exit handlers to JS, so the shutdown path this test drives
+  // (installShutdownHandlers → measureSlot release) can never run there. The
+  // mechanism is POSIX-only, so the test is invalid on win32, not the code.
+  async () => {
+    const path = slotPath()
+    // What `elia bench` / `elia evolve` do: index.ts installs the shutdown
+    // handlers, then the command claims the slot and measures for a long time.
+    const script = [
+      `import { installShutdownHandlers } from ${JSON.stringify(join(import.meta.dir, '..', 'ui', 'shutdown.ts'))}`,
+      `import { claimMeasureSlot } from ${JSON.stringify(join(import.meta.dir, 'measureSlot.ts'))}`,
+      'installShutdownHandlers()',
+      `const slot = claimMeasureSlot('elia bench --all', ${JSON.stringify(path)})`,
+      "console.log(slot.ok ? 'claimed' : 'refused')",
+      'setInterval(() => {}, 1000)',
+    ].join('\n')
+    const child = Bun.spawn([process.execPath, '-e', script], { stdout: 'pipe', stderr: 'pipe' })
+    const reader = child.stdout.getReader()
+    const first = new TextDecoder().decode((await reader.read()).value)
+    expect(first.trim()).toBe('claimed')
+    expect(measuringNow(path)?.pid).toBe(child.pid)
 
-  child.kill('SIGTERM')
-  await child.exited
-  expect(existsSync(path)).toBe(false)
-})
+    child.kill('SIGTERM')
+    await child.exited
+    expect(existsSync(path)).toBe(false)
+  },
+)
 
-test("a stopped measurement takes its task processes with it instead of leaving them spending quota", async () => {
-  // What `elia bench` does when it is sent SIGTERM mid-task: the shutdown
-  // handlers run, and every task process it spawned has to go too.
-  const script = [
-    "process.env.ANTHROPIC_API_KEY ??= 'test-key'",
-    `const { installShutdownHandlers } = await import(${JSON.stringify(join(import.meta.dir, '..', 'ui', 'shutdown.ts'))})`,
-    `const { killOnShutdown } = await import(${JSON.stringify(join(import.meta.dir, 'fitness.ts'))})`,
-    'installShutdownHandlers()',
-    "const task = Bun.spawn(['sleep', '60'])",
-    'killOnShutdown(task)',
-    'console.log(task.pid)',
-    'setInterval(() => {}, 1000)',
-  ].join('\n')
-  const parent = Bun.spawn([process.execPath, '-e', script], { stdout: 'pipe', stderr: 'pipe' })
-  const taskPid = Number(new TextDecoder().decode((await parent.stdout.getReader().read()).value).trim())
-  expect(taskPid).toBeGreaterThan(0)
-  expect(isProcessAlive(taskPid)).toBe(true)
+test.skipIf(process.platform === 'win32')(
+  'a stopped measurement takes its task processes with it instead of leaving them spending quota',
+  // Same Windows signal-semantics limitation as above, plus the `sleep` binary
+  // does not exist on Windows. POSIX-only test.
+  async () => {
+    // What `elia bench` does when it is sent SIGTERM mid-task: the shutdown
+    // handlers run, and every task process it spawned has to go too.
+    const script = [
+      "process.env.ANTHROPIC_API_KEY ??= 'test-key'",
+      `const { installShutdownHandlers } = await import(${JSON.stringify(join(import.meta.dir, '..', 'ui', 'shutdown.ts'))})`,
+      `const { killOnShutdown } = await import(${JSON.stringify(join(import.meta.dir, 'fitness.ts'))})`,
+      'installShutdownHandlers()',
+      "const task = Bun.spawn(['sleep', '60'])",
+      'killOnShutdown(task)',
+      'console.log(task.pid)',
+      'setInterval(() => {}, 1000)',
+    ].join('\n')
+    const parent = Bun.spawn([process.execPath, '-e', script], { stdout: 'pipe', stderr: 'pipe' })
+    const taskPid = Number(new TextDecoder().decode((await parent.stdout.getReader().read()).value).trim())
+    expect(taskPid).toBeGreaterThan(0)
+    expect(isProcessAlive(taskPid)).toBe(true)
 
-  parent.kill('SIGTERM')
-  await parent.exited
-  const deadline = Date.now() + 3_000
-  while (isProcessAlive(taskPid) && Date.now() < deadline) await Bun.sleep(50)
-  expect(isProcessAlive(taskPid)).toBe(false)
-})
+    parent.kill('SIGTERM')
+    await parent.exited
+    const deadline = Date.now() + 3_000
+    while (isProcessAlive(taskPid) && Date.now() < deadline) await Bun.sleep(50)
+    expect(isProcessAlive(taskPid)).toBe(false)
+  },
+)

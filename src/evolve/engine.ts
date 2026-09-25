@@ -916,11 +916,20 @@ export function failingTestFiles(output: string): string[] {
   const files = new Set<string>()
   let current: string | undefined
   for (const line of output.split(/\r?\n/)) {
-    const header = /^([\w./@-]+\.test\.[cm]?[jt]sx?):\s*$/.exec(line.trim())
+    // bun on Windows reports failing files with backslash separators
+    // (`src\bad.test.ts:`), so the path charset accepts both.
+    const header = /^([\w./@\-\\]+\.test\.[cm]?[jt]sx?):\s*$/.exec(line.trim())
     if (header) current = header[1]
-    else if (line.trim().startsWith('(fail)') && current && !current.startsWith('/') && !current.includes('..')) files.add(current)
+    else if (line.trim().startsWith('(fail)') && current && isPathWithinCandidateTree(current)) files.add(current.replace(/\\/g, '/'))
   }
   return [...files].sort()
+}
+
+function isPathWithinCandidateTree(relative: string): boolean {
+  if (relative.startsWith('/') || relative.startsWith('\\')) return false
+  if (/^[a-zA-Z]:[\\/]/.test(relative)) return false
+  if (relative.includes('..')) return false
+  return true
 }
 
 /**
