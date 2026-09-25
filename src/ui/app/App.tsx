@@ -659,11 +659,16 @@ export function App(props: AppProps) {
           setProviderPlan([])
         },
       }
+      let ending: 'done' | 'stopped' | 'failed' = 'done'
       try {
         await props.submitTurn(text, hooks)
       } catch (error) {
-        store.error(`Error: ${error instanceof Error ? error.message : String(error)}`)
+        ending = 'failed'
+        store.error(error instanceof Error ? error.message : String(error))
       } finally {
+        // Esc stops a turn by aborting it; whatever the turn did on the way
+        // out, it ended because it was stopped.
+        if (abortedRef.current) ending = 'stopped'
         abortRef.current = null
         // A lesson that landed in the last moment of the turn is still
         // flaring; let it finish before the receipt pushes it into scrollback.
@@ -685,10 +690,12 @@ export function App(props: AppProps) {
         // usage when the provider reported it, the streamed estimate otherwise.
         const tools = toolsOf(store.turnItems())
         const elapsedMs = Date.now() - startedAt
-        const rollup = tools.length > 2 || elapsedMs >= RECEIPT_AFTER_MS ? rollupLine(rollupTools(tools)) : ''
-        if (elapsedMs >= RECEIPT_AFTER_MS || rollup) {
+        const rollup = tools.length > 2 || elapsedMs >= RECEIPT_AFTER_MS || ending !== 'done' ? rollupLine(rollupTools(tools)) : ''
+        // A turn that stopped or failed always closes with a line saying so,
+        // however short it was.
+        if (elapsedMs >= RECEIPT_AFTER_MS || rollup || ending !== 'done') {
           const reported = sessionUsageSnapshot().usage.outputTokens - outputBefore.current
-          store.receipt(turnReceipt({ elapsedMs, rollup, tokens: reported > 0 ? reported : Math.round(progress.current.tokens) }))
+          store.receipt(turnReceipt({ elapsedMs, rollup, tokens: reported > 0 ? reported : Math.round(progress.current.tokens), ending }), ending)
         }
         turnsRun.current += 1
         setRunSteps([])
@@ -730,7 +737,7 @@ export function App(props: AppProps) {
             store.shell(command, output)
             store.commit()
           } catch (error) {
-            store.error(`Error: ${error instanceof Error ? error.message : String(error)}`)
+            store.error(error instanceof Error ? error.message : String(error))
             store.commit()
           }
         }

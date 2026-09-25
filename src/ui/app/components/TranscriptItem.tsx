@@ -246,9 +246,15 @@ export function TranscriptItemView({ item, expanded, gapAbove = false, live = fa
       return <Note text={item.text} marginTop={gapAbove ? 1 : 0} />
     }
     case 'receipt':
-      // The spark, settled: the turn is over.
+      // The spark, settled: the turn is over. A turn you stopped, or one that
+      // failed, does not get the spark — it gets the mark that says how it ended.
       return (
-        <Marked mark={glyphs.receipt} color={palette.brand} textColor={palette.muted} marginTop={1}>
+        <Marked
+          mark={item.ending === 'stopped' ? glyphs.warn : item.ending === 'failed' ? glyphs.error : glyphs.receipt}
+          color={item.ending === 'stopped' ? palette.warning : item.ending === 'failed' ? palette.failure : palette.brand}
+          textColor={palette.muted}
+          marginTop={1}
+        >
           {item.text}
         </Marked>
       )
