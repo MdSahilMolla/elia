@@ -1,5 +1,6 @@
 import type { Tool } from './types.ts'
-import { existsSync } from 'node:fs'
+import { existsSync, statSync } from 'node:fs'
+import { basename, dirname } from 'node:path'
 import { optionalString } from './args.ts'
 import { isIgnored, SKIP_DIRS } from './ignoreDirs.ts'
 import { resolveWorkspacePath } from '../autonomy/context.ts'
@@ -48,7 +49,7 @@ export const grepTool: Tool = {
     type: 'object',
     properties: {
       pattern: { type: 'string', description: 'Regular expression to search for' },
-      path: { type: 'string', description: 'Directory to search under (default: current directory)' },
+      path: { type: 'string', description: 'Directory to search under, or a single file to search (default: current directory)' },
       glob: { type: 'string', description: 'Only search files matching this glob, e.g. "*.ts" or "**/*.{js,tsx}"' },
       context: { type: 'number', description: `Lines of context to include before and after each match (0-${MAX_CONTEXT_LINES})` },
     },
@@ -76,6 +77,15 @@ export const grepTool: Tool = {
     // naming the *binary*, not the missing directory. That reads as "ripgrep is
     // broken" and sent a run looking in the wrong place entirely.
     if (!existsSync(dir)) throw new Error(`no such directory: ${inputDir}`)
+
+    // A file path is a search of that one file. ripgrep was spawned with the
+    // file as its cwd, which fails on Windows as `ENOTDIR … NtQueryDirectoryFile`
+    // — three failed greps in the recent action ledger were exactly this.
+    if (statSync(dir).isFile()) {
+      const slash = inputDir.replace(/\\/g, '/').lastIndexOf('/')
+      const displayDir = slash > 0 ? inputDir.replace(/\\/g, '/').slice(0, slash) : slash === 0 ? '' : '.'
+      return await searchWithJs(pattern, dirname(dir), displayDir, undefined, context, basename(dir))
+    }
 
     // Preferred tier when enabled: the Go sidecar. Transport or binary
     // problems fall through to ripgrep and then pure-JS; a rejected pattern
@@ -182,7 +192,7 @@ async function runRipgrep(rg: string, args: string[], dir: string): Promise<{ st
 
 /** Used when ripgrep is not installed. Slower, but the same contract. */
 /** Exported for tests: the pure-JS search path, used directly so a test doesn't depend on `rg` being absent from PATH. */
-export async function searchWithJs(pattern: string, dir: string, inputDir: string, globPattern: string | undefined, context: number | undefined): Promise<string> {
+export async function searchWithJs(pattern: string, dir: string, inputDir: string, globPattern: string | undefined, context: number | undefined, onlyFile?: string): Promise<string> {
   let regex: RegExp
   try {
     regex = getCachedRegex(pattern)
@@ -197,8 +207,10 @@ export async function searchWithJs(pattern: string, dir: string, inputDir: strin
   let truncated = false
   let skippedLargeFiles = 0
 
-  for await (const relPath of scan.scan({ cwd: dir, dot: false })) {
-    if (isIgnored(relPath) || isSensitivePath(relPath)) continue
+  // `onlyFile` was named explicitly, so the ignore list (node_modules, dist…)
+  // does not apply to it — only the sensitive-path rule does.
+  for await (const relPath of onlyFile !== undefined ? [onlyFile] : scan.scan({ cwd: dir, dot: false })) {
+    if ((onlyFile === undefined && isIgnored(relPath)) || isSensitivePath(relPath)) continue
     if (fileFilter && !fileFilter.match(relPath) && !fileFilter.match(relPath.split(/[\\/]/).at(-1) ?? relPath)) continue
 
     const fullPath = `${inputDir}/${relPath}`
@@ -216,8 +228,11 @@ export async function searchWithJs(pattern: string, dir: string, inputDir: strin
       continue // binary or unreadable file
     }
 
-    // Process lines in a single pass without creating intermediate arrays
+    // Process lines in a single pass without creating intermediate arrays.
+    // A final newline ends the last line; it does not start an empty one that
+    // context would then print (ripgrep doesn't).
     const lines = text.split('\n')
+    if (lines.length > 1 && lines.at(-1) === '') lines.pop()
     const span = context && context > 0 ? context : 0
     let lastEmitted = -1
     
