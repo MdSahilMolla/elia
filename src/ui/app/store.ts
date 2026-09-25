@@ -9,6 +9,7 @@
 //
 // On turn end `commit()` moves everything from `live` into `committed` and the
 // live region empties.
+import { stripVTControlCharacters } from 'node:util'
 import type { ToolEvent } from '../../agentLoop.ts'
 import type { ProviderActivity } from '../../providers/types.ts'
 import { redactRecord, redactSecrets, redactText, relativizeProjectPaths } from '../redact.ts'
@@ -459,7 +460,12 @@ export function createTranscriptStore(): TranscriptStore {
       changed()
     },
 
-    notice(text) {
+    notice(raw) {
+      // Notices are plain text; the note renderer colours them. Slash commands
+      // built for the readline REPL still hand over `theme.ts` colour codes,
+      // which Ink cannot see through — the wrapper counted them as visible
+      // columns, so a coloured line wrapped early and broke on narrow terminals.
+      const text = stripVTControlCharacters(raw)
       // A hammered key (Esc on a turn that won't stop) would otherwise print the
       // same line 20 times. Collapse an immediately-repeated notice into one
       // line with a ×N counter.

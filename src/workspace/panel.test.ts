@@ -48,6 +48,11 @@ test('with no token the snapshot is unconfigured and the panel shows the setup r
   expect(snap.configured).toBe(false)
   expect(snap.reachable).toBe(false)
   expect(renderEliaspacePanel(snap)).toContain('elia workspace init')
+  // The Ink REPL's form: the same recipe under a title, with no drawn box.
+  const bare = renderEliaspacePanel(snap, { framed: false })
+  expect(bare.split('\n')[0]).toBe('elia workspace')
+  expect(bare).toContain('elia workspace init')
+  expect(bare).not.toMatch(/[╭╮╰╯│┌┐└┘]/)
 })
 
 test('with a reachable server the snapshot carries status and identity', async () => {

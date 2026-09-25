@@ -38,7 +38,7 @@ import { CAPABILITIES } from '../capabilities.ts'
 import { type ActionApproval } from '../autonomy/governor.ts'
 import { routeTurn } from '../autonomy/escalation.ts'
 import { emitEvent, interactiveTerminal, machineReadable, plainOutput, quietOutput } from '../ui/runtime.ts'
-import { renderWorkspacePanel } from '../ui/workspacePanel.ts'
+import { renderWorkspacePanel, renderWorkspaceStatus } from '../ui/workspacePanel.ts'
 import { registerShutdownCleanup } from '../ui/shutdown.ts'
 import { redactText } from '../ui/redact.ts'
 import { writeUserConfig } from '../userConfig.ts'
@@ -2483,7 +2483,7 @@ export async function runInteractive(): Promise<void> {
     if (trimmed === '/eliaspace') {
       const { collectEliaspaceSnapshot, renderEliaspacePanel, renderEliaspaceView } = await import('../workspace/panel.ts')
       const snap = await collectEliaspaceSnapshot()
-      const panel = renderEliaspacePanel(snap)
+      const panel = renderEliaspacePanel(snap, { framed: false })
       if (!snap.configured || !snap.reachable) return { handled: true, text: panel }
       return {
         handled: true,
@@ -2508,10 +2508,14 @@ export async function runInteractive(): Promise<void> {
     // --- text-only commands ---
 
     if (trimmed === '/help' || trimmed === '/?') {
-      return { handled: true, text: allSlashCommands().map((c) => `${c.name}  —  ${c.description}`).join('\n') }
+      // One aligned column of names, so the descriptions read as a list.
+      const commands = allSlashCommands()
+      const column = Math.min(22, Math.max(...commands.map((c) => c.name.length)) + 2)
+      const rows = commands.map((c) => `${c.name.padEnd(column)}${c.description}`)
+      return { handled: true, text: [...rows, '', 'Keys: ? shortcuts · shift+tab plan mode · ctrl+o expand · !cmd runs a shell command · @path attaches a file'].join('\n') }
     }
     if (trimmed === '/status') {
-      return { handled: true, text: renderWorkspacePanel({ sessionId, mode, providerLabel: config.providerLabel, model: config.model }) }
+      return { handled: true, text: renderWorkspaceStatus({ sessionId, mode, providerLabel: config.providerLabel, model: config.model }) }
     }
     if (trimmed === '/team') return { handled: true, text: renderTeamStatus() }
     const expandMatch = /^\/expand(?:\s+(\d+))?$/.exec(trimmed)

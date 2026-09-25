@@ -13,6 +13,31 @@ export interface WorkspacePanelInput {
   model: string
 }
 
+/**
+ * `/status` for the Ink REPL: the same facts as the panel below, as plain
+ * aligned rows. The panel's two drawn frames broke apart inside Ink — its
+ * colour codes counted as width, so on a narrow terminal the borders wrapped.
+ */
+export function renderWorkspaceStatus(input: WorkspacePanelInput): string {
+  const otherSessions = listKnownSessions().filter((session) => session.sessionId !== input.sessionId)
+  const todo = activeTodoList()
+  const planText = todo.render()
+  const steps = planText === '(todo list is empty)' ? [] : planText.split('\n').filter((line) => line.trim())
+  const agents = taskSessions.list().filter((task) => task.role && task.role !== 'lead')
+  const running = agents.filter((task) => task.status === 'running' || task.status === 'pending')
+  const artifacts = listArtifacts()
+  const row = (label: string, value: string) => `${label.padEnd(10)}${value}`
+  return [
+    `elia · ${input.mode}`,
+    row('model', `${input.providerLabel} · ${input.model}`),
+    row('session', `${input.sessionId}${otherSessions.length > 0 ? ` · ${otherSessions.length} other session${otherSessions.length === 1 ? '' : 's'} (/sessions)` : ''}`),
+    row('plan', steps.length > 0 ? `${steps.length} step${steps.length === 1 ? '' : 's'}` : 'none yet — shift+tab switches to plan mode'),
+    ...steps.slice(0, 5).map((line) => `${' '.repeat(10)}${line.trim()}`),
+    row('workers', agents.length === 0 ? 'none this session' : `${running.length} running · ${agents.length} this session`),
+    row('artifacts', artifacts.length === 0 ? 'none saved' : artifacts.slice(0, 3).map((artifact) => artifact.name).join(', ') + (artifacts.length > 3 ? ` · ${artifacts.length - 3} more` : '')),
+  ].join('\n')
+}
+
 /** Renders the normal readline workspace as a bounded two-column snapshot. */
 export function renderWorkspacePanel(input: WorkspacePanelInput): string {
   const width = terminalWidth(96)
@@ -24,7 +49,7 @@ export function renderWorkspacePanel(input: WorkspacePanelInput): string {
 
   const otherSessions = listKnownSessions().filter((session) => session.sessionId !== input.sessionId)
   const plan = activeTodoList().render()
-  const planLines = plan === '(todo list is empty)' ? ['No working plan yet · /plan'] : plan.split('\n').slice(0, 3)
+  const planLines = plan === '(todo list is empty)' ? ['No working plan yet · /plan <goal>'] : plan.split('\n').slice(0, 3)
   const agents = taskSessions.list().filter((task) => task.role && task.role !== 'lead').slice(0, 3)
   const artifacts = listArtifacts().slice(0, 3)
 

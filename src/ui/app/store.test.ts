@@ -349,3 +349,10 @@ test('a lesson stays live while its flare plays, and the turn knows how long to 
   plain.activity({ kind: 'status', status: 'completed', title: '✦ memory · 9 lessons from earlier sessions' })
   expect(flareHoldMs(plain.turnItems())).toBe(0)
 })
+
+test('a notice is stored as plain text, whatever colour codes it arrived with', () => {
+  const s = createTranscriptStore()
+  s.notice('\u001b[33mgold\u001b[39m and \u001b[2mdim\u001b[22m')
+  const notice = s.turnItems().find((i) => i.kind === 'notice') as { text: string }
+  expect(notice.text).toBe('gold and dim')
+})
