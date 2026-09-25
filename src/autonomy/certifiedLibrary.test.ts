@@ -129,3 +129,19 @@ test('state kept under the old vde/ directory moves to compounding/ without losi
   expect(compoundingStateDir(dir)).toBe(moved)
   expect(readFileSync(join(moved, 'activities.jsonl'), 'utf8')).toBe('old activity\nnew activity\n')
 })
+
+test('health: certified artifacts never reused while uncertified ones are is σ = 0, and calls for an audit (#1277)', () => {
+  for (const id of ['c1', 'c2']) registerArtifact({ id, kind: 'lesson', summary: id, source: 's', checks: [pass('lint'), pass('execution')] }, path)
+  registerArtifact({ id: 'u1', kind: 'lesson', summary: 'u1', source: 's', checks: [pass('lint')] }, path)
+  for (let index = 0; index < 5; index += 1) recordReuse(['u1'], path)
+  const inverted = libraryHealth(readLibrary(path))
+  expect(inverted.sigma).toBe(0)
+  expect(inverted.auditFirst).toBe(true)
+  expect(inverted.notes.join(' ')).not.toContain('σ not measured')
+})
+
+test('health: with nothing certified there is no σ to measure, however much the rest is reused', () => {
+  registerArtifact({ id: 'u1', kind: 'lesson', summary: 'u1', source: 's', checks: [pass('lint')] }, path)
+  recordReuse(['u1'], path)
+  expect(libraryHealth(readLibrary(path)).sigma).toBeUndefined()
+})

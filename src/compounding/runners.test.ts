@@ -6,7 +6,7 @@ import { recordGapVector } from '../gap/report.ts'
 import type { GapVector } from '../gap/types.ts'
 import type { LibraryHealth } from '../autonomy/certifiedLibrary.ts'
 import type { EngineState } from './round.ts'
-import { AUDIT_EVERY_MS, createRunners, LADDER_STALE_MS, lastRunAt, PAID_ACTIVITIES } from './runners.ts'
+import { ago, AUDIT_EVERY_MS, createRunners, LADDER_STALE_MS, lastRunAt, PAID_ACTIVITIES } from './runners.ts'
 import { wilson } from './stats.ts'
 
 let cwd: string
@@ -85,4 +85,11 @@ test('every activity but solving has a runner; solving is the person\'s own work
   expect(PAID_ACTIVITIES.has('harvest')).toBe(false)
   expect(PAID_ACTIVITIES.has('verify')).toBe(false)
   expect(PAID_ACTIVITIES.has('meta')).toBe(true)
+})
+
+test('how long ago reads right from seconds to days', () => {
+  expect(ago(6_000)).toBe('moments ago')
+  expect(ago(20 * 60_000)).toBe('20 minute(s) ago')
+  expect(ago(5 * HOUR)).toBe('5 hour(s) ago')
+  expect(ago(72 * HOUR)).toBe('3 day(s) ago')
 })

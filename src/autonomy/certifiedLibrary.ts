@@ -307,7 +307,9 @@ export interface LibraryHealth {
   slip: RateEstimate
   /**
    * σ, the reuse advantage of certified artifacts over uncertified ones, as the
-   * ratio of mean reuse. `undefined` until both groups have been reused.
+   * ratio of mean reuse. 0 when certified artifacts exist and are never reused
+   * while uncertified ones are — the worst case, and a measurement. `undefined`
+   * until uncertified artifacts have been reused and certified ones exist.
    */
   sigma?: number
   meanLeap: number
@@ -337,7 +339,9 @@ export function libraryHealth(artifacts: Map<string, Artifact>): LibraryHealth {
   const meanReuse = (group: Artifact[]) => (group.length === 0 ? 0 : group.reduce((sum, artifact) => sum + artifact.reuse, 0) / group.length)
   const certifiedReuse = meanReuse(certified)
   const uncertifiedReuse = meanReuse(uncertified)
-  const sigma = certifiedReuse > 0 && uncertifiedReuse > 0 ? certifiedReuse / uncertifiedReuse : undefined
+  // Certified reuse of 0 against uncertified reuse above 0 is σ = 0, not "no
+  // data": retrieval is actively passing certified artifacts over (#1277).
+  const sigma = certified.length > 0 && uncertifiedReuse > 0 ? certifiedReuse / uncertifiedReuse : undefined
 
   const live = all.filter((artifact) => artifact.status !== 'purged' && artifact.status !== 'quarantined')
   const meanLeap = live.length === 0 ? 0 : live.reduce((sum, artifact) => sum + artifact.leap, 0) / live.length
@@ -364,7 +368,7 @@ export function libraryHealth(artifacts: Map<string, Artifact>): LibraryHealth {
     health.auditFirst = true
     notes.push(`audits purge ${Math.round(slip.mean * 100)}% of what they re-check — admission is letting too much through`)
   }
-  if (sigma === undefined) notes.push('σ not measured yet: certified and uncertified artifacts both need recorded reuse')
+  if (sigma === undefined) notes.push('σ not measured yet: it needs certified artifacts, and uncertified ones with recorded reuse')
   if (slip.mean === undefined) notes.push('ε not measured yet: nothing admitted has been audited')
   return health
 }
