@@ -1310,9 +1310,14 @@ export async function runInteractive(): Promise<void> {
       // ChatGPT-subscription turns, whose file writes never reach the `preview`
       // tool (Codex writes directly, and its own browser launch is sandboxed).
       if (!previewedThisTurn && !uiHooks?.planMode && !controller.signal.aborted && interactiveTerminal && !machineReadable) {
+        let renderTarget: string | undefined
         try {
           const { findFreshPreviewTarget } = await import('../preview/autoPreview.ts')
-          const target = findFreshPreviewTarget(turnStartedAt - 3_000)
+          // What the turn wrote, not just a scan of workspace/: a page written
+          // anywhere else (a project folder, the repo root) was invisible here,
+          // so it shipped "done" with nothing having checked that it renders.
+          const target = findFreshPreviewTarget(turnStartedAt - 3_000, undefined, Object.keys(tracker.snapshot()))
+          renderTarget = target
           if (target) {
             const { prepareAutoPreview } = await import('../preview/prepare.ts')
             const { waitForHttp, checkRendered } = await import('../preview/readiness.ts')
@@ -1381,8 +1386,18 @@ export async function runInteractive(): Promise<void> {
               }
             }
           }
-        } catch {
-          // Preview is a convenience; never fail a completed turn over it.
+        } catch (error) {
+          // Preview is a convenience; never fail a completed turn over it. But
+          // for a static page this check is the only verification there is, so
+          // a check that could not run leaves the turn "skipped" with the reason
+          // on record — not "none", which reads as "nothing to check".
+          if (renderTarget && verifyResult === 'none') {
+            verifyResult = 'skipped'
+            const line = `Render check could not run — ${error instanceof Error ? error.message : String(error)}`
+            sessionTranscript.notice(line)
+            if (uiHooks) uiHooks.onActivity?.({ kind: 'status', status: 'warning', title: line })
+            else writeNotice(`▸ ${line}`)
+          }
         }
       } else if (previewedUrl && !persona && !escalated && !uiHooks?.planMode && !controller.signal.aborted && (verifyResult === 'none' || verifyResult === 'skipped')) {
         // The model opened the page itself, so the auto-preview above stood
