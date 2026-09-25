@@ -32,7 +32,7 @@ import {
   type Scorecard,
   type TaskOutcome,
 } from './fitness.ts'
-import { raceCandidate, regressionsIn, renderRace, settleRegressions, sieveEnabled } from './sieve.ts'
+import { onTaskTime, raceCandidate, regressionsIn, remeasureDropped, renderRace, settleRegressions, sieveEnabled } from './sieve.ts'
 import {
   blindEvidence,
   blindMetrics,
@@ -653,6 +653,18 @@ async function attemptGeneration(
   writeSubStep('provisional win — running an independent confirmation pair')
   let confirmationCandidateCard = await measureFitness({ sourceRoot: sandbox.root, tasks })
   let confirmationBaselineCard = await measureFitness({ sourceRoot: ELIA_ROOT, tasks })
+  // A task the provider dropped, on either side, gets one more turn on that
+  // side before anything is compared: one dropped task here used to reject a
+  // provisional winner outright, the most expensive generation there is to
+  // lose. Before the regression retest below, so it sees full rows.
+  const candidateAgain = await remeasureDropped({ card: confirmationCandidateCard, tasks, sourceRoot: sandbox.root })
+  const baselineAgain = await remeasureDropped({ card: confirmationBaselineCard, tasks, sourceRoot: ELIA_ROOT })
+  const droppedOnConfirmation = [...new Set([...candidateAgain.retried, ...baselineAgain.retried])]
+  if (droppedOnConfirmation.length > 0) {
+    writeSubStep(`${droppedOnConfirmation.join(', ')} dropped by the provider on the confirmation run — measured once more on that side`)
+    confirmationCandidateCard = onTaskTime(sandbox.root, tasks, candidateAgain.card)
+    confirmationBaselineCard = onTaskTime(ELIA_ROOT, tasks, baselineAgain.card)
+  }
   // Two fresh sweeps of a coin-flip task disagree by half their attempts about
   // one time in nine; an apparent regression is re-run on both trees and the
   // pair judged on pooled attempts (sieve.ts settleRegressions).
@@ -899,6 +911,7 @@ ${IMMUTABLE_FILES.map((file) => `- ${file}`).join('\n')}
 
 Improving your score by changing the benchmark or weakening a safety boundary is not improvement. Do not attempt it.
 ${measurableSection(baseline)}
+${EXECUTED_SECTION}
 
 ## What has already been tried
 ${redactHeldOut(renderLedgerForPrompt(), heldOutIds)}${redactHeldOut(renderSteppingStones(elites(readArchive(EVOLUTION_DIR))), heldOutIds)}
@@ -916,11 +929,20 @@ export function failingTestFiles(output: string): string[] {
   const files = new Set<string>()
   let current: string | undefined
   for (const line of output.split(/\r?\n/)) {
-    const header = /^([\w./@-]+\.test\.[cm]?[jt]sx?):\s*$/.exec(line.trim())
+    // bun on Windows reports failing files with backslash separators
+    // (`src\bad.test.ts:`), so the path charset accepts both.
+    const header = /^([\w./@\-\\]+\.test\.[cm]?[jt]sx?):\s*$/.exec(line.trim())
     if (header) current = header[1]
-    else if (line.trim().startsWith('(fail)') && current && !current.startsWith('/') && !current.includes('..')) files.add(current)
+    else if (line.trim().startsWith('(fail)') && current && isPathWithinCandidateTree(current)) files.add(current.replace(/\\/g, '/'))
   }
   return [...files].sort()
+}
+
+function isPathWithinCandidateTree(relative: string): boolean {
+  if (relative.startsWith('/') || relative.startsWith('\\')) return false
+  if (/^[a-zA-Z]:[\\/]/.test(relative)) return false
+  if (relative.includes('..')) return false
+  return true
 }
 
 /**
@@ -1032,6 +1054,22 @@ ${areas.map((area) => `- ${area}`).join('\n')}
 
 A change confined to anything else cannot move a score — it will be measured as inert and rejected without a task being run. If you want to improve something the benchmark cannot see, say so in your rationale and propose it anyway; it will be rejected, but the ledger will carry the reason.`
 }
+
+/**
+ * What a benchmark task executes, as opposed to what it loads.
+ *
+ * `measurableSection` lists the areas every task loads, and a task loads
+ * nearly the whole tree, so it cannot say which of that code runs. Generation
+ * 15 put its fix in the builder prompt in src/autonomy/loop.ts — loaded by
+ * every task, run by none — and its apparent gain was two unlucky baseline
+ * rows. Read from src/evolve/benchTask.ts, which candidates cannot edit; the
+ * brief test reads that file too, so the two cannot drift apart unnoticed.
+ */
+export const EXECUTED_SECTION = `
+## What a benchmark task runs
+Loaded is not executed. Each task runs exactly one agent loop: \`runAgentLoop\` (src/agentLoop.ts) with \`DEV_SYSTEM_PROMPT\` (src/config.ts) as its system prompt, the tools from \`allWorkerTools()\` (src/tools/registry.ts) plus the \`task\` tool, under an unattended action governor whose one approval is git inside the task's own temporary repository (src/evolve/benchPolicy.ts). See src/evolve/benchTask.ts.
+
+It never runs \`elia auto\`'s autonomous pipeline: not the planner, not the critic, review or repair passes, and none of the prompts in src/autonomy/loop.ts. A sub-agent's role prompt (src/autonomy/roles.ts, through src/subagent.ts) runs only when the agent itself calls the \`task\` tool, which these tasks rarely do. A change confined to code a task never executes cannot move a score: it will measure as noise, and noise is rejected.`
 
 function implementationBrief(sandbox: Sandbox, hypothesis: Hypothesis): string {
   return `Implement this one change to elia's own source, in the copy at ${sandbox.root}.

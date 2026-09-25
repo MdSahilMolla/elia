@@ -2,6 +2,7 @@ import { AsyncLocalStorage } from 'node:async_hooks'
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { existsSync, lstatSync, realpathSync } from 'node:fs'
 import type { RoleName } from './types.ts'
+import type { SessionScope } from '../session/types.ts'
 import { paths } from '../statePaths.ts'
 
 /**
@@ -23,6 +24,8 @@ export interface AgentIdentity {
   cwd?: string
   /** Cooperative cancellation inherited by tools in this execution context. */
   signal?: AbortSignal
+  /** When running inside an isolated session, its filesystem scope. */
+  sessionScope?: SessionScope
 }
 
 const LEAD: AgentIdentity = { name: 'lead', role: 'lead' }
@@ -128,7 +131,7 @@ export function isPathWithinWorkspace(inputPath: string, cwd = currentAgent().cw
   }
 }
 
-function canonicalPathWithExistingParent(target: string): string {
+export function canonicalPathWithExistingParent(target: string): string {
   const missing: string[] = []
   let current = target
   while (true) {

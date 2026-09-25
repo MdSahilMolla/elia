@@ -295,3 +295,13 @@ test('a truncated stream or a dropped connection says nothing about the agent', 
   expect(isInfrastructureFailure({ error: 'missing finish_reason for choice 0', steps: 6 })).toBe(true)
   expect(isInfrastructureFailure({ error: 'Connection error.', steps: 4 })).toBe(true)
 })
+
+test('a dropped or stalled task might measure later; an empty account or an unstartable task will not', async () => {
+  const { mightMeasureLater } = await import('./fitness.ts')
+  expect(mightMeasureLater({ unmeasured: true, error: 'Connection error.' })).toBe(true)
+  expect(mightMeasureLater({ unmeasured: true, error: 'provider stalled: the model sent nothing for 60s or more' })).toBe(true)
+  expect(mightMeasureLater({ unmeasured: true, error: '402 Payment Required' })).toBe(false)
+  expect(mightMeasureLater({ unmeasured: true, error: 'not run: the provider is out of credit (earlier task)' })).toBe(false)
+  expect(mightMeasureLater({ unmeasured: true, error: 'preload not found' })).toBe(false)
+  expect(mightMeasureLater({ error: 'Connection error.' })).toBe(false)
+})

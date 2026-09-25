@@ -19,7 +19,7 @@ import { table } from '../ui/layout.ts'
 import { type ActionApproval } from '../autonomy/governor.ts'
 import { emitEvent, machineReadable } from '../ui/runtime.ts'
 import { registerShutdownCleanup } from '../ui/shutdown.ts'
-import { flagValue, hasFlag, positionals, strictInteger } from './argv.ts'
+import { flagValue, hasFlag, args, positionals, strictInteger } from './argv.ts'
 import { ensureFirstRunProviderSetup } from './providerSetup.ts'
 import { actionApprovalPrompt, createInteractiveApprover, loadRuntimeSkills } from './runtime.ts'
 
@@ -29,6 +29,12 @@ import { actionApprovalPrompt, createInteractiveApprover, loadRuntimeSkills } fr
  * when another elia still has it open.
  */
 export async function runSessionsList(): Promise<void> {
+  const nested = positionals(['--name', '--limit', '--payload', '--from', '--session'])[0]
+  if (nested && ['new', 'list', 'attach', 'kill', 'sync', 'drop', 'subscribe', 'status'].includes(nested)) {
+    const { runParallelSessions } = await import('./parallelSessions.ts')
+    await runParallelSessions(args)
+    return
+  }
   const { DEFAULT_CATALOG_LIMIT, describeSession, listSessionSummaries, relativeTime } = await import('../sessionCatalog.ts')
   const limit = hasFlag('--all') ? 0 : strictInteger(flagValue('--limit')) ?? DEFAULT_CATALOG_LIMIT
   const sessions = await listSessionSummaries({ limit })

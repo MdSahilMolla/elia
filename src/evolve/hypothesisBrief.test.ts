@@ -5,7 +5,7 @@ import { join } from 'node:path'
 
 process.env.ANTHROPIC_API_KEY ??= 'test-key-for-hypothesis-brief-test'
 
-const { hypothesisBrief } = await import('./engine.ts')
+const { EXECUTED_SECTION, hypothesisBrief } = await import('./engine.ts')
 import type { Metrics } from './ledger.ts'
 
 /**
@@ -128,4 +128,21 @@ test('a tool is placed where it is defined, not where it is mentioned', async ()
   // alphabetical order, defines it; the locked file is the right answer.
   expect(owners.run_command).toBe('src/tools/runCommand.ts')
   expect(owners.read_file).toBe('src/tools/readFile.ts')
+})
+
+test('the proposer is told what a benchmark task executes, not just what it loads, and it matches benchTask.ts', async () => {
+  const brief = hypothesisBrief(SANDBOX, METRICS)
+  expect(brief).toContain('## What a benchmark task runs')
+  expect(brief).toContain('none of the prompts in src/autonomy/loop.ts')
+  expect(brief.indexOf('## What a benchmark task runs')).toBeLessThan(brief.indexOf('## What has already been tried'))
+
+  // The section describes src/evolve/benchTask.ts. If that file starts running
+  // something else, this fails and the brief has to be brought back in line.
+  const { readFileSync } = await import('node:fs')
+  const benchTask = readFileSync(join(import.meta.dir, 'benchTask.ts'), 'utf8')
+  for (const runs of ['runAgentLoop', 'DEV_SYSTEM_PROMPT', 'allWorkerTools()', 'taskTool', 'createActionGovernor']) {
+    expect(benchTask).toContain(runs)
+    expect(EXECUTED_SECTION).toContain(runs === 'taskTool' ? '`task` tool' : runs === 'createActionGovernor' ? 'action governor' : runs)
+  }
+  expect(benchTask).not.toMatch(/autonomy\/loop|runAutonomous|planner/)
 })

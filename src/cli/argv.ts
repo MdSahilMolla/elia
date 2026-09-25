@@ -49,6 +49,10 @@ export function strictInteger(value: string | undefined): number | undefined {
   return Number.isSafeInteger(parsed) ? parsed : undefined
 }
 
+export function sessionFlagName(): string | undefined {
+  return flagValue('--session')
+}
+
 /** Positional arguments, with flags and their values removed. */
 export function positionals(valueFlags: string[] = []): string[] {
   const result: string[] = []
