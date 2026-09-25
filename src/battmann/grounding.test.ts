@@ -22,7 +22,7 @@ test('figures match at the precision either side states them, and bare integers,
 })
 
 test('a figure from one source cited against another is flagged; citing the right one clears it', () => {
-  expect(unverifiedFigures('Semicon 2.0 has a ₹1.27 lakh crore outlay', [PIB])).toEqual(['1.27 lakh'])
+  expect(unverifiedFigures('Semicon 2.0 has a ₹1.27 lakh crore outlay', [PIB])).toEqual(['₹1.27 lakh'])
   expect(unverifiedFigures('Semicon 2.0 has a ₹1.27 lakh crore outlay', [BUSINESS_TODAY])).toEqual([])
 })
 
@@ -30,8 +30,16 @@ test('register_claim reports unverified figures at write time', async () => {
   const cwd = mkdtempSync(join(tmpdir(), 'elia-battmann-grounding-'))
   const run = async (input: Record<string, unknown>) => JSON.parse(await withAgentIdentity({ name: 'test', role: 'lead', cwd }, () => battmannTool.execute(input)))
   await run({ action: 'register_evidence', evidenceId: 'pib', title: PIB.split('\n')[0], url: 'https://www.pib.gov.in/x', publishedAt: '2026-08-31', retrievedAt: '2026-09-01', excerpt: PIB.split('\n')[1], independenceGroup: 'gov', reliability: 0.95 })
-  const claim = await run({ action: 'register_claim', statement: 'Semicon 2.0 has a ₹1.27 lakh crore outlay', classification: 'observed_fact', confidence: 'high', asOf: '2026-09-02', evidenceLinks: [{ evidenceId: 'pib', relation: 'supports', supportingExcerpt: '₹1.27 lakh crore' }] })
+  const claim = await run({ action: 'register_claim', statement: 'Semicon 2.0 has a ₹1.27 lakh crore outlay', classification: 'judgement', confidence: 'high', asOf: '2026-09-02', evidenceLinks: [{ evidenceId: 'pib', relation: 'supports', supportingExcerpt: '₹1.27 lakh crore' }] })
   expect(claim.status).toBe('created')
-  expect(claim.unverifiedFigures).toEqual(['1.27 lakh'])
-  expect(claim.note).toContain('Cite the record they come from')
+  expect(claim.unverifiedFigures).toEqual(['₹1.27 lakh'])
+  expect(claim.note).toContain('if they come from a source, cite it')
+})
+
+test('currency figures are checked, and a whole number is matched at the precision its trailing zeros give it', () => {
+  const COMMODITY = 'Crude oil, average of Brent, Dubai and WTI (IMF, monthly price) [USD]: latest 2026-08: 86.4138. Copper (IMF, monthly price) [USD]: latest 2026-08: 14331.26.'
+  expect(unverifiedFigures('Oil prices at ~90-95 USD/bbl (feed series)', [COMMODITY])).toEqual(['95 USD'])
+  expect(unverifiedFigures('Copper near 14000 USD/t in August', [COMMODITY])).toEqual([])
+  expect(unverifiedFigures('Copper near $15,000 a tonne', [COMMODITY])).toEqual(['$15,000'])
+  expect(unverifiedFigures('Crude averaged $86 in August', [COMMODITY])).toEqual([])
 })

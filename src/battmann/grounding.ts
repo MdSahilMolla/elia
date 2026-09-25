@@ -11,25 +11,28 @@
 interface Figure { raw: string; value: number; decimals: number }
 
 const DATE = /\b\d{4}-\d{2}-\d{2}(?:T[\d:.]+Z?)?\b/g
-const NUMBER = /(?<![\w.])(\d{1,3}(?:,\d{2,3})+|\d+)(\.\d+)?(\s*(?:%|percent|pp|bn|billion|b\b|mn|million|m\b|crore|lakh|trillion|t\b))?/gi
+const NUMBER = /(US\$|\$|₹|€|£|Rs\.?\s?)?(?<![\w.])(\d{1,3}(?:,\d{2,3})+|\d+)(\.\d+)?(\s*(?:%|percent|pp|bn|billion|b\b|mn|million|m\b|crore|lakh|trillion|t\b|usd\b|inr\b|eur\b|us\$|\/bbl|bbl\b|\/t\b|tonnes?\b|mmbtu\b|per (?:barrel|tonne|ton)\b))?/gi
 
 function figures(text: string): Figure[] {
   const result: Figure[] = []
   for (const match of text.replace(DATE, ' ').matchAll(NUMBER)) {
-    const whole = match[1]!.replaceAll(',', '')
-    const fraction = match[2] ?? ''
-    const unit = match[3]?.trim() ?? ''
+    const currency = match[1] ?? ''
+    const whole = match[2]!.replaceAll(',', '')
+    const fraction = match[3] ?? ''
+    const unit = match[4]?.trim() ?? ''
     const value = Number(`${whole}${fraction}`)
     if (!Number.isFinite(value)) continue
     // Bare integers are mostly counts, durations, years and codes (HS 8542, 2026, 3-5 years); only figures
-    // with a fraction or a unit are claims about a measured quantity.
-    if (!fraction && !unit) continue
-    result.push({ raw: match[0].trim(), value, decimals: fraction ? fraction.length - 1 : 0 })
+    // with a fraction, a unit or a currency are claims about a measured quantity.
+    if (!fraction && !unit && !currency) continue
+    // A whole number's trailing zeros are its precision: 14000 is a figure rounded to the thousand.
+    const trailingZeros = fraction ? 0 : (/0+$/.exec(whole)?.[0].length ?? 0)
+    result.push({ raw: match[0].trim(), value, decimals: fraction ? fraction.length - 1 : -Math.min(trailingZeros, Math.max(0, whole.length - 1)) })
   }
   return result
 }
 
-const roundTo = (value: number, decimals: number) => Number(value.toFixed(decimals))
+const roundTo = (value: number, decimals: number) => (decimals >= 0 ? Number(value.toFixed(decimals)) : Math.round(value / 10 ** -decimals) * 10 ** -decimals)
 
 /** Two figures agree when one is the other rounded to its own precision (11.7 matches 11.71; 6.45 matches 6.5). */
 function agree(a: Figure, b: Figure): boolean {

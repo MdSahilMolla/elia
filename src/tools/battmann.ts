@@ -6,6 +6,7 @@ import { BATTMANN_STORE_ACTIONS, executeBattmannStoreAction, loadBattmannDashboa
 import { describeFeedResult, fetchFeed, leadingSeries, normalizeFeedRequest, type FeedResult } from '../battmann/feeds.ts'
 import { clampClearance, clearanceRank, modelBoundary } from '../battmann/modelBoundary.ts'
 import { DEFAULT_ARTIFACT_PATHS } from '../battmann/artifactPaths.ts'
+import { excerptIsOnPage, lookupFetchedPage } from './fetchedPages.ts'
 import { openRuleQuestion, resolveDue } from '../battmann/monitor.ts'
 import { atomicWrite } from './atomicWrite.ts'
 import type { Tool } from './types.ts'
@@ -187,7 +188,7 @@ interface ConsequenceNode { id: string; parentId: string | null; statement: stri
 
 export function buildConsequenceChain(input: Record<string, unknown>): string {
   const trigger = text(input.trigger, 'trigger')
-  const asOf = date(input.asOf, 'asOf')
+  const asOf = date(input.asOf ?? new Date().toISOString(), 'asOf')
   const raw = list(input.nodes, 'nodes')
   if (!raw.length) throw new Error('nodes must contain at least one consequence')
   const nodes: ConsequenceNode[] = raw.map((item, index) => ({
@@ -287,7 +288,7 @@ interface Candidate { id: string; name: string; sourceUrl: string; sourceDate: s
 
 export function rankAlternatives(input: Record<string, unknown>): string {
   const subject = text(input.subject, 'subject')
-  const asOf = date(input.asOf, 'asOf')
+  const asOf = date(input.asOf ?? new Date().toISOString(), 'asOf')
   const incumbentId = input.incumbentId === undefined || input.incumbentId === '' ? null : text(input.incumbentId, 'incumbentId', 100)
   const criteria: Criterion[] = list(input.criteria, 'criteria').map((item, index) => {
     const direction = text(item.direction, `criteria[${index}].direction`, 20)
@@ -397,9 +398,9 @@ interface StoredReportData {
   asOf: string
   ontology: { activeObjects: number; activeLinks: number }
   scorecard: Record<string, unknown>
-  questions: Array<{ id: string; question: string; horizon: string; resolutionCriteria: string; status: string; outcome: number | null; latestForecast: null | { probability: number; asOf: string; method: string; evidenceIds: string[] } }>
-  claims: Array<{ id: string; statement: string; classification: Classification; confidence: Confidence; evidence: Array<{ evidenceId: string; relation: string; supportingExcerpt: string }>; review: { verdict: string; reviewer?: string; reviewedAt?: string; notes?: string }; unverifiedFigures: string[] }>
-  evidence: Array<{ id: string; title: string; url: string; publisher?: string; sourceType: string; publishedAt: string; retrievedAt: string; excerpt: string; contentHash: string; independenceGroup: string; reliability: number }>
+  questions: Array<{ id: string; question: string; horizon: string; resolutionCriteria: string; status: string; outcome: number | null; latestForecast: null | { probability: number; asOf: string; method: string; evidenceIds: string[]; unverifiedFigures?: string[] } }>
+  claims: Array<{ id: string; statement: string; classification: Classification; confidence: Confidence; evidence: Array<{ evidenceId: string; relation: string; supportingExcerpt: string }>; review: { verdict: string; reviewer?: string; reviewedAt?: string; notes?: string }; unverifiedFigures: string[]; sources: { verified: number; unverified: number } }>
+  evidence: Array<{ id: string; title: string; url: string; publisher?: string; sourceType: string; publishedAt: string; retrievedAt: string; excerpt: string; contentHash: string; independenceGroup: string; reliability: number; provenance?: string }>
   scenarios: Array<{ id: string; title: string; probability: number; horizon: string; status: string; assumptions: string[]; indicators: string[] }>
   decisions: Array<{ id: string; title: string; chosenOption?: string; rationale: string; status: string; approvedBy?: string; decidedAt: string }>
   outcomes: Array<{ id: string; decisionId: string; observedAt: string; summary: string; metrics: Record<string, unknown>; evidenceIds: string[] }>
@@ -442,14 +443,15 @@ async function createStoreReport(input: Record<string, unknown>): Promise<string
     '> Classification and distribution labels are document metadata; they do not enforce access control.', '',
     '## Executive summary', '', executiveSummary, '',
     '## Key judgments', '',
-    '| ID | Judgment | Classification | Confidence | Review | Evidence | Figures not in cited evidence |', '|---|---|---|---|---|---|---|',
-    ...data.claims.map((claim) => `| ${md(claim.id)} | ${md(claim.statement)} | ${claim.classification} | ${claim.confidence} | ${md(claim.review.verdict)} | ${claim.evidence.map((item) => `[${item.evidenceId}]`).join(', ')} | ${claim.unverifiedFigures.length ? `⚠ ${md(claim.unverifiedFigures.join(', '))}` : '—'} |`),
-    ...(data.claims.length ? [] : ['| — | No stored judgments were available as of the report cutoff. | — | — | — | — | — |']), '',
+    '| ID | Judgment | Classification | Confidence | Review | Evidence | Verified sources | Figures not in cited evidence |', '|---|---|---|---|---|---|---|---|',
+    ...data.claims.map((claim) => `| ${md(claim.id)} | ${md(claim.statement)} | ${claim.classification} | ${claim.confidence} | ${md(claim.review.verdict)} | ${claim.evidence.map((item) => `[${item.evidenceId}]`).join(', ')} | ${claim.sources.verified}/${claim.sources.verified + claim.sources.unverified}${claim.sources.verified === 0 ? ' ⚠' : ''} | ${claim.unverifiedFigures.length ? `⚠ ${md(claim.unverifiedFigures.join(', '))}` : '—'} |`),
+    ...(data.claims.length ? [] : ['| — | No stored judgments were available as of the report cutoff. | — | — | — | — | — | — |']), '',
+    '> Verified sources are records fetched by code from a data feed, or excerpts checked against the page web_fetch retrieved; unverified ones are search snippets or text that was not checked.', '',
     ...(flaggedClaims.length ? [`> ${flaggedClaims.length} judgment(s) state figures that do not appear in the evidence they cite. Check each before this report is finalised.`, ''] : []),
     '## Forecast register', '',
-    '| Question | Probability | Forecast as of | Horizon | Status | Method | Evidence |', '|---|---:|---|---|---|---|---|',
-    ...forecastRows.map((question) => `| ${md(question.question)} | ${((question.latestForecast?.probability ?? 0) * 100).toFixed(1)}% | ${question.latestForecast?.asOf} | ${question.horizon} | ${question.status} | ${md(question.latestForecast?.method)} | ${(question.latestForecast?.evidenceIds ?? []).map((id) => `[${id}]`).join(', ')} |`),
-    ...(forecastRows.length ? [] : ['| No eligible stored forecasts were available. | — | — | — | — | — | — |']), '',
+    '| Question | Probability | Forecast as of | Horizon | Status | Method | Evidence | Rationale figures not in evidence |', '|---|---:|---|---|---|---|---|---|',
+    ...forecastRows.map((question) => `| ${md(question.question)} | ${((question.latestForecast?.probability ?? 0) * 100).toFixed(1)}% | ${question.latestForecast?.asOf} | ${question.horizon} | ${question.status} | ${md(question.latestForecast?.method)} | ${(question.latestForecast?.evidenceIds ?? []).map((id) => `[${id}]`).join(', ')} | ${question.latestForecast?.unverifiedFigures?.length ? `⚠ ${md(question.latestForecast.unverifiedFigures.join(', '))}` : '—'} |`),
+    ...(forecastRows.length ? [] : ['| No eligible stored forecasts were available. | — | — | — | — | — | — | — |']), '',
     '## Scenarios and signposts', '',
     ...data.scenarios.flatMap((scenario) => [`### ${scenario.title} — ${(scenario.probability * 100).toFixed(1)}%`, '', `Status: ${scenario.status}; horizon: ${scenario.horizon}.`, '', `Assumptions: ${scenario.assumptions.join('; ') || 'None supplied.'}`, '', `Indicators: ${scenario.indicators.join('; ') || 'None supplied.'}`, '']),
     ...(data.scenarios.length ? [] : ['No active scenario records were available.', '']),
@@ -466,7 +468,7 @@ async function createStoreReport(input: Record<string, unknown>): Promise<string
     ...(score.warning ? [`- Warning: ${score.warning}`] : []), '',
     '## Ontology coverage', '', `- Active objects: ${data.ontology.activeObjects}`, `- Active links: ${data.ontology.activeLinks}`, '',
     '## Evidence ledger', '',
-    ...data.evidence.flatMap((source) => [`### [${source.id}] ${source.title}`, '', `- URL: ${source.url}`, `- Publisher/type: ${source.publisher ?? 'Unspecified'} / ${source.sourceType}`, `- Published/retrieved: ${source.publishedAt} / ${source.retrievedAt}`, `- Independence group/reliability: ${source.independenceGroup} / ${source.reliability}`, `- SHA-256: ${source.contentHash}`, `- Preserved excerpt: ${md(source.excerpt)}`, '']),
+    ...data.evidence.flatMap((source) => [`### [${source.id}] ${source.title}`, '', `- URL: ${source.url}`, `- Verification: ${source.provenance === 'feed' ? 'fetched by code from a data feed (raw response hashed)' : source.provenance === 'fetched' ? 'excerpt checked against the fetched page' : 'unverified (not checked against the source)'}`, `- Publisher/type: ${source.publisher ?? 'Unspecified'} / ${source.sourceType}`, `- Published/retrieved: ${source.publishedAt} / ${source.retrievedAt}`, `- Independence group/reliability: ${source.independenceGroup} / ${source.reliability}`, `- SHA-256: ${source.contentHash}`, `- Preserved excerpt: ${md(source.excerpt)}`, '']),
     '## Methodology, review and limitations', '',
     '- All data is cut off at the report as-of timestamp; later evidence, forecasts, reviews, resolutions, scenarios, and decisions are excluded.',
     '- Forecast revisions remain immutable and accepted resolutions are scored with proper scoring rules.',
@@ -476,7 +478,7 @@ async function createStoreReport(input: Record<string, unknown>): Promise<string
     '',
   ].join('\n')
   const reportBundle = { reportSchemaVersion: 2, reportId, reportVersion, reportStatus, documentClassification, distribution, generatedAt, title, author, reviewer, executiveSummary, unresolvedReviewCount: unresolvedReviews.length, ...data }
-  const rowsHtml = data.claims.map((claim) => `<tr><td>${html(claim.id)}</td><td>${html(claim.statement)}${claim.unverifiedFigures.length ? `<p class="warning">Not in cited evidence: ${html(claim.unverifiedFigures.join(', '))}</p>` : ''}</td><td>${html(claim.confidence)}</td><td>${html(claim.review.verdict)}</td></tr>`).join('') || '<tr><td colspan="4">No stored judgments.</td></tr>'
+  const rowsHtml = data.claims.map((claim) => `<tr><td>${html(claim.id)}</td><td>${html(claim.statement)}${claim.unverifiedFigures.length ? `<p class="warning">Not in cited evidence: ${html(claim.unverifiedFigures.join(', '))}</p>` : ''}</td><td>${html(claim.confidence)}</td><td>${html(claim.review.verdict)}<br><small>${claim.sources.verified}/${claim.sources.verified + claim.sources.unverified} sources verified</small></td></tr>`).join('') || '<tr><td colspan="4">No stored judgments.</td></tr>'
   const forecastsHtml = forecastRows.map((question) => `<tr><td>${html(question.question)}</td><td><span class="prob" style="--p:${Math.round((question.latestForecast?.probability ?? 0) * 100)}%">${((question.latestForecast?.probability ?? 0) * 100).toFixed(1)}%</span></td><td>${html(question.horizon)}</td><td>${html(question.status)}</td></tr>`).join('') || '<tr><td colspan="4">No eligible forecasts.</td></tr>'
   const scenariosHtml = data.scenarios.map((scenario) => `<article><h3>${html(scenario.title)} — ${(scenario.probability * 100).toFixed(1)}%</h3><p>Status: ${html(scenario.status)} · horizon: ${html(scenario.horizon)}</p><p><b>Assumptions:</b> ${html(scenario.assumptions.join('; ') || 'None supplied.')}<br><b>Indicators:</b> ${html(scenario.indicators.join('; ') || 'None supplied.')}</p></article>`).join('') || '<p>No scenarios recorded.</p>'
   const decisionsHtml = data.decisions.map((decision) => `<tr><td>${html(decision.title)}</td><td>${html(decision.chosenOption ?? 'Not chosen')}</td><td>${html(decision.status)}</td><td>${html(decision.approvedBy ?? 'Not approved')}</td><td>${html(decision.decidedAt)}</td></tr>`).join('') || '<tr><td colspan="5">No decisions recorded.</td></tr>'
@@ -615,14 +617,14 @@ const UNCLAMPED_ACTIONS = new Set(['stage_deployment', 'define_deployment_target
  * more reliably than a hundred-property schema, and a live run spent most of its budget guessing these shapes.
  */
 const ACTION_USAGE: Record<string, string> = {
-  register_evidence: 'register_evidence takes flat fields: title, url, publishedAt (ISO date), retrievedAt (ISO date, not in the future), excerpt, independenceGroup, reliability (0-1); optional evidenceId, publisher, sourceType (primary | secondary | dataset | model), securityClassification. Figures from feed_query or ingest_feed already have an evidenceId; cite that instead of re-registering them.',
-  register_claim: 'register_claim takes: statement, classification (observed_fact | reproducible_calculation | model_estimate | judgement), confidence (low | medium | high), asOf (a date means that day up to now), evidenceLinks [{ evidenceId, relation: supports | contradicts | context, supportingExcerpt }]; optional claimId, securityClassification. Example: { "action": "register_claim", "statement": "China supplied 40.9% of India\'s 2025 IC imports", "classification": "observed_fact", "confidence": "high", "asOf": "2026-09-24", "evidenceLinks": [{ "evidenceId": "feed:comtrade:...", "relation": "supports", "supportingExcerpt": "China 11.71B (40.9%)" }] }',
+  register_evidence: 'register_evidence takes flat fields: title, url, publishedAt (ISO date), retrievedAt (ISO date, not in the future), excerpt (the page\'s exact words; web_fetch the page first so the excerpt is verified), independenceGroup, reliability (0-1); optional evidenceId, publisher, sourceType (primary | secondary | dataset | model), securityClassification. Figures from feed_query or ingest_feed already have an evidenceId; cite that instead of re-registering them.',
+  register_claim: 'register_claim takes: statement, classification (observed_fact | reproducible_calculation | model_estimate | judgement), confidence (low | medium | high), evidenceLinks (at least one: the records the claim rests on, for a judgement too), asOf (default now; a date means that day up to now), evidenceLinks [{ evidenceId, relation: supports | contradicts | context, supportingExcerpt }]; optional claimId, securityClassification. Example: { "action": "register_claim", "statement": "China supplied 40.9% of India\'s 2025 IC imports", "classification": "observed_fact", "confidence": "high", "asOf": "2026-09-24", "evidenceLinks": [{ "evidenceId": "feed:comtrade:...", "relation": "supports", "supportingExcerpt": "China 11.71B (40.9%)" }] }',
   review_claim: 'review_claim takes: claimId, verdict (supported | contradicted | unclear), reviewer, reviewedAt, notes; optional reviewId.',
   submit_forecast: 'submit_forecast takes: questionId, probability (0.001-0.999), method, rationale; evidenceIds [ids] (on a certified question the question\'s own feed evidence is attached if you give none); optional forecaster (default elia), forecastClass (live | backtest), priorProbability. On a certified question asOf is set by the clock.',
   create_question: 'create_question takes: question, and either resolutionRule { source, observation, comparator, threshold } (certified, resolved by code) or resolutionCriteria + openedAt + horizon; optional questionId, domain, tags.',
   risk_assessment: 'risk_assessment takes: subject, factors [{ id, summary, sourceUrl, sourceDate, direction: aggravating | mitigating, magnitude (0.001-1), reliability (0-1), independenceGroup, momentum: rising | stable | falling }]; optional asOf (default now), priorRisk (1-99, default 50). Example: { "action": "risk_assessment", "subject": "India chip import disruption", "factors": [{ "id": "conc", "summary": "85% of IC imports from three suppliers", "sourceUrl": "https://comtradeapi.un.org/...", "sourceDate": "2026-09-24", "direction": "aggravating", "magnitude": 0.7, "reliability": 0.9, "independenceGroup": "trade", "momentum": "stable" }] }',
-  consequence_chain: 'consequence_chain takes: trigger, asOf, nodes [{ id, parentId (null for first-order), statement, mechanism, conditionalProbability (0.001-0.999), lagDays, basis, sourceUrl? }].',
-  alternatives: 'alternatives takes: subject, asOf, criteria [{ id, name, weight (0-1), direction: higher-better | lower-better }], candidates [{ id, name, sourceUrl, sourceDate, reliability, scores: { <criterionId>: 0-100 } }]; optional incumbentId.',
+  consequence_chain: 'consequence_chain takes: trigger, asOf (default now), nodes [{ id, parentId (null for first-order), statement, mechanism, conditionalProbability (0.001-0.999), lagDays, basis, sourceUrl? }].',
+  alternatives: 'alternatives takes: subject, asOf (default now), criteria [{ id, name, weight (0-1), direction: higher-better | lower-better }], candidates [{ id, name, sourceUrl, sourceDate, reliability, scores: { <criterionId>: 0-100 } }]; optional incumbentId.',
   exposure_assessment: 'exposure_assessment takes: subject, asOf, baseValue, exposures [{ id, channel, factor, sourceUrl, sourceDate, notional, shockPct (0.0001-1), reliability, independenceGroup, sensitivity? }]; optional currency.',
   report_from_store: `report_from_store takes: title, executiveSummary, author; optional asOf (default now), outputPath (ending .md, default ${DEFAULT_ARTIFACT_PATHS.report_from_store}), reportStatus (draft | final; final needs reviewer and supported reviews), questionIds, documentClassification.`,
   dashboard: `dashboard takes no required fields; optional outputPath (ending .html, default ${DEFAULT_ARTIFACT_PATHS.dashboard}), title, asOf.`,
@@ -720,6 +722,34 @@ async function ingestFeed(input: Record<string, unknown>): Promise<string> {
   return JSON.stringify({ action: 'ingest_feed', evidenceId: recorded.evidenceId, ...compactFeedResult(result), recorded: summary }, null, 2)
 }
 
+/**
+ * Records agent evidence, grading it against the page web_fetch returned: an excerpt that is on that page is
+ * recorded as fetched (verified); one that is not is refused, since it would present words the source does not
+ * contain; a page never fetched is recorded as unverified, with a note saying how to verify it.
+ */
+function registerEvidenceChecked(input: Record<string, unknown>): string {
+  const url = typeof input.url === 'string' ? input.url : ''
+  const excerpt = typeof input.excerpt === 'string' ? input.excerpt : ''
+  const page = url ? lookupFetchedPage(url) : undefined
+  if (page && excerpt && !excerptIsOnPage(excerpt, page.text)) {
+    throw new Error(`the excerpt is not on the page web_fetch returned for ${url} (fetched ${page.fetchedAt}). Quote the page's own words exactly; join separate passages with "…".`)
+  }
+  const result = JSON.parse(executeBattmannStoreAction(input, page ? { verifiedPage: page } : {})) as Record<string, unknown>
+  return JSON.stringify(page ? result : { ...result, note: 'Recorded as unverified: this page was not fetched in this session, so the excerpt could not be checked. web_fetch the page and register its exact words to make this verified evidence.' }, null, 2)
+}
+
+/** A certified forecast far from the statistical baseline gets a note: large departures need evidence the baseline cannot see. */
+function withDivergenceNote(input: Record<string, unknown>, raw: string): string {
+  const result = JSON.parse(raw) as Record<string, unknown>
+  if (typeof result.questionId !== 'string' || typeof result.probability !== 'number' || result.note) return raw
+  const detail = JSON.parse(executeBattmannStoreAction({ ...input, action: 'question_detail', questionId: result.questionId })) as { question: { resolutionRule: unknown }; forecasts: { forecaster: string; probability: number }[] }
+  const baseline = detail.forecasts.filter((forecast) => forecast.forecaster === 'baseline').at(-1)
+  if (!detail.question.resolutionRule || !baseline) return raw
+  const gap = Math.round(Math.abs(result.probability - baseline.probability) * 100)
+  if (gap < 25) return raw
+  return JSON.stringify({ ...result, note: `This is ${gap} points from the statistical baseline (${Math.round(baseline.probability * 100)}%). A departure that large needs specific evidence the baseline cannot see — name it in the rationale — otherwise forecasts closer to the baseline score better.` }, null, 2)
+}
+
 async function resolveDueAction(input: Record<string, unknown>): Promise<string> {
   return JSON.stringify({ action: 'resolve_due', ...(await resolveDue(input)) }, null, 2)
 }
@@ -785,6 +815,8 @@ export const battmannTool: Tool = {
       if (action === 'ingest_feed') return ingestFeed(bounded)
       if (action === 'resolve_due') return resolveDueAction(bounded)
       if (action === 'create_question' && bounded.resolutionRule !== undefined && bounded.resolutionRule !== null) return openRuleQuestion(bounded).then((result) => JSON.stringify({ action, ...result }, null, 2))
+      if (action === 'register_evidence') return registerEvidenceChecked(bounded)
+      if (action === 'submit_forecast') return withDivergenceNote(bounded, executeBattmannStoreAction(bounded))
       if (typeof action === 'string' && (BATTMANN_STORE_ACTIONS as readonly string[]).includes(action)) return executeBattmannStoreAction(bounded)
       throw new Error(`action must be one of: ${[...CALCULATION_ACTIONS, ...ARTIFACT_ACTIONS, ...FEED_ACTIONS, ...BATTMANN_STORE_ACTIONS].join(', ')}`)
     })

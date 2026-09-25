@@ -521,7 +521,7 @@ function transaction<T>(db: Database, operation: () => T): T {
 }
 
 function assertEvidence(db: Database, ids: string[], asOf?: string): void {
-  if (!ids.length) throw new Error('at least one evidence id is required')
+  if (!ids.length) throw new Error('at least one evidence id is required: cite the records this rests on (feed evidence ids from indicator_series or feed_query count, and so does a registered source)')
   for (const id of new Set(ids)) {
     const row = db.query('SELECT id, published_at, retrieved_at FROM evidence WHERE id = ?').get(id) as Row | null
     if (!row) throw new Error(`unknown evidence id: ${id}`)
@@ -556,7 +556,12 @@ function createQuestion(input: Row): Row {
   }))
 }
 
-function registerEvidence(input: Row): Row {
+/**
+ * Evidence an agent records is graded: `fetched` when its excerpt was confirmed, by code, to be on the page
+ * web_fetch retrieved (the page's hash is kept), `agent` otherwise — a search snippet or the model's own words.
+ * Only the tool can pass a verified page; nothing in the model's input can.
+ */
+function registerEvidence(input: Row, verifiedPage?: { sha256: string }): Row {
   return withStore(input, true, (db, path) => transaction(db, () => {
     const id = identifier(input.evidenceId, 'evidenceId')
     const publishedAt = isoDate(input.publishedAt, 'publishedAt')
@@ -564,34 +569,61 @@ function registerEvidence(input: Row): Row {
     if (publishedAt > retrievedAt) throw new Error('publishedAt cannot be after retrievedAt')
     const excerpt = requiredText(input.excerpt, 'excerpt', 4_000)
     const contentHash = createHash('sha256').update(excerpt).digest('hex')
-    db.query('INSERT INTO evidence (id, title, url, publisher, source_type, published_at, retrieved_at, excerpt, content_hash, independence_group, reliability, security_classification, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(
-      id, requiredText(input.title, 'title', 500), httpUrl(input.url, 'url'), optionalText(input.publisher, 'publisher', 300) ?? null, oneOf(input.sourceType ?? 'primary', 'sourceType', ['primary', 'secondary', 'dataset', 'model'] as const), publishedAt, retrievedAt, excerpt, contentHash, requiredText(input.independenceGroup, 'independenceGroup', 100), boundedNumber(input.reliability, 'reliability', 0, 1), securityClassification(input), new Date().toISOString(),
+    db.query('INSERT INTO evidence (id, title, url, publisher, source_type, published_at, retrieved_at, excerpt, content_hash, independence_group, reliability, security_classification, provenance, response_hash, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(
+      id, requiredText(input.title, 'title', 500), httpUrl(input.url, 'url'), optionalText(input.publisher, 'publisher', 300) ?? null, oneOf(input.sourceType ?? 'primary', 'sourceType', ['primary', 'secondary', 'dataset', 'model'] as const), publishedAt, retrievedAt, excerpt, contentHash, requiredText(input.independenceGroup, 'independenceGroup', 100), boundedNumber(input.reliability, 'reliability', 0, 1), securityClassification(input), verifiedPage ? 'fetched' : 'agent', verifiedPage?.sha256 ?? null, new Date().toISOString(),
     )
-    return { status: 'created', storePath: path, evidenceId: id, contentHash, securityClassification: securityClassification(input) }
+    return { status: 'created', storePath: path, evidenceId: id, contentHash, securityClassification: securityClassification(input), verification: verifiedPage ? 'fetched' : 'unverified' }
   }))
 }
 
 function registerClaim(input: Row): Row {
   return withStore(input, true, (db, path) => transaction(db, () => {
     const id = identifier(input.claimId, 'claimId')
-    const asOf = analysisAsOf(input.asOf, 'asOf')
+    const asOf = input.asOf === undefined || input.asOf === null || input.asOf === '' ? new Date().toISOString() : analysisAsOf(input.asOf, 'asOf')
     const links = objectArray(input.evidenceLinks, 'evidenceLinks', 30).map((link, index) => ({
       evidenceId: identifier(link.evidenceId, `evidenceLinks[${index}].evidenceId`),
       relation: oneOf(link.relation ?? 'supports', `evidenceLinks[${index}].relation`, ['supports', 'contradicts', 'context'] as const),
       supportingExcerpt: requiredText(link.supportingExcerpt, `evidenceLinks[${index}].supportingExcerpt`, 2_000),
     }))
     assertEvidence(db, links.map((link) => link.evidenceId), asOf)
+    const statement = requiredText(input.statement, 'statement')
+    const classification = oneOf(input.classification, 'classification', ['observed_fact', 'reproducible_calculation', 'model_estimate', 'judgement'] as const)
+    const evidenceIds = links.map((link) => link.evidenceId)
+    const unverified = unverifiedFigures(statement, citedEvidenceText(db, evidenceIds))
+    // An observed fact is only as good as the record it cites: its figures have to be in that record.
+    if (classification === 'observed_fact' && unverified.length) throw new Error(`an observed_fact's figures must appear in the evidence it cites, and ${unverified.join(', ')} ${unverified.length === 1 ? 'does' : 'do'} not. Cite the record the figure comes from, or classify the claim as reproducible_calculation, model_estimate, or judgement.`)
+    const grades = evidenceGrades(db, evidenceIds)
     db.query('INSERT INTO claims (id, statement, classification, confidence, as_of, security_classification, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)').run(
-      id, requiredText(input.statement, 'statement'), oneOf(input.classification, 'classification', ['observed_fact', 'reproducible_calculation', 'model_estimate', 'judgement'] as const), oneOf(input.confidence, 'confidence', ['low', 'medium', 'high'] as const), asOf, securityClassification(input), new Date().toISOString(),
+      id, statement, classification, oneOf(input.confidence, 'confidence', ['low', 'medium', 'high'] as const), asOf, securityClassification(input), new Date().toISOString(),
     )
     const insert = db.query('INSERT INTO claim_evidence (claim_id, evidence_id, relation, supporting_excerpt) VALUES (?, ?, ?, ?)')
     for (const link of links) insert.run(id, link.evidenceId, link.relation, link.supportingExcerpt)
-    const unverified = unverifiedFigures(String(input.statement), citedEvidenceText(db, links.map((link) => link.evidenceId)))
+    const notes = [
+      ...(unverified.length ? [`These figures do not appear in the cited evidence: ${unverified.join(', ')}. If they are yours (an estimate or calculation) that is fine; if they come from a source, cite it. A reviewer will see this flag.`] : []),
+      ...(classification === 'observed_fact' && grades.verified === 0 ? ['This fact rests only on unverified evidence (search snippets or text not checked against a fetched page). web_fetch the source and register its exact words to make it verified.'] : []),
+    ]
     return {
-      status: 'created', storePath: path, claimId: id, evidenceLinks: links.length, reviewStatus: 'unreviewed',
-      ...(unverified.length ? { unverifiedFigures: unverified, note: `These figures do not appear in the cited evidence: ${unverified.join(', ')}. Cite the record they come from, or classify the claim as a calculation or estimate; a reviewer will see this flag.` } : {}),
+      status: 'created', storePath: path, claimId: id, evidenceLinks: links.length, reviewStatus: 'unreviewed', sources: grades,
+      ...(unverified.length ? { unverifiedFigures: unverified } : {}), ...(notes.length ? { note: notes.join(' ') } : {}),
     }
   }))
+}
+
+/**
+ * Figures in a forecast rationale that are in neither the cited evidence nor the question itself (its text,
+ * threshold and the forecast's own probability), so a rationale built on a wrong reading of the data is visible.
+ */
+function forecastRationaleUnverified(db: Database, question: Row, rationale: string, evidenceIds: string[], probability: number): string[] {
+  const rule = question.resolution_rule_json ? JSON.parse(String(question.resolution_rule_json)) as ResolutionRule : null
+  const context = [String(question.question), String(question.resolution_criteria), ...(rule ? [`${rule.threshold}`] : []), `${Math.round(probability * 100)}%`, `${probability}`]
+  return unverifiedFigures(rationale, [...citedEvidenceText(db, evidenceIds), ...context])
+}
+
+/** How many of the cited records were fetched by code (feed) or checked against a fetched page, and how many were not. */
+function evidenceGrades(db: Database, evidenceIds: string[]): { verified: number; unverified: number } {
+  const rows = evidenceIds.map((evidenceId) => db.query('SELECT provenance FROM evidence WHERE id = ?').get(evidenceId) as Row | null).filter((row): row is Row => row !== null)
+  const verified = rows.filter((row) => row.provenance === 'feed' || row.provenance === 'fetched').length
+  return { verified, unverified: rows.length - verified }
 }
 
 /** The stored text of cited evidence — title and the source- or feed-written excerpt, never a model's supporting excerpt. */
@@ -645,6 +677,7 @@ function submitForecast(input: Row): Row {
     const prior = input.priorProbability === undefined ? null : probability(input.priorProbability, 'priorProbability')
     const forecastClass = oneOf(input.forecastClass ?? 'live', 'forecastClass', ['live', 'backtest'] as const)
     const latestBaseline = db.query('SELECT probability FROM forecast_revisions WHERE question_id = ? AND forecaster = ? ORDER BY revision DESC LIMIT 1').get(questionId, BASELINE_FORECASTER) as Row | null
+    const rationaleUnverified = forecastRationaleUnverified(db, question, String(input.rationale ?? ''), [...new Set(evidenceIds)], value)
     const baselineMatch = latestBaseline && Math.abs(Number(latestBaseline.probability) - value) < 0.005 ? Number(latestBaseline.probability) : null
     db.query('INSERT INTO forecast_revisions (id, question_id, revision, probability, prior_probability, as_of, method, model, forecaster, rationale, evidence_ids_json, forecast_class, parent_revision_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(
       forecastId, questionId, revision, value, prior, asOf, requiredText(input.method, 'method', 500), optionalText(input.model, 'model', 300) ?? null, forecaster, requiredText(input.rationale, 'rationale', 10_000), JSON.stringify([...new Set(evidenceIds)]), forecastClass, previous ? String(previous.id) : null, new Date().toISOString(),
@@ -653,6 +686,7 @@ function submitForecast(input: Row): Row {
       status: 'recorded', storePath: path, forecastId, questionId, revision, probability: value, forecastClass, parentRevisionId: previous?.id ?? null, asOf, forecaster,
       ...(certified ? { asOfSetBy: 'clock' } : {}), ...(evidenceAttached ? { evidenceAttached: `${evidenceAttached} (the question's own feed series)` } : {}),
       ...(baselineMatch ? { note: `This equals the statistical baseline (${baselineMatch}); a forecast that copies the baseline cannot show skill. Revise it if your evidence says otherwise, and say why.` } : {}),
+      ...(rationaleUnverified.length ? { unverifiedFigures: rationaleUnverified, figuresNote: `Figures in the rationale not found in the cited evidence: ${rationaleUnverified.join(', ')}. Check them against indicator_series; a wrong premise makes the forecast worse, and the report shows this flag.` } : {}),
     }
   }))
 }
@@ -1706,8 +1740,9 @@ export function loadBattmannReportData(input: Row): Row {
     for (const id of requestedQuestionIds) if (!selectedQuestions.some((question) => String(question.id) === id)) throw new Error(`unknown or not-yet-open question id at report asOf: ${id}`)
     const questions = selectedQuestions.map((question) => {
       const latestForecast = db.query('SELECT * FROM forecast_revisions WHERE question_id = ? AND as_of <= ? AND forecaster <> ? ORDER BY as_of DESC, revision DESC LIMIT 1').get(String(question.id), asOf, BASELINE_FORECASTER) as Row | null
+      const hydrated = latestForecast ? { ...hydrateForecast(latestForecast), unverifiedFigures: forecastRationaleUnverified(db, question, String(latestForecast.rationale), parseJson<string[]>(latestForecast.evidence_ids_json, []), Number(latestForecast.probability)) } : null
       const resolution = db.query("SELECT * FROM resolution_events WHERE question_id = ? AND status IN ('accepted','void') AND resolved_at <= ? ORDER BY resolved_at DESC LIMIT 1").get(String(question.id), asOf) as Row | null
-      return { ...hydrateQuestion(question), status: resolution ? resolution.status === 'accepted' ? 'resolved' : 'void' : 'open', outcome: resolution?.outcome ?? null, resolvedAt: resolution?.resolved_at ?? null, latestForecast: latestForecast ? hydrateForecast(latestForecast) : null }
+      return { ...hydrateQuestion(question), status: resolution ? resolution.status === 'accepted' ? 'resolved' : 'void' : 'open', outcome: resolution?.outcome ?? null, resolvedAt: resolution?.resolved_at ?? null, latestForecast: hydrated }
     })
     const rank = clearanceRank(input)
     const claimRows = (db.query('SELECT * FROM claims WHERE as_of <= ? ORDER BY created_at').all(asOf) as Row[]).filter((row) => withinClearance(row, rank))
@@ -1716,7 +1751,8 @@ export function loadBattmannReportData(input: Row): Row {
         FROM claim_evidence ce JOIN evidence e ON e.id = ce.evidence_id WHERE ce.claim_id = ? AND e.published_at <= ? AND e.retrieved_at <= ? ORDER BY ce.evidence_id`).all(String(claim.id), asOf, asOf) as Row[]).filter((row) => withinClearance(row, rank))
       const review = db.query('SELECT verdict, reviewer, reviewed_at, notes FROM claim_reviews WHERE claim_id = ? AND reviewed_at <= ? ORDER BY reviewed_at DESC LIMIT 1').get(String(claim.id), asOf) as Row | null
       const unverified = unverifiedFigures(String(claim.statement), citedEvidenceText(db, links.map((link) => String(link.evidence_id))))
-      return { id: claim.id, statement: claim.statement, classification: claim.classification, confidence: claim.confidence, asOf: claim.as_of, evidence: links.map((link) => ({ evidenceId: link.evidence_id, relation: link.relation, supportingExcerpt: link.supporting_excerpt })), review: review ? { verdict: review.verdict, reviewer: review.reviewer, reviewedAt: review.reviewed_at, notes: review.notes } : { verdict: 'unreviewed' }, unverifiedFigures: unverified }
+      const sources = evidenceGrades(db, links.map((link) => String(link.evidence_id)))
+      return { sources, id: claim.id, statement: claim.statement, classification: claim.classification, confidence: claim.confidence, asOf: claim.as_of, evidence: links.map((link) => ({ evidenceId: link.evidence_id, relation: link.relation, supportingExcerpt: link.supporting_excerpt })), review: review ? { verdict: review.verdict, reviewer: review.reviewer, reviewedAt: review.reviewed_at, notes: review.notes } : { verdict: 'unreviewed' }, unverifiedFigures: unverified }
     })
     const evidence = (db.query('SELECT * FROM evidence WHERE published_at <= ? AND retrieved_at <= ? ORDER BY published_at, id').all(asOf, asOf) as Row[]).filter((row) => withinClearance(row, rank))
     const scenarios = (db.query('SELECT * FROM scenarios WHERE base_as_of <= ? ORDER BY horizon').all(asOf) as Row[]).map((row) => ({ id: row.id, title: row.title, baseAsOf: row.base_as_of, horizon: row.horizon, probability: row.probability, assumptions: parseJson(row.assumptions_json, []), questionIds: parseJson(row.question_ids_json, []), evidenceIds: parseJson(row.evidence_ids_json, []), indicators: parseJson(row.indicators_json, []), status: row.status }))
@@ -2094,11 +2130,11 @@ const MUTATING_STORE_ACTIONS = new Set<string>([
 
 const AUDIT_TARGET_KEYS = ['questionId', 'evidenceId', 'claimId', 'forecastId', 'objectId', 'linkId', 'scenarioId', 'decisionId', 'outcomeId', 'datasetId', 'actionTypeId', 'proposalId', 'geoEventId', 'targetId', 'benchmarkId', 'indicatorId', 'readingId'] as const
 
-export function executeBattmannStoreAction(input: Row): string {
+export function executeBattmannStoreAction(input: Row, options: { verifiedPage?: { sha256: string } } = {}): string {
   const action = requiredText(input.action, 'action', 50)
   const handlers: Record<string, (value: Row) => Row> = {
     create_question: createQuestion,
-    register_evidence: registerEvidence,
+    register_evidence: (value) => registerEvidence(value, options.verifiedPage),
     register_claim: registerClaim,
     review_claim: reviewClaim,
     submit_forecast: submitForecast,
