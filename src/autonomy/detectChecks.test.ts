@@ -105,6 +105,14 @@ test('python + pytest', () => {
   expect(detectChecks(dir)).toEqual(['pytest -q'])
 })
 
+// Session mua47pvq: `mypy .` failed "'mypy' is not recognized" (mypy lived in
+// an unactivated venv) and the turn spent both repairs on the environment.
+test('python + mypy config: mypy only when this machine can run it', () => {
+  writeFileSync(join(dir, 'pyproject.toml'), '[tool.mypy]\nstrict = true\n')
+  const expected = Bun.which('mypy') !== null ? ['mypy .', 'pytest -q'] : ['pytest -q']
+  expect(detectChecks(dir)).toEqual(expected)
+})
+
 test('empty when nothing is inferable', () => {
   expect(detectChecks(dir)).toEqual([])
 })

@@ -107,7 +107,19 @@ export async function runVerification(
   cwd?: string,
   signal?: AbortSignal,
   governor?: ActionGovernor,
-  options: { serverProbeMs?: number; onCheck?: (event: CheckEvent) => void } = {},
+  options: {
+    serverProbeMs?: number
+    onCheck?: (event: CheckEvent) => void
+    /**
+     * Record a check whose program the shell could not find as skipped and
+     * carry on, instead of failing the gate on it. The chat turn's gate wants
+     * this: its checks are inferred, not declared, so "mypy is not installed"
+     * is a fact about the machine, and two repair turns spent on it changed
+     * nothing — one ended with the model saying "mypy passes" over a recorded
+     * `'mypy' is not recognized`.
+     */
+    skipMissingPrograms?: boolean
+  } = {},
 ): Promise<VerificationOutcome> {
   const results: ShellResult[] = []
   let probedServers = 0
@@ -236,13 +248,21 @@ export async function runVerification(
       report(command, 'skipped')
       continue
     }
+    if (options.skipMissingPrograms && isCommandNotFound(result)) {
+      report(command, 'skipped')
+      continue
+    }
     const failed = result.exitCode !== 0 || result.timedOut
     report(command, failed ? 'failed' : 'passed')
     if (failed) return { results, passed: false }
   }
 
   const empty = results.filter(isNoTestsResult).map((result) => result.command)
-  const inconclusive = empty.length > 0 ? `${empty.join(', ')} found no tests to run` : undefined
+  const missing = options.skipMissingPrograms ? results.filter(isCommandNotFound).map((result) => result.command) : []
+  const inconclusive = [
+    empty.length > 0 ? `${empty.join(', ')} found no tests to run` : '',
+    missing.length > 0 ? `${missing.join(', ')} could not run — the program is not installed here` : '',
+  ].filter(Boolean).join('; ') || undefined
   const provedSomething = results.some((result) => result.exitCode === 0 && !result.timedOut && !result.command.startsWith('[skipped]') && !isNoTestsResult(result))
   // Nothing ran but servers: the same outcome as a plan of nothing but dev
   // servers (above), so the caller's fallback for unrunnable checks applies.
@@ -267,6 +287,23 @@ export const SERVER_PROBE_MS = 20_000
  * from before that fix (or any other unrunnable command) can still reach here.
  */
 const SHELL_REJECTED_COMMAND = /is not recognized as an internal or external command|:\s*command not found|No such file or directory/i
+
+/**
+ * The shell could not find the check's program at all: cmd.exe's
+ * `'mypy' is not recognized …`, or sh's `mypy: not found` with exit 127.
+ * Narrower than `SHELL_REJECTED_COMMAND` on purpose — a genuine test failure
+ * can print "No such file or directory", and that has to stay a failure.
+ */
+export function isCommandNotFound(result: ShellResult): boolean {
+  if (result.timedOut || result.exitCode === 0) return false
+  const program = /^\s*"?([^\s"]+)/.exec(result.command)?.[1]
+  if (!program) return false
+  const name = program.replace(/^.*[\\/]/, '').toLowerCase()
+  const stderr = result.stderr.trimStart()
+  const windows = /^'([^']+)' is not recognized as an internal or external command/i.exec(stderr)?.[1]
+  if (windows !== undefined) return windows.replace(/^.*[\\/]/, '').toLowerCase() === name
+  return result.exitCode === 127 && new RegExp(`(?:^|[:\\s])${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}: (?:command )?not found`, 'im').test(stderr)
+}
 
 /** Marks a verification entry elia declined to run because it can never terminate. */
 export const SKIPPED_SERVER_PREFIX = 'not a runnable check'

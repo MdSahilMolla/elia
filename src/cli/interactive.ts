@@ -1195,7 +1195,7 @@ export async function runInteractive(): Promise<void> {
           const gateGovernor = createActionGovernor({ mode: approveAction ? 'supervised' : 'unattended', approve: approveAction })
           const [systemOne, firstOutcome] = await Promise.all([
             askSystemOne().catch(() => undefined),
-            runVerification(checks, root, controller.signal, gateGovernor, { onCheck: uiHooks?.onCheck }),
+            runVerification(checks, root, controller.signal, gateGovernor, { onCheck: uiHooks?.onCheck, skipMissingPrograms: true }),
           ])
           let outcome = firstOutcome
           if (systemOne && !outcome.blocked && !outcome.inconclusive) {
@@ -1214,7 +1214,7 @@ export async function runInteractive(): Promise<void> {
               ),
             )
             await runModelTurn()
-            outcome = await runVerification(checks, root, controller.signal, gateGovernor, { onCheck: uiHooks?.onCheck })
+            outcome = await runVerification(checks, root, controller.signal, gateGovernor, { onCheck: uiHooks?.onCheck, skipMissingPrograms: true })
             sessionTranscript.notice(describeVerification(outcome))
           }
           // A check the governor would not run proved nothing either way, and no
