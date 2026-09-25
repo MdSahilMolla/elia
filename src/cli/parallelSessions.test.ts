@@ -1,4 +1,4 @@
-import { expect, test } from 'bun:test'
+import { afterEach, expect, test } from 'bun:test'
 import {
   makeSessionId,
   makeSessionName,
@@ -24,6 +24,12 @@ import {
   type ParallelSessionsDeps,
 } from './parallelSessions.ts'
 import { sessionFlagName } from './argv.ts'
+
+// The CLI's error path sets process.exitCode = 1; reset it so a test that
+// exercises that path does not fail the whole `bun test` run.
+afterEach(() => {
+  process.exitCode = 0
+})
 
 class FakeBus implements SessionBus {
   activeSession: SessionId | undefined
