@@ -96,7 +96,12 @@ elia battmann dashboard                    # .elia/artifacts/battmann-dashboard.
 
 It opens certified questions whose thresholds sit near the latest fetched values.
 
-`watch` runs only while its process does. For unattended monitoring, use `elia battmann cycle <playbook>`. It refreshes, resolves and updates baselines, then re-runs the brief when the agent's forecasts are older than `--reforecast-days` (7 by default). `elia battmann autorun install <playbook>` schedules that daily from the current workspace as a macOS launchd agent; elsewhere it prints the crontab line. `status` and `uninstall` inspect and remove it. The job carries no API keys: its model step uses the provider saved with `elia config set`, and without one only the model-free steps run. It needs a durable workspace (temporary directories are refused), and it runs only while you are logged in and the machine is awake.
+`watch` runs only while its process does. For unattended monitoring, use `elia battmann cycle <playbook>`. It refreshes, resolves and updates baselines, then re-runs the brief when the agent's forecasts are older than `--reforecast-days` (7 by default). `elia battmann autorun install <playbook> [--at 22:00]` schedules that daily from the current workspace with the operating system's own per-user scheduler:
+- **macOS:** a launchd agent in `~/Library/LaunchAgents`.
+- **Linux:** a line in your crontab, tagged with the workspace so it can be found again.
+- **Windows:** a Task Scheduler task under `elia\` that runs a small script kept in the workspace's `.elia/`.
+
+`status` shows the schedule, the last result and the log tail. `uninstall` removes exactly what `install` created. The job carries no API keys: its model step uses the provider saved with `elia config set`, and without one only the model-free steps run. It needs a durable workspace (temporary directories are refused), and it runs only while you are logged in and the machine is awake.
 
 A certified forecast more than 25 points from the baseline comes back with a note asking for the specific evidence the baseline cannot see. Agent-driven work can recur with `elia schedule add --mode battmann --every 6h "re-forecast the open certified questions"`.
 

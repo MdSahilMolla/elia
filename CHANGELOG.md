@@ -50,7 +50,7 @@ workspace), a REPL redesign, and a broad reliability/perf pass.
   graded feed, fetched (checked against the page web_fetch retrieved) or
   unverified, and an observed fact whose figures are not in its evidence is
   refused. `elia battmann cycle` and `autorun` keep the forecasting loop running
-  daily. The defence primitives (`posture_assessment`, `effector_pairing`)
+  daily on macOS (launchd), Linux (crontab) and Windows (Task Scheduler). The defence primitives (`posture_assessment`, `effector_pairing`)
   and the Palantir-pillar naming were removed.
 - **cyber mode** — evidence-gated findings, scoped `http_probe`, and a
   `.elia/policy.json` governor policy.
