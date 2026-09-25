@@ -243,7 +243,16 @@ class DaemonClient {
     const info = (await this.rawCall('daemon.info', {}, 5_000)) as DaemonInfo
     if (info.protocol !== PROTOCOL_VERSION) {
       // A stale daemon from an older build. Ask it to exit and start fresh.
-      await this.rawCall('daemon.shutdown', {}, 2_000).catch(() => {})
+      // If that request fails the old daemon is still holding the pipe, and the
+      // failure used to vanish: the respawn below then either silently raced the
+      // survivor or surfaced a generic "did not come up within 8s" that never
+      // mentioned the shutdown was what failed.
+      await this.rawCall('daemon.shutdown', {}, 2_000).catch((err) => {
+        logSwallowedError('daemon.client.handshake.shutdownStale', err, {
+          staleProtocol: info.protocol,
+          expected: PROTOCOL_VERSION,
+        })
+      })
       this.socket?.destroy()
       this.socket = undefined
       this.spawnedThisProcess = false
@@ -350,8 +359,15 @@ class DaemonClient {
   }
 
   cancel(target: number): void {
-    // Fire-and-forget; the socket may already be gone.
-    this.rawCall('shell.cancel', { target }, 1_000).catch(() => {})
+    // Fire-and-forget; the socket may already be gone. A rejection is still
+    // recorded, because the local waiter has already been rejected by the abort
+    // that triggered this call — so if `shell.cancel` never lands, the daemon-side
+    // worker keeps running the command until its own `timeout_ms` and nothing
+    // anywhere records that the cancel was lost. That is what made a cancelled
+    // `bun run server` indistinguishable from a cancelled one that stopped.
+    this.rawCall('shell.cancel', { target }, 1_000).catch((err) => {
+      logSwallowedError('daemon.client.cancel', err, { target })
+    })
   }
 
   async info(): Promise<DaemonInfo> {

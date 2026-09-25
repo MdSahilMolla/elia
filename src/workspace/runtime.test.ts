@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from 'bun:test'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { WorkspaceStore } from './store.ts'
@@ -81,6 +81,41 @@ async function poll(check: () => boolean, timeoutMs = 12_000): Promise<void> {
     await Bun.sleep(40)
   }
   throw new Error('poll timed out')
+}
+
+/** Byte length of the shared diagnostics log, so a test asserts only on what it appended. */
+function diagnosticsSize(path: string): number {
+  try {
+    return statSync(path).size
+  } catch {
+    return 0
+  }
+}
+
+/**
+ * First diagnostics record with `scope` appended past `offset`. Polls because the
+ * write is best-effort and lands on a later microtask than the failing call.
+ */
+async function waitForRecord(
+  path: string,
+  offset: number,
+  scope: string,
+  timeoutMs = 8_000,
+): Promise<{ message: string; context?: Record<string, unknown> } | undefined> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    try {
+      for (const line of readFileSync(path, 'utf8').slice(offset).split('\n')) {
+        if (!line.trim()) continue
+        const record = JSON.parse(line)
+        if (record.scope === scope) return record
+      }
+    } catch {
+      // not written yet
+    }
+    await Bun.sleep(25)
+  }
+  return undefined
 }
 
 test('two independent tasks run in parallel; a dependent task waits, then auto-starts', async () => {
@@ -227,6 +262,53 @@ test('agent.control stop aborts the in-flight job and rejects a zombie heartbeat
       { taskId: apiTask.id },
     ),
   ).rejects.toThrow(/cancelled|no longer accepting/i)
+}, TIMEOUT)
+
+test('a failure the runtime cannot report is recorded, leaving the task visibly orphaned', async () => {
+  // #1271: `agent.complete` is what releases the task lease, appends TaskFailed,
+  // and returns the agent to idle. When it rejects, the task stays in-progress
+  // with its lease held and its agent still working, while runOne resolves
+  // normally and the runtime claims the next task. Before this, that was
+  // completely silent: the only eventual symptom was the store's missed-heartbeat
+  // watchdog, which blames a heartbeat that never went out.
+  const { store, server, owner, startRuntime } = await fixture()
+
+  let releaseGate: (() => void) | undefined
+  const gate = new Promise<void>((resolve) => { releaseGate = resolve })
+  const executor: AgentExecutor = async () => {
+    await gate
+    throw new Error('executor blew up')
+  }
+  startRuntime('be', executor)
+  await Bun.sleep(150)
+
+  const planned = await owner.call<{ objectiveId: string }>('objective.add', { goal: 'auth' })
+  await owner.call('objective.approve', { objectiveId: planned.objectiveId })
+
+  await poll(() => store.tasks({ objectiveId: planned.objectiveId }).some((t) => t.status === 'in-progress'))
+  const taskId = store.tasks({ objectiveId: planned.objectiveId }).find((t) => t.status === 'in-progress')!.id
+
+  // Take the server away so the terminal `agent.complete` cannot land.
+  server.stop()
+
+  const { paths } = await import('../statePaths.ts')
+  const before = diagnosticsSize(paths.diagnostics)
+  releaseGate?.()
+
+  const record = await waitForRecord(paths.diagnostics, before, 'workspace.agentRuntime.completeFailed')
+  expect(record).toBeDefined()
+  // `taskId` is asserted loosely on purpose: logSwallowedError runs every context
+  // value through redactRecord, and elia's own `tsk_<hex>_<slug>` ids trip its
+  // entropy heuristic, so the id comes back as `t[REDACTED]`. That collision is
+  // worth knowing about but is a change to the secret detector, not to this
+  // issue — the record existing, being scoped, and carrying the report is the
+  // part that was previously missing entirely.
+  expect(typeof record!.context!.taskId).toBe('string')
+  expect(String(record!.context!.report)).toContain('executor blew up')
+
+  // The orphan itself: still in-progress, lease unreleased. This is the state
+  // that used to have no explanation attached to it anywhere.
+  expect(store.task(taskId)!.status).toBe('in-progress')
 }, TIMEOUT)
 
 test('an out-of-scope task is never assigned to an agent that cannot touch its files', async () => {

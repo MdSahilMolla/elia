@@ -13,6 +13,7 @@ import * as readline from 'node:readline/promises'
 import * as pathModule from 'node:path'
 import type { ConversationMessage, AgentMode } from '../agent.ts'
 import { writeNotice, writeError, writeUsageLine } from '../ui/stream.ts'
+import { logSwallowedError } from '../diagnostics.ts'
 import { type SlashCommand } from '../ui/slashPrompt.ts'
 import { customCommandsAsSlashEntries, loadCustomCommands } from '../commands/loader.ts'
 import { confirmOnce } from '../ui/confirm.ts'
@@ -205,7 +206,17 @@ export async function loadRuntimeSkills({ deferMcp = false }: { deferMcp?: boole
   }
 
   if (deferMcp) {
-    void beginMcpLoad().then(announce).catch(() => {})
+    // The REPL is already up, so this runs unattended — which makes a rejection
+    // here the one MCP failure the user is never told about: `announce` never
+    // runs, so there is no "N tools loaded" line, no per-server failure notice,
+    // and no config-error notice. The session just runs with no MCP tools and no
+    // explanation. Announce on the failure path too, with an empty report, so
+    // "MCP did not load" is stated rather than merely absent.
+    void beginMcpLoad().then(announce, (err) => {
+      logSwallowedError('runtime.loadRuntimeSkills.mcp', err)
+      announce({ servers: [], loaded: [], failed: [], configErrors: [], status: [] })
+      writeNotice(`MCP did not load: ${err instanceof Error ? err.message : String(err)}`)
+    })
     return
   }
   announce(await beginMcpLoad())

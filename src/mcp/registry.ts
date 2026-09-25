@@ -190,7 +190,9 @@ export async function loadMcpTools(cwd = process.cwd()): Promise<McpLoadReport> 
 
 /** Tears down every live connection and reconnects from the current config on disk. */
 export async function reloadMcpTools(cwd = process.cwd()): Promise<McpLoadReport> {
-  await Promise.all(liveClients.splice(0).map((client) => client.closeAndWait().catch(() => {})))
+  await Promise.all(liveClients.splice(0).map((client) => client.closeAndWait().catch((err) => {
+    logSwallowedError('mcp.reload.close', err, { client: client.name })
+  })))
   clearMcpTools()
   clearBrowserMcpToolsForTests()
   loadedOnce = false
@@ -201,7 +203,12 @@ export async function reloadMcpTools(cwd = process.cwd()): Promise<McpLoadReport
 
 /** Await live transport teardown so a completed one-shot CLI command can exit cleanly. */
 export async function shutdownMcpTools(): Promise<void> {
-  await Promise.all(liveClients.splice(0).map((client) => client.closeAndWait().catch(() => {})))
+  // Runs on the exit path of every command, so a transport that fails to close
+  // is the difference between "elia exited" and "elia left a subprocess
+  // running" — and it used to be discarded, leaving no way to tell which.
+  await Promise.all(liveClients.splice(0).map((client) => client.closeAndWait().catch((err) => {
+    logSwallowedError('mcp.shutdown.close', err, { client: client.name })
+  })))
 }
 
 /** The last load/reload result — what `/mcp` and `/connector` render without reconnecting. */

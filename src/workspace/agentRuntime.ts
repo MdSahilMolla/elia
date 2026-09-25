@@ -17,6 +17,7 @@ import { withAgentIdentity } from '../autonomy/context.ts'
 import { createWorktree, mergeWorktreeIntoCwd, removeWorktree, runGit } from '../autonomy/worktree.ts'
 import { paths } from '../statePaths.ts'
 import { writeNotice } from '../ui/stream.ts'
+import { logSwallowedError } from '../diagnostics.ts'
 import { WorkspaceClient } from './client.ts'
 import { HEARTBEAT_INTERVAL_MS } from './types.ts'
 import type { ContextPack } from './coordination.ts'
@@ -173,7 +174,9 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<voi
     controller.signal.addEventListener('abort', onOuterAbort, { once: true })
     currentJobAbort = jobController
     const heartbeat = setInterval(() => {
-      void client.call('agent.progress', { taskId: task.id }).catch(() => {})
+      void client.call('agent.progress', { taskId: task.id }).catch((err) => {
+        logSwallowedError('workspace.agentRuntime.heartbeat', err, { taskId: task.id })
+      })
     }, HEARTBEAT_INTERVAL_MS)
     try {
       const result = await executor({
@@ -183,7 +186,9 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<voi
         role: task.role,
         signal: jobController.signal,
         progress: async (note) => {
-          await client.call('agent.progress', { taskId: task.id, note }).catch(() => {})
+          await client.call('agent.progress', { taskId: task.id, note }).catch((err) => {
+            logSwallowedError('workspace.agentRuntime.progress', err, { taskId: task.id })
+          })
         },
       })
       await client.call('agent.complete', {
@@ -193,11 +198,20 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<voi
         filesChanged: result.filesChanged ?? [],
       })
     } catch (error) {
-      await client.call('agent.complete', {
-        taskId: task.id,
-        ok: false,
-        report: `runtime error: ${error instanceof Error ? error.message : String(error)}`,
-      }).catch(() => {})
+      const report = `runtime error: ${error instanceof Error ? error.message : String(error)}`
+      // This is the one call whose failure orphans work rather than merely
+      // losing a status update: `agent.complete` is what releases the task lease,
+      // appends TaskFailed, and returns the agent to idle server-side. When it
+      // rejects, the task stays `in-progress` with its lease held and its agent
+      // still `working`, while runOne resolves normally and the runtime moves on
+      // to the next claim — so the store's own missed-heartbeat watchdog is the
+      // only thing that eventually reclaims it, and it attributes the failure to
+      // a heartbeat that never went out. Not retried here because the handler
+      // appends events unconditionally, so a retry would double-write TaskFailed.
+      await client.call('agent.complete', { taskId: task.id, ok: false, report }).catch((err) => {
+        logSwallowedError('workspace.agentRuntime.completeFailed', err, { taskId: task.id, report })
+        writeNotice(`agent ${task.id}: could not report its own failure to the workspace server - the task is orphaned until its lease expires`)
+      })
     } finally {
       clearInterval(heartbeat)
       controller.signal.removeEventListener('abort', onOuterAbort)
