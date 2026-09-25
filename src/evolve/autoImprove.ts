@@ -13,7 +13,9 @@
 // on a comparison the governor itself said could not certify anything.
 //
 // It stays out of the way by construction, not by a spending cap:
-//   - one run at a time, across every elia process (a pid in the state file);
+//   - one run at a time, across every elia process (a pid in the state file,
+//     claimed under a cross-process file lock so two sessions can never both
+//     decide to start in the same instant);
 //   - a cooldown between runs, and a longer one after a provider says it is
 //     out of credit or rate-limited, so the loop never eats the quota the
 //     person's own work needs;
@@ -25,7 +27,7 @@ import { spawn } from 'node:child_process'
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { ELIA_ROOT } from '../config.ts'
-import { isProcessAlive } from '../fileLock.ts'
+import { isProcessAlive, withFileLock, withFileLockAsync } from '../fileLock.ts'
 import { writeSecureFile } from '../securePersistence.ts'
 import { EVOLUTION_DIR } from './ledger.ts'
 import { measuringNow } from './measureSlot.ts'
@@ -188,8 +190,17 @@ export function looksBlocked(text: string): boolean {
  * teaches it happens everywhere else.
  */
 export function notePracticeTurn(statePath = AUTO_IMPROVE_STATE): void {
-  const state = readAutoImproveState(statePath)
-  writeAutoImproveState({ ...state, newTurns: (state.newTurns ?? 0) + 1 }, statePath)
+  // Locked read-modify-write: two sessions counting a turn at the same time
+  // must each read the other's increment, or turns are silently lost. On a busy
+  // lock, proceed anyway — a lost increment is preferable to a blocked session.
+  try {
+    withFileLock(`${statePath}.lock`, () => {
+      const state = readAutoImproveState(statePath)
+      writeAutoImproveState({ ...state, newTurns: (state.newTurns ?? 0) + 1 }, statePath)
+    }, { proceedOnTimeout: true })
+  } catch {
+    // Counting is a background nicety; never break a session on a lock failure.
+  }
 }
 
 /** Practice changes elia's own source, so it needs a checkout of it — not an installed package. */
@@ -198,26 +209,27 @@ export function canPractice(root = ELIA_ROOT): boolean {
 }
 
 /**
- * Starts `elia evolve --auto` detached, so it keeps going after this session
- * closes. Returns false when the rules say not to (see `shouldStartPractice`).
+ * A result-shaped stand-in for the spawned child, so tests can inject one
+ * without ever launching a real `elia evolve` background process.
  */
-export async function maybeStartPractice(options: { now?: number; statePath?: string } = {}): Promise<boolean> {
-  const statePath = options.statePath ?? AUTO_IMPROVE_STATE
-  const state = readAutoImproveState(statePath)
-  const now = options.now ?? Date.now()
-  const decision = shouldStartPractice(state, { now, enabled: autoImproveEnabled() })
-  if (!decision.start || !canPractice()) return false
-  // A bench or evolve already measuring in elia's checkout: starting now would
-  // only spawn a run that gives way at once (see measureSlot.ts), and spend the
-  // cooldown on nothing.
-  if (measuringNow(join(ELIA_ROOT, '.elia', 'bench', 'measuring.json'))) return false
+export type PracticeSpawn = (command: string, args: readonly string[], options: {
+  cwd: string
+  detached: boolean
+  windowsHide: boolean
+  stdio: Array<'ignore' | number>
+  env: NodeJS.ProcessEnv
+}) => { pid?: number | undefined; unref?: () => void }
 
-  const entry = join(ELIA_ROOT, 'bin', 'elia.ts')
+/** The real process spawner; tests substitute it for a fake. */
+const defaultPracticeSpawn: PracticeSpawn = (command, args, options) => spawn(command, args, options)
+
+/** Spawn the practice run and claim the slot, holding a state the caller read under the lock. */
+function practiceClaim(state: AutoImproveState, entry: string, statePath: string, now: number, spawnPractice: PracticeSpawn): boolean {
   let log: number | undefined
   try {
     mkdirSync(EVOLUTION_DIR, { recursive: true })
     log = openSync(AUTO_IMPROVE_LOG, 'a')
-    const child = spawn(process.execPath, [entry, 'evolve', '--auto'], {
+    const child = spawnPractice(process.execPath, [entry, 'evolve', '--auto'], {
       // elia's own checkout, whatever project this session was in: the
       // benchmark history, reach map and evolve ledger all live there.
       cwd: ELIA_ROOT,
@@ -226,7 +238,7 @@ export async function maybeStartPractice(options: { now?: number; statePath?: st
       stdio: ['ignore', log, log],
       env: { ...process.env, NO_COLOR: '1', ELIA_AUTO_IMPROVE_CHILD: '1' },
     })
-    child.unref()
+    child.unref?.()
     if (child.pid === undefined) return false
     // Claimed here as well as by the child, so a second session opening in
     // the same second does not start another.
@@ -240,24 +252,87 @@ export async function maybeStartPractice(options: { now?: number; statePath?: st
 }
 
 /**
+ * Starts `elia evolve --auto` detached, so it keeps going after this session
+ * closes. Returns false when the rules say not to (see `shouldStartPractice`).
+ *
+ * The decide→spawn→claim critical section runs under `<statePath>.lock`, so two
+ * sessions racing in the same instant cannot both read "no pid" and both start
+ * a run: the second to the lock re-reads the claim and declines. A lock that is
+ * busy past the timeout gives up as false — never starts a second run — which
+ * is the whole point of holding the lock here.
+ */
+export async function maybeStartPractice(options: {
+  now?: number
+  statePath?: string
+  lockTimeoutMs?: number
+  spawn?: PracticeSpawn
+} = {}): Promise<boolean> {
+  const statePath = options.statePath ?? AUTO_IMPROVE_STATE
+  const now = options.now ?? Date.now()
+  // Cheap guards first; hold the lock only for the claim itself.
+  if (!canPractice()) return false
+  // A bench or evolve already measuring in elia's checkout: starting now would
+  // only spawn a run that gives way at once (see measureSlot.ts), and spend the
+  // cooldown on nothing.
+  if (measuringNow(join(ELIA_ROOT, '.elia', 'bench', 'measuring.json'))) return false
+  const entry = join(ELIA_ROOT, 'bin', 'elia.ts')
+  try {
+    return await withFileLockAsync(
+      `${statePath}.lock`,
+      async () => {
+        // Re-read under the lock: a claim already written (our slot, or another
+        // session's that beat us here) must be seen, never spread over by a
+        // stale earlier read.
+        const state = readAutoImproveState(statePath)
+        const decision = shouldStartPractice(state, { now, enabled: autoImproveEnabled() })
+        if (!decision.start) return false
+        return practiceClaim(state, entry, statePath, now, options.spawn ?? defaultPracticeSpawn)
+      },
+      { timeoutMs: options.lockTimeoutMs },
+    )
+  } catch {
+    return false
+  }
+}
+
+/**
  * Notices a practice run that died without recording anything and writes the
  * crash down, so the status stops calling it "running" and the next session says
- * it happened. Returns the current state either way.
+ * it happened. Returns the current state either way. Locked so a reap can never
+ * race a claim that is mid-write.
  */
 export function reapPractice(statePath = AUTO_IMPROVE_STATE, check?: Partial<StartCheck>): AutoImproveState {
-  const state = readAutoImproveState(statePath)
-  const reaped = reapCrashedRun(state, { now: check?.now ?? Date.now(), alive: check?.alive })
-  if (!reaped) return state
-  writeAutoImproveState(reaped, statePath)
-  return reaped
+  const now = check?.now ?? Date.now()
+  try {
+    return withFileLock(`${statePath}.lock`, () => {
+      const state = readAutoImproveState(statePath)
+      const reaped = reapCrashedRun(state, { now, alive: check?.alive })
+      if (!reaped) return state
+      writeAutoImproveState(reaped, statePath)
+      return reaped
+    })
+  } catch {
+    // A busy lock must not break the status line; read the best state we can.
+    return readAutoImproveState(statePath)
+  }
 }
 
 /** The line a session opens with after a practice run finished, once. Marks it reported. */
 export function takePracticeReport(statePath = AUTO_IMPROVE_STATE): string | undefined {
-  const state = reapPractice(statePath)
-  if (state.finishedAt === undefined || state.reported || !state.summary) return undefined
-  writeAutoImproveState({ ...state, reported: true }, statePath)
-  return state.summary
+  // One locked read-modify-write: reaping a crash and marking a summary reported
+  // belong together, or the written `reported` flag could clobber a claim that
+  // lands in between.
+  try {
+    return withFileLock(`${statePath}.lock`, () => {
+      const raw = readAutoImproveState(statePath)
+      const state = reapCrashedRun(raw, { now: Date.now() }) ?? raw
+      if (state.finishedAt === undefined || state.reported || !state.summary) return undefined
+      writeAutoImproveState({ ...state, reported: true }, statePath)
+      return state.summary
+    })
+  } catch {
+    return undefined
+  }
 }
 
 /**
@@ -267,10 +342,16 @@ export function takePracticeReport(statePath = AUTO_IMPROVE_STATE): string | und
  */
 export function startPracticeHeartbeat(statePath = AUTO_IMPROVE_STATE, everyMs = HEARTBEAT_MS): () => void {
   const beat = () => {
-    const state = readAutoImproveState(statePath)
-    // Only ours to touch: if another run claimed the slot, stop writing.
-    if (state.pid !== process.pid || state.finishedAt !== undefined) return
-    writeAutoImproveState({ ...state, heartbeatAt: Date.now() }, statePath)
+    try {
+      withFileLock(`${statePath}.lock`, () => {
+        const state = readAutoImproveState(statePath)
+        // Only ours to touch: if another run claimed the slot, stop writing.
+        if (state.pid !== process.pid || state.finishedAt !== undefined) return
+        writeAutoImproveState({ ...state, heartbeatAt: Date.now() }, statePath)
+      }, { proceedOnTimeout: true })
+    } catch {
+      // A beat is best effort; a busy lock skips a beat, it never stops a run.
+    }
   }
   beat()
   const timer = setInterval(beat, everyMs)

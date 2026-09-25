@@ -172,7 +172,7 @@ export function createRunners(options: RunnerOptions): Partial<Record<Activity, 
       const { auditSkills } = await import('../skills/audit.ts')
       const { USER_SKILLS_DIR } = await import('../skills/paths.ts')
       const { loadSkillFile } = await import('../skills/loader.ts')
-      const { runShell } = await import('../shell.ts')
+      const { runProcess } = await import('../shell.ts')
       const { paths } = await import('../statePaths.ts')
       // Lessons older than the library get their certificate first, so the
       // audit sees the whole store and hygiene reaches every lesson.
@@ -183,7 +183,7 @@ export function createRunners(options: RunnerOptions): Partial<Record<Activity, 
       const lessons = retireLessons()
       const skills = await auditSkills({
         skillsDir: USER_SKILLS_DIR,
-        runTest: async (file) => (await runShell(`bun test "${file}"`, 120_000)).exitCode === 0,
+        runTest: async (file) => (await runProcess({ executable: 'bun', args: ['test', file], timeoutMs: 120_000 })).exitCode === 0,
         toolName: async (file) => {
           const loaded = await loadSkillFile(file)
           return 'tool' in loaded ? loaded.tool.name : undefined

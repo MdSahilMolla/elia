@@ -82,6 +82,31 @@ describe('autonomy audit ledger and receipt', () => {
     }
   }, 60_000)
 
+  test('at-rest ledger value-scans results and input values for secrets, not just key names', () => {
+    const secretRunId = `${runId}-secrets`
+    const token = 'ghp_1234567890abcdefghij' // pragma: allowlist secret
+    appendActionAudit(
+      {
+        name: 'run_command',
+        input: { command: `curl -s -H "Authorization: Bearer ${token}" https://registry.example.com/v2/` },
+        result: `stdout: ${token}\nregistry ping ok`,
+        isError: false,
+        durationMs: 5,
+        cached: false,
+      },
+      secretRunId,
+    )
+    const blob = readFileSync(join(paths.runs, secretRunId, 'actions.ndjson'), 'utf8')
+    expect(blob).not.toContain(token)
+    expect(blob).toContain('[REDACTED]')
+    const actions = readActionLedger(secretRunId)
+    const input = actions[0]?.input as Record<string, unknown>
+    expect(String(input.command ?? '')).not.toContain(token)
+    expect(actions[0]?.result).not.toContain(token)
+    expect(actions[0]?.result).toContain('[REDACTED]')
+    rmSync(join(paths.runs, secretRunId), { recursive: true, force: true })
+  })
+
   test('a run that died before finishing records why, and the phase it died in', () => {
     // A run that throws or is killed never reaches the one place a receipt is
     // written, so it used to leave nothing at all and `elia distill` could say

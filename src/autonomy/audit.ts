@@ -4,6 +4,7 @@ import type { ToolEvent } from '../agentLoop.ts'
 import type { CriticVerdict, Proposal } from './types.ts'
 import { currentAgent } from './context.ts'
 import { redactActionInput } from './governor.ts'
+import { redactArchiveValue, redactSecrets } from '../ui/redact.ts'
 import type { JournalEvent } from './journal.ts'
 import type { GoalGraphSnapshot } from './goalGraph.ts'
 import type { Usage } from '../providers/types.ts'
@@ -63,14 +64,20 @@ export interface RunReceiptInput {
 export function appendActionAudit(event: ToolEvent, runIdOverride?: string): void {
   const identity = currentAgent()
   const assessment = event.assessment
+  // Secret VALUES ("a credential echoed by a tool run") are redacted, not just
+  // key names: redactActionInput blanks credential-*keyed* inputs, then
+  // redactArchiveValue value-scans every remaining string for token shapes, and
+  // the result goes through redactSecrets before truncation instead of being
+  // stored raw (up to 1200 chars).
+  const result = redactSecrets(event.result)
   const record: ActionLedgerRecord = {
     at: Date.now(),
     actor: identity.name,
     role: identity.role,
     runId: runIdOverride ?? identity.runId,
     tool: event.name,
-    input: redactActionInput(event.name, event.input),
-    result: event.result.length > 1200 ? `${event.result.slice(0, 1200)}…` : event.result,
+    input: redactArchiveValue(redactActionInput(event.name, event.input)) as Record<string, unknown>,
+    result: result.length > 1200 ? `${result.slice(0, 1200)}…` : result,
     isError: event.isError,
     cached: event.cached,
     durationMs: event.durationMs,
@@ -152,7 +159,7 @@ export function writeRunReceipt(input: RunReceiptInput): void {
           recovery: input.proposal.recovery ?? [],
         }
       : undefined,
-    verification: input.events.filter((event) => event.kind === 'verify').map((event) => event.data),
+    verification: input.events.filter((event) => event.kind === 'verify').map((event) => redactArchiveValue(event.data) as Record<string, unknown>),
     verdict: input.verdict,
     lessons: input.lessons ?? [],
     graph: input.graph

@@ -3,7 +3,7 @@ import { join } from 'node:path'
 import { appendSecureFile } from '../securePersistence.ts'
 import { redactSecrets } from '../ui/redact.ts'
 import { currentAgent } from '../autonomy/context.ts'
-import { clampOutput, runShell } from '../shell.ts'
+import { clampOutput, escapeShellArg, runShell } from '../shell.ts'
 import type { Tool } from './types.ts'
 
 type DeploymentProvider = 'vercel' | 'netlify' | 'docker'
@@ -245,7 +245,7 @@ async function verifyDockerImage(target: DeploymentTarget, cwd: string, signal: 
     return { at: new Date().toISOString(), action: 'verify', provider: 'docker', target, cwd, status: 'failed', error: 'ELIA_DOCKER_REGISTRY is not set (or is not a valid image reference).' }
   }
   const image = `${ref}:${dockerTagFor(target)}`
-  const result = await runShell(`docker manifest inspect ${image}`, VERIFY_TIMEOUT_MS, cwd, signal)
+  const result = await runShell(`docker manifest inspect ${escapeShellArg(image)}`, VERIFY_TIMEOUT_MS, cwd, signal)
   const successful = result.exitCode === 0 && !result.timedOut
   return {
     at: new Date().toISOString(),

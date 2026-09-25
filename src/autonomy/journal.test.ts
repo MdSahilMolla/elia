@@ -1,6 +1,8 @@
 import { afterEach, expect, test } from 'bun:test'
-import { rmSync } from 'node:fs'
-import { createJournal, readEvents, runDir } from './journal.ts'
+import { readFileSync, rmSync } from 'node:fs'
+import { join } from 'node:path'
+import { createJournal, readCheckpoint, readEvents, runDir } from './journal.ts'
+import type { ConversationMessage } from '../agentLoop.ts'
 
 const runIds: string[] = []
 
@@ -39,4 +41,26 @@ test('checkpoint ids do not collide across two journals on the same run', () => 
   const id2 = b.checkpoint('two', [])
   const id3 = a.checkpoint('three', [])
   expect(new Set([id1, id2, id3]).size).toBe(3)
+})
+
+// #1242: secret VALUES must be redacted at rest (events.ndjson, checkpoints,
+// and the in-memory events that feed receipts) — not only key names.
+test('secret values are redacted in events.ndjson, checkpoints, and in-memory events', () => {
+  const runId = freshRunId()
+  const journal = createJournal(runId, 'goal')
+  const token = 'sk-proj-1234567890abcdefghij' // pragma: allowlist secret
+  journal.append('verify', { command: `echo ${token}`, exitCode: 0 })
+  journal.checkpoint('c1', [{ role: 'user', content: `use ${token} against the registry` }] as unknown as ConversationMessage[])
+
+  const onDisk = readEvents(runId)
+  expect(onDisk.find((event) => event.kind === 'verify')?.data.command).not.toContain(token)
+  expect(onDisk.find((event) => event.kind === 'verify')?.data.command).toContain('[REDACTED]')
+  // The in-memory copy a receipt embeds must agree with what is on disk.
+  expect(journal.events()).toEqual(onDisk)
+
+  const ndjson = readFileSync(join(runDir(runId), 'events.ndjson'), 'utf8')
+  expect(ndjson).not.toContain(token)
+
+  const checkpoint = readCheckpoint(runId, 1)
+  expect(JSON.stringify(checkpoint?.messages ?? [])).not.toContain(token)
 })
