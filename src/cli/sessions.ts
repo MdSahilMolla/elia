@@ -30,7 +30,7 @@ import { actionApprovalPrompt, createInteractiveApprover, loadRuntimeSkills } fr
  */
 export async function runSessionsList(): Promise<void> {
   const nested = positionals(['--name', '--limit', '--payload', '--from', '--session'])[0]
-  if (nested && ['new', 'list', 'attach', 'kill', 'sync', 'drop', 'subscribe', 'status'].includes(nested)) {
+  if (nested && ['new', 'list', 'attach', 'kill', 'prune', 'sync', 'drop', 'subscribe', 'status'].includes(nested)) {
     const { runParallelSessions } = await import('./parallelSessions.ts')
     await runParallelSessions(args)
     return

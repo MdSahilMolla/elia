@@ -169,11 +169,14 @@ Time travel:
                               Replay that run up to checkpoint <n> and re-plan from there
   elia resume <id>            Continue a durable goal from its persisted graph and approvals
 
-Parallel sessions:
-  elia sessions new --name <name>   Start a live session in its own isolated git worktree (.elia/session-worktrees/<name>)
+Parallel sessions (a session belongs to the elia process that started it — inside a session,
+/sessions new and ctrl+n keep one on the session bar):
+  elia sessions new --name <name>   Create a session worktree (.elia/session-worktrees/<name>) to work in
   elia sessions list | status       Live bus sessions: name, id, status, last task, active agents
   elia sessions attach <id|name>    Make that session this terminal's active one (--session <name> also picks)
   elia sessions kill <id|name>      Kill a live session and remove its worktree (best-effort)
+  elia sessions prune [--yes]       Remove session worktrees nothing uses — only clean ones, and a branch
+                                    only when it is merged
   elia sessions sync <a> <b>        Diff two sessions' memory slices: a-only / b-only / conflicts
   elia sessions drop <name> [--payload <path>] [--from <session>]    Publish a context drop
   elia sessions subscribe <name> --from <session>                    Inject a session's drops as context
