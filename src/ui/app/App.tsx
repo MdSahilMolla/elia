@@ -119,6 +119,8 @@ export interface SlashOutcome {
   runCommand?: SlashRunRequest
   /** `/clear`: wipe the screen and transcript and continue as this new session. */
   clear?: { sessionId: string }
+  /** `/plan`: switch to plan mode — before `submitText` runs, so that turn plans. */
+  enterPlanMode?: boolean
 }
 
 export interface AppEnv {
@@ -800,6 +802,12 @@ export function App(props: AppProps) {
         setProviderPlan([])
         setSessionId(cleared.sessionId)
         lastUserText.current = ''
+      }
+      if (typeof outcome === 'object' && outcome?.enterPlanMode) {
+        // The ref first: `runOne` below reads it to decide this is a plan turn,
+        // before React has re-rendered with the new mode.
+        modeRef.current = 'plan'
+        setMode('plan')
       }
       if (finalText) store.notice(finalText)
       store.commit()

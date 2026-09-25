@@ -2149,6 +2149,34 @@ export async function runInteractive(): Promise<void> {
     // The overlay stays open until Escape or the store's idle timeout.
   }
 
+  /** `/search [on|off]` — shared by both REPLs. */
+  async function reasonSearchCommand(arg?: 'on' | 'off'): Promise<string> {
+    if (arg) {
+      reasonSearch = arg === 'on'
+      return `Reasoning search ${reasonSearch ? 'on' : 'off'} — work with something executable to check ${reasonSearch ? 'is attempted several different ways in isolated worktrees, and the one a real check passes is kept; a question with a short answer is checked by an independent attempt' : 'runs as a single attempt, and answers to questions are not checked'}.`
+    }
+    // No argument: say what it would do with *this* project, which is the
+    // question anyone typing it actually has.
+    const { readLibrary, renderLibrary } = await import('../reason/library.ts')
+    const { detectChecks } = await import('../autonomy/detectChecks.ts')
+    const checks = detectChecks(process.cwd())
+    return [
+      `Reasoning search is ${reasonSearch ? 'on' : 'off'}.`,
+      checks.length === 0
+        ? 'No project checks detected here, so a search would have nothing to judge attempts by and will decline.'
+        : `Attempts would be checked with: ${checks.join(', ')}`,
+      '',
+      renderLibrary(readLibrary()),
+    ].join('\n')
+  }
+
+  /** `/help` — every command on one aligned line each, then the keys worth knowing. Shared by both REPLs. */
+  function slashHelpText(keys: string): string {
+    const commands = allSlashCommands()
+    const column = Math.min(22, Math.max(...commands.map((c) => c.name.length)) + 2)
+    return [...commands.map((c) => `${c.name.padEnd(column)}${c.description}`), '', keys].join('\n')
+  }
+
   async function handleSlashForInk(input: string): Promise<InkSlashOutcome> {
     const trimmed = input.trim()
     const done = (text?: string): InkSlashOutcome => ({ handled: true, text })
@@ -2508,11 +2536,7 @@ export async function runInteractive(): Promise<void> {
     // --- text-only commands ---
 
     if (trimmed === '/help' || trimmed === '/?') {
-      // One aligned column of names, so the descriptions read as a list.
-      const commands = allSlashCommands()
-      const column = Math.min(22, Math.max(...commands.map((c) => c.name.length)) + 2)
-      const rows = commands.map((c) => `${c.name.padEnd(column)}${c.description}`)
-      return { handled: true, text: [...rows, '', 'Keys: ? shortcuts · shift+tab plan mode · ctrl+o expand · !cmd runs a shell command · @path attaches a file'].join('\n') }
+      return done(slashHelpText('Keys: ? shortcuts · shift+tab plan mode · ctrl+o expand · !cmd runs a shell command · @path attaches a file'))
     }
     if (trimmed === '/status') {
       return { handled: true, text: renderWorkspaceStatus({ sessionId, mode, providerLabel: config.providerLabel, model: config.model }) }
@@ -2760,28 +2784,15 @@ export async function runInteractive(): Promise<void> {
     }
 
     const searchMatch = /^\/(?:search|reason)(?:\s+(on|off))?$/.exec(trimmed)
-    if (searchMatch) {
-      if (searchMatch[1]) {
-        reasonSearch = searchMatch[1] === 'on'
-        return done(
-          `Reasoning search ${reasonSearch ? 'on' : 'off'} — work with something executable to check ${reasonSearch ? 'is attempted several different ways in isolated worktrees, and the one a real check passes is kept; a question with a short answer is checked by an independent attempt' : 'runs as a single attempt, and answers to questions are not checked'}.`,
-        )
-      }
-      // No argument: say what it would do with *this* project, which is the
-      // question anyone typing it actually has.
-      const { readLibrary, renderLibrary } = await import('../reason/library.ts')
-      const { detectChecks } = await import('../autonomy/detectChecks.ts')
-      const checks = detectChecks(process.cwd())
-      return done(
-        [
-          `Reasoning search is ${reasonSearch ? 'on' : 'off'}.`,
-          checks.length === 0
-            ? 'No project checks detected here, so a search would have nothing to judge attempts by and will decline.'
-            : `Attempts would be checked with: ${checks.join(', ')}`,
-          '',
-          renderLibrary(readLibrary()),
-        ].join('\n'),
-      )
+    if (searchMatch) return done(await reasonSearchCommand(searchMatch[1] as 'on' | 'off' | undefined))
+
+    // `/plan <goal>`: the documented way into plan mode (shift+tab is the
+    // other). The goal, when given, is sent as the plan-mode turn right away.
+    const planMatch = /^\/plan(?:\s+([\s\S]+))?$/.exec(trimmed)
+    if (planMatch) {
+      const goal = planMatch[1]?.trim()
+      if (goal) return { handled: true, enterPlanMode: true, submitText: goal }
+      return { handled: true, enterPlanMode: true, text: 'Plan mode — describe the task and elia researches it and proposes a plan before changing anything. Enter runs the plan; shift+tab leaves plan mode.' }
     }
 
     const escalateMatch = /^\/(?:auto|escalate)(?:\s+(on|off))?$/.exec(trimmed)
@@ -3172,6 +3183,54 @@ export async function runInteractive(): Promise<void> {
       else {
         const outcome = await runVerification(checks, process.cwd())
         writeUsageLine(`${outcome.passed ? '✓ all checks pass' : '✗ checks failing'}\n${describeVerification(outcome)}`)
+      }
+      continue
+    }
+    // Listed in /help but only ever handled by the full-screen REPL, so here
+    // `/help` said "Unknown command: /help. Type /help for the list", and
+    // `/theme` (listed, so not "unknown") went to the model as a prompt.
+    if (trimmed === '/help' || trimmed === '/?') {
+      writeUsageLine(slashHelpText('!cmd runs a shell command · @path attaches a file · exit quits'))
+      continue
+    }
+    const searchClassic = /^\/(?:search|reason)(?:\s+(on|off))?$/.exec(trimmed)
+    if (searchClassic) {
+      writeUsageLine(await reasonSearchCommand(searchClassic[1] as 'on' | 'off' | undefined))
+      continue
+    }
+    const themeClassic = /^\/theme(?:\s+(\S+))?$/.exec(trimmed)
+    if (themeClassic) {
+      const theme = await import('../ui/app/theme.ts')
+      const choice = themeClassic[1]
+      if (choice !== 'dark' && choice !== 'light' && choice !== 'ansi') {
+        writeNotice(`Theme: ${theme.themeName}. /theme dark|light|ansi — it colours the full-screen UI; this plain prompt stays uncoloured.`)
+        continue
+      }
+      theme.setTheme(choice)
+      process.env.ELIA_THEME = choice
+      try {
+        writeUserConfig({ ELIA_THEME: choice })
+        writeNotice(`Theme: ${choice} — saved for the full-screen UI.`)
+      } catch (error) {
+        writeNotice(`Theme: ${choice} for this session — it could not be saved (${error instanceof Error ? error.message : String(error)}).`)
+      }
+      continue
+    }
+    const planClassic = /^\/plan(?:\s+([\s\S]+))?$/.exec(trimmed)
+    if (planClassic) {
+      const goal = planClassic[1]?.trim()
+      if (!goal) {
+        writeNotice('Usage: /plan <goal> — elia researches the task and proposes a plan without changing anything.')
+        continue
+      }
+      try {
+        await runCheckpointedTurn(goal, undefined, selectedSkillNames, {
+          planMode: true,
+          onActivity: (activity) => writeNotice(activity.detail ? `${activity.title}\n${activity.detail}` : activity.title),
+        })
+        writeNotice('That was a plan — nothing was changed. Say "go ahead" to have elia carry it out.')
+      } catch (err) {
+        writeError(err instanceof Error ? err.message : String(err))
       }
       continue
     }

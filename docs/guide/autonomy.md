@@ -4,7 +4,7 @@
 
 ## Autonomous work: `elia auto`
 
-For plan-first work, `elia plan "<goal>"` and interactive `/plan <goal>` enter the same structured autonomous workflow as `elia auto`: orient, submit a validated proposal, persist it to `.elia/artifacts/plan.md` and `.elia/runs/<run-id>/plan.md`, request approval, execute dependency waves, verify, and review. A bare `elia plan` or `/plan` displays the latest plan; `elia artifact [name]` or `/artifact [name]` displays a bounded Markdown artifact under `.elia` without initializing a model provider.
+For plan-first work inside a session, `/plan <goal>` (or shift+tab into plan mode) has elia research the task read-only and propose a plan without changing anything; Enter runs it, Esc keeps planning. `elia auto "<goal>"` is the full structured workflow: orient, submit a validated proposal, persist it to `.elia/artifacts/plan.md` and `.elia/runs/<run-id>/plan.md`, request approval, execute dependency waves, verify, and review. `/artifact [name]` displays a saved plan artifact under `.elia`.
 
 ```bash
 elia auto "add rate limiting to the API client"
