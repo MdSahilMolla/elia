@@ -5,6 +5,7 @@ import { captureBeforeWrite } from '../checkpoint.ts'
 import { BATTMANN_STORE_ACTIONS, executeBattmannStoreAction, loadBattmannDashboardData, loadBattmannReportData, recordFeedEvidence, recordFeedResult } from '../battmann/store.ts'
 import { describeFeedResult, fetchFeed, leadingSeries, normalizeFeedRequest, type FeedResult } from '../battmann/feeds.ts'
 import { clampClearance, clearanceRank, modelBoundary } from '../battmann/modelBoundary.ts'
+import { DEFAULT_ARTIFACT_PATHS } from '../battmann/artifactPaths.ts'
 import { openRuleQuestion, resolveDue } from '../battmann/monitor.ts'
 import { atomicWrite } from './atomicWrite.ts'
 import type { Tool } from './types.ts'
@@ -134,9 +135,10 @@ interface RiskFactor { id: string; summary: string; sourceUrl: string; sourceDat
 
 export function calculateRiskAssessment(input: Record<string, unknown>): string {
   const subject = text(input.subject, 'subject')
-  const asOf = date(input.asOf, 'asOf')
+  const asOf = date(input.asOf ?? new Date().toISOString(), 'asOf')
   const priorRisk = input.priorRisk === undefined ? 50 : number(input.priorRisk, 'priorRisk', 1, 99)
-  const factors: RiskFactor[] = list(input.factors, 'factors').map((item, index) => {
+  // Common synonyms models send for a factor's fields.
+  const factors: RiskFactor[] = list(input.factors, 'factors').map((raw): Record<string, unknown> => ({ ...raw, summary: raw.summary ?? raw.description, direction: raw.direction ?? raw.type })).map((item, index) => {
     const sourceDate = date(item.sourceDate, `factors[${index}].sourceDate`)
     if (sourceDate > asOf) throw new Error(`factors[${index}].sourceDate cannot be after asOf`)
     const direction = text(item.direction, `factors[${index}].direction`, 20)
@@ -612,16 +614,16 @@ const UNCLAMPED_ACTIONS = new Set(['stage_deployment', 'define_deployment_target
  */
 const ACTION_USAGE: Record<string, string> = {
   register_evidence: 'register_evidence takes flat fields: title, url, publishedAt (ISO date), retrievedAt (ISO date, not in the future), excerpt, independenceGroup, reliability (0-1); optional evidenceId, publisher, sourceType (primary | secondary | dataset | model), securityClassification. Figures from feed_query or ingest_feed already have an evidenceId; cite that instead of re-registering them.',
-  register_claim: 'register_claim takes: statement, classification (observed_fact | reproducible_calculation | model_estimate | judgement), confidence (low | medium | high), asOf, evidenceLinks [{ evidenceId, relation: supports | contradicts | context, supportingExcerpt }]; optional claimId, securityClassification.',
+  register_claim: 'register_claim takes: statement, classification (observed_fact | reproducible_calculation | model_estimate | judgement), confidence (low | medium | high), asOf (a date means that day up to now), evidenceLinks [{ evidenceId, relation: supports | contradicts | context, supportingExcerpt }]; optional claimId, securityClassification. Example: { "action": "register_claim", "statement": "China supplied 40.9% of India\'s 2025 IC imports", "classification": "observed_fact", "confidence": "high", "asOf": "2026-09-24", "evidenceLinks": [{ "evidenceId": "feed:comtrade:...", "relation": "supports", "supportingExcerpt": "China 11.71B (40.9%)" }] }',
   review_claim: 'review_claim takes: claimId, verdict (supported | contradicted | unclear), reviewer, reviewedAt, notes; optional reviewId.',
   submit_forecast: 'submit_forecast takes: questionId, probability (0.001-0.999), method, rationale; evidenceIds [ids] (on a certified question the question\'s own feed evidence is attached if you give none); optional forecaster (default elia), forecastClass (live | backtest), priorProbability. On a certified question asOf is set by the clock.',
   create_question: 'create_question takes: question, and either resolutionRule { source, observation, comparator, threshold } (certified, resolved by code) or resolutionCriteria + openedAt + horizon; optional questionId, domain, tags.',
-  risk_assessment: 'risk_assessment takes: subject, asOf, factors [{ id, summary, sourceUrl, sourceDate, direction: aggravating | mitigating, magnitude (0.001-1), reliability (0-1), independenceGroup, momentum: rising | stable | falling }]; optional priorRisk (1-99, default 50).',
+  risk_assessment: 'risk_assessment takes: subject, factors [{ id, summary, sourceUrl, sourceDate, direction: aggravating | mitigating, magnitude (0.001-1), reliability (0-1), independenceGroup, momentum: rising | stable | falling }]; optional asOf (default now), priorRisk (1-99, default 50). Example: { "action": "risk_assessment", "subject": "India chip import disruption", "factors": [{ "id": "conc", "summary": "85% of IC imports from three suppliers", "sourceUrl": "https://comtradeapi.un.org/...", "sourceDate": "2026-09-24", "direction": "aggravating", "magnitude": 0.7, "reliability": 0.9, "independenceGroup": "trade", "momentum": "stable" }] }',
   consequence_chain: 'consequence_chain takes: trigger, asOf, nodes [{ id, parentId (null for first-order), statement, mechanism, conditionalProbability (0.001-0.999), lagDays, basis, sourceUrl? }].',
   alternatives: 'alternatives takes: subject, asOf, criteria [{ id, name, weight (0-1), direction: higher-better | lower-better }], candidates [{ id, name, sourceUrl, sourceDate, reliability, scores: { <criterionId>: 0-100 } }]; optional incumbentId.',
   exposure_assessment: 'exposure_assessment takes: subject, asOf, baseValue, exposures [{ id, channel, factor, sourceUrl, sourceDate, notional, shockPct (0.0001-1), reliability, independenceGroup, sensitivity? }]; optional currency.',
-  report_from_store: 'report_from_store takes: title, executiveSummary, author, asOf, outputPath (ending .md, e.g. .elia/artifacts/brief.md); optional reportStatus (draft | final; final needs reviewer and supported reviews), questionIds, documentClassification.',
-  dashboard: 'dashboard takes: outputPath (ending .html, e.g. .elia/artifacts/battmann-dashboard.html); optional title, asOf.',
+  report_from_store: `report_from_store takes: title, executiveSummary, author; optional asOf (default now), outputPath (ending .md, default ${DEFAULT_ARTIFACT_PATHS.report_from_store}), reportStatus (draft | final; final needs reviewer and supported reviews), questionIds, documentClassification.`,
+  dashboard: `dashboard takes no required fields; optional outputPath (ending .html, default ${DEFAULT_ARTIFACT_PATHS.dashboard}), title, asOf.`,
   feed_query: 'feed_query takes: feed plus its parameters — fx { quote | quotes, base?, start?, end? }; worldbank { country, indicator }; imf { country, indicator }; comtrade { reporter, hs, partner?, flow?, frequency?, periods? }; gdelt { query, start?, end? }; commodity { commodity | commodities, unit?, start? }; tariff { reporter, hs | products (six-digit), partner?, years? }. Data already recorded is faster to read with indicator_series or supplier_concentration.',
   upsert_object: 'upsert_object takes: objectType, name, validFrom, confidence (low | medium | high), evidenceIds; optional objectId, properties, validTo, latitude, longitude, securityClassification.',
   link_objects: 'link_objects takes: fromId, toId, linkType, validFrom, confidence, evidenceIds; optional linkId, properties, validTo, securityClassification.',
@@ -761,8 +763,12 @@ export const battmannTool: Tool = {
     required: ['action'],
   },
   async execute(input) {
-    return withModelBoundary(input, (bounded) => {
-      const action = bounded.action
+    return withModelBoundary(input, (given) => {
+      const action = given.action
+      // An artifact action with no outputPath writes to its default, the same path the governor assessed.
+      const bounded = typeof action === 'string' && DEFAULT_ARTIFACT_PATHS[action] && (given.outputPath === undefined || given.outputPath === '')
+        ? { ...given, outputPath: DEFAULT_ARTIFACT_PATHS[action], ...(action === 'report_from_store' && given.asOf === undefined ? { asOf: new Date().toISOString() } : {}) }
+        : action === 'report_from_store' && given.asOf === undefined ? { ...given, asOf: new Date().toISOString() } : given
       if (action === 'forecast') return calculateForecast(bounded)
       if (action === 'ensemble') return calculateEnsemble(bounded)
       if (action === 'backtest') return backtestForecasts(bounded)

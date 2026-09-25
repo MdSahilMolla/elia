@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
+import { DEFAULT_ARTIFACT_PATHS } from '../battmann/artifactPaths.ts'
 import { skillCapability } from '../skills/capabilities.ts'
 import { currentAgent, isPathWithinWorkspace } from './context.ts'
 import { commandMayReadSensitiveData } from './sensitivePaths.ts'
@@ -514,7 +515,7 @@ export function assessAction(request: ActionRequest, cwd = currentAgent().cwd ??
   if (name === 'battmann') {
     const action = typeof input.action === 'string' ? input.action : ''
     if (action === 'report' || action === 'report_from_store' || action === 'dashboard') {
-      const path = typeof input.outputPath === 'string' ? input.outputPath : ''
+      const path = typeof input.outputPath === 'string' && input.outputPath ? input.outputPath : DEFAULT_ARTIFACT_PATHS[action]!
       return path && isPathWithinWorkspace(path, cwd)
         ? assessment('review', 'approve', 'Battmann report and dashboard actions write checkpointed local Markdown, JSON, and HTML artifacts', 'battmann', [path], true)
         : assessment('critical', 'approve', 'Battmann artifact output is missing or outside the active workspace', 'battmann', path ? [path] : [], false)
@@ -531,7 +532,7 @@ export function assessAction(request: ActionRequest, cwd = currentAgent().cwd ??
     if (action === 'ingest_feed' || action === 'resolve_due') return assessment('safe', 'allow', `Battmann ${action} reads a fixed public statistics API and appends code-fetched records to the workspace-local intelligence store`, `battmann.${action}`, [storePath], true)
     const readOnly = new Set([
       'forecast', 'ensemble', 'backtest', 'risk_assessment', 'consequence_chain', 'exposure_assessment', 'alternatives', 'question_detail', 'list_questions', 'scorecard', 'workspace_snapshot',
-      'object_detail', 'list_objects', 'find_path', 'explain_causality', 'list_datasets', 'dataset_lineage', 'list_action_proposals', 'geo_query', 'situation_snapshot', 'deployment_status', 'audit_trail', 'list_indicators', 'indicator_series', 'list_feeds', 'supplier_concentration',
+      'object_detail', 'list_objects', 'find_path', 'explain_causality', 'list_datasets', 'dataset_lineage', 'list_action_proposals', 'geo_query', 'situation_snapshot', 'deployment_status', 'audit_trail', 'list_indicators', 'indicator_series', 'list_feeds', 'supplier_concentration', 'list_claims',
     ])
     return readOnly.has(action)
       ? assessment('safe', 'allow', `Battmann ${action} is a deterministic calculation or workspace-local read`, `battmann.${action}`, [storePath], true)

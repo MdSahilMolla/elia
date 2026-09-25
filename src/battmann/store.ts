@@ -43,6 +43,18 @@ function observedDate(value: unknown, name: string): string {
   return result
 }
 
+/**
+ * The instant an analysis is made "as of". A bare date means as of that day — its end, or now if the day is
+ * today — because read as midnight it would put evidence retrieved earlier the same day after the claim,
+ * forecast, review, or report that cites it.
+ */
+function analysisAsOf(value: unknown, name: string): string {
+  if (typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value.trim()) && Number.isFinite(Date.parse(value.trim()))) {
+    return new Date(Math.min(Date.parse(`${value.trim()}T23:59:59.999Z`), Date.now())).toISOString()
+  }
+  return observedDate(value, name)
+}
+
 function probability(value: unknown, name: string): number {
   if (typeof value !== 'number' || !Number.isFinite(value) || value < 0.001 || value > 0.999) throw new Error(`${name} must be between 0.001 and 0.999`)
   return value
@@ -561,7 +573,7 @@ function registerEvidence(input: Row): Row {
 function registerClaim(input: Row): Row {
   return withStore(input, true, (db, path) => transaction(db, () => {
     const id = identifier(input.claimId, 'claimId')
-    const asOf = observedDate(input.asOf, 'asOf')
+    const asOf = analysisAsOf(input.asOf, 'asOf')
     const links = objectArray(input.evidenceLinks, 'evidenceLinks', 30).map((link, index) => ({
       evidenceId: identifier(link.evidenceId, `evidenceLinks[${index}].evidenceId`),
       relation: oneOf(link.relation ?? 'supports', `evidenceLinks[${index}].relation`, ['supports', 'contradicts', 'context'] as const),
@@ -583,7 +595,7 @@ function reviewClaim(input: Row): Row {
     const claim = db.query('SELECT id, as_of FROM claims WHERE id = ?').get(claimId) as Row | null
     if (!claim) throw new Error(`unknown claim id: ${claimId}`)
     const reviewId = identifier(input.reviewId, 'reviewId')
-    const reviewedAt = observedDate(input.reviewedAt, 'reviewedAt')
+    const reviewedAt = analysisAsOf(input.reviewedAt, 'reviewedAt')
     if (reviewedAt < String(claim.as_of)) throw new Error('reviewedAt cannot be before claim asOf')
     const verdict = oneOf(input.verdict, 'verdict', ['supported', 'contradicted', 'unclear'] as const)
     db.query('INSERT INTO claim_reviews (id, claim_id, verdict, reviewer, reviewed_at, notes) VALUES (?, ?, ?, ?, ?, ?)').run(
@@ -604,7 +616,7 @@ function submitForecast(input: Row): Row {
     const certified = Boolean(question.resolution_rule_json)
     const clock = new Date().toISOString()
     if (certified && clock > String(question.horizon)) throw new Error(`question ${questionId} closed for forecasting at ${question.horizon}`)
-    const asOf = certified ? clock : observedDate(input.asOf, 'asOf')
+    const asOf = certified ? clock : analysisAsOf(input.asOf, 'asOf')
     if (asOf < String(question.opened_at) || asOf > String(question.horizon)) throw new Error('forecast asOf must be between question openedAt and horizon')
     const forecaster = optionalText(input.forecaster, 'forecaster', 200) ?? 'elia'
     if (/^baseline/i.test(forecaster)) throw new Error('the "baseline" forecaster is reserved for the statistical baseline elia computes itself')
@@ -622,12 +634,15 @@ function submitForecast(input: Row): Row {
     const value = probability(input.probability, 'probability')
     const prior = input.priorProbability === undefined ? null : probability(input.priorProbability, 'priorProbability')
     const forecastClass = oneOf(input.forecastClass ?? 'live', 'forecastClass', ['live', 'backtest'] as const)
+    const latestBaseline = db.query('SELECT probability FROM forecast_revisions WHERE question_id = ? AND forecaster = ? ORDER BY revision DESC LIMIT 1').get(questionId, BASELINE_FORECASTER) as Row | null
+    const baselineMatch = latestBaseline && Math.abs(Number(latestBaseline.probability) - value) < 0.005 ? Number(latestBaseline.probability) : null
     db.query('INSERT INTO forecast_revisions (id, question_id, revision, probability, prior_probability, as_of, method, model, forecaster, rationale, evidence_ids_json, forecast_class, parent_revision_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(
       forecastId, questionId, revision, value, prior, asOf, requiredText(input.method, 'method', 500), optionalText(input.model, 'model', 300) ?? null, forecaster, requiredText(input.rationale, 'rationale', 10_000), JSON.stringify([...new Set(evidenceIds)]), forecastClass, previous ? String(previous.id) : null, new Date().toISOString(),
     )
     return {
       status: 'recorded', storePath: path, forecastId, questionId, revision, probability: value, forecastClass, parentRevisionId: previous?.id ?? null, asOf, forecaster,
       ...(certified ? { asOfSetBy: 'clock' } : {}), ...(evidenceAttached ? { evidenceAttached: `${evidenceAttached} (the question's own feed series)` } : {}),
+      ...(baselineMatch ? { note: `This equals the statistical baseline (${baselineMatch}); a forecast that copies the baseline cannot show skill. Revise it if your evidence says otherwise, and say why.` } : {}),
     }
   }))
 }
@@ -1673,7 +1688,7 @@ function workspaceSnapshot(input: Row): Row {
 }
 
 export function loadBattmannReportData(input: Row): Row {
-  const asOf = observedDate(input.asOf, 'asOf')
+  const asOf = analysisAsOf(input.asOf, 'asOf')
   return withStore(input, false, (db, path) => {
     const requestedQuestionIds = stringArray(input.questionIds, 'questionIds', 100).map((value, index) => identifier(value, `questionIds[${index}]`))
     const questionRows = db.query('SELECT * FROM questions WHERE opened_at <= ? ORDER BY horizon').all(asOf) as Row[]
@@ -1758,6 +1773,20 @@ function supplierConcentration(db: Database, indicators: Row[], asOf: string): R
   return result
 }
 
+function listClaims(input: Row): Row {
+  const opened = openStore(input, false)
+  if (!opened) return { storePath: storePath(input), claims: [] }
+  try {
+    const rank = clearanceRank(input)
+    const claims = (opened.db.query('SELECT * FROM claims ORDER BY created_at').all() as Row[]).filter((row) => withinClearance(row, rank)).map((claim) => ({
+      id: claim.id, statement: claim.statement, classification: claim.classification, confidence: claim.confidence, asOf: claim.as_of,
+      evidenceIds: (opened.db.query('SELECT evidence_id FROM claim_evidence WHERE claim_id = ?').all(String(claim.id)) as Row[]).map((row) => row.evidence_id),
+      review: (opened.db.query('SELECT verdict FROM claim_reviews WHERE claim_id = ? ORDER BY reviewed_at DESC LIMIT 1').get(String(claim.id)) as Row | null)?.verdict ?? 'unreviewed',
+    }))
+    return { storePath: opened.path, claims }
+  } finally { opened.db.close() }
+}
+
 function supplierConcentrationAction(input: Row): Row {
   const opened = openStore(input, false)
   if (!opened) return { storePath: storePath(input), groups: [] }
@@ -1775,7 +1804,7 @@ function supplierConcentrationAction(input: Row): Row {
 
 /** One read that assembles every panel of the intelligence dashboard as of a cutoff, honouring clearance. */
 export function loadBattmannDashboardData(input: Row): Row {
-  const asOf = input.asOf === undefined ? new Date().toISOString() : observedDate(input.asOf, 'asOf')
+  const asOf = input.asOf === undefined ? new Date().toISOString() : analysisAsOf(input.asOf, 'asOf')
   const rank = clearanceRank(input)
   return withStore(input, false, (db, path) => {
     const nameOf = (id: string) => { const row = currentObject(db, id); return row ? String(row.name) : id }
@@ -2029,7 +2058,7 @@ export const BATTMANN_STORE_ACTIONS = [
   'register_dataset', 'list_datasets', 'dataset_lineage', 'define_action', 'propose_action', 'decide_action_proposal', 'list_action_proposals',
   'register_geo_event', 'geo_query', 'situation_snapshot',
   'define_deployment_target', 'stage_deployment', 'deployment_status', 'audit_trail',
-  'define_indicator', 'record_indicator_reading', 'list_indicators', 'indicator_series', 'list_feeds', 'supplier_concentration',
+  'define_indicator', 'record_indicator_reading', 'list_indicators', 'indicator_series', 'list_feeds', 'supplier_concentration', 'list_claims',
 ] as const
 
 /**
@@ -2097,6 +2126,7 @@ export function executeBattmannStoreAction(input: Row): string {
     indicator_series: indicatorSeries,
     list_feeds: listFeedSubscriptions,
     supplier_concentration: supplierConcentrationAction,
+    list_claims: listClaims,
   }
   const handler = handlers[action]
   if (!handler) throw new Error(`unsupported Battmann store action: ${action}`)

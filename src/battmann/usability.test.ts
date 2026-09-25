@@ -93,3 +93,39 @@ test('commodity prices are read from the IMF SDMX XML, and WITS tariffs from the
   expect(tariffs.series[0]!.name).toContain('Most Favoured Nation Tariff')
   expect(tariffs.notes.join(' ')).toContain('No tariff data yet for 2024')
 })
+
+test('an artifact call with no outputPath writes to its default, and the governor assesses that same path', async () => {
+  const cwd = mkdtempSync(join(tmpdir(), 'elia-battmann-defaults-'))
+  const run = tool(cwd)
+  await run({ action: 'register_evidence', evidenceId: 'e1', title: 'Source', url: 'https://example.com/s', publishedAt: '2026-01-01', retrievedAt: '2026-01-02', excerpt: 'Text.', independenceGroup: 'x', reliability: 0.9 })
+  const dashboard = await run({ action: 'dashboard' })
+  expect(dashboard.dashboardPath.endsWith('.elia/artifacts/battmann-dashboard.html')).toBe(true)
+  const report = await run({ action: 'report_from_store', title: 'Brief', executiveSummary: 'Summary.', author: 'elia battmann' })
+  expect(report.reportPath.endsWith('.elia/artifacts/battmann-report.md')).toBe(true)
+  const { assessAction } = await import('../autonomy/governor.ts')
+  expect(assessAction({ name: 'battmann', input: { action: 'dashboard' } }, cwd).risk).toBe('review')
+})
+
+test('a bare-date asOf means that day up to now, so evidence retrieved earlier today can be cited', async () => {
+  const run = tool(mkdtempSync(join(tmpdir(), 'elia-battmann-asof-')))
+  await run({ action: 'register_evidence', evidenceId: 'today', title: 'Fresh source', url: 'https://example.com/today', publishedAt: day(-1), retrievedAt: new Date(Date.now() - 60_000).toISOString(), excerpt: 'Text.', independenceGroup: 'x', reliability: 0.9 })
+  const claim = await run({ action: 'register_claim', statement: 'Something observed today.', classification: 'observed_fact', confidence: 'high', asOf: day(0), evidenceLinks: [{ evidenceId: 'today', relation: 'supports', supportingExcerpt: 'Text.' }] })
+  expect(claim.status).toBe('created')
+  const listed = await run({ action: 'list_claims' })
+  expect(listed.claims.map((item: { id: string; evidenceIds: string[]; review: string }) => [item.id, item.evidenceIds, item.review])).toEqual([[claim.claimId, ['today'], 'unreviewed']])
+})
+
+test('a forecast that copies the baseline is recorded with a note saying it cannot show skill', async () => {
+  const run = tool(mkdtempSync(join(tmpdir(), 'elia-battmann-copy-')))
+  feedTestHooks.fetch = async (url) => {
+    const [start, end] = url.pathname.replace('/v1/', '').split('..') as [string, string]
+    const rates: Record<string, { INR: number }> = {}
+    for (let t = Date.parse(`${start}T00:00:00Z`); t <= Date.parse(`${end ?? start}T00:00:00Z`); t += DAY) rates[new Date(t).toISOString().slice(0, 10)] = { INR: 95 + Math.sin(t / DAY) * 0.3 }
+    return new Response(JSON.stringify({ base: 'USD', rates }), { status: 200 })
+  }
+  const created = await run({ action: 'create_question', questionId: 'q', question: 'USD/INR above 95.2?', resolutionRule: { source: { feed: 'fx', base: 'USD', quote: 'INR' }, observation: { period: day(20) }, comparator: '>', threshold: 95.2 } })
+  const copied = await run({ action: 'submit_forecast', questionId: 'q', probability: created.baseline.probability, method: 'copied', rationale: 'Same as baseline.' })
+  expect(copied.note).toContain('copies the baseline cannot show skill')
+  const own = await run({ action: 'submit_forecast', questionId: 'q', probability: Math.min(0.95, created.baseline.probability + 0.2), method: 'judgement', rationale: 'Evidence points higher.' })
+  expect(own.note).toBeUndefined()
+})
