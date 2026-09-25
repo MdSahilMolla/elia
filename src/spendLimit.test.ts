@@ -58,3 +58,16 @@ test('the ceiling is enforceable on every Claude model elia routes to, Opus incl
     expect(state.exceeded).toBe(true)
   }
 })
+
+test('the priced part of the session is still enforced when another model has no price (#1245)', async () => {
+  const { recordUsage, resetSessionUsageForTests } = await import('./usage.ts')
+  resetSessionUsageForTests()
+  try {
+    recordUsage(EXPENSIVE, 'mercury-2.5')
+    const state = spendState('some-model-with-no-pricing-entry', EXPENSIVE, { ELIA_MAX_SPEND_USD: '1' })
+    expect(state.exceeded).toBe(true)
+    expect(state.spentUsd).toBeGreaterThan(1)
+  } finally {
+    resetSessionUsageForTests()
+  }
+})

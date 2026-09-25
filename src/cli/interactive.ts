@@ -3342,7 +3342,7 @@ export async function runInteractive(): Promise<void> {
     const taskSummary = renderTaskSummary(taskSessions)
     const contextLine = renderContextStatus(messages, await countEpisodes(sessionId), compactionThresholdFor(config.model))
     const { formatCompactUsage } = await import('../usage.ts')
-    writeUsageLine([contextLine, dim(formatCompactUsage(config.model)), taskSummary ? dim(taskSummary) : ''].filter(Boolean).join('  ·  '))
+    writeUsageLine([contextLine, dim(formatCompactUsage()), taskSummary ? dim(taskSummary) : ''].filter(Boolean).join('  ·  '))
     // The full workspace panel is shown once at startup and on demand via
     // /status — reprinting all 14 lines after every turn buried the conversation.
   }
@@ -3356,7 +3356,7 @@ export async function runInteractive(): Promise<void> {
   // The registerShutdownCleanup callback registered above already writes the
   // "ended" heartbeat for this and every other exit path — no separate call
   // needed here.
-  if (messages.length > 0 && !machineReadable) process.stdout.write(`${box([getSessionSummaryLine(config.model)])}\n`)
+  if (messages.length > 0 && !machineReadable) process.stdout.write(`${box([getSessionSummaryLine()])}\n`)
   await printTurnProfileReport()
   if (messages.length > 0 && !machineReadable) writeNotice(`Resume this session later with: elia --resume ${sessionId}`)
   writeNotice('Goodbye!')

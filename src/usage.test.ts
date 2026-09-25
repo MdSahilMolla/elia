@@ -212,3 +212,21 @@ test('addUsage carries the 1-hour share, and leaves usages that never had one un
     .toEqual({ inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 16, cacheWrite1hTokens: 5 })
   expect(addUsage(ZERO_USAGE, ZERO_USAGE)).toEqual(ZERO_USAGE)
 })
+
+test('a session that touched several models is priced per model, not at one rate (#1245)', async () => {
+  const { sessionCost, formatSessionCost, recordUsage, estimateCostUsd, resetSessionUsageForTests } = await import('./usage.ts')
+  resetSessionUsageForTests()
+  const before = sessionCost()
+  const deep = { inputTokens: 1_000_000, outputTokens: 100_000, cacheReadTokens: 0, cacheWriteTokens: 0 }
+  const fast = { inputTokens: 4_000_000, outputTokens: 400_000, cacheReadTokens: 0, cacheWriteTokens: 0 }
+  recordUsage(deep, 'claude-opus-5')
+  recordUsage(fast, 'mercury-2.5')
+  const after = sessionCost()
+  const expected = estimateCostUsd('claude-opus-5', deep)! + estimateCostUsd('mercury-2.5', fast)!
+  expect(after.usd - before.usd).toBeCloseTo(expected, 6)
+  // An unpriced model is named, and the display says the figure is a floor.
+  recordUsage({ inputTokens: 10, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 }, 'unpriced-model-x')
+  expect(sessionCost().unpriced).toContain('unpriced-model-x')
+  expect(formatSessionCost()).toContain('unpriced-model-x unpriced')
+  resetSessionUsageForTests()
+})
