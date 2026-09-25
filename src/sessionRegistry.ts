@@ -2,6 +2,7 @@ import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { paths } from './statePaths.ts'
 import { ensureSecureDirectory, hardenSecureFile, writeSecureFile } from './securePersistence.ts'
+import { noteCorruptState } from './localJson.ts'
 
 /**
  * Lets one running `elia` process see what other `elia` processes in the same
@@ -91,8 +92,10 @@ export function listKnownSessions(dir = paths.sessionStatus): KnownSession[] {
       const stale = !parsed.endedAt && now - parsed.updatedAt > STALE_MS
       const liveStatus: SessionLiveStatus = parsed.endedAt ? 'ended' : stale ? 'stopped' : parsed.busy ? 'running' : 'idle'
       results.push({ ...parsed, liveStatus })
-    } catch {
-      // A corrupt or half-written heartbeat file shouldn't hide every other session.
+    } catch (error) {
+      // A corrupt or half-written heartbeat file shouldn't hide every other
+      // session. It is rewritten on the next heartbeat, so no copy is kept.
+      noteCorruptState('sessionRegistry.list', path, error)
     }
   }
   return results.sort((a, b) => b.updatedAt - a.updatedAt)

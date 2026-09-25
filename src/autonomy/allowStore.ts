@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'no
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import type { ActionAssessment, ActionRequest } from './governor.ts'
+import { noteCorruptState } from '../localJson.ts'
 
 /**
  * A persistent "always allow" list — the counterpart to `.elia/policy.json`.
@@ -79,8 +80,10 @@ function load(path: string): AllowFile {
           .slice(0, MAX_RULES),
       }
     }
-  } catch {
-    // A malformed allow.json loosens nothing — treat it as empty rather than throw.
+  } catch (error) {
+    // A malformed allow.json loosens nothing — treat it as empty rather than
+    // throw, but say so: otherwise the person's rules just stop applying.
+    noteCorruptState('allowStore.read', path, error, { keepCopy: true })
     file = EMPTY
   }
   cache.set(path, { mtimeMs, file })

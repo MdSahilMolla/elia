@@ -610,11 +610,24 @@ function registerClaim(input: Row): Row {
 }
 
 /**
+ * A question's stored resolution rule. A corrupt one is an error naming the
+ * question, not a bare SyntaxError from somewhere inside a resolution (#1270):
+ * the rule decides a certified outcome, so it is never guessed at.
+ */
+function storedRule(question: Row): ResolutionRule {
+  try {
+    return JSON.parse(String(question.resolution_rule_json)) as ResolutionRule
+  } catch (error) {
+    throw new Error(`question ${String(question.id)}: its stored resolution rule is not valid JSON (${error instanceof Error ? error.message : String(error)}); the record needs repair before it can be resolved or graded`)
+  }
+}
+
+/**
  * Figures in a forecast rationale that are in neither the cited evidence nor the question itself (its text,
  * threshold and the forecast's own probability), so a rationale built on a wrong reading of the data is visible.
  */
 function forecastRationaleUnverified(db: Database, question: Row, rationale: string, evidenceIds: string[], probability: number): string[] {
-  const rule = question.resolution_rule_json ? JSON.parse(String(question.resolution_rule_json)) as ResolutionRule : null
+  const rule = question.resolution_rule_json ? storedRule(question) : null
   const context = [String(question.question), String(question.resolution_criteria), ...(rule ? [`${rule.threshold}`] : []), `${Math.round(probability * 100)}%`, `${probability}`]
   return unverifiedFigures(rationale, [...citedEvidenceText(db, evidenceIds), ...context])
 }
@@ -666,7 +679,7 @@ function submitForecast(input: Row): Row {
     let evidenceAttached: string | undefined
     if (!evidenceIds.length && certified) {
       // A certified question's own feed series is always evidence for a forecast on it.
-      const latest = db.query('SELECT evidence_id FROM indicator_readings WHERE indicator_id = ? AND evidence_id IS NOT NULL ORDER BY observed_at DESC LIMIT 1').get(ruleSeriesKey(JSON.parse(String(question.resolution_rule_json)) as ResolutionRule)) as Row | null
+      const latest = db.query('SELECT evidence_id FROM indicator_readings WHERE indicator_id = ? AND evidence_id IS NOT NULL ORDER BY observed_at DESC LIMIT 1').get(ruleSeriesKey(storedRule(question))) as Row | null
       if (latest) evidenceIds = [evidenceAttached = String(latest.evidence_id)]
     }
     assertEvidence(db, evidenceIds, asOf)
@@ -2026,7 +2039,7 @@ export function openRuleQuestions(input: Row): { id: string; question: string; h
   if (!opened) return []
   try {
     return (opened.db.query("SELECT id, question, horizon, opened_at, resolution_rule_json FROM questions WHERE status = 'open' AND resolution_rule_json IS NOT NULL ORDER BY horizon").all() as Row[])
-      .map((row) => ({ id: String(row.id), question: String(row.question), horizon: String(row.horizon), openedAt: String(row.opened_at), rule: JSON.parse(String(row.resolution_rule_json)) as ResolutionRule }))
+      .map((row) => ({ id: String(row.id), question: String(row.question), horizon: String(row.horizon), openedAt: String(row.opened_at), rule: storedRule(row) }))
   } finally { opened.db.close() }
 }
 
@@ -2038,7 +2051,7 @@ export function recordFeedResolution(input: Row, questionId: string, evaluation:
     if (question.status !== 'open') throw new Error(`question ${questionId} is already ${question.status}`)
     if (!question.resolution_rule_json) throw new Error(`question ${questionId} has no resolution rule`)
     const { evidenceId } = feedEvidence(db, result)
-    const rule = JSON.parse(String(question.resolution_rule_json)) as ResolutionRule
+    const rule = storedRule(question)
     const resolvedAt = new Date().toISOString()
     const resolutionId = randomUUID()
     db.query("INSERT INTO resolution_events (id, question_id, status, outcome, resolved_at, source_url, resolver, rationale, provenance, observed_value) VALUES (?, ?, 'accepted', ?, ?, ?, ?, ?, 'feed', ?)").run(

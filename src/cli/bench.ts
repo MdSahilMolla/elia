@@ -384,7 +384,17 @@ export async function runBenchLatency(): Promise<void> {
       ),
   })
 
-  const baseline = !live && existsSync(baselinePath) ? (JSON.parse(readFileSync(baselinePath, 'utf8')) as import('../bench/latency/harness.ts').LatencyReport) : undefined
+  let baseline: import('../bench/latency/harness.ts').LatencyReport | undefined
+  if (!live && existsSync(baselinePath)) {
+    const { CorruptStateError, noteCorruptState, parseLocalJson } = await import('../localJson.ts')
+    try {
+      baseline = parseLocalJson(readFileSync(baselinePath, 'utf8'), baselinePath) as import('../bench/latency/harness.ts').LatencyReport
+    } catch (error) {
+      if (!(error instanceof CorruptStateError)) throw error
+      noteCorruptState('bench.latencyBaseline', baselinePath, error, { keepCopy: true })
+      writeNotice(`The latency baseline is unreadable (${error.reason}); comparing against nothing. \`elia bench-latency --update-baseline\` rewrites it.`)
+    }
+  }
 
   if (machineReadable) {
     emitEvent('latency_report', { report, comparison: baseline ? compareLatency(baseline, report, { strict }) : undefined })

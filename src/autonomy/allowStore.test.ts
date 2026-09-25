@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test'
-import { mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { addAllowRule, allowPath, canPersistPrefixRule, clearAllowCache, commandPrefix, isAllowlisted, ruleFor, ruleLabel } from './allowStore.ts'
@@ -184,4 +184,16 @@ test.if(process.platform !== 'win32')('the allow-file is written with owner-only
   const mode = statSync(allowPath('project', dir)).mode & 0o777
   expect(mode).toBe(0o600)
   expect(statSync(join(dir, '.elia')).mode & 0o777).toBe(0o700)
+})
+
+test('a corrupt allow list loosens nothing, and the bad file is kept for inspection (#1270)', () => {
+  const dir = project()
+  const push = { name: 'run_command', input: { command: 'git push origin main' } }
+  addAllowRule(ruleFor(push, assessAction(push, dir)), 'project', dir)
+  const path = allowPath('project', dir)
+  writeFileSync(path, '{"rules": [{"tool": "run_command"')
+  clearAllowCache()
+  expect(isAllowlisted(push, assessAction(push, dir), dir)).toBe(false)
+  expect(existsSync(`${path}.corrupt`)).toBe(true)
+  expect(readFileSync(`${path}.corrupt`, 'utf8')).toBe('{"rules": [{"tool": "run_command"')
 })
