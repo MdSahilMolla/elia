@@ -2411,6 +2411,49 @@ export async function runInteractive(): Promise<void> {
       )
     }
 
+    // A parallel session of this REPL: its own git worktree and branch, shown
+    // in the session bar, reachable with /quickchat --session and delegation.
+    // Ctrl+N lands here with no name, and the name prompt is the consent —
+    // creating a worktree and a branch is not something a keypress should do
+    // silently.
+    const sessionsNew = /^\/sessions?\s+new(?:\s+(.+))?$/.exec(trimmed)
+    if (sessionsNew) {
+      const create = async (raw: string): Promise<string> => {
+        const name = raw.trim()
+        if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,39}$/.test(name) || name.includes('..')) {
+          return `"${name}" can't name a session — use letters, digits, ".", "_" or "-" (up to 40), e.g. /sessions new api-tests`
+        }
+        const main = await registerQuickchatSession()
+        const { getSessionBus } = await import('../session/bus.ts')
+        const { makeSessionName } = await import('../session/types.ts')
+        const { createSessionWorktree } = await import('./parallelSessions.ts')
+        const bus = getSessionBus()
+        if (bus.list().some((handle) => handle.name === name)) return `There is already a session named ${name}.`
+        const handle = bus.create(makeSessionName(name))
+        try {
+          const worktree = await createSessionWorktree(name)
+          bus.update(handle.id, { worktree })
+          bus.setStatus(handle.id, 'idle')
+          // The new session sits in the bar; this conversation stays the target.
+          if (main) bus.setActiveSession(main.id)
+          return `✓ Session ${name} created — worktree ${worktree}, branch elia/session-${name}.\nctrl+tab switches which session /quickchat and delegation target · /quickchat --session ${name} <question> asks about it.`
+        } catch (error) {
+          bus.kill(handle.id)
+          const why = (error instanceof Error ? error.message : String(error)).replace(/^Failed to create session worktree:\s*/, '').trim()
+          return `✗ Could not create session ${name}: ${why.split('\n')[0]}`
+        }
+      }
+      if (sessionsNew[1]) return done(await create(sessionsNew[1]))
+      return {
+        handled: true,
+        prompt: {
+          label: 'Name the new session — it gets its own git worktree and branch elia/session-<name>',
+          placeholder: 'e.g. api-tests',
+          onSubmit: (value) => create(value),
+        },
+      }
+    }
+
     if (trimmed === '/sessions' || trimmed === '/session') {
       // Every conversation in this project, not only the ones a live process is
       // currently holding — the ones worth reopening are usually the ones

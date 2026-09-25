@@ -70,7 +70,10 @@ export function createQuickchatOverlayStore({ idleMs = QUICKCHAT_TIMEOUT_MS }: Q
   return {
     open(question: string, contextLabel?: string): void {
       overlay.open(question, contextLabel ?? '')
-      schedule.reset()
+      // No idle window while the answer is still on its way: it started here,
+      // so a slow model's answer arrived after the panel had closed itself and
+      // was dropped. The call has its own ceiling (QUICKCHAT_TIMEOUT_MS) and
+      // always ends in an answer or a failure line; the window starts then.
       sync()
     },
     appendText(text: string): void {

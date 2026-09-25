@@ -1,9 +1,12 @@
-import { useEffect, useState } from 'react'
+import { Fragment, useEffect, useState } from 'react'
 import { Box, Text } from 'ink'
 import { getSessionBus } from '../../session/bus.ts'
-import type { SessionBus, SessionHandle, SessionId } from '../../session/types.ts'
-import { renderSessionBar, statusGlyph, type SessionBarItem } from '../sessionBar.ts'
+import type { SessionBus, SessionHandle, SessionId, SessionStatus } from '../../session/types.ts'
+import { CHIP_SEPARATOR, layoutSessionBar, renderSessionBar, statusGlyph, type SessionBarItem } from '../sessionBar.ts'
 import { isIdle, shouldAutoFocus } from './sessionActions.ts'
+import { palette } from './theme.ts'
+import { Spinner } from './components/Spinner.tsx'
+import { useFrameWidth } from './wrap.ts'
 
 /** How often the bar re-checks the bus — status transitions like running →
  * `waiting-input` emit no `bus.on` event, so a poll catches what events miss. */
@@ -12,32 +15,77 @@ export const SESSION_BAR_POLL_MS = 1_000
 export interface SessionBarData {
   /** The live session handles, in bus order. */
   handles: SessionHandle[]
-  /** Session id → status glyph (● ○ ⚠ ✓ ✗), for inspection without Ink rendering. */
+  /** Name and status of each handle, captured at derive time (handles mutate in place). */
+  items: SessionBarItem[]
+  /** The session /quickchat and delegation currently target. */
+  activeId?: SessionId
+  /** Session id → status glyph (● ? ○ ! ✓ ✗), for inspection without Ink rendering. */
   glyph: Record<string, string>
-  /** The rendered bar line ('' when there are no sessions). */
+  /** The bar as plain text ('' when there are no sessions). */
   barText: string
   /**
-   * Derive-time snapshot of `id:status:name`. Kept separate from `handles`:
-   * the bus hands out handle objects by reference, so a signature recomputed
-   * from the stored state would never see a `setStatus` mutation land.
+   * Derive-time snapshot of `id:status:name` (and the active session).
+   * Kept separate from `handles`: the bus hands out handle objects by
+   * reference, so a signature recomputed from the stored state would never see
+   * a `setStatus` mutation land.
    */
   sig: string
 }
 
-const EMPTY: SessionBarData = { handles: [], glyph: {}, barText: '', sig: '' }
+const EMPTY: SessionBarData = { handles: [], items: [], glyph: {}, barText: '', sig: '' }
 
 function derive(bus: SessionBus): SessionBarData {
   const handles = bus.list()
   if (handles.length === 0) return EMPTY
   const items: SessionBarItem[] = []
   const glyph: Record<string, string> = {}
-  let sig = ''
+  let sig = `active=${bus.activeSession ?? ''}|`
   for (const handle of handles) {
     items.push({ name: handle.name, status: handle.status, lastTask: handle.lastTask })
     glyph[handle.id] = statusGlyph(handle.status)
     sig += `${handle.id}:${handle.status}:${handle.name}|`
   }
-  return { handles, glyph, barText: renderSessionBar(items), sig }
+  return { handles, items, activeId: bus.activeSession, glyph, barText: renderSessionBar(items), sig }
+}
+
+function statusColor(status: SessionStatus): string | undefined {
+  switch (status) {
+    case 'running':
+      return palette.brand
+    case 'waiting-input':
+      return palette.warning
+    case 'blocked':
+    case 'errored':
+      return palette.failure
+    case 'done':
+      return palette.success
+    case 'idle':
+      return palette.subtle
+  }
+}
+
+/**
+ * The chips in the frame's own colours: a running session's dot pulses like a
+ * tool in flight, one waiting on you is a warning-coloured `?`, and the
+ * session /quickchat and delegation target is the one bold name.
+ */
+function SessionChips({ data }: { data: SessionBarData }) {
+  const width = useFrameWidth()
+  const chips = layoutSessionBar(data.items, Number.isFinite(width) ? width : 200)
+  const activeIndex = data.handles.findIndex((handle) => handle.id === data.activeId)
+  return (
+    <Text wrap="truncate-end">
+      {chips.map((chip, index) => (
+        <Fragment key={index}>
+          {index > 0 ? <Text color={palette.subtle}>{CHIP_SEPARATOR}</Text> : null}
+          {chip.status === 'running' ? <Spinner variant="pulse" /> : <Text color={statusColor(chip.status)}>{statusGlyph(chip.status)}</Text>}{' '}
+          <Text bold={index === activeIndex} color={index === activeIndex ? undefined : palette.muted}>
+            {chip.name}
+          </Text>
+        </Fragment>
+      ))}
+    </Text>
+  )
 }
 
 export interface UseSessionBarDataOptions {
@@ -87,11 +135,11 @@ export interface SessionBarProps {
 }
 
 /**
- * The live session status bar: `renderSessionBar` output pinned to the top of
- * the frame, kept current from the session bus. Renders nothing while there
- * are no sessions or `visible` is off. Auto-focus lives here too — when a
- * session goes `waiting-input` and the current session is idle, the bus is
- * switched to it once and `onAutoFocus` is apprised.
+ * The live session status bar, pinned under the status row and kept current
+ * from the session bus. Renders nothing until there are two sessions to tell
+ * apart, or while `visible` is off. Auto-focus lives here too — when a session
+ * goes `waiting-input` and the current session is idle, the bus is switched to
+ * it once and `onAutoFocus` is apprised.
  */
 export function SessionBar({
   bus = getSessionBus(),
@@ -122,13 +170,15 @@ export function SessionBar({
     if (notified === waiting.id) return
     bus.setActiveSession(waiting.id)
     setNotified(waiting.id)
-    onAutoFocus?.(`Waiting for input — focused session ${waiting.name}`)
+    onAutoFocus?.(`Session ${waiting.name} is waiting for you — /quickchat and delegation now target it`)
   }, [autoFocus, suppressed, data.handles, activeRunning, bus, notified, onAutoFocus])
 
-  if (!visible || !data.barText) return null
+  // One session is just this one — the status row already covers it. The bar
+  // earns its row once there is a second session to tell apart.
+  if (!visible || data.items.length < 2) return null
   return (
-    <Box marginBottom={1}>
-      <Text aria-label="session status bar">{data.barText}</Text>
+    <Box>
+      <SessionChips data={data} />
     </Box>
   )
 }

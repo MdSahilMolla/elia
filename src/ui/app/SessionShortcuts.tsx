@@ -39,13 +39,6 @@ export function SessionShortcuts({ bus = getSessionBus(), disabled = false, onSp
         const target = sessions[(activeIndex + delta + sessions.length) % sessions.length]!
         bus.setActiveSession(target.id)
         onCycle?.(target)
-        return
-      }
-      if (action.type === 'needs-focus-at') {
-        const target = sessions[action.index]
-        if (!target) return
-        bus.setActiveSession(target.id)
-        onCycle?.(target)
       }
     },
     { isActive: !disabled },

@@ -5,7 +5,6 @@ export type SessionKeyAction =
   | { type: 'cycle-next' }
   | { type: 'cycle-prev' }
   | { type: 'spawn' }
-  | { type: 'needs-focus-at'; index: number }
 
 export function sessionKeyAction(keyCombo: string, active: number, count: number): SessionKeyAction {
   if (keyCombo === 'ctrl-shift-n') return { type: 'spawn' }

@@ -1,7 +1,7 @@
 import { expect, test } from 'bun:test'
 import { render } from 'ink-testing-library'
 import { Text } from 'ink'
-import { QuickchatOverlay, useQuickchatOverlay } from './QuickchatOverlay.tsx'
+import { QuickchatOverlay, foldQuickchatAnswer, useQuickchatOverlay } from './QuickchatOverlay.tsx'
 import { createQuickchatOverlayStore, type QuickchatOverlayStore } from './quickchatOverlayStore.ts'
 import { waitForFrame } from './testFixtures.ts'
 
@@ -42,12 +42,63 @@ test('a closed overlay does not consume Escape', () => {
   expect(store.getSnapshot().status).toBe('closed')
 })
 
-test('the overlay auto-closes after an idle timeout without appends', async () => {
+// The idle window used to start at open, so a slow model's answer arrived
+// after the panel had closed itself and was dropped. It starts when the answer lands.
+test('a panel waiting on its answer never idles out; the window starts once the answer lands', async () => {
   const store = createQuickchatOverlayStore({ idleMs: 40 })
   store.open('q')
+  await sleep(150)
   expect(store.getSnapshot().status).toBe('open')
+  store.appendText('the answer')
+  expect(store.getSnapshot().answer).toBe('the answer')
   await sleep(150)
   expect(store.getSnapshot().status).toBe('closed')
+})
+
+test('the panel shows a working spark while waiting, and folds a long answer', async () => {
+  const store = createQuickchatOverlayStore({ idleMs: 5_000 })
+  const { lastFrame, unmount } = render(<QuickchatOverlay store={store} />)
+  try {
+    store.open('summarise the run', 'main')
+    let frame = await waitForFrame(lastFrame, 'Thinking…', 2000)
+    expect(frame).toContain('quickchat · main')
+    expect(frame).toContain('❯ summarise the run')
+    // No drawn box: side borders smear on narrow and Windows terminals.
+    expect(frame).not.toMatch(/[│┃|]\s*$/m)
+
+    store.appendText(Array.from({ length: 30 }, (_, i) => `line ${i + 1}`).join('\n'))
+    frame = await waitForFrame(lastFrame, 'line 1', 2000)
+    expect(frame).not.toContain('line 30')
+    expect(frame).toMatch(/… \d+ more lines · esc closes and prints the whole answer/)
+  } finally {
+    store.requestClose()
+    unmount()
+  }
+})
+
+test('a failed quickchat reads as an error, not as an answer', async () => {
+  const store = createQuickchatOverlayStore({ idleMs: 5_000 })
+  const { lastFrame, unmount } = render(<QuickchatOverlay store={store} />)
+  try {
+    store.open('q')
+    store.appendText('quickchat failed: the fast tier timed out after 60s')
+    const frame = await waitForFrame(lastFrame, 'the fast tier timed out', 2000)
+    expect(frame).toContain('✗ the fast tier timed out after 60s')
+    expect(frame).not.toContain('quickchat failed:')
+  } finally {
+    store.requestClose()
+    unmount()
+  }
+})
+
+test('foldQuickchatAnswer keeps whole lines, closes a cut code fence, and clips one huge line', () => {
+  expect(foldQuickchatAnswer('a\nb', 40)).toEqual({ text: 'a\nb', hiddenLines: 0 })
+  const fenced = ['intro', '```ts', ...Array.from({ length: 20 }, (_, i) => `const x${i} = ${i}`), '```'].join('\n')
+  const folded = foldQuickchatAnswer(fenced, 40, 6)
+  expect(folded.text.split('\n').at(-1)).toBe('```')
+  expect(folded.hiddenLines).toBeGreaterThan(0)
+  const huge = foldQuickchatAnswer('x'.repeat(5_000), 20, 3)
+  expect(Bun.stringWidth(huge.text)).toBeLessThanOrEqual(60)
 })
 
 test('streamed appends keep the overlay open past the idle window', async () => {

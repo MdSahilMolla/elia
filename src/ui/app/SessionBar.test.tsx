@@ -31,9 +31,8 @@ test('useSessionBarData exposes handles, glyphs and the rendered bar text', asyn
 
   const { lastFrame, unmount } = render(<Probe />)
   try {
-    const frame = await waitForFrame(lastFrame, '2|●|○|', 2000)
-    expect(frame).toContain('[shop ●]')
-    expect(frame).toContain('[dash ○]')
+    const frame = await waitForFrame(lastFrame, '2|?|○|', 2000)
+    expect(frame).toContain('? shop · ○ dash')
   } finally {
     unmount()
   }
@@ -46,11 +45,11 @@ test('SessionBar renders live session chips and follows status changes', async (
 
   const { lastFrame, unmount } = render(<SessionBar bus={bus} pollMs={20} />)
   try {
-    await waitForFrame(lastFrame, '[ui ●]', 2000)
-    await waitForFrame(lastFrame, '[db ●]', 2000)
+    await waitForFrame(lastFrame, '● ui · ● db', 2000)
     bus.setStatus(ui.id, 'idle')
-    const frame = await waitForFrame(lastFrame, '[ui ○]', 2000)
-    expect(frame).toContain('[db ●]')
+    const frame = await waitForFrame(lastFrame, '○ ui', 2000)
+    expect(frame).toContain('● db')
+    expect(frame).not.toContain('[')
   } finally {
     unmount()
   }
@@ -66,8 +65,20 @@ test('SessionBar renders nothing when empty or hidden', async () => {
     first.unmount()
   }
 
+  // One session is just this one — the status row covers it.
+  const lone = createSessionBus()
+  lone.create(makeSessionName('main'))
+  const single = render(<SessionBar bus={lone} pollMs={20} />)
+  try {
+    await sleep(80)
+    expect(single.lastFrame() ?? '').not.toContain('main')
+  } finally {
+    single.unmount()
+  }
+
   const bus = createSessionBus()
   bus.create(makeSessionName('hidden'))
+  bus.create(makeSessionName('also-hidden'))
   const second = render(<SessionBar bus={bus} pollMs={20} visible={false} />)
   try {
     await sleep(80)
@@ -199,7 +210,7 @@ test('the change signature detects an in-place setStatus(blocked) that left the 
     expect(before?.status).toBe('blocked')
 
     const frame = await waitForFrame(lastFrame, new RegExp(`${gates.id}:blocked:gates`), 2000)
-    expect(frame).toContain('⚠')
+    expect(frame.startsWith('!|')).toBe(true)
   } finally {
     unmount()
   }
@@ -208,15 +219,16 @@ test('the change signature detects an in-place setStatus(blocked) that left the 
 test('SessionBar repaints the blocked glyph for a live setStatus on the same handle bus.list() returns', async () => {
   const bus: SessionBus = createSessionBus()
   const gate = bus.create(makeSessionName('gate'))
+  bus.create(makeSessionName('other'))
   const listed = bus.list()[0]
 
   const { lastFrame, unmount } = render(<SessionBar bus={bus} pollMs={20} />)
   try {
-    await waitForFrame(lastFrame, '[gate ●]', 2000)
+    await waitForFrame(lastFrame, '● gate', 2000)
     bus.setStatus(gate.id, 'blocked')
-    const frame = await waitForFrame(lastFrame, '[gate ⚠]', 2000)
+    const frame = await waitForFrame(lastFrame, '! gate', 2000)
     expect(bus.list()[0]).toBe(listed)
-    expect(frame).toContain('[gate ⚠]')
+    expect(frame).toContain('! gate · ● other')
   } finally {
     unmount()
   }
@@ -232,8 +244,7 @@ test('quickchatStore.open surfaces into the overlay panel the App renders agains
 
     quickchatStore.open('is the deploy green?', 'gates')
     const frame = await waitForFrame(lastFrame, 'is the deploy green?', 2000)
-    expect(frame).toContain('quickchat')
-    expect(frame).toContain('[gates]')
+    expect(frame).toContain('quickchat · gates')
 
     quickchatStore.appendText('blocked on the DB migration.')
     await waitForFrame(lastFrame, 'blocked on the DB migration.', 2000)

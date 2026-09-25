@@ -7,7 +7,7 @@ import { createTranscriptStore, flareHoldMs, toolsOf, type TranscriptStore } fro
 import { useTranscript } from './useSyncStore.ts'
 import { Transcript } from './components/Transcript.tsx'
 import { useTerminalSize } from './useTerminalSize.ts'
-import { clampLive, liveBudgetRows, liveCapEnabled } from './liveRegion.ts'
+import { MIN_LIVE_ROWS, clampLive, liveBudgetRows, liveCapEnabled } from './liveRegion.ts'
 import { StatusBar, type ReplMode } from './components/StatusBar.tsx'
 import { InputBox } from './components/InputBox.tsx'
 import { FrameWidth } from './wrap.ts'
@@ -39,7 +39,7 @@ import { codexContextTokens } from '../../providers/codexSubscription.ts'
 import type { ChatMessage } from '../../providers/types.ts'
 import { onLiveOutput, sessionUsageSnapshot } from '../../usage.ts'
 import { SessionBar } from './SessionBar.tsx'
-import { QuickchatOverlay } from './QuickchatOverlay.tsx'
+import { QuickchatOverlay, quickchatFolded, quickchatPanelRows, quickchatTranscriptText, useQuickchatOverlay } from './QuickchatOverlay.tsx'
 import { SessionShortcuts } from './SessionShortcuts.tsx'
 import { quickchatStore } from './quickchatOverlayStore.ts'
 
@@ -280,16 +280,20 @@ export function App(props: AppProps) {
   // frame is measured underneath a repaint that is already in flight.
   const termSize = useTerminalSize()
   const liveCapOn = useRef(liveCapEnabled()).current
+  // An open quickchat panel is part of the live frame too; its rows come out of
+  // the transcript's budget so the frame as a whole still fits the viewport.
+  const quickchat = useQuickchatOverlay(quickchatStore)
+  const quickchatRows = quickchatPanelRows(quickchat, termSize.columns - 1)
   const clampedLive = useMemo(
     () =>
       liveCapOn
         ? clampLive(snap.live, {
             columns: termSize.columns,
-            budgetRows: liveBudgetRows(termSize.rows),
+            budgetRows: Math.max(MIN_LIVE_ROWS, liveBudgetRows(termSize.rows) - quickchatRows),
             expanded: expandedAll,
           })
         : null,
-    [liveCapOn, snap.live, termSize.columns, termSize.rows, expandedAll],
+    [liveCapOn, snap.live, termSize.columns, termSize.rows, expandedAll, quickchatRows],
   )
   const [steeringCount, setSteeringCount] = useState(0)
   const [queue, setQueue] = useState<string[]>([])
@@ -460,8 +464,21 @@ export function App(props: AppProps) {
     if (key.ctrl && input === 'o' && !modalOrOverlayOpen) setExpandedAll((v) => !v)
     // While the approval menu owns the screen, let it handle Esc (go back / no).
     if (approval) return
-    // A visible quickchat panel eats Esc itself — no normal typing Esc reaches it.
-    if (quickchatStore.handleEscape('esc').consumed) return
+    // A visible quickchat panel eats Esc itself, so the Esc that closes it never
+    // also stops the turn. Only Esc: every keystroke used to be passed in as
+    // 'esc', so typing anything closed the panel and threw its answer away.
+    // A folded answer is printed whole to the transcript as the panel closes.
+    if (key.escape) {
+      const open = quickchatStore.getSnapshot()
+      const folded = quickchatFolded(open, termSize.columns - 1)
+      if (quickchatStore.handleEscape('esc').consumed) {
+        if (folded) {
+          store.notice(quickchatTranscriptText(open))
+          store.commit()
+        }
+        return
+      }
+    }
     if (key.escape) {
       // Staged, so one stray Esc never wipes work: a running turn stops first
       // (queued/steering messages are kept); then the queue; and pending
@@ -983,12 +1000,6 @@ export function App(props: AppProps) {
     <ClockProvider>
     <FrameWidth.Provider value={frameWidth}>
     <Box flexDirection="column" width={frameWidth}>
-      <SessionBar
-        onAutoFocus={noticeAutoFocus}
-        activeRunning={busy}
-        suppressed={modalOpen || showHelp}
-      />
-      <QuickchatOverlay />
       <ErrorBoundary area="transcript" onError={boundaryError}>
         <Transcript
           key={transcriptEpoch}
@@ -1030,6 +1041,13 @@ export function App(props: AppProps) {
           tip={tip}
           checks={checks}
         />
+      )}
+      {/* Just above the input, where the eye already is — not at the top of
+          the live frame, where it moved every time an item settled. */}
+      {!modalOpen && (
+        <ErrorBoundary area="quickchat panel" onError={boundaryError}>
+          <QuickchatOverlay />
+        </ErrorBoundary>
       )}
       {showHelp && <HelpOverlay onClose={() => setShowHelp(false)} />}
       {confirm && <Confirm request={confirm} />}
@@ -1088,11 +1106,20 @@ export function App(props: AppProps) {
           />
         </ErrorBoundary>
         )}
+        {/* Parallel sessions, pinned under the status row with the rest of the
+            chrome. Renders nothing until a second session exists. */}
+        <SessionBar
+          onAutoFocus={noticeAutoFocus}
+          activeRunning={busy}
+          suppressed={modalOpen || showHelp}
+        />
       </Box>
       <SessionShortcuts
         disabled={modalOpen || showHelp || inputMenuOpen}
-        onSpawnSession={props.onSpawnSession ?? (() => store.notice("Session spawning isn't wired up in this build — ctrl+shift+n no-op."))}
-        onCycle={(handle) => store.notice(`Focused session ${handle.name}`)}
+        onSpawnSession={props.onSpawnSession ?? (() => void runCommandLine('/sessions new'))}
+        // Switching sessions changes which one /quickchat and delegation talk
+        // to — the bar's bold chip already shows it, so this stays one quiet line.
+        onCycle={(handle) => store.notice(`/quickchat and delegation now target session ${handle.name}`)}
       />
     </Box>
     </FrameWidth.Provider>
