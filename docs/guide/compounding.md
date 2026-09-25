@@ -108,6 +108,21 @@ Recording what the benchmark loads answered a question nobody had asked. Half of
 
 The same recording showed the limit of the idea: every benchmark child loads the same 218-module core, because `src/tools/registry.ts` imports every tool statically. So reachability prunes *candidates*, not tasks — the per-task saving comes from the stop rules, not from carrying. Making the tool registry lazy would give the map real per-task discrimination, and is the obvious next thing to try.
 
+## Only a verdict counts as a verdict
+
+Of the first ten generations on this machine, one reached a real verdict against its idea (gen 13: no improvement, 79% slower). Three crashed on the provider. Two ran out of Mercury credit halfway through measuring the candidate, and were refused as "an incomplete benchmark". Four carry a hand-written note saying the rejection was noise or a rule since fixed. All nine were still listed to the next proposer as "tried and rejected — do NOT propose these again", and counted against the search strategy that proposed them. The loop was steering away from ideas that had never been tested.
+
+`judgementOf` (`src/evolve/ledger.ts`) now sorts every record into promoted, rejected, or not judged. A record is not judged if it errored, if its comparison could not be completed, or if a note corrects it. The proposer sees not-judged ideas in their own section, "retrying one is allowed". They no longer count toward the strategy trial or the stalled/accelerating trend.
+
+### The improver's memory of its own ideas (hyperdimensional)
+
+The proposer is shown the whole ledger and still resubmits: gen 16 was gen 15 word for word, and gen 9 was gen 7 reworded. `src/evolve/ideas.ts` checks each `submit_hypothesis` call before anything is built or measured. Each verdict costs about 8M tokens here.
+
+- **Encoding.** A hypothesis is encoded as a hypervector, a bundle of character trigrams (`src/hdc/hypervector.ts`: 10,048-bit binary spatter codes with bind, bundle, permute, sets, records and cleanup). Its files are encoded as a set.
+- **The rule.** A title at least 40% alike to a *judged* idea is sent back once, with that generation's verdict. A second submission goes through, recorded as `echoes` on the ledger row. A repeat of a *not-judged* idea is allowed: gen 16 was right to retry 15.
+- **Calibration.** Measured on the real ledger: the two real repeats score 1.00 and 0.51, and the closest pair of different ideas scores 0.28. Two repeats is little to calibrate on.
+- **Honest comparison.** Plain word overlap separates the same pairs too, just with a narrower margin (0.41 against 0.24). HDC is not doing anything magic here. What it adds is one representation for text, sets and structured records, which later memories can reuse.
+
 ## Where it stands today
 
 Run `elia compounding` for the live picture. As of 2026-09-16, on `mercury-2.5`:

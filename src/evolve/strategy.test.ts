@@ -115,3 +115,9 @@ test('a generation that errored is not a strategy failing', () => {
   expect(shouldProposeChallenger([gen(), gen({ verdict: 'error' }), gen({ verdict: 'error' })], paths)).toBe(false)
   expect(shouldProposeChallenger([gen(), gen({ verdict: 'error' }), gen(), gen()], paths)).toBe(true)
 })
+
+test('a generation the benchmark could not finish measuring is not a strategy failing either', () => {
+  const paths = strategyPaths(mkdtempSync(join(tmpdir(), 'elia-strategy-unmeasured-')))
+  const unmeasured = gen({ verdict: 'rejected', reason: 'could not measure hist-43597e6 — refusing to compare an incomplete benchmark' })
+  expect(shouldProposeChallenger([gen(), unmeasured, unmeasured], paths)).toBe(false)
+})

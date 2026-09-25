@@ -61,6 +61,14 @@ export interface GenerationRecord {
   note?: string
   /** The one change this generation tried, in its own words. */
   hypothesis: string
+  /**
+   * The past generation this idea most resembled when it was submitted
+   * (ideas.ts), when one reached the same-idea threshold. A repeat of a judged
+   * idea is sent back once; this records the one that went ahead anyway, or
+   * the unjudged idea it retried, so the ledger shows how often the improver
+   * circles.
+   */
+  echoes?: { generation: number; similarity: number; judgement: Judgement }
   rationale: string
   targetFiles: string[]
   /** Files that actually differed from the live source after the builder ran. */
@@ -204,16 +212,54 @@ function readGenerationCounter(): number {
   }
 }
 
+/** Whether a generation's verdict says anything about its idea. */
+export type Judgement = 'promoted' | 'rejected' | 'not-judged'
+
+/** A comparison the benchmark could not finish: rows missing, so no verdict. */
+const UNMEASURED = /could not measure|refusing to compare an incomplete|could not be measured/i
+
+/**
+ * What a generation's record says about the idea it tried.
+ *
+ * Only a comparison that ran to the end judged anything. Of the first ten
+ * generations on this machine, one did: three crashed on the provider, two
+ * were refused because the provider ran out of credit halfway through the
+ * candidate's tasks, and four carry a hand-written note saying the rejection
+ * was noise or a rule since fixed. All nine were rendered to the next proposer
+ * as "tried and rejected — do not propose again", and counted against the
+ * search strategy that proposed them. The loop was steering away from ideas
+ * that had never been tested.
+ *
+ * A record with a `note` counts as not judged: a note exists to correct how
+ * the verdict should be read, and every one written so far says it should not
+ * be read as evidence against the change.
+ */
+export function judgementOf(record: Pick<GenerationRecord, 'verdict' | 'reason' | 'note'>): { judgement: Judgement; why: string } {
+  if (record.verdict === 'promoted') return { judgement: 'promoted', why: record.reason }
+  if (record.verdict === 'error') return { judgement: 'not-judged', why: `the attempt did not finish (${record.reason})` }
+  if (UNMEASURED.test(record.reason)) return { judgement: 'not-judged', why: 'the benchmark could not measure every task, so nothing was compared' }
+  if (record.note) return { judgement: 'not-judged', why: `the recorded rejection was corrected: ${record.note}` }
+  return { judgement: 'rejected', why: record.reason }
+}
+
+/** Generations whose verdict is evidence about their idea. */
+export function judgedRecords<T extends Pick<GenerationRecord, 'verdict' | 'reason' | 'note'>>(records: readonly T[]): T[] {
+  return records.filter((record) => judgementOf(record).judgement !== 'not-judged')
+}
+
 /**
  * The ledger as the hypothesiser needs to see it: what has been promoted (so it
- * builds on it) and what has been rejected and why (so it stops re-proposing it).
+ * builds on it), what has been judged and rejected and why (so it stops
+ * re-proposing it), and what was tried but never judged (so it is not
+ * mistaken for a rejection).
  */
 export function renderLedgerForPrompt(path = LEDGER_PATH): string {
   const records = readLedger(path)
   if (records.length === 0) return 'No previous generations — this is the first attempt.'
 
   const promoted = records.filter((record) => record.verdict === 'promoted')
-  const rejected = records.filter((record) => record.verdict !== 'promoted')
+  const rejected = records.filter((record) => judgementOf(record).judgement === 'rejected')
+  const unjudged = records.filter((record) => judgementOf(record).judgement === 'not-judged')
 
   const sections: string[] = []
 
@@ -231,10 +277,21 @@ export function renderLedgerForPrompt(path = LEDGER_PATH): string {
   sections.push(
     rejected.length > 0
       ? `### Tried and rejected (do NOT propose these again unless you have a concretely different approach)\n${rejected
-          .map((record) => `- gen ${record.generation}: ${record.hypothesis} → ${record.verdict}: ${record.reason}${record.note ? `\n  NOTE: ${record.note}` : ''}`)
+          .map((record) => `- gen ${record.generation}: ${record.hypothesis} → ${record.verdict}: ${record.reason}`)
           .join('\n')}`
       : '### Tried and rejected\n(nothing yet)',
   )
+
+  if (unjudged.length > 0) {
+    sections.push(
+      `### Tried but never judged (not evidence against the idea: retrying one is allowed)\n${unjudged
+        .filter((record) => record.hypothesis)
+        // Only the first line of the reason: a crashed test run's whole output
+        // says nothing more about an idea that was never judged.
+        .map((record) => `- gen ${record.generation}: ${record.hypothesis} → ${record.verdict}: ${firstLine(record.reason)}${record.note ? `\n  NOTE: ${record.note}` : ''}`)
+        .join('\n')}`,
+    )
+  }
 
   const learning = learningRate(records)
   if (learning.generations >= 2) {
@@ -250,6 +307,11 @@ export function renderLedgerForPrompt(path = LEDGER_PATH): string {
   }
 
   return sections.join('\n\n')
+}
+
+function firstLine(text: string, max = 240): string {
+  const line = text.trim().split('\n')[0]!.trim()
+  return line.length > max ? `${line.slice(0, max)}…` : line
 }
 
 function formatRate(rate: number | undefined): string {
@@ -297,9 +359,10 @@ function realizedGain(record: GenerationRecord): number {
 }
 
 export function learningRate(records: GenerationRecord[], window = LEARNING_WINDOW): LearningSignal {
-  // A generation that errored — a dropped network, a truncated stream — never
-  // reached a verdict, so it says nothing about whether the search is stalling.
-  const ordered = [...records].filter((r) => r.verdict !== 'error').sort((a, b) => a.generation - b.generation)
+  // A generation that never reached a verdict — a dropped network, a provider
+  // out of credit halfway through, a rejection later corrected — says nothing
+  // about whether the search is stalling.
+  const ordered = judgedRecords(records).sort((a, b) => a.generation - b.generation)
   const promotions = ordered.filter((r) => r.verdict === 'promoted').length
   const recent = ordered.slice(-window)
   const prior = ordered.slice(-window * 2, -window)
