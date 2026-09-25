@@ -2,11 +2,15 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { mkdirSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { withAgentIdentity } from './autonomy/context.ts'
+import { createScriptedProvider } from './bench/latency/scriptedProvider.ts'
+import { config } from './config.ts'
 import { createSessionBus } from './session/bus.ts'
 import { makeSessionName, type SessionBus, type SessionHandle } from './session/types.ts'
 import { formatQuickchatResult } from './quickchat/present.ts'
-import { handleQuickchatCommand, parseQuickchatCommand, type FastResponder } from './quickchat/quickchat.ts'
+import { handleQuickchatCommand, parseQuickchatCommand, runQuickchat, type FastResponder } from './quickchat/quickchat.ts'
 import { quickchatStore } from './ui/app/quickchatOverlayStore.ts'
+import type { Provider } from './providers/types.ts'
 
 /**
  * End-to-end proof of the /quickchat logic chain WITHOUT a terminal or Ink
@@ -131,5 +135,36 @@ describe('quickchat logic chain end-to-end', () => {
     const { bus, session } = bootQuickchatSession()
     const result = await handleQuickchatCommand('summarize the diff', session, { bus })
     expect(result.handled).toBe(false)
+  })
+
+  test('runQuickchat without a seam answers through the real fast-tier model call, never the deep tier', async () => {
+    const { bus, session } = bootQuickchatSession()
+    const originalFast = config.tiers.fast.provider
+    const originalDeep = config.tiers.deep.provider
+    const fakeFast = createScriptedProvider([{ text: 'round-trip answer: the deploy is green.' }])
+    let deepCalls = 0
+    const fakeDeep = {
+      async streamTurn(): Promise<never> {
+        deepCalls += 1
+        throw new Error('the deep tier must never be invoked for a quickchat')
+      },
+    } as unknown as Provider
+
+    try {
+      const originalTiers = config.tiers
+      config.tiers = { deep: { ...originalTiers.deep, provider: fakeDeep }, fast: { ...originalTiers.fast, provider: fakeFast } }
+
+      const outcome = await withAgentIdentity({ name: 'behaviour', role: 'lead', cwd: tempLogDir() }, () =>
+        runQuickchat({ sessionRef: session.id, question: 'is the deploy green?', bus, logDir: tempLogDir() }),
+      )
+
+      expect(outcome.answer).toContain('round-trip answer: the deploy is green.')
+      expect(outcome.overlay.status).toBe('closed')
+      expect(fakeFast.calls).toBe(1)
+      expect(deepCalls).toBe(0)
+    } finally {
+      config.tiers.fast.provider = originalFast
+      config.tiers.deep.provider = originalDeep
+    }
   })
 })
