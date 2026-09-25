@@ -223,8 +223,9 @@ const UNMEASURED = /could not measure|refusing to compare an incomplete|could no
  *
  * Only a comparison that ran to the end judged anything. Of the first ten
  * generations on this machine, one did: three crashed on the provider, two
- * were refused because the provider ran out of credit halfway through the
- * candidate's tasks, and four carry a hand-written note saying the rejection
+ * were refused because two history tasks failed on the provider (a stall or a
+ * refusal the retries did not clear) and came back unmeasured, and four carry
+ * a hand-written note saying the rejection
  * was noise or a rule since fixed. All nine were rendered to the next proposer
  * as "tried and rejected — do not propose again", and counted against the
  * search strategy that proposed them. The loop was steering away from ideas
@@ -359,8 +360,8 @@ function realizedGain(record: GenerationRecord): number {
 }
 
 export function learningRate(records: GenerationRecord[], window = LEARNING_WINDOW): LearningSignal {
-  // A generation that never reached a verdict — a dropped network, a provider
-  // out of credit halfway through, a rejection later corrected — says nothing
+  // A generation that never reached a verdict — a dropped network, a task the
+  // provider left unmeasured, a rejection later corrected — says nothing
   // about whether the search is stalling.
   const ordered = judgedRecords(records).sort((a, b) => a.generation - b.generation)
   const promotions = ordered.filter((r) => r.verdict === 'promoted').length

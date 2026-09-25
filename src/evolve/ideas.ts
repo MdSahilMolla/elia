@@ -23,8 +23,8 @@ import { judgementOf, type GenerationRecord, type Judgement } from './ledger.ts'
  * so.
  *
  * Only a judged idea blocks (ledger.ts `judgementOf`). Generation 16 repeating
- * 15 was right, because 15 was never measured: the provider ran out of credit
- * halfway through. A repeat of an idea that was never judged is allowed and
+ * 15 was right, because 15 was never judged: two history tasks came back
+ * unmeasured. A repeat of an idea that was never judged is allowed and
  * said to be allowed.
  */
 

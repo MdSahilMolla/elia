@@ -110,9 +110,13 @@ The same recording showed the limit of the idea: every benchmark child loads the
 
 ## Only a verdict counts as a verdict
 
-Of the first ten generations on this machine, one reached a real verdict against its idea (gen 13: no improvement, 79% slower). Three crashed on the provider. Two ran out of Mercury credit halfway through measuring the candidate, and were refused as "an incomplete benchmark". Four carry a hand-written note saying the rejection was noise or a rule since fixed. All nine were still listed to the next proposer as "tried and rejected — do NOT propose these again", and counted against the search strategy that proposed them. The loop was steering away from ideas that had never been tested.
+Of the first ten generations on this machine, one reached a real verdict against its idea (gen 13: no improvement, 79% slower). Three crashed on the provider. Two were refused as "an incomplete benchmark": the same two history tasks failed on the provider both times (a stall or refusal the retries did not clear), and they were two of the four tasks with any headroom. Four carry a hand-written note saying the rejection was noise or a rule since fixed. All nine were still listed to the next proposer as "tried and rejected — do NOT propose these again", and counted against the search strategy that proposed them. The loop was steering away from ideas that had never been tested.
 
 `judgementOf` (`src/evolve/ledger.ts`) now sorts every record into promoted, rejected, or not judged. A record is not judged if it errored, if its comparison could not be completed, or if a note corrects it. The proposer sees not-judged ideas in their own section, "retrying one is allowed". They no longer count toward the strategy trial or the stalled/accelerating trend.
+
+### Heavy tasks back off when the provider does
+
+The tasks that went unmeasured are the heavy ones. History tasks get 80 steps, an 800-second limit and hundreds of thousands of input tokens each. Two at a time share one rate-capped provider (Mercury's free tier caps input tokens per minute), and the loop runs them two at a time: the sweep, the evolve race's waves, and the regression retest (which runs the candidate and the live tree at once). `fitness.ts` now puts every heavy attempt through one lane per process. The lane starts as wide as the benchmark, so a provider that never objects loses no speed. The first time the provider rate-limits or stalls a heavy task (both are retried, never scored), the lane narrows to one for the rest of the process, and the retry runs alone. The line `the provider pushed back on … heavy tasks run one at a time from here` says when it happened.
 
 ### The improver's memory of its own ideas (hyperdimensional)
 

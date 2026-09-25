@@ -29,7 +29,7 @@ test('on the real ledger, only the two real repeats reach the threshold', () => 
 })
 
 test('repeating an idea that was never judged is allowed, and said to be', () => {
-  // Generation 16 was right to retry 15: the provider ran out of credit mid-comparison.
+  // Generation 16 was right to retry 15: two of 15's tasks came back unmeasured, so nothing was compared.
   const retry = checkIdea({ hypothesis: 'Add "implement from spec" guidance to builder prompt', targetFiles: ['src/autonomy/roles.ts'] }, records)
   expect(retry.match?.generation).toBe(15)
   expect(retry.match?.judgement).toBe('not-judged')
