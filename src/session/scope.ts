@@ -1,6 +1,6 @@
 import { isAbsolute, relative, resolve } from 'node:path'
 import type { SessionId, SessionScope } from './types.ts'
-import { currentAgent, withAgentIdentity } from '../autonomy/context.ts'
+import { canonicalPathWithExistingParent, currentAgent, withAgentIdentity } from '../autonomy/context.ts'
 
 /**
  * Runs `fn` under the given session's filesystem scope. Reuses elia's single
@@ -27,8 +27,10 @@ export function currentSessionScope(): SessionScope | undefined {
 export function assertWriteWithinSessionScope(resolvedPath: string): void {
   const scope = currentSessionScope()
   if (!scope || scope.worktree === undefined) return
-  const target = resolve(resolvedPath)
-  const root = resolve(scope.worktree)
+  // Both sides are canonicalized: the governor hands over a realpath, so a
+  // worktree reached through a symlink (macOS /var -> /private/var) must be too.
+  const target = canonicalPathWithExistingParent(resolve(resolvedPath))
+  const root = canonicalPathWithExistingParent(resolve(scope.worktree))
   const rel = relative(root, target)
   if (rel === '' || (rel !== '..' && !rel.startsWith(`..${'/'}`) && !rel.startsWith(`..${'\\'}`) && !isAbsolute(rel))) return
   throw new Error(`path escapes the session worktree: ${resolvedPath}`)

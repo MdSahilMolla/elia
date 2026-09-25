@@ -131,7 +131,7 @@ export function isPathWithinWorkspace(inputPath: string, cwd = currentAgent().cw
   }
 }
 
-function canonicalPathWithExistingParent(target: string): string {
+export function canonicalPathWithExistingParent(target: string): string {
   const missing: string[] = []
   let current = target
   while (true) {
