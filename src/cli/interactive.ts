@@ -43,7 +43,7 @@ import { registerShutdownCleanup } from '../ui/shutdown.ts'
 import { redactText } from '../ui/redact.ts'
 import { writeUserConfig } from '../userConfig.ts'
 import { removeProviderConfiguration, savedProviderNames } from '../providerSettings.ts'
-import { flagValue, hasFlag, positionals, strictInteger } from './argv.ts'
+import { flagValue, hasFlag, positionals } from './argv.ts'
 import { ensureFirstRunProviderSetup, interactiveProviderSetup, prewarmActiveProvider, runCodexLogin } from './providerSetup.ts'
 import { actionApprovalPrompt, allSlashCommands, approvalTitle, classifyCommandRisk, loadRuntimeSkills, printTurnProfileReport, requestedAgentMode, userMessage, warnIfAtFilesystemRoot } from './runtime.ts'
 import type { ProviderActivity } from '../providers/types.ts'
@@ -101,8 +101,7 @@ export async function runInteractive(): Promise<void> {
   // can finish connecting in the background instead of gating the prompt.
   await loadRuntimeSkills({ deferMcp: interactiveTerminal })
   const { runTurn } = await import('../agent.ts')
-  const { config, describeThinking, describeReviewers, getThinking, switchModel, switchThinking, THINKING_EFFORT_BUDGETS, DEFAULT_THINKING_BUDGET } =
-    await import('../config.ts')
+  const { config, describeThinking, describeReviewers, getThinking, switchModel } = await import('../config.ts')
   setCurrentUsageModel(config.model)
   const { PROVIDER_PRESET_NAMES, isProviderPresetConfigured, providerPresetDefaultModel, providerReadiness, listProviderModels } = await import('../providers/registry.ts')
   const { detectOllama } = await import('../providers/ollama.ts')
@@ -614,6 +613,84 @@ export async function runInteractive(): Promise<void> {
   }
 
   /**
+   * The default answer check (reason/answer.ts), after a question's ordinary
+   * turn has answered it. That answer is the first attempt; one read-only
+   * challenger answers the same question independently, and more are opened
+   * only when the two disagree. The challengers get the conversation before
+   * this question, so a follow-up still makes sense to them, but never this
+   * turn's answer, so their vote stays their own.
+   *
+   * It is quiet when it agrees: one status line. When the independent attempts
+   * contradict the answer, the reply gets a note saying what they answered.
+   */
+  async function runAnswerCheck(
+    question: string,
+    reply: string,
+    earlier: ConversationMessage[],
+    signal: AbortSignal,
+    uiHooks?: TurnUiHooks,
+  ): Promise<import('../trajectory/record.ts').TrajectoryAnswerCheck | undefined> {
+    const { answerSearch, arithmeticCheck, citationCheck, conversationContext, covers, overturned } = await import('../reason/answer.ts')
+    const { runSubAgent } = await import('../subagent.ts')
+    const { totalTokens } = await import('../usage.ts')
+    const note = (title: string, status: 'updated' | 'completed' | 'warning' = 'updated') => {
+      if (uiHooks?.onActivity) uiHooks.onActivity({ kind: 'status', status, title })
+      else writeNotice(title)
+    }
+    const runId = `answer-check-${Date.now().toString(36)}`
+    const context = conversationContext(earlier)
+    note('checking the answer with an independent attempt')
+    const result = await answerSearch({
+      first: { text: reply },
+      checks: [arithmeticCheck(), citationCheck(process.cwd())],
+      signal,
+      produce: async ({ approach, round, briefing, signal: attemptSignal }) => {
+        const report = await runSubAgent({
+          role: 'scout',
+          name: `check/${approach.id}${round > 0 ? `#${round + 1}` : ''}`,
+          runId,
+          prompt: question,
+          briefing: context ? `${context}\n\n${briefing}` : briefing,
+          ...(attemptSignal ? { signal: attemptSignal } : {}),
+        })
+        return { text: report.report, cost: totalTokens(report.usage) }
+      },
+    })
+    if (result.status === 'aborted') return undefined
+    const attempts = result.attempts.length
+    const tokens = `${result.cost.toLocaleString('en-US')} tokens`
+    const replaced = overturned(result)
+    const given = result.attempts[0]
+    const leader = result.clusters[0]
+    const challengers = result.attempts.slice(1).filter((attempt) => attempt.rejected.length === 0 && attempt.key !== undefined)
+    const givenClean = given?.key !== undefined && given.rejected.length === 0
+    sessionTranscript.notice(`Answer check: ${result.status} over ${attempts} attempt(s), ${tokens}${replaced ? ', overturned' : ''}`)
+    if (replaced && result.best && leader) {
+      // The independent attempts agree with each other and not with the answer
+      // already shown. What they said goes into the reply itself, so a
+      // follow-up turn sees it rather than only the terminal does — as a
+      // disagreement, not a correction: the challengers are cheaper attempts,
+      // and agreeing with each other does not make them right.
+      const others = leader.count === 1 ? 'An independent attempt' : `${leader.count} independent attempts`
+      const text = `**Independent check disagrees.** ${others} answered "${leader.answer}" where this reply answered "${given?.answer ?? 'something else'}". Agreement is not proof; check which is right.\n\n${result.best.text.trim()}`
+      const last = messages[messages.length - 1]
+      if (last?.role === 'assistant') last.content.push({ type: 'text', text: `\n\n${text}` })
+      else messages.push({ role: 'assistant', content: [{ type: 'text', text }] })
+      sessionTranscript.appendAssistant(text)
+      note(`⚠ independent attempts answered differently (${result.status}, ${attempts} attempts)`, 'warning')
+      if (uiHooks?.onText) uiHooks.onText(`\n\n${text}`)
+      else writeUsageLine(text)
+    } else if (givenClean && challengers.length > 0 && challengers.every((attempt) => attempt.key === given.key)) {
+      note(`✓ answer checked: an independent attempt reached the same answer · ${tokens}`, 'completed')
+    } else if (givenClean && challengers.length > 0 && challengers.every((attempt) => covers(given.key!, attempt.key!))) {
+      note(`✓ answer checked: an independent attempt found part of this answer ("${challengers[0]!.answer}") and contradicted none of it · ${tokens}`, 'completed')
+    } else {
+      note(`answer check: ${result.receipt}`, 'warning')
+    }
+    return { status: result.status, attempts, overturned: replaced, tokens: result.cost }
+  }
+
+  /**
    * `/attach <path>` — queue an image for the next prompt. No arg lists what's
    * queued; `/attach clear` empties the queue. Pasting or dragging an image
    * path straight into a prompt works too and doesn't need this command.
@@ -831,6 +908,8 @@ export async function runInteractive(): Promise<void> {
     let escalatedAborted = false
     let repairAttempts = 0
     let grounding: import('../trajectory/record.ts').TrajectoryGrounding | undefined
+    let arithmetic: import('../trajectory/record.ts').TrajectoryArithmetic | undefined
+    let answerCheck: import('../trajectory/record.ts').TrajectoryAnswerCheck | undefined
     const unregisterControls = taskSessions.registerControls(task.id, {
       cancel: () => {
         stopRequested = true
@@ -879,6 +958,15 @@ export async function runInteractive(): Promise<void> {
     // A searched turn already chose its winner with the project's own checks;
     // the post-turn gate must not run them a second time to learn the same thing.
     let searched = false
+    // A question gets the answer check by default (reason/answer.ts, decided in
+    // reason/decide.ts): the turn is asked to end in an `Answer:` line, and if
+    // it does, one independent attempt checks it. --no-search or /search off
+    // turns it off with the rest of the reasoning search.
+    const answerCheckPlanned =
+      reasonSearch && mode === 'dev' && !persona && !uiHooks?.planMode && !searchPlan && !(autoEscalate && escalation.escalate)
+        ? (await import('../reason/decide.ts')).decideAnswerCheck(userText).check
+        : false
+    const { ANSWER_GUIDANCE } = await import('../reason/answer.ts')
 
     // `opening` marks the call that answers the user's request itself — the one
     // that thinks it through and plans up front. Repair and self-review passes
@@ -892,6 +980,7 @@ export async function runInteractive(): Promise<void> {
         silent: Boolean(uiHooks),
         planMode: uiHooks?.planMode,
         upfrontPlan: opening,
+        ...(opening && answerCheckPlanned ? { turnGuidance: ANSWER_GUIDANCE } : {}),
         drainSteering: uiHooks?.drainSteering,
         onText: uiHooks?.onText,
         onThinking: uiHooks?.onThinking,
@@ -1175,6 +1264,47 @@ export async function runInteractive(): Promise<void> {
         }
       }
 
+      // Arithmetic: the same shape as grounding. A calculation the answer states
+      // that does not hold is sent back once (reason/arithmetic.ts). Recomputing
+      // costs no model call, and a clean check is never recorded as a pass.
+      if (!persona && !escalated && !searched && autoVerify && !uiHooks?.planMode && !controller.signal.aborted) {
+        const { calculationBriefing, checkArithmetic, describeCalculations } = await import('../reason/arithmetic.ts')
+        const first = checkArithmetic(lastAssistantText(messages, ''))
+        if (first.checked > 0) arithmetic = { checked: first.checked, wrong: first.wrong.length }
+        if (first.wrong.length > 0) {
+          const summary = `The answer's arithmetic does not hold — correcting it (${describeCalculations(first)})`
+          uiHooks?.onActivity?.({ kind: 'status', status: 'warning', title: summary })
+          if (!uiHooks) writeNotice(`▸ ${summary}`)
+          sessionTranscript.notice(summary)
+          messages.push(userMessage(calculationBriefing(first)))
+          await runModelTurn()
+          const after = checkArithmetic(lastAssistantText(messages, ''))
+          if (arithmetic) arithmetic.afterRepair = after.wrong.length
+          if (after.wrong.length > 0) {
+            const line = `⚠ ${describeCalculations(after)} — still, after one correction`
+            uiHooks?.onActivity?.({ kind: 'status', status: 'warning', title: line })
+            if (!uiHooks) writeNotice(line)
+            sessionTranscript.notice(line)
+          }
+        }
+      }
+
+      // The answer check: only for a question whose reply committed to a short
+      // answer, and only when the turn changed nothing — a turn that edited
+      // files was work, whatever it was phrased as.
+      if (answerCheckPlanned && !escalated && !searched && !controller.signal.aborted && Object.keys(tracker.snapshot()).length === 0) {
+        const { checkableAnswer } = await import('../reason/answer.ts')
+        const reply = lastAssistantText(messages, '')
+        if (checkableAnswer(reply) !== undefined) {
+          answerCheck = await runAnswerCheck(userText, reply, messagesBefore, controller.signal, uiHooks).catch((error: unknown) => {
+            // A check that could not run is not a verdict on the answer.
+            const message = error instanceof Error ? error.message : String(error)
+            sessionTranscript.notice(`Answer check could not run: ${redactText(message, 300)}`)
+            return undefined
+          })
+        }
+      }
+
       // Auto-preview: a turn that just scaffolded a static site under workspace/
       // should offer the live URL without the user asking — this also covers
       // ChatGPT-subscription turns, whose file writes never reach the `preview`
@@ -1407,6 +1537,8 @@ export async function runInteractive(): Promise<void> {
             verify: verifyResult,
             cwdIsEliaRoot: process.cwd() === ELIA_ROOT,
             ...(grounding ? { grounding } : {}),
+            ...(arithmetic ? { arithmetic } : {}),
+            ...(answerCheck ? { answerCheck } : {}),
             reward: deriveReward({
               toolErrors: toolErrorCount,
               editRetries: editRetryCount,
@@ -1695,72 +1827,6 @@ export async function runInteractive(): Promise<void> {
     } else await applyModelChoice(config.providerName, first, { anyway })
   }
 
-  function applyThinkingChoice(arg: string): void {
-    if (arg === 'off') {
-      const result = switchThinking({ enabled: false, budgetTokens: 0 })
-      if (!result.ok) writeError(result.error)
-      else {
-        writeNotice(describeThinking())
-        prewarmActiveProvider()
-      }
-      return
-    }
-
-    let budgetTokens: number
-    if (arg === 'on') {
-      const current = getThinking()
-      budgetTokens = current.budgetTokens > 0 ? current.budgetTokens : DEFAULT_THINKING_BUDGET
-    } else if (arg in THINKING_EFFORT_BUDGETS) {
-      budgetTokens = THINKING_EFFORT_BUDGETS[arg as keyof typeof THINKING_EFFORT_BUDGETS]
-    } else {
-      const parsed = strictInteger(arg)
-      if (parsed === undefined || parsed < 1024) {
-        writeError('Usage: /thinking off|on|low|medium|high|<token budget ≥1024>')
-        return
-      }
-      budgetTokens = parsed
-    }
-
-    const result = switchThinking({ enabled: true, budgetTokens })
-    if (!result.ok) {
-      writeError(result.error)
-      return
-    }
-    writeNotice(describeThinking())
-    prewarmActiveProvider()
-    if (config.providerName !== 'anthropic') {
-      writeNotice(
-        `Note: ${config.providerLabel} doesn't take a reasoning budget — this only controls whether elia displays reasoning it sends automatically.`,
-      )
-    }
-  }
-
-  async function handleThinkingCommand(argLine: string): Promise<void> {
-    const arg = argLine.trim().toLowerCase()
-
-    if (!arg) {
-      const current = getThinking()
-      const levels: { label: string; value: string; budget: number }[] = [
-        { label: 'Off', value: 'off', budget: 0 },
-        { label: 'Low', value: 'low', budget: THINKING_EFFORT_BUDGETS.low },
-        { label: 'Medium', value: 'medium', budget: THINKING_EFFORT_BUDGETS.medium },
-        { label: 'High', value: 'high', budget: THINKING_EFFORT_BUDGETS.high },
-      ]
-      const currentIndex = current.enabled ? levels.findIndex((level) => level.budget === current.budgetTokens) : 0
-      const options = levels.map((level) => ({
-        label: level.label,
-        detail: level.budget > 0 ? `${level.budget.toLocaleString()} tokens` : undefined,
-        value: level.value,
-      }))
-      const result = await pick('Reasoning effort', options, Math.max(0, currentIndex))
-      if (result.type === 'select') applyThinkingChoice(result.value)
-      else if (result.type === 'unavailable') writeNotice(describeThinking())
-      return
-    }
-
-    applyThinkingChoice(arg)
-  }
-
   const prompt = createSlashPrompt(allSlashCommands())
 
   async function handleSkillsPicker(): Promise<void> {
@@ -1959,7 +2025,6 @@ export async function runInteractive(): Promise<void> {
         { label: 'Risk checks', detail: replMode, value: 'replMode' },
         { label: 'Model & provider', detail: `${config.routingMode === 'auto' ? 'auto · ' : ''}${config.providerLabel} · ${config.model}`, value: 'model' },
         { label: 'Provider connections', detail: `${savedProviderNames().length} API key(s) · ChatGPT subscription`, value: 'providers' },
-        { label: 'Reasoning effort', detail: describeThinking(), value: 'thinking' },
         { label: 'Skills', detail: selectedSkillNames ? selectedSkillNames.join(', ') : 'all loaded', value: 'skills' },
         { label: 'Compact conversation', detail: conversationDetail('summarise it to free context'), value: 'compact' },
         { label: 'Clear conversation', detail: conversationDetail('start fresh; this one stays resumable'), value: 'clear' },
@@ -1973,7 +2038,6 @@ export async function runInteractive(): Promise<void> {
       if (result.value === 'replMode') await handleReplModePicker()
       else if (result.value === 'model') await handleModelCommand('')
       else if (result.value === 'providers') await handleProviderSettings()
-      else if (result.value === 'thinking') await handleThinkingCommand('')
       else if (result.value === 'skills') await handleSkillsPicker()
       else if (result.value === 'compact') {
         writeNotice(await compactNow(undefined))
@@ -2168,30 +2232,6 @@ export async function runInteractive(): Promise<void> {
       }
     }
 
-    const thinkingArg = /^\/thinking(?:\s+(.+))?$/.exec(trimmed)
-    if (thinkingArg) {
-      if (thinkingArg[1]) {
-        applyThinkingChoice(thinkingArg[1].trim().toLowerCase())
-        return done()
-      }
-      const levels = [
-        { label: 'Off', value: 'off', detail: 'no reasoning' },
-        { label: 'Low', value: 'low', detail: `${THINKING_EFFORT_BUDGETS.low.toLocaleString()} tokens` },
-        { label: 'Medium', value: 'medium', detail: `${THINKING_EFFORT_BUDGETS.medium.toLocaleString()} tokens` },
-        { label: 'High', value: 'high', detail: `${THINKING_EFFORT_BUDGETS.high.toLocaleString()} tokens` },
-      ]
-      return {
-        handled: true,
-        picker: {
-          title: 'Reasoning effort',
-          options: levels,
-          onSelect: (value) => {
-            if (value) applyThinkingChoice(value)
-          },
-        },
-      }
-    }
-
     const compactMatch = /^\/compact(?:\s+(.+))?$/.exec(trimmed)
     if (compactMatch) return done(await compactNow(compactMatch[1]?.trim()))
 
@@ -2238,7 +2278,6 @@ export async function runInteractive(): Promise<void> {
           options: [
             { label: 'Risk checks', detail: replMode, value: 'risk' },
             { label: 'Model & provider', detail: `${config.routingMode === 'auto' ? 'auto · ' : ''}${config.providerLabel} · ${config.model}`, value: 'model' },
-            { label: 'Reasoning effort', detail: describeThinking(), value: 'thinking' },
             { label: 'Theme', detail: (await import('../ui/app/theme.ts')).themeName, value: 'theme' },
             { label: 'Mode / persona', detail: persona ?? mode, value: 'mode' },
             { label: 'Compact conversation', detail: conversationDetail('summarise it to free context'), value: 'compact' },
@@ -2261,7 +2300,6 @@ export async function runInteractive(): Promise<void> {
               }
             }
             if (value === 'model') return handleSlashForInk('/model')
-            if (value === 'thinking') return handleSlashForInk('/thinking')
             if (value === 'theme') return handleSlashForInk('/theme')
             if (value === 'mode') return handleSlashForInk('/mode')
             if (value === 'compact') return handleSlashForInk('/compact')
@@ -2659,7 +2697,7 @@ export async function runInteractive(): Promise<void> {
       if (searchMatch[1]) {
         reasonSearch = searchMatch[1] === 'on'
         return done(
-          `Reasoning search ${reasonSearch ? 'on' : 'off'} — work with something executable to check ${reasonSearch ? 'is attempted several different ways in isolated worktrees, and the one a real check passes is kept' : 'runs as a single attempt'}.`,
+          `Reasoning search ${reasonSearch ? 'on' : 'off'} — work with something executable to check ${reasonSearch ? 'is attempted several different ways in isolated worktrees, and the one a real check passes is kept; a question with a short answer is checked by an independent attempt' : 'runs as a single attempt, and answers to questions are not checked'}.`,
         )
       }
       // No argument: say what it would do with *this* project, which is the
@@ -3086,12 +3124,6 @@ export async function runInteractive(): Promise<void> {
     const modelMatch = /^\/model(?:\s+(.*))?$/.exec(trimmed)
     if (modelMatch) {
       await handleModelCommand(modelMatch[1]?.trim() ?? '')
-      continue
-    }
-
-    const thinkingMatch = /^\/thinking(?:\s+(.*))?$/.exec(trimmed)
-    if (thinkingMatch) {
-      await handleThinkingCommand(thinkingMatch[1]?.trim() ?? '')
       continue
     }
 

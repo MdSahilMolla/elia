@@ -39,20 +39,6 @@ export interface TierConfig {
 export const DEFAULT_THINKING_BUDGET = 4096
 
 /**
- * Named reasoning-effort presets for `/thinking <level>`. Anthropic's API takes a
- * raw token budget, not named levels — this is elia's own friendly mapping onto
- * it, for a user who thinks in "how hard should it think" rather than a token count.
- * A bare number still works too, for anyone who wants the precise value.
- */
-export const THINKING_EFFORT_BUDGETS = {
-  low: 2048,
-  medium: 8192,
-  high: 24576,
-} as const
-
-export type ThinkingEffort = keyof typeof THINKING_EFFORT_BUDGETS
-
-/**
  * Set when the deep tier could not be resolved at startup (no API key, bad
  * config). We deliberately do NOT `process.exit` here the way this used to:
  * config.ts is imported transitively by the CLI entrypoint, so exiting at
@@ -78,8 +64,8 @@ function unconfiguredTier(error: string): TierConfig {
   }
 }
 
-// Mutable — `/model` and `/thinking` in the interactive REPL re-resolve and
-// reassign this rather than only setting env vars, so a switch takes effect for
+// Mutable — `/model` in the interactive REPL re-resolves and
+// reassigns this rather than only setting env vars, so a switch takes effect for
 // the rest of the session without a restart. See switchModel/switchThinking below.
 let currentThinking = resolveThinking()
 

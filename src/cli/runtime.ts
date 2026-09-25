@@ -26,7 +26,6 @@ const REPL_COMMANDS: SlashCommand[] = [
   { name: '/model', description: 'switch model / provider' },
   { name: '/mode', description: 'switch mode: dev, cyber, battmann' },
   { name: '/betamode', description: 'experimental modes & personas — sports, fitness, marketing, finance, …' },
-  { name: '/thinking', description: 'set reasoning effort' },
   { name: '/theme', description: 'colours: dark, light, or your terminal\'s own' },
   { name: '/rewind', description: 'restore an earlier checkpoint' },
   { name: '/compact', description: 'summarise the conversation to free context · /compact [focus]' },

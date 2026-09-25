@@ -53,6 +53,34 @@ elia bench --all --lift      # every task
 
 The control arm keeps what is not a claim about reasoning — the task's step budget, the same unattended safety policy on every command, the same retry on a provider blip — and drops what elia says adds value: the system prompt and Value Core, the tool surface, lessons, speculation, plan tracking, nudges, sub-agents and compaction. Tasks are paired, a task either arm could not measure leaves both sides, two arms on different models are refused, and the verdict is an anytime-valid e-value test: "the harness helps" only at e ≥ 20, and "the harness hurts" is reported just as plainly when the bare model wins. The latest result shows in `elia compounding` beside the benchmark's headroom. The control arm and the comparison are immutable to `elia evolve` candidates, so a candidate cannot raise its lift by weakening the baseline.
 
+### Answer checking and `elia bench --answers` — reasoning over answers, measured
+
+The reasoning search (`src/reason/`) only searches work that something executable can judge, so a question used to get one pass and nothing else. Every question now gets an answer check by default (`src/reason/answer.ts`), with no command to type. The design comes from AION's deep mode; it is not a copy of it:
+
+- `reason/decide.ts` decides whether the turn is a question. For that one turn, the model is asked to end its reply with an `Answer:` line when the answer is short. The reply is otherwise unchanged.
+- If the reply commits to a short answer, it counts as the first attempt, and one read-only scout answers the same question independently. The scout sees the conversation before the question, never the answer being checked. A prose answer, or a turn that changed files, costs nothing extra.
+- Each attempt is checked. Arithmetic it states is recomputed (`src/reason/arithmetic.ts`), and files it cites must exist (`src/reason/grounding.ts`). A failed check rejects the attempt. A passed check proves nothing.
+- If the two answers agree, the check ends with one status line. If the challenger found only part of the answer (a subset of the files and numbers it named), that is not a contradiction and the check stops there. Otherwise it escalates. Each new attempt takes a different way in (another route, look for the trap, decompose), and is told that the earlier attempts disagreed but not what they answered, so its vote stays independent.
+- The verdict is `stable`, `majority`, `split`, `unconfirmed` or `no answer`, and agreement is never reported as verification. When the independent attempts agree on something that contradicts the answer already shown, the reply gets an "Independent check disagrees" note saying what they answered instead, so a follow-up turn sees it too. That is a flag, not a correction: the challengers are cheaper attempts, and agreeing with each other does not make them right.
+- `--no-search` or `/search off` turns it off along with the rest of the reasoning search. Each run is recorded in the turn's trajectory row (`answerCheck`: status, attempts, whether it overturned the answer, tokens).
+
+A challenger is a full scout agent loop, so when the check fires it is not free. In a live run it used about 95k tokens against the main turn's 151k.
+
+The arithmetic check also runs after every ordinary turn, the same way the citation check does. A stated calculation that does not hold is sent back once. The check costs no model call when every calculation holds. Over 795 real assistant answers from local transcripts it raised no false alarm, and on 17 real calculations in Battmann briefs it raised none once dates were excluded.
+
+Reasoning effort is no longer a command either. Extended thinking is on by default, at a 4,096-token budget (adaptive on Anthropic models that support it). `ELIA_THINKING=off` and `ELIA_THINKING_BUDGET=<n>` are the overrides, and `/usage` shows the budget in effect.
+
+`elia bench --answers [--limit N]` measures the search itself on 30 questions with hand-checked answers (traps and multi-step arithmetic). It uses one model call per attempt and no tools. The single-pass arm is the search's own first attempt, so the comparison is paired, and a paired e-value decides it. It also prints how often each verdict was right. That is the number that says whether `stable` and `split` are worth reading.
+
+First results on `mercury-2.5`, 2026-09-25, two runs of all 30 questions:
+
+| run | first attempt | search | fixed / broke | e | tokens (first → search) | verdicts right |
+|---|---|---|---|---|---|---|
+| 1 | 29/30 | 30/30 | 1 / 0 | 1.32 | 39.5k → 146.9k | stable 25/25, majority 4/4, split 1/1 |
+| 2 (final vote key) | 30/30 | 30/30 | 0 / 0 | 1.00 | 39.8k → 104.0k | stable 30/30 |
+
+The model is at ceiling on this set. The search fixed one answer (1234 × 4321) and broke none, which is not evidence of lift. What the runs do show is that `stable` was right 55 times out of 55, at 2.6–3.7× the tokens of one pass. Measuring lift needs questions where the first attempt fails often, chosen for difficulty before the search is run on them. Run 1's one `split` was a unit-spelling artifact ("50 square centimetres" vs "50 cm²"). That is why numeric answers are now keyed by their number, and answers that name files by the files and numbers they claim.
+
 ### Elia Book — session insights and reusable improvement playbooks
 
 Open `/eliabook` during any interactive session to choose **Save this session**

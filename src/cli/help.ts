@@ -211,10 +211,6 @@ Inside an interactive session:
   /model auto                 Keep the selected model primary; fail over to another ready provider
   /model <provider>           Switch provider (e.g. /model groq), keeping its default model
   /model <model-id>           Switch just the model id, keeping the current provider
-  /thinking                   Pick a reasoning effort with up/down or left/right, enter to switch
-  /thinking off|on            Turn reasoning off, or back on at its last budget
-  /thinking low|medium|high   Switch reasoning effort to a preset token budget
-  /thinking <n>               Switch reasoning to an exact token budget (Anthropic only)
   /usage                      Live token consumption, context-window fill, and the limits in
                               effect (context, reasoning, autonomous-run, provider/plan)
 

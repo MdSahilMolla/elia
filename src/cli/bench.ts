@@ -1,6 +1,6 @@
 /**
- * The benchmark subcommands: `elia bench`, its `--harvest`, `--canaries` and
- * `--swe` modes, and the model-free `bench-latency`.
+ * The benchmark subcommands: `elia bench`, its `--harvest`, `--canaries`,
+ * `--answers` and `--swe` modes, and the model-free `bench-latency`.
  *
  * One module because they share a subject rather than an implementation — a
  * change to what a benchmark record holds touches all four, and nothing else.
@@ -164,10 +164,54 @@ export async function runBenchCanaries(): Promise<void> {
   }
 }
 
+/**
+ * `elia bench --answers`: does answer search (reason/answer.ts) beat one
+ * attempt on questions with known answers, and is its verdict worth reading?
+ * One model call per attempt, no tools, so it measures the search and not the
+ * agent. `--limit N` runs the first N questions.
+ */
+export async function runBenchAnswers(): Promise<void> {
+  const { claimMeasureSlot, describeHolder } = await import('../evolve/measureSlot.ts')
+  const slot = claimMeasureSlot(`elia ${process.argv.slice(2).join(' ')}`)
+  if (!slot.ok) {
+    writeError(describeHolder(slot.holder))
+    process.exitCode = 1
+    return
+  }
+  try {
+    if (!(await ensureFirstRunProviderSetup())) return
+    const limitRaw = flagValue('--limit')
+    const limit = limitRaw === undefined ? undefined : strictInteger(limitRaw)
+    if (limitRaw !== undefined && (limit === undefined || limit < 1)) {
+      writeError('--limit must be a positive integer.')
+      process.exitCode = 1
+      return
+    }
+    const { config } = await import('../config.ts')
+    const { QUESTIONS, providerProducer, renderBench, runAnswerBench } = await import('../reason/answerBench.ts')
+    const questions = QUESTIONS.slice(0, limit ?? QUESTIONS.length)
+    writeNotice(`Answering ${questions.length} question(s) with known answers on ${config.model}: the first attempt alone against the whole answer search.`)
+    const report = await runAnswerBench({
+      questions,
+      producerFor: (question) => providerProducer(config.provider, question.question),
+      onRow: (row) => {
+        if (machineReadable) return
+        const mark = (right: boolean) => (right ? '✓' : '✗')
+        writeUsageLine(`  ${row.id.padEnd(15)} first ${mark(row.firstRight)} ${String(row.firstAnswer ?? '—').slice(0, 24).padEnd(24)} search ${mark(row.searchRight)} ${row.status} ×${row.attempts}`)
+      },
+    })
+    if (machineReadable) emitEvent('answer_bench', { ...report })
+    else writeUsageLine(`\n${renderBench(report)}`)
+  } finally {
+    slot.release()
+  }
+}
+
 export async function runBench(): Promise<void> {
   if (positionals(['--file', '--sample', '--out', '--split'])[0] === 'swe') return runBenchSwe()
   if (hasFlag('--harvest')) return runBenchHarvest()
   if (hasFlag('--canaries')) return runBenchCanaries()
+  if (hasFlag('--answers')) return runBenchAnswers()
 
   const { BENCH_TASKS, allBenchTasks } = await import('../evolve/suite.ts')
   const { historyTasks } = await import('../evolve/history/suite.ts')
