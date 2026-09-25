@@ -114,10 +114,17 @@ test('direct process arguments are not interpreted as shell syntax', async () =>
 })
 
 // #1268: a shell-arg escaper must make `"; touch pwned` / `$(…)` payloads one
-// literal argument, never a new command segment.
+// literal argument, never a new command segment. The quoting dialect is
+// platform-specific — cmd.exe takes double quotes, POSIX shells single quotes —
+// so each platform asserts the form it actually produces.
 test('escapeShellArg keeps an injection payload literal', () => {
-  expect(escapeShellArg('simple')).toBe("'simple'")
-  expect(escapeShellArg("it's")).toBe("'it'\\''s'")
+  if (process.platform === 'win32') {
+    expect(escapeShellArg('simple')).toBe('"simple"')
+    expect(escapeShellArg('say "hi"')).toBe('"say ^"hi^""')
+  } else {
+    expect(escapeShellArg('simple')).toBe("'simple'")
+    expect(escapeShellArg("it's")).toBe("'it'\\''s'")
+  }
 })
 
 test.if(process.platform !== 'win32')('an escaping payload passed to a shell cannot break out', async () => {
