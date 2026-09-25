@@ -6,9 +6,9 @@ import { motionReduced, useAnimationClock } from '../animation.tsx'
 import { mixColor } from '../motion.ts'
 import type { ToolItem } from '../store.ts'
 import { activeVerb, exploreSummary, summarizeTool } from '../toolSummary.ts'
-import { summarizeResult } from '../../stream.ts'
+import { hasResultSummarizer, summarizeResult } from '../../stream.ts'
 import { foldText } from '../../render.ts'
-import { redactText } from '../../redact.ts'
+import { redactSecrets, redactText, relativizeProjectPaths } from '../../redact.ts'
 import { visualizationTerminalPreview } from '../../../tools/visualize.ts'
 import { listLoadedSkills } from '../../../skills/loader.ts'
 import { highlightLine, normalizeLanguage } from '../highlight.ts'
@@ -87,21 +87,34 @@ function DiffBody({ rows, limit, language, expanded }: { rows: DiffRow[]; limit:
   )
 }
 
-/** The tail of a command's output — the part that usually says how it went. */
-function ShellBody({ tool, expanded }: { tool: ToolItem; expanded: boolean }) {
-  const body = (tool.result ?? '')
+/** The output lines of a shell result, without run_command's own framing. */
+export function shellOutputLines(result: string): string[] {
+  const body = result
     .split('\n')
     .filter((line) => line !== 'stdout:' && line !== 'stderr:' && !/^(exit code:|timed out)/i.test(line))
   while (body.length > 0 && !body[body.length - 1]!.trim()) body.pop()
   while (body.length > 0 && !body[0]!.trim()) body.shift()
-  if (body.length === 0) return null
+  return body
+}
+
+/**
+ * The tail of a command's output — the part that usually says how it went.
+ * The `⎿` always leads the body, on the "earlier lines" note when there is
+ * one: a card that had been folded used to start with a bare indent, unlike
+ * every other card. Shared by tool cards and `!command` output.
+ */
+export function ShellBody({ lines, failed, expanded }: { lines: string[]; failed: boolean; expanded: boolean }) {
+  if (lines.length === 0) return null
   const limit = expanded ? 400 : COLLAPSED_SHELL_ROWS
-  const shown = body.slice(-limit)
-  const hidden = body.length - shown.length
-  const failed = tool.status === 'error'
+  const shown = lines.slice(-limit)
+  const hidden = lines.length - shown.length
   return (
     <Box flexDirection="column" marginLeft={2}>
-      {hidden > 0 && <Text color={palette.muted}>  … +{hidden} earlier lines{expanded ? '' : ' (ctrl+o to expand)'}</Text>}
+      {hidden > 0 && (
+        <Text color={palette.muted} wrap="truncate-end">
+          {glyphs.branch} … +{hidden} earlier lines{expanded ? '' : ' (ctrl+o to expand)'}
+        </Text>
+      )}
       {shown.map((line, i) => (
         <Text key={i} color={failed ? palette.failure : palette.muted} wrap="truncate-end">
           {i === 0 && hidden === 0 ? `${glyphs.branch} ` : '  '}
@@ -159,8 +172,41 @@ function seconds(ms: number | undefined): string {
   return ms < 60_000 ? `${Math.round(ms / 1000)}s` : `${Math.floor(ms / 60_000)}m ${Math.round((ms % 60_000) / 1000)}s`
 }
 
+/** Fields that say what a JSON result amounts to, most telling first. */
+const JSON_GIST_KEYS = ['summary', 'message', 'status', 'title', 'result', 'text', 'error', 'url', 'name']
+
+/**
+ * The one-line gist of a JSON result: what its telling fields say, or how many
+ * items an array holds. MCP and web tools answer in JSON, and their card
+ * showed the raw payload — `{"status":"ok","items":[…` — as its summary.
+ */
+export function jsonGist(result: string): string | undefined {
+  const body = result.replace(/^Task session:.*$/gm, '').trim()
+  if (!/^[[{]/.test(body)) return undefined
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(body)
+  } catch {
+    return undefined
+  }
+  if (Array.isArray(parsed)) return `${parsed.length} item${parsed.length === 1 ? '' : 's'}`
+  if (!parsed || typeof parsed !== 'object') return undefined
+  const record = parsed as Record<string, unknown>
+  const said = JSON_GIST_KEYS.map((key) => record[key]).filter((value): value is string | number | boolean => ['string', 'number', 'boolean'].includes(typeof value) && String(value).trim() !== '')
+  if (said.length > 0) return said.slice(0, 2).map((value) => String(value).replace(/\s+/g, ' ').trim()).join(' — ')
+  const lists = Object.entries(record).filter(([, value]) => Array.isArray(value))
+  if (lists.length === 1) {
+    const [key, value] = lists[0]!
+    return `${(value as unknown[]).length} ${key}`
+  }
+  const keys = Object.keys(record)
+  return keys.length === 0 ? 'empty result' : `${keys.length} field${keys.length === 1 ? '' : 's'}: ${keys.slice(0, 4).join(', ')}${keys.length > 4 ? ', …' : ''}`
+}
+
 /** First meaningful line of a result — the one-line gist for tools with no custom summary. */
 function gist(result: string): string {
+  const json = jsonGist(result)
+  if (json !== undefined) return redactText(json, 160)
   const line = result.split('\n').map((l) => l.trim()).find((l) => l && !l.startsWith('```')) ?? ''
   return redactText(line, 160)
 }
@@ -209,10 +255,12 @@ function ToolBody({ tool, expanded, isShell, isEdit, target }: { tool: ToolItem;
   const result = tool.result ?? ''
   if (!result.trim()) return null
   if (tool.status === 'error') {
-    const lines = redactText(result, expanded ? 4_000 : 400)
-    return <SummaryRow text={lines} color={palette.failure} />
+    // Collapsed, one line. Expanded (ctrl+o), the error as it was written —
+    // a stack trace or compiler output flattened onto one line is unreadable.
+    if (!expanded) return <SummaryRow text={redactText(result, 400)} color={palette.failure} />
+    return <BranchLines lines={redactSecrets(relativizeProjectPaths(result)).split(/\r?\n/).slice(0, 200)} color={palette.failure} />
   }
-  if (isShell) return <ShellBody tool={tool} expanded={expanded} />
+  if (isShell) return <ShellBody lines={shellOutputLines(result)} failed={false} expanded={expanded} />
   if (tool.name === 'visualize') {
     return (
       <Box marginLeft={4} flexDirection="column">
@@ -225,14 +273,25 @@ function ToolBody({ tool, expanded, isShell, isEdit, target }: { tool: ToolItem;
     if (rows.length > 0) return <DiffBody rows={rows} limit={expanded ? 600 : COLLAPSED_DIFF_ROWS} language={languageForTarget(target)} expanded={expanded} />
     return null
   }
-  if (expanded) {
-    return (
-      <Box marginLeft={4}>
-        <Text color={palette.muted}>{foldText(result, { headLines: 400 }).text}</Text>
-      </Box>
-    )
-  }
-  return <SummaryRow text={summarizeResult(tool.name, result) || gist(result)} />
+  if (expanded) return <BranchLines lines={foldText(result, { headLines: 400 }).text.split('\n')} color={palette.muted} />
+  // A tool with its own summarizer says what it did; anything else (MCP, web,
+  // new tools) gets the gist — never its raw payload.
+  return <SummaryRow text={(hasResultSummarizer(tool.name) && summarizeResult(tool.name, result)) || gist(result)} />
+}
+
+/** A card body of several lines, led by the `⎿` like every other body. */
+function BranchLines({ lines, color }: { lines: string[]; color?: string }) {
+  while (lines.length > 0 && !lines[lines.length - 1]!.trim()) lines = lines.slice(0, -1)
+  return (
+    <Box flexDirection="column" marginLeft={2}>
+      {lines.map((line, i) => (
+        <Text key={i} color={color} wrap="wrap">
+          {i === 0 ? `${glyphs.branch} ` : '  '}
+          {line || ' '}
+        </Text>
+      ))}
+    </Box>
+  )
 }
 
 /**

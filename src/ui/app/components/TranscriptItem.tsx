@@ -5,7 +5,7 @@ import { motionReduced, useAnimationClock } from '../animation.tsx'
 import { FLARE_MS, flareFrame, flareRuns, mixColor } from '../motion.ts'
 import { AssistantMessage } from './AssistantMessage.tsx'
 import { Thinking } from './Thinking.tsx'
-import { ExploreCard, ToolCard } from './ToolCard.tsx'
+import { ExploreCard, ShellBody, ToolCard } from './ToolCard.tsx'
 import { useFrameWidth, wrapPlain } from '../wrap.ts'
 
 /**
@@ -214,17 +214,16 @@ export function TranscriptItemView({ item, expanded, gapAbove = false, live = fa
             <Text color={palette.bash}>{command.slice(0, 1)}</Text>
             {command.slice(1)}
           </Text>
-          {output.map((line, i) => (
-            <Text key={i} color={palette.muted} wrap="truncate-end">
-              {i === 0 ? `${glyphs.branch} ` : '  '}
-              {line || ' '}
-            </Text>
-          ))}
+          {/* The same body a tool card's command gets — indented under the
+              command, `⎿`-led — shown in full, since you asked to see it. */}
+          <ShellBody lines={output} failed={false} expanded />
           {exit ? (
-            <Text color={palette.failure} wrap="truncate-end">
-              {output.length === 0 ? `${glyphs.branch} ` : '  '}
-              {exit}
-            </Text>
+            <Box marginLeft={2}>
+              <Text color={palette.failure} wrap="truncate-end">
+                {output.length === 0 ? `${glyphs.branch} ` : '  '}
+                {exit}
+              </Text>
+            </Box>
           ) : null}
         </Box>
       )
