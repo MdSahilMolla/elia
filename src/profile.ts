@@ -138,7 +138,11 @@ function cacheHitRate(input: number, read: number, write: number): number {
   return total === 0 ? 0 : read / total
 }
 
-function percentile(values: number[], p: number): number | undefined {
+/** The `p`th percentile (0–100) of the finite values, or undefined when there are none. */
+export function percentile(values: number[], p: number): number | undefined {
+  // A NaN or negative p made a NaN or negative index and a silent undefined,
+  // which the caller's `?? 0` then reported as a real 0 ms (#1269).
+  if (!Number.isFinite(p) || p < 0 || p > 100) throw new RangeError(`percentile p must be between 0 and 100, got ${p}`)
   // NaN/Infinity timings (a stopwatch that never started, a clock that went
   // backwards) must not pollute the percentile — a NaN index result slips past
   // the caller's `?? 0` since it is not undefined.
