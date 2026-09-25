@@ -113,6 +113,8 @@ The ledger also carries `register_dataset` / `dataset_lineage`, a hash-chained p
 
 `dashboard` renders the store as one page, written to `.elia/artifacts/` as HTML, JSON and Markdown. It shows alerts (rising forecasts, indicator outliers, failing feeds, review backlog), open questions with Battmann's probability beside the baseline's, indicators with their source and date, feed health, the certified track record, scenarios, the geospatial picture and pending proposals. It is regenerated on demand and by `refresh`, not streamed. `report_from_store` writes a governed Markdown, JSON and printable-HTML report; a final report fails closed until every included claim has a supported review.
 
+Every figure in a claim is checked against the stored text of the evidence it cites. That is the excerpt the source or the feed code wrote, never the model's own supporting excerpt. `register_claim` returns any figure it cannot find, at the moment the claim is recorded, and the report's judgments table lists them for the reviewer. In a live brief this caught two real mistakes: supplier shares taken from HS 8541 but cited against the HS 8542 record, and a scheme outlay cited to a press release that never states it. A derived figure or a model estimate is flagged too, which is right, because the reader should know it is not a measurement.
+
 ### Classification boundary
 
 Records carry a `securityClassification` (`public`, `internal`, `confidential`, `restricted`), and the boundary is enforced in code (`src/battmann/modelBoundary.ts`):

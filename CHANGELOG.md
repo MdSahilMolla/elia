@@ -44,7 +44,9 @@ workspace), a REPL redesign, and a broad reliability/perf pass.
   to be easier for models to use, so `feed_query` now returns a citable
   evidence id, nested fields are lifted, a failed call returns the fields
   that action takes, and certified forecasts are stamped by the clock with
-  their feed evidence attached. The defence primitives (`posture_assessment`, `effector_pairing`)
+  their feed evidence attached. Every figure in a claim is now checked against the
+  stored text of the evidence it cites, at write time and in the report, after
+  a live brief cited HS 8541 shares against the HS 8542 record. The defence primitives (`posture_assessment`, `effector_pairing`)
   and the Palantir-pillar naming were removed.
 - **cyber mode** — evidence-gated findings, scoped `http_probe`, and a
   `.elia/policy.json` governor policy.

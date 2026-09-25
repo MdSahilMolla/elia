@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'no
 import { dirname, extname } from 'node:path'
 import { currentAgent, resolveWorkspacePath } from '../autonomy/context.ts'
 import { ensureSecureDirectory, hardenSecureFile } from '../securePersistence.ts'
+import { unverifiedFigures } from './grounding.ts'
 import { describeFeedResult, feedRequestKey, type FeedRequest, type FeedResult } from './feeds.ts'
 import { describeRule, forecastCutoff, ruleSeriesKey, validateResolutionRule, type Baseline, type Evaluation, type ResolutionRule } from './resolution.ts'
 
@@ -585,8 +586,17 @@ function registerClaim(input: Row): Row {
     )
     const insert = db.query('INSERT INTO claim_evidence (claim_id, evidence_id, relation, supporting_excerpt) VALUES (?, ?, ?, ?)')
     for (const link of links) insert.run(id, link.evidenceId, link.relation, link.supportingExcerpt)
-    return { status: 'created', storePath: path, claimId: id, evidenceLinks: links.length, reviewStatus: 'unreviewed' }
+    const unverified = unverifiedFigures(String(input.statement), citedEvidenceText(db, links.map((link) => link.evidenceId)))
+    return {
+      status: 'created', storePath: path, claimId: id, evidenceLinks: links.length, reviewStatus: 'unreviewed',
+      ...(unverified.length ? { unverifiedFigures: unverified, note: `These figures do not appear in the cited evidence: ${unverified.join(', ')}. Cite the record they come from, or classify the claim as a calculation or estimate; a reviewer will see this flag.` } : {}),
+    }
   }))
+}
+
+/** The stored text of cited evidence — title and the source- or feed-written excerpt, never a model's supporting excerpt. */
+function citedEvidenceText(db: Database, evidenceIds: string[]): string[] {
+  return evidenceIds.map((evidenceId) => db.query('SELECT title, excerpt FROM evidence WHERE id = ?').get(evidenceId) as Row | null).filter((row): row is Row => row !== null).map((row) => `${String(row.title)}\n${String(row.excerpt)}`)
 }
 
 function reviewClaim(input: Row): Row {
@@ -1705,7 +1715,8 @@ export function loadBattmannReportData(input: Row): Row {
       const links = (db.query(`SELECT ce.evidence_id, ce.relation, ce.supporting_excerpt, e.title, e.url, e.publisher, e.source_type, e.published_at, e.retrieved_at, e.content_hash, e.independence_group, e.reliability, e.security_classification
         FROM claim_evidence ce JOIN evidence e ON e.id = ce.evidence_id WHERE ce.claim_id = ? AND e.published_at <= ? AND e.retrieved_at <= ? ORDER BY ce.evidence_id`).all(String(claim.id), asOf, asOf) as Row[]).filter((row) => withinClearance(row, rank))
       const review = db.query('SELECT verdict, reviewer, reviewed_at, notes FROM claim_reviews WHERE claim_id = ? AND reviewed_at <= ? ORDER BY reviewed_at DESC LIMIT 1').get(String(claim.id), asOf) as Row | null
-      return { id: claim.id, statement: claim.statement, classification: claim.classification, confidence: claim.confidence, asOf: claim.as_of, evidence: links.map((link) => ({ evidenceId: link.evidence_id, relation: link.relation, supportingExcerpt: link.supporting_excerpt })), review: review ? { verdict: review.verdict, reviewer: review.reviewer, reviewedAt: review.reviewed_at, notes: review.notes } : { verdict: 'unreviewed' } }
+      const unverified = unverifiedFigures(String(claim.statement), citedEvidenceText(db, links.map((link) => String(link.evidence_id))))
+      return { id: claim.id, statement: claim.statement, classification: claim.classification, confidence: claim.confidence, asOf: claim.as_of, evidence: links.map((link) => ({ evidenceId: link.evidence_id, relation: link.relation, supportingExcerpt: link.supporting_excerpt })), review: review ? { verdict: review.verdict, reviewer: review.reviewer, reviewedAt: review.reviewed_at, notes: review.notes } : { verdict: 'unreviewed' }, unverifiedFigures: unverified }
     })
     const evidence = (db.query('SELECT * FROM evidence WHERE published_at <= ? AND retrieved_at <= ? ORDER BY published_at, id').all(asOf, asOf) as Row[]).filter((row) => withinClearance(row, rank))
     const scenarios = (db.query('SELECT * FROM scenarios WHERE base_as_of <= ? ORDER BY horizon').all(asOf) as Row[]).map((row) => ({ id: row.id, title: row.title, baseAsOf: row.base_as_of, horizon: row.horizon, probability: row.probability, assumptions: parseJson(row.assumptions_json, []), questionIds: parseJson(row.question_ids_json, []), evidenceIds: parseJson(row.evidence_ids_json, []), indicators: parseJson(row.indicators_json, []), status: row.status }))
@@ -1782,7 +1793,7 @@ function listClaims(input: Row): Row {
       id: claim.id, statement: claim.statement, classification: claim.classification, confidence: claim.confidence, asOf: claim.as_of,
       evidenceIds: (opened.db.query('SELECT evidence_id FROM claim_evidence WHERE claim_id = ?').all(String(claim.id)) as Row[]).map((row) => row.evidence_id),
       review: (opened.db.query('SELECT verdict FROM claim_reviews WHERE claim_id = ? ORDER BY reviewed_at DESC LIMIT 1').get(String(claim.id)) as Row | null)?.verdict ?? 'unreviewed',
-    }))
+    })).map((claim) => ({ ...claim, unverifiedFigures: unverifiedFigures(String(claim.statement), citedEvidenceText(opened.db, claim.evidenceIds.map(String))) }))
     return { storePath: opened.path, claims }
   } finally { opened.db.close() }
 }
