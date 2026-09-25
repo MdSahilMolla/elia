@@ -12,7 +12,7 @@ import { executeBattmannStoreAction, listFeedSubscriptions, recordFeedResult, vo
  */
 
 type Row = Record<string, unknown>
-const VALUE_FLAGS = ['--store', '--out', '--every', '--base', '--start', '--end', '--from', '--partner', '--flow', '--periods', '--days', '--by', '--years']
+const VALUE_FLAGS = ['--store', '--out', '--every', '--base', '--start', '--end', '--from', '--partner', '--flow', '--periods', '--days', '--by', '--years', '--at', '--workspace', '--reforecast-days']
 const DEFAULT_DASHBOARD = '.elia/artifacts/battmann-dashboard.html'
 
 const USAGE = `Usage: elia battmann <command>
@@ -28,6 +28,9 @@ const USAGE = `Usage: elia battmann <command>
       commodity <CODE…> [--start YYYY-MM] [--index]       IMF codes: POILAPSP, PCOPP, PTIN, PALUM, PNGASJP…
       tariff <REPORTER> <HS6…> [--partner WLD] [--years 2022,2023]
   refresh                       One monitoring pass: refresh feeds, resolve due questions, update baselines, rebuild the dashboard
+  cycle <playbook>              refresh, then re-run the brief when the agent's forecasts are older than --reforecast-days (7)
+  autorun install|status|uninstall <playbook> [--at 22:00]
+                                Run \`cycle\` daily from this workspace (macOS launchd; prints a crontab line elsewhere)
   watch --every 6h              Repeat refresh on an interval while this process runs
   record                        The certified track record: resolved-by-code questions, Battmann vs the baseline
   feeds                         Feed subscriptions and their last run
@@ -94,6 +97,22 @@ async function dispatch(command: string, rest: string[]): Promise<void> {
   }
   if (command === 'refresh') {
     await refreshOnce(input)
+    return
+  }
+  if (command === 'cycle') {
+    const playbook = PLAYBOOKS[rest[0] ?? '']
+    if (!playbook) throw new Error(`Usage: elia battmann cycle <playbook>. Available: ${Object.keys(PLAYBOOKS).join(', ')}`)
+    writeNotice(`cycle ${playbook.id} at ${new Date().toISOString()}`)
+    await refreshOnce(input)
+    await reforecastIfStale(input, playbook.id, playbook.brief, Number(flagValue('--reforecast-days') ?? 7))
+    return
+  }
+  if (command === 'autorun') {
+    const [action, playbookId] = rest
+    if (!action || !['install', 'status', 'uninstall'].includes(action) || !playbookId || !PLAYBOOKS[playbookId]) throw new Error(`Usage: elia battmann autorun install|status|uninstall <playbook> [--at 22:00]. Available: ${Object.keys(PLAYBOOKS).join(', ')}`)
+    const { autorunPlan, autorunStatus, installAutorun, uninstallAutorun } = await import('./autorun.ts')
+    const plan = autorunPlan({ playbook: playbookId, workspace: flagValue('--workspace'), at: flagValue('--at'), entry: process.argv[1] ?? '', runtime: process.execPath })
+    writeUsageLine(action === 'install' ? await installAutorun(plan) : action === 'uninstall' ? await uninstallAutorun(plan) : await autorunStatus(plan))
     return
   }
   if (command === 'watch') {
@@ -168,6 +187,34 @@ async function refreshOnce(input: Row): Promise<void> {
   const updatedBaselines = pass.baselines.filter((item) => item.recorded).length
   writeUsageLine(`  ${pass.resolutions.resolved.length} resolved, ${pass.resolutions.pending.length} still pending, ${updatedBaselines} baseline(s) updated`)
   await writeDashboard(input)
+}
+
+/**
+ * The model step of a cycle: re-run the playbook's brief when the agent's newest forecast on the playbook's open
+ * certified questions is older than `days`. It needs a configured provider; without one the model-free steps
+ * above still ran, and this says so.
+ */
+async function reforecastIfStale(input: Row, playbookId: string, brief: string, days: number): Promise<void> {
+  const open = (JSON.parse(executeBattmannStoreAction({ ...input, action: 'list_questions', status: 'open' })) as { questions: { id: string; tags: string[]; resolutionRule: unknown }[] }).questions
+    .filter((question) => question.tags.includes(playbookId) && question.resolutionRule)
+  if (!open.length) {
+    writeNotice(`No open certified questions for ${playbookId}; seed new ones with \`elia battmann seed ${playbookId}\`.`)
+    return
+  }
+  const newest = Math.max(0, ...open.flatMap((question) => (JSON.parse(executeBattmannStoreAction({ ...input, action: 'question_detail', questionId: question.id })) as { forecasts: { forecaster: string; recordedAt: string }[] }).forecasts
+    .filter((forecast) => forecast.forecaster !== 'baseline').map((forecast) => Date.parse(forecast.recordedAt))))
+  const ageDays = newest ? (Date.now() - newest) / 86_400_000 : Infinity
+  if (ageDays < days) {
+    writeNotice(`The agent's forecasts are ${ageDays.toFixed(1)} day(s) old; the next re-forecast is due in ${(days - ageDays).toFixed(1)} day(s).`)
+    return
+  }
+  const { providerConfigError } = await import('../config.ts')
+  const problem = providerConfigError()
+  if (problem) {
+    writeNotice(`Skipping the agent re-forecast: no model provider is configured (${problem}). Set one with \`elia config set --provider <name>\`.`)
+    return
+  }
+  await runBrief(brief)
 }
 
 async function writeDashboard(input: Row, outputPath = DEFAULT_DASHBOARD): Promise<void> {

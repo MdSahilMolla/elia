@@ -46,7 +46,11 @@ workspace), a REPL redesign, and a broad reliability/perf pass.
   that action takes, and certified forecasts are stamped by the clock with
   their feed evidence attached. Every figure in a claim is now checked against the
   stored text of the evidence it cites, at write time and in the report, after
-  a live brief cited HS 8541 shares against the HS 8542 record. The defence primitives (`posture_assessment`, `effector_pairing`)
+  a live brief cited HS 8541 shares against the HS 8542 record. Evidence is
+  graded feed, fetched (checked against the page web_fetch retrieved) or
+  unverified, and an observed fact whose figures are not in its evidence is
+  refused. `elia battmann cycle` and `autorun` keep the forecasting loop running
+  daily. The defence primitives (`posture_assessment`, `effector_pairing`)
   and the Palantir-pillar naming were removed.
 - **cyber mode** — evidence-gated findings, scoped `http_probe`, and a
   `.elia/policy.json` governor policy.

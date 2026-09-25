@@ -96,7 +96,9 @@ elia battmann dashboard                    # .elia/artifacts/battmann-dashboard.
 
 It opens certified questions whose thresholds sit near the latest fetched values.
 
-`watch` runs only while its process does. For unattended monitoring, schedule `elia battmann refresh` with cron or launchd. Agent-driven work can recur with `elia schedule add --mode battmann --every 6h "re-forecast the open certified questions"`.
+`watch` runs only while its process does. For unattended monitoring, use `elia battmann cycle <playbook>`. It refreshes, resolves and updates baselines, then re-runs the brief when the agent's forecasts are older than `--reforecast-days` (7 by default). `elia battmann autorun install <playbook>` schedules that daily from the current workspace as a macOS launchd agent; elsewhere it prints the crontab line. `status` and `uninstall` inspect and remove it. The job carries no API keys: its model step uses the provider saved with `elia config set`, and without one only the model-free steps run. It needs a durable workspace (temporary directories are refused), and it runs only while you are logged in and the machine is awake.
+
+A certified forecast more than 25 points from the baseline comes back with a note asking for the specific evidence the baseline cannot see. Agent-driven work can recur with `elia schedule add --mode battmann --every 6h "re-forecast the open certified questions"`.
 
 ### Analysis tools
 
@@ -113,7 +115,14 @@ The ledger also carries `register_dataset` / `dataset_lineage`, a hash-chained p
 
 `dashboard` renders the store as one page, written to `.elia/artifacts/` as HTML, JSON and Markdown. It shows alerts (rising forecasts, indicator outliers, failing feeds, review backlog), open questions with Battmann's probability beside the baseline's, indicators with their source and date, feed health, the certified track record, scenarios, the geospatial picture and pending proposals. It is regenerated on demand and by `refresh`, not streamed. `report_from_store` writes a governed Markdown, JSON and printable-HTML report; a final report fails closed until every included claim has a supported review.
 
-Every figure in a claim is checked against the stored text of the evidence it cites. That is the excerpt the source or the feed code wrote, never the model's own supporting excerpt. `register_claim` returns any figure it cannot find, at the moment the claim is recorded, and the report's judgments table lists them for the reviewer. In a live brief this caught two real mistakes: supplier shares taken from HS 8541 but cited against the HS 8542 record, and a scheme outlay cited to a press release that never states it. A derived figure or a model estimate is flagged too, which is right, because the reader should know it is not a measurement.
+Evidence is graded:
+- **Feed:** fetched by code from a data feed, with the raw response hashed.
+- **Fetched:** the excerpt was checked, by code, against the page `web_fetch` retrieved in the session, and the page's hash is kept. `register_evidence` refuses an excerpt that is not on the page it names.
+- **Unverified:** a search snippet, or text that was never checked against a fetched page.
+
+The model cannot set the grade. The report shows each claim's verified sources, and each evidence record's grade.
+
+Every figure in a claim is checked against the stored text of the evidence it cites. That is the excerpt the source or the feed code wrote, never the model's own supporting excerpt. `register_claim` refuses an `observed_fact` whose figures are not in its evidence. For a calculation, estimate or judgement it returns the unmatched figures as a flag. The report's judgments table lists them for the reviewer. In a live brief this caught two real mistakes: supplier shares taken from HS 8541 but cited against the HS 8542 record, and a scheme outlay cited to a press release that never states it. A derived figure or a model estimate is flagged too, which is right, because the reader should know it is not a measurement.
 
 ### Classification boundary
 
