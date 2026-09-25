@@ -161,6 +161,24 @@ export function shellInvocation(command: string): { argv: string[]; verbatim: bo
 }
 
 /**
+ * Quotes one value so it interpolates into a shell command as a single literal
+ * argument — the layer between "run a free-form command" (runShell) and
+ * "pass known args" (runProcess). Prefer runProcess when the argv is known at
+ * the call site; use this only for the values that genuinely join a command
+ * string. It makes `"; touch pwned` / `$(…)` text inert: the payload becomes
+ * one argument's literal contents, never a new command segment.
+ *
+ * POSIX: single-quote, the only escape POSIX needs (' → `'\''`).
+ * cmd.exe: double-quote and neuter embedded quotes with a caret — cmd has no
+ * single-quoting, and `^` is its only way to stop a quote from closing the
+ * quoted region inside one argument.
+ */
+export function escapeShellArg(value: string): string {
+  if (process.platform === 'win32') return `"${value.replace(/"/g, '^"')}"`
+  return `'${value.replace(/'/g, `'\\''`)}'`
+}
+
+/**
  * Runs an executable directly. Use this for structured operations whose
  * executable and arguments are already known; reserve runShell for genuine
  * shell syntax such as pipelines and builtins.

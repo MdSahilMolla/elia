@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, renameSync, rmSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { runSubAgent } from '../subagent.ts'
-import { clampOutput, runShell } from '../shell.ts'
+import { clampOutput, runProcess } from '../shell.ts'
 import { registerSynthesizedTool } from '../tools/registry.ts'
 import { recordToolConstruction, type ToolConstruction } from './toolLog.ts'
 import { markResolved, type SkillCandidate } from './detector.ts'
@@ -66,7 +66,9 @@ export async function synthesizeSkill(candidate: SkillCandidate): Promise<Synthe
   // Bun resolves as it does in normal use.
   let testPassed: boolean | undefined
   if (existsSync(testFile)) {
-    const test = await runShell(`bun test "${testFile}"`, SKILL_TEST_TIMEOUT_MS)
+    // argv spawn, never `bun test "${file}"`: the path is built from an
+    // LLM-named habit pattern and must not be re-parsed by a shell.
+    const test = await runProcess({ executable: 'bun', args: ['test', testFile], timeoutMs: SKILL_TEST_TIMEOUT_MS })
     testPassed = test.exitCode === 0
     if (test.exitCode !== 0) {
       quarantine(skillFile, testFile)

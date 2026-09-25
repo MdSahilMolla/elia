@@ -2,7 +2,7 @@ import { afterEach, expect, test } from 'bun:test'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { isLongRunningServerCommand, mayStartServer, runProcess, runShell, shellCommandAlternative } from './shell.ts'
+import { escapeShellArg, isLongRunningServerCommand, mayStartServer, runProcess, runShell, shellCommandAlternative } from './shell.ts'
 import { resetContainerSandboxWarningForTests } from './sandbox/container.ts'
 
 afterEach(() => {
@@ -111,6 +111,31 @@ test('direct process arguments are not interpreted as shell syntax', async () =>
   })
   expect(result.exitCode).toBe(0)
   expect(result.stdout).toContain(literal)
+})
+
+// #1268: a shell-arg escaper must make `"; touch pwned` / `$(…)` payloads one
+// literal argument, never a new command segment.
+test('escapeShellArg keeps an injection payload literal', () => {
+  expect(escapeShellArg('simple')).toBe("'simple'")
+  expect(escapeShellArg("it's")).toBe("'it'\\''s'")
+})
+
+test.if(process.platform !== 'win32')('an escaping payload passed to a shell cannot break out', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'elia-shell-escape-'))
+  try {
+    const payload = 'a"; touch pwned; echo "$(id)'
+    const result = await runShell(`printf '%s' ${escapeShellArg(payload)}`, 10_000, dir)
+    expect(result.exitCode).toBe(0)
+    expect(result.stdout).toBe(payload)
+    expect(await Bun.file(join(dir, 'pwned')).exists()).toBe(false)
+
+    const dollar = '$(mkdir dollar-pwned)'
+    const quoted = await runShell(`printf '%s' ${escapeShellArg(dollar)}`, 10_000, dir)
+    expect(quoted.stdout).toBe(dollar)
+    expect(await Bun.file(join(dir, 'dollar-pwned')).exists()).toBe(false)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
 })
 
 test('cancels shell work cooperatively', async () => {

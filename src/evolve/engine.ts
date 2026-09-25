@@ -5,7 +5,7 @@ import { runAgentLoop, type ConversationMessage } from '../agentLoop.ts'
 import { runSubAgent } from '../subagent.ts'
 import { allWorkerTools } from '../tools/registry.ts'
 import type { Tool } from '../tools/types.ts'
-import { clampOutput, runShell } from '../shell.ts'
+import { clampOutput, runProcess, runShell } from '../shell.ts'
 import { writeText } from '../ui/stream.ts'
 import { writeBlock, writeFail, writePass, writePhase, writeSubStep, writeSummary } from '../ui/report.ts'
 import { formatElapsed } from '../usage.ts'
@@ -497,7 +497,7 @@ async function attemptGeneration(
     // the candidate really broke fails again; a list that cannot be read, or a
     // retry that fails, keeps the rejection.
     const files = failingTestFiles(`${unitTests.stdout}\n${unitTests.stderr}`)
-    const retry = files.length > 0 ? await runShell(`bun test ${files.map((file) => `'${file}'`).join(' ')}`, GATE_TIMEOUT_MS, sandbox.root) : undefined
+    const retry = files.length > 0 ? await runProcess({ executable: 'bun', args: ['test', ...files], timeoutMs: GATE_TIMEOUT_MS, cwd: sandbox.root }) : undefined
     if (retry?.exitCode !== 0) {
       writeFail('unit tests failed')
       const output = retry ? `${retry.stderr || retry.stdout}` : `${unitTests.stderr || unitTests.stdout}`
