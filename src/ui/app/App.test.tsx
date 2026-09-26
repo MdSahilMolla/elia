@@ -602,6 +602,13 @@ test('the count carries from the risk pre-check into the turn it gated', async (
 test('a slash command queued during a turn is dispatched, not sent to the model', async () => {
   let slashCalls: string[] = []
   let prompts: string[] = []
+  // The turn stays open until the test has seen the command queued. A fixed
+  // 80ms turn raced the two screen checks below and, on a loaded machine, ended
+  // first — the command then ran directly and the test failed on a correct app.
+  let release: () => void = () => {}
+  const turnOpen = new Promise<void>((resolve) => {
+    release = resolve
+  })
   const props = {
     ...baseProps(),
     handleSlash: async (command: string) => {
@@ -610,7 +617,7 @@ test('a slash command queued during a turn is dispatched, not sent to the model'
     },
     submitTurn: async (text: string, _hooks: import('./App.tsx').TurnHooks) => {
       prompts.push(text)
-      await new Promise((resolve) => setTimeout(resolve, 80))
+      await turnOpen
     },
   }
   const { stdin, lastFrame } = render(<App {...props} />)
@@ -625,8 +632,10 @@ test('a slash command queued during a turn is dispatched, not sent to the model'
   await waitForFrame(lastFrame, '/settings')
   stdin.write('\r')
   await waitForFrame(lastFrame, '1 queued')
+  expect(slashCalls).toEqual([])
 
-  await new Promise((resolve) => setTimeout(resolve, 400))
+  release()
+  await waitForFrame(lastFrame, 'Settings opened')
 
   expect(slashCalls).toEqual(['/settings'])
   // The whole point: it must not have become a prompt.
