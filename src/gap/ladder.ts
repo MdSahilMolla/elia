@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { ELIA_ROOT } from '../config.ts'
+import { terminateProcessGroup } from '../shell.ts'
 import { auditDeliverable } from '../autonomy/hygiene.ts'
 import { lastPreflightSkipReason, preflightStructuralCheck } from '../native/parseCheck.ts'
 import type { LadderResult, LadderRung, PlantedDefect } from './types.ts'
@@ -143,8 +144,16 @@ async function runInFixture(files: Record<string, string>, cmd: string[]): Promi
       mkdirSync(dirname(full), { recursive: true })
       writeFileSync(full, contents)
     }
-    const proc = Bun.spawn(cmd, { cwd: dir, stdout: 'pipe', stderr: 'pipe', env: { ...process.env, NO_COLOR: '1' } })
-    const timer = setTimeout(() => proc.kill(), RUNG_TIMEOUT_MS)
+    const proc = Bun.spawn(cmd, {
+      cwd: dir,
+      stdout: 'pipe',
+      stderr: 'pipe',
+      // Its own process group on POSIX, so a rung that overruns RUNG_TIMEOUT_MS
+      // takes its descendants with it rather than leaving them reparented.
+      ...(process.platform === 'win32' ? {} : { detached: true }),
+      env: { ...process.env, NO_COLOR: '1' },
+    })
+    const timer = setTimeout(() => terminateProcessGroup(proc), RUNG_TIMEOUT_MS)
     try {
       await proc.exited
       return { exitCode: proc.exitCode ?? 1, spawnFailed: false, detail: '' }

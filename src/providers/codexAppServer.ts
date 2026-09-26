@@ -77,7 +77,13 @@ export class CodexAppServerClient {
   async connect(): Promise<void> {
     if (this.proc && !this.closed) return
     this.closed = false
-    this.proc = Bun.spawn(this.command, { stdin: 'pipe', stdout: 'pipe', stderr: 'pipe' })
+    this.proc = Bun.spawn(this.command, {
+        stdin: 'pipe',
+        stdout: 'pipe',
+        stderr: 'pipe',
+        // Its own process group on POSIX, so close() can take the whole tree.
+        ...(process.platform === 'win32' ? {} : { detached: true }),
+      })
     void this.pumpStdout().catch(() => {
       // pumpStdout rejects every pending request when the server closes.
     })
@@ -306,8 +312,7 @@ export class CodexAppServerClient {
       // already gone
     }
     try {
-      if (process.platform === 'win32' && this.proc) terminateProcessGroup(this.proc)
-      else this.proc?.kill()
+      if (this.proc) terminateProcessGroup(this.proc)
     } catch {
       // Best effort: the child may already have exited.
     }

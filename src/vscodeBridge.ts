@@ -16,7 +16,7 @@ import { withProvenance, eliaVersion } from './provenance.ts'
 import { recordUsage } from './usage.ts'
 import { config } from './config.ts'
 import { deploymentTool } from './tools/deployment.ts'
-import { runShell, clampOutput } from './shell.ts'
+import { runShell, clampOutput, terminateProcessGroup } from './shell.ts'
 import { environmentTool } from './tools/environment.ts'
 import { redactActionInput } from './autonomy/governor.ts'
 import { redactText } from './ui/redact.ts'
@@ -340,7 +340,10 @@ export function createBridgeSession(options: BridgeSessionOptions): BridgeSessio
         case 'shutdown':
           response(request.id, { status: 'stopping' })
           shutdownRequested = true
-          for (const active of activeProcesses.values()) active.process.kill()
+          // A `bun run server` this bridge started is a child of the direct
+          // child, so killing only the direct child left the server holding its
+          // port after the extension had already said goodbye.
+          for (const active of activeProcesses.values()) terminateProcessGroup(active.process)
           cancelPendingApprovals('Bridge session is shutting down')
           return
         default:

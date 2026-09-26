@@ -1,8 +1,9 @@
 import { afterEach, expect, test } from 'bun:test'
+import { existsSync, statSync } from 'node:fs'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { escapeShellArg, isLongRunningServerCommand, mayStartServer, runProcess, runShell, shellCommandAlternative } from './shell.ts'
+import { escapeShellArg, isLongRunningServerCommand, mayStartServer, runProcess, runShell, shellCommandAlternative, terminateProcessGroup } from './shell.ts'
 import { resetContainerSandboxWarningForTests } from './sandbox/container.ts'
 
 afterEach(() => {
@@ -279,3 +280,58 @@ test('a go test binary that died without naming a test gets a hint; a normal fai
   expect(formatShellResult({ command: 'go test ./...', exitCode: 1, stdout: silent, stderr: '', elapsedMs: 1, timedOut: false })).toContain('hint: the Go test binary exited')
   expect(formatShellResult({ command: 'go test ./...', exitCode: 0, stdout: 'ok\twordfreq\t0.2s\n', stderr: '', elapsedMs: 1, timedOut: false })).not.toContain('hint:')
 })
+
+test('terminateProcessGroup takes down the grandchild, not just the direct child', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'elia-tree-'))
+  const heartbeat = join(dir, 'heartbeat')
+  const grandchildPath = join(dir, 'grandchild.ts')
+  const childPath = join(dir, 'child.ts')
+
+  // The grandchild appends to a file forever, so "is it still running?" is
+  // answerable from outside the process tree without attaching a debugger.
+  await writeFile(grandchildPath, `
+import { appendFileSync } from 'node:fs'
+setInterval(() => appendFileSync(${JSON.stringify(heartbeat)}, 'x'), 40)
+`)
+  // The child spawns the grandchild and then idles: killing the child alone is
+  // exactly the bug, because the grandchild is reparented and keeps running.
+  await writeFile(childPath, `
+import { spawn } from 'bun'
+spawn([process.execPath, ${JSON.stringify(grandchildPath)}], { stdout: 'ignore', stderr: 'ignore' })
+setInterval(() => {}, 1_000)
+`)
+
+  const size = () => (existsSync(heartbeat) ? statSync(heartbeat).size : 0)
+  const proc = Bun.spawn([process.execPath, childPath], {
+    stdout: 'ignore',
+    stderr: 'ignore',
+    ...(process.platform === 'win32' ? {} : { detached: true }),
+  })
+
+  try {
+    // Wait for the grandchild to prove it is alive and writing on its own.
+    const deadline = Date.now() + 10_000
+    while (size() === 0 && Date.now() < deadline) await Bun.sleep(50)
+    expect(size()).toBeGreaterThan(0)
+
+    // It keeps writing unattended - i.e. it is not coupled to the child's exit.
+    const before = size()
+    await Bun.sleep(300)
+    expect(size()).toBeGreaterThan(before)
+
+    terminateProcessGroup(proc)
+
+    // Generous: the POSIX branch escalates SIGTERM to SIGKILL at 750ms.
+    await Bun.sleep(1_500)
+    const after = size()
+    await Bun.sleep(400)
+    expect(size()).toBe(after)
+  } finally {
+    try {
+      terminateProcessGroup(proc)
+    } catch {
+      // already reaped
+    }
+    await rm(dir, { recursive: true, force: true })
+  }
+}, 30_000)
