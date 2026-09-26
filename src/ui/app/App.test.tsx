@@ -758,3 +758,39 @@ test('a slash command can run as a turn of its own, and mid-turn messages reach 
     unmount()
   }
 })
+
+test('a session can start working by itself, and you can talk to it while it does', async () => {
+  let release!: () => void
+  const held = new Promise<void>((resolve) => { release = resolve })
+  let ran = 0
+  const props = {
+    ...baseProps(),
+    initialTurn: {
+      label: '/autopilot',
+      notice: 'Working on this project by myself.',
+      run: async (hooks: import('./App.tsx').TurnHooks) => {
+        ran += 1
+        hooks.onActivity({ kind: 'status', title: '◆ surveying the repository…', status: 'completed' })
+        await held
+      },
+    },
+    liveReply: async () => ({ answer: 'Surveying the repo, then running its tests.' }),
+  }
+  const { stdin, lastFrame, unmount } = render(<App {...props} />)
+  try {
+    const started = await waitForFrame(lastFrame, 'surveying the repository')
+    expect(started).toContain('Working on this project by myself.')
+    expect(started).toContain('esc to interrupt')
+    // Started by the session, not typed: no user line echoes the label.
+    expect(started).not.toContain('❯ /autopilot')
+    stdin.write('what are you up to')
+    await waitForFrame(lastFrame, 'what are you up to')
+    stdin.write('\r')
+    await waitForFrame(lastFrame, 'then running its tests')
+    release()
+    await waitForFrame(lastFrame, READY)
+    expect(ran).toBe(1)
+  } finally {
+    unmount()
+  }
+})

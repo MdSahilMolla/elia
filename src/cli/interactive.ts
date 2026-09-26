@@ -2751,10 +2751,36 @@ export async function runInteractive(): Promise<void> {
     }
     armPractice()
 
+    // A bare `elia` in a project starts working on its own: the autopilot is
+    // the session's first turn (autopilot/launch.ts says when it is not).
+    const [{ decideLaunch }, { ELIA_ROOT: eliaRoot }] = await Promise.all([import('../autopilot/launch.ts'), import('../config.ts')])
+    const launch = decideLaunch({
+      root: process.cwd(),
+      eliaRoot,
+      env: process.env,
+      interactive: interactiveTerminal,
+      chat: hasFlag('--chat'),
+      prompt: oneShotPrompt.length > 0,
+      continuing: continueFlag || resumeId !== undefined,
+      devMode: mode === 'dev' && !persona,
+    })
+    const practiceReport = practiceHere ? practice.takePracticeReport() : undefined
+    const launchNotice = launch.start ? undefined : launch.notice
+    const initialTurn = launch.start
+      ? {
+          label: launch.resume ? '/autopilot resume' : '/autopilot',
+          notice: launch.resume
+            ? 'Picking the autopilot back up where it stopped. Ask me anything while it works; tell me to change course and it goes to the front of the backlog. Esc stops it · elia --chat opens without it.'
+            : 'Working on this project by myself: surveying it, running its checks, and doing the most valuable next goals on a branch of my own. Ask me anything while I work; tell me to change course and it goes to the front of the backlog. Esc stops me · elia --chat opens without it.',
+          run: (hooks: Parameters<typeof runAutopilotTurn>[1]) => runAutopilotTurn({ planOnly: false, resume: launch.resume, maxGoals: 3 }, hooks),
+        }
+      : undefined
+
     await runInkRepl({
       sessionId,
       version: cliVersion,
-      startupNotice: practiceHere ? practice.takePracticeReport() : undefined,
+      startupNotice: [practiceReport, launchNotice].filter(Boolean).join('\n') || undefined,
+      initialTurn,
       getEnv: () => ({ model: config.model, providerLabel: config.providerLabel, providerName: config.providerName, routing: config.routingMode }),
       commands: allSlashCommands(),
       initialReplMode: replMode,

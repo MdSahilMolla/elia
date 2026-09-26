@@ -163,6 +163,11 @@ export interface AppProps {
    * Absent: mid-turn text is folded in as steering only, as before.
    */
   liveReply?(question: string, view: LiveView, signal: AbortSignal): Promise<{ answer: string; steer?: string }>
+  /**
+   * A turn the session starts by itself as soon as it opens — a bare `elia`
+   * in a project starts the autopilot this way. `notice` says why, once.
+   */
+  initialTurn?: { label: string; notice?: string; run(hooks: TurnHooks): Promise<void> }
 }
 
 /**
@@ -865,6 +870,7 @@ export function App(props: AppProps) {
         if (typeof outcome === 'object' && outcome?.text) store.notice(outcome.text)
         store.commit()
         await runOne(turn.label, { body: turn.run })
+        await drainRef.current?.()
         return
       }
       const submitText = typeof outcome === 'object' && outcome ? outcome.submitText : undefined
@@ -890,6 +896,67 @@ export function App(props: AppProps) {
     [props, store, runOne, writeStdout],
   )
 
+
+  /**
+   * What arrived while a turn ran and still needs doing, run once it ends.
+   *
+   * Queued commands first — but not after an Esc/Ctrl+C stop: the UI just told
+   * the user queued items are kept and need an explicit send ("Send anything to
+   * apply, or Esc again to drop them"), so auto-running them here would
+   * contradict that. The abort check runs *before* each shift (like the
+   * steering drain below) so a stop doesn't silently pop-and-drop an item that
+   * was never run.
+   */
+  const drainAfterTurn = useCallback(async (): Promise<void> => {
+    while (queueRef.current.length > 0 && !abortedRef.current) {
+      const next = shiftQueue()
+      if (next === undefined) break
+      // Only slash and shell lines are ever queued (the busy branch below
+      // steers plain text instead), so they have to be dispatched as
+      // commands here. Handing them to `runOne` sent the literal text to
+      // the model — a queued `/settings` arrived as a prompt reading
+      // "/settings".
+      if (isCommandLine(next)) await runCommandLine(next)
+      else await runOne(next)
+    }
+
+    // Steering that landed in the gap after the loop's last fold-in check —
+    // it was never applied. Send it as its own turn rather than silently
+    // prepending it to whatever the user types next. Not after an Esc/Ctrl+C
+    // stop: there the user chose to halt, so an auto follow-up isn't wanted.
+    while (steeringRef.current.length > 0 && !abortedRef.current) {
+      const pending = steeringRef.current.join('\n')
+      steeringRef.current = []
+      setSteeringCount(0)
+      store.notice('↳ sending steering that arrived as the turn ended')
+      await runOne(pending)
+    }
+  }, [store, runOne, runCommandLine])
+  const drainRef = useRef<(() => Promise<void>) | null>(null)
+  drainRef.current = drainAfterTurn
+
+  // A session that starts working by itself (a bare `elia` in a project):
+  // the turn begins once the header has painted, exactly as if it had been
+  // typed — the working line, Esc and live replies all behave as for any turn.
+  const initialTurnStarted = useRef(false)
+  useEffect(() => {
+    const initial = props.initialTurn
+    if (!initial || initialTurnStarted.current) return
+    initialTurnStarted.current = true
+    const timer = setTimeout(() => {
+      void (async () => {
+        turnStartingRef.current = true
+        try {
+          if (initial.notice) store.notice(initial.notice)
+          await runOne(initial.label, { echo: false, body: initial.run })
+          await drainAfterTurn()
+        } finally {
+          turnStartingRef.current = false
+        }
+      })()
+    }, 30)
+    return () => clearTimeout(timer)
+  }, [])
 
   const onSubmit = useCallback(
     async (line: string) => {
@@ -992,37 +1059,7 @@ export function App(props: AppProps) {
         }
 
         await runOne(trimmed, { echo: false })
-
-        // Drain anything queued while that turn ran — but not after an Esc/
-        // Ctrl+C stop: the UI just told the user queued items are kept and
-        // need an explicit send ("Send anything to apply, or Esc again to
-        // drop them"), so auto-running them here would contradict that. The
-        // abort check runs *before* each shift (like the steering drain
-        // below) so a stop doesn't silently pop-and-drop an item that was
-        // never run.
-        while (queueRef.current.length > 0 && !abortedRef.current) {
-          const next = shiftQueue()
-          if (next === undefined) break
-          // Only slash and shell lines are ever queued (the busy branch above
-          // steers plain text instead), so they have to be dispatched as
-          // commands here. Handing them to `runOne` sent the literal text to
-          // the model — a queued `/settings` arrived as a prompt reading
-          // "/settings".
-          if (isCommandLine(next)) await runCommandLine(next)
-          else await runOne(next)
-        }
-
-        // Steering that landed in the gap after the loop's last fold-in check —
-        // it was never applied. Send it as its own turn rather than silently
-        // prepending it to whatever the user types next. Not after an Esc/Ctrl+C
-        // stop: there the user chose to halt, so an auto follow-up isn't wanted.
-        while (steeringRef.current.length > 0 && !abortedRef.current) {
-          const pending = steeringRef.current.join('\n')
-          steeringRef.current = []
-          setSteeringCount(0)
-          store.notice('↳ sending steering that arrived as the turn ended')
-          await runOne(pending)
-        }
+        await drainAfterTurn()
       } finally {
         turnStartingRef.current = false
         // Nothing ran after the pre-check (an error, a declined risk prompt):
@@ -1030,7 +1067,7 @@ export function App(props: AppProps) {
         carriedTurnStart.current = undefined
       }
     },
-    [busy, mode, props, store, runOne, exit, writeStdout, beginProgress, answerLive],
+    [busy, mode, props, store, runOne, exit, writeStdout, beginProgress, answerLive, drainAfterTurn],
   )
   submitRef.current = onSubmit
 

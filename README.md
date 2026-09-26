@@ -31,7 +31,7 @@ The guards are enforced in code. The verifier must not get worse. The benchmark,
 
 ## What elia does
 
-- **It works a task like an engineer.** Before it changes anything, elia looks around the project and proposes a plan. The plan lists the steps and the exact commands that will prove the work is correct. Once you approve, a fleet of specialised sub-agents (scouts, builders, frontend and backend workers, testers) carries out the plan in parallel. Reviewers then check the result: a critic, a security reviewer and a bug hunter. If something fails, elia repairs it and records what it learned for the next run.
+- **It works a task like an engineer.** Before it changes anything, elia looks around the project and proposes a plan. The plan lists the steps and the exact commands that will prove the work is correct. Then a fleet of specialised sub-agents (scouts, builders, frontend and backend workers, testers) carries out the plan in parallel. Reviewers then check the result: a critic, a security reviewer and a bug hunter. If something fails, elia repairs it and records what it learned for the next run. It doesn't wait for you to approve the plan unless you ask it to (`--supervised`).
 - **Every action goes through a gate.** A code-based *autonomy governor*, not a prompt, checks each tool call before it runs. Safe work goes ahead. Irreversible actions need your explicit approval: deleting, pushing, publishing, sending messages, deploying to production. That includes unattended runs. Each autonomous run leaves a redacted action ledger and a human-readable receipt. elia doesn't count a run as "done" just because the model said so; the run needs evidence first.
 - **It needs no task.** Point `elia autopilot` at a repository it has never seen. It surveys the files and history, runs the project's own checks to see what passes, works out what the project is for, where it stands and where it is heading, and then plans and does the most valuable next goals unattended. Every claim it makes about the project cites a file or a fact it read; claims that cite nothing are dropped. It works on a branch of its own and measures the checks again after each goal. A goal that turns any passing check red is rolled back, and the attempt is kept as a git ref so nothing is lost. Nothing is pushed, deployed or sent; what only a person can do is listed in `.elia/autopilot/REPORT.md`.
 - **You can talk to it while it works.** A message sent mid-task gets an answer right away, with the whole session in view: the conversation, the plan, the tools running, what the autopilot is doing. That answer comes from a read-only side of the session that can open files but not change them. If the message changes the plan ("also add tests", "use postgres instead"), that instruction reaches the running work at its next step. Nothing waits in a queue.
@@ -81,7 +81,8 @@ You can also sign in with a ChatGPT subscription through the official Codex CLI.
 ## Use it
 
 ```bash
-elia                                   # interactive session
+elia                                   # in a clean git repo: starts working on its own; talk to it while it works
+elia --chat                            # a session that waits for you (also ELIA_AUTOPILOT=off)
 elia "summarize this project"          # one-shot prompt
 elia --continue                        # resume the last session in this folder
 elia sessions                          # every conversation saved here, and what each one started with
@@ -91,7 +92,8 @@ elia autopilot                                       # no task: understand the r
 elia autopilot --plan-only                           # survey, run the checks, understand and plan — change nothing
 elia autopilot status                                # where the last pilot stands (full report: .elia/autopilot/REPORT.md)
 
-elia auto "add rate limiting to the API client"      # plan → approve → build → verify → review → learn
+elia auto "add rate limiting to the API client"      # plan → build → verify → review → learn, unattended
+elia auto "…" --supervised                           # show the plan and wait for your approval first
 elia auto "fix the race in the queue" --variants 3   # three independent attempts; the verified one wins
 elia runs                                            # past autonomous runs
 elia fork <run-id> --at 1 --with "use a token bucket instead"   # re-plan from a checkpoint

@@ -188,6 +188,9 @@ async function understand(state: PilotState, options: PilotOptions, log: (line: 
   const survey = state.survey!
   log('◆ forming an understanding of the project (reading its key files)…')
   const formed = await formUnderstanding(survey, state.latest ?? state.baseline, { model: options.understandingModel, signal: options.signal })
+  // Cut short, the answer is a fallback, not an understanding; keeping it
+  // would stop a resumed pilot from ever reading the project properly.
+  if (options.signal?.aborted) return
   state.understanding = formed.understanding
   const before = state.backlog.length
   state.backlog = refreshBacklog(state.backlog, { survey, health: state.latest ?? state.baseline, proposed: formed.goals })

@@ -18,6 +18,12 @@ workspace), a REPL redesign, and a broad reliability/perf pass.
   the attempt at `refs/elia/autopilot/…`. Durable and resumable
   (`.elia/autopilot/`), with `--plan-only`, `--resume`, `status`, `report`, and
   `/autopilot` inside a session.
+- **Working is the default.** A bare `elia` in a clean git repository starts
+  the autopilot as the session's first turn (or resumes it, when you are still
+  on its branch with goals queued); it waits for you instead outside a repo,
+  with uncommitted changes, in elia's own checkout, with a prompt or
+  `--continue`/`--resume`, or with `--chat` / `ELIA_AUTOPILOT=off`. `elia auto`
+  runs unattended by default; `--supervised` restores the plan approval.
 - **Live replies.** A message sent while elia works is answered at once by a
   read-only lane that sees the conversation, plan, running tools, progress and
   the autopilot's state, and can open files. A direction comes back with a

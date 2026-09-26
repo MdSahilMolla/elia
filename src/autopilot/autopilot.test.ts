@@ -275,6 +275,17 @@ describe('pilot end to end (real git, fake model and worker)', () => {
     expect(resumed.state.stopReason).toContain('goal budget reached')
   })
 
+  test('an understanding cut short by Esc is not kept, so a resume reads the project again', async () => {
+    const controller = new AbortController()
+    const stopped = await runPilot({ root, signal: controller.signal, understandingModel: async () => { controller.abort(); return { model: 'fake-model', text: '' } }, checkRunner: fileRunner, has: () => true, env: {}, spendExceeded: () => false, log: () => {} })
+    expect(stopped.state.understanding).toBeUndefined()
+    expect(stopped.state.stopReason).toBe('stopped by the operator')
+    let calls = 0
+    const resumed = await runPilot({ root, resume: true, planOnly: true, understandingModel: async () => { calls += 1; return model() }, checkRunner: fileRunner, has: () => true, env: {}, log: () => {} })
+    expect(calls).toBe(1)
+    expect(resumed.state.understanding?.purpose).toBe('A tiny HTTP API for notes')
+  })
+
   test('operator directions jump the queue', async () => {
     const titles: string[] = []
     let directions = ['add a /health endpoint']

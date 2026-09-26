@@ -11,7 +11,10 @@ export function printHelp(): void {
   console.log(`elia — a general-purpose autonomous agent for your terminal
 
 Usage:
-  elia                        Start an interactive session
+  elia                        Start a session. In a clean git repository elia starts working on its
+                              own (the autopilot) — talk to it while it works, Esc stops it. It waits
+                              for you instead outside a repo, with uncommitted changes, or with --chat
+  elia --chat                 Open a session that waits for you (also ELIA_AUTOPILOT=off)
   elia "<prompt>"             Run a single prompt and exit
   elia --continue, -c         Resume the most recent session in this directory
   elia --resume [id]          Reopen a past conversation — with no id, pick one from the list
@@ -48,12 +51,11 @@ Goal-free autonomy (no task given — elia decides what to work on):
                                      (.elia/autopilot/REPORT.md). Inside a session: /autopilot
 
 Autonomous work:
-  elia auto "<goal>"                Plan the work, show you the plan, then execute it with a
-                                     fleet of sub-agents, verify it, repair what failed, and
-                                     record what it learned
-  elia auto "<goal>" --yolo         Same, without waiting for you to approve the plan
-  elia auto "<goal>" --autonomous   Self-supervised alias for --yolo; executes, verifies, repairs, and polishes
-  elia auto "<goal>" --unattended   Run safe, bounded work without routine prompts; critical actions still block
+  elia auto "<goal>"                Plan the work, then execute it with a fleet of sub-agents,
+                                     verify it, repair what failed, and record what it learned
+  elia auto "<goal>" --supervised   Show you the plan and wait for your approval before executing
+                                     (unattended is the default: safe, bounded work runs without routine
+                                     prompts; critical actions still block. --yolo/--unattended are accepted)
   elia auto "<goal>" --no-polish     Skip the bounded final quality pass
   elia auto "<goal>" --fast          Bounded fast path: no polish, one reviewer, one repair, no lesson pass
   elia auto "<goal>" --thorough      Extra bounded review and repair depth for high-risk changes
