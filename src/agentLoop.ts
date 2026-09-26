@@ -2,7 +2,7 @@ import { availableParallelism, cpus } from 'node:os'
 import { autoFallbacksFor, config } from './config.ts'
 import { beginCompaction, shrinkForOversizedRequest, type PendingCompaction } from './compaction.ts'
 import { compactionThresholdFor } from './contextWindow.ts'
-import { isCapacityError, isConnectionError, isMalformedToolCallError, isRequestTooLargeError, isTransientServerError, retryBackoffMs } from './providerErrors.ts'
+import { isConnectionError, isFallbackableProviderError, isMalformedToolCallError, isRequestTooLargeError, isTransientServerError, isUnusableRouteError, retryBackoffMs } from './providerErrors.ts'
 import { createPlanlessWorkTracker, createRedundantReadTracker, isLoneBatchableRead, serialReadNudge } from './autonomy/toolBatchingNudge.ts'
 import { createReadAhead } from './autonomy/readAhead.ts'
 import { createPlanProgressTracker, planBelongsToRequest, type PlanProgressUpdate, type ToolOutcome } from './autonomy/planProgress.ts'
@@ -60,6 +60,17 @@ function detectCoreCount(): number {
 export const DEFAULT_PARALLEL_TOOLS = Math.max(MAX_PARALLEL_WRITE_TOOLS, Math.min(MAX_SAFE_PARALLEL_TOOLS, detectCoreCount() - 1))
 const MAX_PROVIDER_ATTEMPTS = 3
 const PROVIDER_HEALTH_COOLDOWN_MS = 30_000
+/**
+ * A route that keeps failing gets progressively longer to recover — 30s on the
+ * first failure, doubling each consecutive one and capped at ten minutes. The
+ * failure count was already tracked per route; without this the same route that
+ * failed every turn was cooled down for the same 30s each time the loop sprinted
+ * past it and immediately burned another attempt.
+ */
+const PROVIDER_HEALTH_COOLDOWN_MAX_MS = 10 * 60_000
+export function providerHealthCooldownMs(failures: number): number {
+  return Math.min(PROVIDER_HEALTH_COOLDOWN_MS * 2 ** (failures - 1), PROVIDER_HEALTH_COOLDOWN_MAX_MS)
+}
 
 /**
  * How long to wait before asking the same route again after a server-side
@@ -927,14 +938,15 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
               return result.content
             } catch (error) {
               lastError = error
-              if (isConnectionError(error instanceof Error ? error.message : String(error))) unreachable.add(routeIndex)
+              const message = error instanceof Error ? error.message : String(error)
+              if (isConnectionError(message)) unreachable.add(routeIndex)
               // Ask the same model again, even after text has streamed: the
               // failed attempt's text never reached `messages`, so the only cost
               // is seeing it twice, against losing the turn — or, in a sub-agent,
               // the whole run. Not after an action, and not a provider-health
               // failure: the route is fine, the sample was not.
               if (
-                isMalformedToolCallError(error instanceof Error ? error.message : String(error))
+                isMalformedToolCallError(message)
                 && !emittedActions
                 && !signal?.aborted
                 && attempt < MAX_PROVIDER_ATTEMPTS
@@ -942,35 +954,35 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
                 if (verbose) writeNotice('the model sent a tool call that was not valid JSON; asking it again')
                 continue
               }
-              const unusable = isUnusableRouteError(error)
-              if (unusable || isFallbackableProviderError(error)) {
+              const unusable = isUnusableRouteError(message)
+              if (unusable || isFallbackableProviderError(message)) {
                 const key = providerHealthKey(route)
                 const previous = providerHealth.get(key)
-                providerHealth.set(key, { failures: (previous?.failures ?? 0) + 1, cooldownUntil: Date.now() + PROVIDER_HEALTH_COOLDOWN_MS, lastError: error instanceof Error ? error.message : String(error) })
+                const failures = (previous?.failures ?? 0) + 1
+                providerHealth.set(key, { failures, cooldownUntil: Date.now() + providerHealthCooldownMs(failures), lastError: message })
               }
               // A server-side hiccup: wait, then ask the same route again — even
               // after text has streamed, for the same reason as a garbled tool
               // call above, and never after the provider acted. Only on the last
               // route, or once output has been shown; before that, the next route
               // is the faster answer.
-              const failure = error instanceof Error ? error.message : String(error)
               const transientDelays = transientRetryDelaysMs()
               if (
-                isTransientServerError(failure)
+                isTransientServerError(message)
                 && !emittedActions
                 && !signal?.aborted
                 && attempt <= transientDelays.length
                 && (emittedOutput || !activeRoutes[routeIndex + 1])
               ) {
                 const delayMs = transientDelays[attempt - 1]!
-                if (verbose) writeNotice(`provider ${route.label ?? `${route.providerName} (${route.model})`} failed on its side (${failure.slice(0, 80)}); asking again in ${Math.ceil(delayMs / 1000)}s`)
+                if (verbose) writeNotice(`provider ${route.label ?? `${route.providerName} (${route.model})`} failed on its side (${message.slice(0, 80)}); asking again in ${Math.ceil(delayMs / 1000)}s`)
                 await sleepUnlessAborted(delayMs, signal)
                 if (signal?.aborted) throw error
                 continue
               }
               // Retrying after output was emitted would duplicate a partial answer in
               // the terminal. Only route before any output has been emitted.
-              if (emittedOutput || !(unusable || isFallbackableProviderError(error))) throw error
+              if (emittedOutput || !(unusable || isFallbackableProviderError(message))) throw error
               if (signal?.aborted) throw error
 
               // The request was rejected for its *size*. Neither routing nor
@@ -981,7 +993,7 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
               // the next provider will answer either.
               if (
                 attempt < MAX_PROVIDER_ATTEMPTS
-                && isRequestTooLargeError(error instanceof Error ? error.message : String(error))
+                && isRequestTooLargeError(message)
                 && shrinkForOversizedRequest(messages)
               ) {
                 if (verbose) writeNotice('request was over the provider limit; trimmed oversized tool output and retrying smaller')
@@ -995,7 +1007,7 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
                   // network blip, a spent key or a request too big for all of
                   // them, and afterwards nothing else says which.
                   writeNotice(
-                    `provider ${route.label ?? `${route.providerName} (${route.model})`} unavailable (${redactText(failure.split('\n')[0] ?? '', 120)}); trying ${nextRoute.label ?? `${nextRoute.providerName} (${nextRoute.model})`}`,
+                    `provider ${route.label ?? `${route.providerName} (${route.model})`} unavailable (${redactText(message.split('\n')[0] ?? '', 120)}); trying ${nextRoute.label ?? `${nextRoute.providerName} (${nextRoute.model})`}`,
                   )
                 }
                 break
@@ -1005,7 +1017,7 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
                 if (networkMayRecover()) break
                 throw error
               }
-              await sleepUnlessAborted(retryBackoffMs(failure, attempt), signal)
+              await sleepUnlessAborted(retryBackoffMs(message, attempt), signal)
             }
           }
         }
@@ -1205,40 +1217,6 @@ function providerHealthKey(route: ProviderRoute): string {
 
 export function resetProviderHealthForTests(): void {
   providerHealth.clear()
-}
-
-/**
- * Whether an error is worth retrying, or routing to another provider.
- *
- * Two families were missing and both end a turn outright when they hit:
- * overload (`529` / `overloaded_error`), which is the single most common
- * transient failure under load and is precisely what a fallback route exists
- * for; and context overflow (`prompt is too long`,
- * `context_length_exceeded`), which another route with a larger window can
- * actually serve. Neither is a bug in the request, so neither should be fatal.
- *
- * The context-overflow half was only half-covered: it listed the two Anthropic
- * spellings and missed the OpenAI-compatible ones entirely (`413`, "Request
- * too large", a per-minute token cap), so a live run lost two steps to an
- * error this function called fatal. `isCapacityError` is now the single
- * spelling of that family, shared with `classifyFailure`.
- */
-/**
- * A route that cannot be used at all — out of credit, or its key refused. Asking
- * it again is pointless, but the next route may well answer: these used to end
- * the turn, so a free-tier OpenRouter key with no credit (402) never handed over.
- */
-function isUnusableRouteError(error: unknown): boolean {
-  const message = error instanceof Error ? error.message : String(error)
-  return /\b(?:401|402|403)\b|payment required|insufficient[_ ](?:credits?|quota|balance|funds)|requires more credits|invalid[_ ]api[_ ]key|incorrect api key|unauthori[sz]ed/i.test(message)
-}
-
-function isFallbackableProviderError(error: unknown): boolean {
-  const message = error instanceof Error ? error.message : String(error)
-  if (isCapacityError(message)) return true
-  return /connection|fetch failed|network|timeout|timed out|overloaded|model (?:not found|unavailable)|not found|404|500|502|503|504|529|server had an error/i.test(
-    message,
-  )
 }
 
 /** Runs `fn` over `items` with at most `limit` in flight at once, preserving result order. */

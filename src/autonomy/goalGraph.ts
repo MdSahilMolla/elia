@@ -1113,33 +1113,8 @@ function normalizeSnapshot(snapshot: GoalGraphSnapshot, options: GoalGraphOption
  * worthless half — `"Verdict recorded."` — and the half that matters is the
  * side effect of capturing the verdict, which replay skips entirely.
  *
- * The consequence was severe and silent. A reviewer that approves twice with
- * the same wording produces an identical call, so the second review round
- * replays it: the tool body never runs, nothing is captured, and
- * `requireCriticVerdict` correctly fails closed with "submit_verdict was never
- * called". Every subsequent round does the same, so once a run enters its
- * repair loop the review gate can no longer be satisfied by any reviewer, and
- * the run exhausts its repair budget and ends `needs-attention`. Observed in
- * the recorded history as `reviewPassed: false` on ten of eleven runs, and
- * reproduced end to end: round 1 `replayed=false` (verdict captured), rounds 2
- * and 3 `replayed=true` (all three reviewers reported as never having spoken).
- *
- * Nothing is lost by excluding them: they touch nothing outside the process, so
- * there is no duplicate side effect for idempotency to protect against.
+ * The canonical list lives in `reportingTools.ts` (a leaf, importable by both
+ * the governor and this module); it is re-exported here so every existing
+ * import site keeps working unchanged.
  */
-export const REPORTING_TOOLS = new Set([
-  'submit_proposal',
-  'submit_verdict',
-  'submit_acceptance',
-  'submit_assumptions',
-  'submit_lessons',
-  'submit_route',
-  'submit_fragment',
-  'submit_hypothesis',
-  'submit_strategy',
-  'revise_plan',
-])
-
-export function isReportingTool(name: string): boolean {
-  return REPORTING_TOOLS.has(name)
-}
+export { REPORTING_TOOLS, isReportingTool } from './reportingTools.ts'
