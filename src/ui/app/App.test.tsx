@@ -642,3 +642,36 @@ test('a slash command queued during a turn is dispatched, not sent to the model'
   // The whole point: it must not have become a prompt.
   expect(prompts).toEqual(['build the thing'])
 })
+
+// Seen on a real console with a slow model: Esc during "Checking the request"
+// printed "Stopping the turn…" and the turn then ran anyway — the stop handle
+// only existed once the turn proper had started.
+test('Esc during the risk pre-check stops the message before anything is sent', async () => {
+  let prompts = 0
+  let releaseCheck!: () => void
+  const checking = new Promise<void>((resolve) => { releaseCheck = resolve })
+  const props = {
+    ...baseProps(),
+    classifyRisk: async () => {
+      await checking
+      return { risky: false }
+    },
+    submitTurn: async () => {
+      prompts += 1
+    },
+  }
+  const { stdin, lastFrame } = render(<App {...props} />)
+  await waitForFrame(lastFrame, READY)
+  await settle()
+  stdin.write('deploy the thing')
+  await waitForFrame(lastFrame, 'deploy the thing')
+  stdin.write('\r')
+  await waitForFrame(lastFrame, 'Checking the request')
+  stdin.write('\u001b')
+  await waitForFrame(lastFrame, 'Stopped before it started')
+  // The classifier answering late changes nothing.
+  releaseCheck()
+  await new Promise((resolve) => setTimeout(resolve, 150))
+  expect(prompts).toBe(0)
+  expect(lastFrame()).toContain(READY)
+})

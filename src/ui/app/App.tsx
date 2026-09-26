@@ -889,11 +889,30 @@ export function App(props: AppProps) {
           beginProgress(checkedAt)
           carriedTurnStart.current = checkedAt
           setStatus('Checking the request')
+          // Esc stops a turn by aborting `abortRef`, which the turn proper only
+          // sets once it starts — so an Esc during this pre-check aborted
+          // nothing, "Stopping the turn…" printed, and the turn then ran anyway
+          // (seen on a real console with a slow model, where the check takes
+          // seconds). The pre-check owns the stop handle while it runs, and a
+          // stop ends the message here, before anything is sent.
+          const precheck = new AbortController()
+          abortRef.current = precheck
+          abortedRef.current = false
+          const stopped = new Promise<'stopped'>((resolve) => precheck.signal.addEventListener('abort', () => resolve('stopped'), { once: true }))
           // A pre-check that fails is not a verdict. In manual mode every risky
           // action is still put to you one at a time by the approval menu, so an
           // unreachable classifier lets a harmless message through instead of
           // greeting it with an error and a y/n prompt.
-          const { risky, reason } = await props.classifyRisk(trimmed).catch(() => ({ risky: false, reason: undefined }))
+          const verdict = await Promise.race([props.classifyRisk(trimmed).catch(() => ({ risky: false, reason: undefined })), stopped])
+          if (abortRef.current === precheck) abortRef.current = null
+          if (verdict === 'stopped') {
+            setBusy(false)
+            setStatus('')
+            store.receipt('Stopped before it started — nothing was sent', 'stopped')
+            store.commit()
+            return
+          }
+          const { risky, reason } = verdict
           if (risky) {
             setBusy(false)
             setStatus('')
