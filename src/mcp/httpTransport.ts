@@ -1,6 +1,6 @@
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto'
 import { mcpParseError } from './protocol.ts'
-import { handleMcpMessage } from './protocol.ts'
+import { handleMcpMessage, initializeProtocolVersion, MCP_PROTOCOL_VERSION } from './protocol.ts'
 import type {
   McpClientCapabilities,
   McpProgressEvent,
@@ -135,14 +135,19 @@ function clientCapabilities(message: unknown): McpClientCapabilities | undefined
   return single.params.capabilities as McpClientCapabilities
 }
 
-function requestSessionId(request: Request, sessions: Map<string, McpClientCapabilities>): { id: string; created: boolean; valid: boolean } {
+interface McpSessionState {
+  clientCapabilities: McpClientCapabilities
+  protocolVersion: string
+}
+
+function requestSessionId(request: Request, sessions: Map<string, McpSessionState>): { id: string; created: boolean; valid: boolean } {
   const supplied = request.headers.get('mcp-session-id')
   if (supplied !== null) {
     if (!SESSION_PATTERN.test(supplied)) return { id: supplied, created: false, valid: false }
     return { id: supplied, created: false, valid: sessions.has(supplied) }
   }
   const id = randomUUID()
-  sessions.set(id, {})
+  sessions.set(id, { clientCapabilities: {}, protocolVersion: MCP_PROTOCOL_VERSION })
   while (sessions.size > MAX_SESSIONS) {
     const oldest = sessions.keys().next().value as string | undefined
     if (!oldest) break
@@ -171,7 +176,7 @@ export function createHttpMcpTransport(options: HttpMcpTransportOptions): McpHtt
   const maxBodyBytes = options.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES
   if (!Number.isInteger(maxBodyBytes) || maxBodyBytes < 1_024 || maxBodyBytes > 64 * 1_048_576) throw new Error('HTTP MCP maxBodyBytes must be an integer from 1024 to 67108864')
   if (!isLoopbackHost(host) && options.allowRemoteHost !== true) throw new Error('Remote MCP binding requires an explicit remote-host override')
-  const sessions = new Map<string, McpClientCapabilities>()
+  const sessions = new Map<string, McpSessionState>()
 
   const handleMcp = async (request: Request): Promise<Response> => {
     const url = new URL(request.url)
@@ -260,10 +265,17 @@ export function createHttpMcpTransport(options: HttpMcpTransportOptions): McpHtt
       return jsonResponse(mcpParseError('Unable to read MCP request'), 500, sessionHeaders)
     }
     const capabilities = clientCapabilities(message)
-    if (capabilities) sessions.set(session.id, capabilities)
+    const version = initializeProtocolVersion(message)
+    const existing = sessions.get(session.id)
+    const state: McpSessionState = {
+      clientCapabilities: capabilities ?? existing?.clientCapabilities ?? {},
+      protocolVersion: version ?? existing?.protocolVersion ?? MCP_PROTOCOL_VERSION,
+    }
+    sessions.set(session.id, state)
     const requestOptions: McpProtocolRequestOptions = {
       ...options.requestOptions,
-      clientCapabilities: sessions.get(session.id),
+      clientCapabilities: state.clientCapabilities,
+      protocolVersion: state.protocolVersion,
       signal: request.signal,
     }
     const accept = request.headers.get('accept') ?? ''

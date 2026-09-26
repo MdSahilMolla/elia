@@ -110,7 +110,7 @@ Inside a session, `/model` switches models, `/plan <goal>` starts a planned run,
 
 ## Status
 
-**Working today:** the governed agent loop; parallel role-based sub-agents; the plan → execute → verify → review → repair cycle; durable, resumable runs with receipts; best-of-N execution in git worktrees; run forking; cross-session memory and lessons; MCP client and remote connectors; LSP diagnostics on every edit; the VS Code extension; and the specialist modes.
+**Working today:** the governed agent loop; parallel role-based sub-agents; the plan → execute → verify → review → repair cycle; durable, resumable runs with receipts; best-of-N execution in git worktrees; run forking; cross-session memory and lessons; MCP client and remote connectors; elia itself served as an MCP server over stdio or authenticated HTTP; LSP diagnostics on every edit; the VS Code extension; and the specialist modes.
 
 **Recursive compounding (our focus):** the machinery is complete and gated: recording, real checks, `elia evolve`, `elia distill`, git-history benchmarks, lesson trials and `elia compounding`. So far elia records its experience and checks it for real, and its benchmark still has room to improve (93% on `mercury-2.5`). No generation has been promoted yet, and lesson benefit hasn't been measured, so compounding itself is still unproven. The next milestone is the first promoted generation.
 

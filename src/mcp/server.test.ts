@@ -499,6 +499,9 @@ test('a project policy on disk is honoured when the server starts', async () => 
   writeFileSync(join(cwd, '.elia', 'policy.json'), JSON.stringify({ denyTools: ['shell_exec'], denyIntents: [], denyCommandPatterns: [], requireApprovalAtOrAbove: 'review' }), 'utf8')
   const server = await createEliaMcpServer({ cwd, config: testConfig() })
   try {
+    // A connection that never initializes is treated as 2024-11-05, which
+    // defines no structured output, so a real client has to handshake first.
+    await server.handleRequest({ jsonrpc: '2.0', id: 'init', method: 'initialize', params: INIT_PARAMS })
     const policy = await callTool(server, 'elia_policy_read', {})
     expect(policy.isError).toBeFalsy()
     const effective = policy.structuredContent.effective as Record<string, unknown>
@@ -632,6 +635,83 @@ test('a governance tool rejects two spellings of one argument that disagree', as
     const missing = await callTool(server, 'elia_run_receipt', {})
     expect(missing.isError).toBe(true)
     expect(missing.structuredContent.error.message).toContain('run_id')
+  } finally {
+    await server.close()
+  }
+})
+
+async function initializedWith(protocolVersion: unknown): Promise<EliaMcpServer> {
+  const server = await createEliaMcpServer({ cwd: project(), config: testConfig() })
+  await server.handleRequest({ jsonrpc: '2.0', id: 'init', method: 'initialize', params: { ...INIT_PARAMS, protocolVersion } })
+  return server
+}
+
+async function negotiatedWith(protocolVersion: unknown): Promise<any> {
+  const server = await createEliaMcpServer({ cwd: project(), config: testConfig() })
+  try {
+    return await server.handleRequest({ jsonrpc: '2.0', id: 'init', method: 'initialize', params: { ...INIT_PARAMS, protocolVersion } })
+  } finally {
+    await server.close()
+  }
+}
+
+test('initialize negotiates the version the client asked for', async () => {
+  for (const version of ['2025-06-18', '2025-03-26', '2024-11-05']) {
+    const response = await negotiatedWith(version)
+    expect(response.result.protocolVersion).toBe(version)
+  }
+})
+
+test('initialize falls back rather than echoing a version it does not speak', async () => {
+  for (const unsupported of ['1999-01-01', 'latest', '']) {
+    const response = await negotiatedWith(unsupported)
+    expect(response.result.protocolVersion).toBe('2024-11-05')
+  }
+  const omitted = await negotiatedWith(undefined)
+  expect(omitted.result.protocolVersion).toBe('2024-11-05')
+})
+
+test('a protocolVersion that is not a string is rejected instead of negotiated', async () => {
+  for (const invalid of [7, null, { version: '2025-06-18' }, ['2025-06-18']]) {
+    const response = await negotiatedWith(invalid)
+    expect(response.result).toBeUndefined()
+    expect(response.error.code).toBe(-32_602)
+  }
+})
+
+test('structured output is offered only to a version that defines it', async () => {
+  const modern = await initializedWith('2025-06-18')
+  try {
+    const listed = (await request(modern, 'tools/list')).result.tools as Array<Record<string, unknown>>
+    expect(listed.length).toBe(39)
+    expect(listed.every((tool) => tool.outputSchema !== undefined)).toBe(true)
+    const called = await callTool(modern, 'elia_policy_read', {})
+    expect(called.structuredContent).toBeDefined()
+  } finally {
+    await modern.close()
+  }
+
+  const legacy = await initializedWith('2024-11-05')
+  try {
+    const listed = (await request(legacy, 'tools/list')).result.tools as Array<Record<string, unknown>>
+    expect(listed.length).toBe(39)
+    for (const tool of listed) expect(tool).not.toHaveProperty('outputSchema')
+    const called = await callTool(legacy, 'elia_policy_read', {})
+    expect(called.structuredContent).toBeUndefined()
+    expect(called.content[0].type).toBe('text')
+  } finally {
+    await legacy.close()
+  }
+})
+
+test('requests after initialize do not reset the negotiated version', async () => {
+  const server = await initializedWith('2025-06-18')
+  try {
+    await request(server, 'tools/list')
+    await request(server, 'prompts/list')
+    await callTool(server, 'elia_policy_read', {})
+    const listed = (await request(server, 'tools/list')).result.tools as Array<Record<string, unknown>>
+    expect(listed.every((tool) => tool.outputSchema !== undefined)).toBe(true)
   } finally {
     await server.close()
   }

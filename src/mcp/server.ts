@@ -11,6 +11,8 @@ import { createPromptProvider } from './prompts.ts'
 import { createResourceProvider } from './resources.ts'
 import {
   handleMcpRequest as dispatchMcpRequest,
+  initializeProtocolVersion,
+  MCP_PROTOCOL_VERSION,
   type JsonRpcResponse,
   type McpProtocolRequestOptions,
 } from './protocol.ts'
@@ -37,7 +39,7 @@ export interface EliaMcpServer {
   readonly registry: McpServerRegistry
   handleRequest: (
     request: unknown,
-    options?: Pick<McpProtocolRequestOptions, 'clientCapabilities' | 'signal'>,
+    options?: Pick<McpProtocolRequestOptions, 'clientCapabilities' | 'protocolVersion' | 'signal'>,
   ) => Promise<JsonRpcResponse | undefined>
   close: () => Promise<void>
 }
@@ -88,6 +90,7 @@ export async function createEliaMcpServer(options: CreateEliaMcpServerOptions = 
     promptProvider: registryOptions.promptProvider ?? createPromptProvider(runtime),
   })
   let clientCapabilities: McpClientCapabilities | undefined
+  let protocolVersion = MCP_PROTOCOL_VERSION
   let closed = false
   // The registry filters tools by the mode it is handed, and every tool reads
   // its mode off the execution context, so both have to follow elia_set_mode
@@ -99,9 +102,11 @@ export async function createEliaMcpServer(options: CreateEliaMcpServerOptions = 
     registry,
     async handleRequest(request, requestOptions) {
       clientCapabilities = requestOptions?.clientCapabilities ?? initializeCapabilities(request) ?? clientCapabilities
+      protocolVersion = requestOptions?.protocolVersion ?? initializeProtocolVersion(request) ?? protocolVersion
       return dispatchMcpRequest(request, registry, {
         context: liveContext(),
         clientCapabilities,
+        protocolVersion,
         signal: requestOptions?.signal,
       })
     },
@@ -119,11 +124,13 @@ export async function startStdioMcpServer(
   const server = await createEliaMcpServer(options)
   const onError = options.onError ?? ((error: unknown) => console.error(`elia-mcp stdio: ${errorMessage(error)}`))
   let clientCapabilities: McpClientCapabilities | undefined
+  let protocolVersion = MCP_PROTOCOL_VERSION
   const transport = createStdioTransport({
     backend: server.registry,
     requestOptions: (message) => {
       clientCapabilities = initializeCapabilities(message) ?? clientCapabilities
-      return { context: server.runtime, clientCapabilities }
+      protocolVersion = initializeProtocolVersion(message) ?? protocolVersion
+      return { context: server.runtime, clientCapabilities, protocolVersion }
     },
     input: options.input,
     output: options.output,

@@ -176,6 +176,63 @@ For browser use, a configured Playwright MCP server is detected automatically an
 
 Use `browser` with `status`/`snapshot` first. Accessibility-snapshot targets can then be passed to click or type. Login, CAPTCHA, payment, sensitive input, publishing, sending, purchasing, deletion, and account changes retain their existing approval or user-takeover boundaries.
 
+## Running elia as an MCP server
+
+The sections above are elia *consuming* other people's MCP servers. This is the other direction: elia answering MCP requests, so Claude Desktop, Cursor, Zed, Continue, or anything else that speaks MCP can drive the governed agent loop directly instead of shelling out to the CLI and scraping stdout.
+
+The surface is 39 tools, 6 resources, 2 resource templates, and 5 prompts — see `src/mcp/featureInventory.ts` for the canonical list, which a test walks to prove the inventory and `tools/list` cannot drift apart.
+
+Four ways to start it, for the four ways an operator actually arrives:
+
+```bash
+elia --mcp                      # already in the CLI
+bun run mcp                     # stdio, while developing
+bun run mcp:http                # authenticated HTTP on 127.0.0.1:3284
+elia-mcp                        # the bin, for clients that spawn a command
+```
+
+`mcp-configs/` has a ready file for each client shape: `claude-desktop.json` and `cursor.json` (command plus args), `zed.json` and `continue.json` (command plus env), and `http-example.json`. Copy one into your client's settings directory and set the `cwd` to the project you want governed.
+
+### What the server will and will not let a client do
+
+Three boundaries are enforced in code, not documented as advice:
+
+- **Mode is server state.** A client cannot widen the active mode through `tools/call`; the server rejects a mismatched `mode` outright. `elia_set_mode` changes what `tools/list` advertises *and* what executes, so a mode switch is observable rather than a claim.
+- **A client cannot approve anything.** Every mutation goes through the governor, which owns the approval decision, the actor, and the policy version. `elia_policy_update` rejects a client-supplied `approved`/`actor` rather than quietly overriding it, and policy changes are monotonic — you can tighten, not weaken. Benchmark-gated promotion stays behind its own guard.
+- **Cost is enforced, not reported afterwards.** A run that would cross `--cost-limit-per-session-usd` is refused. `ELIA_MCP_MAX_CONCURRENT_SESSIONS` caps live sessions.
+
+When a receipt carries no priced model, `elia_cost_report` answers `cost_known: false` with `estimate_only: true` and the token counts it *can* prove. It does not invent a dollar figure — a null cost is the honest answer, and the flag tells you which one you got.
+
+### Protocol version
+
+The server negotiates. It accepts `2025-06-18`, `2025-03-26`, and `2024-11-05`; anything else falls back to `2024-11-05` rather than echoing a version it does not speak. `outputSchema` and `structuredContent` are defined in `2025-06-18`, so they are offered **only** to a client that negotiated that version — a client stuck on `2024-11-05` gets plain text content, which it is guaranteed to understand. Elia keeps requesting `2024-11-05` as a *client*, deliberately: raising that would make elia ask every third-party server it connects to for a dialect the server may not have.
+
+### HTTP transport
+
+`--transport http` binds `127.0.0.1:3284` and requires a bearer token, generated on first start at `~/.elia/mcp-token` (override with `--token-path` or `ELIA_MCP_TOKEN_PATH`). Binding anything other than loopback requires an explicit `--allow-remote-host`; the server will not do it by accident. Progress events stream ahead of the response over an SSE channel when the client sends `Accept: text/event-stream`, so a long run visibly makes progress instead of hanging on a pending POST. Unauthenticated requests get 401, unknown sessions 404, and the wrong path 404.
+
+### Verifying it yourself
+
+```bash
+printf '%s\n' \
+  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"probe","version":"0"}}}' \
+  '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
+  '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
+  | bun run mcp
+```
+
+`tools/list` should answer with 39 tools, each carrying an `outputSchema` because you asked for `2025-06-18`. Ask for `2024-11-05` instead and the schemas are gone — that difference is the negotiation working, not a bug.
+
+The one thing the test suite cannot cover is a live provider round trip: `elia_run_task` is exercised against a fake execution context, so the plan → execute → verify → review → repair cycle is only ever driven by a stub. Everything above the model boundary — the governor, the mode pinning, the cost ceiling, the transports — is covered by tests that run on every commit.
+
+There is a separate opt-in smoke for the part tests cannot reach, and it spends real money, so it is not wired into `bun test`:
+
+```bash
+ANTHROPIC_API_KEY=... bun run mcp:smoke
+```
+
+It runs one real `elia_run_task` in a throwaway temp directory, bounded by a cost ceiling, wall clock, and action count, and it only reports success if a receipt landed on disk *and* at least one governed action was actually approved. It does not bypass the governor to get there: the approver grants `safe` actions and refuses `review` and `critical`, so if the planner reaches for something risky the run stops and says why.
+
 ## Delegating to the real OpenAI Codex CLI
 
 The `codex_delegate` tool (dev mode, top-level only) hands a task to the real, separately-installed [OpenAI Codex CLI](https://github.com/openai/codex) — `npm install -g @openai/codex`, then `codex login` with your own ChatGPT subscription or an API key, exactly as you would use it standalone. Elia only shells out to the real binary (`codex exec ... --approve-for-me`, scoped to a given directory, its final answer captured and returned) — it does not implement Codex's authentication itself, does not read or reuse its stored credentials, and does not route elia's own model calls through it. If `codex` isn't installed or not signed in, the tool says so and stops rather than trying to authenticate on your behalf. Like `task`/`preview`, this is governed as a `critical`-risk action requiring explicit approval — elia's governor has no visibility into what Codex does once a task is delegated to it.

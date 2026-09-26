@@ -76,9 +76,43 @@ export interface McpToolCallResult {
   isError?: boolean
 }
 
+/**
+ * The version elia asks for when it is the client. Left at the oldest version
+ * on purpose: raising it would make elia request a dialect from every
+ * third-party server it connects to, which is a different risk from the one
+ * the server role has. The server role negotiates upward from this.
+ */
 export const MCP_PROTOCOL_VERSION = '2024-11-05'
+export const MCP_SUPPORTED_PROTOCOL_VERSIONS = ['2025-06-18', '2025-03-26', MCP_PROTOCOL_VERSION] as const
+export const MCP_STRUCTURED_OUTPUT_VERSION = '2025-06-18'
 export const MCP_CLIENT_INFO = { name: 'elia', version: '0.1.2' }
 export const MCP_SERVER_INFO = { name: 'elia-mcp', version: '0.1.2' }
+
+export function negotiateProtocolVersion(requested: unknown): string {
+  return typeof requested === 'string' && (MCP_SUPPORTED_PROTOCOL_VERSIONS as readonly string[]).includes(requested)
+    ? requested
+    : MCP_PROTOCOL_VERSION
+}
+
+export function supportsStructuredOutput(protocolVersion: string): boolean {
+  return protocolVersion >= MCP_STRUCTURED_OUTPUT_VERSION
+}
+
+/**
+ * Reads the version out of an initialize request so a transport can remember
+ * it for the rest of the connection. Returns undefined when the message is not
+ * an initialize at all, which is different from an initialize that asked for a
+ * version we do not speak - the caller must not treat the second as the first
+ * or every later request resets the connection back to the default.
+ */
+export function initializeProtocolVersion(request: unknown): string | undefined {
+  const entries = Array.isArray(request) ? request : [request]
+  for (const entry of entries) {
+    if (!isRecord(entry) || entry.method !== 'initialize' || !isRecord(entry.params)) continue
+    return negotiateProtocolVersion(entry.params.protocolVersion)
+  }
+  return undefined
+}
 
 export interface McpResourceDescriptor {
   uri: string
@@ -145,6 +179,7 @@ export interface McpProtocolBackend {
 export interface McpProtocolRequestOptions {
   context: McpToolExecutionContext
   clientCapabilities?: McpClientCapabilities
+  protocolVersion?: string
   signal?: AbortSignal
 }
 
@@ -298,12 +333,14 @@ function requireParams(value: unknown): Record<string, unknown> {
   return value
 }
 
-function toolDescriptor(tool: McpToolDefinition): McpToolDescriptor {
+function toolDescriptor(tool: McpToolDefinition, protocolVersion: string): McpToolDescriptor {
   return {
     name: tool.name,
     description: tool.description,
     inputSchema: tool.inputSchema,
-    outputSchema: tool.outputSchema,
+    // outputSchema is defined in 2025-06-18. Advertising it to a client that
+    // negotiated 2024-11-05 is a promise the negotiated version does not make.
+    ...(supportsStructuredOutput(protocolVersion) ? { outputSchema: tool.outputSchema } : {}),
     annotations: {
       title: tool.inventoryId,
       readOnlyHint: !tool.requiresApproval && tool.idempotent,
@@ -333,11 +370,11 @@ function structuredContent(value: unknown): Record<string, unknown> {
   return { result: value }
 }
 
-function toolFailure(error: unknown, code = 'TOOL_EXECUTION_FAILED'): McpToolCallResult {
+function toolFailure(error: unknown, structured: boolean, code = 'TOOL_EXECUTION_FAILED'): McpToolCallResult {
   const message = error instanceof Error ? error.message : String(error)
   return {
     content: [stringContent(message)],
-    structuredContent: { error: { code, message } },
+    ...(structured ? { structuredContent: { error: { code, message } } } : {}),
     isError: true,
   }
 }
@@ -352,16 +389,17 @@ async function callTool(backend: McpProtocolBackend, params: unknown, options: M
   const mode = options.context.mode
   const tool = backend.getTool(call.name, { clientCapabilities: options.clientCapabilities, mode })
   if (!tool) throw new McpProtocolError(JSON_RPC_INVALID_PARAMS, `Tool is unavailable: ${call.name}`)
+  const structured = supportsStructuredOutput(options.protocolVersion ?? MCP_PROTOCOL_VERSION)
   const inputValidation = validateMcpSchema(input, tool.inputSchema)
-  if (!inputValidation.valid) return toolFailure(new Error(`Invalid input: ${inputValidation.errors.join('; ')}`), 'INVALID_INPUT')
+  if (!inputValidation.valid) return toolFailure(new Error(`Invalid input: ${inputValidation.errors.join('; ')}`), structured, 'INVALID_INPUT')
   try {
     const result = await backend.callTool(tool.name, input, options.context, options.signal)
-    const structured = structuredContent(result)
-    const outputValidation = validateMcpSchema(structured, tool.outputSchema)
-    if (!outputValidation.valid) return toolFailure(new Error(`Invalid tool output: ${outputValidation.errors.join('; ')}`), 'INVALID_OUTPUT')
-    return { content: [stringContent(result)], structuredContent: structured }
+    const output = structuredContent(result)
+    const outputValidation = validateMcpSchema(output, tool.outputSchema)
+    if (!outputValidation.valid) return toolFailure(new Error(`Invalid tool output: ${outputValidation.errors.join('; ')}`), structured, 'INVALID_OUTPUT')
+    return { content: [stringContent(result)], ...(structured ? { structuredContent: output } : {}) }
   } catch (error) {
-    return toolFailure(error)
+    return toolFailure(error, structured)
   }
 }
 
@@ -412,7 +450,7 @@ export async function handleMcpRequest(
         const params = requireParams(requestValue.params)
         if (params.protocolVersion !== undefined && typeof params.protocolVersion !== 'string') throw new McpProtocolError(JSON_RPC_INVALID_PARAMS, 'initialize protocolVersion must be a string')
         result = {
-          protocolVersion: MCP_PROTOCOL_VERSION,
+          protocolVersion: negotiateProtocolVersion(params.protocolVersion),
           capabilities: {
             tools: { listChanged: false },
             resources: { subscribe: false, listChanged: false },
@@ -427,7 +465,7 @@ export async function handleMcpRequest(
         result = {}
         break
       case 'tools/list':
-        result = { tools: backend.listTools({ clientCapabilities: options.clientCapabilities, mode: options.context.mode }).map(toolDescriptor) }
+        result = { tools: backend.listTools({ clientCapabilities: options.clientCapabilities, mode: options.context.mode }).map((tool) => toolDescriptor(tool, options.protocolVersion ?? MCP_PROTOCOL_VERSION)) }
         break
       case 'tools/call':
         result = await callTool(backend, requestValue.params, options)

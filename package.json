@@ -43,6 +43,7 @@
     "dev": "bun run bin/elia.ts",
     "mcp": "bun run src/mcp/server.ts",
     "mcp:http": "bun run src/mcp/server.ts --transport http",
+    "mcp:smoke": "bun run scripts/mcp-run-task-smoke.ts",
     "react": "bun run src/react_server.ts",
     "test": "bun test --timeout=20000",
     "typecheck": "tsc --noEmit",
