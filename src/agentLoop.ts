@@ -467,7 +467,10 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
     // folded in at whichever later step boundary it's ready by.
     if (pendingCompaction) {
       if (pendingCompaction.apply(messages)) {
-        if (verbose) writeNotice('elia: earlier history compacted in the background')
+        // Said where the session can see it: otherwise the context meter just
+        // dropped from ~90% with nothing on screen to say why.
+        if (onActivity) onActivity({ kind: 'status', status: 'completed', title: 'Compacted the earlier conversation to free context — it stays recallable' })
+        else if (verbose) writeNotice('elia: earlier history compacted in the background')
         pendingCompaction = undefined
       } else if (pendingCompaction.settled) {
         pendingCompaction = undefined // archive failed or produced nothing — drop it

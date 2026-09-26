@@ -90,7 +90,8 @@ test('a failed risk pre-check lets the message through instead of raising an err
   await new Promise((resolve) => setTimeout(resolve, 80))
   expect(submitted).toBe('change the greeting')
   expect(lastFrame()).not.toContain('Risk check failed')
-  expect(lastFrame()).not.toContain('y/n')
+  // Case-insensitive: the confirm now shows its default as `y/N`.
+  expect(lastFrame()).not.toMatch(/y\/n/i)
 })
 
 test('App streams a turn: user line, tool card, assistant text', async () => {
