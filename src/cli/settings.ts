@@ -45,7 +45,10 @@ export async function runSkills(): Promise<void> {
   if (action === 'bundles') {
     const { bundles, error } = tryListSkillBundles()
     if (error) {
-      writeNotice(`Could not read skill bundles: ${error}`)
+      // A failure, so it goes to stderr and the exit code says so — it used
+      // to be a notice with exit 0, which a script read as success.
+      writeError(`Could not read skill bundles from ${SKILL_BUNDLES_FILE}: ${error}`)
+      process.exitCode = 1
       return
     }
     if (bundles.length === 0) {

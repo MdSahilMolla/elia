@@ -151,8 +151,9 @@ try {
 // Signal handlers are installed by installShutdownHandlers() so every terminal
 // component follows one cleanup path and returns a conventional interrupt code.
 
-await main().catch((err: unknown) => {
-  writeError(`Error: ${err instanceof Error ? err.message : String(err)}`)
+await main().catch(async (err: unknown) => {
+  const { describeCliError } = await import('./cli/errors.ts')
+  writeError(describeCliError(err, { command: subcommand }))
   process.exitCode = 1
 }).finally(async () => {
   const { shutdownMcpTools } = await import('./mcp/registry.ts')

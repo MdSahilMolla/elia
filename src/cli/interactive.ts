@@ -44,6 +44,7 @@ import { redactText } from '../ui/redact.ts'
 import { writeUserConfig } from '../userConfig.ts'
 import { removeProviderConfiguration, savedProviderNames } from '../providerSettings.ts'
 import { flagValue, hasFlag, positionals } from './argv.ts'
+import { describeCliError } from './errors.ts'
 import { ensureFirstRunProviderSetup, interactiveProviderSetup, prewarmActiveProvider, runCodexLogin } from './providerSetup.ts'
 import { actionApprovalPrompt, allSlashCommands, approvalTitle, classifyCommandRisk, loadRuntimeSkills, printTurnProfileReport, requestedAgentMode, userMessage, warnIfAtFilesystemRoot } from './runtime.ts'
 import type { ProviderActivity } from '../providers/types.ts'
@@ -1623,7 +1624,7 @@ export async function runInteractive(): Promise<void> {
         }
       } : undefined)
     } catch (err) {
-      writeError(`Error: ${err instanceof Error ? err.message : String(err)}`)
+      writeError(describeCliError(err, { subject: 'This turn' }))
       process.exitCode = 1
     }
     await persistInteractiveSession()
@@ -3462,7 +3463,7 @@ export async function runInteractive(): Promise<void> {
         return result.action === 'approve'
       })
     } catch (err) {
-      writeError(`Error: ${err instanceof Error ? err.message : String(err)}`)
+      writeError(describeCliError(err, { subject: 'This turn' }))
     }
     await persistInteractiveSession()
     const taskSummary = renderTaskSummary(taskSessions)
