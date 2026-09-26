@@ -219,7 +219,10 @@ export async function runEvolve(): Promise<void> {
   }
   let result: Awaited<ReturnType<typeof evolve>>
   try {
-    result = await evolve({ generations, dryRun: hasFlag('--dry-run'), taskIds })
+    // --branch: a proven change is committed to its own evolve/gen-N-<date>
+    // branch instead of copied into the working tree — what the idle practice
+    // runs do, and what a run nobody is watching should do.
+    result = await evolve({ generations, dryRun: hasFlag('--dry-run'), taskIds, ...(hasFlag('--branch') ? { promoteTo: 'branch' as const } : {}) })
   } finally {
     slot.release()
   }

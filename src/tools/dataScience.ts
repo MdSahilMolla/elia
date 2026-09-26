@@ -127,7 +127,11 @@ function numericValues(dataset: Dataset, column: string): number[] {
   return values(dataset, column).map(numberValue).filter((value): value is number => value !== undefined)
 }
 
-function percentile(sorted: number[], probability: number): number | null {
+/** The value at `probability` (0–1) of an ascending list, interpolated; null for an empty one. */
+export function percentile(sorted: number[], probability: number): number | null {
+  // Out of range used to fall through to an index past the end and come back
+  // as a quiet null, indistinguishable from "no data" (#1269).
+  if (!Number.isFinite(probability) || probability < 0 || probability > 1) throw new RangeError(`percentile probability must be between 0 and 1, got ${probability}`)
   if (sorted.length === 0) return null
   const position = (sorted.length - 1) * probability
   const lower = Math.floor(position)

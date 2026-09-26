@@ -1,5 +1,6 @@
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
+import { noteCorruptState } from '../localJson.ts'
 import { paths } from '../statePaths.ts'
 import type { ConversationMessage } from '../agentLoop.ts'
 import { appendSecureFile, ensureSecureDirectory, hardenSecureFile, writeSecureFile } from '../securePersistence.ts'
@@ -166,7 +167,8 @@ export function readCheckpoint(runId: string, id: number): StoredCheckpoint | un
   hardenSecureFile(path)
   try {
     return JSON.parse(readFileSync(path, 'utf8')) as StoredCheckpoint
-  } catch {
+  } catch (error) {
+    noteCorruptState('journal.readCheckpoint', path, error, { keepCopy: true })
     return undefined
   }
 }

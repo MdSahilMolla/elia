@@ -57,9 +57,12 @@ export function lastRunAt(history: readonly ActivityObservation[], activity: Act
   return latest
 }
 
-function ago(ms: number): string {
+export function ago(ms: number): string {
+  const minutes = Math.round(ms / 60_000)
+  if (minutes < 1) return 'moments ago'
+  if (minutes < 90) return `${minutes} minute(s) ago`
   const hours = Math.round(ms / 3_600_000)
-  return hours < 48 ? `${Math.max(1, hours)} hour(s) ago` : `${Math.round(hours / 24)} day(s) ago`
+  return hours < 48 ? `${hours} hour(s) ago` : `${Math.round(hours / 24)} day(s) ago`
 }
 
 /** Where a round reads elia's state from. Shared, so `elia compounding frontier` and the practice run see the same numbers. */
@@ -189,11 +192,14 @@ export function createRunners(options: RunnerOptions): Partial<Record<Activity, 
           return 'tool' in loaded ? loaded.tool.name : undefined
         },
       })
-      return {
-        ran: true,
-        cost: 0,
-        detail: `lessons: ${backfilled} newly certified, ${lessons.retired.length} retired, ${lessons.kept} kept${lessons.skippedReason ? ` (${lessons.skippedReason})` : ''}; tools: ${skills.audited} re-checked, ${skills.purged.length} purged`,
+      const detail = `lessons: ${backfilled} newly certified, ${lessons.retired.length} retired, ${lessons.kept} kept${lessons.skippedReason ? ` (${lessons.skippedReason})` : ''}; tools: ${skills.audited} re-checked, ${skills.purged.length} purged`
+      // An audit that certified, retired, re-checked and purged nothing did
+      // nothing, and saying it ran would let a free no-op take every round:
+      // on a fresh store the empty library made it "urgent" forever (#1275).
+      if (backfilled === 0 && lessons.retired.length === 0 && skills.audited === 0 && skills.purged.length === 0) {
+        return { ran: false, cost: 0, detail: `nothing to audit yet — ${detail}` }
       }
+      return { ran: true, cost: 0, detail }
     },
 
     // R3. Builds a tool for the most valuable habit that is safe to encode.

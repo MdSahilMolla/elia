@@ -225,6 +225,51 @@ export function sessionUsageByModel(): ModelUsage[] {
     .sort((a, b) => totalTokens(b.usage) - totalTokens(a.usage))
 }
 
+export interface SessionCost {
+  /** What the priced usage cost, each model's tokens at that model's own rate. */
+  usd: number
+  /** Models with usage but no pricing entry, whose share is not in `usd`. */
+  unpriced: string[]
+}
+
+/**
+ * What this session has cost, summed per model.
+ *
+ * A session touches several models — the deep lead, fast-tier sub-agents, the
+ * brain, reviewers — and pricing the summed tokens at any one of them is wrong
+ * in both directions (#1245). `extra` adds usage not recorded yet, such as the
+ * loop that is still running, at the model it runs on.
+ */
+export function sessionCost(extra?: { model: string; usage: Usage }): SessionCost {
+  const entries: Array<[string, Usage]> = [...usageByModel.entries()]
+  if (extra && totalTokens(extra.usage) > 0) entries.push([extra.model, extra.usage])
+  let usd = 0
+  const unpriced: string[] = []
+  for (const [model, usage] of entries) {
+    if (totalTokens(usage) === 0) continue
+    const cost = estimateCostUsd(model, usage)
+    if (cost === undefined) {
+      if (!unpriced.includes(model)) unpriced.push(model)
+    } else usd += cost
+  }
+  return { usd, unpriced }
+}
+
+/** The session's cost for display: exact when every model is priced, a floor marked as such when not. */
+export function formatSessionCost(cost: SessionCost = sessionCost()): string {
+  if (cost.unpriced.length === 0) return formatCostUsd(cost.usd)
+  if (cost.usd === 0) return formatCostUsd(undefined)
+  return `${formatCostUsd(cost.usd)}+ (${cost.unpriced.join(', ')} unpriced)`
+}
+
+/** Session totals are process-wide; tests that record usage clear them so later tests start from zero. */
+export function resetSessionUsageForTests(): void {
+  sessionUsage = ZERO_USAGE
+  sessionTurns = 0
+  sessionElapsedMs = 0
+  usageByModel.clear()
+}
+
 export function recordTopLevelTurn(elapsedMs: number): void {
   sessionTurns += 1
   sessionElapsedMs += elapsedMs
@@ -279,16 +324,14 @@ export function sessionUsageSnapshot(): SessionUsageSnapshot {
 }
 
 /** A compact one-line token/cost tag for the post-turn status line. */
-export function formatCompactUsage(model: string): string {
-  const cost = estimateCostUsd(model, sessionUsage)
-  return `${formatTokenCount(sessionUsage.inputTokens + sessionUsage.cacheReadTokens)} in · ${formatTokenCount(sessionUsage.outputTokens)} out · ${formatCostUsd(cost)}`
+export function formatCompactUsage(): string {
+  return `${formatTokenCount(sessionUsage.inputTokens + sessionUsage.cacheReadTokens)} in · ${formatTokenCount(sessionUsage.outputTokens)} out · ${formatSessionCost()}`
 }
 
-export function getSessionSummaryLine(model: string): string {
-  const cost = estimateCostUsd(model, sessionUsage)
+export function getSessionSummaryLine(): string {
   const tokens = totalTokens(sessionUsage)
   const turnWord = sessionTurns === 1 ? 'turn' : 'turns'
-  return `Session: ${sessionTurns} ${turnWord} · ${formatTokenCount(tokens)} tokens · ${formatCostUsd(cost)} · ${formatElapsed(sessionElapsedMs)}`
+  return `Session: ${sessionTurns} ${turnWord} · ${formatTokenCount(tokens)} tokens · ${formatSessionCost()} · ${formatElapsed(sessionElapsedMs)}`
 }
 
 /** A ten-cell block meter for the `/usage` sub-views. */

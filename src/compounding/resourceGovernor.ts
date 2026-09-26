@@ -16,10 +16,14 @@ import type { CompressionQueue } from '../skills/closure.ts'
  *
  * The expected gains are not known in advance, so the governor starts from the
  * paper's four rules, which say which activity dominates in which state, and
- * lets recorded outcomes take over as they accumulate (a UCB bandit over ΔΦ per
- * unit cost). Every recommendation carries the rule or evidence behind it; a
- * plan with no reason attached is exactly what this directory exists to stop
- * producing.
+ * lets recorded outcomes adjust them as they accumulate (a UCB bandit over ΔΦ
+ * per unit cost). That applies only to the activities whose effect lands on Φ
+ * (`FRONTIER_ACTIVITIES`): Φ is computed from the verification frontier alone,
+ * so an audit, a compression, a harvest or an evolve generation records ΔΦ = 0
+ * whatever it achieved, and a bandit over that would be learning a constant.
+ * Those are ranked by their rules, and the plan says so. Every recommendation
+ * carries the rule or evidence behind it; a plan with no reason attached is
+ * exactly what this directory exists to stop producing.
  */
 
 export type Activity = 'verify' | 'audit' | 'compress' | 'meta' | 'harvest' | 'solve'
@@ -86,6 +90,27 @@ const PRIOR_WEIGHT = 1
 const UCB_C = 0.5
 /** Observations of an activity before its measured value is trusted over the rules. */
 const MIN_OBSERVATIONS = 3
+
+/**
+ * Activities whose outcome moves the verification frontier, the only thing Φ
+ * measures. The measured-value term is applied to these and no others.
+ */
+export const FRONTIER_ACTIVITIES: ReadonlySet<Activity> = new Set(['verify', 'solve'])
+
+/**
+ * ΔΦ per unit cost for one observation, on the scale of the rule priors.
+ *
+ * Divided by the activity's nominal cost, never by the recorded one: a free run
+ * records cost 0, and dividing by that (or a 1e-6 floor) turned a first
+ * `verify` with ΔΦ 0.3 into a score of 300,000 that no later evidence could
+ * displace (#1274). Φ is a share, so ΔΦ lies in [−1, 1], and the mean is kept
+ * in that band too so one lucky run cannot outweigh every rule.
+ */
+export function measuredValue(observation: Pick<ActivityObservation, 'activity' | 'deltaPhi' | 'cost'>): number {
+  const cost = Math.max(ACTIVITY_COST[observation.activity], Number.isFinite(observation.cost) ? observation.cost : 0)
+  const value = observation.deltaPhi / cost
+  return Number.isFinite(value) ? Math.max(-1, Math.min(1, value)) : 0
+}
 
 export function recommend(state: GovernorState, history: readonly ActivityObservation[] = []): Recommendation[] {
   const recs = new Map<Activity, Recommendation>()
@@ -157,14 +182,17 @@ export function recommend(state: GovernorState, history: readonly ActivityObserv
   const inside = state.frontier.families.filter((family) => family.status === 'inside')
   set('solve', inside.length > 0 ? 0.5 : 0.15, 'frontier', inside.length > 0 ? `${inside.map((family) => family.family).join(', ')} are inside the frontier — practice there pays` : 'no family is certainly inside the frontier yet')
 
-  // Measured value: once an activity has a record, ΔΦ per cost (with an
-  // exploration bonus) is added to its rule prior.
-  const total = history.length
+  // Measured value: once an activity that moves Φ has a record, ΔΦ per cost
+  // (with an exploration bonus) is added to its rule prior. The exploration
+  // bonus counts only those activities' runs, so repeating a free activity
+  // outside the frontier cannot inflate anything (#1275, #1276).
+  const frontierRuns = history.filter((observation) => FRONTIER_ACTIVITIES.has(observation.activity)).length
   for (const rec of recs.values()) {
+    if (!FRONTIER_ACTIVITIES.has(rec.activity)) continue
     const mine = history.filter((observation) => observation.activity === rec.activity)
     if (mine.length < MIN_OBSERVATIONS) continue
-    const mean = mine.reduce((sum, observation) => sum + observation.deltaPhi / Math.max(1e-6, observation.cost), 0) / mine.length
-    const bonus = UCB_C * Math.sqrt(Math.log(Math.max(2, total)) / mine.length)
+    const mean = Math.max(-1, Math.min(1, mine.reduce((sum, observation) => sum + measuredValue(observation), 0) / mine.length))
+    const bonus = UCB_C * Math.sqrt(Math.log(Math.max(2, frontierRuns)) / mine.length)
     rec.score = PRIOR_WEIGHT * rec.score + mean + bonus
     rec.why += ` · measured ΔΦ/cost ${mean.toFixed(3)} over ${mine.length} run(s)`
   }

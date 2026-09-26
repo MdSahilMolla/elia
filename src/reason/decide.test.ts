@@ -2,7 +2,7 @@ import { expect, test } from 'bun:test'
 
 process.env.ANTHROPIC_API_KEY ??= 'test-key-for-reason-decide-test'
 
-const { decideSearch, splitChecks } = await import('./decide.ts')
+const { decideAnswerCheck, decideSearch, splitChecks } = await import('./decide.ts')
 
 /** What `detectChecks` actually returns for this repo. */
 const ELIA_CHECKS = ['bun run typecheck', 'bun run test']
@@ -102,4 +102,17 @@ test('naming a file in the project keeps a search even when the request mentions
   // of a named target too.
   const decision = decideSearch('fix the html escaping in src/ui/render.ts', ELIA_CHECKS)
   expect(decision.plan).toBeDefined()
+})
+
+test('questions get the answer check; tasks, small talk and polite requests do not', () => {
+  expect(decideAnswerCheck('which file defines MIN_OBSERVATIONS?').check).toBe(true)
+  expect(decideAnswerCheck('How many retries does the provider make before giving up?').check).toBe(true)
+  expect(decideAnswerCheck('where is the fallback route resolved').check).toBe(true)
+  expect(decideAnswerCheck('the build is slow, is caching on?').check).toBe(true)
+  expect(decideAnswerCheck('can you add a retry to the fetch helper?').check).toBe(false)
+  expect(decideAnswerCheck('fix the failing test in src/parser.ts').check).toBe(false)
+  expect(decideAnswerCheck('add a --json flag to elia bench').check).toBe(false)
+  expect(decideAnswerCheck('thanks, that works?').check).toBe(false)
+  expect(decideAnswerCheck('why?').check).toBe(false)
+  expect(decideAnswerCheck('fix the broken parser?').check).toBe(false)
 })

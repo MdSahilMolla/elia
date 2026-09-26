@@ -129,3 +129,14 @@ test('a forecast that copies the baseline is recorded with a note saying it cann
   const own = await run({ action: 'submit_forecast', questionId: 'q', probability: Math.min(0.95, created.baseline.probability + 0.2), method: 'judgement', rationale: 'Evidence points higher.' })
   expect(own.note).toBeUndefined()
 })
+
+test('a question whose stored resolution rule is corrupt fails naming the question (#1270)', async () => {
+  const { Database } = await import('bun:sqlite')
+  const cwd = mkdtempSync(join(tmpdir(), 'elia-battmann-corrupt-rule-'))
+  const run = async (input: Record<string, unknown>) => JSON.parse(await withAgentIdentity({ name: 'test', role: 'lead', cwd }, () => battmannTool.execute(input)))
+  await run({ action: 'create_question', questionId: 'broken-rule', question: 'Will X happen?', resolutionCriteria: 'X occurs by the horizon.', openedAt: '2025-01-01', horizon: '2099-01-01' })
+  const db = new Database(join(cwd, '.elia', 'battmann.sqlite'))
+  db.query("UPDATE questions SET resolution_rule_json = '{\"source\":' WHERE id = 'broken-rule'").run()
+  db.close()
+  await expect(run({ action: 'submit_forecast', questionId: 'broken-rule', probability: 0.5, method: 'judgement', rationale: 'Even odds.', asOf: '2025-06-01' })).rejects.toThrow('question broken-rule: its stored resolution rule is not valid JSON')
+})
