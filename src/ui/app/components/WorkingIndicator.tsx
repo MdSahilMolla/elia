@@ -1,8 +1,8 @@
 import { useRef, type MutableRefObject } from 'react'
 import { Box, Text } from 'ink'
-import { blendable, glyphs, palette, spinnerFrames } from '../theme.ts'
+import { blendable, glyphs, palette } from '../theme.ts'
 import { motionReduced, useAnimationClock } from '../animation.tsx'
-import { easeToward, mixColor, shimmerRuns, sparkFrame, stallLevel } from '../motion.ts'
+import { easeToward, mixColor, pulseLevel, shimmerRuns, sparkFrame, stallLevel } from '../motion.ts'
 import { formatElapsed, formatTokens, type CheckChip } from '../working.ts'
 import { useFrameWidth } from '../wrap.ts'
 
@@ -58,19 +58,19 @@ const CHECK_MARK: Record<Exclude<CheckChip['state'], 'running'>, string> = {
   skipped: '–',
 }
 
-/** A running check's spinner turns once per this many ms — the same pace as a running tool's. */
-const CHECK_SPIN_MS = 80
-
-export function checkMark(chip: CheckChip, elapsedMs: number, reduced = false): string {
-  if (chip.state !== 'running') return CHECK_MARK[chip.state]
-  if (reduced) return glyphs.running
-  return spinnerFrames[Math.floor(Math.max(0, elapsedMs) / CHECK_SPIN_MS) % spinnerFrames.length]!
+/**
+ * A running check is the pulsing dot a running tool call gets — the one "in
+ * flight" mark the frame uses. It was a braille spinner, a second, busier
+ * vocabulary sitting right beside the spark.
+ */
+export function checkMark(chip: CheckChip): string {
+  return chip.state === 'running' ? glyphs.bullet : CHECK_MARK[chip.state]
 }
 
-function checkColor(state: CheckChip['state']): string | undefined {
+function checkColor(state: CheckChip['state'], elapsedMs = 0): string | undefined {
   if (state === 'passed') return palette.success
   if (state === 'failed') return palette.failure
-  if (state === 'running') return palette.brand
+  if (state === 'running') return motionReduced ? palette.brand : mixColor(palette.brandDim, palette.brand, pulseLevel(elapsedMs))
   return palette.subtle
 }
 
@@ -162,8 +162,8 @@ export function WorkingIndicator({ startedAt, label, progress, thinking = false,
                   {' '}
                   <Text color={chip.state === 'queued' ? palette.subtle : palette.muted}>{chip.label}</Text>
                   {' '}
-                  <Text color={checkColor(chip.state)} bold={chip.state !== 'queued'}>
-                    {checkMark(chip, elapsed, motionReduced)}
+                  <Text color={checkColor(chip.state, elapsed)} bold={chip.state !== 'queued'}>
+                    {checkMark(chip)}
                   </Text>
                 </Text>
               ))}
