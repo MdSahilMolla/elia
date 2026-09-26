@@ -110,10 +110,14 @@ export function profileColumn(frame: Frame, name: string): ColumnProfile {
     semanticType = 'empty'
     confidence = 'high'
     evidence = 'no non-missing values'
-  } else if (distinct === 1) {
+  } else if (distinct === 1 && values.length === present.length) {
     semanticType = 'constant'
     confidence = 'high'
     evidence = `a single value (${String(examples[0])})`
+  } else if (distinct === 1) {
+    semanticType = 'binary'
+    confidence = 'medium'
+    evidence = `a single value (${String(examples[0])}) or missing — informative only through whether it is present`
   } else if (type === 'boolean' || (distinct === 2 && numbers.length && numbers.every((value) => value === 0 || value === 1))) {
     semanticType = hint === 'boolean_flag' || type === 'boolean' ? 'boolean_flag' : 'binary'
     confidence = 'high'

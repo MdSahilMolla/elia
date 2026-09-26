@@ -155,14 +155,21 @@ export function transformRecord(state: PreprocessorState, record: Record<string,
 }
 
 /** Columns that should never be model features: identifiers, constants, free text, and the target itself. */
-export function excludedFeatures(frame: Frame, candidates: string[], profiles: Array<{ name: string; semanticType: string; role: string; distinct: number }>, target?: string): { features: string[]; excluded: Array<{ name: string; reason: string }> } {
+export function excludedFeatures(frame: Frame, candidates: string[], profiles: Array<{ name: string; semanticType: string; role: string; distinct: number }>, target?: string, explicit: Set<string> = new Set()): { features: string[]; excluded: Array<{ name: string; reason: string }>; kept: Array<{ name: string; reason: string }> } {
   const excluded: Array<{ name: string; reason: string }> = []
+  const kept: Array<{ name: string; reason: string }> = []
   const features: string[] = []
   const byName = new Map(profiles.map((profile) => [profile.name, profile]))
   for (const name of candidates) {
     const profile = byName.get(name)
     if (name === target) continue
     if (!profile) {
+      features.push(name)
+      continue
+    }
+    // A feature the user named explicitly is kept unless it cannot carry information at all.
+    if (explicit.has(name) && !['constant', 'empty'].includes(profile.semanticType)) {
+      if (['identifier', 'uuid', 'code'].includes(profile.semanticType) || profile.role === 'text') kept.push({ name, reason: `looks like a ${profile.semanticType === 'code' ? 'near-unique code' : profile.role === 'text' ? 'free-text column' : 'identifier'} but was requested explicitly, so it was kept — check that it generalises` })
       features.push(name)
       continue
     }
@@ -173,7 +180,7 @@ export function excludedFeatures(frame: Frame, candidates: string[], profiles: A
     else if (profile.semanticType === 'code' && profile.distinct > 0.9 * frame.rows.length) excluded.push({ name, reason: 'near-unique code — behaves like an identifier' })
     else features.push(name)
   }
-  return { features, excluded }
+  return { features, excluded, kept }
 }
 
 export { scalarKey }
