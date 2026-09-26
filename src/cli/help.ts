@@ -34,6 +34,19 @@ interruptions; irreversible tool actions are separately governed. Pass --yolo/-y
 (or pick "Risk checks" in "/settings" during a session) to skip the pre-flight
 risk prompt while keeping that action governor active.
 
+Goal-free autonomy (no task given — elia decides what to work on):
+  elia autopilot                    Survey the repo, run its own checks, work out what it is for,
+                                     where it stands and where it is heading, then plan and do the
+                                     next most valuable goals unattended — on a branch of its own.
+                                     A goal that turns any passing check red is rolled back (and
+                                     kept as a git ref). Nothing is pushed, deployed or sent.
+  elia autopilot --plan-only        Survey, measure, understand and plan; change nothing
+  elia autopilot --max-goals N      Goals to run this session (default 5); also --goal-minutes M,
+                                     --hours H, --profile fast|balanced|thorough
+  elia autopilot --resume           Continue the last pilot in this repository
+  elia autopilot status | report    Where the last pilot stands / its full report
+                                     (.elia/autopilot/REPORT.md). Inside a session: /autopilot
+
 Autonomous work:
   elia auto "<goal>"                Plan the work, show you the plan, then execute it with a
                                      fleet of sub-agents, verify it, repair what failed, and

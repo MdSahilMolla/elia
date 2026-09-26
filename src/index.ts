@@ -57,6 +57,10 @@ async function main() {
   switch (subcommand) {
     case 'auto':
       return runAuto()
+    case 'autopilot': {
+      const { runAutopilotCommand } = await import('./cli/autopilot.ts')
+      return runAutopilotCommand()
+    }
     case 'agent':
       return runAgentCommand()
     case 'evolve':

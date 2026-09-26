@@ -120,6 +120,13 @@ export interface AutonomousRunOptions {
   publish?: boolean
   /** Maximum final polish passes; bounded to prevent autonomous thrashing. */
   maxPolishPasses?: number
+  /**
+   * Write PRD/architecture/ADR documents for the goal when the project has
+   * none (default true). The autopilot turns this off: it works a backlog of
+   * small goals in an existing project, and a PRD named after the first of
+   * them would misdescribe the whole project.
+   */
+  projectDocuments?: boolean
   /** Maximum governed tool requests for the entire run; 0 means no additional action-count limit. */
   maxActions?: number
   runId?: string
@@ -1034,7 +1041,7 @@ async function runAutonomousTaskInternal(options: AutonomousRunOptions): Promise
   let hasLocalHistory = false
   if (planApproved) {
     writePhase('scaffold', 'repository, ignore rules, and project documents')
-    const scaffold = await scaffoldProject({ cwd: workspaceRoot, goal, proposal, signal: runSignal, protect: protectedPaths })
+    const scaffold = await scaffoldProject({ cwd: workspaceRoot, goal, proposal, signal: runSignal, protect: protectedPaths, documents: options.projectDocuments })
     if (scaffold.initialized) writeSubStep('initialised a git repository for this project')
     if (scaffold.documents.length > 0) writeSubStep(`wrote ${scaffold.documents.join(', ')}`)
     for (const commit of scaffold.commits) writeSubStep(`committed: ${commit}`)
