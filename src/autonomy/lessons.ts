@@ -76,34 +76,13 @@ const GLOBAL_HEADING = '# Lessons about this machine\n\nEnvironment facts elia l
 const MAX_INJECTED_GLOBAL = 5
 
 /**
- * The keys of the lessons injected into the most recent briefing.
- *
- * Threading these out through every call frame between `renderLessons` (deep in
- * prompt assembly) and the outcome record (the turn's `finally` block) would
- * touch a dozen signatures. elia runs one turn at a time in one process, so a
- * module-local set that the injector fills and the recorder drains is enough —
- * and it is the same shape the autonomous loop passes explicitly through run
- * scope.
+ * The keys of the lessons injected into the most recent briefing used to be
+ * stashed in module globals that the outcome record drained — hidden
+ * render-to-record coupling across call frames. Every render site now returns
+ * `{ text, keys, heldOut }` and its caller records exposure explicitly, so no
+ * hidden state survives between turns (and a turn that escalates into the
+ * autonomous pipeline no longer records the same exposure twice).
  */
-let lastInjectedLessonKeys: string[] = []
-let lastHeldOutLessonKeys: string[] | undefined
-
-export function consumeInjectedLessonKeys(): string[] {
-  const keys = lastInjectedLessonKeys
-  lastInjectedLessonKeys = []
-  return keys
-}
-
-/**
- * The lessons the most recent briefing selected and then withheld — drained
- * like the injected set. `undefined` when holdout was not running for it, so
- * the recorder can keep that run out of the randomized trial.
- */
-export function consumeHeldOutLessonKeys(): string[] | undefined {
-  const keys = lastHeldOutLessonKeys
-  lastHeldOutLessonKeys = undefined
-  return keys
-}
 
 /**
  * Chance that a selected project lesson is withheld from a briefing.
@@ -304,7 +283,7 @@ export function rewriteLessons(lessons: Lesson[], path = paths.lessons): void {
  * which is a real confound for their lift — but a confounded signal on a lesson
  * that could never be measured before is strictly more than none.
  */
-const RECENCY_FLOOR = 10
+export const RECENCY_FLOOR = 10
 
 /** Lessons in file order, so the injected block reads chronologically however members were chosen. */
 function inFileOrder(all: Lesson[], chosen: Set<Lesson>): Lesson[] {
@@ -320,6 +299,16 @@ function inFileOrder(all: Lesson[], chosen: Set<Lesson>): Lesson[] {
  * while 25 unrelated recent ones took the whole budget. The store kept growing
  * and recall did not improve. BM25 is already how `recall` and `brain` search
  * rank; lessons were the one consumer that did not use it.
+ *
+ * The relevance remainder is a genuine threshold, not a force-fill: older
+ * lessons only clear the bar by matching the turn's query, and their score must
+ * reach `RELEVANCE_FLOOR` of the strongest hit to compete. When little is
+ * relevant the budget is undersubscribed — a constant 25 always injected meant
+ * every turn that mentioned a topic at all carried the same wall of old
+ * semi-related lessons, consumed the tokens, and was never a signal. The newest
+ * slice stays unconditional and stays fixed (its exposure pattern is what the
+ * on-disk efficacy history is measured against), so lessening the tail never
+ * invalidates a baseline.
  */
 /**
  * How much more a certified lesson's relevance counts than an uncertified one's
@@ -330,6 +319,16 @@ function inFileOrder(all: Lesson[], chosen: Set<Lesson>): Lesson[] {
  * lose to an uncertified one on the right topic.
  */
 export const CERTIFIED_REUSE_ADVANTAGE = 1.5
+
+/**
+ * Relevance-picked older lessons must score at least this much of the strongest
+ * hit's score. BM25's raw numbers are corpus-dependent, so the floor has to be
+ * relative: a lesson that merely shares one common token with the query would
+ * otherwise ride in on a score just above zero and take a slot from a lesson
+ * that actually matches. The threshold is what makes the budget undersubscribe
+ * instead of force-filling with trivia.
+ */
+const RELEVANCE_FLOOR = 0.2
 
 function selectLessons(all: Lesson[], query: string, certified: ReadonlySet<string> = new Set(), max = MAX_INJECTED_LESSONS): Lesson[] {
   if (all.length <= max) return all
@@ -347,24 +346,27 @@ function selectLessons(all: Lesson[], query: string, certified: ReadonlySet<stri
       return { ...hit, score: hit.score * boost }
     })
     .sort((a, b) => b.score - a.score)
+  // Relative relevance floor against the strongest hit: below it an older
+  // lesson is not relevant enough to displace anything or to pad the budget.
+  const floor = ranked[0] ? ranked[0].score * RELEVANCE_FLOOR : Number.POSITIVE_INFINITY
   for (const hit of ranked) {
-    if (chosen.size >= max) break
+    if (chosen.size >= max || hit.score < floor) break
     const lesson = byId.get(hit.id)
     if (lesson) chosen.add(lesson)
   }
-  // Nothing matched the query — fall back to recency for the remaining budget
-  // rather than injecting fewer lessons than the budget allows.
-  if (chosen.size < max) {
-    for (const lesson of older.slice(-(max - chosen.size))) chosen.add(lesson)
-  }
+  // No recency backfill: if nothing clears the relevance bar, the budget stays
+  // undersubscribed rather than saturated with unrelated older lessons.
   return inFileOrder(all, chosen)
 }
 
 /**
  * The lessons most worth this turn, formatted for injection into a planner's
  * briefing, together with their keys — so the caller can record which lessons a
- * run saw. Also stashes the keys module-locally for the interactive path (see
- * `consumeInjectedLessonKeys`).
+ * run saw, and which it withheld. No hidden state: the return value is the only
+ * record, and the caller decides when and whether to write it. `heldOut` is
+ * `undefined` when holdout was not running for this briefing (so the turn is
+ * kept out of the randomized trial), an empty array when holdout ran but kept
+ * nothing.
  *
  * `query` is what the turn is about; without one this falls back to pure
  * recency, so a caller with no query behaves exactly as before.
@@ -381,7 +383,7 @@ export function renderLessonsWithKeys(
   path = paths.lessons,
   globalPath = path === paths.lessons ? globalLessonsPath() : undefined,
   holdout: { rate: number; random?: () => number } = { rate: path === paths.lessons ? lessonHoldoutRate() : 0 },
-): { text: string; keys: string[]; heldOut: string[] } {
+): { text: string; keys: string[]; heldOut: string[] | undefined } {
   // Quarantined and purged lessons never reach a model; lessons that predate
   // the certified library have no record and stay usable.
   const certificates = lessonArtifacts(path)
@@ -404,10 +406,10 @@ export function renderLessonsWithKeys(
   // Machine facts first: they constrain how a command can be run at all, which
   // is worth knowing before anything specific to this repository.
   const lessons = [...global, ...project]
-  lastInjectedLessonKeys = [...stated, ...lessons].map((lesson) => lesson.key ?? lessonKey(lesson.text))
-  lastHeldOutLessonKeys = holdout.rate > 0 ? heldOut : undefined
-  if (lastInjectedLessonKeys.length === 0) return { text: '', keys: [], heldOut }
-  recordLessonReuse(lastInjectedLessonKeys, path)
+  const injected = [...stated, ...lessons].map((lesson) => lesson.key ?? lessonKey(lesson.text))
+  const withheld = holdout.rate > 0 ? heldOut : undefined
+  if (injected.length === 0) return { text: '', keys: [], heldOut: withheld }
+  recordLessonReuse(injected, path)
   const listing = (items: Lesson[]) =>
     items
       .map((lesson) => {
@@ -421,7 +423,7 @@ export function renderLessonsWithKeys(
     stated.length > 0 ? `\n\n## Rules the user has set for this project\nThe user asked for these directly. Follow them over any learned lesson below.\n${stated.map((lesson) => `- ${lesson.text}`).join('\n')}` : '',
     lessons.length > 0 ? `\n\n## What earlier runs learned about this project\n${listing(lessons)}` : '',
   ].join('')
-  return { text, keys: lastInjectedLessonKeys, heldOut }
+  return { text, keys: injected, heldOut: withheld }
 }
 
 /** The lessons most worth this turn, formatted for injection into a planner's briefing. */

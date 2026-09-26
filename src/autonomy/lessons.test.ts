@@ -6,7 +6,7 @@ import { join } from 'node:path'
 // lessons.ts reads paths from config.ts, which resolves a provider on import.
 process.env.ANTHROPIC_API_KEY ??= 'test-key-for-lessons-test'
 
-const { appendLessons, consumeInjectedLessonKeys, loadLessons, renderLessons, renderLessonsWithKeys, retireLessons } = await import('./lessons.ts')
+const { appendLessons, loadLessons, renderLessons, renderLessonsWithKeys, retireLessons } = await import('./lessons.ts')
 const { recordLessonExposure, MIN_EXPOSURES } = await import('./lessonEfficacy.ts')
 
 /** A minimal TurnOutcome line, written directly so outcomes.jsonl doesn't need a live recordOutcome import. */
@@ -68,15 +68,11 @@ test('loadLessons attaches a stable key derived from the text', () => {
   expect(loadLessons(join(dir, 'other.md'))[0]?.key).toBe(key1!)
 })
 
-test('renderLessonsWithKeys exposes the injected keys and stashes them for the recorder', () => {
+test('renderLessonsWithKeys exposes the injected keys and text for the recorder', () => {
   appendLessons(['a', 'b'], path)
   const rendered = renderLessonsWithKeys('', path)
   expect(rendered.keys).toHaveLength(2)
   expect(rendered.text).toContain('- a')
-  // the module-local stash mirrors the returned keys
-  expect(consumeInjectedLessonKeys()).toEqual(rendered.keys)
-  // draining leaves it empty
-  expect(consumeInjectedLessonKeys()).toEqual([])
 })
 
 test('retireLessons drops a lesson with enough exposures and a confidently negative lift, keeps one with lift', () => {
@@ -254,6 +250,20 @@ test('below the injection ceiling every lesson still goes in, query or not', () 
   expect(renderLessonsWithKeys('topic3', path).keys).toHaveLength(5)
 })
 
+test('relevant older lessons are injected without force-filling the rest of the budget', () => {
+  const path = join(dir, 'lessons.md')
+  // The needle is the oldest entry, far outside the newest-25 window.
+  appendLessons(['On this project the rust crate must be built with the gnullvm toolchain'], path)
+  seed(path, 40, 'unrelated filler lesson')
+
+  const rendered = renderLessonsWithKeys('the rust crate will not build', path)
+  expect(rendered.text).toContain('gnullvm')
+  // The needle takes one relevance slot above the unconditional recency floor;
+  // the rest of the budget is left empty rather than padded with old unrelated
+  // fillers, so the turn is not saturated with semi-relevant memory.
+  expect(rendered.keys).toHaveLength(RECENCY_FLOOR + 1)
+}, 30_000)
+
 test('an old but relevant lesson is injected where pure recency would have dropped it', () => {
   const path = join(dir, 'lessons.md')
   // The needle is the oldest entry, far outside the newest-25 window.
@@ -277,11 +287,13 @@ test('the newest lessons are injected unconditionally, however irrelevant to the
   expect(rendered).toContain('The most recent lesson')
 }, 30_000)
 
-test('the injection budget is still honoured when a query matches nothing', () => {
+test('the injection budget is undersubscribed, not force-filled, when a query matches nothing', () => {
   const path = join(dir, 'lessons.md')
   seed(path, 40, 'filler lesson')
   const keys = renderLessonsWithKeys('zzzzz nothing matches this zzzzz', path).keys
-  expect(keys).toHaveLength(25)
+  // No lesson shares a token with the query, so only the unconditional newest
+  // slice is injected — the budget used to be padded to a full 25 regardless.
+  expect(keys).toHaveLength(RECENCY_FLOOR)
 }, 30_000)
 
 // --- Machine facts go to the global store, and come back everywhere ----------
@@ -332,9 +344,9 @@ test('a caller passing only a path keeps everything in that one file', () => {
   expect(loadLessons(path).map((l) => l.text)).toEqual(['On Windows, list directories with dir; ls is not a command here'])
 })
 
-const { consumeHeldOutLessonKeys, lessonHoldoutRate, DEFAULT_LESSON_HOLDOUT_RATE } = await import('./lessons.ts')
+const { lessonHoldoutRate, DEFAULT_LESSON_HOLDOUT_RATE, RECENCY_FLOOR } = await import('./lessons.ts')
 
-test('renderLessonsWithKeys withholds project lessons by coin flip and stashes the withheld keys', () => {
+test('renderLessonsWithKeys withholds project lessons by coin flip and returns the withheld keys', () => {
   appendLessons(['first', 'second', 'third'], path)
   const flips = [0.9, 0.1, 0.9] // only the second draw falls under the rate
   const rendered = renderLessonsWithKeys('', path, undefined, { rate: 0.15, random: () => flips.shift()! })
@@ -342,9 +354,6 @@ test('renderLessonsWithKeys withholds project lessons by coin flip and stashes t
   expect(rendered.keys).toEqual([first!, third!])
   expect(rendered.heldOut).toEqual([second!])
   expect(rendered.text).not.toContain('- second')
-  expect(consumeInjectedLessonKeys()).toEqual([first!, third!])
-  expect(consumeHeldOutLessonKeys()).toEqual([second!])
-  expect(consumeHeldOutLessonKeys()).toBeUndefined()
 })
 
 test('machine-level lessons are never withheld', () => {
@@ -359,8 +368,7 @@ test('machine-level lessons are never withheld', () => {
 
 test('a test path never gets holdout unless it asks for it, and says holdout was off', () => {
   appendLessons(['a', 'b', 'c', 'd'], path)
-  expect(renderLessonsWithKeys('', path).heldOut).toEqual([])
-  expect(consumeHeldOutLessonKeys()).toBeUndefined()
+  expect(renderLessonsWithKeys('', path).heldOut).toBeUndefined()
 })
 
 test('lessonHoldoutRate reads ELIA_LESSON_HOLDOUT, turns off at 0, and caps at 0.5', () => {
@@ -393,9 +401,8 @@ test("a rule the user set is injected on every turn, under its own heading, and 
   const rendered = renderLessonsWithKeys('fix the flaky parser test', path, undefined, { rate: 1, random: () => 0 })
   expect(rendered.text).toContain('## Rules the user has set for this project\nThe user asked for these directly. Follow them over any learned lesson below.\n- Ask before pushing to any remote branch')
   expect(rendered.text).not.toContain('## What earlier runs learned')
-  expect(rendered.heldOut.length).toBe(24)
+  expect(rendered.heldOut!.length).toBe(24)
   expect(rendered.keys).toEqual([loadLessons(path)[0]!.key!])
-  consumeInjectedLessonKeys()
 })
 
 test('retireLessons never retires a rule the user set, however the runs carrying it went', () => {

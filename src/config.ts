@@ -2,6 +2,7 @@ export { ELIA_ROOT, paths, stateDir } from './statePaths.ts'
 import { paths } from './statePaths.ts'
 import {
   PROVIDER_PRESET_NAMES,
+  providerCapabilities,
   providerPresetDefaultModel,
   tryResolveProvider,
   validateModelId,
@@ -566,9 +567,10 @@ function resolveAutoFallbacks(deepTier: TierConfig, fastTier: TierConfig): TierC
 
   for (const providerName of candidateNames) {
     if (providerName === deepTier.providerName || routes.some((route) => route.providerName === providerName)) continue
-    // Codex subscription requests are mediated by a separate local agent and
-    // are intentionally opt-in, never an automatic fallback from an API route.
-    if (providerName === 'codex') continue
+    // A hand-off provider (the ChatGPT subscription's Codex) mediates requests
+    // through a separate local agent and is intentionally opt-in, never an
+    // automatic fallback from an API route.
+    if (providerCapabilities(providerName).handoff) continue
 
     const resolved = tryResolveProvider({
       providerName,

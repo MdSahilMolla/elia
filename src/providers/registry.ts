@@ -96,6 +96,53 @@ export interface ResolvedProvider {
 /** Preset provider names elia knows about out of the box — `custom` covers anything else via `ELIA_BASE_URL`. */
 export const PROVIDER_PRESET_NAMES = Object.keys(PROVIDER_PRESETS)
 
+export type ProviderKind = 'anthropic' | 'openai-compatible' | 'codex-subscription' | 'ollama'
+
+/**
+ * What a provider route can do, derived once from the preset table instead of a
+ * `providerName === 'codex'`/`=== 'ollama'` comparison at every decision site.
+ * The name-based checks had the same shape and the same spelling risk repeated
+ * across a dozen files; capability queries stay meaningful when a provider gains
+ * a family member or a preset is pointed at a new endpoint. String identity is
+ * still the right tool where a decision is about *which* preset this is — the
+ * provider picker, sign-in messaging — so those sites are untouched.
+ */
+export interface ProviderCapabilities {
+  /** The provider-family this preset speaks over. */
+  kind: ProviderKind
+  /** Accepts base64 image blocks on user turns. Codex has no vision channel; every other preset is treated as capable. */
+  vision: boolean
+  /** Runs against a server on this machine: no API key, and one shared parallel/GPU budget. */
+  local: boolean
+  /** The call hands off to the provider's own agent (the ChatGPT subscription's Codex CLI) rather than Elia's model-tool loop. */
+  handoff: boolean
+  /** Where the working conversation lives: Elia's own messages, or a thread the provider keeps and compacts itself. */
+  threadModel: 'elia' | 'provider'
+}
+
+const GENERIC_CAPABILITIES: ProviderCapabilities = { kind: 'openai-compatible', vision: true, local: false, handoff: false, threadModel: 'elia' }
+
+/**
+ * The capabilities of a provider preset. Unknown names (a caller's typo, or a
+ * provider from a build that knows a preset this one does not) fall back to the
+ * openai-compatible defaults rather than throwing — a capability query must
+ * never be the thing that crashes a turn.
+ */
+export function providerCapabilities(providerName: string): ProviderCapabilities {
+  const preset = PROVIDER_PRESETS[normalizeProviderName(providerName)]
+  if (!preset) return GENERIC_CAPABILITIES
+  switch (preset.kind) {
+    case 'codex-subscription':
+      return { kind: 'codex-subscription', vision: false, local: false, handoff: true, threadModel: 'provider' }
+    case 'ollama':
+      return { kind: 'ollama', vision: true, local: true, handoff: false, threadModel: 'elia' }
+    case 'anthropic':
+      return { kind: 'anthropic', vision: true, local: false, handoff: false, threadModel: 'elia' }
+    case 'openai-compatible':
+      return { kind: 'openai-compatible', vision: true, local: false, handoff: false, threadModel: 'elia' }
+  }
+}
+
 /**
  * The generic `ELIA_API_KEY` belongs to the `custom` preset only. It used to be
  * a universal fallback for every preset, which made a lone `ELIA_API_KEY` report
