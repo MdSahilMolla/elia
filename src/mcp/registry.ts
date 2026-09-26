@@ -272,7 +272,7 @@ function wrapDaemonMcpTool(descriptor: DaemonMcpToolDescriptor): Tool {
   const input_schema: Tool['input_schema'] = {
     type: 'object',
     properties: schema && typeof schema.properties === 'object' && schema.properties !== null ? schema.properties : {},
-    required: schema?.required,
+    required: schema?.required ? [...schema.required] : undefined,
   }
   return {
     name: toolName(descriptor.server, descriptor.name),
@@ -318,12 +318,12 @@ function toolName(server: string, toolName: string): string {
   return raw.slice(0, 64).replace(/_+$/, '') || `mcp_${server}_tool`
 }
 
-function wrapMcpTool(client: McpTransport, server: string, descriptor: { name: string; description?: string; inputSchema?: { type?: string; properties?: Record<string, unknown>; required?: string[] } }): Tool {
+function wrapMcpTool(client: McpTransport, server: string, descriptor: { name: string; description?: string; inputSchema?: { type?: string; properties?: Record<string, unknown>; required?: readonly string[] } }): Tool {
   const schema = descriptor.inputSchema
   const input_schema: Tool['input_schema'] = {
     type: 'object',
     properties: schema && typeof schema.properties === 'object' && schema.properties !== null ? schema.properties : {},
-    required: schema?.required,
+    required: schema?.required ? [...schema.required] : undefined,
   }
 
   return {
@@ -376,3 +376,118 @@ export async function resetMcpLoadStateForTests(): Promise<void> {
   // instead of finding one already flagged as registered from an earlier test.
   shutdownRegistered = false
 }
+
+export {
+  DEFAULT_ELIA_MCP_HOST,
+  DEFAULT_ELIA_MCP_PORT,
+  eliaMcpServerConfigFromCli,
+  expandEliaMcpPath,
+  generateMcpAuthToken,
+  loadEliaMcpServerConfig,
+  loadEliaMcpServerConfigFromCli,
+  loadOrCreateMcpAuthToken,
+  loadOrCreateMcpToken,
+  parseEliaMcpCliOverrides,
+  validateEliaMcpServerConfig,
+} from './config.ts'
+export {
+  CANONICAL_MCP_TOOL_COUNT,
+  MCP_FEATURE_BY_NAME,
+  MCP_FEATURE_CATEGORIES,
+  MCP_FEATURE_INVENTORY,
+  MCP_TOOL_NAMES,
+  SERVER_FEATURE_INVENTORY,
+  assertMcpFeatureInventoryComplete,
+  isCostTier,
+} from './featureInventory.ts'
+export {
+  MCP_CLIENT_INFO,
+  MCP_PROTOCOL_VERSION,
+  MCP_SERVER_INFO,
+  McpProtocolError,
+  handleMcpMessage,
+  handleMcpRequest,
+  isJsonRpcResponse,
+  mcpParseError,
+  validateMcpSchema,
+} from './protocol.ts'
+export {
+  createMcpServerRegistry,
+  createServerRegistry,
+  validateServerToolDefinitions,
+} from './serverRegistry.ts'
+export {
+  createMcpServerRuntime,
+  createServerRuntime,
+  newMcpRunId,
+} from './serverRuntime.ts'
+export {
+  createEliaMcpServer,
+  runMcpServerFromCli,
+  startHttpMcpServer,
+  startStdioMcpServer,
+} from './server.ts'
+export {
+  COST_TIERS,
+  ELIA_MODES,
+  ToolCategory,
+  assertMcpToolName,
+  defineMcpTool,
+  isValidMcpToolName,
+} from './serverTypes.ts'
+export {
+  createHttpMcpTransport,
+  startHttpMcpTransport,
+} from './httpTransport.ts'
+export {
+  createStdioTransport,
+  startStdioTransport,
+} from './stdioTransport.ts'
+export type {
+  CreateEliaMcpServerOptions,
+  EliaMcpServer,
+  StartedHttpMcpServer,
+  StartedStdioMcpServer,
+} from './server.ts'
+export type {
+  CreateMcpServerRegistryOptions,
+  McpPromptProvider,
+  McpPromptRegistration,
+  McpResourceProvider,
+  McpResourceRegistration,
+  McpResourceTemplateRegistration,
+  McpServerRegistry,
+} from './serverRegistry.ts'
+export type {
+  CreateMcpServerRuntimeOptions,
+  McpServerRuntime,
+} from './serverRuntime.ts'
+export type {
+  EliaMcpServerConfig,
+  EliaMcpServerConfigOverrides,
+  McpAuthTokenResult,
+} from './config.ts'
+export type {
+  CostTier,
+  EliaMode,
+  JsonSchema,
+  McpClientCapabilities,
+  McpFeatureMetadata,
+  McpGovernedMutation,
+  McpImportedContext,
+  McpPlanRecord,
+  McpProgressEvent,
+  McpRunState,
+  McpServerRuntimeConfig,
+  McpToolDefinition,
+  McpToolExecutionContext,
+  McpToolRequiredCapability,
+} from './serverTypes.ts'
+export type {
+  HttpMcpTransportOptions,
+  McpHttpServer,
+} from './httpTransport.ts'
+export type {
+  McpStdioTransport,
+  StdioTransportOptions,
+} from './stdioTransport.ts'

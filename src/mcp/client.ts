@@ -53,11 +53,15 @@ export class McpClient implements McpTransport {
   async connect(): Promise<void> {
     if (!this.config.command) throw new Error(`MCP server "${this.name}" has no "command" to spawn`)
     this.proc = Bun.spawn([this.config.command, ...(this.config.args ?? [])], {
-      stdin: 'pipe',
-      stdout: 'pipe',
-      stderr: 'pipe',
-      env: { ...process.env, ...this.config.env } as Record<string, string>,
-    })
+        stdin: 'pipe',
+        stdout: 'pipe',
+        stderr: 'pipe',
+        env: { ...process.env, ...this.config.env } as Record<string, string>,
+        // Its own process group on POSIX, so close() can take the whole tree.
+        // `npx`-backed servers are exactly the case that leaks: npx is the
+        // direct child, and the package it is about to exec is the grandchild.
+        ...(process.platform === 'win32' ? {} : { detached: true }),
+      })
     this.readLoop = this.pumpStdout().catch(() => {
       // A dead read loop just means every pending/future call now times out and
       // rejects on its own — nothing else to do here.
@@ -113,8 +117,7 @@ export class McpClient implements McpTransport {
       // already gone
     }
     try {
-      if (process.platform === 'win32' && this.proc) terminateProcessGroup(this.proc)
-      else this.proc?.kill()
+      if (this.proc) terminateProcessGroup(this.proc)
     } catch {
       // Best-effort — process may already be gone.
     }
@@ -278,6 +281,7 @@ export class McpClient implements McpTransport {
       return
     }
     if (!isJsonRpcResponse(message)) return
+    if (typeof message.id !== 'number') return
     const pending = this.pending.get(message.id)
     if (!pending) return
     this.pending.delete(message.id)
