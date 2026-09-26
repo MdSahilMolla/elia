@@ -18,7 +18,21 @@ import { redactRecord, redactText } from './ui/redact.ts'
 
 const MAX_LOG_BYTES = 2_000_000
 
-export function logSwallowedError(scope: string, error: unknown, context?: Record<string, unknown>, path: string = paths.diagnostics): void {
+/**
+ * Test seam: `ELIA_DIAGNOSTICS_PATH` relocates the log, the way
+ * `ELIA_PREAUTH_DIR` relocates the preauth grant store. Resolved per call
+ * rather than at module load because `paths.diagnostics` is derived from the cwd
+ * captured when `statePaths.ts` was first imported — and under `bun test` another
+ * file may have chdir'd into a temp directory by then, which makes that default
+ * resolve into a directory a later test deletes. Since every write below is
+ * best-effort, a test asserting on the default path would then be asserting on a
+ * file nothing was ever written to, and would fail only in a full-suite run.
+ */
+function defaultDiagnosticsPath(): string {
+  return process.env.ELIA_DIAGNOSTICS_PATH ?? paths.diagnostics
+}
+
+export function logSwallowedError(scope: string, error: unknown, context?: Record<string, unknown>, path: string = defaultDiagnosticsPath()): void {
   try {
     const record = {
       at: new Date().toISOString(),

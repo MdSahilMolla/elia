@@ -83,15 +83,6 @@ async function poll(check: () => boolean, timeoutMs = 12_000): Promise<void> {
   throw new Error('poll timed out')
 }
 
-/** Byte length of the shared diagnostics log, so a test asserts only on what it appended. */
-function diagnosticsSize(path: string): number {
-  try {
-    return statSync(path).size
-  } catch {
-    return 0
-  }
-}
-
 /**
  * First diagnostics record with `scope` appended past `offset`. Polls because the
  * write is best-effort and lands on a later microtask than the failing call.
@@ -288,23 +279,31 @@ test('a failure the runtime cannot report is recorded, leaving the task visibly 
   await poll(() => store.tasks({ objectiveId: planned.objectiveId }).some((t) => t.status === 'in-progress'))
   const taskId = store.tasks({ objectiveId: planned.objectiveId }).find((t) => t.status === 'in-progress')!.id
 
-  // Take the server away so the terminal `agent.complete` cannot land.
+  // Take the server away so the terminal `agent.complete` cannot land. The log
+  // is redirected to a temp file because the default path is derived from the cwd
+  // captured when statePaths.ts was first imported, and several suites chdir into
+  // temp directories — so under a full-suite run the default can resolve
+  // somewhere a later test deletes, and every diagnostics write is best-effort.
   server.stop()
 
-  const { paths } = await import('../statePaths.ts')
-  const before = diagnosticsSize(paths.diagnostics)
+  const logPath = join(mkdtempSync(join(tmpdir(), 'elia-diag-')), 'diagnostics.ndjson')
+  process.env.ELIA_DIAGNOSTICS_PATH = logPath
   releaseGate?.()
 
-  const record = await waitForRecord(paths.diagnostics, before, 'workspace.agentRuntime.completeFailed')
-  expect(record).toBeDefined()
-  // `taskId` is asserted loosely on purpose: logSwallowedError runs every context
-  // value through redactRecord, and elia's own `tsk_<hex>_<slug>` ids trip its
-  // entropy heuristic, so the id comes back as `t[REDACTED]`. That collision is
-  // worth knowing about but is a change to the secret detector, not to this
-  // issue — the record existing, being scoped, and carrying the report is the
-  // part that was previously missing entirely.
-  expect(typeof record!.context!.taskId).toBe('string')
-  expect(String(record!.context!.report)).toContain('executor blew up')
+  try {
+    const record = await waitForRecord(logPath, 0, 'workspace.agentRuntime.completeFailed')
+    expect(record).toBeDefined()
+    // `taskId` is asserted loosely on purpose: logSwallowedError runs every context
+    // value through redactRecord, and elia's own `tsk_<hex>_<slug>` ids trip its
+    // entropy heuristic, so the id comes back as `t[REDACTED]`. That collision is
+    // worth knowing about but is a change to the secret detector, not to this
+    // issue — the record existing, being scoped, and carrying the report is the
+    // part that was previously missing entirely.
+    expect(typeof record!.context!.taskId).toBe('string')
+    expect(String(record!.context!.report)).toContain('executor blew up')
+  } finally {
+    delete process.env.ELIA_DIAGNOSTICS_PATH
+  }
 
   // The orphan itself: still in-progress, lease unreleased. This is the state
   // that used to have no explanation attached to it anywhere.

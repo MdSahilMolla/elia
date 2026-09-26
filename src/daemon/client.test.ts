@@ -18,15 +18,6 @@ import { runShell } from '../shell.ts'
 const binary = resolveEliadPath()
 const scratch = mkdtempSync(join(tmpdir(), 'eliad-test-'))
 
-/** Byte length of the shared diagnostics log, so a test can assert only on what it appended. */
-function diagnosticsSize(path: string): number {
-  try {
-    return statSync(path).size
-  } catch {
-    return 0
-  }
-}
-
 /**
  * Read the records appended to the diagnostics log past `offset` and return the
  * first one with `scope`. Polls because the write is best-effort and happens on
@@ -198,8 +189,14 @@ test('a cancel that never reaches the daemon is recorded, not discarded', async 
   //
   // No daemon is needed: `send` rejects deterministically with `not connected`
   // when there is no socket, which is exactly the "cancel never landed" case.
-  const { paths } = require('../statePaths.ts') as typeof import('../statePaths.ts')
-  const before = diagnosticsSize(paths.diagnostics)
+  //
+  // The log is redirected to a temp file because the default path is derived from
+  // the cwd captured when statePaths.ts was first imported, and several suites
+  // chdir into temp directories — so under a full-suite run the default can
+  // resolve somewhere a later test deletes, and every write is best-effort.
+  const logPath = join(mkdtempSync(join(tmpdir(), 'elia-diag-')), 'diagnostics.ndjson')
+  process.env.ELIA_DIAGNOSTICS_PATH = logPath
+  const before = 0
   const target = 987_654_321
 
   // A client with no live socket: daemon mode off, so nothing dials or spawns.
@@ -207,10 +204,14 @@ test('a cancel that never reaches the daemon is recorded, not discarded', async 
   resetDaemonClientForTests()
   daemonClient().cancel(target)
 
-  const record = await waitForRecord(paths.diagnostics, before, 'daemon.client.cancel')
-  expect(record).toBeDefined()
-  expect(record!.context!.target).toBe(target)
-  expect(record!.message).toContain('not connected')
+  try {
+    const record = await waitForRecord(logPath, before, 'daemon.client.cancel')
+    expect(record).toBeDefined()
+    expect(record!.context!.target).toBe(target)
+    expect(record!.message).toContain('not connected')
+  } finally {
+    delete process.env.ELIA_DIAGNOSTICS_PATH
+  }
 }, 20_000)
 
 maybe('mcp.ensure keeps a stdio server resident and mcp.call proxies to it', async () => {
