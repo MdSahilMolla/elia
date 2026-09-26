@@ -28,15 +28,13 @@ import { confirmOnce } from '../ui/confirm.ts'
 import { gold, dim } from '../ui/theme.ts'
 import { box, table } from '../ui/layout.ts'
 import { pick } from '../ui/picker.ts'
-import { formatQuickchatResult } from '../quickchat/present.ts'
-import type { ParsedQuickchatCommand } from '../quickchat/quickchat.ts'
-import type { SessionHandle } from '../session/types.ts'
 import { openTaskDashboard, renderTaskSummary } from '../ui/taskDashboard.ts'
 import { inferTaskKind, taskSessions } from '../taskSessions.ts'
 import { isAgentPersona, type AgentPersona } from '../agents/types.ts'
 import { CAPABILITIES } from '../capabilities.ts'
 import { type ActionApproval } from '../autonomy/governor.ts'
 import { routeTurn } from '../autonomy/escalation.ts'
+import { autopilotStatusText, parseAutopilotSlash, runAutopilotTurn } from './autopilot.ts'
 import { emitEvent, interactiveTerminal, machineReadable, plainOutput, quietOutput } from '../ui/runtime.ts'
 import { renderWorkspacePanel } from '../ui/workspacePanel.ts'
 import { registerShutdownCleanup } from '../ui/shutdown.ts'
@@ -48,6 +46,9 @@ import { ensureFirstRunProviderSetup, interactiveProviderSetup, prewarmActivePro
 import { actionApprovalPrompt, allSlashCommands, approvalTitle, classifyCommandRisk, loadRuntimeSkills, printTurnProfileReport, requestedAgentMode, userMessage, warnIfAtFilesystemRoot } from './runtime.ts'
 import type { ProviderActivity } from '../providers/types.ts'
 import { type ToolEvent } from '../agentLoop.ts'
+
+/** `/quickchat` was folded into the default mode: a message sent mid-turn is answered right away. */
+const QUICKCHAT_RETIRED = '/quickchat is gone — you no longer need it. While elia works, just type: every message gets an answer right away, with the whole session in view, and anything that should change the work is passed on to it.'
 
 interface TurnUiHooks {
   onText?: (delta: string) => void
@@ -174,6 +175,11 @@ export async function runInteractive(): Promise<void> {
   // Output from `!cmd` lines, held until the next real prompt so the model sees
   // what the user just ran without an extra round-trip.
   const carriedShellContext: string[] = []
+  // Questions answered mid-turn by the live lane. The work lane never saw
+  // them (only a STEER line reaches it), so they ride into the next turn as
+  // context: "do what you said" then means something.
+  const carriedAsides: string[] = []
+  const liveExchanges: Array<{ question: string; answer: string }> = []
   // Images queued by `/attach <path>`, folded into the next prompt as `image`
   // content blocks. Inline paths pasted/dragged straight into a prompt line are
   // resolved separately, in runRecordedTurn.
@@ -2085,50 +2091,6 @@ export async function runInteractive(): Promise<void> {
     }
   }
 
-  // Lazy, in-process handle for this REPL so `/quickchat` can ask about the
-  // live conversation. Registered on first use — creating it up front would add
-  // bus noise to every startup even when nobody runs quickchat.
-  let registeredQuickchatHandle: SessionHandle | undefined
-  async function registerQuickchatSession(): Promise<SessionHandle | undefined> {
-    if (registeredQuickchatHandle) return registeredQuickchatHandle
-    try {
-      const { getSessionBus } = await import('../session/bus.ts')
-      const bus = getSessionBus()
-      const existing = bus.resolve(sessionId)
-      if (existing) {
-        registeredQuickchatHandle = existing
-        return existing
-      }
-      const { makeSessionName } = await import('../session/types.ts')
-      const handle = bus.create(makeSessionName('main'))
-      bus.setActiveSession(handle.id)
-      registeredQuickchatHandle = handle
-      return handle
-    } catch {
-      return undefined
-    }
-  }
-
-  // Answers the slow quickchat kinds in the background and streams the result
-  // into the Ink overlay panel; the active session is never awaited on it.
-  async function runQuickchatOverlay(input: string, session: SessionHandle, parsed: ParsedQuickchatCommand): Promise<void> {
-    const [{ handleQuickchatCommand }, { quickchatStore }] = await Promise.all([
-      import('../quickchat/quickchat.ts'),
-      import('../ui/app/quickchatOverlayStore.ts'),
-    ])
-    const question = parsed.kind === 'session-ask' ? parsed.question : parsed.kind === 'ask' ? parsed.question : 'Risk review of this session'
-    const label = parsed.kind === 'session-ask' ? parsed.targetSession : session.name
-    quickchatStore.open(question, label)
-    try {
-      const result = await handleQuickchatCommand(input, session)
-      const text = formatQuickchatResult(result.result)
-      if (text) quickchatStore.appendText(text)
-    } catch (error) {
-      quickchatStore.appendText(`quickchat failed: ${error instanceof Error ? error.message : String(error)}`)
-    }
-    // The overlay stays open until Escape or the store's idle timeout.
-  }
-
   async function handleSlashForInk(input: string): Promise<InkSlashOutcome> {
     const trimmed = input.trim()
     const done = (text?: string): InkSlashOutcome => ({ handled: true, text })
@@ -2731,22 +2693,23 @@ export async function runInteractive(): Promise<void> {
       return done(selfEdit.describeSelfEdit())
     }
 
-    const quickchatMatch = /^\/quickchat(?:\s+(.*))?$/.exec(trimmed)
-    if (quickchatMatch) {
-      const session = await registerQuickchatSession()
-      if (!session) {
-        return done('No session is registered for quickchat here. Start one with: elia sessions new --name <name>')
+    if (/^\/quickchat\b/.test(trimmed)) return done(QUICKCHAT_RETIRED)
+
+    const autopilotMatch = /^\/autopilot(?:\s+(.*))?$/.exec(trimmed)
+    if (autopilotMatch) {
+      const request = parseAutopilotSlash(autopilotMatch[1] ?? '')
+      if ('text' in request) return done(request.text)
+      if ('status' in request) return done(await autopilotStatusText())
+      return {
+        handled: true,
+        text: request.planOnly
+          ? 'autopilot (plan only): surveying, measuring and planning — nothing will be changed. Ask me anything while it works.'
+          : `autopilot: working unattended on a branch of its own, up to ${request.maxGoals} goal(s). Ask me anything while it works; tell me to change course and I will add it to the front of its backlog. Esc stops it.`,
+        turn: {
+          label: `/autopilot${autopilotMatch[1] ? ` ${autopilotMatch[1]}` : ''}`,
+          run: (hooks) => runAutopilotTurn(request, hooks),
+        },
       }
-      const { parseQuickchatCommand } = await import('../quickchat/quickchat.ts')
-      const parsed = parseQuickchatCommand(trimmed)
-      const answeredInOverlay = parsed.kind === 'ask' || parsed.kind === 'session-ask' || parsed.kind === 'risk'
-      if (answeredInOverlay) {
-        void runQuickchatOverlay(trimmed, session, parsed).catch(() => undefined)
-        return done('Answering in the quickchat overlay — it never blocks this session. (Escape closes it; idle closes it in 60s.)')
-      }
-      const { handleQuickchatCommand } = await import('../quickchat/quickchat.ts')
-      const result = await handleQuickchatCommand(trimmed, session)
-      return done(result.handled ? formatQuickchatResult(result.result) : 'quickchat did not handle that input.')
     }
 
     const custom = resolveCustomCommand(trimmed)
@@ -2819,11 +2782,25 @@ export async function runInteractive(): Promise<void> {
         return rendered
       },
       handleSlash: handleSlashForInk,
+      liveReply: async (question, view, signal) => {
+        const [{ answerWhileWorking }, { activePilot }, { pilotSnapshot }] = await Promise.all([
+          import('../live/liveReply.ts'),
+          import('../autopilot/pilot.ts'),
+          import('../autopilot/report.ts'),
+        ])
+        const pilot = activePilot()
+        const reply = await answerWhileWorking({ ...view, conversation: messages, pilot: pilot ? pilotSnapshot(pilot) : undefined, exchanges: liveExchanges, cwd: process.cwd() }, question, { signal })
+        liveExchanges.push({ question, answer: reply.answer })
+        if (liveExchanges.length > 8) liveExchanges.splice(0, liveExchanges.length - 8)
+        carriedAsides.push(`<aside-while-you-worked>\nThe user asked: ${question}\nYou answered: ${reply.answer}${reply.steer ? `\n(Passed to the work: ${reply.steer})` : ''}\n</aside-while-you-worked>`)
+        sessionTranscript.notice(`live reply — Q: ${question}\nA: ${reply.answer}`)
+        await persistInteractiveSession()
+        return reply
+      },
       submitTurn: async (text, hooks) => {
         holdPractice()
-        const turnText = carriedShellContext.length > 0
-          ? `${carriedShellContext.splice(0).join('\n\n')}\n\n${text}`
-          : text
+        const carried = [...carriedShellContext.splice(0), ...carriedAsides.splice(0)]
+        const turnText = carried.length > 0 ? `${carried.join('\n\n')}\n\n${text}` : text
         await runCheckpointedTurn(
           turnText,
           async (assessment, request) =>
@@ -3290,16 +3267,17 @@ export async function runInteractive(): Promise<void> {
       continue
     }
 
-    const quickchatClassic = /^\/quickchat(?:\s+(.*))?$/.exec(trimmed)
-    if (quickchatClassic) {
-      const session = await registerQuickchatSession()
-      if (!session) {
-        writeNotice('No session is registered for quickchat here. Start one with: elia sessions new --name <name>')
-        continue
-      }
-      const { handleQuickchatCommand } = await import('../quickchat/quickchat.ts')
-      const result = await handleQuickchatCommand(trimmed, session)
-      if (result.handled) writeNotice(formatQuickchatResult(result.result))
+    if (/^\/quickchat\b/.test(trimmed)) {
+      writeNotice(QUICKCHAT_RETIRED)
+      continue
+    }
+
+    const autopilotClassic = /^\/autopilot(?:\s+(.*))?$/.exec(trimmed)
+    if (autopilotClassic) {
+      const request = parseAutopilotSlash(autopilotClassic[1] ?? '')
+      if ('text' in request) writeNotice(request.text)
+      else if ('status' in request) writeNotice(await autopilotStatusText())
+      else await runAutopilotTurn(request)
       continue
     }
 

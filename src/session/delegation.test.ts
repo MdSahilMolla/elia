@@ -4,13 +4,12 @@ import {
   delegateToFromQueue,
   findRecord,
   popNextTask,
-  quickchatStatus,
+  delegationStatus,
   slugifyGoal,
   trackDelegation,
 } from './delegation.ts'
 import { createSessionBus } from './bus.ts'
 import { makeSessionName, type CreateHandleOptions, type DelegationRecord, type DelegationStatus, type SessionBus, type SessionHandle, type SessionId, type SessionName } from './types.ts'
-import { handleQuickchatDelegate } from '../quickchat/delegation-router.ts'
 
 /**
  * Append-only verification harness: the real `createSessionBus` wrapped so that
@@ -358,7 +357,7 @@ describe('queue semantics and append-only invariants', () => {
   })
 })
 
-describe('quickchatStatus', () => {
+describe('delegationStatus', () => {
   test('lists queued/active tasks per session and filters by status', async () => {
     const { bus } = trackedBus()
     const alpha = seedSession(bus, 'alpha')
@@ -367,18 +366,18 @@ describe('quickchatStatus', () => {
     const r2 = await delegateTask({ goal: 'two', mode: 'after-step', target: alpha.id, bus })
     const r3 = await delegateTask({ goal: 'three', mode: 'after-step', target: beta.id, bus })
 
-    const all = quickchatStatus(bus)
+    const all = delegationStatus(bus)
     expect(all).toHaveLength(2)
     expect(all.find((row) => row.sessionName === 'alpha')?.tasks.map((t) => t.id)).toEqual([r1.record.id, r2.record.id])
     expect(all.find((row) => row.sessionName === 'beta')?.tasks.map((t) => t.id)).toEqual([r3.record.id])
 
     popNextTask(alpha, { bus })
-    expect(quickchatStatus(bus, { status: 'active' }).find((row) => row.sessionName === 'alpha')?.tasks.map((t) => t.id)).toEqual([r1.record.id])
-    expect(quickchatStatus(bus, { status: 'queued' }).find((row) => row.sessionName === 'alpha')?.tasks.map((t) => t.id)).toEqual([r2.record.id])
+    expect(delegationStatus(bus, { status: 'active' }).find((row) => row.sessionName === 'alpha')?.tasks.map((t) => t.id)).toEqual([r1.record.id])
+    expect(delegationStatus(bus, { status: 'queued' }).find((row) => row.sessionName === 'alpha')?.tasks.map((t) => t.id)).toEqual([r2.record.id])
 
     trackDelegation(r1.record.id, bus, 'done')
     trackDelegation(r3.record.id, bus, 'done')
-    const doneOnly = quickchatStatus(bus, { status: 'done' })
+    const doneOnly = delegationStatus(bus, { status: 'done' })
     expect(doneOnly.find((row) => row.sessionName === 'alpha')?.tasks.map((t) => t.id)).toEqual([r1.record.id])
     expect(doneOnly.find((row) => row.sessionName === 'beta')?.tasks.map((t) => t.id)).toEqual([r3.record.id])
   })
@@ -388,9 +387,9 @@ describe('quickchatStatus', () => {
     const busy = seedSession(bus, 'busy')
     seedSession(bus, 'idle')
 
-    expect(quickchatStatus(bus)).toEqual([])
+    expect(delegationStatus(bus)).toEqual([])
     const { record } = await delegateTask({ goal: 'work', mode: 'after-step', target: busy.id, bus })
-    const rows = quickchatStatus(bus)
+    const rows = delegationStatus(bus)
     expect(rows).toHaveLength(1)
     expect(rows[0]?.sessionName).toBe('busy')
     expect(rows[0]?.tasks.map((t) => t.id)).toEqual([record.id])
@@ -422,53 +421,5 @@ describe('delegateToFromQueue', () => {
 
     await delegateToFromQueue(bus, { goal: 'fix promptly', mode: 'now' })
     expect(active.taskQueue[0]?.queuedAfterStep).toBe(-1)
-  })
-})
-
-describe('handleQuickchatDelegate', () => {
-  test('queues an after-step task into the active session with a confirmation', async () => {
-    const { bus } = trackedBus()
-    const active = seedSession(bus, 'main')
-    bus.setActiveSession(active.id)
-
-    const result = await handleQuickchatDelegate({ goal: 'reword the help', mode: 'after-step', bus })
-    expect(result.ok).toBe(true)
-    if (result.ok) {
-      expect(result.result.record.targetSession).toBe(active.id)
-      expect(result.result.record.source).toBe('quickchat')
-      expect(result.result.confirmation).toBe('Queued in session main after step 0')
-    }
-  })
-
-  test('resolves sessionRef by id or by unambiguous name', async () => {
-    const { bus } = trackedBus()
-    const other = seedSession(bus, 'other')
-
-    const byName = await handleQuickchatDelegate({ goal: 'x', mode: 'after-step', sessionRef: 'other', bus })
-    const byId = await handleQuickchatDelegate({ goal: 'y', mode: 'after-step', sessionRef: other.id, bus })
-    expect(byName.ok).toBe(true)
-    expect(byId.ok).toBe(true)
-    if (byName.ok && byId.ok) {
-      expect(byName.result.record.targetSession).toBe(other.id)
-      expect(byId.result.record.targetSession).toBe(other.id)
-      expect(other.taskQueue).toHaveLength(2)
-    }
-  })
-
-  test('reports unknown sessions, missing goals and no-active-session as soft failures', async () => {
-    const { bus } = trackedBus()
-    expect(await handleQuickchatDelegate({ goal: 'x', mode: 'now', sessionRef: 'nope', bus })).toMatchObject({ ok: false })
-    expect(await handleQuickchatDelegate({ goal: '   ', mode: 'now', bus })).toMatchObject({ ok: false })
-    expect(await handleQuickchatDelegate({ goal: 'x', mode: 'after-step', bus })).toMatchObject({ ok: false })
-  })
-
-  test('spawns a new session on new-session mode', async () => {
-    const { bus } = trackedBus()
-    const result = await handleQuickchatDelegate({ goal: 'Spin up a spike', mode: 'new-session', bus })
-    expect(result.ok).toBe(true)
-    if (result.ok) {
-      expect(result.result.confirmation).toBe('Spawned session auto-spin-up-a-spike')
-      expect(result.result.record.spawnedName).toBe(makeSessionName('auto-spin-up-a-spike'))
-    }
   })
 })

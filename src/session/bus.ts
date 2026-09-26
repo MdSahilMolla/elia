@@ -20,7 +20,7 @@ interface DropSubscription {
 
 /**
  * The in-process session registry. One `SessionBus` instance keeps every
- * session the CLI / quickchat / sync layer know about; `createSessionBus`
+ * session the CLI / sync layer know about; `createSessionBus`
  * builds a fresh registry for tests so no state bleeds between suites.
  */
 export function createSessionBus(): SessionBus {
@@ -202,7 +202,7 @@ export function createSessionBus(): SessionBus {
 
 let singleton: SessionBus | undefined
 
-/** The process-wide session registry. One instance keeps the status bar, CLI and quickchat in sync. */
+/** The process-wide session registry. One instance keeps the status bar and the CLI in sync. */
 export function getSessionBus(): SessionBus {
   return (singleton ??= createSessionBus())
 }

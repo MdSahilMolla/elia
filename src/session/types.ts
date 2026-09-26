@@ -1,6 +1,6 @@
 /**
  * Shared session contract for elia's parallel multi-session orchestration
- * (`elia sessions …`) and the `/quickchat` overlay.
+ * (`elia sessions …`).
  *
  * This module is the coordination boundary between independent workstreams.
  * It is deliberately dependency-free (no imports of other elia modules) so any
@@ -100,7 +100,8 @@ export type DelegationSource = 'quickchat' | 'cli'
 export type DelegationStatus = 'queued' | 'active' | 'done' | 'cancelled' | 'failed'
 
 /**
- * A task queued into a session by /quickchat or the CLI. Delegation injects
+ * A task queued into a session by the CLI (older records: by /quickchat, now
+ * retired — mid-turn messages are answered by the live lane). Delegation injects
  * into the target's queue append-only — it never mutates a running plan step:
  * the runner pops the head of the queue at a safe step boundary.
  */
@@ -202,35 +203,9 @@ export interface SessionBus {
 /**
  * Declared module-level accessor every cross-module caller uses.
  * Implemented by `bus.ts`. A singleton per process keeps one registry for the
- * status bar, the CLI and quickchat.
+ * status bar and the CLI.
  */
 export declare function getSessionBus(): SessionBus
-
-/** What a quickchat context snapshot looks like after context-builder's token cap. */
-export interface QuickchatPlanStep {
-  id: string
-  title: string
-  status: 'todo' | 'running' | 'done' | 'failed'
-}
-
-export interface QuickchatContext {
-  sessionId: SessionId
-  sessionName: SessionName
-  currentTask?: string
-  planSteps: QuickchatPlanStep[]
-  /** Last N sub-agent outputs, pre-truncated to ~2000 tokens by the builder. */
-  recentAgentOutputs: string[]
-  filesModified: Array<{ path: string; summary: string }>
-  pendingReviews: string[]
-  memorySlice: MemorySlice
-  currentErrors: string[]
-}
-
-/** Result of a /quickchat delegate command, shown in the overlay. */
-export interface QuickchatDelegationResult {
-  record: DelegationRecord
-  confirmation: string
-}
 
 /**
  * Cross-session memory-slice sync, implemented in `sync.ts`.

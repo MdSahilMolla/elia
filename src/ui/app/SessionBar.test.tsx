@@ -4,8 +4,6 @@ import { Text } from 'ink'
 import { createSessionBus } from '../../session/bus.ts'
 import { makeSessionName, type SessionBus } from '../../session/types.ts'
 import { SessionBar, useSessionBarData } from './SessionBar.tsx'
-import { QuickchatOverlay } from './QuickchatOverlay.tsx'
-import { quickchatStore } from './quickchatOverlayStore.ts'
 import { SessionShortcuts } from './SessionShortcuts.tsx'
 import { sessionKeyCombo } from './sessionShortcuts.ts'
 import { sessionKeyAction } from './sessionActions.ts'
@@ -218,30 +216,6 @@ test('SessionBar repaints the blocked glyph for a live setStatus on the same han
     expect(bus.list()[0]).toBe(listed)
     expect(frame).toContain('[gate ⚠]')
   } finally {
-    unmount()
-  }
-})
-
-test('quickchatStore.open surfaces into the overlay panel the App renders against the singleton', async () => {
-  if (quickchatStore.getSnapshot().status !== 'closed') quickchatStore.requestClose()
-
-  const { lastFrame, unmount } = render(<QuickchatOverlay />)
-  try {
-    await sleep(40)
-    expect(lastFrame() ?? '').not.toContain('quickchat')
-
-    quickchatStore.open('is the deploy green?', 'gates')
-    const frame = await waitForFrame(lastFrame, 'is the deploy green?', 2000)
-    expect(frame).toContain('quickchat')
-    expect(frame).toContain('[gates]')
-
-    quickchatStore.appendText('blocked on the DB migration.')
-    await waitForFrame(lastFrame, 'blocked on the DB migration.', 2000)
-
-    expect(quickchatStore.handleEscape('esc')).toEqual({ consumed: true })
-    expect(quickchatStore.getSnapshot().status).toBe('closed')
-  } finally {
-    quickchatStore.requestClose()
     unmount()
   }
 })

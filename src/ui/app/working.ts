@@ -137,7 +137,8 @@ export function workingLabel(state: WorkingState): string {
 
 /** Shown under a long-running turn, one per turn, so they rotate. */
 export const TIPS = [
-  'Type while elia works to steer it — it folds your note in at the next step',
+  'Type while elia works — it answers right away, and passes any change of plan to the work',
+  '/autopilot: no task needed — elia works out what this repo needs and does it',
   'shift+tab cycles manual → auto-accept → plan mode',
   'Mention a file with @, or run a shell command with !',
   'ctrl+o expands every tool result',

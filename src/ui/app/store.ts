@@ -65,6 +65,17 @@ export interface NoticeItem {
   /** When a lesson landed (`✦ learned: …`) — its mark flares once from here. */
   at?: number
 }
+/**
+ * A message the person sent while elia worked, and the answer it got straight
+ * away from the session's read-only live lane (src/live/liveReply.ts). Settled
+ * the moment it is added: it lands in scrollback between the work's own lines.
+ */
+export interface AsideItem {
+  id: string
+  kind: 'aside'
+  question: string
+  text: string
+}
 /** The session header, printed once at the top of scrollback. */
 export interface HeaderItem {
   id: string
@@ -82,7 +93,7 @@ export interface HeaderItem {
   model?: string
 }
 
-export type Item = UserItem | AssistantItem | ThinkingItem | ToolItem | GroupItem | NoticeItem | HeaderItem
+export type Item = UserItem | AssistantItem | ThinkingItem | ToolItem | GroupItem | NoticeItem | HeaderItem | AsideItem
 
 export interface Snapshot {
   committed: readonly Item[]
@@ -105,6 +116,8 @@ export interface TranscriptStore {
   toolEnd(event: ToolEvent & { id?: string }): void
   activity(activity: ProviderActivity): void
   notice(text: string): void
+  /** A mid-turn message and the answer it got while the work carried on. */
+  aside(question: string, answer: string): void
   /** The line that closes a turn. */
   receipt(text: string): void
   error(text: string): void
@@ -442,6 +455,15 @@ export function createTranscriptStore(): TranscriptStore {
       changed()
     },
 
+    aside(question, answer) {
+      if (live.length === 0) turnBase = committed.length
+      // A paragraph mid-stream stays where it is; the exchange lands after it
+      // and the work's next words start a fresh paragraph below.
+      live = live.map((item) => (item.kind === 'assistant' || item.kind === 'thinking' ? { ...item, streaming: false } : item))
+      live = [...live, { id: nextId(), kind: 'aside', question, text: answer }]
+      changed()
+    },
+
     notice(text) {
       // A hammered key (Esc on a turn that won't stop) would otherwise print the
       // same line 20 times. Collapse an immediately-repeated notice into one
@@ -529,6 +551,8 @@ export function createTranscriptStore(): TranscriptStore {
           for (const tool of item.tools) pushTool(tool)
         } else if (item.kind === 'shell') {
           out.push('```console', item.text, '```', '')
+        } else if (item.kind === 'aside') {
+          out.push(`**You (while elia worked):** ${item.question}`, '', `**elia:** ${item.text}`, '')
         } else {
           out.push(`> ${item.kind === 'error' ? '⚠️ ' : ''}${item.text}`, '')
         }

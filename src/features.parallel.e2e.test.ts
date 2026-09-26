@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, test } from 'bun:test'
-import { handleQuickchatDelegate } from './quickchat/delegation-router.ts'
+import { delegateTask } from './session/delegation.ts'
 import { runSessionPlusTaskRunner, wireCrossSessionDependencies } from './session/integration.ts'
 import { createSessionBus } from './session/bus.ts'
 import { makeSessionName, type SessionEvent } from './session/types.ts'
@@ -13,7 +13,7 @@ async function poll(check: () => boolean, timeoutMs = 3_000): Promise<void> {
   throw new Error('poll timed out')
 }
 
-describe('parallel sessions + /quickchat delegation (e2e, pure logic)', () => {
+describe('parallel sessions + cross-session delegation (e2e, pure logic)', () => {
   const aborters: AbortController[] = []
   let unsubscribedEvents: (() => void) | undefined
   const wirings: ReturnType<typeof wireCrossSessionDependencies>[] = []
@@ -28,7 +28,7 @@ describe('parallel sessions + /quickchat delegation (e2e, pure logic)', () => {
     await Promise.all(wirings.map((wiring) => wiring.drain()))
   })
 
-  test('a quickchat new-session delegation spawns an isolated third session that completes without blocking B', async () => {
+  test('a new-session delegation spawns an isolated third session that completes without blocking B', async () => {
     const bus = createSessionBus()
     unsubscribedEvents?.()
     unsubscribedEvents = bus.on((event) => events.push(event))
@@ -65,11 +65,9 @@ describe('parallel sessions + /quickchat delegation (e2e, pure logic)', () => {
     await poll(() => bus.get(b.id)?.status === 'running')
     expect(b.status).toBe('running')
 
-    // /quickchat delegate in new-session mode: a THIRD session auto-<slug> is
-    // spawned with the task queued as its first job. Never touches B.
-    const delegate = await handleQuickchatDelegate({ bus, goal: 'add connection pooling', mode: 'new-session', sessionRef: a.id })
-    if (!delegate.ok) throw new Error(`delegation failed: ${delegate.error}`)
-    const { record } = delegate.result
+    // A new-session delegation: a THIRD session auto-<slug> is spawned with
+    // the task queued as its first job. Never touches B.
+    const { record } = await delegateTask({ bus, goal: 'add connection pooling', mode: 'new-session', target: a.id, source: 'cli' })
 
     const spawned = bus.byName(makeSessionName('auto-add-connection-pooling'))
     expect(spawned).toBeDefined()

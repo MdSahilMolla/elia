@@ -37,11 +37,10 @@ import { looksLikeImageAttachmentLine } from '../../attachments.ts'
 import { compactionThresholdFor, contextWindowFor } from '../../contextWindow.ts'
 import { codexContextTokens } from '../../providers/codexSubscription.ts'
 import type { ChatMessage } from '../../providers/types.ts'
+import type { LiveView } from '../../live/liveReply.ts'
 import { onLiveOutput, sessionUsageSnapshot } from '../../usage.ts'
 import { SessionBar } from './SessionBar.tsx'
-import { QuickchatOverlay } from './QuickchatOverlay.tsx'
 import { SessionShortcuts } from './SessionShortcuts.tsx'
-import { quickchatStore } from './quickchatOverlayStore.ts'
 
 /** `/attach` and its aliases stay real commands even though a POSIX image path also starts with "/". */
 const ATTACH_COMMAND = /^\/(?:attach|image|img)\b/
@@ -119,6 +118,12 @@ export interface SlashOutcome {
   runCommand?: SlashRunRequest
   /** `/clear`: wipe the screen and transcript and continue as this new session. */
   clear?: { sessionId: string }
+  /**
+   * Run this as a turn of its own (`/autopilot`): the working line, Esc, and
+   * live replies all behave as they do for a model turn, but the body is the
+   * command's, not a prompt to the model.
+   */
+  turn?: { label: string; run(hooks: TurnHooks): Promise<void> }
 }
 
 export interface AppEnv {
@@ -152,6 +157,12 @@ export interface AppProps {
   startupNotice?: string
   /** ctrl+shift+n spawn hook; absent in builds without session spawning. */
   onSpawnSession?: () => void
+  /**
+   * Answers a message sent while a turn runs, from the session's read-only
+   * live lane. `steer`, when present, is what the running work should change.
+   * Absent: mid-turn text is folded in as steering only, as before.
+   */
+  liveReply?(question: string, view: LiveView, signal: AbortSignal): Promise<{ answer: string; steer?: string }>
 }
 
 /**
@@ -292,6 +303,14 @@ export function App(props: AppProps) {
     [liveCapOn, snap.live, termSize.columns, termSize.rows, expandedAll],
   )
   const [steeringCount, setSteeringCount] = useState(0)
+  // Messages sent mid-turn that the live lane is answering right now, and the
+  // exchanges already answered this turn (so "do that" can resolve).
+  const [answering, setAnswering] = useState(0)
+  const exchangesRef = useRef<Array<{ question: string; answer: string }>>([])
+  const liveAbortRef = useRef(new Set<AbortController>())
+  useEffect(() => () => {
+    for (const controller of liveAbortRef.current) controller.abort()
+  }, [])
   const [queue, setQueue] = useState<string[]>([])
   // The working line's inputs. `status` is the phase or progress a deeper
   // layer last reported; running tools and the stream mode outrank it.
@@ -460,8 +479,6 @@ export function App(props: AppProps) {
     if (key.ctrl && input === 'o' && !modalOrOverlayOpen) setExpandedAll((v) => !v)
     // While the approval menu owns the screen, let it handle Esc (go back / no).
     if (approval) return
-    // A visible quickchat panel eats Esc itself — no normal typing Esc reaches it.
-    if (quickchatStore.handleEscape('esc').consumed) return
     if (key.escape) {
       // Staged, so one stray Esc never wipes work: a running turn stops first
       // (queued/steering messages are kept); then the queue; and pending
@@ -505,6 +522,87 @@ export function App(props: AppProps) {
     if (key.shift && key.tab && !modalOrOverlayOpen) setMode((m) => (m === 'manual' ? 'auto' : m === 'auto' ? 'plan' : 'manual'))
   })
 
+  // What the live lane reads about the running turn. Plain refs refreshed on
+  // every render: a reply is built in an async callback, after the state it
+  // describes may have rendered several times.
+  const liveStateRef = useRef({ status, runningTools, plan, providerPlan, runSteps, turnStartedAt })
+  liveStateRef.current = { status, runningTools, plan, providerPlan, runSteps, turnStartedAt }
+  const pendingQuestions = useRef(new Set<string>())
+  const submitRef = useRef<((line: string) => Promise<void>) | null>(null)
+
+  /**
+   * Answers a message typed while a turn runs — immediately, from the live
+   * lane, while the turn carries on. A reply that carries a `steer` hands that
+   * instruction to the running work at its next step boundary; one that lands
+   * after the turn already ended starts it as a turn of its own. When no
+   * answer can be had, the message reaches the work as plain steering, which
+   * is what every mid-turn message used to do.
+   */
+  const answerLive = useCallback(
+    async (question: string) => {
+      const liveReply = props.liveReply
+      if (!liveReply) return
+      const controller = new AbortController()
+      liveAbortRef.current.add(controller)
+      pendingQuestions.current.add(question)
+      setAnswering((n) => n + 1)
+      const live = liveStateRef.current
+      const items = store.turnItems()
+      const view: LiveView = {
+        request: lastUserText.current,
+        elapsedMs: live.turnStartedAt ? Date.now() - live.turnStartedAt : 0,
+        status: live.status,
+        runningTools: live.runningTools.map((tool) => tool.activity),
+        plan: live.plan.length > 0
+          ? live.plan
+          : live.providerPlan.length > 0
+            ? live.providerPlan
+            : live.runSteps.map((step) => ({ content: step.title, status: 'in plan' })),
+        recentTools: toolsOf(items)
+          .filter((tool) => tool.status !== 'running')
+          .map((tool) => ({
+            name: tool.name,
+            input: toolActivity({ name: tool.name, input: tool.input }),
+            outcome: (tool.result ?? '').split('\n').find((line) => line.trim())?.trim().slice(0, 160) ?? '',
+            isError: tool.status === 'error',
+          })),
+        assistantSoFar: items.filter((item) => item.kind === 'assistant').map((item) => (item.kind === 'assistant' ? item.text : '')).join('\n'),
+        progress: items.flatMap((item) => (item.kind === 'notice' ? [item.text] : [])).slice(-20),
+        steering: [...steeringRef.current],
+      }
+      const steerWork = (instruction: string) => {
+        if (busyRef.current) {
+          steeringRef.current = [...steeringRef.current, instruction]
+          setSteeringCount(steeringRef.current.length)
+          return true
+        }
+        return false
+      }
+      try {
+        const reply = await liveReply(question, view, controller.signal)
+        store.aside(question, reply.answer)
+        exchangesRef.current = [...exchangesRef.current, { question, answer: reply.answer }]
+        if (reply.steer) {
+          if (steerWork(reply.steer)) store.notice(`↳ passing to the running work: ${reply.steer}`)
+          else {
+            store.notice(`↳ the work had already finished — starting it now: ${reply.steer}`)
+            void submitRef.current?.(reply.steer)
+          }
+        }
+      } catch (error) {
+        if (controller.signal.aborted && !busyRef.current) return
+        const why = error instanceof Error ? error.message : String(error)
+        store.aside(question, `I couldn't answer right away (${why}), so I passed your message to the running work instead.`)
+        if (!steerWork(question)) void submitRef.current?.(question)
+      } finally {
+        liveAbortRef.current.delete(controller)
+        pendingQuestions.current.delete(question)
+        setAnswering((n) => Math.max(0, n - 1))
+      }
+    },
+    [props, store],
+  )
+
   const executePlan = useRef<(() => void) | null>(null)
   useInput((input, key) => {
     if (!planReady || busy) return
@@ -518,7 +616,7 @@ export function App(props: AppProps) {
   })
 
   const runOne = useCallback(
-    async (text: string, opts?: { echo?: boolean }) => {
+    async (text: string, opts?: { echo?: boolean; body?: (hooks: TurnHooks) => Promise<void> }) => {
       const carried = carriedTurnStart.current
       carriedTurnStart.current = undefined
       const startedAt = carried ?? Date.now()
@@ -538,6 +636,7 @@ export function App(props: AppProps) {
       if (opts?.echo !== false) store.appendUser(text)
       lastUserText.current = text
       turnPlan.current = []
+      exchangesRef.current = []
       const controller = new AbortController()
       abortRef.current = controller
       // Every streamed chunk and every tool boundary is a sign of life.
@@ -643,7 +742,7 @@ export function App(props: AppProps) {
         },
       }
       try {
-        await props.submitTurn(text, hooks)
+        await (opts?.body ? opts.body(hooks) : props.submitTurn(text, hooks))
       } catch (error) {
         store.error(`Error: ${error instanceof Error ? error.message : String(error)}`)
       } finally {
@@ -761,6 +860,13 @@ export function App(props: AppProps) {
         }
         break
       }
+      const turn = typeof outcome === 'object' && outcome ? outcome.turn : undefined
+      if (turn) {
+        if (typeof outcome === 'object' && outcome?.text) store.notice(outcome.text)
+        store.commit()
+        await runOne(turn.label, { body: turn.run })
+        return
+      }
       const submitText = typeof outcome === 'object' && outcome ? outcome.submitText : undefined
       const finalText = typeof outcome === 'string' ? outcome : outcome?.text
       const cleared = typeof outcome === 'object' && outcome ? outcome.clear : undefined
@@ -799,6 +905,16 @@ export function App(props: AppProps) {
         // spliced into the running turn at the next step boundary.
         if (trimmed.startsWith('/') || trimmed.startsWith('@') || trimmed.startsWith('!')) {
           pushQueue(trimmed)
+          return
+        }
+        // Everything else is answered right away by the live lane — a question
+        // gets its answer, a direction gets an answer *and* reaches the work.
+        if (props.liveReply) {
+          if (pendingQuestions.current.has(trimmed) || lastUserText.current === trimmed) {
+            store.notice('↳ already asked — the answer is on its way')
+            return
+          }
+          void answerLive(trimmed)
           return
         }
         // Don't stack the same steering twice — a frustrated re-send while the
@@ -914,8 +1030,9 @@ export function App(props: AppProps) {
         carriedTurnStart.current = undefined
       }
     },
-    [busy, mode, props, store, runOne, exit, writeStdout, beginProgress],
+    [busy, mode, props, store, runOne, exit, writeStdout, beginProgress, answerLive],
   )
+  submitRef.current = onSubmit
 
   // In ChatGPT-subscription mode Elia's own `messages` array stays near-empty
   // (Codex keeps the real transcript in its thread), so meter against Codex's
@@ -988,7 +1105,6 @@ export function App(props: AppProps) {
         activeRunning={busy}
         suppressed={modalOpen || showHelp}
       />
-      <QuickchatOverlay />
       <ErrorBoundary area="transcript" onError={boundaryError}>
         <Transcript
           key={transcriptEpoch}
@@ -1027,6 +1143,7 @@ export function App(props: AppProps) {
           thinking={streamMode === 'thinking'}
           waitingOnModel={runningTools.length === 0 && !checks.some((chip) => chip.state === 'running')}
           steeringPending={steeringCount}
+          answering={answering}
           tip={tip}
           checks={checks}
         />
@@ -1057,7 +1174,9 @@ export function App(props: AppProps) {
           disabled={confirm !== null || approval !== null || picker !== null || textPrompt !== null || planReady || showHelp}
           placeholder={
             busy
-              ? 'Type to steer elia · esc to stop'
+              ? props.liveReply
+                ? 'Ask or redirect — elia answers while it works · esc to stop'
+                : 'Type to steer elia · esc to stop'
               : mode === 'plan'
                 ? 'Describe the task — elia will research and propose a plan first'
                 : 'Ask anything, or type / for commands'

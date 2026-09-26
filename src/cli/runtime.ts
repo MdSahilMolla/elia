@@ -39,7 +39,7 @@ const REPL_COMMANDS: SlashCommand[] = [
   { name: '/skills', description: 'list loaded skills' },
   { name: '/task', description: 'browse tasks and subagents' },
   { name: '/sessions', description: 'other elia sessions in this project' },
-  { name: '/quickchat', description: 'ask anything about this session without interrupting it · /quickchat <question>, delegate, status, summary, diff, risk' },
+  { name: '/autopilot', description: 'no goal needed: elia works out what this repo needs and does it, unattended · /autopilot [N] | plan | resume | status' },
   { name: '/eliaspace', description: 'collaborative workspace — status, feed, members, agents' },
   { name: '/artifact', description: 'browse saved plan artifacts' },
   { name: '/verify', description: 'run project checks · /verify on|off' },

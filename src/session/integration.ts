@@ -4,7 +4,7 @@
  *
  * This module owns the *integration* of the parallel-session feature:
  *   - `runSessionPlusTaskRunner` drives one session's loop and demonstrates
- *     non-interrupting delegation: a quickchat/CLI task queued into the session
+ *     non-interrupting delegation: a CLI task queued into the session
  *     is popped at a plan-step boundary (via `popNextTask` in delegation.ts),
  *     marked active, executed, then tracked `done` — it never mutates an
  *     in-flight plan step and never blocks the session that queues into another.
@@ -139,7 +139,7 @@ const NOOP_TASK: (record: DelegationRecord) => void = () => {}
  * (its own loop polls the registry) and proceeds the instant the upstream fires
  * its checkpoint or reaches `done` — no per-session scheduler and no event
  * coordination needed. Sessions without dependencies are left to their caller
- * (the CLI interactive path / quickchat drive those explicitly).
+ * (the CLI interactive path drives those explicitly).
  */
 export function wireCrossSessionDependencies(
   bus: SessionBus,

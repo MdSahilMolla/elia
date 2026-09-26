@@ -245,6 +245,16 @@ export function TranscriptItemView({ item, expanded, gapAbove = false, live = fa
       }
       return <Note text={item.text} marginTop={gapAbove ? 1 : 0} />
     }
+    case 'aside':
+      // Asked mid-task and answered on the spot, while the work carried on.
+      return (
+        <Box flexDirection="column" marginTop={1}>
+          <Marked mark="↳" color={palette.brand} textColor={palette.muted}>
+            {`you, mid-task: ${item.question}`}
+          </Marked>
+          <AssistantMessage text={item.text} streaming={false} />
+        </Box>
+      )
     case 'receipt':
       // The spark, settled: the turn is over.
       return (

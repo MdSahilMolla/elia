@@ -24,6 +24,8 @@ export interface WorkingIndicatorProps {
   /** Only a silent *model* is a stall — a long test run is just a long test run. */
   waitingOnModel?: boolean
   steeringPending?: number
+  /** Messages sent mid-turn that the live lane is answering right now. */
+  answering?: number
   /** A rotating hint, shown under the line. */
   tip?: string
   /** The verification pass under way: each check lands on the line as it finishes. */
@@ -102,7 +104,7 @@ function useRollingCount(target: number, now: number): number {
  * label; if the model goes quiet the spark cools toward red, and after a while
  * the line says how long it has been silent.
  */
-export function WorkingIndicator({ startedAt, label, progress, thinking = false, waitingOnModel = false, steeringPending = 0, tip, checks = [] }: WorkingIndicatorProps) {
+export function WorkingIndicator({ startedAt, label, progress, thinking = false, waitingOnModel = false, steeringPending = 0, answering = 0, tip, checks = [] }: WorkingIndicatorProps) {
   const now = useAnimationClock()
   const width = useFrameWidth()
   const elapsed = Math.max(0, now - startedAt)
@@ -127,6 +129,7 @@ export function WorkingIndicator({ startedAt, label, progress, thinking = false,
       { key: 'tokens', text: tokens > 0 ? `↓ ${formatTokens(tokens)} tokens` : '' },
       { key: 'thinking', text: thinking && !/^thinking/i.test(text) ? 'thinking' : '' },
       { key: 'stall', text: stall >= 1 ? `no output for ${formatElapsed(quiet / 1000)}` : '' },
+      { key: 'answering', text: answering > 0 ? `answering you${answering > 1 ? ` (${answering})` : ''}` : '' },
       { key: 'steering', text: steeringPending > 0 ? `${steeringPending} steering queued` : '' },
       { key: 'esc', text: 'esc to interrupt' },
     ].filter((item) => item.text),

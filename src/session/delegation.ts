@@ -1,6 +1,5 @@
 /**
- * Task delegation for elia's parallel session orchestration (+ the /quickchat
- * overlay). A task is injected append-only into the *target session's*
+ * Task delegation for elia's parallel session orchestration. A task is injected append-only into the *target session's*
  * `taskQueue` — delegation never mutates, reorders or interrupts a running
  * plan step. The run loop reads the queue only at safe step boundaries via
  * `popNextTask` and reports outcome via `trackDelegation`.
@@ -75,6 +74,8 @@ export interface DelegateTaskResult {
 
 export async function delegateTask(opts: DelegateTaskOptions): Promise<DelegateTaskResult> {
   const bus = opts.bus ?? getSessionBus()
+  // Records written before /quickchat was retired carry 'quickchat'; it stays
+  // the default so their ids keep one shape.
   const source = opts.source ?? 'quickchat'
   const slugify = opts.slugify ?? slugifyGoal
 
@@ -200,12 +201,12 @@ export function trackDelegation(recordId: string, bus: SessionBus, nextStatus: D
   bus.update(handle.id, { taskQueue: [...handle.taskQueue] })
 }
 
-export interface QuickchatStatusRow {
+export interface DelegationStatusRow {
   sessionName: string
   tasks: DelegationRecord[]
 }
 
-export interface QuickchatStatusOptions {
+export interface DelegationStatusOptions {
   /** Single status filter; default shows queued + active. */
   status?: DelegationStatus
 }
@@ -213,13 +214,13 @@ export interface QuickchatStatusOptions {
 const DEFAULT_STATUSES: ReadonlySet<DelegationStatus> = new Set(['queued', 'active'])
 
 /**
- * Every session's delegated tasks (queued/active by default) for `/quickchat
- * status`. Sessions with no matching tasks are omitted.
+ * Every session's delegated tasks (queued/active by default). Sessions with no
+ * matching tasks are omitted.
  */
-export function quickchatStatus(bus?: SessionBus, opts: QuickchatStatusOptions = {}): QuickchatStatusRow[] {
+export function delegationStatus(bus?: SessionBus, opts: DelegationStatusOptions = {}): DelegationStatusRow[] {
   const registry = bus ?? getSessionBus()
   const wanted = opts.status === undefined ? DEFAULT_STATUSES : new Set<DelegationStatus>([opts.status])
-  const rows: QuickchatStatusRow[] = []
+  const rows: DelegationStatusRow[] = []
   for (const handle of registry.list()) {
     const tasks = handle.taskQueue.filter((record) => wanted.has(record.status))
     if (tasks.length === 0) continue
