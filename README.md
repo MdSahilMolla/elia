@@ -96,6 +96,7 @@ Inside a session, `/model` switches models, `/plan <goal>` starts a planned run,
 
 | Guide | What's in it |
 |---|---|
+| **[Serve elia over MCP](MCP.md)** | Claude Desktop, Cursor, Zed, Continue: the 39 tools, 6 resources and 5 prompts, client configs, protocol negotiation, and the governance boundaries a client cannot cross |
 | **[Recursive intelligence compounding](docs/guide/compounding.md)** | The six stages, the commands, the guards, and where each stage stands today |
 | [Amplification without distillation](docs/guide/discovery.md) | `elia compounding frontier`: the verification frontier, the certified library, the sealed gate, isolation and the resource governor |
 | [Using the terminal](docs/guide/terminal.md) | All commands and flags, the terminal UI, images, LSP diagnostics, cost display |
