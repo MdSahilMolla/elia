@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "elia": {
+      "url": "http://127.0.0.1:3284/mcp",
+      "headers": {
+        "Authorization": "Bearer ${ELIA_MCP_TOKEN}"
+      }
+    }
+  }
+}
