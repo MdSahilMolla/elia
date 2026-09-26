@@ -50,3 +50,12 @@ test('data science validates actions and required paths', async () => {
 })
 
 afterAll(() => rmSync(testDir, { recursive: true, force: true }))
+
+test('a percentile probability outside 0–1 is an error, not a silent null (#1269)', async () => {
+  const { percentile } = await import('./dataScience.ts')
+  expect(percentile([1, 2, 3, 4], 0.5)).toBe(2.5)
+  expect(percentile([1, 2, 3, 4], 0)).toBe(1)
+  expect(percentile([1, 2, 3, 4], 1)).toBe(4)
+  expect(percentile([], 0.5)).toBeNull()
+  for (const bad of [-0.1, 1.5, Number.NaN]) expect(() => percentile([1, 2, 3], bad)).toThrow(RangeError)
+})

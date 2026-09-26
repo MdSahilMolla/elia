@@ -95,6 +95,7 @@ Self-improvement:
                               in a sandbox, and promote it only if the benchmark agrees
   elia evolve -n 3            Run three generations, each building on the last
   elia evolve --dry-run       Evaluate candidates but never modify the live source
+  elia evolve --branch        Commit a proven change to its own evolve/gen-N branch, not the working tree
   elia evolve --builtin       Score only on the built-in suite (minutes, not hours; no full sweep needed)
                               ELIA_EVOLVE_PROVIDER / ELIA_EVOLVE_MODEL run the proposer and builder
                               on a stronger model; candidates are still measured on the configured one
@@ -211,10 +212,6 @@ Inside an interactive session:
   /model auto                 Keep the selected model primary; fail over to another ready provider
   /model <provider>           Switch provider (e.g. /model groq), keeping its default model
   /model <model-id>           Switch just the model id, keeping the current provider
-  /thinking                   Pick a reasoning effort with up/down or left/right, enter to switch
-  /thinking off|on            Turn reasoning off, or back on at its last budget
-  /thinking low|medium|high   Switch reasoning effort to a preset token budget
-  /thinking <n>               Switch reasoning to an exact token budget (Anthropic only)
   /usage                      Live token consumption, context-window fill, and the limits in
                               effect (context, reasoning, autonomous-run, provider/plan)
 

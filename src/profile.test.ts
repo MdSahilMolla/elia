@@ -143,3 +143,12 @@ test('renderProfileReport appends the tool table when both model and tool calls 
   expect(text).toContain('Tool profile')
   expect(text).toContain('grep')
 })
+
+test('a percentile outside 0–100 is an error, not a silent undefined (#1269)', async () => {
+  const { percentile } = await import('./profile.ts')
+  expect(percentile([10, 20, 30], 50)).toBe(20)
+  expect(percentile([10, 20, 30], 0)).toBe(10)
+  expect(percentile([10, 20, 30], 100)).toBe(30)
+  expect(percentile([Number.NaN], 50)).toBeUndefined()
+  for (const bad of [Number.NaN, -1, 101]) expect(() => percentile([1, 2, 3], bad)).toThrow(RangeError)
+})

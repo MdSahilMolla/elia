@@ -123,6 +123,13 @@ export interface RunTurnOptions {
    * tool runs — see autonomy/upfrontPlan.ts.
    */
   upfrontPlan?: boolean
+  /**
+   * Guidance for this call only, carried in the dynamic system block so it
+   * neither enters the conversation history nor disturbs the cached prefix.
+   * The answer check uses it to ask a question's answer to end in a line it
+   * can compare (reason/answer.ts).
+   */
+  turnGuidance?: string
 }
 
 /** The lessons a `note_lesson` call recorded, for its ✦ receipt. */
@@ -187,7 +194,7 @@ async function runScopedTurn(
   // The wall-clock date leads the dynamic block in every mode: it must reflect
   // real time, and it must not bake into the cached stable prefix (a daemon can
   // stay up across midnight, or for days).
-  const systemDynamicPrompt = [turnContextPrompt(), projectMemory].map((part) => part.trim()).filter(Boolean).join('\n\n') || undefined
+  const systemDynamicPrompt = [turnContextPrompt(), projectMemory, options.turnGuidance ?? ''].map((part) => part.trim()).filter(Boolean).join('\n\n') || undefined
 
   // A step elia ticked from evidence: the plan panel redraws from the checklist
   // (an "updated" activity, so scrollback is not filled with one per tick), and

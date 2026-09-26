@@ -107,3 +107,44 @@ test('a note added to a verdict is shown beside it, and errored generations are 
   const errored = (generation: number) => ({ generation, at: generation, hypothesis: '', rationale: '', targetFiles: [], changedFiles: [], verdict: 'error' as const, reason: 'Connection error.', model: 'm' })
   expect(learningRate([errored(1), errored(2), errored(3)]).trend).toBe('unknown')
 })
+
+test('only a comparison that ran to the end judged its idea (the first ten generations here)', async () => {
+  const { judgementOf, judgedRecords } = await import('./ledger.ts')
+  const record = (verdict: GenerationRecord['verdict'], reason: string, note?: string) => ({ verdict, reason, ...(note ? { note } : {}) })
+  // Shapes copied from this machine's ledger.
+  const crashed = record('error', 'the attempt could not finish: Connection error.')
+  const outOfCredit = record('rejected', 'could not measure hist-43597e6, hist-c6e363d — refusing to compare an incomplete benchmark')
+  const corrected = record('rejected', 'regressed on field-external-contribution', 'Not evidence against the change. field-external-contribution is a coin flip')
+  const real = record('rejected', 'no measurable improvement (pass rate unchanged at 98%, tokens +1%, time +79%)')
+  expect(judgementOf(crashed).judgement).toBe('not-judged')
+  expect(judgementOf(outOfCredit).judgement).toBe('not-judged')
+  expect(judgementOf(outOfCredit).why).toContain('could not measure every task')
+  expect(judgementOf(corrected).judgement).toBe('not-judged')
+  expect(judgementOf(real).judgement).toBe('rejected')
+  expect(judgementOf(record('promoted', 'better')).judgement).toBe('promoted')
+  expect(judgedRecords([crashed, outOfCredit, corrected, real])).toEqual([real])
+})
+
+test('the proposer is told which ideas were judged and which were only tried', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'elia-ledger-judged-'))
+  const path = join(dir, 'ledger.jsonl')
+  try {
+    const records = [
+      { ...gen(13, 'rejected', 0.98, 0.98), hypothesis: 'Add file path verification guidance', reason: 'no measurable improvement' },
+      { ...gen(15, 'rejected', 0.93, 0.93), hypothesis: 'Add "implement from spec" guidance to builder prompt', reason: 'could not measure hist-a — refusing to compare an incomplete benchmark' },
+    ]
+    writeFileSync(path, records.map((r) => JSON.stringify(r)).join('\n') + '\n')
+    const rendered = renderLedgerForPrompt(path)
+    const rejected = rendered.slice(rendered.indexOf('### Tried and rejected'), rendered.indexOf('### Tried but never judged'))
+    expect(rejected).toContain('gen 13: Add file path verification guidance')
+    expect(rejected).not.toContain('gen 15')
+    expect(rendered).toContain('### Tried but never judged (not evidence against the idea: retrying one is allowed)\n- gen 15: Add "implement from spec"')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('generations the provider cut short are not a stall', () => {
+  const cut = (n: number) => ({ ...gen(n, 'rejected', 0.9, 0.9), reason: 'could not measure hist-x — refusing to compare an incomplete benchmark' })
+  expect(learningRate([cut(1), cut(2), cut(3), cut(4), cut(5)]).trend).toBe('unknown')
+})

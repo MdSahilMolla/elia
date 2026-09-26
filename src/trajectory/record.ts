@@ -72,6 +72,14 @@ export interface TrajectoryRow {
    * after the one repair turn. Absent when nothing was cited or it did not run.
    */
   grounding?: TrajectoryGrounding
+  /**
+   * The calculations the answer stated, recomputed (reason/arithmetic.ts): how
+   * many were checked, how many did not hold, and how many still did not after
+   * the one repair turn. Absent when the answer stated none.
+   */
+  arithmetic?: TrajectoryArithmetic
+  /** The default answer check on a question (reason/answer.ts), when it ran. */
+  answerCheck?: TrajectoryAnswerCheck
 }
 
 export interface TrajectoryGrounding {
@@ -79,6 +87,21 @@ export interface TrajectoryGrounding {
   ungrounded: number
   /** Present only when a repair turn ran. */
   afterRepair?: number
+}
+
+export interface TrajectoryArithmetic {
+  checked: number
+  wrong: number
+  /** Present only when a repair turn ran. */
+  afterRepair?: number
+}
+
+export interface TrajectoryAnswerCheck {
+  status: string
+  attempts: number
+  /** The independent attempts agreed on a different answer than the one first given. */
+  overturned: boolean
+  tokens: number
 }
 
 export interface RewardSignals {
@@ -182,6 +205,8 @@ export interface TrajectoryInput {
   cwdIsEliaRoot: boolean
   reward: TrajectoryReward
   grounding?: TrajectoryGrounding
+  arithmetic?: TrajectoryArithmetic
+  answerCheck?: TrajectoryAnswerCheck
 }
 
 /** Append one row for a completed turn/run. Never throws. `baseDir` is for tests. */
@@ -202,6 +227,8 @@ export function recordTrajectory(input: TrajectoryInput, baseDir = paths.traject
       cwdIsEliaRoot: input.cwdIsEliaRoot,
       reward: input.reward,
       ...(input.grounding && input.grounding.checked > 0 ? { grounding: input.grounding } : {}),
+      ...(input.arithmetic && input.arithmetic.checked > 0 ? { arithmetic: input.arithmetic } : {}),
+      ...(input.answerCheck ? { answerCheck: input.answerCheck } : {}),
     }
 
     let line = JSON.stringify(row)

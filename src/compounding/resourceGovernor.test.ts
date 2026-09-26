@@ -129,3 +129,27 @@ test('a round runs the best free activity, never a paid one without --spend, and
     rmSync(dir, { recursive: true, force: true })
   }
 })
+
+test('a free verify run cannot lock the plan: ΔΦ is priced at the nominal cost and kept on the priors\' scale (#1274)', () => {
+  // The issue's reproduction: three free `verify` runs that moved Φ by 0.3.
+  const history = Array.from({ length: 3 }, () => ({ activity: 'verify' as const, deltaPhi: 0.3, cost: 0 }))
+  const plan = recommend(state({ frontier: frontier({ mass: undefined }) }), history)
+  const verify = plan.find((rec) => rec.activity === 'verify')!
+  expect(verify.score).toBeLessThan(3)
+  expect(verify.why).toContain('measured ΔΦ/cost 0.300')
+  // An enormous recorded ΔΦ on a free run is clamped, not multiplied by a million.
+  const extreme = recommend(state({ frontier: frontier({ mass: undefined }) }), Array.from({ length: 3 }, () => ({ activity: 'verify' as const, deltaPhi: 1, cost: 0 })))
+  expect(extreme.find((rec) => rec.activity === 'verify')!.score).toBeLessThan(3)
+})
+
+test('activities that cannot move Φ are ranked by their rules, not by a ΔΦ that is always 0 (#1275, #1276)', () => {
+  const noOps = Array.from({ length: 50 }, () => ({ activity: 'audit' as const, deltaPhi: 0, cost: 0 }))
+  const empty: LibraryHealth = { ...healthy, total: 0, byStatus: { admitted: 0, probation: 0, quarantined: 0, purged: 0 } }
+  const before = recommend(state({ library: empty })).find((rec) => rec.activity === 'audit')!
+  const after = recommend(state({ library: empty }), noOps).find((rec) => rec.activity === 'audit')!
+  // Fifty no-op audits neither inflate the audit (UCB) nor claim a measured value.
+  expect(after.score).toBe(before.score)
+  expect(after.why).not.toContain('measured ΔΦ/cost')
+  const compress = recommend(state(), Array.from({ length: 5 }, () => ({ activity: 'compress' as const, deltaPhi: 0, cost: 1 }))).find((rec) => rec.activity === 'compress')!
+  expect(compress.why).not.toContain('measured')
+})

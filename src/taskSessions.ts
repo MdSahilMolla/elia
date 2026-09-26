@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto'
 import { join } from 'node:path'
 import { emitEvent, machineReadable } from './ui/runtime.ts'
 import { redactText } from './ui/redact.ts'
+import { withFileLockAsync } from './fileLock.ts'
 
 export type TaskKind = 'browser' | 'code' | 'data' | 'finance' | 'sports' | 'fitness' | 'production' | 'research' | 'communication' | 'automation' | 'pending'
 export type TaskStatus = 'pending' | 'running' | 'paused' | 'waiting-input' | 'waiting-approval' | 'needs-review' | 'done' | 'failed'
@@ -285,13 +286,50 @@ export class TaskSessionStore {
       this.writeChain = this.writeChain.then(async () => {
         try {
           ensureSecureDirectory(join(this.persistencePath, '..'))
-          await writeSecureBunFile(this.persistencePath, JSON.stringify({ version: TASKS_SCHEMA_VERSION, tasks: snapshot }, null, 2))
+          // Another elia in the same project holds its own snapshot and writes
+          // the whole file too; last writer wins used to drop every task the
+          // other one had recorded (#1248). Under a cross-process lock, read
+          // what is on disk now and merge by id, keeping the newer copy of
+          // each row, so each process only ever changes its own tasks.
+          const path = this.persistencePath
+          await withFileLockAsync(`${path}.lock`, async () => {
+            const merged = mergeTaskRows(await readTaskRows(path), snapshot)
+            await writeSecureBunFile(path, JSON.stringify({ version: TASKS_SCHEMA_VERSION, tasks: merged }, null, 2))
+          })
         } catch {
           // Persistence is best-effort. The live dashboard remains authoritative.
         }
       })
     })
   }
+}
+
+/** The rows in a tasks file as written, or none when it is missing or corrupt. */
+async function readTaskRows(path: string): Promise<TaskSession[]> {
+  try {
+    const file = Bun.file(path)
+    if (!(await file.exists())) return []
+    const parsed = (await file.json()) as TaskSession[] | { tasks?: TaskSession[] }
+    const rows = Array.isArray(parsed) ? parsed : Array.isArray(parsed?.tasks) ? parsed.tasks : []
+    return rows.filter((row): row is TaskSession => Boolean(row) && typeof row.id === 'string')
+  } catch {
+    return []
+  }
+}
+
+/**
+ * The file's rows with this process's rows laid over them: a row this process
+ * holds replaces the one on disk unless the disk copy is newer, and rows only
+ * another process knows are kept. Nothing is ever deleted from the store, so a
+ * union by id loses nothing.
+ */
+export function mergeTaskRows(onDisk: readonly TaskSession[], mine: readonly TaskSession[]): TaskSession[] {
+  const merged = new Map(onDisk.map((row) => [row.id, row] as const))
+  for (const row of mine) {
+    const theirs = merged.get(row.id)
+    if (!theirs || !(Number(theirs.updatedAt) > Number(row.updatedAt))) merged.set(row.id, row)
+  }
+  return [...merged.values()].sort((a, b) => Number(a.createdAt) - Number(b.createdAt))
 }
 
 export const taskSessions = new TaskSessionStore()

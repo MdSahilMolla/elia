@@ -2,7 +2,7 @@ import { existsSync, readFileSync, renameSync } from 'node:fs'
 import { join } from 'node:path'
 import { stateDir } from '../statePaths.ts'
 import { writeSecureFile } from '../securePersistence.ts'
-import type { GenerationRecord } from './ledger.ts'
+import { judgedRecords, type GenerationRecord } from './ledger.ts'
 
 /**
  * The improver improving itself.
@@ -111,12 +111,13 @@ export interface StrategyTrial {
 
 /**
  * Generations that reached a verdict. One that errored — the network dropped,
- * a stream came back truncated — is evidence about the provider, not the
- * strategy: the first run here wrote itself a new strategy after two outages
- * and a rejection, and the strategy it wrote was built on those outages.
+ * a stream came back truncated — or whose comparison the benchmark could not
+ * finish is evidence about the provider, not the strategy: the first run here
+ * wrote itself a new strategy after two outages and a rejection, and the
+ * strategy it wrote was built on those outages. See `judgementOf`.
  */
 function judged(records: GenerationRecord[]): GenerationRecord[] {
-  return records.filter((record) => record.verdict !== 'error')
+  return judgedRecords(records)
 }
 
 function arm(id: string, records: GenerationRecord[]): StrategyArm {

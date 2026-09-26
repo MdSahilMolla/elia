@@ -64,7 +64,7 @@ interface Run {
 /** Drive the real loop with a scripted model, inside `dir`, and record everything the tools did. */
 async function run(
   turns: ScriptedTurn[],
-  options: { maxSteps?: number; usage?: Usage; model?: string; approve?: (request: ActionRequest) => boolean; graph?: GoalGraphStore; tools?: Tool[] } = {},
+  options: { maxSteps?: number; usage?: Usage; model?: string; routeModel?: string; approve?: (request: ActionRequest) => boolean; graph?: GoalGraphStore; tools?: Tool[] } = {},
 ): Promise<Run> {
   const provider = createScriptedProvider(turns, options.usage ? { usage: options.usage } : {})
   const events: ToolEvent[] = []
@@ -85,6 +85,8 @@ async function run(
       provider,
       providerName: 'scripted',
       model: options.model ?? 'scripted-behaviour',
+      // A sub-agent reaches the loop this way: a route, resolved per call.
+      ...(options.routeModel ? { resolveRoute: () => ({ provider, providerName: 'scripted', model: options.routeModel!, label: `scripted (${options.routeModel})` }) } : {}),
       useAnimation: false,
       verbose: false,
       maxSteps: options.maxSteps ?? 20,
@@ -278,6 +280,19 @@ test('spend is priced against the model the loop is actually running, not the gl
   const { result } = await run([...writes, done], { usage: EXPENSIVE, model: 'a-model-with-no-pricing-entry' })
   expect(result.stopReason).toBe('complete')
   expect(existsSync(join(dir, 'u2.txt'))).toBe(true)
+})
+
+test('a worker is priced at the model its route runs, not the model the loop was handed (#1244)', async () => {
+  // `runSubAgent` passes a route and no model of its own, so the loop's
+  // `model` fell back to the session's deep model and every worker was priced
+  // at that rate.
+  process.env.ELIA_MAX_SPEND_USD = '1'
+  const writes = Array.from({ length: 3 }, (_, i) => call('write_file', { path: `r${i}.txt`, content: 'x' }))
+  const unpricedWorker = await run([...writes, done], { usage: EXPENSIVE, model: 'mercury-2.5', routeModel: 'a-model-with-no-pricing-entry' })
+  expect(unpricedWorker.result.stopReason).toBe('complete')
+  rmSync(join(dir, 'r2.txt'), { force: true })
+  const pricedWorker = await run([...writes, done], { usage: EXPENSIVE, model: 'a-model-with-no-pricing-entry', routeModel: 'mercury-2.5' })
+  expect(pricedWorker.result.stopReason).toBe('spend-budget')
 })
 
 // --- Commands reach the shell intact, and failures read as failures ---------

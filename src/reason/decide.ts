@@ -1,5 +1,5 @@
 import type { ProjectChecks } from './reason.ts'
-import { taskSignature, worthSearching } from './signature.ts'
+import { classify, taskSignature, worthSearching } from './signature.ts'
 import type { TaskSignature } from './signature.ts'
 
 /**
@@ -100,4 +100,36 @@ export function decideSearch(request: string, detected: string[]): SearchDecisio
       ? `${signature.taskClass} work, checked by: ${[checks.build, checks.test].filter(Boolean).join(', ')}`
       : `${signature.taskClass} work — elia will write the check before attempting it`,
   }
+}
+
+/** Opens like a question, or ends like one. */
+const QUESTION = /^\s*(?:what|what's|whats|which|where|when|who|whom|whose|why|how|is|are|was|were|does|do|did|can|could|should|would|will|has|have)\b/i
+/** A request phrased as a question: "can you add…" is a task, not a question with an answer. */
+const POLITE_TASK =
+  /^\s*(?:can|could|would|will)\s+you\s+(?:please\s+)?(?:add|fix|make|write|create|build|implement|change|update|remove|delete|refactor|rename|run|install|deploy|push|commit|set\s?up|move|convert|generate)\b/i
+const SMALL_TALK = /^\s*(?:thanks|thank\s+you|ok|okay|hi|hello|hey|cool|great|nice|got\s+it|sounds\s+good)\b/i
+
+/**
+ * Whether this turn's answer gets the default answer check (reason/answer.ts).
+ *
+ * The check is cheap by construction: the ordinary turn is its first attempt,
+ * and a challenger is only paid for when that turn ends in a short answer a
+ * vote can compare. So this errs toward asking. A task phrased politely, small
+ * talk, or a request with no question in it is left alone. The caller also
+ * drops the check when the turn turns out to change files, because then it
+ * was work, not a question.
+ */
+export function decideAnswerCheck(request: string): { check: boolean; why: string } {
+  const head = request.trim().slice(0, 600)
+  if (head.split(/\s+/).length < 3 || SMALL_TALK.test(head)) return { check: false, why: 'too short to be a question with an answer' }
+  if (POLITE_TASK.test(head)) return { check: false, why: 'a task phrased as a question' }
+  const opensAsQuestion = QUESTION.test(head)
+  if (!opensAsQuestion && !/\?\s*$/.test(head)) return { check: false, why: 'not a question' }
+  // The task classifier reads verbs, so "the build is slow, is caching on?"
+  // looks like implement work to it. The question mark is the better signal;
+  // only an imperative that merely ends in one ("fix the parser?") is declined.
+  if (!opensAsQuestion && classify(head) === 'repair' && !/\b(?:is|are|was|were|does|do|did|why|what|which|where|how)\b/i.test(head)) {
+    return { check: false, why: 'a repair request, not a question' }
+  }
+  return { check: true, why: 'a question: if its answer is short, an independent attempt checks it' }
 }

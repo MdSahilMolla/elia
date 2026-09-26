@@ -75,6 +75,7 @@ import { proposeChallengerStrategy } from './metaPropose.ts'
 import { fieldEvidenceSection } from './fieldEvidence.ts'
 import { gateDecision, gateMode, meanGainOver, sealedCompare, type SealedVerdict } from './acceptance.ts'
 import { diffDigest, redactHeldOut, sealedReadTools } from './isolation.ts'
+import { checkIdea, type IdeaMatch } from './ideas.ts'
 import { applySteppingStone, archiveNearMiss, elites, readArchive, renderSteppingStones } from './archive.ts'
 import { improverLoopRoute, improverRoute, withImproverBuilder } from './improverRoute.ts'
 import { checkCanaries } from './canaryGate.ts'
@@ -377,7 +378,9 @@ async function attemptGeneration(
 
   // --- Hypothesise ----------------------------------------------------------
 
-  const capture = createHypothesisTool()
+  // The proposer is checked against the whole ledger, but a bounce is redacted
+  // the same way the brief is, so it cannot name a held-out task.
+  const capture = createHypothesisTool({ records: readLedger(), heldOutIds: split.split ? split.heldOut.map((task) => task.id) : [] })
 
   // The proposer is briefed on the shown half only. `baseline` itself stays
   // whole — it is what the candidate is compared against, and thinning that
@@ -418,11 +421,13 @@ async function attemptGeneration(
     return { ...base, reason: 'the model never submitted a hypothesis' }
   }
 
+  const echo = capture.echo()
   Object.assign(base, {
     funnel: 'proposed',
     hypothesis: hypothesis.title,
     rationale: hypothesis.rationale,
     targetFiles: hypothesis.targetFiles,
+    ...(echo ? { echoes: { generation: echo.generation, similarity: Math.round(echo.textSimilarity * 1000) / 1000, judgement: echo.judgement } } : {}),
   })
 
   writeBlock(
@@ -1099,10 +1104,19 @@ Report what you changed and why it should move the benchmark.`
 interface HypothesisCapture {
   tool: Tool
   taken(): Hypothesis | undefined
+  /** The past generation the accepted hypothesis most resembles, when one reached the threshold (ideas.ts). */
+  echo(): IdeaMatch | undefined
 }
 
-function createHypothesisTool(): HypothesisCapture {
+/**
+ * `checkIdea` sends a repeat of a judged idea back once. A second submission
+ * of the same idea is accepted: the proposer was told what was tried and why
+ * it failed, and may have a real difference the titles do not show.
+ */
+export function createHypothesisTool(ideas?: { records: readonly GenerationRecord[]; heldOutIds: readonly string[] }): HypothesisCapture {
   let captured: Hypothesis | undefined
+  let echo: IdeaMatch | undefined
+  let bounced = false
 
   const tool: Tool = {
     name: 'submit_hypothesis',
@@ -1147,6 +1161,18 @@ function createHypothesisTool(): HypothesisCapture {
         )
       }
 
+      if (ideas) {
+        const verdict = checkIdea({ hypothesis: title, targetFiles }, ideas.records)
+        if (verdict.bounce && !bounced) {
+          bounced = true
+          writeSubStep(`sent back: repeats generation ${verdict.match!.generation} (titles ${Math.round(verdict.match!.textSimilarity * 100)}% alike)`)
+          // Thrown so the proposer reads it as the tool's answer and submits
+          // again, the way a forbidden file is refused above.
+          throw new Error(redactHeldOut(verdict.bounce, ideas.heldOutIds))
+        }
+        echo = verdict.match
+      }
+
       const buildOn = typeof input.buildOn === 'string' && input.buildOn.trim() ? input.buildOn.trim() : undefined
       captured = { title, rationale, targetFiles, plan, ...(buildOn ? { buildOn } : {}) }
       return 'Hypothesis recorded. Stop now — implementation happens in a separate step.'
@@ -1160,6 +1186,7 @@ function createHypothesisTool(): HypothesisCapture {
       captured = undefined
       return hypothesis
     },
+    echo: () => echo,
   }
 }
 

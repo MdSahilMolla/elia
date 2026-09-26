@@ -9,6 +9,7 @@ import { bold, dim, green, red } from '../ui/theme.ts'
 import { table } from '../ui/layout.ts'
 import { MAX_SHELL_OUTPUT_LENGTH, readBoundedOutput, terminateProcessGroup } from '../shell.ts'
 import { registerShutdownCleanup } from '../ui/shutdown.ts'
+import { writeSubStep } from '../ui/report.ts'
 import { ELIA_ROOT } from '../statePaths.ts'
 import { REACH_OUT_ENV, absorbReachFile } from './reach.ts'
 import { MODEL_SILENCE_MS, TRACE_OUT_ENV, readTrace, renderTrace, waitingOnModel } from './trace.ts'
@@ -32,7 +33,7 @@ const TASK_TIMEOUT_MS = 300_000
  * 80-step task in a real repository as a hang, which measures the timeout
  * instead of the agent. Tasks that say nothing keep the original ceiling.
  */
-function timeoutFor(task: BenchTask): number {
+function timeoutFor(task: Pick<BenchTask, 'maxSteps'>): number {
   if (!task.maxSteps) return TASK_TIMEOUT_MS
   return Math.max(TASK_TIMEOUT_MS, Math.round((TASK_TIMEOUT_MS / 30) * task.maxSteps))
 }
@@ -390,15 +391,85 @@ export function benchTaskEnv(env: Record<string, string | undefined>, reachOut: 
   return { ...env, [REACH_OUT_ENV]: reachOut, ...(traceOut ? { [TRACE_OUT_ENV]: traceOut } : {}), ELIA_ROUTING_MODE: 'selected' }
 }
 
+/** A task given more than the default step budget: the history tasks, each sending hundreds of thousands of tokens. */
+export function isHeavy(task: Pick<BenchTask, 'maxSteps'>): boolean {
+  return timeoutFor(task) > TASK_TIMEOUT_MS
+}
+
+/** The provider refused or went quiet: retried, never scored, and a sign that it is being asked too much at once. */
+export function providerPushedBack(outcome: Pick<TaskOutcome, 'error'>): boolean {
+  return RATE_LIMITED.test(outcome.error ?? '') || PROVIDER_STALLED.test(outcome.error ?? '')
+}
+
+/**
+ * How many heavy tasks may run at once, narrowed on evidence.
+ *
+ * The evolve comparison refuses a scorecard with any task unmeasured, and the
+ * tasks that go unmeasured are the heavy ones: generations 15 and 16 each lost
+ * the same two history tasks, which are also two of the four tasks with any
+ * headroom, so the one change the benchmark could have judged was voided
+ * twice. Two history tasks at once share one rate-capped provider (mercury's
+ * free tier caps input tokens per minute), and both slow down until one
+ * stalls. Running them one at a time always would halve a sweep's speed on a
+ * provider that never objects, so the lane starts as wide as the benchmark
+ * and narrows to one the first time the provider pushes back on a heavy task.
+ * The retry of that task then runs alone. It stays narrow for the rest of the
+ * process: a provider that throttled once will again.
+ */
+export class HeavyLane {
+  private active = 0
+  private readonly waiting: Array<() => void> = []
+
+  constructor(private width: number) {}
+
+  get capacity(): number {
+    return this.width
+  }
+
+  narrow(): boolean {
+    if (this.width <= 1) return false
+    this.width = 1
+    return true
+  }
+
+  async run<T>(work: () => Promise<T>): Promise<T> {
+    while (this.active >= this.width) await new Promise<void>((resolve) => this.waiting.push(resolve))
+    this.active += 1
+    try {
+      return await work()
+    } finally {
+      this.active -= 1
+      this.waiting.shift()?.()
+    }
+  }
+}
+
+/** One lane per process, shared by the sweep, the race, and the regression retest. */
+export const heavyLane = new HeavyLane(benchConcurrency())
+
+/** Heavy attempts go through the lane; a push-back on one narrows it before the retry. */
+export async function attemptInLane<T extends Pick<TaskOutcome, 'error'>>(
+  task: Pick<BenchTask, 'id' | 'maxSteps'>,
+  attempt: () => Promise<T>,
+  lane: HeavyLane = heavyLane,
+  onNarrow: (task: Pick<BenchTask, 'id'>) => void = (narrowed) =>
+    writeSubStep(`the provider pushed back on ${narrowed.id} — heavy tasks run one at a time from here`),
+): Promise<T> {
+  if (!isHeavy(task)) return attempt()
+  const outcome = await lane.run(attempt)
+  if (providerPushedBack(outcome) && lane.narrow()) onNarrow(task)
+  return outcome
+}
+
 async function runTaskWithRetry(task: BenchTask, sourceRoot: string, arm: BenchArm = 'elia'): Promise<TaskOutcome> {
-  let last = await runOneTask(task, sourceRoot, arm)
+  let last = await attemptInLane(task, () => runOneTask(task, sourceRoot, arm))
 
   for (let attempt = 1; ; attempt++) {
     const delay = retryDelayMs(last, attempt)
     if (delay === undefined) break
     if (last.keptDir) rmSync(last.keptDir, { recursive: true, force: true })
     await new Promise((resolve) => setTimeout(resolve, delay))
-    last = await runOneTask(task, sourceRoot, arm)
+    last = await attemptInLane(task, () => runOneTask(task, sourceRoot, arm))
   }
 
   return markUnmeasured(last)

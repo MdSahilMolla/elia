@@ -1,4 +1,4 @@
-import { addUsage, estimateCostUsd, formatCostUsd, sessionUsageSnapshot } from './usage.ts'
+import { formatCostUsd, sessionCost } from './usage.ts'
 import type { Usage } from './providers/types.ts'
 
 /**
@@ -42,23 +42,38 @@ export function spendCeilingUsd(env: NodeJS.ProcessEnv = process.env): number | 
 /**
  * Where this session stands against its ceiling.
  *
- * `runUsage` is what the current loop has spent so far. It is added to the
- * session total because `recordUsage` only lands at the end of a turn — without
- * it, a single long autonomous turn could run past the ceiling unnoticed,
- * which is exactly the case the ceiling exists for.
+ * `runUsage` is what the current loop has spent so far, and `model` is the
+ * model that loop runs on. It is added to the session total because
+ * `recordUsage` only lands at the end of a turn — without it, a single long
+ * autonomous turn could run past the ceiling unnoticed, which is exactly the
+ * case the ceiling exists for.
+ *
+ * Everything already recorded is priced per model (usage.ts `sessionCost`):
+ * a session that ran a deep lead and cheap sub-agents was priced at one rate
+ * for all of it (#1245). Usage on a model with no pricing entry cannot be
+ * measured; the priced part is still enforced, since it is a floor on the
+ * true spend, and the gap is reported rather than hidden.
  */
 export function spendState(model: string, runUsage: Usage, env: NodeJS.ProcessEnv = process.env): SpendState {
   const limitUsd = spendCeilingUsd(env)
-  const spentUsd = estimateCostUsd(model, addUsage(sessionUsageSnapshot().usage, runUsage))
-  if (limitUsd === undefined) return { spentUsd, exceeded: false }
-  if (spentUsd === undefined) {
+  const cost = sessionCost({ model, usage: runUsage })
+  const known = cost.unpriced.length === 0 || cost.usd > 0
+  const spentUsd = known ? cost.usd : undefined
+  if (limitUsd === undefined) return { ...(spentUsd === undefined ? {} : { spentUsd }), exceeded: false }
+  if (cost.usd >= limitUsd) return { limitUsd, spentUsd: cost.usd, exceeded: true }
+  if (cost.unpriced.length > 0) {
+    const models = cost.unpriced.join(', ')
     return {
       limitUsd,
+      ...(spentUsd === undefined ? {} : { spentUsd }),
       exceeded: false,
-      unenforceable: `ELIA_MAX_SPEND_USD is set to ${formatCostUsd(limitUsd)} but ${model} has no pricing entry, so spend cannot be measured and the ceiling is not being enforced.`,
+      unenforceable:
+        cost.usd === 0
+          ? `ELIA_MAX_SPEND_USD is set to ${formatCostUsd(limitUsd)} but ${models} has no pricing entry, so spend cannot be measured and the ceiling is not being enforced.`
+          : `ELIA_MAX_SPEND_USD is set to ${formatCostUsd(limitUsd)} but ${models} has no pricing entry; the ceiling is enforced only on the priced part (${formatCostUsd(cost.usd)} so far).`,
     }
   }
-  return { limitUsd, spentUsd, exceeded: spentUsd >= limitUsd }
+  return { limitUsd, spentUsd: cost.usd, exceeded: false }
 }
 
 /** The message handed to the model when the ceiling is reached, in the same shape as the step-budget wrap-up. */

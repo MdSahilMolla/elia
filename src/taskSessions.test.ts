@@ -2,7 +2,7 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { expect, test } from 'bun:test'
-import { inferTaskKind, taskFingerprint, TaskSessionStore } from './taskSessions.ts'
+import { inferTaskKind, mergeTaskRows, taskFingerprint, TaskSessionStore, type TaskSession } from './taskSessions.ts'
 
 test('infers browser work separately from coding work', () => {
   expect(inferTaskKind('Open the website', 'navigate Chrome to the login page')).toBe('browser')
@@ -203,4 +203,46 @@ test('recovers stale running tasks into needs-review with a resume action', asyn
   } finally {
     await rm(dir, { recursive: true, force: true })
   }
+})
+
+/** Waits until the file holds every one of `ids`, or gives up. */
+async function fileHolds(file: string, ids: string[], timeoutMs = 3_000): Promise<string[]> {
+  const deadline = Date.now() + timeoutMs
+  let seen: string[] = []
+  while (Date.now() < deadline) {
+    try {
+      const parsed = (await Bun.file(file).json()) as { tasks?: Array<{ id: string }> }
+      seen = (parsed.tasks ?? []).map((row) => row.id)
+      if (ids.every((id) => seen.includes(id))) return seen
+    } catch {}
+    await Bun.sleep(20)
+  }
+  return seen
+}
+
+test('two processes writing one tasks.json keep each other\'s tasks (#1248)', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'elia-task-clobber-'))
+  const file = join(dir, 'tasks.json')
+  try {
+    // Two stores stand in for two elia processes: each holds only its own snapshot.
+    const first = new TaskSessionStore()
+    const second = new TaskSessionStore()
+    await first.load(file)
+    await second.load(file)
+    const a = first.create('code', 'First process task')
+    await fileHolds(file, [a.id])
+    const b = second.create('code', 'Second process task')
+    const c = first.create('code', 'First process, again')
+    second.update(b.id, { status: 'running', action: 'Working' })
+    expect((await fileHolds(file, [a.id, b.id, c.id])).sort()).toEqual([a.id, b.id, c.id].sort())
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('a merge keeps the newer copy of a row and every row only one side knows', () => {
+  const row = (id: string, updatedAt: number, action: string) => ({ id, title: id, createdAt: 1, updatedAt, action }) as unknown as TaskSession
+  const merged = mergeTaskRows([row('shared', 5, 'disk, newer'), row('theirs', 1, 'theirs')], [row('shared', 3, 'mine, older'), row('mine', 2, 'mine')])
+  expect(merged.map((entry) => `${entry.id}:${entry.action}`).sort()).toEqual(['mine:mine', 'shared:disk, newer', 'theirs:theirs'])
+  expect(mergeTaskRows([row('shared', 3, 'disk')], [row('shared', 3, 'mine')])[0]!.action).toBe('mine')
 })
