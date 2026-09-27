@@ -383,3 +383,106 @@ test('the planner cannot launch a worker that writes while it orients', async ()
   // …and a builder asked for anyway is refused, with a reason the model can act on.
   expect(results.some((result) => /while planning/i.test(result) && /proposal/i.test(result))).toBe(true)
 })
+
+// Seen live: a person typed "make it realistic" while an escalated run was
+// planning, the status row said "1 steering queued" — and the run finished
+// without ever reading it, because nothing in the pipeline drained steering.
+// A note now reaches the run: its plan change is applied before the first
+// worker starts, and its text reaches every worker from there.
+test('a note sent while the plan is approved changes the plan before building, and reaches the workers', async () => {
+  const { mkdtempSync, rmSync } = await import('node:fs')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+  const { config } = await import('../config.ts')
+  const { createScriptedProvider } = await import('../bench/latency/scriptedProvider.ts')
+  const { runAutonomousTask } = await import('./loop.ts')
+  const { encodeNote } = await import('./operatorNotes.ts')
+
+  const scripted = createScriptedProvider([
+    { text: 'One text file; I will write it and check it exists.' },
+    {
+      toolCalls: [
+        {
+          name: 'submit_proposal',
+          input: {
+            goal: 'write a greeting file',
+            understanding: 'Create greeting.txt containing a greeting.',
+            steps: [{ id: 's1', title: 'Write greeting.txt', instructions: 'Write greeting.txt', role: 'builder', files: ['greeting.txt'], dependsOn: [] }],
+            verification: ['echo ok'],
+            acceptanceCriteria: ['greeting.txt exists'],
+          },
+        },
+      ],
+    },
+  ])
+  // Every request the run sends, so the test can see what the workers were told.
+  const requests: string[] = []
+  const provider = {
+    ...scripted,
+    get calls() {
+      return scripted.calls
+    },
+    streamTurn(params: Parameters<typeof scripted.streamTurn>[0]) {
+      requests.push(JSON.stringify(params.messages))
+      return scripted.streamTurn(params)
+    },
+  }
+  const original = config.provider
+  const originalTiers = { fast: config.tiers.fast, deep: config.tiers.deep }
+  const originalFallbacks = config.fallbacks
+  const originalRouting = config.routingMode
+  const scriptedTier = (tier: typeof config.tiers.fast) => ({ ...tier, provider, providerName: 'scripted', model: 'scripted' })
+  const workspace = mkdtempSync(join(tmpdir(), 'elia-notes-'))
+  const inbox: string[] = []
+  const revised: Array<Array<{ id: string; title: string }>> = []
+  try {
+    config.provider = provider
+    config.tiers.fast = scriptedTier(config.tiers.fast)
+    config.tiers.deep = scriptedTier(config.tiers.deep)
+    config.fallbacks = []
+    config.routingMode = 'selected'
+    const result = await runAutonomousTask({
+      goal: 'write a greeting file',
+      workspaceRoot: workspace,
+      approve: async () => {
+        // Typed while the plan waited for approval.
+        inbox.push(encodeNote("The person's note: say it in French, and say goodbye too", {
+          wants: 'a French greeting and a farewell',
+          edits: [
+            { kind: 'change', stepId: 's1', stepTitle: 'Write greeting.txt', to: 'Write greeting.txt in French' },
+            { kind: 'add', title: 'Write farewell.txt', afterId: 's1', afterTitle: 'Write greeting.txt' },
+          ],
+        }))
+        return { action: 'approve' as const }
+      },
+      drainDirections: () => inbox.splice(0),
+      onPlanRevised: (steps) => revised.push(steps),
+      profile: 'fast',
+      polish: false,
+      publish: false,
+      learn: false,
+      maxRepairAttempts: 0,
+      maxWallClockMs: 120_000,
+    } as Parameters<typeof runAutonomousTask>[0])
+
+    expect(revised[0]).toEqual([
+      { id: 's1', title: 'Write greeting.txt in French' },
+      { id: 'note-1', title: 'Write farewell.txt' },
+    ])
+    expect(result.proposal?.steps.map((step) => step.title)).toEqual(['Write greeting.txt in French', 'Write farewell.txt'])
+    expect(result.completion.evidence.join(' ')).toContain('All 2 planned step(s) completed')
+    // The builder of the changed step was told what changed and why.
+    const toWorkers = requests.slice(2).join('\n')
+    expect(toWorkers).toContain('Changed by the person while the work ran')
+    expect(toWorkers).toContain('Notes from the person, sent while the work ran')
+    expect(toWorkers).toContain('say it in French')
+    expect(inbox).toEqual([])
+  } finally {
+    config.provider = original
+    config.tiers.fast = originalTiers.fast
+    config.tiers.deep = originalTiers.deep
+    config.fallbacks = originalFallbacks
+    config.routingMode = originalRouting
+    rmSync(workspace, { recursive: true, force: true })
+  }
+}, 120_000)

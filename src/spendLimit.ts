@@ -1,4 +1,4 @@
-import { formatCostUsd, sessionCost } from './usage.ts'
+import { ZERO_USAGE, formatCostUsd, sessionCost } from './usage.ts'
 import type { Usage } from './providers/types.ts'
 
 /**
@@ -12,8 +12,40 @@ import type { Usage } from './providers/types.ts'
  * status line, the session summary. Nothing ever read it back to decide
  * anything.
  *
- * Set `ELIA_MAX_SPEND_USD` to bound it. Unset, nothing changes.
+ * A session a person starts is bounded by default: `DEFAULT_SPEND_LIMIT_USD`
+ * unless `ELIA_MAX_SPEND_USD` says otherwise (`0`, `off` or `none` lift it),
+ * and `/limit` changes it mid-session. Commands that measure or train elia
+ * (bench, evolve, …) run to completion and get no default.
  */
+
+/** What a session may spend when nobody said otherwise. */
+export const DEFAULT_SPEND_LIMIT_USD = 1
+
+/** Measuring and training commands: they run to completion, so no default ceiling. */
+const UNCAPPED_COMMANDS = new Set(['bench', 'bench-latency', 'evolve', 'gap', 'distill', 'compounding', 'jev', 'values'])
+
+/** Gives a session `DEFAULT_SPEND_LIMIT_USD` unless the environment already set a limit (or lifted it). */
+export function applyDefaultSpendLimit(subcommand: string | undefined, env: NodeJS.ProcessEnv = process.env): void {
+  if (env.ELIA_MAX_SPEND_USD !== undefined) return
+  if (subcommand !== undefined && UNCAPPED_COMMANDS.has(subcommand)) return
+  env.ELIA_MAX_SPEND_USD = String(DEFAULT_SPEND_LIMIT_USD)
+}
+
+/**
+ * `/limit` — what the session may spend from here. A number in dollars sets it,
+ * `off` lifts it; anything else is refused with the reason.
+ */
+export function setSpendLimit(raw: string, env: NodeJS.ProcessEnv = process.env): { ok: true; limitUsd?: number } | { ok: false; error: string } {
+  const value = raw.trim().replace(/^\$/, '').toLowerCase()
+  if (value === 'off' || value === 'none' || value === '0') {
+    env.ELIA_MAX_SPEND_USD = '0'
+    return { ok: true }
+  }
+  const usd = Number.parseFloat(value)
+  if (!/^\d+(?:\.\d+)?$/.test(value) || !Number.isFinite(usd) || usd <= 0) return { ok: false, error: `"${raw.trim()}" is not an amount — try /limit 5 or /limit off` }
+  env.ELIA_MAX_SPEND_USD = String(usd)
+  return { ok: true, limitUsd: usd }
+}
 
 export interface SpendState {
   /** Configured ceiling in USD, or undefined when none is set. */
@@ -69,8 +101,8 @@ export function spendState(model: string, runUsage: Usage, env: NodeJS.ProcessEn
       exceeded: false,
       unenforceable:
         cost.usd === 0
-          ? `ELIA_MAX_SPEND_USD is set to ${formatCostUsd(limitUsd)} but ${models} has no pricing entry, so spend cannot be measured and the ceiling is not being enforced.`
-          : `ELIA_MAX_SPEND_USD is set to ${formatCostUsd(limitUsd)} but ${models} has no pricing entry; the ceiling is enforced only on the priced part (${formatCostUsd(cost.usd)} so far).`,
+          ? `The spending limit is ${formatCostUsd(limitUsd)} but ${models} has no pricing entry, so spend cannot be measured and the limit is not being enforced.`
+          : `The spending limit is ${formatCostUsd(limitUsd)} but ${models} has no pricing entry; the limit is enforced only on the priced part (${formatCostUsd(cost.usd)} so far).`,
     }
   }
   return { limitUsd, spentUsd: cost.usd, exceeded: false }
@@ -83,5 +115,22 @@ export function spendStopPrompt(state: SpendState): string {
 
 /** The line shown to the operator when a run stops on spend. */
 export function spendStopNotice(state: SpendState): string {
-  return `Stopped on the spending ceiling — about ${formatCostUsd(state.spentUsd)} spent against a ${formatCostUsd(state.limitUsd)} limit. Raise or unset ELIA_MAX_SPEND_USD to continue.`
+  return `Stopped on the spending limit — about ${formatCostUsd(state.spentUsd)} spent of ${formatCostUsd(state.limitUsd)}. Type /limit 5 to allow more (or /limit off), then send the request again.`
+}
+
+/** `/limit [amount|off]`: shows the session's limit, or changes it, and says where spend stands. */
+export function limitCommand(arg: string, model: string, env: NodeJS.ProcessEnv = process.env): string {
+  const spent = sessionCost({ model, usage: ZERO_USAGE }).usd
+  const spentLine = `${formatCostUsd(spent)} spent this session`
+  if (arg.trim()) {
+    const result = setSpendLimit(arg, env)
+    if (!result.ok) return result.error
+    return result.limitUsd === undefined
+      ? `Spending limit lifted — this session can spend without a ceiling (${spentLine}).`
+      : `Spending limit set to ${formatCostUsd(result.limitUsd)} (${spentLine}).`
+  }
+  const limit = spendCeilingUsd(env)
+  return limit === undefined
+    ? `No spending limit (${spentLine}). /limit 5 sets one.`
+    : `Spending limit ${formatCostUsd(limit)} — ${spentLine}. /limit 5 raises it · /limit off lifts it.`
 }

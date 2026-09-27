@@ -61,6 +61,11 @@ async function main() {
   // after the module is already loaded.
   process.on('exit', flushUsageStats)
 
+  // A session a person starts is bounded in money by default ($1 unless
+  // ELIA_MAX_SPEND_USD says otherwise); bench, evolve and the like are not.
+  const { applyDefaultSpendLimit } = await import('./spendLimit.ts')
+  applyDefaultSpendLimit(subcommand)
+
   await taskSessions.load()
   updateTerminalTaskTitle(taskSessions)
   taskSessions.subscribe(() => updateTerminalTaskTitle(taskSessions))

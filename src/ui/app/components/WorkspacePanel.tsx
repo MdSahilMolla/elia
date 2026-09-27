@@ -146,6 +146,7 @@ export function WorkspacePanel({
   sessionId,
   expanded = false,
   evidence,
+  highlight,
 }: {
   plan: TodoItem[]
   agents: TaskSession[]
@@ -156,6 +157,8 @@ export function WorkspacePanel({
   expanded?: boolean
   /** Steps elia ticked on evidence (keyed by `stepEvidenceKey`), and what proved each. */
   evidence?: ReadonlyMap<string, StepProof>
+  /** Steps a note just changed or added, by their text — lit up briefly so the change is seen. */
+  highlight?: ReadonlyMap<string, 'changed' | 'added'>
 }) {
   // A worker belongs to this run if it carries this session's id. `tasks.json`
   // is reloaded on every startup, so without this check a `needs-review` or
@@ -207,6 +210,15 @@ export function WorkspacePanel({
     .filter(Boolean)
     .join(' · ')
 
+  // "1 changed, 1 added" — said once on the header, which is never truncated.
+  const noted = highlight && highlight.size > 0
+    ? (['changed', 'added'] as const)
+        .map((kind) => [kind, plan.filter((item) => highlight.get(item.content) === kind).length] as const)
+        .filter(([, n]) => n > 0)
+        .map(([kind, n]) => `${n} ${kind}`)
+        .join(', ')
+    : ''
+
   return (
     <Box flexDirection="column" width="100%" marginTop={1}>
       {plan.length > 0 && (
@@ -215,6 +227,7 @@ export function WorkspacePanel({
             <Text bold>Plan</Text>
             {plan.length > 1 ? <Text color={palette.muted}> · {planDone}/{plan.length}</Text> : null}
             {plan.length > 1 ? <ProgressBar done={planDone} total={plan.length} /> : null}
+            {noted ? <Text color={palette.plan}> · {noted} from your note</Text> : null}
           </Text>
           {start > 0 && <Text color={palette.muted}>  … {start} done</Text>}
           {shown.map((item, i) => {
@@ -232,10 +245,12 @@ export function WorkspacePanel({
                     {TODO_MARK[item.status]}
                   </Text>
                 )}{' '}
+                {/* In front, not after: a long row is truncated at its end. */}
+                {highlight?.has(item.content) ? <Text color={palette.plan} bold>{highlight.get(item.content) === 'added' ? '+ ' : '~ '}</Text> : null}
                 <Text
-                  bold={item.status === 'in_progress'}
+                  bold={item.status === 'in_progress' || highlight?.has(item.content)}
                   strikethrough={item.status === 'completed'}
-                  color={item.status === 'in_progress' ? undefined : palette.muted}
+                  color={highlight?.has(item.content) ? palette.plan : item.status === 'in_progress' ? undefined : palette.muted}
                 >
                   {item.content}
                 </Text>

@@ -366,7 +366,7 @@ export async function runInteractive(): Promise<void> {
       uiHooks
         ? 'This reads as a new project, so elia will research it, plan it, and build it — the plan shows as it starts.'
         : `This looks like a full build (${reason}) — planning it properly.`,
-      uiHooks ? '/auto off answers requests like this in a single reply instead.' : undefined,
+      undefined,
       'completed',
     )
 
@@ -424,6 +424,10 @@ export async function runInteractive(): Promise<void> {
         profile: 'balanced',
         governanceMode: 'supervised',
         reviewRunsFreely: true,
+        // A note sent mid-run reaches the pipeline at its next safe point, and a
+        // plan it changes redraws the session's plan panel.
+        drainDirections: uiHooks?.drainSteering,
+        onPlanRevised: uiHooks?.onRunPlan ? (steps) => uiHooks.onRunPlan?.(steps) : undefined,
         signal,
         polish: true,
         // A build asked for from the chat stays local unless the request itself
@@ -1024,6 +1028,12 @@ export async function runInteractive(): Promise<void> {
         },
       })
       lastTurnLessonMemory = { lessonKeys: turn.lessonKeys, lessonHeldOut: turn.lessonHeldOut }
+      // The model was told to wrap up; the person is told why, and how to go on.
+      if (turn.stopReason === 'spend-budget') {
+        const { spendState, spendStopNotice } = await import('../spendLimit.ts')
+        const { ZERO_USAGE } = await import('../usage.ts')
+        writeNotice(spendStopNotice(spendState(config.model, ZERO_USAGE)))
+      }
       return turn
     }
 
@@ -2499,6 +2509,10 @@ export async function runInteractive(): Promise<void> {
       if (!item) return { handled: true, text: `No tool call ${expandMatch[1]}. This session has ${total}.` }
       return { handled: true, text: `⎿ ${item.name} · full output (${item.status})\n${colorizeDiffBlock(item.result)}` }
     }
+    if (trimmed === '/limit' || trimmed.startsWith('/limit ')) {
+      const { limitCommand } = await import('../spendLimit.ts')
+      return { handled: true, text: limitCommand(trimmed.slice('/limit'.length), config.model) }
+    }
     if (trimmed === '/cost') {
       const { sessionUsageSnapshot, estimateCostUsd, formatCostUsd, formatTokenCount, formatElapsed } = await import('../usage.ts')
       const s = sessionUsageSnapshot()
@@ -2831,8 +2845,10 @@ export async function runInteractive(): Promise<void> {
           label: launch.resume ? '/autopilot resume' : '/autopilot',
           notice: launch.resume
             ? 'Picking the autopilot back up where it stopped. Ask me anything while it works; tell me to change course and it goes to the front of the backlog. Esc stops it · elia --chat opens without it.'
-            : 'Working on this project by myself: surveying it, running its checks, and doing the most valuable next goals on a branch of my own. Ask me anything while I work; tell me to change course and it goes to the front of the backlog. Esc stops me · elia --chat opens without it.',
-          run: (hooks: Parameters<typeof runAutopilotTurn>[1]) => runAutopilotTurn({ planOnly: false, resume: launch.resume, maxGoals: 3 }, hooks),
+            : 'Working on this project by myself: surveying it, running its checks, and doing the most valuable next goal on a branch of my own. Ask me anything while I work; tell me to change course and it goes to the front of the backlog. Esc stops me · /autopilot 3 does more · elia --chat opens without it.',
+          // One goal per launch: opening elia should not quietly spend on a
+          // backlog. /autopilot N asks for more.
+          run: (hooks: Parameters<typeof runAutopilotTurn>[1]) => runAutopilotTurn({ planOnly: false, resume: launch.resume, maxGoals: 1 }, hooks),
         }
       : undefined
 
@@ -2855,18 +2871,18 @@ export async function runInteractive(): Promise<void> {
         return rendered
       },
       handleSlash: handleSlashForInk,
-      liveReply: async (question, view, signal) => {
+      liveReply: async (question, view, signal, onThinking) => {
         const [{ answerWhileWorking }, { activePilot }, { pilotSnapshot }] = await Promise.all([
           import('../live/liveReply.ts'),
           import('../autopilot/pilot.ts'),
           import('../autopilot/report.ts'),
         ])
         const pilot = activePilot()
-        const reply = await answerWhileWorking({ ...view, conversation: messages, pilot: pilot ? pilotSnapshot(pilot) : undefined, exchanges: liveExchanges, cwd: process.cwd() }, question, { signal })
+        const reply = await answerWhileWorking({ ...view, conversation: messages, pilot: pilot ? pilotSnapshot(pilot) : undefined, exchanges: liveExchanges, cwd: process.cwd() }, question, { signal, onThinking })
         liveExchanges.push({ question, answer: reply.answer })
         if (liveExchanges.length > 8) liveExchanges.splice(0, liveExchanges.length - 8)
         carriedAsides.push(`<aside-while-you-worked>\nThe user asked: ${question}\nYou answered: ${reply.answer}${reply.steer ? `\n(Passed to the work: ${reply.steer})` : ''}\n</aside-while-you-worked>`)
-        sessionTranscript.notice(`live reply — Q: ${question}\nA: ${reply.answer}`)
+        sessionTranscript.notice(`live reply — Q: ${question}\nA: ${reply.answer}${reply.dropped ? `\n(${reply.dropped} unbacked claim(s) removed)` : ''}`)
         await persistInteractiveSession()
         return reply
       },
@@ -2972,6 +2988,13 @@ export async function runInteractive(): Promise<void> {
     }
     if (trimmed === '/team') {
       process.stdout.write(`${renderTeamStatus()}\n`)
+      continue
+    }
+
+    // /limit — what this session may spend.
+    if (trimmed === '/limit' || trimmed.startsWith('/limit ')) {
+      const { limitCommand } = await import('../spendLimit.ts')
+      writeNotice(limitCommand(trimmed.slice('/limit'.length), config.model))
       continue
     }
 

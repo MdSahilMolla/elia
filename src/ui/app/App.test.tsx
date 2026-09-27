@@ -32,6 +32,9 @@ function baseProps() {
 }
 
 test('App prints a one-line header and a quiet status row before any turn', async () => {
+  // Session spend is process-wide; other suites leave some behind.
+  const { resetSessionUsageForTests } = await import('../../usage.ts')
+  resetSessionUsageForTests()
   const { lastFrame } = render(<App {...baseProps()} />)
   const frame = await waitForFrame(lastFrame, 'dev mode — say hi')
   expect(frame).toContain('elia v0.0.0-test · dev mode — say hi')
@@ -547,13 +550,14 @@ test('a slash command queued during a turn is dispatched, not sent to the model'
   expect(prompts).toEqual(['build the thing'])
 })
 
-test('a message typed mid-turn is answered right away, and a direction also reaches the running work', async () => {
+test('a message typed mid-turn opens the thinking panel, is answered there, and leaves a receipt when it closes', async () => {
   let release!: () => void
   const held = new Promise<void>((resolve) => { release = resolve })
   const drained: string[][] = []
   const asked: Array<{ question: string; request: string; tools: string[] }> = []
   const props = {
     ...baseProps(),
+    panelReadMs: 800,
     submitTurn: async (_text: string, hooks: import('./App.tsx').TurnHooks) => {
       hooks.onToolStart({ id: 'r1', name: 'read_file', input: { path: 'src/auth.ts' } })
       hooks.onTool({ id: 'r1', name: 'read_file', input: { path: 'src/auth.ts' }, result: 'export function login() {}', isError: false, durationMs: 2, cached: false })
@@ -578,21 +582,145 @@ test('a message typed mid-turn is answered right away, and a direction also reac
     stdin.write('what are you doing?')
     await waitForFrame(lastFrame, 'what are you doing?')
     stdin.write('\r')
-    const answered = await waitForFrame(lastFrame, 'find where the session expires')
-    expect(answered).toContain('you, mid-task: what are you doing?')
+    const answered = await waitForFrame(lastFrame, 'No plan change.')
+    expect(answered).toContain('find where the session expires')
+    expect(answered).toContain('Thinking about your note')
+    // Where the work stands comes from what ran, not from the model.
+    expect(answered).toContain('Right now:')
+    expect(answered).toContain('No plan change.')
     // The turn is still running: an answer is not a turn.
     expect(answered).toContain('esc to interrupt')
+    // Once read, the panel shuts and the exchange stays as a receipt.
+    const closed = await waitForFrame(lastFrame, 'you, mid-task: what are you doing?')
+    expect(closed).not.toContain('Thinking about your note')
 
     stdin.write('also add tests')
     await waitForFrame(lastFrame, 'also add tests')
     stdin.write('\r')
-    await waitForFrame(lastFrame, 'passing to the running work')
+    await waitForFrame(lastFrame, 'your note reaches the work at its next step')
 
     release()
     await new Promise((resolve) => setTimeout(resolve, 100))
     expect(asked[0]).toEqual({ question: 'what are you doing?', request: 'fix the login bug', tools: ['read_file'] })
     // Only the instruction the live lane distilled reaches the work — not the raw chat.
     expect(drained).toEqual([['Add unit tests for login() after fixing it.']])
+  } finally {
+    unmount()
+  }
+})
+
+test('the panel streams the thinking, and a plan change lands in the main plan and reaches the run by step id', async () => {
+  let release!: () => void
+  const held = new Promise<void>((resolve) => { release = resolve })
+  let think!: () => void
+  const thought = new Promise<void>((resolve) => { think = resolve })
+  const drained: string[][] = []
+  const props = {
+    ...baseProps(),
+    panelReadMs: 60_000,
+    submitTurn: async (_text: string, hooks: import('./App.tsx').TurnHooks) => {
+      hooks.onRunPlan?.([
+        { id: 'schema', title: 'Design the schema' },
+        { id: 'api', title: 'Build the API' },
+        { id: 'ui', title: 'Build the page' },
+      ])
+      await held
+      drained.push(hooks.drainSteering())
+    },
+    liveReply: async (_question: string, view: import('../../live/liveReply.ts').LiveView, _signal: AbortSignal, onThinking?: (text: string) => void) => {
+      expect(view.plan.map((step) => step.content)).toEqual(['Design the schema', 'Build the API', 'Build the page'])
+      onThinking?.('They want real data, so the API step changes and seeding comes first.')
+      await thought
+      return {
+        answer: 'The API will read from Postgres, seeded with realistic rows.',
+        steer: "The person's note: make it realistic",
+        wants: 'realistic data from a real database',
+        edits: [
+          { kind: 'change' as const, step: 2, to: 'Build the API on Postgres' },
+          { kind: 'add' as const, after: 1, title: 'Seed realistic rows' },
+        ],
+      }
+    },
+  }
+  const { stdin, lastFrame, unmount } = render(<App {...props} />)
+  try {
+    await waitForFrame(lastFrame, READY)
+    await settle()
+    stdin.write('build the shop')
+    await waitForFrame(lastFrame, 'build the shop')
+    stdin.write('\r')
+    await waitForFrame(lastFrame, 'Build the API')
+
+    stdin.write('make it realistic')
+    await waitForFrame(lastFrame, 'make it realistic')
+    stdin.write('\r')
+    // The reasoning shows while it is still being written.
+    await waitForFrame(lastFrame, 'so the API step changes')
+    think()
+    const updated = await waitForFrame(lastFrame, 'Plan updated')
+    expect(updated).toContain('You want:')
+    expect(updated).toContain('realistic data from a real database')
+    expect(updated).toContain('~ Build the API → Build the API on Postgres')
+    expect(updated).toContain('+ Seed realistic rows')
+    // The main chat's plan changed too, and says why.
+    expect(updated).toContain('1 changed, 1 added from your note')
+    expect(updated).toContain('+ Seed realistic rows')
+    expect(updated).toContain('~ Build the API on Postgres')
+    expect(updated.indexOf('+ Seed realistic rows')).toBeLessThan(updated.indexOf('~ Build the API on Postgres'))
+
+    release()
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    expect(drained).toHaveLength(1)
+    const note = drained[0]![0]!
+    expect(note).toContain("The person's note: make it realistic")
+    const change = JSON.parse(note.slice(note.indexOf('<plan-change>') + '<plan-change>'.length, note.indexOf('</plan-change>')))
+    expect(change).toEqual({
+      wants: 'realistic data from a real database',
+      edits: [
+        { kind: 'change', stepId: 'api', stepTitle: 'Build the API', to: 'Build the API on Postgres' },
+        { kind: 'add', title: 'Seed realistic rows', afterId: 'schema', afterTitle: 'Design the schema' },
+      ],
+    })
+  } finally {
+    unmount()
+  }
+})
+
+test('ctrl+w keeps the thinking panel open past its reading time, and ctrl+w again puts it away', async () => {
+  let release!: () => void
+  const held = new Promise<void>((resolve) => { release = resolve })
+  const props = {
+    ...baseProps(),
+    panelReadMs: 1_000,
+    submitTurn: async () => {
+      await held
+    },
+    liveReply: async () => ({ answer: 'Halfway through the parser.' }),
+  }
+  const { stdin, lastFrame, unmount } = render(<App {...props} />)
+  try {
+    await waitForFrame(lastFrame, READY)
+    await settle()
+    stdin.write('go')
+    await waitForFrame(lastFrame, 'go')
+    stdin.write('\r')
+    await waitForFrame(lastFrame, 'esc to interrupt')
+    stdin.write('how far along?')
+    await waitForFrame(lastFrame, 'how far along?')
+    stdin.write('\r')
+    await waitForFrame(lastFrame, 'ctrl+w keeps this open')
+    stdin.write('\x17')
+    await waitForFrame(lastFrame, 'ctrl+w hides this')
+    await new Promise((resolve) => setTimeout(resolve, 1_500))
+    // Pinned: the reading time passed and it is still there, with no receipt yet.
+    expect(lastFrame()).toContain('Halfway through the parser.')
+    expect(lastFrame()).not.toContain('you, mid-task')
+    // ctrl+w never types into the input.
+    expect(lastFrame()).not.toMatch(/❯ w\b/)
+    stdin.write('\x17')
+    const closed = await waitForFrame(lastFrame, 'you, mid-task: how far along?')
+    expect(closed).not.toContain('ctrl+w hides this')
+    release()
   } finally {
     unmount()
   }
@@ -623,7 +751,7 @@ test('when the live lane cannot answer, the message still reaches the work as st
     stdin.write('use postgres not sqlite')
     await waitForFrame(lastFrame, 'use postgres not sqlite')
     stdin.write('\r')
-    await waitForFrame(lastFrame, 'so I passed your message')
+    await waitForFrame(lastFrame, 'could not think it through (provider down)')
     release()
     await new Promise((resolve) => setTimeout(resolve, 100))
     expect(drained).toEqual([['use postgres not sqlite']])
@@ -759,5 +887,38 @@ test('there is one way of working: no approval posture to pick, and shift+tab on
     expect(back).not.toContain('plan mode on')
   } finally {
     unmount()
+  }
+})
+
+test('the status row shows what the session has spent against its limit, once it has spent anything', async () => {
+  const { recordUsage, resetSessionUsageForTests } = await import('../../usage.ts')
+  const prior = process.env.ELIA_MAX_SPEND_USD
+  resetSessionUsageForTests()
+  process.env.ELIA_MAX_SPEND_USD = '1'
+  try {
+    const props = {
+      ...baseProps(),
+      submitTurn: async () => {
+        // 50k input + 2k output on mercury-2.5: $0.0115.
+        recordUsage({ inputTokens: 50_000, outputTokens: 2_000, cacheReadTokens: 0, cacheWriteTokens: 0 }, 'mercury-2.5')
+      },
+    }
+    const { stdin, lastFrame, unmount } = render(<App {...props} />)
+    try {
+      const idle = await waitForFrame(lastFrame, READY)
+      expect(idle).not.toContain('of $1.00')
+      await settle()
+      stdin.write('go')
+      await waitForFrame(lastFrame, 'go')
+      stdin.write('\r')
+      const spent = await waitForFrame(lastFrame, '$0.012 of $1.00')
+      expect(spent).toContain('$0.012 of $1.00 · mercury-2')
+    } finally {
+      unmount()
+    }
+  } finally {
+    resetSessionUsageForTests()
+    if (prior === undefined) delete process.env.ELIA_MAX_SPEND_USD
+    else process.env.ELIA_MAX_SPEND_USD = prior
   }
 })

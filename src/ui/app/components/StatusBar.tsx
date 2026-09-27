@@ -32,10 +32,13 @@ export interface StatusBarProps {
    * read 100% on a model with most of its window still free.
    */
   contextLimit: number
-  /** Kept for callers; token and cost detail live in /cost, not the status row. */
+  /** Kept for callers; token detail lives in /cost, not the status row. */
   sessionInput?: number
   sessionOutput?: number
+  /** What the session has spent so far — shown once it is more than nothing. */
   costUsd?: number | undefined
+  /** The session's spending limit, when there is one: "$0.012 of $1.00". */
+  limitUsd?: number | undefined
   providerName?: string
   /**
    * `auto` when the session falls back across every ready provider. Shown next
@@ -58,6 +61,12 @@ export interface StatusBarProps {
   selfEdit?: boolean
 }
 
+/** Spend at a glance: tenths of a cent under a dollar, cents above. */
+export function formatSpend(usd: number): string {
+  if (usd < 0.001) return '<$0.001'
+  return usd < 1 ? `$${usd.toFixed(3)}` : `$${usd.toFixed(2)}`
+}
+
 /** Context use only earns space once it is worth watching. */
 export function contextPercent(tokens: number, limit: number): number {
   return limit > 0 ? Math.min(100, Math.round((tokens / limit) * 100)) : 0
@@ -73,6 +82,9 @@ export function StatusBar(props: StatusBarProps) {
   const modeLabel = MODE_LABEL[props.mode]
   const modeColor = props.mode === 'plan' ? palette.plan : palette.muted
   const ctxColor = pct >= 92 ? palette.failure : pct >= 80 ? palette.warning : palette.muted
+  const spent = props.costUsd ?? 0
+  const spendShare = props.limitUsd ? spent / props.limitUsd : 0
+  const spendColor = spendShare >= 1 ? palette.failure : spendShare >= 0.8 ? palette.warning : palette.muted
   const extras = [
     props.queued > 0 ? `${props.queued} queued` : '',
     props.steering ? `${props.steering} steering` : '',
@@ -96,6 +108,13 @@ export function StatusBar(props: StatusBarProps) {
       </Box>
       <Box flexShrink={1} marginLeft={2}>
         <Text color={palette.muted} wrap="truncate-start">
+          {spent > 0 ? (
+            <Text color={spendColor}>
+              {formatSpend(spent)}
+              {props.limitUsd ? ` of ${formatSpend(props.limitUsd)}` : ''}
+              {' · '}
+            </Text>
+          ) : null}
           {props.model}
           {/* Model fallback, not a mode: "auto" here read as yet another autonomy switch. */}
           {props.routing === 'auto' ? ' + fallback' : ''}

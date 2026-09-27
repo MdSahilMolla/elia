@@ -61,12 +61,13 @@ test('a provider out of credit or rate-limited is left alone until the backoff p
   expect(looksBlocked('no measurable improvement (pass rate unchanged at 93%)')).toBe(false)
 })
 
-test('ELIA_AUTO_IMPROVE=off is the off switch, and on is the default', () => {
-  expect(autoImproveEnabled({})).toBe(true)
+test('practice is off unless asked for — idle sessions no longer spend credit by themselves', () => {
+  expect(autoImproveEnabled({})).toBe(false)
   expect(autoImproveEnabled({ NODE_ENV: 'test' })).toBe(false)
   expect(autoImproveEnabled({ NODE_ENV: 'test', ELIA_AUTO_IMPROVE: 'on' })).toBe(true)
+  expect(autoImproveEnabled({ ELIA_AUTO_IMPROVE: 'on' })).toBe(true)
   expect(autoImproveEnabled({ ELIA_AUTO_IMPROVE: 'off' })).toBe(false)
-  expect(shouldStartPractice({}, { now, enabled: false, alive: dead }).start).toBe(false)
+  expect(autoImproveEnabled({ ELIA_AUTO_IMPROVE: 'maybe' })).toBe(false)
 })
 
 test('turns from any session count as new experience, and a finished run is reported exactly once', () => {

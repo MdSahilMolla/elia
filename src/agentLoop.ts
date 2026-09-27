@@ -7,6 +7,7 @@ import { createPlanlessWorkTracker, createRedundantReadTracker, isLoneBatchableR
 import { createReadAhead } from './autonomy/readAhead.ts'
 import { createPlanProgressTracker, planBelongsToRequest, type PlanProgressUpdate, type ToolOutcome } from './autonomy/planProgress.ts'
 import { activeTodoList } from './autonomy/todoList.ts'
+import { applyEditsToTodos, decodeNote } from './autonomy/operatorNotes.ts'
 import type { ChatMessage, ContentBlock, Provider, ProviderActivity, Usage } from './providers/types.ts'
 import type { Tool } from './tools/types.ts'
 import { unknownToolMessage } from './tools/toolNameSuggest.ts'
@@ -353,9 +354,22 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
     return true
   }
 
+  // A note from the thinking panel carries its plan change as a block for the
+  // autonomous pipeline; a chat turn applies it to its own todo list instead,
+  // and shows the model the list it should keep.
+  const takeSteering = (): string[] =>
+    (drainSteering?.() ?? []).map((raw) => {
+      const { text, change } = decodeNote(raw)
+      if (!change || change.edits.length === 0) return text
+      const list = activeTodoList()
+      const before = list.read()
+      if (before.length === 0) return text
+      list.write(applyEditsToTodos(before, change.edits))
+      return `${text}\n\nYour todo list now reads:\n${list.render()}\nKeep these steps and titles the next time you update it.`
+    })
   const injectSteering = (): boolean =>
     injectPending(
-      drainSteering?.() ?? [],
+      takeSteering(),
       '[Operator steering — the user sent this while you were working. Take it as a direct instruction and adjust course now.]',
       'elia: operator steering applied',
       true,

@@ -209,6 +209,9 @@ describe('pilot end to end (real git, fake model and worker)', () => {
       expect(activePilot()?.currentGoalId).toBe(goal.id)
       if (goal.kind === 'repair') {
         expect(prompt).toContain('## Definition of done')
+        // What the goal's run spent: 1M input + 100k output on mercury-2.5 = $0.275.
+        const { recordUsage } = await import('../usage.ts')
+        recordUsage({ inputTokens: 1_000_000, outputTokens: 100_000, cacheReadTokens: 0, cacheWriteTokens: 0 }, 'mercury-2.5')
         writeFileSync(join(at, 'FIXED'), 'fixed\n')
         writeFileSync(join(at, '.env'), 'SECRET=1\n')
         return { outcome: 'completed', blockers: ['refused: git push (github.push) — needs a person'] }
@@ -221,6 +224,8 @@ describe('pilot end to end (real git, fake model and worker)', () => {
     const lines: string[] = []
     const result = await runPilot({ root, maxGoals: 4, understandingModel: model, runGoal, checkRunner: fileRunner, has: () => true, env: {}, spendExceeded: () => false, maxReplans: 0, log: (line) => lines.push(line) })
     const state = result.state
+    // The goal's spend is on its outcome now; leave no session spend behind for other suites.
+    ;(await import('../usage.ts')).resetSessionUsageForTests()
 
     expect(state.branch?.startsWith('elia/autopilot-')).toBe(true)
     expect(sh(root, 'rev-parse', '--abbrev-ref', 'HEAD')).toBe(state.branch!)
@@ -230,6 +235,9 @@ describe('pilot end to end (real git, fake model and worker)', () => {
     expect(repair.status).toBe('done')
     expect(repair.outcomes[0]?.accepted).toBe(true)
     expect(repair.outcomes[0]?.fixed).toEqual([state.survey!.checks.find((c) => c.includes('test'))!])
+    // Each goal says what it cost; one that spent nothing says so.
+    expect(repair.outcomes[0]?.costUsd).toBeCloseTo(0.275, 6)
+    expect(lines.some((line) => line.includes('✓ landed') && line.endsWith('· $0.28'))).toBe(true)
     // Landed as a commit; the secret was left out of it.
     expect(sh(root, 'log', '--format=%s', '-n', '1')).toBe('autopilot: ' + repair.title)
     expect(sh(root, 'ls-files')).toContain('FIXED')
@@ -254,6 +262,7 @@ describe('pilot end to end (real git, fake model and worker)', () => {
     expect(report).toContain('## What this project is')
     expect(report).toContain('Rolled back (kept for inspection)')
     expect(report).toContain('## Needs a person')
+    expect(report).toContain('Spent on goals: about $0.28 across 3 attempt(s).')
     expect(statusText(state)).toContain('1 landed, 1 parked')
     expect(pilotSnapshot(state)).toContain('purpose: A tiny HTTP API for notes')
     expect(renderReport(state)).toContain('| at start | now |')

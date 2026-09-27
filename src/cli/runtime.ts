@@ -49,6 +49,7 @@ const REPL_COMMANDS: SlashCommand[] = [
   { name: '/verify', description: 'run project checks · /verify on|off' },
   { name: '/self', description: "stop asking before elia changes its own source · /self on|off" },
   { name: '/cost', description: 'token & cost breakdown' },
+  { name: '/limit', description: 'what this session may spend · /limit 5 | off' },
   { name: '/usage', description: 'live token consumption, context & limits' },
   { name: '/status', description: 'session, plan, subagents, artifacts' },
   { name: '/expand', description: 'reprint the last tool result in full' },

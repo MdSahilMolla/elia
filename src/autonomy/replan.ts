@@ -18,7 +18,10 @@
 import type { Tool } from '../tools/types.ts'
 import { isRoleName, type ProposalStep, type Proposal } from './types.ts'
 
-export type PlanRevisionKind = 'add-step' | 'add-dependency' | 'drop-step'
+// `revise-step` is the operator's alone: a person changing a step that has not
+// started. Workers cannot request it — their tool's schema and parser accept
+// only the other three — so a worker still cannot rewrite what a step does.
+export type PlanRevisionKind = 'add-step' | 'add-dependency' | 'drop-step' | 'revise-step'
 
 export interface PlanRevision {
   kind: PlanRevisionKind
@@ -30,6 +33,10 @@ export interface PlanRevision {
   stepId?: string
   /** add-dependency: the step that must finish first. */
   dependsOn?: string
+  /** revise-step: the step's new title, when it changes. */
+  title?: string
+  /** revise-step: what the person asked for, added to the step's instructions. */
+  change?: string
 }
 
 export interface RevisionCapture {
@@ -52,7 +59,7 @@ export interface AppliedRevisions {
  */
 export const MAX_PLAN_REVISIONS = 6
 
-const KIND_ORDER: Record<PlanRevisionKind, number> = { 'add-step': 0, 'add-dependency': 1, 'drop-step': 2 }
+const KIND_ORDER: Record<PlanRevisionKind, number> = { 'revise-step': 0, 'add-step': 1, 'add-dependency': 2, 'drop-step': 3 }
 
 /**
  * Revisions from several workers arrive in whatever order each wave emptied the
@@ -150,6 +157,23 @@ export function applyPlanRevisions(
 
   for (const revision of sortRevisions(revisions).slice(0, Math.max(0, maxRevisions))) {
     const index = byId()
+
+    if (revision.kind === 'revise-step') {
+      const target = revision.stepId ? index.get(revision.stepId) : undefined
+      if (!target) {
+        rejected.push(`revise-step ${revision.stepId}: no such step`)
+        continue
+      }
+      if (completed.has(target.id)) {
+        rejected.push(`revise-step "${target.id}": that step has already completed; changing it would rewrite what the run did`)
+        continue
+      }
+      const before = target.title
+      if (revision.title?.trim()) target.title = revision.title.trim()
+      if (revision.change?.trim()) target.instructions = `${target.instructions}\n\n## Changed by the person while the work ran\n${revision.change.trim()}`
+      applied.push(`changed step "${target.id}" (${before}${target.title !== before ? ` → ${target.title}` : ''}) — ${revision.reason}`)
+      continue
+    }
 
     if (revision.kind === 'add-step') {
       const step = revision.step

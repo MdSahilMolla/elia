@@ -108,6 +108,13 @@ const QUESTION = /^\s*(?:what|what's|whats|which|where|when|who|whom|whose|why|h
 const POLITE_TASK =
   /^\s*(?:can|could|would|will)\s+you\s+(?:please\s+)?(?:add|fix|make|write|create|build|implement|change|update|remove|delete|refactor|rename|run|install|deploy|push|commit|set\s?up|move|convert|generate)\b/i
 const SMALL_TALK = /^\s*(?:thanks|thank\s+you|ok|okay|hi|hello|hey|cool|great|nice|got\s+it|sounds\s+good)\b/i
+/**
+ * A question about elia itself — "what can you do", "who are you", "how do you
+ * work". Seen live: "what can you do" drew an independent second attempt and
+ * a vote, 240k tokens to compare two self-descriptions.
+ */
+const ABOUT_ELIA =
+  /^\s*(?:(?:so|and|but|ok|okay|hey|hi|hello|yo)\b[\s,!.]*)?(?:what\s+(?:can|could|else\s+can|do|are)\s+you\b(?!\s+(?:think|recommend|suggest|see|find|know|mean)\b)|who\s+(?:are|made|built|created)\s+you\b|how\s+(?:are\s+you|do\s+you\s+work|does\s+elia\s+work)\b|what(?:'s|\s+is)\s+your\s+(?:name|model|purpose|job)\b|what\s+model\s+are\s+you\b|are\s+you\s+(?:there|working|done|ok|okay|alive|busy|an?)\b|help\b|what\s+commands\b)/i
 
 /**
  * Whether this turn's answer gets the default answer check (reason/answer.ts).
@@ -122,6 +129,7 @@ const SMALL_TALK = /^\s*(?:thanks|thank\s+you|ok|okay|hi|hello|hey|cool|great|ni
 export function decideAnswerCheck(request: string): { check: boolean; why: string } {
   const head = request.trim().slice(0, 600)
   if (head.split(/\s+/).length < 3 || SMALL_TALK.test(head)) return { check: false, why: 'too short to be a question with an answer' }
+  if (ABOUT_ELIA.test(head)) return { check: false, why: 'a question about elia itself — nothing to check' }
   if (POLITE_TASK.test(head)) return { check: false, why: 'a task phrased as a question' }
   const opensAsQuestion = QUESTION.test(head)
   if (!opensAsQuestion && !/\?\s*$/.test(head)) return { check: false, why: 'not a question' }

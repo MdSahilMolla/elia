@@ -330,6 +330,54 @@ test('operator steering is spliced into the running turn at the next step bounda
   expect(seen[1]).toContain('Operator steering')
 })
 
+test('a note with a plan change updates the turn\'s todo list, and the model sees it without the machine block', async () => {
+  const { createTodoList, withTodoList } = await import('./autonomy/todoList.ts')
+  const { encodeNote } = await import('./autonomy/operatorNotes.ts')
+  const originalProvider = config.provider
+  const seen: string[] = []
+  const steering: string[] = []
+  const list = createTodoList()
+  list.write([
+    { content: 'Read the parser', status: 'completed' },
+    { content: 'Write tests for the parser', status: 'in_progress' },
+  ])
+  let call = 0
+  config.provider = {
+    async streamTurn({ messages }) {
+      call += 1
+      const lastUser = [...messages].reverse().find((m) => m.role === 'user')
+      seen.push(lastUser!.content.map((b) => (b.type === 'text' ? b.text : `[${b.type}]`)).join(' '))
+      if (call === 1) {
+        steering.push(encodeNote("The person's note: use real fixtures", { edits: [{ kind: 'change', stepTitle: 'Write tests for the parser', to: 'Write tests for the parser against real fixtures' }] }))
+        return { content: [{ type: 'tool_use', id: 't1', name: 'noop', input: {} }] as ContentBlock[], usage: { inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 } }
+      }
+      return { content: [{ type: 'text', text: 'done' }] as ContentBlock[], usage: { inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 } }
+    },
+  }
+  const noopTool: Tool = { name: 'noop', description: 'x', input_schema: { type: 'object', properties: {} }, async execute() { return 'ok' } }
+  try {
+    await withTodoList(list, () =>
+      runAgentLoop({
+        messages: [{ role: 'user', content: [{ type: 'text', text: 'test the parser' }] }],
+        systemPrompt: 'S',
+        tools: [noopTool],
+        useAnimation: false,
+        verbose: false,
+        drainSteering: () => steering.splice(0),
+      }),
+    )
+  } finally {
+    config.provider = originalProvider
+  }
+  expect(list.read()).toEqual([
+    { content: 'Read the parser', status: 'completed' },
+    { content: 'Write tests for the parser against real fixtures', status: 'in_progress' },
+  ])
+  expect(seen[1]).toContain("The person's note: use real fixtures")
+  expect(seen[1]).toContain('[~] Write tests for the parser against real fixtures')
+  expect(seen[1]).not.toContain('<plan-change>')
+})
+
 test('steering after the model is ready to stop keeps the turn going instead of ending', async () => {
   const originalProvider = config.provider
   const steering: string[] = []

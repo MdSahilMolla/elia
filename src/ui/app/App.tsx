@@ -37,8 +37,11 @@ import { looksLikeImageAttachmentLine } from '../../attachments.ts'
 import { compactionThresholdFor, contextWindowFor } from '../../contextWindow.ts'
 import { codexContextTokens } from '../../providers/codexSubscription.ts'
 import type { ChatMessage } from '../../providers/types.ts'
-import type { LiveView } from '../../live/liveReply.ts'
-import { onLiveOutput, sessionUsageSnapshot } from '../../usage.ts'
+import type { LivePlanEdit, LiveView } from '../../live/liveReply.ts'
+import { ThinkingPanel, type PanelNote } from './components/ThinkingPanel.tsx'
+import { encodeNote, type NotePlanChange, type NotePlanEdit } from '../../autonomy/operatorNotes.ts'
+import { onLiveOutput, sessionCost, sessionUsageSnapshot } from '../../usage.ts'
+import { spendCeilingUsd } from '../../spendLimit.ts'
 import { SessionBar } from './SessionBar.tsx'
 import { SessionShortcuts } from './SessionShortcuts.tsx'
 
@@ -162,7 +165,17 @@ export interface AppProps {
    * live lane. `steer`, when present, is what the running work should change.
    * Absent: mid-turn text is folded in as steering only, as before.
    */
-  liveReply?(question: string, view: LiveView, signal: AbortSignal): Promise<{ answer: string; steer?: string }>
+  /**
+   * How long a settled note stays in the thinking panel before it slides shut.
+   * Defaults to a reading time that scales with the note's length.
+   */
+  panelReadMs?: number
+  liveReply?(
+    question: string,
+    view: LiveView,
+    signal: AbortSignal,
+    onThinking?: (textSoFar: string) => void,
+  ): Promise<{ answer: string; steer?: string; wants?: string; edits?: LivePlanEdit[]; thinking?: string; dropped?: number }>
   /**
    * A turn the session starts by itself as soon as it opens — a bare `elia`
    * in a project starts the autopilot this way. `notice` says why, once.
@@ -480,6 +493,27 @@ export function App(props: AppProps) {
     // agent mode in the background.
     const modalOrOverlayOpen = confirm !== null || approval !== null || picker !== null || textPrompt !== null || showHelp
     if (key.ctrl && input === 'o' && !modalOrOverlayOpen) setExpandedAll((v) => !v)
+    // ctrl+w: keep the thinking panel open, or put it away — and bring back
+    // the last notes when it is shut.
+    if (key.ctrl && input === 'w' && !modalOrOverlayOpen) {
+      if (panelOpen) {
+        if (panelPinned) {
+          setPanelPinned(false)
+          setPanelOpen(false)
+        } else {
+          if (closeTimer.current) clearTimeout(closeTimer.current)
+          setPanelPinned(true)
+        }
+      } else if (notesRef.current.length > 0 || recentNotes.current.length > 0) {
+        if (notesRef.current.length === 0) setNotes(recentNotes.current.map((note) => ({ ...note })))
+        setPanelPinned(true)
+        setPanelMounted(true)
+        setPanelOpen(true)
+      } else {
+        store.notice('The thinking panel opens when you send a message while elia works.')
+      }
+      return
+    }
     // While the approval menu owns the screen, let it handle Esc (go back / no).
     if (approval) return
     if (key.escape) {
@@ -528,18 +562,146 @@ export function App(props: AppProps) {
   // What the live lane reads about the running turn. Plain refs refreshed on
   // every render: a reply is built in an async callback, after the state it
   // describes may have rendered several times.
-  const liveStateRef = useRef({ status, runningTools, plan, providerPlan, runSteps, turnStartedAt })
-  liveStateRef.current = { status, runningTools, plan, providerPlan, runSteps, turnStartedAt }
+  const liveStateRef = useRef({ status, runningTools, plan, providerPlan, runSteps, turnStartedAt, agents, sessionId })
+  liveStateRef.current = { status, runningTools, plan, providerPlan, runSteps, turnStartedAt, agents, sessionId }
   const pendingQuestions = useRef(new Set<string>())
   const submitRef = useRef<((line: string) => Promise<void>) | null>(null)
 
+  // The thinking panel: every message sent mid-work gets a note there — elia's
+  // reasoning about it, what the person wants, where the work really stands,
+  // and the plan change it made. It slides shut once the notes are settled and
+  // leaves each one in the transcript as a receipt.
+  const [notes, setNotes] = useState<PanelNote[]>([])
+  const notesRef = useRef<PanelNote[]>([])
+  notesRef.current = notes
+  const recentNotes = useRef<PanelNote[]>([])
+  const [panelOpen, setPanelOpen] = useState(false)
+  // True from the moment the panel opens until it has finished sliding shut.
+  const [panelMounted, setPanelMounted] = useState(false)
+  const [panelPinned, setPanelPinned] = useState(false)
+  const pinnedRef = useRef(false)
+  pinnedRef.current = panelPinned
+  const [planHighlight, setPlanHighlight] = useState<ReadonlyMap<string, 'changed' | 'added'>>(new Map())
+  const noteSeq = useRef(0)
+  const closeTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+  const highlightTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+  useEffect(() => () => {
+    if (closeTimer.current) clearTimeout(closeTimer.current)
+    if (highlightTimer.current) clearTimeout(highlightTimer.current)
+  }, [])
+
+  const updateNote = useCallback((id: number, patch: Partial<PanelNote>) => {
+    setNotes((all) => all.map((note) => (note.id === id ? { ...note, ...patch } : note)))
+  }, [])
+
+  /** Shut the panel once every note in it is settled and it has been read — unless pinned. */
+  const scheduleClose = useCallback(() => {
+    if (closeTimer.current) clearTimeout(closeTimer.current)
+    closeTimer.current = setTimeout(() => {
+      const current = notesRef.current
+      if (pinnedRef.current || current.length === 0 || current.some((note) => note.state === 'thinking')) return
+      setPanelOpen(false)
+    }, props.panelReadMs ?? Math.min(9_000, Math.max(3_000, 2_000 + notesRef.current.reduce((n, note) => n + (note.answer?.length ?? 0) + note.thinking.length, 0) * 12)))
+  }, [props.panelReadMs])
+
+  /** The panel finished sliding shut: its notes become receipts in the transcript. */
+  const onPanelClosed = useCallback(() => {
+    const settled = notesRef.current.filter((note) => note.state !== 'thinking')
+    for (const note of settled) {
+      const plan = note.changes && note.changes.length > 0
+        ? `\nPlan: ${[['change', 'changed'], ['add', 'added'], ['remove', 'removed']].map(([kind, word]) => {
+            const n = note.changes!.filter((change) => change.kind === kind).length
+            return n > 0 ? `${n} step${n === 1 ? '' : 's'} ${word}` : ''
+          }).filter(Boolean).join(', ')}`
+        : ''
+      const body = note.state === 'failed' ? `${note.error ?? 'Could not think it through'} — your note went to the work as written.` : note.answer ?? ''
+      store.aside(note.question, `${body}${plan}`)
+    }
+    if (settled.length > 0) recentNotes.current = settled
+    setNotes((all) => all.filter((note) => note.state === 'thinking'))
+    setPanelPinned(false)
+    setPanelMounted(false)
+  }, [store])
+
+  /** Where the work really stands, from what ran — the model never writes this line. */
+  const rightNowOf = (view: LiveView): string => {
+    const wrote = view.recentTools.some((tool) => !tool.isError && /^(?:write_file|edit_file|delete_file|lsp_refactor)$/.test(tool.name))
+    const steps = view.plan
+    const done = steps.filter((step) => step.status === 'completed').length
+    const running = steps.findIndex((step) => step.status === 'in_progress')
+    const status = view.status.replace(/…$/, '')
+    if (steps.length > 0 && running >= 0) return `step ${running + 1} of ${steps.length} — ${steps[running]!.content}`
+    if (steps.length > 0 && done > 0) return `${done} of ${steps.length} steps done${view.runningTools.length > 0 ? ` · ${view.runningTools[0]}` : ''}`
+    if (view.runningTools.length > 0) return `${view.runningTools.join(', ')}${wrote ? '' : ' — nothing built yet'}`
+    return `${status ? status.charAt(0).toLowerCase() + status.slice(1) : 'thinking'}${wrote ? '' : ' — nothing built yet'}`
+  }
+
   /**
-   * Answers a message typed while a turn runs — immediately, from the live
-   * lane, while the turn carries on. A reply that carries a `steer` hands that
-   * instruction to the running work at its next step boundary; one that lands
-   * after the turn already ended starts it as a turn of its own. When no
-   * answer can be had, the message reaches the work as plain steering, which
-   * is what every mid-turn message used to do.
+   * Applies a note's plan change to the plan the main chat shows, and describes
+   * it for the work: by step id for an escalated run (its pipeline applies it
+   * as revisions), by title for a chat turn's own todo list.
+   */
+  const applyEdits = (edits: readonly LivePlanEdit[], wants: string | undefined): { lines: PanelNote['changes']; change?: NotePlanChange } => {
+    const live = liveStateRef.current
+    const source: 'run' | 'todo' | 'provider' | 'none' = live.runSteps.length > 0 ? 'run' : live.plan.length > 0 ? 'todo' : live.providerPlan.length > 0 ? 'provider' : 'none'
+    if (source === 'none' || edits.length === 0) return { lines: [] }
+    type Row = { key: string; title: string; status: TodoItem['status']; at: number }
+    const runStatus = runPlanFromWorkers(live.runSteps, live.agents, live.sessionId)
+    let rows: Row[] = source === 'run'
+      ? live.runSteps.map((step, index) => ({ key: step.id, title: step.title, status: runStatus[index]?.status ?? 'pending', at: index + 1 }))
+      : (source === 'todo' ? live.plan : live.providerPlan).map((item, index) => ({ key: `t${index}`, title: item.content, status: item.status, at: index + 1 }))
+    const lines: NonNullable<PanelNote['changes']> = []
+    const planEdits: NotePlanEdit[] = []
+    const lit = new Map<string, 'changed' | 'added'>()
+    for (const edit of edits) {
+      if (edit.kind === 'change') {
+        const row = rows.find((candidate) => candidate.at === edit.step)
+        if (!row || row.status === 'completed') continue
+        lines.push({ kind: 'change', text: `${row.title} → ${edit.to}` })
+        planEdits.push({ kind: 'change', ...(source === 'run' ? { stepId: row.key } : {}), stepTitle: row.title, to: edit.to })
+        row.title = edit.to
+        lit.set(edit.to, 'changed')
+      } else if (edit.kind === 'remove') {
+        const row = rows.find((candidate) => candidate.at === edit.step)
+        if (!row || row.status === 'completed') continue
+        lines.push({ kind: 'remove', text: row.title })
+        planEdits.push({ kind: 'remove', ...(source === 'run' ? { stepId: row.key } : {}), stepTitle: row.title })
+        rows = rows.filter((candidate) => candidate !== row)
+      } else {
+        const after = rows.find((candidate) => candidate.at === edit.after)
+        const index = edit.after === 0 ? 0 : after ? rows.indexOf(after) + 1 : rows.length
+        const added: Row = { key: `note-${noteSeq.current}-${lines.length}`, title: edit.title, status: 'pending', at: -1 }
+        rows = [...rows.slice(0, index), added, ...rows.slice(index)]
+        lines.push({ kind: 'add', text: edit.title })
+        planEdits.push({ kind: 'add', title: edit.title, ...(after && source === 'run' ? { afterId: after.key } : {}), ...(after ? { afterTitle: after.title } : {}) })
+        lit.set(edit.title, 'added')
+      }
+    }
+    if (lines.length === 0) return { lines: [] }
+    if (source === 'run') {
+      const next = rows.map((row) => ({ id: row.key, title: row.title }))
+      runStepsRef.current = next
+      setRunSteps(next)
+    } else {
+      const next = rows.map((row) => ({ content: row.title, status: row.status }))
+      // The work's next todo_write is told the same change, in the note.
+      if (source === 'todo') {
+        turnPlan.current = next
+        setPlan(next)
+      } else setProviderPlan(next)
+    }
+    setPlanHighlight(lit)
+    if (highlightTimer.current) clearTimeout(highlightTimer.current)
+    highlightTimer.current = setTimeout(() => setPlanHighlight(new Map()), 8_000)
+    return { lines, change: { ...(wants ? { wants } : {}), edits: planEdits } }
+  }
+
+  /**
+   * A message typed while a turn runs: a note in the thinking panel, thought
+   * through by the live lane while the turn carries on. A direction reaches
+   * the work — with its plan change — at the next step boundary; one that
+   * lands after the turn ended starts a turn of its own. When the lane cannot
+   * answer, the message reaches the work as written.
    */
   const answerLive = useCallback(
     async (question: string) => {
@@ -551,16 +713,14 @@ export function App(props: AppProps) {
       setAnswering((n) => n + 1)
       const live = liveStateRef.current
       const items = store.turnItems()
+      const runPlan = runPlanFromWorkers(live.runSteps, live.agents, live.sessionId)
       const view: LiveView = {
         request: lastUserText.current,
         elapsedMs: live.turnStartedAt ? Date.now() - live.turnStartedAt : 0,
         status: live.status,
         runningTools: live.runningTools.map((tool) => tool.activity),
-        plan: live.plan.length > 0
-          ? live.plan
-          : live.providerPlan.length > 0
-            ? live.providerPlan
-            : live.runSteps.map((step) => ({ content: step.title, status: 'in plan' })),
+        // The plan exactly as the main chat numbers it, so "step 3" means the same to both.
+        plan: runPlan.length > 0 ? runPlan : live.plan.length > 0 ? live.plan : live.providerPlan,
         recentTools: toolsOf(items)
           .filter((tool) => tool.status !== 'running')
           .map((tool) => ({
@@ -573,6 +733,11 @@ export function App(props: AppProps) {
         progress: items.flatMap((item) => (item.kind === 'notice' ? [item.text] : [])).slice(-20),
         steering: [...steeringRef.current],
       }
+      const id = ++noteSeq.current
+      setNotes((all) => [...all, { id, question, thinking: '', rightNow: rightNowOf(view), state: 'thinking' }])
+      if (closeTimer.current) clearTimeout(closeTimer.current)
+      setPanelMounted(true)
+      setPanelOpen(true)
       const steerWork = (instruction: string) => {
         if (busyRef.current) {
           steeringRef.current = [...steeringRef.current, instruction]
@@ -582,28 +747,39 @@ export function App(props: AppProps) {
         return false
       }
       try {
-        const reply = await liveReply(question, view, controller.signal)
-        store.aside(question, reply.answer)
+        const reply = await liveReply(question, view, controller.signal, (thinking) => updateNote(id, { thinking }))
+        const { lines, change } = applyEdits(reply.edits ?? [], reply.wants)
         exchangesRef.current = [...exchangesRef.current, { question, answer: reply.answer }]
-        if (reply.steer) {
-          if (steerWork(reply.steer)) store.notice(`↳ passing to the running work: ${reply.steer}`)
-          else {
-            store.notice(`↳ the work had already finished — starting it now: ${reply.steer}`)
-            void submitRef.current?.(reply.steer)
-          }
+        const instruction = reply.steer ?? (change ? `The person's note: ${question}` : undefined)
+        updateNote(id, {
+          answer: reply.answer,
+          ...(reply.wants ? { wants: reply.wants } : {}),
+          ...(reply.thinking ? { thinking: reply.thinking } : {}),
+          ...(reply.dropped ? { dropped: reply.dropped } : {}),
+          changes: lines,
+          passed: instruction !== undefined,
+          state: lines && lines.length > 0 ? 'updated' : 'answered',
+        })
+        if (instruction && !steerWork(encodeNote(instruction, change))) {
+          store.notice(`↳ the work had already finished — starting it now: ${question}`)
+          void submitRef.current?.(question)
         }
       } catch (error) {
-        if (controller.signal.aborted && !busyRef.current) return
+        if (controller.signal.aborted && !busyRef.current) {
+          updateNote(id, { state: 'failed', error: 'stopped' })
+          return
+        }
         const why = error instanceof Error ? error.message : String(error)
-        store.aside(question, `I couldn't answer right away (${why}), so I passed your message to the running work instead.`)
+        updateNote(id, { state: 'failed', error: `could not think it through (${why})` })
         if (!steerWork(question)) void submitRef.current?.(question)
       } finally {
         liveAbortRef.current.delete(controller)
         pendingQuestions.current.delete(question)
         setAnswering((n) => Math.max(0, n - 1))
+        scheduleClose()
       }
     },
-    [props, store],
+    [props, store, updateNote, scheduleClose],
   )
 
   const executePlan = useRef<(() => void) | null>(null)
@@ -1049,6 +1225,21 @@ export function App(props: AppProps) {
     () => (isCodex ? contextWindowFor(env.model) : compactionThresholdFor(env.model)),
     [isCodex, env.model],
   )
+  // What the session has spent against its limit, for the status row. Session
+  // totals move as each model call, worker or turn is recorded, so this reads
+  // them every second while work runs and once more when it stops.
+  const [spend, setSpend] = useState(() => ({ usd: sessionCost().usd, limit: spendCeilingUsd() }))
+  useEffect(() => {
+    const tick = () =>
+      setSpend((prev) => {
+        const next = { usd: sessionCost().usd, limit: spendCeilingUsd() }
+        return prev.usd === next.usd && prev.limit === next.limit ? prev : next
+      })
+    tick()
+    if (!busy) return
+    const timer = setInterval(tick, 1_000)
+    return () => clearInterval(timer)
+  }, [busy, snap.version])
   // An escalated run's plan, ticked from its workers — the report sink never
   // carried step progress, so this panel used to show no plan at all there.
   const runPlan = useMemo(() => runPlanFromWorkers(runSteps, agents, sessionId), [runSteps, agents, sessionId])
@@ -1098,28 +1289,18 @@ export function App(props: AppProps) {
   // consoles resolve differently from how Ink counts rows — the next repaint
   // then erases one row too few and the frame smears into scrollback.
   const frameWidth = Math.max(20, termSize.columns - 1)
-
-  return (
-    <ClockProvider>
-    <FrameWidth.Provider value={frameWidth}>
-    <Box flexDirection="column" width={frameWidth}>
-      <ErrorBoundary area="transcript" onError={boundaryError}>
-        <Transcript
-          key={transcriptEpoch}
-          committed={snap.committed}
-          live={clampedLive?.items ?? snap.live}
-          hiddenRows={clampedLive?.hiddenRows ?? 0}
-          expandedAll={expandedAll}
-          width={frameWidth}
-        />
-      </ErrorBoundary>
-
+  const sideBySide = frameWidth >= 100
+  const panelWidth = Math.min(46, Math.floor(frameWidth * 0.38))
+  const showPanel = panelMounted && !modalOpen
+  const leftWidth = showPanel && sideBySide ? frameWidth - panelWidth - 1 : frameWidth
+  const livePanels = (
+    <>
       {/* The plan and the workers are "right now" — once the turn is over the
           receipt in scrollback is the record, and a leftover "3 workers · 3
           done" parked above the input only competes with it. */}
       {!modalOpen && (busy || planReady || visiblePlan.length > 0) && (
         <ErrorBoundary area="workspace panel" onError={boundaryError}>
-          <WorkspacePanel plan={visiblePlan} agents={agents} since={sessionStartedAt} sessionId={sessionId} expanded={expandedAll} evidence={planEvidence} />
+          <WorkspacePanel plan={visiblePlan} agents={agents} since={sessionStartedAt} sessionId={sessionId} expanded={expandedAll} evidence={planEvidence} highlight={planHighlight} />
         </ErrorBoundary>
       )}
       {previewUrl && !modalOpen && (
@@ -1145,6 +1326,50 @@ export function App(props: AppProps) {
           tip={tip}
           checks={checks}
         />
+      )}
+    </>
+  )
+
+  return (
+    <ClockProvider>
+    <FrameWidth.Provider value={frameWidth}>
+    <Box flexDirection="column" width={frameWidth}>
+      <ErrorBoundary area="transcript" onError={boundaryError}>
+        <Transcript
+          key={transcriptEpoch}
+          committed={snap.committed}
+          live={clampedLive?.items ?? snap.live}
+          hiddenRows={clampedLive?.hiddenRows ?? 0}
+          expandedAll={expandedAll}
+          width={frameWidth}
+        />
+      </ErrorBoundary>
+
+      {/* The thinking panel sits beside the plan it changes when there is room,
+          and above the input when there is not. The plan's column narrows once
+          as the panel opens — the panel's slide never reflows it. */}
+      {showPanel && sideBySide ? (
+        <Box flexDirection="row" width={frameWidth}>
+          <FrameWidth.Provider value={leftWidth}>
+            <Box flexDirection="column" width={leftWidth} flexShrink={0}>
+              {livePanels}
+            </Box>
+          </FrameWidth.Provider>
+          <Box marginLeft={1}>
+            <ErrorBoundary area="thinking panel" onError={boundaryError}>
+              <ThinkingPanel open={panelOpen} notes={notes} width={panelWidth} layout="side" pinned={panelPinned} onClosed={onPanelClosed} />
+            </ErrorBoundary>
+          </Box>
+        </Box>
+      ) : (
+        <>
+          {livePanels}
+          {showPanel && (
+            <ErrorBoundary area="thinking panel" onError={boundaryError}>
+              <ThinkingPanel open={panelOpen} notes={notes} width={frameWidth} layout="stacked" pinned={panelPinned} onClosed={onPanelClosed} />
+            </ErrorBoundary>
+          )}
+        </>
       )}
       {showHelp && <HelpOverlay onClose={() => setShowHelp(false)} />}
       {confirm && <Confirm request={confirm} />}
@@ -1202,6 +1427,8 @@ export function App(props: AppProps) {
             repo={repo}
             narrow={termSize.narrow}
             selfEdit={selfEditGuard()?.allowed}
+            costUsd={spend.usd}
+            limitUsd={spend.limit}
           />
         </ErrorBoundary>
         )}
