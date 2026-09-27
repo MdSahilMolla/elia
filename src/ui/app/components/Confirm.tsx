@@ -34,10 +34,12 @@ export function Confirm({ request }: { request: ConfirmRequest }) {
         </Box>
       )}
       <Box marginTop={1}>
+        {/* Enter declines, so the default is shown the conventional way: N. */}
         <Text>
           Continue? <Text bold>y</Text>
           <Text color={palette.muted}>/</Text>
-          <Text bold>n</Text>
+          <Text bold>N</Text>
+          <Text color={palette.muted}>  enter or esc declines</Text>
         </Text>
       </Box>
     </Panel>

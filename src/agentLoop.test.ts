@@ -1071,6 +1071,48 @@ test('auto mode hands a turn on when the selected provider is out of credit or r
   }
 })
 
+// Session mubbhz5c: a spent Gemini key was asked again every turn once its 30s
+// cooldown lapsed. A route that cannot answer stays out for far longer than a
+// hiccup; an overloaded route is back in the chain a minute later.
+test('a route whose key, credit or daily quota is spent stays out of the chain; an overloaded one comes back', async () => {
+  const { setSystemTime } = await import('bun:test')
+  const original = { provider: config.provider, providerName: config.providerName, model: config.model, providerLabel: config.providerLabel, routingMode: config.routingMode, fallbacks: config.fallbacks }
+  config.routingMode = 'auto'
+  config.fallbacks = [{
+    provider: { async streamTurn() { return { content: [{ type: 'text', text: 'backup' }] as ContentBlock[], usage: ZERO_USAGE } } },
+    providerName: 'cooldown-backup', model: 'backup-model', label: 'cooldown-backup (backup-model)',
+  }]
+  const turn = async () => {
+    const messages: ConversationMessage[] = [{ role: 'user', content: [{ type: 'text', text: 'go' }] }]
+    await runAgentLoop({ messages, systemPrompt: 'test', tools: [], useAnimation: false, verbose: false })
+    return lastAssistantText(messages, '')
+  }
+  try {
+    for (const [failure, staysOut] of [
+      ['402 This request requires more credits', true],
+      ['429 You exceeded your current quota, please check your plan and billing details', true],
+      ['503 Service temporarily overloaded', false],
+    ] as const) {
+      resetProviderHealthForTests()
+      setSystemTime(new Date('2026-09-27T10:00:00Z'))
+      let primaryCalls = 0
+      config.provider = { async streamTurn() { primaryCalls += 1; throw new Error(failure) } }
+      config.providerName = 'cooldown-primary'
+      config.model = 'primary-model'
+      expect(await turn()).toBe('backup')
+      const afterFirst = primaryCalls
+      setSystemTime(new Date('2026-09-27T10:01:00Z'))
+      expect(await turn()).toBe('backup')
+      if (staysOut) expect(primaryCalls, failure).toBe(afterFirst)
+      else expect(primaryCalls, failure).toBeGreaterThan(afterFirst)
+    }
+  } finally {
+    setSystemTime()
+    resetProviderHealthForTests()
+    Object.assign(config, original)
+  }
+})
+
 test('a running loop follows a model switch on its next call', async () => {
   resetProviderHealthForTests()
   const used: string[] = []

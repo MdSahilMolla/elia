@@ -23,8 +23,10 @@ import { redactText } from '../ui/redact.ts'
 import { flagValue, hasFlag, subcommand } from './argv.ts'
 
 const REPL_COMMANDS: SlashCommand[] = [
+  { name: '/help', description: 'every command, one line each' },
   { name: '/model', description: 'switch model / provider' },
   { name: '/mode', description: 'switch mode: dev, cyber, battmann' },
+  { name: '/plan', description: 'research and propose a plan before changing anything · /plan <goal>' },
   { name: '/betamode', description: 'experimental modes & personas — sports, fitness, marketing, finance, …' },
   { name: '/theme', description: 'colours: dark, light, or your terminal\'s own' },
   { name: '/rewind', description: 'restore an earlier checkpoint' },
@@ -38,7 +40,8 @@ const REPL_COMMANDS: SlashCommand[] = [
   { name: '/packages', description: 'installed packages & skills — remove one' },
   { name: '/skills', description: 'list loaded skills' },
   { name: '/task', description: 'browse tasks and subagents' },
-  { name: '/sessions', description: 'other elia sessions in this project' },
+  { name: '/sessions', description: 'conversations in this project · /sessions new <name> starts a parallel session' },
+  { name: '/search', description: 'reasoning search — several attempts, keep the one a check passes · /search on|off' },
   { name: '/autopilot', description: 'no goal needed: elia works out what this repo needs and does it, unattended · /autopilot [N] | plan | resume | status' },
   { name: '/eliaspace', description: 'collaborative workspace — status, feed, members, agents' },
   { name: '/artifact', description: 'browse saved plan artifacts' },

@@ -116,8 +116,28 @@ test('direct process arguments are not interpreted as shell syntax', async () =>
 // #1268: a shell-arg escaper must make `"; touch pwned` / `$(…)` payloads one
 // literal argument, never a new command segment.
 test('escapeShellArg keeps an injection payload literal', () => {
-  expect(escapeShellArg('simple')).toBe("'simple'")
-  expect(escapeShellArg("it's")).toBe("'it'\\''s'")
+  expect(escapeShellArg('simple', 'linux')).toBe("'simple'")
+  expect(escapeShellArg("it's", 'linux')).toBe("'it'\\''s'")
+  // cmd.exe: every metacharacter, quotes included, is caret-escaped, so an
+  // embedded quote can never end a quoted region and let `&` start a command.
+  expect(escapeShellArg('simple', 'win32')).toBe('^"simple^"')
+  expect(escapeShellArg('a" & calc & "b', 'win32')).toBe('^"a\\^"^ ^&^ calc^ ^&^ \\^"b^"')
+  expect(escapeShellArg('%PATH%', 'win32')).toBe('^"^%PATH^%^"')
+  expect(escapeShellArg('dir\\', 'win32')).toBe('^"dir\\\\^"')
+})
+
+test.if(process.platform === 'win32')('an escaping payload passed to cmd.exe cannot break out', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'elia-shell-escape-win-'))
+  try {
+    for (const payload of ['a" & echo pwned> pwned.txt & "b', '%PATH%', 'x|y<z>w', '^caret!bang', 'C:\\dir with space\\', 'q\\"q']) {
+      const result = await runShell(`"${process.execPath}" -e "process.stdout.write(process.argv.at(-1))" ${escapeShellArg(payload)}`, 20_000, dir)
+      expect(result.exitCode, payload).toBe(0)
+      expect(result.stdout, payload).toBe(payload)
+    }
+    expect(await Bun.file(join(dir, 'pwned.txt')).exists()).toBe(false)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
 })
 
 test.if(process.platform !== 'win32')('an escaping payload passed to a shell cannot break out', async () => {

@@ -17,21 +17,42 @@ test('a trailing stderr redirect is dropped; run_command returns stderr on its o
   expect(normalizeRunCommandInput({ command: 'cd app && bun test 2>&1' })).toEqual({ command: 'bun test', cwd: 'app' })
 })
 
+test('a quoted directory with nothing to expand is read the same by every shell', () => {
+  for (const platform of ['linux', 'win32'] as const) {
+    expect(normalizeRunCommandInput({ command: 'cd "my app" && ls' }, platform)).toEqual({ command: 'ls', cwd: 'my app' })
+  }
+})
+
+test('cmd.exe paths: drive letters, backslashes and `cd /d` become the cwd', () => {
+  expect(normalizeRunCommandInput({ command: 'cd "D:\\My Projects\\shop" && bun install' }, 'win32')).toEqual({ command: 'bun install', cwd: 'D:/My Projects/shop' })
+  expect(normalizeRunCommandInput({ command: 'cd /d D:\\work\\api && npm test' }, 'win32')).toEqual({ command: 'npm test', cwd: 'D:/work/api' })
+  expect(normalizeRunCommandInput({ command: 'cd workspace\\app && bun run build', cwd: 'x' }, 'win32')).toEqual({ command: 'bun run build', cwd: 'x/workspace/app' })
+  // `/d` with nothing after it is a directory, not the flag.
+  expect(normalizeRunCommandInput({ command: 'cd /d && dir' }, 'win32')).toEqual({ command: 'dir', cwd: '/d' })
+  // On POSIX a backslash is an escape, so the same text is left for the governor.
+  const posix = { command: 'cd workspace\\app && ls' }
+  expect(normalizeRunCommandInput(posix, 'linux')).toBe(posix)
+})
+
 test('anything the shell could read differently is left exactly as written', () => {
-  for (const command of [
-    'cd "my app" && ls',
-    'cd $HOME && ls',
-    'cd ~ && ls',
-    'cd app; rm -rf build',
-    'cd app || exit 1',
-    'cd `pwd` && ls',
-    'cd app &&',
-    'bun test > out.txt',
-    'bun test 2>&1 | tail -5',
-    'echo hi',
-  ]) {
-    const input = { command }
-    expect(normalizeRunCommandInput(input)).toBe(input)
+  for (const platform of ['linux', 'win32'] as const) {
+    for (const command of [
+      'cd $HOME && ls',
+      'cd "$HOME/app" && ls',
+      'cd "%USERPROFILE%\\app" && dir',
+      'cd "app*" && ls',
+      'cd ~ && ls',
+      'cd app; rm -rf build',
+      'cd app || exit 1',
+      'cd `pwd` && ls',
+      'cd app &&',
+      'bun test > out.txt',
+      'bun test 2>&1 | tail -5',
+      'echo hi',
+    ]) {
+      const input = { command }
+      expect(normalizeRunCommandInput(input, platform), `${platform}: ${command}`).toBe(input)
+    }
   }
   // The rest of a chain is still the governor's to judge as composed.
   expect(normalizeRunCommandInput({ command: 'cd app && bun test | tail -5' })).toEqual({ command: 'bun test | tail -5', cwd: 'app' })

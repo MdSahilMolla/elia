@@ -429,3 +429,8 @@ export function summarizeResult(name: string, result: string): string {
   const summary = summarize ? summarize(result) : result
   return redactText(summary, 200)
 }
+
+/** Whether `summarizeResult` knows this tool, rather than passing its raw result through. */
+export function hasResultSummarizer(name: string): boolean {
+  return Object.hasOwn(RESULT_SUMMARIZERS, name)
+}

@@ -70,3 +70,36 @@ test('every recognised subcommand has a case in the dispatcher', async () => {
   const missing = SUBCOMMANDS.filter((name) => !dispatcher.includes(`case '${name}':`))
   expect(missing).toEqual([])
 })
+
+// `elia workspace --help` — which the global help tells you to run — used to
+// print the global help: `--help` was answered before the command was read.
+test('<command> --help is that command\'s help, not the whole manual', async () => {
+  const auto = await run('auto', '--help')
+  expect(auto.code).toBe(0)
+  expect(auto.out).toContain('Usage: elia auto')
+  expect(auto.out).toContain('--unattended')
+  expect(auto.out).not.toContain('Battmann intelligence')
+
+  const workspace = await run('workspace', '--help')
+  expect(workspace.code).toBe(0)
+  expect(workspace.out).toContain('elia workspace serve')
+  expect(workspace.out).not.toContain('Autonomous work:')
+
+  const battmann = await run('battmann', '--help')
+  expect(battmann.code).toBe(0)
+  expect(battmann.out).toContain('Usage: elia battmann <command>')
+}, 60_000)
+
+test('-v after a command is not a request for the version', async () => {
+  const pkg = await Bun.file(fileURLToPath(new URL('../../package.json', import.meta.url))).json()
+  const { out } = await run('bench', '-v', '--help')
+  expect(out.trim()).not.toBe(pkg.version)
+  expect(out).toContain('Usage: elia bench')
+}, 30_000)
+
+test('every recognised subcommand is documented in --help', async () => {
+  const { SUBCOMMANDS } = await import('./argv.ts')
+  const { helpFor } = await import('./help.ts')
+  const undocumented = SUBCOMMANDS.filter((name) => helpFor(name) === undefined)
+  expect(undocumented).toEqual([])
+})

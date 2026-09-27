@@ -124,6 +124,8 @@ export interface SlashOutcome {
    * command's, not a prompt to the model.
    */
   turn?: { label: string; run(hooks: TurnHooks): Promise<void> }
+  /** `/plan`: switch to plan mode — before `submitText` runs, so that turn plans. */
+  enterPlanMode?: boolean
 }
 
 export interface AppEnv {
@@ -746,11 +748,16 @@ export function App(props: AppProps) {
           setProviderPlan([])
         },
       }
+      let ending: 'done' | 'stopped' | 'failed' = 'done'
       try {
         await (opts?.body ? opts.body(hooks) : props.submitTurn(text, hooks))
       } catch (error) {
-        store.error(`Error: ${error instanceof Error ? error.message : String(error)}`)
+        ending = 'failed'
+        store.error(error instanceof Error ? error.message : String(error))
       } finally {
+        // Esc stops a turn by aborting it; whatever the turn did on the way
+        // out, it ended because it was stopped.
+        if (abortedRef.current) ending = 'stopped'
         abortRef.current = null
         // A lesson that landed in the last moment of the turn is still
         // flaring; let it finish before the receipt pushes it into scrollback.
@@ -772,10 +779,12 @@ export function App(props: AppProps) {
         // usage when the provider reported it, the streamed estimate otherwise.
         const tools = toolsOf(store.turnItems())
         const elapsedMs = Date.now() - startedAt
-        const rollup = tools.length > 2 || elapsedMs >= RECEIPT_AFTER_MS ? rollupLine(rollupTools(tools)) : ''
-        if (elapsedMs >= RECEIPT_AFTER_MS || rollup) {
+        const rollup = tools.length > 2 || elapsedMs >= RECEIPT_AFTER_MS || ending !== 'done' ? rollupLine(rollupTools(tools)) : ''
+        // A turn that stopped or failed always closes with a line saying so,
+        // however short it was.
+        if (elapsedMs >= RECEIPT_AFTER_MS || rollup || ending !== 'done') {
           const reported = sessionUsageSnapshot().usage.outputTokens - outputBefore.current
-          store.receipt(turnReceipt({ elapsedMs, rollup, tokens: reported > 0 ? reported : Math.round(progress.current.tokens) }))
+          store.receipt(turnReceipt({ elapsedMs, rollup, tokens: reported > 0 ? reported : Math.round(progress.current.tokens), ending }), ending)
         }
         turnsRun.current += 1
         setRunSteps([])
@@ -817,7 +826,7 @@ export function App(props: AppProps) {
             store.shell(command, output)
             store.commit()
           } catch (error) {
-            store.error(`Error: ${error instanceof Error ? error.message : String(error)}`)
+            store.error(error instanceof Error ? error.message : String(error))
             store.commit()
           }
         }
@@ -888,6 +897,12 @@ export function App(props: AppProps) {
         setProviderPlan([])
         setSessionId(cleared.sessionId)
         lastUserText.current = ''
+      }
+      if (typeof outcome === 'object' && outcome?.enterPlanMode) {
+        // The ref first: `runOne` below reads it to decide this is a plan turn,
+        // before React has re-rendered with the new mode.
+        modeRef.current = 'plan'
+        setMode('plan')
       }
       if (finalText) store.notice(finalText)
       store.commit()
@@ -1040,11 +1055,30 @@ export function App(props: AppProps) {
           beginProgress(checkedAt)
           carriedTurnStart.current = checkedAt
           setStatus('Checking the request')
+          // Esc stops a turn by aborting `abortRef`, which the turn proper only
+          // sets once it starts — so an Esc during this pre-check aborted
+          // nothing, "Stopping the turn…" printed, and the turn then ran anyway
+          // (seen on a real console with a slow model, where the check takes
+          // seconds). The pre-check owns the stop handle while it runs, and a
+          // stop ends the message here, before anything is sent.
+          const precheck = new AbortController()
+          abortRef.current = precheck
+          abortedRef.current = false
+          const stopped = new Promise<'stopped'>((resolve) => precheck.signal.addEventListener('abort', () => resolve('stopped'), { once: true }))
           // A pre-check that fails is not a verdict. In manual mode every risky
           // action is still put to you one at a time by the approval menu, so an
           // unreachable classifier lets a harmless message through instead of
           // greeting it with an error and a y/n prompt.
-          const { risky, reason } = await props.classifyRisk(trimmed).catch(() => ({ risky: false, reason: undefined }))
+          const verdict = await Promise.race([props.classifyRisk(trimmed).catch(() => ({ risky: false, reason: undefined })), stopped])
+          if (abortRef.current === precheck) abortRef.current = null
+          if (verdict === 'stopped') {
+            setBusy(false)
+            setStatus('')
+            store.receipt('Stopped before it started — nothing was sent', 'stopped')
+            store.commit()
+            return
+          }
+          const { risky, reason } = verdict
           if (risky) {
             setBusy(false)
             setStatus('')
@@ -1137,11 +1171,6 @@ export function App(props: AppProps) {
     <ClockProvider>
     <FrameWidth.Provider value={frameWidth}>
     <Box flexDirection="column" width={frameWidth}>
-      <SessionBar
-        onAutoFocus={noticeAutoFocus}
-        activeRunning={busy}
-        suppressed={modalOpen || showHelp}
-      />
       <ErrorBoundary area="transcript" onError={boundaryError}>
         <Transcript
           key={transcriptEpoch}
@@ -1244,11 +1273,20 @@ export function App(props: AppProps) {
           />
         </ErrorBoundary>
         )}
+        {/* Parallel sessions, pinned under the status row with the rest of the
+            chrome. Renders nothing until a second session exists. */}
+        <SessionBar
+          onAutoFocus={noticeAutoFocus}
+          activeRunning={busy}
+          suppressed={modalOpen || showHelp}
+        />
       </Box>
       <SessionShortcuts
         disabled={modalOpen || showHelp || inputMenuOpen}
-        onSpawnSession={props.onSpawnSession ?? (() => store.notice("Session spawning isn't wired up in this build — ctrl+shift+n no-op."))}
-        onCycle={(handle) => store.notice(`Focused session ${handle.name}`)}
+        onSpawnSession={props.onSpawnSession ?? (() => void runCommandLine('/sessions new'))}
+        // Switching sessions changes which one delegation talks to — the bar's
+        // bold chip already shows it, so this stays one quiet line.
+        onCycle={(handle) => store.notice(`delegation now targets session ${handle.name}`)}
       />
     </Box>
     </FrameWidth.Provider>

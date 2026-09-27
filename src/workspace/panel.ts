@@ -8,7 +8,7 @@
  * server, or mutates the workspace — those stay in `elia workspace ...`.
  */
 
-import { box } from '../ui/layout.ts'
+import { box as drawBox } from '../ui/layout.ts'
 import { bold, cyan, dim, gold } from '../ui/theme.ts'
 import { openWorkspaceClient, resolveServer, workspaceTokenFromEnv, type ResolvedServer } from './connection.ts'
 import type { WorkspaceStatusResult } from './protocol.ts'
@@ -47,8 +47,15 @@ export async function collectEliaspaceSnapshot(): Promise<EliaspaceSnapshot> {
   }
 }
 
-export function renderEliaspacePanel(snap: EliaspaceSnapshot): string {
+/**
+ * `framed: false` is the Ink REPL's form: the same lines under a title, with
+ * no drawn box — inside Ink the box's colour codes counted as width and its
+ * borders broke apart on a narrow terminal.
+ */
+export function renderEliaspacePanel(snap: EliaspaceSnapshot, { framed = true }: { framed?: boolean } = {}): string {
   const lines: string[] = []
+  const box = (body: string[], options: Parameters<typeof drawBox>[1]): string =>
+    framed ? drawBox(body, options) : [options?.title ?? '', ...body.map((line) => (line ? `  ${line}` : line))].join('\n')
 
   if (!snap.configured) {
     lines.push(

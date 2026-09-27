@@ -81,3 +81,20 @@ test('the header says how many carried lessons are proven to help, and never cla
   const hurting = view({ id: 'h', kind: 'header', version: '1.2.3', greeting: '', lessons: 5, lessonsHurt: 2 }, 100)
   expect(hurting).toContain('2 proven to hurt')
 })
+
+test('the confirm shows its Enter default as N, and the text prompt says how to leave it', async () => {
+  const { Confirm } = await import('./Confirm.tsx')
+  const { TextPrompt } = await import('./TextPrompt.tsx')
+  const confirm = render(<Confirm request={{ title: 'Install lodash?', lines: [], resolve: () => {} }} />).lastFrame() ?? ''
+  expect(confirm).toContain('y/N')
+  expect(confirm).toContain('enter or esc declines')
+  const prompt = render(<TextPrompt request={{ label: 'search npm for:', placeholder: 'e.g. zod', resolve: () => {} }} />).lastFrame() ?? ''
+  expect(prompt).toContain('enter to confirm · esc to cancel')
+  expect(prompt).not.toContain('▏')
+})
+
+test('the shortcut sheet lists the session and history keys', async () => {
+  const { HelpOverlay } = await import('./HelpOverlay.tsx')
+  const sheet = render(<HelpOverlay onClose={() => {}} />).lastFrame() ?? ''
+  for (const key of ['ctrl+n', 'ctrl+tab', '↑ / ↓', 'ctrl+a / ctrl+e', 'answered right away']) expect(sheet).toContain(key)
+})

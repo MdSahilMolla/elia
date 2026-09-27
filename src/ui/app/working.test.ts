@@ -60,6 +60,11 @@ test('the closing line says how long, what changed and how much was written', ()
   expect(turnReceipt({ elapsedMs: 75_000, rollup: '', tokens: 0 })).toBe('Worked for 1m 15s')
 })
 
+test('a stopped or failed turn never closes with "Worked for"', () => {
+  expect(turnReceipt({ elapsedMs: 4_000, rollup: 'Edited 1 file', tokens: 0, ending: 'stopped' })).toBe('Stopped after 4s · edited 1 file')
+  expect(turnReceipt({ elapsedMs: 12_000, rollup: '', tokens: 300, ending: 'failed' })).toBe('Failed after 12s · ↓ 300 tokens')
+})
+
 test('tips rotate per turn and can be switched off; motion can be reduced', () => {
   expect(tipFor(0)).toBe(TIPS[0]!)
   expect(tipFor(TIPS.length + 1)).toBe(TIPS[1]!)

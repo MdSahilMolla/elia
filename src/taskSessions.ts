@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import { emitEvent, machineReadable } from './ui/runtime.ts'
 import { redactText } from './ui/redact.ts'
 import { withFileLockAsync } from './fileLock.ts'
+import { paths } from './statePaths.ts'
 
 export type TaskKind = 'browser' | 'code' | 'data' | 'finance' | 'sports' | 'fitness' | 'production' | 'research' | 'communication' | 'automation' | 'pending'
 export type TaskStatus = 'pending' | 'running' | 'paused' | 'waiting-input' | 'waiting-approval' | 'needs-review' | 'done' | 'failed'
@@ -78,7 +79,14 @@ export interface TaskControls {
 }
 export type TaskSessionListener = (sessions: TaskSession[]) => void
 
-const TASKS_FILE = join(process.cwd(), '.elia', 'tasks.json')
+/**
+ * Read on use, not at import: the test preload redirects `paths` to a scratch
+ * directory, and a path fixed when this module loaded kept every test that
+ * created a task writing into the checkout's own `.elia/tasks.json`.
+ */
+function defaultTasksFile(): string {
+  return join(paths.state, 'tasks.json')
+}
 const TASKS_SCHEMA_VERSION = 5
 const STALE_TASK_HEARTBEAT_MS = 5 * 60_000
 const ACTIVE_TASK_STATUSES = new Set<TaskStatus>(['pending', 'running', 'paused', 'waiting-input', 'waiting-approval', 'needs-review'])
@@ -95,8 +103,12 @@ export class TaskSessionStore {
   private writeQueued = false
   private writeChain = Promise.resolve()
   private pendingSnapshot: TaskSession[] = []
-  private persistencePath = TASKS_FILE
+  private loadedPath: string | undefined
   private activeSessionId: string | undefined
+
+  private get persistencePath(): string {
+    return this.loadedPath ?? defaultTasksFile()
+  }
 
   /** Stamps every task created from here on with the current session's id.
    * Called once, after the interactive/autonomous session id is resolved. */
@@ -108,8 +120,8 @@ export class TaskSessionStore {
     return this.activeSessionId
   }
 
-  async load(filePath = TASKS_FILE): Promise<void> {
-    this.persistencePath = filePath
+  async load(filePath = defaultTasksFile()): Promise<void> {
+    this.loadedPath = filePath
     hardenSecureFile(filePath)
     const file = Bun.file(filePath)
     if (!(await file.exists())) return

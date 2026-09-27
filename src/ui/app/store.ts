@@ -9,6 +9,7 @@
 //
 // On turn end `commit()` moves everything from `live` into `committed` and the
 // live region empties.
+import { stripVTControlCharacters } from 'node:util'
 import type { ToolEvent } from '../../agentLoop.ts'
 import type { ProviderActivity } from '../../providers/types.ts'
 import { redactRecord, redactSecrets, redactText, relativizeProjectPaths } from '../redact.ts'
@@ -64,6 +65,8 @@ export interface NoticeItem {
   text: string
   /** When a lesson landed (`✦ learned: …`) — its mark flares once from here. */
   at?: number
+  /** `receipt` only: how the turn ended, when it did not simply finish. */
+  ending?: 'stopped' | 'failed'
 }
 /**
  * A message the person sent while elia worked, and the answer it got straight
@@ -118,8 +121,8 @@ export interface TranscriptStore {
   notice(text: string): void
   /** A mid-turn message and the answer it got while the work carried on. */
   aside(question: string, answer: string): void
-  /** The line that closes a turn. */
-  receipt(text: string): void
+  /** The line that closes a turn — marked by how the turn ended. */
+  receipt(text: string, ending?: 'done' | 'stopped' | 'failed'): void
   error(text: string): void
   shell(command: string, output: string): void
 
@@ -199,7 +202,22 @@ function activityText(activity: ProviderActivity): string {
   const kept = lines.slice(0, 12)
   if (lines.length > kept.length) kept.push(`… ${lines.length - kept.length} more lines`)
   const joined = kept.join('\n')
-  return joined.length > 2_000 ? `${joined.slice(0, 1_999)}…` : joined
+  return statusMarked(activity, joined.length > 2_000 ? `${joined.slice(0, 1_999)}…` : joined)
+}
+
+/**
+ * A warning or a failure keeps its meaning once it is a transcript line. The
+ * status used to be dropped here, so "this turn stopped — /rewind 3 undoes it"
+ * and "Verification failed (repair 1/2)" arrived as the same grey as
+ * "Orienting". A leading mark is what the note renderer colours (`!` warning,
+ * `✗` failure); `⚠` becomes `!` because it is double-width in some consoles.
+ */
+function statusMarked(activity: ProviderActivity, text: string): string {
+  const leading = text.replace(/^⚠\s*/, '! ')
+  if (/^[✓✗◐!▸]\s/.test(leading)) return leading
+  if (activity.status === 'failed') return `✗ ${leading}`
+  if (activity.status === 'warning' || activity.kind === 'warning') return `! ${leading}`
+  return leading
 }
 
 export function createTranscriptStore(): TranscriptStore {
@@ -464,7 +482,12 @@ export function createTranscriptStore(): TranscriptStore {
       changed()
     },
 
-    notice(text) {
+    notice(raw) {
+      // Notices are plain text; the note renderer colours them. Slash commands
+      // built for the readline REPL still hand over `theme.ts` colour codes,
+      // which Ink cannot see through — the wrapper counted them as visible
+      // columns, so a coloured line wrapped early and broke on narrow terminals.
+      const text = stripVTControlCharacters(raw)
       // A hammered key (Esc on a turn that won't stop) would otherwise print the
       // same line 20 times. Collapse an immediately-repeated notice into one
       // line with a ×N counter.
@@ -481,12 +504,15 @@ export function createTranscriptStore(): TranscriptStore {
       live = [...live, { id: nextId(), kind: 'notice', text }]
       changed()
     },
-    receipt(text) {
-      live = [...live, { id: nextId(), kind: 'receipt', text }]
+    receipt(text, ending = 'done') {
+      live = [...live, ending === 'done' ? { id: nextId(), kind: 'receipt', text } : { id: nextId(), kind: 'receipt', text, ending }]
       changed()
     },
     error(text) {
-      live = [...live, { id: nextId(), kind: 'error', text }]
+      // The `✗` mark already says "error"; a leading "Error:" only repeats it.
+      // Redacted at ingestion like every other item — provider errors can echo
+      // request details back.
+      live = [...live, { id: nextId(), kind: 'error', text: redactSecrets(text.replace(/^(?:Error:\s*)+/, '')) }]
       changed()
     },
     shell(command, output) {

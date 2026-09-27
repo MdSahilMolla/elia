@@ -99,7 +99,7 @@ elia runs                                            # past autonomous runs
 elia fork <run-id> --at 1 --with "use a token bucket instead"   # re-plan from a checkpoint
 ```
 
-Inside a session, type while elia works to ask or redirect it; `/autopilot` runs the pilot as a turn you can talk to. `/model` switches models, `/plan <goal>` starts a planned run, `/task` opens the task dashboard, `/mcp` manages MCP servers, and `!cmd` runs a shell command. Type `exit` or press Ctrl+C to quit. Use `--plain`, `--quiet` or `--json` for CI and scripts.
+Inside a session, type while elia works to ask or redirect it; `/autopilot` runs the pilot as a turn you can talk to. `/model` switches models, `/plan <goal>` researches and proposes a plan before changing anything, `/task` opens the task dashboard, `/mcp` manages MCP servers, and `!cmd` runs a shell command. Type `exit` or press Ctrl+C to quit. Use `--plain`, `--quiet` or `--json` for CI and scripts.
 
 ## Guides
 

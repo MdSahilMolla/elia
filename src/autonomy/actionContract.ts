@@ -93,7 +93,14 @@ export function contractForAction(request: ActionRequest, cwd: string, idempoten
     // and drive a repair loop. Those are started differently (see run_command's
     // own guidance); everything else must still exit clean.
     if (!isLongRunningServerCommand(command) && !isProbe) {
-      postconditions.push({ kind: 'shell-exit-zero', description: 'the command must return exit code 0 and not time out' })
+      // robocopy's exit code is a bit field: 1 means "files were copied", and
+      // anything under 8 is success. Holding it to 0 failed 12 successful
+      // copies in the recent ledger and sent each one to a repair.
+      if (executable && /^robocopy(?:\.exe)?$/i.test(executable.replace(/^.*[\\/]/, ''))) {
+        postconditions.push({ kind: 'shell-exit-zero', value: '7', description: 'robocopy must return an exit code below 8 (0–7 mean success) and not time out' })
+      } else {
+        postconditions.push({ kind: 'shell-exit-zero', description: 'the command must return exit code 0 and not time out' })
+      }
     }
   }
 
@@ -207,8 +214,13 @@ export function evaluatePostconditions(contract: ActionContract, result: string,
     if (check.kind === 'shell-exit-zero') {
       const timedOut = /^timed out after /i.test(result.trim())
       const exitCode = /^exit code:\s*(-?\d+)/im.exec(result)?.[1]
-      if (!timedOut && exitCode === '0') evidence.push('command returned exit code 0')
-      else failures.push(timedOut ? 'command timed out' : `command did not return exit code 0${exitCode ? ` (exit code ${exitCode})` : ''}`)
+      // `value` is the highest exit code the program uses for success (robocopy: 7).
+      const highestSuccess = check.value !== undefined ? Number(check.value) : 0
+      const code = exitCode === undefined ? Number.NaN : Number(exitCode)
+      if (!timedOut && code >= 0 && code <= highestSuccess) evidence.push(`command returned exit code ${code}${code > 0 ? ' (success for this program)' : ''}`)
+      else if (timedOut) failures.push('command timed out')
+      else if (highestSuccess > 0) failures.push(`command returned exit code ${exitCode ?? 'unknown'}, a failure for this program (success is 0–${highestSuccess})`)
+      else failures.push(`command did not return exit code 0${exitCode ? ` (exit code ${exitCode})` : ''}`)
       continue
     }
     if (check.kind === 'result-contains') {

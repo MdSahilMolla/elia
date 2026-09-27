@@ -216,3 +216,51 @@ test('a finished call shows no track — the animation costs nothing once it is 
   expect(frame).not.toContain('interacting')
   expect(frame).not.toContain('◌')
 })
+
+test('a tool without its own summary shows the gist of a JSON result, never the raw payload', () => {
+  const tool: ToolItem = {
+    id: 'mcp-1',
+    kind: 'tool',
+    name: 'mcp__linear__list_issues',
+    input: {},
+    status: 'ok',
+    result: '{"issues":[{"id":1,"title":"a"},{"id":2,"title":"b"},{"id":3,"title":"c"}],"cursor":"abc"}',
+  }
+  const frame = render(<ToolCard tool={tool} expanded={false} />).lastFrame() ?? ''
+  expect(frame).toContain('⎿ 3 issues')
+  expect(frame).not.toContain('{"issues"')
+  const status: ToolItem = { ...tool, id: 'mcp-2', result: '{"status":"ok","message":"Deployed to staging"}' }
+  expect(render(<ToolCard tool={status} expanded={false} />).lastFrame() ?? '').toContain('⎿ Deployed to staging — ok')
+})
+
+test('an expanded error keeps its line breaks under one ⎿', () => {
+  const tool: ToolItem = {
+    id: 'err-1',
+    kind: 'tool',
+    name: 'read_file',
+    input: { path: 'a.ts' },
+    status: 'error',
+    result: 'TypeError: boom\n    at run (a.ts:3:5)\n    at main (a.ts:9:1)',
+  }
+  const collapsed = render(<ToolCard tool={tool} expanded={false} />).lastFrame() ?? ''
+  expect(collapsed).toContain('TypeError: boom at run')
+  const expanded = (render(<ToolCard tool={tool} expanded />).lastFrame() ?? '').split('\n')
+  expect(expanded.some((line) => line.includes('⎿ TypeError: boom'))).toBe(true)
+  expect(expanded.some((line) => /^\s+at run \(a\.ts:3:5\)/.test(line))).toBe(true)
+  expect(expanded.filter((line) => line.includes('⎿'))).toHaveLength(1)
+})
+
+test('a folded shell tail still leads with ⎿', () => {
+  const tool: ToolItem = {
+    id: 'cmd-9',
+    kind: 'tool',
+    name: 'run_command',
+    input: { command: 'bun test' },
+    status: 'ok',
+    result: `exit code: 0\nstdout:\n${Array.from({ length: 12 }, (_, i) => `line ${i + 1}`).join('\n')}`,
+  }
+  const lines = (render(<ToolCard tool={tool} expanded={false} />).lastFrame() ?? '').split('\n')
+  const note = lines.findIndex((line) => line.includes('earlier lines'))
+  expect(lines[note]).toContain('⎿ … +7 earlier lines')
+  expect(lines.filter((line) => line.includes('⎿'))).toHaveLength(1)
+})

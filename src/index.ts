@@ -25,12 +25,21 @@ import { runAgentCommand, runAuto } from './cli/agent.ts'
 // `new URL('../package.json', import.meta.url)` below is resolved relative to
 // this file, so moving it one directory deeper silently reads a path that does
 // not exist.
-if (rawArgs.includes('--help') || rawArgs.includes('-h')) {
-  printHelp()
+//
+// `--help` after a command is that command's help. It used to be answered
+// before the command was even looked at, so `elia workspace --help` — which the
+// global help itself tells you to run — printed the global help instead.
+// `workspace` and `battmann` have their own usage; the rest get their lines
+// cut from the global help.
+const wantsHelp = rawArgs.includes('--help') || rawArgs.includes('-h')
+if (wantsHelp && subcommand !== 'workspace' && subcommand !== 'battmann') {
+  printHelp(subcommand)
   process.exit(0)
 }
 
-if (rawArgs.includes('--version') || rawArgs.includes('-v')) {
+// `-v` is the version only on its own: after a command it is that command's
+// argument, not a request to print the version and exit.
+if (rawArgs[0] === '--version' || rawArgs[0] === '-v' || (subcommand === undefined && rawArgs.includes('--version'))) {
   const pkg = JSON.parse(await Bun.file(new URL('../package.json', import.meta.url)).text())
   console.log(pkg.version)
   process.exit(0)
@@ -146,8 +155,9 @@ try {
 // Signal handlers are installed by installShutdownHandlers() so every terminal
 // component follows one cleanup path and returns a conventional interrupt code.
 
-await main().catch((err: unknown) => {
-  writeError(`Error: ${err instanceof Error ? err.message : String(err)}`)
+await main().catch(async (err: unknown) => {
+  const { describeCliError } = await import('./cli/errors.ts')
+  writeError(describeCliError(err, { command: subcommand }))
   process.exitCode = 1
 }).finally(async () => {
   const { shutdownMcpTools } = await import('./mcp/registry.ts')

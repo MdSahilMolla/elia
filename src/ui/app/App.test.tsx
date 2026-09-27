@@ -90,7 +90,8 @@ test('a failed risk pre-check lets the message through instead of raising an err
   await new Promise((resolve) => setTimeout(resolve, 80))
   expect(submitted).toBe('change the greeting')
   expect(lastFrame()).not.toContain('Risk check failed')
-  expect(lastFrame()).not.toContain('y/n')
+  // Case-insensitive: the confirm now shows its default as `y/N`.
+  expect(lastFrame()).not.toMatch(/y\/n/i)
 })
 
 test('App streams a turn: user line, tool card, assistant text', async () => {
@@ -602,6 +603,13 @@ test('the count carries from the risk pre-check into the turn it gated', async (
 test('a slash command queued during a turn is dispatched, not sent to the model', async () => {
   let slashCalls: string[] = []
   let prompts: string[] = []
+  // The turn stays open until the test has seen the command queued. A fixed
+  // 80ms turn raced the two screen checks below and, on a loaded machine, ended
+  // first — the command then ran directly and the test failed on a correct app.
+  let release: () => void = () => {}
+  const turnOpen = new Promise<void>((resolve) => {
+    release = resolve
+  })
   const props = {
     ...baseProps(),
     handleSlash: async (command: string) => {
@@ -610,7 +618,7 @@ test('a slash command queued during a turn is dispatched, not sent to the model'
     },
     submitTurn: async (text: string, _hooks: import('./App.tsx').TurnHooks) => {
       prompts.push(text)
-      await new Promise((resolve) => setTimeout(resolve, 80))
+      await turnOpen
     },
   }
   const { stdin, lastFrame } = render(<App {...props} />)
@@ -625,8 +633,10 @@ test('a slash command queued during a turn is dispatched, not sent to the model'
   await waitForFrame(lastFrame, '/settings')
   stdin.write('\r')
   await waitForFrame(lastFrame, '1 queued')
+  expect(slashCalls).toEqual([])
 
-  await new Promise((resolve) => setTimeout(resolve, 400))
+  release()
+  await waitForFrame(lastFrame, 'Settings opened')
 
   expect(slashCalls).toEqual(['/settings'])
   // The whole point: it must not have become a prompt.
@@ -793,4 +803,37 @@ test('a session can start working by itself, and you can talk to it while it doe
   } finally {
     unmount()
   }
+})
+
+// Seen on a real console with a slow model: Esc during "Checking the request"
+// printed "Stopping the turn…" and the turn then ran anyway — the stop handle
+// only existed once the turn proper had started.
+test('Esc during the risk pre-check stops the message before anything is sent', async () => {
+  let prompts = 0
+  let releaseCheck!: () => void
+  const checking = new Promise<void>((resolve) => { releaseCheck = resolve })
+  const props = {
+    ...baseProps(),
+    classifyRisk: async () => {
+      await checking
+      return { risky: false }
+    },
+    submitTurn: async () => {
+      prompts += 1
+    },
+  }
+  const { stdin, lastFrame } = render(<App {...props} />)
+  await waitForFrame(lastFrame, READY)
+  await settle()
+  stdin.write('deploy the thing')
+  await waitForFrame(lastFrame, 'deploy the thing')
+  stdin.write('\r')
+  await waitForFrame(lastFrame, 'Checking the request')
+  stdin.write('\u001b')
+  await waitForFrame(lastFrame, 'Stopped before it started')
+  // The classifier answering late changes nothing.
+  releaseCheck()
+  await new Promise((resolve) => setTimeout(resolve, 150))
+  expect(prompts).toBe(0)
+  expect(lastFrame()).toContain(READY)
 })

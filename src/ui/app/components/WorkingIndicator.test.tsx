@@ -111,8 +111,8 @@ test('verification checks land on the line as they finish', async () => {
 
 test('the checks give way on a narrow line instead of wrapping it', () => {
   const checks = [{ command: 'bun test', label: 'tests', state: 'running' as const }]
-  expect(checksWidth(checks)).toBe(Bun.stringWidth('  tests ⠋'))
+  expect(checksWidth(checks)).toBe(Bun.stringWidth('  tests ●'))
   expect(checksWidth([])).toBe(0)
-  expect(checkMark(checks[0]!, 0)).toBe('⠋')
-  expect(checkMark(checks[0]!, 0, true)).toBe('◐')
+  // A running check is the pulsing dot a running tool gets, not a second spinner.
+  expect(checkMark(checks[0]!)).toBe('●')
 })
