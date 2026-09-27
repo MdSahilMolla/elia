@@ -230,13 +230,19 @@ struct ShellWorker {
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
     stderr: BufReader<ChildStderr>,
+    /// The shell's pid; on POSIX it is also its process-group id, so the whole
+    /// tree can be addressed with a single `kill -PGID`.
+    pid: Option<u32>,
     /// Updated after every command; read by `ShellPool::reap_idle`.
     last_used: Instant,
 }
 
 impl Drop for ShellWorker {
     fn drop(&mut self) {
-        // Best-effort: kill the shell so a runaway child does not outlive us.
+        // Best-effort: take down the whole process group first (a runaway
+        // `bun run server` descendant must not be reparented and kept alive by
+        // the daemon), then the direct child as the backstop.
+        let _ = crate::killtree::kill_tree(self.pid);
         let _ = self.child.start_kill();
     }
 }
@@ -244,6 +250,7 @@ impl Drop for ShellWorker {
 impl ShellWorker {
     async fn spawn(cwd: &Path) -> Result<Self> {
         let mut command = base_command();
+        crate::killtree::own_process_group(command.as_std_mut());
         command
             .current_dir(if cwd.exists() { cwd } else { Path::new(".") })
             .stdin(Stdio::piped())
@@ -252,6 +259,7 @@ impl ShellWorker {
             .kill_on_drop(true);
 
         let mut child = command.spawn().context("failed to start shell")?;
+        let pid = child.id();
         let stdin = child.stdin.take().ok_or_else(|| anyhow!("no stdin"))?;
         let stdout = BufReader::new(child.stdout.take().ok_or_else(|| anyhow!("no stdout"))?);
         let stderr = BufReader::new(child.stderr.take().ok_or_else(|| anyhow!("no stderr"))?);
@@ -260,6 +268,7 @@ impl ShellWorker {
             stdin,
             stdout,
             stderr,
+            pid,
             last_used: Instant::now(),
         };
 
@@ -761,6 +770,69 @@ mod tests {
         let res = pool.exec(sleep, ".", 30_000, rx).await.unwrap();
         assert!(matches!(res, Err(ExecStop::Cancelled)));
         assert_eq!(pool.worker_count().await, 0);
+    }
+
+    static TREE_NONCE: AtomicU64 = AtomicU64::new(0);
+
+    #[tokio::test]
+    async fn tree_kill_takes_a_runaway_grandchild_down() {
+        // A command backgrounds a descendant that appends to a file forever,
+        // then idles. The pre-fix pool killed only the shell; the descendant
+        // was reparented to the daemon and kept writing — a leak that every
+        // timeout/cancel used to go through. The tree kill must take it down
+        // with the worker. On Windows grandchildren are bound to the parent's
+        // lifetime, so this is a POSIX regression guard.
+        if cfg!(windows) {
+            return;
+        }
+        let pool = Arc::new(ShellPool::new());
+        run(&pool, "echo warm").await;
+
+        let heartbeat = std::env::temp_dir().join(format!(
+            "elia-treekill-{}-{}.hb",
+            std::process::id(),
+            TREE_NONCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        let size = |path: &std::path::Path| std::fs::read_to_string(path).map_or(0, |s| s.len());
+        let cmd = format!(
+            "( while :; do printf 'x' >> \"{}\"; sleep 0.05; done ) & sleep 30",
+            heartbeat.display()
+        );
+
+        let (tx, rx) = oneshot::channel();
+        let exec = {
+            let pool = pool.clone();
+            tokio::spawn(async move { pool.exec(&cmd, ".", 30_000, rx).await })
+        };
+
+        // Wait for the grandchild to prove it is alive and writing on its own.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while size(&heartbeat) == 0 && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(size(&heartbeat) > 0, "grandchild never started writing");
+        // ...and that it keeps writing unattended, i.e. not coupled to the shell.
+        let before = size(&heartbeat);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(
+            size(&heartbeat) > before,
+            "grandchild stopped writing on its own"
+        );
+
+        tx.send(()).unwrap();
+        let inner = exec.await.unwrap().expect("exec task panicked");
+        assert!(matches!(inner, Err(ExecStop::Cancelled)));
+        assert_eq!(pool.worker_count().await, 0);
+
+        let after = size(&heartbeat);
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert_eq!(
+            size(&heartbeat),
+            after,
+            "grandchild kept writing after the worker was cancelled"
+        );
+
+        let _ = std::fs::remove_file(&heartbeat);
     }
 
     #[tokio::test]

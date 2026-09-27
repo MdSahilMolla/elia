@@ -221,10 +221,15 @@ struct McpProc {
     stdin: ChildStdin,
     stdout: tokio::io::Lines<BufReader<ChildStdout>>,
     next_id: i64,
+    /// The server's pid; on POSIX the process-group id, for tree kills.
+    pid: Option<u32>,
 }
 
 impl Drop for McpProc {
     fn drop(&mut self) {
+        // `npx`/`bunx` wrappers leave the actual server running when only the
+        // direct child is killed; take the whole group down first.
+        let _ = crate::killtree::kill_tree(self.pid);
         let _ = self.child.start_kill();
     }
 }
@@ -232,6 +237,7 @@ impl Drop for McpProc {
 impl McpProc {
     async fn spawn(config: &McpServerConfig) -> Result<Self> {
         let mut cmd = Command::new(&config.command);
+        crate::killtree::own_process_group(cmd.as_std_mut());
         cmd.args(&config.args)
             .envs(&config.env)
             .stdin(Stdio::piped())
@@ -241,6 +247,7 @@ impl McpProc {
         let mut child = cmd
             .spawn()
             .with_context(|| format!("spawn mcp server '{}'", config.command))?;
+        let pid = child.id();
         let stdin = child.stdin.take().ok_or_else(|| anyhow!("no stdin"))?;
         let stdout =
             BufReader::new(child.stdout.take().ok_or_else(|| anyhow!("no stdout"))?).lines();
@@ -249,6 +256,7 @@ impl McpProc {
             stdin,
             stdout,
             next_id: 0,
+            pid,
         })
     }
 

@@ -27,10 +27,13 @@ struct Proc {
     stdin: ChildStdin,
     stdout: tokio::io::Lines<BufReader<ChildStdout>>,
     next_id: u64,
+    /// The process's pid; on POSIX the process-group id, for tree kills.
+    pid: Option<u32>,
 }
 
 impl Drop for Proc {
     fn drop(&mut self) {
+        let _ = crate::killtree::kill_tree(self.pid);
         let _ = self.child.start_kill();
     }
 }
@@ -72,7 +75,9 @@ impl Proc {
         let jar = jar_path()
             .ok_or_else(|| anyhow!("elia-jvm-bridge jar not found (set ELIA_JVM_BRIDGE_JAR)"))?;
         let java = java_bin();
-        let mut child = Command::new(&java)
+        let mut command = Command::new(&java);
+        crate::killtree::own_process_group(command.as_std_mut());
+        let mut child = command
             .arg("-jar")
             .arg(&jar)
             .stdin(Stdio::piped())
@@ -81,6 +86,7 @@ impl Proc {
             .kill_on_drop(true)
             .spawn()
             .with_context(|| format!("failed to start '{java} -jar {}'", jar.display()))?;
+        let pid = child.id();
 
         let stdin = child.stdin.take().ok_or_else(|| anyhow!("no stdin"))?;
         let stdout =
@@ -90,6 +96,7 @@ impl Proc {
             stdin,
             stdout,
             next_id: 1,
+            pid,
         })
     }
 
