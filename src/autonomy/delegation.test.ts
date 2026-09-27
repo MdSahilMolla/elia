@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { createDelegationTool } from '../tools/delegate.ts'
+import { createDelegationTool, MAX_DELEGATION_DEPTH } from '../tools/delegate.ts'
 import { GoalGraphStore } from './goalGraph.ts'
 import { role } from './roles.ts'
 
@@ -20,9 +20,29 @@ describe('hierarchical delegation', () => {
     expect(role('accessibility').canDelegate).not.toBe(true)
   })
 
-  test('child depth refuses recursive delegation', async () => {
-    const tool = createDelegationTool({ parentRole: 'frontend', parentName: 'frontend#child', depth: 1 })
+  test('a worker at the depth cap refuses to delegate further', async () => {
+    const tool = createDelegationTool({ parentRole: 'frontend', parentName: 'frontend#deep', depth: MAX_DELEGATION_DEPTH })
     await expect(tool.execute({ assignments: [{ id: 'a', title: 'A', role: 'designer', prompt: 'inspect' }] })).rejects.toThrow('delegation depth limit')
+  })
+
+  // #1279: delegation used to be hardcoded to depth 1 (a lead's children could
+  // never delegate their own children, even when assigned a delegation-capable
+  // role like frontend/backend). MAX_DELEGATION_DEPTH is now >1 by default
+  // (configurable via ELIA_MAX_DELEGATION_DEPTH), so a child one level below
+  // the top is allowed to delegate its own bounded fleet, as long as it has
+  // not yet reached the cap.
+  test('a child below the depth cap can still delegate its own fleet', async () => {
+    if (MAX_DELEGATION_DEPTH < 2) return // ELIA_MAX_DELEGATION_DEPTH=1 in this environment restores the old behavior on purpose.
+    const tool = createDelegationTool({
+      parentRole: 'frontend',
+      parentName: 'frontend#child',
+      depth: 1,
+      runFleet: (async (options: { assignments: Array<{ id: string; title: string; role: string }> }) => ({
+        results: options.assignments.map((a) => ({ id: a.id, title: a.title, role: a.role, ok: true, report: 'done', steps: 1, elapsedMs: 5 })),
+      })) as never,
+    })
+    const report = await tool.execute({ assignments: [{ id: 'a', title: 'A', role: 'designer', prompt: 'inspect' }] })
+    expect(report).toContain('completed')
   })
 
   test('rejects unknown child roles and dependency cycles before execution', async () => {
