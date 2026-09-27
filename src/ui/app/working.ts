@@ -40,9 +40,12 @@ export function charTokens(chars: number): number {
  * The line that closes a longer turn: how long it took, what it changed, how
  * much the model wrote. `rollup` is toolSummary's `rollupLine` ("Edited 1
  * file, ran 2 commands · +3 −1"); `tokens` is output tokens, 0 when unknown.
+ * A turn you stopped or that failed says so — "Worked for" on a turn that
+ * died read as a success.
  */
-export function turnReceipt({ elapsedMs, rollup, tokens }: { elapsedMs: number; rollup: string; tokens: number }): string {
-  const parts = [`Worked for ${formatElapsed(elapsedMs / 1000)}`]
+export function turnReceipt({ elapsedMs, rollup, tokens, ending = 'done' }: { elapsedMs: number; rollup: string; tokens: number; ending?: 'done' | 'stopped' | 'failed' }): string {
+  const lead = ending === 'stopped' ? 'Stopped after' : ending === 'failed' ? 'Failed after' : 'Worked for'
+  const parts = [`${lead} ${formatElapsed(elapsedMs / 1000)}`]
   if (rollup) parts.push(rollup.charAt(0).toLowerCase() + rollup.slice(1))
   if (tokens > 0) parts.push(`↓ ${formatTokens(tokens)} tokens`)
   return parts.join(' · ')
@@ -137,7 +140,8 @@ export function workingLabel(state: WorkingState): string {
 
 /** Shown under a long-running turn, one per turn, so they rotate. */
 export const TIPS = [
-  'Type while elia works to steer it — it folds your note in at the next step',
+  'Type while elia works — it answers right away, and passes any change of plan to the work',
+  '/autopilot: no task needed — elia works out what this repo needs and does it',
   'shift+tab cycles manual → auto-accept → plan mode',
   'Mention a file with @, or run a shell command with !',
   'ctrl+o expands every tool result',

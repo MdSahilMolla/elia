@@ -5,7 +5,7 @@ import { motionReduced, useAnimationClock } from '../animation.tsx'
 import { FLARE_MS, flareFrame, flareRuns, mixColor } from '../motion.ts'
 import { AssistantMessage } from './AssistantMessage.tsx'
 import { Thinking } from './Thinking.tsx'
-import { ExploreCard, ToolCard } from './ToolCard.tsx'
+import { ExploreCard, ShellBody, ToolCard } from './ToolCard.tsx'
 import { useFrameWidth, wrapPlain } from '../wrap.ts'
 
 /**
@@ -214,17 +214,16 @@ export function TranscriptItemView({ item, expanded, gapAbove = false, live = fa
             <Text color={palette.bash}>{command.slice(0, 1)}</Text>
             {command.slice(1)}
           </Text>
-          {output.map((line, i) => (
-            <Text key={i} color={palette.muted} wrap="truncate-end">
-              {i === 0 ? `${glyphs.branch} ` : '  '}
-              {line || ' '}
-            </Text>
-          ))}
+          {/* The same body a tool card's command gets — indented under the
+              command, `⎿`-led — shown in full, since you asked to see it. */}
+          <ShellBody lines={output} failed={false} expanded />
           {exit ? (
-            <Text color={palette.failure} wrap="truncate-end">
-              {output.length === 0 ? `${glyphs.branch} ` : '  '}
-              {exit}
-            </Text>
+            <Box marginLeft={2}>
+              <Text color={palette.failure} wrap="truncate-end">
+                {output.length === 0 ? `${glyphs.branch} ` : '  '}
+                {exit}
+              </Text>
+            </Box>
           ) : null}
         </Box>
       )
@@ -245,10 +244,26 @@ export function TranscriptItemView({ item, expanded, gapAbove = false, live = fa
       }
       return <Note text={item.text} marginTop={gapAbove ? 1 : 0} />
     }
-    case 'receipt':
-      // The spark, settled: the turn is over.
+    case 'aside':
+      // Asked mid-task and answered on the spot, while the work carried on.
       return (
-        <Marked mark={glyphs.receipt} color={palette.brand} textColor={palette.muted} marginTop={1}>
+        <Box flexDirection="column" marginTop={1}>
+          <Marked mark="↳" color={palette.brand} textColor={palette.muted}>
+            {`you, mid-task: ${item.question}`}
+          </Marked>
+          <AssistantMessage text={item.text} streaming={false} />
+        </Box>
+      )
+    case 'receipt':
+      // The spark, settled: the turn is over. A turn you stopped, or one that
+      // failed, does not get the spark — it gets the mark that says how it ended.
+      return (
+        <Marked
+          mark={item.ending === 'stopped' ? glyphs.warn : item.ending === 'failed' ? glyphs.error : glyphs.receipt}
+          color={item.ending === 'stopped' ? palette.warning : item.ending === 'failed' ? palette.failure : palette.brand}
+          textColor={palette.muted}
+          marginTop={1}
+        >
           {item.text}
         </Marked>
       )

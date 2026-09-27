@@ -4,7 +4,7 @@
 
 ## Dev mode
 
-Elia’s default general-purpose coding mode is called **dev mode**. It covers building, debugging, refactoring, testing, software operations, browser work, and task delegation. Start it explicitly with `elia --dev`, or switch back to it interactively with `/dev`. The old `/normal` command remains accepted as a compatibility alias but is not shown in command completion.
+Elia’s default general-purpose coding mode is called **dev mode**. It covers building, debugging, refactoring, testing, software operations, browser work, and task delegation. Start it explicitly with `elia --dev`, or switch back to it interactively with `/mode dev` (`/mode` alone opens a picker; `tech` is an alias for dev).
 
 Dev mode is separate from execution policy: manual policy asks before risky actions, while auto policy skips preliminary risk checks but keeps governed irreversible actions behind explicit approval unless unattended execution has been explicitly requested.
 
@@ -27,7 +27,7 @@ Malformed or oversized hook configuration fails closed. Hooks are inherited by d
 
 ## Specialist modes and capability contracts
 
-Elia routes requests across explicit specialist modes: **Sports**, **Fitness**, **Marketing**, **Finance**, **Business Analyst**, **Data Analyst**, **Research**, **Cybersecurity**, **Automation**, **Communications**, **AI/ML**, **Production Engineering**, and **Tech**. Automatic routing is available through `elia agent "<request>"`; interactive sessions can pin a specialist with `/sports`, `/fitness`, `/marketing`, `/finance`, `/business`, `/data`, `/research`, `/cybersecurity`, `/automation`, `/communications`, `/ai`, `/production`, or `/tech`. `/sports` and `/fitness` are also true operating modes, so their system prompts and delegated workers inherit the selected domain. Use `/capabilities` to inspect each mode’s risk class, preferred tools, and required output contract.
+Elia routes requests across explicit specialist modes: **Sports**, **Fitness**, **Marketing**, **Finance**, **Business Analyst**, **Data Analyst**, **Research**, **Cybersecurity**, **Automation**, **Communications**, **AI/ML**, **Production Engineering**, and **Tech**. Automatic routing is available through `elia agent "<request>"`; interactive sessions can pin one with `/betamode <name>` — `sports`, `fitness`, `marketing`, `finance`, `business`, `data`, `research`, `cybersecurity`, `automation`, `communications`, `ai` or `production` (`/betamode` alone opens a picker) — and `/mode cyber` / `/mode battmann` switch the core modes. Sports and Fitness are also true operating modes, so their system prompts and delegated workers inherit the selected domain. Use `/capabilities` to inspect each mode’s risk class, preferred tools, and required output contract.
 
 Each specialist must separate facts, assumptions, recommendations, and unknowns. Finance and cybersecurity work require explicit assumptions or authorized scope; data work requires quality checks and reproducibility; research requires sources and citations; Sports work must separate supplied facts from metrics, estimates, and opinion; Fitness work must remain conservative and non-medical; communications and automation require exact approval immediately before consequential external actions.
 

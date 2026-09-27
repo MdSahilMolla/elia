@@ -547,3 +547,50 @@ test('sessionRef reads --session against the parsed args', () => {
   expect(sessionRef(parseParallelSessionsArgs(['kill', '--session', 'alpha']))).toBe('alpha')
   expect(sessionRef(parseParallelSessionsArgs(['list']))).toBeUndefined()
 })
+// `elia sessions new` from a shell left a worktree and a branch that no later
+// command could see or remove. prune removes only what exists elsewhere.
+test('prune removes clean leftover session worktrees and merged branches, and keeps the rest', async () => {
+  const { mkdtempSync, rmSync, writeFileSync, existsSync } = await import('node:fs')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+  const { runGit } = await import('../autonomy/worktree.ts')
+  const { createSessionWorktree, findLeftoverSessionWorktrees, pruneSessionWorktrees } = await import('./parallelSessions.ts')
+  const repo = mkdtempSync(join(tmpdir(), 'elia-prune-'))
+  const state = join(repo, '.elia')
+  try {
+    await runGit(['init', '-q', '-b', 'main'], repo)
+    await runGit(['config', 'user.email', 'test@example.com'], repo)
+    await runGit(['config', 'user.name', 'test'], repo)
+    writeFileSync(join(repo, '.gitignore'), '.elia/\n')
+    writeFileSync(join(repo, 'a.txt'), 'a\n')
+    await runGit(['add', '.'], repo)
+    await runGit(['commit', '-q', '-m', 'init'], repo)
+
+    const clean = await createSessionWorktree('clean', repo, state)
+    const dirty = await createSessionWorktree('dirty', repo, state)
+    const ahead = await createSessionWorktree('ahead', repo, state)
+    writeFileSync(join(dirty, 'wip.txt'), 'not committed\n')
+    writeFileSync(join(ahead, 'b.txt'), 'b\n')
+    await runGit(['add', 'b.txt'], ahead)
+    await runGit(['commit', '-q', '-m', 'work only on the session branch'], ahead)
+
+    const leftovers = await findLeftoverSessionWorktrees(repo, state)
+    expect(leftovers.map((l) => l.name).sort()).toEqual(['ahead', 'clean', 'dirty'])
+    expect(leftovers.find((l) => l.name === 'dirty')?.dirty).toBe(true)
+    // A session that is live in this process is not a leftover.
+    expect((await findLeftoverSessionWorktrees(repo, state, ['clean'])).map((l) => l.name)).not.toContain('clean')
+
+    const result = await pruneSessionWorktrees(leftovers, repo)
+    expect(result.removed).toEqual(['clean'])
+    expect(result.branchKept).toEqual(['ahead'])
+    expect(result.skipped).toEqual([{ name: 'dirty', reason: 'has uncommitted changes' }])
+    expect(existsSync(clean)).toBe(false)
+    expect(existsSync(dirty)).toBe(true)
+    const branches = (await runGit(['branch', '--list', 'elia/session-*'], repo)).stdout
+    expect(branches).not.toContain('elia/session-clean')
+    expect(branches).toContain('elia/session-ahead')
+  } finally {
+    await runGit(['worktree', 'remove', '--force', join(state, 'session-worktrees', 'dirty')], repo).catch(() => undefined)
+    rmSync(repo, { recursive: true, force: true })
+  }
+}, 60_000)

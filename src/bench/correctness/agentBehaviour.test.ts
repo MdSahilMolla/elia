@@ -623,3 +623,37 @@ test('a sweeping commit in this project is refused while the work belongs to a c
     setContributionsPathForTests()
   }
 })
+
+// --- Friction the run corpus measured (2026-09-26 polish) ---------------------
+
+test('`cd "<dir with spaces>" && <command>` runs in that directory instead of being refused', async () => {
+  // The largest group of Windows shell-mismatch errors in the action ledger:
+  // a quoted `cd` was refused as a composed script and cost the run a step.
+  mkdirSync(join(dir, 'my app'))
+  writeFileSync(join(dir, 'my app', 'marker.txt'), 'here\n')
+  const list = process.platform === 'win32' ? 'dir /b' : 'ls'
+  const { events } = await run([call('run_command', { command: `cd "my app" && ${list}` }), done])
+  expect(events[0]).toMatchObject({ name: 'run_command', isError: false })
+  expect(events[0]!.result).toContain('marker.txt')
+  expect(events[0]!.result).toContain('exit code: 0')
+}, 30_000)
+
+test('grep given a file searches that file instead of failing ENOTDIR', async () => {
+  const { grepTool } = await import('../../tools/grep.ts')
+  mkdirSync(join(dir, 'src'))
+  writeFileSync(join(dir, 'src', 'app.ts'), 'const a = 1\nexport const needle = 2\n')
+  const { events } = await run([call('grep', { pattern: 'needle', path: 'src/app.ts' }), done], { tools: [...TOOLS, grepTool] })
+  expect(events[0]).toMatchObject({ name: 'grep', isError: false })
+  expect(events[0]!.result).toBe('src/app.ts:2:export const needle = 2')
+})
+
+test('.env.example is readable through the governor, and .env still is not', async () => {
+  // Session mubi8m6o: 29 refusals on a task the user asked for by name.
+  writeFileSync(join(dir, '.env.example'), 'DATABASE_URL=\n')
+  writeFileSync(join(dir, '.env'), 'DATABASE_URL=postgres://real-secret\n')
+  const { events } = await run([call('read_file', { path: '.env.example' }), call('read_file', { path: '.env' }), done])
+  expect(events[0]).toMatchObject({ name: 'read_file', isError: false })
+  expect(events[0]!.result).toContain('DATABASE_URL=')
+  expect(events[1]!.isError).toBe(true)
+  expect(events[1]!.result).not.toContain('real-secret')
+})

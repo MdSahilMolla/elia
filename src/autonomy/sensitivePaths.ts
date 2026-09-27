@@ -33,12 +33,30 @@ const SENSITIVE_FILE_NAMES = new Set([
   'passwd',
 ])
 
+/**
+ * `.env.example` and its kin are the committed, secret-free template a project
+ * documents its variables in — reading one is how you learn what `.env` needs.
+ * Blocking them stopped a task the user had asked for by name (session
+ * mubi8m6o, 29 refusals). Any other `.env.*` stays protected.
+ */
+const ENV_TEMPLATE_SUFFIX = String.raw`(?:\.[\w-]+)*\.(?:example|sample|template|dist)`
+const ENV_TEMPLATE_FILE = new RegExp(String.raw`^\.env${ENV_TEMPLATE_SUFFIX}$`, 'i')
+
+/**
+ * Source and style files named `token` are code, not stored tokens: a lexer's
+ * `token.ts`, an ERC-20 contract's `token/` folder, a design system's
+ * `tokens.css`. The same session was refused `contracts\token\BhumiNFT.sol`.
+ * `token`, `token.txt`, `tokens.json` and the like stay protected.
+ */
+const CODE_EXTENSIONS = 'ts|tsx|js|jsx|mjs|cjs|py|go|rs|sol|java|kt|swift|rb|php|cs|c|cc|cpp|h|hpp|css|scss|sass|less|md|html?|vue|svelte|dart|scala|lua|zig'
+
 const SENSITIVE_FILE_PATTERNS = [
   /^\.env(?:\..+)?$/i,
   // The Battmann intelligence store: its records reach a model only through the battmann tool, which applies
   // the classification boundary (battmann/modelBoundary.ts). Reading the file directly would bypass it.
   /battmann[^/\\]*\.sqlite(?:-wal|-shm|-journal)?$/i,
-  /^(?:credentials?|secrets?|tokens?|passwords?)(?:\.[^.]+)*$/i,
+  /^(?:credentials?|secrets?|passwords?)(?:\.[^.]+)*$/i,
+  new RegExp(String.raw`^tokens?(?!(?:\.[^.]+)*\.(?:${CODE_EXTENSIONS})$)(?:\.[^.]+)*$`, 'i'),
   /^id_(?:rsa|dsa|ecdsa|ed25519)(?:\.pub)?$/i,
   /\.(?:pem|key|p12|pfx)$/i,
 ]
@@ -74,6 +92,7 @@ export function isSensitivePath(inputPath: string): boolean {
   // can never match) and the `includes('.config/gcloud/')` check below it.
   if (lowerPath === '.config/gcloud' || lowerPath.startsWith('.config/gcloud/')) return true
   if (SENSITIVE_FILE_NAMES.has(fileName)) return true
+  if (ENV_TEMPLATE_FILE.test(fileName)) return false
   return SENSITIVE_FILE_PATTERNS.some((pattern) => pattern.test(fileName))
 }
 
@@ -87,8 +106,20 @@ export function assertSafeFileAccess(path: string): void {
  * loosely against a whole command line rather than a single path argument.
  * Shared by every "does this command disclose a protected path" check below.
  */
-const SENSITIVE_PATH_MENTION =
-  /\.env(?:\.[A-Za-z0-9._-]+)?\b|\.npmrc\b|\.pypirc\b|\.netrc\b|\.(?:pem|key|p12|pfx)\b|\.git-credentials\b|\.aws(?:[\\/]|\b)|\.azure(?:[\\/]|\b)|\.docker(?:[\\/]|\b)|\.kube(?:[\\/]|\b)|\.gnupg(?:[\\/]|\b)|\.config[\\/]gcloud(?:[\\/]|\b)|\.ssh(?:[\\/]|\b)|\bid_(?:rsa|dsa|ecdsa|ed25519)(?:\.pub)?\b|\b(?:credentials?|secrets?|tokens?|passwords?|shadow|passwd|cookies|login data|local state|web data|environ|sudoers|sshd_config)\b|battmann[\w.-]*\.sqlite/i
+const SENSITIVE_PATH_MENTION = new RegExp(
+  [
+    // `.env` and `.env.*`, but not a template (`.env.example`, `.env.local.sample`).
+    String.raw`\.env(?!${ENV_TEMPLATE_SUFFIX}\b)(?:\.[A-Za-z0-9._-]+)?\b`,
+    String.raw`\.npmrc\b|\.pypirc\b|\.netrc\b|\.(?:pem|key|p12|pfx)\b|\.git-credentials\b`,
+    String.raw`\.aws(?:[\\/]|\b)|\.azure(?:[\\/]|\b)|\.docker(?:[\\/]|\b)|\.kube(?:[\\/]|\b)|\.gnupg(?:[\\/]|\b)|\.config[\\/]gcloud(?:[\\/]|\b)|\.ssh(?:[\\/]|\b)`,
+    String.raw`\bid_(?:rsa|dsa|ecdsa|ed25519)(?:\.pub)?\b`,
+    String.raw`\b(?:credentials?|secrets?|passwords?|shadow|passwd|cookies|login data|local state|web data|environ|sudoers|sshd_config)\b`,
+    // `token` as a file — not a `token/` folder of code, not `token.ts`.
+    String.raw`\btokens?\b(?![\\/]|(?:\.[\w-]+)*\.(?:${CODE_EXTENSIONS})\b)`,
+    String.raw`battmann[\w.-]*\.sqlite`,
+  ].join('|'),
+  'i',
+)
 
 /** Conservative shell check for common commands that would disclose protected local files. */
 export function commandMayReadSensitiveData(command: string): boolean {

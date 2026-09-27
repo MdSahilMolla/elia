@@ -9,6 +9,31 @@ workspace), a REPL redesign, and a broad reliability/perf pass.
 
 ### Added
 
+- **`elia autopilot`: goal-free, unsupervised development.** No task given: it
+  surveys the repository, measures its own checks, forms an evidence-cited
+  understanding (purpose, current state, direction; ungrounded claims are
+  dropped), builds a backlog ranked in code (failing checks first), and works
+  it with governed unattended `auto` runs on an `elia/autopilot-*` branch. A
+  health ratchet rolls back any goal that turns a passing check red and keeps
+  the attempt at `refs/elia/autopilot/…`. Durable and resumable
+  (`.elia/autopilot/`), with `--plan-only`, `--resume`, `status`, `report`, and
+  `/autopilot` inside a session.
+- **Working is the default.** A bare `elia` in a clean git repository starts
+  the autopilot as the session's first turn (or resumes it, when you are still
+  on its branch with goals queued); it waits for you instead outside a repo,
+  with uncommitted changes, in elia's own checkout, with a prompt or
+  `--continue`/`--resume`, or with `--chat` / `ELIA_AUTOPILOT=off`. `elia auto`
+  runs unattended by default; `--supervised` restores the plan approval.
+- **Live replies.** A message sent while elia works is answered at once by a
+  read-only lane that sees the conversation, plan, running tools, progress and
+  the autopilot's state, and can open files. A direction comes back with a
+  `STEER:` line that reaches the running work. `/quickchat` and its overlay are
+  retired; this is the default behaviour.
+- **`database` tool** for development: detect the project's database setup,
+  start/stop a project-local PostgreSQL (`.elia/devdb/`, loopback only, no
+  Docker), query, schema, and apply/create migrations. Governed by locality:
+  local work runs unattended (destructive SQL is `pg_dump`ed first); any
+  remote database is `critical` and never auto-approved.
 - **Native stack.** `eliad` daemon with a per-directory persistent shell pool
   and a resident MCP supervisor (behind `ELIA_DAEMON`); `elia-parse` C++
   structural edit-check and `elia-jvm-bridge` Java type-check services routed

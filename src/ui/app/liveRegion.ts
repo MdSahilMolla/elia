@@ -89,6 +89,9 @@ function shapeOf(item: Item, expanded: boolean): Shape {
       return { chrome: 1, gutter: 2, bodyLimit: Infinity }
     case 'header':
       return { chrome: 1, gutter: 2, bodyLimit: 3 }
+    case 'aside':
+      // marginTop + the "↳ you, mid-task" line; the answer sits behind "● ".
+      return { chrome: 2, gutter: 2, bodyLimit: Infinity }
   }
 }
 
@@ -101,6 +104,8 @@ function payloadOf(item: Item): string {
       return item.tools.map((tool) => tool.name).join('\n')
     case 'header':
       return 'header\nline'
+    case 'aside':
+      return item.text
     default:
       return item.text
   }

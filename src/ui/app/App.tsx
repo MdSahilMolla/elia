@@ -37,11 +37,10 @@ import { looksLikeImageAttachmentLine } from '../../attachments.ts'
 import { compactionThresholdFor, contextWindowFor } from '../../contextWindow.ts'
 import { codexContextTokens } from '../../providers/codexSubscription.ts'
 import type { ChatMessage } from '../../providers/types.ts'
+import type { LiveView } from '../../live/liveReply.ts'
 import { onLiveOutput, sessionUsageSnapshot } from '../../usage.ts'
 import { SessionBar } from './SessionBar.tsx'
-import { QuickchatOverlay } from './QuickchatOverlay.tsx'
 import { SessionShortcuts } from './SessionShortcuts.tsx'
-import { quickchatStore } from './quickchatOverlayStore.ts'
 
 /** `/attach` and its aliases stay real commands even though a POSIX image path also starts with "/". */
 const ATTACH_COMMAND = /^\/(?:attach|image|img)\b/
@@ -119,6 +118,14 @@ export interface SlashOutcome {
   runCommand?: SlashRunRequest
   /** `/clear`: wipe the screen and transcript and continue as this new session. */
   clear?: { sessionId: string }
+  /**
+   * Run this as a turn of its own (`/autopilot`): the working line, Esc, and
+   * live replies all behave as they do for a model turn, but the body is the
+   * command's, not a prompt to the model.
+   */
+  turn?: { label: string; run(hooks: TurnHooks): Promise<void> }
+  /** `/plan`: switch to plan mode — before `submitText` runs, so that turn plans. */
+  enterPlanMode?: boolean
 }
 
 export interface AppEnv {
@@ -152,6 +159,17 @@ export interface AppProps {
   startupNotice?: string
   /** ctrl+shift+n spawn hook; absent in builds without session spawning. */
   onSpawnSession?: () => void
+  /**
+   * Answers a message sent while a turn runs, from the session's read-only
+   * live lane. `steer`, when present, is what the running work should change.
+   * Absent: mid-turn text is folded in as steering only, as before.
+   */
+  liveReply?(question: string, view: LiveView, signal: AbortSignal): Promise<{ answer: string; steer?: string }>
+  /**
+   * A turn the session starts by itself as soon as it opens — a bare `elia`
+   * in a project starts the autopilot this way. `notice` says why, once.
+   */
+  initialTurn?: { label: string; notice?: string; run(hooks: TurnHooks): Promise<void> }
 }
 
 /**
@@ -292,6 +310,14 @@ export function App(props: AppProps) {
     [liveCapOn, snap.live, termSize.columns, termSize.rows, expandedAll],
   )
   const [steeringCount, setSteeringCount] = useState(0)
+  // Messages sent mid-turn that the live lane is answering right now, and the
+  // exchanges already answered this turn (so "do that" can resolve).
+  const [answering, setAnswering] = useState(0)
+  const exchangesRef = useRef<Array<{ question: string; answer: string }>>([])
+  const liveAbortRef = useRef(new Set<AbortController>())
+  useEffect(() => () => {
+    for (const controller of liveAbortRef.current) controller.abort()
+  }, [])
   const [queue, setQueue] = useState<string[]>([])
   // The working line's inputs. `status` is the phase or progress a deeper
   // layer last reported; running tools and the stream mode outrank it.
@@ -460,8 +486,6 @@ export function App(props: AppProps) {
     if (key.ctrl && input === 'o' && !modalOrOverlayOpen) setExpandedAll((v) => !v)
     // While the approval menu owns the screen, let it handle Esc (go back / no).
     if (approval) return
-    // A visible quickchat panel eats Esc itself — no normal typing Esc reaches it.
-    if (quickchatStore.handleEscape('esc').consumed) return
     if (key.escape) {
       // Staged, so one stray Esc never wipes work: a running turn stops first
       // (queued/steering messages are kept); then the queue; and pending
@@ -505,6 +529,87 @@ export function App(props: AppProps) {
     if (key.shift && key.tab && !modalOrOverlayOpen) setMode((m) => (m === 'manual' ? 'auto' : m === 'auto' ? 'plan' : 'manual'))
   })
 
+  // What the live lane reads about the running turn. Plain refs refreshed on
+  // every render: a reply is built in an async callback, after the state it
+  // describes may have rendered several times.
+  const liveStateRef = useRef({ status, runningTools, plan, providerPlan, runSteps, turnStartedAt })
+  liveStateRef.current = { status, runningTools, plan, providerPlan, runSteps, turnStartedAt }
+  const pendingQuestions = useRef(new Set<string>())
+  const submitRef = useRef<((line: string) => Promise<void>) | null>(null)
+
+  /**
+   * Answers a message typed while a turn runs — immediately, from the live
+   * lane, while the turn carries on. A reply that carries a `steer` hands that
+   * instruction to the running work at its next step boundary; one that lands
+   * after the turn already ended starts it as a turn of its own. When no
+   * answer can be had, the message reaches the work as plain steering, which
+   * is what every mid-turn message used to do.
+   */
+  const answerLive = useCallback(
+    async (question: string) => {
+      const liveReply = props.liveReply
+      if (!liveReply) return
+      const controller = new AbortController()
+      liveAbortRef.current.add(controller)
+      pendingQuestions.current.add(question)
+      setAnswering((n) => n + 1)
+      const live = liveStateRef.current
+      const items = store.turnItems()
+      const view: LiveView = {
+        request: lastUserText.current,
+        elapsedMs: live.turnStartedAt ? Date.now() - live.turnStartedAt : 0,
+        status: live.status,
+        runningTools: live.runningTools.map((tool) => tool.activity),
+        plan: live.plan.length > 0
+          ? live.plan
+          : live.providerPlan.length > 0
+            ? live.providerPlan
+            : live.runSteps.map((step) => ({ content: step.title, status: 'in plan' })),
+        recentTools: toolsOf(items)
+          .filter((tool) => tool.status !== 'running')
+          .map((tool) => ({
+            name: tool.name,
+            input: toolActivity({ name: tool.name, input: tool.input }),
+            outcome: (tool.result ?? '').split('\n').find((line) => line.trim())?.trim().slice(0, 160) ?? '',
+            isError: tool.status === 'error',
+          })),
+        assistantSoFar: items.filter((item) => item.kind === 'assistant').map((item) => (item.kind === 'assistant' ? item.text : '')).join('\n'),
+        progress: items.flatMap((item) => (item.kind === 'notice' ? [item.text] : [])).slice(-20),
+        steering: [...steeringRef.current],
+      }
+      const steerWork = (instruction: string) => {
+        if (busyRef.current) {
+          steeringRef.current = [...steeringRef.current, instruction]
+          setSteeringCount(steeringRef.current.length)
+          return true
+        }
+        return false
+      }
+      try {
+        const reply = await liveReply(question, view, controller.signal)
+        store.aside(question, reply.answer)
+        exchangesRef.current = [...exchangesRef.current, { question, answer: reply.answer }]
+        if (reply.steer) {
+          if (steerWork(reply.steer)) store.notice(`↳ passing to the running work: ${reply.steer}`)
+          else {
+            store.notice(`↳ the work had already finished — starting it now: ${reply.steer}`)
+            void submitRef.current?.(reply.steer)
+          }
+        }
+      } catch (error) {
+        if (controller.signal.aborted && !busyRef.current) return
+        const why = error instanceof Error ? error.message : String(error)
+        store.aside(question, `I couldn't answer right away (${why}), so I passed your message to the running work instead.`)
+        if (!steerWork(question)) void submitRef.current?.(question)
+      } finally {
+        liveAbortRef.current.delete(controller)
+        pendingQuestions.current.delete(question)
+        setAnswering((n) => Math.max(0, n - 1))
+      }
+    },
+    [props, store],
+  )
+
   const executePlan = useRef<(() => void) | null>(null)
   useInput((input, key) => {
     if (!planReady || busy) return
@@ -518,7 +623,7 @@ export function App(props: AppProps) {
   })
 
   const runOne = useCallback(
-    async (text: string, opts?: { echo?: boolean }) => {
+    async (text: string, opts?: { echo?: boolean; body?: (hooks: TurnHooks) => Promise<void> }) => {
       const carried = carriedTurnStart.current
       carriedTurnStart.current = undefined
       const startedAt = carried ?? Date.now()
@@ -538,6 +643,7 @@ export function App(props: AppProps) {
       if (opts?.echo !== false) store.appendUser(text)
       lastUserText.current = text
       turnPlan.current = []
+      exchangesRef.current = []
       const controller = new AbortController()
       abortRef.current = controller
       // Every streamed chunk and every tool boundary is a sign of life.
@@ -642,11 +748,16 @@ export function App(props: AppProps) {
           setProviderPlan([])
         },
       }
+      let ending: 'done' | 'stopped' | 'failed' = 'done'
       try {
-        await props.submitTurn(text, hooks)
+        await (opts?.body ? opts.body(hooks) : props.submitTurn(text, hooks))
       } catch (error) {
-        store.error(`Error: ${error instanceof Error ? error.message : String(error)}`)
+        ending = 'failed'
+        store.error(error instanceof Error ? error.message : String(error))
       } finally {
+        // Esc stops a turn by aborting it; whatever the turn did on the way
+        // out, it ended because it was stopped.
+        if (abortedRef.current) ending = 'stopped'
         abortRef.current = null
         // A lesson that landed in the last moment of the turn is still
         // flaring; let it finish before the receipt pushes it into scrollback.
@@ -668,10 +779,12 @@ export function App(props: AppProps) {
         // usage when the provider reported it, the streamed estimate otherwise.
         const tools = toolsOf(store.turnItems())
         const elapsedMs = Date.now() - startedAt
-        const rollup = tools.length > 2 || elapsedMs >= RECEIPT_AFTER_MS ? rollupLine(rollupTools(tools)) : ''
-        if (elapsedMs >= RECEIPT_AFTER_MS || rollup) {
+        const rollup = tools.length > 2 || elapsedMs >= RECEIPT_AFTER_MS || ending !== 'done' ? rollupLine(rollupTools(tools)) : ''
+        // A turn that stopped or failed always closes with a line saying so,
+        // however short it was.
+        if (elapsedMs >= RECEIPT_AFTER_MS || rollup || ending !== 'done') {
           const reported = sessionUsageSnapshot().usage.outputTokens - outputBefore.current
-          store.receipt(turnReceipt({ elapsedMs, rollup, tokens: reported > 0 ? reported : Math.round(progress.current.tokens) }))
+          store.receipt(turnReceipt({ elapsedMs, rollup, tokens: reported > 0 ? reported : Math.round(progress.current.tokens), ending }), ending)
         }
         turnsRun.current += 1
         setRunSteps([])
@@ -713,7 +826,7 @@ export function App(props: AppProps) {
             store.shell(command, output)
             store.commit()
           } catch (error) {
-            store.error(`Error: ${error instanceof Error ? error.message : String(error)}`)
+            store.error(error instanceof Error ? error.message : String(error))
             store.commit()
           }
         }
@@ -761,6 +874,14 @@ export function App(props: AppProps) {
         }
         break
       }
+      const turn = typeof outcome === 'object' && outcome ? outcome.turn : undefined
+      if (turn) {
+        if (typeof outcome === 'object' && outcome?.text) store.notice(outcome.text)
+        store.commit()
+        await runOne(turn.label, { body: turn.run })
+        await drainRef.current?.()
+        return
+      }
       const submitText = typeof outcome === 'object' && outcome ? outcome.submitText : undefined
       const finalText = typeof outcome === 'string' ? outcome : outcome?.text
       const cleared = typeof outcome === 'object' && outcome ? outcome.clear : undefined
@@ -777,6 +898,12 @@ export function App(props: AppProps) {
         setSessionId(cleared.sessionId)
         lastUserText.current = ''
       }
+      if (typeof outcome === 'object' && outcome?.enterPlanMode) {
+        // The ref first: `runOne` below reads it to decide this is a plan turn,
+        // before React has re-rendered with the new mode.
+        modeRef.current = 'plan'
+        setMode('plan')
+      }
       if (finalText) store.notice(finalText)
       store.commit()
       if (submitText) await runOne(submitText)
@@ -784,6 +911,67 @@ export function App(props: AppProps) {
     [props, store, runOne, writeStdout],
   )
 
+
+  /**
+   * What arrived while a turn ran and still needs doing, run once it ends.
+   *
+   * Queued commands first — but not after an Esc/Ctrl+C stop: the UI just told
+   * the user queued items are kept and need an explicit send ("Send anything to
+   * apply, or Esc again to drop them"), so auto-running them here would
+   * contradict that. The abort check runs *before* each shift (like the
+   * steering drain below) so a stop doesn't silently pop-and-drop an item that
+   * was never run.
+   */
+  const drainAfterTurn = useCallback(async (): Promise<void> => {
+    while (queueRef.current.length > 0 && !abortedRef.current) {
+      const next = shiftQueue()
+      if (next === undefined) break
+      // Only slash and shell lines are ever queued (the busy branch below
+      // steers plain text instead), so they have to be dispatched as
+      // commands here. Handing them to `runOne` sent the literal text to
+      // the model — a queued `/settings` arrived as a prompt reading
+      // "/settings".
+      if (isCommandLine(next)) await runCommandLine(next)
+      else await runOne(next)
+    }
+
+    // Steering that landed in the gap after the loop's last fold-in check —
+    // it was never applied. Send it as its own turn rather than silently
+    // prepending it to whatever the user types next. Not after an Esc/Ctrl+C
+    // stop: there the user chose to halt, so an auto follow-up isn't wanted.
+    while (steeringRef.current.length > 0 && !abortedRef.current) {
+      const pending = steeringRef.current.join('\n')
+      steeringRef.current = []
+      setSteeringCount(0)
+      store.notice('↳ sending steering that arrived as the turn ended')
+      await runOne(pending)
+    }
+  }, [store, runOne, runCommandLine])
+  const drainRef = useRef<(() => Promise<void>) | null>(null)
+  drainRef.current = drainAfterTurn
+
+  // A session that starts working by itself (a bare `elia` in a project):
+  // the turn begins once the header has painted, exactly as if it had been
+  // typed — the working line, Esc and live replies all behave as for any turn.
+  const initialTurnStarted = useRef(false)
+  useEffect(() => {
+    const initial = props.initialTurn
+    if (!initial || initialTurnStarted.current) return
+    initialTurnStarted.current = true
+    const timer = setTimeout(() => {
+      void (async () => {
+        turnStartingRef.current = true
+        try {
+          if (initial.notice) store.notice(initial.notice)
+          await runOne(initial.label, { echo: false, body: initial.run })
+          await drainAfterTurn()
+        } finally {
+          turnStartingRef.current = false
+        }
+      })()
+    }, 30)
+    return () => clearTimeout(timer)
+  }, [])
 
   const onSubmit = useCallback(
     async (line: string) => {
@@ -799,6 +987,16 @@ export function App(props: AppProps) {
         // spliced into the running turn at the next step boundary.
         if (trimmed.startsWith('/') || trimmed.startsWith('@') || trimmed.startsWith('!')) {
           pushQueue(trimmed)
+          return
+        }
+        // Everything else is answered right away by the live lane — a question
+        // gets its answer, a direction gets an answer *and* reaches the work.
+        if (props.liveReply) {
+          if (pendingQuestions.current.has(trimmed) || lastUserText.current === trimmed) {
+            store.notice('↳ already asked — the answer is on its way')
+            return
+          }
+          void answerLive(trimmed)
           return
         }
         // Don't stack the same steering twice — a frustrated re-send while the
@@ -857,11 +1055,30 @@ export function App(props: AppProps) {
           beginProgress(checkedAt)
           carriedTurnStart.current = checkedAt
           setStatus('Checking the request')
+          // Esc stops a turn by aborting `abortRef`, which the turn proper only
+          // sets once it starts — so an Esc during this pre-check aborted
+          // nothing, "Stopping the turn…" printed, and the turn then ran anyway
+          // (seen on a real console with a slow model, where the check takes
+          // seconds). The pre-check owns the stop handle while it runs, and a
+          // stop ends the message here, before anything is sent.
+          const precheck = new AbortController()
+          abortRef.current = precheck
+          abortedRef.current = false
+          const stopped = new Promise<'stopped'>((resolve) => precheck.signal.addEventListener('abort', () => resolve('stopped'), { once: true }))
           // A pre-check that fails is not a verdict. In manual mode every risky
           // action is still put to you one at a time by the approval menu, so an
           // unreachable classifier lets a harmless message through instead of
           // greeting it with an error and a y/n prompt.
-          const { risky, reason } = await props.classifyRisk(trimmed).catch(() => ({ risky: false, reason: undefined }))
+          const verdict = await Promise.race([props.classifyRisk(trimmed).catch(() => ({ risky: false, reason: undefined })), stopped])
+          if (abortRef.current === precheck) abortRef.current = null
+          if (verdict === 'stopped') {
+            setBusy(false)
+            setStatus('')
+            store.receipt('Stopped before it started — nothing was sent', 'stopped')
+            store.commit()
+            return
+          }
+          const { risky, reason } = verdict
           if (risky) {
             setBusy(false)
             setStatus('')
@@ -876,37 +1093,7 @@ export function App(props: AppProps) {
         }
 
         await runOne(trimmed, { echo: false })
-
-        // Drain anything queued while that turn ran — but not after an Esc/
-        // Ctrl+C stop: the UI just told the user queued items are kept and
-        // need an explicit send ("Send anything to apply, or Esc again to
-        // drop them"), so auto-running them here would contradict that. The
-        // abort check runs *before* each shift (like the steering drain
-        // below) so a stop doesn't silently pop-and-drop an item that was
-        // never run.
-        while (queueRef.current.length > 0 && !abortedRef.current) {
-          const next = shiftQueue()
-          if (next === undefined) break
-          // Only slash and shell lines are ever queued (the busy branch above
-          // steers plain text instead), so they have to be dispatched as
-          // commands here. Handing them to `runOne` sent the literal text to
-          // the model — a queued `/settings` arrived as a prompt reading
-          // "/settings".
-          if (isCommandLine(next)) await runCommandLine(next)
-          else await runOne(next)
-        }
-
-        // Steering that landed in the gap after the loop's last fold-in check —
-        // it was never applied. Send it as its own turn rather than silently
-        // prepending it to whatever the user types next. Not after an Esc/Ctrl+C
-        // stop: there the user chose to halt, so an auto follow-up isn't wanted.
-        while (steeringRef.current.length > 0 && !abortedRef.current) {
-          const pending = steeringRef.current.join('\n')
-          steeringRef.current = []
-          setSteeringCount(0)
-          store.notice('↳ sending steering that arrived as the turn ended')
-          await runOne(pending)
-        }
+        await drainAfterTurn()
       } finally {
         turnStartingRef.current = false
         // Nothing ran after the pre-check (an error, a declined risk prompt):
@@ -914,8 +1101,9 @@ export function App(props: AppProps) {
         carriedTurnStart.current = undefined
       }
     },
-    [busy, mode, props, store, runOne, exit, writeStdout, beginProgress],
+    [busy, mode, props, store, runOne, exit, writeStdout, beginProgress, answerLive, drainAfterTurn],
   )
+  submitRef.current = onSubmit
 
   // In ChatGPT-subscription mode Elia's own `messages` array stays near-empty
   // (Codex keeps the real transcript in its thread), so meter against Codex's
@@ -983,12 +1171,6 @@ export function App(props: AppProps) {
     <ClockProvider>
     <FrameWidth.Provider value={frameWidth}>
     <Box flexDirection="column" width={frameWidth}>
-      <SessionBar
-        onAutoFocus={noticeAutoFocus}
-        activeRunning={busy}
-        suppressed={modalOpen || showHelp}
-      />
-      <QuickchatOverlay />
       <ErrorBoundary area="transcript" onError={boundaryError}>
         <Transcript
           key={transcriptEpoch}
@@ -1027,6 +1209,7 @@ export function App(props: AppProps) {
           thinking={streamMode === 'thinking'}
           waitingOnModel={runningTools.length === 0 && !checks.some((chip) => chip.state === 'running')}
           steeringPending={steeringCount}
+          answering={answering}
           tip={tip}
           checks={checks}
         />
@@ -1057,7 +1240,9 @@ export function App(props: AppProps) {
           disabled={confirm !== null || approval !== null || picker !== null || textPrompt !== null || planReady || showHelp}
           placeholder={
             busy
-              ? 'Type to steer elia · esc to stop'
+              ? props.liveReply
+                ? 'Ask or redirect — elia answers while it works · esc to stop'
+                : 'Type to steer elia · esc to stop'
               : mode === 'plan'
                 ? 'Describe the task — elia will research and propose a plan first'
                 : 'Ask anything, or type / for commands'
@@ -1088,11 +1273,20 @@ export function App(props: AppProps) {
           />
         </ErrorBoundary>
         )}
+        {/* Parallel sessions, pinned under the status row with the rest of the
+            chrome. Renders nothing until a second session exists. */}
+        <SessionBar
+          onAutoFocus={noticeAutoFocus}
+          activeRunning={busy}
+          suppressed={modalOpen || showHelp}
+        />
       </Box>
       <SessionShortcuts
         disabled={modalOpen || showHelp || inputMenuOpen}
-        onSpawnSession={props.onSpawnSession ?? (() => store.notice("Session spawning isn't wired up in this build — ctrl+shift+n no-op."))}
-        onCycle={(handle) => store.notice(`Focused session ${handle.name}`)}
+        onSpawnSession={props.onSpawnSession ?? (() => void runCommandLine('/sessions new'))}
+        // Switching sessions changes which one delegation talks to — the bar's
+        // bold chip already shows it, so this stays one quiet line.
+        onCycle={(handle) => store.notice(`delegation now targets session ${handle.name}`)}
       />
     </Box>
     </FrameWidth.Provider>

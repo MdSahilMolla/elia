@@ -90,7 +90,8 @@ test('a failed risk pre-check lets the message through instead of raising an err
   await new Promise((resolve) => setTimeout(resolve, 80))
   expect(submitted).toBe('change the greeting')
   expect(lastFrame()).not.toContain('Risk check failed')
-  expect(lastFrame()).not.toContain('y/n')
+  // Case-insensitive: the confirm now shows its default as `y/N`.
+  expect(lastFrame()).not.toMatch(/y\/n/i)
 })
 
 test('App streams a turn: user line, tool card, assistant text', async () => {
@@ -602,6 +603,13 @@ test('the count carries from the risk pre-check into the turn it gated', async (
 test('a slash command queued during a turn is dispatched, not sent to the model', async () => {
   let slashCalls: string[] = []
   let prompts: string[] = []
+  // The turn stays open until the test has seen the command queued. A fixed
+  // 80ms turn raced the two screen checks below and, on a loaded machine, ended
+  // first — the command then ran directly and the test failed on a correct app.
+  let release: () => void = () => {}
+  const turnOpen = new Promise<void>((resolve) => {
+    release = resolve
+  })
   const props = {
     ...baseProps(),
     handleSlash: async (command: string) => {
@@ -610,7 +618,7 @@ test('a slash command queued during a turn is dispatched, not sent to the model'
     },
     submitTurn: async (text: string, _hooks: import('./App.tsx').TurnHooks) => {
       prompts.push(text)
-      await new Promise((resolve) => setTimeout(resolve, 80))
+      await turnOpen
     },
   }
   const { stdin, lastFrame } = render(<App {...props} />)
@@ -625,10 +633,207 @@ test('a slash command queued during a turn is dispatched, not sent to the model'
   await waitForFrame(lastFrame, '/settings')
   stdin.write('\r')
   await waitForFrame(lastFrame, '1 queued')
+  expect(slashCalls).toEqual([])
 
-  await new Promise((resolve) => setTimeout(resolve, 400))
+  release()
+  await waitForFrame(lastFrame, 'Settings opened')
 
   expect(slashCalls).toEqual(['/settings'])
   // The whole point: it must not have become a prompt.
   expect(prompts).toEqual(['build the thing'])
+})
+
+test('a message typed mid-turn is answered right away, and a direction also reaches the running work', async () => {
+  let release!: () => void
+  const held = new Promise<void>((resolve) => { release = resolve })
+  const drained: string[][] = []
+  const asked: Array<{ question: string; request: string; tools: string[] }> = []
+  const props = {
+    ...baseProps(),
+    submitTurn: async (_text: string, hooks: import('./App.tsx').TurnHooks) => {
+      hooks.onToolStart({ id: 'r1', name: 'read_file', input: { path: 'src/auth.ts' } })
+      hooks.onTool({ id: 'r1', name: 'read_file', input: { path: 'src/auth.ts' }, result: 'export function login() {}', isError: false, durationMs: 2, cached: false })
+      await held
+      drained.push(hooks.drainSteering())
+    },
+    liveReply: async (question: string, view: import('../../live/liveReply.ts').LiveView) => {
+      asked.push({ question, request: view.request, tools: view.recentTools.map((tool) => tool.name) })
+      if (question.startsWith('also')) return { answer: 'Sure — I will add tests after the fix.', steer: 'Add unit tests for login() after fixing it.' }
+      return { answer: 'I am reading src/auth.ts to find where the session expires.' }
+    },
+  }
+  const { stdin, lastFrame, unmount } = render(<App {...props} />)
+  try {
+    await waitForFrame(lastFrame, READY)
+    await settle()
+    stdin.write('fix the login bug')
+    await waitForFrame(lastFrame, 'fix the login bug')
+    stdin.write('\r')
+    await waitForFrame(lastFrame, 'esc to interrupt')
+
+    stdin.write('what are you doing?')
+    await waitForFrame(lastFrame, 'what are you doing?')
+    stdin.write('\r')
+    const answered = await waitForFrame(lastFrame, 'find where the session expires')
+    expect(answered).toContain('you, mid-task: what are you doing?')
+    // The turn is still running: an answer is not a turn.
+    expect(answered).toContain('esc to interrupt')
+
+    stdin.write('also add tests')
+    await waitForFrame(lastFrame, 'also add tests')
+    stdin.write('\r')
+    await waitForFrame(lastFrame, 'passing to the running work')
+
+    release()
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    expect(asked[0]).toEqual({ question: 'what are you doing?', request: 'fix the login bug', tools: ['read_file'] })
+    // Only the instruction the live lane distilled reaches the work — not the raw chat.
+    expect(drained).toEqual([['Add unit tests for login() after fixing it.']])
+  } finally {
+    unmount()
+  }
+})
+
+test('when the live lane cannot answer, the message still reaches the work as steering', async () => {
+  let release!: () => void
+  const held = new Promise<void>((resolve) => { release = resolve })
+  const drained: string[][] = []
+  const props = {
+    ...baseProps(),
+    submitTurn: async (_text: string, hooks: import('./App.tsx').TurnHooks) => {
+      await held
+      drained.push(hooks.drainSteering())
+    },
+    liveReply: async () => {
+      throw new Error('provider down')
+    },
+  }
+  const { stdin, lastFrame, unmount } = render(<App {...props} />)
+  try {
+    await waitForFrame(lastFrame, READY)
+    await settle()
+    stdin.write('build it')
+    await waitForFrame(lastFrame, 'build it')
+    stdin.write('\r')
+    await waitForFrame(lastFrame, 'esc to interrupt')
+    stdin.write('use postgres not sqlite')
+    await waitForFrame(lastFrame, 'use postgres not sqlite')
+    stdin.write('\r')
+    await waitForFrame(lastFrame, 'so I passed your message')
+    release()
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    expect(drained).toEqual([['use postgres not sqlite']])
+  } finally {
+    unmount()
+  }
+})
+
+test('a slash command can run as a turn of its own, and mid-turn messages reach it as steering', async () => {
+  let release!: () => void
+  const held = new Promise<void>((resolve) => { release = resolve })
+  const seen: string[][] = []
+  const props = {
+    ...baseProps(),
+    handleSlash: async () => ({
+      handled: true,
+      text: 'autopilot starting',
+      turn: {
+        label: '/autopilot',
+        run: async (hooks: import('./App.tsx').TurnHooks) => {
+          hooks.onText('◆ surveying the repository…\n')
+          await held
+          seen.push(hooks.drainSteering())
+        },
+      },
+    }),
+    liveReply: async () => ({ answer: 'Adding it to the backlog.', steer: 'add a /health endpoint' }),
+  }
+  const { stdin, lastFrame, unmount } = render(<App {...props} />)
+  try {
+    await waitForFrame(lastFrame, READY)
+    await settle()
+    stdin.write('/autopilot')
+    await waitForFrame(lastFrame, '/autopilot')
+    stdin.write('\r')
+    await waitForFrame(lastFrame, 'surveying the repository')
+    await waitForFrame(lastFrame, 'esc to interrupt')
+    stdin.write('please add a health endpoint')
+    await waitForFrame(lastFrame, 'please add a health endpoint')
+    stdin.write('\r')
+    await waitForFrame(lastFrame, 'Adding it to the backlog.')
+    release()
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    expect(seen).toEqual([['add a /health endpoint']])
+  } finally {
+    unmount()
+  }
+})
+
+test('a session can start working by itself, and you can talk to it while it does', async () => {
+  let release!: () => void
+  const held = new Promise<void>((resolve) => { release = resolve })
+  let ran = 0
+  const props = {
+    ...baseProps(),
+    initialTurn: {
+      label: '/autopilot',
+      notice: 'Working on this project by myself.',
+      run: async (hooks: import('./App.tsx').TurnHooks) => {
+        ran += 1
+        hooks.onActivity({ kind: 'status', title: '◆ surveying the repository…', status: 'completed' })
+        await held
+      },
+    },
+    liveReply: async () => ({ answer: 'Surveying the repo, then running its tests.' }),
+  }
+  const { stdin, lastFrame, unmount } = render(<App {...props} />)
+  try {
+    const started = await waitForFrame(lastFrame, 'surveying the repository')
+    expect(started).toContain('Working on this project by myself.')
+    expect(started).toContain('esc to interrupt')
+    // Started by the session, not typed: no user line echoes the label.
+    expect(started).not.toContain('❯ /autopilot')
+    stdin.write('what are you up to')
+    await waitForFrame(lastFrame, 'what are you up to')
+    stdin.write('\r')
+    await waitForFrame(lastFrame, 'then running its tests')
+    release()
+    await waitForFrame(lastFrame, READY)
+    expect(ran).toBe(1)
+  } finally {
+    unmount()
+  }
+})
+
+// Seen on a real console with a slow model: Esc during "Checking the request"
+// printed "Stopping the turn…" and the turn then ran anyway — the stop handle
+// only existed once the turn proper had started.
+test('Esc during the risk pre-check stops the message before anything is sent', async () => {
+  let prompts = 0
+  let releaseCheck!: () => void
+  const checking = new Promise<void>((resolve) => { releaseCheck = resolve })
+  const props = {
+    ...baseProps(),
+    classifyRisk: async () => {
+      await checking
+      return { risky: false }
+    },
+    submitTurn: async () => {
+      prompts += 1
+    },
+  }
+  const { stdin, lastFrame } = render(<App {...props} />)
+  await waitForFrame(lastFrame, READY)
+  await settle()
+  stdin.write('deploy the thing')
+  await waitForFrame(lastFrame, 'deploy the thing')
+  stdin.write('\r')
+  await waitForFrame(lastFrame, 'Checking the request')
+  stdin.write('\u001b')
+  await waitForFrame(lastFrame, 'Stopped before it started')
+  // The classifier answering late changes nothing.
+  releaseCheck()
+  await new Promise((resolve) => setTimeout(resolve, 150))
+  expect(prompts).toBe(0)
+  expect(lastFrame()).toContain(READY)
 })

@@ -110,7 +110,10 @@ export async function runAuto(): Promise<void> {
     process.exitCode = 1
     return
   }
-  const yolo = !supervisedFlag && (unattendedFlag || supervisionEnv === 'unattended' || process.env.ELIA_AUTO_APPROVE === '1')
+  // Unattended is the default: elia plans and does the work without waiting
+  // for a plan approval. --supervised (or ELIA_SUPERVISION=supervised) puts
+  // the plan in front of you first. The unattended flags stay accepted.
+  const yolo = !supervisedFlag
   writeNotice(
     `supervision: ${
       yolo
@@ -149,7 +152,7 @@ export async function runAuto(): Promise<void> {
 
   let approveAction: ActionApproval | undefined
   if (!yolo && !process.stdin.isTTY) {
-    writeError('elia auto needs a terminal to approve the plan. Re-run with --unattended to skip routine approval.')
+    writeError('elia auto --supervised needs a terminal to approve the plan. Drop --supervised to run it unattended.')
     process.exitCode = 1
     return
   }

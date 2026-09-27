@@ -2,7 +2,7 @@ import { join } from 'node:path'
 import { config, paths, systemPromptForMode, turnContextPrompt } from '../config.ts'
 import { withFileLockAsync } from '../fileLock.ts'
 import { lastAssistantText, runAgentLoop, type ConversationMessage, type ToolEvent } from '../agentLoop.ts'
-import { taskTool } from '../tools/task.ts'
+import { planningTaskTool, taskTool } from '../tools/task.ts'
 import { allWorkerTools } from '../tools/registry.ts'
 import { environmentTool } from '../tools/environment.ts'
 import { runSubAgent } from '../subagent.ts'
@@ -120,6 +120,13 @@ export interface AutonomousRunOptions {
   publish?: boolean
   /** Maximum final polish passes; bounded to prevent autonomous thrashing. */
   maxPolishPasses?: number
+  /**
+   * Write PRD/architecture/ADR documents for the goal when the project has
+   * none (default true). The autopilot turns this off: it works a backlog of
+   * small goals in an existing project, and a PRD named after the first of
+   * them would misdescribe the whole project.
+   */
+  projectDocuments?: boolean
   /** Maximum governed tool requests for the entire run; 0 means no additional action-count limit. */
   maxActions?: number
   runId?: string
@@ -778,9 +785,11 @@ async function runAutonomousTaskInternal(options: AutonomousRunOptions): Promise
   const plannerPrompt = profile === 'fast'
     ? `${basePlannerPrompt}\n\n## Fast bounded mode\nThis is a time-sensitive task. Prefer 3–6 high-value steps, combine edits that share a coherent UI or subsystem, and keep independent steps in the same wave. Do not create separate steps for trivial assets, documentation, or cosmetic micro-edits. The goal is a complete verified result, not an exhaustive project plan.`
     : basePlannerPrompt
+  // Orienting changes nothing: the planner's `task` launches look-only
+  // workers (scouts), never builders — see planningTaskTool.
   const planningTools = [
     ...allWorkerTools().filter((tool) => ['read_file', 'list_files', 'grep', 'web_search', 'web_fetch', 'browser', 'board_read', 'board_post', 'environment'].includes(tool.name)),
-    taskTool,
+    planningTaskTool,
     proposalCapture.tool,
   ]
 
@@ -1034,7 +1043,7 @@ async function runAutonomousTaskInternal(options: AutonomousRunOptions): Promise
   let hasLocalHistory = false
   if (planApproved) {
     writePhase('scaffold', 'repository, ignore rules, and project documents')
-    const scaffold = await scaffoldProject({ cwd: workspaceRoot, goal, proposal, signal: runSignal, protect: protectedPaths })
+    const scaffold = await scaffoldProject({ cwd: workspaceRoot, goal, proposal, signal: runSignal, protect: protectedPaths, documents: options.projectDocuments })
     if (scaffold.initialized) writeSubStep('initialised a git repository for this project')
     if (scaffold.documents.length > 0) writeSubStep(`wrote ${scaffold.documents.join(', ')}`)
     for (const commit of scaffold.commits) writeSubStep(`committed: ${commit}`)

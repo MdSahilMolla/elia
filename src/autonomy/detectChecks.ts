@@ -197,7 +197,11 @@ export function detectChecks(cwd: string = process.cwd()): string[] {
   if (existsSync(join(cwd, 'Cargo.toml'))) return ['cargo check', 'cargo test']
   if (existsSync(join(cwd, 'go.mod'))) return ['go build ./...', 'go test ./...']
   if (existsSync(join(cwd, 'pyproject.toml')) || existsSync(join(cwd, 'pytest.ini')) || existsSync(join(cwd, 'setup.cfg'))) {
-    return existsSync(join(cwd, 'mypy.ini')) || hasMypyConfig(cwd) ? ['mypy .', 'pytest -q'] : ['pytest -q']
+    // mypy only when this machine can run it: a project that configures mypy
+    // in a venv nobody activated made `mypy .` fail "not recognized", and the
+    // turn spent its repairs on the environment, not the code.
+    const mypy = (existsSync(join(cwd, 'mypy.ini')) || hasMypyConfig(cwd)) && Bun.which('mypy') !== null
+    return mypy ? ['mypy .', 'pytest -q'] : ['pytest -q']
   }
 
   // JVM. A Gradle wrapper is the project's own pinned Gradle; prefer it over a

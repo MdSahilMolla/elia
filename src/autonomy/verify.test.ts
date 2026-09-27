@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, expect, test } from 'bun:test'
-import { fallbackStaticPageVerification, hasBlockingIssues, isNoTestsResult, isUnrunnableCommandFailure, requireCriticVerdict, runVerification, staticRenderRole, unwinnableVerificationCommands } from './verify.ts'
+import { fallbackStaticPageVerification, hasBlockingIssues, isCommandNotFound, isNoTestsResult, isUnrunnableCommandFailure, requireCriticVerdict, runVerification, staticRenderRole, unwinnableVerificationCommands } from './verify.ts'
 import { resetPreviewServerForTests } from '../preview/server.ts'
 
 afterEach(() => {
@@ -163,6 +163,36 @@ test('the gate reports an empty test suite as inconclusive instead of failing â€
     const withTypecheck = await runVerification(['exit 0', 'bun test'], dir, undefined, allowAllGovernor())
     expect(withTypecheck.passed).toBe(true)
     expect(withTypecheck.inconclusive).toContain('bun test found no tests')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('a program the shell cannot find is recognised exactly, and only when asked is it skipped', async () => {
+  const winMissing = { command: 'mypy .', exitCode: 1, stdout: '', stderr: "'mypy' is not recognized as an internal or external command,\r\noperable program or batch file.\r\n", elapsedMs: 5, timedOut: false }
+  const shMissing = { command: 'mypy .', exitCode: 127, stdout: '', stderr: 'sh: 1: mypy: not found\n', elapsedMs: 5, timedOut: false }
+  const realFailure = { command: 'pytest -q', exitCode: 1, stdout: "FileNotFoundError: [Errno 2] No such file or directory: 'data.csv'", stderr: '', elapsedMs: 5, timedOut: false }
+  const otherProgram = { command: 'npm test', exitCode: 1, stdout: '', stderr: "'jest' is not recognized as an internal or external command,", elapsedMs: 5, timedOut: false }
+  expect(isCommandNotFound(winMissing)).toBe(true)
+  expect(isCommandNotFound(shMissing)).toBe(true)
+  expect(isCommandNotFound(realFailure)).toBe(false)
+  // A script whose *own* child is missing is a broken project, not a missing check.
+  expect(isCommandNotFound(otherProgram)).toBe(false)
+
+  const dir = mkdtempSync(join(tmpdir(), 'elia-verify-missing-program-'))
+  try {
+    const missing = 'elia-definitely-not-installed-xyz --check'
+    const strict = await runVerification([missing, 'exit 0'], dir, undefined, allowAllGovernor())
+    expect(strict.passed).toBe(false)
+    expect(strict.inconclusive).toBeUndefined()
+
+    const lenient = await runVerification([missing, 'exit 0'], dir, undefined, allowAllGovernor(), { skipMissingPrograms: true })
+    expect(lenient.passed).toBe(true)
+    expect(lenient.inconclusive).toContain(`${missing} could not run`)
+
+    const nothingRan = await runVerification([missing], dir, undefined, allowAllGovernor(), { skipMissingPrograms: true })
+    expect(nothingRan.passed).toBe(false)
+    expect(nothingRan.inconclusive).toContain('not installed')
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }

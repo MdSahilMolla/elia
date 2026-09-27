@@ -119,6 +119,40 @@ test('an activity keeps its line breaks instead of flattening a checklist onto o
   expect(notice.text).toBe('Checks\n✓ build\n✗ tests')
 })
 
+test('a warning or failed activity keeps its meaning as a leading mark', () => {
+  const s = createTranscriptStore()
+  s.activity({ kind: 'status', status: 'warning', title: 'This turn stopped — /rewind 3 undoes what it wrote' })
+  s.activity({ kind: 'status', status: 'failed', title: 'Deploy failed' })
+  s.activity({ kind: 'status', status: 'warning', title: '⚠ checks still failing after 2 repair attempts' })
+  s.activity({ kind: 'status', status: 'completed', title: '✓ verified — bun test pass' })
+  s.activity({ kind: 'status', title: 'Orienting' })
+  const texts = s.turnItems().filter((i) => i.kind === 'notice').map((i) => (i as { text: string }).text)
+  expect(texts).toEqual([
+    '! This turn stopped — /rewind 3 undoes what it wrote',
+    '✗ Deploy failed',
+    '! checks still failing after 2 repair attempts',
+    '✓ verified — bun test pass',
+    'Orienting',
+  ])
+})
+
+test('an error drops a redundant "Error:" prefix and is redacted at ingestion', () => {
+  const s = createTranscriptStore()
+  s.error('Error: 401 from provider — key sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789 rejected')
+  const error = s.turnItems().find((i) => i.kind === 'error') as { text: string }
+  expect(error.text.startsWith('401 from provider')).toBe(true)
+  expect(error.text).not.toContain('abcdefghijklmnopqrstuvwxyz0123456789')
+})
+
+test('a receipt remembers how the turn ended', () => {
+  const s = createTranscriptStore()
+  s.receipt('Worked for 12s')
+  s.receipt('Stopped after 3s', 'stopped')
+  s.receipt('Failed after 9s', 'failed')
+  const endings = s.turnItems().filter((i) => i.kind === 'receipt').map((i) => (i as { ending?: string }).ending)
+  expect(endings).toEqual([undefined, 'stopped', 'failed'])
+})
+
 test('toolEnd matches the running card by id', () => {
   const s = createTranscriptStore()
   s.toolStart({ id: 't1', name: 'read_file', input: { path: 'a' } })
@@ -314,4 +348,11 @@ test('a lesson stays live while its flare plays, and the turn knows how long to 
   const plain = createTranscriptStore()
   plain.activity({ kind: 'status', status: 'completed', title: '✦ memory · 9 lessons from earlier sessions' })
   expect(flareHoldMs(plain.turnItems())).toBe(0)
+})
+
+test('a notice is stored as plain text, whatever colour codes it arrived with', () => {
+  const s = createTranscriptStore()
+  s.notice('\u001b[33mgold\u001b[39m and \u001b[2mdim\u001b[22m')
+  const notice = s.turnItems().find((i) => i.kind === 'notice') as { text: string }
+  expect(notice.text).toBe('gold and dim')
 })

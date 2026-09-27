@@ -1,4 +1,5 @@
 import { rm } from 'node:fs/promises'
+import { realpathSync } from 'node:fs'
 import { join } from 'node:path'
 import * as readline from 'node:readline/promises'
 import { emitEvent, machineReadable, plainOutput, quietOutput } from '../ui/runtime.ts'
@@ -156,8 +157,8 @@ function usage(out: SessionCliOut, command: string | undefined): void {
   fail(
     out,
     command === undefined
-      ? 'Usage: elia sessions <new|list|status|attach|kill|sync|drop|subscribe> [args]'
-      : `Unknown "elia sessions" subcommand "${command}". Expected one of: new, list, status, attach, kill, sync, drop, subscribe.`,
+      ? 'Usage: elia sessions <new|list|status|attach|kill|prune|sync|drop|subscribe> [args]'
+      : `Unknown "elia sessions" subcommand "${command}". Expected one of: new, list, status, attach, kill, prune, sync, drop, subscribe.`,
   )
 }
 
@@ -194,6 +195,85 @@ export async function removeSessionWorktree(path: string | undefined, sourceRoot
   }
 }
 
+export interface LeftoverSessionWorktree {
+  name: string
+  path: string
+  branch: string
+  /** Uncommitted changes — prune leaves these alone. */
+  dirty: boolean
+}
+
+/**
+ * Session worktrees nothing is using: every `elia/session-*` worktree under
+ * `<state>/session-worktrees/` whose session is not live in this process.
+ *
+ * The session bus lives in one process, so `elia sessions new` from a shell
+ * created a worktree and a branch and then exited — no later command could
+ * see the session, and `kill` could not remove what it could not see.
+ */
+/** The path with symlinks resolved, or as given when it does not exist. */
+function canonicalPath(path: string): string {
+  try {
+    return realpathSync.native(path)
+  } catch {
+    return path
+  }
+}
+
+export async function findLeftoverSessionWorktrees(sourceRoot: string = process.cwd(), baseDir: string = paths.state, live: string[] = []): Promise<LeftoverSessionWorktree[]> {
+  const listed = await runGit(['worktree', 'list', '--porcelain'], sourceRoot)
+  if (listed.exitCode !== 0) return []
+  // git lists every worktree by its real path. On macOS the temp and many
+  // project folders sit behind a symlink (/var → /private/var), so a prefix
+  // taken from the unresolved state directory matched nothing there: every
+  // leftover stayed invisible to `sessions prune`.
+  const comparable = (path: string) => canonicalPath(path).replace(/\\/g, '/').toLowerCase()
+  const root = comparable(join(baseDir, 'session-worktrees'))
+  const leftovers: LeftoverSessionWorktree[] = []
+  for (const block of listed.stdout.split(/\r?\n\r?\n/)) {
+    const path = /^worktree (.+)$/m.exec(block)?.[1]?.trim()
+    const branch = /^branch refs\/heads\/(elia\/session-.+)$/m.exec(block)?.[1]?.trim()
+    if (!path || !branch) continue
+    if (!comparable(path).startsWith(`${root}/`)) continue
+    const name = branch.slice('elia/session-'.length)
+    if (live.includes(name)) continue
+    const status = await runGit(['status', '--porcelain'], path)
+    leftovers.push({ name, path, branch, dirty: status.exitCode !== 0 || status.stdout.trim() !== '' })
+  }
+  return leftovers
+}
+
+export interface PruneResult {
+  removed: string[]
+  /** Worktree removed; branch kept because it has commits that are not merged. */
+  branchKept: string[]
+  skipped: Array<{ name: string; reason: string }>
+}
+
+/**
+ * Removes leftover session worktrees and their branches — only ones with no
+ * uncommitted changes, and a branch only when `git branch -d` agrees it is
+ * merged. Nothing is forced: work that exists nowhere else is never deleted.
+ */
+export async function pruneSessionWorktrees(leftovers: LeftoverSessionWorktree[], sourceRoot: string = process.cwd()): Promise<PruneResult> {
+  const result: PruneResult = { removed: [], branchKept: [], skipped: [] }
+  for (const leftover of leftovers) {
+    if (leftover.dirty) {
+      result.skipped.push({ name: leftover.name, reason: 'has uncommitted changes' })
+      continue
+    }
+    const removed = await runGit(['worktree', 'remove', leftover.path], sourceRoot)
+    if (removed.exitCode !== 0) {
+      result.skipped.push({ name: leftover.name, reason: (removed.stderr || removed.stdout).trim().split('\n')[0] || 'git worktree remove failed' })
+      continue
+    }
+    const branch = await runGit(['branch', '-d', leftover.branch], sourceRoot)
+    if (branch.exitCode === 0) result.removed.push(leftover.name)
+    else result.branchKept.push(leftover.name)
+  }
+  return result
+}
+
 async function loadBusDefault(): Promise<SessionBus> {
   const { getSessionBus } = await import('../session/bus.ts')
   return getSessionBus()
@@ -228,7 +308,9 @@ export async function runParallelSessions(args: string[], deps: Partial<Parallel
   try {
     bus = await d.loadBus()
   } catch (err) {
-    fail(out, `The session bus is not available in this build: ${err instanceof Error ? err.message : String(err)}`)
+    // A load failure, not a missing feature: "not available in this build"
+    // sent people looking for a different build.
+    fail(out, `Could not load the session bus: ${err instanceof Error ? err.message : String(err)}`)
     return
   }
 
@@ -247,6 +329,9 @@ export async function runParallelSessions(args: string[], deps: Partial<Parallel
       return
     case 'kill':
       await runCommandKill(bus, d, parsed, out)
+      return
+    case 'prune':
+      await runCommandPrune(bus, d, parsed, out)
       return
     case 'sync':
       await runCommandSync(bus, d, parsed, out)
@@ -287,6 +372,10 @@ async function runCommandNew(bus: SessionBus, deps: ParallelSessionsDeps, parsed
   }
   notice(out, `Session "${handle.name}" started: ${handle.id}`)
   notice(out, `Worktree: ${worktree}`)
+  // Sessions live in one process's bus: this one ends when the command does.
+  // Say so, and where the work goes from here, instead of letting a later
+  // `elia sessions list` find nothing.
+  notice(out, `Work there with: cd ${worktree} && elia · a session started inside a running elia (/sessions new) stays on its session bar · elia sessions prune removes worktrees nothing uses`)
 }
 
 export function renderLiveSessionsTable(sessions: SessionHandle[]): string[] {
@@ -315,7 +404,11 @@ async function runCommandList(bus: SessionBus, parsed: ParallelSessionArgs, out:
   })
   if (out.json || out.quiet) return
   if (sessions.length === 0) {
-    notice(out, 'No live sessions.')
+    // Live sessions belong to the elia process that started them, so a
+    // separate `elia sessions list` sees none — say that, and what is left on disk.
+    const leftovers = await findLeftoverSessionWorktrees().catch(() => [])
+    notice(out, 'No live sessions in this process — a session belongs to the elia that started it (its session bar shows them).')
+    if (leftovers.length > 0) notice(out, `${leftovers.length} session worktree${leftovers.length === 1 ? '' : 's'} left on disk (${leftovers.map((l) => l.name).join(', ')}) — elia sessions prune removes the clean ones.`)
     return
   }
   if (withBar) {
@@ -338,6 +431,56 @@ async function runCommandAttach(bus: SessionBus, parsed: ParallelSessionArgs, ou
   if (!out.quiet) {
     notice(out, `Attached to session "${handle.name}" (${handle.id})`)
   }
+}
+
+/**
+ * `elia sessions prune [--yes]`: list the session worktrees nothing uses, ask,
+ * and remove the clean ones (see `pruneSessionWorktrees` — nothing is forced).
+ * Without a terminal to ask on, it needs `--yes`.
+ */
+async function runCommandPrune(bus: SessionBus, deps: ParallelSessionsDeps, parsed: ParallelSessionArgs, out: SessionCliOut): Promise<void> {
+  const live = bus.list().map((handle) => String(handle.name))
+  const leftovers = await findLeftoverSessionWorktrees(process.cwd(), paths.state, live)
+  emitSessionEvent(out, 'sessions_leftovers', { leftovers })
+  if (leftovers.length === 0) {
+    notice(out, 'No leftover session worktrees.')
+    return
+  }
+  for (const leftover of leftovers) usageLine(out, `  ${leftover.name}  ${leftover.path}${leftover.dirty ? '  (uncommitted changes — kept)' : ''}`)
+  const removable = leftovers.filter((leftover) => !leftover.dirty)
+  if (removable.length === 0) {
+    notice(out, 'Every one has uncommitted changes, so none were removed.')
+    return
+  }
+  let confirmed = parsed.flags['yes'] === 'true'
+  if (!confirmed) {
+    const canAsk = !out.json && !out.quiet && (deps.asker !== undefined || Boolean(process.stdin.isTTY))
+    if (!canAsk) {
+      fail(out, `Re-run with --yes to remove ${removable.length} worktree${removable.length === 1 ? '' : 's'} and their merged branches.`)
+      return
+    }
+    const label = `Remove ${removable.length} worktree${removable.length === 1 ? '' : 's'} and ${removable.length === 1 ? 'its branch' : 'their branches'} (a branch with unmerged commits is kept)? [y/N] `
+    let answer: string | null
+    if (deps.asker) answer = await deps.asker.question(label)
+    else {
+      const rl = readline.createInterface({ input: process.stdin, output: process.stdout })
+      try {
+        answer = await rl.question(label).catch(() => null)
+      } finally {
+        rl.close()
+      }
+    }
+    confirmed = /^y(?:es)?$/i.test(answer?.trim() ?? '')
+  }
+  if (!confirmed) {
+    notice(out, 'Nothing removed.')
+    return
+  }
+  const result = await pruneSessionWorktrees(removable)
+  emitSessionEvent(out, 'sessions_pruned', { ...result })
+  if (result.removed.length > 0) notice(out, `Removed ${result.removed.join(', ')} (worktree and branch).`)
+  if (result.branchKept.length > 0) notice(out, `Removed the worktree of ${result.branchKept.join(', ')}; kept ${result.branchKept.length === 1 ? 'its branch' : 'their branches'} — unmerged commits (git branch -D elia/session-<name> drops one).`)
+  for (const skipped of result.skipped) notice(out, `Kept ${skipped.name}: ${skipped.reason}`)
 }
 
 async function runCommandKill(bus: SessionBus, deps: ParallelSessionsDeps, parsed: ParallelSessionArgs, out: SessionCliOut): Promise<void> {

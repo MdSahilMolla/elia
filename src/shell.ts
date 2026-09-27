@@ -169,12 +169,23 @@ export function shellInvocation(command: string): { argv: string[]; verbatim: bo
  * one argument's literal contents, never a new command segment.
  *
  * POSIX: single-quote, the only escape POSIX needs (' → `'\''`).
- * cmd.exe: double-quote and neuter embedded quotes with a caret — cmd has no
- * single-quoting, and `^` is its only way to stop a quote from closing the
- * quoted region inside one argument.
+ * cmd.exe: quote the argument the way the program's own argv parser reads it
+ * (backslashes before a quote doubled, the quote itself `\"`), then caret-escape
+ * every cmd.exe metacharacter — the quotes included. A caret is literal *inside*
+ * a quoted region, so the old `"…^"…"` form let an embedded `"` end the quoting
+ * and a following `&` start a new command (`a" & echo pwned> x & "b` wrote the
+ * file on a real cmd.exe), and `%PATH%` expanded. With every quote escaped, cmd
+ * never enters a quoted state for a payload to break out of. This is
+ * cross-spawn's escaping, checked against cmd.exe for `&`, `|`, `<>`, `%VAR%`,
+ * `!`, `^` and trailing backslashes.
  */
-export function escapeShellArg(value: string): string {
-  if (process.platform === 'win32') return `"${value.replace(/"/g, '^"')}"`
+const CMD_METACHARACTERS = /([()\][%!^"`<>&|;, *?])/g
+
+export function escapeShellArg(value: string, platform: NodeJS.Platform = process.platform): string {
+  if (platform === 'win32') {
+    const quoted = `"${value.replace(/(\\*)"/g, '$1$1\\"').replace(/(\\*)$/, '$1$1')}"`
+    return quoted.replace(CMD_METACHARACTERS, '^$1')
+  }
   return `'${value.replace(/'/g, `'\\''`)}'`
 }
 

@@ -35,6 +35,7 @@ import { sportsTool } from './sports.ts'
 import { fitnessTool } from './fitness.ts'
 import { environmentTool } from './environment.ts'
 import { provisionEnvironmentTool } from './provisionEnvironment.ts'
+import { databaseTool } from './database.ts'
 import { githubTool } from './github.ts'
 import { todoWriteTool } from './todo.ts'
 import { battmannTool } from './battmann.ts'
@@ -87,6 +88,7 @@ export const tools: Tool[] = [
   fitnessTool,
   environmentTool,
   provisionEnvironmentTool,
+  databaseTool,
   githubTool,
   causalDebugTool,
   causalFixTool,

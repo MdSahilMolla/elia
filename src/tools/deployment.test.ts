@@ -47,8 +47,11 @@ describe('deployment tool', () => {
       capturedRedirectMode = init?.redirect
       return new Response(null, { status: 302, headers: { Location: 'http://169.254.169.254/latest/meta-data' } })
     }) as typeof fetch
+    // The receipt lands in `<cwd>/.elia/deployments.jsonl`; without a temp cwd
+    // every run of this test appended a failed verify to the checkout's own log.
+    const cwd = mkdtempSync(join(tmpdir(), 'elia-deployment-verify-'))
     try {
-      const raw = await deploymentTool.execute({ action: 'verify', provider: 'vercel', url: 'https://my-app.vercel.app/' })
+      const raw = await withAgentIdentity({ name: 'test', role: 'lead', cwd }, () => deploymentTool.execute({ action: 'verify', provider: 'vercel', url: 'https://my-app.vercel.app/' }))
       const result = JSON.parse(raw) as { status: string; httpStatus: number; error: string }
       expect(capturedRedirectMode).toBe('manual')
       expect(result.status).toBe('failed')
@@ -56,6 +59,7 @@ describe('deployment tool', () => {
       expect(result.error).toContain('redirect')
     } finally {
       globalThis.fetch = originalFetch
+      rmSync(cwd, { recursive: true, force: true })
     }
   })
 

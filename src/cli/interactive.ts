@@ -28,26 +28,29 @@ import { confirmOnce } from '../ui/confirm.ts'
 import { gold, dim } from '../ui/theme.ts'
 import { box, table } from '../ui/layout.ts'
 import { pick } from '../ui/picker.ts'
-import { formatQuickchatResult } from '../quickchat/present.ts'
-import type { ParsedQuickchatCommand } from '../quickchat/quickchat.ts'
-import type { SessionHandle } from '../session/types.ts'
 import { openTaskDashboard, renderTaskSummary } from '../ui/taskDashboard.ts'
 import { inferTaskKind, taskSessions } from '../taskSessions.ts'
 import { isAgentPersona, type AgentPersona } from '../agents/types.ts'
 import { CAPABILITIES } from '../capabilities.ts'
 import { type ActionApproval } from '../autonomy/governor.ts'
 import { routeTurn } from '../autonomy/escalation.ts'
+import type { SessionHandle } from '../session/types.ts'
+import { autopilotStatusText, parseAutopilotSlash, runAutopilotTurn } from './autopilot.ts'
 import { emitEvent, interactiveTerminal, machineReadable, plainOutput, quietOutput } from '../ui/runtime.ts'
-import { renderWorkspacePanel } from '../ui/workspacePanel.ts'
+import { renderWorkspacePanel, renderWorkspaceStatus } from '../ui/workspacePanel.ts'
 import { registerShutdownCleanup } from '../ui/shutdown.ts'
 import { redactText } from '../ui/redact.ts'
 import { writeUserConfig } from '../userConfig.ts'
 import { removeProviderConfiguration, savedProviderNames } from '../providerSettings.ts'
 import { flagValue, hasFlag, positionals } from './argv.ts'
+import { describeCliError } from './errors.ts'
 import { ensureFirstRunProviderSetup, interactiveProviderSetup, prewarmActiveProvider, runCodexLogin } from './providerSetup.ts'
 import { actionApprovalPrompt, allSlashCommands, approvalTitle, classifyCommandRisk, loadRuntimeSkills, printTurnProfileReport, requestedAgentMode, userMessage, warnIfAtFilesystemRoot } from './runtime.ts'
 import type { ProviderActivity } from '../providers/types.ts'
 import { type ToolEvent } from '../agentLoop.ts'
+
+/** `/quickchat` was folded into the default mode: a message sent mid-turn is answered right away. */
+const QUICKCHAT_RETIRED = '/quickchat is gone — you no longer need it. While elia works, just type: every message gets an answer right away, with the whole session in view, and anything that should change the work is passed on to it.'
 
 interface TurnUiHooks {
   onText?: (delta: string) => void
@@ -174,6 +177,11 @@ export async function runInteractive(): Promise<void> {
   // Output from `!cmd` lines, held until the next real prompt so the model sees
   // what the user just ran without an extra round-trip.
   const carriedShellContext: string[] = []
+  // Questions answered mid-turn by the live lane. The work lane never saw
+  // them (only a STEER line reaches it), so they ride into the next turn as
+  // context: "do what you said" then means something.
+  const carriedAsides: string[] = []
+  const liveExchanges: Array<{ question: string; answer: string }> = []
   // Images queued by `/attach <path>`, folded into the next prompt as `image`
   // content blocks. Inline paths pasted/dragged straight into a prompt line are
   // resolved separately, in runRecordedTurn.
@@ -1195,7 +1203,7 @@ export async function runInteractive(): Promise<void> {
           const gateGovernor = createActionGovernor({ mode: approveAction ? 'supervised' : 'unattended', approve: approveAction })
           const [systemOne, firstOutcome] = await Promise.all([
             askSystemOne().catch(() => undefined),
-            runVerification(checks, root, controller.signal, gateGovernor, { onCheck: uiHooks?.onCheck }),
+            runVerification(checks, root, controller.signal, gateGovernor, { onCheck: uiHooks?.onCheck, skipMissingPrograms: true }),
           ])
           let outcome = firstOutcome
           if (systemOne && !outcome.blocked && !outcome.inconclusive) {
@@ -1214,7 +1222,7 @@ export async function runInteractive(): Promise<void> {
               ),
             )
             await runModelTurn()
-            outcome = await runVerification(checks, root, controller.signal, gateGovernor, { onCheck: uiHooks?.onCheck })
+            outcome = await runVerification(checks, root, controller.signal, gateGovernor, { onCheck: uiHooks?.onCheck, skipMissingPrograms: true })
             sessionTranscript.notice(describeVerification(outcome))
           }
           // A check the governor would not run proved nothing either way, and no
@@ -1310,9 +1318,14 @@ export async function runInteractive(): Promise<void> {
       // ChatGPT-subscription turns, whose file writes never reach the `preview`
       // tool (Codex writes directly, and its own browser launch is sandboxed).
       if (!previewedThisTurn && !uiHooks?.planMode && !controller.signal.aborted && interactiveTerminal && !machineReadable) {
+        let renderTarget: string | undefined
         try {
           const { findFreshPreviewTarget } = await import('../preview/autoPreview.ts')
-          const target = findFreshPreviewTarget(turnStartedAt - 3_000)
+          // What the turn wrote, not just a scan of workspace/: a page written
+          // anywhere else (a project folder, the repo root) was invisible here,
+          // so it shipped "done" with nothing having checked that it renders.
+          const target = findFreshPreviewTarget(turnStartedAt - 3_000, undefined, Object.keys(tracker.snapshot()))
+          renderTarget = target
           if (target) {
             const { prepareAutoPreview } = await import('../preview/prepare.ts')
             const { waitForHttp, checkRendered } = await import('../preview/readiness.ts')
@@ -1381,8 +1394,18 @@ export async function runInteractive(): Promise<void> {
               }
             }
           }
-        } catch {
-          // Preview is a convenience; never fail a completed turn over it.
+        } catch (error) {
+          // Preview is a convenience; never fail a completed turn over it. But
+          // for a static page this check is the only verification there is, so
+          // a check that could not run leaves the turn "skipped" with the reason
+          // on record — not "none", which reads as "nothing to check".
+          if (renderTarget && verifyResult === 'none') {
+            verifyResult = 'skipped'
+            const line = `Render check could not run — ${error instanceof Error ? error.message : String(error)}`
+            sessionTranscript.notice(line)
+            if (uiHooks) uiHooks.onActivity?.({ kind: 'status', status: 'warning', title: line })
+            else writeNotice(`▸ ${line}`)
+          }
         }
       } else if (previewedUrl && !persona && !escalated && !uiHooks?.planMode && !controller.signal.aborted && (verifyResult === 'none' || verifyResult === 'skipped')) {
         // The model opened the page itself, so the auto-preview above stood
@@ -1565,8 +1588,13 @@ export async function runInteractive(): Promise<void> {
       try {
         await saveCheckpoints(sessionId, checkpoints)
       } catch (error) {
-        // Never let a failed save replace the error that ended the turn.
-        if (endStatus !== 'failed') throw error
+        // A rewind point that could not be saved costs `/rewind` for this
+        // turn, not the turn itself — and a throw from this `finally` would
+        // replace whatever ended the turn. Say so instead.
+        const line = `Could not save this turn's rewind point — /rewind will not undo it (${error instanceof Error ? error.message : String(error)})`
+        sessionTranscript.notice(line)
+        if (uiHooks) uiHooks.onActivity?.({ kind: 'status', status: 'warning', title: line })
+        else writeNotice(`▸ ${line}`)
       }
     }
   }
@@ -1603,7 +1631,7 @@ export async function runInteractive(): Promise<void> {
         }
       } : undefined)
     } catch (err) {
-      writeError(`Error: ${err instanceof Error ? err.message : String(err)}`)
+      writeError(describeCliError(err, { subject: 'This turn' }))
       process.exitCode = 1
     }
     await persistInteractiveSession()
@@ -2094,48 +2122,56 @@ export async function runInteractive(): Promise<void> {
     }
   }
 
-  // Lazy, in-process handle for this REPL so `/quickchat` can ask about the
-  // live conversation. Registered on first use — creating it up front would add
-  // bus noise to every startup even when nobody runs quickchat.
-  let registeredQuickchatHandle: SessionHandle | undefined
-  async function registerQuickchatSession(): Promise<SessionHandle | undefined> {
-    if (registeredQuickchatHandle) return registeredQuickchatHandle
+  // This REPL's own handle on the session bus, registered the first time a
+  // parallel session needs something to sit beside — creating it up front
+  // would add bus noise to every startup.
+  let mainSessionHandle: SessionHandle | undefined
+  async function registerMainSession(): Promise<SessionHandle | undefined> {
+    if (mainSessionHandle) return mainSessionHandle
     try {
       const { getSessionBus } = await import('../session/bus.ts')
       const bus = getSessionBus()
       const existing = bus.resolve(sessionId)
       if (existing) {
-        registeredQuickchatHandle = existing
+        mainSessionHandle = existing
         return existing
       }
       const { makeSessionName } = await import('../session/types.ts')
       const handle = bus.create(makeSessionName('main'))
       bus.setActiveSession(handle.id)
-      registeredQuickchatHandle = handle
+      mainSessionHandle = handle
       return handle
     } catch {
       return undefined
     }
   }
 
-  // Answers the slow quickchat kinds in the background and streams the result
-  // into the Ink overlay panel; the active session is never awaited on it.
-  async function runQuickchatOverlay(input: string, session: SessionHandle, parsed: ParsedQuickchatCommand): Promise<void> {
-    const [{ handleQuickchatCommand }, { quickchatStore }] = await Promise.all([
-      import('../quickchat/quickchat.ts'),
-      import('../ui/app/quickchatOverlayStore.ts'),
-    ])
-    const question = parsed.kind === 'session-ask' ? parsed.question : parsed.kind === 'ask' ? parsed.question : 'Risk review of this session'
-    const label = parsed.kind === 'session-ask' ? parsed.targetSession : session.name
-    quickchatStore.open(question, label)
-    try {
-      const result = await handleQuickchatCommand(input, session)
-      const text = formatQuickchatResult(result.result)
-      if (text) quickchatStore.appendText(text)
-    } catch (error) {
-      quickchatStore.appendText(`quickchat failed: ${error instanceof Error ? error.message : String(error)}`)
+  /** `/search [on|off]` — shared by both REPLs. */
+  async function reasonSearchCommand(arg?: 'on' | 'off'): Promise<string> {
+    if (arg) {
+      reasonSearch = arg === 'on'
+      return `Reasoning search ${reasonSearch ? 'on' : 'off'} — work with something executable to check ${reasonSearch ? 'is attempted several different ways in isolated worktrees, and the one a real check passes is kept; a question with a short answer is checked by an independent attempt' : 'runs as a single attempt, and answers to questions are not checked'}.`
     }
-    // The overlay stays open until Escape or the store's idle timeout.
+    // No argument: say what it would do with *this* project, which is the
+    // question anyone typing it actually has.
+    const { readLibrary, renderLibrary } = await import('../reason/library.ts')
+    const { detectChecks } = await import('../autonomy/detectChecks.ts')
+    const checks = detectChecks(process.cwd())
+    return [
+      `Reasoning search is ${reasonSearch ? 'on' : 'off'}.`,
+      checks.length === 0
+        ? 'No project checks detected here, so a search would have nothing to judge attempts by and will decline.'
+        : `Attempts would be checked with: ${checks.join(', ')}`,
+      '',
+      renderLibrary(readLibrary()),
+    ].join('\n')
+  }
+
+  /** `/help` — every command on one aligned line each, then the keys worth knowing. Shared by both REPLs. */
+  function slashHelpText(keys: string): string {
+    const commands = allSlashCommands()
+    const column = Math.min(22, Math.max(...commands.map((c) => c.name.length)) + 2)
+    return [...commands.map((c) => `${c.name.padEnd(column)}${c.description}`), '', keys].join('\n')
   }
 
   async function handleSlashForInk(input: string): Promise<InkSlashOutcome> {
@@ -2400,6 +2436,49 @@ export async function runInteractive(): Promise<void> {
       )
     }
 
+    // A parallel session of this REPL: its own git worktree and branch, shown
+    // in the session bar, reachable with delegation.
+    // Ctrl+N lands here with no name, and the name prompt is the consent —
+    // creating a worktree and a branch is not something a keypress should do
+    // silently.
+    const sessionsNew = /^\/sessions?\s+new(?:\s+(.+))?$/.exec(trimmed)
+    if (sessionsNew) {
+      const create = async (raw: string): Promise<string> => {
+        const name = raw.trim()
+        if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,39}$/.test(name) || name.includes('..')) {
+          return `"${name}" can't name a session — use letters, digits, ".", "_" or "-" (up to 40), e.g. /sessions new api-tests`
+        }
+        const main = await registerMainSession()
+        const { getSessionBus } = await import('../session/bus.ts')
+        const { makeSessionName } = await import('../session/types.ts')
+        const { createSessionWorktree } = await import('./parallelSessions.ts')
+        const bus = getSessionBus()
+        if (bus.list().some((handle) => handle.name === name)) return `There is already a session named ${name}.`
+        const handle = bus.create(makeSessionName(name))
+        try {
+          const worktree = await createSessionWorktree(name)
+          bus.update(handle.id, { worktree })
+          bus.setStatus(handle.id, 'idle')
+          // The new session sits in the bar; this conversation stays the target.
+          if (main) bus.setActiveSession(main.id)
+          return `✓ Session ${name} created — worktree ${worktree}, branch elia/session-${name}.\nctrl+tab switches which session delegation targets.`
+        } catch (error) {
+          bus.kill(handle.id)
+          const why = (error instanceof Error ? error.message : String(error)).replace(/^Failed to create session worktree:\s*/, '').trim()
+          return `✗ Could not create session ${name}: ${why.split('\n')[0]}`
+        }
+      }
+      if (sessionsNew[1]) return done(await create(sessionsNew[1]))
+      return {
+        handled: true,
+        prompt: {
+          label: 'Name the new session — it gets its own git worktree and branch elia/session-<name>',
+          placeholder: 'e.g. api-tests',
+          onSubmit: (value) => create(value),
+        },
+      }
+    }
+
     if (trimmed === '/sessions' || trimmed === '/session') {
       // Every conversation in this project, not only the ones a live process is
       // currently holding — the ones worth reopening are usually the ones
@@ -2429,7 +2508,7 @@ export async function runInteractive(): Promise<void> {
     if (trimmed === '/eliaspace') {
       const { collectEliaspaceSnapshot, renderEliaspacePanel, renderEliaspaceView } = await import('../workspace/panel.ts')
       const snap = await collectEliaspaceSnapshot()
-      const panel = renderEliaspacePanel(snap)
+      const panel = renderEliaspacePanel(snap, { framed: false })
       if (!snap.configured || !snap.reachable) return { handled: true, text: panel }
       return {
         handled: true,
@@ -2454,10 +2533,10 @@ export async function runInteractive(): Promise<void> {
     // --- text-only commands ---
 
     if (trimmed === '/help' || trimmed === '/?') {
-      return { handled: true, text: allSlashCommands().map((c) => `${c.name}  —  ${c.description}`).join('\n') }
+      return done(slashHelpText('Keys: ? shortcuts · shift+tab plan mode · ctrl+o expand · !cmd runs a shell command · @path attaches a file'))
     }
     if (trimmed === '/status') {
-      return { handled: true, text: renderWorkspacePanel({ sessionId, mode, providerLabel: config.providerLabel, model: config.model }) }
+      return { handled: true, text: renderWorkspaceStatus({ sessionId, mode, providerLabel: config.providerLabel, model: config.model }) }
     }
     if (trimmed === '/team') return { handled: true, text: renderTeamStatus() }
     const expandMatch = /^\/expand(?:\s+(\d+))?$/.exec(trimmed)
@@ -2702,28 +2781,15 @@ export async function runInteractive(): Promise<void> {
     }
 
     const searchMatch = /^\/(?:search|reason)(?:\s+(on|off))?$/.exec(trimmed)
-    if (searchMatch) {
-      if (searchMatch[1]) {
-        reasonSearch = searchMatch[1] === 'on'
-        return done(
-          `Reasoning search ${reasonSearch ? 'on' : 'off'} — work with something executable to check ${reasonSearch ? 'is attempted several different ways in isolated worktrees, and the one a real check passes is kept; a question with a short answer is checked by an independent attempt' : 'runs as a single attempt, and answers to questions are not checked'}.`,
-        )
-      }
-      // No argument: say what it would do with *this* project, which is the
-      // question anyone typing it actually has.
-      const { readLibrary, renderLibrary } = await import('../reason/library.ts')
-      const { detectChecks } = await import('../autonomy/detectChecks.ts')
-      const checks = detectChecks(process.cwd())
-      return done(
-        [
-          `Reasoning search is ${reasonSearch ? 'on' : 'off'}.`,
-          checks.length === 0
-            ? 'No project checks detected here, so a search would have nothing to judge attempts by and will decline.'
-            : `Attempts would be checked with: ${checks.join(', ')}`,
-          '',
-          renderLibrary(readLibrary()),
-        ].join('\n'),
-      )
+    if (searchMatch) return done(await reasonSearchCommand(searchMatch[1] as 'on' | 'off' | undefined))
+
+    // `/plan <goal>`: the documented way into plan mode (shift+tab is the
+    // other). The goal, when given, is sent as the plan-mode turn right away.
+    const planMatch = /^\/plan(?:\s+([\s\S]+))?$/.exec(trimmed)
+    if (planMatch) {
+      const goal = planMatch[1]?.trim()
+      if (goal) return { handled: true, enterPlanMode: true, submitText: goal }
+      return { handled: true, enterPlanMode: true, text: 'Plan mode — describe the task and elia researches it and proposes a plan before changing anything. Enter runs the plan; shift+tab leaves plan mode.' }
     }
 
     const escalateMatch = /^\/(?:auto|escalate)(?:\s+(on|off))?$/.exec(trimmed)
@@ -2740,22 +2806,23 @@ export async function runInteractive(): Promise<void> {
       return done(selfEdit.describeSelfEdit())
     }
 
-    const quickchatMatch = /^\/quickchat(?:\s+(.*))?$/.exec(trimmed)
-    if (quickchatMatch) {
-      const session = await registerQuickchatSession()
-      if (!session) {
-        return done('No session is registered for quickchat here. Start one with: elia sessions new --name <name>')
+    if (/^\/quickchat\b/.test(trimmed)) return done(QUICKCHAT_RETIRED)
+
+    const autopilotMatch = /^\/autopilot(?:\s+(.*))?$/.exec(trimmed)
+    if (autopilotMatch) {
+      const request = parseAutopilotSlash(autopilotMatch[1] ?? '')
+      if ('text' in request) return done(request.text)
+      if ('status' in request) return done(await autopilotStatusText())
+      return {
+        handled: true,
+        text: request.planOnly
+          ? 'autopilot (plan only): surveying, measuring and planning — nothing will be changed. Ask me anything while it works.'
+          : `autopilot: working unattended on a branch of its own, up to ${request.maxGoals} goal(s). Ask me anything while it works; tell me to change course and I will add it to the front of its backlog. Esc stops it.`,
+        turn: {
+          label: `/autopilot${autopilotMatch[1] ? ` ${autopilotMatch[1]}` : ''}`,
+          run: (hooks) => runAutopilotTurn(request, hooks),
+        },
       }
-      const { parseQuickchatCommand } = await import('../quickchat/quickchat.ts')
-      const parsed = parseQuickchatCommand(trimmed)
-      const answeredInOverlay = parsed.kind === 'ask' || parsed.kind === 'session-ask' || parsed.kind === 'risk'
-      if (answeredInOverlay) {
-        void runQuickchatOverlay(trimmed, session, parsed).catch(() => undefined)
-        return done('Answering in the quickchat overlay — it never blocks this session. (Escape closes it; idle closes it in 60s.)')
-      }
-      const { handleQuickchatCommand } = await import('../quickchat/quickchat.ts')
-      const result = await handleQuickchatCommand(trimmed, session)
-      return done(result.handled ? formatQuickchatResult(result.result) : 'quickchat did not handle that input.')
     }
 
     const custom = resolveCustomCommand(trimmed)
@@ -2797,10 +2864,36 @@ export async function runInteractive(): Promise<void> {
     }
     armPractice()
 
+    // A bare `elia` in a project starts working on its own: the autopilot is
+    // the session's first turn (autopilot/launch.ts says when it is not).
+    const [{ decideLaunch }, { ELIA_ROOT: eliaRoot }] = await Promise.all([import('../autopilot/launch.ts'), import('../config.ts')])
+    const launch = decideLaunch({
+      root: process.cwd(),
+      eliaRoot,
+      env: process.env,
+      interactive: interactiveTerminal,
+      chat: hasFlag('--chat'),
+      prompt: oneShotPrompt.length > 0,
+      continuing: continueFlag || resumeId !== undefined,
+      devMode: mode === 'dev' && !persona,
+    })
+    const practiceReport = practiceHere ? practice.takePracticeReport() : undefined
+    const launchNotice = launch.start ? undefined : launch.notice
+    const initialTurn = launch.start
+      ? {
+          label: launch.resume ? '/autopilot resume' : '/autopilot',
+          notice: launch.resume
+            ? 'Picking the autopilot back up where it stopped. Ask me anything while it works; tell me to change course and it goes to the front of the backlog. Esc stops it · elia --chat opens without it.'
+            : 'Working on this project by myself: surveying it, running its checks, and doing the most valuable next goals on a branch of my own. Ask me anything while I work; tell me to change course and it goes to the front of the backlog. Esc stops me · elia --chat opens without it.',
+          run: (hooks: Parameters<typeof runAutopilotTurn>[1]) => runAutopilotTurn({ planOnly: false, resume: launch.resume, maxGoals: 3 }, hooks),
+        }
+      : undefined
+
     await runInkRepl({
       sessionId,
       version: cliVersion,
-      startupNotice: practiceHere ? practice.takePracticeReport() : undefined,
+      startupNotice: [practiceReport, launchNotice].filter(Boolean).join('\n') || undefined,
+      initialTurn,
       getEnv: () => ({ model: config.model, providerLabel: config.providerLabel, providerName: config.providerName, routing: config.routingMode }),
       commands: allSlashCommands(),
       initialReplMode: replMode,
@@ -2828,11 +2921,25 @@ export async function runInteractive(): Promise<void> {
         return rendered
       },
       handleSlash: handleSlashForInk,
+      liveReply: async (question, view, signal) => {
+        const [{ answerWhileWorking }, { activePilot }, { pilotSnapshot }] = await Promise.all([
+          import('../live/liveReply.ts'),
+          import('../autopilot/pilot.ts'),
+          import('../autopilot/report.ts'),
+        ])
+        const pilot = activePilot()
+        const reply = await answerWhileWorking({ ...view, conversation: messages, pilot: pilot ? pilotSnapshot(pilot) : undefined, exchanges: liveExchanges, cwd: process.cwd() }, question, { signal })
+        liveExchanges.push({ question, answer: reply.answer })
+        if (liveExchanges.length > 8) liveExchanges.splice(0, liveExchanges.length - 8)
+        carriedAsides.push(`<aside-while-you-worked>\nThe user asked: ${question}\nYou answered: ${reply.answer}${reply.steer ? `\n(Passed to the work: ${reply.steer})` : ''}\n</aside-while-you-worked>`)
+        sessionTranscript.notice(`live reply — Q: ${question}\nA: ${reply.answer}`)
+        await persistInteractiveSession()
+        return reply
+      },
       submitTurn: async (text, hooks) => {
         holdPractice()
-        const turnText = carriedShellContext.length > 0
-          ? `${carriedShellContext.splice(0).join('\n\n')}\n\n${text}`
-          : text
+        const carried = [...carriedShellContext.splice(0), ...carriedAsides.splice(0)]
+        const turnText = carried.length > 0 ? `${carried.join('\n\n')}\n\n${text}` : text
         await runCheckpointedTurn(
           turnText,
           async (assessment, request) =>
@@ -3117,6 +3224,54 @@ export async function runInteractive(): Promise<void> {
       }
       continue
     }
+    // Listed in /help but only ever handled by the full-screen REPL, so here
+    // `/help` said "Unknown command: /help. Type /help for the list", and
+    // `/theme` (listed, so not "unknown") went to the model as a prompt.
+    if (trimmed === '/help' || trimmed === '/?') {
+      writeUsageLine(slashHelpText('!cmd runs a shell command · @path attaches a file · exit quits'))
+      continue
+    }
+    const searchClassic = /^\/(?:search|reason)(?:\s+(on|off))?$/.exec(trimmed)
+    if (searchClassic) {
+      writeUsageLine(await reasonSearchCommand(searchClassic[1] as 'on' | 'off' | undefined))
+      continue
+    }
+    const themeClassic = /^\/theme(?:\s+(\S+))?$/.exec(trimmed)
+    if (themeClassic) {
+      const theme = await import('../ui/app/theme.ts')
+      const choice = themeClassic[1]
+      if (choice !== 'dark' && choice !== 'light' && choice !== 'ansi') {
+        writeNotice(`Theme: ${theme.themeName}. /theme dark|light|ansi — it colours the full-screen UI; this plain prompt stays uncoloured.`)
+        continue
+      }
+      theme.setTheme(choice)
+      process.env.ELIA_THEME = choice
+      try {
+        writeUserConfig({ ELIA_THEME: choice })
+        writeNotice(`Theme: ${choice} — saved for the full-screen UI.`)
+      } catch (error) {
+        writeNotice(`Theme: ${choice} for this session — it could not be saved (${error instanceof Error ? error.message : String(error)}).`)
+      }
+      continue
+    }
+    const planClassic = /^\/plan(?:\s+([\s\S]+))?$/.exec(trimmed)
+    if (planClassic) {
+      const goal = planClassic[1]?.trim()
+      if (!goal) {
+        writeNotice('Usage: /plan <goal> — elia researches the task and proposes a plan without changing anything.')
+        continue
+      }
+      try {
+        await runCheckpointedTurn(goal, undefined, selectedSkillNames, {
+          planMode: true,
+          onActivity: (activity) => writeNotice(activity.detail ? `${activity.title}\n${activity.detail}` : activity.title),
+        })
+        writeNotice('That was a plan — nothing was changed. Say "go ahead" to have elia carry it out.')
+      } catch (err) {
+        writeError(err instanceof Error ? err.message : String(err))
+      }
+      continue
+    }
     const escalateClassic = /^\/(?:auto|escalate)(?:\s+(on|off))?$/.exec(trimmed)
     if (escalateClassic) {
       if (escalateClassic[1]) autoEscalate = escalateClassic[1] === 'on'
@@ -3299,16 +3454,17 @@ export async function runInteractive(): Promise<void> {
       continue
     }
 
-    const quickchatClassic = /^\/quickchat(?:\s+(.*))?$/.exec(trimmed)
-    if (quickchatClassic) {
-      const session = await registerQuickchatSession()
-      if (!session) {
-        writeNotice('No session is registered for quickchat here. Start one with: elia sessions new --name <name>')
-        continue
-      }
-      const { handleQuickchatCommand } = await import('../quickchat/quickchat.ts')
-      const result = await handleQuickchatCommand(trimmed, session)
-      if (result.handled) writeNotice(formatQuickchatResult(result.result))
+    if (/^\/quickchat\b/.test(trimmed)) {
+      writeNotice(QUICKCHAT_RETIRED)
+      continue
+    }
+
+    const autopilotClassic = /^\/autopilot(?:\s+(.*))?$/.exec(trimmed)
+    if (autopilotClassic) {
+      const request = parseAutopilotSlash(autopilotClassic[1] ?? '')
+      if ('text' in request) writeNotice(request.text)
+      else if ('status' in request) writeNotice(await autopilotStatusText())
+      else await runAutopilotTurn(request)
       continue
     }
 
@@ -3345,7 +3501,7 @@ export async function runInteractive(): Promise<void> {
         return result.action === 'approve'
       })
     } catch (err) {
-      writeError(`Error: ${err instanceof Error ? err.message : String(err)}`)
+      writeError(describeCliError(err, { subject: 'This turn' }))
     }
     await persistInteractiveSession()
     const taskSummary = renderTaskSummary(taskSessions)

@@ -64,7 +64,8 @@ export function DiffPreview({ lines, limit }: { lines: readonly string[]; limit:
           </Text>
         )
       })}
-      {rows.length > shown.length ? <Text color={palette.muted}>… +{rows.length - shown.length} more lines</Text> : null}
+      {/* Under the code, past the +/− column, like the rows above it. */}
+      {rows.length > shown.length ? <Text color={palette.muted}>{'  '}… +{rows.length - shown.length} more lines</Text> : null}
     </Box>
   )
 }

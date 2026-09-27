@@ -182,8 +182,17 @@ export function workspaceScopedEnv(cwd: string): Record<string, string> | undefi
   return base
 }
 
-/** A directory `cd` can be read as without any doubt about what the shell will do: no quotes, `$`, `~`, globs or spaces. */
-const CD_THEN = /^\s*cd\s+([A-Za-z0-9_./-]+)\s*&&\s*(\S[\s\S]*?)\s*$/
+/**
+ * A directory `cd` can be read as without any doubt about what the shell will
+ * do: a plain path, or one in double quotes with nothing either shell would
+ * expand inside (`$`, backticks, `%`, `!`) and no globs. cmd.exe also gets
+ * drive letters, backslashes and `cd /d` — the shapes behind most of the 65
+ * Windows shell-mismatch errors in the action ledger (`cd "D:\proj" && bun
+ * install` was refused as a composed script). On POSIX a backslash is an
+ * escape, not a separator, so it stays out of both forms there.
+ */
+const CD_THEN_POSIX = /^\s*cd\s+(?:"([^"$`%!*?<>|\\\n]+)"|([A-Za-z0-9_./-]+))\s*&&\s*(\S[\s\S]*?)\s*$/
+const CD_THEN_WINDOWS = /^\s*cd\s+(?:\/d\s+)?(?:"([^"$`%!*?<>|\n]+)"|((?:[A-Za-z]:)?[A-Za-z0-9_.\\/-]+))\s*&&\s*(\S[\s\S]*?)\s*$/i
 const TRAILING_STDERR_REDIRECT = /\s+2>(?:&1|\/dev\/null)\s*$/
 
 /**
@@ -194,25 +203,27 @@ const TRAILING_STDERR_REDIRECT = /\s+2>(?:&1|\/dev\/null)\s*$/
  * runs in — where every path check on `cwd` applies — instead of refusing the
  * pair as a composed script, which cost unattended runs a step or two each time.
  * A trailing `2>&1` or `2>/dev/null` only reshapes output this tool already
- * returns separately, and is dropped. Anything else — a directory with quotes,
- * `$` or spaces, a `;`, a pipe — stays in the command, for the governor to
+ * returns separately, and is dropped. Anything else — a directory with `$`,
+ * `~` or a glob, a `;`, a pipe — stays in the command, for the governor to
  * judge as the composed command it is.
  */
-export function normalizeRunCommandInput(input: Record<string, unknown>): Record<string, unknown> {
+export function normalizeRunCommandInput(input: Record<string, unknown>, platform: NodeJS.Platform = process.platform): Record<string, unknown> {
   if (typeof input.command !== 'string') return input
+  const cdThen = platform === 'win32' ? CD_THEN_WINDOWS : CD_THEN_POSIX
   let command = input.command
   let cwd = typeof input.cwd === 'string' ? input.cwd.trim() : ''
   for (let hops = 0; hops < 4; hops++) {
-    const match = CD_THEN.exec(command)
+    const match = cdThen.exec(command)
     if (!match) break
-    const dir = match[1]!
     // A composed cwd is normalized to forward slashes whichever platform runs
     // this: cmd.exe and PowerShell both accept `/`, and the tool's inputs —
     // including paths echoed back from `cd` — are otherwise inconsistent between
     // platforms (a `cd workspace/fork && …` input once surfaced a backslash
     // cwd on Windows).
-    cwd = isAbsolute(dir) || !cwd ? dir : join(cwd, dir).replace(/\\/g, '/')
-    command = match[2]!
+    const dir = (match[1] ?? match[2]!).replace(/\\/g, '/')
+    const absolute = isAbsolute(dir) || /^[A-Za-z]:\//.test(dir)
+    cwd = absolute || !cwd ? dir : join(cwd, dir).replace(/\\/g, '/')
+    command = match[3]!
   }
   command = command.replace(TRAILING_STDERR_REDIRECT, '')
   if (command === input.command) return input

@@ -55,6 +55,19 @@ describe('action contracts', () => {
     expect(evaluatePostconditions(contract, 'timed out after 1000ms (killed)', process.cwd())).toMatchObject({ ok: false, failures: ['command timed out'] })
   })
 
+  test('robocopy succeeds with exit codes 0–7 and fails from 8 up', () => {
+    for (const input of [{ name: 'run_command', input: { command: 'robocopy src dist /E' } }, { name: 'run_program', input: { program: 'robocopy.exe', args: ['src', 'dist', '/E'] } }]) {
+      const contract = contractForAction(input, process.cwd(), `run:robocopy:${input.name}`)
+      expect(evaluatePostconditions(contract, 'exit code: 1\nstdout:\n  Files : 12', process.cwd())).toMatchObject({ ok: true, evidence: ['command returned exit code 1 (success for this program)'] })
+      expect(evaluatePostconditions(contract, 'exit code: 3', process.cwd()).ok).toBe(true)
+      expect(evaluatePostconditions(contract, 'exit code: 8', process.cwd())).toMatchObject({ ok: false, failures: ['command returned exit code 8, a failure for this program (success is 0–7)'] })
+      expect(evaluatePostconditions(contract, 'timed out after 1000ms (killed)', process.cwd()).ok).toBe(false)
+    }
+    // Every other program still has to exit 0.
+    const copy = contractForAction({ name: 'run_command', input: { command: 'xcopy src dist /E' } }, process.cwd(), 'run:xcopy:1')
+    expect(evaluatePostconditions(copy, 'exit code: 1', process.cwd()).ok).toBe(false)
+  })
+
   test('requires configured browser transport and preserves takeover for browser mutations', async () => {
     const contract = contractForAction({ name: 'browser', input: { action: 'click', target: 'Publish', expectUrl: 'https://example.test/done' } }, process.cwd(), 'run:browser:1')
     expect(contract.requiresUserTakeover).toBe(true)

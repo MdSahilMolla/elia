@@ -46,6 +46,50 @@ test('isSensitivePath conservatively protects dot-env family files', () => {
   for (const path of sensitiveByDesign) expect(isSensitivePath(path), path).toBe(true)
 })
 
+// Session mubi8m6o: 29 refusals on a task the user asked for by name — reading
+// `.env.example` and the contract at `contracts\token\BhumiNFT.sol`.
+test('templates and source files named for a secret are not secrets', () => {
+  for (const path of [
+    '.env.example',
+    'backend/.env.sample',
+    '.env.local.example',
+    '.env.template',
+    'src/lexer/token.ts',
+    'contracts/token/BhumiNFT.sol',
+    'contracts\\token\\ERC20Token.sol',
+    'styles/tokens.css',
+    'src/Token.java',
+  ]) {
+    expect(isSensitivePath(path), path).toBe(false)
+  }
+  for (const path of ['token', 'token.txt', 'tokens.json', '.env.local', '.env.production', 'secrets.py', '.ssh/.env.example', 'id_rsa']) {
+    expect(isSensitivePath(path), path).toBe(true)
+  }
+})
+
+test('commandMayReadSensitiveData lets templates and code named for a secret through', () => {
+  for (const command of [
+    'cat .env.example',
+    'type backend\\.env.sample',
+    'type contracts\\token\\BhumiNFT.sol',
+    'cat src/lexer/token.ts',
+    'head -20 styles/tokens.css',
+  ]) {
+    expect(commandMayReadSensitiveData(command), command).toBe(false)
+  }
+  for (const command of [
+    'cat .env',
+    'cat .env.local',
+    'cat .env.example .env',
+    'cat token',
+    'type tokens.json',
+    'cat ~/.docker/config.json',
+    'cat secrets/prod.yaml',
+  ]) {
+    expect(commandMayReadSensitiveData(command), command).toBe(true)
+  }
+})
+
 test('NTFS alternate data streams cannot smuggle a sensitive file past the classifier', () => {
   // `.env::$DATA` opens the default stream of `.env` on Windows. Every stream
   // spelling of a protected file must classify as sensitive; today the guard

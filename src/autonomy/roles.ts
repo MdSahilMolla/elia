@@ -39,7 +39,10 @@ const READ_TOOLS = ['read_file', 'list_files', 'grep', 'find_symbol', 'web_searc
 const WRITE_TOOLS = [...READ_TOOLS, 'write_file', 'edit_file', 'delete_file', 'lsp_refactor', 'record_rationale', 'note_lesson']
 // Direct argv execution is the normal worker path. Shell strings remain for
 // genuine shell syntax only and are governed more conservatively at runtime.
-const FULL_TOOLS = [...WRITE_TOOLS, 'run_program', 'run_command']
+// `database` rides with the process tools: a builder that owns a schema change
+// has to be able to migrate and query a local dev database, and psql through
+// run_command is refused in an unattended run (devdb/policy.ts has the bands).
+const FULL_TOOLS = [...WRITE_TOOLS, 'run_program', 'run_command', 'database']
 
 export const ROLES: Record<RoleName, Role> = {
   scout: {

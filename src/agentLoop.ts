@@ -60,6 +60,20 @@ function detectCoreCount(): number {
 export const DEFAULT_PARALLEL_TOOLS = Math.max(MAX_PARALLEL_WRITE_TOOLS, Math.min(MAX_SAFE_PARALLEL_TOOLS, detectCoreCount() - 1))
 const MAX_PROVIDER_ATTEMPTS = 3
 const PROVIDER_HEALTH_COOLDOWN_MS = 30_000
+/**
+ * How long a route that *cannot* answer — its key refused, its credit or its
+ * daily quota spent — stays out of the fallback chain. Thirty seconds suited a
+ * hiccup, not these: every later turn asked the dead route again first, and a
+ * turn whose preferred route overloaded fell back onto a Gemini key that had
+ * been out of quota all session (session mubbhz5c). None of them recovers in
+ * minutes; a restart, or a quiet quarter hour, tries them again.
+ */
+const UNUSABLE_ROUTE_COOLDOWN_MS = 15 * 60_000
+
+/** A daily or plan quota spent — distinct from a per-minute rate limit, which clears in seconds. */
+function isQuotaExhaustedError(message: string): boolean {
+  return /exceeded your current quota|quota (?:has been )?exceeded|daily (?:request |token )?(?:limit|quota)|requests? per day|free[- ]tier (?:limit|quota)|usage limit reached/i.test(message)
+}
 
 /**
  * How long to wait before asking the same route again after a server-side
@@ -453,7 +467,10 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
     // folded in at whichever later step boundary it's ready by.
     if (pendingCompaction) {
       if (pendingCompaction.apply(messages)) {
-        if (verbose) writeNotice('elia: earlier history compacted in the background')
+        // Said where the session can see it: otherwise the context meter just
+        // dropped from ~90% with nothing on screen to say why.
+        if (onActivity) onActivity({ kind: 'status', status: 'completed', title: 'Compacted the earlier conversation to free context — it stays recallable' })
+        else if (verbose) writeNotice('elia: earlier history compacted in the background')
         pendingCompaction = undefined
       } else if (pendingCompaction.settled) {
         pendingCompaction = undefined // archive failed or produced nothing — drop it
@@ -946,7 +963,9 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
               if (unusable || isFallbackableProviderError(error)) {
                 const key = providerHealthKey(route)
                 const previous = providerHealth.get(key)
-                providerHealth.set(key, { failures: (previous?.failures ?? 0) + 1, cooldownUntil: Date.now() + PROVIDER_HEALTH_COOLDOWN_MS, lastError: error instanceof Error ? error.message : String(error) })
+                const message = error instanceof Error ? error.message : String(error)
+                const cooldown = unusable || isQuotaExhaustedError(message) ? UNUSABLE_ROUTE_COOLDOWN_MS : PROVIDER_HEALTH_COOLDOWN_MS
+                providerHealth.set(key, { failures: (previous?.failures ?? 0) + 1, cooldownUntil: Date.now() + cooldown, lastError: message })
               }
               // A server-side hiccup: wait, then ask the same route again — even
               // after text has streamed, for the same reason as a garbled tool

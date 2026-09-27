@@ -7,6 +7,7 @@ import { assertWriteWithinSessionScope, currentSessionScope } from '../session/s
 import { commandMayReadSensitiveData } from './sensitivePaths.ts'
 import { pauseToolSpinner, resumeToolSpinner } from '../ui/stream.ts'
 import { applyPolicy } from './policy.ts'
+import { assessDatabaseRequest } from '../devdb/policy.ts'
 import { addAllowRule, canPersistPrefixRule, isAllowlisted, ruleFor, type AllowScope } from './allowStore.ts'
 import { consumePreauth, currentBranch, isPreauthorized, preauthPath } from './preauth.ts'
 import { approveSelfEditFile, needsSelfEditApproval, SELF_EDIT_INTENT, selfEditLabel, selfEditRefusal, setSelfEditAllowed } from './selfEdit.ts'
@@ -324,6 +325,8 @@ export function assessAction(request: ActionRequest, cwd = currentAgent().cwd ??
   if (name === 'environment') {
     return assessment('safe', 'allow', 'environment discovery is a local, read-only capability snapshot', 'environment.inspect', resources, true)
   }
+
+  if (name === 'database') return assessDatabaseRequest(input, cwd)
 
   if (name === 'provision_environment') {
     return assessment('review', 'approve', 'provisioning installs dependencies and starts local services from a fixed setup-command allowlist', 'environment.provision', resources, true)

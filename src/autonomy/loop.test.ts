@@ -275,3 +275,111 @@ test('an approved run reaches execution and verification, and returns a whole re
     rmSync(workspace, { recursive: true, force: true })
   }
 }, 120_000)
+
+/**
+ * Orienting changes nothing — and that has to hold in code, not only in the
+ * planner's prompt ("you have no write tools in this phase").
+ *
+ * Seen live (run 2026-09-26-gjlp-c3lh): mid-orient, the planner called `task`
+ * with a builder role, the builder fixed the bug and verified it, and only
+ * then did the planner submit a proposal "for review". In a supervised run the
+ * change was made before anyone approved the plan.
+ */
+test('the planner cannot launch a worker that writes while it orients', async () => {
+  const { existsSync, mkdtempSync, rmSync } = await import('node:fs')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+  const { config } = await import('../config.ts')
+  const { createScriptedProvider } = await import('../bench/latency/scriptedProvider.ts')
+  const { runAutonomousTask } = await import('./loop.ts')
+
+  const scripted = createScriptedProvider([
+    { text: 'A one-line fix; I will look first.' },
+    {
+      toolCalls: [
+        {
+          name: 'task',
+          input: {
+            description: 'fix it now',
+            role: 'builder',
+            prompt: 'Write fixed.txt containing "fixed".',
+            acceptanceCriteria: ['fixed.txt exists'],
+            verificationCommands: ['echo ok'],
+          },
+        },
+      ],
+    },
+    {
+      toolCalls: [
+        {
+          name: 'submit_proposal',
+          input: {
+            goal: 'fix the bug',
+            understanding: 'A one-line fix.',
+            steps: [{ id: 's1', title: 'Fix it', instructions: 'Fix it', role: 'builder', files: ['fixed.txt'], dependsOn: [] }],
+            verification: ['echo ok'],
+            acceptanceCriteria: ['fixed'],
+          },
+        },
+      ],
+    },
+  ])
+  // Record what the planner was offered and what its `task` call came back with.
+  const offered: Array<{ name: string; roles?: string[] }> = []
+  const results: string[] = []
+  const provider = {
+    ...scripted,
+    streamTurn: (params: Parameters<typeof scripted.streamTurn>[0]) => {
+      if (offered.length === 0) {
+        for (const tool of params.tools ?? []) {
+          const role = (tool.input_schema.properties as Record<string, { enum?: string[] }>).role
+          offered.push({ name: tool.name, ...(role?.enum ? { roles: role.enum } : {}) })
+        }
+      }
+      for (const message of params.messages) {
+        for (const block of message.content) if (block.type === 'tool_result') results.push(block.content)
+      }
+      return scripted.streamTurn(params)
+    },
+  }
+
+  // Every route points at the script, so even a regression that did launch
+  // the builder would stay offline instead of billing a real provider.
+  const original = config.provider
+  const originalTiers = { fast: config.tiers.fast, deep: config.tiers.deep }
+  const originalFallbacks = config.fallbacks
+  const originalRouting = config.routingMode
+  const scriptedTier = (tier: typeof config.tiers.fast) => ({ ...tier, provider, providerName: 'scripted', model: 'scripted' })
+  const workspace = mkdtempSync(join(tmpdir(), 'elia-orient-readonly-'))
+  try {
+    config.provider = provider
+    config.tiers.fast = scriptedTier(config.tiers.fast)
+    config.tiers.deep = scriptedTier(config.tiers.deep)
+    config.fallbacks = []
+    config.routingMode = 'selected'
+    const result = await runAutonomousTask({
+      goal: 'fix the bug',
+      workspaceRoot: workspace,
+      approve: async () => ({ action: 'reject' as const }),
+      profile: 'fast',
+      polish: false,
+      publish: false,
+      learn: false,
+    })
+    expect(result.outcome).toBe('rejected')
+    expect(existsSync(join(workspace, 'fixed.txt'))).toBe(false)
+  } finally {
+    config.provider = original
+    config.tiers.fast = originalTiers.fast
+    config.tiers.deep = originalTiers.deep
+    config.fallbacks = originalFallbacks
+    config.routingMode = originalRouting
+    rmSync(workspace, { recursive: true, force: true })
+  }
+
+  // The planner's `task` offers only roles that can look but not touch…
+  const task = offered.find((tool) => tool.name === 'task')
+  expect(task?.roles).toEqual(['scout', 'designer'])
+  // …and a builder asked for anyway is refused, with a reason the model can act on.
+  expect(results.some((result) => /while planning/i.test(result) && /proposal/i.test(result))).toBe(true)
+})
