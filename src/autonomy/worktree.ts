@@ -238,6 +238,39 @@ export async function mergeWorktreeIntoCwd(worktree: Worktree, targetRoot: strin
 }
 
 /**
+ * Total lines changed against the worktree's base, for ranking best-of-N
+ * variants on something besides cost (see variants.ts): every variant forked
+ * from the same base, so this is a fair size comparison across them. Compares
+ * against `worktree.base` (the commit it was cut from), not the literal
+ * `HEAD` — a variant's work can now include real commits (mergeWorktreeBack
+ * fast-forwards them), and `diff HEAD` alone would only see what is still
+ * uncommitted, silently scoring committed work as zero churn. `git diff`
+ * never sees an untracked file either, so a variant that adds a whole new
+ * file would otherwise score as a free, zero-churn change relative to one
+ * that only edited existing files — each untracked file's own line count is
+ * added in separately to close that gap.
+ */
+export async function diffChurn(worktree: Worktree): Promise<number> {
+  const tracked = await runGit(['diff', '--shortstat', worktree.base ?? 'HEAD'], worktree.path)
+  let churn = parseShortstat(tracked.stdout)
+
+  const untrackedFiles = await runGit(['ls-files', '--others', '--exclude-standard'], worktree.path)
+  const paths = untrackedFiles.stdout.split('\n').map((line) => line.trim()).filter(Boolean)
+  for (const path of paths) {
+    const content = await Bun.file(join(worktree.path, path)).text().catch(() => '')
+    if (content) churn += content.split('\n').length
+  }
+  return churn
+}
+
+/** Parses `git diff --shortstat`'s one-line summary into a single line-churn count. */
+function parseShortstat(summary: string): number {
+  const insertions = /(\d+) insertion/.exec(summary)?.[1]
+  const deletions = /(\d+) deletion/.exec(summary)?.[1]
+  return (insertions ? Number.parseInt(insertions, 10) : 0) + (deletions ? Number.parseInt(deletions, 10) : 0)
+}
+
+/**
  * Tears down a variant's worktree and branch. Best-effort — a stray worktree
  * under `.elia/worktrees/` is cheap to clean up manually and must never fail
  * the run that's already picked a winner.
