@@ -106,7 +106,7 @@ elia resume <run-id>             # only after reviewing the receipt and blockers
 
 Pause and stop requests are written atomically under the run directory, validated against a safe run-ID format, picked up by the owning process at a bounded polling interval, recorded in the run journal, and propagated to the internal abort signal. `Ctrl+C`, the `/task` dashboard’s `c` control, wall-clock budgets, and governed action budgets remain additional stop boundaries. A stopped run is reported as paused/aborted rather than falsely completed.
 
-For one-off safe work, `elia auto "<goal>" --unattended` runs the plan without routine interactive prompts; it still uses the autonomy governor and stops at consequential actions. Create a schedule, inspect it, pause or resume it, and run due work through a single-flight daemon:
+For one-off safe work, `elia auto "<goal>" --unattended` runs the plan without routine interactive prompts; it still uses the autonomy governor and stops at consequential actions. Create a schedule, inspect it, pause or resume it, and run due work through the daemon, which runs up to `ELIA_MAX_CONCURRENT_SCHEDULES` (default 4) concurrently-due schedules per poll rather than waiting for each in turn:
 
 ```bash
 elia schedule add --every 1h --max-actions 300 --title "Repository health" "Inspect the repository, run the declared checks, and report only evidence-backed findings"
