@@ -1,5 +1,6 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { DEFAULT_ARTIFACT_PATHS } from '../battmann/artifactPaths.ts'
+import { DATASCIENCE_TOOLS, datascienceEffect } from '../datascience/effects.ts'
 import { skillCapability } from '../skills/capabilities.ts'
 import { currentAgent, isPathWithinWorkspace, resolveWorkspacePath } from './context.ts'
 import { assertWriteWithinSessionScope, currentSessionScope } from '../session/scope.ts'
@@ -209,6 +210,68 @@ export const MAX_GOVERNED_ACTIONS = 10_000
  */
 export const READ_ONLY_ROLES: ReadonlySet<string> = new Set(['scout', 'designer', 'accessibility', 'critic', 'security', 'bughunter'])
 
+const DATASCIENCE_TOOL_NAMES: ReadonlySet<string> = new Set(DATASCIENCE_TOOLS)
+
+/** Secret-bearing paths as analysis code names them (open('.env'), Path.home() / '.aws' / …). */
+const PYTHON_SECRET_PATH = /(?:^|[\s'"/\\(])\.env(?:\.[\w.-]+)?\b|\.(?:ssh|aws|azure|kube|gnupg|docker)\b|\.(?:netrc|npmrc|pypirc|git-credentials)\b|\bid_(?:rsa|dsa|ecdsa|ed25519)\b|\.config[\\/]gcloud|battmann[\w.-]*\.sqlite|\.(?:pem|p12|pfx)\b/i
+
+function hostOf(url: string): string {
+  try {
+    return new URL(url).host || url
+  } catch {
+    return url
+  }
+}
+
+/**
+ * Data-science mode actions, assessed from the effect table the engine itself is checked
+ * against (datascience/effects.ts). Analysis and workspace-local writes proceed on their own —
+ * they only add new versioned datasets, models, records, and artifacts under .elia/datascience
+ * and never modify a source. Anything that reaches a live database, sends a stored credential,
+ * runs model-written code, writes into the project, or installs packages asks first.
+ */
+function assessDataScience(name: string, input: Record<string, unknown>, cwd: string): ActionAssessment {
+  const action = typeof input.action === 'string' ? input.action : ''
+  const intent = `${name}.${action || 'unknown'}`
+  const effect = datascienceEffect(name, action, input)
+  if (!effect) return assessment('safe', 'allow', `${name} has no action "${action}"; the engine refuses it and lists the valid actions without running anything`, intent, [], true)
+  const paths = ['path', 'geojson'].map((key) => input[key]).filter((value): value is string => typeof value === 'string' && value.length > 0)
+  const outside = paths.filter((path) => !isPathWithinWorkspace(path, cwd))
+  if (outside.length) return assessment('critical', 'approve', `${intent} names a path outside the active workspace`, intent, outside, false)
+  if (intent === 'ds_data.export' && paths.length) return assessment('review', 'approve', `${intent} writes an exported file into the project at ${paths[0]} (never over a registered source file)`, intent, paths, false)
+  switch (effect) {
+    case 'compute':
+      return assessment('safe', 'allow', `${intent} is deterministic analysis of workspace datasets; it writes only its execution record`, intent, [], true)
+    case 'local-write':
+      return assessment('safe', 'allow', `${intent} adds a new versioned dataset, model, or plan under .elia/datascience; sources and earlier versions are never modified`, intent, paths, true)
+    case 'artifact-write':
+      return assessment('safe', 'allow', `${intent} writes derived files under .elia/datascience/artifacts`, intent, [], true)
+    case 'network-read': {
+      const url = typeof input.url === 'string' ? input.url : ''
+      const headerEnv = input.headers && typeof input.headers === 'object' ? Object.values(input.headers as Record<string, unknown>).flatMap((value) => typeof value === 'string' ? [...value.matchAll(/\$\{([A-Z_][A-Z0-9_]*)\}/g)].map((match) => match[1]!) : []) : []
+      const credentials = [...headerEnv, ...(typeof input.urlEnv === 'string' ? [input.urlEnv] : [])]
+      const target = url ? [url.replace(/\?.*$/, '')] : []
+      if (url.startsWith('s3://')) return assessment('review', 'approve', `${intent} reads an object storage key with the ambient cloud credentials`, intent, target, true)
+      if (credentials.length) return assessment('review', 'approve', `${intent} sends the stored credential${credentials.length > 1 ? 's' : ''} ${credentials.map((env) => `$${env}`).join(', ')} to ${url ? hostOf(url) : 'the URL in that variable'}`, intent, target, true)
+      if (input.allowLocal === true) return assessment('review', 'approve', `${intent} reads from an API on a local or private network address`, intent, target, true)
+      return assessment('safe', 'allow', `${intent} is a bounded read-only GET restricted to public http(s) addresses; the response becomes a new workspace dataset`, intent, target, true)
+    }
+    case 'database-read': {
+      const connection = typeof input.connection === 'string' ? input.connection : 'database'
+      const credential = typeof input.dsnEnv === 'string' ? ` with the credential in $${input.dsnEnv}` : ''
+      return assessment('review', 'approve', `${intent} queries a live ${connection} database${credential}; only SELECT/WITH passes the SQL guard and it runs read-only, but the query reaches the system of record`, intent, [], true)
+    }
+    case 'process':
+      if (action === 'capabilities') return assessment('safe', 'allow', `${intent} probes the Python interpreter for installed packages`, intent, [], true)
+      return typeof input.code === 'string' && PYTHON_SECRET_PATH.test(input.code)
+        ? assessment('critical', 'approve', `${intent} runs Python that names a credential or secret-bearing path`, intent, [], false)
+        : assessment('review', 'approve', `${intent} runs model-written Python in a separate process (scrubbed environment, time and memory limits; a container only when ELIA_SANDBOX=container)`, intent, [], true)
+    case 'install':
+      return assessment('critical', 'approve', `${intent} downloads and installs third-party packages from PyPI into .elia/datascience/venv`, intent, [], false)
+  }
+  return assessment('critical', 'approve', `${intent} has an unrecognised effect`, intent, paths, false)
+}
+
 export function assessAction(request: ActionRequest, cwd = currentAgent().cwd ?? process.cwd()): ActionAssessment {
   const { name, input } = request
   if (INTERNAL_SAFE_TOOLS.has(name)) return assessment('safe', 'allow', `${name} records structured control-flow metadata`, name, [], true)
@@ -336,6 +399,8 @@ export function assessAction(request: ActionRequest, cwd = currentAgent().cwd ??
       ? assessment('critical', 'approve', 'data-science analysis targets data outside the active workspace or uses an invalid path', 'data_science', [path], false)
       : assessment('safe', 'allow', 'data-science analysis is read-only and does not mutate the dataset', 'data_science', resources, true)
   }
+
+  if (DATASCIENCE_TOOL_NAMES.has(name)) return assessDataScience(name, input, cwd)
 
   if (name === 'spreadsheet') {
     const action = typeof input.action === 'string' ? input.action : 'unknown'

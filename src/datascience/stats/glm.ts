@@ -304,7 +304,7 @@ function irls(x: Matrix, y: Vector, family: IrlsFamily, offset?: Vector, maxIter
   const n = x.length
   const meanY = mean(y)
   let mu = y.map((value) => family.initialMu(value, meanY))
-  let eta = mu.map((m, index) => (family === LOGISTIC ? Math.log(m / (1 - m)) : Math.log(Math.max(1e-8, m))) )
+  let eta = mu.map((m) => (family === LOGISTIC ? Math.log(m / (1 - m)) : Math.log(Math.max(1e-8, m))))
   let beta: Vector = new Array<number>(x[0]!.length).fill(0)
   let deviance = Number.POSITIVE_INFINITY
   let converged = false

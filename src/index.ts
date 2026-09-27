@@ -106,6 +106,11 @@ async function main() {
       const { runBattmann } = await import('./battmann/cli.ts')
       return runBattmann()
     }
+    case 'ds':
+    case 'datascience': {
+      const { runDataScience } = await import('./datascience/cli.ts')
+      return runDataScience()
+    }
     case 'bridge': {
       if (hasFlag('--http')) {
         const portRaw = flagValue('--port') ?? '4319'

@@ -8,6 +8,7 @@ import JSZip from 'jszip'
 import { resolveWorkspacePath } from '../autonomy/context.ts'
 import { assertSafeFileAccess } from '../autonomy/sensitivePaths.ts'
 import { publicFetch } from '../networkPolicy.ts'
+import { assertForwardableEnv } from './secrets.ts'
 import { pdfToText, thinExtractionReason } from '../tools/pdfText.ts'
 import { frameFromRows, MAX_FRAME_ROWS, type Frame } from './frame.ts'
 import { detectPython, requirementMessage, runPythonJob } from './python.ts'
@@ -683,6 +684,7 @@ function loadSqlite(request: LoadRequest, path: string, sha256: string, size: nu
 function credentialFromEnv(name: string | undefined, what: string): string {
   if (!name) throw new Error(`${what} needs dsnEnv: the NAME of an environment variable holding the connection string (the value is never passed through the model)`)
   if (!/^[A-Z_][A-Z0-9_]*$/.test(name)) throw new Error('dsnEnv must be an environment variable name like WAREHOUSE_URL')
+  assertForwardableEnv(name, what)
   const value = process.env[name]
   if (!value) throw new Error(`environment variable ${name} is not set; set it to the connection string in the environment elia runs in (or in .env) and retry`)
   return value
@@ -794,6 +796,7 @@ async function loadPythonDatabase(request: LoadRequest): Promise<LoadResult> {
 
 function substituteEnv(template: string): string {
   return template.replace(/\$\{([A-Z_][A-Z0-9_]*)\}/g, (_, name: string) => {
+    assertForwardableEnv(name, 'an HTTP header')
     const value = process.env[name]
     if (value === undefined) throw new Error(`environment variable ${name} referenced in a header is not set`)
     return value

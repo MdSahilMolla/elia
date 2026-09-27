@@ -144,6 +144,53 @@ What this does not cover: files the agent reads with other tools. A confidential
 
 These controls make forecasts reproducible and hard to flatter. They do not show that Battmann forecasts better than anyone else. That needs a large independently resolved live sample, which the certified record accumulates over time, plus competitive baselines and external review. The store is a local, single-workspace SQLite file, not enterprise access control. `watch` and the scheduler are local processes, not hosted 24/7 monitoring. The sources' own terms apply to what you do with their data; check UN Comtrade's, GDELT's and the others' terms before commercial redistribution.
 
+## Data Science mode
+
+Start with `elia --datascience` (or `--ds`), switch with `/mode datascience`, or run governed autonomy with `elia auto --datascience "<goal>"`. Data Science mode is an execution system, not a code-writing assistant: elia loads the data, checks it, runs the analysis, validates the result, and answers with Objective · Data · Method · Results · Validation · Limitations · Artifacts. It follows the loop understand → inspect → plan → execute → validate → analyze → iterate → explain → deliver.
+
+The model decides what to run. A deterministic TypeScript engine (`src/datascience/`) computes it, and each action's own postcondition checks decide whether the result can be trusted. Every call writes an execution record under `.elia/datascience/runs/`: the input datasets with content fingerprints, the parameters, the seed, any SQL, expression, or Python code, the checks, and the outputs. A result whose checks failed comes back marked `VALIDATION FAILED`, and the prompt forbids reporting it as a finding. Code that ran without an exception is not treated as a validated result.
+
+### Tools
+
+| Tool | Actions |
+|---|---|
+| `ds_data` | `load` (CSV/TSV/JSON/JSONL/XLSX/XML/PDF/DOCX/Markdown natively; Parquet/Feather/Avro/ORC/XLS via Python; SQLite; Postgres/MySQL/Redshift read-only; DuckDB/SQL Server/Oracle/Snowflake/BigQuery via Python drivers; REST APIs; `s3://`), `schema`, `inspect` (data dictionary, semantic types, candidate keys, grain), `quality` (transparent 0–100 score by component; drift against another version), `relationships`, `transform` (recorded pipeline → new dataset version), `sql` (read-only over workspace datasets), `export`, `lineage`, `preview` |
+| `ds_stats` | `describe`, `test` (auto-selected with assumption checks, effect sizes, CIs, post-hoc), `correlations`, `regression` (OLS with HC3/cluster SEs, logistic, Poisson, negative binomial, robust, mixed), `power`, `multiple_testing`, `bootstrap`, `ab_test` (SRM, CUPED, guardrails, segments), `design_experiment`, `causal` (DiD, propensity/IPW/AIPW/matching, RDD, IV, synthetic control, DAG) |
+| `ds_ml` | `train` (AutoML: leakage screen, grouped/stratified/time-series CV, baseline, one-standard-error selection, untouched holdout, calibration, fairness, permutation importance), `predict` (drift checks), `explain`, `models`, `promote`, `model_card`, `cluster`, `reduce`, `anomalies`, `drift`, `recommend` |
+| `ds_timeseries` | `analyze` (decomposition, ADF/KPSS, ACF/PACF, change points, anomalies), `forecast` (methods compared by rolling-origin backtest, empirical prediction intervals, compared against naive) |
+| `ds_analytics` | `root_cause`, `cohorts`, `funnel`, `rfm`, `clv`, `kpis`, `simulate`, `queue`, `optimize` (LP/MILP with shadow prices), `graph`, `geo`, `text`, `llm_eval` |
+| `ds_report` | `plan`, `chart` (validated accessible palette, data table beside every chart), `report` (HTML + Markdown from execution records; narrative numbers are traced to results), `powerbi`, `records`, `deliver` |
+| `ds_python` | `capabilities`, `run` (isolated job; code recorded), `setup` (installs into `.elia/datascience/venv`) |
+
+Cleaning never modifies a source: `transform` writes a new version with lineage, and loaded snapshots are stored gzip-compressed under `.elia/datascience/data/`. Statistical routines are tested against SciPy and NumPy reference values.
+
+### What asks first
+
+Analysis and workspace-local writes run without asking: new dataset versions, models, charts, and reports under `.elia/datascience/`. The governor asks before any of these: querying a live database, sending a stored credential to an API (a `${ENV}` header, `urlEnv`, or `s3://`), reading from an API on a local or private address, exporting a file into the project, running Python, and installing packages. Installing packages and Python code that names a secret-bearing path (`.env`, `.aws/…`) are critical-risk. SQL sent to a database must pass a read-only guard and runs inside a read-only transaction.
+
+Credentials are passed by environment-variable name (`dsnEnv`, `urlEnv`, `"Bearer ${API_TOKEN}"`) and never appear in tool input, output, or records. elia's own model-provider, GitHub, search, deployment, and cloud keys are refused as data-source credentials, so they cannot be forwarded to an endpoint or into analysis code. Reviewer sub-agents (critic, security, scout, …) get only the computation actions.
+
+### From the command line
+
+These commands do not use a model:
+
+```bash
+elia ds capabilities      # every ds_* action and how it touches the world
+elia ds datasets          # registered datasets, versions, sources and derivations
+elia ds runs              # recent execution records and their validation status
+elia ds record <runId>    # one record in full
+elia ds verify            # recheck recorded artifacts against their SHA-256
+elia ds python            # the Python interpreter and data packages available
+```
+
+### Limits
+
+- **Power BI.** `ds_report powerbi` writes a Power BI Project (PBIP): a TMDL semantic model with a star schema, DAX measures, and a Date table, plus PBIR report pages. Its JSON files were validated against Microsoft's published schemas during development; the repository tests check the file layout, relationships, and DAX references. It is not a `.pbix`: open the `.pbip` in Power BI Desktop and use File → Save As to get one. The project has not been opened in Power BI Desktop as part of elia's tests.
+- **Python is optional.** The TypeScript engine runs on any machine with Bun. XGBoost/LightGBM/CatBoost, SHAP, Prophet, UMAP/HDBSCAN, deep learning, Parquet writing, and the Python-driver databases need the packages installed (`ds_python setup`, which asks first).
+- **Sandboxing.** Python runs in a separate process with a scrubbed environment, a timeout, and CPU and memory limits (memory limits apply on Linux). It is not a container unless `ELIA_SANDBOX=container` and `ELIA_SANDBOX_IMAGE` are set.
+- **Not implemented:** streaming sources such as Kafka, geocoding of addresses, and deep-learning computer vision in the TypeScript engine. Text sentiment is a lexicon baseline and is labelled as one.
+- **Scale.** Data is held in memory, up to 2 million rows per dataset. For larger data, aggregate in the database first.
+
 ## Cybersecurity mode
 
 Start with `elia --cyber` or switch with `/mode cyber`. Cyber mode is for **authorized** security testing, CTF, vulnerability research, and defensive hardening — it acts only against systems the user owns or has written authorization to test, and refuses destructive techniques, denial-of-service, opportunistic scanning of third-party infrastructure, and detection-evasion tooling built for malicious use.

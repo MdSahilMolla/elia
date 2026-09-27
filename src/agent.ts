@@ -4,7 +4,7 @@ import { runAgentLoop, type ConversationMessage, type RunAgentLoopResult, type T
 import { setParentSteering } from './autonomy/steering.ts'
 import { currentAgent, withAgentIdentity } from './autonomy/context.ts'
 import type { Provider, ProviderActivity } from './providers/types.ts'
-import { allWorkerTools, battmannTools, businessTools, cyberTools, getSynthesizedTools } from './tools/registry.ts'
+import { allWorkerTools, battmannTools, businessTools, cyberTools, datascienceTools, getSynthesizedTools } from './tools/registry.ts'
 import { taskTool } from './tools/task.ts'
 import { previewTool } from './tools/preview.ts'
 import { codexTool } from './tools/codex.ts'
@@ -70,7 +70,11 @@ function topLevelTools(mode: AgentMode, selectedSkillNames?: string[]) {
   const expandedSelection = expandSkillSelection(selectedSkillNames)
   const selected = new Set(expandedSelection ?? [])
   const synthesized = new Set(getSynthesizedTools().map((tool) => tool.name))
-  const workerTools = allWorkerTools().filter((tool) => expandedSelection === undefined || !synthesized.has(tool.name) || selected.has(tool.name))
+  const workerTools = allWorkerTools()
+    .filter((tool) => expandedSelection === undefined || !synthesized.has(tool.name) || selected.has(tool.name))
+    // Data-science mode computes through the recorded ds_* engine; the older one-shot
+    // data_science tool leaves no execution record, so it is not offered alongside it.
+    .filter((tool) => mode !== 'datascience' || tool.name !== 'data_science')
   // Battmann gets the research and reporting set: an intelligence brief
   // grounded only in the local filesystem would be fabrication by construction.
   return [
@@ -79,6 +83,7 @@ function topLevelTools(mode: AgentMode, selectedSkillNames?: string[]) {
     previewTool,
     ...(mode === 'cyber' ? cyberTools : []),
     ...(mode === 'battmann' ? [...businessTools, ...battmannTools] : []),
+    ...(mode === 'datascience' ? [...businessTools, ...datascienceTools] : []),
     // A silent sub-agent handing work off to a whole separate external agent
     // would be even more surprising than task/preview — dev mode only.
     ...(mode === 'dev' ? [codexTool] : []),

@@ -1,7 +1,7 @@
 import ExcelJS from 'exceljs'
 import { resolveWorkspacePath, isPathWithinWorkspace } from '../../autonomy/context.ts'
-import { registerCapability, type ActionContext } from '../engine.ts'
-import { previewRows, type Frame } from '../frame.ts'
+import { registerCapability } from '../engine.ts'
+import { previewRows } from '../frame.ts'
 import { describeDatabase, loadSource, type LoadRequest } from '../ingest.ts'
 import { driftAgainstProfile, trainingProfile } from '../ml/automl.ts'
 import { frameToCsv } from '../powerbi/project.ts'
@@ -11,19 +11,7 @@ import { runPipeline, transformUsage } from '../transform.ts'
 import { discoverRelationships, understandDataset } from '../understand.ts'
 import { assertDatasetName, refOf } from '../workspace.ts'
 import { DATASET, list, outputName, preview, str, WHERE } from './common.ts'
-
-function sourceEffect(params: Record<string, unknown>) {
-  const connection = typeof params.connection === 'string' ? params.connection.toLowerCase() : ''
-  if (connection && connection !== 'sqlite') return 'database-read' as const
-  if (typeof params.url === 'string' || typeof params.urlEnv === 'string') return 'network-read' as const
-  return 'local-write' as const
-}
-
-function summarizeQuality(frame: Frame, ctx: ActionContext, extra: Parameters<typeof assessQuality>[2] = {}) {
-  const understanding = understandDataset(frame)
-  const report = assessQuality(frame, understanding, extra)
-  return { understanding, report }
-}
+import { sourceEffect } from '../effects.ts'
 
 registerCapability({
   tool: 'ds_data',

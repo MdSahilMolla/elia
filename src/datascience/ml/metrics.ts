@@ -65,7 +65,10 @@ export function averagePrecision(labels: number[], scores: number[]): number {
   while (index < order.length) {
     let end = index
     while (end + 1 < order.length && order[end + 1]!.score === order[index]!.score) end++
-    for (let k = index; k <= end; k++) (order[k]!.label === 1 ? tp++ : fp++)
+    for (let k = index; k <= end; k++) {
+      if (order[k]!.label === 1) tp++
+      else fp++
+    }
     const recall = tp / positives
     const precision = tp / (tp + fp)
     ap += (recall - previousRecall) * precision
@@ -186,7 +189,9 @@ export function thresholdAnalysis(labels: number[], scores: number[], costs?: { 
     let tp = 0
     let fp = 0
     for (let index = 0; index < labels.length; index++) {
-      if (scores[index]! >= threshold) labels[index] === 1 ? tp++ : fp++
+      if (scores[index]! < threshold) continue
+      if (labels[index] === 1) tp++
+      else fp++
     }
     const fn = positives - tp
     const tn = negatives - fp

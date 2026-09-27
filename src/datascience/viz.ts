@@ -203,7 +203,8 @@ export function barChart(spec: BarSpec): ChartResult {
       const tip = `${category}${series.length > 1 ? ` · ${s.name}` : ''}: ${formatNumber(value, format === 'percent' ? 'percent' : 'plain')}`
       const start = spec.stacked ? (value >= 0 ? posOffset : negOffset) : 0
       const end = start + value
-      if (spec.stacked) value >= 0 ? (posOffset = end) : (negOffset = end)
+      if (spec.stacked && value >= 0) posOffset = end
+      else if (spec.stacked) negOffset = end
       const a = valueScale(start)
       const b = valueScale(end)
       const offset = spec.stacked ? -thickness / 2 : -((perSeries * thickness + (perSeries - 1) * 2) / 2) + j * (thickness + 2)

@@ -35,7 +35,7 @@ The guards are enforced in code. The verifier must not get worse. The benchmark,
 - **Every action goes through a gate.** A code-based *autonomy governor*, not a prompt, checks each tool call before it runs. Safe work goes ahead. Irreversible actions need your explicit approval: deleting, pushing, publishing, sending messages, deploying to production. That includes unattended runs. Each autonomous run leaves a redacted action ledger and a human-readable receipt. elia doesn't count a run as "done" just because the model said so; the run needs evidence first.
 - **It remembers.** Lessons, past sessions and project notes carry across runs. When you correct it ("stop adding comments", "we use bun here"), it keeps that as a rule for every later session in the project. elia notices routines it keeps repeating and can turn them into tested tools of its own.
 
-It isn't only for code. Specialist modes cover research, data analysis, finance, spreadsheets and presentations, authorized security testing, and strategic intelligence (Battmann). Each mode has its own tools and safety rules.
+It isn't only for code. Specialist modes cover research, data science (`elia --datascience`: elia runs and validates the analysis itself, with an execution record for every step), finance, spreadsheets and presentations, authorized security testing, and strategic intelligence (Battmann). Each mode has its own tools and safety rules.
 
 ## Install
 
@@ -101,7 +101,7 @@ Inside a session, `/model` switches models, `/plan <goal>` starts a planned run,
 | [Using the terminal](docs/guide/terminal.md) | All commands and flags, the terminal UI, images, LSP diagnostics, cost display |
 | [Autonomous work](docs/guide/autonomy.md) | How `elia auto` works, roles, delegation, best-of-N, forking, durable runs, schedules and the daemon |
 | [Configuration](docs/guide/configuration.md) | Providers, the Codex subscription, fallback, fast tier, per-role providers |
-| [Modes and specialists](docs/guide/modes.md) | Dev mode and hooks, specialists, Battmann, Cybersecurity, Sports/Fitness, supported languages |
+| [Modes and specialists](docs/guide/modes.md) | Dev mode and hooks, specialists, Data Science, Battmann, Cybersecurity, Sports/Fitness, supported languages |
 | [Integrations](docs/guide/integrations.md) | MCP servers and remote connectors, browser tasks, VS Code extension, deployment, Office files, data and finance, messaging, skills |
 | [Security](docs/guide/security.md) | File and network boundaries, `.elia/policy.json` |
 | [Self-improvement](docs/guide/self-improvement.md) | `elia bench`, `elia evolve`, Elia Books, `elia bench-latency`, learned tools |

@@ -50,6 +50,12 @@ const CATALOG: CapabilityContract[] = [
   contract('read_spreadsheet', 'safe', ['workspace-read'], true, 'parsed workbook result'),
   ...['spreadsheet', 'presentation'].map((tool) => contract(tool, 'review', ['workspace-write'], false, 'saved artifact and schema/readback')),
   contract('battmann', 'critical', ['workspace-write', 'network-read', 'external-write'], false, 'dated evidence, audit entry, and governed action receipt'),
+  // Data-science mode: per-action effects live in datascience/effects.ts; these are the worst case per tool.
+  ...['ds_stats', 'ds_timeseries', 'ds_analytics'].map((tool) => contract(tool, 'safe', ['workspace-read', 'workspace-write'], true, 'execution record with input fingerprints, seed, and validation checks')),
+  contract('ds_ml', 'safe', ['workspace-read', 'workspace-write'], true, 'execution record, versioned model artifact, baseline and holdout checks'),
+  contract('ds_report', 'safe', ['workspace-read', 'workspace-write'], true, 'hashed artifact recorded against the execution records it reports'),
+  contract('ds_data', 'review', ['workspace-read', 'workspace-write', 'network-read'], true, 'versioned dataset snapshot with source hash, lineage, and execution record'),
+  contract('ds_python', 'critical', ['process', 'network-read', 'workspace-write'], false, 'recorded code, exit status, hashed outputs, and installed package list'),
 ]
 
 const BY_TOOL = new Map(CATALOG.map((entry) => [entry.tool, entry]))

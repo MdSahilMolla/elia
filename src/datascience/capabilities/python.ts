@@ -6,6 +6,7 @@ import { containerSandboxConfigured } from '../../sandbox/container.ts'
 import { registerCapability } from '../engine.ts'
 import { frameToCsv } from '../powerbi/project.ts'
 import { detectPython, KNOWN_PACKAGES, minimalEnv, PYTHON_PROFILES, resetPythonCache, runPythonJob } from '../python.ts'
+import { assertForwardableEnv } from '../secrets.ts'
 import { datascienceRoot } from '../workspace.ts'
 import { list, str } from './common.ts'
 
@@ -45,7 +46,7 @@ registerCapability({
       datasets[entry.name] = { csv: frameToCsv(frame), types: frame.types }
     }
     const passEnv = Array.isArray(ctx.params.passEnv) ? (ctx.params.passEnv as unknown[]).map(String).filter((name) => /^[A-Z_][A-Z0-9_]*$/.test(name)) : []
-    if (passEnv.some((name) => /ANTHROPIC|OPENAI|GITHUB|AWS_SECRET|API_KEY$/.test(name))) throw new Error('model-provider, GitHub, and cloud secret keys are never passed to analysis code')
+    for (const name of passEnv) assertForwardableEnv(name, 'analysis code')
     const job = await runPythonJob({ code, datasets, input: ctx.params.input ?? {}, passEnv, ...(typeof ctx.params.timeoutMs === 'number' ? { timeoutMs: ctx.params.timeoutMs } : {}), ...(typeof ctx.params.memoryMb === 'number' ? { memoryMb: ctx.params.memoryMb } : {}) })
     ctx.record.expect('process succeeded', job.exitCode === 0 && !job.timedOut, job.timedOut ? `timed out after ${job.elapsedMs} ms` : `exit code ${job.exitCode}`)
     ctx.record.expect('result emitted', job.result !== null && job.result !== undefined, job.result === null ? 'the code did not call emit(); nothing structured was returned' : 'emit() returned a result', 'warn')

@@ -48,7 +48,7 @@ const SECRETISH = /(password|passwd|secret|token|api[_-]?key|authorization|cooki
 export function redactParams(params: Record<string, unknown>): Record<string, unknown> {
   const out: Record<string, unknown> = {}
   for (const [key, value] of Object.entries(params)) {
-    if (SECRETISH.test(key) && !/Env$/.test(key)) out[key] = '[REDACTED]'
+    if (SECRETISH.test(key) && !key.endsWith('Env')) out[key] = '[REDACTED]'
     else if (typeof value === 'string' && value.length > 4000) out[key] = `${value.slice(0, 4000)}… (${value.length} chars)`
     else if (Array.isArray(value) && value.length > 200) out[key] = [...value.slice(0, 200), `… ${value.length - 200} more`]
     else out[key] = value

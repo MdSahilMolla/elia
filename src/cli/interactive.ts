@@ -1635,6 +1635,8 @@ export async function runInteractive(): Promise<void> {
             ? 'fitness mode on — conservative training, habit, recovery, and wellbeing support; not medical advice. type a prompt, "/" to see commands, or "exit" to quit'
             : mode === 'battmann'
               ? 'Battmann mode on — strategic risk intelligence across trade, geopolitics, markets, supply chain, policy, and commodities. type a prompt, "/" to see commands, or "exit" to quit'
+              : mode === 'datascience'
+                ? 'Data Science mode on — elia runs, validates, and records the analysis: ingestion, quality, statistics, ML, forecasting, causal inference, BI. type a prompt, "/" to see commands, or "exit" to quit'
               : 'dev mode on — building, debugging, testing, browser, and task workflows available. type a prompt, "/" to see commands, or "exit" to quit (Ctrl+C also works)',
     )
     writeNotice(
@@ -1891,6 +1893,12 @@ export async function runInteractive(): Promise<void> {
       writeNotice('Battmann mode on — strategic intelligence across trade, geopolitics, financial markets, supply chain, policy, and commodities. Every score and claim is sourced or labelled an estimate; elia surfaces intelligence, you decide.')
       return
     }
+    if (choice === 'datascience' || choice === 'ds' || choice === 'data-science') {
+      mode = 'datascience'
+      persona = undefined
+      writeNotice('Data Science mode on — elia loads, checks, analyses, and validates your data itself; every result carries an execution record under .elia/datascience. Live databases, credentialed APIs, Python code, and package installs ask first.')
+      return
+    }
     if (choice === 'tech') {
       const hadSpecialist = persona !== undefined || mode !== 'dev'
       mode = 'dev'
@@ -1916,6 +1924,7 @@ export async function runInteractive(): Promise<void> {
     { label: 'Dev', detail: "elia's development mode — building, debugging, testing, browser & task workflows", value: 'dev' },
     { label: 'Cyber', detail: 'authorized security testing, vuln research, CTFs', value: 'cyber' },
     { label: 'Battmann', detail: 'strategic risk intelligence — trade, geopolitics, markets, supply chain', value: 'battmann' },
+    { label: 'Data Science', detail: 'autonomous, validated analysis — ingestion, statistics, ML, forecasting, causal, Power BI', value: 'datascience' },
   ]
 
   const BETA_MODE_ENTRIES: { label: string; detail: string; value: string }[] = [

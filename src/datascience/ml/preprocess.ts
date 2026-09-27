@@ -33,7 +33,6 @@ export interface PreprocessOptions {
 }
 
 const MISSING_LEVEL = '__missing__'
-const OTHER_LEVEL = '__other__'
 
 export function featureKind(frame: Frame, name: string): FeatureKind {
   const type = frame.types[name]

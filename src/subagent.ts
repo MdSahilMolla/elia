@@ -1,8 +1,8 @@
-import { BATTMANN_SUBAGENT_SYSTEM_PROMPT, CYBER_SUBAGENT_SYSTEM_PROMPT, FITNESS_SUBAGENT_SYSTEM_PROMPT, roleConfig, SPORTS_SUBAGENT_SYSTEM_PROMPT, SUBAGENT_SYSTEM_PROMPT, tierConfig, turnContextPrompt } from './config.ts'
+import { BATTMANN_SUBAGENT_SYSTEM_PROMPT, CYBER_SUBAGENT_SYSTEM_PROMPT, DATASCIENCE_SUBAGENT_SYSTEM_PROMPT, FITNESS_SUBAGENT_SYSTEM_PROMPT, roleConfig, SPORTS_SUBAGENT_SYSTEM_PROMPT, SUBAGENT_SYSTEM_PROMPT, tierConfig, turnContextPrompt } from './config.ts'
 import { runAgentLoop, lastAssistantText, type ConversationMessage, type ToolEvent } from './agentLoop.ts'
 import type { Provider, Usage } from './providers/types.ts'
 import type { Tool } from './tools/types.ts'
-import { battmannTools, businessTools } from './tools/registry.ts'
+import { battmannTools, businessTools, datascienceTools, readOnlyDatascienceTools } from './tools/registry.ts'
 import { toolsForRole, role as roleDefinition, promptForRole } from './autonomy/roles.ts'
 import { currentAgent, withAgentIdentity } from './autonomy/context.ts'
 import { drainParentSteering } from './autonomy/steering.ts'
@@ -152,6 +152,16 @@ export async function runSubAgent(request: SubAgentRequest): Promise<SubAgentRes
       if (!tools.some((existing) => existing.name === tool.name)) tools.push(tool)
     }
   }
+  // A data-science worker computes through the same recorded engine as the lead, so its
+  // numbers carry execution records; a reviewer gets only the analysis actions.
+  if (activeMode() === 'datascience') {
+    const modeTools = definition.canWrite
+      ? [...businessTools, ...datascienceTools]
+      : [...businessTools.filter((tool) => tool.name === 'read_spreadsheet'), ...readOnlyDatascienceTools]
+    for (const tool of modeTools) {
+      if (!tools.some((existing) => existing.name === tool.name)) tools.push(tool)
+    }
+  }
   if (definition.canDelegate && delegationDepth < 1) {
     tools.push(createDelegationTool({
       parentRole: request.role,
@@ -196,7 +206,9 @@ export async function runSubAgent(request: SubAgentRequest): Promise<SubAgentRes
         ? FITNESS_SUBAGENT_SYSTEM_PROMPT
         : activeMode() === 'battmann'
           ? BATTMANN_SUBAGENT_SYSTEM_PROMPT
-          : SUBAGENT_SYSTEM_PROMPT
+          : activeMode() === 'datascience'
+            ? DATASCIENCE_SUBAGENT_SYSTEM_PROMPT
+            : SUBAGENT_SYSTEM_PROMPT
   const cwd = request.cwd ?? currentAgent().cwd
   const reminders = request.requiredTool ? requiredToolReminders(request.requiredTool, definition.maxSteps) : undefined
 

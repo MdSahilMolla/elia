@@ -503,8 +503,8 @@ function renderEditorContext(value: unknown): string {
 
 function parseMode(value: unknown): AgentMode {
   if (value === undefined || value === 'dev') return 'dev'
-  if (value === 'cyber' || value === 'sports' || value === 'fitness' || value === 'battmann') return value
-  throw new Error('mode must be dev, cyber, sports, fitness, or battmann')
+  if (value === 'cyber' || value === 'sports' || value === 'fitness' || value === 'battmann' || value === 'datascience') return value
+  throw new Error('mode must be dev, cyber, sports, fitness, battmann, or datascience')
 }
 
 function parseGovernanceMode(value: unknown): GovernanceMode | undefined {

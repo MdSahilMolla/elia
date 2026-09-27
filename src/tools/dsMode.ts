@@ -18,8 +18,13 @@ const DESCRIPTIONS: Record<DsTool, string> = {
   ds_python: 'Optional Python backend: capabilities (what is installed), run (analysis code in an isolated job with load_dataset/emit/OUTPUT_DIR; code is recorded), setup (install packages into .elia/datascience/venv — always needs approval).',
 }
 
-function makeTool(name: DsTool): Tool {
-  const capabilities = capabilitiesFor(name)
+/**
+ * `readOnly` keeps only actions whose effect is pure computation — for reviewer and scout
+ * workers, which may re-run and check an analysis but never add datasets, models, or
+ * artifacts. The restriction is enforced at execution, not just in the schema.
+ */
+function makeTool(name: DsTool, readOnly = false): Tool {
+  const capabilities = capabilitiesFor(name).filter((capability) => !readOnly || capability.effect === 'compute')
   const actions = capabilities.map((capability) => capability.action)
   const properties: Record<string, unknown> = { action: { type: 'string', enum: actions, description: capabilities.map((c) => `${c.action}: ${c.summary}`).join(' | ') } }
   for (const capability of capabilities) {
@@ -31,13 +36,15 @@ function makeTool(name: DsTool): Tool {
   }
   return {
     name,
-    description: `${DESCRIPTIONS[name]} Every call writes an execution record; the result's "status" says whether its validation checks passed. Pass "action" plus that action's parameters; a wrong call returns the action's exact usage.`,
+    description: `${DESCRIPTIONS[name]} Every call writes an execution record; the result's "status" says whether its validation checks passed. Pass "action" plus that action's parameters; a wrong call returns the action's exact usage.${readOnly ? ` Read-only worker: only ${actions.join(', ')} are available.` : ''}`,
     input_schema: { type: 'object', properties, required: ['action'] },
     async execute(input) {
+      if (readOnly && !actions.includes(String(input.action))) throw new Error(`this worker is read-only: ${name} action "${String(input.action)}" is not available to it (read-only actions: ${actions.join(', ')})`)
       return formatOutcome(await runCapability(name, input))
     },
   }
 }
 
 export const DATASCIENCE_TOOL_NAMES: DsTool[] = ['ds_data', 'ds_stats', 'ds_ml', 'ds_timeseries', 'ds_analytics', 'ds_report', 'ds_python']
-export const datascienceTools: Tool[] = DATASCIENCE_TOOL_NAMES.map(makeTool)
+export const datascienceTools: Tool[] = DATASCIENCE_TOOL_NAMES.map((name) => makeTool(name))
+export const readOnlyDatascienceTools: Tool[] = DATASCIENCE_TOOL_NAMES.filter((name) => capabilitiesFor(name).some((capability) => capability.effect === 'compute')).map((name) => makeTool(name, true))

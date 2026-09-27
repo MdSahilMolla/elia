@@ -385,13 +385,13 @@ export function trainAutoML(request: TrainRequest): TrainResult {
   }
   const leaderboard: LeaderboardRow[] = []
   for (const algorithm of algorithms) {
-    let params: Record<string, unknown> = { ...(DEFAULT_PARAMS[algorithm] ?? {}), ...(request.params?.[algorithm] ?? {}) }
+    let params: Record<string, unknown> = { ...DEFAULT_PARAMS[algorithm], ...request.params?.[algorithm] }
     let result = evaluate(algorithm, params)
     if (request.tune && SEARCH_SPACES[algorithm] && algorithm !== 'baseline') {
       const iterations = Math.max(1, Math.min(30, request.tuneIterations ?? 6))
       const tuneRng = rng.fork(100 + algorithms.indexOf(algorithm))
       for (let iteration = 0; iteration < iterations; iteration++) {
-        const candidate = { ...params, ...sampleParams(SEARCH_SPACES[algorithm]!, tuneRng, d, task), ...(request.params?.[algorithm] ?? {}) }
+        const candidate = { ...params, ...sampleParams(SEARCH_SPACES[algorithm]!, tuneRng, d, task), ...request.params?.[algorithm] }
         const candidateResult = evaluate(algorithm, candidate)
         if (better(metric, mean(candidateResult.scores), mean(result.scores))) {
           params = candidate

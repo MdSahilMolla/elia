@@ -9,7 +9,8 @@ export type Effect = 'compute' | 'local-write' | 'artifact-write' | 'network-rea
 type Params = Record<string, unknown>
 type Rule = Effect | ((params: Params) => Effect)
 
-function sourceEffect(params: Params): Effect {
+/** Loading from a file writes a snapshot; from a database or an API it also reads a remote system. */
+export function sourceEffect(params: Params): Effect {
   const connection = typeof params.connection === 'string' ? params.connection.toLowerCase() : ''
   if (connection && connection !== 'sqlite') return 'database-read'
   if (typeof params.url === 'string' || typeof params.urlEnv === 'string') return 'network-read'

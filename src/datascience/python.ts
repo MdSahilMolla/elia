@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto'
 import { currentAgent } from '../autonomy/context.ts'
 import { runProcess, type ShellResult } from '../shell.ts'
 import { containerSandboxConfigured, ContainerUnavailable, runShellInContainer } from '../sandbox/container.ts'
+import { assertForwardableEnv } from './secrets.ts'
 import { datascienceRoot, sha256File } from './workspace.ts'
 
 /**
@@ -250,7 +251,10 @@ export async function runPythonJob(options: RunPythonOptions): Promise<PythonJob
   const limitSeconds = Math.ceil(timeoutMs / 1000)
   const memoryMb = options.memoryMb ?? 4096
   const passed: Record<string, string> = {}
-  for (const name of options.passEnv ?? []) if (process.env[name] !== undefined) passed[name] = process.env[name]!
+  for (const name of options.passEnv ?? []) {
+    assertForwardableEnv(name, 'analysis code')
+    if (process.env[name] !== undefined) passed[name] = process.env[name]!
+  }
   let result: ShellResult
   let sandbox: PythonJobResult['sandbox'] = 'process'
   if (containerSandboxConfigured()) {

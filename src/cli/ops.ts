@@ -70,7 +70,7 @@ export async function runSchedule(): Promise<void> {
   const goal = positionals(['--every', '--title', '--profile', '--mode', '--max-run-ms', '--max-actions']).slice(1).join(' ').trim()
   const every = flagValue('--every')
   if (!goal || !every) {
-    writeError('Usage: elia schedule add --every 1h [--mode battmann] [--title "Short title"] [--max-actions N] "<goal>"')
+    writeError('Usage: elia schedule add --every 1h [--mode battmann|datascience] [--title "Short title"] [--max-actions N] "<goal>"')
     process.exitCode = 1
     return
   }
@@ -90,8 +90,8 @@ export async function runSchedule(): Promise<void> {
     return
   }
   const modeValue = flagValue('--mode') ?? 'dev'
-  if (!['dev', 'cyber', 'sports', 'fitness', 'battmann'].includes(modeValue)) {
-    writeError('--mode must be dev, cyber, sports, fitness, or battmann')
+  if (!['dev', 'cyber', 'sports', 'fitness', 'battmann', 'datascience'].includes(modeValue)) {
+    writeError('--mode must be dev, cyber, sports, fitness, battmann, or datascience')
     process.exitCode = 1
     return
   }

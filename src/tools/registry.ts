@@ -38,6 +38,7 @@ import { provisionEnvironmentTool } from './provisionEnvironment.ts'
 import { githubTool } from './github.ts'
 import { todoWriteTool } from './todo.ts'
 import { battmannTool } from './battmann.ts'
+import { datascienceTools } from './dsMode.ts'
 import { visualizeTool } from './visualize.ts'
 import { causalDebugTool, causalFixTool, causalVerifyTool } from './causal/index.ts'
 import { archDriftTool } from './archDrift.ts'
@@ -118,6 +119,8 @@ export const cyberTools: Tool[] = [newEngagementTool, runSecurityToolTool, httpP
 /** Real external data for the Marketing/Finance personas — see src/agents/personas.ts. Tech's toolset is unchanged. */
 export const businessTools: Tool[] = [readSpreadsheetTool, spreadsheetTool, presentationTool]
 export const battmannTools: Tool[] = [battmannTool]
+/** Data-science mode's execution engine — see src/datascience/engine.ts. Granted only in that mode. */
+export { datascienceTools, readOnlyDatascienceTools } from './dsMode.ts'
 
 /**
  * The complete static registry. Dynamic skills and MCP tools are intentionally
@@ -125,7 +128,7 @@ export const battmannTools: Tool[] = [battmannTool]
  * exposure rather than receiving a permissive built-in default.
  */
 export function allBuiltinTools(): Tool[] {
-  return [...tools, ...collaborationTools, ...browserTools, ...communicationTools, ...cyberTools, ...businessTools, ...battmannTools]
+  return [...tools, ...collaborationTools, ...browserTools, ...communicationTools, ...cyberTools, ...businessTools, ...battmannTools, ...datascienceTools]
 }
 
 /** Fail closed when a newly registered built-in lacks a capability contract. */

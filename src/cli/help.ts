@@ -133,12 +133,18 @@ Parallel sessions:
   elia sessions subscribe <name> --from <session>                    Inject a session's drops as context
 
 Background autonomy:
-  elia schedule add --every 1h [--mode battmann] [--max-actions N] "<goal>"  Persist a recurring goal for the local daemon
+  elia schedule add --every 1h [--mode battmann|datascience] [--max-actions N] "<goal>"  Persist a recurring goal for the local daemon
   elia schedule list                       Show scheduled goals and last outcomes
   elia schedule pause|resume|remove <id>  Control a scheduled goal
   elia schedule run <id>                   Run one scheduled goal immediately
   elia daemon --once                       Run due schedules once and exit
   elia daemon --poll-ms 30000             Keep checking due schedules in the foreground
+
+Data Science workspace (no model involved):
+  elia ds capabilities                     Every ds_* action and how it touches the world
+  elia ds datasets | runs | record <id>    Datasets, execution records, and one record in full
+  elia ds verify                           Recheck recorded artifacts against their hashes
+  elia ds python                           The Python interpreter and packages the engine can use
 
 Battmann intelligence (no model involved unless noted):
   elia battmann seed india-semiconductors  Subscribe real data feeds and open certified questions
@@ -193,7 +199,7 @@ Inside an interactive session:
   /eliabook create <run-id>   Create a Book from a complete autonomous-run recording
   /eliabook run <book-id>     Run its active verified procedure in this session
   /eliabook improve <book-id> <run-id>  Promote a measurably better verified run
-  /mode                       Pick a core mode with arrow keys: dev, cyber, battmann
+  /mode                       Pick a core mode with arrow keys: dev, cyber, battmann, datascience
   /mode <name>                Switch directly, e.g. /mode cyber, /mode dev ("tech" is an alias for dev)
   /betamode                   Pick an experimental mode or persona: sports, fitness, marketing,
                               finance, business, data, research, cybersecurity, automation,
@@ -221,6 +227,9 @@ Inside an interactive session:
   elia --battmann             Start (or run a one-shot prompt) in Battmann mode — strategic
                               intelligence across trade, geopolitics, financial markets,
                               supply chain, policy, and commodities
+  elia --datascience          Start (or run a one-shot prompt) in Data Science mode — runs and
+                              validates the analysis itself, with an execution record per step
+                              (--ds is the short form)
   elia --beta <mode>          Start in an experimental mode: sports, fitness
                               (the old --sports / --fitness flags still work, deprecated)
   elia --json                 Emit stable JSONL lifecycle events for automation
