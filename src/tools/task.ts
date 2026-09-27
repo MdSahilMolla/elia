@@ -2,7 +2,7 @@ import type { Tool } from './types.ts'
 import { optionalString } from './args.ts'
 import { runSubAgent } from '../subagent.ts'
 import { roleMenu } from '../autonomy/roles.ts'
-import { isRoleName, ROLE_NAMES } from '../autonomy/types.ts'
+import { isRoleName, ROLE_NAMES, type RoleName } from '../autonomy/types.ts'
 import { inferTaskKind, taskFingerprint, taskSessions } from '../taskSessions.ts'
 import { currentAgent } from '../autonomy/context.ts'
 import { activeActionGovernor } from '../autonomy/governor.ts'
@@ -126,6 +126,47 @@ Scouts run on a faster, cheaper model and cannot modify anything, so prefer a ha
       taskSessions.update(session.id, { status: 'failed', action: 'Failed', detail, blockedReason: 'Worker execution raised an error', nextAction: 'Inspect the error, check environment prerequisites, and retry if safe', error: detail })
       throw error
     }
+  },
+}
+
+/**
+ * Roles that can look but not touch: no write tools and no shell. `canWrite`
+ * alone is not enough — a critic or a bug hunter cannot edit a file, but it
+ * can run commands, and an unattended run lets `git commit` through.
+ */
+export const LOOK_ONLY_ROLES: readonly RoleName[] = ROLE_NAMES.filter((name) => {
+  const definition = roleDefinition(name)
+  return !definition.canWrite && !definition.allow.some((tool) => tool === 'run_command' || tool === 'run_program')
+})
+
+/**
+ * `task` as the planner gets it while it orients: look-only roles, scout by
+ * default. The plan is what gets approved, so nothing may change before it —
+ * that is enforced here, not left to the planner prompt. Seen live (run
+ * 2026-09-26-gjlp-c3lh): the planner launched a builder mid-orient, which
+ * fixed the bug and verified it before the proposal was ever submitted.
+ */
+export const planningTaskTool: Tool = {
+  name: 'task',
+  description: `Launch a read-only sub-agent to investigate while you plan: ${LOOK_ONLY_ROLES.join(' or ')} (default scout). They search and read; nothing is changed while planning — the work itself goes into your proposal and is built only after the plan is approved. Call this several times in one turn to investigate in parallel. Returns the sub-agent's report.`,
+  input_schema: {
+    type: 'object',
+    properties: {
+      description: { type: 'string', description: 'Short (3-6 word) label for this task, shown in the terminal log' },
+      role: { type: 'string', enum: [...LOOK_ONLY_ROLES], description: 'Which read-only worker to use (default: scout)' },
+      prompt: { type: 'string', description: 'Full, self-contained instructions for the sub-agent' },
+    },
+    required: ['description', 'prompt'],
+  },
+  async execute(input) {
+    const role = input.role === undefined ? 'scout' : input.role
+    if (!isRoleName(role) || !LOOK_ONLY_ROLES.includes(role)) {
+      throw new Error(
+        `While planning, task can only launch a read-only ${LOOK_ONLY_ROLES.join(' or ')} — "${String(input.role)}" could change the project before the plan is approved. `
+          + 'Investigate with scouts, then put the change in your proposal as a step; it is built once the plan is approved.',
+      )
+    }
+    return taskTool.execute({ ...input, role })
   },
 }
 

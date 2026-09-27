@@ -2,7 +2,7 @@ import { join } from 'node:path'
 import { config, paths, systemPromptForMode, turnContextPrompt } from '../config.ts'
 import { withFileLockAsync } from '../fileLock.ts'
 import { lastAssistantText, runAgentLoop, type ConversationMessage, type ToolEvent } from '../agentLoop.ts'
-import { taskTool } from '../tools/task.ts'
+import { planningTaskTool, taskTool } from '../tools/task.ts'
 import { allWorkerTools } from '../tools/registry.ts'
 import { environmentTool } from '../tools/environment.ts'
 import { runSubAgent } from '../subagent.ts'
@@ -785,9 +785,11 @@ async function runAutonomousTaskInternal(options: AutonomousRunOptions): Promise
   const plannerPrompt = profile === 'fast'
     ? `${basePlannerPrompt}\n\n## Fast bounded mode\nThis is a time-sensitive task. Prefer 3–6 high-value steps, combine edits that share a coherent UI or subsystem, and keep independent steps in the same wave. Do not create separate steps for trivial assets, documentation, or cosmetic micro-edits. The goal is a complete verified result, not an exhaustive project plan.`
     : basePlannerPrompt
+  // Orienting changes nothing: the planner's `task` launches look-only
+  // workers (scouts), never builders — see planningTaskTool.
   const planningTools = [
     ...allWorkerTools().filter((tool) => ['read_file', 'list_files', 'grep', 'web_search', 'web_fetch', 'browser', 'board_read', 'board_post', 'environment'].includes(tool.name)),
-    taskTool,
+    planningTaskTool,
     proposalCapture.tool,
   ]
 
