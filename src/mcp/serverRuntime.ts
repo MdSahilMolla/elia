@@ -94,7 +94,16 @@ function mutationContract(request: ActionRequest): MutationContract {
       assessment: assessment('safe', 'allow', 'imports bounded context into server memory', 'mcp.context.import', [String(input.source ?? '')], true),
     },
     policy_update: {
-      action: { name: 'write_file', input: { path: '.elia/policy.json' } },
+      // A neutral representative action, like every other mutation in this
+      // table. It used to stand in as `write_file .elia/policy.json`, which
+      // the governor re-assesses from scratch — and that path is now
+      // trust-control (editing `.elia/policy.json` is exactly the change the
+      // governor must be told about, never make itself), so the tool's own
+      // sanctioned update refused itself. The declared assessment below is
+      // what this contract is: critical, approval-gated, non-reversible, and
+      // it can only ever tighten (policyUpdate.ts rejects a weakening, and
+      // the tool rejects a client-supplied `approved`).
+      action: { name: 'submit_hypothesis', input: { mutation: request.name } },
       assessment: assessment('critical', 'approve', 'changes the checked-in autonomy policy and can only tighten future authorization', 'mcp.policy.update', ['.elia/policy.json'], false),
     },
     evolve: {

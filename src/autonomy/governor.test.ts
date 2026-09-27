@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { READ_ONLY_ROLES, assessAction, blockedInUnattendedMode, createActionGovernor, redactActionInput } from './governor.ts'
 import { clearPreauthCaches, grantPreauth } from './preauth.ts'
@@ -14,15 +14,26 @@ import { clearAllowCache } from './allowStore.ts'
 // green on one machine, silently skipping the approval prompt on another
 // where "git" (say) was already always-allowed for real.
 let globalAllowDir: string
+let preauthDir: string
 beforeEach(() => {
   globalAllowDir = mkdtempSync(join(tmpdir(), 'elia-governor-allow-'))
   process.env.ELIA_ALLOW_GLOBAL_PATH = join(globalAllowDir, 'allow.json')
+  // Pre-authorization grants below are written through grantPreauth, so the
+  // store needs the same isolation as the allow file. Without it the suite
+  // wrote grants into the real per-user store — and, since the store's
+  // one-time relocation, would consume (and delete) the real ~/.elia store.
+  preauthDir = mkdtempSync(join(tmpdir(), 'elia-governor-preauth-store-'))
+  process.env.ELIA_PREAUTH_DIR = preauthDir
+  clearPreauthCaches()
   clearAllowCache()
 })
 afterEach(() => {
   delete process.env.ELIA_ALLOW_GLOBAL_PATH
+  delete process.env.ELIA_PREAUTH_DIR
+  clearPreauthCaches()
   clearAllowCache()
   rmSync(globalAllowDir, { recursive: true, force: true })
+  rmSync(preauthDir, { recursive: true, force: true })
 })
 
 describe('autonomy governor', () => {
@@ -866,4 +877,116 @@ test('mkdir of plain relative paths is a reversible workspace write; anything th
   const governor = createActionGovernor({ mode: 'unattended', cwd: process.cwd() })
   expect((await governor.check({ name: 'run_command', input: { command: 'mkdir -p workspace' } })).allowed).toBe(true)
   expect((await governor.check({ name: 'run_command', input: { command: 'mkdir ../outside' } })).allowed).toBe(false)
+})
+
+describe('trust-control writes (#1272)', () => {
+  // A real directory: the workspace check resolves relative paths against it,
+  // so an invented root would fail every path as "outside" before the
+  // trust-control gate is ever reached.
+  const repo = process.cwd()
+
+  test('editing a .elia trust store is a non-settling critical approval, never a workspace write', () => {
+    for (const tool of ['write_file', 'edit_file', 'lsp_refactor', 'delete_file']) {
+      for (const target of [
+        '.elia/policy.json',
+        '.elia/allow.json',
+        '.elia/preauth.json',
+        '.elia/preauth.secret',
+        'packages/app/.elia/allow.json',
+      ]) {
+        const result = assessAction({ name: tool, input: { path: target } }, repo)
+        expect(result.risk, `${tool} ${target}`).toBe('critical')
+        expect(result.decision, `${tool} ${target}`).toBe('approve')
+        expect(result.intent, `${tool} ${target}`).toBe('trust-control')
+        // Non-reversible: a trust edit is not a checkpointable workspace write,
+        // so nothing may promise it can be rolled back after the fact.
+        expect(result.reversible, `${tool} ${target}`).toBe(false)
+      }
+    }
+  })
+
+  test('a write into the per-user elia home is trust-control too, wherever it is named', () => {
+    // An in-workspace `.config/elia` (what a session sees when it is started
+    // in the home directory, or a container home mounted as the workspace).
+    for (const target of ['.config/elia/allow.json', '.config/elia/preauth.secret',
+      // Fail-closed: the whole relocated trust home is off limits, including
+      // files that do not exist yet.
+      '.config/elia/anything-else.json']) {
+      const result = assessAction({ name: 'edit_file', input: { path: target } }, repo)
+      expect(result.risk, target).toBe('critical')
+      expect(result.intent, target).toBe('trust-control')
+    }
+    // A real per-user home is outside the workspace, so it is already refused
+    // as an outside write — trust-control is a second layer, not the only one.
+    expect(assessAction({ name: 'edit_file', input: { path: join(homedir(), '.config', 'elia', 'allow.json') } }, repo).risk).toBe('critical')
+  })
+
+  test('an ordinary project file that merely shares the name is still a workspace write', () => {
+    // `policy.json`/`allow.json` are common application config names. Gating
+    // them by bare file name would refuse a real project's work; only the
+    // `.elia/` (and per-user home) locations are trust-control.
+    for (const target of ['src/policy.json', 'config/allow.json', 'src/policy.ts', 'docs/preauth.md']) {
+      const result = assessAction({ name: 'edit_file', input: { path: target } }, repo)
+      expect(result.risk, target).toBe('safe')
+      expect(result.intent, target).toBe('edit_file')
+    }
+  })
+
+  test('a trust edit is refused unattended and asked per-action when supervised', async () => {
+    // SELF_EDIT_INTENT is settleable-once; a trust edit must not be, or a
+    // single "yes" would quietly authorize a second one later in the run.
+    const unattended = createActionGovernor({ mode: 'unattended', cwd: repo })
+    const refused = await unattended.check({ name: 'edit_file', input: { path: '.elia/allow.json' } })
+    expect(refused.allowed).toBe(false)
+    expect(refused.assessment.intent).toBe('trust-control')
+    // Even with an approval channel attached it stays refused: an unattended
+    // run has nobody to ask, and only a human's own `--authorize` (never the
+    // model) can pre-authorize such an intent.
+    const asked: string[] = []
+    const unattendedWithApprover = createActionGovernor({
+      mode: 'unattended',
+      cwd: repo,
+      approve: async (assessment) => {
+        asked.push(assessment.intent)
+        return true
+      },
+    })
+    expect((await unattendedWithApprover.check({ name: 'edit_file', input: { path: '.elia/allow.json' } })).allowed).toBe(false)
+    expect(asked).toEqual([])
+
+    const askedSupervised: string[] = []
+    const supervised = createActionGovernor({
+      mode: 'supervised',
+      cwd: repo,
+      approve: async (assessment) => {
+        askedSupervised.push(assessment.intent)
+        return true
+      },
+    })
+    expect((await supervised.check({ name: 'edit_file', input: { path: '.elia/allow.json' } })).allowed).toBe(true)
+    expect((await supervised.check({ name: 'edit_file', input: { path: '.elia/policy.json' } })).allowed).toBe(true)
+    // Asked each time — supervised mode deliberately does not remember, and
+    // trust-control gets no "asked once for the rest of the run" shortcut.
+    expect(askedSupervised).toEqual(['trust-control', 'trust-control'])
+  })
+
+  test('the shell cannot read the trust stores through the read-only policy', () => {
+    // `cat` is in the read-only allow-list, so without a text-level match on
+    // the trust paths a shell read of them rides straight through — including
+    // the HMAC key that signs pre-authorizations.
+    for (const command of [
+      'cat ~/.config/elia/allow.json',
+      'cat .config/elia/preauth.secret',
+      'cat .elia/policy.json',
+      'type .elia\\preauth.secret',
+      'git show HEAD:.config/elia/allow.json',
+      'grep -r git ~/.config/elia',
+    ]) {
+      const result = assessAction({ name: 'run_command', input: { command } }, repo)
+      expect(result.risk, command).toBe('critical')
+      expect(result.intent, command).toBe('shell.sensitive-read')
+    }
+    // ...while the same readers on ordinary project files are unaffected.
+    expect(assessAction({ name: 'run_command', input: { command: 'cat src/policy.json' } }, repo).risk).toBe('safe')
+  })
 })

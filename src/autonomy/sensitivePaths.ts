@@ -59,7 +59,29 @@ const SENSITIVE_FILE_PATTERNS = [
   new RegExp(String.raw`^tokens?(?!(?:\.[^.]+)*\.(?:${CODE_EXTENSIONS})$)(?:\.[^.]+)*$`, 'i'),
   /^id_(?:rsa|dsa|ecdsa|ed25519)(?:\.pub)?$/i,
   /\.(?:pem|key|p12|pfx)$/i,
+  // Elia's per-user HMAC key, which signs pre-authorizations. A model that
+  // reads this can mint its own standing approvals. A write to it is refused
+  // here as a sensitive path AND gated at the governor layer
+  // (TRUST_CONTROL_INTENT).
+  /^preauth\.secret$/i,
 ]
+
+/**
+ * Elia's own trust surface: `policy.json` (governance policy), `allow.json`
+ * (standing approvals), `preauth.json` + `preauth.secret` (pre-authorizations
+ * and their HMAC key) under a `.elia/` directory, plus anything under the
+ * per-user `~/.config/elia` home those stores relocated to. Matched by PATH
+ * rather than bare file name, because `policy.json`/`allow.json` are ordinary
+ * project config names elsewhere and must not be swept up.
+ */
+const ELIA_TRUST_FILE = /(?:^|\/)\.elia\/(?:policy|allow)\.json$|(?:^|\/)\.elia\/preauth\.(?:json|secret)$/
+const ELIA_TRUST_HOME = /(?:^|\/)\.config\/elia(?:\/|$)/
+
+/** True when a path names one of elia's own trust-control files. */
+export function isEliaTrustFile(inputPath: string): boolean {
+  const norm = inputPath.replaceAll('\\', '/').toLocaleLowerCase()
+  return ELIA_TRUST_FILE.test(norm) || ELIA_TRUST_HOME.test(norm)
+}
 
 /**
  * NTFS alternate data streams let `read_file .env::$DATA` open the default
@@ -117,6 +139,14 @@ const SENSITIVE_PATH_MENTION = new RegExp(
     // `token` as a file — not a `token/` folder of code, not `token.ts`.
     String.raw`\btokens?\b(?![\\/]|(?:\.[\w-]+)*\.(?:${CODE_EXTENSIONS})\b)`,
     String.raw`battmann[\w.-]*\.sqlite`,
+    // Elia's own trust surface. A shell command carries no resolved path and
+    // can hide one behind `~`, a glob, or a `cd`, so the trust files are
+    // matched as text here: `cat ~/.config/elia/allow.json` would otherwise
+    // ride the read-only shell policy and hand the model its own governor
+    // inputs (and `preauth.secret`, the key that signs them).
+    String.raw`\.elia[\\/](?:policy|allow|preauth)\.(?:json|secret)\b`,
+    String.raw`\.config[\\/]elia(?:[\\/]|\b)`,
+    String.raw`preauth\.secret\b`,
   ].join('|'),
   'i',
 )

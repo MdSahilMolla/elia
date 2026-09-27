@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test'
 import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { clearPreauthCaches, consumePreauth, DEFAULT_PREAUTH_TTL_MS, grantPreauth, isPreauthorized, preauthPath } from './preauth.ts'
+import { clearPreauthCaches, consumePreauth, DEFAULT_PREAUTH_TTL_MS, grantPreauth, isPreauthorized, preauthPath, userPreauthSecret } from './preauth.ts'
 
 let repoDir: string
 let preauthDir: string
@@ -152,4 +152,95 @@ test.if(process.platform !== 'win32')('the grant store is written with owner-onl
   expect(mode).toBe(0o600)
   // The store directory is owner-only too.
   expect(statSync(preauthDir).mode & 0o777).toBe(0o700)
+})
+
+test('the grant store lives under ~/.config/elia, never in the repo tree (#1272)', () => {
+  const override = process.env.ELIA_PREAUTH_DIR
+  delete process.env.ELIA_PREAUTH_DIR
+  clearPreauthCaches()
+  try {
+    const home = homedir().replaceAll('\\', '/')
+    expect(preauthPath().replaceAll('\\', '/')).toBe(`${home}/.config/elia/preauth.json`)
+    // And it is not the project's own `.elia`, which a repository could ship.
+    expect(preauthPath().replaceAll('\\', '/')).not.toContain('/.elia/')
+  } finally {
+    if (override) process.env.ELIA_PREAUTH_DIR = override
+    clearPreauthCaches()
+  }
+})
+
+test('a pre-relocation ~/.elia store is migrated once, and its grants stay valid (#1272)', () => {
+  // What the previous location looked like: a store plus the secret that signs
+  // its grants, both under ~/.elia.
+  const legacy = mkdtempSync(join(tmpdir(), 'elia-preauth-legacy-'))
+  const legacyStore = join(legacy, 'preauth.json')
+  const legacySecret = join(legacy, 'preauth.secret')
+  writeFileSync(legacySecret, 'legacy-secret-value\n', { mode: 0o600 })
+  const relocated = mkdtempSync(join(tmpdir(), 'elia-preauth-dir-'))
+  try {
+    process.env.ELIA_PREAUTH_DIR = legacy
+    clearPreauthCaches()
+    grantPreauth(['deployment.production'], repoDir, 'main')
+
+    process.env.ELIA_PREAUTH_DIR = relocated
+    process.env.ELIA_PREAUTH_LEGACY_PATH = legacyStore
+    clearPreauthCaches()
+
+    // The grant still verifies, which it only can if the legacy secret came
+    // across with it — a fresh secret would silently invalidate every grant.
+    expect(isPreauthorized('deployment.production', repoDir, 'main')).toBe(true)
+    expect(preauthPath()).toBe(join(relocated, 'preauth.json'))
+    expect(readFileSync(join(relocated, 'preauth.secret'), 'utf8').trim()).toBe('legacy-secret-value')
+    // Moved, not copied: no second, unmigrated copy of live authority is left
+    // behind in the old location.
+    expect(existsSync(legacyStore)).toBe(false)
+    expect(existsSync(legacySecret)).toBe(false)
+  } finally {
+    delete process.env.ELIA_PREAUTH_LEGACY_PATH
+    process.env.ELIA_PREAUTH_DIR = preauthDir
+    clearPreauthCaches()
+    rmSync(legacy, { recursive: true, force: true })
+    rmSync(relocated, { recursive: true, force: true })
+  }
+})
+
+test('a legacy store is left alone when the store is relocated by a test override (#1272)', () => {
+  // With ELIA_PREAUTH_DIR set and no ELIA_PREAUTH_LEGACY_PATH, migration is
+  // disabled: a test run must never consume the real machine's ~/.elia store
+  // (and delete it), which is exactly what a naive "migrate on first read"
+  // would do to whoever runs the suite.
+  const untouched = mkdtempSync(join(tmpdir(), 'elia-preauth-untouched-'))
+  try {
+    writeFileSync(join(untouched, 'preauth.json'), '{"grants":[]}', { mode: 0o600 })
+    expect(isPreauthorized('deployment.production', repoDir, 'main')).toBe(false)
+    expect(existsSync(join(untouched, 'preauth.json'))).toBe(true)
+  } finally {
+    rmSync(untouched, { recursive: true, force: true })
+  }
+})
+
+test('an empty secret file is replaced, not used as an empty HMAC key (#1272)', () => {
+  // An empty key would make every grant signature forgeable — the exact hole
+  // the per-user secret exists to close — so a blank or truncated secret file
+  // (an interrupted write, a bad disk) must regenerate rather than verify
+  // anything.
+  const blank = mkdtempSync(join(tmpdir(), 'elia-preauth-blank-'))
+  try {
+    writeFileSync(join(blank, 'preauth.secret'), '   \n', { mode: 0o600 })
+    process.env.ELIA_PREAUTH_DIR = blank
+    clearPreauthCaches()
+    expect(userPreauthSecret().length).toBe(64)
+    expect(readFileSync(join(blank, 'preauth.secret'), 'utf8').trim().length).toBe(64)
+    // A grant signed by the regenerated key is the only one that verifies.
+    grantPreauth(['deployment.production'], repoDir, 'main')
+    const store = JSON.parse(readFileSync(join(blank, 'preauth.json'), 'utf8'))
+    store.grants[0].hmac = 'f'.repeat(64)
+    writeFileSync(join(blank, 'preauth.json'), JSON.stringify(store))
+    clearPreauthCaches()
+    expect(isPreauthorized('deployment.production', repoDir, 'main')).toBe(false)
+  } finally {
+    process.env.ELIA_PREAUTH_DIR = preauthDir
+    clearPreauthCaches()
+    rmSync(blank, { recursive: true, force: true })
+  }
 })

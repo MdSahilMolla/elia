@@ -24,3 +24,14 @@ A checked-in `.elia/policy.json` tightens the autonomy governor before the model
 - `requireApprovalAtOrAbove` — `"safe"`, `"review"`, or `"critical"` (default). Any action assessed at this risk or higher stops being auto-allowed in unattended mode and needs an explicit approval.
 
 A malformed policy file fails loudly rather than being ignored. A refused action reports `Blocked by .elia/policy.json`.
+
+### Elia's own trust stores
+
+A handful of files decide what elia trusts and who has already said yes: `.elia/policy.json` (the tightening policy above), `.elia/allow.json` and `~/.config/elia/allow.json` (standing "always allow" rules), and `~/.config/elia/preauth.json` plus its `preauth.secret` (time-limited pre-authorizations, and the HMAC key that signs them). Two rules keep them from being edited quietly:
+
+- **A trust edit is never a workspace write.** `write_file`, `edit_file`, `lsp_refactor` and `delete_file` aimed at any of these paths — anywhere under a `.elia/` directory, or anywhere under the per-user `~/.config/elia` home — are assessed `critical` / approve with the `trust-control` intent, marked non-reversible, and deliberately excluded from the "asked once per run" family. One approval cannot carry into a second trust edit later in the same run; an unattended run refuses them outright, and only a human's own `elia auto --authorize trust-control` can pre-authorize one. Ordinary project files that merely share a name (`src/policy.json`, `config/allow.json`) are unaffected.
+- **The per-user allow list is signed.** Its rules are exactly the standing authority that lets a later run skip an approval, so the file carries an HMAC-SHA256 over its rules keyed by the same per-user secret that signs pre-authorizations. An unsigned or edited file is refused rather than honored, which is what makes the governor's parent-signs-the-child boundary real for that store: a shell mishap, a dropped-in repository, or any other writer cannot grant itself a permanent bypass. The checked-in project allow file stays unsigned by design — a reviewed team decision, in the same spirit as `policy.json` only ever being able to tighten.
+
+`preauth.secret` is itself treated as a credential: the file tools refuse to read it, and a shell command that names a trust store is classified as a sensitive read rather than riding the read-only shell policy.
+
+The per-user stores live under `~/.config/elia` rather than `~/.elia`, one level further from a checked-out repository's own `.elia` directory. An existing `~/.elia/preauth.json`, `~/.elia/preauth.secret`, or `~/.elia/allow.json` is migrated once on first use — carrying the grants and the signing secret across, so existing authorizations stay valid — and then removed rather than left behind as a second copy of the same authority.

@@ -1,7 +1,9 @@
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { createHmac, timingSafeEqual } from 'node:crypto'
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import type { ActionAssessment, ActionRequest } from './governor.ts'
+import { userPreauthSecret } from './preauth.ts'
 import { noteCorruptState } from '../localJson.ts'
 
 /**
@@ -13,13 +15,26 @@ import { noteCorruptState } from '../localJson.ts'
  *
  * Two scopes, mirroring what a person actually means when they click that:
  *   - `project` → `.elia/allow.json`, versioned with the repo (a team decision)
- *   - `global`  → `~/.elia/allow.json`, this machine only (a personal habit)
+ *   - `global`  → `~/.config/elia/allow.json`, this machine only (a personal
+ *     habit, alongside the preauth trust stores)
  *
  * A rule is deliberately narrow. For `run_command` it is keyed to the leading
  * token of the command (`git`, `npm`, `New-Item`) — approving `git status` once
  * does not wave through `git push`. For every other tool it is keyed to the tool
  * name plus the governor's `intent`, so "always allow edit_file" cannot silently
  * also mean "always allow github.push".
+ *
+ * The per-user store is signed. Its rules are exactly the standing authority
+ * that lets a later run skip an approval, so an unsigned or edited file is
+ * refused rather than honored: the `mac` is an HMAC-SHA256 over the rules array
+ * keyed by the same per-user secret that signs pre-authorizations
+ * (preauth.ts), which only this machine's own `--authorize`/approval flow can
+ * produce. That is what makes the governor's "parent-signs-the-child" boundary
+ * real for this store: a shell mishap, a dropped-in repo, or anyone else who
+ * can write the file cannot grant themselves a permanent bypass. The
+ * checked-in project file stays unsigned by design — it is a reviewed team
+ * decision, and policy.json's invariant is that a repo may only ever tighten
+ * governance, never hand out standing approvals.
  */
 export interface AllowRule {
   /** Tool name: `run_command`, `edit_file`, `github`, … */
@@ -38,16 +53,50 @@ export type AllowScope = 'project' | 'global'
 
 interface AllowFile {
   rules: AllowRule[]
+  /** HMAC-SHA256 over the rules array with the per-user preauth secret — an
+   * allow file a repo (or a shell mishap) can write is verified, not trusted. */
+  mac?: string
 }
 
 const MAX_RULES = 500
 
 export function allowPath(scope: AllowScope, cwd = process.cwd()): string {
   if (scope === 'project') return join(cwd, '.elia', 'allow.json')
-  // Tests need to isolate the global scope from the real machine's actual
-  // ~/.elia/allow.json — and on win32, os.homedir() reads %USERPROFILE%, not
-  // $HOME, so the usual "just set $HOME" trick silently does nothing there.
-  return process.env.ELIA_ALLOW_GLOBAL_PATH || join(homedir(), '.elia', 'allow.json')
+  // The per-user store lives under ~/.config/elia (the same home the preauth
+  // trust stores relocated to), never inside a checked-out repo's `.elia`.
+  // Tests isolate this with ELIA_ALLOW_GLOBAL_PATH — and on win32,
+  // os.homedir() reads %USERPROFILE%, not $HOME, so the usual "just set
+  // $HOME" trick silently does nothing there.
+  return process.env.ELIA_ALLOW_GLOBAL_PATH || join(homedir(), '.config', 'elia', 'allow.json')
+}
+
+/**
+ * The pre-relocation location (~/.elia/allow.json); read once to migrate.
+ * ELIA_ALLOW_LEGACY_PATH is the test seam for that (mirroring
+ * preauth.ts): with ELIA_ALLOW_GLOBAL_PATH set, a test must never consume —
+ * let alone delete — the real machine's ~/.elia/allow.json.
+ */
+function legacyGlobalAllowPath(): string {
+  return process.env.ELIA_ALLOW_LEGACY_PATH ?? join(homedir(), '.elia', 'allow.json')
+}
+
+/** True when a legacy ~/.elia/allow.json may be migrated into the active one. */
+function legacyMigrationAllowed(): boolean {
+  return !process.env.ELIA_ALLOW_GLOBAL_PATH || process.env.ELIA_ALLOW_LEGACY_PATH !== undefined
+}
+
+function signRules(rules: AllowRule[]): string {
+  return createHmac('sha256', userPreauthSecret()).update(JSON.stringify(rules)).digest('hex')
+}
+
+function verifies(file: AllowFile): boolean {
+  if (typeof file.mac !== 'string' || file.mac.length === 0) return false
+  const expected = signRules(file.rules)
+  try {
+    return timingSafeEqual(Buffer.from(file.mac, 'hex'), Buffer.from(expected, 'hex'))
+  } catch {
+    return false
+  }
 }
 
 interface Cached {
@@ -58,6 +107,23 @@ const cache = new Map<string, Cached>()
 const EMPTY: AllowFile = { rules: [] }
 
 function load(path: string): AllowFile {
+  // One-time migration: a pre-relocation ~/.elia/allow.json predates signing;
+  // it was written by this machine's own earlier elia, so carry the rules
+  // across once — as a freshly signed store — rather than silently dropping
+  // the operator's standing approvals.
+  if (path === allowPath('global', process.cwd()) && !existsSync(path)) {
+    const legacy = legacyGlobalAllowPath()
+    if (legacy && legacy !== path && legacyMigrationAllowed() && existsSync(legacy)) {
+      try {
+        mkdirSync(dirname(path), { recursive: true, mode: 0o700 })
+        const rules = readLegacyRules(legacy)
+        writeFileSync(path, `${JSON.stringify({ rules, mac: signRules(rules) }, null, 2)}\n`, { mode: 0o600 })
+        rmSync(legacy, { force: true })
+      } catch {
+        /* migration is best effort; the store just starts empty */
+      }
+    }
+  }
   if (!existsSync(path)) {
     cache.delete(path)
     return EMPTY
@@ -74,10 +140,18 @@ function load(path: string): AllowFile {
   try {
     const parsed = JSON.parse(readFileSync(path, 'utf8')) as unknown
     if (parsed && typeof parsed === 'object' && Array.isArray((parsed as AllowFile).rules)) {
-      file = {
-        rules: (parsed as AllowFile).rules
-          .filter((r): r is AllowRule => Boolean(r) && typeof r.tool === 'string')
-          .slice(0, MAX_RULES),
+      const raw = parsed as AllowFile
+      // The per-user global store must verify; the checked-in project store is
+      // a deliberate, reviewed team file and stays unsigned by design.
+      if (path === allowPath('global', process.cwd()) && !verifies(raw)) {
+        noteCorruptState('allowStore.verify', path, new Error('allow.json failed its HMAC verification — refusing the rules'), { keepCopy: true })
+        file = EMPTY
+      } else {
+        file = {
+          rules: raw.rules
+            .filter((r): r is AllowRule => Boolean(r) && typeof r.tool === 'string')
+            .slice(0, MAX_RULES),
+        }
       }
     }
   } catch (error) {
@@ -88,6 +162,15 @@ function load(path: string): AllowFile {
   }
   cache.set(path, { mtimeMs, file })
   return file
+}
+
+/** Rules from a pre-signing allow.json, coerced to its shape without a mac. */
+function readLegacyRules(path: string): AllowRule[] {
+  const parsed = JSON.parse(readFileSync(path, 'utf8')) as unknown
+  if (!parsed || typeof parsed !== 'object' || !Array.isArray((parsed as AllowFile).rules)) return []
+  return (parsed as AllowFile).rules
+    .filter((r): r is AllowRule => Boolean(r) && typeof r.tool === 'string')
+    .slice(0, MAX_RULES)
 }
 
 /**
@@ -190,7 +273,8 @@ export function addAllowRule(rule: AllowRule, scope: AllowScope, cwd = process.c
   const duplicate = file.rules.some(
     (r) => r.tool === rule.tool && r.commandPrefix === rule.commandPrefix && r.intent === rule.intent,
   )
-  const next: AllowFile = duplicate ? file : { rules: [...file.rules, rule].slice(-MAX_RULES) }
+  const rules: AllowRule[] = duplicate ? file.rules : [...file.rules, rule].slice(-MAX_RULES)
+  const next: AllowFile = scope === 'global' ? { rules, mac: signRules(rules) } : { rules }
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 })
   writeFileSync(path, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 })
   cache.delete(path)

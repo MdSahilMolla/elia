@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { commandMayReadSensitiveData, isSensitivePath } from './sensitivePaths.ts'
+import { commandMayReadSensitiveData, isEliaTrustFile, isSensitivePath } from './sensitivePaths.ts'
 
 const classic = [
   '.env',
@@ -156,5 +156,43 @@ test('PowerShell readers cannot bypass the sensitive-command gate', () => {
     'Import-Csv .env',
   ]) {
     expect(commandMayReadSensitiveData(command), command).toBe(true)
+  }
+})
+test('elia’s own per-user HMAC secret is a protected path (#1272)', () => {
+  // preauth.secret signs every pre-authorization grant. Read it and you can
+  // mint your own; the file tools refuse it the same way they refuse an .env.
+  for (const path of ['preauth.secret', '.elia/preauth.secret', 'C:\\Users\\me\\.config\\elia\\preauth.secret', 'state/preauth.secret']) {
+    expect(isSensitivePath(path), path).toBe(true)
+  }
+})
+
+test('the trust store matcher is by path, so an app’s own policy.json is untouched (#1272)', () => {
+  for (const path of ['.elia/policy.json', '.elia/allow.json', '.elia/preauth.json',
+    'packages/app/.elia/allow.json', '.config/elia/allow.json', 'C:\\Users\\me\\.config\\elia\\preauth.json',
+    // Fail-closed: the whole relocated per-user trust home.
+    '.config/elia/anything-new.json']) {
+    expect(isEliaTrustFile(path), path).toBe(true)
+  }
+  for (const path of ['src/policy.json', 'config/allow.json', 'src/policy.ts', 'docs/preauth.md',
+    'src/.config/eliased.json', 'elia/policy.json']) {
+    expect(isEliaTrustFile(path), path).toBe(false)
+  }
+})
+
+test('a shell command that names a trust store is a sensitive read (#1272)', () => {
+  for (const command of [
+    'cat ~/.config/elia/allow.json',
+    'cat .config/elia/preauth.secret',
+    'type .elia\\policy.json',
+    'head -5 .elia/preauth.secret',
+    'cat preauth.secret',
+    'git show HEAD:.config/elia/allow.json',
+    'grep -r token ~/.config/elia',
+  ]) {
+    expect(commandMayReadSensitiveData(command), command).toBe(true)
+  }
+  // The same readers on ordinary project files are still read-only.
+  for (const command of ['cat src/policy.json', 'cat config/allow.json', 'grep -r allow src/']) {
+    expect(commandMayReadSensitiveData(command), command).toBe(false)
   }
 })

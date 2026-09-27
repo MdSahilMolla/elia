@@ -4,14 +4,14 @@ import { DATASCIENCE_TOOLS, datascienceEffect } from '../datascience/effects.ts'
 import { skillCapability } from '../skills/capabilities.ts'
 import { currentAgent, isPathWithinWorkspace, resolveWorkspacePath } from './context.ts'
 import { assertWriteWithinSessionScope, currentSessionScope } from '../session/scope.ts'
-import { commandMayReadSensitiveData } from './sensitivePaths.ts'
+import { commandMayReadSensitiveData, isEliaTrustFile } from './sensitivePaths.ts'
 import { pauseToolSpinner, resumeToolSpinner } from '../ui/stream.ts'
 import { applyPolicy } from './policy.ts'
 import { assessDatabaseRequest } from '../devdb/policy.ts'
 import { addAllowRule, canPersistPrefixRule, isAllowlisted, ruleFor, type AllowScope } from './allowStore.ts'
 import { consumePreauth, currentBranch, isPreauthorized, preauthPath } from './preauth.ts'
 import { approveSelfEditFile, needsSelfEditApproval, SELF_EDIT_INTENT, selfEditLabel, selfEditRefusal, setSelfEditAllowed } from './selfEdit.ts'
-import { resolve as resolvePath } from 'node:path'
+import { basename, dirname, resolve as resolvePath } from 'node:path'
 import { REPORTING_TOOLS } from './reportingTools.ts'
 
 export type ActionRisk = 'safe' | 'review' | 'critical'
@@ -55,7 +55,7 @@ export interface ApprovalOutcome {
    * Persist a rule so this class of action stops prompting:
    *   - `session` → in memory, this run only
    *   - `project` → `.elia/allow.json`
-   *   - `global`  → `~/.elia/allow.json`
+   *   - `global`  → `~/.config/elia/allow.json` (signed with the per-user secret)
    */
   remember?: 'session' | AllowScope
   /** On a denial: operator guidance to surface back to the model. */
@@ -436,12 +436,31 @@ export function assessAction(request: ActionRequest, cwd = currentAgent().cwd ??
     const path = typeof input.path === 'string' ? input.path : ''
     const outside = path.length === 0 || !isPathWithinWorkspace(path, cwd)
     if (outside) return assessment('critical', 'approve', `${name} targets a path outside the active workspace or uses an invalid path`, name, path ? [path] : [], false)
-    // Inside the workspace, but the workspace is elia's own checkout — see selfEdit.ts.
-    if (needsSelfEditApproval(resolvePath(cwd, path))) {
+    // Elia's own trust surface, before self-edit: policy.json / allow.json /
+    // preauth.json / preauth.secret anywhere under a `.elia/` directory, and
+    // the per-user `~/.config/elia` home those files moved to. Editing any of
+    // them edits the rules that police this run — loosening the policy, adding
+    // a standing approval, or minting pre-authorizations is precisely the move
+    // the governor exists to catch, so it is never a "workspace write". It is
+    // critical, non-reversible, and deliberately outside SETTLEABLE_ONCE: one
+    // approval must never carry into a second trust edit later in the run.
+    const resolved = resolvePath(cwd, path)
+    if (isTrustControlFile(resolved)) {
       return assessment(
         'critical',
         'approve',
-        `This changes ${selfEditLabel(resolvePath(cwd, path))} — part of elia's OWN source, not a project it is building. The session was started inside elia's repository.`,
+        `${name} would modify elia's own trust store (${trustControlLabel(resolved)}) — changing what elia trusts is an explicit, non-reversible decision, not a workspace edit`,
+        TRUST_CONTROL_INTENT,
+        [path],
+        false,
+      )
+    }
+    // Inside the workspace, but the workspace is elia's own checkout — see selfEdit.ts.
+    if (needsSelfEditApproval(resolved)) {
+      return assessment(
+        'critical',
+        'approve',
+        `This changes ${selfEditLabel(resolved)} — part of elia's OWN source, not a project it is building. The session was started inside elia's repository.`,
         SELF_EDIT_INTENT,
         [path],
         true,
@@ -766,6 +785,31 @@ function sessionScopeWriteBlock(request: ActionRequest): string | undefined {
 
 const SESSION_SCOPE_FILE_WRITES = new Set(['write_file', 'edit_file', 'lsp_refactor', 'delete_file'])
 
+/** One named intent for "this edits elia's own trust rules", so every such
+ * action is settled on its own, with its own explicit approval. */
+export const TRUST_CONTROL_INTENT = 'trust-control'
+
+/**
+ * Files that define elia's own trust surface, anywhere a session can reach:
+ * `policy.json` (governance policy), `allow.json` (standing approvals),
+ * `preauth.json` / `preauth.secret` (pre-authorizations and the HMAC key that
+ * signs them) under a `.elia/` directory, plus anything under the per-user
+ * `~/.config/elia` home those files moved to. The matcher itself lives in
+ * sensitivePaths.ts (a leaf module) so the command-level read guard and this
+ * write gate agree on exactly one set of paths.
+ */
+const isTrustControlFile = isEliaTrustFile
+
+
+/** A short, human-readable name for the trust store a write would touch. */
+export function trustControlLabel(absPath: string): string {
+  const norm = absPath.replaceAll('\\', '/').toLocaleLowerCase()
+  const file = basename(norm)
+  if (/(?:^|\/)\.config\/elia(?:\/|$)/.test(norm)) return `${file} in your per-user elia home`
+  if (basename(dirname(norm)) === '.elia') return `${file} in this project's .elia store`
+  return file
+}
+
 export function createActionGovernor(options: { mode?: GovernanceMode; approve?: ActionApproval; cwd?: string; maxActions?: number } = {}): ActionGovernor {
   const mode = options.mode ?? 'unattended'
   const cwd = options.cwd ?? process.cwd()
@@ -837,7 +881,8 @@ export function createActionGovernor(options: { mode?: GovernanceMode; approve?:
         return { allowed: true, assessment }
       }
 
-      // A standing "always allow" — persisted (.elia/allow.json or ~/.elia/allow.json)
+      // A standing "always allow" — persisted (.elia/allow.json or
+      // ~/.config/elia/allow.json)
       // or chosen for this session at the approval menu — clears the prompt.
       // Supervised only: an unattended run keeps its strict per-run boundary, so
       // a critical action never rides in on a rule written during some past
