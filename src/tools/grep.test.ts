@@ -56,7 +56,10 @@ test('a file path searches that one file, with the path the model gave', async (
 
   const nested = await withAgentIdentity({ name: 'test', role: 'lead', cwd: dir }, () => grepTool.execute({ pattern: 'needle', path: 'src/lib/one.ts' }))
   expect(nested).toBe('src/lib/one.ts:2:export const needle = 2')
-  const withContext = await withAgentIdentity({ name: 'test', role: 'lead', cwd: dir }, () => grepTool.execute({ pattern: 'needle', path: 'src\\lib\\one.ts', context: 1 }))
+  // A backslash is a path separator only on Windows; elsewhere it is part of
+  // a file name, so `src\lib\one.ts` names a file that does not exist.
+  const modelPath = process.platform === 'win32' ? 'src\\lib\\one.ts' : 'src/lib/one.ts'
+  const withContext = await withAgentIdentity({ name: 'test', role: 'lead', cwd: dir }, () => grepTool.execute({ pattern: 'needle', path: modelPath, context: 1 }))
   expect(withContext).toBe('src/lib/one.ts-1-const a = 1\nsrc/lib/one.ts:2:export const needle = 2')
   const top = await withAgentIdentity({ name: 'test', role: 'lead', cwd: dir }, () => grepTool.execute({ pattern: 'needle', path: 'top.txt' }))
   expect(top).toBe('./top.txt:1:needle at the top')

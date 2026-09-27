@@ -1,4 +1,5 @@
 import { rm } from 'node:fs/promises'
+import { realpathSync } from 'node:fs'
 import { join } from 'node:path'
 import * as readline from 'node:readline/promises'
 import { emitEvent, machineReadable, plainOutput, quietOutput } from '../ui/runtime.ts'
@@ -210,16 +211,30 @@ export interface LeftoverSessionWorktree {
  * created a worktree and a branch and then exited — no later command could
  * see the session, and `kill` could not remove what it could not see.
  */
+/** The path with symlinks resolved, or as given when it does not exist. */
+function canonicalPath(path: string): string {
+  try {
+    return realpathSync.native(path)
+  } catch {
+    return path
+  }
+}
+
 export async function findLeftoverSessionWorktrees(sourceRoot: string = process.cwd(), baseDir: string = paths.state, live: string[] = []): Promise<LeftoverSessionWorktree[]> {
   const listed = await runGit(['worktree', 'list', '--porcelain'], sourceRoot)
   if (listed.exitCode !== 0) return []
-  const root = join(baseDir, 'session-worktrees').replace(/\\/g, '/').toLowerCase()
+  // git lists every worktree by its real path. On macOS the temp and many
+  // project folders sit behind a symlink (/var → /private/var), so a prefix
+  // taken from the unresolved state directory matched nothing there: every
+  // leftover stayed invisible to `sessions prune`.
+  const comparable = (path: string) => canonicalPath(path).replace(/\\/g, '/').toLowerCase()
+  const root = comparable(join(baseDir, 'session-worktrees'))
   const leftovers: LeftoverSessionWorktree[] = []
   for (const block of listed.stdout.split(/\r?\n\r?\n/)) {
     const path = /^worktree (.+)$/m.exec(block)?.[1]?.trim()
     const branch = /^branch refs\/heads\/(elia\/session-.+)$/m.exec(block)?.[1]?.trim()
     if (!path || !branch) continue
-    if (!path.replace(/\\/g, '/').toLowerCase().startsWith(`${root}/`)) continue
+    if (!comparable(path).startsWith(`${root}/`)) continue
     const name = branch.slice('elia/session-'.length)
     if (live.includes(name)) continue
     const status = await runGit(['status', '--porcelain'], path)
