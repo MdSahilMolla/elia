@@ -135,6 +135,8 @@ export interface AutonomousRunOptions {
   approveAction?: ActionApproval
   /** Defaults to unattended: safe work flows, irreversible work pauses or blocks. */
   governanceMode?: GovernanceMode
+  /** Supervised, but local reversible actions run without asking (governor.ts `reviewRunsFreely`). */
+  reviewRunsFreely?: boolean
   /** Fast skips optional quality loops; thorough adds bounded review and repair depth. */
   profile?: AutonomyProfile
   /** Capture cross-run lessons after completion; defaults from the selected profile. */
@@ -493,7 +495,7 @@ async function runAutonomousTaskInternal(options: AutonomousRunOptions): Promise
     },
   })
   const maxActions = options.maxActions ?? defaults.maxActions
-  const governor = createActionGovernor({ mode: options.governanceMode ?? 'unattended', approve: options.approveAction, maxActions })
+  const governor = createActionGovernor({ mode: options.governanceMode ?? 'unattended', approve: options.approveAction, maxActions, reviewRunsFreely: options.reviewRunsFreely })
 
   let supervisorTimer: ReturnType<typeof setInterval> | undefined
   let supervisorRequest: SupervisorControlRequest | undefined

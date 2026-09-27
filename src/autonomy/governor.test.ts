@@ -859,3 +859,38 @@ test('mkdir of plain relative paths is a reversible workspace write; anything th
   expect((await governor.check({ name: 'run_command', input: { command: 'mkdir -p workspace' } })).allowed).toBe(true)
   expect((await governor.check({ name: 'run_command', input: { command: 'mkdir ../outside' } })).allowed).toBe(false)
 })
+
+test('autonomous sessions: local reversible work runs unasked; outside-world and irreversible actions still ask', async () => {
+  const asked: string[] = []
+  const approve = async (assessment: { intent: string }) => {
+    asked.push(assessment.intent)
+    return true
+  }
+  const autonomous = createActionGovernor({ mode: 'supervised', approve, reviewRunsFreely: true })
+  // Local and reversible: a commit on the current branch.
+  expect((await autonomous.check({ name: 'run_command', input: { command: 'git commit -m "fix"' } })).allowed).toBe(true)
+  expect(asked).toEqual([])
+  // Reaches other people: still asks.
+  await autonomous.check({ name: 'github', input: { action: 'push', ref: 'owner/repo' } })
+  // Irreversible or outside the project: still asks.
+  await autonomous.check({ name: 'run_command', input: { command: 'curl -X POST https://example.com/hook' } })
+  expect(asked.length).toBe(2)
+
+  // Ask first (no flag): the same commit goes to the approval menu.
+  const askFirstAsked: string[] = []
+  const askFirst = createActionGovernor({ mode: 'supervised', approve: async (assessment) => { askFirstAsked.push(assessment.intent); return true } })
+  await askFirst.check({ name: 'run_command', input: { command: 'git commit -m "fix"' } })
+  expect(askFirstAsked.length).toBe(1)
+})
+
+test('staging and renaming are local review work like commit; forcing an ignored file in is not', () => {
+  const classify = (command: string) => assessAction({ name: 'run_command', input: { command } }, '/tmp')
+  for (const command of ['git add hello.txt', 'git add -A', 'git add src/ tests/', 'git mv a.ts b.ts', 'git commit -m "x"']) {
+    expect(classify(command).risk).toBe('review')
+  }
+  for (const command of ['git add -f .env', 'git add --force secrets.json', 'git add -Af', 'git mv -f a.ts b.ts', 'git add x && git push', 'git add ../../../etc/passwd', 'git add /etc/hosts', 'git -C /elsewhere add x', 'git mv a.ts ../outside.ts']) {
+    expect(classify(command).risk).toBe('critical')
+  }
+  // The same through run_program, the argv path workers prefer.
+  expect(assessAction({ name: 'run_program', input: { program: 'git', args: ['add', 'hello.txt'] } }, '/tmp').risk).toBe('review')
+})

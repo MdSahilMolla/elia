@@ -54,8 +54,11 @@ test('help documents autonomous budget and agent dry-run controls', async () => 
   expect(result.stdout).toContain('presentation')
   expect(result.stdout).toContain('Dev mode (default)')
   expect(result.stdout).toContain('/mode')
-  expect(result.stdout).toContain('--unattended')
-  expect(result.stdout).toContain('--supervised')
+  // One way of working: the help names the one gate and no approval modes.
+  expect(result.stdout).toContain('there is no mode to pick')
+  expect(result.stdout).toContain('--authorize')
+  expect(result.stdout).not.toContain('--supervised')
+  expect(result.stdout).not.toContain('/auto on|off')
   expect(result.stdout).toContain('elia control stop')
   expect(result.stdout).toContain('--beta <mode>')
   expect(result.stdout).toContain('/betamode')
@@ -218,23 +221,16 @@ test('config set stores a provider key without printing it', async () => {
   expect(stored).toContain('ELIA_MODEL=nvidia/nemotron-3-super-120b-a12b')
 })
 
-test('invalid supervision settings fail before provider initialization', async () => {
-  const result = await runCli(['auto', 'do work', '--plain'], {
+test('the old supervision switches are gone: elia auto says so and stays autonomous', async () => {
+  const result = await runCli(['auto', 'do work', '--supervised', '--plain'], {
     ELIA_PROVIDER: undefined,
     ELIA_MODEL: undefined,
     ELIA_API_KEY: undefined,
     ANTHROPIC_API_KEY: undefined,
-    ELIA_SUPERVISION: 'unsafe',
+    ELIA_SUPERVISION: 'supervised',
   })
-  expect(result.code).toBe(1)
-  expect(result.stderr).toContain('ELIA_SUPERVISION must be either supervised or unattended')
-  expect(result.stderr).not.toContain('No API key found')
-})
-
-test('conflicting supervision flags fail closed', async () => {
-  const result = await runCli(['auto', 'do work', '--supervised', '--unattended', '--plain'])
-  expect(result.code).toBe(1)
-  expect(result.stderr).toContain('Supervision conflict')
+  expect(`${result.stdout}${result.stderr}`).toContain('elia is always autonomous now')
+  expect(`${result.stdout}${result.stderr}`).not.toContain('Supervision conflict')
 })
 
 test('control status stays provider-independent', async () => {

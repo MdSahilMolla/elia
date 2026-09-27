@@ -10,18 +10,16 @@ import { reportLiveOutput } from '../../usage.ts'
 
 const SHIFT_TAB = '\x1b[Z'
 const settle = () => new Promise((resolve) => setTimeout(resolve, 30))
-/** The status row in the default (manual) mode — the frame is mounted and idle. */
+/** The status row while elia works autonomously (always) — the frame is mounted and idle. */
 const READY = '? for shortcuts'
 
 function baseProps() {
   return {
     getEnv: () => ({ model: 'mercury-2', providerLabel: 'Mercury', providerName: 'inception' }),
     commands: REPL_COMMANDS_FOR_TEST,
-    initialReplMode: 'manual' as const,
     messages: [],
     greeting: 'dev mode — say hi',
     version: '0.0.0-test',
-    classifyRisk: async () => ({ risky: false }),
     runShellLine: async (c: string) => `ran ${c}`,
     handleSlash: async () => ({ handled: true, text: 'slash ok' }),
     submitTurn: async (_text: string, hooks: import('./App.tsx').TurnHooks) => {
@@ -68,30 +66,6 @@ test('a busy turn shows what is running, not a random verb', async () => {
   } finally {
     unmount()
   }
-})
-
-test('a failed risk pre-check lets the message through instead of raising an error and a y/n', async () => {
-  let submitted = ''
-  const props = {
-    ...baseProps(),
-    classifyRisk: async () => {
-      throw new Error('Tool call validation failed: attempted to call tool run_command')
-    },
-    submitTurn: async (text: string) => {
-      submitted = text
-    },
-  }
-  const { stdin, lastFrame } = render(<App {...props} />)
-  await waitForFrame(lastFrame, READY)
-  await settle()
-  stdin.write('change the greeting')
-  await waitForFrame(lastFrame, 'change the greeting')
-  stdin.write('\r')
-  await new Promise((resolve) => setTimeout(resolve, 80))
-  expect(submitted).toBe('change the greeting')
-  expect(lastFrame()).not.toContain('Risk check failed')
-  // Case-insensitive: the confirm now shows its default as `y/N`.
-  expect(lastFrame()).not.toMatch(/y\/n/i)
 })
 
 test('App streams a turn: user line, tool card, assistant text', async () => {
@@ -141,9 +115,7 @@ test('Shift+Tab into plan mode makes the turn read-only and offers to execute', 
   const { stdin, lastFrame } = render(<App {...props} />)
   await waitForFrame(lastFrame, READY)
   await settle()
-  stdin.write(SHIFT_TAB) // manual → auto-accept
-  await waitForFrame(lastFrame, 'auto-accept on')
-  stdin.write(SHIFT_TAB) // auto-accept → plan
+  stdin.write(SHIFT_TAB) // autonomous → plan
   await waitForFrame(lastFrame, 'plan mode on')
   stdin.write('research the task')
   await waitForFrame(lastFrame, 'research the task')
@@ -231,15 +203,16 @@ test('status bar reflects a live model change from getEnv', async () => {
   await waitForFrame(lastFrame, 'gpt-5.6-terra')
 })
 
-test('auto routing is named next to the model it is leading with', async () => {
+test('fallback routing is named next to the model it is leading with', async () => {
   // Two rows of the /model picker used to claim to be current at once, and the
-  // status row said only "mercury-2.5" — nothing on screen said the session was
-  // on auto at all.
+  // status row said only "mercury-2.5" — nothing on screen said the session
+  // would fall back to other providers. It said "auto", which read as one more
+  // autonomy switch; it is model fallback, so it says so.
   const { lastFrame } = render(
     <App {...baseProps()} getEnv={() => ({ model: 'mercury-2.5', providerLabel: 'mercury', providerName: 'mercury', routing: 'auto' as const })} />,
   )
   await waitForFrame(lastFrame, READY)
-  expect(lastFrame()).toContain('auto · mercury-2.5')
+  expect(lastFrame()).toContain('mercury-2.5 + fallback')
 })
 
 test('a session on one selected provider says nothing about routing', async () => {
@@ -248,7 +221,7 @@ test('a session on one selected provider says nothing about routing', async () =
   )
   await waitForFrame(lastFrame, READY)
   expect(lastFrame()).toContain('mercury-2.5')
-  expect(lastFrame()).not.toContain('auto · ')
+  expect(lastFrame()).not.toContain('fallback')
 })
 
 test('a codex-subscription message submits without a per-turn hand-off prompt', async () => {
@@ -258,14 +231,13 @@ test('a codex-subscription message submits without a per-turn hand-off prompt', 
   let submitted = ''
   const props = {
     ...baseProps(),
-    initialReplMode: 'auto' as const,
     getEnv: () => ({ model: 'gpt-5.6-terra', providerLabel: 'Codex', providerName: 'codex' }),
     submitTurn: async (text: string) => {
       submitted = text
     },
   }
   const { stdin, lastFrame } = render(<App {...props} />)
-  await waitForFrame(lastFrame, 'auto-accept on')
+  await waitForFrame(lastFrame, READY)
   await settle()
   stdin.write('build me a thing')
   await waitForFrame(lastFrame, 'build me a thing')
@@ -528,74 +500,6 @@ test('the token count keeps moving through a turn that streams nothing', async (
   }
 })
 
-test('a new turn counts its own tokens, not the ones before it', async () => {
-  let checks = 0
-  let release!: () => void
-  const held = new Promise<void>((resolve) => { release = resolve })
-  const props = {
-    ...baseProps(),
-    classifyRisk: async () => {
-      checks += 1
-      if (checks === 2) await held
-      return { risky: false }
-    },
-    submitTurn: async () => {
-      reportLiveOutput({ kind: 'settled', outputTokens: 900 })
-    },
-  }
-  const { stdin, lastFrame, unmount } = render(<App {...props} />)
-  try {
-    await waitForFrame(lastFrame, READY)
-    await settle()
-    stdin.write('first')
-    await waitForFrame(lastFrame, 'first')
-    stdin.write('\r')
-    await waitForFrame(lastFrame, READY)
-    await settle()
-    stdin.write('second')
-    await waitForFrame(lastFrame, 'second')
-    stdin.write('\r')
-    // The pre-check runs under the working line — with last turn's count wiped.
-    expect(await waitForFrame(lastFrame, 'Checking the request…')).not.toContain('tokens')
-    release()
-  } finally {
-    unmount()
-  }
-})
-
-test('the count carries from the risk pre-check into the turn it gated', async () => {
-  let release!: () => void
-  const held = new Promise<void>((resolve) => { release = resolve })
-  const props = {
-    ...baseProps(),
-    classifyRisk: async () => {
-      // The classifier is a model call of its own — real spend, on the line.
-      reportLiveOutput({ kind: 'settled', outputTokens: 140 })
-      return { risky: false }
-    },
-    submitTurn: async (_text: string, hooks: import('./App.tsx').TurnHooks) => {
-      hooks.onToolStart({ id: 'r', name: 'read_file', input: { path: 'src/store.ts' } })
-      await held
-    },
-  }
-  const { stdin, lastFrame, unmount } = render(<App {...props} />)
-  try {
-    await waitForFrame(lastFrame, READY)
-    await settle()
-    stdin.write('look at the store')
-    await waitForFrame(lastFrame, 'look at the store')
-    stdin.write('\r')
-    await waitForFrame(lastFrame, 'Reading store.ts…')
-    // One Enter press is one line: the turn keeps counting where the pre-check
-    // left off instead of dropping back to zero.
-    reportLiveOutput({ kind: 'settled', outputTokens: 60 })
-    await waitForFrame(lastFrame, '200 tokens', 5_000)
-    release()
-  } finally {
-    unmount()
-  }
-})
-
 // Session mubbhz5c-tnp9i0: `/settings` was typed while a run was in flight, so
 // it was queued. The drain handed it to `runOne`, which sent the literal text
 // to the model as a prompt — and the model, seeing a build request and no
@@ -805,35 +709,55 @@ test('a session can start working by itself, and you can talk to it while it doe
   }
 })
 
-// Seen on a real console with a slow model: Esc during "Checking the request"
-// printed "Stopping the turn…" and the turn then ran anyway — the stop handle
-// only existed once the turn proper had started.
-test('Esc during the risk pre-check stops the message before anything is sent', async () => {
-  let prompts = 0
-  let releaseCheck!: () => void
-  const checking = new Promise<void>((resolve) => { releaseCheck = resolve })
+test('a new turn counts its own tokens, not the ones before it', async () => {
+  let turns = 0
+  let release!: () => void
+  const held = new Promise<void>((resolve) => { release = resolve })
   const props = {
     ...baseProps(),
-    classifyRisk: async () => {
-      await checking
-      return { risky: false }
-    },
-    submitTurn: async () => {
-      prompts += 1
+    submitTurn: async (_t: string, hooks: import('./App.tsx').TurnHooks) => {
+      turns += 1
+      if (turns === 1) {
+        reportLiveOutput({ kind: 'settled', outputTokens: 900 })
+        return
+      }
+      hooks.onActivity({ kind: 'status', title: 'Second turn working', status: 'started' })
+      await held
     },
   }
-  const { stdin, lastFrame } = render(<App {...props} />)
-  await waitForFrame(lastFrame, READY)
-  await settle()
-  stdin.write('deploy the thing')
-  await waitForFrame(lastFrame, 'deploy the thing')
-  stdin.write('\r')
-  await waitForFrame(lastFrame, 'Checking the request')
-  stdin.write('\u001b')
-  await waitForFrame(lastFrame, 'Stopped before it started')
-  // The classifier answering late changes nothing.
-  releaseCheck()
-  await new Promise((resolve) => setTimeout(resolve, 150))
-  expect(prompts).toBe(0)
-  expect(lastFrame()).toContain(READY)
+  const { stdin, lastFrame, unmount } = render(<App {...props} />)
+  try {
+    await waitForFrame(lastFrame, READY)
+    await settle()
+    stdin.write('first')
+    await waitForFrame(lastFrame, 'first')
+    stdin.write('\r')
+    await waitForFrame(lastFrame, READY)
+    await settle()
+    stdin.write('second')
+    await waitForFrame(lastFrame, 'second')
+    stdin.write('\r')
+    // The second turn's working line starts from zero, not from the first turn's 900.
+    expect(await waitForFrame(lastFrame, 'Second turn working')).not.toContain('900')
+    release()
+  } finally {
+    unmount()
+  }
+})
+
+test('there is one way of working: no approval posture to pick, and shift+tab only toggles plan mode', async () => {
+  const { stdin, lastFrame, unmount } = render(<App {...baseProps()} />)
+  try {
+    const idle = await waitForFrame(lastFrame, READY)
+    expect(idle).not.toContain('ask first')
+    expect(idle).not.toContain('auto-accept')
+    await settle()
+    stdin.write('\x1b[Z')
+    await waitForFrame(lastFrame, 'plan mode on')
+    stdin.write('\x1b[Z')
+    const back = await waitForFrame(lastFrame, READY)
+    expect(back).not.toContain('plan mode on')
+  } finally {
+    unmount()
+  }
 })

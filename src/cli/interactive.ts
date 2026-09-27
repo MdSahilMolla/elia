@@ -45,9 +45,12 @@ import { removeProviderConfiguration, savedProviderNames } from '../providerSett
 import { flagValue, hasFlag, positionals } from './argv.ts'
 import { describeCliError } from './errors.ts'
 import { ensureFirstRunProviderSetup, interactiveProviderSetup, prewarmActiveProvider, runCodexLogin } from './providerSetup.ts'
-import { actionApprovalPrompt, allSlashCommands, approvalTitle, classifyCommandRisk, loadRuntimeSkills, printTurnProfileReport, requestedAgentMode, userMessage, warnIfAtFilesystemRoot } from './runtime.ts'
+import { actionApprovalPrompt, allSlashCommands, approvalTitle, loadRuntimeSkills, printTurnProfileReport, requestedAgentMode, userMessage, warnIfAtFilesystemRoot } from './runtime.ts'
 import type { ProviderActivity } from '../providers/types.ts'
 import { type ToolEvent } from '../agentLoop.ts'
+
+/** There is one way elia works — autonomously — so the switches that chose between ways are gone. */
+const AUTO_RETIRED = 'elia is always autonomous now, so /auto is gone: big new-project requests always run through the full pipeline (plan → workers → verify → repair), and everything else just runs.'
 
 /** `/quickchat` was folded into the default mode: a message sent mid-turn is answered right away. */
 const QUICKCHAT_RETIRED = '/quickchat is gone — you no longer need it. While elia works, just type: every message gets an answer right away, with the whole session in view, and anything that should change the work is passed on to it.'
@@ -145,22 +148,18 @@ export async function runInteractive(): Promise<void> {
   let priorUsage: SessionUsageSnapshot = { usage: ZERO_USAGE, turns: 0, elapsedMs: 0 }
   /** Where the current conversation begins in this process's own usage counters — see cumulativeSessionUsage. */
   let usageBaseline: SessionUsageSnapshot = { usage: ZERO_USAGE, turns: 0, elapsedMs: 0 }
-  // manual (default): a cheap risk check runs before each command — only
-  // commands flagged risky (deletes, sends, spend, publishing, system
-  // changes, ...) get an "About to: ... run it?" prompt; everything else just
-  // runs. auto (--yolo, or "/settings" → Risk checks): skips the pre-flight prompt while the
-  // shared governor still blocks or requests approval for critical actions.
-  // Safe and reversible work runs end to end without interruption.
-  let replMode: 'manual' | 'auto' = hasFlag('--yolo', '-y') ? 'auto' : 'manual'
+  // elia works autonomously, always: no pre-flight risk check, and local,
+  // reversible work (edits, commits, staging, setup) runs without asking. The
+  // one gate left is the governor's critical band — actions that cannot be
+  // undone or that reach outside this machine (push, deploy, send, spend,
+  // delete, a remote database) — which asks once, with "always allow".
   // After a turn that changed code, run the project's own checks and repair any
   // failure before reporting done. On by default; --no-verify or /verify off.
   let autoVerify = !hasFlag('--no-verify')
-  // When the first line of a request reads as a whole new project ("build me an
-  // end-to-end X"), route it through the autonomous pipeline — plan, parallel
-  // workers, adversarial review, verify, repair — instead of letting the plain
-  // turn wing a twenty-file scaffold. On by default in dev mode; --no-escalate
-  // or /auto off. Targeted edits and questions always stay on the fast path.
-  let autoEscalate = !hasFlag('--no-escalate')
+  // A request that reads as a whole new project ("build me an end-to-end X")
+  // always runs through the autonomous pipeline — plan, parallel workers,
+  // adversarial review, verify, repair — instead of a plain turn winging a
+  // twenty-file scaffold. Targeted edits and questions stay on the fast path.
   // Answer work that has something executable to check by trying it several
   // different ways at once — each in its own worktree — and keeping the one a
   // real check passes, instead of committing to whichever line of attack the
@@ -356,7 +355,6 @@ export async function runInteractive(): Promise<void> {
   ): Promise<import('../autonomy/outcome.ts').CompletionState | undefined> {
     const { runAutonomousTask, autoApprove } = await import('../autonomy/loop.ts')
     const { setReportSink } = await import('../ui/report.ts')
-    const { renderProposalSummary } = await import('../autonomy/proposal.ts')
 
     const note = (title: string, detail?: string, status: 'updated' | 'completed' = 'updated') => {
       if (uiHooks?.onActivity) uiHooks.onActivity({ kind: 'status', status, title, detail })
@@ -366,7 +364,7 @@ export async function runInteractive(): Promise<void> {
     // without this the first thing on screen was subagents nobody asked for.
     note(
       uiHooks
-        ? 'This reads as a new project, so elia will research it first and show you a plan to approve before building anything.'
+        ? 'This reads as a new project, so elia will research it, plan it, and build it — the plan shows as it starts.'
         : `This looks like a full build (${reason}) — planning it properly.`,
       uiHooks ? '/auto off answers requests like this in a single reply instead.' : undefined,
       'completed',
@@ -407,25 +405,11 @@ export async function runInteractive(): Promise<void> {
       })
     }
 
-    const ttyApprover = !uiHooks && process.stdin.isTTY && !hasFlag('--yolo', '-y')
-    const approvalRl = ttyApprover ? createSlashPrompt([]) : undefined
-    const approve: import('../autonomy/loop.ts').Approver = uiHooks?.approve
-      ? async (proposal) => {
-          const preview = renderProposalSummary(proposal)
-          const res = await uiHooks.approve!({ title: 'Run this plan?', lines: [], preview, ruleLabel: 'this plan', variant: 'plan' })
-          const outcome = typeof res === 'boolean' ? { approved: res, feedback: undefined } : res
-          if (outcome.approved) {
-            // The live plan panel follows these steps; each ticks off as the
-            // worker carrying its step id finishes.
-            uiHooks.onRunPlan?.(proposal.steps.map((step) => ({ id: step.id, title: step.title })))
-            return { action: 'approve' }
-          }
-          if ('feedback' in outcome && outcome.feedback) return { action: 'amend', feedback: outcome.feedback }
-          return { action: 'reject' }
-        }
-      : approvalRl
-        ? () => confirmOnce(approvalRl, 'Approve this plan? [y]es / [n]o / [e]dit <what to change>: ')
-        : autoApprove
+    // The plan is shown and run, never put to a vote: elia is autonomous.
+    const approve: import('../autonomy/loop.ts').Approver = async (proposal) => {
+      uiHooks?.onRunPlan?.(proposal.steps.map((step) => ({ id: step.id, title: step.title })))
+      return autoApprove(proposal)
+    }
 
     try {
       const result = await runAutonomousTask({
@@ -439,6 +423,7 @@ export async function runInteractive(): Promise<void> {
         mode,
         profile: 'balanced',
         governanceMode: 'supervised',
+        reviewRunsFreely: true,
         signal,
         polish: true,
         // A build asked for from the chat stays local unless the request itself
@@ -472,7 +457,6 @@ export async function runInteractive(): Promise<void> {
       throw error
     } finally {
       setReportSink(undefined)
-      approvalRl?.close()
     }
   }
 
@@ -594,7 +578,19 @@ export async function runInteractive(): Promise<void> {
         }
       }
       const merged = await search.settle(outcome.result.best)
-      const report = outcome.result.best?.text ?? 'The search produced no answer.'
+      // The attempt's report is its own account, written inside a sandbox. Say
+      // what really reached this tree: whether it was verified, and whether a
+      // commit it describes landed here or only its files did.
+      const mergeReport = search.lastMerge()
+      const facts = [
+        outcome.result.verified ? '' : 'Not verified: no check passed for this attempt — review the change before relying on it.',
+        mergeReport && mergeReport.commits > 0
+          ? mergeReport.commitsCarried
+            ? `The attempt's ${mergeReport.commits} commit(s) are now on this branch.`
+            : `The attempt made ${mergeReport.commits} commit(s) in its sandbox, but they were not reproduced here because ${mergeReport.commitsNote ?? 'the fast-forward was not possible'}; its changes are in the working tree, uncommitted.`
+          : '',
+      ].filter(Boolean)
+      const report = `${outcome.result.best?.text ?? 'The search produced no answer.'}${facts.length > 0 ? `\n\n${facts.map((fact) => `**${fact}**`).join('\n\n')}` : ''}`
       // The model sees the winning attempt's own report, so a follow-up turn
       // knows what was done; the receipt is for the person and says plainly
       // whether it was proved or merely chosen.
@@ -966,7 +962,7 @@ export async function runInteractive(): Promise<void> {
     // not run while elia's own source still needs asking about.
     const selfEditClosed = selfEdit.selfEditGuard()?.allowed === false
     const searchPlan =
-      reasonSearch && !selfEditClosed && mode === 'dev' && !persona && !uiHooks?.planMode && !(autoEscalate && escalation.escalate)
+      reasonSearch && !selfEditClosed && mode === 'dev' && !persona && !uiHooks?.planMode && !escalation.escalate
         ? await planSearch(userText)
         : undefined
     // A searched turn already chose its winner with the project's own checks;
@@ -977,7 +973,7 @@ export async function runInteractive(): Promise<void> {
     // it does, one independent attempt checks it. --no-search or /search off
     // turns it off with the rest of the reasoning search.
     const answerCheckPlanned =
-      reasonSearch && mode === 'dev' && !persona && !uiHooks?.planMode && !searchPlan && !(autoEscalate && escalation.escalate)
+      reasonSearch && mode === 'dev' && !persona && !uiHooks?.planMode && !searchPlan && !escalation.escalate
         ? (await import('../reason/decide.ts')).decideAnswerCheck(userText).check
         : false
     const { ANSWER_GUIDANCE } = await import('../reason/answer.ts')
@@ -989,6 +985,7 @@ export async function runInteractive(): Promise<void> {
       const turn = await runTurn(messages, {
         mode,
         approveAction,
+        reviewRunsFreely: true,
         skillNames,
         signal: controller.signal,
         silent: Boolean(uiHooks),
@@ -1039,7 +1036,7 @@ export async function runInteractive(): Promise<void> {
         // repaints the frame — the raw writes and Ink's own repaint race and
         // corrupt the terminal.
         await runPersonaTurn(messages, persona, skillNames, controller.signal, uiHooks)
-      } else if (autoEscalate && mode === 'dev' && !uiHooks?.planMode && escalation.escalate) {
+      } else if (mode === 'dev' && !uiHooks?.planMode && escalation.escalate) {
         escalated = true
         // "continue" is not the goal — the build the dead run never finished is.
         const completionState = await runEscalatedTurn(resumedGoal ?? userText, escalation.reason, approveAction, controller.signal, uiHooks)
@@ -1209,7 +1206,7 @@ export async function runInteractive(): Promise<void> {
           // `bun run build` — was refused even when the user had just allowed
           // the model to run that exact command. Ask the way the turn asks.
           const { createActionGovernor } = await import('../autonomy/governor.ts')
-          const gateGovernor = createActionGovernor({ mode: approveAction ? 'supervised' : 'unattended', approve: approveAction })
+          const gateGovernor = createActionGovernor({ mode: approveAction ? 'supervised' : 'unattended', approve: approveAction, reviewRunsFreely: true })
           const [systemOne, firstOutcome] = await Promise.all([
             askSystemOne().catch(() => undefined),
             runVerification(checks, root, controller.signal, gateGovernor, { onCheck: uiHooks?.onCheck, skipMissingPrograms: true }),
@@ -1616,24 +1613,6 @@ export async function runInteractive(): Promise<void> {
   if (oneShotPrompt) {
     let commandToRun = oneShotPrompt
 
-    // Non-TTY (piped/scripted) runs can't answer a prompt, so they skip straight
-    // to execution — same as today. A real terminal gets the same risk-gated
-    // ask as the interactive loop below, unless --yolo skips it.
-    if (!hasFlag('--yolo', '-y') && process.stdin.isTTY) {
-      const { risky, reason } = await classifyCommandRisk(commandToRun)
-      if (risky) {
-        const confirmPrompt = createSlashPrompt([])
-        const label = `${reason ? `${redactText(reason, 500)}\n` : ''}About to: "${redactText(commandToRun, 500)}" — run it? [y]es / [n]o / [e]dit: `
-        const result = await confirmOnce(confirmPrompt, label)
-        confirmPrompt.close()
-        if (result.action === 'reject') {
-          writeNotice('Skipped.')
-          return
-        }
-        if (result.action === 'amend') commandToRun = result.feedback
-      }
-    }
-
     try {
       await runCheckpointedTurn(commandToRun, process.stdin.isTTY ? async (assessment, request) => {
         const actionPrompt = createSlashPrompt([])
@@ -1681,11 +1660,7 @@ export async function runInteractive(): Promise<void> {
                 ? 'Data Science mode on — elia runs, validates, and records the analysis: ingestion, quality, statistics, ML, forecasting, causal inference, BI. type a prompt, "/" to see commands, or "exit" to quit'
               : 'dev mode on — building, debugging, testing, browser, and task workflows available. type a prompt, "/" to see commands, or "exit" to quit (Ctrl+C also works)',
     )
-    writeNotice(
-      replMode === 'auto'
-        ? 'auto mode (--yolo) — preliminary risk checks are skipped; safe work runs immediately, while governed irreversible actions still require explicit approval. "/settings" → Risk checks to turn checks back on.'
-        : 'manual mode — elia flags risky commands and asks before running them; safe commands just run. "/settings" → Risk checks for zero prompts.',
-    )
+    writeNotice('elia works on its own — it only stops for actions that cannot be undone or that reach outside this machine (push, deploy, send, spend, delete).')
     if (mode === 'dev') {
       try {
         const { detectGitHubContext, renderGitHubBanner } = await import('../github/context.ts')
@@ -2003,25 +1978,6 @@ export async function runInteractive(): Promise<void> {
   const handleBetaModePicker = (): Promise<void> => runModePicker('Beta modes & personas', BETA_MODE_ENTRIES)
 
   /** Set from the /settings risk-checks picker. */
-  function applyReplModeChoice(value: 'auto' | 'manual'): void {
-    replMode = value
-    writeNotice(
-      value === 'auto'
-        ? 'Auto mode — preliminary risk checks are skipped. Safe work runs immediately; governed irreversible actions still require explicit approval. "/settings" → Risk checks to re-enable checks.'
-        : 'Manual mode — elia flags risky commands and asks first; safe commands just run.',
-    )
-  }
-
-  async function handleReplModePicker(): Promise<void> {
-    const options = [
-      { label: replMode === 'manual' ? 'Manual (current)' : 'Manual', detail: 'flags risky commands, asks before running them', value: 'manual' },
-      { label: replMode === 'auto' ? 'Auto (current)' : 'Auto', detail: 'skips the pre-flight prompt; governed irreversible actions still require approval', value: 'auto' },
-    ]
-    const result = await pick('Risk checks', options, replMode === 'auto' ? 1 : 0)
-    if (result.type === 'select') applyReplModeChoice(result.value as 'auto' | 'manual')
-    else if (result.type === 'unavailable') writeNotice(`Current: ${replMode}`)
-  }
-
   async function handleProviderSettings(): Promise<void> {
     const saved = savedProviderNames()
     const options = [
@@ -2073,8 +2029,7 @@ export async function runInteractive(): Promise<void> {
   async function handleSettingsCommand(): Promise<void> {
     while (true) {
       const options = [
-        { label: 'Risk checks', detail: replMode, value: 'replMode' },
-        { label: 'Model & provider', detail: `${config.routingMode === 'auto' ? 'auto · ' : ''}${config.providerLabel} · ${config.model}`, value: 'model' },
+        { label: 'Model & provider', detail: `${config.providerLabel} · ${config.model}${config.routingMode === 'auto' ? ' + fallback' : ''}`, value: 'model' },
         { label: 'Provider connections', detail: `${savedProviderNames().length} API key(s) · ChatGPT subscription`, value: 'providers' },
         { label: 'Skills', detail: selectedSkillNames ? selectedSkillNames.join(', ') : 'all loaded', value: 'skills' },
         { label: 'Compact conversation', detail: conversationDetail('summarise it to free context'), value: 'compact' },
@@ -2086,8 +2041,7 @@ export async function runInteractive(): Promise<void> {
         return
       }
       if (result.type !== 'select') return
-      if (result.value === 'replMode') await handleReplModePicker()
-      else if (result.value === 'model') await handleModelCommand('')
+      if (result.value === 'model') await handleModelCommand('')
       else if (result.value === 'providers') await handleProviderSettings()
       else if (result.value === 'skills') await handleSkillsPicker()
       else if (result.value === 'compact') {
@@ -2335,29 +2289,13 @@ export async function runInteractive(): Promise<void> {
         picker: {
           title: 'Settings',
           options: [
-            { label: 'Risk checks', detail: replMode, value: 'risk' },
-            { label: 'Model & provider', detail: `${config.routingMode === 'auto' ? 'auto · ' : ''}${config.providerLabel} · ${config.model}`, value: 'model' },
+            { label: 'Model & provider', detail: `${config.providerLabel} · ${config.model}${config.routingMode === 'auto' ? ' + fallback' : ''}`, value: 'model' },
             { label: 'Theme', detail: (await import('../ui/app/theme.ts')).themeName, value: 'theme' },
             { label: 'Mode / persona', detail: persona ?? mode, value: 'mode' },
             { label: 'Compact conversation', detail: conversationDetail('summarise it to free context'), value: 'compact' },
             { label: 'Clear conversation', detail: conversationDetail('start fresh; this one stays resumable'), value: 'clear' },
           ],
           onSelect: (value) => {
-            if (value === 'risk') {
-              return {
-                handled: true,
-                picker: {
-                  title: 'Risk checks',
-                  options: [
-                    { label: replMode === 'manual' ? 'Manual (current)' : 'Manual', detail: 'flag risky commands, ask first', value: 'manual' },
-                    { label: replMode === 'auto' ? 'Auto (current)' : 'Auto', detail: 'skip the pre-flight prompt; governor still gates critical actions', value: 'auto' },
-                  ],
-                  onSelect: (v) => {
-                    if (v === 'manual' || v === 'auto') applyReplModeChoice(v)
-                  },
-                },
-              }
-            }
             if (value === 'model') return handleSlashForInk('/model')
             if (value === 'theme') return handleSlashForInk('/theme')
             if (value === 'mode') return handleSlashForInk('/mode')
@@ -2807,13 +2745,7 @@ export async function runInteractive(): Promise<void> {
       return { handled: true, enterPlanMode: true, text: 'Plan mode — describe the task and elia researches it and proposes a plan before changing anything. Enter runs the plan; shift+tab leaves plan mode.' }
     }
 
-    const escalateMatch = /^\/(?:auto|escalate)(?:\s+(on|off))?$/.exec(trimmed)
-    if (escalateMatch) {
-      if (escalateMatch[1]) autoEscalate = escalateMatch[1] === 'on'
-      return done(
-        `Auto-escalation ${autoEscalate ? 'on' : 'off'} — a request that reads as a whole new project ${autoEscalate ? 'routes through the autonomous pipeline (plan → workers → verify → repair)' : 'runs as a plain turn'}. Targeted edits are unaffected.`,
-      )
-    }
+    if (/^\/(?:auto|escalate)\b/.test(trimmed)) return done(AUTO_RETIRED)
 
     const selfMatch = /^\/self(?:\s+(on|off))?$/.exec(trimmed)
     if (selfMatch) {
@@ -2911,21 +2843,8 @@ export async function runInteractive(): Promise<void> {
       initialTurn,
       getEnv: () => ({ model: config.model, providerLabel: config.providerLabel, providerName: config.providerName, routing: config.routingMode }),
       commands: allSlashCommands(),
-      initialReplMode: replMode,
       messages,
       greeting,
-      // A pre-check that could not answer is not a verdict. Every risky action
-      // in this REPL is still gated one at a time by the governor's approval
-      // menu, so a classifier outage lets the message through instead of
-      // stopping a harmless request behind an error and a y/n prompt.
-      classifyRisk: async (command) => {
-        try {
-          const verdict = await classifyCommandRisk(command)
-          return 'unavailable' in verdict && verdict.unavailable ? { risky: false } : verdict
-        } catch {
-          return { risky: false }
-        }
-      },
       runShellLine: async (command) => {
         const { runShell, formatShellResult, clampOutput } = await import('../shell.ts')
         const result = await runShell(command, undefined, process.cwd())
@@ -3017,16 +2936,6 @@ export async function runInteractive(): Promise<void> {
     if (trimmed.startsWith('!')) {
       const command = trimmed.slice(1).trim()
       if (!command) continue
-      if (replMode === 'manual') {
-        const { risky, reason } = await classifyCommandRisk(command)
-        if (risky) {
-          const decision = await confirmOnce(prompt, `${reason ? `${redactText(reason, 500)}\n` : ''}About to run: "${redactText(command, 500)}" — run it? [y]es / [n]o: `)
-          if (decision.action !== 'approve') {
-            writeNotice('Skipped.')
-            continue
-          }
-        }
-      }
       const { runShell, formatShellResult, clampOutput } = await import('../shell.ts')
       const shellResult = await runShell(command, undefined, process.cwd())
       const rendered = clampOutput(formatShellResult(shellResult), 8_000)
@@ -3287,10 +3196,8 @@ export async function runInteractive(): Promise<void> {
       }
       continue
     }
-    const escalateClassic = /^\/(?:auto|escalate)(?:\s+(on|off))?$/.exec(trimmed)
-    if (escalateClassic) {
-      if (escalateClassic[1]) autoEscalate = escalateClassic[1] === 'on'
-      writeNotice(`Auto-escalation ${autoEscalate ? 'on' : 'off'} — big new-project requests ${autoEscalate ? 'route through the autonomous pipeline' : 'run as a plain turn'}.`)
+    if (/^\/(?:auto|escalate)\b/.test(trimmed)) {
+      writeNotice(AUTO_RETIRED)
       continue
     }
     const selfClassic = /^\/self(?:\s+(on|off))?$/.exec(trimmed)
@@ -3494,19 +3401,6 @@ export async function runInteractive(): Promise<void> {
         continue
       }
     }
-    if (replMode === 'manual') {
-      const { risky, reason } = await classifyCommandRisk(commandToRun)
-      if (risky) {
-        const label = `${reason ? `${redactText(reason, 500)}\n` : ''}About to: "${redactText(commandToRun, 500)}" — run it? [y]es / [n]o / [e]dit: `
-        const result = await confirmOnce(prompt, label)
-        if (result.action === 'reject') {
-          writeNotice('Skipped.')
-          continue
-        }
-        if (result.action === 'amend') commandToRun = result.feedback
-      }
-    }
-
     const turnText = carriedShellContext.length > 0
       ? `${carriedShellContext.splice(0).join('\n\n')}\n\n${commandToRun}`
       : commandToRun

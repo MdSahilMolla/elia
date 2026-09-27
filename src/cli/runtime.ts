@@ -47,7 +47,6 @@ const REPL_COMMANDS: SlashCommand[] = [
   { name: '/eliaspace', description: 'collaborative workspace — status, feed, members, agents' },
   { name: '/artifact', description: 'browse saved plan artifacts' },
   { name: '/verify', description: 'run project checks · /verify on|off' },
-  { name: '/auto', description: 'auto-escalate big builds to the autonomous pipeline · /auto on|off' },
   { name: '/self', description: "stop asking before elia changes its own source · /self on|off" },
   { name: '/cost', description: 'token & cost breakdown' },
   { name: '/usage', description: 'live token consumption, context & limits' },

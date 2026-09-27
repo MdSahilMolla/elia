@@ -1,5 +1,5 @@
 import { join } from 'node:path'
-import { createWorktree, mergeWorktreeIntoCwd, parseStatus, removeWorktree, runGit } from '../autonomy/worktree.ts'
+import { changesSinceBase, createWorktree, mergeWorktreeBack, removeWorktree, type MergeReport } from '../autonomy/worktree.ts'
 import { withRepoLock } from '../repoLock.ts'
 import type { Worktree } from '../autonomy/worktree.ts'
 import { failureBriefing } from './select.ts'
@@ -49,6 +49,12 @@ export interface IsolatedSearch {
    * without an answer still has to leave the user's checkout clean.
    */
   settle(winner?: Candidate): Promise<string[]>
+  /**
+   * What the settle that merged a winner did — including whether commits the
+   * attempt made inside its worktree landed on the real branch. The attempt's
+   * own report may say "committed"; this is what actually happened.
+   */
+  lastMerge(): MergeReport | undefined
   /** Worktrees currently held, so a caller can report or clean up after a crash. */
   held(): Worktree[]
   /**
@@ -91,6 +97,7 @@ export function isolatedSearch(options: IsolatedSearchOptions): IsolatedSearch {
   const worktrees = new Map<string, Worktree>()
   let index = 0
   let settled = false
+  let merge: MergeReport | undefined
 
   const produce: Producer = async ({ approach, round, priorFailures, signal }) => {
     const slot = index++
@@ -130,11 +137,11 @@ export function isolatedSearch(options: IsolatedSearchOptions): IsolatedSearch {
   return {
     produce,
     held: () => [...worktrees.values()],
+    lastMerge: () => merge,
     async changedBy(candidate) {
       const worktree = worktrees.get(candidate.id)
       if (!worktree) return []
-      const status = await runGit(['status', '--porcelain'], worktree.path)
-      return status.exitCode === 0 ? parseStatus(status.stdout).map((change) => change.path) : []
+      return (await changesSinceBase(worktree)).map((change) => change.path)
     },
     async settle(winner) {
       if (settled) return []
@@ -143,7 +150,8 @@ export function isolatedSearch(options: IsolatedSearchOptions): IsolatedSearch {
       // Merge before cleanup, and only ever the winner: copying a rejected
       // attempt's files into the user's tree is the one unrecoverable mistake
       // available here.
-      const merged = winning ? await mergeWorktreeIntoCwd(winning, options.sourceRoot) : []
+      merge = winning ? await mergeWorktreeBack(winning, options.sourceRoot) : undefined
+      const merged = merge?.files ?? []
       for (const worktree of worktrees.values()) {
         await removeWorktree(worktree, options.sourceRoot)
       }

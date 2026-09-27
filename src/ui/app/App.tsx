@@ -146,11 +146,9 @@ export interface AppProps {
   /** Live provider/model — read every render so a `/model` switch shows immediately. */
   getEnv(): AppEnv
   commands: SlashCommand[]
-  initialReplMode: 'manual' | 'auto'
   messages: ChatMessage[]
   submitTurn(text: string, hooks: TurnHooks): Promise<void>
   runShellLine(command: string): Promise<string>
-  classifyRisk(command: string): Promise<{ risky: boolean; reason?: string }>
   handleSlash(command: string): Promise<SlashOutcome>
   greeting: string
   /** CLI version, for the startup banner. */
@@ -250,7 +248,7 @@ export function App(props: AppProps) {
       lessons: lessonTally.count,
       lessonsHelp: lessonTally.helps,
       lessonsHurt: lessonTally.hurts,
-      model: routing === 'auto' ? `auto · ${named}` : named,
+      model: routing === 'auto' ? `${named} + fallback` : named,
     })
   }
   // The header is the first scrollback item — printed once through <Static>,
@@ -273,8 +271,10 @@ export function App(props: AppProps) {
   // first new items.
   const [transcriptEpoch, setTranscriptEpoch] = useState(0)
 
-  const [mode, setMode] = useState<ReplMode>(props.initialReplMode)
-  const modeRef = useRef<ReplMode>(props.initialReplMode)
+  // elia is always autonomous; the one other state is plan mode (research and
+  // propose before changing anything), which shift+tab toggles.
+  const [mode, setMode] = useState<ReplMode>('auto')
+  const modeRef = useRef<ReplMode>('auto')
   useEffect(() => {
     modeRef.current = mode
   }, [mode])
@@ -350,10 +350,6 @@ export function App(props: AppProps) {
     progress.current = { tokens: 0, lastAt: startedAt }
     outputBefore.current = sessionUsageSnapshot().usage.outputTokens
   }, [])
-  // When the risk pre-check has already put the working line up for a message,
-  // the turn that follows inherits its clock and its count: one Enter press is
-  // one line, not a count that climbs, drops to zero and starts over.
-  const carriedTurnStart = useRef<number | undefined>(undefined)
   // Every model call under the turn reports what it produced as it lands — the
   // lead's own steps, a sub-agent's, an escalated run's. A finished call is
   // also a sign of life, however quiet it was.
@@ -526,7 +522,7 @@ export function App(props: AppProps) {
         }
       }
     }
-    if (key.shift && key.tab && !modalOrOverlayOpen) setMode((m) => (m === 'manual' ? 'auto' : m === 'auto' ? 'plan' : 'manual'))
+    if (key.shift && key.tab && !modalOrOverlayOpen) setMode((m) => (m === 'plan' ? 'auto' : 'plan'))
   })
 
   // What the live lane reads about the running turn. Plain refs refreshed on
@@ -615,7 +611,7 @@ export function App(props: AppProps) {
     if (!planReady || busy) return
     if (key.return) {
       setPlanReady(false)
-      setMode('manual')
+      setMode('auto')
       executePlan.current?.()
     } else if (key.escape || input === 'k') {
       setPlanReady(false)
@@ -624,9 +620,7 @@ export function App(props: AppProps) {
 
   const runOne = useCallback(
     async (text: string, opts?: { echo?: boolean; body?: (hooks: TurnHooks) => Promise<void> }) => {
-      const carried = carriedTurnStart.current
-      carriedTurnStart.current = undefined
-      const startedAt = carried ?? Date.now()
+      const startedAt = Date.now()
       busyRef.current = true
       setBusy(true)
       setStatus('')
@@ -634,7 +628,7 @@ export function App(props: AppProps) {
       setChecks([])
       setPlanEvidence(new Map())
       setStreamMode(null)
-      if (carried === undefined) beginProgress(startedAt)
+      beginProgress(startedAt)
       abortedRef.current = false
       setTurnStartedAt(startedAt)
       // onSubmit echoes the message the instant Enter is pressed so it never
@@ -1029,79 +1023,17 @@ export function App(props: AppProps) {
           return
         }
 
-        const ask = (title: string, lines: string[]) =>
-          new Promise<boolean>((resolve) =>
-            setConfirm({ title, lines: lines.filter(Boolean), resolve: (v) => { setConfirm(null); resolve(v) } }),
-          )
-
-        // Echo the message immediately — before the risk check — so pressing
-        // Enter always feels instant, not gated on a fast-tier round-trip.
+        // Echo the message immediately so pressing Enter always feels instant.
         store.appendUser(trimmed)
         lastUserText.current = trimmed
-
-        // When the ChatGPT subscription is the selected model, running Codex in
-        // the workspace is the whole point of that choice — it is confirmed once
-        // per session by the agent loop's own governor prompt, not re-approved on
-        // every message, and it skips the risky-prompt classifier (its prompts
-        // expose no Elia tools for the classifier to reason about).
-        const live = props.getEnv()
-        if (live.providerName !== 'codex' && mode === 'manual') {
-          setBusy(true)
-          const checkedAt = Date.now()
-          setTurnStartedAt(checkedAt)
-          // The working line is up from here, so the turn starts here too —
-          // otherwise the pre-check sits under the last turn's leftover total
-          // and the classifier's own tokens vanish when the turn proper begins.
-          beginProgress(checkedAt)
-          carriedTurnStart.current = checkedAt
-          setStatus('Checking the request')
-          // Esc stops a turn by aborting `abortRef`, which the turn proper only
-          // sets once it starts — so an Esc during this pre-check aborted
-          // nothing, "Stopping the turn…" printed, and the turn then ran anyway
-          // (seen on a real console with a slow model, where the check takes
-          // seconds). The pre-check owns the stop handle while it runs, and a
-          // stop ends the message here, before anything is sent.
-          const precheck = new AbortController()
-          abortRef.current = precheck
-          abortedRef.current = false
-          const stopped = new Promise<'stopped'>((resolve) => precheck.signal.addEventListener('abort', () => resolve('stopped'), { once: true }))
-          // A pre-check that fails is not a verdict. In manual mode every risky
-          // action is still put to you one at a time by the approval menu, so an
-          // unreachable classifier lets a harmless message through instead of
-          // greeting it with an error and a y/n prompt.
-          const verdict = await Promise.race([props.classifyRisk(trimmed).catch(() => ({ risky: false, reason: undefined })), stopped])
-          if (abortRef.current === precheck) abortRef.current = null
-          if (verdict === 'stopped') {
-            setBusy(false)
-            setStatus('')
-            store.receipt('Stopped before it started — nothing was sent', 'stopped')
-            store.commit()
-            return
-          }
-          const { risky, reason } = verdict
-          if (risky) {
-            setBusy(false)
-            setStatus('')
-            const ok = await ask('This request looks risky', [reason ?? '', `About to: ${trimmed}`])
-            if (!ok) {
-              carriedTurnStart.current = undefined
-              store.notice('Skipped.')
-              store.commit()
-              return
-            }
-          }
-        }
 
         await runOne(trimmed, { echo: false })
         await drainAfterTurn()
       } finally {
         turnStartingRef.current = false
-        // Nothing ran after the pre-check (an error, a declined risk prompt):
-        // don't leave a stale start time for the next message to inherit.
-        carriedTurnStart.current = undefined
       }
     },
-    [busy, mode, props, store, runOne, exit, writeStdout, beginProgress, answerLive, drainAfterTurn],
+    [busy, props, store, runOne, exit, writeStdout, answerLive, drainAfterTurn],
   )
   submitRef.current = onSubmit
 
@@ -1234,7 +1166,7 @@ export function App(props: AppProps) {
         <InputBox
           commands={props.commands}
           mode={mode}
-          onTabEmpty={() => setMode((m) => (m === 'plan' ? 'manual' : 'plan'))}
+          onTabEmpty={() => setMode((m) => (m === 'plan' ? 'auto' : 'plan'))}
           onHelp={() => setShowHelp(true)}
           onMenuChange={setInputMenuOpen}
           disabled={confirm !== null || approval !== null || picker !== null || textPrompt !== null || planReady || showHelp}
