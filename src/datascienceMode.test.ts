@@ -123,3 +123,15 @@ test('ingestion refuses to put an elia credential into a request header or conne
   await expect(loadSource({ url: 'https://api.example.com/data.json', headers: { Authorization: 'Bearer ${ANTHROPIC_API_KEY}' } })).rejects.toThrow('never forwarded')
   await expect(loadSource({ connection: 'postgres', dsnEnv: 'GITHUB_TOKEN', query: 'select 1' })).rejects.toThrow('never forwarded')
 })
+
+test('the engine never rewrites a parameter the governor assessed', async () => {
+  const { GOVERNED_PARAMS } = await import('./datascience/effects.ts')
+  for (const name of ['path', 'url', 'urlEnv', 'headers', 'allowLocal', 'connection', 'dsnEnv', 'code', 'passEnv']) expect(GOVERNED_PARAMS.has(name)).toBe(true)
+  const data = datascienceTools.find((tool) => tool.name === 'ds_data')!
+  // `paths` must not quietly become `path` (an unapproved project write) …
+  await expect(data.execute({ action: 'export', dataset: 'x', paths: 'out.csv' })).rejects.toThrow('unknown parameter(s) "paths"')
+  // … headers sent as JSON text must not be parsed after the governor saw no credential …
+  await expect(data.execute({ action: 'load', name: 'x', url: 'https://api.example.com/x', headers: '{"Authorization":"Bearer ${API_TOKEN}"}' })).rejects.toThrow('"headers" must be object')
+  // … and "true" must not turn on private-network access the governor did not see.
+  await expect(data.execute({ action: 'load', name: 'x', url: 'http://127.0.0.1/x', allowLocal: 'true' })).rejects.toThrow('"allowLocal" must be boolean')
+})

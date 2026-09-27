@@ -87,7 +87,7 @@ registerCapability({
     test: { type: 'string', enum: ['auto', 'welch_t', 'student_t', 'paired_t', 'one_sample_t', 'mann_whitney', 'wilcoxon', 'anova', 'welch_anova', 'kruskal', 'chi_square', 'fisher', 'two_proportion', 'shapiro', 'dagostino', 'jarque_bera', 'levene', 'bartlett', 'ks', 'correlation', 'manova'], description: 'test to run (default auto)' },
     value: { type: 'string', description: 'numeric outcome column (or categorical outcome for chi-square)' },
     group: { type: 'string', description: 'grouping column' },
-    groups: { type: 'array', description: 'the group levels to compare (default: all; two-sample tests use the first two)' },
+    groups: { type: 'array', description: 'the group levels to compare (default: all; a two-sample test on a column with more than two levels needs exactly two here)' },
     pair: { type: 'array', description: 'two columns measured on the same rows, for paired tests' },
     x: { type: 'string', description: 'first variable (correlation)' },
     y: { type: 'string', description: 'second variable (correlation)' },
@@ -144,7 +144,8 @@ registerCapability({
       const g = groupsOf(frame, value, group, onlyGroups)
       const names = onlyGroups ?? Object.keys(g).sort()
       if (names.length < 2) throw new Error(`need two groups in ${group}; found ${names.join(', ') || 'none'}`)
-      if (names.length > 2) ctx.record.warn(`${group} has ${names.length} levels; comparing the first two (${names[0]} vs ${names[1]}) — pass groups to choose`)
+      // Picking two of many levels silently would be an answer to a question nobody asked.
+      if (names.length > 2) throw new Error(`${test} compares two groups, but ${group} has ${names.length} levels (${names.slice(0, 5).join(', ')}${names.length > 5 ? ', …' : ''}). Pass groups: ["a", "b"] to choose two, derive a two-level column first, or use test "auto", "anova", or "kruskal" for all levels.`)
       return { a: g[names[0]!] ?? [], b: g[names[1]!] ?? [], names: [names[0]!, names[1]!] }
     }
     switch (test) {

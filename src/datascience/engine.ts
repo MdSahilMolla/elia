@@ -3,7 +3,7 @@ import { compileExpression } from './expr.ts'
 import type { Frame } from './frame.ts'
 import { RecordBuilder, type ExecutionRecord } from './record.ts'
 import { refOf, Workspace, type DatasetEntry } from './workspace.ts'
-import { datascienceEffect, EFFECTS, type Effect } from './effects.ts'
+import { datascienceEffect, EFFECTS, GOVERNED_PARAMS, type Effect } from './effects.ts'
 
 /**
  * The data-science execution engine. The model decides WHAT to do by calling an action;
@@ -71,6 +71,58 @@ export function effectOf(tool: string, action: string, params: Record<string, un
 export function usage(capability: Capability): string {
   const params = Object.entries(capability.params).map(([name, doc]) => `  ${name}${doc.required ? ' (required)' : ''}: ${doc.type}${doc.enum ? ` — one of ${doc.enum.join(', ')}` : ''} — ${doc.description}`)
   return `${capability.tool} action "${capability.action}": ${capability.summary}\n${params.join('\n')}${capability.example ? `\n  example: ${JSON.stringify(capability.example)}` : ''}`
+}
+
+/**
+ * Models often send an array or object as its JSON text ('["region","channel"]'), a number
+ * as a string, or `dataset` where the action takes `datasets`. Each is unambiguous, so it is
+ * normalised in place — and noted in the record — rather than failing the call.
+ */
+function normaliseParams(capability: Capability, params: Record<string, unknown>): string[] {
+  const notes: string[] = []
+  for (const key of Object.keys(params)) {
+    if (GOVERNED_PARAMS.has(key) || capability.params[key]) continue
+    const target = [`${key}s`, key.replace(/s$/, '')].find((candidate) => candidate !== key && !GOVERNED_PARAMS.has(candidate) && capability.params[candidate] && params[candidate] === undefined)
+    if (!target) continue
+    const value = params[key]
+    const targetType = capability.params[target]!.type
+    params[target] = targetType === 'array' && !Array.isArray(value) ? [value] : targetType === 'string' && Array.isArray(value) && value.length === 1 ? value[0] : value
+    delete params[key]
+    notes.push(`"${key}" read as "${target}"`)
+  }
+  for (const [name, doc] of Object.entries(capability.params)) {
+    const value = params[name]
+    if (typeof value !== 'string' || GOVERNED_PARAMS.has(name)) continue
+    const text = value.trim()
+    if ((doc.type === 'array' || doc.type === 'string|array') && text.startsWith('[') && text.endsWith(']')) {
+      try {
+        const parsed: unknown = JSON.parse(text)
+        if (Array.isArray(parsed)) {
+          params[name] = parsed
+          notes.push(`"${name}" parsed from JSON text`)
+        }
+      } catch {
+        // Not JSON: a string|array parameter keeps the string; an array parameter fails its type check.
+      }
+    } else if (doc.type === 'object' && text.startsWith('{') && text.endsWith('}')) {
+      try {
+        const parsed: unknown = JSON.parse(text)
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          params[name] = parsed
+          notes.push(`"${name}" parsed from JSON text`)
+        }
+      } catch {
+        // Left as is; the type check reports it.
+      }
+    } else if ((doc.type === 'number' || doc.type === 'integer') && /^-?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?$/i.test(text)) {
+      params[name] = Number(text)
+      notes.push(`"${name}" read as a number`)
+    } else if (doc.type === 'boolean' && (text === 'true' || text === 'false')) {
+      params[name] = text === 'true'
+      notes.push(`"${name}" read as a boolean`)
+    }
+  }
+  return notes
 }
 
 function checkParams(capability: Capability, params: Record<string, unknown>): void {
@@ -149,6 +201,7 @@ export async function runCapability(tool: DsTool, params: Record<string, unknown
     const actions = capabilitiesFor(tool).map((c) => `${c.action} — ${c.summary}`)
     throw new Error(`${tool} has no action "${action}". Actions:\n${actions.join('\n')}`)
   }
+  const normalised = normaliseParams(capability, params)
   try {
     checkParams(capability, params)
   } catch (error) {
@@ -156,6 +209,8 @@ export async function runCapability(tool: DsTool, params: Record<string, unknown
   }
   const workspace = new Workspace()
   const record = new RecordBuilder(tool, action, params)
+  // Recorded, not warned: how the call was spelled is not a caveat on the data.
+  if (normalised.length) record.metric('inputNormalised', normalised)
   const ctx: ActionContext = {
     params,
     workspace,

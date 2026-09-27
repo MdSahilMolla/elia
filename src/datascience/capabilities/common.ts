@@ -7,7 +7,12 @@ import { assertDatasetName } from '../workspace.ts'
 
 export function list(value: unknown, name: string): string[] {
   if (value === undefined || value === null) return []
-  if (typeof value === 'string') return value.split(',').map((item) => item.trim()).filter(Boolean)
+  if (typeof value === 'string') {
+    // "a, b", or a list written as text: "[a, b]" / '["a","b"]'.
+    const text = value.trim()
+    const inner = text.startsWith('[') && text.endsWith(']') ? text.slice(1, -1) : text
+    return inner.split(',').map((item) => item.trim().replace(/^["'`]|["'`]$/g, '')).filter(Boolean)
+  }
   if (Array.isArray(value) && value.every((item) => typeof item === 'string')) return value as string[]
   throw new Error(`"${name}" must be a column name or an array of column names`)
 }

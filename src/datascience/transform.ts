@@ -184,7 +184,9 @@ const STEPS: Record<string, { usage: string; run: StepFn }> = {
   derive: {
     usage: '{ "op": "derive", "columns": { "margin": "revenue - cost", "order_month": "month_start(order_date)" } }',
     run(frame, params) {
-      const specs = (params.columns ?? (typeof params.column === 'string' && typeof params.expr === 'string' ? { [params.column]: params.expr } : undefined)) as Record<string, string> | undefined
+      const single = [params.column, params.name, params.as, params.output].find((value): value is string => typeof value === 'string')
+      const expression = [params.expr, params.expression, params.formula].find((value): value is string => typeof value === 'string')
+      const specs = (params.columns ?? (single && expression ? { [single]: expression } : undefined)) as Record<string, string> | undefined
       if (!specs || typeof specs !== 'object' || Object.keys(specs).length === 0) throw new Error('derive needs columns: { "new_column": "expression" }')
       let current = frame
       const notes: string[] = []

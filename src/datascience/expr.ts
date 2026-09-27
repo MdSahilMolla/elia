@@ -82,7 +82,7 @@ function tokenize(source: string): Token[] {
       index += 2
       continue
     }
-    if ('+-*/%^()<>=!,[]'.includes(character)) {
+    if ('+-*/%^()<>=!,[]?:'.includes(character)) {
       tokens.push({ type: 'op', value: character === '=' ? '==' : character, position: start })
       index++
       continue
@@ -99,7 +99,7 @@ class Parser {
   constructor(private readonly tokens: Token[]) {}
 
   parse(): Node {
-    const node = this.or()
+    const node = this.ternary()
     if (this.peek().type !== 'eof') throw new Error(`unexpected "${this.peek().value}" at position ${this.peek().position}`)
     return node
   }
@@ -134,6 +134,17 @@ class Parser {
     } finally {
       this.depth--
     }
+  }
+
+  /** `cond ? a : b` — the same as if(cond, a, b); right-associative, lowest precedence. */
+  private ternary(): Node {
+    const condition = this.or()
+    if (!this.isOp('?')) return condition
+    this.take()
+    const whenTrue = this.nested(() => this.ternary())
+    this.expectOp(':')
+    const whenFalse = this.nested(() => this.ternary())
+    return { kind: 'call', name: 'if', args: [condition, whenTrue, whenFalse] }
   }
 
   private or(): Node {
@@ -233,14 +244,14 @@ class Parser {
     if (token.type === 'number') return { kind: 'literal', value: Number(token.value) }
     if (token.type === 'string') return { kind: 'literal', value: token.value }
     if (token.type === 'op' && token.value === '(') {
-      const node = this.nested(() => this.or())
+      const node = this.nested(() => this.ternary())
       this.expectOp(')')
       return node
     }
     if (token.type === 'op' && token.value === '[') {
       const items: Node[] = []
       if (!this.isOp(']')) {
-        do items.push(this.nested(() => this.or()))
+        do items.push(this.nested(() => this.ternary()))
         while (this.isOp(',') && this.take())
       }
       this.expectOp(']')
@@ -254,7 +265,7 @@ class Parser {
         this.take()
         const args: Node[] = []
         if (!this.isOp(')')) {
-          do args.push(this.nested(() => this.or()))
+          do args.push(this.nested(() => this.ternary()))
           while (this.isOp(',') && this.take())
         }
         this.expectOp(')')

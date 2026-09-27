@@ -98,3 +98,27 @@ test('a bad call returns the action usage and still leaves an error record', asy
   const unknown = await withAgentIdentity({ name: 't', role: 'lead', cwd: dir }, () => tool('ds_stats').execute({ action: 'nope' })).catch((e: Error) => e.message)
   expect(unknown).toContain('Actions:')
 })
+
+test('the spellings a real model sent in a live run are normalised, not refused', async () => {
+  // Each call below failed verbatim in a Data Science mode run on mercury-2.5.
+  const rc = await call('ds_analytics', { action: 'root_cause', dataset: 'orders', metric: '{"column":"amount","kind":"sum"}', dimensions: '["region", "channel"]', before: 'order_date >= "2025-08-01" and order_date < "2025-10-01"', after: 'order_date >= "2025-11-01"' })
+  expect(rc.status).not.toBe('error')
+  expect(rc.result.levels[0].segments[0].segment).toBe('South')
+  const described = await call('ds_stats', { action: 'describe', dataset: 'orders', columns: '["amount"]' })
+  expect(described.status).not.toBe('error')
+  const sql = await call('ds_data', { action: 'sql', dataset: 'orders', query: 'select count(*) as n from orders' })
+  expect(sql.result.preview[0].n).toBeGreaterThan(1000)
+  const derived = await call('ds_data', { action: 'transform', dataset: 'orders', output: 'orders_period', steps: '[{"op":"derive","name":"period","expression":"month(order_date) == 12 ? \'Dec\' : \'other\'"}]' })
+  expect(derived.status).toBe('passed')
+  const preview = await call('ds_data', { action: 'preview', dataset: 'orders_period', where: 'period == "Dec"', n: '3' })
+  expect(preview.status).not.toBe('error')
+  expect(JSON.stringify(preview.result)).toContain('Dec')
+})
+
+test('a two-sample test refuses a many-level grouping instead of comparing two arbitrary levels', async () => {
+  // Seen live: group by order_date (56 levels) + mann_whitney compared the first two dates and "passed".
+  const message = await withAgentIdentity({ name: 't', role: 'lead', cwd: dir }, () => tool('ds_stats').execute({ action: 'test', dataset: 'orders', value: 'amount', group: 'order_date', test: 'mann_whitney' })).catch((e: Error) => e.message)
+  expect(message).toContain('compares two groups')
+  const chosen = await call('ds_stats', { action: 'test', dataset: 'orders', value: 'amount', group: 'region', groups: ['North', 'South'], test: 'mann_whitney' })
+  expect(chosen.status).not.toBe('error')
+})

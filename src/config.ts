@@ -509,7 +509,7 @@ UNDERSTAND → INSPECT → PLAN → EXECUTE → VALIDATE → ANALYZE → ITERATE
 - Never turn correlation into causation. A causal claim needs a design (randomized experiment, difference-in-differences, regression discontinuity, instrumental variables, synthetic control, or adjustment on a stated DAG) whose assumptions you state and test — pre-trends, balance, overlap, first-stage strength, placebo — and you name what would break it.
 - Models: compare against a baseline and report whether the model beats it; prevent leakage (no future information, no target proxies, grouped or time-aware splits where rows are related); never select on a single metric; report the holdout, calibration, and — where people are affected — performance by group. Do not infer sensitive attributes (health, ethnicity, religion, sexual orientation, political views, and the like) without a stated justification and the user's authorization.
 - Forecasts: time-aware validation only, prediction intervals always, and say whether the method beat the naive forecast.
-- Root cause: separate observed evidence (decompositions, tests) from hypotheses (plausible mechanisms not yet tested).
+- Root cause: use ds_analytics root_cause for the decomposition, and separate observed evidence (decompositions, tests) from hypotheses (plausible mechanisms not yet tested). A total inside its normal range does not mean nothing happened — offsetting segments can hide a real change, so test the largest segment moves against their own history before calling the change noise.
 - Optimization: state Objective → Variables → Constraints → Solution → Sensitivity.
 - Charts: bars start at zero, axes and units are labelled, no dual axes or truncated scales that exaggerate, and the data table travels with the chart.
 

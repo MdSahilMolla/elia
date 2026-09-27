@@ -82,4 +82,11 @@ export function datascienceEffect(tool: string, action: string, params: Params):
   return typeof rule === 'function' ? rule(params) : rule
 }
 
+/**
+ * Parameters the governor reads to decide whether a call needs approval. The engine never
+ * rewrites these (no aliasing, JSON parsing, or type coercion): the value that was assessed
+ * must be the value that runs.
+ */
+export const GOVERNED_PARAMS: ReadonlySet<string> = new Set(['path', 'url', 'urlEnv', 'connection', 'dsnEnv', 'headers', 'allowLocal', 'code', 'passEnv', 'geojson', 'packages', 'profile', 'action'])
+
 export const DATASCIENCE_TOOLS = ['ds_data', 'ds_stats', 'ds_ml', 'ds_timeseries', 'ds_analytics', 'ds_report', 'ds_python'] as const

@@ -182,4 +182,9 @@ test('expressions are sandboxed, typo-checked, and null-safe', () => {
   expect(compileExpression('status != "x"', ['status']).test({ status: null })).toBe(true)
   expect(compileExpression('`order total` * 2', ['order total']).evaluate({ 'order total': 3 })).toBe(6)
   expect(compileExpression('x between 1 and 3 and y in ["a", "b"]', ['x', 'y']).test({ x: 2, y: 'b' })).toBe(true)
+  // `?:` is if(); it nests to the right and binds looser than `or`.
+  const t = compileExpression('amount > 100 ? "big" : amount > 10 ? "mid" : "small"', ['amount'])
+  expect([150, 50, 5].map((amount) => t.evaluate({ amount }))).toEqual(['big', 'mid', 'small'])
+  expect(compileExpression('if(amount > 1 or amount < 0 ? true : false, 1, 2)', ['amount']).evaluate({ amount: -1 })).toBe(1)
+  expect(() => compileExpression('amount > 1 ? "a"', ['amount'])).toThrow(/expected ":"/)
 })
