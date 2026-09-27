@@ -381,7 +381,7 @@ function etsFit(y: number[], m: number, kind: 'ses' | 'holt' | 'damped' | 'hwa' 
     const start = seasonal ? m : 1
     for (let t = 0; t < start; t++) fitted.push(y[t]!)
     for (let t = start; t < y.length; t++) {
-      const s = seasonal ? season[t % m]! : kind === 'hwm' ? 1 : 0
+      const s = seasonal ? season[t % m]! : 0
       const damp = kind === 'damped' ? phi! : 1
       const prediction = kind === 'hwm' ? (level + damp * trend) * s : level + damp * trend + (seasonal ? s : 0)
       fitted.push(prediction)
@@ -405,7 +405,7 @@ function etsFit(y: number[], m: number, kind: 'ses' | 'holt' | 'damped' | 'hwa' 
   }
   const start = kind === 'ses' ? [0.3] : kind === 'holt' ? [0.3, 0.1] : kind === 'damped' ? [0.3, 0.1, 0, 0.95] : [0.3, 0.1, 0.1]
   const lower = start.map(() => 0.0001)
-  const upper = start.map((_, index) => (kind === 'damped' && index === 3 ? 0.999 : 0.9999))
+  const upper: number[] = start.map((_, index) => (kind === 'damped' && index === 3 ? 0.999 : 0.9999))
   if (kind === 'damped') { lower[3] = 0.8; lower[2] = 0; upper[2] = 0 }
   const result = nelderMead((params) => run(params, 0).sse, start, { lower, upper, maxIterations: 600 })
   return { params: result.x, sse: result.value, forecast: (h) => run(result.x, h).forecast, fitted: run(result.x, 0).fitted }
