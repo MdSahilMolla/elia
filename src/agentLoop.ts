@@ -16,7 +16,7 @@ import { redactText } from './ui/redact.ts'
 import { endTextTurn, writeNotice, writeToolCall, writeToolResult } from './ui/stream.ts'
 import { startThinkingAnimation } from './ui/animator.ts'
 import { createStreamCursor } from './ui/streamCursor.ts'
-import { ZERO_USAGE, addUsage, reportLiveOutput } from './usage.ts'
+import { ZERO_USAGE, addUsage, reportLiveOutput, trackInflightUsage, type InflightUsage } from './usage.ts'
 import { spendState, spendStopPrompt } from './spendLimit.ts'
 import { SPECULABLE_TOOLS, type CacheStats, type ToolResultCache } from './speculation/cache.ts'
 import { readMemo } from './speculation/deterministicCache.ts'
@@ -291,6 +291,17 @@ export function isObservation(request: { name: string; input: Record<string, unk
 }
 
 export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentLoopResult> {
+  // Spend shows while the loop runs (usage.ts, "in flight"); the slot is
+  // cleared before the caller records the loop's final total.
+  const inflight = trackInflightUsage()
+  try {
+    return await runAgentLoopTracked(opts, inflight)
+  } finally {
+    inflight.done()
+  }
+}
+
+async function runAgentLoopTracked(opts: RunAgentLoopOptions, inflight: InflightUsage): Promise<RunAgentLoopResult> {
   const {
     messages,
     systemPrompt,
@@ -925,6 +936,7 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
             try {
               const result = await streamProvider(route)
               totalUsage = addUsage(totalUsage, result.usage)
+              inflight.update(route.model, totalUsage)
               // What this call really cost, the moment it is known — the working
               // line counts a long turn step by step instead of jumping at the end.
               reportLiveOutput({ kind: 'settled', outputTokens: result.usage.outputTokens })

@@ -40,7 +40,7 @@ import type { ChatMessage } from '../../providers/types.ts'
 import type { LivePlanEdit, LiveView } from '../../live/liveReply.ts'
 import { ThinkingPanel, type PanelNote } from './components/ThinkingPanel.tsx'
 import { encodeNote, type NotePlanChange, type NotePlanEdit } from '../../autonomy/operatorNotes.ts'
-import { onLiveOutput, sessionCost, sessionUsageSnapshot } from '../../usage.ts'
+import { onLiveOutput, sessionCostLive, sessionUsageSnapshot } from '../../usage.ts'
 import { spendCeilingUsd } from '../../spendLimit.ts'
 import { SessionBar } from './SessionBar.tsx'
 import { SessionShortcuts } from './SessionShortcuts.tsx'
@@ -1225,14 +1225,14 @@ export function App(props: AppProps) {
     () => (isCodex ? contextWindowFor(env.model) : compactionThresholdFor(env.model)),
     [isCodex, env.model],
   )
-  // What the session has spent against its limit, for the status row. Session
-  // totals move as each model call, worker or turn is recorded, so this reads
-  // them every second while work runs and once more when it stops.
-  const [spend, setSpend] = useState(() => ({ usd: sessionCost().usd, limit: spendCeilingUsd() }))
+  // What the session has spent against its limit, for the status row — model
+  // calls still inside a running loop included — read every second while work
+  // runs and once more when it stops.
+  const [spend, setSpend] = useState(() => ({ usd: sessionCostLive().usd, limit: spendCeilingUsd() }))
   useEffect(() => {
     const tick = () =>
       setSpend((prev) => {
-        const next = { usd: sessionCost().usd, limit: spendCeilingUsd() }
+        const next = { usd: sessionCostLive().usd, limit: spendCeilingUsd() }
         return prev.usd === next.usd && prev.limit === next.limit ? prev : next
       })
     tick()

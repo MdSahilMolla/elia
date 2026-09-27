@@ -891,15 +891,22 @@ test('there is one way of working: no approval posture to pick, and shift+tab on
 })
 
 test('the status row shows what the session has spent against its limit, once it has spent anything', async () => {
-  const { recordUsage, resetSessionUsageForTests } = await import('../../usage.ts')
+  const { recordUsage, resetSessionUsageForTests, trackInflightUsage } = await import('../../usage.ts')
   const prior = process.env.ELIA_MAX_SPEND_USD
+  let release!: () => void
+  const held = new Promise<void>((resolve) => { release = resolve })
   resetSessionUsageForTests()
   process.env.ELIA_MAX_SPEND_USD = '1'
   try {
     const props = {
       ...baseProps(),
       submitTurn: async () => {
-        // 50k input + 2k output on mercury-2.5: $0.0115.
+        // A model call inside the running turn: 50k input + 2k output on
+        // mercury-2.5, $0.0115 — shown before the turn records anything.
+        const loop = trackInflightUsage()
+        loop.update('mercury-2.5', { inputTokens: 50_000, outputTokens: 2_000, cacheReadTokens: 0, cacheWriteTokens: 0 })
+        await held
+        loop.done()
         recordUsage({ inputTokens: 50_000, outputTokens: 2_000, cacheReadTokens: 0, cacheWriteTokens: 0 }, 'mercury-2.5')
       },
     }
@@ -911,7 +918,10 @@ test('the status row shows what the session has spent against its limit, once it
       stdin.write('go')
       await waitForFrame(lastFrame, 'go')
       stdin.write('\r')
-      const spent = await waitForFrame(lastFrame, '$0.012 of $1.00')
+      const working = await waitForFrame(lastFrame, '$0.012 of $1.00')
+      expect(working).toContain('esc to interrupt')
+      release()
+      const spent = await waitForFrame(lastFrame, 'Ask anything, or type / for commands')
       expect(spent).toContain('$0.012 of $1.00 · mercury-2')
     } finally {
       unmount()

@@ -255,6 +255,49 @@ export function sessionCost(extra?: { model: string; usage: Usage }): SessionCos
   return { usd, unpriced }
 }
 
+// --- Spend still in flight ---
+// Usage is recorded when a turn or a worker finishes, so a five-minute turn
+// left the status row's spend where it was until the end. Each running loop
+// reports its running total here as every model call settles; the display adds
+// them in. Display only: nothing here is recorded, and a loop clears its entry
+// before its caller records the final total, so nothing is counted twice.
+
+const inflight = new Map<number, { model: string; usage: Usage }>()
+let inflightSeq = 0
+
+export interface InflightUsage {
+  update(model: string, usage: Usage): void
+  done(): void
+}
+
+/** A running loop's slot for its spend so far. */
+export function trackInflightUsage(): InflightUsage {
+  const id = ++inflightSeq
+  return {
+    update(model, usage) {
+      inflight.set(id, { model, usage })
+    },
+    done() {
+      inflight.delete(id)
+    },
+  }
+}
+
+/** What the session has cost so far, including model calls whose loops are still running. */
+export function sessionCostLive(): SessionCost {
+  const recorded = sessionCost()
+  let usd = recorded.usd
+  const unpriced = [...recorded.unpriced]
+  for (const { model, usage } of inflight.values()) {
+    if (totalTokens(usage) === 0) continue
+    const cost = estimateCostUsd(model, usage)
+    if (cost === undefined) {
+      if (!unpriced.includes(model)) unpriced.push(model)
+    } else usd += cost
+  }
+  return { usd, unpriced }
+}
+
 /** The session's cost for display: exact when every model is priced, a floor marked as such when not. */
 export function formatSessionCost(cost: SessionCost = sessionCost()): string {
   if (cost.unpriced.length === 0) return formatCostUsd(cost.usd)
@@ -264,6 +307,7 @@ export function formatSessionCost(cost: SessionCost = sessionCost()): string {
 
 /** Session totals are process-wide; tests that record usage clear them so later tests start from zero. */
 export function resetSessionUsageForTests(): void {
+  inflight.clear()
   sessionUsage = ZERO_USAGE
   sessionTurns = 0
   sessionElapsedMs = 0
