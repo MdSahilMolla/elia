@@ -549,6 +549,8 @@ export interface BacktestResult {
   mase: number | null
   origins: number
   errorsByStep: number[][]
+  /** Steps ahead actually backtested; shorter than the requested horizon when history is short. */
+  backtestHorizon?: number
   failed?: string
 }
 
@@ -560,6 +562,15 @@ function scaleForMase(y: number[], m: number): number | null {
 }
 
 /** Rolling-origin evaluation: each origin trains on everything before it and forecasts `horizon` steps. */
+/** History a method needs before its first backtest forecast: seasonal methods need full seasons, others a few points. */
+export function minimumHistory(method: ForecastMethod, m: number): number {
+  if (method === 'seasonal_naive') return Math.max(m, 4)
+  if (method === 'holt_winters_additive' || method === 'holt_winters_multiplicative') return Math.max(2 * m, 8)
+  if (method === 'gbm_lags') return Math.max(2 * m, 4) + 30
+  if (method === 'arima') return 12
+  return 6
+}
+
 export function backtest(y: number[], method: ForecastMethod, horizon: number, m: number, origins: number, seed = 42): BacktestResult {
   const n = y.length
   const errorsByStep: number[][] = Array.from({ length: horizon }, () => [])
@@ -567,7 +578,10 @@ export function backtest(y: number[], method: ForecastMethod, horizon: number, m
   const predictions: number[] = []
   let description = ''
   let used = 0
-  const minTrain = Math.max(m > 1 ? 2 * m : 8, 8)
+  const minTrain = minimumHistory(method, m)
+  if (n - minTrain < 1) throw new Error(`${method} needs at least ${minTrain + 1} points to backtest, the series has ${n}`)
+  // With short history the backtest horizon shrinks to what the data allows (reported by the caller).
+  horizon = Math.min(horizon, n - minTrain)
   for (let o = origins; o >= 1; o--) {
     const end = n - horizon - (o - 1) * Math.max(1, Math.floor(horizon / 2))
     if (end < minTrain) continue
@@ -583,6 +597,7 @@ export function backtest(y: number[], method: ForecastMethod, horizon: number, m
     used++
   }
   if (used === 0) throw new Error(`not enough history for a ${horizon}-step backtest (need at least ${minTrain + horizon} points)`)
+  const backtestHorizon = horizon
   const errors = actuals.map((value, index) => value - predictions[index]!)
   const nonZero = actuals.map((value, index) => ({ value, index })).filter(({ value }) => value !== 0)
   const scale = scaleForMase(y, m)
@@ -597,6 +612,7 @@ export function backtest(y: number[], method: ForecastMethod, horizon: number, m
     mase: scale === null ? null : mae / scale,
     origins: used,
     errorsByStep,
+    backtestHorizon,
   }
 }
 

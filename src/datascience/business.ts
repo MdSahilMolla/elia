@@ -43,6 +43,10 @@ export interface SegmentContribution {
   change: number
   contribution: number
   shareOfChange: number
+  /** What this segment would contribute if the change were spread in proportion to its size. */
+  expected: number
+  /** contribution − expected: the part of the change this segment's size does not explain. */
+  excess: number
   mixEffect?: number
   rateEffect?: number
   rowsBefore: number
@@ -55,7 +59,8 @@ export interface DrillLevel {
   metricBefore: number
   metricAfter: number
   change: number
-  concentration: number
+  /** Σ|excess| / |change|: how far the change departs from proportional (0 = spread evenly by size). */
+  surprise: number
   segments: SegmentContribution[]
 }
 
@@ -68,7 +73,7 @@ export interface RootCauseResult {
   relativeChange: number
   driverDecomposition?: Array<{ driver: string; before: number; after: number; logContribution: number; shareOfChange: number }>
   levels: DrillLevel[]
-  dimensionRanking: Array<{ dimension: string; concentration: number; topSegment: string; topShare: number }>
+  dimensionRanking: Array<{ dimension: string; surprise: number; topSegment: string; topShare: number }>
   findings: string[]
   hypotheses: string[]
   stoppedBecause: string
@@ -84,6 +89,7 @@ function decomposeBy(before: Row[], after: Row[], dimension: string, metric: Met
   for (const row of before) { const key = String(row[dimension] ?? '(missing)'); const g = groups.get(key) ?? { b: [], a: [] }; g.b.push(row); groups.set(key, g) }
   for (const row of after) { const key = String(row[dimension] ?? '(missing)'); const g = groups.get(key) ?? { b: [], a: [] }; g.a.push(row); groups.set(key, g) }
   const totalChange = metricOf(after, metric) - metricOf(before, metric)
+  const totalBefore = metricOf(before, metric)
   const additive = metric.kind === 'sum' || metric.kind === 'count'
   const wB = weightOf(before, metric)
   const wA = weightOf(after, metric)
@@ -105,9 +111,11 @@ function decomposeBy(before: Row[], after: Row[], dimension: string, metric: Met
       rateEffect = shareA * (rA - rB) * (g.b.length && g.a.length ? 1 : 0)
       contribution = mixEffect + rateEffect
     }
-    out.push({ segment, before: valueB, after: valueA, change: valueA - valueB, contribution, shareOfChange: totalChange === 0 ? 0 : contribution / totalChange, ...(mixEffect !== undefined ? { mixEffect, rateEffect } : {}), rowsBefore: g.b.length, rowsAfter: g.a.length })
+    const sizeShare = additive || metric.kind === 'count_distinct' ? (totalBefore === 0 ? 0 : valueB / totalBefore) : wB ? weightOf(g.b, metric) / wB : 0
+    const expected = sizeShare * totalChange
+    out.push({ segment, before: valueB, after: valueA, change: valueA - valueB, contribution, shareOfChange: totalChange === 0 ? 0 : contribution / totalChange, expected, excess: contribution - expected, ...(mixEffect !== undefined ? { mixEffect, rateEffect } : {}), rowsBefore: g.b.length, rowsAfter: g.a.length })
   }
-  return out.sort((x, y) => Math.abs(y.contribution) - Math.abs(x.contribution))
+  return out.sort((x, y) => Math.abs(y.excess) - Math.abs(x.excess))
 }
 
 export function rootCause(frame: Frame, input: { metric: MetricSpec; dimensions: string[]; before: string; after: string; maxDepth?: number; minShare?: number; minRows?: number; drivers?: { count?: string; value?: string } }): RootCauseResult {
@@ -139,18 +147,20 @@ export function rootCause(frame: Frame, input: { metric: MetricSpec; dimensions:
     if (scopeChange === 0 || !Number.isFinite(scopeChange)) { stoppedBecause = 'the segment metric did not change'; break }
     const candidates = remaining.map((dimension) => {
       const segments = decomposeBy(scopeB, scopeA, dimension, input.metric)
-      const absolute = segments.reduce((total, s) => total + Math.abs(s.contribution), 0) || 1
-      const concentration = Math.abs(segments[0]?.contribution ?? 0) / absolute
-      return { dimension, segments, concentration }
+      // Ranking by raw concentration favours dimensions with few levels; surprise asks which
+      // dimension's segments moved out of proportion to their size (Adtributor-style).
+      const surprise = segments.reduce((total, s) => total + Math.abs(s.excess), 0) / Math.max(1e-12, Math.abs(scopeChange))
+      return { dimension, segments, surprise }
     })
-    candidates.sort((a, b) => b.concentration - a.concentration)
-    if (depth === 0) for (const c of candidates) ranking.push({ dimension: c.dimension, concentration: c.concentration, topSegment: c.segments[0]?.segment ?? '', topShare: c.segments[0]?.shareOfChange ?? 0 })
+    candidates.sort((a, b) => b.surprise - a.surprise)
+    if (depth === 0) for (const c of candidates) ranking.push({ dimension: c.dimension, surprise: c.surprise, topSegment: c.segments[0]?.segment ?? '', topShare: c.segments[0]?.shareOfChange ?? 0 })
     const best = candidates[0]!
-    levels.push({ path: [...path], dimension: best.dimension, metricBefore: metricOf(scopeB, input.metric), metricAfter: metricOf(scopeA, input.metric), change: scopeChange, concentration: best.concentration, segments: best.segments.slice(0, 12) })
+    levels.push({ path: [...path], dimension: best.dimension, metricBefore: metricOf(scopeB, input.metric), metricAfter: metricOf(scopeA, input.metric), change: scopeChange, surprise: best.surprise, segments: best.segments.slice(0, 12) })
     const top = best.segments[0]!
     const scale = input.metric.kind === 'sum' || input.metric.kind === 'count' ? '' : ' (weighted mix + rate)'
-    findings.push(`${path.length ? `Within ${path.join(' › ')}, ` : ''}${best.dimension} = "${top.segment}" accounts for ${(top.shareOfChange * 100).toFixed(0)}% of the ${depth === 0 ? 'overall' : 'segment'} change${scale}: ${fmt(top.before)} → ${fmt(top.after)}${top.mixEffect !== undefined ? ` (mix effect ${fmt(top.mixEffect)}, rate effect ${fmt(top.rateEffect!)})` : ''}.`)
-    if (Math.abs(top.shareOfChange) < minShare) { stoppedBecause = `no single ${best.dimension} segment explains at least ${(minShare * 100).toFixed(0)}% of the change — the change is spread out`; break }
+    const expectedShare = scopeChange === 0 ? 0 : top.expected / scopeChange
+    findings.push(`${path.length ? `Within ${path.join(' › ')}, ` : ''}${best.dimension} = "${top.segment}" accounts for ${(top.shareOfChange * 100).toFixed(0)}% of the ${depth === 0 ? 'overall' : 'segment'} change versus ${(expectedShare * 100).toFixed(0)}% expected from its size${scale}: ${fmt(top.before)} → ${fmt(top.after)}${top.mixEffect !== undefined ? ` (mix effect ${fmt(top.mixEffect)}, rate effect ${fmt(top.rateEffect!)})` : ''}.`)
+    if (best.surprise < minShare || Math.abs(top.excess) < minShare * Math.abs(scopeChange)) { stoppedBecause = `no ${best.dimension} segment departs from proportional change by at least ${(minShare * 100).toFixed(0)}% of the change — it is spread in line with segment sizes`; break }
     path.push(`${best.dimension}=${top.segment}`)
     scopeB = scopeB.filter((row) => String(row[best.dimension] ?? '(missing)') === top.segment)
     scopeA = scopeA.filter((row) => String(row[best.dimension] ?? '(missing)') === top.segment)

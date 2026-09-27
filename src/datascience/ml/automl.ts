@@ -2,6 +2,7 @@ import type { Frame } from '../frame.ts'
 import type { Check } from '../record.ts'
 import { createRng, type Rng } from '../rng.ts'
 import { mean, quantileSorted, spearman, standardDeviation } from '../stats/describe.ts'
+import { tQuantile } from '../stats/special.ts'
 import { isMissing, parseDateMs, scalarKey, toDateMs, toNumber, type Scalar } from '../values.ts'
 import { groupKFold, holdout, kFold, stratifiedKFold, timeSeriesSplit, describeStrategy, type CvStrategy, type Fold } from './cv.ts'
 import { calibration, classificationMetrics, liftTable, LOWER_IS_BETTER, metricValue, regressionMetrics, rocAuc, thresholdAnalysis } from './metrics.ts'
@@ -219,7 +220,7 @@ function leakageScreen(frame: Frame, rows: number[], features: string[], target:
   return suspects
 }
 
-function trainingProfile(frame: Frame, rows: number[], features: string[]): TrainingProfileFeature[] {
+export function trainingProfile(frame: Frame, rows: number[], features: string[]): TrainingProfileFeature[] {
   return features.map((name) => {
     const values = rows.map((index) => frame.rows[index]![name])
     const missingRate = values.filter((value) => isMissing(value)).length / Math.max(1, values.length)
@@ -402,7 +403,17 @@ export function trainAutoML(request: TrainRequest): TrainResult {
     leaderboard.push({ algorithm, params, metric, cvMean: finite.length ? mean(finite) : Number.NaN, cvSd: finite.length > 1 ? standardDeviation(finite) : 0, cvScores: result.scores, secondary: result.secondary, fitSeconds: result.fitSeconds, predictMsPer1k: result.predictMsPer1k, sizeKb: result.sizeKb, interpretability: ALGORITHMS[algorithm].interpretability, beatsBaseline: null })
   }
   const baselineRow = leaderboard.find((row) => row.algorithm === 'baseline')!
-  for (const row of leaderboard) row.beatsBaseline = row.algorithm === 'baseline' ? null : better(metric, row.cvMean, baselineRow.cvMean) && Math.abs(row.cvMean - baselineRow.cvMean) > 1e-12
+  // "Beats the baseline" needs evidence, not a lucky decimal: a one-sided paired t test on the
+  // per-fold differences (same folds for every model) at the 5% level.
+  const pairedAdvantage = (row: LeaderboardRow) => {
+    const diffs = row.cvScores.map((score, fold) => (LOWER_IS_BETTER.has(metric) ? baselineRow.cvScores[fold]! - score : score - baselineRow.cvScores[fold]!)).filter(Number.isFinite)
+    if (diffs.length < 2) return { significant: false, meanDiff: diffs[0] ?? 0 }
+    const meanDiff = mean(diffs)
+    const sd = standardDeviation(diffs)
+    const threshold = sd === 0 ? 0 : tQuantile(0.95, diffs.length - 1) * (sd / Math.sqrt(diffs.length))
+    return { significant: meanDiff > threshold && meanDiff > 0, meanDiff }
+  }
+  for (const row of leaderboard) row.beatsBaseline = row.algorithm === 'baseline' ? null : pairedAdvantage(row).significant
   leaderboard.sort((a, b) => (better(metric, a.cvMean, b.cvMean) ? -1 : better(metric, b.cvMean, a.cvMean) ? 1 : 0))
   const contenders = leaderboard.filter((row) => row.algorithm !== 'baseline' && Number.isFinite(row.cvMean))
   if (contenders.length === 0) throw new Error('every candidate model failed to produce a finite validation score')
@@ -414,7 +425,8 @@ export function trainAutoML(request: TrainRequest): TrainResult {
   const reason = chosen.algorithm === best.algorithm
     ? `${chosen.algorithm} had the best cross-validated ${metric} (${chosen.cvMean.toPrecision(4)} ± ${chosen.cvSd.toPrecision(2)})${withinOneSe.length > 1 ? ' and no simpler model was within one standard error' : ''}`
     : `${best.algorithm} scored best (${best.cvMean.toPrecision(4)}), but ${chosen.algorithm} (${chosen.cvMean.toPrecision(4)}) is within one standard error (${se.toPrecision(2)}) and is ${chosen.interpretability === 'high' && best.interpretability !== 'high' ? 'more interpretable' : 'faster'} — the one-standard-error rule prefers it`
-  checks.push({ name: 'beats baseline in cross-validation', status: chosen.beatsBaseline ? 'pass' : 'fail', detail: `${chosen.algorithm} ${metric} ${chosen.cvMean.toPrecision(4)} vs baseline ${baselineRow.cvMean.toPrecision(4)}` })
+  const advantage = pairedAdvantage(chosen)
+  checks.push({ name: 'beats baseline in cross-validation', status: chosen.beatsBaseline ? 'pass' : advantage.meanDiff > 0 ? 'warn' : 'fail', detail: `${chosen.algorithm} ${metric} ${chosen.cvMean.toPrecision(4)} vs baseline ${baselineRow.cvMean.toPrecision(4)}${chosen.beatsBaseline ? ' (paired across folds, one-sided p < 0.05)' : advantage.meanDiff > 0 ? ' — ahead on average but not consistently across folds; the model may have no real signal' : ' — the model is no better than predicting the baseline'}` })
   const unstable = chosen.cvMean !== 0 && Math.abs(chosen.cvSd / chosen.cvMean) > 0.25
   checks.push({ name: 'stable across folds', status: unstable ? 'warn' : 'pass', detail: `fold scores ${chosen.cvScores.map((s) => s.toPrecision(3)).join(', ')}` })
   // Final fit on the full training split, scored once on the holdout.
@@ -431,7 +443,23 @@ export function trainAutoML(request: TrainRequest): TrainResult {
   const test = scoreOf(task, metric, yTest, testPrediction, classLabels)
   const baselineTest = scoreOf(task, metric, yTest, predictModel(baselineModel, xTest), classLabels)
   const trainScore = scoreOf(task, metric, yTrain, predictModel(model, xTrain), classLabels)
-  checks.push({ name: 'beats baseline on the untouched holdout', status: better(metric, test.primary, baselineTest.primary) ? 'pass' : 'fail', detail: `${metric} ${test.primary.toPrecision(4)} vs baseline ${baselineTest.primary.toPrecision(4)} on ${yTest.length} holdout rows` })
+  // Paired bootstrap of the holdout metric difference: the lower bound must clear zero.
+  const baselineHoldoutPrediction = predictModel(baselineModel, xTest)
+  const bootRng = rng.fork(9)
+  const diffs: number[] = []
+  for (let b = 0; b < 300; b++) {
+    const idx = Array.from({ length: yTest.length }, () => bootRng.int(yTest.length))
+    const pick = (prediction: Prediction): Prediction => ({ values: idx.map((i) => prediction.values[i]!), ...(prediction.probabilities ? { probabilities: idx.map((i) => prediction.probabilities![i]!) } : {}) })
+    const ys = idx.map((i) => yTest[i]!)
+    const a = scoreOf(task, metric, ys, pick(testPrediction), classLabels).primary
+    const c = scoreOf(task, metric, ys, pick(baselineHoldoutPrediction), classLabels).primary
+    const d = LOWER_IS_BETTER.has(metric) ? c - a : a - c
+    if (Number.isFinite(d)) diffs.push(d)
+  }
+  diffs.sort((x, y) => x - y)
+  const lowerBound = diffs.length ? quantileSorted(diffs, 0.05) : Number.NaN
+  const holdoutBetter = better(metric, test.primary, baselineTest.primary)
+  checks.push({ name: 'beats baseline on the untouched holdout', status: lowerBound > 0 ? 'pass' : holdoutBetter ? 'warn' : 'fail', detail: `${metric} ${test.primary.toPrecision(4)} vs baseline ${baselineTest.primary.toPrecision(4)} on ${yTest.length} holdout rows; 90% bootstrap interval of the improvement starts at ${Number.isFinite(lowerBound) ? lowerBound.toPrecision(3) : 'n/a'}${lowerBound > 0 ? '' : ' — not clearly better than the baseline'}` })
   const gap = LOWER_IS_BETTER.has(metric) ? (test.primary - trainScore.primary) / Math.max(1e-12, Math.abs(trainScore.primary)) : (trainScore.primary - test.primary) / Math.max(1e-12, Math.abs(trainScore.primary))
   checks.push({ name: 'no severe overfitting', status: gap > 0.3 ? 'warn' : 'pass', detail: `train ${metric} ${trainScore.primary.toPrecision(4)} vs holdout ${test.primary.toPrecision(4)} (relative gap ${(gap * 100).toFixed(1)}%)` })
   const cvVsTest = Math.abs(test.primary - chosen.cvMean) / Math.max(1e-12, Math.abs(chosen.cvMean))
