@@ -642,4 +642,3 @@ registerCapability({
     return { dataset: refOf(entry), method, ...result, caution: 'This estimate is causal only if the listed assumptions hold; untestable assumptions (no unmeasured confounding, exclusion restriction, parallel trends) must be argued from domain knowledge, not from this output.' }
   },
 })
-

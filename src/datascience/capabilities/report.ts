@@ -340,4 +340,3 @@ function summarizeResult(record: StoredRecord): Record<string, unknown> {
     }
   }
 }
-
