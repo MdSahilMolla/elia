@@ -53,11 +53,16 @@ export class LspClient {
 
   async connect(): Promise<void> {
     this.proc = Bun.spawn([this.command, ...this.args], {
-      stdin: 'pipe',
-      stdout: 'pipe',
-      stderr: 'pipe',
-      cwd: this.rootPath,
-    })
+        stdin: 'pipe',
+        stdout: 'pipe',
+        stderr: 'pipe',
+        cwd: this.rootPath,
+        // Its own process group on POSIX, so close() can take the whole tree.
+        // A language server routinely re-execs itself or hands off to a helper
+        // (tsserver forks its own workers, pyright spawns node), and killing the
+        // launcher alone leaves those holding the workspace's file handles.
+        ...(process.platform === 'win32' ? {} : { detached: true }),
+      })
     this.pump().catch(() => {
       // A dead read loop just means every pending/future call now times out and
       // rejects on its own.
@@ -165,8 +170,7 @@ export class LspClient {
       // already gone
     }
     try {
-      if (process.platform === 'win32' && this.proc) terminateProcessGroup(this.proc)
-      else this.proc?.kill()
+      if (this.proc) terminateProcessGroup(this.proc)
     } catch {
       // Best-effort — process may already be gone.
     }

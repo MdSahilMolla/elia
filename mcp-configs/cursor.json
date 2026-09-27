@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "elia": {
+      "type": "stdio",
+      "command": "elia-mcp",
+      "args": []
+    }
+  }
+}

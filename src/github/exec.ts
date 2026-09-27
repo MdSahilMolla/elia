@@ -1,4 +1,4 @@
-import { readBoundedOutput } from '../shell.ts'
+import { readBoundedOutput, terminateProcessGroup } from '../shell.ts'
 
 /**
  * Argv-level execution for `git` and `gh`, with no shell in the middle.
@@ -39,12 +39,17 @@ const realExec: ExecFn = async (bin, args, cwd, signal, timeoutMs) => {
       stderr: 'pipe',
       stdin: 'ignore',
       ...(cwd ? { cwd } : {}),
+      // Its own process group on POSIX, so terminateProcessGroup can signal the
+      // whole tree. `gh` and `git` both fan out to children of their own (an
+      // `gh pr create` runs git under itself), and killing only the direct child
+      // left those running.
+      ...(process.platform === 'win32' ? {} : { detached: true }),
       env: { ...process.env, GIT_TERMINAL_PROMPT: '0', GH_PROMPT_DISABLED: '1', GH_NO_UPDATE_NOTIFIER: '1' },
     })
     let timedOut = false
     const kill = () => {
       try {
-        proc.kill()
+        terminateProcessGroup(proc)
       } catch {
         // already gone
       }

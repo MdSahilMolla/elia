@@ -225,6 +225,12 @@ Battmann intelligence (no model involved unless noted):
   elia battmann feeds | dashboard | void   Feed status, write the dashboard, void a question (a person only)
   elia battmann --help                     Every battmann command and feed
 
+MCP server:
+  elia --mcp [--transport stdio|http] [--port N] [--host H]
+                              Start the Elia MCP server without opening an interactive session
+  elia mcp                   Same, using the subcommand form
+  elia-mcp                   Start the stdio MCP server directly
+
 Editor / external integration:
   elia bridge                              Start the local JSONL-over-stdio bridge (used by the Elia VS Code extension)
   elia bridge --http [--port 4319] [--host 127.0.0.1]  Same bridge protocol over WebSocket instead of stdio,

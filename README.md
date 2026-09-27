@@ -105,6 +105,7 @@ Inside a session, type while elia works to ask or redirect it; `/autopilot` runs
 
 | Guide | What's in it |
 |---|---|
+| **[Serve elia over MCP](MCP.md)** | Claude Desktop, Cursor, Zed, Continue: the 39 tools, 6 resources and 5 prompts, client configs, protocol negotiation, and the governance boundaries a client cannot cross |
 | **[Recursive intelligence compounding](docs/guide/compounding.md)** | The six stages, the commands, the guards, and where each stage stands today |
 | [Amplification without distillation](docs/guide/discovery.md) | `elia compounding frontier`: the verification frontier, the certified library, the sealed gate, isolation and the resource governor |
 | [Using the terminal](docs/guide/terminal.md) | All commands and flags, the terminal UI, images, LSP diagnostics, cost display |
@@ -119,7 +120,7 @@ Inside a session, type while elia works to ask or redirect it; `/autopilot` runs
 
 ## Status
 
-**Working today:** the governed agent loop; parallel role-based sub-agents; the plan → execute → verify → review → repair cycle; durable, resumable runs with receipts; best-of-N execution in git worktrees; run forking; cross-session memory and lessons; MCP client and remote connectors; LSP diagnostics on every edit; the VS Code extension; and the specialist modes.
+**Working today:** the governed agent loop; parallel role-based sub-agents; the plan → execute → verify → review → repair cycle; durable, resumable runs with receipts; best-of-N execution in git worktrees; run forking; cross-session memory and lessons; MCP client and remote connectors; elia itself served as an MCP server over stdio or authenticated HTTP; LSP diagnostics on every edit; the VS Code extension; and the specialist modes.
 
 **Recursive compounding (our focus):** the machinery is complete and gated: recording, real checks, `elia evolve`, `elia distill`, git-history benchmarks, lesson trials and `elia compounding`. So far elia records its experience and checks it for real, and its benchmark still has room to improve (93% on `mercury-2.5`). No generation has been promoted yet, and lesson benefit hasn't been measured, so compounding itself is still unproven. The next milestone is the first promoted generation.
 

@@ -1,7 +1,7 @@
 import { afterAll, afterEach, beforeEach, expect, test } from 'bun:test'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs'
 import {
   DaemonUnavailable,
   daemonClient,
@@ -17,6 +17,34 @@ import { runShell } from '../shell.ts'
 
 const binary = resolveEliadPath()
 const scratch = mkdtempSync(join(tmpdir(), 'eliad-test-'))
+
+/**
+ * Read the records appended to the diagnostics log past `offset` and return the
+ * first one with `scope`. Polls because the write is best-effort and happens on
+ * a later microtask than the call that triggered it.
+ */
+async function waitForRecord(
+  path: string,
+  offset: number,
+  scope: string,
+  timeoutMs = 5_000,
+): Promise<{ message: string; context?: Record<string, unknown> } | undefined> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    try {
+      const appended = readFileSync(path, 'utf8').slice(offset)
+      for (const line of appended.split('\n')) {
+        if (!line.trim()) continue
+        const record = JSON.parse(line)
+        if (record.scope === scope) return record
+      }
+    } catch {
+      // not written yet
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25))
+  }
+  return undefined
+}
 // A socket name unique to this run so we never collide with a real daemon or a
 // leftover one from an earlier run (Windows reuses pids).
 const runId = `${process.pid}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
@@ -151,6 +179,40 @@ maybe('parse.check flags a structurally broken edit', async () => {
 }, 30_000)
 
 const withJvm = binary && resolveJvmBridgeJar() ? test : test.skip
+
+test('a cancel that never reaches the daemon is recorded, not discarded', async () => {
+  // #1271: `cancel()` returns void, so a lost `shell.cancel` had nowhere to go.
+  // The abort that triggered it had already rejected the local waiter, which made
+  // the CLI stop waiting and look correct while the daemon-side worker kept
+  // running to its own `timeout_ms` — a cancelled `bun run server` that never
+  // stopped, with no record that the cancel was lost. This pins the record.
+  //
+  // No daemon is needed: `send` rejects deterministically with `not connected`
+  // when there is no socket, which is exactly the "cancel never landed" case.
+  //
+  // The log is redirected to a temp file because the default path is derived from
+  // the cwd captured when statePaths.ts was first imported, and several suites
+  // chdir into temp directories — so under a full-suite run the default can
+  // resolve somewhere a later test deletes, and every write is best-effort.
+  const logPath = join(mkdtempSync(join(tmpdir(), 'elia-diag-')), 'diagnostics.ndjson')
+  process.env.ELIA_DIAGNOSTICS_PATH = logPath
+  const before = 0
+  const target = 987_654_321
+
+  // A client with no live socket: daemon mode off, so nothing dials or spawns.
+  process.env.ELIA_DAEMON = 'off'
+  resetDaemonClientForTests()
+  daemonClient().cancel(target)
+
+  try {
+    const record = await waitForRecord(logPath, before, 'daemon.client.cancel')
+    expect(record).toBeDefined()
+    expect(record!.context!.target).toBe(target)
+    expect(record!.message).toContain('not connected')
+  } finally {
+    delete process.env.ELIA_DIAGNOSTICS_PATH
+  }
+}, 20_000)
 
 maybe('mcp.ensure keeps a stdio server resident and mcp.call proxies to it', async () => {
   process.env.ELIA_ELIAD_SOCKET = socketAddr

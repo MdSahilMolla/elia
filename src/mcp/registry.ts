@@ -6,6 +6,7 @@ import { McpHttpClient } from './httpClient.ts'
 import type { McpTransport } from './transport.ts'
 import { registerShutdownCleanup } from '../ui/shutdown.ts'
 import { clearBrowserMcpToolsForTests, registerBrowserMcpTool } from './browserRegistry.ts'
+import { logSwallowedError } from '../diagnostics.ts'
 import { DaemonUnavailable } from '../daemon/index.ts'
 import {
   daemonCallMcp,
@@ -51,6 +52,12 @@ function mcpSoftDeadlineMs(): number {
 }
 const liveClients: McpTransport[] = []
 let shutdownRegistered = false
+/**
+ * What the last connect pass gave up waiting on, if anything. Set only when the
+ * soft deadline beat the last handshake, and cleared by every fresh load, so a
+ * stale "these were pending" record can never be read as the current state.
+ */
+let lastConnectDeadline: { at: string; deadlineMs: number; pending: string[] } | undefined
 
 function emptyReport(): McpLoadReport {
   return { servers: [], loaded: [], failed: [], configErrors: [], status: [] }
@@ -119,16 +126,49 @@ export async function loadMcpTools(cwd = process.cwd()): Promise<McpLoadReport> 
   // whenever that is — so a straggler that lands after the deadline still becomes
   // usable, it just isn't counted in the report handed back to the startup path.
   const throughClient = enabled.filter((server) => !daemonHandled.has(server.name))
-  const allConnected = Promise.all(throughClient.map((server) => connectServer(server, report, statusByName.get(server.name)!)))
+  const settled = new Set<string>()
+  const allConnected = Promise.all(
+    throughClient.map((server) =>
+      connectServer(server, report, statusByName.get(server.name)!).finally(() => settled.add(server.name)),
+    ),
+  )
+  const deadlineMs = mcpSoftDeadlineMs()
   let deadlineTimer: ReturnType<typeof setTimeout> | undefined
+  let deadlineReached = false
   const deadline = new Promise<void>((resolve) => {
-    deadlineTimer = setTimeout(resolve, mcpSoftDeadlineMs())
+    deadlineTimer = setTimeout(() => {
+      deadlineReached = true
+      resolve()
+    }, deadlineMs)
   })
   await Promise.race([allConnected, deadline])
   if (deadlineTimer) clearTimeout(deadlineTimer)
-  // A straggler keeps connecting and registering its tools; just make sure a
-  // rejection from the abandoned wait can't surface as an unhandled rejection.
-  void allConnected.catch(() => {})
+
+  if (deadlineReached) {
+    // Name the servers that were still mid-handshake when startup stopped
+    // waiting. Without this the only difference between "everything connected"
+    // and "we gave up waiting" is a missing tool, which reads exactly like a
+    // server that was never configured — so a cold `npx -y` server that would
+    // have connected fine 10s later looked like a silent no-op.
+    const pending = throughClient.map((server) => server.name).filter((name) => !settled.has(name))
+    if (pending.length > 0) {
+      lastConnectDeadline = { at: new Date().toISOString(), deadlineMs, pending }
+      logSwallowedError(
+        'mcp.connect.deadline',
+        new Error(`connect deadline reached with ${pending.length} server(s) still connecting`),
+        { servers: pending, deadlineMs },
+      )
+    }
+  }
+
+  // A straggler keeps connecting and registering its tools, so `allConnected`
+  // is still outstanding here on purpose. What changes is that its rejection is
+  // recorded instead of discarded: a server failing *after* startup stopped
+  // waiting was previously the one MCP failure mode with no symptom anywhere,
+  // because the report the caller already holds can no longer be amended.
+  void allConnected.catch((err) => {
+    logSwallowedError('mcp.connect.straggler', err, { phase: 'post-deadline' })
+  })
 
   // Register unconditionally, once — not gated on how many clients had
   // connected by this instant. A cold `npx -y` server can still be mid-connect
@@ -150,7 +190,9 @@ export async function loadMcpTools(cwd = process.cwd()): Promise<McpLoadReport> 
 
 /** Tears down every live connection and reconnects from the current config on disk. */
 export async function reloadMcpTools(cwd = process.cwd()): Promise<McpLoadReport> {
-  await Promise.all(liveClients.splice(0).map((client) => client.closeAndWait().catch(() => {})))
+  await Promise.all(liveClients.splice(0).map((client) => client.closeAndWait().catch((err) => {
+    logSwallowedError('mcp.reload.close', err, { client: client.name })
+  })))
   clearMcpTools()
   clearBrowserMcpToolsForTests()
   loadedOnce = false
@@ -161,7 +203,12 @@ export async function reloadMcpTools(cwd = process.cwd()): Promise<McpLoadReport
 
 /** Await live transport teardown so a completed one-shot CLI command can exit cleanly. */
 export async function shutdownMcpTools(): Promise<void> {
-  await Promise.all(liveClients.splice(0).map((client) => client.closeAndWait().catch(() => {})))
+  // Runs on the exit path of every command, so a transport that fails to close
+  // is the difference between "elia exited" and "elia left a subprocess
+  // running" — and it used to be discarded, leaving no way to tell which.
+  await Promise.all(liveClients.splice(0).map((client) => client.closeAndWait().catch((err) => {
+    logSwallowedError('mcp.shutdown.close', err, { client: client.name })
+  })))
 }
 
 /** The last load/reload result — what `/mcp` and `/connector` render without reconnecting. */
@@ -225,7 +272,7 @@ function wrapDaemonMcpTool(descriptor: DaemonMcpToolDescriptor): Tool {
   const input_schema: Tool['input_schema'] = {
     type: 'object',
     properties: schema && typeof schema.properties === 'object' && schema.properties !== null ? schema.properties : {},
-    required: schema?.required,
+    required: schema?.required ? [...schema.required] : undefined,
   }
   return {
     name: toolName(descriptor.server, descriptor.name),
@@ -271,12 +318,12 @@ function toolName(server: string, toolName: string): string {
   return raw.slice(0, 64).replace(/_+$/, '') || `mcp_${server}_tool`
 }
 
-function wrapMcpTool(client: McpTransport, server: string, descriptor: { name: string; description?: string; inputSchema?: { type?: string; properties?: Record<string, unknown>; required?: string[] } }): Tool {
+function wrapMcpTool(client: McpTransport, server: string, descriptor: { name: string; description?: string; inputSchema?: { type?: string; properties?: Record<string, unknown>; required?: readonly string[] } }): Tool {
   const schema = descriptor.inputSchema
   const input_schema: Tool['input_schema'] = {
     type: 'object',
     properties: schema && typeof schema.properties === 'object' && schema.properties !== null ? schema.properties : {},
-    required: schema?.required,
+    required: schema?.required ? [...schema.required] : undefined,
   }
 
   return {
@@ -300,9 +347,16 @@ function flattenContent(content: { type: string; text?: string }[] | undefined):
 
 /** Test-only: exposes the module-level state the shutdown-cleanup registration
  * depends on, so a test can assert the cleanup got registered without waiting
- * on a real process signal. */
-export function mcpShutdownStateForTests(): { shutdownRegistered: boolean; liveClientCount: number } {
-  return { shutdownRegistered, liveClientCount: liveClients.length }
+ * on a real process signal. `lastConnectDeadline` is exposed for the same
+ * reason: the diagnostic it produces is otherwise only observable by reading
+ * this machine's real `.elia/diagnostics.ndjson`, which is not a hermetic
+ * assertion. */
+export function mcpShutdownStateForTests(): {
+  shutdownRegistered: boolean
+  liveClientCount: number
+  lastConnectDeadline: { at: string; deadlineMs: number; pending: string[] } | undefined
+} {
+  return { shutdownRegistered, liveClientCount: liveClients.length, lastConnectDeadline }
 }
 
 /** Test-only: resets the load-once guard so a fresh loadMcpTools() call reconnects. */
@@ -310,6 +364,7 @@ export async function resetMcpLoadStateForTests(): Promise<void> {
   loadedOnce = false
   loadPromise = undefined
   lastReport = emptyReport()
+  lastConnectDeadline = undefined
   // Wait for each subprocess to actually be reaped, not just signaled — otherwise
   // bun test's cross-file dangling-process sweep can race a still-tearing-down
   // pipe and surface a stray EPIPE attributed to some unrelated later file.
@@ -321,3 +376,118 @@ export async function resetMcpLoadStateForTests(): Promise<void> {
   // instead of finding one already flagged as registered from an earlier test.
   shutdownRegistered = false
 }
+
+export {
+  DEFAULT_ELIA_MCP_HOST,
+  DEFAULT_ELIA_MCP_PORT,
+  eliaMcpServerConfigFromCli,
+  expandEliaMcpPath,
+  generateMcpAuthToken,
+  loadEliaMcpServerConfig,
+  loadEliaMcpServerConfigFromCli,
+  loadOrCreateMcpAuthToken,
+  loadOrCreateMcpToken,
+  parseEliaMcpCliOverrides,
+  validateEliaMcpServerConfig,
+} from './config.ts'
+export {
+  CANONICAL_MCP_TOOL_COUNT,
+  MCP_FEATURE_BY_NAME,
+  MCP_FEATURE_CATEGORIES,
+  MCP_FEATURE_INVENTORY,
+  MCP_TOOL_NAMES,
+  SERVER_FEATURE_INVENTORY,
+  assertMcpFeatureInventoryComplete,
+  isCostTier,
+} from './featureInventory.ts'
+export {
+  MCP_CLIENT_INFO,
+  MCP_PROTOCOL_VERSION,
+  MCP_SERVER_INFO,
+  McpProtocolError,
+  handleMcpMessage,
+  handleMcpRequest,
+  isJsonRpcResponse,
+  mcpParseError,
+  validateMcpSchema,
+} from './protocol.ts'
+export {
+  createMcpServerRegistry,
+  createServerRegistry,
+  validateServerToolDefinitions,
+} from './serverRegistry.ts'
+export {
+  createMcpServerRuntime,
+  createServerRuntime,
+  newMcpRunId,
+} from './serverRuntime.ts'
+export {
+  createEliaMcpServer,
+  runMcpServerFromCli,
+  startHttpMcpServer,
+  startStdioMcpServer,
+} from './server.ts'
+export {
+  COST_TIERS,
+  ELIA_MODES,
+  ToolCategory,
+  assertMcpToolName,
+  defineMcpTool,
+  isValidMcpToolName,
+} from './serverTypes.ts'
+export {
+  createHttpMcpTransport,
+  startHttpMcpTransport,
+} from './httpTransport.ts'
+export {
+  createStdioTransport,
+  startStdioTransport,
+} from './stdioTransport.ts'
+export type {
+  CreateEliaMcpServerOptions,
+  EliaMcpServer,
+  StartedHttpMcpServer,
+  StartedStdioMcpServer,
+} from './server.ts'
+export type {
+  CreateMcpServerRegistryOptions,
+  McpPromptProvider,
+  McpPromptRegistration,
+  McpResourceProvider,
+  McpResourceRegistration,
+  McpResourceTemplateRegistration,
+  McpServerRegistry,
+} from './serverRegistry.ts'
+export type {
+  CreateMcpServerRuntimeOptions,
+  McpServerRuntime,
+} from './serverRuntime.ts'
+export type {
+  EliaMcpServerConfig,
+  EliaMcpServerConfigOverrides,
+  McpAuthTokenResult,
+} from './config.ts'
+export type {
+  CostTier,
+  EliaMode,
+  JsonSchema,
+  McpClientCapabilities,
+  McpFeatureMetadata,
+  McpGovernedMutation,
+  McpImportedContext,
+  McpPlanRecord,
+  McpProgressEvent,
+  McpRunState,
+  McpServerRuntimeConfig,
+  McpToolDefinition,
+  McpToolExecutionContext,
+  McpToolRequiredCapability,
+} from './serverTypes.ts'
+export type {
+  HttpMcpTransportOptions,
+  McpHttpServer,
+} from './httpTransport.ts'
+export type {
+  McpStdioTransport,
+  StdioTransportOptions,
+} from './stdioTransport.ts'

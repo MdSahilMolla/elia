@@ -11,6 +11,7 @@
 
 import { existsSync } from 'node:fs'
 import { writeError, writeNotice } from '../ui/stream.ts'
+import { logSwallowedError } from '../diagnostics.ts'
 import { table } from '../ui/layout.ts'
 import { paths } from '../statePaths.ts'
 import { machineReadable } from '../ui/runtime.ts'
@@ -392,7 +393,20 @@ async function runWatch(): Promise<void> {
     const backlog = await client.call<PersistedEvent[]>('events.query', { limit: 40 })
     feed.push(...backlog)
     await refresh()
-    const timer = setInterval(() => void refresh().catch(() => {}), 1_000)
+    // A dead board is the failure this whole view exists to prevent, so the
+    // refresh is not allowed to die quietly: a server restart or an expired
+    // token used to freeze the board at its last good frame, forever, with
+    // Ctrl+C still exiting 0 and nothing to say why it stopped updating.
+    let refreshFailures = 0
+    const timer = setInterval(() => {
+      void refresh().catch((err) => {
+        refreshFailures += 1
+        logSwallowedError('workspace.watch.refresh', err, { failures: refreshFailures })
+        if (refreshFailures === 1) {
+          writeNotice(`workspace board stopped updating: ${err instanceof Error ? err.message : String(err)}`)
+        }
+      })
+    }, 1_000)
     await new Promise<void>((resolve) => {
       process.on('SIGINT', () => {
         clearInterval(timer)

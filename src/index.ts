@@ -51,6 +51,8 @@ if (rawArgs[0] === '--version' || rawArgs[0] === '-v' || (subcommand === undefin
 // selects a run profile. `ELIA_PROFILE=1` in the environment does the same.
 if (hasFlag('--profile-turns')) process.env.ELIA_PROFILE = '1'
 
+const mcpRequested = rawArgs.includes('--mcp') || rawArgs[0] === 'mcp'
+
 async function main() {
   installShutdownHandlers()
   emitEvent('cli_started', { version: JSON.parse(await Bun.file(new URL('../package.json', import.meta.url)).text()).version, uiMode: machineReadable ? 'json' : plainOutput ? 'plain' : 'normal' })
@@ -145,26 +147,33 @@ async function main() {
   }
 }
 
-// Sweep temp files orphaned by earlier crashed writes. Only temps whose owning
-// process is gone are removed, so a concurrently running elia is never touched.
-// Without this they accumulate silently and are never cleaned up by anything.
-try {
-  const { sweepStaleTemporaries } = await import('./securePersistence.ts')
-  const { isProcessAlive } = await import('./fileLock.ts')
-  const { paths: statePaths } = await import('./config.ts')
-  sweepStaleTemporaries(statePaths.state, isProcessAlive)
-} catch {
-  // Housekeeping is never a reason to fail a command.
+if (mcpRequested) {
+  if (rawArgs[0] === 'mcp') process.argv.splice(2, 1)
+  const mcpFlagIndex = process.argv.indexOf('--mcp')
+  if (mcpFlagIndex >= 2) process.argv.splice(mcpFlagIndex, 1)
+  const { runMcpServerFromCli } = await import('./mcp/server.ts')
+  await runMcpServerFromCli()
+} else {
+  // Sweep temp files orphaned by earlier crashed writes. Only temps whose owning
+  // process is gone are removed, so a concurrently running elia is never touched.
+  // Without this they accumulate silently and are never cleaned up by anything.
+  try {
+    const { sweepStaleTemporaries } = await import('./securePersistence.ts')
+    const { isProcessAlive } = await import('./fileLock.ts')
+    const { paths: statePaths } = await import('./config.ts')
+    sweepStaleTemporaries(statePaths.state, isProcessAlive)
+  } catch {
+    // Housekeeping is never a reason to fail a command.
+  }
+
+  // Signal handlers are installed by installShutdownHandlers() so every terminal
+  // component follows one cleanup path and returns a conventional interrupt code.
+  await main().catch(async (err: unknown) => {
+    const { describeCliError } = await import('./cli/errors.ts')
+    writeError(describeCliError(err, { command: subcommand }))
+    process.exitCode = 1
+  }).finally(async () => {
+    const { shutdownMcpTools } = await import('./mcp/registry.ts')
+    await shutdownMcpTools()
+  })
 }
-
-// Signal handlers are installed by installShutdownHandlers() so every terminal
-// component follows one cleanup path and returns a conventional interrupt code.
-
-await main().catch(async (err: unknown) => {
-  const { describeCliError } = await import('./cli/errors.ts')
-  writeError(describeCliError(err, { command: subcommand }))
-  process.exitCode = 1
-}).finally(async () => {
-  const { shutdownMcpTools } = await import('./mcp/registry.ts')
-  await shutdownMcpTools()
-})

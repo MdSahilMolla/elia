@@ -196,6 +196,78 @@ test('shutdown cleanup is registered even when nothing had connected by the soft
   }
 })
 
+test('a hung server is named in a connect-deadline record instead of vanishing silently', async () => {
+  // #1271: the soft deadline used to be an unobservable `Promise.race`. When it
+  // won, the only evidence was a missing tool — indistinguishable from a server
+  // that was never configured, so a cold `npx -y` server that would have
+  // connected fine a few seconds later looked like a silent no-op with no record
+  // anywhere that startup had actually given up on it.
+  const cwd = mkdtempSync(join(tmpdir(), 'elia-mcp-registry-'))
+  mkdirSync(join(cwd, '.elia'), { recursive: true })
+  const slow = join(import.meta.dir, 'fixtures', 'slowServer.ts')
+  writeFileSync(
+    join(cwd, '.elia', 'mcp.json'),
+    JSON.stringify({
+      mcpServers: {
+        echo: { command: process.execPath, args: [FIXTURE] },
+        hung: { command: process.execPath, args: [slow] },
+      },
+    }),
+    'utf8',
+  )
+
+  // Long enough for the healthy server's subprocess to spawn and handshake, so
+  // the record isolates the genuine straggler instead of merely listing every
+  // server that had not finished in the first fraction of a second.
+  process.env.ELIA_MCP_CONNECT_DEADLINE_MS = '800'
+  try {
+    await loadMcpTools(cwd)
+    const deadline = mcpShutdownStateForTests().lastConnectDeadline
+    expect(deadline).toBeDefined()
+    // The server that was still handshaking is named; the one that finished in
+    // time is not, so the record identifies the straggler rather than just
+    // saying "something was slow".
+    expect(deadline!.pending).toEqual(['hung'])
+    expect(deadline!.deadlineMs).toBe(800)
+  } finally {
+    delete process.env.ELIA_MCP_CONNECT_DEADLINE_MS
+  }
+})
+
+test('a connect pass that finishes inside the deadline records no deadline at all', async () => {
+  const cwd = projectWithServer()
+  await loadMcpTools(cwd)
+  expect(mcpShutdownStateForTests().lastConnectDeadline).toBeUndefined()
+})
+
+test('a slow server that fails after the deadline produces no unhandled rejection', async () => {
+  // #1271: `allConnected` stays outstanding past the soft deadline by design, so
+  // its rejection needs a handler that records rather than discards. The old
+  // `void allConnected.catch(() => {})` left no unhandled rejection either, but
+  // also left no record — this pins the "still no unhandled rejection" half so a
+  // future refactor cannot reintroduce a dangling promise while fixing the
+  // observability half.
+  const cwd = mkdtempSync(join(tmpdir(), 'elia-mcp-registry-'))
+  mkdirSync(join(cwd, '.elia'), { recursive: true })
+  const slow = join(import.meta.dir, 'fixtures', 'slowServer.ts')
+  writeFileSync(join(cwd, '.elia', 'mcp.json'), JSON.stringify({ mcpServers: { hung: { command: process.execPath, args: [slow] } } }), 'utf8')
+
+  const unhandled: unknown[] = []
+  const onUnhandled = (reason: unknown) => unhandled.push(reason)
+  process.on('unhandledRejection', onUnhandled)
+  process.env.ELIA_MCP_CONNECT_DEADLINE_MS = '50'
+  try {
+    await loadMcpTools(cwd)
+    // Long enough for the straggler to connect (or fail) and settle, so its
+    // outcome lands on the handler installed above rather than after the test.
+    await new Promise((resolve) => setTimeout(resolve, 1_500))
+  } finally {
+    delete process.env.ELIA_MCP_CONNECT_DEADLINE_MS
+    process.off('unhandledRejection', onUnhandled)
+  }
+  expect(unhandled).toEqual([])
+})
+
 test('reloadMcpTools picks up a newly added server without a process restart', async () => {
   const cwd = mkdtempSync(join(tmpdir(), 'elia-mcp-registry-'))
   mkdirSync(join(cwd, '.elia'), { recursive: true })

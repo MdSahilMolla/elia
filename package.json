@@ -36,10 +36,14 @@
     "bun": ">=1.3.0"
   },
   "bin": {
-    "elia": "bin/elia.ts"
+    "elia": "bin/elia.ts",
+    "elia-mcp": "./src/mcp/server.ts"
   },
   "scripts": {
     "dev": "bun run bin/elia.ts",
+    "mcp": "bun run src/mcp/server.ts",
+    "mcp:http": "bun run src/mcp/server.ts --transport http",
+    "mcp:smoke": "bun run scripts/mcp-run-task-smoke.ts",
     "react": "bun run src/react_server.ts",
     "test": "bun test --timeout=20000",
     "test:fast": "bun test --timeout=20000 --path-ignore-patterns 'src/battmann/**' --path-ignore-patterns 'src/ui/app/fastRender.test.ts' --path-ignore-patterns 'src/ui/cliSmoke.test.ts' --path-ignore-patterns 'src/sourceHygiene.test.ts' --path-ignore-patterns 'src/bridgeHttp.test.ts' --path-ignore-patterns 'src/vscodeBridge.test.ts' --path-ignore-patterns 'src/vscodeBridgeProtocol.test.ts' --path-ignore-patterns 'src/evolve/hypothesisBrief.test.ts' --path-ignore-patterns 'src/tools/causalDebug.test.ts' --path-ignore-patterns 'src/tools/communication.test.ts' --path-ignore-patterns 'src/tools/environment.test.ts'",
