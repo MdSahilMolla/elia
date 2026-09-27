@@ -1,8 +1,8 @@
-import { availableParallelism, cpus } from 'node:os'
 import { autoFallbacksFor, config } from './config.ts'
+import { providerCapabilities } from './providers/registry.ts'
 import { beginCompaction, shrinkForOversizedRequest, type PendingCompaction } from './compaction.ts'
 import { compactionThresholdFor } from './contextWindow.ts'
-import { isCapacityError, isConnectionError, isMalformedToolCallError, isRequestTooLargeError, isTransientServerError, retryBackoffMs } from './providerErrors.ts'
+import { isConnectionError, isFallbackableProviderError, isMalformedToolCallError, isQuotaExhaustedError, isRequestTooLargeError, isTransientServerError, isUnusableRouteError, retryBackoffMs } from './providerErrors.ts'
 import { createPlanlessWorkTracker, createRedundantReadTracker, isLoneBatchableRead, serialReadNudge } from './autonomy/toolBatchingNudge.ts'
 import { createReadAhead } from './autonomy/readAhead.ts'
 import { createPlanProgressTracker, planBelongsToRequest, type PlanProgressUpdate, type ToolOutcome } from './autonomy/planProgress.ts'
@@ -36,28 +36,12 @@ import { activeSessionTranscript } from './ui/transcript.ts'
 
 export type ConversationMessage = ChatMessage
 
-/** Any batch that mutates the repo or touches the outside world stays on this conservative ceiling. */
-const MAX_PARALLEL_WRITE_TOOLS = 4
-/** Hard cap on the read-only pool, whatever the machine or the env override asks for. */
-const MAX_SAFE_PARALLEL_TOOLS = 8
-
-/**
- * Default read-only pool when nothing is configured: one per core, leaving a
- * core for everything else, clamped to [MAX_PARALLEL_WRITE_TOOLS, MAX_SAFE_PARALLEL_TOOLS].
- * A 4-core box keeps the old behaviour; an 8+-core box gets a wider recon fan-out.
- */
-function detectCoreCount(): number {
-  try {
-    return availableParallelism()
-  } catch {
-    try {
-      return cpus().length
-    } catch {
-      return 4
-    }
-  }
-}
-export const DEFAULT_PARALLEL_TOOLS = Math.max(MAX_PARALLEL_WRITE_TOOLS, Math.min(MAX_SAFE_PARALLEL_TOOLS, detectCoreCount() - 1))
+// Tool-batch concurrency policy lives in tools/batching.ts (one cohesive leaf):
+// which tool calls may run together, how many at once, and the concurrency-limiter
+// helper. Re-exported here so the five callers that already import them from the
+// agent loop keep working.
+import { DEFAULT_PARALLEL_TOOLS, runWithConcurrencyLimit, toolBatchConcurrency } from './tools/batching.ts'
+export { DEFAULT_PARALLEL_TOOLS, runWithConcurrencyLimit, toolBatchConcurrency }
 const MAX_PROVIDER_ATTEMPTS = 3
 const PROVIDER_HEALTH_COOLDOWN_MS = 30_000
 /**
@@ -70,9 +54,16 @@ const PROVIDER_HEALTH_COOLDOWN_MS = 30_000
  */
 const UNUSABLE_ROUTE_COOLDOWN_MS = 15 * 60_000
 
-/** A daily or plan quota spent — distinct from a per-minute rate limit, which clears in seconds. */
-function isQuotaExhaustedError(message: string): boolean {
-  return /exceeded your current quota|quota (?:has been )?exceeded|daily (?:request |token )?(?:limit|quota)|requests? per day|free[- ]tier (?:limit|quota)|usage limit reached/i.test(message)
+/**
+ * A route that keeps failing gets progressively longer to recover — 30s on the
+ * first failure, doubling each consecutive one and capped at ten minutes. The
+ * failure count was already tracked per route; without this the same route that
+ * failed every turn was cooled down for the same 30s each time the loop sprinted
+ * past it and immediately burned another attempt.
+ */
+const PROVIDER_HEALTH_COOLDOWN_MAX_MS = 10 * 60_000
+export function providerHealthCooldownMs(failures: number): number {
+  return Math.min(PROVIDER_HEALTH_COOLDOWN_MS * 2 ** (failures - 1), PROVIDER_HEALTH_COOLDOWN_MAX_MS)
 }
 
 /**
@@ -944,14 +935,15 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
               return result.content
             } catch (error) {
               lastError = error
-              if (isConnectionError(error instanceof Error ? error.message : String(error))) unreachable.add(routeIndex)
+              const message = error instanceof Error ? error.message : String(error)
+              if (isConnectionError(message)) unreachable.add(routeIndex)
               // Ask the same model again, even after text has streamed: the
               // failed attempt's text never reached `messages`, so the only cost
               // is seeing it twice, against losing the turn — or, in a sub-agent,
               // the whole run. Not after an action, and not a provider-health
               // failure: the route is fine, the sample was not.
               if (
-                isMalformedToolCallError(error instanceof Error ? error.message : String(error))
+                isMalformedToolCallError(message)
                 && !emittedActions
                 && !signal?.aborted
                 && attempt < MAX_PROVIDER_ATTEMPTS
@@ -959,37 +951,36 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
                 if (verbose) writeNotice('the model sent a tool call that was not valid JSON; asking it again')
                 continue
               }
-              const unusable = isUnusableRouteError(error)
-              if (unusable || isFallbackableProviderError(error)) {
+              const unusable = isUnusableRouteError(message)
+              if (unusable || isFallbackableProviderError(message)) {
                 const key = providerHealthKey(route)
                 const previous = providerHealth.get(key)
-                const message = error instanceof Error ? error.message : String(error)
-                const cooldown = unusable || isQuotaExhaustedError(message) ? UNUSABLE_ROUTE_COOLDOWN_MS : PROVIDER_HEALTH_COOLDOWN_MS
-                providerHealth.set(key, { failures: (previous?.failures ?? 0) + 1, cooldownUntil: Date.now() + cooldown, lastError: message })
+                const failures = (previous?.failures ?? 0) + 1
+                const cooldown = unusable || isQuotaExhaustedError(message) ? UNUSABLE_ROUTE_COOLDOWN_MS : providerHealthCooldownMs(failures)
+                providerHealth.set(key, { failures, cooldownUntil: Date.now() + cooldown, lastError: message })
               }
               // A server-side hiccup: wait, then ask the same route again — even
               // after text has streamed, for the same reason as a garbled tool
               // call above, and never after the provider acted. Only on the last
               // route, or once output has been shown; before that, the next route
               // is the faster answer.
-              const failure = error instanceof Error ? error.message : String(error)
               const transientDelays = transientRetryDelaysMs()
               if (
-                isTransientServerError(failure)
+                isTransientServerError(message)
                 && !emittedActions
                 && !signal?.aborted
                 && attempt <= transientDelays.length
                 && (emittedOutput || !activeRoutes[routeIndex + 1])
               ) {
                 const delayMs = transientDelays[attempt - 1]!
-                if (verbose) writeNotice(`provider ${route.label ?? `${route.providerName} (${route.model})`} failed on its side (${failure.slice(0, 80)}); asking again in ${Math.ceil(delayMs / 1000)}s`)
+                if (verbose) writeNotice(`provider ${route.label ?? `${route.providerName} (${route.model})`} failed on its side (${message.slice(0, 80)}); asking again in ${Math.ceil(delayMs / 1000)}s`)
                 await sleepUnlessAborted(delayMs, signal)
                 if (signal?.aborted) throw error
                 continue
               }
               // Retrying after output was emitted would duplicate a partial answer in
               // the terminal. Only route before any output has been emitted.
-              if (emittedOutput || !(unusable || isFallbackableProviderError(error))) throw error
+              if (emittedOutput || !(unusable || isFallbackableProviderError(message))) throw error
               if (signal?.aborted) throw error
 
               // The request was rejected for its *size*. Neither routing nor
@@ -1000,7 +991,7 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
               // the next provider will answer either.
               if (
                 attempt < MAX_PROVIDER_ATTEMPTS
-                && isRequestTooLargeError(error instanceof Error ? error.message : String(error))
+                && isRequestTooLargeError(message)
                 && shrinkForOversizedRequest(messages)
               ) {
                 if (verbose) writeNotice('request was over the provider limit; trimmed oversized tool output and retrying smaller')
@@ -1014,7 +1005,7 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
                   // network blip, a spent key or a request too big for all of
                   // them, and afterwards nothing else says which.
                   writeNotice(
-                    `provider ${route.label ?? `${route.providerName} (${route.model})`} unavailable (${redactText(failure.split('\n')[0] ?? '', 120)}); trying ${nextRoute.label ?? `${nextRoute.providerName} (${nextRoute.model})`}`,
+                    `provider ${route.label ?? `${route.providerName} (${route.model})`} unavailable (${redactText(message.split('\n')[0] ?? '', 120)}); trying ${nextRoute.label ?? `${nextRoute.providerName} (${nextRoute.model})`}`,
                   )
                 }
                 break
@@ -1024,7 +1015,7 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
                 if (networkMayRecover()) break
                 throw error
               }
-              await sleepUnlessAborted(retryBackoffMs(failure, attempt), signal)
+              await sleepUnlessAborted(retryBackoffMs(message, attempt), signal)
             }
           }
         }
@@ -1044,11 +1035,11 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
     }
 
     async function streamProvider(route: ProviderRoute) {
-      // A ChatGPT subscription is backed by the separately authenticated Codex
-      // CLI, which executes its own workspace tools. Treat that hand-off as one
-      // critical, approval-gated action rather than silently bypassing Elia's
-      // safety boundary. Normal API providers still return Elia tool calls.
-      const delegated = route.providerName === 'codex'
+      // A hand-off provider (the ChatGPT subscription's own agent) executes its own
+      // workspace tools. Treat that hand-off as one critical, approval-gated
+      // action rather than silently bypassing Elia's safety boundary. Normal API
+      // providers still return Elia tool calls.
+      const delegated = providerCapabilities(route.providerName).handoff
       const workspaceRoot = currentAgent().cwd ?? process.cwd()
       const request = { name: 'codex_delegate', input: { model: route.model, path: workspaceRoot } }
       const DELEGATED_ID = 'codex-subscription-run'
@@ -1189,94 +1180,10 @@ export function lastAssistantText(messages: ConversationMessage[], fallback: str
   return text && text.length > 0 ? text : fallback
 }
 
-type ToolBatch = Array<{ name: string; input: Record<string, unknown> }>
-
-/**
- * Read-only batches are the dominant reconnaissance path in coding work. They can
- * safely use a larger pool because they do not compete on file mutations, while
- * any batch containing a write or external side effect stays on the conservative
- * default. The environment override is bounded so a fast setting cannot create
- * an unbounded fan-out against a provider or local machine.
- */
-export function toolBatchConcurrency(batch: ToolBatch): number {
-  const configured = Number.parseInt(process.env.ELIA_TOOL_CONCURRENCY ?? '', 10)
-  const requested = Number.isInteger(configured) && configured > 0 ? Math.min(configured, MAX_SAFE_PARALLEL_TOOLS) : DEFAULT_PARALLEL_TOOLS
-  if (batch.length === 0) return requested
-  return batch.every(isReadOnlyToolCall) ? requested : Math.min(requested, MAX_PARALLEL_WRITE_TOOLS)
-}
-
-function isReadOnlyToolCall(block: { name: string; input: Record<string, unknown> }): boolean {
-  if (SPECULABLE_TOOLS.has(block.name)) return true
-  if (block.name === 'read_spreadsheet' || block.name === 'web_search' || block.name === 'web_fetch') return true
-  if (block.name === 'spreadsheet') return ['inspect', 'analyze', 'audit'].includes(String(block.input.action ?? ''))
-  // Browser sessions are shared state: only pure observations may run together.
-  // Navigation, scrolling, waits, and verification can race with another page
-  // action even when they do not create an external side effect.
-  if (block.name === 'browser') return ['status', 'snapshot', 'extract'].includes(String(block.input.action ?? ''))
-  if (block.name === 'communication') return ['status', 'inspect', 'list', 'verify'].includes(String(block.input.action ?? ''))
-  if (block.name === 'project_profile' || block.name === 'recall' || block.name === 'board_read') return true
-  return false
-}
-
 function providerHealthKey(route: ProviderRoute): string {
   return `${route.providerName}:${route.model}`
 }
 
 export function resetProviderHealthForTests(): void {
   providerHealth.clear()
-}
-
-/**
- * Whether an error is worth retrying, or routing to another provider.
- *
- * Two families were missing and both end a turn outright when they hit:
- * overload (`529` / `overloaded_error`), which is the single most common
- * transient failure under load and is precisely what a fallback route exists
- * for; and context overflow (`prompt is too long`,
- * `context_length_exceeded`), which another route with a larger window can
- * actually serve. Neither is a bug in the request, so neither should be fatal.
- *
- * The context-overflow half was only half-covered: it listed the two Anthropic
- * spellings and missed the OpenAI-compatible ones entirely (`413`, "Request
- * too large", a per-minute token cap), so a live run lost two steps to an
- * error this function called fatal. `isCapacityError` is now the single
- * spelling of that family, shared with `classifyFailure`.
- */
-/**
- * A route that cannot be used at all — out of credit, or its key refused. Asking
- * it again is pointless, but the next route may well answer: these used to end
- * the turn, so a free-tier OpenRouter key with no credit (402) never handed over.
- */
-function isUnusableRouteError(error: unknown): boolean {
-  const message = error instanceof Error ? error.message : String(error)
-  return /\b(?:401|402|403)\b|payment required|insufficient[_ ](?:credits?|quota|balance|funds)|requires more credits|invalid[_ ]api[_ ]key|incorrect api key|unauthori[sz]ed/i.test(message)
-}
-
-function isFallbackableProviderError(error: unknown): boolean {
-  const message = error instanceof Error ? error.message : String(error)
-  if (isCapacityError(message)) return true
-  return /connection|fetch failed|network|timeout|timed out|overloaded|model (?:not found|unavailable)|not found|404|500|502|503|504|529|server had an error/i.test(
-    message,
-  )
-}
-
-/** Runs `fn` over `items` with at most `limit` in flight at once, preserving result order. */
-export async function runWithConcurrencyLimit<T, R>(
-  items: T[],
-  limit: number,
-  fn: (item: T, index: number) => Promise<R>,
-): Promise<R[]> {
-  const results: R[] = new Array<R>(items.length)
-  let cursor = 0
-
-  async function worker(): Promise<void> {
-    while (true) {
-      const index = cursor++
-      if (index >= items.length) return
-      results[index] = await fn(items[index]!, index)
-    }
-  }
-
-  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker))
-  return results
 }

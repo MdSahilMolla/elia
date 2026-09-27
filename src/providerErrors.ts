@@ -125,6 +125,54 @@ const TRANSIENT_SERVER_ERROR =
   /overloaded|temporarily unavailable|service unavailable|server had an error|internal server error|bad gateway|gateway time-?out|\b(?:500|502|503|504|529)\b|ECONNRESET|socket hang up|connection (?:was )?(?:closed|reset|terminated)|response stalled|missing finish_reason/i
 
 /**
+ * The route-health half of provider classification. The agent loop's route
+ * fallback once kept its own regex spellings of "is this worth routing around",
+ * so the same failure could be spelled one way here and another next to the loop
+ * that consumed it — the drift this module was written to end. Every decision
+ * about routing and cooldowns now shares these predicates.
+ */
+
+/**
+ * A route that cannot be used at all — out of credit, or its key refused. Asking
+ * it again is pointless, but the next route may well answer: these used to end
+ * the turn, so a free-tier OpenRouter key with no credit (402) never handed over.
+ */
+export function isUnusableRouteError(message: string): boolean {
+  return /\b(?:401|402|403)\b|payment required|insufficient[_ ](?:credits?|quota|balance|funds)|requires more credits|invalid[_ ]api[_ ]key|incorrect api key|unauthori[sz]ed/i.test(message)
+}
+
+/** A daily or plan quota spent — distinct from a per-minute rate limit, which clears in seconds. */
+export function isQuotaExhaustedError(message: string): boolean {
+  return /exceeded your current quota|quota (?:has been )?exceeded|daily (?:request |token )?(?:limit|quota)|requests? per day|free[- ]tier (?:limit|quota)|usage limit reached/i.test(message)
+}
+
+/**
+ * Whether an error is worth routing to another provider instead of ending the
+ * turn. Two families were missing and both end a turn outright when they hit:
+ * overload (`529` / `overloaded_error`), the single most common transient
+ * failure under load and precisely what a fallback route exists for; and
+ * context overflow (`prompt is too long`, `context_length_exceeded`), which
+ * another route with a larger window can actually serve. Neither is a bug in
+ * the request, so neither should be fatal.
+ *
+ * The context-overflow half was only half-covered: it listed the two Anthropic
+ * spellings and missed the OpenAI-compatible ones entirely (`413`, "Request
+ * too large", a per-minute token cap), so a live run lost two steps to an error
+ * this predicate called fatal. `isCapacityError` covers that family now, shared
+ * with `classifyFailure` in the goal graph.
+ *
+ * Built from the shared family predicates plus
+ * `ROUTE_FALLBACK_MODEL_OR_TIMEOUT` — model-not-found and plain timeouts,
+ * which are not part of the transient or connection families but still mean
+ * "ask another route".
+ */
+export function isFallbackableProviderError(message: string): boolean {
+  return isCapacityError(message) || isConnectionError(message) || isTransientServerError(message) || ROUTE_FALLBACK_MODEL_OR_TIMEOUT.test(message)
+}
+
+const ROUTE_FALLBACK_MODEL_OR_TIMEOUT = /timeout|timed out|model (?:not found|unavailable)|\b404\b|not found|connection|network/i
+
+/**
  * How long to wait before re-attempting a capacity failure.
  *
  * A per-minute token cap ("tokens per minute (TPM): Limit 8000") clears on a

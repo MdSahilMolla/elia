@@ -142,10 +142,12 @@ function notedLessons(input: Record<string, unknown>): string[] {
   return Array.isArray(input.lessons) ? input.lessons.filter((lesson): lesson is string => typeof lesson === 'string' && lesson.trim().length > 0) : []
 }
 
+export type TurnLessonMemory = { lessonKeys: string[]; lessonHeldOut: string[] | undefined }
+
 export async function runTurn(
   messages: ConversationMessage[],
   options: RunTurnOptions = {},
-): Promise<RunAgentLoopResult> {
+): Promise<RunAgentLoopResult & TurnLessonMemory> {
   const todoList = options.todoList ?? activeTodoList()
   const mode = options.mode ?? 'dev'
   return withTodoList(todoList, () => withActiveMode(mode, () => runScopedTurn(messages, options)))
@@ -154,7 +156,7 @@ export async function runTurn(
 async function runScopedTurn(
   messages: ConversationMessage[],
   options: RunTurnOptions,
-): Promise<RunAgentLoopResult> {
+): Promise<RunAgentLoopResult & TurnLessonMemory> {
   const startedAt = Date.now()
   const mode = options.mode ?? 'dev'
   // A new user request starts here. A list written before this point — the last
@@ -176,7 +178,7 @@ async function runScopedTurn(
   // files this turn is about to touch. Derived on read from the second brain;
   // empty (and free) until the brain has something anchored to those paths.
   const brainCards = mode === 'dev' && turnPaths.length > 0 ? await renderBrainCards(turnPaths) : ''
-  const lessonMemory = mode === 'dev' ? renderLessonsWithKeys(turnQuery) : { text: '', keys: [] }
+  const lessonMemory = mode === 'dev' ? renderLessonsWithKeys(turnQuery) : { text: '', keys: [], heldOut: undefined }
   const rationale = mode === 'dev' ? renderRationale(turnQuery, turnPaths) : ''
   const weakCaution = mode === 'dev' ? weakDomainCaution(turnQuery, turnPaths) : ''
   const lastTurnFriction = mode === 'dev' ? regretNudge() : ''
@@ -344,5 +346,5 @@ async function runScopedTurn(
   const prefetchNote = hits > 0 ? ` · ${hits} read${hits === 1 ? '' : 's'} prefetched` : ''
   if (!options.silent && !options.skipStats) writeUsageLine(`${config.providerLabel} · ${formatUsageLine(result.usage, elapsedMs, config.model)}${prefetchNote}`)
 
-  return result
+  return { ...result, lessonKeys: lessonMemory.keys, lessonHeldOut: lessonMemory.heldOut }
 }

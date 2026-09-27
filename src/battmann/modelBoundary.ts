@@ -1,5 +1,6 @@
 import { config, type TierConfig } from '../config.ts'
 import { ollamaHost } from '../providers/ollama.ts'
+import { providerCapabilities } from '../providers/registry.ts'
 
 /**
  * Which Battmann records may enter a model's context, decided from where the model runs.
@@ -38,9 +39,14 @@ function isLoopback(url: string): boolean {
 }
 
 function routeIsLocal(route: TierConfig): boolean {
-  if (route.providerName === 'ollama') return isLoopback(ollamaHost())
+  // Local runs on the machine's own server (presets like ollama), where the
+  // host is still checked for loopback — a remote Ollama is cloud egress too.
+  if (providerCapabilities(route.providerName).local) {
+    return route.providerName === 'ollama' ? isLoopback(ollamaHost()) : true
+  }
   if (route.providerName === 'custom') {
-    // A tier does not record which base-URL variable built it, so every configured one must be loopback.
+    // A tier does not record which base-URL variable built it, so every
+    // configured one must be loopback.
     const baseUrls = Object.entries(process.env).filter(([name, value]) => /^ELIA_(?:[A-Z]+_)?BASE_URL$/.test(name) && value).map(([, value]) => value!)
     return baseUrls.length > 0 && baseUrls.every(isLoopback)
   }

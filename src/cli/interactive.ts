@@ -106,7 +106,7 @@ export async function runInteractive(): Promise<void> {
   const { runTurn } = await import('../agent.ts')
   const { config, describeThinking, describeReviewers, getThinking, switchModel } = await import('../config.ts')
   setCurrentUsageModel(config.model)
-  const { PROVIDER_PRESET_NAMES, isProviderPresetConfigured, providerPresetDefaultModel, providerReadiness, listProviderModels } = await import('../providers/registry.ts')
+  const { PROVIDER_PRESET_NAMES, isProviderPresetConfigured, providerCapabilities, providerPresetDefaultModel, providerReadiness, listProviderModels } = await import('../providers/registry.ts')
   const { detectOllama } = await import('../providers/ollama.ts')
   /** The picker's right-hand column for a provider: readiness, then its default model. */
   const providerDetail = (name: string) => `${providerReadiness(name)} · ${providerPresetDefaultModel(name) ?? (name === 'ollama' ? 'models on this machine' : 'custom')}`
@@ -714,7 +714,7 @@ export async function runInteractive(): Promise<void> {
       pendingAttachments.length = 0
       return n === 0 ? 'Nothing was queued.' : `Cleared ${n} queued image${n === 1 ? '' : 's'}.`
     }
-    if (config.providerName === 'codex') {
+    if (!providerCapabilities(config.providerName).vision) {
       return 'The ChatGPT-subscription (Codex) provider has no image input — it runs in a sandbox with no vision channel. Switch to an API provider with /model to send images.'
     }
     const loaded = await loadImageAttachment(arg)
@@ -915,6 +915,12 @@ export async function runInteractive(): Promise<void> {
     // verify:"none"/clean regardless of what actually happened.
     let escalatedAborted = false
     let repairAttempts = 0
+    // The lessons the last interactive model turn of this request was briefed
+    // with. A dev turn's `runTurn` returns them explicitly; an escalated turn
+    // never calls `runTurn`, so this stays undefined and the exposure record is
+    // left to the autonomous pipeline — which no longer double-records through
+    // a shared stash.
+    let lastTurnLessonMemory: import('../agent.ts').TurnLessonMemory | undefined
     let grounding: import('../trajectory/record.ts').TrajectoryGrounding | undefined
     let arithmetic: import('../trajectory/record.ts').TrajectoryArithmetic | undefined
     let answerCheck: import('../trajectory/record.ts').TrajectoryAnswerCheck | undefined
@@ -979,8 +985,8 @@ export async function runInteractive(): Promise<void> {
     // `opening` marks the call that answers the user's request itself — the one
     // that thinks it through and plans up front. Repair and self-review passes
     // continue that work and must not re-plan it.
-    const runModelTurn = (opening = false) =>
-      runTurn(messages, {
+    const runModelTurn = async (opening = false) => {
+      const turn = await runTurn(messages, {
         mode,
         approveAction,
         skillNames,
@@ -1020,6 +1026,9 @@ export async function runInteractive(): Promise<void> {
           pushHeartbeat(true, action)
         },
       })
+      lastTurnLessonMemory = { lessonKeys: turn.lessonKeys, lessonHeldOut: turn.lessonHeldOut }
+      return turn
+    }
 
     try {
       if (persona) {
@@ -1531,12 +1540,17 @@ export async function runInteractive(): Promise<void> {
           ...(turnFailed ? { failed: true } : {}),
         })
         const cleanTurn = !turnFailed && toolErrorCount === 0 && editRetryCount === 0 && (verifyResult === 'pass' || verifyResult === 'none' || verifyResult === 'skipped') && !(stopRequested || controller.signal.aborted || escalatedAborted)
-        try {
-          const { recordLessonExposure } = await import('../autonomy/lessonEfficacy.ts')
-          const { consumeInjectedLessonKeys, consumeHeldOutLessonKeys } = await import('../autonomy/lessons.ts')
-          recordLessonExposure(task.id, consumeInjectedLessonKeys(), { verify: verifyResult, clean: cleanTurn, heldOut: consumeHeldOutLessonKeys() })
-        } catch {
-          // best-effort
+        // The interactive exposure record exists only when this turn actually
+        // ran an interactive model turn (escalated turns record inside the
+        // autonomous pipeline instead) — and comes from runTurn's explicit
+        // return, not module-global state that another render could clobber.
+        if (lastTurnLessonMemory) {
+          try {
+            const { recordLessonExposure } = await import('../autonomy/lessonEfficacy.ts')
+            recordLessonExposure(task.id, lastTurnLessonMemory.lessonKeys, { verify: verifyResult, clean: cleanTurn, heldOut: lastTurnLessonMemory.lessonHeldOut })
+          } catch {
+            // best-effort
+          }
         }
         try {
           const { recordTrajectory, deriveReward, refSystemPrompt } = await import('../trajectory/record.ts')
@@ -1695,7 +1709,7 @@ export async function runInteractive(): Promise<void> {
         const chosen = { providerName: config.providerName, model: config.model }
         // A local model is read from disk into memory on its first request, which
         // can take minutes for a large one — that is loading, not failing to answer.
-        const local = config.providerName === 'ollama'
+        const local = providerCapabilities(config.providerName).local
         writeNotice(local ? `Loading ${config.model} in Ollama and checking it answers (the first load can take a minute)…` : `Checking that ${result.label} answers…`)
         const { describeProbeFailure, probeModel } = await import('../providers/probe.ts')
         const probe = await probeModel(config.provider, local ? { timeoutMs: 300_000 } : {})
@@ -2568,17 +2582,18 @@ export async function runInteractive(): Promise<void> {
       const { renderUsageBreakdown, tokenMeter, totalTokens, estimateCostUsd, formatCostUsd, formatTokenCount } = await import('../usage.ts')
       const { codexContextTokens } = await import('../providers/codexSubscription.ts')
       const cum = cumulativeSessionUsage()
-      const isCodex = config.providerName === 'codex'
-      const costLabel = isCodex ? 'included in ChatGPT plan (subscription turns are not metered in $)' : undefined
-      // In subscription mode Elia's `messages` stay near-empty; meter against
-      // Codex's reported prompt size and its model's real window.
-      const threshold = isCodex ? contextWindowFor(config.model) : compactionThresholdFor(config.model)
-      const contextUsed = isCodex ? codexContextTokens() : estimateTokens(messages)
+      // A hand-off provider (the ChatGPT subscription) keeps the working thread
+      // on its own side, so Elia's `messages` stay near-empty and its tokenizer
+      // undercounts; meter against the provider's reported prompt size instead.
+      const handedOff = providerCapabilities(config.providerName).handoff
+      const costLabel = handedOff ? 'included in ChatGPT plan (subscription turns are not metered in $)' : undefined
+      const threshold = handedOff ? contextWindowFor(config.model) : compactionThresholdFor(config.model)
+      const contextUsed = handedOff ? codexContextTokens() : estimateTokens(messages)
       const ctxPct = threshold > 0 ? Math.min(100, Math.round((contextUsed / threshold) * 100)) : 0
 
       const contextView = async (): Promise<string> => {
         const override = contextWindowOverride()
-        if (isCodex) {
+        if (handedOff) {
           return [
             `Context window — ${config.model} (ChatGPT subscription)`,
             '',
@@ -2612,14 +2627,14 @@ export async function runInteractive(): Promise<void> {
         const thinking = getThinking()
         const runMs = process.env.ELIA_MAX_RUN_MS?.trim()
         const providerLine =
-          config.providerName === 'codex'
+          handedOff
             ? '  ChatGPT subscription — capacity is capped by your ChatGPT plan and is\n  not metered by Elia. At the cap a turn fails with "usage limit reached\n  — resets ...".'
             : `  ${config.providerLabel} — billed per token by the provider. Elia enforces no\n  spend cap; set limits in your provider dashboard.`
         return [
           'Limits',
           '',
           'Context',
-          isCodex
+          handedOff
             ? `  model window                ${formatTokenCount(threshold)} tokens (${config.model}; Codex compacts its own thread)`
             : `  compaction threshold        ${formatTokenCount(threshold)} tokens (${config.model})`,
           `  ELIA_CONTEXT_WINDOW         ${contextWindowOverride() ?? 'unset'}`,
@@ -2646,10 +2661,10 @@ export async function runInteractive(): Promise<void> {
           options: [
             {
               label: 'Tokens this session',
-              detail: `${formatTokenCount(totalTokens(cum.usage))} tokens · ${isCodex ? 'ChatGPT plan' : formatCostUsd(estimateCostUsd(config.model, cum.usage))} · ${cum.turns} turn${cum.turns === 1 ? '' : 's'}`,
+              detail: `${formatTokenCount(totalTokens(cum.usage))} tokens · ${handedOff ? 'ChatGPT plan' : formatCostUsd(estimateCostUsd(config.model, cum.usage))} · ${cum.turns} turn${cum.turns === 1 ? '' : 's'}`,
               value: 'tokens',
             },
-            { label: 'Context window', detail: isCodex ? `${ctxPct}% of ${formatTokenCount(threshold)} window (Codex thread)` : `${ctxPct}% of ${formatTokenCount(threshold)} before compaction`, value: 'context' },
+            { label: 'Context window', detail: handedOff ? `${ctxPct}% of ${formatTokenCount(threshold)} window (Codex thread)` : `${ctxPct}% of ${formatTokenCount(threshold)} before compaction`, value: 'context' },
             { label: 'Limits', detail: 'context, reasoning, run & provider caps', value: 'limits' },
             { label: 'Usage-affecting settings', detail: `${config.model} · ${describeThinking()}`, value: 'settings' },
           ],
@@ -3073,16 +3088,16 @@ export async function runInteractive(): Promise<void> {
     if (trimmed === '/usage' || trimmed === '/limits') {
       const { renderUsageBreakdown, tokenMeter, formatTokenCount } = await import('../usage.ts')
       const { codexContextTokens } = await import('../providers/codexSubscription.ts')
-      const isCodexUsage = config.providerName === 'codex'
-      const threshold = isCodexUsage ? contextWindowFor(config.model) : compactionThresholdFor(config.model)
-      const contextUsed = isCodexUsage ? codexContextTokens() : estimateTokens(messages)
+      const handedOffUsage = providerCapabilities(config.providerName).handoff
+      const threshold = handedOffUsage ? contextWindowFor(config.model) : compactionThresholdFor(config.model)
+      const contextUsed = handedOffUsage ? codexContextTokens() : estimateTokens(messages)
       const ctxPct = threshold > 0 ? Math.min(100, Math.round((contextUsed / threshold) * 100)) : 0
       const thinking = getThinking()
       const runMs = process.env.ELIA_MAX_RUN_MS?.trim()
-      writeUsageLine(renderUsageBreakdown(cumulativeSessionUsage(), config.model, isCodexUsage ? 'included in ChatGPT plan (not metered in $)' : undefined))
+      writeUsageLine(renderUsageBreakdown(cumulativeSessionUsage(), config.model, handedOffUsage ? 'included in ChatGPT plan (not metered in $)' : undefined))
       writeUsageLine('')
       writeUsageLine(
-        isCodexUsage
+        handedOffUsage
           ? `Context — ${tokenMeter(ctxPct)} ${ctxPct}%  ·  ${contextUsed > 0 ? formatTokenCount(contextUsed) : 'no turn yet'} / ${formatTokenCount(threshold)} tokens (Codex thread)`
           : `Context — ${tokenMeter(ctxPct)} ${ctxPct}%  ·  ${formatTokenCount(contextUsed)} / ${formatTokenCount(threshold)} tokens before compaction`,
       )
@@ -3092,7 +3107,7 @@ export async function runInteractive(): Promise<void> {
       writeUsageLine(`  reasoning budget   ${thinking.enabled ? `${formatTokenCount(thinking.budgetTokens)} tokens/turn` : 'off'}`)
       writeUsageLine(`  autonomous run     ELIA_MAX_RUN_MS ${runMs ? `${runMs} ms` : 'unset — no default cap'}`)
       writeUsageLine(
-        config.providerName === 'codex'
+        handedOffUsage
           ? '  provider           ChatGPT plan cap (not metered by Elia)'
           : `  provider           ${config.providerLabel} — per-token billing, no Elia spend cap`,
       )

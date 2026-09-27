@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test'
-import { isInceptionEndpoint, isProviderPresetConfigured, listProviderModels, providerPresetDefaultModel, PROVIDER_PRESET_NAMES, tryResolveProvider, validateModelId } from './registry.ts'
+import { isInceptionEndpoint, isProviderPresetConfigured, listProviderModels, providerCapabilities, providerPresetDefaultModel, PROVIDER_PRESET_NAMES, tryResolveProvider, validateModelId } from './registry.ts'
 import { publicFetchTestHooks } from '../networkPolicy.ts'
 
 const originalProvider = process.env.ELIA_PROVIDER
@@ -190,4 +190,35 @@ test('validateModelId rejects empty, whitespace, sentinel, and overlong ids', ()
   expect(validateModelId('x'.repeat(300))).toBeTruthy()
   expect(validateModelId('claude-sonnet-5')).toBeUndefined()
   expect(validateModelId('openrouter/auto')).toBeUndefined()
+})
+
+test('providerCapabilities classifies the ChatGPT subscription as a non-vision hand-off that owns its own thread', () => {
+  const caps = providerCapabilities('codex')
+  expect(caps.handoff).toBe(true)
+  expect(caps.vision).toBe(false)
+  expect(caps.local).toBe(false)
+  expect(caps.threadModel).toBe('provider')
+})
+
+test('providerCapabilities classifies presets that run their own model-tool loop as elia-threaded', () => {
+  for (const name of ['anthropic', 'openai', 'groq', 'google', 'mercury']) {
+    const caps = providerCapabilities(name)
+    expect(caps.handoff).toBe(false)
+    expect(caps.vision).toBe(true)
+    expect(caps.local).toBe(false)
+    expect(caps.threadModel).toBe('elia')
+  }
+})
+
+test('providerCapabilities marks only the local provider local', () => {
+  expect(providerCapabilities('ollama')).toMatchObject({ local: true })
+  expect(providerCapabilities('ollama').threadModel).toBe('elia')
+  for (const name of PROVIDER_PRESET_NAMES.filter((n) => n !== 'ollama')) {
+    expect(providerCapabilities(name).local).toBe(false)
+  }
+})
+
+test('providerCapabilities favours a case-insensitive preset lookup and never throws for an unknown name', () => {
+  expect(providerCapabilities('CODEX').handoff).toBe(true)
+  expect(providerCapabilities('not-a-real-provider')).toMatchObject({ handoff: false, vision: true, threadModel: 'elia' })
 })

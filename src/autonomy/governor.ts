@@ -12,6 +12,7 @@ import { addAllowRule, canPersistPrefixRule, isAllowlisted, ruleFor, type AllowS
 import { consumePreauth, currentBranch, isPreauthorized, preauthPath } from './preauth.ts'
 import { approveSelfEditFile, needsSelfEditApproval, SELF_EDIT_INTENT, selfEditLabel, selfEditRefusal, setSelfEditAllowed } from './selfEdit.ts'
 import { resolve as resolvePath } from 'node:path'
+import { REPORTING_TOOLS } from './reportingTools.ts'
 
 export type ActionRisk = 'safe' | 'review' | 'critical'
 export type ActionDecision = 'allow' | 'approve' | 'block'
@@ -182,23 +183,14 @@ const SHELL_SIDE_EFFECT = /[<>]/i
  * That is not hypothetical. `submit_hypothesis` and `submit_strategy` were
  * missing from this list, so every `elia evolve` proposer did its analysis, went
  * to submit, and was blocked by elia's own unattended policy — which is why the
- * self-improvement loop had proposed nothing in its entire history. The list
- * must stay in step with `REPORTING_TOOLS` in autonomy/goalGraph.ts; the two are
- * literals rather than one import because governor.ts sits under goalGraph.ts in
- * the import graph, and governor.test.ts fails if they drift.
+ * self-improvement loop had proposed nothing in its entire history. The list is
+ * built from the canonical `REPORTING_TOOLS` (a leaf module, so there is no
+ * import cycle to work around) plus the two governor-only reporting tools that
+ * the goal graph does not deduplicate.
  */
-const INTERNAL_SAFE_TOOLS = new Set([
+const INTERNAL_SAFE_TOOLS = new Set<string>([
+  ...REPORTING_TOOLS,
   'flag_risk',
-  'submit_route',
-  'submit_proposal',
-  'submit_verdict',
-  'submit_acceptance',
-  'revise_plan',
-  'submit_assumptions',
-  'submit_lessons',
-  'submit_hypothesis',
-  'submit_strategy',
-  'submit_fragment',
   'delegate_tasks',
 ])
 export const MAX_GOVERNED_ACTIONS = 10_000

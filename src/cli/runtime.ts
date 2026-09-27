@@ -132,12 +132,14 @@ export function userMessage(text: string, images: import('../attachments.ts').Im
 }
 
 export async function classifyCommandRisk(command: string): Promise<{ risky: boolean; reason?: string }> {
-  // Codex is an autonomous workspace-writing agent, not an Elia tool-calling
-  // model — every prompt hands the whole task to it. That hand-off is always
-  // worth an explicit confirmation, so flag it risky rather than skipping the
-  // check. (The Ink REPL confirms this directly; this covers the classic path.)
+  // A hand-off provider (the ChatGPT subscription's Codex) is an autonomous
+  // workspace-writing agent, not an Elia tool-calling model — every prompt hands
+  // the whole task to it. That hand-off is always worth an explicit
+  // confirmation, so flag it risky rather than skipping the check. (The Ink REPL
+  // confirms this directly; this covers the classic path.)
   const { config } = await import('../config.ts')
-  if (config.providerName === 'codex') {
+  const { providerCapabilities } = await import('../providers/registry.ts')
+  if (providerCapabilities(config.providerName).handoff) {
     return { risky: true, reason: `${config.model} (Codex) will run this task autonomously in your workspace — it can read, edit, and run commands.` }
   }
   const { classifyRisk, looksObviouslySafe } = await import('../autonomy/risk.ts')

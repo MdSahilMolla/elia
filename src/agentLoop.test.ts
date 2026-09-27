@@ -18,7 +18,7 @@ import { createToolResultCache } from './speculation/cache.ts'
 process.env.ANTHROPIC_API_KEY ??= 'test-key-for-agentloop-test'
 
 const { config } = await import('./config.ts')
-const { resetProviderHealthForTests, runAgentLoop, toolBatchConcurrency, DEFAULT_PARALLEL_TOOLS, lastAssistantText } = await import('./agentLoop.ts')
+const { resetProviderHealthForTests, runAgentLoop, toolBatchConcurrency, DEFAULT_PARALLEL_TOOLS, lastAssistantText, providerHealthCooldownMs } = await import('./agentLoop.ts')
 const { resetCodexSubscriptionApprovalForTests } = await import('./providers/codexSubscription.ts')
 
 test('session recording captures nested agent tools and provider activity without crossing session boundaries', async () => {
@@ -795,6 +795,19 @@ test('provider health cooldown skips a recently failing route on the next turn',
     config.routingMode = original.routingMode
     config.fallbacks = original.fallbacks
   }
+})
+
+test('a route that keeps failing is cooled down for longer, capped at ten minutes', () => {
+  // First failure keeps the historical 30s so a one-off blip recovers fast;
+  // each consecutive failure doubles the exclusion so a route that fails every
+  // turn stops burning attempts, and the cap prevents an outage from freezing
+  // a recovered route out for hours.
+  expect(providerHealthCooldownMs(1)).toBe(30_000)
+  expect(providerHealthCooldownMs(2)).toBe(60_000)
+  expect(providerHealthCooldownMs(3)).toBe(120_000)
+  expect(providerHealthCooldownMs(5)).toBe(480_000)
+  expect(providerHealthCooldownMs(6)).toBe(600_000)
+  expect(providerHealthCooldownMs(20)).toBe(600_000)
 })
 
 test('auto mode falls back to another provider on model unavailability without changing the primary selection', async () => {

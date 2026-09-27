@@ -7,6 +7,7 @@ import { reportSinkActive } from '../ui/report.ts'
 import { ZERO_USAGE, addUsage } from '../usage.ts'
 import { routeForAssignment } from '../config.ts'
 import { ollamaParallelSlots } from '../providers/ollama.ts'
+import { providerCapabilities } from '../providers/registry.ts'
 import { role as roleDefinition, toolsForRole } from './roles.ts'
 import type { Usage } from '../providers/types.ts'
 import type { Journal } from './journal.ts'
@@ -328,7 +329,7 @@ export async function runFleet(options: FleetRunOptions): Promise<FleetResult> {
 export function fleetConcurrency(providerNames: string[]): number {
   const distinct = [...new Set(providerNames)]
   if (distinct.length === 0) return DEFAULT_FLEET_CONCURRENCY
-  const slots = distinct.reduce((total, name) => total + (name === 'ollama' ? ollamaParallelSlots() : DEFAULT_FLEET_CONCURRENCY), 0)
+  const slots = distinct.reduce((total, name) => total + (providerCapabilities(name).local ? ollamaParallelSlots() : DEFAULT_FLEET_CONCURRENCY), 0)
   return Math.min(MAX_FLEET_CONCURRENCY, slots)
 }
 

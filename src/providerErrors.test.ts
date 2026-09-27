@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { capacityRetryDelayMs, isCapacityError, isConnectionError, isRequestTooLargeError, isTransientServerError, retryBackoffMs } from './providerErrors.ts'
+import { capacityRetryDelayMs, isCapacityError, isConnectionError, isFallbackableProviderError, isRequestTooLargeError, isTransientServerError, isUnusableRouteError, retryBackoffMs } from './providerErrors.ts'
 
 /**
  * The exact message that took two steps out of run 2026-09-13-l0av-rnq0. Every
@@ -103,6 +103,43 @@ test('retryBackoffMs prefers the capacity window over binary backoff', () => {
   expect(retryBackoffMs(GROQ_413, 3)).toBe(60_000)
   expect(retryBackoffMs('429 too many requests', 1)).toBe(30_000)
   expect(retryBackoffMs('Error code: 429 - rate_limit_exceeded', 2)).toBe(30_000)
+})
+
+// The route-health predicates were agent-loop literals until a spelling drift
+// cost turn-ending failures their fallback. Their home is now this module, and
+// the spellings must not widen or narrow independently of the families above.
+test('isUnusableRouteError flags a route whose credit or key is spent', () => {
+  for (const message of [
+    '401 invalid api key',
+    'Error code: 402 - payment required',
+    '402 This request requires more credits',
+    '403 forbidden: insufficient_quota',
+    'insufficient balance to complete this request',
+    'unauthorized',
+  ]) {
+    expect(isUnusableRouteError(message), message).toBe(true)
+  }
+  for (const message of ['429 too many requests', 'Service temporarily overloaded', 'Failed to parse tool call arguments as JSON']) {
+    expect(isUnusableRouteError(message), message).toBe(false)
+  }
+})
+
+test('isFallbackableProviderError is the union of the fallbackable families', () => {
+  for (const message of [
+    '413 Payload Too Large',
+    'connect ECONNREFUSED 127.0.0.1:11434',
+    'getaddrinfo EAI_AGAIN api.groq.com',
+    'Service temporarily overloaded',
+    'Connection reset by peer',
+    'model not found for the given provider',
+    '404 model unavailable',
+    'Our server could not handle the request (timed out)',
+  ]) {
+    expect(isFallbackableProviderError(message), message).toBe(true)
+  }
+  for (const message of ['401 invalid api key', 'failed to parse tool call arguments as JSON']) {
+    expect(isFallbackableProviderError(message), message).toBe(false)
+  }
 })
 
 test('retryBackoffMs keeps the binary fallback for non-capacity failures', () => {

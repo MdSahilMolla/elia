@@ -37,7 +37,7 @@ import { commitAll, scaffoldProject, stageUntrackedForReview } from './scaffold.
 import { publishProject } from './publish.ts'
 import { emitEvent, machineReadable } from '../ui/runtime.ts'
 import { redactText } from '../ui/redact.ts'
-import { appendLessons, consumeHeldOutLessonKeys, consumeInjectedLessonKeys, createLessonsTool, renderLessons, retireLessons } from './lessons.ts'
+import { appendLessons, createLessonsTool, renderLessonsWithKeys, retireLessons } from './lessons.ts'
 import { recordLessonExposure } from './lessonEfficacy.ts'
 import {
   createVerdictTool,
@@ -677,11 +677,11 @@ async function runAutonomousTaskInternal(options: AutonomousRunOptions): Promise
     }
     recordCompletion(runId, completion, completionFacts)
     const contradictions = detectContradictions(completion.state, completion.confidence, completionFacts)
-    recordLessonExposure(runId, consumeInjectedLessonKeys(), {
+    recordLessonExposure(runId, lessonMemory?.keys ?? [], {
       verify: verificationPassed ? 'pass' : 'fail',
       regime: verificationRegime,
       clean: verificationPassed && contradictions.length === 0,
-      heldOut: consumeHeldOutLessonKeys(),
+      heldOut: lessonMemory?.heldOut,
     })
     // This run just added a data point to the trial ledger, so re-judge it here.
     //
@@ -793,13 +793,17 @@ async function runAutonomousTaskInternal(options: AutonomousRunOptions): Promise
     proposalCapture.tool,
   ]
 
+  // The lessons a run is briefed with are rendered once, here, and handed to
+  // the exposure recorder at the run's end — no hidden stash that a second
+  // render (or an escalated chat turn sharing the process) could clobber.
+  const lessonMemory = options.resumeMessages ? undefined : renderLessonsWithKeys(goal)
   const messages: ConversationMessage[] = options.resumeMessages ?? [
     {
       role: 'user',
       content: [
         {
           type: 'text',
-          text: `## Goal\n${goal}\n\n## Project snapshot\n${snapshot}${renderLessons(goal)}\n\nOrient yourself, then submit a proposal.`,
+          text: `## Goal\n${goal}\n\n## Project snapshot\n${snapshot}${lessonMemory?.text ?? ''}\n\nOrient yourself, then submit a proposal.`,
         },
       ],
     },
