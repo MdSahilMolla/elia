@@ -136,8 +136,17 @@ async function main() {
           return
         }
         const hostname = flagValue('--host')
+        // The network bridge is authenticated by default: a `--token` (or
+        // ELIA_BRIDGE_TOKEN) is required; without one a random token is
+        // generated and printed in the startup notice. ELIA_BRIDGE_ALLOWED_ORIGINS
+        // (comma-separated) admits browsers; everything else is refused.
+        const token = flagValue('--token') ?? process.env.ELIA_BRIDGE_TOKEN
+        const allowedOrigins = (process.env.ELIA_BRIDGE_ALLOWED_ORIGINS ?? '')
+          .split(',')
+          .map((origin) => origin.trim())
+          .filter((origin) => origin.length > 0)
         const { runHttpBridge } = await import('./bridgeHttp.ts')
-        return runHttpBridge({ port, hostname })
+        return runHttpBridge({ port, hostname, requireToken: true, token, allowedOrigins })
       }
       const { runVscodeBridge } = await import('./vscodeBridge.ts')
       return runVscodeBridge()

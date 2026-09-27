@@ -75,6 +75,7 @@ dependencies = [
  "anyhow",
  "dirs",
  "elia-parse",
+ "libc",
  "serde",
  "serde_json",
  "tokio",

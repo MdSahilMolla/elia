@@ -1,13 +1,24 @@
 import { expect, test } from 'bun:test'
 import { runHttpBridge } from './bridgeHttp.ts'
 
-async function connect(port: number): Promise<WebSocket> {
-  const ws = new WebSocket(`ws://127.0.0.1:${port}/bridge`)
+async function connect(port: number, opts: { token?: string } = {}): Promise<WebSocket> {
+  const query = opts.token ? `?token=${encodeURIComponent(opts.token)}` : ''
+  const ws = new WebSocket(`ws://127.0.0.1:${port}/bridge${query}`)
   await new Promise<void>((resolve, reject) => {
     ws.addEventListener('open', () => resolve(), { once: true })
     ws.addEventListener('error', () => reject(new Error('WebSocket connection failed')), { once: true })
   })
   return ws
+}
+
+async function failsToConnect(port: number, token?: string): Promise<boolean> {
+  try {
+    const ws = await connect(port, token === undefined ? {} : { token })
+    ws.close()
+    return false
+  } catch {
+    return true
+  }
 }
 
 function nextMessage(ws: WebSocket): Promise<unknown> {
@@ -101,6 +112,48 @@ test('malformed JSON gets a clear error instead of crashing the server', async (
     expect(message.ok).toBe(false)
     expect(message.error).toContain('valid JSON')
     ws.close()
+  } finally {
+    server.stop(true)
+  }
+})
+
+test('a required token gates every upgrade, and a matching one passes', async () => {
+  const server = await runHttpBridge({ port: 0, hostname: '127.0.0.1', requireToken: true, token: 's3cret-bridge-token' })
+  try {
+    expect(await failsToConnect(server.port!)).toBe(true)
+    expect(await failsToConnect(server.port!, 'wrong-token')).toBe(true)
+
+    const ws = await connect(server.port!, { token: 's3cret-bridge-token' })
+    ws.send(JSON.stringify({ id: 'rT', method: 'environment.inspect' }))
+    const message = (await nextMessage(ws)) as { ok: boolean; id: string }
+    expect(message.ok).toBe(true)
+    expect(message.id).toBe('rT')
+    ws.close()
+  } finally {
+    server.stop(true)
+  }
+})
+
+test('a non-loopback bind demands a token even when not asked for explicitly', async () => {
+  const server = await runHttpBridge({ port: 0, hostname: '0.0.0.0' })
+  try {
+    expect(await failsToConnect(server.port!)).toBe(true)
+  } finally {
+    server.stop(true)
+  }
+})
+
+test('a browser Origin is refused unless allowlisted', async () => {
+  const server = await runHttpBridge({ port: 0, hostname: '127.0.0.1', allowedOrigins: ['https://good.example'] })
+  try {
+    const http = `http://127.0.0.1:${server.port!}/bridge`
+    const upgrade = { Upgrade: 'websocket', Connection: 'Upgrade', 'Sec-WebSocket-Version': '13', 'Sec-WebSocket-Key': 'dGhlIHNhbXBsZSBub25jZQ==' }
+    const evil = await fetch(http, { headers: { ...upgrade, Origin: 'https://evil.example' } })
+    expect(evil.status).toBe(403)
+    // The allowlisted Origin sails past the gate (the WebSocket handshake that
+    // follows is what the connect() helper exercises above).
+    const good = await fetch(http, { headers: { ...upgrade, Origin: 'https://good.example' } })
+    expect(good.status).not.toBe(403)
   } finally {
     server.stop(true)
   }

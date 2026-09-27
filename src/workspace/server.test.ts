@@ -73,9 +73,41 @@ test('a token in the ?token= query string is refused, even a valid one', async (
   const viaQuery = await fetch(`${http}?token=${encodeURIComponent(owner)}`, { headers: { Upgrade: 'websocket', Connection: 'Upgrade', 'Sec-WebSocket-Version': '13', 'Sec-WebSocket-Key': 'dGhlIHNhbXBsZSBub25jZQ==' } })
   expect(viaQuery.status).toBe(400)
   expect(await viaQuery.text()).toContain('Authorization: Bearer')
+
   // ...while the same token in the header (what WorkspaceClient sends) connects.
   const client = await connect(server, owner)
   expect(client.hello?.caller.role).toBe('owner')
+})
+
+test('a browser Origin is refused unless explicitly allowed', async () => {
+  const { server, owner } = await fixture()
+  const http = server.url.replace(/^ws/, 'http')
+  const base = {
+    Authorization: `Bearer ${owner}`,
+    Upgrade: 'websocket',
+    Connection: 'Upgrade',
+    'Sec-WebSocket-Version': '13',
+    'Sec-WebSocket-Key': 'dGhlIHNhbXBsZSBub25jZQ==',
+  }
+  // Default server allows no Origin: any browser is refused, good or bad.
+  const crossOrigin = await fetch(`${http}`, { headers: { ...base, Origin: 'https://evil.example' } })
+  expect(crossOrigin.status).toBe(403)
+  const stillNotAllowed = await fetch(`${http}`, { headers: { ...base, Origin: 'https://good.example' } })
+  expect(stillNotAllowed.status).toBe(403)
+
+  // An explicit allowlist admits only the listed Origin (the bearer token still
+  // has to be valid for the handshake to proceed).
+  const dir = mkdtempSync(join(tmpdir(), 'elia-ws-origin-'))
+  const store = WorkspaceStore.open(join(dir, 'workspace.sqlite'))
+  createWorkspace(store, { name: 'origin', ownerName: 'owner' })
+  const allowed = runWorkspaceServer({ port: 0, store, planner: stubPlanner, allowedOrigins: ['https://good.example'] })
+  cleanup.push(() => allowed.stop())
+  cleanup.push(() => store.close())
+  const allowedHttp = allowed.url.replace(/^ws/, 'http')
+  const evilOnAllowed = await fetch(`${allowedHttp}`, { headers: { ...base, Origin: 'https://evil.example' } })
+  expect(evilOnAllowed.status).toBe(403)
+  const admitted = await fetch(`${allowedHttp}`, { headers: { ...base, Origin: 'https://good.example' } })
+  expect(admitted.status).not.toBe(403) // sailed past the Origin gate (a WS handshake follows)
 })
 
 test('a valid token connects and receives a hello with its resolved identity', async () => {

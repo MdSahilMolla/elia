@@ -11,8 +11,8 @@ use serde_json::Value;
 
 /// Bumped on any breaking change to a method's params or result shape. The
 /// client refuses a daemon whose `daemon.info` reports a different value and
-/// spawns a replacement.
-pub const PROTOCOL_VERSION: u32 = 1;
+/// spawns a replacement. (Kept in lockstep with `src/daemon/types.ts`.)
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// A request from the client. `id` is echoed back on the matching response;
 /// notifications (no response wanted) use `id == 0`.
@@ -69,6 +69,8 @@ pub mod codes {
     pub const INVALID_PARAMS: i32 = -32602;
     pub const INTERNAL: i32 = -32603;
     pub const SHELL_SPAWN_FAILED: i32 = -32000;
+    /// First request on a connection did not present the matching daemon token.
+    pub const UNAUTHORIZED: i32 = -32001;
 }
 
 // ---- daemon.info ----

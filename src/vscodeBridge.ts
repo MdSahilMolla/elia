@@ -226,12 +226,13 @@ export function createBridgeSession(options: BridgeSessionOptions): BridgeSessio
     const actionRequest: ActionRequest = { name: 'deployment', input: params }
     const cwd = currentAgent().cwd ?? process.cwd()
     const assessment = assessAction(actionRequest, cwd)
-    const governanceMode = parseGovernanceMode(params.governanceMode) ?? 'supervised'
+    // A deployment is an external, destructive action: its approval bar must
+    // not be lowerable by the *caller* passing `governanceMode: 'unattended'`
+    // over the wire. The operator on this transport decides, always.
+    const governanceMode: GovernanceMode = 'supervised'
     const governor = createActionGovernor({
       mode: governanceMode,
-      approve: governanceMode === 'supervised'
-        ? async (nextAssessment, nextRequest) => waitForApproval(request.id, 'deployment', { assessment: nextAssessment, request: redactActionInput(nextRequest.name, nextRequest.input) })
-        : undefined,
+      approve: async (nextAssessment, nextRequest) => waitForApproval(request.id, 'deployment', { assessment: nextAssessment, request: redactActionInput(nextRequest.name, nextRequest.input) }),
       maxActions: 1,
     })
     const gate = await governor.check(actionRequest)

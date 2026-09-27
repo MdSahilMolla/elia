@@ -13,7 +13,7 @@
  */
 
 import net from 'node:net'
-import { existsSync, readdirSync, statSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { ELIA_ROOT } from '../statePaths.ts'
 import { logSwallowedError } from '../diagnostics.ts'
@@ -66,6 +66,16 @@ export function socketPath(): string {
   return join(dir, `eliad-${userTag()}.sock`)
 }
 
+/** Where the daemon persists the connection token, 0600 in a 0700 directory —
+ * must match `crates/eliad/src/socket.rs`'s `token_path()`. */
+export function socketTokenPath(): string {
+  if (process.platform === 'win32') {
+    return join(process.env.HOME ?? '.', '.elia', `elia-eliad-${userTag()}.token`)
+  }
+  const dir = process.env.XDG_RUNTIME_DIR || join(process.env.HOME ?? '.', '.elia')
+  return join(dir, `eliad-${userTag()}.token`)
+}
+
 /** Locate the `eliad` binary: an explicit override, then a published platform
  * package, then whichever local cargo build is newest (so `cargo build` and
  * `cargo build --release` both "just work" during development). */
@@ -107,6 +117,27 @@ function safeReaddir(dir: string): string[] {
     return readdirSync(dir)
   } catch {
     return []
+  }
+}
+
+/** Read the daemon's connection token, polling briefly for the window between
+ * the socket appearing and the daemon's (0600) token file being written. */
+async function readSocketToken(): Promise<string> {
+  const deadline = Date.now() + 8_000
+  while (Date.now() < deadline) {
+    const token = safeReadTokenFile()
+    if (token) return token
+    await sleep(50)
+  }
+  throw new DaemonUnavailable(`eliad token file never appeared: ${socketTokenPath()}`)
+}
+
+function safeReadTokenFile(): string | undefined {
+  try {
+    const token = readFileSync(socketTokenPath(), 'utf8').trim()
+    return token || undefined
+  } catch {
+    return undefined
   }
 }
 
@@ -240,14 +271,18 @@ class DaemonClient {
   }
 
   private async handshake(): Promise<void> {
-    const info = (await this.rawCall('daemon.info', {}, 5_000)) as DaemonInfo
+    // The daemon writes its token (0600) as part of coming up, before it serves
+    // connections; after a successful dial it is there or a retry is abundant
+    // (the accept loop starts a beat after the file is written).
+    const token = await readSocketToken()
+    const info = (await this.rawCall('daemon.info', { token }, 5_000)) as DaemonInfo
     if (info.protocol !== PROTOCOL_VERSION) {
       // A stale daemon from an older build. Ask it to exit and start fresh.
       // If that request fails the old daemon is still holding the pipe, and the
       // failure used to vanish: the respawn below then either silently raced the
       // survivor or surfaced a generic "did not come up within 8s" that never
       // mentioned the shutdown was what failed.
-      await this.rawCall('daemon.shutdown', {}, 2_000).catch((err) => {
+      await this.rawCall('daemon.shutdown', { token }, 2_000).catch((err) => {
         logSwallowedError('daemon.client.handshake.shutdownStale', err, {
           staleProtocol: info.protocol,
           expected: PROTOCOL_VERSION,
@@ -258,7 +293,10 @@ class DaemonClient {
       this.spawnedThisProcess = false
       await this.spawnDaemon()
       await this.dialWithRetry()
-      const fresh = (await this.rawCall('daemon.info', {}, 5_000)) as DaemonInfo
+      // The replacement wrote a fresh token; a stale read here would be an
+      // unauthorized handshake straight into the same trap.
+      const freshToken = await readSocketToken()
+      const fresh = (await this.rawCall('daemon.info', { token: freshToken }, 5_000)) as DaemonInfo
       if (fresh.protocol !== PROTOCOL_VERSION) {
         throw new DaemonUnavailable(
           `eliad protocol ${fresh.protocol}, expected ${PROTOCOL_VERSION}`,

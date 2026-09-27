@@ -36,6 +36,11 @@ export interface WorkspaceServerOptions {
   port?: number
   hostname?: string
   dbPath?: string
+  /** Origins permitted to open a WebSocket. Any connection sending an `Origin`
+   * header (i.e. any browser) is refused unless listed; a non-browser client
+   * sends no Origin and is judged by its bearer token alone. Default: refuse
+   * every Origin-bearing connection. */
+  allowedOrigins?: string[]
   /** Injected in tests; defaults to opening `dbPath`. */
   store?: WorkspaceStore
   /** Objective planner override; defaults to the model-backed planner. */
@@ -104,6 +109,12 @@ export function runWorkspaceServer(options: WorkspaceServerOptions = {}): Runnin
       const url = new URL(request.url)
       if (url.pathname !== '/workspace') {
         return new Response('elia workspace server: connect over WebSocket at /workspace', { status: 404 })
+      }
+      // Same browser cross-origin rule as the bridge: a browser's Origin is
+      // refused unless explicitly allowed. Local CLI/TUI clients send none.
+      const origin = request.headers.get('origin')
+      if (origin && !(options.allowedOrigins ?? []).includes(origin)) {
+        return new Response('Forbidden: this Origin is not allowed to open a workspace connection', { status: 403 })
       }
       // Bearer header only. A token in the query string lands in proxy/access
       // logs, shell history and process listings, and outlives its revocation
