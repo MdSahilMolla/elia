@@ -47,7 +47,9 @@ export interface PreauthGrant {
   expiresAt: number
   usedCount: number
   lastUsedAt?: number
-  /** HMAC-SHA256 over intent/repo/branch/grantedAt/expiresAt with the per-user secret. */
+  /** Once `usedCount` reaches this, the grant is spent even if still inside its time window. `--authorize deployment.production:1` sets this to 1 for a true one-shot. Absent means uncapped (the original time-window-only behavior). */
+  maxUses?: number
+  /** HMAC-SHA256 over intent/repo/branch/grantedAt/expiresAt/maxUses with the per-user secret. */
   hmac?: string
 }
 
@@ -97,7 +99,7 @@ function getSecret(): string {
 }
 
 function hmacGrant(grant: PreauthGrant): string {
-  const data = [grant.intent, grant.repo, grant.branch, grant.grantedAt, grant.expiresAt].join('\n')
+  const data = [grant.intent, grant.repo, grant.branch, grant.grantedAt, grant.expiresAt, grant.maxUses ?? ''].join('\n')
   return createHmac('sha256', getSecret()).update(data).digest('hex')
 }
 
@@ -129,6 +131,7 @@ function load(path: string): PreauthFile {
         grants: (parsed as PreauthFile).grants
           .filter((g): g is PreauthGrant => {
             if (!g || typeof g.intent !== 'string' || typeof g.repo !== 'string' || typeof g.branch !== 'string' || typeof g.grantedAt !== 'number' || typeof g.expiresAt !== 'number') return false
+            if (g.maxUses !== undefined && (typeof g.maxUses !== 'number' || !Number.isInteger(g.maxUses) || g.maxUses < 1)) return false
             // A grant with no signature is not one the CLI produced — and a
             // malformed one grants nothing. Signing requires the per-user
             // secret, so a hand-written or repo-committed grant fails here.
@@ -181,17 +184,18 @@ export function clearPreauthCaches(): void {
  * site — a human granting `--authorize` from a terminal at run start). Returns
  * the grants actually written (invalid intents are dropped, not thrown).
  */
-export function grantPreauth(intents: string[], cwd: string, branch: string, ttlMs = DEFAULT_PREAUTH_TTL_MS): PreauthGrant[] {
+export function grantPreauth(intents: string[], cwd: string, branch: string, ttlMs = DEFAULT_PREAUTH_TTL_MS, maxUses?: number): PreauthGrant[] {
   const path = preauthPath()
   const file = load(path)
   const now = Date.now()
   // Clamp rather than honor: `-1` (an already-expired grant, used under test)
   // and oversized TTLs both resolve to the supported window.
   const clampedTtlMs = Math.min(Math.max(0, ttlMs), MAX_ACCEPTED_TTL_MS)
+  const clampedMaxUses = maxUses !== undefined && Number.isInteger(maxUses) && maxUses >= 1 ? maxUses : undefined
   const granted: PreauthGrant[] = []
   for (const intent of intents) {
     if (!INTENT_PATTERN.test(intent)) continue
-    const grant: PreauthGrant = { intent, repo: cwd, branch, grantedAt: now, expiresAt: now + clampedTtlMs, usedCount: 0 }
+    const grant: PreauthGrant = { intent, repo: cwd, branch, grantedAt: now, expiresAt: now + clampedTtlMs, usedCount: 0, maxUses: clampedMaxUses }
     grant.hmac = hmacGrant(grant)
     granted.push(grant)
   }
@@ -201,11 +205,36 @@ export function grantPreauth(intents: string[], cwd: string, branch: string, ttl
   return granted
 }
 
+function isSpent(grant: PreauthGrant): boolean {
+  return grant.maxUses !== undefined && grant.usedCount >= grant.maxUses
+}
+
 function findLive(intent: string, cwd: string, branch: string, now: number): { file: PreauthFile; path: string; grant: PreauthGrant } | undefined {
   const path = preauthPath()
   const file = load(path)
-  const grant = file.grants.find((g) => g.intent === intent && g.repo === cwd && g.branch === branch && g.expiresAt > now)
+  const grant = file.grants.find((g) => g.intent === intent && g.repo === cwd && g.branch === branch && g.expiresAt > now && !isSpent(g))
   return grant ? { file, path, grant } : undefined
+}
+
+/** Every live (unexpired, not yet spent) grant for this project + branch — for `elia control preauth list`. */
+export function listLivePreauth(cwd = process.cwd(), branch = 'unknown', now = Date.now()): PreauthGrant[] {
+  const file = load(preauthPath())
+  return file.grants.filter((g) => g.repo === cwd && g.branch === branch && g.expiresAt > now && !isSpent(g))
+}
+
+/**
+ * Removes every live grant for this intent + project + branch immediately,
+ * regardless of remaining time or uses. Returns how many were revoked. The
+ * one way to take back a grant before it expires or is spent on its own.
+ */
+export function revokePreauth(intent: string, cwd = process.cwd(), branch = 'unknown'): number {
+  const path = preauthPath()
+  const file = load(path)
+  const now = Date.now()
+  const remaining = file.grants.filter((g) => !(g.intent === intent && g.repo === cwd && g.branch === branch && g.expiresAt > now))
+  const revokedCount = file.grants.length - remaining.length
+  if (revokedCount > 0) save(path, { grants: remaining })
+  return revokedCount
 }
 
 /** True when a live, unexpired grant covers this exact intent + project + branch. */

@@ -110,23 +110,34 @@ export async function runAuto(): Promise<void> {
   )
   const authorizeRaw = flagValue('--authorize')
   if (authorizeRaw) {
-    const intents = [...new Set(authorizeRaw.split(',').map((s) => s.trim()).filter(Boolean))]
-    if (intents.length === 0) {
-      writeError('--authorize needs at least one intent, e.g. --authorize deployment.production,github.pr_merge')
+    // "intent" grants a time-windowed intent as before; "intent:N" caps it at
+    // N uses regardless of remaining time — "intent:1" is a true one-shot.
+    const entries = [...new Set(authorizeRaw.split(',').map((s) => s.trim()).filter(Boolean))]
+    const parsed = entries.map((entry) => {
+      const [intent, usesRaw] = entry.split(':', 2)
+      const maxUses = usesRaw !== undefined && /^[1-9]\d*$/.test(usesRaw) ? Number(usesRaw) : undefined
+      return { intent: intent ?? '', maxUses, valid: usesRaw === undefined || maxUses !== undefined }
+    })
+    if (parsed.length === 0) {
+      writeError('--authorize needs at least one intent, e.g. --authorize deployment.production,github.pr_merge:1')
       process.exitCode = 1
       return
     }
     const { currentBranch, grantPreauth } = await import('../autonomy/preauth.ts')
     const branch = await currentBranch(process.cwd())
-    const granted = grantPreauth(intents, process.cwd(), branch)
+    const granted: Awaited<ReturnType<typeof grantPreauth>> = []
+    for (const entry of parsed) {
+      if (!entry.valid) continue
+      granted.push(...grantPreauth([entry.intent], process.cwd(), branch, undefined, entry.maxUses))
+    }
     if (granted.length > 0) {
       writeNotice(
-        `pre-authorized for this run only, on branch "${branch}": ${granted.map((g) => g.intent).join(', ')} — expires ${new Date(granted[0]!.expiresAt).toLocaleTimeString()}`,
+        `pre-authorized for this run only, on branch "${branch}": ${granted.map((g) => (g.maxUses ? `${g.intent} (${g.maxUses} use${g.maxUses === 1 ? '' : 's'})` : g.intent)).join(', ')} — expires ${new Date(granted[0]!.expiresAt).toLocaleTimeString()}`,
       )
     }
-    const rejected = intents.filter((intent) => !granted.some((g) => g.intent === intent))
+    const rejected = parsed.filter((entry) => !entry.valid || !granted.some((g) => g.intent === entry.intent)).map((entry) => entry.intent)
     if (rejected.length > 0) {
-      writeError(`--authorize ignored invalid intent(s) (expected lowercase dotted names like "deployment.production"): ${rejected.join(', ')}`)
+      writeError(`--authorize ignored invalid intent(s) (expected lowercase dotted names like "deployment.production", optionally suffixed ":N" for a use cap): ${rejected.join(', ')}`)
     }
   }
 
