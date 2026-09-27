@@ -110,6 +110,14 @@ describe('autonomy governor', () => {
     }
   })
 
+  test('browser.navigate is never observational: it steers an authenticated session and needs approval', () => {
+    const result = assessAction({ name: 'browser', input: { action: 'navigate', url: 'http://192.168.1.10/admin' } }, '/repo')
+    expect(result.risk).toBe('review')
+    expect(result.decision).toBe('approve')
+    expect(result.intent).toBe('browser.navigate')
+    expect(result.resources).toContain('http://192.168.1.10/admin')
+  })
+
   test('fails closed for shell variants that are not provably read-only', () => {
     for (const command of [
       'rm -r -f target',

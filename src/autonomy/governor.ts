@@ -412,12 +412,22 @@ export function assessAction(request: ActionRequest, cwd = currentAgent().cwd ??
 
   if (name === 'browser') {
     const action = typeof input.action === 'string' ? input.action : 'unknown'
+    // `navigate` is not observational. It steers an authenticated, cookie-bearing
+    // browser session at a model-chosen URL — internal hosts, admin panels, the
+    // operator's logged-in session — and leaves that page open for the rest of
+    // the turn, so it is the closest thing the browser tool has to network
+    // access. It needs the same approval boundary as `communication.verify`,
+    // not the standing auto-allow an observational action gets.
+    if (action === 'navigate') {
+      const target = typeof input.url === 'string' ? input.url.replace(/\?.*$/, '') : 'a URL'
+      return assessment('review', 'approve', `browser navigate drives an authenticated browser session to ${target} — an explicit navigation, not an observation`, 'browser.navigate', [target], false)
+    }
     // `console` and `network` read back what the page already logged — the same
     // kind of read as `snapshot`. Classed as page-changing, each was refused in
     // unattended runs, left a pending approval, and held a finished, verified
     // invoice fix at `blocked` on two log reads its orientation scout had tried.
-    if (['status', 'navigate', 'refresh', 'back', 'forward', 'snapshot', 'extract', 'console', 'network', 'scroll', 'wait', 'wait_for'].includes(action)) {
-      return assessment('safe', 'allow', `browser ${action} is observational or navigation-only`, `browser.${action}`, resources, true)
+    if (['status', 'refresh', 'back', 'forward', 'snapshot', 'extract', 'console', 'network', 'scroll', 'wait', 'wait_for'].includes(action)) {
+      return assessment('safe', 'allow', `browser ${action} is observational or within-session navigation`, `browser.${action}`, resources, true)
     }
     return assessment('critical', 'approve', `browser ${action} changes page state and needs an authorization record`, `browser.${action}`, resources, false)
   }

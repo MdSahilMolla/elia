@@ -6,6 +6,7 @@ import { launchInBrowser } from '../preview/launchChrome.ts'
 import { checkRendered, waitForHttp } from '../preview/readiness.ts'
 import { findProject, pickBuildOutput } from '../preview/project.ts'
 import { resolveProjectPath } from '../autonomy/context.ts'
+import { validateNetworkUrl } from '../networkPolicy.ts'
 import { paths } from '../config.ts'
 import { runShell } from '../shell.ts'
 import { activeActionGovernor } from '../autonomy/governor.ts'
@@ -65,6 +66,15 @@ export const previewTool: Tool = {
         throw new Error(`preview URL is invalid: ${url}`)
       }
       if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') throw new Error('preview URL must use http or https')
+      // Same boundary web_fetch and the providers apply: a loopback dev server
+      // is preview's whole point, but a private/metadata network address is
+      // not something a preview should silently reach (or probe through its
+      // readiness fetches). Non-loopback private hosts are refused up front.
+      try {
+        validateNetworkUrl(url, { allowExplicitLocal: true })
+      } catch (error) {
+        throw new Error(`preview URL refused: ${error instanceof Error ? error.message : String(error)}`)
+      }
       // The `path` branch below has checked its page since the "preview called a
       // 404 opened" fix; this branch never did. It opened whatever URL it was
       // handed and returned "Opened … in Chrome" — so a guessed dev-server port

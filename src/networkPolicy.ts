@@ -10,6 +10,11 @@ export interface NetworkUrlOptions {
 
 const LOCALHOST_NAMES = new Set(['localhost', 'localhost.'])
 
+/** True for loopback-only hostnames — localhost, *.localhost, 127.0.0.1, ::1. */
+export function isExplicitLocalHostname(hostname: string): boolean {
+  return isExplicitLocalHost(hostname)
+}
+
 /** Parse and validate a network URL without performing any request. */
 export function validateNetworkUrl(raw: string, options: NetworkUrlOptions = {}): URL {
   let url: URL

@@ -10,6 +10,8 @@ Durable run state, checkpoints, task snapshots, journals, ledgers, schedules, co
 
 `web_fetch` accepts only HTTP(S) URLs, rejects embedded credentials and local, private, link-local, metadata, multicast, and reserved targets, resolves public hostnames before requesting, bounds response size and duration, and refuses automatic redirects. Custom model endpoints must use HTTPS. A localhost development endpoint is permitted only when `ELIA_ALLOW_INSECURE_LOCAL_ENDPOINT=1` is explicitly set; it remains a local development exception, not a production trust model. DNS checks are defense in depth and do not claim to eliminate every time-of-check/time-of-use or network-rebinding risk, so use network isolation for stronger guarantees.
 
+The same address policy extends to the adjacent network paths: remote MCP connectors (`url`-based servers) may only target loopback or genuinely public HTTP(S) hosts, carry no embedded credentials, and refuse redirects; `preview`'s `url` branch rejects private/metadata targets the way `web_fetch` does, keeping loopback dev servers—its stated purpose—as the only local exception; and Jev and connection-warming use the same HTTPS-or-explicit-loopback rule as any custom model endpoint.
+
 The React artifact server binds to loopback and uses a bounded, traversal-safe resolver. It is intended for local preview, not public hosting. Elia remains a local application rather than a hardened multi-user sandbox: it does not provide kernel isolation, hosted identity, a secure keyring, or guaranteed protection from a user who grants the process broad operating-system access. See [`SECURITY.md`](../../SECURITY.md) for reporting and supported-version guidance.
 
 ### Deterministic policy: `.elia/policy.json`

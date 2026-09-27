@@ -13,6 +13,8 @@
  * it properly a moment later.
  */
 
+import { validateNetworkUrl } from '../networkPolicy.ts'
+
 let warmed: string | undefined
 
 export function warmConnection(baseURL: string | undefined): void {
@@ -20,6 +22,13 @@ export function warmConnection(baseURL: string | undefined): void {
   let origin: string
   try {
     origin = new URL(baseURL).origin
+    // A warm-up HEAD is a real request to a real address. It never carries a
+    // credential, but it still sets the *origin* of the connection pool the
+    // real (credential-bearing) request will reuse — so it must only ever open
+    // a connection to a host the provider policy would admit, never an insecure
+    // or private/metadata one. Every provider that calls this has already
+    // validated; this makes the warming path safe on its own.
+    validateNetworkUrl(origin, { allowExplicitLocal: process.env.ELIA_ALLOW_INSECURE_LOCAL_ENDPOINT === '1', requireHttps: true })
   } catch {
     return
   }
