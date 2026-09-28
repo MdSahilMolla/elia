@@ -376,7 +376,7 @@ async function runAgentLoopTracked(opts: RunAgentLoopOptions, inflight: Inflight
       const before = list.read()
       if (before.length === 0) return text
       list.write(applyEditsToTodos(before, change.edits))
-      return `${text}\n\nYour todo list now reads:\n${list.render()}\nKeep these steps and titles the next time you update it.`
+      return `${text}\n\nYour todo list now reads:\n${list.render()}\nKeep these steps and titles. The person is watching this plan: when you finish a step, call todo_write to mark it completed and the next one in_progress.`
     })
   const injectSteering = (): boolean =>
     injectPending(

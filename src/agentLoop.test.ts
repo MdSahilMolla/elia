@@ -375,6 +375,8 @@ test('a note with a plan change updates the turn\'s todo list, and the model see
   ])
   expect(seen[1]).toContain("The person's note: use real fixtures")
   expect(seen[1]).toContain('[~] Write tests for the parser against real fixtures')
+  // And told to keep the plan moving — the person is watching it.
+  expect(seen[1]).toContain('call todo_write to mark it completed')
   expect(seen[1]).not.toContain('<plan-change>')
 })
 
