@@ -99,6 +99,8 @@ export interface PostgresBinaries {
   initdb: string
   pgCtl: string
   pgDump?: string
+  pgRestore?: string
+  psql?: string
 }
 
 export function findPostgresBinaries(which: (name: string) => string | null = (name) => Bun.which(name)): PostgresBinaries | undefined {
@@ -107,14 +109,14 @@ export function findPostgresBinaries(which: (name: string) => string | null = (n
   const pgCtlOnPath = which('pg_ctl')
   if (onPath && pgCtlOnPath) {
     const binDir = onPath.slice(0, onPath.length - `initdb${exe}`.length - 1)
-    return { binDir, initdb: onPath, pgCtl: pgCtlOnPath, pgDump: which('pg_dump') ?? undefined }
+    return { binDir, initdb: onPath, pgCtl: pgCtlOnPath, pgDump: which('pg_dump') ?? undefined, pgRestore: which('pg_restore') ?? undefined, psql: which('psql') ?? undefined }
   }
   for (const dir of candidateBinDirs()) {
     const initdb = join(dir, `initdb${exe}`)
     const pgCtl = join(dir, `pg_ctl${exe}`)
     if (existsSync(initdb) && existsSync(pgCtl)) {
-      const pgDump = join(dir, `pg_dump${exe}`)
-      return { binDir: dir, initdb, pgCtl, pgDump: existsSync(pgDump) ? pgDump : undefined }
+      const optional = (name: string) => (existsSync(join(dir, `${name}${exe}`)) ? join(dir, `${name}${exe}`) : undefined)
+      return { binDir: dir, initdb, pgCtl, pgDump: optional('pg_dump'), pgRestore: optional('pg_restore'), psql: optional('psql') }
     }
   }
   return undefined
@@ -275,27 +277,4 @@ export function isEliaDevDatabase(root: string, url: string): boolean {
   const state = readLocalDbState(root)
   const parsed = parseDatabaseUrl(url)
   return Boolean(state && parsed?.local && parsed.port === state.port)
-}
-
-const BACKUP_SIZE_LIMIT_BYTES = 512 * 1024 * 1024
-
-/**
- * Dumps a local postgres database before a destructive statement runs against
- * it. Returns the dump path, or why none was taken (the caller decides whether
- * that is a reason to refuse).
- */
-export async function backupLocalDatabase(root: string, url: string, sizeBytes?: number): Promise<{ ok: boolean; path?: string; message: string }> {
-  if (sizeBytes !== undefined && sizeBytes > BACKUP_SIZE_LIMIT_BYTES) {
-    return { ok: false, message: `database is ${Math.round(sizeBytes / 1024 / 1024)}MB, over the ${BACKUP_SIZE_LIMIT_BYTES / 1024 / 1024}MB automatic-backup limit` }
-  }
-  const binaries = findPostgresBinaries()
-  const pgDump = binaries?.pgDump
-  if (!pgDump) return { ok: false, message: 'pg_dump is not installed, so no backup can be taken' }
-  const dir = join(devdbDir(root), 'backups')
-  mkdirSync(dir, { recursive: true })
-  if (!existsSync(join(devdbDir(root), '.gitignore'))) writeFileSync(join(devdbDir(root), '.gitignore'), '*\n')
-  const database = parseDatabaseUrl(url)?.database || 'db'
-  const path = join(dir, `${database}-${new Date().toISOString().replace(/[:.]/g, '-')}.sql`)
-  const dumped = await spawnChecked([pgDump, '--no-owner', '--no-privileges', '-f', path, url], 300_000)
-  return dumped.ok ? { ok: true, path, message: `backed up to ${path}` } : { ok: false, message: `pg_dump failed: ${dumped.output.replace(url, '<url>').slice(-600)}` }
 }

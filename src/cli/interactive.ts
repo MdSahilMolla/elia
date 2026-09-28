@@ -1668,6 +1668,8 @@ export async function runInteractive(): Promise<void> {
               ? 'Battmann mode on — strategic risk intelligence across trade, geopolitics, markets, supply chain, policy, and commodities. type a prompt, "/" to see commands, or "exit" to quit'
               : mode === 'datascience'
                 ? 'Data Science mode on — elia runs, validates, and records the analysis: ingestion, quality, statistics, ML, forecasting, causal inference, BI. type a prompt, "/" to see commands, or "exit" to quit'
+              : mode === 'sysintel'
+                ? 'System Intelligence mode on — elia works as a whole technical organization: research, product, engineering, data, security, QA, and operations, with gates only real evidence can pass. type a prompt, "/" to see commands, or "exit" to quit'
               : 'dev mode on — building, debugging, testing, browser, and task workflows available. type a prompt, "/" to see commands, or "exit" to quit (Ctrl+C also works)',
     )
     writeNotice('elia works on its own — it only stops for actions that cannot be undone or that reach outside this machine (push, deploy, send, spend, delete).')
@@ -1962,6 +1964,12 @@ export async function runInteractive(): Promise<void> {
       writeNotice('Data Science mode on — elia loads, checks, analyses, and validates your data itself; every result carries an execution record under .elia/datascience. Live databases, credentialed APIs, Python code, and package installs ask first.')
       return
     }
+    if (choice === 'sysintel' || choice === 'si' || choice === 'system-intelligence' || choice === 'systemintelligence') {
+      mode = 'sysintel'
+      persona = undefined
+      writeNotice('System Intelligence mode on — elia runs work the way a mature technical organization does: every request is triaged into a lifecycle, each stage has an owner hat, and a stage only passes on evidence the engine verified — tests it ran, independent reviews, your sign-offs. The record lives under .elia/sysintel; `elia si` shows the board.')
+      return
+    }
     if (choice === 'tech') {
       const hadSpecialist = persona !== undefined || mode !== 'dev'
       mode = 'dev'
@@ -1988,6 +1996,7 @@ export async function runInteractive(): Promise<void> {
     { label: 'Cyber', detail: 'authorized security testing, vuln research, CTFs', value: 'cyber' },
     { label: 'Battmann', detail: 'strategic risk intelligence — trade, geopolitics, markets, supply chain', value: 'battmann' },
     { label: 'Data Science', detail: 'autonomous, validated analysis — ingestion, statistics, ML, forecasting, causal, Power BI', value: 'datascience' },
+    { label: 'System Intelligence', detail: 'the whole technical organization — research, product, engineering, data, security, QA, ops — with evidence gates', value: 'sysintel' },
   ]
 
   const BETA_MODE_ENTRIES: { label: string; detail: string; value: string }[] = [

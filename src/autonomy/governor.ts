@@ -1,6 +1,7 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { DEFAULT_ARTIFACT_PATHS } from '../battmann/artifactPaths.ts'
 import { DATASCIENCE_TOOLS, datascienceEffect } from '../datascience/effects.ts'
+import { SYSINTEL_RECORD_DIR, SYSINTEL_TOOLS, sysintelEffect } from '../sysintel/effects.ts'
 import { skillCapability } from '../skills/capabilities.ts'
 import { currentAgent, isPathWithinWorkspace, resolveWorkspacePath } from './context.ts'
 import { assertWriteWithinSessionScope, currentSessionScope } from '../session/scope.ts'
@@ -11,7 +12,7 @@ import { assessDatabaseRequest } from '../devdb/policy.ts'
 import { addAllowRule, canPersistPrefixRule, isAllowlisted, ruleFor, type AllowScope } from './allowStore.ts'
 import { consumePreauth, currentBranch, isPreauthorized, preauthPath } from './preauth.ts'
 import { approveSelfEditFile, needsSelfEditApproval, SELF_EDIT_INTENT, selfEditLabel, selfEditRefusal, setSelfEditAllowed } from './selfEdit.ts'
-import { basename, dirname, resolve as resolvePath } from 'node:path'
+import { basename, dirname, relative, resolve as resolvePath } from 'node:path'
 import { REPORTING_TOOLS } from './reportingTools.ts'
 
 export type ActionRisk = 'safe' | 'review' | 'critical'
@@ -286,6 +287,63 @@ function assessDataScience(name: string, input: Record<string, unknown>, cwd: st
   return assessment('critical', 'approve', `${intent} has an unrecognised effect`, intent, paths, false)
 }
 
+const SYSINTEL_TOOL_NAMES: ReadonlySet<string> = new Set(SYSINTEL_TOOLS)
+
+/**
+ * A person's sign-off (release, production, direction, risk acceptance) is never covered
+ * by an earlier yes: no "allow for this session", no allow.json rule, no remembered class
+ * decision. Each one is asked for, because each one approves a specific state of the work.
+ */
+export const SIGNOFF_INTENT_PREFIX = 'sysintel.signoff.'
+const neverRemembered = (intent: string): boolean => intent.startsWith(SIGNOFF_INTENT_PREFIX)
+
+/** True when a path is inside the System Intelligence record (written only through si_* tools). */
+function isSysintelRecordPath(resolved: string, cwd: string): boolean {
+  const rel = relative(resolvePath(cwd), resolved).split('\\').join('/')
+  return rel === SYSINTEL_RECORD_DIR || rel.startsWith(`${SYSINTEL_RECORD_DIR}/`)
+}
+
+const SYSINTEL_RECORD_MENTION = /\.elia[\\/]+sysintel\b/i
+const PLAIN_READ_COMMAND = /^\s*(?:cat|ls|head|tail|grep|rg|wc|jq|less|more|stat|file|tree|diff)\b/i
+
+/**
+ * System Intelligence actions, assessed from the effect table the engine is checked against
+ * (sysintel/effects.ts). Reading the org model and appending to the workspace-local record
+ * proceed on their own. A check's command is gated separately, as run_command, before it
+ * runs. Exporting into the project asks under the review band. A sign-off records a decision
+ * only a person can make, so it is critical and asked for every single time.
+ */
+function assessSysintel(name: string, input: Record<string, unknown>, cwd: string): ActionAssessment {
+  const action = typeof input.action === 'string' ? input.action : ''
+  const intent = `${name}.${action || 'unknown'}`
+  const effect = sysintelEffect(name, action)
+  if (!effect) return assessment('safe', 'allow', `${name} has no action "${action}"; the engine refuses it and lists the valid actions without running anything`, intent, [], true)
+  switch (effect) {
+    case 'compute':
+      return assessment('safe', 'allow', `${intent} reads the organization model or the workspace record; it writes nothing`, intent, [], true)
+    case 'record':
+      return assessment('safe', 'allow', `${intent} appends to the workspace-local record under ${SYSINTEL_RECORD_DIR}`, intent, [SYSINTEL_RECORD_DIR], true)
+    case 'git-read':
+      return assessment('safe', 'allow', `${intent} reads git metadata and records it under ${SYSINTEL_RECORD_DIR}`, intent, [SYSINTEL_RECORD_DIR], true)
+    case 'process': {
+      const command = typeof input.command === 'string' ? input.command : ''
+      return assessment('safe', 'allow', `${intent} records a check; its command runs only after passing this governor as run_command`, intent, command ? [command] : [], true)
+    }
+    case 'project-write': {
+      const path = typeof input.path === 'string' ? input.path : ''
+      if (!path || !isPathWithinWorkspace(path, cwd)) return assessment('critical', 'approve', `${intent} targets a path outside the active workspace or an invalid path`, intent, path ? [path] : [], false)
+      return assessment('review', 'approve', `${intent} writes the artifact into the project at ${path}`, intent, [path], true)
+    }
+    case 'signoff': {
+      const gate = typeof input.gate === 'string' && /^[a-z-]{1,40}$/.test(input.gate) ? input.gate : 'unknown'
+      const id = typeof input.id === 'string' ? input.id.slice(0, 20) : '?'
+      const summary = typeof input.summary === 'string' ? input.summary.slice(0, 300) : ''
+      return assessment('critical', 'approve', `records YOUR ${gate} sign-off on ${id}${summary ? `: "${summary}"` : ''} — only a person can give it, and approving here is that sign-off`, `${SIGNOFF_INTENT_PREFIX}${gate}`, [id], false)
+    }
+  }
+  return assessment('critical', 'approve', `${intent} has an unrecognised effect`, intent, [], false)
+}
+
 export function assessAction(request: ActionRequest, cwd = currentAgent().cwd ?? process.cwd()): ActionAssessment {
   const { name, input } = request
   if (INTERNAL_SAFE_TOOLS.has(name)) return assessment('safe', 'allow', `${name} records structured control-flow metadata`, name, [], true)
@@ -419,6 +477,7 @@ export function assessAction(request: ActionRequest, cwd = currentAgent().cwd ??
   }
 
   if (DATASCIENCE_TOOL_NAMES.has(name)) return assessDataScience(name, input, cwd)
+  if (SYSINTEL_TOOL_NAMES.has(name)) return assessSysintel(name, input, cwd)
 
   if (name === 'spreadsheet') {
     const action = typeof input.action === 'string' ? input.action : 'unknown'
@@ -477,6 +536,11 @@ export function assessAction(request: ActionRequest, cwd = currentAgent().cwd ??
         [path],
         false,
       )
+    }
+    // The System Intelligence record holds engine-produced evidence, reviews, and sign-offs;
+    // editing its files directly would forge them, so it is written only through si_* tools.
+    if (isSysintelRecordPath(resolved, cwd)) {
+      return assessment('critical', 'approve', `${name} would edit the System Intelligence record (${SYSINTEL_RECORD_DIR}) directly — its evidence and sign-offs are written only through the si_* tools`, 'sysintel.record-edit', [path], false)
     }
     // Inside the workspace, but the workspace is elia's own checkout — see selfEdit.ts.
     if (needsSelfEditApproval(resolved)) {
@@ -944,6 +1008,7 @@ export function createActionGovernor(options: ActionGovernorOptions = {}): Actio
       // interactive session.
       if (
         mode === 'supervised' &&
+        !neverRemembered(assessment.intent) &&
         (sessionAllow.has(sessionKey(request, assessment)) || isAllowlisted(request, assessment, options.cwd))
       ) {
         actionCount += 1
@@ -976,7 +1041,10 @@ export function createActionGovernor(options: ActionGovernorOptions = {}): Actio
         return {
           allowed: false,
           assessment: { ...assessment, decision: 'block' },
-          message: `Action blocked by Elia’s unattended policy: ${assessment.reason}. This kind of action reaches outside the project, so one approval can never stand for the next — resume in supervised mode for an exact per-action boundary, or start this run with "elia auto --authorize ${assessment.intent}" to pre-authorize it.`,
+          message: neverRemembered(assessment.intent)
+            // A sign-off does not reach outside the project; it is a decision this run cannot make for the person.
+            ? `Action blocked by Elia’s unattended policy: ${assessment.reason}. An unattended run cannot give a person's sign-off. Stop here and report it: they can sign off in an interactive session, or at a terminal with "elia si signoff ${assessment.resources[0] ?? '<SI-n>'} ${assessment.intent.slice(SIGNOFF_INTENT_PREFIX.length)}".`
+            : `Action blocked by Elia’s unattended policy: ${assessment.reason}. This kind of action reaches outside the project, so one approval can never stand for the next — resume in supervised mode for an exact per-action boundary, or start this run with "elia auto --authorize ${assessment.intent}" to pre-authorize it.`,
         }
       }
       if (mode === 'unattended' && assessment.risk === 'critical' && !options.approve) {
@@ -1035,7 +1103,7 @@ export function createActionGovernor(options: ActionGovernorOptions = {}): Actio
         return normalized ? normalized : undefined
       })()
       const decisionKey = scopedCommand ?? `${assessment.risk}:${assessment.intent}`
-      if (mode === 'unattended') {
+      if (mode === 'unattended' && !neverRemembered(assessment.intent)) {
         const remembered = classDecisions.get(decisionKey)
         if (remembered === true) {
           actionCount += 1
@@ -1084,12 +1152,12 @@ export function createActionGovernor(options: ActionGovernorOptions = {}): Actio
         const approved = outcome === true || (typeof outcome === 'object' && outcome.approved)
         const remember = typeof outcome === 'object' ? outcome.remember : undefined
         const feedback = typeof outcome === 'object' ? outcome.feedback : undefined
-        if (mode === 'unattended') classDecisions.set(decisionKey, approved)
-        if (approved && remember === 'session') sessionAllow.add(sessionKey(request, assessment))
+        if (mode === 'unattended' && !neverRemembered(assessment.intent)) classDecisions.set(decisionKey, approved)
+        if (approved && remember === 'session' && !neverRemembered(assessment.intent)) sessionAllow.add(sessionKey(request, assessment))
         // "Don't ask again" for elia's own source covers every file tool for the
         // session, not just the tool that asked — the same state as /self on.
         if (approved && remember && assessment.intent === SELF_EDIT_INTENT) setSelfEditAllowed(true)
-        if (approved && (remember === 'project' || remember === 'global') && canPersistPrefixRule(request)) {
+        if (approved && (remember === 'project' || remember === 'global') && !neverRemembered(assessment.intent) && canPersistPrefixRule(request)) {
           try {
             addAllowRule(ruleFor(request, assessment), remember, options.cwd)
           } catch {
@@ -1178,6 +1246,9 @@ function assessCommand(command: string, _cwd: string): ActionAssessment {
   }
   if (commandMayReadSensitiveData(command)) {
     return assessment('critical', 'approve', 'shell command may read credentials or protected system data', 'shell.sensitive-read', [], false)
+  }
+  if (SYSINTEL_RECORD_MENTION.test(command) && !PLAIN_READ_COMMAND.test(command)) {
+    return assessment('critical', 'approve', `shell command may modify the System Intelligence record (${SYSINTEL_RECORD_DIR}), which is written only through the si_* tools`, 'sysintel.record-edit', [], false)
   }
   // The named hazard intents are checked BEFORE the generic CRITICAL_COMMAND
   // (and before the settleable-once classification those matches fall into).

@@ -35,6 +35,10 @@ export interface MigrationTool {
   command: string
   /** Creates a new migration from the schema and applies it; `{name}` is the migration name. */
   create?: string
+  /** Lists applied and pending migrations without changing anything. */
+  status?: string
+  /** Reverts the most recent migration (or batch). Absent where the tool has no down migrations. */
+  rollback?: string
   evidence: string
 }
 
@@ -130,24 +134,24 @@ function migrationTools(root: string): MigrationTool[] {
   const run = nodeRunner(root)
   const prismaSchema = ['prisma/schema.prisma', 'schema.prisma'].find((file) => existsSync(join(root, file)))
   if (prismaSchema || deps.prisma || deps['@prisma/client']) {
-    tools.push({ name: 'prisma', command: `${run} prisma migrate deploy`, create: `${run} prisma migrate dev --name {name}`, evidence: prismaSchema ?? 'package.json: prisma' })
+    tools.push({ name: 'prisma', command: `${run} prisma migrate deploy`, create: `${run} prisma migrate dev --name {name}`, status: `${run} prisma migrate status`, evidence: prismaSchema ?? 'package.json: prisma' })
   }
   const drizzleConfig = ['drizzle.config.ts', 'drizzle.config.js', 'drizzle.config.mjs', 'drizzle.config.json'].find((file) => existsSync(join(root, file)))
   if (drizzleConfig || deps['drizzle-kit']) {
     tools.push({ name: 'drizzle', command: `${run} drizzle-kit migrate`, create: `${run} drizzle-kit generate --name {name}`, evidence: drizzleConfig ?? 'package.json: drizzle-kit' })
   }
   const knexfile = ['knexfile.ts', 'knexfile.js'].find((file) => existsSync(join(root, file)))
-  if (knexfile) tools.push({ name: 'knex', command: `${run} knex migrate:latest`, create: `${run} knex migrate:make {name}`, evidence: knexfile })
+  if (knexfile) tools.push({ name: 'knex', command: `${run} knex migrate:latest`, create: `${run} knex migrate:make {name}`, status: `${run} knex migrate:status`, rollback: `${run} knex migrate:rollback`, evidence: knexfile })
   if (existsSync(join(root, '.sequelizerc')) || deps['sequelize-cli']) {
-    tools.push({ name: 'sequelize', command: `${run} sequelize-cli db:migrate`, evidence: existsSync(join(root, '.sequelizerc')) ? '.sequelizerc' : 'package.json: sequelize-cli' })
+    tools.push({ name: 'sequelize', command: `${run} sequelize-cli db:migrate`, status: `${run} sequelize-cli db:migrate:status`, rollback: `${run} sequelize-cli db:migrate:undo`, evidence: existsSync(join(root, '.sequelizerc')) ? '.sequelizerc' : 'package.json: sequelize-cli' })
   }
   if (deps.typeorm && existsSync(join(root, 'ormconfig.json'))) {
-    tools.push({ name: 'typeorm', command: `${run} typeorm migration:run`, evidence: 'ormconfig.json' })
+    tools.push({ name: 'typeorm', command: `${run} typeorm migration:run`, status: `${run} typeorm migration:show`, rollback: `${run} typeorm migration:revert`, evidence: 'ormconfig.json' })
   }
-  if (existsSync(join(root, 'alembic.ini'))) tools.push({ name: 'alembic', command: 'alembic upgrade head', create: 'alembic revision --autogenerate -m {name}', evidence: 'alembic.ini' })
-  if (existsSync(join(root, 'manage.py'))) tools.push({ name: 'django', command: 'python manage.py migrate --noinput', create: 'python manage.py makemigrations --name {name}', evidence: 'manage.py' })
+  if (existsSync(join(root, 'alembic.ini'))) tools.push({ name: 'alembic', command: 'alembic upgrade head', create: 'alembic revision --autogenerate -m {name}', status: 'alembic current --verbose', rollback: 'alembic downgrade -1', evidence: 'alembic.ini' })
+  if (existsSync(join(root, 'manage.py'))) tools.push({ name: 'django', command: 'python manage.py migrate --noinput', create: 'python manage.py makemigrations --name {name}', status: 'python manage.py showmigrations', evidence: 'manage.py' })
   if (existsSync(join(root, 'config', 'database.yml')) && existsSync(join(root, 'bin', 'rails'))) {
-    tools.push({ name: 'rails', command: 'bin/rails db:migrate', evidence: 'config/database.yml' })
+    tools.push({ name: 'rails', command: 'bin/rails db:migrate', status: 'bin/rails db:migrate:status', rollback: 'bin/rails db:rollback', evidence: 'config/database.yml' })
   }
   return tools
 }
@@ -216,6 +220,26 @@ export function detectDatabase(root: string, env: NodeJS.ProcessEnv = process.en
     ...migrationDirs.map((dir) => `migration folder: ${dir}/`),
   ]
   return { targets, migrationTools: tools, composeServices, migrationDirs, signals }
+}
+
+/**
+ * A connection string under any variable name — `STAGING_DATABASE_URL`,
+ * `ANALYTICS_DB` — from the process environment or the project's own env files
+ * (example files excluded). This is how a DBA session reaches a second
+ * database without its password ever being written into the conversation.
+ */
+export function findEnvDatabaseUrl(root: string, name: string, env: NodeJS.ProcessEnv = process.env): { url: string; source: string } | undefined {
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) return undefined
+  const usable = (value: string | undefined): value is string => Boolean(value && engineOf(value.trim()) !== 'unknown' && !/\$\{?[A-Z_]/.test(value))
+  const fromProcess = env[name]
+  if (usable(fromProcess)) return { url: fromProcess.trim(), source: `process env: ${name}` }
+  for (const file of ENV_FILES) {
+    if (/\.(?:example|sample|template)$/.test(file)) continue
+    const text = readText(join(root, file))
+    const value = text === undefined ? undefined : parseEnvFile(text)[name]
+    if (usable(value)) return { url: value.trim(), source: `${file}: ${name}` }
+  }
+  return undefined
 }
 
 /**
