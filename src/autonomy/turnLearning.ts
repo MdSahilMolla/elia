@@ -92,11 +92,11 @@ const MAX_FAILURES = 6
  * policy block, or an edit that missed its target text (a slip in the model's
  * own copy of the file, not a fact about the project).
  */
-const NOT_A_PROJECT_FACT =
+export const NOT_A_PROJECT_FACT =
   /\b(?:denied|declined|rejected|not approved|blocked by|requires approval|old_string|not found in the file|appears \d+ times|not unique)\b/i
 
 /** Tools whose failures say nothing durable about the project. */
-const SLIP_TOOLS = new Set(['edit_file', 'write_file', 'todo_write', 'note_lesson', 'task'])
+export const SLIP_TOOLS = new Set(['edit_file', 'write_file', 'todo_write', 'note_lesson', 'task'])
 
 function clip(text: string, max: number): string {
   const flat = text.replace(/\s+/g, ' ').trim()

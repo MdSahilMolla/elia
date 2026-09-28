@@ -50,6 +50,8 @@ Usage:
   elia "<task>"               Do one task and exit (a big build runs the full pipeline by itself)
   elia --continue, -c         Resume the most recent session in this directory
   elia --resume [id]          Reopen a past conversation — with no id, pick one from the list
+  elia --no-record            Do not record this session (also ELIA_RECORD=off). By default every session is
+                              recorded to .elia/recordings/ as it happens, redacted, and added to an Elia Book
   elia sessions [--all]       List the conversations saved here: id, when, and what each started with
   elia --self                 Started inside elia's own repository, change elia's source without asking
                               (by default elia asks first there, for anything outside workspace/ and .elia/)
@@ -292,7 +294,7 @@ Inside an interactive session:
   /capabilities               List specialist capabilities, risk classes, and output contracts
   /eliabook                   Open Save this session / Saved Elia Books
   /eliabook save [book-id]    Save the complete current session as a reusable Book
-  /eliabook saved             Browse saved session playbooks
+  /eliabook saved             Browse session playbooks — sessions are added automatically as they end
   /eliabook create <run-id>   Create a Book from a complete autonomous-run recording
   /eliabook run <book-id>     Run its active verified procedure in this session
   /eliabook improve <book-id> <run-id>  Promote a measurably better verified run

@@ -44,6 +44,7 @@ import { writeUserConfig } from '../userConfig.ts'
 import { removeProviderConfiguration, savedProviderNames } from '../providerSettings.ts'
 import { flagValue, hasFlag, positionals } from './argv.ts'
 import { describeCliError } from './errors.ts'
+import { logSwallowedError } from '../diagnostics.ts'
 import { ensureFirstRunProviderSetup, interactiveProviderSetup, prewarmActiveProvider, runCodexLogin } from './providerSetup.ts'
 import { actionApprovalPrompt, allSlashCommands, approvalTitle, loadRuntimeSkills, printTurnProfileReport, requestedAgentMode, userMessage, warnIfAtFilesystemRoot } from './runtime.ts'
 import type { ProviderActivity } from '../providers/types.ts'
@@ -186,9 +187,11 @@ export async function runInteractive(): Promise<void> {
   // resolved separately, in runRecordedTurn.
   const pendingAttachments: import('../attachments.ts').ImageAttachment[] = []
 
+  let resumedFrom: string | undefined
   if (continueFlag || resumeId) {
     const loaded = resumeId ? await loadSession(resumeId) : await loadLatestSession()
     if (loaded) {
+      resumedFrom = loaded.id
       messages = loaded.messages
       sessionId = loaded.id
       sessionTranscript.restore(loaded.recording ?? transcriptFromMessages(loaded.messages))
@@ -232,6 +235,28 @@ export async function runInteractive(): Promise<void> {
   // panel shows only workers carrying it — tasks reloaded from a previous
   // process keep their old id and stay in history where they belong.
   taskSessions.setActiveSession(sessionId)
+
+  // The live recorder (autonomy/sessionRecorder.ts): every event of this session
+  // lands in .elia/recordings/<session>.ndjson as it happens, and when the
+  // session ends — cleanly, or found unclosed by a later start — the recording is
+  // folded into an Elia Book. On by default; --no-record or ELIA_RECORD=off turns
+  // it off. Recording never breaks a session: every failure below is swallowed.
+  const { createSessionRecorder, recordingEnabled, pruneRecordings } = await import('../autonomy/sessionRecorder.ts')
+  const recording = recordingEnabled() && !hasFlag('--no-record')
+  const recorder = createSessionRecorder({ cwd: process.cwd(), enabled: recording })
+  // Loaded once, here, because the exit path that closes a session cannot await an import.
+  const eliaBooks = recording ? await import('../eliaBook.ts') : undefined
+  recorder.attach(sessionTranscript)
+  const beginRecording = (from?: string): void => recorder.begin(sessionId, { mode: persona ?? mode, model: config.model, ...(from ? { resumedFrom: from } : {}) })
+  const closeRecording = (): void => {
+    try {
+      const closed = recorder.finish()
+      if (closed) eliaBooks?.recordSessionAsBook(closed.sessionId, process.cwd())
+    } catch (error) {
+      logSwallowedError('elia-book', error)
+    }
+  }
+  beginRecording(resumedFrom)
 
   // Opportunistically tidy the cross-session brain: merge duplicate lessons and
   // drop stale ones so every future prompt isn't paying to carry them. Fire and
@@ -320,12 +345,28 @@ export async function runInteractive(): Promise<void> {
     }
   }
   pushHeartbeat(false, 'Idle at prompt')
+  // Sessions that died without closing their recording (a kill, a crash) are
+  // finished now: closed, and made into Books. A session another elia still
+  // holds is left alone, and so are recordings from the last couple of minutes.
+  // Done after the heartbeat so this session already counts as live to the others.
+  if (eliaBooks) {
+    try {
+      const { sessionHolder } = await import('../sessionCatalog.ts')
+      eliaBooks.recoverRecordings(process.cwd(), { current: sessionId, isLive: (id) => sessionHolder(id) !== undefined })
+      pruneRecordings(process.cwd(), { current: sessionId, protect: eliaBooks.bookedSessionIds() })
+    } catch (error) {
+      logSwallowedError('session-recorder', error)
+    }
+  }
   // The single source of truth for "this session ended," covering every exit
   // path at once — normal completion (one-shot prompts return before ever
   // reaching the interactive loop's own Goodbye code below), Ctrl+C, and
   // signals — since registerShutdownCleanup's callbacks run on process 'exit'
   // regardless of why the process is exiting (see ui/shutdown.ts).
-  registerShutdownCleanup(() => writeSessionEnded(sessionStatus(false, 'Session ended')))
+  registerShutdownCleanup(() => {
+    writeSessionEnded(sessionStatus(false, 'Session ended'))
+    closeRecording()
+  })
 
   /**
    * A build whose run died before it built anything.
@@ -760,6 +801,7 @@ export async function runInteractive(): Promise<void> {
     const hadConversation = messages.length > 0
     if (hadConversation) await persistInteractiveSession()
     writeSessionEnded(sessionStatus(false, 'Cleared — continued in a new session'))
+    closeRecording()
 
     sessionId = newSessionId()
     // /clear starts a new session; commits after it belong to that one.
@@ -775,6 +817,7 @@ export async function runInteractive(): Promise<void> {
     resetActiveTodoList()
     resetProviderConversations()
     usageBaseline = sessionUsageSnapshot()
+    beginRecording()
     pushHeartbeat(false, 'Idle at prompt')
 
     return hadConversation
@@ -802,6 +845,7 @@ export async function runInteractive(): Promise<void> {
     const hadConversation = messages.length > 0
     if (hadConversation) await persistInteractiveSession()
     writeSessionEnded(sessionStatus(false, `Switched to session ${targetId}`))
+    closeRecording()
 
     sessionId = holder ? newSessionId() : loaded.id
     messages.length = 0
@@ -818,6 +862,7 @@ export async function runInteractive(): Promise<void> {
     const { resetActiveTodoList } = await import('../autonomy/todoList.ts')
     resetActiveTodoList()
     resetProviderConversations()
+    beginRecording(targetId)
     // Writes the new id's file immediately, so a copy exists on disk from the
     // moment it is offered rather than only after the first turn.
     await persistInteractiveSession()
@@ -1472,6 +1517,8 @@ export async function runInteractive(): Promise<void> {
           recordUsage(learned.usage, config.tiers.fast.model)
         }
         for (const lesson of learned.lessons) {
+          // Recorded with the turn that taught it, so the lesson can point back at what produced it.
+          recorder.lesson(lesson)
           const line = `✦ learned: ${lesson}`
           sessionTranscript.notice(line)
           if (uiHooks) uiHooks.onActivity?.({ kind: 'status', status: 'completed', title: line })
@@ -1522,6 +1569,19 @@ export async function runInteractive(): Promise<void> {
         }
       }
       sessionTranscript.notice(`Turn outcome: ${taskSessions.get(task.id)?.status ?? 'unknown'}; verification: ${verifyResult}; touched files: ${Object.keys(tracker.snapshot()).join(', ') || 'none'}`)
+      // What the turn did to the tree and how it was judged, for the recording —
+      // the playbook and the search index are both read from it.
+      const turnUsage = cumulativeSessionUsage()
+      recorder.turnEnd({
+        outcome: endStatus === 'done' ? 'completed' : endStatus ?? 'unknown',
+        verify: verifyResult,
+        repairAttempts,
+        touched: Object.keys(tracker.snapshot()).map((file) => {
+          const relative = pathModule.relative(process.cwd(), file)
+          return relative && !relative.startsWith('..') && !pathModule.isAbsolute(relative) ? relative : file
+        }),
+        usage: { ...turnUsage.usage, turns: turnUsage.turns, elapsedMs: turnUsage.elapsedMs },
+      })
       sessionTranscript.endTurn()
       pushHeartbeat(false, taskSessions.get(task.id)?.action ?? 'Idle at prompt')
       if (!persona) {
