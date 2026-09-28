@@ -14,7 +14,7 @@ elia compounding predict         # the paper's predictions P1–P8 and Conjectur
 
 `frontier`, `simulate` and `predict` are read-only. `round` acts: it may prove new benchmark tasks, measure the verifier ladder, or audit the lessons. Without `--spend` it calls no model.
 
-The same rounds run by themselves. When the REPL sits idle, elia's practice run is one round of the governor (`ELIA_AUTO_IMPROVE=off` stops it). Whatever the governor ranks first and can run, runs: grow the benchmark, build a tool for a repeated habit, audit the library, or run an evolve generation. Practice used to run an evolve generation every time, which spent credit on a comparison the governor already said could not certify a gain.
+The same rounds run by themselves. When the REPL sits idle, elia's practice run is one round of the governor (only when `ELIA_AUTO_IMPROVE=on`; it is off by default). Whatever the governor ranks first and can run, runs: grow the benchmark, build a tool for a repeated habit, audit the library, or run an evolve generation. Practice used to run an evolve generation every time, which spent credit on a comparison the governor already said could not certify a gain.
 
 ## What each part of the paper became
 

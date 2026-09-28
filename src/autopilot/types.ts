@@ -109,6 +109,8 @@ export interface GoalOutcome {
   regressions: string[]
   fixed: string[]
   elapsedMs: number
+  /** What the goal cost, from the session's priced usage while it ran. */
+  costUsd?: number
   blockers: string[]
 }
 

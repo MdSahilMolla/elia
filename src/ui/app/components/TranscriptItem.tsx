@@ -245,14 +245,12 @@ export function TranscriptItemView({ item, expanded, gapAbove = false, live = fa
       return <Note text={item.text} marginTop={gapAbove ? 1 : 0} />
     }
     case 'aside':
-      // Asked mid-task and answered on the spot, while the work carried on.
+      // What the thinking panel leaves behind when it closes: one line — the
+      // note, and the plan change it made or the answer it got.
       return (
-        <Box flexDirection="column" marginTop={1}>
-          <Marked mark="↳" color={palette.brand} textColor={palette.muted}>
-            {`you, mid-task: ${item.question}`}
-          </Marked>
-          <AssistantMessage text={item.text} streaming={false} />
-        </Box>
+        <Marked mark="↳" color={palette.note} textColor={palette.muted} marginTop={1}>
+          {`Your note "${item.question}" → ${item.plan ? `plan: ${item.plan}` : item.text.replace(/\s*\n+\s*/g, ' ')}`}
+        </Marked>
       )
     case 'receipt':
       // The spark, settled: the turn is over. A turn you stopped, or one that

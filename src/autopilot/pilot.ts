@@ -24,6 +24,7 @@
  */
 
 import { writeFileSync } from 'node:fs'
+import { formatCostUsd, sessionCost } from '../usage.ts'
 import { isSensitivePath } from '../autonomy/sensitivePaths.ts'
 import type { AutonomyProfile } from '../autonomy/loop.ts'
 import { addUserGoal, MAX_ATTEMPTS, nextGoal, refreshBacklog } from './backlog.ts'
@@ -204,6 +205,7 @@ async function understand(state: PilotState, options: PilotOptions, log: (line: 
 async function runOneGoal(state: PilotState, goal: Goal, options: PilotOptions, log: (line: string) => void): Promise<GoalOutcome> {
   const root = state.root
   const startedAt = Date.now()
+  const spentBefore = sessionCost().usd
   const beforeSha = headSha(root)!
   const keep = new Set(untrackedPaths(root))
   const before = state.latest ?? state.baseline!
@@ -258,8 +260,10 @@ async function runOneGoal(state: PilotState, goal: Goal, options: PilotOptions, 
     regressions: delta.regressions,
     fixed: delta.fixed,
     elapsedMs: Date.now() - startedAt,
+    costUsd: Math.max(0, sessionCost().usd - spentBefore),
     blockers: run.blockers.slice(0, 8),
   }
+  const cost = outcome.costUsd! > 0 ? ` · ${formatCostUsd(outcome.costUsd)}` : ''
 
   if (accepted) {
     try {
@@ -268,7 +272,7 @@ async function runOneGoal(state: PilotState, goal: Goal, options: PilotOptions, 
       outcome.afterSha = headSha(root)
       goal.status = 'done'
       state.latest = after
-      log(`  ✓ landed ${outcome.afterSha?.slice(0, 10)} — ${reason}${delta.fixed.length > 0 ? `; fixed ${delta.fixed.join(', ')}` : ''}`)
+      log(`  ✓ landed ${outcome.afterSha?.slice(0, 10)} — ${reason}${delta.fixed.length > 0 ? `; fixed ${delta.fixed.join(', ')}` : ''}${cost}`)
     } catch (error) {
       // A commit hook refused it: treat it like any other rejection.
       accepted = false
@@ -291,7 +295,7 @@ async function runOneGoal(state: PilotState, goal: Goal, options: PilotOptions, 
     const nothingToDo = !changed && run.outcome === 'completed'
     if (nothingToDo) goal.status = 'done'
     else if (goal.attempts >= MAX_ATTEMPTS) goal.status = 'parked'
-    log(`  ↺ ${changed ? 'rolled back' : 'no change'} — ${outcome.reason}${outcome.keptAt ? ` (attempt kept at ${outcome.keptAt})` : ''}${goal.status === 'parked' ? '; parked after two attempts' : ''}`)
+    log(`  ↺ ${changed ? 'rolled back' : 'no change'} — ${outcome.reason}${outcome.keptAt ? ` (attempt kept at ${outcome.keptAt})` : ''}${goal.status === 'parked' ? '; parked after two attempts' : ''}${cost}`)
   }
 
   for (const blocker of outcome.blockers) {
@@ -301,7 +305,7 @@ async function runOneGoal(state: PilotState, goal: Goal, options: PilotOptions, 
   goal.outcomes.push(outcome)
   state.goalsRun += 1
   state.currentGoalId = undefined
-  appendJournal(root, 'goal-end', { goal: goal.id, accepted: outcome.accepted, reason: outcome.reason, runOutcome: run.outcome, regressions: delta.regressions, fixed: delta.fixed, keptAt: outcome.keptAt })
+  appendJournal(root, 'goal-end', { goal: goal.id, accepted: outcome.accepted, reason: outcome.reason, runOutcome: run.outcome, regressions: delta.regressions, fixed: delta.fixed, keptAt: outcome.keptAt, costUsd: outcome.costUsd })
   persist(state)
   return outcome
 }

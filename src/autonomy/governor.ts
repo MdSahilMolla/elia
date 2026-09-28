@@ -127,6 +127,27 @@ const REMOTE_FETCH_COMMAND = /^(?:\S+=\S+\s+)*(?:command\s+)?(?:curl|wget)\b/i
 // each deployment/PR verb is classified critical (CRITICAL_COMMAND) instead
 // of riding the unattended review-band auto-allow.
 const REVIEW_COMMAND = /\bgit\s+commit\b/i
+
+/**
+ * `git add` / `git mv` of paths inside the repository: the rest of a commit,
+ * local, and undone with `git restore --staged` or another `git mv`. They were
+ * classed critical (shell.unknown), so every unattended run — and the live
+ * session's search attempts — was refused `git add` and could never commit its
+ * own work (seen live: four refused `git add`s in a row, then a turn spinning
+ * on retries). Anything else stays critical: a forced add or move (`git add -f
+ * .env` is how an ignored secret gets committed; `git mv -f` overwrites), `-C`
+ * or any path that leaves the tree (absolute, `~`, or through `..`).
+ */
+function isLocalGitStaging(command: string): boolean {
+  const tokens = command.trim().split(/\s+/)
+  const start = tokens[0] === 'command' ? 1 : 0
+  if (tokens[start] !== 'git' || (tokens[start + 1] !== 'add' && tokens[start + 1] !== 'mv')) return false
+  return tokens.slice(start + 2).every((token) => {
+    if (token === '--force' || /^-[A-Za-z]*f[A-Za-z]*$/.test(token)) return false
+    if (token.startsWith('/') || token.startsWith('~') || /^[A-Za-z]:[\\/]/.test(token)) return false
+    return !token.split(/[\\/]/).includes('..')
+  })
+}
 // Checks and builds that run the project's own code and write only inside it.
 // `go build`, `cargo check` and `gradlew build` were here while `npm run build`
 // and a bare `tsc --noEmit` were not, so an unattended Vite app could never be
@@ -800,7 +821,6 @@ export const TRUST_CONTROL_INTENT = 'trust-control'
  */
 const isTrustControlFile = isEliaTrustFile
 
-
 /** A short, human-readable name for the trust store a write would touch. */
 export function trustControlLabel(absPath: string): string {
   const norm = absPath.replaceAll('\\', '/').toLocaleLowerCase()
@@ -810,7 +830,22 @@ export function trustControlLabel(absPath: string): string {
   return file
 }
 
-export function createActionGovernor(options: { mode?: GovernanceMode; approve?: ActionApproval; cwd?: string; maxActions?: number } = {}): ActionGovernor {
+export interface ActionGovernorOptions {
+  mode?: GovernanceMode
+  approve?: ActionApproval
+  cwd?: string
+  maxActions?: number
+  /**
+   * Local, reversible work — the review band: edits, commits, mkdir,
+   * provisioning — runs without asking, as it does unattended. Only critical
+   * actions, and review-band actions that reach other people (a push, a PR,
+   * a preview deploy), still go to `approve`. The interactive session's
+   * default posture ("autonomous") sets this; "ask first" does not.
+   */
+  reviewRunsFreely?: boolean
+}
+
+export function createActionGovernor(options: ActionGovernorOptions = {}): ActionGovernor {
   const mode = options.mode ?? 'unattended'
   const cwd = options.cwd ?? process.cwd()
   // Resolved at most once per governor, and only the first time a
@@ -941,7 +976,7 @@ export function createActionGovernor(options: { mode?: GovernanceMode; approve?:
           noApprover: true,
         }
       }
-      if (assessment.risk === 'review' && mode === 'unattended' && !OUTBOUND_REVIEW_INTENTS.has(assessment.intent)) {
+      if (assessment.risk === 'review' && (mode === 'unattended' || options.reviewRunsFreely) && !OUTBOUND_REVIEW_INTENTS.has(assessment.intent)) {
         actionCount += 1
         return { allowed: true, assessment: { ...assessment, decision: 'allow' } }
       }
@@ -1156,7 +1191,7 @@ function assessCommand(command: string, _cwd: string): ActionAssessment {
   if (CRITICAL_COMMAND.test(command)) {
     return assessment('critical', 'approve', 'shell command may cause an irreversible or external side effect', 'shell', [], false)
   }
-  if (REVIEW_COMMAND.test(command)) {
+  if (REVIEW_COMMAND.test(command) || isLocalGitStaging(command)) {
     return assessment('review', 'approve', 'shell command changes dependencies, reaches a remote system, or creates a durable artifact', 'shell', [], true)
   }
   if (/^(?:command\s+)?git\s+branch\b/i.test(command) && !GIT_BRANCH_LIST_ONLY.test(command)) {

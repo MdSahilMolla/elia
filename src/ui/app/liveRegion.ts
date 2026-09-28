@@ -90,7 +90,7 @@ function shapeOf(item: Item, expanded: boolean): Shape {
     case 'header':
       return { chrome: 1, gutter: 2, bodyLimit: 3 }
     case 'aside':
-      // marginTop + the "↳ you, mid-task" line; the answer sits behind "● ".
+      // marginTop, and the `Your note "…" →` lead-in before the answer.
       return { chrome: 2, gutter: 2, bodyLimit: Infinity }
   }
 }

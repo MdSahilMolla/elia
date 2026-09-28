@@ -230,3 +230,22 @@ test('a session that touched several models is priced per model, not at one rate
   expect(formatSessionCost()).toContain('unpriced-model-x unpriced')
   resetSessionUsageForTests()
 })
+
+test('spend still inside a running loop shows in the live cost, and never twice', async () => {
+  const { recordUsage, resetSessionUsageForTests, sessionCost, sessionCostLive, trackInflightUsage } = await import('./usage.ts')
+  resetSessionUsageForTests()
+  try {
+    const call = { inputTokens: 1_000_000, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 }
+    const loop = trackInflightUsage()
+    loop.update('mercury-2.5', call)
+    // Not recorded yet, but the display already counts it.
+    expect(sessionCost().usd).toBe(0)
+    expect(sessionCostLive().usd).toBeCloseTo(0.2, 6)
+    // The loop finishes and clears its slot; its caller records the total.
+    loop.done()
+    recordUsage(call, 'mercury-2.5')
+    expect(sessionCostLive().usd).toBeCloseTo(0.2, 6)
+  } finally {
+    resetSessionUsageForTests()
+  }
+})

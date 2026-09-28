@@ -22,7 +22,8 @@
 //   - a proven change lands on its own `evolve/…` branch, never in the
 //     working tree (see engine.ts `promoteTo: 'branch'`).
 //
-// ELIA_AUTO_IMPROVE=off turns it off.
+// Off unless asked for: ELIA_AUTO_IMPROVE=on turns it on. Practice spends
+// credit nobody asked for, so an idle session no longer starts it by itself.
 import { spawn } from 'node:child_process'
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -81,10 +82,8 @@ export interface AutoImproveState {
 }
 
 export function autoImproveEnabled(env: Record<string, string | undefined> = process.env): boolean {
-  // Off under `bun test` unless a test asks: a suite that opens and closes the
-  // real REPL must never leave a real evolve run going in the background.
-  const raw = (env.ELIA_AUTO_IMPROVE ?? (env.NODE_ENV === 'test' ? 'off' : 'on')).trim().toLowerCase()
-  return !(raw === 'off' || raw === '0' || raw === 'false' || raw === 'no')
+  const raw = (env.ELIA_AUTO_IMPROVE ?? 'off').trim().toLowerCase()
+  return raw === 'on' || raw === '1' || raw === 'true' || raw === 'yes'
 }
 
 export function readAutoImproveState(path = AUTO_IMPROVE_STATE): AutoImproveState {
@@ -168,7 +167,7 @@ function describeSpan(ms: number): string {
 
 /** Whether to start a practice run now, and if not, why not. Pure. */
 export function shouldStartPractice(state: AutoImproveState, check: StartCheck): { start: boolean; reason: string } {
-  if (check.enabled === false) return { start: false, reason: 'ELIA_AUTO_IMPROVE is off' }
+  if (check.enabled === false) return { start: false, reason: 'practice is off (ELIA_AUTO_IMPROVE=on turns it on)' }
   // Only a run with a pid holds the slot; a record with no process behind it
   // falls through to the cooldown like any other.
   if (state.pid !== undefined && practicePhase(state, check) === 'running') return { start: false, reason: 'a practice run is already going' }
@@ -408,7 +407,7 @@ export function practiceSummary(outcome: AutoOutcome, detail: string, branch?: s
 
 /** What `elia compounding` says about practice: the last run, and whether the next one would start now. */
 export function renderPracticeStatus(state: AutoImproveState, check: StartCheck): string {
-  const lines = ['practice — when idle, elia runs the one activity its resource governor ranks first: grow the benchmark, build a tool, audit, or an evolve generation (ELIA_AUTO_IMPROVE=off to stop)']
+  const lines = ['practice — when idle, elia runs the one activity its resource governor ranks first: grow the benchmark, build a tool, audit, or an evolve generation. Off unless ELIA_AUTO_IMPROVE=on']
   const phase = practicePhase(state, check)
   const at = (ms: number) => new Date(ms).toISOString().slice(0, 16).replace('T', ' ')
   if (phase === 'never') lines.push('  never run yet')

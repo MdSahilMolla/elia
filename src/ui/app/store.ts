@@ -78,6 +78,8 @@ export interface AsideItem {
   kind: 'aside'
   question: string
   text: string
+  /** "1 step changed, 1 added" — when the note changed the plan, the receipt says that instead of the answer. */
+  plan?: string
 }
 /** The session header, printed once at the top of scrollback. */
 export interface HeaderItem {
@@ -119,8 +121,8 @@ export interface TranscriptStore {
   toolEnd(event: ToolEvent & { id?: string }): void
   activity(activity: ProviderActivity): void
   notice(text: string): void
-  /** A mid-turn message and the answer it got while the work carried on. */
-  aside(question: string, answer: string): void
+  /** A mid-turn message and the answer it got while the work carried on — and the plan change it made, if any. */
+  aside(question: string, answer: string, plan?: string): void
   /** The line that closes a turn — marked by how the turn ended. */
   receipt(text: string, ending?: 'done' | 'stopped' | 'failed'): void
   error(text: string): void
@@ -473,12 +475,12 @@ export function createTranscriptStore(): TranscriptStore {
       changed()
     },
 
-    aside(question, answer) {
+    aside(question, answer, plan) {
       if (live.length === 0) turnBase = committed.length
       // A paragraph mid-stream stays where it is; the exchange lands after it
       // and the work's next words start a fresh paragraph below.
       live = live.map((item) => (item.kind === 'assistant' || item.kind === 'thinking' ? { ...item, streaming: false } : item))
-      live = [...live, { id: nextId(), kind: 'aside', question, text: answer }]
+      live = [...live, { id: nextId(), kind: 'aside', question, text: answer, ...(plan ? { plan } : {}) }]
       changed()
     },
 
@@ -578,7 +580,7 @@ export function createTranscriptStore(): TranscriptStore {
         } else if (item.kind === 'shell') {
           out.push('```console', item.text, '```', '')
         } else if (item.kind === 'aside') {
-          out.push(`**You (while elia worked):** ${item.question}`, '', `**elia:** ${item.text}`, '')
+          out.push(`**You (while elia worked):** ${item.question}`, '', `**elia:** ${item.text}`, '', ...(item.plan ? [`_Plan: ${item.plan}_`, ''] : []))
         } else {
           out.push(`> ${item.kind === 'error' ? '⚠️ ' : ''}${item.text}`, '')
         }

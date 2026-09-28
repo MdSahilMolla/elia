@@ -7,6 +7,7 @@ import { createPlanlessWorkTracker, createRedundantReadTracker, isLoneBatchableR
 import { createReadAhead } from './autonomy/readAhead.ts'
 import { createPlanProgressTracker, planBelongsToRequest, type PlanProgressUpdate, type ToolOutcome } from './autonomy/planProgress.ts'
 import { activeTodoList } from './autonomy/todoList.ts'
+import { applyEditsToTodos, decodeNote } from './autonomy/operatorNotes.ts'
 import type { ChatMessage, ContentBlock, Provider, ProviderActivity, Usage } from './providers/types.ts'
 import type { Tool } from './tools/types.ts'
 import { unknownToolMessage } from './tools/toolNameSuggest.ts'
@@ -15,7 +16,7 @@ import { redactText } from './ui/redact.ts'
 import { endTextTurn, writeNotice, writeToolCall, writeToolResult } from './ui/stream.ts'
 import { startThinkingAnimation } from './ui/animator.ts'
 import { createStreamCursor } from './ui/streamCursor.ts'
-import { ZERO_USAGE, addUsage, reportLiveOutput } from './usage.ts'
+import { ZERO_USAGE, addUsage, reportLiveOutput, trackInflightUsage, type InflightUsage } from './usage.ts'
 import { spendState, spendStopPrompt } from './spendLimit.ts'
 import { SPECULABLE_TOOLS, type CacheStats, type ToolResultCache } from './speculation/cache.ts'
 import { readMemo } from './speculation/deterministicCache.ts'
@@ -290,6 +291,17 @@ export function isObservation(request: { name: string; input: Record<string, unk
 }
 
 export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentLoopResult> {
+  // Spend shows while the loop runs (usage.ts, "in flight"); the slot is
+  // cleared before the caller records the loop's final total.
+  const inflight = trackInflightUsage()
+  try {
+    return await runAgentLoopTracked(opts, inflight)
+  } finally {
+    inflight.done()
+  }
+}
+
+async function runAgentLoopTracked(opts: RunAgentLoopOptions, inflight: InflightUsage): Promise<RunAgentLoopResult> {
   const {
     messages,
     systemPrompt,
@@ -353,9 +365,22 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
     return true
   }
 
+  // A note from the thinking panel carries its plan change as a block for the
+  // autonomous pipeline; a chat turn applies it to its own todo list instead,
+  // and shows the model the list it should keep.
+  const takeSteering = (): string[] =>
+    (drainSteering?.() ?? []).map((raw) => {
+      const { text, change } = decodeNote(raw)
+      if (!change || change.edits.length === 0) return text
+      const list = activeTodoList()
+      const before = list.read()
+      if (before.length === 0) return text
+      list.write(applyEditsToTodos(before, change.edits))
+      return `${text}\n\nYour todo list now reads:\n${list.render()}\nKeep these steps and titles the next time you update it.`
+    })
   const injectSteering = (): boolean =>
     injectPending(
-      drainSteering?.() ?? [],
+      takeSteering(),
       '[Operator steering — the user sent this while you were working. Take it as a direct instruction and adjust course now.]',
       'elia: operator steering applied',
       true,
@@ -911,6 +936,7 @@ export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentL
             try {
               const result = await streamProvider(route)
               totalUsage = addUsage(totalUsage, result.usage)
+              inflight.update(route.model, totalUsage)
               // What this call really cost, the moment it is known — the working
               // line counts a long turn step by step instead of jumping at the end.
               reportLiveOutput({ kind: 'settled', outputTokens: result.usage.outputTokens })

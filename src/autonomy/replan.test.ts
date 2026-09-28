@@ -184,3 +184,34 @@ test('an unrecognised role falls back to a general worker rather than failing at
 
   expect(capture.taken()[0]!.step?.role).toBe('builder')
 })
+
+// --- the person's changes, sent while the work ran ---
+
+test('the person can rewrite a step that has not started; the old instructions stay and the change is added', () => {
+  const result = applyPlanRevisions(
+    proposal,
+    [{ kind: 'revise-step', reason: 'the person asked for it', stepId: 's2', title: 'Step s2 on Postgres', change: 'Use Postgres, not SQLite.' }],
+    none,
+  )
+  expect(result.rejected).toEqual([])
+  const revised = result.proposal.steps.find((entry) => entry.id === 's2')!
+  expect(revised.title).toBe('Step s2 on Postgres')
+  expect(revised.instructions).toBe('do s2\n\n## Changed by the person while the work ran\nUse Postgres, not SQLite.')
+  expect(result.applied[0]).toContain('Step s2 → Step s2 on Postgres')
+  // The input proposal is untouched.
+  expect(proposal.steps[1]!.title).toBe('Step s2')
+})
+
+test('a finished step, or one the plan does not have, cannot be rewritten', () => {
+  const done = applyPlanRevisions(proposal, [{ kind: 'revise-step', reason: 'late', stepId: 's1', title: 'redo' }], new Set(['s1']))
+  expect(done.applied).toEqual([])
+  expect(done.rejected[0]).toContain('already completed')
+  const missing = applyPlanRevisions(proposal, [{ kind: 'revise-step', reason: 'typo', stepId: 's9', title: 'x' }], none)
+  expect(missing.rejected[0]).toContain('no such step')
+})
+
+test('a worker cannot rewrite a step — revise-step is the person\'s alone', async () => {
+  const capture = createPlanRevisionTool()
+  await expect(capture.tool.execute({ kind: 'revise-step', reason: 'I prefer my version', stepId: 's2', title: 'something else' })).rejects.toThrow('needs a "kind"')
+  expect(capture.taken()).toEqual([])
+})

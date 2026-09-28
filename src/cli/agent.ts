@@ -14,7 +14,7 @@ import { MAX_GOVERNED_ACTIONS, type ActionApproval } from '../autonomy/governor.
 import { registerShutdownCleanup } from '../ui/shutdown.ts'
 import { flagValue, hasFlag, positionals, strictInteger } from './argv.ts'
 import { ensureFirstRunProviderSetup } from './providerSetup.ts'
-import { actionApprovalPrompt, createInteractiveApprover, loadRuntimeSkills, requestedAgentMode } from './runtime.ts'
+import { actionApprovalPrompt, loadRuntimeSkills, requestedAgentMode } from './runtime.ts'
 
 export async function runAgentCommand(): Promise<void> {
   const request = positionals(['--beta']).join(' ').trim()
@@ -97,38 +97,18 @@ export async function runAuto(): Promise<void> {
     )
   }
 
-  const supervisionEnv = process.env.ELIA_SUPERVISION?.trim().toLowerCase()
-  if (supervisionEnv !== undefined && supervisionEnv !== 'supervised' && supervisionEnv !== 'unattended') {
-    writeError('ELIA_SUPERVISION must be either supervised or unattended')
-    process.exitCode = 1
-    return
+  // elia auto is always autonomous: the plan runs as soon as it is made, and
+  // only actions that cannot be undone or that reach outside this machine are
+  // gated. The supervision switches that used to choose otherwise are gone.
+  if (hasFlag('--supervised') || process.env.ELIA_SUPERVISION?.trim()) {
+    writeNotice('elia is always autonomous now: --supervised and ELIA_SUPERVISION no longer exist and are ignored.')
   }
-  const unattendedFlag = hasFlag('--yolo', '-y', '--autonomous', '--self-supervise', '--unattended')
-  const supervisedFlag = hasFlag('--supervised') || supervisionEnv === 'supervised'
-  if (supervisedFlag && (unattendedFlag || supervisionEnv === 'unattended')) {
-    writeError('Supervision conflict: choose --supervised/ELIA_SUPERVISION=supervised or an unattended flag, not both')
-    process.exitCode = 1
-    return
-  }
-  // Unattended is the default: elia plans and does the work without waiting
-  // for a plan approval. --supervised (or ELIA_SUPERVISION=supervised) puts
-  // the plan in front of you first. The unattended flags stay accepted.
-  const yolo = !supervisedFlag
   writeNotice(
-    `supervision: ${
-      yolo
-        ? process.stdin.isTTY
-          ? 'unattended (a critical action asks once, then runs freely for the rest of the run)'
-          : 'unattended with no terminal (critical actions are refused)'
-        : 'supervised (approval required for review and critical actions)'
-    }`,
+    process.stdin.isTTY
+      ? 'autonomous: the plan runs as soon as it is made; an irreversible or outside-world action asks once, then that kind runs freely for the rest of the run'
+      : 'autonomous, no terminal: irreversible or outside-world actions are skipped and reported, never waited on',
   )
   const authorizeRaw = flagValue('--authorize')
-  if (authorizeRaw !== undefined && !yolo) {
-    writeError('--authorize only applies to an unattended run (--unattended/--yolo) — supervised mode already asks per action.')
-    process.exitCode = 1
-    return
-  }
   if (authorizeRaw) {
     const intents = [...new Set(authorizeRaw.split(',').map((s) => s.trim()).filter(Boolean))]
     if (intents.length === 0) {
@@ -151,11 +131,6 @@ export async function runAuto(): Promise<void> {
   }
 
   let approveAction: ActionApproval | undefined
-  if (!yolo && !process.stdin.isTTY) {
-    writeError('elia auto --supervised needs a terminal to approve the plan. Drop --supervised to run it unattended.')
-    process.exitCode = 1
-    return
-  }
 
   if (!(await ensureFirstRunProviderSetup())) return
   await loadRuntimeSkills()
@@ -164,36 +139,21 @@ export async function runAuto(): Promise<void> {
   const unregisterShutdown = registerShutdownCleanup(() => controller.abort())
   let rl: readline.Interface | undefined
   try {
-    if (yolo) {
-      // Unattended means "stop asking me about routine work", not "refuse
-      // anything risky and spend the run failing on it". With a terminal
-      // present, a critical action gets exactly one question — and the answer
-      // then covers every action of that kind for the rest of the run. With no
-      // terminal (CI, the scheduler daemon) there is nobody to ask, so the
-      // governor refuses as before.
-      if (process.stdin.isTTY) {
-        rl = readline.createInterface({ input: process.stdin, output: process.stdout })
-        const unattendedRl = rl
-        approveAction = async (assessment, request) => {
-          const label = `${actionApprovalPrompt(assessment, request)}\n  Answering here settles every "${assessment.intent}" action for the rest of this run.`
-          const result = await confirmOnce(unattendedRl, label)
-          return result.action === 'approve'
-        }
+    // Nobody is asked about routine work. With a terminal present, an action
+    // that cannot be undone gets exactly one question — and the answer covers
+    // every action of that kind for the rest of the run. With no terminal (CI,
+    // the scheduler daemon) there is nobody to ask, so the governor skips it.
+    if (process.stdin.isTTY) {
+      rl = readline.createInterface({ input: process.stdin, output: process.stdout })
+      const terminal = rl
+      approveAction = async (assessment, request) => {
+        const label = `${actionApprovalPrompt(assessment, request)}\n  Answering here settles every "${assessment.intent}" action for the rest of this run.`
+        const result = await confirmOnce(terminal, label)
+        return result.action === 'approve'
       }
-      const result = await runAutonomousTask({ goal, approve: autoApprove, mode: requestedAgentMode(), variants, profile, resumeGraph, runId: resumeRunId, polish: !hasFlag('--no-polish'), governanceMode: 'unattended', approveAction, signal: controller.signal, maxWallClockMs: maxRunMs, maxActions })
-      if (result.outcome !== 'completed') process.exitCode = 1
-      return
     }
-
-    const interactiveRl = readline.createInterface({ input: process.stdin, output: process.stdout })
-    rl = interactiveRl
-    approveAction = async (assessment, request) => {
-      const label = actionApprovalPrompt(assessment, request)
-      const result = await confirmOnce(interactiveRl, label)
-      return result.action === 'approve'
-    }
-    const result = await runAutonomousTask({ goal, approve: createInteractiveApprover(interactiveRl), mode: requestedAgentMode(), variants, profile, resumeGraph, runId: resumeRunId, polish: !hasFlag('--no-polish'), governanceMode: 'supervised', approveAction, signal: controller.signal, maxWallClockMs: maxRunMs, maxActions })
-    if (result.outcome !== 'completed' && result.outcome !== 'rejected') process.exitCode = 1
+    const result = await runAutonomousTask({ goal, approve: autoApprove, mode: requestedAgentMode(), variants, profile, resumeGraph, runId: resumeRunId, polish: !hasFlag('--no-polish'), governanceMode: 'unattended', approveAction, signal: controller.signal, maxWallClockMs: maxRunMs, maxActions })
+    if (result.outcome !== 'completed') process.exitCode = 1
   } finally {
     rl?.close()
     unregisterShutdown()

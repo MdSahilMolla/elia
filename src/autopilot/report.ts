@@ -6,6 +6,7 @@
 import { goalScore, openGoals } from './backlog.ts'
 import { summarizeHealth } from './health.ts'
 import type { CheckStatus, Claim, Goal, PilotState } from './types.ts'
+import { formatCostUsd } from '../usage.ts'
 
 const MARK: Record<CheckStatus, string> = { pass: 'pass', fail: 'FAIL', timeout: 'TIMEOUT', inconclusive: 'no tests', blocked: 'not run' }
 
@@ -15,7 +16,8 @@ function cite(claim: Claim): string {
 
 function goalLine(goal: Goal): string {
   const last = goal.outcomes[goal.outcomes.length - 1]
-  const result = last ? `${last.accepted ? 'landed' : 'rolled back'} — ${last.reason}` : goal.status === 'open' ? `queued (score ${goalScore(goal).toFixed(1)})` : ''
+  const cost = last?.costUsd ? ` (${formatCostUsd(last.costUsd)})` : ''
+  const result = last ? `${last.accepted ? 'landed' : 'rolled back'} — ${last.reason}${cost}` : goal.status === 'open' ? `queued (score ${goalScore(goal).toFixed(1)})` : ''
   return `| ${goal.id} | ${goal.title.replace(/\|/g, '\\|')} | ${goal.kind} | ${goal.status} | ${goal.attempts} | ${result.replace(/\|/g, '\\|').replace(/\n/g, ' ')} |`
 }
 
@@ -45,6 +47,9 @@ export function renderReport(state: PilotState): string {
   }
   if (state.backlog.length > 0) {
     lines.push('', '## Goals', '', '| id | goal | kind | status | attempts | result |', '|---|---|---|---|---|---|', ...[...state.backlog].sort((a, b) => a.id.localeCompare(b.id, undefined, { numeric: true })).map(goalLine))
+    const costs = state.backlog.flatMap((goal) => goal.outcomes.map((o) => o.costUsd ?? 0))
+    const spent = costs.reduce((sum, usd) => sum + usd, 0)
+    if (spent > 0) lines.push('', `Spent on goals: about ${formatCostUsd(spent)} across ${costs.length} attempt(s).`)
     const landed = state.backlog.flatMap((goal) => goal.outcomes.filter((o) => o.accepted).map((o) => ({ goal, o })))
     if (landed.length > 0) {
       lines.push('', '### Landed', '')

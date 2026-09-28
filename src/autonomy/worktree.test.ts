@@ -6,7 +6,7 @@ import { join } from 'node:path'
 // worktree.ts pulls `paths` from config.ts, which resolves a provider on import.
 process.env.ANTHROPIC_API_KEY ??= 'test-key-for-worktree-test'
 
-const { createWorktree, mergeWorktreeIntoCwd, removeWorktree, parseStatus } = await import('./worktree.ts')
+const { createWorktree, mergeWorktreeBack, mergeWorktreeIntoCwd, removeWorktree, parseStatus } = await import('./worktree.ts')
 
 async function git(args: string[], cwd: string): Promise<{ exitCode: number; stdout: string; stderr: string }> {
   const proc = Bun.spawn(['git', ...args], { stdout: 'pipe', stderr: 'pipe', cwd })
@@ -129,4 +129,68 @@ test('removeWorktree tears down both the worktree and its branch', async () => {
   expect(list.stdout).not.toContain('runE')
   const branches = await git(['branch'], repoDir)
   expect(branches.stdout).not.toContain('elia/variant-runE-0')
+})
+
+// Seen live: a session's search attempt was asked to "create hello.txt and
+// commit it", did exactly that inside its worktree, and the merge copied back
+// only what `git status` showed — nothing, for the committed file. The person
+// was told "committed" while their tree had neither the file nor the commit.
+test('work the variant committed comes back as commits when the target has not moved', async () => {
+  const worktree = await createWorktree('runCommit', 0, repoDir, stateDir)
+  try {
+    writeFileSync(join(worktree.path, 'hello.txt'), 'hi\n')
+    await git(['add', 'hello.txt'], worktree.path)
+    await git(['commit', '-q', '-m', 'add hello'], worktree.path)
+    writeFileSync(join(worktree.path, 'notes.txt'), 'uncommitted leftover\n')
+
+    const report = await mergeWorktreeBack(worktree, repoDir)
+    expect(report.commits).toBe(1)
+    expect(report.commitsCarried).toBe(true)
+    expect(report.files.sort()).toEqual(['hello.txt', 'notes.txt'])
+    expect((await git(['log', '-1', '--format=%s'], repoDir)).stdout.trim()).toBe('add hello')
+    expect(await Bun.file(join(repoDir, 'hello.txt')).text()).toBe('hi\n')
+    expect(await Bun.file(join(repoDir, 'notes.txt')).text()).toBe('uncommitted leftover\n')
+  } finally {
+    await removeWorktree(worktree, repoDir)
+  }
+})
+
+test('when the target moved on, committed work still arrives — as files — and the report says why the commit did not', async () => {
+  const worktree = await createWorktree('runMoved', 0, repoDir, stateDir)
+  try {
+    writeFileSync(join(worktree.path, 'hello.txt'), 'hi\n')
+    await git(['add', 'hello.txt'], worktree.path)
+    await git(['commit', '-q', '-m', 'add hello'], worktree.path)
+    // Meanwhile the person committed something else on the real branch.
+    writeFileSync(join(repoDir, 'other.txt'), 'theirs\n')
+    await git(['add', 'other.txt'], repoDir)
+    await git(['commit', '-q', '-m', 'their work'], repoDir)
+
+    const report = await mergeWorktreeBack(worktree, repoDir)
+    expect(report.commitsCarried).toBe(false)
+    expect(report.commitsNote).toContain('moved on')
+    expect(report.files).toEqual(['hello.txt'])
+    expect(await Bun.file(join(repoDir, 'hello.txt')).text()).toBe('hi\n')
+    expect((await git(['log', '-1', '--format=%s'], repoDir)).stdout.trim()).toBe('their work')
+  } finally {
+    await removeWorktree(worktree, repoDir)
+  }
+})
+
+test('files inside a new directory come back; the worktree\'s own .elia state does not', async () => {
+  const worktree = await createWorktree('runDirs', 0, repoDir, stateDir)
+  const targetDir = mkdtempSync(join(tmpdir(), 'elia-merge-target-'))
+  try {
+    mkdirSync(join(worktree.path, 'src', 'feature'), { recursive: true })
+    writeFileSync(join(worktree.path, 'src', 'feature', 'index.ts'), 'export {}\n')
+    mkdirSync(join(worktree.path, '.elia'), { recursive: true })
+    writeFileSync(join(worktree.path, '.elia', 'tasks.json'), '{"from":"worktree"}')
+    const touched = await mergeWorktreeIntoCwd(worktree, targetDir)
+    expect(touched).toEqual(['src/feature/index.ts'])
+    expect(await Bun.file(join(targetDir, 'src', 'feature', 'index.ts')).text()).toBe('export {}\n')
+    expect(await Bun.file(join(targetDir, '.elia', 'tasks.json')).exists()).toBe(false)
+  } finally {
+    rmSync(targetDir, { recursive: true, force: true })
+    await removeWorktree(worktree, repoDir)
+  }
 })

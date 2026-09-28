@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test'
 import { render } from 'ink-testing-library'
-import { App, planReceipt, providerPlanItems, shouldPersistActivity } from './App.tsx'
+import { App, planReceipt, planSummary, providerPlanItems, shouldPersistActivity } from './App.tsx'
 import { REPL_COMMANDS_FOR_TEST, waitForFrame } from './testFixtures.ts'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
@@ -10,18 +10,16 @@ import { reportLiveOutput } from '../../usage.ts'
 
 const SHIFT_TAB = '\x1b[Z'
 const settle = () => new Promise((resolve) => setTimeout(resolve, 30))
-/** The status row in the default (manual) mode — the frame is mounted and idle. */
+/** The status row while elia works autonomously (always) — the frame is mounted and idle. */
 const READY = '? for shortcuts'
 
 function baseProps() {
   return {
     getEnv: () => ({ model: 'mercury-2', providerLabel: 'Mercury', providerName: 'inception' }),
     commands: REPL_COMMANDS_FOR_TEST,
-    initialReplMode: 'manual' as const,
     messages: [],
     greeting: 'dev mode — say hi',
     version: '0.0.0-test',
-    classifyRisk: async () => ({ risky: false }),
     runShellLine: async (c: string) => `ran ${c}`,
     handleSlash: async () => ({ handled: true, text: 'slash ok' }),
     submitTurn: async (_text: string, hooks: import('./App.tsx').TurnHooks) => {
@@ -34,6 +32,9 @@ function baseProps() {
 }
 
 test('App prints a one-line header and a quiet status row before any turn', async () => {
+  // Session spend is process-wide; other suites leave some behind.
+  const { resetSessionUsageForTests } = await import('../../usage.ts')
+  resetSessionUsageForTests()
   const { lastFrame } = render(<App {...baseProps()} />)
   const frame = await waitForFrame(lastFrame, 'dev mode — say hi')
   expect(frame).toContain('elia v0.0.0-test · dev mode — say hi')
@@ -68,30 +69,6 @@ test('a busy turn shows what is running, not a random verb', async () => {
   } finally {
     unmount()
   }
-})
-
-test('a failed risk pre-check lets the message through instead of raising an error and a y/n', async () => {
-  let submitted = ''
-  const props = {
-    ...baseProps(),
-    classifyRisk: async () => {
-      throw new Error('Tool call validation failed: attempted to call tool run_command')
-    },
-    submitTurn: async (text: string) => {
-      submitted = text
-    },
-  }
-  const { stdin, lastFrame } = render(<App {...props} />)
-  await waitForFrame(lastFrame, READY)
-  await settle()
-  stdin.write('change the greeting')
-  await waitForFrame(lastFrame, 'change the greeting')
-  stdin.write('\r')
-  await new Promise((resolve) => setTimeout(resolve, 80))
-  expect(submitted).toBe('change the greeting')
-  expect(lastFrame()).not.toContain('Risk check failed')
-  // Case-insensitive: the confirm now shows its default as `y/N`.
-  expect(lastFrame()).not.toMatch(/y\/n/i)
 })
 
 test('App streams a turn: user line, tool card, assistant text', async () => {
@@ -141,9 +118,7 @@ test('Shift+Tab into plan mode makes the turn read-only and offers to execute', 
   const { stdin, lastFrame } = render(<App {...props} />)
   await waitForFrame(lastFrame, READY)
   await settle()
-  stdin.write(SHIFT_TAB) // manual → auto-accept
-  await waitForFrame(lastFrame, 'auto-accept on')
-  stdin.write(SHIFT_TAB) // auto-accept → plan
+  stdin.write(SHIFT_TAB) // autonomous → plan
   await waitForFrame(lastFrame, 'plan mode on')
   stdin.write('research the task')
   await waitForFrame(lastFrame, 'research the task')
@@ -231,15 +206,16 @@ test('status bar reflects a live model change from getEnv', async () => {
   await waitForFrame(lastFrame, 'gpt-5.6-terra')
 })
 
-test('auto routing is named next to the model it is leading with', async () => {
+test('fallback routing is named next to the model it is leading with', async () => {
   // Two rows of the /model picker used to claim to be current at once, and the
-  // status row said only "mercury-2.5" — nothing on screen said the session was
-  // on auto at all.
+  // status row said only "mercury-2.5" — nothing on screen said the session
+  // would fall back to other providers. It said "auto", which read as one more
+  // autonomy switch; it is model fallback, so it says so.
   const { lastFrame } = render(
     <App {...baseProps()} getEnv={() => ({ model: 'mercury-2.5', providerLabel: 'mercury', providerName: 'mercury', routing: 'auto' as const })} />,
   )
   await waitForFrame(lastFrame, READY)
-  expect(lastFrame()).toContain('auto · mercury-2.5')
+  expect(lastFrame()).toContain('mercury-2.5 + fallback')
 })
 
 test('a session on one selected provider says nothing about routing', async () => {
@@ -248,7 +224,7 @@ test('a session on one selected provider says nothing about routing', async () =
   )
   await waitForFrame(lastFrame, READY)
   expect(lastFrame()).toContain('mercury-2.5')
-  expect(lastFrame()).not.toContain('auto · ')
+  expect(lastFrame()).not.toContain('fallback')
 })
 
 test('a codex-subscription message submits without a per-turn hand-off prompt', async () => {
@@ -258,14 +234,13 @@ test('a codex-subscription message submits without a per-turn hand-off prompt', 
   let submitted = ''
   const props = {
     ...baseProps(),
-    initialReplMode: 'auto' as const,
     getEnv: () => ({ model: 'gpt-5.6-terra', providerLabel: 'Codex', providerName: 'codex' }),
     submitTurn: async (text: string) => {
       submitted = text
     },
   }
   const { stdin, lastFrame } = render(<App {...props} />)
-  await waitForFrame(lastFrame, 'auto-accept on')
+  await waitForFrame(lastFrame, READY)
   await settle()
   stdin.write('build me a thing')
   await waitForFrame(lastFrame, 'build me a thing')
@@ -528,74 +503,6 @@ test('the token count keeps moving through a turn that streams nothing', async (
   }
 })
 
-test('a new turn counts its own tokens, not the ones before it', async () => {
-  let checks = 0
-  let release!: () => void
-  const held = new Promise<void>((resolve) => { release = resolve })
-  const props = {
-    ...baseProps(),
-    classifyRisk: async () => {
-      checks += 1
-      if (checks === 2) await held
-      return { risky: false }
-    },
-    submitTurn: async () => {
-      reportLiveOutput({ kind: 'settled', outputTokens: 900 })
-    },
-  }
-  const { stdin, lastFrame, unmount } = render(<App {...props} />)
-  try {
-    await waitForFrame(lastFrame, READY)
-    await settle()
-    stdin.write('first')
-    await waitForFrame(lastFrame, 'first')
-    stdin.write('\r')
-    await waitForFrame(lastFrame, READY)
-    await settle()
-    stdin.write('second')
-    await waitForFrame(lastFrame, 'second')
-    stdin.write('\r')
-    // The pre-check runs under the working line — with last turn's count wiped.
-    expect(await waitForFrame(lastFrame, 'Checking the request…')).not.toContain('tokens')
-    release()
-  } finally {
-    unmount()
-  }
-})
-
-test('the count carries from the risk pre-check into the turn it gated', async () => {
-  let release!: () => void
-  const held = new Promise<void>((resolve) => { release = resolve })
-  const props = {
-    ...baseProps(),
-    classifyRisk: async () => {
-      // The classifier is a model call of its own — real spend, on the line.
-      reportLiveOutput({ kind: 'settled', outputTokens: 140 })
-      return { risky: false }
-    },
-    submitTurn: async (_text: string, hooks: import('./App.tsx').TurnHooks) => {
-      hooks.onToolStart({ id: 'r', name: 'read_file', input: { path: 'src/store.ts' } })
-      await held
-    },
-  }
-  const { stdin, lastFrame, unmount } = render(<App {...props} />)
-  try {
-    await waitForFrame(lastFrame, READY)
-    await settle()
-    stdin.write('look at the store')
-    await waitForFrame(lastFrame, 'look at the store')
-    stdin.write('\r')
-    await waitForFrame(lastFrame, 'Reading store.ts…')
-    // One Enter press is one line: the turn keeps counting where the pre-check
-    // left off instead of dropping back to zero.
-    reportLiveOutput({ kind: 'settled', outputTokens: 60 })
-    await waitForFrame(lastFrame, '200 tokens', 5_000)
-    release()
-  } finally {
-    unmount()
-  }
-})
-
 // Session mubbhz5c-tnp9i0: `/settings` was typed while a run was in flight, so
 // it was queued. The drain handed it to `runOne`, which sent the literal text
 // to the model as a prompt — and the model, seeing a build request and no
@@ -643,13 +550,14 @@ test('a slash command queued during a turn is dispatched, not sent to the model'
   expect(prompts).toEqual(['build the thing'])
 })
 
-test('a message typed mid-turn is answered right away, and a direction also reaches the running work', async () => {
+test('a message typed mid-turn opens the thinking panel, is answered there, and leaves a receipt when it closes', async () => {
   let release!: () => void
   const held = new Promise<void>((resolve) => { release = resolve })
   const drained: string[][] = []
   const asked: Array<{ question: string; request: string; tools: string[] }> = []
   const props = {
     ...baseProps(),
+    panelReadMs: 2_500,
     submitTurn: async (_text: string, hooks: import('./App.tsx').TurnHooks) => {
       hooks.onToolStart({ id: 'r1', name: 'read_file', input: { path: 'src/auth.ts' } })
       hooks.onTool({ id: 'r1', name: 'read_file', input: { path: 'src/auth.ts' }, result: 'export function login() {}', isError: false, durationMs: 2, cached: false })
@@ -674,15 +582,22 @@ test('a message typed mid-turn is answered right away, and a direction also reac
     stdin.write('what are you doing?')
     await waitForFrame(lastFrame, 'what are you doing?')
     stdin.write('\r')
-    const answered = await waitForFrame(lastFrame, 'find where the session expires')
-    expect(answered).toContain('you, mid-task: what are you doing?')
+    const answered = await waitForFrame(lastFrame, 'No plan change.', 4_000)
+    expect(answered).toContain('find where the session expires')
+    expect(answered).toContain('Thinking about your note')
+    // Where the work stands comes from what ran, not from the model.
+    expect(answered).toContain('Right now:')
+    expect(answered).toContain('No plan change.')
     // The turn is still running: an answer is not a turn.
     expect(answered).toContain('esc to interrupt')
+    // Once read, the panel shuts and the exchange stays as a one-line receipt.
+    const closed = await waitForFrame(lastFrame, 'Your note "what are you doing?" → I am reading src/auth.ts', 4_000)
+    expect(closed).not.toContain('Thinking about your note')
 
     stdin.write('also add tests')
     await waitForFrame(lastFrame, 'also add tests')
     stdin.write('\r')
-    await waitForFrame(lastFrame, 'passing to the running work')
+    await waitForFrame(lastFrame, 'your note reaches the work at its next step', 4_000)
 
     release()
     await new Promise((resolve) => setTimeout(resolve, 100))
@@ -692,7 +607,130 @@ test('a message typed mid-turn is answered right away, and a direction also reac
   } finally {
     unmount()
   }
-})
+}, 20_000)
+
+test('the panel streams the thinking, and a plan change lands in the main plan and reaches the run by step id', async () => {
+  let release!: () => void
+  const held = new Promise<void>((resolve) => { release = resolve })
+  let think!: () => void
+  const thought = new Promise<void>((resolve) => { think = resolve })
+  const drained: string[][] = []
+  const props = {
+    ...baseProps(),
+    panelReadMs: 60_000,
+    submitTurn: async (_text: string, hooks: import('./App.tsx').TurnHooks) => {
+      hooks.onRunPlan?.([
+        { id: 'schema', title: 'Design the schema' },
+        { id: 'api', title: 'Build the API' },
+        { id: 'ui', title: 'Build the page' },
+      ])
+      await held
+      drained.push(hooks.drainSteering())
+    },
+    liveReply: async (_question: string, view: import('../../live/liveReply.ts').LiveView, _signal: AbortSignal, onThinking?: (text: string) => void) => {
+      expect(view.plan.map((step) => step.content)).toEqual(['Design the schema', 'Build the API', 'Build the page'])
+      onThinking?.('They want real data, so the API step changes and seeding comes first.')
+      await thought
+      return {
+        answer: 'The API will read from Postgres, seeded with realistic rows.',
+        steer: "The person's note: make it realistic",
+        wants: 'realistic data from a real database',
+        edits: [
+          { kind: 'change' as const, step: 2, to: 'Build the API on Postgres' },
+          { kind: 'add' as const, after: 1, title: 'Seed realistic rows' },
+        ],
+      }
+    },
+  }
+  const { stdin, lastFrame, unmount } = render(<App {...props} />)
+  try {
+    await waitForFrame(lastFrame, READY)
+    await settle()
+    stdin.write('build the shop')
+    await waitForFrame(lastFrame, 'build the shop')
+    stdin.write('\r')
+    await waitForFrame(lastFrame, 'Build the API')
+
+    stdin.write('make it realistic')
+    await waitForFrame(lastFrame, 'make it realistic')
+    stdin.write('\r')
+    // The reasoning shows while it is still being written.
+    await waitForFrame(lastFrame, 'so the API step changes', 3_000)
+    think()
+    const updated = await waitForFrame(lastFrame, 'Plan updated', 4_000)
+    expect(updated).toContain('You want:')
+    expect(updated).toContain('realistic data from a real database')
+    expect(updated).toContain('~ Build the API → Build the API on Postgres')
+    expect(updated).toContain('+ Seed realistic rows')
+    // The main chat's plan changed too, and says why.
+    // The main chat's plan changed too: the new step sits after the one it follows.
+    const mainPlan = updated.slice(updated.indexOf('Plan ·'), updated.indexOf('Thinking about your note'))
+    expect(mainPlan).toContain('Build the API on Postgres')
+    expect(mainPlan.indexOf('Seed realistic rows')).toBeGreaterThan(-1)
+    expect(mainPlan.indexOf('Seed realistic rows')).toBeLessThan(mainPlan.indexOf('Build the API on Postgres'))
+
+    // Put away (ctrl+w pins, ctrl+w again hides): the note leaves one line behind.
+    stdin.write('\x17')
+    await waitForFrame(lastFrame, 'ctrl+w hides this', 3_000)
+    stdin.write('\x17')
+    await waitForFrame(lastFrame, 'Your note "make it realistic" → plan: 1 step changed, 1 added', 3_000)
+    release()
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    expect(drained).toHaveLength(1)
+    const note = drained[0]![0]!
+    expect(note).toContain("The person's note: make it realistic")
+    const change = JSON.parse(note.slice(note.indexOf('<plan-change>') + '<plan-change>'.length, note.indexOf('</plan-change>')))
+    expect(change).toEqual({
+      wants: 'realistic data from a real database',
+      edits: [
+        { kind: 'change', stepId: 'api', stepTitle: 'Build the API', to: 'Build the API on Postgres' },
+        { kind: 'add', title: 'Seed realistic rows', afterId: 'schema', afterTitle: 'Design the schema' },
+      ],
+    })
+  } finally {
+    unmount()
+  }
+}, 20_000)
+
+test('ctrl+w keeps the thinking panel open past its reading time, and ctrl+w again puts it away', async () => {
+  let release!: () => void
+  const held = new Promise<void>((resolve) => { release = resolve })
+  const props = {
+    ...baseProps(),
+    panelReadMs: 3_000,
+    submitTurn: async () => {
+      await held
+    },
+    liveReply: async () => ({ answer: 'Halfway through the parser.' }),
+  }
+  const { stdin, lastFrame, unmount } = render(<App {...props} />)
+  try {
+    await waitForFrame(lastFrame, READY)
+    await settle()
+    stdin.write('go')
+    await waitForFrame(lastFrame, 'go')
+    stdin.write('\r')
+    await waitForFrame(lastFrame, 'esc to interrupt')
+    stdin.write('how far along?')
+    await waitForFrame(lastFrame, 'how far along?')
+    stdin.write('\r')
+    await waitForFrame(lastFrame, 'ctrl+w keeps this open', 3_000)
+    stdin.write('\x17')
+    await waitForFrame(lastFrame, 'ctrl+w hides this')
+    await new Promise((resolve) => setTimeout(resolve, 3_200))
+    // Pinned: the reading time passed and it is still there, with no receipt yet.
+    expect(lastFrame()).toContain('Halfway through the parser.')
+    expect(lastFrame()).not.toContain('Your note')
+    // ctrl+w never types into the input.
+    expect(lastFrame()).not.toMatch(/❯ w\b/)
+    stdin.write('\x17')
+    const closed = await waitForFrame(lastFrame, 'Your note "how far along?" → Halfway through the parser.')
+    expect(closed).not.toContain('ctrl+w hides this')
+    release()
+  } finally {
+    unmount()
+  }
+}, 20_000)
 
 test('when the live lane cannot answer, the message still reaches the work as steering', async () => {
   let release!: () => void
@@ -719,14 +757,14 @@ test('when the live lane cannot answer, the message still reaches the work as st
     stdin.write('use postgres not sqlite')
     await waitForFrame(lastFrame, 'use postgres not sqlite')
     stdin.write('\r')
-    await waitForFrame(lastFrame, 'so I passed your message')
+    await waitForFrame(lastFrame, 'could not think it through (provider down)', 4_000)
     release()
     await new Promise((resolve) => setTimeout(resolve, 100))
     expect(drained).toEqual([['use postgres not sqlite']])
   } finally {
     unmount()
   }
-})
+}, 20_000)
 
 test('a slash command can run as a turn of its own, and mid-turn messages reach it as steering', async () => {
   let release!: () => void
@@ -805,35 +843,156 @@ test('a session can start working by itself, and you can talk to it while it doe
   }
 })
 
-// Seen on a real console with a slow model: Esc during "Checking the request"
-// printed "Stopping the turn…" and the turn then ran anyway — the stop handle
-// only existed once the turn proper had started.
-test('Esc during the risk pre-check stops the message before anything is sent', async () => {
-  let prompts = 0
-  let releaseCheck!: () => void
-  const checking = new Promise<void>((resolve) => { releaseCheck = resolve })
+test('a new turn counts its own tokens, not the ones before it', async () => {
+  let turns = 0
+  let release!: () => void
+  const held = new Promise<void>((resolve) => { release = resolve })
   const props = {
     ...baseProps(),
-    classifyRisk: async () => {
-      await checking
-      return { risky: false }
-    },
-    submitTurn: async () => {
-      prompts += 1
+    submitTurn: async (_t: string, hooks: import('./App.tsx').TurnHooks) => {
+      turns += 1
+      if (turns === 1) {
+        reportLiveOutput({ kind: 'settled', outputTokens: 900 })
+        return
+      }
+      hooks.onActivity({ kind: 'status', title: 'Second turn working', status: 'started' })
+      await held
     },
   }
-  const { stdin, lastFrame } = render(<App {...props} />)
-  await waitForFrame(lastFrame, READY)
-  await settle()
-  stdin.write('deploy the thing')
-  await waitForFrame(lastFrame, 'deploy the thing')
-  stdin.write('\r')
-  await waitForFrame(lastFrame, 'Checking the request')
-  stdin.write('\u001b')
-  await waitForFrame(lastFrame, 'Stopped before it started')
-  // The classifier answering late changes nothing.
-  releaseCheck()
-  await new Promise((resolve) => setTimeout(resolve, 150))
-  expect(prompts).toBe(0)
-  expect(lastFrame()).toContain(READY)
+  const { stdin, lastFrame, unmount } = render(<App {...props} />)
+  try {
+    await waitForFrame(lastFrame, READY)
+    await settle()
+    stdin.write('first')
+    await waitForFrame(lastFrame, 'first')
+    stdin.write('\r')
+    await waitForFrame(lastFrame, READY)
+    await settle()
+    stdin.write('second')
+    await waitForFrame(lastFrame, 'second')
+    stdin.write('\r')
+    // The second turn's working line starts from zero, not from the first turn's 900.
+    expect(await waitForFrame(lastFrame, 'Second turn working')).not.toContain('900')
+    release()
+  } finally {
+    unmount()
+  }
+})
+
+test('there is one way of working: no approval posture to pick, and shift+tab only toggles plan mode', async () => {
+  const { stdin, lastFrame, unmount } = render(<App {...baseProps()} />)
+  try {
+    const idle = await waitForFrame(lastFrame, READY)
+    expect(idle).not.toContain('ask first')
+    expect(idle).not.toContain('auto-accept')
+    await settle()
+    stdin.write('\x1b[Z')
+    await waitForFrame(lastFrame, 'plan mode on')
+    stdin.write('\x1b[Z')
+    const back = await waitForFrame(lastFrame, READY)
+    expect(back).not.toContain('plan mode on')
+  } finally {
+    unmount()
+  }
+})
+
+test('the status row shows what the session has spent against its limit, once it has spent anything', async () => {
+  const { recordUsage, resetSessionUsageForTests, trackInflightUsage } = await import('../../usage.ts')
+  const prior = process.env.ELIA_MAX_SPEND_USD
+  let release!: () => void
+  const held = new Promise<void>((resolve) => { release = resolve })
+  resetSessionUsageForTests()
+  process.env.ELIA_MAX_SPEND_USD = '1'
+  try {
+    const props = {
+      ...baseProps(),
+      submitTurn: async () => {
+        // A model call inside the running turn: 50k input + 2k output on
+        // mercury-2.5, $0.0115 — shown before the turn records anything.
+        const loop = trackInflightUsage()
+        loop.update('mercury-2.5', { inputTokens: 50_000, outputTokens: 2_000, cacheReadTokens: 0, cacheWriteTokens: 0 })
+        await held
+        loop.done()
+        recordUsage({ inputTokens: 50_000, outputTokens: 2_000, cacheReadTokens: 0, cacheWriteTokens: 0 }, 'mercury-2.5')
+      },
+    }
+    const { stdin, lastFrame, unmount } = render(<App {...props} />)
+    try {
+      const idle = await waitForFrame(lastFrame, READY)
+      expect(idle).not.toContain('of $1.00')
+      await settle()
+      stdin.write('go')
+      await waitForFrame(lastFrame, 'go')
+      stdin.write('\r')
+      const working = await waitForFrame(lastFrame, '$0.012 of $1.00')
+      expect(working).toContain('esc to interrupt')
+      release()
+      const spent = await waitForFrame(lastFrame, 'Ask anything, or type / for commands')
+      expect(spent).toContain('$0.012 of $1.00 · mercury-2')
+    } finally {
+      unmount()
+    }
+  } finally {
+    resetSessionUsageForTests()
+    if (prior === undefined) delete process.env.ELIA_MAX_SPEND_USD
+    else process.env.ELIA_MAX_SPEND_USD = prior
+  }
+})
+
+test('an approval that pops up mid-sentence takes none of it as an answer, and the sentence stays in the input', async () => {
+  let ask!: () => void
+  const asking = new Promise<void>((resolve) => { ask = resolve })
+  const answers: unknown[] = []
+  const props = {
+    ...baseProps(),
+    submitTurn: async (_text: string, hooks: import('./App.tsx').TurnHooks) => {
+      await asking
+      answers.push(await hooks.approve({ title: 'Run this command?', lines: ['not in the read-only policy'], ruleLabel: '`cat` commands', command: 'cat package.json' }))
+    },
+  }
+  const { stdin, lastFrame, unmount } = render(<App {...props} />)
+  const typeSlowly = async (text: string) => {
+    for (const ch of text) {
+      stdin.write(ch)
+      await new Promise((resolve) => setTimeout(resolve, 20))
+    }
+  }
+  try {
+    await waitForFrame(lastFrame, READY)
+    await settle()
+    stdin.write('build it')
+    await waitForFrame(lastFrame, 'build it')
+    stdin.write('\r')
+    await waitForFrame(lastFrame, 'esc to interrupt')
+    await typeSlowly('make s')
+    ask()
+    await waitForFrame(lastFrame, 'Run this command?')
+    // The rest of the sentence — an "e", a digit, and the Enter meant to send it.
+    await typeSlowly('ure step 2 is realistic')
+    stdin.write('\r')
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    expect(answers).toEqual([])
+    expect(lastFrame()).toContain('Run this command?')
+    expect(lastFrame()).toContain('make sure step 2 is realistic')
+    // A deliberate answer, after a pause, still works.
+    await new Promise((resolve) => setTimeout(resolve, 900))
+    stdin.write('4')
+    await waitForFrame(lastFrame, 'what should elia do instead?')
+    stdin.write('\x1B')
+    await waitForFrame(lastFrame, 'esc to decline')
+    stdin.write('\x1B')
+    await waitForFrame(() => (answers.length > 0 ? 'answered' : ''), 'answered')
+    expect(answers).toEqual([{ approved: false }])
+    await waitForFrame(lastFrame, READY)
+    // The sentence is still there to send.
+    expect(lastFrame()).toMatch(/❯\s+make sure step 2 is realistic/)
+  } finally {
+    unmount()
+  }
+})
+
+test('a note\'s receipt counts its plan change the way the design says it', () => {
+  expect(planSummary([])).toBeUndefined()
+  expect(planSummary([{ kind: 'change' }, { kind: 'add' }])).toBe('1 step changed, 1 added')
+  expect(planSummary([{ kind: 'add' }, { kind: 'add' }, { kind: 'remove' }])).toBe('2 steps added, 1 removed')
 })

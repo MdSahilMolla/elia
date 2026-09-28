@@ -19,6 +19,20 @@ import { MAX_SHELL_OUTPUT_LENGTH, readBoundedOutput } from '../shell.ts'
 export interface Worktree {
   path: string
   branch: string
+  /** The commit the worktree was cut from. Its changes are measured from here, committed or not. */
+  base?: string
+}
+
+/** What bringing a worktree's work back into the real tree did. */
+export interface MergeReport {
+  /** Paths written or deleted in the target, relative to its root. */
+  files: string[]
+  /** Commits the worktree made on top of its base. */
+  commits: number
+  /** True when those commits now sit on the target's branch (a fast-forward). */
+  commitsCarried: boolean
+  /** Why they were not carried, when there were some and they were not. */
+  commitsNote?: string
 }
 
 interface StatusChange {
@@ -114,6 +128,85 @@ async function syncDirtyFiles(fromRoot: string, toRoot: string): Promise<string[
   return changes.map((change) => change.path)
 }
 
+/** elia's own run state never travels between trees: it belongs to the tree that wrote it. */
+function isEliaState(path: string): boolean {
+  return path === '.elia' || path.startsWith('.elia/')
+}
+
+/**
+ * Every path a worktree changed since it was cut: tracked files changed by a
+ * commit *or* in the working tree (`git diff <base>`), plus each untracked
+ * file. Status alone (the old measure) missed two things: anything the work
+ * had committed, and the files inside a new directory, which status reports
+ * as one `?? dir/` entry that is not a file to copy.
+ */
+export async function changesSinceBase(worktree: Worktree): Promise<StatusChange[]> {
+  if (!worktree.base) {
+    const status = await runGit(['status', '--porcelain=v1'], worktree.path)
+    return parseStatus(status.stdout).filter((change) => !isEliaState(change.path))
+  }
+  const changes = new Map<string, StatusChange>()
+  const diff = await runGit(['diff', '--name-status', '--no-renames', '-z', worktree.base], worktree.path)
+  const fields = diff.stdout.split('\0')
+  for (let i = 0; i + 1 < fields.length; i += 2) {
+    const code = fields[i]!.trim()
+    const path = fields[i + 1]!
+    if (code && path && !isEliaState(path)) changes.set(path, { path, deleted: code.startsWith('D') })
+  }
+  const untracked = await runGit(['ls-files', '--others', '--exclude-standard', '-z'], worktree.path)
+  for (const path of untracked.stdout.split('\0')) {
+    if (path && !isEliaState(path) && !changes.has(path)) changes.set(path, { path, deleted: false })
+  }
+  return [...changes.values()]
+}
+
+async function copyChanges(fromRoot: string, toRoot: string, changes: StatusChange[]): Promise<string[]> {
+  for (const change of changes) {
+    const targetPath = join(toRoot, change.path)
+    if (change.deleted) {
+      await rm(targetPath, { force: true })
+      continue
+    }
+    const source = Bun.file(join(fromRoot, change.path))
+    if (await source.exists()) await Bun.write(targetPath, await source.arrayBuffer())
+  }
+  return changes.map((change) => change.path)
+}
+
+/**
+ * Brings a worktree's work into `targetRoot` — commits included.
+ *
+ * When the work committed and the target is exactly where the worktree was cut
+ * (same HEAD, nothing uncommitted in tracked files), its branch is
+ * fast-forwarded, so the commits land as the work made them. Otherwise every
+ * change since the base is copied in as uncommitted work, and the report says
+ * why the commits themselves did not come along — a caller must never tell
+ * the person "committed" when nothing was.
+ */
+export async function mergeWorktreeBack(worktree: Worktree, targetRoot: string = process.cwd()): Promise<MergeReport> {
+  const commits = worktree.base
+    ? Number.parseInt((await runGit(['rev-list', '--count', `${worktree.base}..HEAD`], worktree.path)).stdout.trim(), 10) || 0
+    : 0
+  if (commits > 0 && worktree.base) {
+    const head = (await runGit(['rev-parse', 'HEAD'], targetRoot)).stdout.trim()
+    const dirty = (await runGit(['status', '--porcelain', '--untracked-files=no'], targetRoot)).stdout.trim()
+    let note = head !== worktree.base ? 'the branch moved on while the work ran' : dirty ? 'the working tree had uncommitted changes' : undefined
+    if (!note) {
+      const forward = await runGit(['merge', '--ff-only', '-q', worktree.branch], targetRoot)
+      if (forward.exitCode === 0) {
+        const committed = await runGit(['diff', '--name-only', '-z', worktree.base, 'HEAD'], targetRoot)
+        const leftovers = await syncDirtyFiles(worktree.path, targetRoot)
+        const files = [...new Set([...committed.stdout.split('\0').filter(Boolean), ...leftovers])].filter((path) => !isEliaState(path))
+        return { files, commits, commitsCarried: true }
+      }
+      note = `git refused the fast-forward (${(forward.stderr || forward.stdout).trim().split('\n')[0]})`
+    }
+    const files = await copyChanges(worktree.path, targetRoot, await changesSinceBase(worktree))
+    return { files, commits, commitsCarried: false, commitsNote: note }
+  }
+  return { files: await copyChanges(worktree.path, targetRoot, await changesSinceBase(worktree)), commits: 0, commitsCarried: false }
+}
+
 /**
  * Creates a new worktree on a fresh branch from HEAD, seeded with the source
  * repo's current uncommitted changes. `sourceRoot`/`baseDir` default to the
@@ -133,14 +226,15 @@ export async function createWorktree(
   if (result.exitCode !== 0) {
     throw new Error(`Failed to create worktree for variant ${index + 1}: ${result.stderr || result.stdout}`)
   }
+  const base = (await runGit(['rev-parse', 'HEAD'], path)).stdout.trim() || undefined
 
   await syncDirtyFiles(sourceRoot, path)
-  return { path, branch }
+  return { path, branch, ...(base ? { base } : {}) }
 }
 
-/** Copies the winning variant's changes back into the real working tree (or `targetRoot`, for tests). Returns the files it touched. */
-export function mergeWorktreeIntoCwd(worktree: Worktree, targetRoot: string = process.cwd()): Promise<string[]> {
-  return syncDirtyFiles(worktree.path, targetRoot)
+/** Brings the winning variant's work back into the real working tree (or `targetRoot`, for tests). Returns the files it touched. */
+export async function mergeWorktreeIntoCwd(worktree: Worktree, targetRoot: string = process.cwd()): Promise<string[]> {
+  return (await mergeWorktreeBack(worktree, targetRoot)).files
 }
 
 /**

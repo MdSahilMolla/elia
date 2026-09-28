@@ -99,6 +99,8 @@ export interface RunTurnOptions {
   planMode?: boolean
   approveAction?: ActionApproval
   governanceMode?: GovernanceMode
+  /** Local, reversible actions run without the approval menu (governor.ts `reviewRunsFreely`). */
+  reviewRunsFreely?: boolean
   /** Names of synthesized skills explicitly selected for this turn; omitted means all loaded skills remain available. */
   skillNames?: string[]
   /** Cooperative cancellation for task-console shutdown and operator control. */
@@ -271,6 +273,7 @@ async function runScopedTurn(
   const governor = createActionGovernor({
     mode: options.governanceMode ?? (options.approveAction ? 'supervised' : 'unattended'),
     approve: options.approveAction,
+    reviewRunsFreely: options.reviewRunsFreely,
   })
 
   const hooks = mode === 'dev' ? loadDevelopmentToolHooks() : []

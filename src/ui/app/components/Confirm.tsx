@@ -1,7 +1,8 @@
-import { Box, Text, useInput } from 'ink'
+import { Box, Text, useInput, type Key } from 'ink'
 import { palette } from '../theme.ts'
 import { Panel } from './Panel.tsx'
 import { DiffPreview } from './DiffPreview.tsx'
+import { ARM_MS, isTypingKey, useArming } from '../typingGuard.ts'
 
 export interface ConfirmRequest {
   title: string
@@ -14,11 +15,23 @@ export interface ConfirmRequest {
 
 const PREVIEW_LIMIT = 24
 
-/** A y/n question. Mirrors confirm.ts semantics (y/yes → approve, anything else → deny). */
-export function Confirm({ request }: { request: ConfirmRequest }) {
+/**
+ * A y/n question. Mirrors confirm.ts semantics (y/yes → approve, anything else → deny).
+ * Like the approval menu, it answers only once the keyboard has gone quiet —
+ * a "y" in the middle of a sentence is typing, not a yes (typingGuard.ts).
+ */
+export function Confirm({ request, onTypeThrough, armMs = ARM_MS }: { request: ConfirmRequest; onTypeThrough?: (input: string, key: Key) => void; armMs?: number }) {
+  const arming = useArming(armMs)
   useInput((input, key) => {
+    if (key.escape) return request.resolve(false)
+    const decision = input === 'y' || input === 'Y' || input === 'n' || input === 'N' || key.return
+    if (!arming.press() || !decision) {
+      if (isTypingKey(input, key)) onTypeThrough?.(input, key)
+      arming.rest()
+      return
+    }
     if (input === 'y' || input === 'Y') request.resolve(true)
-    else if (input === 'n' || input === 'N' || key.escape || key.return) request.resolve(false)
+    else request.resolve(false)
   })
 
   return (

@@ -8,6 +8,7 @@ import { environmentTool } from '../tools/environment.ts'
 import { runSubAgent } from '../subagent.ts'
 import { runShell, clampOutput } from '../shell.ts'
 import { ZERO_USAGE, addUsage, formatElapsed, recordUsage } from '../usage.ts'
+import { spendState, spendStopNotice } from '../spendLimit.ts'
 import type { Usage } from '../providers/types.ts'
 import { writeNotice, writeText, writeThinking } from '../ui/stream.ts'
 import { reportSinkActive, writeBlock, writeFail, writePass, writePhase, writeSubStep, writeSummary } from '../ui/report.ts'
@@ -56,6 +57,7 @@ import { assessProgress, earnsExtraRepair, failureFingerprints, repeatedFailureL
 import { filesFromGitStatus, hygieneVerdict, scanProjectFiles, type HygieneInput } from './hygiene.ts'
 import { acceptanceCriteriaFor, acceptanceVerdict, createAcceptanceTool } from './acceptance.ts'
 import { applyPlanRevisions, createPlanRevisionTool, MAX_PLAN_REVISIONS } from './replan.ts'
+import { decodeNote, describeEdit, notesSection, operatorRevisions } from './operatorNotes.ts'
 import { assumptionOutcome, auditPlanFeasibility, createAssumptionTool } from './assumptions.ts'
 import { isSensitivePath } from './sensitivePaths.ts'
 import { classifyStuck, type StuckRecovery } from './stuck.ts'
@@ -135,6 +137,17 @@ export interface AutonomousRunOptions {
   approveAction?: ActionApproval
   /** Defaults to unattended: safe work flows, irreversible work pauses or blocks. */
   governanceMode?: GovernanceMode
+  /** Supervised, but local reversible actions run without asking (governor.ts `reviewRunsFreely`). */
+  reviewRunsFreely?: boolean
+  /**
+   * Notes the person sends while the run works (operatorNotes.ts), drained at
+   * every safe point: while orienting they reach the planner; before building
+   * and between waves their plan changes are applied as revisions and their
+   * text reaches every step that starts afterwards.
+   */
+  drainDirections?: () => string[]
+  /** The plan changed because of a note — the session redraws its plan panel. */
+  onPlanRevised?: (steps: Array<{ id: string; title: string }>) => void
   /** Fast skips optional quality loops; thorough adds bounded review and repair depth. */
   profile?: AutonomyProfile
   /** Capture cross-run lessons after completion; defaults from the selected profile. */
@@ -493,12 +506,50 @@ async function runAutonomousTaskInternal(options: AutonomousRunOptions): Promise
     },
   })
   const maxActions = options.maxActions ?? defaults.maxActions
-  const governor = createActionGovernor({ mode: options.governanceMode ?? 'unattended', approve: options.approveAction, maxActions })
+  const governor = createActionGovernor({ mode: options.governanceMode ?? 'unattended', approve: options.approveAction, maxActions, reviewRunsFreely: options.reviewRunsFreely })
 
   let supervisorTimer: ReturnType<typeof setInterval> | undefined
   let supervisorRequest: SupervisorControlRequest | undefined
   let controlCorruptionSurfaced = false
   const journal = createJournal(runId, goal)
+  // Notes the person sent while the run works. Plain text reaches every step
+  // that starts after it; plan changes are applied as revisions at the next
+  // safe point (operatorNotes.ts).
+  const operatorNotes: string[] = []
+  const oneLine = (text: string, max: number): string => {
+    const flat = text.replace(/\s+/g, ' ').trim()
+    return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat
+  }
+  const notesForPlanner = (): string[] =>
+    (options.drainDirections?.() ?? []).map((raw) => {
+      const { text, change } = decodeNote(raw)
+      writeSubStep(`note from you, taken into the plan: ${oneLine(text, 140)}`)
+      journal.append('phase', { phase: 'orient', note: 'operator note' })
+      const edits = change?.edits.length ? ` Plan changes they asked for: ${change.edits.map(describeEdit).join('; ')}.` : ''
+      return `The person sent this while you plan — build it into your proposal: ${text}${edits}`
+    })
+  const applyOperatorNotes = (current: Proposal, when: string, completed: ReadonlySet<string>): Proposal => {
+    const raw = options.drainDirections?.() ?? []
+    if (raw.length === 0) return current
+    const { revisions, plain, unmatched } = operatorRevisions(raw, current)
+    for (const text of plain) {
+      operatorNotes.push(text)
+      writeSubStep(`note from you — every step from here gets it: ${oneLine(text, 140)}`)
+    }
+    for (const miss of unmatched) writeSubStep(`⚠ a plan change from your note was not applied — ${miss}: the plan has no such step`)
+    let next = current
+    if (revisions.length > 0) {
+      const revision = applyPlanRevisions(current, revisions, completed, revisions.length)
+      for (const change of revision.applied) writeSubStep(`plan revised from your note — ${change}`)
+      for (const refusal of revision.rejected) writeSubStep(`⚠ a plan change from your note was refused — ${refusal}`)
+      if (revision.applied.length > 0) {
+        next = revision.proposal
+        options.onPlanRevised?.(next.steps.map((step) => ({ id: step.id, title: step.title })))
+      }
+    }
+    journal.append('phase', { phase: 'execute', note: 'operator note', when, notes: raw.length, revisions: revisions.length })
+    return next
+  }
   if (workspace.repositoryWarning) {
     writeSubStep(`⚠ ${workspace.repositoryWarning}`)
     journal.append('phase', { phase: 'orient', note: workspace.repositoryWarning })
@@ -886,7 +937,7 @@ async function runAutonomousTaskInternal(options: AutonomousRunOptions): Promise
       cache: planningCache,
       prefetcher: createPrefetcher({ tools: planningTools, cache: planningCache }),
       signal: runSignal,
-      drainDirectives: drainOrientDeadline,
+      drainDirectives: () => [...drainOrientDeadline(), ...notesForPlanner()],
       onTool: (event) => appendActionAudit(event, runId),
     }))))
     track(planning.usage)
@@ -1136,6 +1187,15 @@ Finding that an assumption is FALSE is worth more than a confident guess on ever
     journal.append('phase', { phase: 'scaffold', note: 'assumptions checked', summary: outcome.summary, falsified: outcome.falsified, unverifiable: outcome.unverifiable })
   }
 
+  // A note that arrived while the plan was approved or its assumptions checked
+  // changes the plan before the first worker starts.
+  {
+    const noted = applyOperatorNotes(proposal, 'before building', new Set())
+    if (noted !== proposal) {
+      proposal = noted
+      graph.seedProposal(proposal)
+    }
+  }
   const briefing = `## The goal of this run\n${proposal.goal}\n\n## What we established while planning\n${proposal.understanding}${assumptionBriefing ? `\n\n${assumptionBriefing}` : ''}`
   let totalSavedMs = 0
   // Variant worktrees currently require a repository root. A freshly allocated
@@ -1197,6 +1257,15 @@ Finding that an assumption is FALSE is worth more than a confident guess on ever
         for (const file of filesWrittenBy(event, workspaceRoot)) writtenThisWave.add(file)
       }
       if (runSignal?.aborted) return abortedAt('execute (waves)', { proposal })
+      // Money is checked where work is scheduled: each worker already wraps up
+      // on the ceiling, but without this the run went on starting every step
+      // left, each spending one wrap-up call to say it could not work.
+      const spend = spendState(runConfig.model, ZERO_USAGE)
+      if (spend.exceeded) {
+        writeSubStep(`⚠ ${spendStopNotice(spend)} The steps left were not started.`)
+        journal.append('phase', { phase: 'budget', note: 'spending ceiling reached', spentUsd: spend.spentUsd, limitUsd: spend.limitUsd })
+        break
+      }
       if (waves.length > 1) writeSubStep(`wave ${index + 1} of ${waves.length}`)
       taskSessions.update(parentTask.id, {
         status: 'running',
@@ -1243,7 +1312,7 @@ Finding that an assumption is FALSE is worth more than a confident guess on ever
           id: step.id,
           title: step.title,
           role: step.role,
-          instructions: step.instructions,
+          instructions: `${step.instructions}${notesSection(operatorNotes)}`,
           acceptanceCriteria: plan.acceptanceCriteria,
           sideEffects: plan.sideEffects,
         })),
@@ -1327,7 +1396,7 @@ Finding that an assumption is FALSE is worth more than a confident guess on ever
 ## This assignment already failed once
 ${clampOutput(report, 2000)}
 
-Do not repeat whatever failed. ${retryGuidanceFor(report)}`,
+Do not repeat whatever failed. ${retryGuidanceFor(report)}${notesSection(operatorNotes)}`,
             acceptanceCriteria: plan.acceptanceCriteria,
             sideEffects: plan.sideEffects,
           })),
@@ -1425,6 +1494,24 @@ Do not repeat whatever failed. ${retryGuidanceFor(report)}`,
           // Re-schedule from the top: completed steps fall out as empty waves,
           // and a newly added step lands wherever its dependencies put it
           // rather than always at the end.
+          waves = planWaves(plan.steps).waves
+          waveCursor = 0
+          taskSessions.update(parentTask.id, { stepsTotal: plan.steps.length })
+          options.onPlanRevised?.(plan.steps.map((step) => ({ id: step.id, title: step.title })))
+        }
+      }
+
+      // Then the person's notes: a change they asked for lands before the next
+      // wave is scheduled, exactly like a worker's revision.
+      {
+        const completedIds = new Set(
+          graph.state().nodes.filter((node) => node.kind === 'step' && node.status === 'completed').map((node) => node.id.replace(/^step:/, '')),
+        )
+        const noted = applyOperatorNotes(plan, 'between waves', completedIds)
+        if (noted !== plan) {
+          plan = noted
+          proposal = plan
+          graph.seedProposal(plan)
           waves = planWaves(plan.steps).waves
           waveCursor = 0
           taskSessions.update(parentTask.id, { stepsTotal: plan.steps.length })

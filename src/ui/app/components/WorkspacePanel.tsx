@@ -146,6 +146,8 @@ export function WorkspacePanel({
   sessionId,
   expanded = false,
   evidence,
+  highlight,
+  highlightFade = 0,
 }: {
   plan: TodoItem[]
   agents: TaskSession[]
@@ -156,6 +158,10 @@ export function WorkspacePanel({
   expanded?: boolean
   /** Steps elia ticked on evidence (keyed by `stepEvidenceKey`), and what proved each. */
   evidence?: ReadonlyMap<string, StepProof>
+  /** Steps a note just changed or added, by their text — lit up briefly so the change is seen. */
+  highlight?: ReadonlyMap<string, 'changed' | 'added'>
+  /** How far the highlight has faded: 0 full, 1 and 2 on the way out. */
+  highlightFade?: number
 }) {
   // A worker belongs to this run if it carries this session's id. `tasks.json`
   // is reloaded on every startup, so without this check a `needs-review` or
@@ -207,6 +213,11 @@ export function WorkspacePanel({
     .filter(Boolean)
     .join(' · ')
 
+  // Steps a note changed glow, the way the design has them, and the glow fades
+  // out once the panel has closed. Without a glow colour (NO_COLOR, the 16-colour
+  // theme) they are marked `~`/`+` instead, so the change is never colour-only.
+  const glow = [palette.noteGlow, palette.noteGlowDim, palette.noteGlowFaint][Math.min(2, Math.max(0, highlightFade))]
+
   return (
     <Box flexDirection="column" width="100%" marginTop={1}>
       {plan.length > 0 && (
@@ -232,10 +243,13 @@ export function WorkspacePanel({
                     {TODO_MARK[item.status]}
                   </Text>
                 )}{' '}
+                {/* In front, not after: a long row is truncated at its end. */}
+                {highlight?.has(item.content) && !glow ? <Text color={palette.note} bold>{highlight.get(item.content) === 'added' ? '+ ' : '~ '}</Text> : null}
                 <Text
                   bold={item.status === 'in_progress'}
                   strikethrough={item.status === 'completed'}
-                  color={item.status === 'in_progress' ? undefined : palette.muted}
+                  color={highlight?.has(item.content) ? undefined : item.status === 'in_progress' ? undefined : palette.muted}
+                  backgroundColor={highlight?.has(item.content) ? glow : undefined}
                 >
                   {item.content}
                 </Text>

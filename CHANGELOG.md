@@ -24,6 +24,17 @@ workspace), a REPL redesign, and a broad reliability/perf pass.
   with uncommitted changes, in elia's own checkout, with a prompt or
   `--continue`/`--resume`, or with `--chat` / `ELIA_AUTOPILOT=off`. `elia auto`
   runs unattended by default; `--supervised` restores the plan approval.
+- **One way of working: autonomous.** There is no approval mode to pick any
+  more. Removed: the "Risk checks (auto/manual)" / "Approvals" setting and its
+  shift+tab posture cycle (shift+tab now only toggles plan mode), the
+  per-request risk pre-check (in sessions and in `elia "<task>"`), `/auto on|off`
+  and `--no-escalate` (big builds always take the full pipeline), and
+  `elia auto --supervised` / `ELIA_SUPERVISION` (accepted, ignored, and said
+  so). Local reversible work — edits, commits, staging, setup — runs without
+  asking everywhere; the one gate left is for irreversible or outside-world
+  actions, asked once in a session (with "always allow") and skipped-and-listed
+  in unattended runs. The status row's "auto · model" (model fallback) now
+  reads "model + fallback", so no on-screen "auto" means anything but elia.
 - **Live replies.** A message sent while elia works is answered at once by a
   read-only lane that sees the conversation, plan, running tools, progress and
   the autopilot's state, and can open files. A direction comes back with a

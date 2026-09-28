@@ -19,7 +19,8 @@ function harness(over: Partial<ApprovalRequest> = {}) {
     },
     ...over,
   }
-  const app = render(<ApprovalMenu request={request} />)
+  // Armed from the start: these tests are about the choices, not the typing guard.
+  const app = render(<ApprovalMenu request={request} armMs={0} />)
   return { app, get: () => resolved }
 }
 
@@ -109,4 +110,71 @@ test('a plan approval asks only run-it or change-it', async () => {
   app.stdin.write('\r')
   await tick()
   expect(get()).toEqual({ approved: false, feedback: 'use react' })
+})
+
+// --- a menu that pops up while the person is typing ---
+
+function typingHarness() {
+  let resolved: ApprovalResult | undefined
+  const typed: string[] = []
+  const request: ApprovalRequest = {
+    title: 'Run this command?',
+    lines: ['not in the read-only policy'],
+    preview: ['$ cat package.json'],
+    ruleLabel: '`cat` commands',
+    command: 'cat package.json',
+    resolve: (r) => {
+      resolved = r
+    },
+  }
+  const app = render(<ApprovalMenu request={request} armMs={200} onTypeThrough={(input) => typed.push(input)} />)
+  return { app, typed, get: () => resolved }
+}
+
+const typeSlowly = async (app: ReturnType<typeof render>, text: string) => {
+  for (const ch of text) {
+    app.stdin.write(ch)
+    await tick()
+  }
+}
+
+test('keys typed while the menu appears are not answers — they go on into the message', async () => {
+  const { app, typed, get } = typingHarness()
+  // "make sure" has an "e" (edit the command) and Enter picks "Yes".
+  await typeSlowly(app, 'make sure 1 thing')
+  app.stdin.write('\r')
+  await tick()
+  expect(get()).toBeUndefined()
+  expect(typed.join('')).toBe('make sure 1 thing')
+  expect(app.lastFrame()).not.toContain('enter to run this instead')
+  expect(app.lastFrame()).toContain('waiting for you to finish typing')
+})
+
+test('once the keyboard has been quiet, the menu answers as before', async () => {
+  const { app, get } = typingHarness()
+  await typeSlowly(app, 'abc')
+  await new Promise((r) => setTimeout(r, 260))
+  app.stdin.write('1')
+  await tick()
+  expect(get()).toEqual({ approved: true })
+})
+
+test('a text key the menu has no use for, even when armed, is typing and makes it wait again', async () => {
+  const { app, typed, get } = typingHarness()
+  await new Promise((r) => setTimeout(r, 260))
+  app.stdin.write('m')
+  await tick()
+  app.stdin.write('1')
+  await tick()
+  expect(get()).toBeUndefined()
+  expect(typed).toEqual(['m', '1'])
+})
+
+test('Esc always declines, typing or not', async () => {
+  const { app, get } = typingHarness()
+  app.stdin.write('x')
+  await tick()
+  app.stdin.write('\x1B')
+  await waitForFrame(() => (get() ? 'done' : ''), 'done')
+  expect(get()).toEqual({ approved: false })
 })

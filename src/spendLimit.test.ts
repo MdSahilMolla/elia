@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { spendCeilingUsd, spendState, spendStopNotice, spendStopPrompt } from './spendLimit.ts'
+import { DEFAULT_SPEND_LIMIT_USD, applyDefaultSpendLimit, setSpendLimit, spendCeilingUsd, spendState, spendStopNotice, spendStopPrompt } from './spendLimit.ts'
 import type { Usage } from './providers/types.ts'
 
 const NO_USAGE: Usage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 }
@@ -46,7 +46,8 @@ test('a ceiling on an unpriced model is reported as unenforceable rather than si
 test('the stop prompt and notice both name the spend and the limit', () => {
   const state = spendState(PRICED_MODEL, EXPENSIVE, { ELIA_MAX_SPEND_USD: '1' })
   expect(spendStopPrompt(state)).toContain('Stop calling tools')
-  expect(spendStopNotice(state)).toContain('ELIA_MAX_SPEND_USD')
+  // The person is told how to go on, in the session they are in.
+  expect(spendStopNotice(state)).toContain('/limit 5')
 })
 
 test('the ceiling is enforceable on every Claude model elia routes to, Opus included', () => {
@@ -70,4 +71,39 @@ test('the priced part of the session is still enforced when another model has no
   } finally {
     resetSessionUsageForTests()
   }
+})
+
+test('a session a person starts is bounded by default; measuring and training commands are not', () => {
+  expect(DEFAULT_SPEND_LIMIT_USD).toBe(1)
+  for (const command of [undefined, 'auto', 'autopilot', 'resume']) {
+    const env: NodeJS.ProcessEnv = {}
+    applyDefaultSpendLimit(command, env)
+    expect(spendCeilingUsd(env)).toBe(1)
+  }
+  for (const command of ['bench', 'bench-latency', 'evolve', 'distill', 'compounding', 'jev', 'gap']) {
+    const env: NodeJS.ProcessEnv = {}
+    applyDefaultSpendLimit(command, env)
+    expect(env.ELIA_MAX_SPEND_USD).toBeUndefined()
+  }
+  // What the person set always wins — including lifting it.
+  const raised: NodeJS.ProcessEnv = { ELIA_MAX_SPEND_USD: '5' }
+  applyDefaultSpendLimit(undefined, raised)
+  expect(spendCeilingUsd(raised)).toBe(5)
+  const lifted: NodeJS.ProcessEnv = { ELIA_MAX_SPEND_USD: '0' }
+  applyDefaultSpendLimit(undefined, lifted)
+  expect(spendCeilingUsd(lifted)).toBeUndefined()
+})
+
+test('/limit sets or lifts the limit mid-session, and refuses what is not an amount', () => {
+  const env: NodeJS.ProcessEnv = { ELIA_MAX_SPEND_USD: '1' }
+  expect(setSpendLimit('5', env)).toEqual({ ok: true, limitUsd: 5 })
+  expect(spendCeilingUsd(env)).toBe(5)
+  expect(setSpendLimit('$2.50', env)).toEqual({ ok: true, limitUsd: 2.5 })
+  expect(setSpendLimit('off', env)).toEqual({ ok: true })
+  expect(spendCeilingUsd(env)).toBeUndefined()
+  for (const bad of ['lots', '-3', '1e9x', '']) {
+    const result = setSpendLimit(bad, env)
+    expect(result.ok).toBe(false)
+  }
+  expect(spendCeilingUsd(env)).toBeUndefined()
 })

@@ -47,29 +47,27 @@ Usage:
                               own (the autopilot) — talk to it while it works, Esc stops it. It waits
                               for you instead outside a repo, with uncommitted changes, or with --chat
   elia --chat                 Open a session that waits for you (also ELIA_AUTOPILOT=off)
-  elia "<prompt>"             Run a single prompt and exit
+  elia "<task>"               Do one task and exit (a big build runs the full pipeline by itself)
   elia --continue, -c         Resume the most recent session in this directory
   elia --resume [id]          Reopen a past conversation — with no id, pick one from the list
   elia sessions [--all]       List the conversations saved here: id, when, and what each started with
-  elia --no-escalate          Never auto-route a big "build me an X" request through the autonomous pipeline
   elia --self                 Started inside elia's own repository, change elia's source without asking
                               (by default elia asks first there, for anything outside workspace/ and .elia/)
 
-Dev mode (default): elia is the general-purpose development mode for building,
-debugging, testing, refactoring, and operating software. A request that reads as
-a whole new project ("build an end-to-end X") is automatically planned and run
-through the autonomous pipeline — plan, parallel workers, review, verify, repair
-— instead of a single plain turn. Toggle with /auto on|off or --no-escalate.
+elia is autonomous — there is no mode to pick. It reads, edits, runs the
+project's checks, commits on the working branch and sets up the environment
+without asking; a request that reads as a whole new project ("build an
+end-to-end X") runs through the full pipeline by itself: plan, parallel
+workers, review, verify, repair. The one gate, enforced in code, is for actions
+that cannot be undone or that reach outside this machine — pushing, deploying,
+sending messages, spending money, deleting data, a remote or production
+database. In a session elia asks once (and you can answer "always"); an
+unattended run never waits — it skips the action and lists it for you.
 
-Execution policy (manual by default): before running a command, elia checks whether it looks
-risky (deletes, sends, spending, publishing, system changes, ...) — only
-risky commands get an "About to: ... run it?" prompt, safe ones just run.
-Once a command starts, safe and reversible work finishes end to end without
-interruptions; irreversible tool actions are separately governed. Pass --yolo/-y
-(or pick "Risk checks" in "/settings" during a session) to skip the pre-flight
-risk prompt while keeping that action governor active.
+Dev mode (default) covers building, debugging, testing, refactoring and
+operating software; /mode switches to a specialist mode.
 
-Goal-free autonomy (no task given — elia decides what to work on):
+Autonomous runs from the command line — autopilot picks the goals, auto takes yours:
   elia autopilot                     Survey the repo, run its own checks, work out what it is for,
                                      where it stands and where it is heading, then plan and do the
                                      next most valuable goals unattended — on a branch of its own.
@@ -82,19 +80,14 @@ Goal-free autonomy (no task given — elia decides what to work on):
   elia autopilot status | report     Where the last pilot stands / its full report
                                      (.elia/autopilot/REPORT.md). Inside a session: /autopilot
 
-Autonomous work:
-  elia auto "<goal>"                 Plan the work, then execute it with a fleet of sub-agents,
-                                     verify it, repair what failed, and record what it learned
-  elia auto "<goal>" --supervised    Show you the plan and wait for your approval before executing
-                                     (unattended is the default: safe, bounded work runs without
-                                     routine prompts; critical actions still block. --yolo and
-                                     --unattended are accepted)
+  elia auto "<goal>"                 Your goal, through the full pipeline: plan it, execute it with a
+                                     fleet of sub-agents, verify, repair, and record what it learned
   elia auto "<goal>" --no-polish     Skip the bounded final quality pass
   elia auto "<goal>" --fast          Bounded fast path: no polish, one reviewer, one repair, no lesson pass
   elia auto "<goal>" --thorough      Extra bounded review and repair depth for high-risk changes
   elia auto "<goal>" --max-run-ms N  Abort the run after N milliseconds (also ELIA_MAX_RUN_MS)
   elia auto "<goal>" --max-actions N Bound governed tool requests for this run
-  elia auto "<goal>" --unattended --authorize <intent>[,<intent>...]
+  elia auto "<goal>" --authorize <intent>[,<intent>...]
                                      Pre-authorize specific critical intents (e.g.
                                      deployment.production, github.pr_merge) for this run only, on
                                      this branch, for a few hours — the one way past the "browser/
@@ -261,7 +254,6 @@ Supervisor controls:
   elia control pause <run-id>              Request a safe pause of an active autonomous run
   elia control stop <run-id>               Request a safe stop of an active autonomous run
                                            (review the stopped run's receipt, then: elia resume <run-id>)
-  elia auto "<goal>" --supervised          Require an interactive approval boundary for auto work
   elia doctor                              Check native-stack health: eliad daemon, C++ validator, Java bridge
 
 Inside an interactive session:
@@ -297,7 +289,7 @@ Inside an interactive session:
                               finance, business, data, research, cybersecurity, automation,
                               communications, ai, production
   /betamode <name>            Switch directly, e.g. /betamode sports
-  /settings                   Risk checks (auto/manual), model, reasoning effort, skills,
+  /settings                   Model, reasoning effort, skills,
                               and compact / clear the conversation
   /compact [focus]            Summarise the conversation so far into one recallable episode and
                               continue from the summary; optional focus, e.g. /compact the auth bug

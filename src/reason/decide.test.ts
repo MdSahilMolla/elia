@@ -116,3 +116,13 @@ test('questions get the answer check; tasks, small talk and polite requests do n
   expect(decideAnswerCheck('why?').check).toBe(false)
   expect(decideAnswerCheck('fix the broken parser?').check).toBe(false)
 })
+
+test('a question about elia itself is answered once, never checked', () => {
+  for (const meta of ['what can you do', 'What can you do?', 'hey, what can you do for me here?', 'who are you exactly?', 'how do you work?', "what's your name?", 'what model are you running?', 'are you there?', 'help me understand what you can do', 'what are you working on right now?']) {
+    expect({ meta, check: decideAnswerCheck(meta).check }).toEqual({ meta, check: false })
+  }
+  // A real question that merely mentions "you" is still checked.
+  for (const real of ['what do you think causes the flaky date test?', 'how do you run the tests in this repo?', 'which file defines MIN_OBSERVATIONS?']) {
+    expect({ real, check: decideAnswerCheck(real).check }).toEqual({ real, check: true })
+  }
+})

@@ -60,6 +60,12 @@ export interface InputBoxProps {
   onHelp?(): void
   /** A completion menu (commands, files, history search) opened or closed below the prompt. */
   onMenuChange?(open: boolean): void
+  /**
+   * Set to a function that types one key into the draft while the prompt is
+   * disabled — how an approval menu that popped up mid-sentence hands the rest
+   * of the sentence back to the message it belongs to.
+   */
+  typeRef?: { current: ((input: string, key: Key) => void) | null }
 }
 
 /**
@@ -343,6 +349,15 @@ export function InputBox(props: InputBoxProps) {
     if (mentionDismissed && result.state.buffer !== current.buffer) setMentionDismissed('')
     commit(result.state)
   })
+
+  if (props.typeRef) {
+    props.typeRef.current = (input: string, key: Key) => {
+      const { str, event } = toKeyEvent(input, key)
+      const result = applyKey(stateRef.current, str, event, props.commands)
+      // Only edits: a key handed over this way never submits or quits.
+      if (result.type === 'update') commit(result.state)
+    }
+  }
 
   const menu = mentionOpen ? [] : filteredCommands(state.buffer, props.commands)
   const selected = Math.min(state.selectedIndex, Math.max(0, menu.length - 1))
