@@ -94,6 +94,7 @@ PLAN:
 Rules:
 - The ANSWER says only what the activity shows. Never say you set up, wrote, ran or finished anything the tool calls and progress lines do not show. If nothing has been built yet, say so.
 - Change the plan only when the message asks for something the plan does not already cover. Reword a step that should now do more; add a step for new work; remove a step they no longer want. Use the plan's own step numbers; "+ after 0" puts a step first.
+- Word a new or reworded step so it can be checked: name the file it changes, the command it runs or the page it opens, in backticks, whenever the activity shows which — "+ after 4: Add the demo section to \`public/index.html\`". A step that names nothing concrete can only be ticked by hand.
 - A plain question (status, why, how far) gets WANTS: none and PLAN: none.`
 
 function clip(text: string, max: number): string {

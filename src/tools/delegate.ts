@@ -9,7 +9,19 @@ import { currentAgent } from '../autonomy/context.ts'
 import { emitEvent, machineReadable } from '../ui/runtime.ts'
 import { redactText } from '../ui/redact.ts'
 
-const MAX_DELEGATION_DEPTH = 1
+/**
+ * How many child levels deep delegation can go: depth 0 is the top-level
+ * lead, so `MAX_DELEGATION_DEPTH = 2` allows one grandchild level (lead →
+ * child → grandchild) before a worker stops being offered `delegate_tasks`
+ * at all. `ELIA_MAX_DELEGATION_DEPTH` overrides it — clamped to [1, 4]: 1
+ * restores the original depth-1-only behavior, and past 4 the fan-out
+ * (up to `maxChildren` per level, compounding) risks costing far more than
+ * any task actually decomposes into.
+ */
+export const MAX_DELEGATION_DEPTH = (() => {
+  const raw = Number.parseInt(process.env.ELIA_MAX_DELEGATION_DEPTH ?? '', 10)
+  return Number.isFinite(raw) && raw >= 1 ? Math.min(raw, 4) : 2
+})()
 const MAX_DELEGATION_CONTEXT = 12_000
 const MAX_CHILD_PROMPT_LENGTH = 20_000
 const MAX_CHILD_STRING_LENGTH = 4_000
@@ -35,10 +47,12 @@ export interface DelegationToolOptions {
 /**
  * Creates the only recursive delegation surface in Elia.
  *
- * A coding lead can fan out one bounded child fleet. Children inherit the lead's
- * governance, graph, working directory, cancellation signal, and blackboard, but
- * depth is incremented so a child cannot create another fleet. This gives Elia
- * useful hierarchy without unbounded recursive agent spawning.
+ * A coding lead can fan out a bounded child fleet. Children inherit the lead's
+ * governance, graph, working directory, cancellation signal, and blackboard,
+ * and depth is incremented on the way down — a child assigned a delegation-
+ * capable role may itself delegate a further fleet, up to MAX_DELEGATION_DEPTH
+ * levels, before a worker stops being offered this tool at all. This gives
+ * Elia useful hierarchy without unbounded recursive agent spawning.
  */
 export function createDelegationTool(options: DelegationToolOptions): Tool {
   const definition = roleDefinition(options.parentRole)
@@ -48,7 +62,11 @@ export function createDelegationTool(options: DelegationToolOptions): Tool {
 
   return {
     name: 'delegate_tasks',
-    description: `Delegate a bounded set of independent child tasks to specialist sub-agents. You are the ${options.parentRole} lead. Use this when a request contains separable design, implementation, accessibility, testing, documentation, or investigation work. Child tasks run in dependency-safe waves: independent tasks run in parallel, tasks that share files are serialized, and later waves receive earlier reports. You may delegate at most ${maxChildren} children in this call, only to these roles: ${allowedRoles.join(', ') || '(none)'}. Delegation depth is capped at one child level; your children cannot delegate again. Do not delegate one large vague task — give each child a concrete outcome, exact files or areas, and verification expectations.`,
+    description: `Delegate a bounded set of independent child tasks to specialist sub-agents. You are the ${options.parentRole} lead. Use this when a request contains separable design, implementation, accessibility, testing, documentation, or investigation work. Child tasks run in dependency-safe waves: independent tasks run in parallel, tasks that share files are serialized, and later waves receive earlier reports. You may delegate at most ${maxChildren} children in this call, only to these roles: ${allowedRoles.join(', ') || '(none)'}. ${
+      options.depth + 1 < MAX_DELEGATION_DEPTH
+        ? `Delegation depth is capped at ${MAX_DELEGATION_DEPTH} levels; a child assigned a delegation-capable role may still delegate its own children, but a grandchild at the cap cannot.`
+        : 'Delegation depth is capped here; the children you assign cannot delegate further themselves.'
+    } Do not delegate one large vague task — give each child a concrete outcome, exact files or areas, and verification expectations.`,
     input_schema: {
       type: 'object',
       properties: {

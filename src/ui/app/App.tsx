@@ -39,7 +39,7 @@ import { codexContextTokens } from '../../providers/codexSubscription.ts'
 import type { ChatMessage } from '../../providers/types.ts'
 import type { LivePlanEdit, LiveView } from '../../live/liveReply.ts'
 import { FIRST_ROW_MS, ROW_FADE_MS, ROW_STAGGER_MS, ThinkingPanel, type PanelNote } from './components/ThinkingPanel.tsx'
-import { encodeNote, type NotePlanChange, type NotePlanEdit } from '../../autonomy/operatorNotes.ts'
+import { encodeNote, hasStarted, withCurrentStep, type NotePlanChange, type NotePlanEdit } from '../../autonomy/operatorNotes.ts'
 import { onLiveOutput, sessionCostLive, sessionUsageSnapshot } from '../../usage.ts'
 import { spendCeilingUsd } from '../../spendLimit.ts'
 import { SessionBar } from './SessionBar.tsx'
@@ -728,7 +728,8 @@ export function App(props: AppProps) {
       runStepsRef.current = next
       setRunSteps(next)
     } else {
-      const next = rows.map((row) => ({ content: row.title, status: row.status }))
+      // One step under way, as the work's own list now has it (applyEditsToTodos).
+      const next = withCurrentStep(rows.map((row) => ({ content: row.title, status: row.status })), hasStarted(source === 'todo' ? live.plan : live.providerPlan))
       // The work's next todo_write is told the same change, in the note.
       if (source === 'todo') {
         turnPlan.current = next

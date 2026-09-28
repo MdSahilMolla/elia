@@ -996,3 +996,52 @@ test('a note\'s receipt counts its plan change the way the design says it', () =
   expect(planSummary([{ kind: 'change' }, { kind: 'add' }])).toBe('1 step changed, 1 added')
   expect(planSummary([{ kind: 'add' }, { kind: 'add' }, { kind: 'remove' }])).toBe('2 steps added, 1 removed')
 })
+
+// The screenshot this fixes: four steps done, the person's note added "Add a
+// dynamic demo section", the work built it — and the plan sat at 4/6 with no
+// step under way.
+test('after a note adds a step, the plan shows it under way, and moves on when the work ticks it', async () => {
+  let release!: () => void
+  const held = new Promise<void>((resolve) => { release = resolve })
+  let tick!: () => void
+  const ticking = new Promise<void>((resolve) => { tick = resolve })
+  const { planChecklist } = await import('../../autonomy/planProgress.ts')
+  const done = (content: string) => ({ content, status: 'completed' as const })
+  const props = {
+    ...baseProps(),
+    panelReadMs: 60_000,
+    submitTurn: async (_text: string, hooks: import('./App.tsx').TurnHooks) => {
+      // The plan as elia's tracker draws it: step 4 just ticked, the preview up next.
+      hooks.onActivity({ kind: 'plan', status: 'updated', title: 'Plan · 4/5 done', detail: planChecklist([done('Check the workspace'), done('Create index.html'), done('Add styles.css'), done('Render the roadmap'), { content: 'Open the preview to verify it', status: 'in_progress' }]) })
+      await ticking
+      // The work built the demo; the tracker ticked the step the note added.
+      hooks.onActivity({ kind: 'plan', status: 'updated', title: 'Plan · 5/6 done', detail: planChecklist([done('Check the workspace'), done('Create index.html'), done('Add styles.css'), done('Render the roadmap'), done('Add the demo section to `public/index.html`'), { content: 'Open the preview to verify it', status: 'in_progress' }]) })
+      await held
+    },
+    liveReply: async () => ({
+      answer: 'I will add the demo before the preview.',
+      steer: "The person's note: add a dynamic demo",
+      edits: [{ kind: 'add' as const, after: 4, title: 'Add the demo section to `public/index.html`' }],
+    }),
+  }
+  const { stdin, lastFrame, unmount } = render(<App {...props} />)
+  try {
+    await waitForFrame(lastFrame, READY)
+    await settle()
+    stdin.write('build the roadmap site')
+    await waitForFrame(lastFrame, 'build the roadmap site')
+    stdin.write('\r')
+    await waitForFrame(lastFrame, 'Open the preview to verify it')
+    stdin.write('add a dynamic demo')
+    await waitForFrame(lastFrame, 'add a dynamic demo')
+    stdin.write('\r')
+    const noted = await waitForFrame(lastFrame, /Plan · 4\/6[\s\S]*◐ Add the demo section/, 4_000)
+    expect(noted).toMatch(/□ Open the preview to verify it/)
+    tick()
+    const moved = await waitForFrame(lastFrame, /Plan · 5\/6[\s\S]*✓ Add the demo section[\s\S]*◐ Open the preview/, 4_000)
+    expect(moved).not.toMatch(/□ Add the demo section/)
+    release()
+  } finally {
+    unmount()
+  }
+}, 20_000)

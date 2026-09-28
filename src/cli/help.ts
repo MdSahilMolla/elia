@@ -254,6 +254,9 @@ Supervisor controls:
   elia control pause <run-id>              Request a safe pause of an active autonomous run
   elia control stop <run-id>               Request a safe stop of an active autonomous run
                                            (review the stopped run's receipt, then: elia resume <run-id>)
+  elia control preauth list                Show live --authorize grants for this project + branch
+  elia control preauth revoke <intent>     Revoke a live grant immediately, before it expires or is spent
+  elia auto "<goal>" --authorize intent:1  Pre-authorize a run for exactly one use of <intent>
   elia doctor                              Check native-stack health: eliad daemon, C++ validator, Java bridge
 
 Inside an interactive session:

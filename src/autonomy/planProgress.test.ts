@@ -246,3 +246,43 @@ test('each tick carries what proved it, in words the plan panel can print', () =
   expect(proofLabel(previewed)).toBe('page rendered')
   expect(proofLabel(ok('bun test --coverage --reporter=junit --reporter-outfile=out/report.xml'))).toMatch(/^ran bun test --coverage.{0,40}…$/)
 })
+
+// Seen live: the person's note added "Add a dynamic demo section to the
+// website" to a chat turn's plan; the work built the demo, and the plan sat at
+// 4/6 with every open step a bare □ — nothing was ticked, nothing shown under
+// way, and the model was not reminded until six more actions had gone by.
+test('a step a note adds that names its file is ticked when that file is written', async () => {
+  const { applyEditsToTodos } = await import('./operatorNotes.ts')
+  const { list, tracker, status } = planOf('Write `public/css/style.css`', 'Open the preview to verify it')
+  tracker.observe([wrote('public/css/style.css')])
+  expect(status()).toBe('ci')
+  // The note, as the session applies it between two model calls.
+  list.write(applyEditsToTodos(list.read(), [{ kind: 'add', title: 'Add the demo section to `public/index.html`', afterTitle: 'Write `public/css/style.css`' }]))
+  // Under way at once: the new step, not the one it now stands before.
+  expect(status()).toBe('cip')
+  const ticked = tracker.observe([wrote('workspace/ds-cyber-roadmap/public/index.html')])
+  expect(ticked.update?.ticked).toEqual(['Add the demo section to `public/index.html`'])
+  expect(status()).toBe('cci')
+})
+
+test('after a note rewrites the plan, the model is reminded to keep it moving after half the usual quiet', async () => {
+  const { applyEditsToTodos } = await import('./operatorNotes.ts')
+  const { list, tracker } = planOf('Build the page', 'Check it')
+  list.write(applyEditsToTodos(list.read(), [{ kind: 'add', title: 'Add a dynamic demo section', afterTitle: 'Build the page' }]))
+  const quiet = Math.ceil(STALE_PLAN_ACTIONS / 2)
+  let nudge: string | undefined
+  let actions = 0
+  while (!nudge && actions < STALE_PLAN_ACTIONS) {
+    actions += 1
+    nudge = tracker.observe([wrote(`src/part${actions}.ts`)]).nudge
+  }
+  expect(actions).toBe(quiet)
+  expect(nudge).toContain('Add a dynamic demo section')
+  // The model's own todo_write is not "from outside": no early reminder after it.
+  tracker.observe([todoWrite(list.read())])
+  let later = 0
+  while (later < quiet) {
+    later += 1
+    expect(tracker.observe([wrote(`src/more${later}.ts`)]).nudge).toBeUndefined()
+  }
+})

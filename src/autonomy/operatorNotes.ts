@@ -109,7 +109,24 @@ export function applyEditsToTodos(items: readonly TodoItem[], edits: readonly No
     if (edit.kind === 'change' && edit.to?.trim()) target.item.content = edit.to.trim()
     else if (edit.kind === 'remove') next = next.filter((entry) => entry !== target)
   }
-  return next.map((entry) => entry.item)
+  return withCurrentStep(next.map((entry) => entry.item), hasStarted(items))
+}
+
+/** Work has started on a plan once any step is under way or done. Judge it before an edit: removing the current step must not make the plan look untouched. */
+export function hasStarted(items: ReadonlyArray<{ status: TodoItem['status'] }>): boolean {
+  return items.some((item) => item.status !== 'pending')
+}
+
+/**
+ * Once work has started on a plan, exactly one step is in progress: the first
+ * one still open. A note that adds a step ahead of the current one, or removes
+ * the current one, would otherwise leave the plan showing nothing under way —
+ * every open step a bare □ while the work carries on.
+ */
+export function withCurrentStep<T extends { status: TodoItem['status'] }>(items: readonly T[], started = hasStarted(items)): T[] {
+  if (!started) return [...items]
+  const first = items.findIndex((item) => item.status !== 'completed')
+  return items.map((item, index) => (item.status === 'completed' ? item : { ...item, status: index === first ? 'in_progress' : 'pending' }))
 }
 
 /**

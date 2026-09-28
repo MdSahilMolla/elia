@@ -2,7 +2,7 @@ import { rm } from 'node:fs/promises'
 import { join } from 'node:path'
 import { planWaves, runFleet } from './fleet.ts'
 import { runVerification } from './verify.ts'
-import { createWorktree, mergeWorktreeIntoCwd, removeWorktree, type Worktree } from './worktree.ts'
+import { createWorktree, diffChurn, mergeWorktreeIntoCwd, removeWorktree, type Worktree } from './worktree.ts'
 import { ZERO_USAGE, addUsage, totalTokens } from '../usage.ts'
 import { writeFail, writePass, writeSubStep } from '../ui/report.ts'
 import { paths } from '../config.ts'
@@ -19,6 +19,10 @@ export interface VariantOutcome {
   usage: Usage
   elapsedMs: number
   verificationSummary: string
+  /** How many verification commands failed or timed out — 0 for a passing variant. */
+  failedCount: number
+  /** Lines changed against HEAD (tracked diff + untracked file contents). undefined if it could not be measured. */
+  diffChurn?: number
 }
 
 export interface VariantsResult {
@@ -48,11 +52,20 @@ export interface RunVariantsOptions {
  * report sounds. Only the winner's files are copied into the real working
  * tree; every worktree, winner included, is discarded afterward.
  *
+ * Among variants that pass equally, the smaller diff against HEAD wins before
+ * cost does — cost alone used to decide (fewest tokens, then fastest), which
+ * meant a needlessly sprawling but cheap-to-generate change could beat a
+ * tighter, more surgical one with no signal for that at all. If every variant
+ * fails, the fallback is no longer always variant 1: it ranks by how many
+ * verification commands actually failed, so the attempt closest to passing
+ * feeds the repair loop instead of an arbitrary one.
+ *
  * Deliberately does NOT run the critic/security/bughunter review panel per
  * variant — that would multiply an already N-times-more-expensive phase by
  * another 3x for N-1 attempts that get thrown away regardless. Verification
- * alone picks the winner; the caller's normal verify-phase loop still reviews
- * the merged result afterward exactly as it would for a single-plan run.
+ * (plus diff size as a tiebreaker) alone picks the winner; the caller's
+ * normal verify-phase loop still reviews the merged result afterward exactly
+ * as it would for a single-plan run.
  */
 export async function runVariants(options: RunVariantsOptions): Promise<VariantsResult> {
   const { proposal, briefing, count, runId, journal, governor, graph, signal } = options
@@ -67,14 +80,7 @@ export async function runVariants(options: RunVariantsOptions): Promise<Variants
 
   const usage = outcomes.reduce((total, outcome) => addUsage(total, outcome.usage), ZERO_USAGE)
 
-  const passing = outcomes.filter((outcome) => outcome.passed)
-  // Fail-open on the feature itself, not fail-closed: if every attempt failed
-  // verification, fall back to the first one rather than aborting the whole
-  // run — the existing repair loop downstream still gets a chance to fix it,
-  // exactly as it would have if there had only ever been one attempt.
-  const ranked = [...(passing.length > 0 ? passing : [outcomes[0]!])]
-  ranked.sort((a, b) => totalTokens(a.usage) - totalTokens(b.usage) || a.elapsedMs - b.elapsedMs)
-  const chosen = ranked[0]!
+  const chosen = rankVariants(outcomes)[0]!
 
   for (const outcome of outcomes) {
     const label = `variant ${outcome.index + 1}/${count}`
@@ -92,11 +98,32 @@ export async function runVariants(options: RunVariantsOptions): Promise<Variants
   journal?.append('variants', {
     phase: 'done',
     chosen: chosen.index,
-    outcomes: outcomes.map((outcome) => ({ index: outcome.index, passed: outcome.passed, elapsedMs: outcome.elapsedMs })),
+    outcomes: outcomes.map((outcome) => ({ index: outcome.index, passed: outcome.passed, elapsedMs: outcome.elapsedMs, failedCount: outcome.failedCount, diffChurn: outcome.diffChurn })),
     mergedFiles,
   })
 
   return { chosen, all: outcomes, usage, mergedFiles }
+}
+
+/**
+ * Ranks variants best-first: pass/fail beats everything (a variant that
+ * fails typecheck/tests/build can never outrank one that passes), then among
+ * ties the smaller diff against HEAD, then the cheaper token cost, then the
+ * faster wall-clock time. If every variant failed, ranks the whole set by
+ * how many verification commands each one actually failed instead of falling
+ * back to an arbitrary one — the fewest-failures attempt is the one closest
+ * to passing and the best input to the repair loop that runs next.
+ */
+export function rankVariants(outcomes: VariantOutcome[]): VariantOutcome[] {
+  const passing = outcomes.filter((outcome) => outcome.passed)
+  const ranked = [...(passing.length > 0 ? passing : outcomes)]
+  ranked.sort((a, b) =>
+    a.failedCount - b.failedCount
+    || diffChurnOrInfinity(a) - diffChurnOrInfinity(b)
+    || totalTokens(a.usage) - totalTokens(b.usage)
+    || a.elapsedMs - b.elapsedMs,
+  )
+  return ranked
 }
 
 async function runOneVariant(
@@ -138,10 +165,20 @@ async function runOneVariant(
     const verificationSummary = verification.passed
       ? 'verification passed'
       : `verification failed (${failedCount}/${verification.results.length} command${verification.results.length === 1 ? '' : 's'})`
+    const churn = await diffChurn(worktree).catch(() => undefined)
 
-    return { index, worktree, passed: verification.passed, usage, elapsedMs: Date.now() - startedAt, verificationSummary }
+    return { index, worktree, passed: verification.passed, usage, elapsedMs: Date.now() - startedAt, verificationSummary, failedCount, diffChurn: churn }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
-    return { index, worktree, passed: false, usage, elapsedMs: Date.now() - startedAt, verificationSummary: `attempt failed: ${message}` }
+    // The attempt never reached (or never finished) verification, so there is
+    // no real failedCount to report — scored as having failed everything, so
+    // it never outranks an attempt that at least ran and failed only some
+    // commands in the all-fail fallback ranking above.
+    return { index, worktree, passed: false, usage, elapsedMs: Date.now() - startedAt, verificationSummary: `attempt failed: ${message}`, failedCount: Math.max(1, proposal.verification.length) }
   }
+}
+
+/** `diffChurn` sorts ascending, so a variant whose churn could not be measured must rank last, not first. */
+function diffChurnOrInfinity(outcome: VariantOutcome): number {
+  return outcome.diffChurn ?? Number.POSITIVE_INFINITY
 }

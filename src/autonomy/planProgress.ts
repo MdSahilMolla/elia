@@ -659,12 +659,26 @@ export function createPlanProgressTracker(options: PlanProgressOptions): PlanPro
   let wroteThisLoop = false
   let actionsSinceUpdate = 0
   let nudges = 0
+  // The list's revision as last seen here. A change that no todo_write in the
+  // batch explains came from outside — a note from the person rewrote the
+  // plan — and the model has new steps to keep up to date, so the reminder
+  // comes after half the usual quiet stretch.
+  let lastRevision = options.list().revision()
+  let rewritten = false
 
   return {
     observe(batch) {
       const list = options.list()
       const items = list.read()
-      if (batch.some((outcome) => outcome.name === 'todo_write' && !outcome.isError)) {
+      const modelWrote = batch.some((outcome) => outcome.name === 'todo_write' && !outcome.isError)
+      if (!modelWrote && list.revision() !== lastRevision) {
+        rewritten = true
+        nudges = 0
+        actionsSinceUpdate = 0
+      }
+      lastRevision = list.revision()
+      if (modelWrote) {
+        rewritten = false
         wroteThisLoop = true
         actionsSinceUpdate = 0
         // The model's list is authoritative. A step it reopened — done before
@@ -715,6 +729,7 @@ export function createPlanProgressTracker(options: PlanProgressOptions): PlanPro
           if (item.status !== 'completed') item.status = index === firstOpen ? 'in_progress' : 'pending'
         })
         list.write(items)
+        lastRevision = list.revision()
         lastSeen = items.map((item) => ({ ...item }))
         actionsSinceUpdate = 0
         const numbered = (content: string): string => `${items.findIndex((item) => item.content === content) + 1}. ${clip(content, 90)}`
@@ -729,7 +744,9 @@ export function createPlanProgressTracker(options: PlanProgressOptions): PlanPro
       }
 
       const open = items.filter((item) => item.status !== 'completed')
-      if (open.length === 0 || nudges >= MAX_STALE_NUDGES || actionsSinceUpdate < STALE_PLAN_ACTIONS * 2 ** nudges) return {}
+      const quietFor = rewritten ? Math.ceil(STALE_PLAN_ACTIONS / 2) : STALE_PLAN_ACTIONS * 2 ** nudges
+      if (open.length === 0 || nudges >= MAX_STALE_NUDGES || actionsSinceUpdate < quietFor) return {}
+      rewritten = false
       nudges += 1
       const staleFor = actionsSinceUpdate
       actionsSinceUpdate = 0

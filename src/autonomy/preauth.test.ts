@@ -2,7 +2,7 @@ import { afterEach, beforeEach, expect, test } from 'bun:test'
 import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { clearPreauthCaches, consumePreauth, DEFAULT_PREAUTH_TTL_MS, grantPreauth, isPreauthorized, preauthPath, userPreauthSecret } from './preauth.ts'
+import { clearPreauthCaches, consumePreauth, DEFAULT_PREAUTH_TTL_MS, grantPreauth, isPreauthorized, listLivePreauth, preauthPath, revokePreauth, userPreauthSecret } from './preauth.ts'
 
 let repoDir: string
 let preauthDir: string
@@ -152,6 +152,65 @@ test.if(process.platform !== 'win32')('the grant store is written with owner-onl
   expect(mode).toBe(0o600)
   // The store directory is owner-only too.
   expect(statSync(preauthDir).mode & 0o777).toBe(0o700)
+})
+
+test('a maxUses:1 grant is spent after its one use, even though its time window has not expired', () => {
+  grantPreauth(['deployment.production'], repoDir, 'main', DEFAULT_PREAUTH_TTL_MS, 1)
+  expect(isPreauthorized('deployment.production', repoDir, 'main')).toBe(true)
+  expect(consumePreauth('deployment.production', repoDir, 'main')?.usedCount).toBe(1)
+  expect(isPreauthorized('deployment.production', repoDir, 'main')).toBe(false)
+  expect(consumePreauth('deployment.production', repoDir, 'main')).toBeUndefined()
+})
+
+test('a grant with no maxUses stays usable across repeated consumption', () => {
+  grantPreauth(['deployment.production'], repoDir, 'main')
+  for (let i = 0; i < 5; i++) expect(isPreauthorized('deployment.production', repoDir, 'main')).toBe(true)
+  for (let i = 0; i < 5; i++) consumePreauth('deployment.production', repoDir, 'main')
+  expect(isPreauthorized('deployment.production', repoDir, 'main')).toBe(true)
+})
+
+test('a maxUses of 3 allows exactly 3 uses, not 2 or 4', () => {
+  grantPreauth(['deployment.production'], repoDir, 'main', DEFAULT_PREAUTH_TTL_MS, 3)
+  for (let i = 0; i < 3; i++) {
+    expect(isPreauthorized('deployment.production', repoDir, 'main')).toBe(true)
+    consumePreauth('deployment.production', repoDir, 'main')
+  }
+  expect(isPreauthorized('deployment.production', repoDir, 'main')).toBe(false)
+})
+
+test('a hand-edited maxUses (loosening a cap after the fact) invalidates the signature', () => {
+  grantPreauth(['deployment.production'], repoDir, 'main', DEFAULT_PREAUTH_TTL_MS, 1)
+  const path = preauthPath()
+  const onDisk = JSON.parse(readFileSync(path, 'utf8'))
+  onDisk.grants[0].maxUses = 1000 // forged: raise the cap without the secret
+  writeFileSync(path, JSON.stringify(onDisk, null, 2) + '\n')
+  clearPreauthCaches()
+  expect(isPreauthorized('deployment.production', repoDir, 'main')).toBe(false)
+})
+
+test('revokePreauth removes a live grant immediately, before it expires or is spent', () => {
+  grantPreauth(['deployment.production'], repoDir, 'main')
+  expect(isPreauthorized('deployment.production', repoDir, 'main')).toBe(true)
+  expect(revokePreauth('deployment.production', repoDir, 'main')).toBe(1)
+  expect(isPreauthorized('deployment.production', repoDir, 'main')).toBe(false)
+  // Revoking again finds nothing left to remove.
+  expect(revokePreauth('deployment.production', repoDir, 'main')).toBe(0)
+})
+
+test('revokePreauth only removes the named intent + project + branch, not siblings', () => {
+  grantPreauth(['deployment.production', 'github.pr_merge'], repoDir, 'main')
+  expect(revokePreauth('deployment.production', repoDir, 'main')).toBe(1)
+  expect(isPreauthorized('deployment.production', repoDir, 'main')).toBe(false)
+  expect(isPreauthorized('github.pr_merge', repoDir, 'main')).toBe(true)
+})
+
+test('listLivePreauth reports only live grants for the given project + branch, with use counts', () => {
+  grantPreauth(['deployment.production'], repoDir, 'main', DEFAULT_PREAUTH_TTL_MS, 2)
+  grantPreauth(['github.pr_merge'], repoDir, 'main', -1) // already expired
+  consumePreauth('deployment.production', repoDir, 'main')
+  const live = listLivePreauth(repoDir, 'main')
+  expect(live).toHaveLength(1)
+  expect(live[0]).toMatchObject({ intent: 'deployment.production', usedCount: 1, maxUses: 2 })
 })
 
 test('the grant store lives under ~/.config/elia, never in the repo tree (#1272)', () => {

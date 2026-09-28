@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { applyEditsToTodos, decodeNote, encodeNote, notesSection, operatorRevisions } from './operatorNotes.ts'
+import { applyEditsToTodos, decodeNote, encodeNote, notesSection, operatorRevisions, withCurrentStep } from './operatorNotes.ts'
 import { applyPlanRevisions } from './replan.ts'
 import type { Proposal, ProposalStep } from './types.ts'
 
@@ -99,4 +99,19 @@ test('a chat turn applies the change to its own todo list, by title, and never t
   ])
   // The input is untouched.
   expect(items[1]!.content).toBe('Write node:test tests for the notes functions.')
+})
+
+test('once work has started, a note never leaves the plan with nothing under way', () => {
+  // A step added ahead of the current one becomes the current one.
+  expect(applyEditsToTodos(
+    [{ content: 'Build', status: 'completed' }, { content: 'Preview', status: 'in_progress' }],
+    [{ kind: 'add', title: 'Add the demo', afterTitle: 'Build' }],
+  ).map((item) => item.status)).toEqual(['completed', 'in_progress', 'pending'])
+  // Removing the current step hands "in progress" to the next open one.
+  expect(applyEditsToTodos(
+    [{ content: 'Build', status: 'in_progress' }, { content: 'Test', status: 'pending' }],
+    [{ kind: 'remove', stepTitle: 'Build' }],
+  )).toEqual([{ content: 'Test', status: 'in_progress' }])
+  // A plan nobody has started stays untouched.
+  expect(withCurrentStep([{ content: 'a', status: 'pending' }, { content: 'b', status: 'pending' }]).map((item) => item.status)).toEqual(['pending', 'pending'])
 })

@@ -15,7 +15,7 @@ import { createPrefetcher } from './speculation/prefetch.ts'
 import { recordUsage } from './usage.ts'
 import { appendActionAudit } from './autonomy/audit.ts'
 import { activeActionGovernor, withActionGovernor, type ActionGovernor } from './autonomy/governor.ts'
-import { createDelegationTool } from './tools/delegate.ts'
+import { createDelegationTool, MAX_DELEGATION_DEPTH } from './tools/delegate.ts'
 import { activeGoalGraph, withGoalGraph, withGoalNode, type GoalGraphStore } from './autonomy/goalGraph.ts'
 import type { Journal } from './autonomy/journal.ts'
 import { requiredToolReminders } from './requiredTool.ts'
@@ -49,7 +49,7 @@ export interface SubAgentRequest {
   cwd?: string
   onTool?: (event: ToolEvent) => void
   signal?: AbortSignal
-  /** Zero for a direct worker; one for a child worker. Children cannot delegate. */
+  /** Zero for a direct worker, incremented per delegation level. A worker stops being offered delegate_tasks once this reaches MAX_DELEGATION_DEPTH (tools/delegate.ts). */
   delegationDepth?: number
   /** Durable parent node identity for nested action attribution. */
   parentNodeId?: string
@@ -162,7 +162,7 @@ export async function runSubAgent(request: SubAgentRequest): Promise<SubAgentRes
       if (!tools.some((existing) => existing.name === tool.name)) tools.push(tool)
     }
   }
-  if (definition.canDelegate && delegationDepth < 1) {
+  if (definition.canDelegate && delegationDepth < MAX_DELEGATION_DEPTH) {
     tools.push(createDelegationTool({
       parentRole: request.role,
       parentName: request.name,

@@ -6,7 +6,7 @@ import { join } from 'node:path'
 // worktree.ts pulls `paths` from config.ts, which resolves a provider on import.
 process.env.ANTHROPIC_API_KEY ??= 'test-key-for-worktree-test'
 
-const { createWorktree, mergeWorktreeBack, mergeWorktreeIntoCwd, removeWorktree, parseStatus } = await import('./worktree.ts')
+const { createWorktree, diffChurn, mergeWorktreeBack, mergeWorktreeIntoCwd, removeWorktree, parseStatus } = await import('./worktree.ts')
 
 async function git(args: string[], cwd: string): Promise<{ exitCode: number; stdout: string; stderr: string }> {
   const proc = Bun.spawn(['git', ...args], { stdout: 'pipe', stderr: 'pipe', cwd })
@@ -107,6 +107,28 @@ test('mergeWorktreeIntoCwd deletes files the variant deleted', async () => {
     expect(await Bun.file(join(targetDir, 'committed.txt')).exists()).toBe(false)
   } finally {
     rmSync(targetDir, { recursive: true, force: true })
+    await removeWorktree(worktree, repoDir)
+  }
+})
+
+test('diffChurn counts a tracked edit and an untracked file, but reports zero for an untouched worktree', async () => {
+  const worktree = await createWorktree('runChurn', 0, repoDir, stateDir)
+  try {
+    expect(await diffChurn(worktree)).toBe(0)
+
+    // committed.txt was "original\n" (1 line); this edit is a 1-line change.
+    writeFileSync(join(worktree.path, 'committed.txt'), 'changed\nand a second line\n')
+    // A brand-new file has no tracked diff at all — its own 2 lines must
+    // still count, or a variant that adds a whole file scores as free churn.
+    writeFileSync(join(worktree.path, 'new-file.txt'), 'line one\nline two\n')
+
+    const churn = await diffChurn(worktree)
+    expect(churn).toBeGreaterThan(0)
+
+    // A bigger edit to the same files must score strictly higher.
+    writeFileSync(join(worktree.path, 'committed.txt'), 'changed\nand a second line\nand a third\nand a fourth\n')
+    expect(await diffChurn(worktree)).toBeGreaterThan(churn)
+  } finally {
     await removeWorktree(worktree, repoDir)
   }
 })

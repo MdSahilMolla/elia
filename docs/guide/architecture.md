@@ -10,7 +10,7 @@
 - **`src/autonomy/loop.ts`** — the orient → propose → execute → verify → reflect → learn cycle, with durable graph resumption across process boundaries.
 - **`src/autonomy/goalGraph.ts`** — atomic goal-graph persistence, dependency-aware node states, stable action idempotency keys, failure classes, resumable approvals, and evidence-gated completion.
 - **`src/autonomy/actionContract.ts`** — inferred action contracts with readiness preconditions, exit/artifact/UI postconditions, bounded retry dispositions, idempotency metadata, and takeover escalation.
-- **`src/autonomy/scheduler.ts`** + **`src/autonomy/daemon.ts`** — atomic recurring-goal storage, reclaimable leases, single-flight background execution, pause/resume controls, and explicit local-daemon lifecycle.
+- **`src/autonomy/scheduler.ts`** + **`src/autonomy/daemon.ts`** — atomic recurring-goal storage, reclaimable leases, background execution bounded to `ELIA_MAX_CONCURRENT_SCHEDULES` due schedules at once (default 4), pause/resume controls, and explicit local-daemon lifecycle.
 
 - **`src/autonomy/proposal.ts`** — the `submit_proposal` tool, plan validation (unknown step ids, duplicate ids, dependency cycles, and missing verification are all rejected with a message the model can act on), and terminal rendering that shows the wave structure and warns about two steps in one wave claiming the same file.
 - **`src/autonomy/artifacts.ts`** — secure Markdown plan persistence and bounded artifact lookup under `.elia`; arbitrary filesystem reads are rejected.
