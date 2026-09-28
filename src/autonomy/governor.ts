@@ -305,7 +305,9 @@ export function assessAction(request: ActionRequest, cwd = currentAgent().cwd ??
   if (name === 'process') {
     const action = typeof input.action === 'string' ? input.action : ''
     if (action === 'start') return assessCommand(typeof input.command === 'string' ? input.command : '', cwd)
-    if (action === 'logs' || action === 'list' || action === 'stop') {
+    // `send` joins them: it writes one line to a process this session itself
+    // started, so it is bounded by the same argument as logs and list.
+    if (action === 'logs' || action === 'list' || action === 'stop' || action === 'send') {
       return assessment('safe', 'allow', `process ${action} only touches processes this session started`, `process.${action}`, [], action !== 'stop')
     }
     return assessment('critical', 'approve', `process ${action || '(no action)'} is not a known process action`, 'process', resources, false)
@@ -684,6 +686,22 @@ export function assessAction(request: ActionRequest, cwd = currentAgent().cwd ??
   }
   if (name === 'engagement_report') {
     return assessment('review', 'approve', 'engagement_report compiles a workspace-local Markdown report from logged findings', 'engagement_report', resources, true)
+  }
+
+  // The CTF and triage tools are observation, not action, so they sit beside
+  // project_profile and dependency_audit rather than the scanners above:
+  // ctf_toolchain probes which binaries exist (a `--version`-style read), and
+  // ctf_playbook and security_triage only read local files. An install plan
+  // ctf_toolchain prints is text, not an execution — the commands still go
+  // through run_command's own assessment when the model actually runs one.
+  if (name === 'ctf_toolchain') {
+    return assessment('safe', 'allow', 'ctf_toolchain reports which security tools are installed and prints an install plan without running any of it', 'ctf_toolchain', resources, true)
+  }
+  if (name === 'ctf_playbook') {
+    return assessment('safe', 'allow', 'ctf_playbook returns a stored triage procedure and executes nothing', 'ctf_playbook', resources, true)
+  }
+  if (name === 'security_triage') {
+    return assessment('safe', 'allow', 'security_triage parses recon output already saved under the engagement folder', 'security_triage', resources, true)
   }
 
   // A read-only worker (a scout researching, a critic reviewing) cannot change
