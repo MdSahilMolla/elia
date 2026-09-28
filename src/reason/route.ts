@@ -50,8 +50,10 @@ export function reasoningRoute(input: {
   escalate: boolean
   /** Whether replies are audited (/verify). */
   audited: boolean
+  /** Whether the opening turn is asked to reason from first principles (decide.ts). */
+  firstPrinciples?: boolean
 }): { route: ReasoningRoute; line: string } {
-  const audit = input.audited ? 'then the reply\'s citations and arithmetic are checked' : 'reply checks are off (/verify on)'
+  const audit = `${input.firstPrinciples ? 'reasoned from first principles (a design question); ' : ''}${input.audited ? 'then the reply\'s citations and arithmetic are checked' : 'reply checks are off (/verify on)'}`
   if (input.escalate) return { route: 'pipeline', line: `pipeline — ${input.unavailable ?? 'a build for the autonomous pipeline'}` }
   if (input.search?.plan) return { route: 'search', line: `search — ${input.search.why}; ${audit}` }
   if (input.answerCheck?.check) return { route: 'answer-check', line: `answer check — ${input.answerCheck.why}; ${audit}` }

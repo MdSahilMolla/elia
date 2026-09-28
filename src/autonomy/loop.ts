@@ -251,6 +251,7 @@ Do not write the plan out in prose first. The proposal is rendered for the user 
 
 What makes a good proposal:
 - \`understanding\` names real files, real symbols, real patterns you verified. Not "the codebase appears to use X" — say which file proves it.
+- Derive the plan from first principles: from what the result must satisfy, not from the nearest familiar recipe. Every step is there because the goal or a verified constraint needs it; a step nothing needs is cut.
 - Steps are decomposed for parallelism. Two steps touching disjoint files with no ordering requirement must NOT depend on each other; each unnecessary dependency costs the user wall-clock time.
 - Pick the specific role for each step, not just "builder": use \`frontend\` for UI/component/styling/client-side work and \`backend\` for API/business-logic/data work — a change that touches both should be two independent steps (one per role) so they execute in parallel instead of one generalist doing both serially.
 - Every step's instructions stand alone. The worker executing it sees your instructions and nothing else — not this conversation, not the other steps.

@@ -31,8 +31,9 @@ test('each prompt gets exactly one route, with the reason in words', () => {
   expect(declined.line).toContain('not searched because this reads as a question')
   expect(declined.line).toContain('reply checks are off')
 
-  const persona = reasoningRoute({ unavailable: searchUnavailable({ ...base, persona: 'finance' }), escalate: false, audited: true })
+  const persona = reasoningRoute({ unavailable: searchUnavailable({ ...base, persona: 'finance' }), escalate: false, audited: true, firstPrinciples: true })
   expect(persona.line).toContain('finance persona')
+  expect(persona.line).toContain('first principles')
 
   expect(reasoningRoute({ unavailable: 'x', escalate: true, audited: true }).route).toBe('pipeline')
 })

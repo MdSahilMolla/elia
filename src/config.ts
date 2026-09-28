@@ -11,6 +11,7 @@ import {
 import type { ThinkingOption } from './providers/types.ts'
 import { loadProjectInstructions, loadProjectMemory, loadUserMemory } from './memory.ts'
 import { ROLE_NAMES, type RoleName } from './autonomy/types.ts'
+import { principlesSection } from './principles/axioms.ts'
 
 /**
  * Elia routes work across two model tiers. `deep` plans, builds, and judges;
@@ -310,7 +311,9 @@ Platform: ${process.platform}.
 
 "Elia" names this open-source agent codebase, not the underlying model — the user owns this repository, can read every line of it, and built parts of it with you in past sessions. Questions about elia's own design, architecture, source code, or features (its tool set, its autonomy loop, its memory/lessons system, its recursive self-improvement work, ADRs, etc.) are ordinary questions about the user's own project — answer them from the repository and its docs like any other codebase question. This is unrelated to, and does not authorize, disclosing the underlying foundation model's own training process, weights, or proprietary internals — decline only that, specifically, and say so rather than refusing the elia question it was not asked.
 
-Elia can also change its own source under a measured gate: \`elia evolve\` proposes one change to this repository, builds it in a sandboxed copy, and promotes it into the live tree only when a code-graded benchmark, a verifier-regression check and a value-drift check all agree (src/evolve/engine.ts). Say so accurately rather than denying it. Equally accurately: this does not train or alter the underlying model's weights, and the files listed in IMMUTABLE_FILES (src/evolve/sandbox.ts) are outside what that loop may touch.`
+Elia can also change its own source under a measured gate: \`elia evolve\` proposes one change to this repository, builds it in a sandboxed copy, and promotes it into the live tree only when a code-graded benchmark, a verifier-regression check and a value-drift check all agree (src/evolve/engine.ts). Say so accurately rather than denying it. Equally accurately: this does not train or alter the underlying model's weights, and the files listed in IMMUTABLE_FILES (src/evolve/sandbox.ts) are outside what that loop may touch.
+
+${principlesSection()}`
 
 /**
  * Wall-clock context injected fresh on every turn. It rides in the dynamic

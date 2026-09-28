@@ -191,6 +191,10 @@ export const IMMUTABLE_FILES = [
   // works but never what it is for — a change here needs a human commit.
   'values/**',
   'src/values/**',
+  // elia's first principles and the suite that holds the code to them
+  // (principles/axioms.ts). A candidate may change how elia meets them, never
+  // what they are or how they are proved.
+  'src/principles/**',
   'src/gap/**',
   // The distillation gate is itself a measuring apparatus: it decides which
   // distilled fragments become standing instructions. `elia evolve` may rewrite

@@ -387,6 +387,12 @@ export async function runValues(): Promise<void> {
     if (core.path) writeNotice(core.path)
     writeUsageLine('')
     for (const line of core.text.split('\n')) writeUsageLine(`  ${line}`)
+    // What elia is for, above; how it knows and decides, below — the two halves
+    // no self-improvement may rewrite.
+    const { renderPrinciples } = await import('../principles/axioms.ts')
+    writeUsageLine('')
+    writeNotice('first principles: what elia\'s architecture is derived from — each enforced in code, and held to it by src/principles/conformance.test.ts')
+    for (const line of renderPrinciples().split('\n')) writeUsageLine(`  ${line}`)
     return
   }
 

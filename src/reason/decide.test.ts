@@ -126,3 +126,20 @@ test('a question about elia itself is answered once, never checked', () => {
     expect({ real, check: decideAnswerCheck(real).check }).toEqual({ real, check: true })
   }
 })
+
+test('design and architecture requests are reasoned from first principles; fixes inside a design are not', async () => {
+  const { decideFirstPrinciples, FIRST_PRINCIPLES_GUIDANCE } = await import('./decide.ts')
+  for (const request of [
+    'design the architecture for a multi-tenant job queue',
+    'how should we structure the sync engine?',
+    'what are the trade-offs between polling and webhooks here',
+    'redesign the plugin system',
+    'think about this from first principles',
+    'propose a data model for invoices',
+  ]) expect(decideFirstPrinciples(request).apply).toBe(true)
+  for (const request of ['fix the typo in the design doc', 'add a test for parseArgs', 'what does the retry do?', 'rename the design tokens in theme.ts']) {
+    expect(decideFirstPrinciples(request).apply).toBe(false)
+  }
+  // Constraints before patterns: the order is the instruction.
+  expect(FIRST_PRINCIPLES_GUIDANCE.indexOf('hard constraints')).toBeLessThan(FIRST_PRINCIPLES_GUIDANCE.indexOf('usual patterns'))
+})

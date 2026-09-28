@@ -150,7 +150,7 @@ Self-improvement:
   elia evolve --auto          One governed practice run, the same one elia starts when it is idle
   elia gap [history] [--check] Score the verification ladder on planted defects (free, no model);
                               --check fails when the gap regressed against the last recorded score
-  elia values [show|probe]    Show the Value Core, or probe that the role prompts still honour it
+  elia values [show|probe]    Show the Value Core and the first principles, or probe that the role prompts honour the core
   elia distill [run|traces|export]
                               Turn verified runs into prompt fragments (dry run; --promote keeps the
                               ones that pass every gate); traces lists what qualifies

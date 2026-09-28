@@ -1033,9 +1033,14 @@ export async function runInteractive(): Promise<void> {
         : undefined
     const answerCheckPlanned = answerDecision?.check ?? false
     const { ANSWER_GUIDANCE } = await import('../reason/answer.ts')
+    // A design or architecture request is reasoned from first principles:
+    // constraints first, the familiar pattern only after (reason/decide.ts).
+    const { FIRST_PRINCIPLES_GUIDANCE, decideFirstPrinciples } = await import('../reason/decide.ts')
+    const firstPrinciples = !persona && !escalation.escalate && decideFirstPrinciples(requestText).apply
+    const openingGuidance = [answerCheckPlanned ? ANSWER_GUIDANCE : '', firstPrinciples ? FIRST_PRINCIPLES_GUIDANCE : ''].filter(Boolean).join('\n\n')
     // Every prompt gets a reasoning route, and the session says which and why
     // (reason/route.ts) — including the prompts it decided not to search.
-    const route = reasoningRoute({ unavailable: searchBlocked, search: searchDecision, answerCheck: answerDecision, escalate: escalation.escalate, audited: autoVerify })
+    const route = reasoningRoute({ unavailable: searchBlocked, search: searchDecision, answerCheck: answerDecision, escalate: escalation.escalate, audited: autoVerify, firstPrinciples })
     sessionTranscript.notice(`Reasoning: ${route.line}`)
     emitEvent('reasoning_route', { taskId: task.id, sessionId, route: route.route, why: route.line })
 
@@ -1052,7 +1057,7 @@ export async function runInteractive(): Promise<void> {
         silent: Boolean(uiHooks),
         planMode: uiHooks?.planMode,
         upfrontPlan: opening,
-        ...(opening && answerCheckPlanned ? { turnGuidance: ANSWER_GUIDANCE } : {}),
+        ...(opening && openingGuidance ? { turnGuidance: openingGuidance } : {}),
         drainSteering: uiHooks?.drainSteering,
         onText: uiHooks?.onText,
         onThinking: uiHooks?.onThinking,
