@@ -8,6 +8,7 @@ use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::{mpsc, oneshot, Mutex, Notify};
 
+use crate::auth;
 use crate::jvm::JvmBridge;
 use crate::mcp::McpSupervisor;
 use crate::protocol::{
@@ -51,8 +52,10 @@ impl AppState {
     }
 }
 
-/// Handle one client connection. `S` is a split-able duplex stream.
-pub async fn serve_connection<S>(state: Arc<AppState>, stream: S)
+/// Handle one client connection. `S` is a split-able duplex stream. The first
+/// request on the connection must present `expected_token`; a connection that
+/// cannot is answered once and dropped without serving anything.
+pub async fn serve_connection<S>(state: Arc<AppState>, stream: S, expected_token: String)
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + 'static,
 {
@@ -73,6 +76,7 @@ where
         }
     });
 
+    let mut authenticated = false;
     loop {
         let line = match read_request_line(&mut reader, MAX_REQUEST_BYTES).await {
             Ok(Some(RequestLine::Line(line))) => line,
@@ -97,6 +101,19 @@ where
                 continue;
             }
         };
+        if !authenticated {
+            if !request_presents_token(&req, &expected_token) {
+                let _ = tx
+                    .send(Response::err(
+                        req.id,
+                        codes::UNAUTHORIZED,
+                        "missing or invalid daemon token",
+                    ))
+                    .await;
+                break;
+            }
+            authenticated = true;
+        }
         state.touch().await;
         let state = state.clone();
         let tx = tx.clone();
@@ -110,6 +127,14 @@ where
 
     drop(tx);
     let _ = writer.await;
+}
+
+/// Whether `req.params.token` matches `expected` in constant time.
+fn request_presents_token(req: &Request, expected: &str) -> bool {
+    req.params
+        .get("token")
+        .and_then(Value::as_str)
+        .is_some_and(|token| auth::constant_time_eq(token, expected))
 }
 
 /// Largest request line accepted. `parse.check` carries a whole file's source,
@@ -377,8 +402,8 @@ mod tests {
     use crate::{socket, transport};
 
     /// Bind a real listener on a scratch address, run the accept loop, and
-    /// return the address plus a shutdown signal.
-    async fn spawn_server() -> (String, Arc<AppState>) {
+    /// return the address, the shared token, and a shutdown signal.
+    async fn spawn_server() -> (String, String, Arc<AppState>) {
         use std::sync::atomic::{AtomicU64, Ordering};
         static SEQ: AtomicU64 = AtomicU64::new(0);
         // A unique scratch address per test — pid + monotonic seq + clock.
@@ -398,13 +423,19 @@ mod tests {
         };
         let mut listener = transport::Listener::bind(&addr).expect("bind scratch listener");
         let state = Arc::new(AppState::new());
+        let token = auth::generate();
         let accept_state = state.clone();
+        let accept_token = token.clone();
         tokio::spawn(async move {
             while let Ok(conn) = listener.accept().await {
-                tokio::spawn(serve_connection(accept_state.clone(), conn));
+                tokio::spawn(serve_connection(
+                    accept_state.clone(),
+                    conn,
+                    accept_token.clone(),
+                ));
             }
         });
-        (addr, state)
+        (addr, token, state)
     }
 
     fn fastrand_like() -> u64 {
@@ -432,8 +463,12 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn daemon_info_reports_protocol_version() {
-        let (addr, _state) = spawn_server().await;
-        let res = call(&addr, r#"{"id":1,"method":"daemon.info","params":{}}"#).await;
+        let (addr, token, _state) = spawn_server().await;
+        let res = call(
+            &addr,
+            &format!(r#"{{"id":1,"method":"daemon.info","params":{{"token":"{token}"}}}}"#),
+        )
+        .await;
         assert_eq!(res["id"], 1);
         assert_eq!(res["result"]["protocol"], PROTOCOL_VERSION);
         transport::cleanup(&addr);
@@ -441,13 +476,13 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn shell_exec_runs_a_command() {
-        let (addr, _state) = spawn_server().await;
+        let (addr, token, _state) = spawn_server().await;
         let cwd = std::env::current_dir()
             .unwrap()
             .to_string_lossy()
             .replace('\\', "\\\\");
         let req = format!(
-            r#"{{"id":7,"method":"shell.exec","params":{{"command":"echo daemon-e2e","cwd":"{cwd}","timeout_ms":20000}}}}"#
+            r#"{{"id":7,"method":"shell.exec","params":{{"command":"echo daemon-e2e","cwd":"{cwd}","timeout_ms":20000,"token":"{token}"}}}}"#
         );
         let res = call(&addr, &req).await;
         assert_eq!(res["id"], 7);
@@ -461,29 +496,58 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn unknown_method_is_an_error_not_a_panic() {
-        let (addr, _state) = spawn_server().await;
-        let res = call(&addr, r#"{"id":2,"method":"nope.nope","params":{}}"#).await;
+        let (addr, token, _state) = spawn_server().await;
+        let res = call(
+            &addr,
+            &format!(r#"{{"id":2,"method":"nope.nope","params":{{"token":"{token}"}}}}"#),
+        )
+        .await;
         assert_eq!(res["error"]["code"], codes::METHOD_NOT_FOUND);
         transport::cleanup(&addr);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn parse_check_flags_a_broken_edit() {
-        let (addr, _state) = spawn_server().await;
+        let (addr, token, _state) = spawn_server().await;
         let clean = call(
             &addr,
-            r#"{"id":1,"method":"parse.check","params":{"source":"export const x = { a: 1 }","path":"a.ts"}}"#,
+            &format!(
+                r#"{{"id":1,"method":"parse.check","params":{{"source":"export const x = {{ a: 1 }}","path":"a.ts","token":"{token}"}}}}"#
+            ),
         )
         .await;
         assert_eq!(clean["result"]["ok"], true);
 
         let broken = call(
             &addr,
-            r#"{"id":2,"method":"parse.check","params":{"source":"export function f() {\n  return 1;\n","path":"a.ts"}}"#,
+            &format!(
+                r#"{{"id":2,"method":"parse.check","params":{{"source":"export function f() {{\n  return 1;\n","path":"a.ts","token":"{token}"}}}}"#
+            ),
         )
         .await;
         assert_eq!(broken["result"]["ok"], false);
         assert_eq!(broken["result"]["errors"][0]["message"], "unclosed '{'");
+        transport::cleanup(&addr);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_connection_without_the_token_gets_nowhere() {
+        let (addr, _token, _state) = spawn_server().await;
+        // First request carries no token: answered with UNAUTHORIZED and the
+        // connection is closed, so even a guessed method never dispatches.
+        let res = call(&addr, r#"{"id":9,"method":"daemon.info","params":{}}"#).await;
+        assert_eq!(res["error"]["code"], codes::UNAUTHORIZED);
+
+        // Wrong token: same refusal.
+        let bad = call(
+            &addr,
+            &format!(
+                r#"{{"id":10,"method":"daemon.info","params":{{"token":"{}"}}}}"#,
+                auth::generate()
+            ),
+        )
+        .await;
+        assert_eq!(bad["error"]["code"], codes::UNAUTHORIZED);
         transport::cleanup(&addr);
     }
 

@@ -8,7 +8,7 @@
  */
 
 /** Bumped on any breaking change to a method's params or result shape. */
-export const PROTOCOL_VERSION = 1
+export const PROTOCOL_VERSION = 2
 
 /**
  * Thrown for any transport/daemon problem, including a response that fails

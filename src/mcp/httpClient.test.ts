@@ -149,5 +149,28 @@ test('HTTP error responses (401, 500, JSON-RPC error) do not open the circuit �
 })
 
 test('refuses a legacy SSE-transport connector up front', () => {
-  expect(() => new McpHttpClient({ name: 'fx', url: 'https://e.com/sse', transport: 'sse' })).toThrow(/legacy SSE/)
+  expect(() => new McpHttpClient({ name: 'sse', url: 'http://127.0.0.1:1/sse', transport: 'sse' })).toThrow(/legacy SSE/)
+})
+
+test('refuses a connector URL pointing at a private or metadata host', () => {
+  expect(() => new McpHttpClient({ name: 'meta', url: 'http://169.254.169.254/latest/meta-data' })).toThrow(/private or local/)
+  expect(() => new McpHttpClient({ name: 'lan', url: 'http://10.0.0.5/mcp' })).toThrow(/private or local/)
+  expect(() => new McpHttpClient({ name: 'creds', url: 'http://user:secret@localhost:11435/mcp' })).toThrow(/credentials/)
+  // Loopback — the "local dev MCP server" case — stays allowed.
+  expect(() => new McpHttpClient({ name: 'local', url: 'http://127.0.0.1:11435/mcp' })).not.toThrow()
+})
+
+test('a connector that redirects is refused rather than followed across origins', async () => {
+  const target = Bun.serve({ port: 0, async fetch() { return Response.json({ jsonrpc: '2.0', id: 1, result: {} }) } })
+  const redirector = Bun.serve({
+    port: 0,
+    fetch() { return new Response('moved', { status: 302, headers: { location: `http://127.0.0.1:${target.port}/moved` } }) },
+  })
+  try {
+    const client = new McpHttpClient({ name: 'mover', url: `http://127.0.0.1:${redirector.port}/mcp` })
+    await expect(client.connect()).rejects.toThrow(/redirect/i)
+  } finally {
+    redirector.stop(true)
+    target.stop(true)
+  }
 })

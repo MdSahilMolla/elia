@@ -6,7 +6,9 @@
 //! version does not match. Everything it does has an in-process fallback on the
 //! TypeScript side, so a daemon that will not start is never fatal.
 
+mod auth;
 mod jvm;
+mod killtree;
 mod mcp;
 mod protocol;
 mod server;
@@ -56,6 +58,19 @@ fn main() -> Result<()> {
     rt.block_on(run(idle_secs))
 }
 
+/// Whether to keep an accepted connection. Linux checks `SO_PEERCRED` so a
+/// sibling user is dropped before negotiation; elsewhere there is no portable
+/// syscall, so the permission layers are the gate.
+#[cfg(unix)]
+fn keep_peer(conn: &tokio::net::UnixStream) -> bool {
+    crate::socket::peer_is_same_user(conn)
+}
+
+#[cfg(windows)]
+fn keep_peer<T>(_conn: &T) -> bool {
+    true
+}
+
 fn parse_flag(args: &[String], flag: &str) -> Option<u64> {
     let pos = args.iter().position(|a| a == flag)?;
     args.get(pos + 1)?.parse().ok()
@@ -72,6 +87,9 @@ async fn run(idle_secs: u64) -> Result<()> {
 
     let mut listener =
         transport::Listener::bind(&addr).context("failed to bind the daemon socket")?;
+    // We won the bind, so this token is authoritative: generate/refresh the
+    // socket-side file now, after the loser of a spawn race has already exited.
+    let expected_token = auth::server_token();
     let state = Arc::new(AppState::new());
     println!(
         "eliad {} listening (pid {})",
@@ -86,7 +104,14 @@ async fn run(idle_secs: u64) -> Result<()> {
         loop {
             match listener.accept().await {
                 Ok(conn) => {
-                    tokio::spawn(serve_connection(accept_state.clone(), conn));
+                    // SO_PEERCRED (Linux): a sibling user connecting to our
+                    // 0600 socket is dropped without a single byte written.
+                    // Other platforms have no portable equivalent; the 0700 dir
+                    // / 0600 file / token layers carry that weight instead.
+                    if keep_peer(&conn) {
+                        let token = expected_token.clone();
+                        tokio::spawn(serve_connection(accept_state.clone(), conn, token));
+                    }
                 }
                 Err(err) => {
                     eprintln!("eliad: accept error: {err}");
@@ -122,8 +147,11 @@ async fn send_shutdown() -> Result<()> {
         .await
         .context("no daemon to stop")?;
     let (r, mut w) = tokio::io::split(stream);
-    w.write_all(b"{\"id\":1,\"method\":\"daemon.shutdown\",\"params\":{}}\n")
-        .await?;
+    let request = format!(
+        "{{\"id\":1,\"method\":\"daemon.shutdown\",\"params\":{{\"token\":\"{}\"}}}}\n",
+        auth::server_token()
+    );
+    w.write_all(request.as_bytes()).await?;
     w.flush().await?;
     let mut lines = BufReader::new(r).lines();
     let _ = tokio::time::timeout(Duration::from_secs(3), lines.next_line()).await;
@@ -145,7 +173,10 @@ async fn daemon_responds(addr: &str) -> bool {
         return false;
     };
     let (r, mut w) = tokio::io::split(stream);
-    let ping = format!("{{\"id\":{PING_ID},\"method\":\"daemon.ping\",\"params\":{{}}}}\n");
+    let ping = format!(
+        "{{\"id\":{PING_ID},\"method\":\"daemon.ping\",\"params\":{{\"token\":\"{}\"}}}}\n",
+        auth::server_token()
+    );
     if w.write_all(ping.as_bytes()).await.is_err() {
         return false;
     }

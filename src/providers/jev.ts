@@ -1,4 +1,5 @@
 import { redactText } from '../ui/redact.ts'
+import { validateNetworkUrl } from '../networkPolicy.ts'
 
 /**
  * A client for Jev, TypeSafe AI's "System One" model
@@ -66,6 +67,19 @@ export function jevBaseUrl(): string {
   return (process.env.ELIA_JEV_BASE_URL?.trim() || DEFAULT_BASE_URL).replace(/\/+$/, '')
 }
 
+/** Validates the configured endpoint against the same rules as any custom model
+ * provider (`asserProviderEndpoint`'s sync half): HTTPS always, unless it is an
+ * explicitly allowed loopback. A rejected endpoint is reported, never fetched. */
+export function validatedJevEndpoint(): { ok: true; base: string } | { ok: false; error: string } {
+  const base = jevBaseUrl()
+  try {
+    validateNetworkUrl(base, { allowExplicitLocal: process.env.ELIA_ALLOW_INSECURE_LOCAL_ENDPOINT === '1', requireHttps: true })
+    return { ok: true, base }
+  } catch (error) {
+    return { ok: false, error: `Jev endpoint refused: ${error instanceof Error ? error.message : String(error)}` }
+  }
+}
+
 export function jevModel(): string {
   return process.env.ELIA_JEV_MODEL?.trim() || 'jev-latest'
 }
@@ -83,9 +97,11 @@ export async function askJev(state: JevText, questions: Record<string, JevQuesti
   const signal = options.signal ? AbortSignal.any([options.signal, timeout.signal]) : timeout.signal
   // State and question text leave the machine: strip anything that looks like a credential first.
   const body = JSON.stringify({ model: jevModel(), state: redactValue(state), questions })
+  const endpoint = validatedJevEndpoint()
+  if (!endpoint.ok) return { ok: false, error: endpoint.error, latencyMs: 0 }
   try {
     for (let attempt = 0; ; attempt += 1) {
-      const response = await fetch(`${jevBaseUrl()}/v1/systemone`, {
+      const response = await fetch(`${endpoint.base}/v1/systemone`, {
         method: 'POST',
         headers: { authorization: `Bearer ${key}`, 'content-type': 'application/json' },
         body,

@@ -1,25 +1,36 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test'
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { homedir, tmpdir } from 'node:os'
+import { dirname, join } from 'node:path'
 import { addAllowRule, allowPath, canPersistPrefixRule, clearAllowCache, commandPrefix, isAllowlisted, ruleFor, ruleLabel } from './allowStore.ts'
 import { assessAction, createActionGovernor } from './governor.ts'
+import { clearPreauthCaches } from './preauth.ts'
 
 const dirs: string[] = []
 let globalAllowDir: string
+let secretDir: string
 beforeEach(() => {
-  // isAllowlisted() also reads the *global* scope (~/.elia/allow.json, real
+  // isAllowlisted() also reads the *global* scope (~/.config/elia/allow.json, real
   // homedir, not cwd-relative) even though every test here only sets up a
   // project-scope tmpdir — without this override these tests are exposed to
   // whatever the machine actually running them has globally allowed.
   globalAllowDir = mkdtempSync(join(tmpdir(), 'elia-allow-global-'))
   process.env.ELIA_ALLOW_GLOBAL_PATH = join(globalAllowDir, 'allow.json')
+  // The global store is signed with the per-user preauth secret, so writing a
+  // global rule reaches for that secret — which would otherwise create a real
+  // ~/.config/elia/preauth.secret on whoever runs the suite.
+  secretDir = mkdtempSync(join(tmpdir(), 'elia-allow-secret-'))
+  process.env.ELIA_PREAUTH_DIR = secretDir
+  clearPreauthCaches()
   clearAllowCache()
 })
 afterEach(() => {
   delete process.env.ELIA_ALLOW_GLOBAL_PATH
+  delete process.env.ELIA_PREAUTH_DIR
+  clearPreauthCaches()
   clearAllowCache()
   rmSync(globalAllowDir, { recursive: true, force: true })
+  rmSync(secretDir, { recursive: true, force: true })
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true })
 })
 
@@ -196,4 +207,84 @@ test('a corrupt allow list loosens nothing, and the bad file is kept for inspect
   expect(isAllowlisted(push, assessAction(push, dir), dir)).toBe(false)
   expect(existsSync(`${path}.corrupt`)).toBe(true)
   expect(readFileSync(`${path}.corrupt`, 'utf8')).toBe('{"rules": [{"tool": "run_command"')
+})
+
+test('the per-user store is signed, and a hand-edited copy grants nothing (#1272)', () => {
+  const dir = project()
+  const push = { name: 'run_command', input: { command: 'git push origin main' } }
+  addAllowRule(ruleFor(push, assessAction(push, dir)), 'global', dir)
+
+  const path = allowPath('global', dir)
+  const saved = JSON.parse(readFileSync(path, 'utf8'))
+  expect(typeof saved.mac).toBe('string')
+  expect(saved.mac).toMatch(/^[0-9a-f]{64}$/)
+  expect(isAllowlisted(push, assessAction(push, dir), dir)).toBe(true)
+
+  // Someone who can write this file — a shell mishap, a dropped-in repo, a
+  // compromised tool — adds themselves a permanent rule. The stored mac no
+  // longer covers the rules, so the whole file is refused rather than honored.
+  const forged = {
+    ...saved,
+    rules: [...saved.rules, { tool: 'run_command', commandPrefix: 'rm', addedAt: '2026-01-01T00:00:00.000Z' }],
+  }
+  writeFileSync(path, `${JSON.stringify(forged, null, 2)}\n`)
+  clearAllowCache()
+  expect(isAllowlisted(push, assessAction(push, dir), dir)).toBe(false)
+  const rm = { name: 'run_command', input: { command: 'rm -rf build' } }
+  expect(isAllowlisted(rm, assessAction(rm, dir), dir)).toBe(false)
+  // The tampered file is kept for inspection, like any other unusable state.
+  expect(existsSync(`${path}.corrupt`)).toBe(true)
+})
+
+test('an unsigned per-user allow file grants nothing (#1272)', () => {
+  const dir = project()
+  const path = allowPath('global', dir)
+  mkdirSync(dirname(path), { recursive: true })
+  // Exactly what a pre-signing elia (or a hand-written file) leaves behind: the
+  // rules with no proof they came from this machine's own approval flow.
+  writeFileSync(path, `${JSON.stringify({ rules: [{ tool: 'run_command', commandPrefix: 'git', addedAt: '2026-01-01T00:00:00.000Z' }] }, null, 2)}\n`)
+  clearAllowCache()
+  const push = { name: 'run_command', input: { command: 'git push origin main' } }
+  expect(isAllowlisted(push, assessAction(push, dir), dir)).toBe(false)
+})
+
+test('the checked-in project allow file stays unsigned — it is a reviewed team decision (#1272)', () => {
+  const dir = project()
+  const push = { name: 'run_command', input: { command: 'git push origin main' } }
+  addAllowRule(ruleFor(push, assessAction(push, dir)), 'project', dir)
+  const saved = JSON.parse(readFileSync(allowPath('project', dir), 'utf8'))
+  expect(saved.mac).toBeUndefined()
+  clearAllowCache()
+  expect(isAllowlisted(push, assessAction(push, dir), dir)).toBe(true)
+})
+
+test('a legacy ~/.elia/allow.json is migrated once, as a signed store (#1272)', () => {
+  const dir = project()
+  const legacy = join(globalAllowDir, 'legacy-allow.json')
+  writeFileSync(legacy, `${JSON.stringify({ rules: [{ tool: 'run_command', commandPrefix: 'git', addedAt: '2026-01-01T00:00:00.000Z' }] }, null, 2)}\n`)
+  process.env.ELIA_ALLOW_LEGACY_PATH = legacy
+  clearAllowCache()
+  try {
+    const push = { name: 'run_command', input: { command: 'git push origin main' } }
+    // The standing approvals a person already had are not thrown away.
+    expect(isAllowlisted(push, assessAction(push, dir), dir)).toBe(true)
+    const saved = JSON.parse(readFileSync(allowPath('global', dir), 'utf8'))
+    expect(typeof saved.mac).toBe('string')
+    // Moved, not copied: the pre-relocation file does not linger as a second,
+    // unsigned copy of the same authority.
+    expect(existsSync(legacy)).toBe(false)
+  } finally {
+    delete process.env.ELIA_ALLOW_LEGACY_PATH
+  }
+})
+
+test('the per-user allow store lives under ~/.config/elia, not ~/.elia (#1272)', () => {
+  const override = process.env.ELIA_ALLOW_GLOBAL_PATH
+  delete process.env.ELIA_ALLOW_GLOBAL_PATH
+  try {
+    const home = homedir().replaceAll('\\', '/')
+    expect(allowPath('global').replaceAll('\\', '/')).toBe(`${home}/.config/elia/allow.json`)
+  } finally {
+    if (override) process.env.ELIA_ALLOW_GLOBAL_PATH = override
+  }
 })

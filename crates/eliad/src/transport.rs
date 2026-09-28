@@ -73,6 +73,7 @@ mod win {
 #[cfg(not(windows))]
 mod nix {
     use super::*;
+    use std::fs;
     use tokio::net::{UnixListener, UnixStream};
 
     pub type Conn = UnixStream;
@@ -87,10 +88,24 @@ mod nix {
             let _ = std::fs::remove_file(addr);
             if let Some(parent) = std::path::Path::new(addr).parent() {
                 let _ = std::fs::create_dir_all(parent);
+                // mkdir honours umask (commonly 0755), which would let sibling
+                // users at least *try* to connect to the socket and read the
+                // token file. Owner-only keeps both out of reach.
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let _ = std::fs::set_permissions(parent, fs::Permissions::from_mode(0o700));
+                }
             }
-            Ok(Self {
-                inner: UnixListener::bind(addr)?,
-            })
+            let inner = UnixListener::bind(addr)?;
+            // The listener creates its file with umask too; tighten it so a
+            // same-user process on a shared machine is the only plausible peer.
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(addr, fs::Permissions::from_mode(0o600));
+            }
+            Ok(Self { inner })
         }
 
         pub async fn accept(&mut self) -> io::Result<Conn> {

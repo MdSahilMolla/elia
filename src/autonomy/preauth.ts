@@ -3,17 +3,20 @@
  * around governor.ts's blanket unattended refusal for browser/comms/
  * production-deploy/PR-merge/force-push/codex_delegate actions.
  *
- * Grants live under the user's home directory (~/.elia/preauth.json), NOT in
- * the project tree. A repository once shipped grant data via its own
+ * Grants live under the user's home directory (~/.config/elia/preauth.json),
+ * NOT in the project tree. A repository once shipped grant data via its own
  * `.elia/preauth.json`; that let any commit forge silent authority for the
  * critical intents below. Keeping the grant file out of the repo means a
- * cloned or compromised repository can never contribute an authorization.
- * Grants are keyed by the exact project directory + git branch they name, and
- * each carries an HMAC-SHA256 signature over its own fields, produced from a
- * per-user secret stored at ~/.elia/preauth.secret (generated on first use) —
- * a file whose content nobody but this machine's `--authorize` invocation can
- * reproduce, so a file edited by hand (or committed somewhere by accident)
- * verifies as nothing.
+ * cloned or compromised repository can never contribute an authorization. (It
+ * also used to be ~/.elia/preauth.json, one dot-directory away from where a
+ * session's own state lives; the grant store, its secret and the global
+ * allow-file now share one ~/.config/elia home, and a pre-existing ~/.elia
+ * store is migrated on first read.) Grants are keyed by the exact project
+ * directory + git branch they name, and each carries an HMAC-SHA256 signature
+ * over its own fields, produced from a per-user secret stored at
+ * ~/.config/elia/preauth.secret (generated on first use) — a file whose content
+ * nobody but this machine's `--authorize` invocation can reproduce, so a file
+ * edited by hand (or committed somewhere by accident) verifies as nothing.
  *
  * `policy.ts` can only ever tighten the governor; it says so in its own
  * doc comment, and that invariant is worth keeping simple and absolute. This
@@ -31,7 +34,7 @@
  */
 
 import { createHmac, randomBytes } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { execCapture } from '../github/exec.ts'
@@ -71,8 +74,33 @@ const MAX_ACCEPTED_TTL_MS = DEFAULT_PREAUTH_TTL_MS * 2
 // Test seam: ELIA_PREAUTH_DIR relocates the grant store (mirrors how
 // ELIA_ALLOW_GLOBAL_PATH relocates the global allow-file for hermetic tests).
 // Computed dynamically so tests can change ELIA_PREAUTH_DIR between imports.
+// The per-user trust stores live under ~/.config/elia (not the project's
+// `.elia`) so no checked-out repo picks up or shadows them; a one-time
+// migration moves an existing ~/.elia store across on first read.
 function preauthDir(): string {
-  return process.env.ELIA_PREAUTH_DIR ?? join(homedir(), '.elia')
+  return process.env.ELIA_PREAUTH_DIR ?? join(homedir(), '.config', 'elia')
+}
+
+/**
+ * The pre-relocation location. Only consulted when migration is allowed:
+ * with ELIA_PREAUTH_DIR set for a test, the real ~/.elia store must never be
+ * consumed (and deleted) by a test run, so ELIA_PREAUTH_LEGACY_PATH is the
+ * only way to point a test at a legacy store to migrate.
+ */
+function legacyPreauthPath(): string {
+  return process.env.ELIA_PREAUTH_LEGACY_PATH ?? join(homedir(), '.elia', 'preauth.json')
+}
+
+function legacyPreauthSecretPath(): string {
+  const base = process.env.ELIA_PREAUTH_LEGACY_PATH
+  // Mirror the real legacy layout: the store is preauth.json, the secret
+  // preauth.secret, side by side.
+  return base ? `${base.replace(/\.json$/, '')}.secret` : join(homedir(), '.elia', 'preauth.secret')
+}
+
+/** True when a legacy `~/.elia` store may be migrated into the active one. */
+function legacyMigrationAllowed(): boolean {
+  return !process.env.ELIA_PREAUTH_DIR || process.env.ELIA_PREAUTH_LEGACY_PATH !== undefined
 }
 
 function preauthSecretPath(): string {
@@ -83,19 +111,41 @@ export function preauthPath(): string {
   return join(preauthDir(), 'preauth.json')
 }
 
-/** The per-user HMAC secret, created lazily at ~/.elia/preauth.secret (mode 0600). */
+/** The per-user HMAC secret, created lazily at ~/.config/elia/preauth.secret (mode 0600). */
 let cachedSecret: string | undefined
 function getSecret(): string {
   if (cachedSecret !== undefined) return cachedSecret
   const secretPath = preauthSecretPath()
-  if (existsSync(secretPath)) {
-    cachedSecret = readFileSync(secretPath, 'utf8').trim()
-  } else {
-    mkdirSync(dirname(secretPath), { recursive: true, mode: 0o700 })
-    cachedSecret = randomBytes(32).toString('hex')
-    writeFileSync(secretPath, `${cachedSecret}\n`, { mode: 0o600 })
+  const existing = existsSync(secretPath) ? readFileSync(secretPath, 'utf8').trim() : ''
+  if (existing) {
+    cachedSecret = existing
+    return cachedSecret
+  }
+  mkdirSync(dirname(secretPath), { recursive: true, mode: 0o700 })
+  // First use under the new home: carry a legacy secret across rather than
+  // silently invalidating every pre-existing grant, then discard the old file.
+  // An empty or missing secret falls back to a fresh random one: an empty HMAC
+  // key would make every signature forgeable, which is the hole this secret
+  // exists to close.
+  const legacySecret = legacyPreauthSecretPath()
+  const migrated = legacySecret && legacyMigrationAllowed() && existsSync(legacySecret)
+    ? readFileSync(legacySecret, 'utf8').trim()
+    : ''
+  cachedSecret = migrated || randomBytes(32).toString('hex')
+  writeFileSync(secretPath, `${cachedSecret}\n`, { mode: 0o600 })
+  if (migrated && legacySecret) {
+    try {
+      rmSync(legacySecret, { force: true })
+    } catch {
+      /* best effort */
+    }
   }
   return cachedSecret
+}
+
+/** The per-user HMAC secret — also signs the global allow-store. */
+export function userPreauthSecret(): string {
+  return getSecret()
 }
 
 function hmacGrant(grant: PreauthGrant): string {
@@ -111,6 +161,20 @@ const cache = new Map<string, Cached>()
 const EMPTY: PreauthFile = { grants: [] }
 
 function load(path: string): PreauthFile {
+  // One-time migration of a pre-relocation store at ~/.elia/preauth.json: the
+  // grants are whatever the previous elia wrote (signed with the migrated
+  // secret above), so copying the file over keeps live grants alive. New
+  // writes land on the ~/.config/elia path from here on.
+  const legacy = legacyPreauthPath()
+  if (legacyMigrationAllowed() && legacy !== path && !existsSync(path) && existsSync(legacy)) {
+    try {
+      mkdirSync(dirname(path), { recursive: true, mode: 0o700 })
+      writeFileSync(path, readFileSync(legacy, 'utf8'), { mode: 0o600 })
+      rmSync(legacy, { force: true })
+    } catch {
+      /* migration is best effort; a failed load below simply grants nothing */
+    }
+  }
   if (!existsSync(path)) {
     cache.delete(path)
     return EMPTY

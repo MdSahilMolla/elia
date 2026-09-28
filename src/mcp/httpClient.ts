@@ -1,6 +1,7 @@
 import type { McpServerConfig } from './config.ts'
 import type { McpTransport } from './transport.ts'
 import { isJsonRpcResponse, MCP_CLIENT_INFO, MCP_PROTOCOL_VERSION, type JsonRpcResponse, type McpToolCallResult, type McpToolsListResult } from './protocol.ts'
+import { publicFetch, validateNetworkUrl } from '../networkPolicy.ts'
 import { CircuitBreaker } from './circuit.ts'
 import { MCP_CALL_TIMEOUT_MS, MCP_CONNECT_TIMEOUT_MS } from './timeouts.ts'
 
@@ -48,6 +49,12 @@ export class McpHttpClient implements McpTransport {
     if (config.transport === 'sse') {
       throw new Error(`connector "${config.name}" uses the legacy SSE transport, which elia does not support — ask the provider for a Streamable HTTP (\`/mcp\`) endpoint`)
     }
+    // A connector is a configured endpoint, not a model-chosen target — but the
+    // operator's config can still name a private or metadata host, and the
+    // world-facing rule is the same one web_fetch and the providers apply:
+    // loopback (the "local dev MCP server" case) or a genuinely public host,
+    // nothing in between, no embedded credentials.
+    validateNetworkUrl(config.url, { allowExplicitLocal: true })
     this.url = config.url
     this.headers = { ...config.headers }
   }
@@ -114,7 +121,7 @@ export class McpHttpClient implements McpTransport {
   private async requestOnce(method: string, id: number, body: string, timeoutMs: number, timeoutMessage: string): Promise<unknown> {
     let response: Response
     try {
-      response = await fetch(this.url, { method: 'POST', headers: this.buildHeaders(), body, signal: AbortSignal.timeout(timeoutMs) })
+      response = await this.transportRequest(body, timeoutMs)
     } catch (err) {
       if (err instanceof Error && err.name === 'TimeoutError') throw new TransportFailure(timeoutMessage)
       throw new TransportFailure(`connector "${this.name}" request failed: ${err instanceof Error ? err.message : String(err)}`)
@@ -142,15 +149,37 @@ export class McpHttpClient implements McpTransport {
   private async notify(method: string, params?: unknown): Promise<void> {
     if (this.closed) return
     try {
-      await fetch(this.url, {
-        method: 'POST',
-        headers: this.buildHeaders(),
-        body: JSON.stringify({ jsonrpc: '2.0', method, params }),
-        signal: AbortSignal.timeout(CONNECT_TIMEOUT_MS),
-      })
+      await this.transportRequest(JSON.stringify({ jsonrpc: '2.0', method, params }), CONNECT_TIMEOUT_MS)
     } catch {
       // Best-effort — a notification expects no reply, and initialize already succeeded.
     }
+  }
+
+  /**
+   * POSTs the JSON-RPC body with the connector's headers (auth included).
+   *
+   * Routed through `publicFetch`, so every request re-runs the address policy —
+   * the configured URL can only be loopback or a public host. A redirect
+   * (any 3xx) is refused outright: a Streamable HTTP session carries a
+   * `Mcp-Session-Id` across requests and would break if the endpoint moved
+   * under it, and following a redirect on the way means the *second* hop is
+   * controlled by the first one — exactly the SSRF shape the address policy
+   * exists to stop.
+   */
+  private async transportRequest(body: string, timeoutMs: number): Promise<Response> {
+    const response = await publicFetch(new URL(this.url), {
+      method: 'POST',
+      headers: this.buildHeaders(),
+      body,
+      signal: AbortSignal.timeout(timeoutMs),
+      policy: { allowExplicitLocal: true },
+    })
+    if (response.status >= 300 && response.status < 400) {
+      const location = response.headers.get('location')
+      response.body?.cancel().catch(() => {})
+      throw new Error(`connector "${this.name}" answered ${response.status}${location ? ` redirecting to ${location}` : ''}; refusing to follow`)
+    }
+    return response
   }
 }
 

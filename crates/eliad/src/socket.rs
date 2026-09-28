@@ -8,7 +8,6 @@
 //! `ELIA_ELIAD_SOCKET` overrides it: a bare pipe name on Windows, a full path
 //! elsewhere (tests point it at a scratch location).
 
-#[cfg(not(windows))]
 use std::path::PathBuf;
 
 fn user_tag() -> String {
@@ -59,16 +58,74 @@ pub fn address() -> String {
     }
     #[cfg(not(windows))]
     {
-        let dir = std::env::var_os("XDG_RUNTIME_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| {
-                dirs::home_dir()
-                    .unwrap_or_else(|| PathBuf::from("."))
-                    .join(".elia")
-            });
-        dir.join(format!("eliad-{tag}.sock"))
+        socket_dir()
+            .join(format!("eliad-{tag}.sock"))
             .to_string_lossy()
             .into_owned()
+    }
+}
+
+/// Where the connection token lives on disk, mirroring `address()`'s location
+/// rules so `src/daemon/client.ts` can compute the identical file. The daemon
+/// writes it `0600`; a sibling user can't read a `0700` directory.
+pub fn token_path() -> String {
+    let tag = user_tag();
+    #[cfg(windows)]
+    {
+        dirs::home_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join(".elia")
+            .join(format!("elia-eliad-{tag}.token"))
+            .to_string_lossy()
+            .into_owned()
+    }
+    #[cfg(not(windows))]
+    {
+        socket_dir()
+            .join(format!("eliad-{tag}.token"))
+            .to_string_lossy()
+            .into_owned()
+    }
+}
+
+/// The unix socket directory (default `~/.elia` or `$XDG_RUNTIME_DIR`).
+#[cfg(not(windows))]
+fn socket_dir() -> PathBuf {
+    std::env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            dirs::home_dir()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join(".elia")
+        })
+}
+
+/// Whether the peer of an accepted unix connection is the same user as us.
+/// On Linux this is `SO_PEERCRED`; other unices have no portable equivalent
+/// without a per-OS syscall module, so there the (0600-file / 0700-dir / token)
+/// layers do the work alone.
+#[cfg(unix)]
+pub fn peer_is_same_user(stream: &tokio::net::UnixStream) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::io::AsRawFd;
+        let mut cred: libc::ucred = unsafe { std::mem::zeroed() };
+        let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+        let rc = unsafe {
+            libc::getsockopt(
+                stream.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_PEERCRED,
+                &mut cred as *mut libc::ucred as *mut libc::c_void,
+                &mut len,
+            )
+        };
+        rc == 0 && cred.uid == unsafe { libc::getuid() }
+    }
+    #[cfg(all(unix, not(target_os = "linux")))]
+    {
+        let _ = stream;
+        true
     }
 }
 
