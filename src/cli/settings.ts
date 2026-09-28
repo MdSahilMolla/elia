@@ -152,6 +152,38 @@ export async function runControl(): Promise<void> {
   const action = values[0] ?? 'status'
   const runId = values[1]
 
+  if (action === 'preauth') {
+    const { currentBranch, listLivePreauth, revokePreauth } = await import('../autonomy/preauth.ts')
+    const sub = values[1]
+    const branch = await currentBranch(process.cwd())
+    if (sub === 'list' || sub === undefined) {
+      const grants = listLivePreauth(process.cwd(), branch)
+      if (grants.length === 0) {
+        writeNotice(`No live pre-authorization grants for this project on branch "${branch}".`)
+        return
+      }
+      for (const grant of grants) {
+        const uses = grant.maxUses ? `${grant.usedCount}/${grant.maxUses} uses` : `${grant.usedCount} use(s), no cap`
+        writeUsageLine(`${grant.intent} · ${uses} · expires ${new Date(grant.expiresAt).toLocaleTimeString()}`)
+      }
+      return
+    }
+    if (sub === 'revoke') {
+      const intent = values[2]
+      if (!intent) {
+        writeError('control preauth revoke requires <intent>')
+        process.exitCode = 1
+        return
+      }
+      const revokedCount = revokePreauth(intent, process.cwd(), branch)
+      writeNotice(revokedCount > 0 ? `Revoked ${revokedCount} grant(s) for "${intent}" on branch "${branch}".` : `No live grant for "${intent}" on branch "${branch}" — nothing to revoke.`)
+      return
+    }
+    writeError('Usage: elia control preauth list | elia control preauth revoke <intent>')
+    process.exitCode = 1
+    return
+  }
+
   if (action === 'status') {
     const runs = listRuns(20)
     if (runs.length === 0) {
@@ -168,7 +200,7 @@ export async function runControl(): Promise<void> {
   }
 
   if (action !== 'pause' && action !== 'stop') {
-    writeError('Usage: elia control status | elia control pause <run-id> | elia control stop <run-id>')
+    writeError('Usage: elia control status | elia control pause <run-id> | elia control stop <run-id> | elia control preauth list|revoke <intent>')
     process.exitCode = 1
     return
   }
