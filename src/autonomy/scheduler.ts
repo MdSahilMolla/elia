@@ -89,7 +89,7 @@ export class ScheduleStore {
           nextRunAt: Number.isFinite(raw.nextRunAt) ? raw.nextRunAt : Date.now() + intervalMs,
           status: raw.status === 'paused' || raw.status === 'running' ? raw.status : 'active',
           profile: raw.profile === 'fast' || raw.profile === 'thorough' ? raw.profile : 'balanced',
-          mode: raw.mode === 'cyber' || raw.mode === 'sports' || raw.mode === 'fitness' || raw.mode === 'battmann' || raw.mode === 'datascience' ? raw.mode : 'dev',
+          mode: raw.mode === 'cyber' || raw.mode === 'sports' || raw.mode === 'fitness' || raw.mode === 'battmann' || raw.mode === 'datascience' || raw.mode === 'sysintel' ? raw.mode : 'dev',
           maxRunMs: typeof raw.maxRunMs === 'number' && Number.isFinite(raw.maxRunMs) ? Math.max(1, Math.min(24 * 60 * 60_000, raw.maxRunMs)) : undefined,
           maxActions: typeof raw.maxActions === 'number' && Number.isFinite(raw.maxActions) && raw.maxActions > 0 ? Math.max(1, Math.min(MAX_SCHEDULE_ACTIONS, Math.floor(raw.maxActions))) : undefined,
           createdAt: Number.isFinite(raw.createdAt) ? raw.createdAt : Date.now(),

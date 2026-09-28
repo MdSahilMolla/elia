@@ -4,7 +4,7 @@ import { runAgentLoop, type ConversationMessage, type RunAgentLoopResult, type T
 import { setParentSteering } from './autonomy/steering.ts'
 import { currentAgent, withAgentIdentity } from './autonomy/context.ts'
 import type { Provider, ProviderActivity } from './providers/types.ts'
-import { allWorkerTools, battmannTools, businessTools, cyberTools, datascienceTools, getSynthesizedTools } from './tools/registry.ts'
+import { allWorkerTools, battmannTools, businessTools, cyberTools, datascienceTools, getSynthesizedTools, sysintelTools } from './tools/registry.ts'
 import { taskTool } from './tools/task.ts'
 import { previewTool } from './tools/preview.ts'
 import { codexTool } from './tools/codex.ts'
@@ -84,6 +84,9 @@ function topLevelTools(mode: AgentMode, selectedSkillNames?: string[]) {
     ...(mode === 'cyber' ? cyberTools : []),
     ...(mode === 'battmann' ? [...businessTools, ...battmannTools] : []),
     ...(mode === 'datascience' ? [...businessTools, ...datascienceTools] : []),
+    // System Intelligence is dev mode run as an organization: every engineering tool, plus
+    // the engine that holds initiatives to their lifecycle gates.
+    ...(mode === 'sysintel' ? sysintelTools : []),
     // A silent sub-agent handing work off to a whole separate external agent
     // would be even more surprising than task/preview — dev mode only.
     ...(mode === 'dev' ? [codexTool] : []),

@@ -32,7 +32,7 @@ import { runAgentCommand, runAuto } from './cli/agent.ts'
 // `workspace`, `battmann`, and `ds` have their own usage; the rest get their lines
 // cut from the global help.
 const wantsHelp = rawArgs.includes('--help') || rawArgs.includes('-h')
-if (wantsHelp && subcommand !== 'workspace' && subcommand !== 'battmann' && subcommand !== 'ds' && subcommand !== 'datascience') {
+if (wantsHelp && subcommand !== 'workspace' && subcommand !== 'battmann' && subcommand !== 'ds' && subcommand !== 'datascience' && subcommand !== 'si' && subcommand !== 'sysintel') {
   printHelp(subcommand)
   process.exit(0)
 }
@@ -130,6 +130,11 @@ async function main() {
     case 'datascience': {
       const { runDataScience } = await import('./datascience/cli.ts')
       return runDataScience()
+    }
+    case 'si':
+    case 'sysintel': {
+      const { runSysintel } = await import('./sysintel/cli.ts')
+      return runSysintel()
     }
     case 'bridge': {
       if (hasFlag('--http')) {

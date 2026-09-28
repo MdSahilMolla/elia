@@ -60,6 +60,11 @@ const CATALOG: CapabilityContract[] = [
   contract('ds_report', 'safe', ['workspace-read', 'workspace-write'], true, 'hashed artifact recorded against the execution records it reports'),
   contract('ds_data', 'review', ['workspace-read', 'workspace-write', 'network-read'], true, 'versioned dataset snapshot with source hash, lineage, and execution record'),
   contract('ds_python', 'critical', ['process', 'network-read', 'workspace-write'], false, 'recorded code, exit status, hashed outputs, and installed package list'),
+  // System Intelligence mode: per-action effects live in sysintel/effects.ts; these are the worst case per tool.
+  contract('si_org', 'safe', ['workspace-read'], true, 'organization model reference; nothing is recorded'),
+  contract('si_work', 'safe', ['workspace-read', 'workspace-write'], true, 'initiative record under .elia/sysintel with an append-only journal entry'),
+  contract('si_artifact', 'review', ['workspace-read', 'workspace-write'], true, 'artifact version validated against its template and hashed; exports name the project path'),
+  contract('si_record', 'critical', ['workspace-write', 'process'], false, 'engine-run check results, git-verified commits, attributed reviews, and person-approved sign-offs'),
 ]
 
 const BY_TOOL = new Map(CATALOG.map((entry) => [entry.tool, entry]))

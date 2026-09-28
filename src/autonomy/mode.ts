@@ -2,7 +2,7 @@ import { AsyncLocalStorage } from 'node:async_hooks'
 
 /**
  * Which operating mode the current top-level turn is running as: dev, cyber,
- * sports, fitness, battmann, or datascience.
+ * sports, fitness, battmann, datascience, or sysintel.
  *
  * Ambient rather than threaded as a parameter because sub-agents (dispatched via
  * the `task` tool, arbitrarily deep in a tool call) need to pick it up too: a
@@ -11,7 +11,7 @@ import { AsyncLocalStorage } from 'node:async_hooks'
  * ambient-blackboard pattern in autonomy/blackboard.ts for the same reason —
  * the `Tool` interface is intentionally context-free.
  */
-export type AgentMode = 'dev' | 'cyber' | 'sports' | 'fitness' | 'battmann' | 'datascience'
+export type AgentMode = 'dev' | 'cyber' | 'sports' | 'fitness' | 'battmann' | 'datascience' | 'sysintel'
 
 let current: AgentMode = 'dev'
 const storage = new AsyncLocalStorage<AgentMode>()

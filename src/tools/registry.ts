@@ -40,6 +40,7 @@ import { githubTool } from './github.ts'
 import { todoWriteTool } from './todo.ts'
 import { battmannTool } from './battmann.ts'
 import { datascienceTools } from './dsMode.ts'
+import { sysintelTools } from './sysintel.ts'
 import { visualizeTool } from './visualize.ts'
 import { causalDebugTool, causalFixTool, causalVerifyTool } from './causal/index.ts'
 import { archDriftTool } from './archDrift.ts'
@@ -123,6 +124,8 @@ export const businessTools: Tool[] = [readSpreadsheetTool, spreadsheetTool, pres
 export const battmannTools: Tool[] = [battmannTool]
 /** Data-science mode's execution engine — see src/datascience/engine.ts. Granted only in that mode. */
 export { datascienceTools, readOnlyDatascienceTools } from './dsMode.ts'
+/** System Intelligence mode's organization engine — see src/sysintel/engine.ts. Granted only in that mode. */
+export { sysintelTools, sysintelWorkerTools } from './sysintel.ts'
 
 /**
  * The complete static registry. Dynamic skills and MCP tools are intentionally
@@ -130,7 +133,7 @@ export { datascienceTools, readOnlyDatascienceTools } from './dsMode.ts'
  * exposure rather than receiving a permissive built-in default.
  */
 export function allBuiltinTools(): Tool[] {
-  return [...tools, ...collaborationTools, ...browserTools, ...communicationTools, ...cyberTools, ...businessTools, ...battmannTools, ...datascienceTools]
+  return [...tools, ...collaborationTools, ...browserTools, ...communicationTools, ...cyberTools, ...businessTools, ...battmannTools, ...datascienceTools, ...sysintelTools]
 }
 
 /** Fail closed when a newly registered built-in lacks a capability contract. */

@@ -26,7 +26,7 @@ import { flagValue, hasFlag, subcommand } from './argv.ts'
 const REPL_COMMANDS: SlashCommand[] = [
   { name: '/help', description: 'every command, one line each' },
   { name: '/model', description: 'switch model / provider' },
-  { name: '/mode', description: 'switch mode: dev, cyber, battmann, datascience' },
+  { name: '/mode', description: 'switch mode: dev, cyber, battmann, datascience, sysintel' },
   { name: '/plan', description: 'research and propose a plan before changing anything · /plan <goal>' },
   { name: '/betamode', description: 'experimental modes & personas — sports, fitness, marketing, finance, …' },
   { name: '/theme', description: 'colours: dark, light, or your terminal\'s own' },
@@ -79,6 +79,7 @@ export function requestedAgentMode(): AgentMode {
   if (hasFlag('--cyber')) return 'cyber'
   if (hasFlag('--battmann')) return 'battmann'
   if (hasFlag('--datascience') || hasFlag('--ds')) return 'datascience'
+  if (hasFlag('--sysintel') || hasFlag('--si') || hasFlag('--system-intelligence')) return 'sysintel'
   const beta = flagValue('--beta')
   if (beta && (BETA_MODES as readonly string[]).includes(beta)) return beta as AgentMode
   if (beta) {
