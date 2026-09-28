@@ -78,6 +78,7 @@ import { clearRunControl, readRunControl, takeRunControlCorruption, type Supervi
 import { provisionTaskWorkspace, taskWorkspaceLabel, type TaskWorkspace } from './taskWorkspace.ts'
 import { jevEnabled } from '../providers/jev.ts'
 import { inBackground, predict, resolvePrediction, settleSystemOne } from '../reason/systemOne.ts'
+import type { StalledRepairInput, StalledRepairResult } from './repairSearch.ts'
 
 export type ApprovalDecision =
   | { action: 'approve' }
@@ -1631,6 +1632,9 @@ Read the changed files in full context. Improve only concrete issues directly re
   const escalationsUsed = new Set<StuckRecovery>()
   let lastRepairReport = ''
   let pendingApproachChange: string | undefined
+  // Set when a wrong-approach stall on a red build is handed to the reasoning
+  // layer (repairSearch.ts) instead of a third linear pass; read once, below.
+  let wideRepairPending = false
   const verificationRoot = checkRoot(proposal.steps.flatMap((step) => step.files), workspaceRoot) ?? workspaceRoot
   // How much a "looks fine" verdict on this run is actually worth. A
   // `judgment`-regime run has nothing but self-critique behind it, so its
@@ -1929,6 +1933,7 @@ Judge what is there, not what the code looks like it would probably do. A criter
     progressHistory.push({ attempt, failures: failureFingerprints(verification, verification.passed ? verdict : undefined) })
     const progress = assessProgress(progressHistory)
     pendingApproachChange = undefined
+    wideRepairPending = false
     // Which allowance this pass draws on: the build gate while verification is
     // red, the review gate once it is green.
     const gate = verification.passed ? 'review' : 'build'
@@ -1981,6 +1986,19 @@ Judge what is there, not what the code looks like it would probably do. A criter
           : `The failure is an environment problem, not a defect in the change: ${stuck.reason} Fix the environment first (install the missing dependency, create the missing file, free the port), then re-run verification.`) + rewindNote
         writeSubStep(`Not converging (${progress.trend}) — ${stuck.category}: trying a ${stuck.recovery === 'replan' ? 'different approach' : 'environment fix'} once before handing off.`)
         journal.append('phase', { phase: 'reflect', attempt, note: `stall escalation: ${stuck.category} -> ${stuck.recovery}` })
+        // A wrong-approach stall on a red build is where a single lead has had
+        // its say twice. Only a failing check can judge attempts apart — with the
+        // build green the reviewers are the only thing failing, and every attempt
+        // would pass the checks — so the reasoning layer's search takes it there
+        // and nowhere else (reason/signature.ts: a check that passes for every
+        // attempt launders a guess into a verdict).
+        wideRepairPending =
+          stuck.recovery === 'replan' &&
+          !verification.passed &&
+          hasLocalHistory &&
+          verificationRegime !== 'judgment' &&
+          proposal.verification.length > 0 &&
+          (await repairSearchOn())
       } else {
         writeSubStep(`Stopping repair — ${stuck.category}: ${stuck.reason}`)
         if (stuck.question) writeBlock('Needs a decision from you', stuck.question)
@@ -2064,18 +2082,59 @@ Judge what is there, not what the code looks like it would probably do. A criter
 
     const fileContext = repairFileContext(proposal)
 
+    // A red build has a failing check to work from, and each pass is told a
+    // different way into it (reason/harness.ts) rather than the same one again.
+    // With the build green the findings are review prose, which those
+    // approaches do not fit.
+    const approachHint = gate === 'build' ? await repairApproach(gateAttempt) : ''
+
     const repairMessages: ConversationMessage[] = [
       {
         role: 'user',
         content: [
           {
             type: 'text',
-            text: `${briefing}\n\n## What went wrong\n${problem}${planGap}${persisted}${directive}${fileContext}\n\nFix all of it, then re-run: ${proposal.verification.join(' && ') || '(no verification commands were defined)'}`,
+            text: `${briefing}\n\n## What went wrong\n${problem}${planGap}${persisted}${directive}${approachHint}${fileContext}\n\nFix all of it, then re-run: ${proposal.verification.join(' && ') || '(no verification commands were defined)'}`,
           },
         ],
       },
     ]
     journal.checkpoint(`before-repair-${attempt}`, repairMessages)
+
+    // The reasoning layer's search, for the one stall the linear repair cannot
+    // get out of by asking again. It merges only an attempt the governed checks
+    // passed; anything else — nothing passed, a protected path, the ceiling, an
+    // error — leaves the tree as it is and the linear repair below runs.
+    if (wideRepairPending) {
+      wideRepairPending = false
+      const wide = await tryWideRepair({
+        workspaceRoot,
+        runId,
+        problem: `## What went wrong\n${problem}${planGap}${persisted}${directive}${fileContext}\n\nFix all of it, then re-run: ${proposal.verification.join(' && ')}`,
+        briefing,
+        verification: proposal.verification,
+        verificationRoot,
+        governor,
+        signal: runSignal,
+        // The linear passes already spent on this gate — this one is replaced, not added to.
+        spent: Math.max(0, buildRepairs - 1),
+        files: proposal.steps.flatMap((step) => step.files),
+        acceptanceCriteria: proposal.acceptanceCriteria?.length ?? 0,
+        protectedPaths,
+        onNote: writeSubStep,
+      })
+      if (wide) {
+        track(wide.usage)
+        recordUsage(wide.usage)
+        // What the merge wrote counts as this run's own writes, so a later
+        // rewind to the last green state can take it back.
+        for (const file of wide.merged) writtenSinceGreen.add(file)
+        lastRepairReport = wide.report
+        writeSubStep(`repair search (${wide.harnessId}): a different approach passed ${wide.detail} after ${wide.attempts} attempt(s), ${wide.tokens.toLocaleString('en-US')} tokens; merged ${wide.merged.length} file(s)`)
+        journal.append('phase', { phase: 'reflect', attempt, note: `repair search ${wide.harnessId}: ${wide.attempts} attempt(s), ${wide.tokens} tokens, merged ${wide.merged.length} file(s) (${wide.detail})` })
+        continue
+      }
+    }
 
     const cache = createToolResultCache()
     const repairTools = [...allWorkerTools(), taskTool]
@@ -2251,6 +2310,41 @@ export function retryGuidanceFor(report: string): string {
     return 'If a file is protected, a path is refused, or a command is blocked, route around it: use a different path, a different mechanism, or leave that one piece out and finish everything else in the assignment. Coming back with the rest of the work done beats coming back with nothing.'
   }
   return "Fix the assignment's existing target file(s) in place — do not create the deliverable at a new path or start over from scratch. If an edit failed because the target text had already changed, re-read the file first and adjust to what is actually there now."
+}
+
+/**
+ * The three hooks into the reasoning layer (repairSearch.ts), each loaded on use
+ * and each answering "behave as before" if anything about them goes wrong: a
+ * repair must never fail, or grow a new failure mode, because of an addition
+ * that only tries to make it better.
+ */
+async function repairApproach(gateAttempt: number): Promise<string> {
+  try {
+    const { repairApproachDirective } = await import('./repairSearch.ts')
+    return repairApproachDirective(gateAttempt)
+  } catch {
+    return ''
+  }
+}
+
+async function repairSearchOn(): Promise<boolean> {
+  try {
+    const { repairSearchEnabled } = await import('./repairSearch.ts')
+    return repairSearchEnabled()
+  } catch {
+    return false
+  }
+}
+
+async function tryWideRepair(input: StalledRepairInput): Promise<StalledRepairResult | undefined> {
+  try {
+    const { runStalledRepairSearch } = await import('./repairSearch.ts')
+    return await runStalledRepairSearch(input)
+  } catch (error) {
+    // Not swallowed silently: a search that cannot even start is worth seeing.
+    writeSubStep(`repair search could not run (${(error instanceof Error ? error.message : String(error)).slice(0, 160)}) — continuing with the linear repair`)
+    return undefined
+  }
 }
 
 function delay(ms: number, signal?: AbortSignal): Promise<void> {
