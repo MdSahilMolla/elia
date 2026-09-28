@@ -11,7 +11,7 @@
 
 import { statSync } from 'node:fs'
 import {
-  connectionProblem, formatBytes, isPlainName, numberOf, parseQualifiedName, qualifiedIdent, queryRows, quoteIdent, quoteLiteral,
+  connectionProblem, formatBytes, isPlainName, numberOf, parseQualifiedName, queryRows, quoteIdent, quoteLiteral,
   renderSections, targetLine, type CatalogSection, type DbContext, type QualifiedName,
 } from './common.ts'
 import { formatRows, withSqlSession, type SqlSession } from './sql.ts'
