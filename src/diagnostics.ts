@@ -28,11 +28,11 @@ const MAX_LOG_BYTES = 2_000_000
  * best-effort, a test asserting on the default path would then be asserting on a
  * file nothing was ever written to, and would fail only in a full-suite run.
  */
-function defaultDiagnosticsPath(): string {
+export function diagnosticsPath(): string {
   return process.env.ELIA_DIAGNOSTICS_PATH ?? paths.diagnostics
 }
 
-export function logSwallowedError(scope: string, error: unknown, context?: Record<string, unknown>, path: string = defaultDiagnosticsPath()): void {
+export function logSwallowedError(scope: string, error: unknown, context?: Record<string, unknown>, path: string = diagnosticsPath()): void {
   try {
     const record = {
       at: new Date().toISOString(),

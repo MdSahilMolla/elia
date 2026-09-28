@@ -121,7 +121,9 @@ export function createJournal(runId: string, goal: string): Journal {
     },
   }
 
-  journal.append('run-start', { runId, goal, cwd: process.cwd() })
+  // The pid is what tells a run that is still going from one whose process died
+  // without writing `run-end` (recovery/uncleanExits.ts).
+  journal.append('run-start', { runId, goal, cwd: process.cwd(), pid: process.pid })
   return journal
 }
 

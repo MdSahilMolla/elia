@@ -142,6 +142,9 @@ export async function runDaemon(): Promise<void> {
  * last structural pre-flight (if any) did nothing.
  */
 export async function runDoctor(): Promise<void> {
+  // `elia doctor --repair [signature]` hands a recorded bug in elia's own source
+  // to a repair run on a branch of its own (recovery/selfRepair.ts).
+  if (hasFlag('--repair')) return runSelfRepairCommand()
   const { daemonMode, resolveEliadPath, resolveJvmBridgeJar, daemonClient, DaemonUnavailable, socketPath } = await import('../daemon/client.ts')
   const { lastPreflightSkipReason, lastStructuralBackend } = await import('../native/parseCheck.ts')
   const { nativeAvailable, nativeUnavailableReason, nativeLibPath, nativeVersion } = await import('../native/ffi.ts')
@@ -191,6 +194,36 @@ export async function runDoctor(): Promise<void> {
   const skip = lastPreflightSkipReason()
   if (skip) lines.push(`last pre-flight     skipped — ${skip}`)
 
+  // What broke in elia itself: crashes, bugs a turn surfaced, sessions and runs
+  // that died, and the errors it degraded around — read back, not just written.
+  const { gatherSelfCheck, renderSelfCheck } = await import('../recovery/selfRepair.ts')
+  lines.push(...renderSelfCheck(gatherSelfCheck()).split('\n'))
+
   if (machineReadable) emitEvent('doctor', { report: lines.join('\n') })
   else process.stdout.write(`${lines.join('\n')}\n`)
+}
+
+async function runSelfRepairCommand(): Promise<void> {
+  const { groupFaults, readFaults } = await import('../recovery/faults.ts')
+  const { repairBrief, runSelfRepair, selfRepairTarget } = await import('../recovery/selfRepair.ts')
+  const groups = groupFaults(readFaults())
+  const wanted = positionals()[0]
+  if (groups.length === 0) {
+    writeNotice('No errors in elia\'s own code are recorded here, so there is nothing to repair. elia doctor shows what is recorded.')
+    return
+  }
+  const group = wanted ? groups.find((candidate) => candidate.signature.startsWith(wanted)) : groups[0]
+  if (!group) {
+    writeError(`No recorded bug matches ${wanted}. Recorded: ${groups.map((candidate) => candidate.signature).join(', ')}`)
+    process.exitCode = 1
+    return
+  }
+  if (hasFlag('--brief')) {
+    writeUsageLine(repairBrief(group))
+    return
+  }
+  const result = runSelfRepair(group, selfRepairTarget(group.signature))
+  if (result.status === 'ran' || result.status === 'already-attempted' || result.status === 'not-a-checkout') writeNotice(result.message)
+  else writeError(result.message)
+  if (result.status === 'worktree-failed' || (result.status === 'ran' && result.exitCode !== 0)) process.exitCode = 1
 }

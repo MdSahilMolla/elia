@@ -2,7 +2,7 @@ import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { appendSecureFile } from '../securePersistence.ts'
-import { stateDir } from '../statePaths.ts'
+import { paths } from '../statePaths.ts'
 import { askJev, jevEnabled, type JevText } from '../providers/jev.ts'
 
 /**
@@ -70,7 +70,8 @@ export const MIN_MARGIN = 0.05
 /** Jev acts only on confident answers. */
 export const ACT_CONFIDENCE = 0.8
 
-export function ledgerPath(dir = stateDir): string {
+// `paths.state` for the same reason as reason/library.ts's libraryPath.
+export function ledgerPath(dir = paths.state): string {
   return join(dir, 'system-one.ndjson')
 }
 

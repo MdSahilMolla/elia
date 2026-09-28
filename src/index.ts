@@ -53,6 +53,23 @@ if (hasFlag('--profile-turns')) process.env.ELIA_PROFILE = '1'
 
 const mcpRequested = rawArgs.includes('--mcp') || rawArgs[0] === 'mcp'
 
+/**
+ * An error that gets past every handler is recorded and reported, and the
+ * process leaves through the normal shutdown path — see recovery/crashGuard.ts.
+ * Installed before any command runs, the MCP server included. That one speaks
+ * its protocol on stdout, so its warnings go to stderr as plain text.
+ */
+async function guardProcess(command: string): Promise<void> {
+  const { installCrashGuard } = await import('./recovery/crashGuard.ts')
+  const { gracefulShutdown } = await import('./ui/shutdown.ts')
+  installCrashGuard({
+    command,
+    sessionId: () => taskSessions.getActiveSession(),
+    ...(command === 'mcp' ? {} : { warn: writeError }),
+    exit: (code, message) => void gracefulShutdown(code, () => process.stderr.write(`${message}\n`)),
+  })
+}
+
 async function main() {
   installShutdownHandlers()
   emitEvent('cli_started', { version: JSON.parse(await Bun.file(new URL('../package.json', import.meta.url)).text()).version, uiMode: machineReadable ? 'json' : plainOutput ? 'plain' : 'normal' })
@@ -167,6 +184,7 @@ async function main() {
 }
 
 if (mcpRequested) {
+  await guardProcess('mcp')
   if (rawArgs[0] === 'mcp') process.argv.splice(2, 1)
   const mcpFlagIndex = process.argv.indexOf('--mcp')
   if (mcpFlagIndex >= 2) process.argv.splice(mcpFlagIndex, 1)
@@ -185,11 +203,16 @@ if (mcpRequested) {
     // Housekeeping is never a reason to fail a command.
   }
 
+  await guardProcess(subcommand ?? 'repl')
   // Signal handlers are installed by installShutdownHandlers() so every terminal
   // component follows one cleanup path and returns a conventional interrupt code.
   await main().catch(async (err: unknown) => {
     const { describeCliError } = await import('./cli/errors.ts')
     writeError(describeCliError(err, { command: subcommand }))
+    // Only a programming error in elia's own source is kept (recovery/faults.ts):
+    // a bad key or an unreachable provider is the environment, not a bug.
+    const { recordFault } = await import('./recovery/faults.ts')
+    recordFault(err, { source: 'command', command: subcommand ?? 'repl', sessionId: taskSessions.getActiveSession() })
     process.exitCode = 1
   }).finally(async () => {
     const { shutdownMcpTools } = await import('./mcp/registry.ts')

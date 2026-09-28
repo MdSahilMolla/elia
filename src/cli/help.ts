@@ -269,7 +269,8 @@ Supervisor controls:
   elia control preauth list                Show live --authorize grants for this project + branch
   elia control preauth revoke <intent>     Revoke a live grant immediately, before it expires or is spent
   elia auto "<goal>" --authorize intent:1  Pre-authorize a run for exactly one use of <intent>
-  elia doctor                              Check native-stack health: eliad daemon, C++ validator, Java bridge
+  elia doctor                              Check native-stack health, and elia's own: crashes, bugs, unclean exits
+  elia doctor --repair [signature]         Fix a recorded bug in elia's source on its own branch (--brief prints the goal)
 
 Inside an interactive session:
   /                           Type "/" to see available commands — up/down to highlight,

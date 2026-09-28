@@ -358,6 +358,12 @@ export async function runInteractive(): Promise<void> {
       logSwallowedError('session-recorder', error)
     }
   }
+  // A session or run that died last time — killed, or crashed past every
+  // handler — is said so once, with the command that picks it back up
+  // (recovery/uncleanExits.ts). After the heartbeat, for the same reason as above.
+  const { crashLoop, takeRecoveryNotice } = await import('../recovery/uncleanExits.ts')
+  const recoveryNotice = takeRecoveryNotice()
+  const repeatedCrash = crashLoop()
   // The single source of truth for "this session ended," covering every exit
   // path at once — normal completion (one-shot prompts return before ever
   // reaching the interactive loop's own Goodbye code below), Ctrl+C, and
@@ -516,13 +522,13 @@ export async function runInteractive(): Promise<void> {
    * classifier is unsure of — a search that cannot be judged is just a
    * three-times-more-expensive guess.
    */
-  async function planSearch(requestText: string): Promise<{ signature: import('../reason/signature.ts').TaskSignature; checks: import('../reason/reason.ts').ProjectChecks } | undefined> {
+  async function planSearch(requestText: string): Promise<import('../reason/decide.ts').SearchDecision> {
     const { detectChecks } = await import('../autonomy/detectChecks.ts')
     const { decideSearch } = await import('../reason/decide.ts')
     // Nothing has changed yet, so there are no changed paths to infer a project
     // from the way the post-turn gate does — the project that would check this
     // turn's work is simply the one owning the working tree.
-    return decideSearch(requestText, detectChecks(process.cwd())).plan
+    return decideSearch(requestText, detectChecks(process.cwd()))
   }
 
   /**
@@ -1010,10 +1016,10 @@ export async function runInteractive(): Promise<void> {
     // tree, past the governor and the file tools' self-edit check, so it does
     // not run while elia's own source still needs asking about.
     const selfEditClosed = selfEdit.selfEditGuard()?.allowed === false
-    const searchPlan =
-      reasonSearch && !selfEditClosed && mode === 'dev' && !persona && !uiHooks?.planMode && !escalation.escalate
-        ? await planSearch(userText)
-        : undefined
+    const { reasoningRoute, searchUnavailable } = await import('../reason/route.ts')
+    const searchBlocked = searchUnavailable({ reasonSearch, selfEditClosed, mode, persona, planMode: Boolean(uiHooks?.planMode), escalate: escalation.escalate })
+    const searchDecision = searchBlocked === undefined ? await planSearch(userText) : undefined
+    const searchPlan = searchDecision?.plan
     // A searched turn already chose its winner with the project's own checks;
     // the post-turn gate must not run them a second time to learn the same thing.
     let searched = false
@@ -1021,11 +1027,17 @@ export async function runInteractive(): Promise<void> {
     // reason/decide.ts): the turn is asked to end in an `Answer:` line, and if
     // it does, one independent attempt checks it. --no-search or /search off
     // turns it off with the rest of the reasoning search.
-    const answerCheckPlanned =
+    const answerDecision =
       reasonSearch && mode === 'dev' && !persona && !uiHooks?.planMode && !searchPlan && !escalation.escalate
-        ? (await import('../reason/decide.ts')).decideAnswerCheck(userText).check
-        : false
+        ? (await import('../reason/decide.ts')).decideAnswerCheck(userText)
+        : undefined
+    const answerCheckPlanned = answerDecision?.check ?? false
     const { ANSWER_GUIDANCE } = await import('../reason/answer.ts')
+    // Every prompt gets a reasoning route, and the session says which and why
+    // (reason/route.ts) — including the prompts it decided not to search.
+    const route = reasoningRoute({ unavailable: searchBlocked, search: searchDecision, answerCheck: answerDecision, escalate: escalation.escalate, audited: autoVerify })
+    sessionTranscript.notice(`Reasoning: ${route.line}`)
+    emitEvent('reasoning_route', { taskId: task.id, sessionId, route: route.route, why: route.line })
 
     // `opening` marks the call that answers the user's request itself — the one
     // that thinks it through and plans up front. Repair and self-review passes
@@ -1104,7 +1116,24 @@ export async function runInteractive(): Promise<void> {
         // winner by a check that ran, and merges only that one. A search that
         // declined (no harness for this signature) falls through to the plain
         // turn rather than leaving the request unanswered.
-        const outcome = await runSearchedTurn(userText, searchPlan, tracker, controller.signal, uiHooks)
+        let outcome: Awaited<ReturnType<typeof runSearchedTurn>> = { verify: 'none', attempts: 0 }
+        try {
+          outcome = await runSearchedTurn(userText, searchPlan, tracker, controller.signal, uiHooks)
+        } catch (error) {
+          if (controller.signal.aborted) throw error
+          // The search is a better way to answer, not the only one. When it
+          // breaks, the request is still answered — by the single attempt it
+          // would otherwise have had — and the failure is kept: a bug in elia's
+          // own code for self-repair (recovery/faults.ts), anything else in the
+          // handled-error log. Files a half-finished merge wrote are in this
+          // turn's rewind point.
+          const { recordFault } = await import('../recovery/faults.ts')
+          if (!recordFault(error, { source: 'reasoning', command: oneShotPrompt ? 'prompt' : 'repl', sessionId })) logSwallowedError('reason-search', error)
+          const line = `The reasoning search failed (${redactText(error instanceof Error ? error.message : String(error), 160)}) — answering with a single attempt instead`
+          uiHooks?.onActivity?.({ kind: 'status', status: 'warning', title: line })
+          if (!uiHooks) writeNotice(`▸ ${line}`)
+          sessionTranscript.notice(line)
+        }
         if (outcome.attempts === 0) {
           const turnResult = await runModelTurn(true)
           if (turnResult.stopReason === 'aborted') stopRequested = true
@@ -1306,55 +1335,46 @@ export async function runInteractive(): Promise<void> {
         }
       }
 
-      // Grounding: an answer that cites a file or line that does not exist is
-      // sent back once to look it up (reason/grounding.ts). Checking costs no
-      // model call; the repair turn is spent only when a citation is provably
-      // wrong, and a clean check is never recorded as a pass.
-      if (!persona && !escalated && !searched && autoVerify && !uiHooks?.planMode && !controller.signal.aborted) {
-        const { checkGrounding, describeGrounding, extractCitations, groundingBriefing } = await import('../reason/grounding.ts')
-        const ground = () => checkGrounding(extractCitations(lastAssistantText(messages, '')), process.cwd(), { touched: Object.keys(tracker.snapshot()) })
-        const first = ground()
-        grounding = { checked: first.checked, ungrounded: first.ungrounded.length }
-        if (first.ungrounded.length > 0) {
-          const summary = `The answer cites locations that do not exist — checking them (${describeGrounding(first)})`
-          uiHooks?.onActivity?.({ kind: 'status', status: 'warning', title: summary })
-          if (!uiHooks) writeNotice(`▸ ${summary}`)
-          sessionTranscript.notice(summary)
-          messages.push(userMessage(groundingBriefing(first)))
-          await runModelTurn()
-          const after = ground()
-          grounding.afterRepair = after.ungrounded.length
-          if (after.ungrounded.length > 0) {
-            const line = `⚠ ${describeGrounding(after)} — still, after one correction`
-            uiHooks?.onActivity?.({ kind: 'status', status: 'warning', title: line })
-            if (!uiHooks) writeNotice(line)
-            sessionTranscript.notice(line)
-          }
-        }
-      }
-
-      // Arithmetic: the same shape as grounding. A calculation the answer states
-      // that does not hold is sent back once (reason/arithmetic.ts). Recomputing
-      // costs no model call, and a clean check is never recorded as a pass.
-      if (!persona && !escalated && !searched && autoVerify && !uiHooks?.planMode && !controller.signal.aborted) {
-        const { calculationBriefing, checkArithmetic, describeCalculations } = await import('../reason/arithmetic.ts')
-        const first = checkArithmetic(lastAssistantText(messages, ''))
-        if (first.checked > 0) arithmetic = { checked: first.checked, wrong: first.wrong.length }
-        if (first.wrong.length > 0) {
-          const summary = `The answer's arithmetic does not hold — correcting it (${describeCalculations(first)})`
-          uiHooks?.onActivity?.({ kind: 'status', status: 'warning', title: summary })
-          if (!uiHooks) writeNotice(`▸ ${summary}`)
-          sessionTranscript.notice(summary)
-          messages.push(userMessage(calculationBriefing(first)))
-          await runModelTurn()
-          const after = checkArithmetic(lastAssistantText(messages, ''))
-          if (arithmetic) arithmetic.afterRepair = after.wrong.length
-          if (after.wrong.length > 0) {
-            const line = `⚠ ${describeCalculations(after)} — still, after one correction`
-            uiHooks?.onActivity?.({ kind: 'status', status: 'warning', title: line })
-            if (!uiHooks) writeNotice(line)
-            sessionTranscript.notice(line)
-          }
+      // Every reply is audited, whatever produced it — a plain turn, a search's
+      // winner, a persona, a plan, any mode — because this is the part of the
+      // reasoning layer that costs no model call (reason/audit.ts). A citation
+      // to a file or line that does not exist, or a stated calculation that does
+      // not hold, is sent back once; both at once share one correction. A clean
+      // audit proves nothing beyond the citations and sums, and is never recorded
+      // as a pass. The pipeline's reply is its own receipt and is left alone.
+      // A search's report is audited but not corrected: its winner was chosen by
+      // checks that already ran, and a correction turn after them could change
+      // files nothing would verify — so what is wrong is named instead.
+      if (!escalated && autoVerify && !controller.signal.aborted) {
+        const { auditAndCorrect, auditReply, describeAudit } = await import('../reason/audit.ts')
+        const audited = searched ? { before: auditReply(lastAssistantText(messages, ''), { cwd: process.cwd(), touched: Object.keys(tracker.snapshot()) }), after: undefined } : await auditAndCorrect({
+          reply: () => lastAssistantText(messages, ''),
+          cwd: process.cwd(),
+          touched: () => Object.keys(tracker.snapshot()),
+          signal: controller.signal,
+          correct: async (briefing, before) => {
+            const summary = `The answer has something provably wrong — correcting it (${describeAudit(before)})`
+            uiHooks?.onActivity?.({ kind: 'status', status: 'warning', title: summary })
+            if (!uiHooks) writeNotice(`▸ ${summary}`)
+            sessionTranscript.notice(summary)
+            messages.push(userMessage(briefing))
+            if (persona) {
+              const { runPersonaTurn } = await import('../agents/orchestrator.ts')
+              await runPersonaTurn(messages, persona, skillNames, controller.signal, uiHooks)
+            } else {
+              await runModelTurn()
+            }
+          },
+        })
+        const { before, after } = audited
+        grounding = { checked: before.grounding.checked, ungrounded: before.grounding.ungrounded.length, ...(after ? { afterRepair: after.grounding.ungrounded.length } : {}) }
+        if (before.arithmetic.checked > 0) arithmetic = { checked: before.arithmetic.checked, wrong: before.arithmetic.wrong.length, ...(after ? { afterRepair: after.arithmetic.wrong.length } : {}) }
+        const unresolved = after ?? (searched ? before : undefined)
+        if (unresolved && unresolved.problems > 0) {
+          const line = `⚠ ${describeAudit(unresolved)} — ${after ? 'still, after one correction' : 'in the search\'s report, left uncorrected'}`
+          uiHooks?.onActivity?.({ kind: 'status', status: 'warning', title: line })
+          if (!uiHooks) writeNotice(line)
+          sessionTranscript.notice(line)
         }
       }
 
@@ -1537,6 +1557,10 @@ export async function runInteractive(): Promise<void> {
       } else {
         taskSessions.update(task.id, { status: 'failed', action: 'Failed', detail, error: detail })
         emitEvent('turn_finished', { taskId: task.id, sessionId, outcome: 'failed', error: redactText(detail, 2000) })
+        // A programming error in elia's own source is a bug for self-repair to
+        // find; a provider outage or a context overflow is not, and is not kept.
+        const { recordFault } = await import('../recovery/faults.ts')
+        recordFault(error, { source: 'turn', command: oneShotPrompt ? 'prompt' : 'repl', sessionId })
         throw error
       }
     } finally {
@@ -1679,6 +1703,10 @@ export async function runInteractive(): Promise<void> {
       }
     }
   }
+
+  // The live UI shows it in its own startup notice; a one-shot prompt and the
+  // line-mode REPL print it here, before any work starts.
+  if (recoveryNotice && (oneShotPrompt || !interactiveTerminal)) writeNotice(recoveryNotice)
 
   if (oneShotPrompt) {
     let commandToRun = oneShotPrompt
@@ -2908,8 +2936,13 @@ export async function runInteractive(): Promise<void> {
       devMode: mode === 'dev' && !persona,
     })
     const practiceReport = practiceHere ? practice.takePracticeReport() : undefined
-    const launchNotice = launch.start ? undefined : launch.notice
-    const initialTurn = launch.start
+    // The same bug ended elia twice today: starting the same unattended work
+    // again would most likely end the same way, so it waits to be asked.
+    const heldByCrash = launch.start && repeatedCrash !== undefined
+    const launchNotice = heldByCrash
+      ? `Not starting the autopilot on its own: the same internal error ended elia ${repeatedCrash.count} times today (${repeatedCrash.summary}). /autopilot starts it anyway; elia doctor --repair fixes the bug on a branch of elia's source.`
+      : launch.start ? undefined : launch.notice
+    const initialTurn = launch.start && !heldByCrash
       ? {
           label: launch.resume ? '/autopilot resume' : '/autopilot',
           notice: launch.resume
@@ -2924,7 +2957,7 @@ export async function runInteractive(): Promise<void> {
     await runInkRepl({
       sessionId,
       version: cliVersion,
-      startupNotice: [practiceReport, launchNotice].filter(Boolean).join('\n') || undefined,
+      startupNotice: [recoveryNotice, practiceReport, launchNotice].filter(Boolean).join('\n') || undefined,
       initialTurn,
       getEnv: () => ({ model: config.model, providerLabel: config.providerLabel, providerName: config.providerName, routing: config.routingMode }),
       commands: allSlashCommands(),
