@@ -133,7 +133,7 @@ describe('governance', () => {
     expect(assessDatabaseRequest({ action: 'migrate' }, dir, {})).toMatchObject({ risk: 'review', intent: 'database.migrate' })
     expect(assessDatabaseRequest({ action: 'start' }, dir, {})).toMatchObject({ risk: 'review', intent: 'database.local-server' })
     const remote = assessDatabaseRequest({ action: 'query', sql: 'select 1', url: 'postgres://u:secret@prod.example.com/app' }, dir, {})
-    expect(remote).toMatchObject({ risk: 'critical', intent: 'database.remote' })
+    expect(remote).toMatchObject({ risk: 'critical', intent: 'database.remote.read' })
     expect(remote.resources.join(' ')).not.toContain('secret')
     expect(assessDatabaseRequest({ action: 'nuke' }, dir, {}).risk).toBe('critical')
   })

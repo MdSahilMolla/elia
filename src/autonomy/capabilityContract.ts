@@ -42,9 +42,10 @@ const CATALOG: CapabilityContract[] = [
   // a port, so it is reviewed like any other process capability.
   contract('process', 'review', ['process'], false, 'process id, live status, and captured output'),
   contract('provision_environment', 'review', ['process', 'workspace-write'], false, 'installed dependency or recorded blocker'),
-  // Per-call risk comes from the target's locality (devdb/policy.ts): local work
-  // is review, anything remote is critical. `review` is the ceiling it starts from.
-  contract('database', 'review', ['process', 'workspace-write', 'network-read'], false, 'query rows, schema readback, migration exit status, or pre-destructive backup path'),
+  // Per-call risk comes from the target's locality and what the call does
+  // (devdb/policy.ts): local work is safe or review, anything remote — and any
+  // SQL that reaches past the database — is critical. `review` is where it starts.
+  contract('database', 'review', ['process', 'workspace-write', 'network-read', 'external-write'], false, 'query rows, catalog readback, health findings, migration exit status, or the backup path taken before a destructive change'),
   contract('github', 'review', ['network-read', 'external-write'], false, 'provider response and readback'),
   contract('deployment', 'critical', ['process', 'network-read', 'external-write'], false, 'provider receipt and live postcondition'),
   contract('browser', 'critical', ['network-read', 'external-write'], false, 'fresh browser state or user takeover'),
