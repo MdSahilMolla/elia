@@ -1,9 +1,10 @@
 import { useState } from 'react'
-import { Box, Text, useInput } from 'ink'
+import { Box, Text, useInput, type Key } from 'ink'
 import { glyphs, palette } from '../theme.ts'
 import { Panel } from './Panel.tsx'
 import { DiffPreview } from './DiffPreview.tsx'
 import type { ApprovalResult } from '../../../autonomy/governor.ts'
+import { ARM_MS, isTypingKey, useArming } from '../typingGuard.ts'
 
 export interface ApprovalRequest {
   title: string
@@ -32,8 +33,23 @@ const PREVIEW_LIMIT = 24
  * in as few choices as it takes: yes, yes-and-stop-asking (this session or
  * this project), or no-and-here's-what-to-do-instead. Digits pick directly,
  * ↑/↓ + Enter work too, Esc is "no", and `e` edits a command before it runs.
+ *
+ * It answers only once the keyboard has gone quiet (typingGuard.ts): keys
+ * that arrive while the person is still typing go on into their message
+ * through `onTypeThrough`, never into a choice.
  */
-export function ApprovalMenu({ request }: { request: ApprovalRequest }) {
+export function ApprovalMenu({
+  request,
+  onTypeThrough,
+  armMs = ARM_MS,
+}: {
+  request: ApprovalRequest
+  /** Where keys typed at the menu go instead — the message being written. */
+  onTypeThrough?: (input: string, key: Key) => void
+  armMs?: number
+}) {
+  const arming = useArming(armMs)
+  const [typedThrough, setTypedThrough] = useState(false)
   const [editing, setEditing] = useState<string | null>(null)
   const [feedback, setFeedback] = useState<string | null>(null)
   const [cursor, setCursor] = useState(0)
@@ -94,7 +110,29 @@ export function ApprovalMenu({ request }: { request: ApprovalRequest }) {
       if (input && !key.ctrl && !key.meta) setFeedback((v) => (v ?? '') + input)
       return
     }
-    if (key.escape || input.toLowerCase() === 'n') {
+    // Esc is never typed by accident into a sentence: it always declines.
+    if (key.escape) {
+      request.resolve({ approved: false })
+      return
+    }
+    const decision =
+      input.toLowerCase() === 'n' ||
+      key.upArrow ||
+      key.downArrow ||
+      key.return ||
+      (input.toLowerCase() === 'e' && request.command !== undefined && !plan) ||
+      choices.some((c) => c.key === input)
+    if (!arming.press() || !decision) {
+      // Still typing: not an answer. Text keys carry on into the message; the
+      // menu waits for the keyboard to go quiet again.
+      if (isTypingKey(input, key)) {
+        onTypeThrough?.(input, key)
+        setTypedThrough(true)
+      }
+      arming.rest()
+      return
+    }
+    if (input.toLowerCase() === 'n') {
       request.resolve({ approved: false })
       return
     }
@@ -158,6 +196,11 @@ export function ApprovalMenu({ request }: { request: ApprovalRequest }) {
               {'  '}esc to decline{request.command !== undefined && !plan ? ' · e to edit the command' : ''}
             </Text>
           </Box>
+          {!arming.armed && typedThrough ? (
+            <Text color={palette.muted} dimColor>
+              {'  '}waiting for you to finish typing — what you type goes to your message, not this menu
+            </Text>
+          ) : null}
         </Box>
       )}
     </Panel>

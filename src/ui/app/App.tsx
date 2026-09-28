@@ -1,6 +1,6 @@
 import { homedir } from 'node:os'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Box, Text, useApp, useInput, useStdout } from 'ink'
+import { Box, Text, useApp, useInput, useStdout, type Key } from 'ink'
 import { setInkSink } from '../stream.ts'
 import type { SlashCommand } from '../slashPrompt.ts'
 import { createTranscriptStore, flareHoldMs, toolsOf, type TranscriptStore } from './store.ts'
@@ -566,6 +566,11 @@ export function App(props: AppProps) {
   liveStateRef.current = { status, runningTools, plan, providerPlan, runSteps, turnStartedAt, agents, sessionId }
   const pendingQuestions = useRef(new Set<string>())
   const submitRef = useRef<((line: string) => Promise<void>) | null>(null)
+
+  // Keys typed while an approval or confirm prompt is up that were not an
+  // answer (typingGuard.ts) — they carry on into the message being written.
+  const typeRef = useRef<((input: string, key: Key) => void) | null>(null)
+  const typeThrough = useCallback((input: string, key: Key) => typeRef.current?.(input, key), [])
 
   // The thinking panel: every message sent mid-work gets a note there — elia's
   // reasoning about it, what the person wants, where the work really stands,
@@ -1372,8 +1377,8 @@ export function App(props: AppProps) {
         </>
       )}
       {showHelp && <HelpOverlay onClose={() => setShowHelp(false)} />}
-      {confirm && <Confirm request={confirm} />}
-      {approval && <ApprovalMenu request={approval} />}
+      {confirm && <Confirm request={confirm} onTypeThrough={typeThrough} />}
+      {approval && <ApprovalMenu request={approval} onTypeThrough={typeThrough} />}
       {picker && <Picker request={picker} />}
       {textPrompt && <TextPrompt request={textPrompt} />}
       {planReady && !busy && (
@@ -1389,6 +1394,7 @@ export function App(props: AppProps) {
       <Box marginTop={1} flexDirection="column">
         <ErrorBoundary area="input box" onError={boundaryError}>
         <InputBox
+          typeRef={typeRef}
           commands={props.commands}
           mode={mode}
           onTabEmpty={() => setMode((m) => (m === 'plan' ? 'auto' : 'plan'))}

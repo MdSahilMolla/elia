@@ -932,3 +932,55 @@ test('the status row shows what the session has spent against its limit, once it
     else process.env.ELIA_MAX_SPEND_USD = prior
   }
 })
+
+test('an approval that pops up mid-sentence takes none of it as an answer, and the sentence stays in the input', async () => {
+  let ask!: () => void
+  const asking = new Promise<void>((resolve) => { ask = resolve })
+  const answers: unknown[] = []
+  const props = {
+    ...baseProps(),
+    submitTurn: async (_text: string, hooks: import('./App.tsx').TurnHooks) => {
+      await asking
+      answers.push(await hooks.approve({ title: 'Run this command?', lines: ['not in the read-only policy'], ruleLabel: '`cat` commands', command: 'cat package.json' }))
+    },
+  }
+  const { stdin, lastFrame, unmount } = render(<App {...props} />)
+  const typeSlowly = async (text: string) => {
+    for (const ch of text) {
+      stdin.write(ch)
+      await new Promise((resolve) => setTimeout(resolve, 20))
+    }
+  }
+  try {
+    await waitForFrame(lastFrame, READY)
+    await settle()
+    stdin.write('build it')
+    await waitForFrame(lastFrame, 'build it')
+    stdin.write('\r')
+    await waitForFrame(lastFrame, 'esc to interrupt')
+    await typeSlowly('make s')
+    ask()
+    await waitForFrame(lastFrame, 'Run this command?')
+    // The rest of the sentence — an "e", a digit, and the Enter meant to send it.
+    await typeSlowly('ure step 2 is realistic')
+    stdin.write('\r')
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    expect(answers).toEqual([])
+    expect(lastFrame()).toContain('Run this command?')
+    expect(lastFrame()).toContain('make sure step 2 is realistic')
+    // A deliberate answer, after a pause, still works.
+    await new Promise((resolve) => setTimeout(resolve, 900))
+    stdin.write('4')
+    await waitForFrame(lastFrame, 'what should elia do instead?')
+    stdin.write('\x1B')
+    await waitForFrame(lastFrame, 'esc to decline')
+    stdin.write('\x1B')
+    await waitForFrame(() => (answers.length > 0 ? 'answered' : ''), 'answered')
+    expect(answers).toEqual([{ approved: false }])
+    await waitForFrame(lastFrame, READY)
+    // The sentence is still there to send.
+    expect(lastFrame()).toMatch(/❯\s+make sure step 2 is realistic/)
+  } finally {
+    unmount()
+  }
+})
