@@ -38,12 +38,39 @@ import { compactionThresholdFor, contextWindowFor } from '../../contextWindow.ts
 import { codexContextTokens } from '../../providers/codexSubscription.ts'
 import type { ChatMessage } from '../../providers/types.ts'
 import type { LivePlanEdit, LiveView } from '../../live/liveReply.ts'
-import { ThinkingPanel, type PanelNote } from './components/ThinkingPanel.tsx'
+import { FIRST_ROW_MS, ROW_FADE_MS, ROW_STAGGER_MS, ThinkingPanel, type PanelNote } from './components/ThinkingPanel.tsx'
 import { encodeNote, type NotePlanChange, type NotePlanEdit } from '../../autonomy/operatorNotes.ts'
 import { onLiveOutput, sessionCostLive, sessionUsageSnapshot } from '../../usage.ts'
 import { spendCeilingUsd } from '../../spendLimit.ts'
 import { SessionBar } from './SessionBar.tsx'
 import { SessionShortcuts } from './SessionShortcuts.tsx'
+
+/** After the thinking panel closes, how long the steps a note changed stay lit, then each fade step. */
+const HIGHLIGHT_HOLD_MS = 1_100
+const HIGHLIGHT_STEP_MS = 470
+
+/** How long the panel's rows take to appear one after another — the reading time starts after that. */
+function revealMs(notes: readonly PanelNote[]): number {
+  if (motionReduced) return 0
+  // Heading and hint, then per note: question, thinking, want, where it stands, answer, plan change, outcome.
+  const rows = 2 + notes.slice(-2).length * 7
+  return FIRST_ROW_MS + rows * ROW_STAGGER_MS + ROW_FADE_MS
+}
+
+/** "1 step changed, 1 added" — a note's plan change, for its receipt. Undefined when it changed nothing. */
+export function planSummary(changes: ReadonlyArray<{ kind: 'change' | 'add' | 'remove' }>): string | undefined {
+  const parts = (
+    [
+      ['change', 'changed'],
+      ['add', 'added'],
+      ['remove', 'removed'],
+    ] as const
+  )
+    .map(([kind, word]) => [changes.filter((change) => change.kind === kind).length, word] as const)
+    .filter(([n]) => n > 0)
+    .map(([n, word], index) => (index === 0 ? `${n} step${n === 1 ? '' : 's'} ${word}` : `${n} ${word}`))
+  return parts.length > 0 ? parts.join(', ') : undefined
+}
 
 /** `/attach` and its aliases stay real commands even though a POSIX image path also starts with "/". */
 const ATTACH_COMMAND = /^\/(?:attach|image|img)\b/
@@ -587,12 +614,30 @@ export function App(props: AppProps) {
   const pinnedRef = useRef(false)
   pinnedRef.current = panelPinned
   const [planHighlight, setPlanHighlight] = useState<ReadonlyMap<string, 'changed' | 'added'>>(new Map())
+  const [highlightFade, setHighlightFade] = useState(0)
   const noteSeq = useRef(0)
   const closeTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
-  const highlightTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+  const highlightTimers = useRef<Array<ReturnType<typeof setTimeout>>>([])
+  const stopHighlightFade = () => {
+    for (const timer of highlightTimers.current) clearTimeout(timer)
+    highlightTimers.current = []
+  }
   useEffect(() => () => {
     if (closeTimer.current) clearTimeout(closeTimer.current)
-    if (highlightTimer.current) clearTimeout(highlightTimer.current)
+    stopHighlightFade()
+  }, [])
+  /** The glow on the steps a note changed goes out a moment after the panel closes, in two steps. */
+  const fadeHighlight = useCallback(() => {
+    stopHighlightFade()
+    const later = (ms: number, fn: () => void) => highlightTimers.current.push(setTimeout(fn, ms))
+    if (!motionReduced) {
+      later(HIGHLIGHT_HOLD_MS, () => setHighlightFade(1))
+      later(HIGHLIGHT_HOLD_MS + HIGHLIGHT_STEP_MS, () => setHighlightFade(2))
+    }
+    later(HIGHLIGHT_HOLD_MS + (motionReduced ? 0 : 2 * HIGHLIGHT_STEP_MS), () => {
+      setPlanHighlight(new Map())
+      setHighlightFade(0)
+    })
   }, [])
 
   const updateNote = useCallback((id: number, patch: Partial<PanelNote>) => {
@@ -606,27 +651,22 @@ export function App(props: AppProps) {
       const current = notesRef.current
       if (pinnedRef.current || current.length === 0 || current.some((note) => note.state === 'thinking')) return
       setPanelOpen(false)
-    }, props.panelReadMs ?? Math.min(9_000, Math.max(3_000, 2_000 + notesRef.current.reduce((n, note) => n + (note.answer?.length ?? 0) + note.thinking.length, 0) * 12)))
+    }, props.panelReadMs ?? revealMs(notesRef.current) + Math.min(9_000, Math.max(3_000, 2_000 + notesRef.current.reduce((n, note) => n + (note.answer?.length ?? 0) + note.thinking.length, 0) * 12)))
   }, [props.panelReadMs])
 
   /** The panel finished sliding shut: its notes become receipts in the transcript. */
   const onPanelClosed = useCallback(() => {
     const settled = notesRef.current.filter((note) => note.state !== 'thinking')
     for (const note of settled) {
-      const plan = note.changes && note.changes.length > 0
-        ? `\nPlan: ${[['change', 'changed'], ['add', 'added'], ['remove', 'removed']].map(([kind, word]) => {
-            const n = note.changes!.filter((change) => change.kind === kind).length
-            return n > 0 ? `${n} step${n === 1 ? '' : 's'} ${word}` : ''
-          }).filter(Boolean).join(', ')}`
-        : ''
-      const body = note.state === 'failed' ? `${note.error ?? 'Could not think it through'} — your note went to the work as written.` : note.answer ?? ''
-      store.aside(note.question, `${body}${plan}`)
+      const body = note.state === 'failed' ? `sent to the work as written (${note.error ?? 'could not think it through'})` : note.answer ?? ''
+      store.aside(note.question, body, planSummary(note.changes ?? []))
     }
     if (settled.length > 0) recentNotes.current = settled
     setNotes((all) => all.filter((note) => note.state === 'thinking'))
     setPanelPinned(false)
     setPanelMounted(false)
-  }, [store])
+    fadeHighlight()
+  }, [store, fadeHighlight])
 
   /** Where the work really stands, from what ran — the model never writes this line. */
   const rightNowOf = (view: LiveView): string => {
@@ -695,9 +735,10 @@ export function App(props: AppProps) {
         setPlan(next)
       } else setProviderPlan(next)
     }
+    // Lit until the panel closes; then it fades (fadeHighlight).
+    stopHighlightFade()
+    setHighlightFade(0)
     setPlanHighlight(lit)
-    if (highlightTimer.current) clearTimeout(highlightTimer.current)
-    highlightTimer.current = setTimeout(() => setPlanHighlight(new Map()), 8_000)
     return { lines, change: { ...(wants ? { wants } : {}), edits: planEdits } }
   }
 
@@ -1305,7 +1346,7 @@ export function App(props: AppProps) {
           done" parked above the input only competes with it. */}
       {!modalOpen && (busy || planReady || visiblePlan.length > 0) && (
         <ErrorBoundary area="workspace panel" onError={boundaryError}>
-          <WorkspacePanel plan={visiblePlan} agents={agents} since={sessionStartedAt} sessionId={sessionId} expanded={expandedAll} evidence={planEvidence} highlight={planHighlight} />
+          <WorkspacePanel plan={visiblePlan} agents={agents} since={sessionStartedAt} sessionId={sessionId} expanded={expandedAll} evidence={planEvidence} highlight={planHighlight} highlightFade={highlightFade} />
         </ErrorBoundary>
       )}
       {previewUrl && !modalOpen && (

@@ -17,16 +17,22 @@ export interface PanelNote {
   wants?: string
   answer?: string
   changes?: Array<{ kind: 'change' | 'add' | 'remove'; text: string }>
+  state: 'thinking' | 'updated' | 'answered' | 'failed'
+  error?: string
   /** The note went to the running work (with or without a plan change). */
   passed?: boolean
   /** Sentences taken out of the answer because nothing that ran backs them up. */
   dropped?: number
-  state: 'thinking' | 'updated' | 'answered' | 'failed'
-  error?: string
 }
 
 /** How long the panel takes to slide open or shut. */
-export const PANEL_SLIDE_MS = 420
+export const PANEL_SLIDE_MS = 460
+/** After the panel starts opening, when its first row appears. */
+export const FIRST_ROW_MS = 180
+/** Rows that arrive together appear one after another, this far apart… */
+export const ROW_STAGGER_MS = 250
+/** …each fading in (dim, then full) over this long. */
+export const ROW_FADE_MS = 300
 const FRAME_MS = 33
 
 /** 0 = shut, 1 = open, eased between the two whenever `open` flips. */
@@ -45,7 +51,8 @@ function useSlide(open: boolean): number {
     const started = Date.now()
     const timer = setInterval(() => {
       const t = Math.min(1, (Date.now() - started) / PANEL_SLIDE_MS)
-      const eased = 1 - (1 - t) ** 3
+      // cubic-bezier(0.2, 0.8, 0.2, 1) is close to a quartic ease-out.
+      const eased = 1 - (1 - t) ** 4
       const value = t >= 1 ? target : from + (target - from) * eased
       current.current = value
       setProgress(value)
@@ -56,75 +63,140 @@ function useSlide(open: boolean): number {
   return progress
 }
 
+type RowPhase = 'hidden' | 'fading' | 'shown'
+
+/**
+ * Rows appear in order: a row that arrives with others waits its turn,
+ * `ROW_STAGGER_MS` after the one above, and fades in. A row keeps the moment
+ * it first appeared, so text that grows in place (the streamed thinking)
+ * never appears twice.
+ */
+function useRowReveal(keys: readonly string[]): (key: string) => RowPhase {
+  const openedAt = useRef(Date.now())
+  const revealAt = useRef(new Map<string, number>())
+  const [, setFrame] = useState(0)
+  const now = Date.now()
+  let previous = openedAt.current + FIRST_ROW_MS - ROW_STAGGER_MS
+  for (const key of keys) {
+    let at = revealAt.current.get(key)
+    if (at === undefined) {
+      at = motionReduced ? now : Math.max(now, previous + ROW_STAGGER_MS)
+      revealAt.current.set(key, at)
+    }
+    previous = Math.max(previous, at)
+  }
+  const moving = !motionReduced && keys.some((key) => now < (revealAt.current.get(key) ?? 0) + ROW_FADE_MS)
+  useEffect(() => {
+    if (!moving) return
+    const timer = setInterval(() => setFrame((n) => n + 1), FRAME_MS)
+    return () => clearInterval(timer)
+  }, [moving])
+  return (key) => {
+    const at = revealAt.current.get(key) ?? 0
+    if (now < at) return 'hidden'
+    return now < at + ROW_FADE_MS / 2 ? 'fading' : 'shown'
+  }
+}
+
 const MARK: Record<'change' | 'add' | 'remove', string> = { change: '~', add: '+', remove: '−' }
 
-function noteLines(note: PanelNote): ReactNode[] {
-  const lines: ReactNode[] = [
-    <Text key={`q${note.id}`} wrap="wrap">
-      <Text color={palette.muted}>❯ </Text>
-      {note.question}
-    </Text>,
+type Row = { key: string; node: ReactNode }
+
+function noteRows(note: PanelNote): Row[] {
+  const rows: Row[] = [
+    { key: `${note.id}:q`, node: <Text wrap="wrap">❯ {note.question}</Text> },
   ]
   const thinking = note.thinking.length > 420 ? `…${note.thinking.slice(-420)}` : note.thinking
   if (thinking || note.state === 'thinking') {
-    lines.push(
-      <Text key={`t${note.id}`} italic color={palette.muted} wrap="wrap">
-        ✻ {thinking || 'reading your note…'}
-      </Text>,
-    )
+    rows.push({
+      key: `${note.id}:t`,
+      node: (
+        <Text italic color={palette.muted} wrap="wrap">
+          ✻ {thinking || 'reading your note…'}
+        </Text>
+      ),
+    })
   }
+  // The rest lands together when the reply does, and appears in this order.
+  if (note.state === 'thinking') return rows
   if (note.wants) {
-    lines.push(
-      <Text key={`w${note.id}`} wrap="wrap">
-        <Text bold>You want: </Text>
-        <Text color={palette.muted}>{note.wants}</Text>
-      </Text>,
-    )
+    rows.push({
+      key: `${note.id}:w`,
+      node: (
+        <Text wrap="wrap">
+          You want: <Text color={palette.muted}>{note.wants}</Text>
+        </Text>
+      ),
+    })
   }
-  lines.push(
-    <Text key={`r${note.id}`} wrap="wrap">
-      <Text bold>Right now: </Text>
-      <Text color={palette.muted}>{note.rightNow}</Text>
-    </Text>,
-  )
+  rows.push({
+    key: `${note.id}:r`,
+    node: (
+      <Text wrap="wrap">
+        Right now: <Text color={palette.muted}>{note.rightNow}</Text>
+      </Text>
+    ),
+  })
   if (note.answer) {
-    lines.push(
-      <Text key={`a${note.id}`} wrap="wrap">
-        <Text color={palette.brand}>● </Text>
-        {note.answer}
-      </Text>,
-    )
+    rows.push({
+      key: `${note.id}:a`,
+      node: (
+        <Text wrap="wrap">
+          <Text color={palette.brand}>● </Text>
+          {note.answer}
+        </Text>
+      ),
+    })
   }
   if (note.dropped) {
-    lines.push(
-      <Text key={`d${note.id}`} color={palette.muted} dimColor wrap="wrap">
-        {`✂ ${note.dropped === 1 ? 'a claim' : `${note.dropped} claims`} removed — nothing that ran backs ${note.dropped === 1 ? 'it' : 'them'} up`}
-      </Text>,
-    )
+    rows.push({
+      key: `${note.id}:d`,
+      node: (
+        <Text color={palette.muted} dimColor wrap="wrap">
+          {`✂ ${note.dropped === 1 ? 'a claim' : `${note.dropped} claims`} removed — nothing that ran backs ${note.dropped === 1 ? 'it' : 'them'} up`}
+        </Text>
+      ),
+    })
   }
   if (note.changes && note.changes.length > 0) {
-    lines.push(<Text key={`p${note.id}`} bold>Plan change</Text>)
-    note.changes.forEach((change, index) =>
-      lines.push(
-        <Text key={`p${note.id}-${index}`} wrap="wrap">
-          <Text color={change.kind === 'add' ? palette.success : change.kind === 'remove' ? palette.failure : palette.warning}>{MARK[change.kind]} </Text>
-          <Text color={palette.muted}>{change.text}</Text>
-        </Text>,
+    rows.push({
+      key: `${note.id}:p`,
+      // One Text, not a Box: a fading row is wrapped in <Text dimColor>, and Ink
+      // cannot put a Box inside a Text.
+      node: (
+        <Text wrap="wrap">
+          Plan change
+          {note.changes.map((change, index) => (
+            <Text key={index}>
+              {'\n'}
+              <Text color={change.kind === 'add' ? palette.success : change.kind === 'remove' ? palette.failure : palette.warning}>{MARK[change.kind]} </Text>
+              <Text color={palette.muted}>{change.text}</Text>
+            </Text>
+          ))}
+        </Text>
       ),
-    )
+    })
   }
-  lines.push(
-    <Text key={`s${note.id}`} wrap="wrap" color={note.state === 'failed' ? palette.failure : palette.muted}>
-      {note.state === 'thinking'
-        ? '… thinking'
-        : note.state === 'updated'
-          ? '✓ Plan updated — the work picks it up at its next step.'
-          : note.state === 'answered'
-            ? note.passed ? '↳ No plan change — your note reaches the work at its next step.' : 'No plan change.'
-            : `✗ ${note.error ?? 'could not think it through'} — your note went to the work as written.`}
-    </Text>,
-  )
-  return lines
+  rows.push({
+    key: `${note.id}:s`,
+    node:
+      note.state === 'updated' ? (
+        <Text wrap="wrap">
+          <Text color={palette.success}>✓ </Text>
+          <Text color={palette.muted}>Plan updated — the work picks it up at its next step.</Text>
+        </Text>
+      ) : note.state === 'answered' ? (
+        <Text color={palette.muted} dimColor wrap="wrap">
+          {note.passed ? 'No plan change — your note reaches the work at its next step.' : 'No plan change.'}
+        </Text>
+      ) : (
+        <Text wrap="wrap">
+          <Text color={palette.failure}>✗ </Text>
+          <Text color={palette.muted}>{`${note.error ?? 'could not think it through'} — your note went to the work as written.`}</Text>
+        </Text>
+      ),
+  })
+  return rows
 }
 
 /**
@@ -134,7 +206,8 @@ function noteLines(note: PanelNote): ReactNode[] {
  * Wide terminals get a column that slides in from the right: its width eases
  * open while the content, laid out at the final width and clipped, stays put —
  * nothing reflows frame to frame. Narrow terminals get the same content above
- * the input, revealed line by line. Reduced motion skips the slide.
+ * the input. Either way the rows appear one after another, each fading in, and
+ * reduced motion shows them at once.
  */
 export function ThinkingPanel({
   open,
@@ -161,30 +234,64 @@ export function ThinkingPanel({
       }
     } else closedRef.current = false
   }, [open, progress, onClosed])
+
+  const rows: Row[] = [
+    { key: 'head', node: <Text color={palette.note}>◇ Thinking about your note</Text> },
+    ...notes.slice(-2).flatMap((note, index) => (index > 0 ? [{ key: `${note.id}:gap`, node: <Text> </Text> }, ...noteRows(note)] : noteRows(note))),
+    {
+      key: pinned ? 'hint:pinned' : 'hint',
+      node: (
+        <Text color={palette.muted} dimColor>
+          {pinned ? 'ctrl+w hides this' : 'ctrl+w keeps this open'}
+        </Text>
+      ),
+    },
+  ]
+  const phaseOf = useRowReveal(rows.map((row) => row.key))
   if (!open && progress === 0) return null
 
-  const lines: ReactNode[] = [
-    <Text key="head" color={palette.plan}>◇ Thinking about your note</Text>,
-    ...notes.slice(-2).flatMap((note, index) => (index > 0 ? [<Text key={`gap${note.id}`}> </Text>, ...noteLines(note)] : noteLines(note))),
-    <Text key="hint" color={palette.muted} dimColor>
-      {pinned ? 'ctrl+w hides this' : 'ctrl+w keeps this open'}
-    </Text>,
-  ]
+  const visible = rows
+    .map((row) => ({ row, phase: phaseOf(row.key) }))
+    .filter(({ phase }) => phase !== 'hidden')
+    .map(({ row, phase }) => (phase === 'fading' ? <Text key={row.key} dimColor>{row.node}</Text> : <Box key={row.key}>{row.node}</Box>))
 
   if (layout === 'stacked') {
-    const shown = Math.max(1, Math.round(progress * lines.length))
+    // Opening, the rows reveal themselves; closing, the panel folds up from the bottom.
+    const shown = open ? visible.length : Math.max(1, Math.round(progress * visible.length))
     return (
-      <Box flexDirection="column" marginTop={1} borderStyle="single" borderColor={palette.plan} borderRight={false} borderTop={false} borderBottom={false} paddingLeft={1}>
-        {lines.slice(0, shown)}
+      <Box
+        flexDirection="column"
+        marginTop={1}
+        borderStyle="single"
+        borderColor={palette.note}
+        borderRight={false}
+        borderTop={false}
+        borderBottom={false}
+        paddingLeft={1}
+        backgroundColor={palette.noteBg}
+      >
+        {visible.slice(0, shown)}
       </Box>
     )
   }
 
-  const visible = Math.max(1, Math.round(progress * width))
+  const edge = Math.max(1, Math.round(progress * width))
   return (
-    <Box width={visible} flexShrink={0} overflowX="hidden" marginTop={1}>
-      <Box width={width} flexShrink={0} flexDirection="column" borderStyle="single" borderColor={palette.plan} borderRight={false} borderTop={false} borderBottom={false} paddingLeft={1}>
-        {lines}
+    <Box width={edge} flexShrink={0} overflowX="hidden" marginTop={1}>
+      <Box
+        width={width}
+        flexShrink={0}
+        flexDirection="column"
+        borderStyle="single"
+        borderColor={palette.note}
+        borderRight={false}
+        borderTop={false}
+        borderBottom={false}
+        paddingLeft={1}
+        paddingRight={1}
+        backgroundColor={palette.noteBg}
+      >
+        {visible}
       </Box>
     </Box>
   )

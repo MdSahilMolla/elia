@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test'
 import { render } from 'ink-testing-library'
-import { App, planReceipt, providerPlanItems, shouldPersistActivity } from './App.tsx'
+import { App, planReceipt, planSummary, providerPlanItems, shouldPersistActivity } from './App.tsx'
 import { REPL_COMMANDS_FOR_TEST, waitForFrame } from './testFixtures.ts'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
@@ -557,7 +557,7 @@ test('a message typed mid-turn opens the thinking panel, is answered there, and 
   const asked: Array<{ question: string; request: string; tools: string[] }> = []
   const props = {
     ...baseProps(),
-    panelReadMs: 800,
+    panelReadMs: 2_500,
     submitTurn: async (_text: string, hooks: import('./App.tsx').TurnHooks) => {
       hooks.onToolStart({ id: 'r1', name: 'read_file', input: { path: 'src/auth.ts' } })
       hooks.onTool({ id: 'r1', name: 'read_file', input: { path: 'src/auth.ts' }, result: 'export function login() {}', isError: false, durationMs: 2, cached: false })
@@ -582,7 +582,7 @@ test('a message typed mid-turn opens the thinking panel, is answered there, and 
     stdin.write('what are you doing?')
     await waitForFrame(lastFrame, 'what are you doing?')
     stdin.write('\r')
-    const answered = await waitForFrame(lastFrame, 'No plan change.')
+    const answered = await waitForFrame(lastFrame, 'No plan change.', 4_000)
     expect(answered).toContain('find where the session expires')
     expect(answered).toContain('Thinking about your note')
     // Where the work stands comes from what ran, not from the model.
@@ -590,14 +590,14 @@ test('a message typed mid-turn opens the thinking panel, is answered there, and 
     expect(answered).toContain('No plan change.')
     // The turn is still running: an answer is not a turn.
     expect(answered).toContain('esc to interrupt')
-    // Once read, the panel shuts and the exchange stays as a receipt.
-    const closed = await waitForFrame(lastFrame, 'you, mid-task: what are you doing?')
+    // Once read, the panel shuts and the exchange stays as a one-line receipt.
+    const closed = await waitForFrame(lastFrame, 'Your note "what are you doing?" → I am reading src/auth.ts', 4_000)
     expect(closed).not.toContain('Thinking about your note')
 
     stdin.write('also add tests')
     await waitForFrame(lastFrame, 'also add tests')
     stdin.write('\r')
-    await waitForFrame(lastFrame, 'your note reaches the work at its next step')
+    await waitForFrame(lastFrame, 'your note reaches the work at its next step', 4_000)
 
     release()
     await new Promise((resolve) => setTimeout(resolve, 100))
@@ -607,7 +607,7 @@ test('a message typed mid-turn opens the thinking panel, is answered there, and 
   } finally {
     unmount()
   }
-})
+}, 20_000)
 
 test('the panel streams the thinking, and a plan change lands in the main plan and reaches the run by step id', async () => {
   let release!: () => void
@@ -655,19 +655,25 @@ test('the panel streams the thinking, and a plan change lands in the main plan a
     await waitForFrame(lastFrame, 'make it realistic')
     stdin.write('\r')
     // The reasoning shows while it is still being written.
-    await waitForFrame(lastFrame, 'so the API step changes')
+    await waitForFrame(lastFrame, 'so the API step changes', 3_000)
     think()
-    const updated = await waitForFrame(lastFrame, 'Plan updated')
+    const updated = await waitForFrame(lastFrame, 'Plan updated', 4_000)
     expect(updated).toContain('You want:')
     expect(updated).toContain('realistic data from a real database')
     expect(updated).toContain('~ Build the API → Build the API on Postgres')
     expect(updated).toContain('+ Seed realistic rows')
     // The main chat's plan changed too, and says why.
-    expect(updated).toContain('1 changed, 1 added from your note')
-    expect(updated).toContain('+ Seed realistic rows')
-    expect(updated).toContain('~ Build the API on Postgres')
-    expect(updated.indexOf('+ Seed realistic rows')).toBeLessThan(updated.indexOf('~ Build the API on Postgres'))
+    // The main chat's plan changed too: the new step sits after the one it follows.
+    const mainPlan = updated.slice(updated.indexOf('Plan ·'), updated.indexOf('Thinking about your note'))
+    expect(mainPlan).toContain('Build the API on Postgres')
+    expect(mainPlan.indexOf('Seed realistic rows')).toBeGreaterThan(-1)
+    expect(mainPlan.indexOf('Seed realistic rows')).toBeLessThan(mainPlan.indexOf('Build the API on Postgres'))
 
+    // Put away (ctrl+w pins, ctrl+w again hides): the note leaves one line behind.
+    stdin.write('\x17')
+    await waitForFrame(lastFrame, 'ctrl+w hides this', 3_000)
+    stdin.write('\x17')
+    await waitForFrame(lastFrame, 'Your note "make it realistic" → plan: 1 step changed, 1 added', 3_000)
     release()
     await new Promise((resolve) => setTimeout(resolve, 100))
     expect(drained).toHaveLength(1)
@@ -684,14 +690,14 @@ test('the panel streams the thinking, and a plan change lands in the main plan a
   } finally {
     unmount()
   }
-})
+}, 20_000)
 
 test('ctrl+w keeps the thinking panel open past its reading time, and ctrl+w again puts it away', async () => {
   let release!: () => void
   const held = new Promise<void>((resolve) => { release = resolve })
   const props = {
     ...baseProps(),
-    panelReadMs: 1_000,
+    panelReadMs: 3_000,
     submitTurn: async () => {
       await held
     },
@@ -708,23 +714,23 @@ test('ctrl+w keeps the thinking panel open past its reading time, and ctrl+w aga
     stdin.write('how far along?')
     await waitForFrame(lastFrame, 'how far along?')
     stdin.write('\r')
-    await waitForFrame(lastFrame, 'ctrl+w keeps this open')
+    await waitForFrame(lastFrame, 'ctrl+w keeps this open', 3_000)
     stdin.write('\x17')
     await waitForFrame(lastFrame, 'ctrl+w hides this')
-    await new Promise((resolve) => setTimeout(resolve, 1_500))
+    await new Promise((resolve) => setTimeout(resolve, 3_200))
     // Pinned: the reading time passed and it is still there, with no receipt yet.
     expect(lastFrame()).toContain('Halfway through the parser.')
-    expect(lastFrame()).not.toContain('you, mid-task')
+    expect(lastFrame()).not.toContain('Your note')
     // ctrl+w never types into the input.
     expect(lastFrame()).not.toMatch(/❯ w\b/)
     stdin.write('\x17')
-    const closed = await waitForFrame(lastFrame, 'you, mid-task: how far along?')
+    const closed = await waitForFrame(lastFrame, 'Your note "how far along?" → Halfway through the parser.')
     expect(closed).not.toContain('ctrl+w hides this')
     release()
   } finally {
     unmount()
   }
-})
+}, 20_000)
 
 test('when the live lane cannot answer, the message still reaches the work as steering', async () => {
   let release!: () => void
@@ -751,14 +757,14 @@ test('when the live lane cannot answer, the message still reaches the work as st
     stdin.write('use postgres not sqlite')
     await waitForFrame(lastFrame, 'use postgres not sqlite')
     stdin.write('\r')
-    await waitForFrame(lastFrame, 'could not think it through (provider down)')
+    await waitForFrame(lastFrame, 'could not think it through (provider down)', 4_000)
     release()
     await new Promise((resolve) => setTimeout(resolve, 100))
     expect(drained).toEqual([['use postgres not sqlite']])
   } finally {
     unmount()
   }
-})
+}, 20_000)
 
 test('a slash command can run as a turn of its own, and mid-turn messages reach it as steering', async () => {
   let release!: () => void
@@ -983,4 +989,10 @@ test('an approval that pops up mid-sentence takes none of it as an answer, and t
   } finally {
     unmount()
   }
+})
+
+test('a note\'s receipt counts its plan change the way the design says it', () => {
+  expect(planSummary([])).toBeUndefined()
+  expect(planSummary([{ kind: 'change' }, { kind: 'add' }])).toBe('1 step changed, 1 added')
+  expect(planSummary([{ kind: 'add' }, { kind: 'add' }, { kind: 'remove' }])).toBe('2 steps added, 1 removed')
 })

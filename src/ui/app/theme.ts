@@ -62,6 +62,17 @@ export interface Palette {
   diffDelWordBg: string | undefined
   /** What the spark fades toward when nothing has arrived for a while. */
   stall: string | undefined
+  /** The thinking panel: its edge, its heading, a note's receipt. */
+  note: string | undefined
+  /** The band behind the thinking panel. Undefined: no band. */
+  noteBg: string | undefined
+  /**
+   * The glow behind plan steps a note changed, and the two steps it fades
+   * through. Undefined: no glow — the steps are marked `~`/`+` instead.
+   */
+  noteGlow: string | undefined
+  noteGlowDim: string | undefined
+  noteGlowFaint: string | undefined
 }
 
 const DARK: Palette = {
@@ -90,6 +101,11 @@ const DARK: Palette = {
   diffAddWordBg: '#236B35',
   diffDelWordBg: '#7C2C35',
   stall: '#E0645A',
+  note: '#B98CF2',
+  noteBg: '#24212D',
+  noteGlow: '#40364D',
+  noteGlowDim: '#352E40',
+  noteGlowFaint: '#2A2633',
 }
 
 const LIGHT: Palette = {
@@ -118,6 +134,11 @@ const LIGHT: Palette = {
   diffAddWordBg: '#A8E2B6',
   diffDelWordBg: '#F4AEB5',
   stall: '#C8343D',
+  note: '#7B52C9',
+  noteBg: '#F4F1FA',
+  noteGlow: '#E4D9F7',
+  noteGlowDim: '#ECE4FA',
+  noteGlowFaint: '#F4F0FC',
 }
 
 const ANSI: Palette = {
@@ -146,6 +167,11 @@ const ANSI: Palette = {
   diffAddWordBg: undefined,
   diffDelWordBg: undefined,
   stall: 'red',
+  note: 'magenta',
+  noteBg: undefined,
+  noteGlow: undefined,
+  noteGlowDim: undefined,
+  noteGlowFaint: undefined,
 }
 
 const NONE = Object.fromEntries(Object.keys(DARK).map((key) => [key, undefined])) as unknown as Palette
