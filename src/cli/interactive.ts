@@ -1867,7 +1867,7 @@ export async function runInteractive(): Promise<void> {
     if (bundlesResult.error) writeNotice(`Could not read skill bundles: ${bundlesResult.error}`)
     const bundles = bundlesResult.bundles
     if (skills.length === 0 && bundles.length === 0) {
-      writeNotice(`No loaded skills. Add a validated *.skill.ts file to ${PROJECT_SKILLS_DIR} for this project or ${USER_SKILLS_DIR} for all projects, then restart Elia.`)
+      writeNotice(`No loaded skills. Add a validated *.skill.ts file to ${PROJECT_SKILLS_DIR} for this project or ${USER_SKILLS_DIR} for all projects, then run /skills reload.`)
       return
     }
 
@@ -1890,6 +1890,42 @@ export async function runInteractive(): Promise<void> {
     const selection = result.value as string
     selectedSkillNames = selection === '__all__' ? undefined : [selection.startsWith('__bundle:') ? selection.slice('__bundle:'.length) : selection]
     writeNotice(selectedSkillNames ? `Skill selection for subsequent turns: ${selectedSkillNames[0]}` : 'All loaded skills are available for subsequent turns.')
+  }
+
+  /**
+   * `/skills reload` — re-read every skills directory now, with no restart.
+   *
+   * The load is the startup one: `loadRuntimeSkills()` runs `loadSkills()` with
+   * its default arguments (runtime.ts:195), and its only other duty — the MCP
+   * pass — already ran at startup and is memoised. `loadSkills` clears the
+   * synthesized-tool registry before it repopulates (loader.ts:58) and imports
+   * each file behind a `?t=` cache-buster (loader.ts:127), so a skill written or
+   * deleted since startup takes effect here. It re-reads the project trust file
+   * on every call, so a reload is never a way around `elia skills trust`; and a
+   * file it quarantined has been moved into a `quarantine/` subdirectory, which
+   * is not scanned, so reloading does not re-quarantine it.
+   *
+   * `selectedSkillNames` is deliberately untouched: reloading the catalog is not
+   * a request to change what the user picked, and a name that has gone missing
+   * is simply ignored by the tool filter until they choose again.
+   */
+  async function reloadSkillsForSession(): Promise<string> {
+    const { loadSkills } = await import('../skills/loader.ts')
+    const report = await loadSkills()
+    const lines = [
+      report.loaded.length === 0
+        ? 'Reloaded — no skills loaded.'
+        : [`Reloaded — ${report.loaded.length} skill(s):`, ...report.loaded.map((skill) => `  ${skill.name}  (${skill.source})`)].join('\n'),
+    ]
+    for (const quarantined of report.quarantined) lines.push(`Quarantined ${quarantined.file} — ${quarantined.reason}`)
+    if (report.untrustedProject.length > 0) {
+      lines.push(`Not loaded — this project is not trusted: ${report.untrustedProject.join(', ')}. Inspect them, then run \`elia skills trust\`.`)
+    }
+    if (selectedSkillNames) {
+      const gone = selectedSkillNames.filter((name) => !report.loaded.some((skill) => skill.name === name))
+      if (gone.length > 0) lines.push(`Still selected: ${selectedSkillNames.join(', ')} — ${gone.join(', ')} is no longer loaded. /skills to change it.`)
+    }
+    return lines.join('\n')
   }
 
   /** Shared by the `/mode` and `/betamode` pickers, their direct `<name>` forms, and the /settings mode picker so every path stays in sync. */
@@ -2343,6 +2379,9 @@ export async function runInteractive(): Promise<void> {
         },
       }
     }
+
+    // Ahead of the picker below, which matches the bare command exactly.
+    if (/^\/skills\s+reload$/.test(trimmed)) return done(await reloadSkillsForSession())
 
     if (trimmed === '@skills' || trimmed === '/skills') {
       const { listLoadedSkills } = await import('../skills/loader.ts')
@@ -3111,7 +3150,12 @@ export async function runInteractive(): Promise<void> {
       writeUsageLine(renderCompetence())
       continue
     }
-    if (trimmed === '/skills') {
+    const skillsClassic = /^\/skills(?:\s+(reload))?$/.exec(trimmed)
+    if (skillsClassic) {
+      if (skillsClassic[1] === 'reload') {
+        writeUsageLine(await reloadSkillsForSession())
+        continue
+      }
       const { listLoadedSkills } = await import('../skills/loader.ts')
       const skills = listLoadedSkills()
       writeUsageLine(skills.length === 0 ? 'No skills loaded.' : ['Loaded skills:', ...skills.map((s) => `  ${s.name}  (${s.source})`)].join('\n'))

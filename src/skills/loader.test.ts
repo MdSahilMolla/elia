@@ -1,9 +1,9 @@
 import { afterEach, expect, test } from 'bun:test'
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { listLoadedSkills, loadSkills } from './loader.ts'
-import { trustProjectSkills } from './trust.ts'
+import { trustProjectSkills, untrustProjectSkills } from './trust.ts'
 
 // These pin down finding #1: a project's `.elia/skills/*.skill.ts` must never
 // be imported — and therefore never have its top-level code run — until the
@@ -140,4 +140,95 @@ test('a skill deleted from disk stops being callable after a reload', async () =
   rmSync(join(skillsDir, 'evil.skill.ts'))
   await loadSkills({}, skillsDir)
   expect(findTool('evil_tool')).toBeUndefined()
+  expect(listLoadedSkills().map((skill) => skill.name)).not.toContain('evil_tool')
+})
+
+// --- reload (`/skills reload`) ---
+
+// The command itself is a thin wrapper over a second `loadSkills()` call, so
+// what is worth pinning down here is the reload's guarantees, not the wiring:
+// the trust gate is re-read every time, a new file is importable without a
+// restart, and a quarantined file is not carried through the loop again.
+
+/** A minimal, valid skill file — the shape `loadSkillFile` accepts. */
+function writeSkill(skillsDir: string, fileName: string, toolName: string): string {
+  const file = join(skillsDir, fileName)
+  writeFileSync(
+    file,
+    [
+      `export default { name: '${toolName}', description: 'x', input_schema: { type: 'object', properties: {} }, async execute() { return 'ok' } }`,
+      '',
+    ].join('\n'),
+  )
+  return file
+}
+
+test('a skill written after the first load is callable after a reload', async () => {
+  const { skillsDir } = setupProject()
+  trustProjectSkills(skillsDir)
+  const { findTool } = await import('../tools/registry.ts')
+  // Only meaningful if this machine has no user skill of the same name, which
+  // would be found regardless of what the project directory holds.
+  const baseline = await machineBaseline()
+  if (baseline.includes('late_skill_tool')) return
+
+  const first = await loadSkills({}, skillsDir)
+  expect(first.loaded.some((s) => s.name === 'late_skill_tool')).toBe(false)
+
+  writeSkill(skillsDir, 'late.skill.ts', 'late_skill_tool')
+  const second = await loadSkills({}, skillsDir)
+  expect(second.loaded.some((s) => s.name === 'late_skill_tool')).toBe(true)
+  expect(listLoadedSkills().map((skill) => skill.name)).toContain('late_skill_tool')
+  expect(findTool('late_skill_tool')).toBeDefined()
+})
+
+test('a reload re-checks project trust — it is never a way around it', async () => {
+  const { skillsDir, markerPath } = setupProject()
+  const { findTool } = await import('../tools/registry.ts')
+  const baseline = await machineBaseline()
+  if (baseline.includes('evil_tool')) return
+
+  // Two reloads of an untrusted project: the top-level side effect still must
+  // not run, however many times the command is typed.
+  await loadSkills({}, skillsDir)
+  await loadSkills({}, skillsDir)
+  expect(existsSync(markerPath)).toBe(false)
+  expect(findTool('evil_tool')).toBeUndefined()
+
+  trustProjectSkills(skillsDir)
+  const trusted = await loadSkills({}, skillsDir)
+  expect(trusted.loaded.some((s) => s.name === 'evil_tool')).toBe(true)
+  expect(findTool('evil_tool')).toBeDefined()
+
+  // Revoking is not a restart either: the tool stops being callable on the
+  // next reload instead of lingering in the registry for the rest of the session.
+  untrustProjectSkills(skillsDir)
+  const revoked = await loadSkills({}, skillsDir)
+  expect(findTool('evil_tool')).toBeUndefined()
+  expect(revoked.loaded.some((s) => s.name === 'evil_tool')).toBe(false)
+  expect(revoked.untrustedProject).toEqual([join(skillsDir, 'evil.skill.ts')])
+})
+
+test('a quarantined skill is not re-quarantined by the next reload', async () => {
+  const projectDir = mkdtempSync(join(tmpdir(), 'elia-skills-reload-'))
+  dirs.push(projectDir)
+  const skillsDir = join(projectDir, '.elia', 'skills')
+  mkdirSync(skillsDir, { recursive: true })
+  trustProjectSkills(skillsDir)
+  // Imports cleanly but exports nothing the loader will accept, so it is moved
+  // into `<skillsDir>/quarantine` with a timestamp prefix.
+  const file = join(skillsDir, 'broken.skill.ts')
+  writeFileSync(file, "export const notATool = { name: 'not_a_tool' }\n")
+
+  const first = await loadSkills({}, skillsDir)
+  const second = await loadSkills({}, skillsDir)
+  const third = await loadSkills({}, skillsDir)
+
+  expect(first.quarantined.filter((entry) => entry.file === file)).toHaveLength(1)
+  expect(existsSync(file)).toBe(false)
+  // `quarantine/` is a subdirectory, not a skills directory, so the moved file is
+  // never scanned again — one move, not a fresh one on every reload.
+  expect(second.quarantined.filter((entry) => entry.file === file)).toHaveLength(0)
+  expect(third.quarantined.filter((entry) => entry.file === file)).toHaveLength(0)
+  expect(readdirSync(join(skillsDir, 'quarantine'))).toHaveLength(1)
 })
