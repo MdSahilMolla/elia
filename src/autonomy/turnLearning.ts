@@ -1,3 +1,5 @@
+import { existsSync } from 'node:fs'
+import { resolve } from 'node:path'
 import type { ChatMessage, ContentBlock, Provider, Usage } from '../providers/types.ts'
 import { redactSecrets } from '../ui/redact.ts'
 import { addUsage } from '../usage.ts'
@@ -257,8 +259,89 @@ export function similarity(a: string, b: string): number {
   return shared / Math.min(left.size, right.size)
 }
 
-/** Lessons out of the model's reply, minus anything generic, malformed, or already known. */
-export function parseLessons(reply: string, known: string[]): string[] {
+// --- Grounding: a lesson may only name what the turn or the repo shows exists ---
+
+/**
+ * What the turn's own tool calls establish: every input the model sent and every
+ * result that came back, lower-cased with backslashes folded to `/` so a Windows
+ * path in an error matches the same path in a lesson. Nothing anyone *said* is in
+ * it — a name that has only ever appeared in a claim is exactly what a lesson
+ * must not be built on.
+ */
+export function turnSupport(messages: ChatMessage[], fromIndex: number): string {
+  const parts: string[] = []
+  for (const message of messages.slice(fromIndex)) {
+    for (const block of message.content) {
+      if (block.type === 'tool_use') parts.push(...Object.values(block.input).map((value) => (typeof value === 'string' ? value : JSON.stringify(value))))
+      else if (block.type === 'tool_result') parts.push(block.content)
+    }
+  }
+  return parts.join('\n').toLowerCase().replace(/\\+/g, '/')
+}
+
+/** `NODE_ENV`, or the name in `CI=true` — not an acronym like `JSON`. */
+const NAMED_ENV_VAR = /(?<![\w-])[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+(?![\w-])|(?<![\w-])[A-Z][A-Z0-9]+(?==[^\s=])/g
+/** `--frozen-lockfile` or `-p`, with any `=value` left off. */
+const NAMED_FLAG = /^(--[a-z][\w-]*|-[a-zA-Z])(?:=.*)?$/
+/** A code span of several words, `bun test`, names the command `bun`; one word could as well be an identifier. */
+const CODE_COMMAND = /`([a-z][a-z0-9.+-]*)\s+[^`]+`/g
+/** Without `js` on a bare name: `Node.js` is a runtime, not a file. It counts once a directory comes before it. */
+const FILE_EXTENSIONS = 'json|ya?ml|toml|ini|cfg|conf|lockb?|sql|sh|py|rs|go|mjs|cjs|jsx|tsx?|md|txt|xml|html|css'
+const BARE_FILE = new RegExp(`^[\\w@-][\\w@.-]*\\.(?:${FILE_EXTENSIONS})$`, 'i')
+const FILE_IN_DIRECTORY = new RegExp(`/[\\w@.-]+\\.(?:${FILE_EXTENSIONS}|js)$`, 'i')
+/** A path that is unmistakably one without an extension: rooted or explicitly relative. `/b` is a switch, not a path. */
+const ANCHORED_PATH = /^(?:\.{1,2}\/|~\/|\/[\w@.-]{2,})/
+
+function namesPath(token: string): boolean {
+  if (!/^[\w@./~-]+$/.test(token)) return false
+  return token.includes('/') ? ANCHORED_PATH.test(token) || FILE_IN_DIRECTORY.test(token) : BARE_FILE.test(token)
+}
+
+/** Whether `word` appears in `support` as a word of its own; `joiners` are the characters that would make it part of a longer one. */
+function seenAsWord(support: string, word: string, joiners: string): boolean {
+  const escaped = word.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  return new RegExp(`(?<![\\w${joiners}])${escaped}(?![\\w${joiners}])`).test(support)
+}
+
+/**
+ * The first file path, environment variable, flag or command a lesson names that
+ * neither the turn's tool calls (`turnSupport`) nor the repo back up, or
+ * `undefined` when it names nothing it cannot account for.
+ *
+ * Seen live: a one-shot run in a repo of four files learned "ensure
+ * config/order_limits.yml is present at /app/config" and "set
+ * ORDER_LIMIT_CHECK=true before running the tests". Neither existed anywhere;
+ * the reflection model had filled in what a lesson about an order limit ought to
+ * mention, and every later prompt would have carried both as fact. The check is
+ * narrow on purpose: it looks only at names that are unmistakably one of those
+ * things, and a lesson that names none of them passes.
+ */
+export function ungroundedReference(lesson: string, support: string, cwd: string): string | undefined {
+  const text = lesson.replace(/\\+/g, '/')
+  const tokens = text
+    .replace(/\b[a-z][a-z0-9+.-]*:\/\/\S+/gi, ' ')
+    .split(/[\s`'"(),;<>[\]{}]+/)
+    .map((token) => token.replace(/[.:!?]+$/, ''))
+  const seen = (name: string) => support.includes(name.toLowerCase())
+  for (const name of text.match(NAMED_ENV_VAR) ?? []) if (!seen(name)) return name
+  for (const token of tokens) {
+    const path = token.replace(/^[A-Za-z]:(?=\/)/, '').replace(/:\d+(?::\d+)?$/, '')
+    if (namesPath(path) && !seen(path.replace(/^\.\//, '')) && !existsSync(resolve(cwd, path))) return path
+  }
+  for (const token of tokens) {
+    const flag = NAMED_FLAG.exec(token)?.[1]
+    if (flag && !seenAsWord(support, flag, '-')) return flag
+  }
+  for (const [, command] of text.matchAll(CODE_COMMAND)) if (!seenAsWord(support, command!, '')) return command
+  return undefined
+}
+
+/**
+ * Lessons out of the model's reply, minus anything generic, malformed, or already
+ * known, and anything `accept` refuses. `accept` runs before the cap, so a lesson
+ * it refuses does not use up one of the two places.
+ */
+export function parseLessons(reply: string, known: string[], accept?: (lesson: string) => boolean): string[] {
   const start = reply.indexOf('{')
   const end = reply.lastIndexOf('}')
   if (start < 0 || end <= start) return []
@@ -277,6 +360,7 @@ export function parseLessons(reply: string, known: string[]): string[] {
     // The same hygiene check the certified library admits every lesson by —
     // generic advice, and instructions to fabricate what is missing, never land.
     if (lesson.length < 20 || lesson.length > 280 || lessonHygieneProblem(lesson)) continue
+    if (accept && !accept(lesson)) continue
     if ([...known, ...kept].some((existing) => similarity(existing, lesson) >= 0.7)) continue
     kept.push(lesson)
     if (kept.length === 2) break
@@ -394,7 +478,7 @@ const REFLECTION_SYSTEM = "You are elia's long-term memory for one software proj
 const CORRECTION_SYSTEM = "You are elia's long-term memory for one software project. You turn a user's correction into a standing rule elia follows in every later session. Reply with JSON only."
 
 /** One lesson-writing call. Never throws: a failed call learns nothing. */
-async function distil(options: LearnFromTurnOptions, system: string, prompt: string, known: string[], signal: AbortSignal): Promise<LearnedFromTurn> {
+async function distil(options: LearnFromTurnOptions, system: string, prompt: string, known: string[], signal: AbortSignal, accept?: (lesson: string) => boolean): Promise<LearnedFromTurn> {
   try {
     const result = await options.provider.streamTurn({
       cwd: options.cwd,
@@ -406,7 +490,7 @@ async function distil(options: LearnFromTurnOptions, system: string, prompt: str
       reasoningEffort: 'low',
     })
     const reply = result.content.flatMap((block) => (block.type === 'text' ? [block.text] : [])).join('')
-    return { lessons: parseLessons(reply, known), usage: result.usage }
+    return { lessons: parseLessons(reply, known, accept), usage: result.usage }
   } catch {
     return { lessons: [] }
   }
@@ -455,7 +539,12 @@ export async function learnFromTurn(options: LearnFromTurnOptions): Promise<Lear
   if (mode) {
     const already = [...known, ...learned]
     const prompt = mode === 'repair' ? reflectionPrompt(options.request, evidence, already) : blockerPrompt(options.request, evidence, already)
-    const facts = await distil(options, REFLECTION_SYSTEM, prompt, already, signal)
+    // Every later prompt carries a lesson as fact, so one that names a file,
+    // variable, command or flag nothing in this turn touched — the model filled
+    // it in — is dropped here, before it is stored or shown. A user's rule is
+    // judged by their own words, not by tool output, so it is not held to this.
+    const support = turnSupport(options.messages, options.fromIndex)
+    const facts = await distil(options, REFLECTION_SYSTEM, prompt, already, signal, (lesson) => ungroundedReference(lesson, support, options.cwd) === undefined)
     tally(facts.usage)
     if (facts.lessons.length > 0) {
       // A blocker lesson records an unverified constraint, not a proven fix, so
