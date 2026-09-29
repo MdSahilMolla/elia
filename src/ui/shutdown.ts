@@ -12,8 +12,14 @@ export function registerShutdownCleanup(cleanup: Cleanup): () => void {
 /** Bounded budget so a hung async cleanup cannot wedge the exit path. */
 const SHUTDOWN_CLEANUP_BUDGET_MS = 2_000
 
-export async function gracefulShutdown(code = 130): Promise<never> {
+/** `beforeExit` runs after the cleanups — once the terminal is restored — for a last word that must stay on screen. */
+export async function gracefulShutdown(code = 130, beforeExit?: () => void): Promise<never> {
   await runCleanupsOnce()
+  try {
+    beforeExit?.()
+  } catch {
+    // A last word that fails to print must not keep the process alive.
+  }
   process.exitCode = code
   process.exit(code)
 }

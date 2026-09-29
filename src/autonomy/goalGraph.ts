@@ -905,6 +905,20 @@ export function activeGoalGraph(): GoalGraphStore | undefined {
   return graphStorage.getStore()
 }
 
+/**
+ * Runs `fn` outside the run's goal graph, for everything it awaits.
+ *
+ * `runSubAgent` falls back to the ambient graph, and the durable ledger keys an
+ * action on (run, node, tool, input) with no working directory — so several
+ * attempts at one problem, each in its own checkout, would share one idempotency
+ * namespace, and an identical write or install in the second would be replayed
+ * from the first's record instead of run. Attempts in disposable worktrees are
+ * not actions in the world; what is merged back is.
+ */
+export function withoutGoalGraph<T>(fn: () => Promise<T>): Promise<T> {
+  return graphStorage.run(undefined as unknown as GoalGraphStore, fn)
+}
+
 export function withGoalNode<T>(nodeId: string | undefined, fn: () => Promise<T>): Promise<T> {
   return nodeStorage.run(nodeId, fn)
 }

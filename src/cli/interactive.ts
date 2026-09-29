@@ -44,6 +44,7 @@ import { writeUserConfig } from '../userConfig.ts'
 import { removeProviderConfiguration, savedProviderNames } from '../providerSettings.ts'
 import { flagValue, hasFlag, positionals } from './argv.ts'
 import { describeCliError } from './errors.ts'
+import { logSwallowedError } from '../diagnostics.ts'
 import { ensureFirstRunProviderSetup, interactiveProviderSetup, prewarmActiveProvider, runCodexLogin } from './providerSetup.ts'
 import { actionApprovalPrompt, allSlashCommands, approvalTitle, loadRuntimeSkills, printTurnProfileReport, requestedAgentMode, userMessage, warnIfAtFilesystemRoot } from './runtime.ts'
 import type { ProviderActivity } from '../providers/types.ts'
@@ -186,9 +187,11 @@ export async function runInteractive(): Promise<void> {
   // resolved separately, in runRecordedTurn.
   const pendingAttachments: import('../attachments.ts').ImageAttachment[] = []
 
+  let resumedFrom: string | undefined
   if (continueFlag || resumeId) {
     const loaded = resumeId ? await loadSession(resumeId) : await loadLatestSession()
     if (loaded) {
+      resumedFrom = loaded.id
       messages = loaded.messages
       sessionId = loaded.id
       sessionTranscript.restore(loaded.recording ?? transcriptFromMessages(loaded.messages))
@@ -232,6 +235,28 @@ export async function runInteractive(): Promise<void> {
   // panel shows only workers carrying it — tasks reloaded from a previous
   // process keep their old id and stay in history where they belong.
   taskSessions.setActiveSession(sessionId)
+
+  // The live recorder (autonomy/sessionRecorder.ts): every event of this session
+  // lands in .elia/recordings/<session>.ndjson as it happens, and when the
+  // session ends — cleanly, or found unclosed by a later start — the recording is
+  // folded into an Elia Book. On by default; --no-record or ELIA_RECORD=off turns
+  // it off. Recording never breaks a session: every failure below is swallowed.
+  const { createSessionRecorder, recordingEnabled, pruneRecordings } = await import('../autonomy/sessionRecorder.ts')
+  const recording = recordingEnabled() && !hasFlag('--no-record')
+  const recorder = createSessionRecorder({ cwd: process.cwd(), enabled: recording })
+  // Loaded once, here, because the exit path that closes a session cannot await an import.
+  const eliaBooks = recording ? await import('../eliaBook.ts') : undefined
+  recorder.attach(sessionTranscript)
+  const beginRecording = (from?: string): void => recorder.begin(sessionId, { mode: persona ?? mode, model: config.model, ...(from ? { resumedFrom: from } : {}) })
+  const closeRecording = (): void => {
+    try {
+      const closed = recorder.finish()
+      if (closed) eliaBooks?.recordSessionAsBook(closed.sessionId, process.cwd())
+    } catch (error) {
+      logSwallowedError('elia-book', error)
+    }
+  }
+  beginRecording(resumedFrom)
 
   // Opportunistically tidy the cross-session brain: merge duplicate lessons and
   // drop stale ones so every future prompt isn't paying to carry them. Fire and
@@ -320,12 +345,34 @@ export async function runInteractive(): Promise<void> {
     }
   }
   pushHeartbeat(false, 'Idle at prompt')
+  // Sessions that died without closing their recording (a kill, a crash) are
+  // finished now: closed, and made into Books. A session another elia still
+  // holds is left alone, and so are recordings from the last couple of minutes.
+  // Done after the heartbeat so this session already counts as live to the others.
+  if (eliaBooks) {
+    try {
+      const { sessionHolder } = await import('../sessionCatalog.ts')
+      eliaBooks.recoverRecordings(process.cwd(), { current: sessionId, isLive: (id) => sessionHolder(id) !== undefined })
+      pruneRecordings(process.cwd(), { current: sessionId, protect: eliaBooks.bookedSessionIds() })
+    } catch (error) {
+      logSwallowedError('session-recorder', error)
+    }
+  }
+  // A session or run that died last time — killed, or crashed past every
+  // handler — is said so once, with the command that picks it back up
+  // (recovery/uncleanExits.ts). After the heartbeat, for the same reason as above.
+  const { crashLoop, takeRecoveryNotice } = await import('../recovery/uncleanExits.ts')
+  const recoveryNotice = takeRecoveryNotice()
+  const repeatedCrash = crashLoop()
   // The single source of truth for "this session ended," covering every exit
   // path at once — normal completion (one-shot prompts return before ever
   // reaching the interactive loop's own Goodbye code below), Ctrl+C, and
   // signals — since registerShutdownCleanup's callbacks run on process 'exit'
   // regardless of why the process is exiting (see ui/shutdown.ts).
-  registerShutdownCleanup(() => writeSessionEnded(sessionStatus(false, 'Session ended')))
+  registerShutdownCleanup(() => {
+    writeSessionEnded(sessionStatus(false, 'Session ended'))
+    closeRecording()
+  })
 
   /**
    * A build whose run died before it built anything.
@@ -475,13 +522,13 @@ export async function runInteractive(): Promise<void> {
    * classifier is unsure of — a search that cannot be judged is just a
    * three-times-more-expensive guess.
    */
-  async function planSearch(requestText: string): Promise<{ signature: import('../reason/signature.ts').TaskSignature; checks: import('../reason/reason.ts').ProjectChecks } | undefined> {
+  async function planSearch(requestText: string): Promise<import('../reason/decide.ts').SearchDecision> {
     const { detectChecks } = await import('../autonomy/detectChecks.ts')
     const { decideSearch } = await import('../reason/decide.ts')
     // Nothing has changed yet, so there are no changed paths to infer a project
     // from the way the post-turn gate does — the project that would check this
     // turn's work is simply the one owning the working tree.
-    return decideSearch(requestText, detectChecks(process.cwd())).plan
+    return decideSearch(requestText, detectChecks(process.cwd()))
   }
 
   /**
@@ -760,6 +807,7 @@ export async function runInteractive(): Promise<void> {
     const hadConversation = messages.length > 0
     if (hadConversation) await persistInteractiveSession()
     writeSessionEnded(sessionStatus(false, 'Cleared — continued in a new session'))
+    closeRecording()
 
     sessionId = newSessionId()
     // /clear starts a new session; commits after it belong to that one.
@@ -775,6 +823,7 @@ export async function runInteractive(): Promise<void> {
     resetActiveTodoList()
     resetProviderConversations()
     usageBaseline = sessionUsageSnapshot()
+    beginRecording()
     pushHeartbeat(false, 'Idle at prompt')
 
     return hadConversation
@@ -802,6 +851,7 @@ export async function runInteractive(): Promise<void> {
     const hadConversation = messages.length > 0
     if (hadConversation) await persistInteractiveSession()
     writeSessionEnded(sessionStatus(false, `Switched to session ${targetId}`))
+    closeRecording()
 
     sessionId = holder ? newSessionId() : loaded.id
     messages.length = 0
@@ -818,6 +868,7 @@ export async function runInteractive(): Promise<void> {
     const { resetActiveTodoList } = await import('../autonomy/todoList.ts')
     resetActiveTodoList()
     resetProviderConversations()
+    beginRecording(targetId)
     // Writes the new id's file immediately, so a copy exists on disk from the
     // moment it is offered rather than only after the first turn.
     await persistInteractiveSession()
@@ -965,10 +1016,10 @@ export async function runInteractive(): Promise<void> {
     // tree, past the governor and the file tools' self-edit check, so it does
     // not run while elia's own source still needs asking about.
     const selfEditClosed = selfEdit.selfEditGuard()?.allowed === false
-    const searchPlan =
-      reasonSearch && !selfEditClosed && mode === 'dev' && !persona && !uiHooks?.planMode && !escalation.escalate
-        ? await planSearch(userText)
-        : undefined
+    const { reasoningRoute, searchUnavailable } = await import('../reason/route.ts')
+    const searchBlocked = searchUnavailable({ reasonSearch, selfEditClosed, mode, persona, planMode: Boolean(uiHooks?.planMode), escalate: escalation.escalate })
+    const searchDecision = searchBlocked === undefined ? await planSearch(userText) : undefined
+    const searchPlan = searchDecision?.plan
     // A searched turn already chose its winner with the project's own checks;
     // the post-turn gate must not run them a second time to learn the same thing.
     let searched = false
@@ -976,11 +1027,22 @@ export async function runInteractive(): Promise<void> {
     // reason/decide.ts): the turn is asked to end in an `Answer:` line, and if
     // it does, one independent attempt checks it. --no-search or /search off
     // turns it off with the rest of the reasoning search.
-    const answerCheckPlanned =
+    const answerDecision =
       reasonSearch && mode === 'dev' && !persona && !uiHooks?.planMode && !searchPlan && !escalation.escalate
-        ? (await import('../reason/decide.ts')).decideAnswerCheck(userText).check
-        : false
+        ? (await import('../reason/decide.ts')).decideAnswerCheck(userText)
+        : undefined
+    const answerCheckPlanned = answerDecision?.check ?? false
     const { ANSWER_GUIDANCE } = await import('../reason/answer.ts')
+    // A design or architecture request is reasoned from first principles:
+    // constraints first, the familiar pattern only after (reason/decide.ts).
+    const { FIRST_PRINCIPLES_GUIDANCE, decideFirstPrinciples } = await import('../reason/decide.ts')
+    const firstPrinciples = !persona && !escalation.escalate && decideFirstPrinciples(requestText).apply
+    const openingGuidance = [answerCheckPlanned ? ANSWER_GUIDANCE : '', firstPrinciples ? FIRST_PRINCIPLES_GUIDANCE : ''].filter(Boolean).join('\n\n')
+    // Every prompt gets a reasoning route, and the session says which and why
+    // (reason/route.ts) — including the prompts it decided not to search.
+    const route = reasoningRoute({ unavailable: searchBlocked, search: searchDecision, answerCheck: answerDecision, escalate: escalation.escalate, audited: autoVerify, firstPrinciples })
+    sessionTranscript.notice(`Reasoning: ${route.line}`)
+    emitEvent('reasoning_route', { taskId: task.id, sessionId, route: route.route, why: route.line })
 
     // `opening` marks the call that answers the user's request itself — the one
     // that thinks it through and plans up front. Repair and self-review passes
@@ -995,7 +1057,7 @@ export async function runInteractive(): Promise<void> {
         silent: Boolean(uiHooks),
         planMode: uiHooks?.planMode,
         upfrontPlan: opening,
-        ...(opening && answerCheckPlanned ? { turnGuidance: ANSWER_GUIDANCE } : {}),
+        ...(opening && openingGuidance ? { turnGuidance: openingGuidance } : {}),
         drainSteering: uiHooks?.drainSteering,
         onText: uiHooks?.onText,
         onThinking: uiHooks?.onThinking,
@@ -1059,7 +1121,24 @@ export async function runInteractive(): Promise<void> {
         // winner by a check that ran, and merges only that one. A search that
         // declined (no harness for this signature) falls through to the plain
         // turn rather than leaving the request unanswered.
-        const outcome = await runSearchedTurn(userText, searchPlan, tracker, controller.signal, uiHooks)
+        let outcome: Awaited<ReturnType<typeof runSearchedTurn>> = { verify: 'none', attempts: 0 }
+        try {
+          outcome = await runSearchedTurn(userText, searchPlan, tracker, controller.signal, uiHooks)
+        } catch (error) {
+          if (controller.signal.aborted) throw error
+          // The search is a better way to answer, not the only one. When it
+          // breaks, the request is still answered — by the single attempt it
+          // would otherwise have had — and the failure is kept: a bug in elia's
+          // own code for self-repair (recovery/faults.ts), anything else in the
+          // handled-error log. Files a half-finished merge wrote are in this
+          // turn's rewind point.
+          const { recordFault } = await import('../recovery/faults.ts')
+          if (!recordFault(error, { source: 'reasoning', command: oneShotPrompt ? 'prompt' : 'repl', sessionId })) logSwallowedError('reason-search', error)
+          const line = `The reasoning search failed (${redactText(error instanceof Error ? error.message : String(error), 160)}) — answering with a single attempt instead`
+          uiHooks?.onActivity?.({ kind: 'status', status: 'warning', title: line })
+          if (!uiHooks) writeNotice(`▸ ${line}`)
+          sessionTranscript.notice(line)
+        }
         if (outcome.attempts === 0) {
           const turnResult = await runModelTurn(true)
           if (turnResult.stopReason === 'aborted') stopRequested = true
@@ -1261,55 +1340,46 @@ export async function runInteractive(): Promise<void> {
         }
       }
 
-      // Grounding: an answer that cites a file or line that does not exist is
-      // sent back once to look it up (reason/grounding.ts). Checking costs no
-      // model call; the repair turn is spent only when a citation is provably
-      // wrong, and a clean check is never recorded as a pass.
-      if (!persona && !escalated && !searched && autoVerify && !uiHooks?.planMode && !controller.signal.aborted) {
-        const { checkGrounding, describeGrounding, extractCitations, groundingBriefing } = await import('../reason/grounding.ts')
-        const ground = () => checkGrounding(extractCitations(lastAssistantText(messages, '')), process.cwd(), { touched: Object.keys(tracker.snapshot()) })
-        const first = ground()
-        grounding = { checked: first.checked, ungrounded: first.ungrounded.length }
-        if (first.ungrounded.length > 0) {
-          const summary = `The answer cites locations that do not exist — checking them (${describeGrounding(first)})`
-          uiHooks?.onActivity?.({ kind: 'status', status: 'warning', title: summary })
-          if (!uiHooks) writeNotice(`▸ ${summary}`)
-          sessionTranscript.notice(summary)
-          messages.push(userMessage(groundingBriefing(first)))
-          await runModelTurn()
-          const after = ground()
-          grounding.afterRepair = after.ungrounded.length
-          if (after.ungrounded.length > 0) {
-            const line = `⚠ ${describeGrounding(after)} — still, after one correction`
-            uiHooks?.onActivity?.({ kind: 'status', status: 'warning', title: line })
-            if (!uiHooks) writeNotice(line)
-            sessionTranscript.notice(line)
-          }
-        }
-      }
-
-      // Arithmetic: the same shape as grounding. A calculation the answer states
-      // that does not hold is sent back once (reason/arithmetic.ts). Recomputing
-      // costs no model call, and a clean check is never recorded as a pass.
-      if (!persona && !escalated && !searched && autoVerify && !uiHooks?.planMode && !controller.signal.aborted) {
-        const { calculationBriefing, checkArithmetic, describeCalculations } = await import('../reason/arithmetic.ts')
-        const first = checkArithmetic(lastAssistantText(messages, ''))
-        if (first.checked > 0) arithmetic = { checked: first.checked, wrong: first.wrong.length }
-        if (first.wrong.length > 0) {
-          const summary = `The answer's arithmetic does not hold — correcting it (${describeCalculations(first)})`
-          uiHooks?.onActivity?.({ kind: 'status', status: 'warning', title: summary })
-          if (!uiHooks) writeNotice(`▸ ${summary}`)
-          sessionTranscript.notice(summary)
-          messages.push(userMessage(calculationBriefing(first)))
-          await runModelTurn()
-          const after = checkArithmetic(lastAssistantText(messages, ''))
-          if (arithmetic) arithmetic.afterRepair = after.wrong.length
-          if (after.wrong.length > 0) {
-            const line = `⚠ ${describeCalculations(after)} — still, after one correction`
-            uiHooks?.onActivity?.({ kind: 'status', status: 'warning', title: line })
-            if (!uiHooks) writeNotice(line)
-            sessionTranscript.notice(line)
-          }
+      // Every reply is audited, whatever produced it — a plain turn, a search's
+      // winner, a persona, a plan, any mode — because this is the part of the
+      // reasoning layer that costs no model call (reason/audit.ts). A citation
+      // to a file or line that does not exist, or a stated calculation that does
+      // not hold, is sent back once; both at once share one correction. A clean
+      // audit proves nothing beyond the citations and sums, and is never recorded
+      // as a pass. The pipeline's reply is its own receipt and is left alone.
+      // A search's report is audited but not corrected: its winner was chosen by
+      // checks that already ran, and a correction turn after them could change
+      // files nothing would verify — so what is wrong is named instead.
+      if (!escalated && autoVerify && !controller.signal.aborted) {
+        const { auditAndCorrect, auditReply, describeAudit } = await import('../reason/audit.ts')
+        const audited = searched ? { before: auditReply(lastAssistantText(messages, ''), { cwd: process.cwd(), touched: Object.keys(tracker.snapshot()) }), after: undefined } : await auditAndCorrect({
+          reply: () => lastAssistantText(messages, ''),
+          cwd: process.cwd(),
+          touched: () => Object.keys(tracker.snapshot()),
+          signal: controller.signal,
+          correct: async (briefing, before) => {
+            const summary = `The answer has something provably wrong — correcting it (${describeAudit(before)})`
+            uiHooks?.onActivity?.({ kind: 'status', status: 'warning', title: summary })
+            if (!uiHooks) writeNotice(`▸ ${summary}`)
+            sessionTranscript.notice(summary)
+            messages.push(userMessage(briefing))
+            if (persona) {
+              const { runPersonaTurn } = await import('../agents/orchestrator.ts')
+              await runPersonaTurn(messages, persona, skillNames, controller.signal, uiHooks)
+            } else {
+              await runModelTurn()
+            }
+          },
+        })
+        const { before, after } = audited
+        grounding = { checked: before.grounding.checked, ungrounded: before.grounding.ungrounded.length, ...(after ? { afterRepair: after.grounding.ungrounded.length } : {}) }
+        if (before.arithmetic.checked > 0) arithmetic = { checked: before.arithmetic.checked, wrong: before.arithmetic.wrong.length, ...(after ? { afterRepair: after.arithmetic.wrong.length } : {}) }
+        const unresolved = after ?? (searched ? before : undefined)
+        if (unresolved && unresolved.problems > 0) {
+          const line = `⚠ ${describeAudit(unresolved)} — ${after ? 'still, after one correction' : 'in the search\'s report, left uncorrected'}`
+          uiHooks?.onActivity?.({ kind: 'status', status: 'warning', title: line })
+          if (!uiHooks) writeNotice(line)
+          sessionTranscript.notice(line)
         }
       }
 
@@ -1472,11 +1542,32 @@ export async function runInteractive(): Promise<void> {
           recordUsage(learned.usage, config.tiers.fast.model)
         }
         for (const lesson of learned.lessons) {
+          // Recorded with the turn that taught it, so the lesson can point back at what produced it.
+          recorder.lesson(lesson)
           const line = `✦ learned: ${lesson}`
           sessionTranscript.notice(line)
           if (uiHooks) uiHooks.onActivity?.({ kind: 'status', status: 'completed', title: line })
           else writeNotice(line)
         }
+
+        // Fire-and-forget: when enough certified lessons cluster on one topic,
+        // elia writes or revises its own instruction skill from them. Cheap
+        // clustering runs inline; the subagent draft (if any) runs in the
+        // background so it never delays the next prompt. See
+        // src/skills/instructionSkills.ts for the evidence and gating.
+        void (async () => {
+          try {
+            const { evolveInstructionSkills } = await import('../skills/instructionSkills.ts')
+            for (const line of await evolveInstructionSkills()) {
+              const notice = `✦ skill: ${line}`
+              sessionTranscript.notice(notice)
+              if (uiHooks) uiHooks.onActivity?.({ kind: 'status', status: 'completed', title: notice })
+              else writeNotice(notice)
+            }
+          } catch {
+            // Best effort, same as learning itself — never surfaces as a turn failure.
+          }
+        })()
       }
 
       taskSessions.update(task.id, { status: 'done', action: 'Finished', detail: 'Request completed and session saved' })
@@ -1490,6 +1581,10 @@ export async function runInteractive(): Promise<void> {
       } else {
         taskSessions.update(task.id, { status: 'failed', action: 'Failed', detail, error: detail })
         emitEvent('turn_finished', { taskId: task.id, sessionId, outcome: 'failed', error: redactText(detail, 2000) })
+        // A programming error in elia's own source is a bug for self-repair to
+        // find; a provider outage or a context overflow is not, and is not kept.
+        const { recordFault } = await import('../recovery/faults.ts')
+        recordFault(error, { source: 'turn', command: oneShotPrompt ? 'prompt' : 'repl', sessionId })
         throw error
       }
     } finally {
@@ -1522,6 +1617,19 @@ export async function runInteractive(): Promise<void> {
         }
       }
       sessionTranscript.notice(`Turn outcome: ${taskSessions.get(task.id)?.status ?? 'unknown'}; verification: ${verifyResult}; touched files: ${Object.keys(tracker.snapshot()).join(', ') || 'none'}`)
+      // What the turn did to the tree and how it was judged, for the recording —
+      // the playbook and the search index are both read from it.
+      const turnUsage = cumulativeSessionUsage()
+      recorder.turnEnd({
+        outcome: endStatus === 'done' ? 'completed' : endStatus ?? 'unknown',
+        verify: verifyResult,
+        repairAttempts,
+        touched: Object.keys(tracker.snapshot()).map((file) => {
+          const relative = pathModule.relative(process.cwd(), file)
+          return relative && !relative.startsWith('..') && !pathModule.isAbsolute(relative) ? relative : file
+        }),
+        usage: { ...turnUsage.usage, turns: turnUsage.turns, elapsedMs: turnUsage.elapsedMs },
+      })
       sessionTranscript.endTurn()
       pushHeartbeat(false, taskSessions.get(task.id)?.action ?? 'Idle at prompt')
       if (!persona) {
@@ -1619,6 +1727,10 @@ export async function runInteractive(): Promise<void> {
       }
     }
   }
+
+  // The live UI shows it in its own startup notice; a one-shot prompt and the
+  // line-mode REPL print it here, before any work starts.
+  if (recoveryNotice && (oneShotPrompt || !interactiveTerminal)) writeNotice(recoveryNotice)
 
   if (oneShotPrompt) {
     let commandToRun = oneShotPrompt
@@ -2395,7 +2507,10 @@ export async function runInteractive(): Promise<void> {
     if (trimmed === '@skills' || trimmed === '/skills') {
       const { listLoadedSkills } = await import('../skills/loader.ts')
       const skills = listLoadedSkills()
-      if (skills.length === 0) return done('No loaded skills.')
+      const { loadInstalledSkills } = await import('../memory.ts')
+      const guides = loadInstalledSkills(process.cwd())
+      if (skills.length === 0 && guides.length === 0) return done('No loaded skills.')
+      if (skills.length === 0) return done(['Instruction skills (SKILL.md, read by elia when relevant):', ...guides.map((g) => `  ${g.name}${g.eliaVersion ? ` [self-authored v${g.eliaVersion}]` : ''}  (${g.path})`)].join('\n'))
       return {
         handled: true,
         picker: {
@@ -2404,9 +2519,11 @@ export async function runInteractive(): Promise<void> {
           options: [
             { label: selectedSkillNames === undefined ? 'all loaded skills (current)' : 'all loaded skills', detail: 'every loaded skill available', value: '__all__' },
             ...skills.map((s) => ({ label: s.name, detail: `${s.source} · ${s.file}`, value: s.name })),
+            ...guides.map((g) => ({ label: g.name, detail: `${g.eliaVersion ? `self-authored v${g.eliaVersion}` : 'instruction skill'} · ${g.path}`, value: `guide:${g.name}` })),
           ],
           onSelect: (value) => {
             if (!value) return
+            if (value.startsWith('guide:')) return `${value.slice(6)} is an instruction skill — elia reads it when the task matches; say its name to force it.`
             selectedSkillNames = value === '__all__' ? undefined : [value]
             return selectedSkillNames ? `Skills: ${selectedSkillNames[0]}` : 'All loaded skills available.'
           },
@@ -2735,8 +2852,13 @@ export async function runInteractive(): Promise<void> {
     if (trimmed === '/skills' || trimmed === '@skills-list') {
       const { listLoadedSkills } = await import('../skills/loader.ts')
       const skills = listLoadedSkills()
-      if (skills.length === 0) return done('No skills loaded. Add a *.skill.ts file to .elia/skills, or find one with /marketplace.')
-      return done(['Loaded skills:', ...skills.map((s) => `  ${s.name}  (${s.source} · ${s.file})`)].join('\n'))
+      const { loadInstalledSkills } = await import('../memory.ts')
+      const guides = loadInstalledSkills(process.cwd())
+      if (skills.length === 0 && guides.length === 0) return done('No skills loaded. Add a *.skill.ts file to .elia/skills, or find one with /marketplace.')
+      return done([
+        ...(skills.length ? ['Loaded skills:', ...skills.map((s) => `  ${s.name}  (${s.source} · ${s.file})`)] : []),
+        ...(guides.length ? ['Instruction skills (SKILL.md, read by elia when relevant):', ...guides.map((g) => `  ${g.name}${g.eliaVersion ? ` [self-authored v${g.eliaVersion}]` : ''}  (${g.path})`)] : []),
+      ].join('\n'))
     }
 
     const marketMatch = /^\/marketplace(?:\s+([a-z]+)?\s*(.*))?$/.exec(trimmed)
@@ -2887,8 +3009,13 @@ export async function runInteractive(): Promise<void> {
       devMode: mode === 'dev' && !persona,
     })
     const practiceReport = practiceHere ? practice.takePracticeReport() : undefined
-    const launchNotice = launch.start ? undefined : launch.notice
-    const initialTurn = launch.start
+    // The same bug ended elia twice today: starting the same unattended work
+    // again would most likely end the same way, so it waits to be asked.
+    const heldByCrash = launch.start && repeatedCrash !== undefined
+    const launchNotice = heldByCrash
+      ? `Not starting the autopilot on its own: the same internal error ended elia ${repeatedCrash.count} times today (${repeatedCrash.summary}). /autopilot starts it anyway; elia doctor --repair fixes the bug on a branch of elia's source.`
+      : launch.start ? undefined : launch.notice
+    const initialTurn = launch.start && !heldByCrash
       ? {
           label: launch.resume ? '/autopilot resume' : '/autopilot',
           notice: launch.resume
@@ -2903,7 +3030,7 @@ export async function runInteractive(): Promise<void> {
     await runInkRepl({
       sessionId,
       version: cliVersion,
-      startupNotice: [practiceReport, launchNotice].filter(Boolean).join('\n') || undefined,
+      startupNotice: [recoveryNotice, practiceReport, launchNotice].filter(Boolean).join('\n') || undefined,
       initialTurn,
       getEnv: () => ({ model: config.model, providerLabel: config.providerLabel, providerName: config.providerName, routing: config.routingMode }),
       commands: allSlashCommands(),

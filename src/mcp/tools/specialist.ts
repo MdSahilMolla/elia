@@ -444,10 +444,45 @@ async function modelSection(
     if (!result.ok) return { unavailable: `the ${request.name} worker did not complete` }
     const text = result.report.trim()
     if (!text) return { unavailable: `the ${request.name} worker returned no text` }
-    return { text: truncate(text, MAX_MODEL_TEXT_CHARS) }
+    return { text: truncate(await auditedSection(context, request, text), MAX_MODEL_TEXT_CHARS) }
   } catch (error) {
     return { unavailable: message(error) }
   }
+}
+
+/**
+ * Every model-written section is audited before it goes back to the client
+ * (reason/audit.ts), as a reply in a session is: a citation to a file that does
+ * not exist, or a calculation that does not hold, costs one more pass of the
+ * same worker with the problem named. What still fails after it is said in the
+ * section, so the client never takes it for checked.
+ */
+async function auditedSection(
+  context: McpToolExecutionContext,
+  request: { role: 'scout' | 'critic' | 'scribe'; name: string; prompt: string; runId: string; tools?: Tool[] },
+  text: string,
+): Promise<string> {
+  const { auditBriefing, auditReply, describeAudit } = await import('../../reason/audit.ts')
+  const before = auditReply(text, { cwd: context.cwd })
+  const briefing = auditBriefing(before)
+  if (!briefing || context.signal?.aborted) return text
+  let revised = text
+  try {
+    const retry = await runSubAgent({
+      prompt: `${request.prompt}\n\nA first draft of this answer was checked:\n<draft>\n${text}\n</draft>\n\n${briefing}\n\nReply with the corrected answer in full.`,
+      role: request.role,
+      name: `${request.name}#corrected`,
+      runId: request.runId,
+      cwd: context.cwd,
+      signal: context.signal,
+      tools: request.tools ?? [],
+    })
+    if (retry.ok && retry.report.trim()) revised = retry.report.trim()
+  } catch {
+    // The first draft stands, with its problems named below.
+  }
+  const after = auditReply(revised, { cwd: context.cwd })
+  return after.problems === 0 ? revised : `${revised}\n\n_elia's check: ${describeAudit(after)}._`
 }
 
 function readOnlyBattmannTool(onOutput: (text: string) => void): Tool {

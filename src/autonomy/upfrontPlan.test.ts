@@ -275,3 +275,13 @@ test('a reply that opens with blank lines does not leave the ✻ mark stranded a
 test('the same blank opening does not strand the mark on a chat turn either', () => {
   expect(visibleThinking('\n\nGoing static, then checking it.', true)).toBe('Going static, then checking it.')
 })
+
+test('premises after the plan are read as premises, never as steps', () => {
+  const parsed = parsePlannerReply(
+    'THINKING: Add retries to the client.\nPLAN:\n1. Read src/api/client.ts\n2. Add retry with backoff\n3. Run bun run test\nPREMISES:\n- `src/api/client.ts` holds the HTTP client\n- `bun run test` runs the suite',
+  )
+  expect(parsed?.steps).toEqual(['Read src/api/client.ts', 'Add retry with backoff', 'Run bun run test'])
+  expect(parsed?.premises).toEqual(['`src/api/client.ts` holds the HTTP client', '`bun run test` runs the suite'])
+  expect(parsePlannerReply('THINKING: x.\nPLAN:\n1. a\n2. b\nPREMISES: none')?.premises).toBeUndefined()
+  expect(plannerPrompt('add retries', '')).toContain('PREMISES:')
+})

@@ -1,7 +1,8 @@
 import { existsSync, readFileSync } from 'node:fs'
 import { paths } from '../config.ts'
 import { getActiveLedgerSession, listLedgerSessionIds } from '../ledger.ts'
-import { loadBrainItems } from './store.ts'
+import { loadBrainItems, type BrainItemKind } from './store.ts'
+import { openBrainReference } from './open.ts'
 import { searchBrain } from './search.ts'
 import { loadRelevance } from './relevance.ts'
 import { consolidateBrain } from './consolidate.ts'
@@ -22,16 +23,21 @@ export async function runBrainCommand(arg: string): Promise<string> {
     return `Brain consolidated: lessons ${result.lessonsBefore} → ${result.lessonsAfter}, ${result.notesRemoved} redundant note(s) dropped${retired}.`
   }
 
+  // A pointer from a search hit, back to the raw recording or playbook it came from.
+  const open = /^open\s+(\S+)$/.exec(query)
+  if (open) return openBrainReference(open[1]!)
+
   const items = await loadBrainItems({ currentSessionId: getActiveLedgerSession()?.id })
 
   if (!query) {
-    const counts = { episode: 0, lesson: 0, rationale: 0, note: 0 }
+    const counts: Record<BrainItemKind, number> = { episode: 0, lesson: 0, rationale: 0, note: 0, book: 0, moment: 0, pattern: 0 }
     for (const item of items) counts[item.kind] += 1
     const sessions = listLedgerSessionIds().length
     const lines = [
       `Project brain — ${items.length} item(s):`,
       `  ${counts.episode} episode(s) across ${sessions} session(s)`,
       `  ${counts.lesson} lesson(s) · ${counts.rationale} rationale note(s) · ${counts.note} saved note(s)`,
+      `  ${counts.book} playbook(s) · ${counts.moment} recorded moment(s) · ${counts.pattern} recurring failure pattern(s)`,
     ]
     if (existsSync(paths.brainConsolidatedAt)) {
       try {
@@ -41,7 +47,7 @@ export async function runBrainCommand(arg: string): Promise<string> {
         // no-op — the timestamp is informational
       }
     }
-    lines.push('', 'Search it with /brain <query>, tidy it with /brain consolidate.')
+    lines.push('', 'Search it with /brain <query>, read the record behind a hit with /brain open <pointer>, tidy it with /brain consolidate.')
     return lines.join('\n')
   }
 

@@ -88,4 +88,8 @@ export const paths = {
   workspaceServerInfo: join(stateDir, 'workspace', 'server.json'),
   /** Redacted NDJSON log of errors that are handled by degrading rather than throwing — see diagnostics.ts. */
   diagnostics: join(stateDir, 'diagnostics.ndjson'),
+  /** Errors in elia's own code — crashes, and bugs a turn surfaced — grouped by signature for self-repair. See recovery/faults.ts. */
+  faults: join(stateDir, 'faults.ndjson'),
+  /** Unclean exits the person has already been told about, so each is reported once. */
+  recoverySeen: join(stateDir, 'recovery-seen.json'),
 }

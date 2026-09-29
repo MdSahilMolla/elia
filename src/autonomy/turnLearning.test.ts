@@ -1,8 +1,8 @@
 import { afterEach, expect, test } from 'bun:test'
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { blockerPrompt, correctionPrompt, isStandingCorrection, learnFromTurn, learningMode, memoryReceipt, parseLessons, similarity, turnEvidence, worthLearningFrom } from './turnLearning.ts'
+import { blockerPrompt, correctionPrompt, isStandingCorrection, learnFromTurn, learningMode, memoryReceipt, parseLessons, similarity, turnEvidence, turnSupport, ungroundedReference, worthLearningFrom } from './turnLearning.ts'
 import type { ChatMessage, Provider, StreamTurnParams } from '../providers/types.ts'
 
 const dirs: string[] = []
@@ -16,7 +16,14 @@ function lessonsFile(): string {
   return join(dir, 'lessons.md')
 }
 
-const text = (value: string) => ({ type: 'text' as const, text: value })
+/** An empty project directory, so a path check never depends on what the machine running the tests has. */
+function projectDir(): string {
+  const dir = mkdtempSync(join(tmpdir(), 'elia-turn-project-'))
+  dirs.push(dir)
+  return dir
+}
+
+const text =(value: string) => ({ type: 'text' as const, text: value })
 const call = (id: string, name: string, input: Record<string, unknown>) => ({ type: 'tool_use' as const, id, name, input })
 const result = (id: string, content: string, isError = false) => ({ type: 'tool_result' as const, tool_use_id: id, content, is_error: isError })
 
@@ -250,6 +257,100 @@ test('a worker that finished with nothing going wrong costs no model call', asyn
   })
   expect(learned.lessons).toEqual([])
   expect(provider.calls.length).toBe(0)
+})
+
+// --- A lesson may only name what the turn or the repo shows exists ------------
+
+/**
+ * The shape of a live one-shot run in a repo of four files: a test timed out and
+ * a longer timeout fixed it. Nothing in it mentions a config file or an env var.
+ */
+const TIMEOUT_TURN: ChatMessage[] = [
+  { role: 'user', content: [text('why does the oversized order check fail?')] },
+  { role: 'assistant', content: [call('a', 'run_command', { command: 'bun test' })] },
+  { role: 'user', content: [result('a', 'error: test "rejects an oversized order" timed out after 5000ms', true)] },
+  { role: 'assistant', content: [call('b', 'run_command', { command: 'bun test --timeout 20000' })] },
+  { role: 'user', content: [result('b', '1 pass')] },
+]
+
+test('a lesson naming a file or env var the turn never touched is dropped before it is stored or shown', async () => {
+  const path = lessonsFile()
+  // The first two are what the reflection model actually wrote in that run.
+  const provider = reflectingProvider(
+    JSON.stringify({
+      lessons: [
+        'Ensure the configuration file config/order_limits.yml is present in the container at /app/config during production deployment.',
+        'Set the environment variable ORDER_LIMIT_CHECK=true before running the bun test to enable oversized order validation.',
+        'Run the order tests with `bun test --timeout 20000`; the default 5000ms timeout is too short for them here.',
+      ],
+    }),
+  )
+  const learned = await learnFromTurn({ provider, messages: TIMEOUT_TURN, fromIndex: 0, request: 'why does the oversized order check fail?', outcome: { verify: 'pass', repairAttempts: 0 }, cwd: projectDir(), lessonsPath: path })
+
+  // The two invented lessons do not use up the cap of two: the grounded one still lands.
+  expect(learned.lessons).toEqual(['Run the order tests with `bun test --timeout 20000`; the default 5000ms timeout is too short for them here.'])
+  const stored = readFileSync(path, 'utf8')
+  expect(stored).toContain('bun test --timeout 20000')
+  expect(stored).not.toContain('order_limits.yml')
+  expect(stored).not.toContain('ORDER_LIMIT_CHECK')
+})
+
+test('a blocker lesson is held to the same rule', async () => {
+  const path = lessonsFile()
+  const stuck: ChatMessage[] = [
+    { role: 'assistant', content: [call('a', 'run_command', { command: 'cargo build' })] },
+    { role: 'user', content: [result('a', 'error: linker link.exe not found', true)] },
+  ]
+  const provider = reflectingProvider(
+    JSON.stringify({
+      lessons: [
+        "cargo build fails on this machine with 'linker link.exe not found'; the MSVC build tools are not installed.",
+        'Set CARGO_TARGET_DIR to a short path before building so the linker is found.',
+      ],
+    }),
+  )
+  const learned = await learnFromTurn({ provider, messages: stuck, fromIndex: 0, request: 'build the crate', outcome: { verify: 'fail', repairAttempts: 1 }, cwd: projectDir(), lessonsPath: path })
+  expect(learned.lessons).toEqual(["cargo build fails on this machine with 'linker link.exe not found'; the MSVC build tools are not installed."])
+  expect(readFileSync(path, 'utf8')).not.toContain('CARGO_TARGET_DIR')
+})
+
+test('a name is grounded by what the turn ran or read, or by the repo, and by nothing else', () => {
+  const repo = projectDir()
+  writeFileSync(join(repo, 'config.json'), '{}')
+  const support = turnSupport(
+    [
+      { role: 'user', content: [text('the request itself names /srv/only-in-the-request.yml and REQUEST_ONLY_VAR')] },
+      { role: 'assistant', content: [call('a', 'read_file', { path: 'src/tools/registry.ts' }), call('b', 'read_file', { path: 'D:\\elia\\workspace\\notes.md' }), call('c', 'run_command', { command: 'bun test --timeout 20000' })] },
+      { role: 'user', content: [result('a', 'export const url = process.env.ELIA_REGISTRY_URL', false), result('b', 'notes', false), result('c', '1 pass', false)] },
+    ],
+    0,
+  )
+  const missing = (lesson: string) => ungroundedReference(lesson, support, repo)
+
+  // Paths: in a tool input, in a Windows-style input, or on disk in the repo.
+  expect(missing('The registry lives in src/tools/registry.ts')).toBeUndefined()
+  expect(missing('Notes are kept in D:\\elia\\workspace\\notes.md')).toBeUndefined()
+  expect(missing('Settings live in config.json')).toBeUndefined()
+  expect(missing('Settings live in settings.yml')).toBe('settings.yml')
+  expect(missing('Deploy the file to /opt/elia-test-missing/config')).toBe('/opt/elia-test-missing/config')
+  // What the user typed is not evidence that a thing exists.
+  expect(missing('Keep it at /srv/only-in-the-request.yml')).toBe('/srv/only-in-the-request.yml')
+  expect(missing('Export REQUEST_ONLY_VAR first')).toBe('REQUEST_ONLY_VAR')
+
+  // Environment variables, flags and commands.
+  expect(missing('Set ELIA_REGISTRY_URL before starting')).toBeUndefined()
+  expect(missing('Set ORDER_LIMIT_CHECK=true before starting')).toBe('ORDER_LIMIT_CHECK')
+  expect(missing('Pass --timeout 20000 when running the suite')).toBeUndefined()
+  expect(missing('Pass --frozen-lockfile when installing')).toBe('--frozen-lockfile')
+  expect(missing('Run `bun test` from the repo root')).toBeUndefined()
+  expect(missing('Start it with `make deploy`')).toBe('make')
+})
+
+test('prose that only looks like a path, flag or command is not held against a lesson', () => {
+  const missing = (lesson: string) => ungroundedReference(lesson, '', projectDir())
+  expect(missing('On Windows list files with dir /b; read/write access and/or Node.js are not the problem.')).toBeUndefined()
+  expect(missing('The well-known issue is documented at https://bun.sh/docs/cli/test.md and is not specific to this project.')).toBeUndefined()
+  expect(missing('On this Windows machine list directories with dir; ls is not available in cmd')).toBeUndefined()
 })
 
 // --- A correction from the user becomes a standing rule -----------------------

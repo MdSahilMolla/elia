@@ -1,0 +1,21 @@
+[package]
+name = "elia-box"
+description = "Elia's agent sandbox: confined execution, copy-on-write forks, brokered egress and sealed receipts."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "elia-box"
+path = "src/main.rs"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+libc.workspace = true
+
+[build-dependencies]
+cc = "1"

@@ -46,11 +46,27 @@ export interface Harness {
   effort: 'instant' | 'low' | 'medium' | 'high'
 }
 
+/**
+ * Reasoning from first principles, as a line of attack rather than a slogan:
+ * throw out what is usually done, state what must be true, check each piece of
+ * that directly, and build back up from what survived. It is what an engineer
+ * does when the obvious move has already failed, which is why it sits second in
+ * the repair pool — the pipeline hands repair passes out in pool order
+ * (autonomy/repairSearch.ts), so the pass after a failed direct fix starts here.
+ * In the implement pool it stands opposite `follow-the-grain`: one derives the
+ * design from the requirement, the other copies the nearest precedent, and a
+ * search that opens both finds out which one this codebase rewards.
+ */
 const REPAIR_APPROACHES: Approach[] = [
   {
     id: 'from-the-failure',
     instruction:
       'Start from the failure itself. Read the exact error or failing assertion, find the precise line it names, and work outward from there. Do not guess at a cause before you have read what the check actually said.',
+  },
+  {
+    id: 'first-principles',
+    instruction:
+      'Distrust every assumption, the last attempt\'s included. Write down what must be true for the check to pass — the inputs, the environment, what each function on the path actually returns — then confirm each one directly by running or reading it, never by recalling it. Fix the first one that turns out false, at the place where it becomes false.',
   },
   {
     id: 'from-the-code',
@@ -76,14 +92,19 @@ const IMPLEMENT_APPROACHES: Approach[] = [
       'Write the check before the code. Decide concretely how you would know this works, write that as a test, watch it fail for the right reason, and only then implement until it passes.',
   },
   {
-    id: 'smallest-slice',
+    id: 'first-principles',
     instruction:
-      'Build the narrowest version that genuinely works end to end — one path, no options, no generality — and get that running. Extend only once it does.',
+      'Derive the design from the requirement, not from habit. State what this must do as hard constraints — inputs, outputs, invariants, how it fails — and build the simplest thing that satisfies exactly those; every part must be there for a constraint. Only then fit it to the codebase\'s conventions, and say where you departed from them and why.',
   },
   {
     id: 'follow-the-grain',
     instruction:
       'Find the closest existing thing in this codebase that already does something similar, read how it is built and wired, and build this the same way. Match the surrounding conventions rather than inventing a new shape.',
+  },
+  {
+    id: 'smallest-slice',
+    instruction:
+      'Build the narrowest version that genuinely works end to end — one path, no options, no generality — and get that running. Extend only once it does.',
   },
 ]
 
@@ -114,6 +135,11 @@ const LOCATE_APPROACHES: Approach[] = [
 ]
 
 const PLAN_APPROACHES: Approach[] = [
+  {
+    id: 'first-principles',
+    instruction:
+      'Start from the outcome, not the usual shape of the work. State what must be true when it is done and which constraints are real rather than assumed — check the doubtful ones — then plan only the steps those require, in the order they require them.',
+  },
   {
     id: 'spine-first',
     instruction:

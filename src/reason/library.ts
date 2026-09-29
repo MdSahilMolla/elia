@@ -3,7 +3,7 @@ import { join } from 'node:path'
 import { wilson } from '../compounding/stats.ts'
 import { withFileLock } from '../fileLock.ts'
 import { writeSecureFile } from '../securePersistence.ts'
-import { stateDir } from '../statePaths.ts'
+import { paths } from '../statePaths.ts'
 
 /**
  * Where the search's results are kept, so the next task of the same shape
@@ -73,7 +73,9 @@ export const EXPLORATION_CAP = 30
 
 const EMPTY: Library = { version: 1, records: [] }
 
-export function libraryPath(dir = join(stateDir, 'reason')): string {
+// `paths.state`, not the `stateDir` constant: the test preload redirects the
+// former, so a test that forgets `libraryFile` cannot write the real library.
+export function libraryPath(dir = join(paths.state, 'reason')): string {
   return join(dir, 'library.json')
 }
 

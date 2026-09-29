@@ -4,22 +4,27 @@ import { paths } from '../config.ts'
 import { listLedgerSessionIds, loadLedger, type LedgerRecord } from '../ledger.ts'
 import { loadLessons } from '../autonomy/lessons.ts'
 import { loadRationale, RATIONALE_PATH } from '../autonomy/rationale.ts'
+import { loadRecordingIndex, minePatterns, recordingsFingerprint, type FrictionPattern, type RecordedMoment } from '../autonomy/recordingIndex.ts'
+import type { EliaBook } from '../eliaBook.ts'
 import { loadNotes } from './notes.ts'
 import { registerCache } from '../cacheRegistry.ts'
 
 /**
  * The read layer of elia's second brain: one merged, typed view over every
  * durable knowledge source in a project — episodes from *all* past sessions
- * (not just this one), lessons, rationale, and notes. `search.ts` ranks these,
- * `cards.ts` folds them into per-file knowledge cards, and the `brain` tool
- * exposes both.
+ * (not just this one), lessons, rationale, and notes, and now what the live
+ * recorder kept: the Elia Books (playbooks) made from past sessions, the moments
+ * worth returning to inside their recordings, and the failures that keep
+ * recurring across them. `search.ts` ranks these, `cards.ts` folds the original
+ * four into per-file knowledge cards, and the `brain` tool exposes both — and
+ * opens any hit back to the raw recording behind it.
  *
  * Everything here is derived on read from the existing append-only stores.
  * There is no separate write path and nothing to keep in sync — a brain query
  * always reflects exactly what the underlying files hold right now.
  */
 
-export type BrainItemKind = 'episode' | 'lesson' | 'rationale' | 'note'
+export type BrainItemKind = 'episode' | 'lesson' | 'rationale' | 'note' | 'book' | 'moment' | 'pattern'
 
 export interface BrainItem {
   kind: BrainItemKind
@@ -38,6 +43,10 @@ export interface BrainItem {
   /** For episodes: which session produced it, and whether that is the current one. */
   sessionId?: string
   fromCurrentSession?: boolean
+  /** A multiplier on the search score; a verified playbook or a fix that worked outranks a bare mention. Absent means 1. */
+  weight?: number
+  /** What `brain open` turns back into the raw record: `recording:<session>#<from>-<to>` or `book:<id>`. */
+  pointer?: string
 }
 
 export interface LoadBrainOptions {
@@ -45,6 +54,8 @@ export interface LoadBrainOptions {
   lessonsPath?: string
   rationalePath?: string
   notesPath?: string
+  /** The project whose Books and recordings are read; the working directory when omitted. */
+  cwd?: string
   /** The live session — its episodes are marked so output can distinguish "now" from "an earlier session". */
   currentSessionId?: string
 }
@@ -100,12 +111,69 @@ function defaultFingerprint(sessionsDir: string, currentSessionId: string | unde
     mtime(paths.lessons),
     mtime(RATIONALE_PATH),
     mtime(paths.brainNotes),
+    // A Book rewrites its file atomically, which moves the directory's mtime; a recording is appended to, which does not, so each one is listed.
+    mtime(join(paths.state, 'books')),
+    recordingsFingerprint(process.cwd(), currentSessionId),
   ].join(':')
+}
+
+const clip = (text: string, max: number): string => (text.length > max ? `${text.slice(0, max - 1)}…` : text)
+
+function bookItem(book: EliaBook): BrainItem {
+  const current = book.versions.find((version) => version.version === book.activeVersion) ?? book.versions.at(-1)!
+  const { procedure, evidence } = current
+  const files = [...new Set(procedure.steps.flatMap((step) => step.files))]
+  return {
+    kind: 'book',
+    key: `book:${book.id}`,
+    text: clip(
+      [book.title, procedure.goal, procedure.understanding, ...procedure.steps.map((step) => `${step.title} ${clip(step.instructions, 300)}`), ...procedure.verification, ...evidence.failures, ...evidence.lessons, ...files].join(' '),
+      4_000,
+    ),
+    render: `playbook ${book.id} (${book.status}, v${book.activeVersion}, ${evidence.actionCount} actions, ${evidence.failedActions} failed): ${clip(book.title, 160)}  [open: book:${book.id}]`,
+    at: Date.parse(book.updatedAt) || 0,
+    paths: files,
+    symbols: [],
+    weight: book.status === 'verified' ? 1.5 : book.status === 'recorded' ? 1.1 : 1,
+    pointer: `book:${book.id}`,
+  }
+}
+
+function momentItem(moment: RecordedMoment): BrainItem {
+  return {
+    kind: 'moment',
+    key: `moment:${moment.kind}:${moment.sessionId}:${moment.from}`,
+    text: moment.text,
+    render: `${moment.render}  [open: ${moment.pointer}]`,
+    at: moment.at,
+    paths: moment.paths,
+    symbols: [],
+    sessionId: moment.sessionId,
+    weight: moment.weight,
+    pointer: moment.pointer,
+  }
+}
+
+function patternItem(pattern: FrictionPattern): BrainItem {
+  const open = pattern.fix?.pointer ?? pattern.example.pointer
+  return {
+    kind: 'pattern',
+    key: `pattern:${keyHash(pattern.signature)}`,
+    text: `${pattern.example.failed} ${pattern.example.error} ${pattern.fix?.label ?? ''} recurring failure`,
+    render: `pattern ×${pattern.occurrences} across ${pattern.sessions.length} session(s): ${pattern.example.failed} fails with "${clip(pattern.example.error, 120)}"${pattern.fix ? ` → fixed by ${pattern.fix.label} (${pattern.fix.count} of ${pattern.occurrences})` : ' → no fix found yet'}  [open: ${open}]`,
+    at: pattern.at,
+    paths: [],
+    symbols: [],
+    // A failure seen again and again, with a fix that keeps working, is the strongest thing a recording can say.
+    weight: 1 + 0.5 * Math.log2(pattern.occurrences) + (pattern.fix ? 0.25 : 0),
+    pointer: open,
+  }
 }
 
 export async function loadBrainItems(options: LoadBrainOptions = {}): Promise<BrainItem[]> {
   const sessionsDir = options.sessionsDir ?? paths.sessions
-  const usesDefaults = !options.sessionsDir && !options.lessonsPath && !options.rationalePath && !options.notesPath
+  const usesDefaults = !options.sessionsDir && !options.lessonsPath && !options.rationalePath && !options.notesPath && !options.cwd
+  const cwd = options.cwd ?? process.cwd()
 
   let fingerprint: string | undefined
   if (usesDefaults) {
@@ -132,15 +200,30 @@ export async function loadBrainItems(options: LoadBrainOptions = {}): Promise<Br
     items.push(...sessionItems)
   }
 
+  // What the live recorder kept. Read before the lessons, because a lesson that
+  // a recorded turn taught carries a pointer back to the events that taught it.
+  // The session in progress is left out: it is in the model's own window already.
+  const recordings = loadRecordingIndex(cwd, { currentSessionId: options.currentSessionId })
+  const taught = new Map<string, string>()
+  for (const recording of recordings) {
+    for (const lesson of recording.lessons) {
+      const key = keyHash(lesson.text.toLowerCase())
+      if (!taught.has(key)) taught.set(key, lesson.pointer)
+    }
+  }
+
   for (const lesson of loadLessons(options.lessonsPath)) {
+    const key = keyHash(lesson.text.toLowerCase())
+    const pointer = taught.get(key)
     items.push({
       kind: 'lesson',
-      key: `lesson:${keyHash(lesson.text.toLowerCase())}`,
+      key: `lesson:${key}`,
       text: lesson.text,
-      render: `lesson: ${lesson.text}`,
+      render: `lesson: ${lesson.text}${pointer ? `  [recorded · open: ${pointer}]` : ''}`,
       at: lesson.at,
       paths: pathsIn(lesson.text),
       symbols: [],
+      ...(pointer ? { pointer } : {}),
     })
   }
 
@@ -168,6 +251,16 @@ export async function loadBrainItems(options: LoadBrainOptions = {}): Promise<Br
       symbols: [],
     })
   }
+
+  // Loaded on first use: the Book code is not needed by a turn that never searches the brain.
+  try {
+    const { listEliaBooks } = await import('../eliaBook.ts')
+    for (const book of listEliaBooks(cwd)) items.push(bookItem(book))
+  } catch {
+    // An unreadable Book must not sink the brain.
+  }
+  for (const recording of recordings) for (const moment of recording.moments) items.push(momentItem(moment))
+  for (const pattern of minePatterns(recordings)) items.push(patternItem(pattern))
 
   if (fingerprint !== undefined) cache = { fingerprint, items }
   return items
