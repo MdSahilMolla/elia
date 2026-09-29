@@ -317,6 +317,8 @@ export interface SkillStorageOptions {
   root?: string
   stagingDir?: string
   quarantineDir?: string
+  /** Replaces the builder subagent that writes the draft — tests only, so no test spends a model call. */
+  draft?: (prompt: string, stagingFile: string) => Promise<void>
 }
 
 export async function createInstructionSkill(cluster: LessonEvidence[], options: SkillStorageOptions = {}): Promise<SkillEvolutionResult> {
@@ -326,7 +328,7 @@ export async function createInstructionSkill(cluster: LessonEvidence[], options:
   mkdirSync(stagingDir, { recursive: true })
   const stagingFile = join(stagingDir, `${Date.now()}-new.md`)
   try {
-    await draftToStagingFile(createPrompt(cluster, stagingFile), stagingFile)
+    await (options.draft ?? draftToStagingFile)(createPrompt(cluster, stagingFile), stagingFile)
   } catch (err) {
     return { ok: false, detail: `drafting a new skill failed: ${err instanceof Error ? err.message : String(err)}` }
   }
@@ -362,11 +364,19 @@ export async function createInstructionSkill(cluster: LessonEvidence[], options:
   return { ok: true, detail: `created skill "${slug}" from ${cluster.length} certified lessons`, slug }
 }
 
+/**
+ * `retiredKeys` are source lessons the revision has just re-derived the skill
+ * without. They must leave `sourceLessonKeys` once the rewrite lands, or the
+ * next pass still finds them "lost" and rewrites the same skill again — a paid
+ * subagent call on every turn (`elia-development-workflow` went v14→v17 in
+ * four turns, each time retiring the same 8 lessons).
+ */
 export async function reviseInstructionSkill(
   slug: string,
   newEvidence: LessonEvidence[],
   reason: string,
   options: SkillStorageOptions = {},
+  retiredKeys: readonly string[] = [],
 ): Promise<SkillEvolutionResult> {
   const root = options.root ?? INSTRUCTION_SKILLS_ROOT
   const stagingDir = options.stagingDir ?? INSTRUCTION_SKILL_STAGING_DIR
@@ -377,7 +387,7 @@ export async function reviseInstructionSkill(
   mkdirSync(stagingDir, { recursive: true })
   const stagingFile = join(stagingDir, `${Date.now()}-${slug}-revision.md`)
   try {
-    await draftToStagingFile(revisePrompt(currentContent, newEvidence, reason, stagingFile), stagingFile)
+    await (options.draft ?? draftToStagingFile)(revisePrompt(currentContent, newEvidence, reason, stagingFile), stagingFile)
   } catch (err) {
     return { ok: false, detail: `revising "${slug}" failed: ${err instanceof Error ? err.message : String(err)}` }
   }
@@ -401,7 +411,7 @@ export async function reviseInstructionSkill(
       name: validation.name ?? meta.name,
       version: nextVersion,
       updatedAt: Date.now(),
-      sourceLessonKeys: [...new Set([...meta.sourceLessonKeys, ...newEvidence.map((item) => item.key)])],
+      sourceLessonKeys: [...new Set([...meta.sourceLessonKeys.filter((key) => !retiredKeys.includes(key)), ...newEvidence.map((item) => item.key)])],
       history: [...meta.history, { version: nextVersion, at: Date.now(), reason }],
     },
     root,
@@ -479,8 +489,9 @@ export async function evolveInstructionSkills(lessonsPath = paths.lessons, optio
         revisions++
       } else if (lost.length > 0) {
         log.push(
-          (await reviseInstructionSkill(slug, [], `${lost.length} source lesson(s) were retired for not holding up — re-derived from what remains`, options))
-            .detail,
+          (
+            await reviseInstructionSkill(slug, [], `${lost.length} source lesson(s) were retired for not holding up — re-derived from what remains`, options, lost)
+          ).detail,
         )
         revisions++
       }

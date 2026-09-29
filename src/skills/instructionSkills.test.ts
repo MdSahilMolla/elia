@@ -6,6 +6,7 @@ import { appendLessons } from '../autonomy/lessons.ts'
 import {
   clusterAlreadyCovered,
   elianAuthoredSlugs,
+  evolveInstructionSkills,
   findLessonClusters,
   readSkillMeta,
   relatesToSkill,
@@ -245,4 +246,70 @@ test('relatesToSkill matches a new lesson on the same topic as the skill was bui
 test('relatesToSkill is false when the skill has no resolvable member texts', () => {
   const meta = makeMeta({ sourceLessonKeys: ['missing'] })
   expect(relatesToSkill({ key: 'c', text: 'anything at all' }, meta, new Map())).toBe(false)
+})
+
+// --- evolveInstructionSkills: retiring lessons -----------------------------------
+
+test('retiring source lessons rewrites the skill once, then leaves it alone', async () => {
+  const root = tempDir('elia-instr-skills-root-')
+  const lessonsDir = tempDir('elia-instr-skills-lessons-')
+  const lessonsPath = join(lessonsDir, 'lessons.md')
+  appendLessons([{ text: 'This project deploys with a blue-green swap, never in place.' }], lessonsPath, lessonsPath)
+  const live = trustworthyLessons(lessonsPath)[0]!
+
+  const dir = join(root, 'deploy-discipline')
+  mkdirSync(dir, { recursive: true })
+  writeFileSync(join(dir, 'SKILL.md'), VALID_DRAFT)
+  writeFileSync(
+    join(dir, '.meta.json'),
+    JSON.stringify(makeMeta({ sourceLessonKeys: [live.key, 'retired-1', 'retired-2'] })),
+  )
+
+  let builderCalls = 0
+  const options = {
+    root,
+    stagingDir: join(lessonsDir, 'staging'),
+    quarantineDir: join(lessonsDir, 'quarantine'),
+    draft: async (_prompt: string, stagingFile: string) => {
+      builderCalls++
+      writeFileSync(stagingFile, VALID_DRAFT)
+    },
+  }
+
+  const first = await evolveInstructionSkills(lessonsPath, options)
+  expect(first.join('\n')).toMatch(/2 source lesson\(s\) were retired/)
+  expect(builderCalls).toBe(1)
+  expect(readSkillMeta('deploy-discipline', root)?.sourceLessonKeys).toEqual([live.key])
+
+  // The retired keys are gone, so the next turn has nothing to rewrite.
+  expect(await evolveInstructionSkills(lessonsPath, options)).toEqual([])
+  expect(await evolveInstructionSkills(lessonsPath, options)).toEqual([])
+  expect(builderCalls).toBe(1)
+  expect(readSkillMeta('deploy-discipline', root)?.version).toBe(2)
+})
+
+test('a failed re-derivation keeps the retired keys, so the rewrite is retried rather than forgotten', async () => {
+  const root = tempDir('elia-instr-skills-root-')
+  const lessonsDir = tempDir('elia-instr-skills-lessons-')
+  const lessonsPath = join(lessonsDir, 'lessons.md')
+  appendLessons([{ text: 'This project deploys with a blue-green swap, never in place.' }], lessonsPath, lessonsPath)
+  const live = trustworthyLessons(lessonsPath)[0]!
+
+  const dir = join(root, 'deploy-discipline')
+  mkdirSync(dir, { recursive: true })
+  writeFileSync(join(dir, 'SKILL.md'), VALID_DRAFT)
+  writeFileSync(join(dir, '.meta.json'), JSON.stringify(makeMeta({ sourceLessonKeys: [live.key, 'retired-1'] })))
+
+  const log = await evolveInstructionSkills(lessonsPath, {
+    root,
+    stagingDir: join(lessonsDir, 'staging'),
+    quarantineDir: join(lessonsDir, 'quarantine'),
+    draft: async () => {
+      throw new Error('builder unavailable')
+    },
+  })
+  expect(log.join('\n')).toMatch(/failed: builder unavailable/)
+  const meta = readSkillMeta('deploy-discipline', root)
+  expect(meta?.sourceLessonKeys).toEqual([live.key, 'retired-1'])
+  expect(meta?.version).toBe(1)
 })
