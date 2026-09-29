@@ -39,7 +39,7 @@ const REPL_COMMANDS: SlashCommand[] = [
   { name: '/connector', description: 'hosted MCP connectors — add, test, remove' },
   { name: '/marketplace', description: 'packages, skills, MCP: installed · suggested · add' },
   { name: '/packages', description: 'installed packages & skills — remove one' },
-  { name: '/skills', description: 'list loaded skills' },
+  { name: '/skills', description: 'list loaded skills · /skills reload re-reads them now' },
   { name: '/task', description: 'browse tasks and subagents' },
   { name: '/sessions', description: 'conversations in this project · /sessions new <name> starts a parallel session' },
   { name: '/search', description: 'reasoning search — several attempts, keep the one a check passes · /search on|off' },

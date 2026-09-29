@@ -100,7 +100,7 @@ const COMMANDS = new Set([
 const NEEDS_ARGUMENTS = new Set([...RUNNERS, 'pip', 'pip3', 'cargo', 'go', 'git', 'docker', 'dotnet', 'mvn', 'gradle', 'kubectl', 'terraform', 'mkdir', 'java', 'php', 'ruby', 'bundle', 'flutter', 'dart', 'swift'])
 const ALIASES: Record<string, string> = { i: 'install', ci: 'install', t: 'test', tst: 'test' }
 /** Tools a step can name outright ("use the `preview` tool"); the file tools are how every step is done, so they name nothing. */
-const NAMEABLE_TOOLS = new Set(['preview', 'list_files', 'grep', 'web_search', 'web_fetch', 'browser', 'find_symbol', 'http_probe', 'github', 'task', 'process'])
+const NAMEABLE_TOOLS = new Set(['preview', 'list_files', 'grep', 'web_search', 'web_fetch', 'browser', 'find_symbol', 'http_probe', 'github', 'task', 'process', 'ctf_toolchain', 'ctf_playbook', 'security_triage'])
 /** Scripts that start something long-running: they are verified by opening what they serve, never by exiting. */
 const SERVE_SCRIPT = /^(?:dev|start|serve|server|preview|watch)$/
 

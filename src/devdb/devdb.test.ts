@@ -2,7 +2,7 @@ import { afterAll, afterEach, beforeEach, describe, expect, test } from 'bun:tes
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { describeDatabaseUrl, isLocalDatabaseUrl, parseDatabaseUrl, redactDatabaseUrl } from './url.ts'
+import { describeDatabaseUrl, isLocalDatabaseUrl, parseDatabaseUrl, redactDatabaseUrl, resolveSqliteUrl } from './url.ts'
 import { classifySql, splitSqlStatements, stripSqlNoise, formatRows } from './sql.ts'
 import { composeDatabaseServices, detectDatabase, parseEnvFile, primaryTarget } from './detect.ts'
 import { assessDatabaseRequest, resolveDatabaseTarget } from './policy.ts'
@@ -34,6 +34,24 @@ describe('database urls', () => {
     expect(describeDatabaseUrl('postgres://admin:s3cret@db.example.com/shop')).toBe('postgres @ db.example.com/shop (remote)')
     expect(describeDatabaseUrl('postgres://admin:s3cret@db.example.com/shop')).not.toContain('s3cret')
   })
+
+  test('a multi-segment absolute sqlite path is not rewritten into the project, on any platform', () => {
+    // Regression: whether an absolute path counted as absolute used to depend on
+    // whether its parent directory existed on this machine, so on Windows
+    // `sqlite:///etc/some.db` was relocated to `<project>/etc/some.db`, came back
+    // local, and a destructive query on it cleared as review instead of critical.
+    const root = mkdtempSync(join(tmpdir(), 'devdb-sqlite-abs-'))
+    try {
+      expect(resolveSqliteUrl('sqlite:///etc/some.db', root)).toBe('sqlite:///etc/some.db')
+      expect(resolveSqliteUrl('sqlite:////server/share/x.db', root)).toBe('sqlite:////server/share/x.db')
+      expect(resolveDatabaseTarget(root, { url: 'sqlite:///etc/some.db' }, {})?.local).toBe(false)
+      // A single leading segment stays the SQLAlchemy project-relative spelling.
+      expect(resolveSqliteUrl('sqlite:///app.db', root)).toBe(`sqlite://${join(root, 'app.db')}`)
+      expect(resolveDatabaseTarget(root, { url: 'sqlite://./dev.db' }, {})?.local).toBe(true)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  }, 30_000)
 })
 
 describe('sql classification', () => {
