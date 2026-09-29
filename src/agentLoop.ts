@@ -4,6 +4,7 @@ import { beginCompaction, shrinkForOversizedRequest, type PendingCompaction } fr
 import { compactionThresholdFor } from './contextWindow.ts'
 import { isConnectionError, isFallbackableProviderError, isMalformedToolCallError, isQuotaExhaustedError, isRequestTooLargeError, isTransientServerError, isUnusableRouteError, retryBackoffMs } from './providerErrors.ts'
 import { createPlanlessWorkTracker, createRedundantReadTracker, isLoneBatchableRead, serialReadNudge } from './autonomy/toolBatchingNudge.ts'
+import { createLeakedToolCallGuard } from './autonomy/leakedToolCall.ts'
 import { createReadAhead } from './autonomy/readAhead.ts'
 import { createPlanProgressTracker, planBelongsToRequest, type PlanProgressUpdate, type ToolOutcome } from './autonomy/planProgress.ts'
 import { activeTodoList } from './autonomy/todoList.ts'
@@ -435,6 +436,8 @@ async function runAgentLoopTracked(opts: RunAgentLoopOptions, inflight: Inflight
   // it has something true the model may not be holding. ELIA_WORLD=off removes it.
   const world = createWorld(currentAgent().cwd ?? process.cwd())
   const planlessWork = createPlanlessWorkTracker()
+  // A tool call the model wrote as text never ran; see autonomy/leakedToolCall.ts.
+  const leakedToolCalls = createLeakedToolCallGuard()
   // The list this loop runs under — the turn's, via withTodoList.
   const todoList = activeTodoList()
   const planProgress = onPlanProgress
@@ -562,6 +565,20 @@ async function runAgentLoopTracked(opts: RunAgentLoopOptions, inflight: Inflight
     for (const block of toolUseBlocks) if (block.name === 'run_command') block.input = normalizeRunCommandInput(block.input)
 
     if (toolUseBlocks.length === 0) {
+      // Not ready to stop if what it "called" was only written out as text:
+      // nothing ran, and ending here would report a finished turn with no work.
+      const leak = leakedToolCalls.observe(content)
+      if (leak.leaked) {
+        const title = leak.note
+          ? 'The model wrote a tool call as text, so it did not run — asking it to call the tool properly'
+          : 'The model wrote a tool call as text and no tool ran'
+        if (onActivity) onActivity({ kind: 'warning', status: 'warning', title })
+        else writeNotice(`elia: ${title}`)
+        if (leak.note) {
+          messages.push({ role: 'user', content: [{ type: 'text', text: leak.note }] })
+          continue
+        }
+      }
       // The model is ready to stop — but if the operator sent steering during
       // this last response, don't end the turn: fold it in and keep going.
       if (injectSteering() || injectDirectives()) continue

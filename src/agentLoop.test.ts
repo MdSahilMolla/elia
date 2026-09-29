@@ -1426,3 +1426,51 @@ test('ELIA_WORLD=off removes the world model: the same run is told nothing', asy
     else process.env.ELIA_WORLD_PERSIST = saved.persist
   }
 })
+
+// A model that writes its tool call as text instead of calling the tool: nothing runs,
+// so the turn must not end as finished work (reported with mercury-2.5 on battmann).
+const LEAKED_CALL = 'I will pull the data.\n<function=grep> <parameter=q> fx </parameter> </function> <|tool_call_end|>'
+
+test('a tool call written as text is not treated as a finished turn: the model is told nothing ran, and its retry runs', async () => {
+  let calls = 0
+  let ran = 0
+  const seen: string[] = []
+  const activities: ProviderActivity[] = []
+  const messages: ConversationMessage[] = [{ role: 'user', content: [{ type: 'text', text: 'get the fx data' }] }]
+  const result = await runAgentLoop({
+    messages, systemPrompt: 'test', providerName: 'anthropic', model: 'leaked-call-test', useAnimation: false, verbose: false,
+    onActivity: (activity) => activities.push(activity),
+    tools: [{ name: 'grep', description: 'Test tool', input_schema: { type: 'object', properties: {} }, async execute() { ran += 1; return 'fx rows' } }],
+    provider: { async streamTurn(params) {
+      calls += 1
+      seen.push(JSON.stringify(params.messages))
+      if (calls === 1) return { content: [{ type: 'text', text: LEAKED_CALL }], usage: ZERO_USAGE }
+      if (calls === 2) return { content: [{ type: 'tool_use', id: 'p1', name: 'grep', input: { q: 'fx' } }], usage: ZERO_USAGE }
+      return { content: [{ type: 'text', text: 'Rupee is weaker.' }], usage: ZERO_USAGE }
+    } },
+  })
+  expect(result.stopReason).toBe('complete')
+  expect(calls).toBe(3)
+  expect(ran).toBe(1)
+  // The retry was told plainly, and did not get to copy the markup from its own history.
+  expect(seen[1]).toContain('wrote a tool call as plain text')
+  expect(seen[1]).not.toContain('<function=')
+  expect(JSON.stringify(messages)).not.toContain('<function=')
+  expect(activities.some((activity) => activity.kind === 'warning' && /wrote a tool call as text/.test(activity.title))).toBe(true)
+})
+
+test('a model that keeps writing its tool call as text is corrected twice, then the turn ends with a warning instead of spinning', async () => {
+  let calls = 0
+  const activities: ProviderActivity[] = []
+  const result = await runAgentLoop({
+    messages: [{ role: 'user', content: [{ type: 'text', text: 'get the fx data' }] }], systemPrompt: 'test', providerName: 'anthropic', model: 'leaked-call-stubborn-test', useAnimation: false, verbose: false,
+    onActivity: (activity) => activities.push(activity),
+    tools: [{ name: 'grep', description: 'Test tool', input_schema: { type: 'object', properties: {} }, async execute() { return 'never called' } }],
+    provider: { async streamTurn() { calls += 1; return { content: [{ type: 'text', text: LEAKED_CALL }], usage: ZERO_USAGE } } },
+  })
+  expect(result.stopReason).toBe('complete')
+  expect(calls).toBe(3)
+  const warnings = activities.filter((activity) => activity.kind === 'warning')
+  expect(warnings).toHaveLength(3)
+  expect(warnings.at(-1)?.title).toMatch(/no tool ran/)
+})
