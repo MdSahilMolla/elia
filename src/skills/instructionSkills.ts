@@ -300,7 +300,8 @@ Hard requirements:
 Write the file with your file tools, then stop. Do not write anything else.`
 }
 
-async function draftToStagingFile(prompt: string, stagingFile: string): Promise<void> {
+/** `stagingFile` is already named in the prompt; the builder writes it with its file tools. */
+async function draftToStagingFile(prompt: string, _stagingFile: string): Promise<void> {
   const { runSubAgent } = await import('../subagent.ts')
   await runSubAgent({ role: 'builder', name: 'builder#instruction-skill', prompt })
 }

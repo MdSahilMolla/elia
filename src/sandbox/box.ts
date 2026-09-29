@@ -115,7 +115,7 @@ export function boxPolicyFor(cwd: string, timeoutMs: number, env?: Record<string
     limits: { wallMs: Math.max(1, timeoutMs) },
     // PATH is the one host variable the command needs to find its tools; nothing else that
     // could carry a credential is inherited. Per-call `env` overrides layer on top.
-    env: { PATH: process.env.PATH ?? '', ...(env ?? {}) },
+    env: { PATH: process.env.PATH ?? '', ...env },
     envPassthrough: PASSTHROUGH,
   }
   if (process.env.ELIA_BOX_IMAGE?.trim()) policy.image = process.env.ELIA_BOX_IMAGE.trim()
