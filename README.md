@@ -27,6 +27,8 @@ Most agents are exactly as good on their thousandth task as on their first. elia
 5. **Measure memory.** Lessons elia infers are kept for measured benefit, tested with and without and in randomized holdouts. Rules you set by correcting it are never withheld, retired or reworded.
 6. **Compound.** The agent that proposes and builds improvements is elia itself. A promoted change to its loop, roles, tools or prompts improves the improver too, and its search strategy is replaced when it stalls.
 
+Underneath all of it, elia carries a **world model** in every run: it keeps what is true of your project (what it has changed, which check last ran against which version of the code, how likely each command is to work *here*), predicts each action before it takes it, and is scored on the outcome. It is advisory, uses no extra model calls, and is on by default (`ELIA_WORLD=off` removes it). `elia world` shows what it has learned and how well it predicts. The same model prices elia's own changes before `elia evolve` pays to measure them.
+
 The guards are enforced in code. The verifier must not get worse. The benchmark, the gate and elia's Value Core are off limits to the loop. Wins must repeat. Run `elia compounding` to see where each stage stands, computed from elia's own ledgers. **Today:** stages 1, 2 and 4 are working or partial; no generation has been promoted yet, so compounding itself is still unproven. See the [compounding guide](docs/guide/compounding.md).
 
 ## What elia does

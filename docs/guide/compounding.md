@@ -127,6 +127,38 @@ The proposer is shown the whole ledger and still resubmits: gen 16 was gen 15 wo
 - **Calibration.** Measured on the real ledger: the two real repeats score 1.00 and 0.51, and the closest pair of different ideas scores 0.28. Two repeats is little to calibrate on.
 - **Honest comparison.** Plain word overlap separates the same pairs too, just with a narrower margin (0.41 against 0.24). HDC is not doing anything magic here. What it adds is one representation for text, sets and structured records, which later memories can reuse.
 
+## The world model: pay only for a change that can win
+
+The world model has two halves that share one discipline: commit to a prediction before the result, score it after. The **runtime** half runs in every agent loop and models the project elia is working in (`src/world/runtime.ts`, described in [How it works](architecture.md)). The **twin** half models elia's own source, and is what this section is about.
+
+A verdict costs about a full sweep, and nearly every candidate loses. Two generations (15 and 16) each spent 13M and 10M tokens on a builder-prompt edit in `src/autonomy/roles.ts`, which loads in every task and runs in none. A search that pays that to learn "no" does not compound, so the loop now reads a change before it pays for it.
+
+**The twin** (`src/world/`) is an executable model of elia's own harness that prices a diff without calling a model. Its core is exact. A task's tokens are steps times what every call sends first plus what the conversation has built up, and on the 19 built-in tasks the fixed part alone (113 steps × 3 attempts × about 17k tokens) is 94% of the 6.3M tokens they cost. So for an edit to the system prompt or a tool definition, `Δtokens = Σ steps × attempts × Δprompt`, which is arithmetic on text. The probe (`src/world/probe.ts`) reads the prompt size by running the *candidate's own code*, the same way the tool-surface check does. An edit to logic has no formula (a changed loop can take more steps or fewer), so it is priced as a gamble, wide, and left to the benchmark. `src/world/text.ts` tells a wording edit from a logic edit by blanking comments and string text and comparing what is left; anything it cannot read confidently counts as logic.
+
+Before any benchmark task runs, the twin stops a change in three cases, and says why:
+
+- **No task can see it.** Every changed file is a test, a document, or code a task loads but never runs (`src/autonomy/loop.ts`, `roles.ts`, `subagent.ts`). The record reads "could not be measured", so it is not evidence against the idea.
+- **A saving too small to clear the gate.** The gate needs 5% beyond about ±8% run-to-run noise. The twin says how many more tokens per call to cut. Trimming one tool description by 862 characters is 217 tokens a call, 1.2% of the suite; the gate needs about 1,160.
+- **Text added to every call, nothing failing to fix.** The proposer names the failing tasks it means to fix in `targetTasks`; a change that only adds text and names none is stopped.
+
+The builder can ask the same model while it works (`world_predict`, free, about a second), so it shortens until the answer is "worth measuring" instead of finding out after a measurement.
+
+**It is scored, so it can be trusted or not.** Every prediction is a belief (a mean and an sd over the log token ratio), committed to a hash-chained receipt ledger (`.elia/world/receipts.jsonl`) *before* measurement and closed with the measured value after. From that ledger the twin reads back its own coefficient and how wide to make its intervals, once it has three scored predictions. A rewritten prediction breaks the chain, and `elia compounding world` says so. It also shows what the twin stopped and roughly what that did not cost. `elia compounding world predict` prices your own uncommitted edits against a base revision (`--base`), which is useful for prompt work whether or not evolve is running.
+
+**Backtest, not a live run.** On generation 13 (a prompt trim), the twin predicts −1.4% tokens from the 265 tokens per call the edit removed; the race measured +0.6%, inside the ±8% noise. It would have stopped that candidate for free. There has been no live `elia evolve` run with the twin in the loop: the provider's free tier ran out before one could start, so the calibration ledger is empty and the coefficient is uncorrected.
+
+### What stands behind a promotion
+
+A change is read the way a reviewer would read it, on the diff, before a model is paid (`src/evolve/quality.ts`). It may not switch a check off (`@ts-ignore`, `oxlint-disable`, a new `any`), leave a debugger in, carry a credential, or grow past 8 files and about 400 lines. A change to logic has to ship a **new** test file beside the code, named after it (`foo.ts` gets `foo.<change>.test.ts`). Existing tests stay immutable, and a new one may not skip, isolate or mock-replace anything. That test must also fail on the live tree (`failToPass.ts`), because a test that passes without the change proves nothing. It must not add lint errors to the files it touches. A promotion writes what stood behind it into the ledger (`proof`: the review, the fail-to-pass result, and what contained the gate).
+
+### Never the expensive part
+
+`src/evolve/budget.ts` puts a ceiling on it: 80M tokens a day (`ELIA_EVOLVE_DAILY_TOKENS`) read back from the ledger so it holds across restarts, and 3.5 sweeps per generation. A generation is refused *before* it starts if it could not be afforded to the end, because a winner that cannot be confirmed is the most expensive thing to lose. `ELIA_EVOLVE_BUDGET=off` removes it, and `ELIA_TWIN=off` skips the screen (the control arm for what it saves).
+
+### Keeping what it proved
+
+With `ELIA_COMPOUND_LAND=on`, a branch promotion is fast-forwarded into the checkout (`src/evolve/landing.ts`), so the next generation builds on it instead of on source that lacks it. It lands only if the gate ran inside elia-box with no run cut short (`ELIA_EVOLVE_BOX=on`), the checkout is exactly where the candidate was cut from, nothing local touches its files, and the tree still type-checks afterwards. If it does not, it is reverted with a new commit, never a reset. It never pushes. It is off by default because writing to a checkout on nobody's say-so is a decision.
+
 ## Where it stands today
 
 Run `elia compounding` for the live picture. As of 2026-09-16, on `mercury-2.5`:

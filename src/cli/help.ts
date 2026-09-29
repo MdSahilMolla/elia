@@ -154,6 +154,9 @@ Self-improvement:
   elia distill [run|traces|export]
                               Turn verified runs into prompt fragments (dry run; --promote keeps the
                               ones that pass every gate); traces lists what qualifies
+  elia world [predict|simulate] What elia has learned about how this project behaves and how well it
+                                predicts; 'predict' prices your uncommitted edits without a model,
+                                'simulate' checks the reasoning planner against the library it replaces
   elia jev [status|ping|bench]  How Jev, the optional independent judge, scores against elia's own
                               decisions (needs ELIA_JEV_API_KEY)
   elia compounding            Where each stage of the self-improvement loop stands

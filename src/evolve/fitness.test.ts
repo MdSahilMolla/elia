@@ -216,6 +216,13 @@ test('a benchmark task never falls back to another provider', async () => {
   expect(env.ELIA_PROVIDER).toBe('mercury')
 })
 
+test('a benchmark task runs the world model but does not persist one into its temporary repository', async () => {
+  const { benchTaskEnv } = await import('./fitness.ts')
+  expect(benchTaskEnv({}, '/tmp/x.reach').ELIA_WORLD_PERSIST).toBe('off')
+  // Not switched off: the benchmark measures elia as shipped.
+  expect(benchTaskEnv({}, '/tmp/x.reach').ELIA_WORLD).toBeUndefined()
+})
+
 const { measureFitness, outOfCredit } = await import('./fitness.ts')
 
 test('only an account out of credit counts as out of credit, not a rate limit', () => {

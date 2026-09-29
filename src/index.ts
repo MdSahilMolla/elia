@@ -12,7 +12,7 @@ import { printHelp } from './cli/help.ts'
 import { runCodexLogin } from './cli/providerSetup.ts'
 import { runInteractive } from './cli/interactive.ts'
 import { runBench, runBenchLatency } from './cli/bench.ts'
-import { runCompounding, runDistill, runEvolve, runGap, runJev, runValues } from './cli/selfImprove.ts'
+import { runCompounding, runDistill, runEvolve, runGap, runJev, runValues, runWorld } from './cli/selfImprove.ts'
 import { runConfig, runControl, runSkills } from './cli/settings.ts'
 import { runDaemon, runDoctor, runSchedule } from './cli/ops.ts'
 import { runFork, runResume, runRuns, runSessionsList } from './cli/sessions.ts'
@@ -106,6 +106,8 @@ async function main() {
       return runDistill()
     case 'compounding':
       return runCompounding()
+    case 'world':
+      return runWorld()
     case 'jev':
       return runJev()
     case 'bench':

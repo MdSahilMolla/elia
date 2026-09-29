@@ -60,7 +60,7 @@ From elia's own records, as `elia compounding frontier` reported them on 2026-09
 These parts of the paper aren't built yet, or have never been run on a live model:
 
 - **P1–P3 and P8 are untested.** They need a live model with credit. P2 also needs a labelled judge set: the critic corpus has two defects, too few to estimate `ρ`.
-- **Tier 2 of the verifier lattice** (executable world models scored on held-out observations) and **tier 4** (empirical checks that resolve later) have no implementation in elia.
+- **Tier 2 of the verifier lattice** (executable world models scored on held-out observations) is partly built: the twin (`src/world/`, see the [compounding guide](compounding.md)) predicts what a diff does to token cost and is scored against measurements, but it has not yet been scored on a live run, and it models cost only, not correctness. **Tier 4** (empirical checks that resolve later) has no implementation in elia.
 - **`λ` is unmeasured.** It needs a log of tasks sampled at the moving frontier over time.
 - **Failure records at the turn level.** The library keeps dead ends for tool builds. A verification failure in an ordinary turn isn't yet a retrievable artifact.
 - **Signed tool-call logs (I4).** I4 holds by construction, because nothing a candidate reports is read. No signatures are kept.

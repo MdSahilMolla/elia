@@ -242,3 +242,22 @@ test('with no approaches there is nothing to run', async () => {
   expect(result.stopped).toBe('no-producer')
   expect(result.best).toBeUndefined()
 })
+
+test('every candidate in a round is paid for, however early in the round the winner comes', async () => {
+  const approaches = [
+    { id: 'a', instruction: 'a' },
+    { id: 'b', instruction: 'b' },
+    { id: 'c', instruction: 'c' },
+  ]
+  const result = await solve({
+    approaches,
+    produce: async (input) => ({ id: input.approach.id, approach: input.approach.id, text: input.approach.id === 'a' ? 'right' : 'wrong', cost: 10 }),
+    verifier: { id: 'v', strength: 'executed', costHint: 'cheap', run: async (candidate) => ({ passed: candidate.text === 'right', strength: 'executed', detail: '', evidence: '', elapsedMs: 0 }) },
+    budget: { attempts: 3 },
+    width: 3,
+  })
+  expect(result.verified).toBe(true)
+  // The first candidate passed, and the other two had already been produced.
+  expect(result.attempts).toHaveLength(1)
+  expect(result.cost).toBe(30)
+})

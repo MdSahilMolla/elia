@@ -1364,3 +1364,65 @@ test('falling back to the next provider says why the last one failed, without le
   expect(notice).toContain('trying works-net')
   expect(written.join('')).not.toContain(secret)
 })
+
+/** A model that re-runs the same failing test command `times` times, then stops. Returns everything it was shown on each call. */
+async function rerunFailingTest(times: number): Promise<string[]> {
+  const originalProvider = config.provider
+  const shown: string[] = []
+  let call = 0
+  config.provider = {
+    async streamTurn({ messages }) {
+      shown.push(JSON.stringify(messages))
+      call += 1
+      if (call <= times) return { content: [{ type: 'tool_use', id: `t${call}`, name: 'run_command', input: { command: 'bun test' } }] as ContentBlock[], usage: ZERO_USAGE }
+      return { content: [{ type: 'text', text: 'done' }] as ContentBlock[], usage: ZERO_USAGE }
+    },
+  }
+  try {
+    await runAgentLoop({
+      messages: [{ role: 'user', content: [{ type: 'text', text: 'fix the tests' }] }],
+      systemPrompt: 'test',
+      tools: [{ name: 'run_command', description: 'shell', input_schema: { type: 'object', properties: {} }, async execute() { throw new Error('FAIL src/a.test.ts\nexpected 2, got 3') } }],
+      useAnimation: false,
+      verbose: false,
+    })
+  } finally {
+    config.provider = originalProvider
+  }
+  return shown
+}
+
+test('the world model tells a model that keeps re-running a failing check against an untouched tree, and nothing before that', async () => {
+  const saved = { world: process.env.ELIA_WORLD, persist: process.env.ELIA_WORLD_PERSIST }
+  delete process.env.ELIA_WORLD
+  process.env.ELIA_WORLD_PERSIST = 'off'
+  try {
+    const shown = await rerunFailingTest(3)
+    // What the model saw before its 2nd, 3rd and 4th calls: nothing after the first run, the note after the second.
+    expect(shown[1]).not.toContain('[elia world model]')
+    expect(shown[2]).toContain('[elia world model]')
+    expect(shown[2]).toContain('ran at step 1 with nothing in the tree changed since')
+    expect(shown[2]).toContain('FAIL src/a.test.ts')
+    expect(shown[3]).toContain('identical run 3')
+  } finally {
+    if (saved.world === undefined) delete process.env.ELIA_WORLD
+    else process.env.ELIA_WORLD = saved.world
+    if (saved.persist === undefined) delete process.env.ELIA_WORLD_PERSIST
+    else process.env.ELIA_WORLD_PERSIST = saved.persist
+  }
+})
+
+test('ELIA_WORLD=off removes the world model: the same run is told nothing', async () => {
+  const saved = { world: process.env.ELIA_WORLD, persist: process.env.ELIA_WORLD_PERSIST }
+  process.env.ELIA_WORLD = 'off'
+  process.env.ELIA_WORLD_PERSIST = 'off'
+  try {
+    const shown = await rerunFailingTest(3)
+    expect(shown.every((text) => !text.includes('[elia world model]'))).toBe(true)
+  } finally {
+    if (saved.world === undefined) delete process.env.ELIA_WORLD
+    else process.env.ELIA_WORLD = saved.world
+    if (saved.persist === undefined) delete process.env.ELIA_WORLD_PERSIST
+    else process.env.ELIA_WORLD_PERSIST = saved.persist
+  }
+})
