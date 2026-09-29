@@ -1549,6 +1549,25 @@ export async function runInteractive(): Promise<void> {
           if (uiHooks) uiHooks.onActivity?.({ kind: 'status', status: 'completed', title: line })
           else writeNotice(line)
         }
+
+        // Fire-and-forget: when enough certified lessons cluster on one topic,
+        // elia writes or revises its own instruction skill from them. Cheap
+        // clustering runs inline; the subagent draft (if any) runs in the
+        // background so it never delays the next prompt. See
+        // src/skills/instructionSkills.ts for the evidence and gating.
+        void (async () => {
+          try {
+            const { evolveInstructionSkills } = await import('../skills/instructionSkills.ts')
+            for (const line of await evolveInstructionSkills()) {
+              const notice = `✦ skill: ${line}`
+              sessionTranscript.notice(notice)
+              if (uiHooks) uiHooks.onActivity?.({ kind: 'status', status: 'completed', title: notice })
+              else writeNotice(notice)
+            }
+          } catch {
+            // Best effort, same as learning itself — never surfaces as a turn failure.
+          }
+        })()
       }
 
       taskSessions.update(task.id, { status: 'done', action: 'Finished', detail: 'Request completed and session saved' })
@@ -2491,7 +2510,7 @@ export async function runInteractive(): Promise<void> {
       const { loadInstalledSkills } = await import('../memory.ts')
       const guides = loadInstalledSkills(process.cwd())
       if (skills.length === 0 && guides.length === 0) return done('No loaded skills.')
-      if (skills.length === 0) return done(['Instruction skills (SKILL.md, read by elia when relevant):', ...guides.map((g) => `  ${g.name}  (${g.path})`)].join('\n'))
+      if (skills.length === 0) return done(['Instruction skills (SKILL.md, read by elia when relevant):', ...guides.map((g) => `  ${g.name}${g.eliaVersion ? ` [self-authored v${g.eliaVersion}]` : ''}  (${g.path})`)].join('\n'))
       return {
         handled: true,
         picker: {
@@ -2500,7 +2519,7 @@ export async function runInteractive(): Promise<void> {
           options: [
             { label: selectedSkillNames === undefined ? 'all loaded skills (current)' : 'all loaded skills', detail: 'every loaded skill available', value: '__all__' },
             ...skills.map((s) => ({ label: s.name, detail: `${s.source} · ${s.file}`, value: s.name })),
-            ...guides.map((g) => ({ label: g.name, detail: `instruction skill · ${g.path}`, value: `guide:${g.name}` })),
+            ...guides.map((g) => ({ label: g.name, detail: `${g.eliaVersion ? `self-authored v${g.eliaVersion}` : 'instruction skill'} · ${g.path}`, value: `guide:${g.name}` })),
           ],
           onSelect: (value) => {
             if (!value) return
@@ -2838,7 +2857,7 @@ export async function runInteractive(): Promise<void> {
       if (skills.length === 0 && guides.length === 0) return done('No skills loaded. Add a *.skill.ts file to .elia/skills, or find one with /marketplace.')
       return done([
         ...(skills.length ? ['Loaded skills:', ...skills.map((s) => `  ${s.name}  (${s.source} · ${s.file})`)] : []),
-        ...(guides.length ? ['Instruction skills (SKILL.md, read by elia when relevant):', ...guides.map((g) => `  ${g.name}  (${g.path})`)] : []),
+        ...(guides.length ? ['Instruction skills (SKILL.md, read by elia when relevant):', ...guides.map((g) => `  ${g.name}${g.eliaVersion ? ` [self-authored v${g.eliaVersion}]` : ''}  (${g.path})`)] : []),
       ].join('\n'))
     }
 

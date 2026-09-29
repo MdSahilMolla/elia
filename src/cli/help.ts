@@ -172,6 +172,9 @@ Learned tools:
   elia skills trust           Trust this project's .elia/skills so they load on startup
   elia skills untrust         Revoke a prior trust decision for this project
   elia skills status          Show whether this project's local skills are trusted
+  elia skills instructions    List SKILL.md instruction skills elia wrote for itself
+  elia skills instructions history <slug>    Why each version of a self-authored skill happened
+  elia skills instructions rollback <slug> <v>  Restore an archived version
 
 Time travel:
   elia runs                   List autonomous runs

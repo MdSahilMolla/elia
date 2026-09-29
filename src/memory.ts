@@ -31,7 +31,7 @@ function readMemoryFile(path: string): string | undefined {
   return content.length > 0 ? content : undefined
 }
 
-export interface InstalledSkill { name: string; description: string; path: string }
+export interface InstalledSkill { name: string; description: string; path: string; eliaVersion?: number }
 
 /** Where `npx skills` and other agents drop SKILL.md skills (project first, then home). */
 const SKILL_ROOTS = (dir: string): string[] => [
@@ -53,7 +53,11 @@ export function loadInstalledSkills(dir: string): InstalledSkill[] {
       const name = fm.match(/^name:\s*(.+)$/m)?.[1]?.trim() ?? entry
       const description = fm.match(/^description:\s*(?:>-?\s*\n((?:[ \t]+.*\n?)+)|(.+))/m)
       const desc = (description?.[1] ?? description?.[2] ?? '').replace(/\s+/g, ' ').trim()
-      if (!seen.has(name)) seen.set(name, { name, description: desc.slice(0, 400), path })
+      // A sibling `.meta.json` (written by src/skills/instructionSkills.ts) marks a
+      // skill elia wrote and revises itself, versus one a person installed.
+      const metaText = readMemoryFile(join(root, entry, '.meta.json'))
+      const eliaVersion = metaText ? (() => { try { return JSON.parse(metaText).version } catch { return undefined } })() : undefined
+      if (!seen.has(name)) seen.set(name, { name, description: desc.slice(0, 400), path, ...(typeof eliaVersion === 'number' ? { eliaVersion } : {}) })
     }
   }
   return [...seen.values()]

@@ -2270,6 +2270,18 @@ Read the shared blackboard with \`board_read\` to see what the workers actually 
   } else if (deterministic.length === 0) {
     writeSubStep('nothing durable worth keeping from this run')
   }
+
+  // Same bonus-never-a-blocker treatment as the lessons above: fire-and-forget
+  // so a slow subagent draft never holds this run's own completion hostage.
+  void (async () => {
+    try {
+      const { evolveInstructionSkills } = await import('../skills/instructionSkills.ts')
+      for (const line of await evolveInstructionSkills()) writeSubStep(`skill: ${line}`)
+    } catch {
+      // Best effort.
+    }
+  })()
+
   return [...deterministic, ...lessons]
 }
 
