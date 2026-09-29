@@ -12,7 +12,7 @@
  */
 
 import { existsSync } from 'node:fs'
-import { dirname, isAbsolute, join, resolve } from 'node:path'
+import { isAbsolute, join, resolve } from 'node:path'
 
 export type DatabaseEngine = 'postgres' | 'mysql' | 'sqlite' | 'unknown'
 
@@ -115,7 +115,15 @@ export function resolveSqliteUrl(url: string, root: string, exists: (path: strin
     : prisma ? [resolve(root, 'prisma', file), resolve(root, file)] : [resolve(root, file), resolve(root, 'prisma', file)]
   const found = candidates.find((candidate) => exists(candidate))
   if (found) return `sqlite://${found}`
-  const absoluteUsable = isAbsolute(file) && dirname(file) !== '/' && exists(dirname(file))
+  // A single leading segment is the SQLAlchemy spelling of a project-relative
+  // file (`sqlite:///dev.db`); more than one is a real absolute path. Deciding
+  // by segment count rather than by whether the parent directory happens to
+  // exist keeps the answer the same on every platform: testing the directory
+  // silently relocated `/etc/some.db` to `<project>/etc/some.db` on Windows,
+  // where `/etc` is absent, so an out-of-project database was classified
+  // local and a destructive query on it cleared as review instead of critical.
+  const segments = file.replace(/^[\\/]+/, '').split(/[\\/]/)
+  const absoluteUsable = isAbsolute(file) && segments.length > 1 && !segments[0]?.includes(':')
   return `sqlite://${absoluteUsable ? file : isAbsolute(file) ? candidates[1]! : candidates[0]!}`
 }
 
