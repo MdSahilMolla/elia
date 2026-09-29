@@ -32,6 +32,7 @@ import { clampOutput } from './shell.ts'
 import { boundToolResult } from './toolOutputBudget.ts'
 import { isRepoMutatingTool, withRepoLock } from './repoLock.ts'
 import { profilingEnabled, recordModelCall, recordToolCall } from './profile.ts'
+import { createWorld } from './world/runtime.ts'
 import { codexSubscriptionApprovedThisSession, markCodexSubscriptionApproved } from './providers/codexSubscription.ts'
 import { activeSessionTranscript } from './ui/transcript.ts'
 
@@ -428,6 +429,11 @@ async function runAgentLoopTracked(opts: RunAgentLoopOptions, inflight: Inflight
   // autonomy layer can retry it or hand off, instead of spending 80 model calls.
   let unproductiveStreak = 0
   const redundantReads = createRedundantReadTracker()
+  // What is true of the tree, kept by the runtime instead of remembered by the
+  // model, and a prediction before every action scored on its outcome
+  // (world/runtime.ts). Advisory: it never blocks a call, and says nothing unless
+  // it has something true the model may not be holding. ELIA_WORLD=off removes it.
+  const world = createWorld(currentAgent().cwd ?? process.cwd())
   const planlessWork = createPlanlessWorkTracker()
   // The list this loop runs under — the turn's, via withTodoList.
   const todoList = activeTodoList()
@@ -448,12 +454,15 @@ async function runAgentLoopTracked(opts: RunAgentLoopOptions, inflight: Inflight
     return text
   }
 
-  const finish = (stopReason: StopReason): RunAgentLoopResult => ({
-    usage: totalUsage,
-    steps,
-    stopReason,
-    cacheStats: cache?.stats(),
-  })
+  const finish = (stopReason: StopReason): RunAgentLoopResult => {
+    world?.save()
+    return {
+      usage: totalUsage,
+      steps,
+      stopReason,
+      cacheStats: cache?.stats(),
+    }
+  }
 
   // The history-shrinking archive is a model call of its own. Rather than stall
   // the first step of a turn on it (every turn, in a long `--continue` session),
@@ -488,6 +497,10 @@ async function runAgentLoopTracked(opts: RunAgentLoopOptions, inflight: Inflight
         if (onActivity) onActivity({ kind: 'status', status: 'completed', title: 'Compacted the earlier conversation to free context — it stays recallable' })
         else if (verbose) writeNotice('elia: earlier history compacted in the background')
         pendingCompaction = undefined
+        // What the compacted turns knew about the tree is the first thing to go;
+        // the runtime still holds it, so hand it back.
+        const worldState = world?.snapshot()
+        if (worldState) messages.push({ role: 'user', content: [{ type: 'text', text: worldState }] })
       } else if (pendingCompaction.settled) {
         pendingCompaction = undefined // archive failed or produced nothing — drop it
       }
@@ -567,6 +580,11 @@ async function runAgentLoopTracked(opts: RunAgentLoopOptions, inflight: Inflight
     // batch mixes reads and writes, the reads in it also bypass the cache, since
     // within a parallel batch there is no ordering guarantee between them.
     const batchMutates = toolUseBlocks.some((block) => !SPECULABLE_TOOLS.has(block.name))
+    // Every action is predicted before any of them runs, and scored afterwards.
+    // How long each call took, for what the world model learns about what a project's commands cost.
+    const durations: number[] = new Array<number>(toolUseBlocks.length).fill(0)
+    const worldCalls = toolUseBlocks.map((block) => ({ name: block.name, input: block.input, observation: isObservation({ name: block.name, input: block.input }) }))
+    world?.beforeBatch(worldCalls)
     if (batchMutates) cache?.invalidate()
     // The deterministic read cache tolerates elia's own edits (flushed per-path
     // below), but anything opaque in the batch — a shell command, a sub-agent —
@@ -769,6 +787,7 @@ async function runAgentLoopTracked(opts: RunAgentLoopOptions, inflight: Inflight
       }
 
       const durationMs = Date.now() - startedAt
+      durations[blockIndex] = cached ? 0 : durationMs
       if (verbose) writeToolResult(block.name, resultText, isError, cached)
       onTool?.({ id: block.id, name: block.name, input: block.input, result: resultText, isError, durationMs, cached, assessment, ungoverned: tool.ungoverned, actionId: reservation?.action.id, idempotencyKey: reservation?.action.idempotencyKey, replayed, failureClass })
       outcomes[blockIndex] = { name: block.name, input: block.input, result: resultText, isError }
@@ -792,6 +811,13 @@ async function runAgentLoopTracked(opts: RunAgentLoopOptions, inflight: Inflight
     if (batchMutates) cache?.invalidate()
 
     messages.push({ role: 'user', content: toolResults })
+
+    // What the batch did against what was predicted. Almost always nothing to say.
+    const worldNote = world?.afterBatch(worldCalls, outcomes, durations)
+    if (worldNote) {
+      messages.push({ role: 'user', content: [{ type: 'text', text: worldNote }] })
+      if (verbose) writeNotice('elia: world model told the model something about the state of the tree')
+    }
 
     if (finishAfterTool && outcomes.some((outcome) => outcome?.name === finishAfterTool && !outcome.isError)) {
       return finishAndFlush('complete')

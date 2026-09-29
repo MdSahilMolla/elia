@@ -1,6 +1,9 @@
 import { harnessById, harnessesFor } from './harness.ts'
 import type { Harness, VerifierKind } from './harness.ts'
-import { chooseHarness, libraryPath, readLibrary, recordOutcome } from './library.ts'
+import { dirname } from 'node:path'
+import { libraryPath, readLibrary, recordOutcome } from './library.ts'
+import { metaPath, planHarness, plannerEnabled, recordMeta, worldContext, type Plan, type WorldContext } from './plan.ts'
+import { readPriors } from '../world/runtime.ts'
 import { solve } from './select.ts'
 import type { AttemptRecord, Producer, SolveResult } from './select.ts'
 import { taskSignature, worthSearching } from './signature.ts'
@@ -51,6 +54,8 @@ export interface ReasonOptions {
   /** Overrides the library's pick. For `/reason wide`, and for tests. */
   forceHarnessId?: string
   libraryFile?: string
+  /** What the world model says about this project. Read from its record when absent; injected by tests. */
+  context?: WorldContext
   onAttempt?: (record: AttemptRecord) => void
   /** Each project check as an attempt queues, runs and lands it. */
   onCheck?: (event: { command: string; state: 'queued' | 'running' | 'passed' | 'failed' }) => void
@@ -64,6 +69,8 @@ export interface ReasonResult {
   harness?: Harness
   /** Why this harness — the library's own words, so its state is legible. */
   choice?: string
+  /** What the planner predicted before the search, and from what. */
+  plan?: Plan
   result?: SolveResult
   /**
    * One line for the user. Says plainly whether the answer was proved or merely
@@ -125,6 +132,22 @@ export async function resolveVerifier(options: {
   return { verifier: consensusVerifier(), degraded: kind !== 'consensus' }
 }
 
+/** Where the search paid off: the attempt that verified, when one did. */
+export function successOf(result: Pick<SolveResult, 'attempts' | 'best' | 'verified'>): { successAt?: number } {
+  if (!result.verified) return {}
+  const index = result.attempts.findIndex((record) => record.candidate === result.best)
+  return index >= 0 ? { successAt: index + 1 } : {}
+}
+
+/** The world model's flags for this project, or nothing when its record cannot be read. */
+function safeContext(): WorldContext | undefined {
+  try {
+    return worldContext(readPriors())
+  } catch {
+    return undefined
+  }
+}
+
 function receiptFor(options: { harness: Harness; result: SolveResult; degraded: boolean }): string {
   const { harness, result, degraded } = options
   const attempts = `${result.attempts.length} attempt${result.attempts.length === 1 ? '' : 's'}`
@@ -149,9 +172,18 @@ export async function reason(options: ReasonOptions): Promise<ReasonResult> {
 
   const file = options.libraryFile ?? libraryPath()
   const library = readLibrary(file)
+  // What the runtime world model has measured about this project. A record it cannot read is no reason not to search.
+  const context = options.context ?? safeContext()
+  const plan = planHarness({
+    signature: signature.key,
+    candidates: candidates.map((harness) => ({ id: harness.id, maxAttempts: harness.maxAttempts, ...(harness.subsetOf ? { subsetOf: harness.subsetOf } : {}) })),
+    library,
+    ...(context ? { context } : {}),
+    enabled: plannerEnabled(),
+  })
   const choice = options.forceHarnessId
     ? { harnessId: options.forceHarnessId, reason: `harness pinned to ${options.forceHarnessId}`, exploring: false }
-    : chooseHarness(signature.key, candidates.map((harness) => harness.id), library)
+    : { harnessId: plan.harnessId, reason: plan.reason, exploring: plan.exploring }
   const harness = harnessById(signature, choice.harnessId)!
 
   const { verifier, degraded } = await resolveVerifier({
@@ -167,7 +199,8 @@ export async function reason(options: ReasonOptions): Promise<ReasonResult> {
     approaches: harness.approaches,
     produce: options.produce,
     verifier,
-    budget: { attempts: harness.maxAttempts },
+    // The record can shorten a harness's budget where nothing past a point has ever paid, never lengthen it.
+    budget: { attempts: options.forceHarnessId ? harness.maxAttempts : Math.min(harness.maxAttempts, plan.maxAttempts ?? harness.maxAttempts) },
     width: harness.width,
     // A harness that wanted a real check and did not get one must still not be
     // allowed to call agreement proof — but it may stop on it, since spending
@@ -189,10 +222,14 @@ export async function reason(options: ReasonOptions): Promise<ReasonResult> {
         cost: result.cost,
         elapsedMs: result.elapsedMs,
         at: Date.now(),
+        ...successOf(result),
+        ...(context ? { context: context.flags } : {}),
       },
       file,
     )
+    // Scored against what the independent cells would have said, on this very run.
+    if (plan.prediction && !options.forceHarnessId) recordMeta(plan.prediction, result.verified, plan.differed ?? false, metaPath(dirname(file)))
   }
 
-  return { searched: true, signature, harness, choice: choice.reason, result, receipt: receiptFor({ harness, result, degraded }) }
+  return { searched: true, signature, harness, choice: choice.reason, plan, result, receipt: receiptFor({ harness, result, degraded }) }
 }

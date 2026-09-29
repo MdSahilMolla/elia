@@ -1,3 +1,4 @@
+import { spawnSync } from 'node:child_process'
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { ELIA_ROOT } from '../config.ts'
@@ -95,6 +96,15 @@ export interface GenerationRecord {
   /** Set when an unattended run committed its promotion to a branch instead of the live tree. */
   branch?: string
   commit?: string
+  /**
+   * Set when an earlier generation in the same process promoted a change to the
+   * improver itself (recursion.ts IMPROVER_SHARED), so this generation's
+   * proposer and builder ran on the code the process loaded at start, not on
+   * that change. The value is the promoting generation. The verdict is still a
+   * verdict on this generation's idea; it just says nothing about whether the
+   * promoted improver works, so the recursion signal leaves it out.
+   */
+  staleImprover?: number
   /** The search strategy that steered the proposal; absent on records from before strategies were state. */
   strategyId?: string
   /**
@@ -135,6 +145,41 @@ export interface GenerationRecord {
   }
   /** Content hash of the changed files the verdict was about (isolation requirement I3). */
   diffDigest?: string
+  /**
+   * Tokens this generation spent reaching its verdict: the proposer and the
+   * builder, the race, and the confirmation pair. What the daily budget
+   * (budget.ts) adds up. Absent on older records, where `evidenceCost.tokens`
+   * — the race alone — stands in.
+   */
+  costTokens?: number
+  /**
+   * What the world model said before anything was measured (world/twin.ts),
+   * and what the measurement then showed. `receipt` is the hash of the
+   * committed prediction in the receipt ledger.
+   */
+  twin?: {
+    surface: string
+    decision: 'proceed' | 'skip'
+    reason: string
+    /** Predicted log token ratio, candidate over baseline, and its sd. */
+    predicted: { mean: number; sd: number }
+    winProbability: number
+    /** Measured log token ratio, once one exists. */
+    actual?: number
+    receipt?: string
+  }
+  /**
+   * What stood behind a promotion beyond the score: the code review, the new
+   * test that fails without the change, and what contained the gate. Written
+   * only on promotions, so a promoted change carries its own evidence.
+   */
+  proof?: {
+    review: string[]
+    failToPass: string
+    contained: string
+  }
+  /** Set when an unattended run's branch promotion was fast-forwarded into the live tree (landing.ts). */
+  landed?: { previousHead: string; at: number }
 }
 
 export interface EvidenceCost {
@@ -249,6 +294,23 @@ export function judgedRecords<T extends Pick<GenerationRecord, 'verdict' | 'reas
 }
 
 /**
+ * Whether a promotion is in the tree the next generation starts from.
+ *
+ * A live promotion is copied into the source, so it is. A branch promotion
+ * (`evolve --branch`, and every unattended run) is only a commit on its own
+ * `evolve/gen-N-…` branch until someone merges it: the live tree, and so every
+ * later candidate's sandbox, does not have it. Judged by whether the commit is
+ * an ancestor of HEAD, so a merge counts and a squash merge does not (it
+ * under-claims rather than over-claims).
+ */
+export function landedOnLive(record: Pick<GenerationRecord, 'branch' | 'commit'>, liveRoot = ELIA_ROOT): boolean {
+  if (!record.branch) return true
+  if (!record.commit) return false
+  const result = spawnSync('git', ['-C', liveRoot, 'merge-base', '--is-ancestor', record.commit, 'HEAD'], { stdio: 'ignore', windowsHide: true })
+  return result.status === 0
+}
+
+/**
  * The ledger as the hypothesiser needs to see it: what has been promoted (so it
  * builds on it), what has been judged and rejected and why (so it stops
  * re-proposing it), and what was tried but never judged (so it is not
@@ -259,21 +321,29 @@ export function renderLedgerForPrompt(path = LEDGER_PATH): string {
   if (records.length === 0) return 'No previous generations — this is the first attempt.'
 
   const promoted = records.filter((record) => record.verdict === 'promoted')
+  const inSource = promoted.filter((record) => landedOnLive(record))
+  const onBranch = promoted.filter((record) => !inSource.includes(record))
   const rejected = records.filter((record) => judgementOf(record).judgement === 'rejected')
   const unjudged = records.filter((record) => judgementOf(record).judgement === 'not-judged')
 
   const sections: string[] = []
 
+  const promotedLine = (record: GenerationRecord) =>
+    `- gen ${record.generation}: ${record.hypothesis} → pass rate ${formatRate(record.baseline?.passRate)} to ${formatRate(record.candidate?.passRate)} (${record.changedFiles.join(', ') || 'no files recorded'})`
+
   sections.push(
-    promoted.length > 0
-      ? `### Already promoted (these changes are IN the current source — build on them, do not redo them)\n${promoted
-          .map(
-            (record) =>
-              `- gen ${record.generation}: ${record.hypothesis} → pass rate ${formatRate(record.baseline?.passRate)} to ${formatRate(record.candidate?.passRate)} (${record.changedFiles.join(', ') || 'no files recorded'})`,
-          )
-          .join('\n')}`
+    inSource.length > 0
+      ? `### Already promoted (these changes are IN the current source — build on them, do not redo them)\n${inSource.map(promotedLine).join('\n')}`
       : '### Already promoted\n(nothing yet)',
   )
+
+  if (onBranch.length > 0) {
+    sections.push(
+      `### Proven, but not in your source (each is a commit on a branch nobody has merged — do not redo these, and do not build on them: the files you read are as they were without them)\n${onBranch
+        .map((record) => `${promotedLine(record)} on ${record.branch}`)
+        .join('\n')}`,
+    )
+  }
 
   sections.push(
     rejected.length > 0

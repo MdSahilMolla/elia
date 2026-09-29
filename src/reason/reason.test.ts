@@ -129,8 +129,46 @@ test('the library steers the second run of the same shape', async () => {
   })
 
   expect(outcome.harness?.id).toBe('deep')
-  expect(outcome.choice).toContain('verified 5/5')
+  // The planner's words: a rate, a bound, what it cost, and what the estimate stands on.
+  expect(outcome.choice).toContain('verified for repair/unchecked/single')
+  expect(outcome.choice).toContain('from 5 related run(s)')
+  expect(outcome.plan?.prediction?.harnessId).toBe('deep')
   expect(calls).toBeGreaterThan(0)
+})
+
+test('with the planner off the library speaks and chooses as it always did', async () => {
+  const request = 'fix the failing test in src/parser.ts'
+  for (let run = 0; run < 5; run += 1) {
+    await reason({ request, checks: {}, produce: producerThatNeeds('from-the-failure'), synthesizeProbe: probeFor('right'), forceHarnessId: 'deep', libraryFile: file })
+  }
+  const saved = process.env.ELIA_META_WORLD
+  process.env.ELIA_META_WORLD = 'off'
+  try {
+    const outcome = await reason({ request, checks: {}, produce: producerThatNeeds('from-the-failure'), synthesizeProbe: probeFor('right'), libraryFile: file })
+    expect(outcome.harness?.id).toBe('deep')
+    expect(outcome.choice).toContain('verified 5/5')
+    expect(outcome.plan?.prediction).toBeUndefined()
+  } finally {
+    if (saved === undefined) delete process.env.ELIA_META_WORLD
+    else process.env.ELIA_META_WORLD = saved
+  }
+})
+
+test('every search records where it paid off and what the world looked like, and scores its own plan', async () => {
+  const request = 'fix the failing test in src/parser.ts'
+  const { readMeta, metaPath } = await import('./plan.ts')
+  const { dirname } = await import('node:path')
+  const context = { flags: { slow: false, flaky: true, cold: false, unsteady: false }, modelled: 300 }
+  for (let run = 0; run < 3; run += 1) {
+    await reason({ request, checks: {}, produce: producerThatNeeds('from-the-failure'), synthesizeProbe: probeFor('right'), libraryFile: file, context })
+  }
+  const library = readLibrary(file)
+  // The measuring pass rotates through the harnesses, so three runs land on three of them.
+  for (const record of library.records) expect(record.successAt?.reduce((a, b) => a + b, 0) ?? 0).toBe(record.verifiedRuns)
+  const flaky = Object.values(library.flags ?? {}).reduce((total, table) => total + (table.flaky?.on.runs ?? 0), 0)
+  expect(flaky).toBe(3)
+  // Each plan was scored on its own outcome.
+  expect(readMeta(metaPath(dirname(file))).n).toBe(3)
 })
 
 test('an aborted search is not recorded — it is the user changing their mind, not evidence', async () => {

@@ -388,7 +388,9 @@ export function retryDelayMs(outcome: Pick<TaskOutcome, 'error' | 'steps'>, atte
  * never a different one.
  */
 export function benchTaskEnv(env: Record<string, string | undefined>, reachOut: string, traceOut?: string): Record<string, string | undefined> {
-  return { ...env, [REACH_OUT_ENV]: reachOut, ...(traceOut ? { [TRACE_OUT_ENV]: traceOut } : {}), ELIA_ROUTING_MODE: 'selected' }
+  // A task's temporary repository is not a project: the world model runs there as
+  // shipped, but must not leave files behind that a task's own checks might see.
+  return { ...env, [REACH_OUT_ENV]: reachOut, ...(traceOut ? { [TRACE_OUT_ENV]: traceOut } : {}), ELIA_ROUTING_MODE: 'selected', ELIA_WORLD_PERSIST: 'off' }
 }
 
 /** A task given more than the default step budget: the history tasks, each sending hundreds of thousands of tokens. */

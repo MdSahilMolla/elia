@@ -1,7 +1,7 @@
 import { existsSync, readdirSync } from 'node:fs'
 import { dirname } from 'node:path'
-import type { GenerationRecord } from '../evolve/ledger.ts'
-import { funnelScore, readStrategyTrial, strategyPaths } from '../evolve/strategy.ts'
+import { judgedRecords, landedOnLive, type GenerationRecord } from '../evolve/ledger.ts'
+import { ADOPT_MARGIN, funnelScore, readStrategyTrial, strategyPaths } from '../evolve/strategy.ts'
 
 /**
  * Is improvement compounding — do gains make the next gain easier to get?
@@ -12,6 +12,14 @@ import { funnelScore, readStrategyTrial, strategyPaths } from '../evolve/strateg
  * change to the improver. And the improver's search strategy is itself trialled
  * and replaced (evolve/strategy.ts). This reads the ledger for the evidence that
  * those channels actually paid off.
+ *
+ * Three things would make that evidence up, and each is excluded here. A
+ * generation the provider cut short says nothing about how deep the search
+ * went, so only judged generations are compared. A promotion committed to a
+ * branch nobody merged is not in the tree later generations start from, so it
+ * cannot have made them better. And a generation that ran on improver code
+ * older than a promotion in its own process (`staleImprover`) is a sample of
+ * the old improver, not the new one.
  */
 
 /** Files the improver runs on: a promotion here changes how later generations propose and build. */
@@ -41,12 +49,15 @@ const EFFECT_WINDOW = 5
 export interface ImproverEffect {
   generation: number
   before: number
+  beforeGenerations: number
   after: number
   afterGenerations: number
 }
 
 export interface RecursionSignal {
   promotions: number
+  /** Promotions committed to a branch nobody has merged: proven, but not in the tree later generations start from. */
+  awaitingMerge: number
   /** Promotions that stood on an earlier promotion — the live tree already carried a win. */
   stacked: number
   /** Promotions that changed what the improver itself runs on, with the search depth either side. */
@@ -61,38 +72,63 @@ function meanDepth(records: GenerationRecord[]): number {
   return records.length === 0 ? 0 : records.reduce((sum, record) => sum + funnelScore(record), 0) / records.length
 }
 
-export function recursionSignal(records: GenerationRecord[], paths = strategyPaths()): RecursionSignal {
-  const ordered = [...records].sort((a, b) => a.generation - b.generation)
+export function recursionSignal(records: GenerationRecord[], paths = strategyPaths(), landed: (record: GenerationRecord) => boolean = landedOnLive): RecursionSignal {
+  const ordered = judgedRecords(records).sort((a, b) => a.generation - b.generation)
   const promoted = ordered.filter((record) => record.verdict === 'promoted')
+  const standing = promoted.filter((record) => landed(record))
+  // Search depth is only comparable across generations that ran on the improver
+  // in force when they started.
+  const clean = ordered.filter((record) => record.staleImprover === undefined)
 
   const improverEffects: ImproverEffect[] = []
-  for (const record of promoted) {
+  for (const record of standing) {
     if (!touchesImprover(record.changedFiles)) continue
-    const index = ordered.indexOf(record)
-    const before = ordered.slice(Math.max(0, index - EFFECT_WINDOW), index)
-    const after = ordered.slice(index + 1, index + 1 + EFFECT_WINDOW)
-    improverEffects.push({ generation: record.generation, before: meanDepth(before), after: meanDepth(after), afterGenerations: after.length })
+    const before = clean.filter((other) => other.generation < record.generation).slice(-EFFECT_WINDOW)
+    const after = clean.filter((other) => other.generation > record.generation).slice(0, EFFECT_WINDOW)
+    improverEffects.push({
+      generation: record.generation,
+      before: meanDepth(before),
+      beforeGenerations: before.length,
+      after: meanDepth(after),
+      afterGenerations: after.length,
+    })
   }
 
   const archiveDir = dirname(paths.challenger)
   const strategiesAdopted = existsSync(archiveDir) ? readdirSync(archiveDir).filter((file) => file.includes('.adopted-')).length : 0
 
-  const improverHelped = improverEffects.some((effect) => effect.afterGenerations >= EFFECT_WINDOW && effect.after > effect.before)
+  // A full window on both sides and the same margin a search strategy has to
+  // clear to be adopted: a mean over an empty or one-sided window is not a
+  // comparison, and a few hundredths of a step is noise.
+  const improverHelped = improverEffects.some(
+    (effect) => effect.beforeGenerations >= EFFECT_WINDOW && effect.afterGenerations >= EFFECT_WINDOW && effect.after >= effect.before + ADOPT_MARGIN,
+  )
   return {
     promotions: promoted.length,
-    stacked: Math.max(0, promoted.length - 1),
+    awaitingMerge: promoted.length - standing.length,
+    stacked: Math.max(0, standing.length - 1),
     improverEffects,
     strategiesAdopted,
     trial: readStrategyTrial(ordered, paths).verdict,
-    compounding: promoted.length >= 2 && (improverHelped || strategiesAdopted > 0),
+    compounding: standing.length >= 2 && (improverHelped || strategiesAdopted > 0),
   }
 }
 
 export function renderRecursion(signal: RecursionSignal): string {
+  const settling = (effect: ImproverEffect) =>
+    [
+      effect.beforeGenerations < EFFECT_WINDOW ? `${effect.beforeGenerations}/${EFFECT_WINDOW} judged gens before` : '',
+      effect.afterGenerations < EFFECT_WINDOW ? `${effect.afterGenerations}/${EFFECT_WINDOW} after` : '',
+    ].filter(Boolean)
   const effects = signal.improverEffects.length === 0
     ? 'no promotion has changed the improver yet'
     : signal.improverEffects
-        .map((effect) => `gen ${effect.generation}: search depth ${effect.before.toFixed(2)} → ${effect.after.toFixed(2)}${effect.afterGenerations < EFFECT_WINDOW ? ` (${effect.afterGenerations}/${EFFECT_WINDOW} gens after, still settling)` : ''}`)
+        .map((effect) => {
+          const pending = settling(effect)
+          const before = effect.beforeGenerations === 0 ? 'no earlier search to compare' : effect.before.toFixed(2)
+          return `gen ${effect.generation}: search depth ${before} → ${effect.after.toFixed(2)}${pending.length > 0 ? ` (${pending.join(', ')}; still settling)` : ''}`
+        })
         .join('; ')
-  return `${signal.promotions} promotion(s), ${signal.stacked} stacked on an earlier win · ${effects} · ${signal.strategiesAdopted} search strateg${signal.strategiesAdopted === 1 ? 'y' : 'ies'} adopted, trial: ${signal.trial}`
+  const unmerged = signal.awaitingMerge > 0 ? ` · ${signal.awaitingMerge} proven on a branch nobody has merged, not counted` : ''
+  return `${signal.promotions} promotion(s), ${signal.stacked} stacked on an earlier win${unmerged} · ${effects} · ${signal.strategiesAdopted} search strateg${signal.strategiesAdopted === 1 ? 'y' : 'ies'} adopted, trial: ${signal.trial}`
 }

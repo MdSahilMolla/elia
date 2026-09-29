@@ -598,10 +598,10 @@ test('with the search on, a wrong-approach stall on a red build is handed to it,
   const run = await runRedBuild(true)
   const notes = run.notes.join('\n')
 
-  expect(notes).toContain('repair search (duo)')
-  expect(notes).toContain('none of 2 attempt(s) passed the checks — continuing with the linear repair')
-  // Two attempts were opened (each is a worker whose task is the repair brief)…
-  expect(run.prompts.filter((prompt) => prompt.includes('## Your task\n## What went wrong')).length).toBe(2)
+  expect(notes).toContain('repair search (trio)')
+  expect(notes).toContain('none of 3 attempt(s) passed the checks — continuing with the linear repair')
+  // Three attempts were opened, the planner's opening shape (each is a worker whose task is the repair brief)…
+  expect(run.prompts.filter((prompt) => prompt.includes('## Your task\n## What went wrong')).length).toBe(3)
   // …and the linear repair that follows a search that found nothing did run.
   expect(run.prompts.filter((prompt) => prompt.includes('## Approach for this attempt')).length).toBeGreaterThanOrEqual(2)
   // Every attempt's checkout was torn down: only the project's own remains.
@@ -611,6 +611,6 @@ test('with the search on, a wrong-approach stall on a red build is handed to it,
   // The outcome is filed under the stalled key, in the run's own state
   // directory — not in a developer's real library.
   const [record] = readLibrary(join(paths.state, 'reason', 'library.json')).records
-  expect(record).toMatchObject({ harnessId: 'duo', runs: 1, verifiedRuns: 0 })
+  expect(record).toMatchObject({ harnessId: 'trio', runs: 1, verifiedRuns: 0 })
   expect(record?.signature.startsWith('stalled-repair/')).toBe(true)
 }, 120_000)

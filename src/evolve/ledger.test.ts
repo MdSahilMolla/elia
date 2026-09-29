@@ -148,3 +148,28 @@ test('generations the provider cut short are not a stall', () => {
   const cut = (n: number) => ({ ...gen(n, 'rejected', 0.9, 0.9), reason: 'could not measure hist-x — refusing to compare an incomplete benchmark' })
   expect(learningRate([cut(1), cut(2), cut(3), cut(4), cut(5)]).trend).toBe('unknown')
 })
+
+test('a promotion sitting on an unmerged branch is not presented as part of the source', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'elia-ledger-branch-'))
+  const path = join(dir, 'ledger.jsonl')
+  try {
+    const head = Bun.spawnSync(['git', 'rev-parse', 'HEAD']).stdout.toString().trim()
+    const records = [
+      { ...gen(3, 'promoted', 0.9, 0.95), hypothesis: 'live promotion' },
+      { ...gen(4, 'promoted', 0.9, 0.95), hypothesis: 'unmerged branch promotion', branch: 'evolve/gen-4-2026-09-24', commit: '0000000000000000000000000000000000000000' },
+      { ...gen(5, 'promoted', 0.9, 0.95), hypothesis: 'merged branch promotion', branch: 'evolve/gen-5-2026-09-24', commit: head },
+    ]
+    writeFileSync(path, records.map((r) => JSON.stringify(r)).join('\n') + '\n')
+    const rendered = renderLedgerForPrompt(path)
+    const inSource = rendered.slice(rendered.indexOf('### Already promoted'), rendered.indexOf('### Proven, but not in your source'))
+    const notInSource = rendered.slice(rendered.indexOf('### Proven, but not in your source'), rendered.indexOf('### Tried and rejected'))
+    expect(inSource).toContain('gen 3: live promotion')
+    expect(inSource).toContain('gen 5: merged branch promotion')
+    expect(inSource).not.toContain('gen 4')
+    expect(notInSource).toContain('gen 4: unmerged branch promotion')
+    expect(notInSource).toContain('on evolve/gen-4-2026-09-24')
+    expect(notInSource).not.toContain('gen 3')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})

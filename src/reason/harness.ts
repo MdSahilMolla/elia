@@ -44,6 +44,13 @@ export interface Harness {
   allowUnverifiedStop: boolean
   /** Per-attempt deliberation, for providers with an effort knob. */
   effort: 'instant' | 'low' | 'medium' | 'high'
+  /**
+   * The harness whose attempts include all of this one's: same approaches in the
+   * same order, same effort, and no more of them. Whatever this one verifies, that
+   * one verifies too, so it can never do worse — a fact about how the two are built
+   * that the planner uses instead of having to learn it (plan.ts).
+   */
+  subsetOf?: string
 }
 
 /**
@@ -206,6 +213,8 @@ export function harnessesFor(signature: TaskSignature): Harness[] {
     verifier,
     allowUnverifiedStop,
     effort: 'medium',
+    // `wide` opens with the same first approach at the same effort, so it verifies whenever this does.
+    subsetOf: 'wide',
   }
   const wide: Harness = {
     id: 'wide',

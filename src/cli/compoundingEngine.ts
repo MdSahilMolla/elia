@@ -7,16 +7,22 @@
  *   elia compounding round [--spend]   run the resource governor's top activity (Algorithm 1, one round)
  *   elia compounding simulate          the paper's §11 simulations, plus the control §11.4 lacked
  *   elia compounding predict           P1–P8 and Conjecture 1, with elia's evidence on each
+ *   elia compounding world             the world model: predictions, calibration, what it saved
+ *   elia compounding world predict     what your uncommitted edits would do, priced without a model
+ *   elia compounding world simulate    the reasoning planner against the library it replaces, on simulated task streams
  *
  * `frontier`, `simulate` and `predict` are read-only. `round` acts — it may
  * audit the lessons, measure the verifier ladder or prove new benchmark tasks —
  * but without `--spend` it runs nothing that calls a model.
  */
+import { spawnSync } from 'node:child_process'
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs'
+import { join } from 'node:path'
 import { writeNotice, writeUsageLine } from '../ui/stream.ts'
 import { emitEvent, machineReadable } from '../ui/runtime.ts'
-import { flagValue, hasFlag, strictInteger } from './argv.ts'
+import { flagValue, hasFlag, positionals, strictInteger } from './argv.ts'
 
-export const COMPOUNDING_ACTIONS = ['frontier', 'round', 'simulate', 'predict'] as const
+export const COMPOUNDING_ACTIONS = ['frontier', 'round', 'simulate', 'predict', 'world'] as const
 
 /** Runs one of `COMPOUNDING_ACTIONS`. False when `action` is not one of them. */
 export async function runCompoundingAction(action: string): Promise<boolean> {
@@ -24,6 +30,7 @@ export async function runCompoundingAction(action: string): Promise<boolean> {
   else if (action === 'round') await round()
   else if (action === 'simulate') await simulate()
   else if (action === 'predict') await predict()
+  else if (action === 'world') await world()
   else return false
   return true
 }
@@ -153,4 +160,98 @@ async function predict(): Promise<void> {
   const list = predictions({ ledger: readLedger(), library: readLibrary(), growth: growthReport(readExposures(paths.lessonsEfficacy)), closure: readClosureLog() })
   if (machineReadable) emitEvent('compounding_predictions', { predictions: list })
   else writeUsageLine(renderPredictions(list))
+}
+
+/** Repo-relative paths git says differ from `base`, plus files it does not track yet. */
+function changedSince(root: string, base: string): string[] {
+  const run = (args: string[]) => spawnSync('git', ['-C', root, ...args], { encoding: 'utf8', windowsHide: true }).stdout.split('\n').filter(Boolean)
+  return [...new Set([...run(['diff', '--name-only', base]), ...run(['ls-files', '--others', '--exclude-standard'])])].filter((path) => !path.startsWith('.evolution/'))
+}
+
+async function world(): Promise<void> {
+  const { readReceipts } = await import('../world/kernel.ts')
+  const { readLedger } = await import('../evolve/ledger.ts')
+  const { renderWorld, worldStatus } = await import('../world/status.ts')
+  const status = worldStatus(readReceipts(), readLedger())
+  // `elia compounding world predict` and `elia world predict`: the subcommand is not a positional in the second.
+  const args = positionals()
+  const sub = args[0] === 'world' ? args[1] : args[0]
+  if (sub === 'simulate') {
+    await simulateReasoning()
+    return
+  }
+  if (sub !== 'predict') {
+    if (machineReadable) emitEvent('world_status', { ...status })
+    else writeUsageLine(renderWorld(status))
+    return
+  }
+
+  // What would these uncommitted edits do to what every call costs? Priced the
+  // way a candidate is: the base revision is exported, both trees are probed,
+  // and nothing calls a model.
+  const base = flagValue('--base') ?? 'HEAD'
+  if (!/^[\w./~^@{}-]+$/.test(base)) {
+    writeNotice('--base must be a git revision such as HEAD or origin/production.')
+    process.exitCode = 1
+    return
+  }
+  const { ELIA_ROOT } = await import('../config.ts')
+  const { assess, describeScreen } = await import('../world/index.ts')
+  const changed = changedSince(ELIA_ROOT, base)
+  if (changed.length === 0) {
+    writeNotice(`nothing differs from ${base}.`)
+    return
+  }
+  const scratch = mkdtempSync(join(ELIA_ROOT, '.evolution', 'world-base-'))
+  try {
+    // argv, not a shell string: the revision is untrusted input.
+    const exported = spawnSync('sh', ['-c', 'git -C "$1" archive "$2" | tar -x -C "$3"', 'sh', ELIA_ROOT, base, scratch], { encoding: 'utf8' })
+    if (exported.status !== 0) {
+      writeNotice(`could not export ${base}: ${exported.stderr.trim().split('\n')[0]}`)
+      process.exitCode = 1
+      return
+    }
+    // The probe is an instrument, not part of what is measured: a base revision
+    // from before it existed is read with the current one, as both trees must be.
+    const probe = join('src', 'world', 'probe.ts')
+    if (!existsSync(join(scratch, probe))) {
+      mkdirSync(join(scratch, 'src', 'world'), { recursive: true })
+      copyFileSync(join(ELIA_ROOT, probe), join(scratch, probe))
+    }
+    // The last measured baseline stands in for the suite: what is being asked is a fraction of what it spends.
+    const record = [...readLedger()].reverse().find((row) => row.baseline?.steps)
+    const rows = record?.baseline?.steps
+      ? Object.entries(record.baseline.steps).map(([taskId, steps]) => ({ taskId, steps, attempts: 3, totalTokens: record.baseline!.totalTokens / Math.max(1, Object.keys(record.baseline!.steps!).length) }))
+      : []
+    const { calibrate, readReceipts: read } = await import('../world/kernel.ts')
+    const screen = await assess({ liveRoot: scratch, candidateRoot: ELIA_ROOT, changed, baseline: rows, calibration: calibrate(read()), failingReachable: hasFlag('--fixes-failing') })
+    const files = changed.length <= 12 ? changed.join(', ') : `${changed.slice(0, 12).join(', ')} and ${changed.length - 12} more`
+    writeUsageLine([`${changed.length} file(s) differ from ${base}: ${files}`, describeScreen(screen), rows.length === 0 ? '(no measured baseline yet, so no token forecast: run `elia bench --all`)' : ''].filter(Boolean).join('\n'))
+  } finally {
+    rmSync(scratch, { recursive: true, force: true })
+  }
+}
+
+/**
+ * The reasoning planner against the library it replaces, where the true odds are
+ * known. The control world is printed with the structured one on purpose: a
+ * comparison shown only where the method's assumptions hold would be a
+ * demonstration.
+ */
+async function simulateReasoning(): Promise<void> {
+  const { compare, renderComparison } = await import('../reason/metaSim.ts')
+  const seeds = strictInteger(flagValue('--seeds') ?? '30') ?? 30
+  const tasks = strictInteger(flagValue('--tasks') ?? '100') ?? 100
+  const worlds = ['structured', 'null', 'dead-tail'] as const
+  const out = worlds.map((world) => {
+    const result = compare({ world, seeds, tasks, policies: ['library', 'planner', 'single', 'wide', 'deep', 'oracle'] })
+    return renderComparison(result)
+  })
+  out.push(
+    '',
+    'Read it as: the planner verifies more often, starting with the first fifty searches, at about the same tokens per verified fix. It is learning speed, so the lead narrows as the library catches up (--tasks 1000).',
+    'The control world has no structure to exploit and the lead is the same, so it comes from the cold start and less exploring, not from the world. The oracle knows the true odds and is the ceiling.',
+    'This is a simulation of the search mechanics in select.ts with the odds made up, not a measurement of elia. `elia world` scores the planner on real searches as they happen.',
+  )
+  writeUsageLine(out.join('\n\n'))
 }

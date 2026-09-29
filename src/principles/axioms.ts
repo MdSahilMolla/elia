@@ -110,7 +110,7 @@ export const AXIOMS: readonly Axiom[] = [
       'Three successes in three tries and nineteen in twenty have similar means and very different reliability. Deciding on the mean rewards luck; deciding on a lower confidence bound rewards evidence.',
     so: 'Measured choices — which reasoning harness to use, which lesson to keep — rank by the lower bound of a confidence interval and need a minimum number of observations before they override the default.',
     inPractice: 'Say how sure you are and why. One case that worked does not show it always works.',
-    enforcedBy: ['src/reason/library.ts#chooseHarness', 'src/reason/library.ts#successLowerBound'],
+    enforcedBy: ['src/reason/library.ts#chooseHarness', 'src/reason/library.ts#successLowerBound', 'src/reason/plan.ts#planHarness'],
   },
   {
     id: 'judge-is-not-judged',

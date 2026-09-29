@@ -1,4 +1,4 @@
-import { join, relative } from 'node:path'
+import { dirname, join, relative } from 'node:path'
 import { config } from '../config.ts'
 import { paths } from '../statePaths.ts'
 import { spendState } from '../spendLimit.ts'
@@ -14,7 +14,10 @@ import { isSensitivePath } from './sensitivePaths.ts'
 import { describeVerification, runVerification, type VerificationOutcome } from './verify.ts'
 import { isolatedSearch, type AttemptRunner } from '../reason/attempt.ts'
 import { APPROACHES_BY_CLASS, type Harness } from '../reason/harness.ts'
-import { chooseHarness, libraryPath, readLibrary, recordOutcome } from '../reason/library.ts'
+import { libraryPath, readLibrary, recordOutcome } from '../reason/library.ts'
+import { metaPath, planHarness, plannerEnabled, recordMeta, worldContext, type WorldContext } from '../reason/plan.ts'
+import { successOf } from '../reason/reason.ts'
+import { readPriors } from '../world/runtime.ts'
 import { solve } from '../reason/select.ts'
 import { signatureKey, type TaskFeatures, type TaskSignature } from '../reason/signature.ts'
 import type { Verdict, Verifier } from '../reason/verify.ts'
@@ -106,7 +109,7 @@ export function stalledRepairHarnesses(spent: number): Harness[] {
   if (pool.length === 0) return []
   const offset = ((Math.max(0, Math.floor(spent)) % pool.length) + pool.length) % pool.length
   const approaches = [...pool.slice(offset), ...pool.slice(0, offset)]
-  const shape = (id: string, width: number): Harness => ({
+  const shape = (id: string, width: number, subsetOf?: string): Harness => ({
     id,
     width,
     maxAttempts: width,
@@ -114,8 +117,10 @@ export function stalledRepairHarnesses(spent: number): Harness[] {
     verifier: 'project-tests',
     allowUnverifiedStop: false,
     effort: 'medium',
+    ...(subsetOf ? { subsetOf } : {}),
   })
-  return [shape('duo', Math.min(2, approaches.length)), shape('trio', Math.min(3, approaches.length))]
+  // Two lines of attack are the first two of the three: the trio verifies whenever the duo does.
+  return [shape('duo', Math.min(2, approaches.length), 'trio'), shape('trio', Math.min(3, approaches.length))]
 }
 
 export interface StalledRepairInput {
@@ -213,7 +218,19 @@ export async function runStalledRepairSearch(input: StalledRepairInput): Promise
   // `stateDir` constant, which the test preload does not redirect, so a run
   // driven by a test would file its outcome in the developer's real library.
   const file = input.libraryFile ?? libraryPath(join(paths.state, 'reason'))
-  const choice = chooseHarness(signature.key, harnesses.map((candidate) => candidate.id), readLibrary(file))
+  let context: WorldContext | undefined
+  try {
+    context = worldContext(readPriors())
+  } catch {
+    // A world record that cannot be read is no reason not to repair.
+  }
+  const choice = planHarness({
+    signature: signature.key,
+    candidates: harnesses.map((candidate) => ({ id: candidate.id, maxAttempts: candidate.maxAttempts, ...(candidate.subsetOf ? { subsetOf: candidate.subsetOf } : {}) })),
+    library: readLibrary(file),
+    ...(context ? { context } : {}),
+    enabled: plannerEnabled(),
+  })
   const harness = harnesses.find((candidate) => candidate.id === choice.harnessId) ?? harnesses[0]!
   say(`repair search (${harness.id}): ${choice.reason}`)
 
@@ -305,7 +322,7 @@ export async function runStalledRepairSearch(input: StalledRepairInput): Promise
             approaches: harness.approaches,
             produce: search.produce,
             verifier,
-            budget: { attempts: harness.maxAttempts },
+            budget: { attempts: Math.min(harness.maxAttempts, choice.maxAttempts ?? harness.maxAttempts) },
             width: harness.width,
             signal: input.signal,
           }),
@@ -325,9 +342,12 @@ export async function runStalledRepairSearch(input: StalledRepairInput): Promise
           cost: tokensSpent,
           elapsedMs: result.elapsedMs,
           at: Date.now(),
+          ...successOf(result),
+          ...(context ? { context: context.flags } : {}),
         },
         file,
       )
+      if (choice.prediction) recordMeta(choice.prediction, result.verified, choice.differed ?? false, metaPath(dirname(file)))
     }
     if (!result.verified || !result.best) {
       say(`repair search: none of ${attemptsRun} attempt(s) passed the checks — continuing with the linear repair`)

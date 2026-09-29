@@ -236,8 +236,13 @@ export async function solve(options: SolveOptions): Promise<SolveResult> {
     const all = [...attempts.map((record) => record.candidate), ...produced]
     const verifier: Verifier = typeof options.verifier === 'function' ? options.verifier(all) : options.verifier
 
+    // A round's candidates run at once, so all of them were paid for whichever
+    // one passes: counting only up to the winner made a wide search that won on
+    // its first candidate look as cheap as a single attempt, and the library
+    // priced harnesses on that.
+    cost += produced.reduce((total, candidate) => total + (candidate.cost ?? 0), 0)
+
     for (const candidate of produced) {
-      cost += candidate.cost ?? 0
       const thrown = (candidate as Candidate & { error?: string }).error
       const verdict: Verdict = thrown
         ? { passed: false, strength: 'structural', detail: `attempt failed: ${thrown}`, evidence: thrown, elapsedMs: 0 }

@@ -121,13 +121,14 @@ test('the first attempt that passes the checks stops its sibling and is the only
   expect(result!.merged).toContain('answer.txt')
   expect(readFileSync(join(repo, 'answer.txt'), 'utf8').trim()).toBe('good')
   expect(result!.report).toBe('fixed it')
-  expect(result!.harnessId).toBe('duo')
+  // The planner opens with the smallest search no other contains: the trio holds the duo's two attempts and one more.
+  expect(result!.harnessId).toBe('trio')
   // The stopped sibling's spend is still on the bill.
-  expect(result!.attempts).toBe(2)
-  expect(result!.tokens).toBe(8)
+  expect(result!.attempts).toBe(3)
+  expect(result!.tokens).toBe(9)
 
   const [record] = readLibrary(join(libraryDir, 'library.json')).records
-  expect(record).toMatchObject({ signature: 'stalled-repair/checked/single', harnessId: 'duo', runs: 1, verifiedRuns: 1, totalAttempts: 2, totalCost: 8 })
+  expect(record).toMatchObject({ signature: 'stalled-repair/checked/single', harnessId: 'trio', runs: 1, verifiedRuns: 1, totalAttempts: 3, totalCost: 9 })
 })
 
 test('when nothing passes, nothing is merged and the tree is as it was', async () => {
@@ -144,9 +145,9 @@ test('when nothing passes, nothing is merged and the tree is as it was', async (
   expect(result).toBeUndefined()
   expect(readFileSync(join(repo, 'answer.txt'), 'utf8').trim()).toBe('original')
   expect(await Bun.file(join(repo, 'scratch.txt')).exists()).toBe(false)
-  // It still counts as evidence about the harness: two attempts, neither verified.
+  // It still counts as evidence about the harness: three attempts, none verified.
   const [record] = readLibrary(join(libraryDir, 'library.json')).records
-  expect(record).toMatchObject({ runs: 1, verifiedRuns: 0, totalAttempts: 2 })
+  expect(record).toMatchObject({ runs: 1, verifiedRuns: 0, totalAttempts: 3 })
 })
 
 test('a check that ran no tests, or was refused, is not a pass', async () => {
