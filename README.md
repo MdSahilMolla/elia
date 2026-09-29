@@ -115,6 +115,7 @@ Inside a session, type while elia works to ask or redirect it; `/autopilot` runs
 | [Modes and specialists](docs/guide/modes.md) | Dev mode and hooks, specialists, Data Science, System Intelligence, Battmann, Cybersecurity, Sports/Fitness, supported languages |
 | [Integrations](docs/guide/integrations.md) | MCP servers and remote connectors, browser tasks, VS Code extension, deployment, Office files, data and finance, messaging, skills |
 | [Security](docs/guide/security.md) | File and network boundaries, `.elia/policy.json` |
+| **[elia-box, the agent sandbox](crates/elia-box/README.md)** | Confined execution (Seatbelt or Docker), copy-on-write forks, a brokered network, sealed receipts, and the escape suite; opt-in with `ELIA_SANDBOX=box` |
 | [Self-improvement](docs/guide/self-improvement.md) | `elia bench`, `elia evolve`, Elia Books, `elia bench-latency`, learned tools |
 | [Speed](docs/guide/performance.md) | Where elia's speed comes from and how it's measured |
 | [How it works](docs/guide/architecture.md) | Source layout and testing |
@@ -125,7 +126,7 @@ Inside a session, type while elia works to ask or redirect it; `/autopilot` runs
 
 **Recursive compounding (our focus):** the machinery is complete and gated: recording, real checks, `elia evolve`, `elia distill`, git-history benchmarks, lesson trials and `elia compounding`. So far elia records its experience and checks it for real, and its benchmark still has room to improve (93% on `mercury-2.5`). No generation has been promoted yet, and lesson benefit hasn't been measured, so compounding itself is still unproven. The next milestone is the first promoted generation.
 
-**Limits:** elia is a local application with application-level governance. It doesn't provide OS-level sandboxing, a secure keyring, or hosted 24/7 execution. See [SECURITY.md](SECURITY.md).
+**Limits:** elia is a local application with application-level governance. OS-level confinement exists as an opt-in ([elia-box](crates/elia-box/README.md), macOS Seatbelt or Docker), but it is not a separate kernel, and there is no secure keyring or hosted 24/7 execution. See [SECURITY.md](SECURITY.md).
 
 ## Contributing
 

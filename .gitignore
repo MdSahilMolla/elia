@@ -89,3 +89,7 @@ meat-awareness/
 
 # --- Local team records (never push to GitHub) ---
 /team-records/
+
+# elia-box build outputs
+/bin/elia-box
+/bin/elia-egress

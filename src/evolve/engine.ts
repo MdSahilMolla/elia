@@ -5,7 +5,9 @@ import { runAgentLoop, type ConversationMessage } from '../agentLoop.ts'
 import { runSubAgent } from '../subagent.ts'
 import { allWorkerTools } from '../tools/registry.ts'
 import type { Tool } from '../tools/types.ts'
-import { clampOutput, runProcess, runShell } from '../shell.ts'
+import { clampOutput } from '../shell.ts'
+import { ContainmentRequired, attest, describeAttestation, evolveBoxMode, runGate } from './containment.ts'
+import { recentBoxReceipts } from '../sandbox/box.ts'
 import { writeText } from '../ui/stream.ts'
 import { writeBlock, writeFail, writePass, writePhase, writeSubStep, writeSummary } from '../ui/report.ts'
 import { formatElapsed } from '../usage.ts'
@@ -488,10 +490,21 @@ async function attemptGeneration(
     }
   }
 
-  const [typecheck, unitTests] = await Promise.all([
-    runShell('bun run typecheck', GATE_TIMEOUT_MS, sandbox.root),
-    runShell('bun test', GATE_TIMEOUT_MS, sandbox.root),
-  ])
+  const receiptsBefore = recentBoxReceipts().length
+  let typecheck: Awaited<ReturnType<typeof runGate>>
+  let unitTests: Awaited<ReturnType<typeof runGate>>
+  try {
+    ;[typecheck, unitTests] = await Promise.all([
+      runGate('bun run typecheck', GATE_TIMEOUT_MS, sandbox.root, ELIA_ROOT, options.signal),
+      runGate('bun test', GATE_TIMEOUT_MS, sandbox.root, ELIA_ROOT, options.signal),
+    ])
+  } catch (error) {
+    if (!(error instanceof ContainmentRequired)) throw error
+    // Infrastructure, not the candidate's fault: nothing was learned about the change.
+    writeFail(error.message)
+    return { ...base, verdict: 'error', reason: error.message }
+  }
+  if (evolveBoxMode() !== 'off') writeSubStep(describeAttestation(attest(receiptsBefore)))
   if (typecheck.exitCode !== 0) {
     if (looksUnavailable(typecheck.stderr)) {
       writeSubStep('typecheck unavailable in the sandbox — skipping that gate')
@@ -516,7 +529,9 @@ async function attemptGeneration(
     // the candidate really broke fails again; a list that cannot be read, or a
     // retry that fails, keeps the rejection.
     const files = failingTestFiles(`${unitTests.stdout}\n${unitTests.stderr}`)
-    const retry = files.length > 0 ? await runProcess({ executable: 'bun', args: ['test', ...files], timeoutMs: GATE_TIMEOUT_MS, cwd: sandbox.root }) : undefined
+    // Through the same gate as the first run: a retry that escaped the box would run the candidate uncontained.
+    const quoted = files.map((file) => `'${file.replace(/'/g, `'\\''`)}'`).join(' ')
+    const retry = files.length > 0 ? await runGate(`bun test ${quoted}`, GATE_TIMEOUT_MS, sandbox.root, ELIA_ROOT, options.signal) : undefined
     if (retry?.exitCode !== 0) {
       writeFail('unit tests failed')
       const output = retry ? `${retry.stderr || retry.stdout}` : `${unitTests.stderr || unitTests.stdout}`

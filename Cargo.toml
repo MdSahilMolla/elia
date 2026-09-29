@@ -4,11 +4,12 @@
 #
 #   crates/eliad        the resident daemon (`src/daemon/` spawns + dials it)
 #   crates/elia-parse   safe Rust bindings for the C++ structural validator
+#   crates/elia-box     the agent sandbox: supervisor, backends, receipts (+ native/elia-box-fs, go/cmd/elia-egress)
 #   crates/elia-native  cdylib `src/native/ffi.ts` dlopen's via bun:ffi — the
 #                       in-process structural edit-check, no daemon hop
 [workspace]
 resolver = "2"
-members = ["crates/eliad", "crates/elia-parse", "crates/elia-native"]
+members = ["crates/eliad", "crates/elia-parse", "crates/elia-native", "crates/elia-box"]
 
 [workspace.package]
 version = "0.1.0"

@@ -3,6 +3,7 @@
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { DaemonUnavailable, daemonMode, daemonShellExec } from './daemon/index.ts'
+import { BoxUnavailable, boxFallbackToHost, boxSandboxRequested, noteBoxFallback, runShellInBox } from './sandbox/box.ts'
 import { ContainerUnavailable, containerSandboxRequested, noteContainerFallback, runShellInContainer } from './sandbox/container.ts'
 
 /**
@@ -72,6 +73,28 @@ export async function runShell(
   // Operator cancellation must win even before the shell is spawned.
   if (signal?.aborted) {
     return { command, exitCode: 1, stdout: '', stderr: 'cancelled by operator', elapsedMs: 0, timedOut: false }
+  }
+
+  // elia-box (ELIA_SANDBOX=box) is elia's own sandbox and, unlike the container
+  // path, fails closed: when the box cannot run, the command is refused rather
+  // than quietly run outside it. Only an explicit ELIA_BOX_FALLBACK=host runs it
+  // unsandboxed, and that is recorded once.
+  if (boxSandboxRequested()) {
+    try {
+      return await runShellInBox(command, timeoutMs, cwd, signal, env)
+    } catch (err) {
+      if (signal?.aborted) {
+        return { command, exitCode: 1, stdout: '', stderr: 'cancelled by operator', elapsedMs: Date.now() - startedAt, timedOut: false }
+      }
+      const message = err instanceof Error ? err.message : String(err)
+      if (err instanceof BoxUnavailable && boxFallbackToHost()) {
+        noteBoxFallback(message)
+        // fall through to the daemon/in-process shell below.
+      } else {
+        const hint = err instanceof BoxUnavailable ? ' Set ELIA_BOX_FALLBACK=host to run unsandboxed instead.' : ''
+        return { command, exitCode: 1, stdout: '', stderr: `elia-box did not run this command: ${message}.${hint}`, elapsedMs: Date.now() - startedAt, timedOut: false }
+      }
+    }
   }
 
   // Container sandboxing (ELIA_SANDBOX=container) takes precedence over the
