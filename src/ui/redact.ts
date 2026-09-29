@@ -71,7 +71,9 @@ export function isSensitiveKey(key: string): boolean {
 //  2. prefixed API keys — the prefix must be followed by its own separator
 //     (`sk-`, `sk_`, `rk_`, `re_`). The old arm matched a bare `sk`/`pk`/`rk`
 //     and up to 8 following path chars, so `wo|rk|space/edcdemo/src/...`
-//     redacted to `wo[REDACTED]` — a repo path, not a secret.
+//     redacted to `wo[REDACTED]` — a repo path, not a secret. The prefix must
+//     also start a token (`\b`): unanchored, `sk_assessment` inside the tool
+//     name `risk_assessment` read as a key and printed as `ri[REDACTED]`.
 //  3. vendor-prefixed tokens (`ghp_…`, `xoxb-…`, `AKIA…`, `AIza…`)
 //  4. a general `<prefix>_<token>` shape for vendor secrets outside the
 //     hardcoded list above (e.g. Stripe `whsec_…`) — lowercase prefix so it
@@ -83,7 +85,7 @@ export function isSensitiveKey(key: string): boolean {
 //     arm read `$errorActionPreference='Stop'` as a padded blob and rewrote it
 //     to `$[REDACTED]'Stop'`. `isFalseBase64Padding` below settles it on length.
 const SECRET_VALUE =
-  /(\beyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\b|(?:sk|pk|rk|re|ey)[-_][A-Za-z0-9._-]{8,}|(?:xox[baprs]-|gh[pousr]_|AIza|AKIA|ASIA)[A-Za-z0-9_\-/]{8,}|\b[a-z]{2,10}_[A-Za-z0-9]{16,}\b|Bearer\s+[A-Za-z0-9._\-/+=]{8,}|\b[A-Za-z0-9+/]{16,}={1,2})/g
+  /(\beyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\b|\b(?:sk|pk|rk|re|ey)[-_][A-Za-z0-9._-]{8,}|(?:xox[baprs]-|gh[pousr]_|AIza|AKIA|ASIA)[A-Za-z0-9_\-/]{8,}|\b[a-z]{2,10}_[A-Za-z0-9]{16,}\b|Bearer\s+[A-Za-z0-9._\-/+=]{8,}|\b[A-Za-z0-9+/]{16,}={1,2})/g
 
 // Shapeless opaque runs, checked separately because they carry no prefix to
 // vouch for them:

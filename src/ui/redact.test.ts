@@ -144,3 +144,21 @@ test('masking a cookie inside serialized evidence does not break the JSON', () =
   const redacted = redactSecrets(record)
   expect(JSON.parse(redacted)).toEqual({ body: 'cookie debug: PHPSESSID=[REDACTED] set', status: 200 })
 })
+
+test('an identifier that merely contains a key prefix is not a key', () => {
+  for (const name of ['risk_assessment', 'disk_usage_report', 'store_snapshot_now', 'core_dump_report', 'whisk_something_long', 'tsk_abc12345678_step']) {
+    expect(redactText(name)).toBe(name)
+    expect(redactText(`battmann ${name} takes: subject, factors`)).toBe(`battmann ${name} takes: subject, factors`)
+  }
+})
+
+test('a real prefixed key is still redacted wherever it starts a token', () => {
+  const skKey = ['sk', 'proj-abcdefghijklmnop1234'].join('-')
+  const skLive = ['sk', 'live_abcdefghijklmnop1234'].join('_')
+  const resend = ['re', 'AbCdEfGh1234567890'].join('_')
+  for (const value of [skKey, skLive, resend]) {
+    expect(redactText(value)).toBe('[REDACTED]')
+    expect(redactText(`key: ${value}`)).toContain('[REDACTED]')
+    expect(redactText(`("${value}")`)).toContain('[REDACTED]')
+  }
+})
