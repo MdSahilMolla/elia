@@ -2449,7 +2449,10 @@ export async function runInteractive(): Promise<void> {
     if (trimmed === '@skills' || trimmed === '/skills') {
       const { listLoadedSkills } = await import('../skills/loader.ts')
       const skills = listLoadedSkills()
-      if (skills.length === 0) return done('No loaded skills.')
+      const { loadInstalledSkills } = await import('../memory.ts')
+      const guides = loadInstalledSkills(process.cwd())
+      if (skills.length === 0 && guides.length === 0) return done('No loaded skills.')
+      if (skills.length === 0) return done(['Instruction skills (SKILL.md, read by elia when relevant):', ...guides.map((g) => `  ${g.name}  (${g.path})`)].join('\n'))
       return {
         handled: true,
         picker: {
@@ -2458,9 +2461,11 @@ export async function runInteractive(): Promise<void> {
           options: [
             { label: selectedSkillNames === undefined ? 'all loaded skills (current)' : 'all loaded skills', detail: 'every loaded skill available', value: '__all__' },
             ...skills.map((s) => ({ label: s.name, detail: `${s.source} · ${s.file}`, value: s.name })),
+            ...guides.map((g) => ({ label: g.name, detail: `instruction skill · ${g.path}`, value: `guide:${g.name}` })),
           ],
           onSelect: (value) => {
             if (!value) return
+            if (value.startsWith('guide:')) return `${value.slice(6)} is an instruction skill — elia reads it when the task matches; say its name to force it.`
             selectedSkillNames = value === '__all__' ? undefined : [value]
             return selectedSkillNames ? `Skills: ${selectedSkillNames[0]}` : 'All loaded skills available.'
           },
@@ -2789,8 +2794,13 @@ export async function runInteractive(): Promise<void> {
     if (trimmed === '/skills' || trimmed === '@skills-list') {
       const { listLoadedSkills } = await import('../skills/loader.ts')
       const skills = listLoadedSkills()
-      if (skills.length === 0) return done('No skills loaded. Add a *.skill.ts file to .elia/skills, or find one with /marketplace.')
-      return done(['Loaded skills:', ...skills.map((s) => `  ${s.name}  (${s.source} · ${s.file})`)].join('\n'))
+      const { loadInstalledSkills } = await import('../memory.ts')
+      const guides = loadInstalledSkills(process.cwd())
+      if (skills.length === 0 && guides.length === 0) return done('No skills loaded. Add a *.skill.ts file to .elia/skills, or find one with /marketplace.')
+      return done([
+        ...(skills.length ? ['Loaded skills:', ...skills.map((s) => `  ${s.name}  (${s.source} · ${s.file})`)] : []),
+        ...(guides.length ? ['Instruction skills (SKILL.md, read by elia when relevant):', ...guides.map((g) => `  ${g.name}  (${g.path})`)] : []),
+      ].join('\n'))
     }
 
     const marketMatch = /^\/marketplace(?:\s+([a-z]+)?\s*(.*))?$/.exec(trimmed)
