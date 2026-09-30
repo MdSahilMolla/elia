@@ -140,3 +140,23 @@ test('a question whose stored resolution rule is corrupt fails naming the questi
   db.close()
   await expect(run({ action: 'submit_forecast', questionId: 'broken-rule', probability: 0.5, method: 'judgement', rationale: 'Even odds.', asOf: '2025-06-01' })).rejects.toThrow('question broken-rule: its stored resolution rule is not valid JSON')
 })
+
+test('a report built on feed evidence, with every section recorded, reports no integrity problems', async () => {
+  const cwd = mkdtempSync(join(tmpdir(), 'elia-battmann-clean-report-'))
+  const run = tool(cwd)
+  feedTestHooks.fetch = async (url) => {
+    const [start, end] = url.pathname.replace('/v1/', '').split('..') as [string, string]
+    const rates: Record<string, { INR: number }> = {}
+    for (let t = Date.parse(`${start}T00:00:00Z`); t <= Date.parse(`${end ?? start}T00:00:00Z`); t += DAY) rates[new Date(t).toISOString().slice(0, 10)] = { INR: 95 + Math.sin(t / DAY) * 0.3 }
+    return new Response(JSON.stringify({ base: 'USD', rates }), { status: 200 })
+  }
+  const queried = await run({ action: 'feed_query', feed: 'fx', quote: 'INR', start: day(-30), end: day(-1) })
+  await run({ action: 'create_question', questionId: 'q', question: 'Will the rupee weaken further?', openedAt: day(-2), resolutionCriteria: 'The reference rate at the horizon is above the rate at opening.', horizon: day(30) })
+  await run({ action: 'submit_forecast', questionId: 'q', probability: 0.6, method: 'judgement', rationale: 'The trend is weakening.', asOf: new Date().toISOString(), evidenceIds: [queried.evidenceId] })
+  await run({ action: 'register_claim', claimId: 'c1', statement: 'The rupee has been weakening against the dollar.', classification: 'model_estimate', confidence: 'medium', asOf: new Date().toISOString(), evidenceLinks: [{ evidenceId: queried.evidenceId, relation: 'supports', supportingExcerpt: 'reference rate' }] })
+  await run({ action: 'create_scenario', scenarioId: 's1', title: 'Continued slide', baseAsOf: new Date().toISOString(), horizon: day(30), probability: 0.3, assumptions: ['Weakening continues'], questionIds: ['q'], evidenceIds: [queried.evidenceId], indicators: ['Weekly close'], status: 'active' })
+  const report = await run({ action: 'report_from_store', title: 'FX brief', executiveSummary: 'The rupee is weakening and further weakness is more likely than not.', author: 'Battmann' })
+  expect(report.integrityProblems).toBeUndefined()
+  expect(report.summaryFiguresNotInEvidence).toBeUndefined()
+  expect(report.sources).toBe(1)
+})
