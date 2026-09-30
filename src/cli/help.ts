@@ -227,6 +227,8 @@ System Intelligence record (no model involved):
   elia si review <SI-n> <kind> <verdict> --note ".."   Record your own review
   elia si journal | verify | org | structure | lifecycles | template <kind> | cadence
   elia sysintel <command>                  The same commands under their long name
+  elia trials [analyze]                    What happened to each commit after it landed: is that signal usable, and how big a trial it needs
+  elia trials basket                       The outcome basket and its digest (the outcomes, fixed before any analysis)
 
 Battmann intelligence (no model involved unless noted):
   elia battmann seed india-semiconductors  Subscribe real data feeds and open certified questions

@@ -155,6 +155,10 @@ async function main() {
       const { runSysintel } = await import('./sysintel/cli.ts')
       return runSysintel()
     }
+    case 'trials': {
+      const { runTrials } = await import('./trials/cli.ts')
+      return runTrials()
+    }
     case 'bridge': {
       if (hasFlag('--http')) {
         const portRaw = flagValue('--port') ?? '4319'
