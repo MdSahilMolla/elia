@@ -27,15 +27,20 @@ import { writeFileSync } from 'node:fs'
 import { formatCostUsd, sessionCost } from '../usage.ts'
 import { isSensitivePath } from '../autonomy/sensitivePaths.ts'
 import type { AutonomyProfile } from '../autonomy/loop.ts'
-import { addUserGoal, MAX_ATTEMPTS, nextGoal, refreshBacklog } from './backlog.ts'
+import { addEventGoal, addUserGoal, MAX_ATTEMPTS, nextGoal, refreshBacklog } from './backlog.ts'
+import type { CapabilityScope } from '../autonomy/capabilityContract.ts'
+import { scopeHook } from './scopes.ts'
+import { describeTrigger, fetchPage, loadWatchers, pollWatchers, runGh, type TriggerDeps } from './watch.ts'
 import {
   AUTOPILOT_BRANCH_PREFIX,
+  changedFilesBetween,
   commitEverything,
   currentBranchName,
   dirtyPaths,
   excludeEliaState,
   headSha,
   isGitWorkTree,
+  isTestPath,
   keepRef,
   rollbackTo,
   switchToBranch,
@@ -60,7 +65,7 @@ export interface GoalRunResult {
   blockers: string[]
 }
 
-export type GoalRunner = (input: { goal: Goal; prompt: string; root: string; signal?: AbortSignal; maxWallClockMs: number; profile: AutonomyProfile }) => Promise<GoalRunResult>
+export type GoalRunner = (input: { goal: Goal; prompt: string; root: string; signal?: AbortSignal; maxWallClockMs: number; profile: AutonomyProfile; scopes?: readonly CapabilityScope[] }) => Promise<GoalRunResult>
 
 export interface PilotOptions {
   root: string
@@ -80,6 +85,20 @@ export interface PilotOptions {
   drainDirections?: () => string[]
   /** How many times an emptied backlog may be refilled by re-understanding the repo (default 1). */
   maxReplans?: number
+  /**
+   * Keep running and react to what the watchers in `.elia/autopilot/watch.json`
+   * see (watch.ts): each event is a goal, an empty backlog is a wait rather
+   * than the end, and there is no goal budget unless `maxGoals` is given.
+   */
+  watch?: boolean
+  /** How long a watching pilot waits between looks when it has nothing to do (default 15s). */
+  idlePollMs?: number
+  /** What goal runs may do (scopes.ts). Unset: everything the unattended governor allows, as before. */
+  scopes?: readonly CapabilityScope[]
+  watchDeps?: Partial<Omit<TriggerDeps, 'now'>>
+  /** A watching pilot's spending limit per UTC day, in USD (default `dailyBudgetUsd()`). */
+  dailyBudgetUsd?: number
+  sleep?: (ms: number, signal?: AbortSignal) => Promise<void>
   // Seams for tests.
   understandingModel?: UnderstandingModel
   runGoal?: GoalRunner
@@ -92,6 +111,20 @@ export interface PilotOptions {
 export interface PilotResult {
   state: PilotState
   reportPath: string
+}
+
+/**
+ * What a watching pilot may spend a day. A session limit is not enough for it:
+ * one that stops at its limit is restarted by the service manager 30s later,
+ * with a fresh session and a fresh limit. `ELIA_AUTOPILOT_DAILY_USD` sets it.
+ */
+export function dailyBudgetUsd(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = Number(env.ELIA_AUTOPILOT_DAILY_USD)
+  return Number.isFinite(raw) && raw > 0 ? raw : 2
+}
+
+function today(now = new Date()): string {
+  return now.toISOString().slice(0, 10)
 }
 
 /** A direction that asks the pilot to stop rather than to do something. */
@@ -129,7 +162,7 @@ export function goalPrompt(goal: Goal, state: PilotState): string {
   ].filter((line) => line !== undefined).join('\n').replace(/\n{3,}/g, '\n\n')
 }
 
-const defaultRunGoal: GoalRunner = async ({ prompt, root, signal, maxWallClockMs, profile }) => {
+const defaultRunGoal: GoalRunner = async ({ prompt, root, signal, maxWallClockMs, profile, scopes }) => {
   const { runAutonomousTask, autoApprove } = await import('../autonomy/loop.ts')
   const result = await runAutonomousTask({
     goal: prompt,
@@ -142,6 +175,7 @@ const defaultRunGoal: GoalRunner = async ({ prompt, root, signal, maxWallClockMs
     projectDocuments: false,
     signal,
     maxWallClockMs,
+    ...(scopes ? { extraToolHooks: [scopeHook(scopes)] } : {}),
   })
   return { runId: result.runId, outcome: result.outcome, summary: result.completion.summary, blockers: result.completion.blockers }
 }
@@ -224,6 +258,7 @@ async function runOneGoal(state: PilotState, goal: Goal, options: PilotOptions, 
       signal: options.signal,
       maxWallClockMs: Math.max(1, options.goalMinutes ?? 45) * 60_000,
       profile: options.profile ?? 'balanced',
+      scopes: options.scopes,
     })
   } catch (error) {
     run = { outcome: 'error', summary: error instanceof Error ? error.message : String(error), blockers: [] }
@@ -238,12 +273,24 @@ async function runOneGoal(state: PilotState, goal: Goal, options: PilotOptions, 
   const target = goal.kind === 'repair' ? after.checks.find((check) => check.command === goal.verification[0]) : undefined
   const ownChecksPass = goal.verification.length > 0 && goal.verification.every((command) => after.checks.find((check) => check.command === command)?.status === 'pass')
 
+  // Progress on the target that a whole-check pass/fail cannot see: fewer
+  // failing tests, none new. A repair of a large suite rarely goes green in
+  // one goal; rolling that back threw the progress away (elia's own suite,
+  // 2026-09-30: a real fix discarded because six other tests still failed).
+  const progress = target && target.status !== 'pass' ? delta.improved.find((entry) => entry.command === target.command) : undefined
+
   let accepted = false
+  let partial = false
   let reason: string
   if (options.signal?.aborted) reason = 'stopped by the operator mid-goal'
   else if (!changed) reason = run.outcome === 'completed' ? 'the run completed without changing anything' : `the run ended "${run.outcome}" without changing anything`
   else if (delta.regressions.length > 0) reason = `it turned passing checks red: ${delta.regressions.join(', ')}`
-  else if (target && target.status !== 'pass') reason = `the target check \`${target.command}\` still ${target.status === 'timeout' ? 'times out' : 'fails'}`
+  else if (delta.worsened.length > 0) reason = `it broke tests that passed before: ${delta.worsened.map((entry) => `${entry.newFailures.slice(0, 5).join(', ')}${entry.newFailures.length > 5 ? ` and ${entry.newFailures.length - 5} more` : ''} (in \`${entry.command}\`)`).join('; ')}`
+  else if (progress) {
+    accepted = true
+    partial = true
+    reason = `progress on \`${progress.command}\`: ${progress.before} → ${progress.after} failing test(s), none new (fixed ${progress.fixedTests.slice(0, 5).join(', ')}${progress.fixedTests.length > 5 ? ', …' : ''})`
+  } else if (target && target.status !== 'pass') reason = `the target check \`${target.command}\` still ${target.status === 'timeout' ? 'times out' : 'fails'}`
   else if (run.outcome !== 'completed' && !ownChecksPass) reason = `the run ended "${run.outcome}" and the goal's own checks do not all pass`
   else {
     accepted = true
@@ -270,9 +317,22 @@ async function runOneGoal(state: PilotState, goal: Goal, options: PilotOptions, 
       const commit = commitEverything(root, `autopilot: ${goal.title}\n\n${reason}.\nPilot ${state.id}, goal ${goal.id}${run.runId ? `, run ${run.runId}` : ''}.`, isSensitivePath)
       if (commit.skipped.length > 0) outcome.blockers.push(`left uncommitted because they look like secrets: ${commit.skipped.join(', ')}`)
       outcome.afterSha = headSha(root)
-      goal.status = 'done'
       state.latest = after
-      log(`  ✓ landed ${outcome.afterSha?.slice(0, 10)} — ${reason}${delta.fixed.length > 0 ? `; fixed ${delta.fixed.join(', ')}` : ''}${cost}`)
+      // The ratchet sees that checks pass, not how: a goal that edits tests may
+      // have fixed them, or made them easier. Seen on elia's own suite: a repair
+      // that landed 8 → 5 also changed a test that had not been failing.
+      const testsTouched = outcome.afterSha ? changedFilesBetween(root, beforeSha, outcome.afterSha).filter(isTestPath) : []
+      if (testsTouched.length > 0) outcome.blockers.push(`changed test file(s) — check they were fixed, not weakened: ${testsTouched.slice(0, 6).join(', ')}${testsTouched.length > 6 ? ', …' : ''}`)
+      if (partial && target) {
+        // The rest of the goal is still open, starting from where this left it.
+        goal.status = 'open'
+        goal.attempts = 0
+        goal.detail = `${goal.detail.split('\nLast output:\n')[0]}\nLast output:\n${target.tail}`
+        log(`  ◐ landed progress ${outcome.afterSha?.slice(0, 10)} — ${reason}; the goal stays open for the rest${cost}`)
+      } else {
+        goal.status = 'done'
+        log(`  ✓ landed ${outcome.afterSha?.slice(0, 10)} — ${reason}${delta.fixed.length > 0 ? `; fixed ${delta.fixed.join(', ')}` : ''}${cost}`)
+      }
     } catch (error) {
       // A commit hook refused it: treat it like any other rejection.
       accepted = false
@@ -302,6 +362,10 @@ async function runOneGoal(state: PilotState, goal: Goal, options: PilotOptions, 
     const line = `${goal.title}: ${blocker}`
     if (!state.needsHuman.includes(line)) state.needsHuman.push(line)
   }
+  if (outcome.costUsd && outcome.costUsd > 0) {
+    const day = today()
+    state.spentByDay = { ...state.spentByDay, [day]: (state.spentByDay?.[day] ?? 0) + outcome.costUsd }
+  }
   goal.outcomes.push(outcome)
   state.goalsRun += 1
   state.currentGoalId = undefined
@@ -317,6 +381,9 @@ export async function runPilot(options: PilotOptions): Promise<PilotResult> {
     throw new PilotError('elia autopilot works inside a git repository: it commits each goal it lands on a branch of its own and rolls back any goal that breaks a check. Initialise one first (git init, then commit the current files).')
   }
   if (!headSha(root)) throw new PilotError('this repository has no commits yet; the autopilot needs one to branch from. Commit the current files first.')
+  if (options.watch && loadWatchers(root).length === 0) {
+    throw new PilotError('there is nothing to watch yet. Add a watcher first, e.g.: elia autopilot watch add "github ci" (or "github issues", "file src/", "url https://…", "every 6h")')
+  }
   excludeEliaState(root)
 
   let state: PilotState
@@ -363,7 +430,17 @@ export async function runPilot(options: PilotOptions): Promise<PilotResult> {
     }
 
     state.phase = 'work'
-    const maxGoals = Math.max(1, options.maxGoals ?? 5)
+    const maxGoals = options.watch && options.maxGoals === undefined ? Number.POSITIVE_INFINITY : Math.max(1, options.maxGoals ?? 5)
+    const sleep = options.sleep ?? waitUnlessAborted
+    const idlePollMs = Math.max(100, options.idlePollMs ?? 15_000)
+    // What a watching pilot last said it was waiting for, so it says it once, not every poll.
+    let waitingFor: string | undefined
+    const wait = async (why: string): Promise<void> => {
+      if (why !== waitingFor) log(`… ${why}`)
+      waitingFor = why
+      await sleep(idlePollMs, options.signal)
+    }
+    if (options.watch) log(`◆ watching: ${loadWatchers(root).map((watcher) => describeTrigger(watcher.spec)).join(' · ')}`)
     const deadline = options.maxHours && options.maxHours > 0 ? Date.now() + options.maxHours * 3_600_000 : undefined
     const spendExceeded = options.spendExceeded ?? defaultSpendExceeded
     let rejectedInARow = 0
@@ -388,6 +465,32 @@ export async function runPilot(options: PilotOptions): Promise<PilotResult> {
         state.stopReason = `the operator asked to stop ("${stopAsked.slice(0, 80)}")`
         break
       }
+      if (options.watch) {
+        const { events, notices, rescan } = await pollWatchers(root, { now: Date.now(), gh: options.watchDeps?.gh ?? runGh, fetchText: options.watchDeps?.fetchText ?? fetchPage })
+        for (const notice of notices) {
+          if (!state.needsHuman.includes(notice)) state.needsHuman.push(notice)
+          appendJournal(root, 'needs-human', { text: notice.slice(0, 500) })
+          log(`⚠ watcher: ${notice.slice(0, 200)}`)
+        }
+        for (const event of events) {
+          state.backlog = addEventGoal(state.backlog, event, state.survey, state.latest)
+          appendJournal(root, 'event', { text: event.slice(0, 500) })
+          log(`↳ watcher: ${event.slice(0, 160)}`)
+        }
+        if (rescan) {
+          // A schedule: look at the whole repository again, as a new pilot would —
+          // what it is now, which of its checks pass, and what is worth doing next.
+          log('◆ scheduled look: re-surveying, re-measuring and re-reading the project…')
+          state.survey = surveyRepository(root, { env: options.env, has: options.has })
+          state.latest = await measureHealth(root, state.survey.checks, { signal: options.signal, runner: options.checkRunner })
+          await understand(state, options, log)
+          appendJournal(root, 'rescan', { health: summarizeHealth(state.latest) })
+        }
+        if (events.length > 0 || notices.length > 0 || rescan) {
+          waitingFor = undefined
+          persist(state)
+        }
+      }
       if (goalsThisSession >= maxGoals) {
         state.stopReason = `goal budget reached (${maxGoals})`
         break
@@ -396,7 +499,14 @@ export async function runPilot(options: PilotOptions): Promise<PilotResult> {
         state.stopReason = `time budget reached (${options.maxHours}h)`
         break
       }
-      if (await spendExceeded()) {
+      if (options.watch) {
+        const budget = options.dailyBudgetUsd ?? dailyBudgetUsd(options.env ?? process.env)
+        const spent = state.spentByDay?.[today()] ?? 0
+        if (spent >= budget) {
+          await wait(`today's spending limit is reached ($${spent.toFixed(2)} of $${budget.toFixed(2)}, ELIA_AUTOPILOT_DAILY_USD); waiting for tomorrow`)
+          continue
+        }
+      } else if (await spendExceeded()) {
         state.stopReason = 'spending ceiling reached (ELIA_MAX_SPEND_USD)'
         break
       }
@@ -405,6 +515,11 @@ export async function runPilot(options: PilotOptions): Promise<PilotResult> {
         break
       }
       const dirty = dirtyPaths(root)
+      if (dirty.length > 0 && options.watch) {
+        // Someone is working in this checkout: wait for them rather than stop a watcher that is meant to keep going.
+        await wait(`the working tree has changes the pilot did not make (${dirty.slice(0, 3).join(', ')}); waiting for them to be committed or put away`)
+        continue
+      }
       if (dirty.length > 0) {
         state.stopReason = `the working tree changed outside the pilot (${dirty.slice(0, 3).join(', ')}); stopping rather than mixing that work into a goal`
         break
@@ -418,10 +533,15 @@ export async function runPilot(options: PilotOptions): Promise<PilotResult> {
         persist(state)
         goal = nextGoal(state.backlog)
       }
+      if (!goal && options.watch) {
+        await wait('nothing to do right now; watching for what happens next')
+        continue
+      }
       if (!goal) {
         state.stopReason = 'nothing left worth doing: every goal is landed or parked'
         break
       }
+      waitingFor = undefined
       const outcome = await runOneGoal(state, goal, options, log)
       goalsThisSession += 1
       rejectedInARow = outcome.accepted || outcome.reason.startsWith('the run completed without changing') ? 0 : rejectedInARow + 1
@@ -442,6 +562,19 @@ export async function runPilot(options: PilotOptions): Promise<PilotResult> {
     appendJournal(root, 'stop', { reason: state.stopReason, health: summarizeHealth(state.latest) })
     active = undefined
   }
+}
+
+function waitUnlessAborted(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(done, ms)
+    function done() {
+      clearTimeout(timer)
+      signal?.removeEventListener('abort', done)
+      resolve()
+    }
+    if (signal?.aborted) done()
+    else signal?.addEventListener('abort', done, { once: true })
+  })
 }
 
 /** Re-exported so callers can print a status without loading the whole pilot. */

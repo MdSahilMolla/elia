@@ -81,6 +81,11 @@ Autonomous runs from the command line — autopilot picks the goals, auto takes 
   elia autopilot --resume            Continue the last pilot in this repository
   elia autopilot status | report     Where the last pilot stands / its full report
                                      (.elia/autopilot/REPORT.md). Inside a session: /autopilot
+  elia autopilot watch add "github ci"  React to events too: github ci|issues|prs, file <path>, url <https>, every 6h
+  elia autopilot --watch             Keep going: every event becomes a goal; waits when there is nothing to do
+  elia autopilot --scopes a,b        Limit what its goal runs may do (e.g. workspace-read,workspace-write,process)
+  elia autopilot install [--env-file F]  Run --watch in the background from log-in on (uninstall | service for status);
+                                     a watching pilot spends at most ELIA_AUTOPILOT_DAILY_USD a day (default $2)
 
   elia auto "<goal>"                 Your goal, through the full pipeline: plan it, execute it with a
                                      fleet of sub-agents, verify, repair, and record what it learned

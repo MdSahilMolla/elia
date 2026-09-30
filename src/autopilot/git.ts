@@ -149,3 +149,14 @@ export function rollbackTo(root: string, sha: string, keep: ReadonlySet<string>)
   const created = untrackedPaths(root).filter((path) => !keep.has(path))
   if (created.length > 0) git(['clean', '-q', '-f', '--', ...created], root)
 }
+
+/** Files that changed between two commits. */
+export function changedFilesBetween(root: string, from: string, to: string): string[] {
+  const result = git(['diff', '--name-only', `${from}..${to}`], root)
+  return result.ok ? result.stdout.split('\n').map((line) => line.trim()).filter(Boolean) : []
+}
+
+/** A test file by the common conventions: `*.test.*`, `*.spec.*`, `*_test.*`, `test_*.py`, or anything under `test(s)/` or `__tests__/`. */
+export function isTestPath(path: string): boolean {
+  return /(?:^|\/)(?:tests?|__tests__)\/|\.(?:test|spec)\.[a-z0-9]+$|_test\.[a-z0-9]+$|(?:^|\/)test_[^/]+\.py$/i.test(path)
+}

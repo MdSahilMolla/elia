@@ -66,6 +66,8 @@ export interface CheckHealth {
   elapsedMs: number
   /** Last lines of output for a check that did not pass; empty for a pass. */
   tail: string
+  /** For a red check whose runner names its failing tests (health.ts `failingTests`), which ones. */
+  failures?: string[]
 }
 
 export interface HealthReport {
@@ -93,7 +95,8 @@ export interface Understanding {
 }
 
 export type GoalKind = 'user' | 'repair' | 'provision' | 'test' | 'hardening' | 'feature' | 'refactor' | 'docs'
-export type GoalOrigin = 'user' | 'health' | 'environment' | 'model'
+/** `event`: something a watcher saw while the pilot ran with `--watch` (watch.ts). */
+export type GoalOrigin = 'user' | 'health' | 'environment' | 'model' | 'event'
 export type GoalStatus = 'open' | 'done' | 'parked'
 
 export interface GoalOutcome {
@@ -154,4 +157,10 @@ export interface PilotState {
   stopReason?: string
   /** Things only a person can do: refused critical actions, missing tools, credentials. */
   needsHuman: string[]
+  /**
+   * What goals cost, by UTC day (`2026-09-30`). Kept in the state, not the
+   * process, so a watching pilot that the service manager restarts cannot
+   * reset its own budget by exiting.
+   */
+  spentByDay?: Record<string, number>
 }

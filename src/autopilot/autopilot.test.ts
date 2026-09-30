@@ -4,12 +4,13 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { surveyRepository, renderSurvey } from './survey.ts'
-import { compareHealth, measureHealth, type CheckRunner } from './health.ts'
+import { compareHealth, failingTests, measureHealth, type CheckRunner } from './health.ts'
 import { extractJsonObject, isRealCitation, parseUnderstanding } from './understand.ts'
 import { addUserGoal, goalScore, isSameGoal, nextGoal, refreshBacklog, verificationFor } from './backlog.ts'
 import { activePilot, goalPrompt, runPilot, PilotError, type GoalRunner } from './pilot.ts'
 import { renderReport, statusText, pilotSnapshot } from './report.ts'
 import { loadPilotState } from './store.ts'
+import { isTestPath } from './git.ts'
 import type { HealthReport, RepoSurvey } from './types.ts'
 
 function sh(root: string, ...args: string[]): string {
@@ -74,7 +75,31 @@ describe('health', () => {
     writeFileSync(join(root, 'FIXED'), '')
     writeFileSync(join(root, 'BROKEN'), '')
     const after = await measureHealth(root, ['bun run typecheck', 'bun test'], { runner: fileRunner })
-    expect(compareHealth(before, after)).toEqual({ regressions: ['bun run typecheck'], fixed: ['bun test'], stillFailing: [] })
+    expect(compareHealth(before, after)).toEqual({ regressions: ['bun run typecheck'], fixed: ['bun test'], stillFailing: [], worsened: [], improved: [] })
+  })
+
+  test('failing tests are read from the common runners, and a red check is compared test by test', () => {
+    expect(failingTests('(pass) ok\n(fail) store > loads [2.10ms]\n(fail) triage > escapes')).toEqual(['store > loads', 'triage > escapes'])
+    expect(failingTests('  ✕ adds numbers (3 ms)\n  ✓ fine')).toEqual(['adds numbers'])
+    expect(failingTests('FAILED tests/test_api.py::test_login - assert 1 == 2')).toEqual(['tests/test_api.py::test_login'])
+    expect(failingTests('--- FAIL: TestParse (0.00s)')).toEqual(['TestParse'])
+    expect(failingTests('test parser::works ... FAILED')).toEqual(['parser::works'])
+    expect(failingTests('error: something went wrong')).toBeUndefined()
+
+    const report = (failures: string[]) => ({ takenAt: '', checks: [{ command: 'bun test', status: 'fail' as const, exitCode: 1, elapsedMs: 1, tail: '', failures }] })
+    expect(compareHealth(report(['a', 'b', 'c']), report(['c'])).improved).toEqual([{ command: 'bun test', before: 3, after: 1, fixedTests: ['a', 'b'] }])
+    // Fixing two and breaking one is not progress: the new failure is a regression hidden in a red check.
+    const mixed = compareHealth(report(['a', 'b', 'c']), report(['c', 'd']))
+    expect(mixed.improved).toEqual([])
+    expect(mixed.worsened).toEqual([{ command: 'bun test', newFailures: ['d'] }])
+  })
+
+  test('a failed check names what failed, not only the summary at its end', async () => {
+    const noisy: CheckRunner = async () => ({ exitCode: 1, stdout: ['(pass) a', '(fail) brain store > loads nothing [2ms]', ...Array.from({ length: 80 }, (_, i) => `(pass) filler ${i}`), '(fail) resolveReconLogPath > refuses escapes', ' 4705 pass', ' 7 fail'].join('\n'), stderr: '', elapsedMs: 5, timedOut: false })
+    const report = await measureHealth(root, ['bun test'], { runner: noisy })
+    const tail = report.checks[0]!.tail
+    expect(tail).toStartWith('Failures:\n(fail) brain store > loads nothing [2ms]\n(fail) resolveReconLogPath > refuses escapes')
+    expect(tail).toContain('7 fail')
   })
 
   test('a command the unattended governor refuses is never run', async () => {
@@ -314,6 +339,141 @@ describe('pilot end to end (real git, fake model and worker)', () => {
     } finally {
       rmSync(plain, { recursive: true, force: true })
     }
+  })
+
+  test('a watching pilot turns what its watchers see into goals, and waits instead of stopping when there is nothing to do', async () => {
+    const inbox = mkdtempSync(join(tmpdir(), 'autopilot-inbox-'))
+    try {
+      const { addWatcher, parseTrigger } = await import('./watch.ts')
+      const { autopilotDir } = await import('./store.ts')
+      addWatcher(root, parseTrigger(`file ${inbox}`))
+      const dueNow = () => {
+        const file = join(autopilotDir(root), 'watch.json')
+        const saved = JSON.parse(readFileSync(file, 'utf8')) as { watchers: Array<{ nextCheckAt: number }> }
+        for (const watcher of saved.watchers) watcher.nextCheckAt = 0
+        writeFileSync(file, JSON.stringify(saved))
+      }
+      const controller = new AbortController()
+      const titles: string[] = []
+      const scopesSeen: unknown[] = []
+      let idles = 0
+      const lines: string[] = []
+      const result = await runPilot({
+        root, watch: true, idlePollMs: 1, maxReplans: 0, understandingModel: model, checkRunner: fileRunner, has: () => true, env: {}, spendExceeded: () => false,
+        signal: controller.signal, scopes: ['workspace-read', 'workspace-write'], log: (line) => lines.push(line),
+        runGoal: async ({ goal, scopes }) => {
+          titles.push(goal.title)
+          scopesSeen.push(scopes)
+          return { outcome: 'completed', blockers: [] }
+        },
+        sleep: async () => {
+          idles += 1
+          if (idles === 1) {
+            // Something happens while it waits.
+            writeFileSync(join(inbox, 'note.txt'), 'the export button does nothing')
+            dueNow()
+          } else controller.abort()
+        },
+      })
+      const event = result.state.backlog.find((goal) => goal.origin === 'event')
+      expect(event?.title).toContain('Files changed')
+      expect(titles).toContain(event!.title)
+      // No goal budget stopped it: the operator did.
+      expect(result.state.stopReason).toBe('stopped by the operator')
+      expect(lines.filter((line) => line.includes('watching for what happens next'))).toHaveLength(2)
+      expect(scopesSeen.every((scopes) => JSON.stringify(scopes) === JSON.stringify(['workspace-read', 'workspace-write']))).toBe(true)
+    } finally {
+      rmSync(inbox, { recursive: true, force: true })
+    }
+  })
+
+  test('a repair that fixes some failing tests lands that progress and keeps the goal open; one that breaks a test is rolled back', async () => {
+    // `bun test` fails one test per file named BUG-*; FIXED-less, so the check stays red until all are gone.
+    const bugs = ['BUG-a', 'BUG-b', 'BUG-c']
+    for (const bug of bugs) writeFileSync(join(root, bug), '')
+    sh(root, 'add', '-A')
+    sh(root, 'commit', '-q', '-m', 'three known bugs')
+    const perTest: CheckRunner = async (command, at) => {
+      if (command.includes('typecheck')) return { exitCode: 0, stdout: 'ok', stderr: '', elapsedMs: 1, timedOut: false }
+      const failing = ['a', 'b', 'c', 'd'].filter((name) => existsSync(join(at, `BUG-${name}`)))
+      return { exitCode: failing.length > 0 ? 1 : 0, stdout: [...failing.map((name) => `(fail) suite > ${name} [1ms]`), ` ${failing.length} fail`].join('\n'), stderr: '', elapsedMs: 1, timedOut: false }
+    }
+    let call = 0
+    const lines: string[] = []
+    const result = await runPilot({
+      root, maxGoals: 3, maxReplans: 0, understandingModel: model, checkRunner: perTest, has: () => true, env: {}, spendExceeded: () => false, log: (line) => lines.push(line),
+      runGoal: async ({ goal, root: at }) => {
+        if (goal.kind !== 'repair') return { outcome: 'completed', blockers: [] }
+        call += 1
+        if (call === 1) unlinkSync(join(at, 'BUG-a')) // real progress: 3 → 2
+        else if (call === 2) {
+          unlinkSync(join(at, 'BUG-b'))
+          writeFileSync(join(at, 'BUG-d'), '') // fixes one, breaks another
+        }
+        return { outcome: 'needs-attention', blockers: [] }
+      },
+    })
+    const repair = result.state.backlog.find((goal) => goal.kind === 'repair')!
+    expect(repair.outcomes[0]).toMatchObject({ accepted: true })
+    expect(repair.outcomes[0]!.reason).toContain('3 → 2 failing test(s), none new')
+    expect(repair.outcomes[1]).toMatchObject({ accepted: false })
+    expect(repair.outcomes[1]!.reason).toContain('broke tests that passed before: suite > d')
+    // The landed progress stays; the bad attempt is gone.
+    expect(existsSync(join(root, 'BUG-a'))).toBe(false)
+    expect(existsSync(join(root, 'BUG-b'))).toBe(true)
+    expect(existsSync(join(root, 'BUG-d'))).toBe(false)
+    expect(lines.some((line) => line.includes('◐ landed progress'))).toBe(true)
+    // It changed no test files, so nothing is flagged.
+    expect(result.state.needsHuman.some((line) => line.includes('changed test file'))).toBe(false)
+    ;(await import('../usage.ts')).resetSessionUsageForTests()
+  })
+
+  test('a landed goal that changed a test file is flagged for a person', async () => {
+    expect(['src/a.test.ts', 'src/a.spec.tsx', 'pkg/a_test.go', 'tests/test_api.py', 'src/__tests__/x.ts'].every(isTestPath)).toBe(true)
+    expect(['src/testing.ts', 'src/contest.ts', 'README.md'].some(isTestPath)).toBe(false)
+    const result = await runPilot({
+      root, maxGoals: 1, maxReplans: 0, understandingModel: model, checkRunner: fileRunner, has: () => true, env: {}, spendExceeded: () => false, log: () => {},
+      runGoal: async ({ root: at }) => {
+        writeFileSync(join(at, 'FIXED'), '')
+        writeFileSync(join(at, 'src', 'notes.test.ts'), 'test("x", () => { /* made easier */ })\n')
+        return { outcome: 'completed', blockers: [] }
+      },
+    })
+    expect(result.state.needsHuman.some((line) => line.includes('changed test file(s)') && line.includes('src/notes.test.ts'))).toBe(true)
+    ;(await import('../usage.ts')).resetSessionUsageForTests()
+  })
+
+  test('a watching pilot stops spending at its daily budget, and a restart cannot reset it', async () => {
+    const inbox = mkdtempSync(join(tmpdir(), 'autopilot-budget-'))
+    try {
+      const { addWatcher, parseTrigger } = await import('./watch.ts')
+      addWatcher(root, parseTrigger(`file ${inbox}`))
+      const ran: string[] = []
+      const lines: string[] = []
+      const controller = new AbortController()
+      const runGoal: GoalRunner = async ({ goal }) => {
+        ran.push(goal.title)
+        const { recordUsage } = await import('../usage.ts')
+        recordUsage({ inputTokens: 1_000_000, outputTokens: 100_000, cacheReadTokens: 0, cacheWriteTokens: 0 }, 'mercury-2.5') // $0.275
+        return { outcome: 'completed', blockers: [] }
+      }
+      const options = { root, watch: true, idlePollMs: 1, maxReplans: 0, dailyBudgetUsd: 0.2, understandingModel: model, checkRunner: fileRunner, has: () => true, env: {}, spendExceeded: () => false, runGoal, log: (line: string) => lines.push(line), signal: controller.signal, sleep: async () => controller.abort() }
+      const first = await runPilot(options)
+      expect(ran).toHaveLength(1)
+      expect(lines.some((line) => line.includes("today's spending limit is reached"))).toBe(true)
+      expect(Object.values(first.state.spentByDay ?? {})[0]).toBeCloseTo(0.275, 6)
+      // Restarted (as the service manager would): the budget is in the state, so it still waits.
+      const again = new AbortController()
+      await runPilot({ ...options, resume: true, signal: again.signal, sleep: async () => again.abort() })
+      expect(ran).toHaveLength(1)
+    } finally {
+      rmSync(inbox, { recursive: true, force: true })
+      ;(await import('../usage.ts')).resetSessionUsageForTests()
+    }
+  })
+
+  test('watching needs something to watch', async () => {
+    await expect(runPilot({ root, watch: true, understandingModel: model, checkRunner: fileRunner, has: () => true, env: {}, log: () => {} })).rejects.toThrow('nothing to watch yet')
   })
 
   test('the goal prompt carries the definition of done and the outside-world constraint', () => {

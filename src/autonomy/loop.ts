@@ -25,7 +25,7 @@ import { createBlackboard, setActiveBlackboard } from './blackboard.ts'
 import { createTodoList, setActiveTodoList } from './todoList.ts'
 import { withAgentIdentity } from './context.ts'
 import { activeMode, withActiveMode, type AgentMode } from './mode.ts'
-import { loadDevelopmentToolHooks, withToolHooks } from './devHooks.ts'
+import { loadDevelopmentToolHooks, withToolHooks, type ToolHook } from './devHooks.ts'
 import { createJournal, newRunId, runDir, type Journal } from './journal.ts'
 import { registerShutdownCleanup } from '../ui/shutdown.ts'
 import { captureTreeSnapshot, discardTreeSnapshot, dirtyPaths, restoreTreeSnapshot, type TreeSnapshot } from './treeSnapshot.ts'
@@ -173,6 +173,12 @@ export interface AutonomousRunOptions {
    * the session id so the session's cost roll-ups include the run's spending.
    */
   sessionId?: SessionId
+  /**
+   * Tool hooks added to the run's own (see devHooks.ts). Hooks can only block,
+   * never grant: `elia autopilot --scopes` (autopilot/scopes.ts) uses them to
+   * keep its goal runs inside what they were given.
+   */
+  extraToolHooks?: readonly ToolHook[]
 }
 
 export type AutonomyProfile = 'fast' | 'balanced' | 'thorough'
@@ -391,7 +397,7 @@ function finalizeDeadRun(reason: string, error?: unknown): void {
 
 export function runAutonomousTask(options: AutonomousRunOptions): Promise<AutonomousRunResult> {
   const mode = options.mode ?? activeMode()
-  const hooks = mode === 'dev' ? loadDevelopmentToolHooks() : []
+  const hooks = [...(mode === 'dev' ? loadDevelopmentToolHooks() : []), ...(options.extraToolHooks ?? [])]
   const run = (): Promise<AutonomousRunResult> =>
     withActiveMode(mode, () =>
       withToolHooks(hooks, () =>
