@@ -379,9 +379,12 @@ export function resolveReconLogPath(dir: string, reference: string): string {
   const raw = reference.trim().replace(/^recon[\\/]/i, '')
   if (raw.length === 0) throw new Error('log must be a non-empty recon/-relative filename')
   if (raw.includes('\0')) throw new Error('log contains an invalid character')
+  // Reject absolute Windows paths (e.g. C:\Windows\...) that look like they're trying to escape
+  if (/^[a-zA-Z]:\\/.test(raw)) throw new Error(`log "${reference}" is outside the engagement's recon/ folder — triage reads saved recon output and nothing else`)
   const resolved = isAbsolute(raw) ? resolve(raw) : resolve(join(reconDir, raw))
   const rel = relative(reconDir, resolved)
-  if (rel === '' || rel.startsWith('..') || isAbsolute(rel)) {
+  // Reject paths that escape reconDir: empty rel, current dir, parent dirs, or absolute relative paths
+  if (rel === '' || rel === '.' || rel.startsWith('..') || isAbsolute(rel)) {
     throw new Error(`log "${reference}" is outside the engagement's recon/ folder — triage reads saved recon output and nothing else`)
   }
   return resolved
