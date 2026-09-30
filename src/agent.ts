@@ -21,6 +21,7 @@ import { renderCards } from './brain/cards.ts'
 import { noteBrainToolUse } from './brain/relevance.ts'
 import { appendActionAudit } from './autonomy/audit.ts'
 import { createActionGovernor, withActionGovernor, type ActionApproval, type GovernanceMode } from './autonomy/governor.ts'
+import type { SpendState } from './spendLimit.ts'
 import { loadDevelopmentToolHooks, withToolHooks } from './autonomy/devHooks.ts'
 import { expandSkillSelection } from './skills/bundles.ts'
 import { activeTodoList, type TodoList, withTodoList } from './autonomy/todoList.ts'
@@ -127,6 +128,13 @@ export interface RunTurnOptions {
   skipStats?: boolean
   /** Mid-run steering: pending operator messages to splice in at the next step boundary (see runAgentLoop). */
   drainSteering?: () => string[]
+  /**
+   * Asked when the turn hits its spending ceiling, so a cyber run can ask for
+   * more and finish the task it is in the middle of. Undefined everywhere
+   * except the interactive cyber REPL, which means every other caller keeps
+   * wrapping up on the ceiling exactly as before.
+   */
+  onSpendCeiling?: (state: SpendState, requestedUsd: number | undefined) => Promise<number | undefined>
   /**
    * This call opens a fresh user request (not a verification-repair or
    * self-review continuation): say what memory the turn is drawing on, and for
@@ -327,7 +335,8 @@ async function runScopedTurn(
       cache,
       prefetcher,
       signal: options.signal,
-      drainSteering: options.drainSteering,
+        drainSteering: options.drainSteering,
+        onSpendCeiling: options.onSpendCeiling,
       // Plan mode proposes a plan; there is nothing yet to tick.
       onPlanProgress: mode === 'dev' && !options.planMode ? planProgressed : undefined,
       // A ChatGPT-subscription turn is one internal `codex_delegate` action for

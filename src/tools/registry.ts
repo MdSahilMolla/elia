@@ -18,6 +18,7 @@ import { engagementReportTool, logFindingTool } from './findings.ts'
 import { ctfToolchainTool } from './ctfToolchain.ts'
 import { ctfPlaybookTool } from './ctfPlaybook.ts'
 import { securityTriageTool } from './securityTriage.ts'
+import { askUserTool } from './askUser.ts'
 import { webSearchTool } from './webSearch.ts'
 import { webFetchTool } from './webFetch.ts'
 import { readSpreadsheetTool } from './readSpreadsheet.ts'
@@ -120,7 +121,7 @@ export const browserTools: Tool[] = [browserTool]
 export const communicationTools: Tool[] = [communicationTool]
 
 /** Only granted to the lead agent's own turn, and only in cyber mode — see agent.ts. */
-export const cyberTools: Tool[] = [newEngagementTool, runSecurityToolTool, httpProbeTool, logFindingTool, engagementReportTool, ctfToolchainTool, ctfPlaybookTool, securityTriageTool]
+export const cyberTools: Tool[] = [newEngagementTool, runSecurityToolTool, httpProbeTool, logFindingTool, engagementReportTool, ctfToolchainTool, ctfPlaybookTool, securityTriageTool, askUserTool]
 
 /** Real external data for the Marketing/Finance personas — see src/agents/personas.ts. Tech's toolset is unchanged. */
 export const businessTools: Tool[] = [readSpreadsheetTool, spreadsheetTool, presentationTool]
