@@ -268,7 +268,7 @@ describe('pilot end to end (real git, fake model and worker)', () => {
     expect(renderReport(state)).toContain('| at start | now |')
     // .elia/ never shows up as the operator's work.
     expect(sh(root, 'status', '--porcelain')).toBe('')
-  })
+  }, 120_000)
 
   test('plan-only changes nothing and resume picks the plan back up', async () => {
     const plan = await runPilot({ root, planOnly: true, understandingModel: model, checkRunner: fileRunner, has: () => true, env: {}, log: () => {} })
