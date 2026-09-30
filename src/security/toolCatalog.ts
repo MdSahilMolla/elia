@@ -19,7 +19,7 @@
  * "no install hint" rather than guessed at.
  */
 
-export type ToolCategory = 'pwn' | 'rev' | 'crypto' | 'stego' | 'misc'
+export type ToolCategory = 'pwn' | 'rev' | 'crypto' | 'stego' | 'web' | 'misc'
 
 export interface CatalogEntry {
   /** Display name, e.g. `nmap`. Unique across the catalog. */
@@ -37,18 +37,28 @@ export interface CatalogEntry {
   scopeNote?: string
 }
 
-export const TOOL_CATEGORIES: ToolCategory[] = ['pwn', 'rev', 'crypto', 'stego', 'misc']
+export const TOOL_CATEGORIES: ToolCategory[] = ['pwn', 'rev', 'crypto', 'stego', 'web', 'misc']
 
 export const CATEGORY_DESCRIPTIONS: Record<ToolCategory, string> = {
   pwn: 'Binary exploitation: read the mitigations, find the bug, build the chain.',
   rev: 'Reverse engineering: recover what a stripped or compiled artifact was doing.',
   crypto: 'Cryptanalysis: solve the maths instead of guessing the plaintext.',
   stego: 'Steganography: find what was hidden inside an image, audio file or archive.',
+  web: 'Web exploitation: read what the app trusts, change one value at a time, and diff the response.',
   misc: 'Forensics and general-purpose: the capture, document, media and encoding tools everything else leans on.',
 }
 
 /** The two password-cracking entries are the same boundary, so it is written once. */
 const CRACK_SCOPE_NOTE = 'Only run this against a CTF challenge\'s own artifacts — the hashes and files the challenge ships with, or a target inside a recorded, authorized engagement. Never against third-party accounts, a hash you scraped from somewhere else, or a machine you were not engaged to test.'
+
+/**
+ * Every entry that talks to a host shares one boundary. These scanners will send
+ * real requests and will happily enumerate a target they were pointed at, so the
+ * engagement record is the only thing standing between a breadth tool and a
+ * stranger's server. Each one also sprays findings — a tool whose output needs no
+ * confirmation is a tool that manufactures false positives.
+ */
+const TARGET_SCOPE_NOTE = 'Only run this against a target inside a recorded, authorized engagement whose SCOPE.md covers that host. Never point it at a third-party or public site. Its output is a list of hypotheses: confirm each one with a single controlled request before reporting it.'
 
 /** `binutils` ships the three of them, so the same hint serves objdump/readelf/nm/strings. */
 const BINUTILS = {
@@ -473,6 +483,63 @@ export const SECURITY_TOOL_CATALOG: CatalogEntry[] = [
     purpose: 'Carve a raw byte stream or an image back into its original files by signature.',
     binaries: ['foremost'],
     install: { linux: 'sudo apt install foremost', macos: 'brew install foremost', windows: 'choco install foremost' },
+  },
+
+  // ---------------------------------------------------------------- web ----
+  {
+    name: 'nuclei',
+    category: 'web',
+    purpose: 'Run a library of known-issue templates against a target for breadth; confirm every hit before believing it.',
+    binaries: ['nuclei'],
+    scopeNote: TARGET_SCOPE_NOTE,
+    install: {
+      linux: 'go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest (needs go on PATH), or download the release binary from github.com/projectdiscovery/nuclei/releases',
+      macos: 'brew install nuclei',
+      windows: 'winget install ProjectDiscovery.nuclei',
+    },
+  },
+  {
+    name: 'ffuf',
+    category: 'web',
+    purpose: 'Fuzz one request position — paths, query keys, headers, values — and sort by response size so soft-404s drop out.',
+    binaries: ['ffuf'],
+    scopeNote: TARGET_SCOPE_NOTE,
+    install: {
+      linux: 'go install -v github.com/ffuf/ffuf/v2@latest (needs go on PATH), or download the release binary from github.com/ffuf/ffuf/releases',
+      macos: 'brew install ffuf',
+      windows: 'choco install ffuf',
+    },
+  },
+  {
+    name: 'gobuster',
+    category: 'web',
+    purpose: 'Enumerate directories and files against a vhost, with an extension list to catch .bak and .php leftovers.',
+    binaries: ['gobuster'],
+    scopeNote: TARGET_SCOPE_NOTE,
+    install: { linux: 'sudo apt install gobuster', macos: 'brew install gobuster', windows: 'choco install gobuster' },
+  },
+  {
+    name: 'sqlmap',
+    category: 'web',
+    purpose: 'Confirm and exploit a SQL injection you have already found; treat its output as a hypothesis until a request proves it.',
+    binaries: ['sqlmap'],
+    scopeNote: TARGET_SCOPE_NOTE,
+    install: PIP('sqlmap'),
+  },
+  {
+    name: 'nikto',
+    category: 'web',
+    purpose: 'Run a broad server misconfiguration and known-file scan for a quick inventory of what is exposed.',
+    binaries: ['nikto'],
+    scopeNote: TARGET_SCOPE_NOTE,
+    install: { linux: 'sudo apt install nikto', macos: 'brew install nikto', windows: 'choco install nikto' },
+  },
+  {
+    name: 'jwt_tool',
+    category: 'web',
+    purpose: 'Decode, tamper with and re-sign a JWT to test alg:none, weak secrets and unsigned claims.',
+    binaries: ['jwt_tool'],
+    install: { linux: 'pip install jwt-tool' },
   },
 
   // --------------------------------------------------------------- misc ----

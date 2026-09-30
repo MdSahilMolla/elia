@@ -34,9 +34,9 @@ const onlyInstalled = (...present: string[]) => noneInstalled({
 })
 
 describe('reportToolchain structure', () => {
-  test('groups all five categories and states that nothing was installed', async () => {
+  test('groups all six categories and states that nothing was installed', async () => {
     const report = await reportToolchain({}, noneInstalled())
-    for (const category of ['pwn', 'rev', 'crypto', 'stego', 'misc']) {
+    for (const category of ['pwn', 'rev', 'crypto', 'stego', 'web', 'misc']) {
       expect(report).toContain(`--- ${category} — `)
     }
     expect(report).toContain('=== CTF toolchain (read-only detection) ===')
@@ -48,14 +48,14 @@ describe('reportToolchain structure', () => {
   test('a category filter narrows the report to that category only', async () => {
     const report = await reportToolchain({ category: 'crypto' }, noneInstalled())
     expect(report).toContain('--- crypto — ')
-    for (const category of ['pwn', 'rev', 'stego', 'misc']) expect(report).not.toContain(`--- ${category} — `)
+    for (const category of ['pwn', 'rev', 'stego', 'web', 'misc']) expect(report).not.toContain(`--- ${category} — `)
     expect(report).toContain('Categories: crypto')
   })
 
   test('an unknown category throws and names the valid ones', async () => {
-    await expect(reportToolchain({ category: 'forensics' }, noneInstalled())).rejects.toThrow(/category must be one of: pwn, rev, crypto, stego, misc/)
+    await expect(reportToolchain({ category: 'forensics' }, noneInstalled())).rejects.toThrow(/category must be one of: pwn, rev, crypto, stego, web, misc/)
     // An empty string is "not provided" here, not an invalid category.
-    await expect(reportToolchain({ category: '' }, noneInstalled())).resolves.toContain('Categories: pwn, rev, crypto, stego, misc')
+    await expect(reportToolchain({ category: '' }, noneInstalled())).resolves.toContain('Categories: pwn, rev, crypto, stego, web, misc')
   })
 
   test('every catalogued tool appears exactly once in a full report', async () => {
@@ -191,10 +191,10 @@ describe('runProbeCommand', () => {
 })
 
 describe('ctfToolchainTool', () => {
-  test('declares the five categories and says it only reports', () => {
+  test('declares the six categories and says it only reports', () => {
     expect(ctfToolchainTool.name).toBe('ctf_toolchain')
     const category = ctfToolchainTool.input_schema.properties.category as { enum: string[] }
-    expect(category.enum).toEqual(['pwn', 'rev', 'crypto', 'stego', 'misc'])
+    expect(category.enum).toEqual(['pwn', 'rev', 'crypto', 'stego', 'web', 'misc'])
     expect(ctfToolchainTool.description).toContain('NEVER installs')
     expect(ctfToolchainTool.description).toContain('READ-ONLY')
   })
