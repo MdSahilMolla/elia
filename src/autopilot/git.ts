@@ -10,6 +10,7 @@
 import { spawnSync } from 'node:child_process'
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { signCommitMessage } from '../provenance.ts'
 
 export interface GitResult {
   ok: boolean
@@ -124,7 +125,7 @@ export function commitEverything(
   if (include.length === 0) return { committed: false, skipped }
   const add = git(['add', '-A', '--', ...include], root)
   if (!add.ok) throw new Error(`git add failed: ${add.stderr}`)
-  const commit = git([...identityArgs(root), 'commit', '-q', ...(options.hooks === false ? ['--no-verify'] : []), '-m', message], root, 300_000)
+  const commit = git([...identityArgs(root), 'commit', '-q', ...(options.hooks === false ? ['--no-verify'] : []), '-m', signCommitMessage(message)], root, 300_000)
   if (!commit.ok) {
     git(['reset', '-q'], root)
     throw new Error(`git commit failed: ${(commit.stderr || commit.stdout).slice(-600)}`)
