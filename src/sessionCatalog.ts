@@ -104,6 +104,7 @@ export function sessionTitle(messages: { role: string; content: unknown[] }[]): 
   })
   const text = (block?.text ?? '')
     .replace(/<elia-plan>[\s\S]*?<\/elia-plan>/g, ' ')
+    .replace(/<elia-premises>[\s\S]*?<\/elia-premises>/g, ' ')
     .replace(/<local-command>[\s\S]*?<\/output>/g, ' ')
     .replace(/\s+/g, ' ')
     .trim()

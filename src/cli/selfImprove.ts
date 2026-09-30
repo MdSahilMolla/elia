@@ -55,6 +55,9 @@ export async function runCompounding(): Promise<void> {
   // have seen a win if one had been proposed, which is the other half of that.
   const lastBench = [...readBenchRuns()].reverse().find((run) => run.set === 'all')
   const gatePower = lastBench ? renderGatePower(inferTasks(lastBench), benchRepeats(), 1, isAssumed(lastBench)) : undefined
+  const { readReceipts } = await import('../world/kernel.ts')
+  const { renderWorld, worldStatus } = await import('../world/status.ts')
+  const worldLines = renderWorld(worldStatus(readReceipts(), readLedger()))
   const practice = await import('../evolve/autoImprove.ts')
   const practiceLine = practice.renderPracticeStatus(practice.reapPractice(), { now: Date.now(), enabled: practice.autoImproveEnabled() })
   // Capability in the field, beside capability on the benchmark: what elia
@@ -68,6 +71,7 @@ export async function runCompounding(): Promise<void> {
       [
         renderCompoundingStatus(stages),
         practiceLine,
+        worldLines,
         renderContributionEvidence(contributions),
         renderVelocity(velocity),
         renderCoverage(coverage.lifetime, coverage.recent),
@@ -125,6 +129,12 @@ export async function runJev(): Promise<void> {
   const summaries = summarize(readLedger())
   if (machineReadable) emitEvent('jev_status', { enabled: jevEnabled(), summaries })
   else writeUsageLine(`\n${renderSummary(summaries)}`)
+}
+
+/** `elia world` — what elia has learned about how this project behaves, and how well it predicts. */
+export async function runWorld(): Promise<void> {
+  const { runCompoundingAction } = await import('./compoundingEngine.ts')
+  await runCompoundingAction('world')
 }
 
 export async function runEvolve(): Promise<void> {
@@ -387,6 +397,12 @@ export async function runValues(): Promise<void> {
     if (core.path) writeNotice(core.path)
     writeUsageLine('')
     for (const line of core.text.split('\n')) writeUsageLine(`  ${line}`)
+    // What elia is for, above; how it knows and decides, below — the two halves
+    // no self-improvement may rewrite.
+    const { renderPrinciples } = await import('../principles/axioms.ts')
+    writeUsageLine('')
+    writeNotice('first principles: what elia\'s architecture is derived from — each enforced in code, and held to it by src/principles/conformance.test.ts')
+    for (const line of renderPrinciples().split('\n')) writeUsageLine(`  ${line}`)
     return
   }
 

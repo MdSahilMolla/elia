@@ -3,6 +3,7 @@ import { ELIA_ROOT } from '../config.ts'
 import { readBoundedOutput, terminateProcessGroup } from '../shell.ts'
 import type { GapVector } from '../gap/types.ts'
 import type { ValueProbeRun } from '../values/probes.ts'
+import { isPrefixSizes, type PrefixSizes } from '../world/probe.ts'
 
 /**
  * Measuring a property of a source tree by running *that tree's own* code.
@@ -51,6 +52,12 @@ export async function valueProbesIn(
 export async function toolNamesIn(root: string, signal?: AbortSignal): Promise<string[] | undefined> {
   const surface = await spawnJson<{ tools?: unknown }>(join(root, 'src', 'evolve', 'toolSurface.ts'), [], signal)
   return Array.isArray(surface?.tools) && surface.tools.every((name) => typeof name === 'string') ? (surface.tools as string[]) : undefined
+}
+
+/** What `root`'s own prompt and tool definitions cost every call (world/probe.ts). */
+export async function prefixIn(root: string, signal?: AbortSignal): Promise<PrefixSizes | undefined> {
+  const sizes = await spawnJson<unknown>(join(root, 'src', 'world', 'probe.ts'), [], signal)
+  return isPrefixSizes(sizes) ? sizes : undefined
 }
 
 async function spawnJson<T>(entry: string, args: string[], signal?: AbortSignal): Promise<T | undefined> {

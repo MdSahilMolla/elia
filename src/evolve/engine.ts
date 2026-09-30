@@ -1,14 +1,16 @@
-import { readFileSync, readdirSync, statSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { DEV_SYSTEM_PROMPT, ELIA_ROOT, config } from '../config.ts'
 import { runAgentLoop, type ConversationMessage } from '../agentLoop.ts'
 import { runSubAgent } from '../subagent.ts'
 import { allWorkerTools } from '../tools/registry.ts'
 import type { Tool } from '../tools/types.ts'
-import { clampOutput, runProcess, runShell } from '../shell.ts'
+import { clampOutput, runShell } from '../shell.ts'
+import { ContainmentRequired, attest, describeAttestation, evolveBoxMode, runGate } from './containment.ts'
+import { recentBoxReceipts } from '../sandbox/box.ts'
 import { writeText } from '../ui/stream.ts'
 import { writeBlock, writeFail, writePass, writePhase, writeSubStep, writeSummary } from '../ui/report.ts'
-import { formatElapsed } from '../usage.ts'
+import { formatElapsed, sessionUsageSnapshot, totalTokens as usageTokens } from '../usage.ts'
 import { emitEvent, machineReadable, quietOutput } from '../ui/runtime.ts'
 import {
   EVOLUTION_DIR,
@@ -79,6 +81,14 @@ import { checkIdea, type IdeaMatch } from './ideas.ts'
 import { applySteppingStone, archiveNearMiss, elites, readArchive, renderSteppingStones } from './archive.ts'
 import { improverLoopRoute, improverRoute, withImproverBuilder } from './improverRoute.ts'
 import { checkCanaries } from './canaryGate.ts'
+import { touchesImprover } from '../compounding/recursion.ts'
+import { assess, readChangedFiles, surfaceLine, twinEnabled } from '../world/twin.ts'
+import { appendReceipt, calibrate, closeReceipt, readReceipts, type Receipt } from '../world/kernel.ts'
+import { isNewTestForChange, lintFinding, reviewDiff } from './quality.ts'
+import { failToPass } from './failToPass.ts'
+import { budgetPolicy, mayStart, overran } from './budget.ts'
+import { land, landingEnabled } from './landing.ts'
+import { createWorldPredictTool } from './worldTool.ts'
 
 /**
  * Elia improving elia.
@@ -120,6 +130,12 @@ export interface Hypothesis {
   plan: string
   /** An archived stepping stone to start from instead of the current source (archive.ts). */
   buildOn?: string
+  /**
+   * The failing benchmark tasks this change is meant to fix. Empty for a
+   * change that only makes elia cheaper. The world model stops a change that
+   * merely adds text to every call unless it names a failing task to earn it.
+   */
+  targetTasks?: string[]
 }
 
 export interface EvolveOptions {
@@ -144,6 +160,8 @@ export interface EvolveResult {
   final: Metrics
   /** Set when no generation was attempted, and why. */
   stoppedReason?: string
+  /** Set when the run ended early because the next generation could not be afforded (budget.ts). */
+  budgetStop?: string
 }
 
 export async function evolve(options: EvolveOptions = {}): Promise<EvolveResult> {
@@ -192,6 +210,11 @@ export async function evolve(options: EvolveOptions = {}): Promise<EvolveResult>
     return { generations: [], baseline: firstBaseline, final: firstBaseline, stoppedReason }
   }
 
+  // What a full sweep of this run's task set costs, the unit the budget is in.
+  const policy = budgetPolicy()
+  const sweepTokens = baselineCard.totalTokens
+  let budgetStop: string | undefined
+
   // One slice of the corpus is scored but never described to the proposer, so
   // that a gain there cannot have been aimed at. See split.ts for what that
   // does and does not buy. Computed once per run: a split that moved between
@@ -209,21 +232,42 @@ export async function evolve(options: EvolveOptions = {}): Promise<EvolveResult>
   // not change. Replaced on a promotion for the same reason `baseline` is.
   let baselineOutcomes = baselineCard.outcomes
 
+  // The generation whose promotion changed the improver itself. This process
+  // imported the agent loop, the sub-agent, the roles and the tools when it
+  // started, so every generation after that one still proposes and builds with
+  // the old ones; only a new process picks the change up. Recorded on those
+  // generations so the recursion signal does not credit the change with them.
+  let improverStaleSince: number | undefined
+
   for (let index = 0; index < generations; index++) {
     if (options.signal?.aborted) break
 
+    // Refused before it starts if it could not be afforded to the end: a winner
+    // that cannot be confirmed is the most expensive thing to lose.
+    const afford = mayStart(policy, readLedger(), sweepTokens)
+    if (!afford.ok) {
+      budgetStop = afford.reason
+      writeFail(`stopped: ${afford.reason}`)
+      break
+    }
+
     const generation = nextGenerationNumber()
     const { record, candidateCard } = await runGeneration(generation, baseline, options, tasks, evidence, baselineOutcomes, split)
+    if (improverStaleSince !== undefined) record.staleImprover = improverStaleSince
     records.push(record)
     appendGeneration(record)
 
-    if (record.verdict === 'promoted' && record.candidate) {
+    if (standsOnWinner(record)) {
       // Stand on the winner: the next generation is measured against, and builds
       // on, the version that just won.
       baseline = record.candidate
       if (candidateCard) {
         evidence = candidateCard.outcomes.filter((outcome) => !outcome.passed)
         baselineOutcomes = candidateCard.outcomes
+      }
+      if (touchesImprover(record.changedFiles)) {
+        improverStaleSince ??= record.generation
+        if (index < generations - 1) writeSubStep(`generation ${record.generation} changed the improver itself — this process still runs the old one, so the generations left in it are recorded as stale; the next \`elia evolve\` picks the change up`)
       }
     }
 
@@ -234,7 +278,24 @@ export async function evolve(options: EvolveOptions = {}): Promise<EvolveResult>
     }
   }
 
-  return { generations: records, baseline: firstBaseline, final: baseline }
+  return {
+    generations: records,
+    baseline: firstBaseline,
+    final: baseline,
+    ...(budgetStop ? { budgetStop, ...(records.length === 0 ? { stoppedReason: budgetStop } : {}) } : {}),
+  }
+}
+
+/**
+ * Whether the next generation should be measured against, and build on, what
+ * this one promoted. A live promotion has been copied into the tree every later
+ * sandbox starts from, so it should. A branch promotion has not: the live tree
+ * is unchanged, so a candidate cut from it lacks the win, and holding that
+ * candidate to a baseline that includes the win asks it to beat a gain it was
+ * never given.
+ */
+export function standsOnWinner(record: GenerationRecord): record is GenerationRecord & { candidate: Metrics } {
+  return record.verdict === 'promoted' && record.candidate !== undefined && (record.branch === undefined || record.landed !== undefined)
 }
 
 /**
@@ -352,6 +413,8 @@ async function attemptGeneration(
   onSandbox: (sandbox: Sandbox) => void = () => {},
 ): Promise<GenerationRecord> {
   const startedAt = Date.now()
+  const policy = budgetPolicy()
+  const improverTokensBefore = usageTokens(sessionUsageSnapshot().usage)
   const strategy = pickStrategy()
   const base: GenerationRecord = {
     generation,
@@ -450,15 +513,28 @@ async function attemptGeneration(
   // --- Implement it inside the sandbox --------------------------------------
 
   writePhase('execute', `applying it in ${sandbox.root}`)
+  const failedIds = new Set(baseline.failed)
+  const targetsFailing = (hypothesis.targetTasks ?? []).some((id) => failedIds.has(id))
+  const worldTool = createWorldPredictTool({
+    liveRoot: ELIA_ROOT,
+    candidateRoot: sandbox.root,
+    baseline: baselineOutcomes,
+    failingTargets: () => targetsFailing,
+    changed: () => changedFiles(sandbox),
+    ...(options.signal ? { signal: options.signal } : {}),
+  })
   await withImproverBuilder(improver, () =>
     runSubAgent({
       role: 'builder',
       name: `builder#gen${generation}`,
       prompt: implementationBrief(sandbox, hypothesis),
       signal: options.signal,
-      tools: candidateTools(sandbox.root, allWorkerTools()),
+      tools: [...candidateTools(sandbox.root, allWorkerTools()), ...(twinEnabled() ? [worldTool] : [])],
     }),
   )
+  // What the proposer and the builder spent, in this process: the race and the
+  // confirmation run in child processes and are added as they come back.
+  base.costTokens = Math.max(0, usageTokens(sessionUsageSnapshot().usage) - improverTokensBefore)
 
   // --- Gate -----------------------------------------------------------------
 
@@ -476,7 +552,12 @@ async function attemptGeneration(
   if (machineReadable) emitEvent('candidate_changes', { generation, files: changed, description: describeChanges(sandbox, changed) })
   else process.stdout.write(`${describeChanges(sandbox, changed)}\n`)
 
-  const violations = violatedImmutables(changed)
+  // The one edit to the immutable test suite a candidate may make: a new test
+  // file beside the code it changes (quality.ts). It is held to its own rules
+  // below; an existing test is still untouchable.
+  const liveHas = (path: string) => existsSync(join(ELIA_ROOT, path))
+  const addedTests = changed.filter((file) => isNewTestForChange(file, changed, liveHas))
+  const violations = violatedImmutables(changed.filter((file) => !addedTests.includes(file)))
   if (violations.length > 0) {
     // Not treated as a bug to fix — the attempt is void, because a candidate that
     // edits the benchmark cannot be meaningfully scored by it.
@@ -488,10 +569,74 @@ async function attemptGeneration(
     }
   }
 
-  const [typecheck, unitTests] = await Promise.all([
-    runShell('bun run typecheck', GATE_TIMEOUT_MS, sandbox.root),
-    runShell('bun test', GATE_TIMEOUT_MS, sandbox.root),
-  ])
+  // --- Read it, then price it, before anything that costs is run ------------
+
+  const review = reviewDiff(readChangedFiles(ELIA_ROOT, sandbox.root, changed))
+  if (!review.ok) {
+    const reason = `code review: ${review.findings.map((finding) => `${finding.rule}${finding.file ? ` in ${finding.file}` : ''} — ${finding.detail}`).join('; ')}`
+    writeFail(`rejected: ${reason}`)
+    writeSubStep(`sandbox kept at ${sandbox.root} if you want to look`)
+    return { ...base, verdict: 'rejected', reason }
+  }
+
+  // What the world model believes, committed before a single task runs, so it
+  // can be scored afterwards (world/kernel.ts). Fails open: a screen that cannot
+  // run is not a reason to stop a candidate.
+  let openReceipt: Receipt | undefined
+  if (twinEnabled()) {
+    try {
+      const screen = await assess({
+        liveRoot: ELIA_ROOT,
+        candidateRoot: sandbox.root,
+        changed,
+        baseline: baselineOutcomes,
+        calibration: calibrate(readReceipts()),
+        failingReachable: targetsFailing,
+        ...(options.signal ? { signal: options.signal } : {}),
+      })
+      openReceipt = appendReceipt({
+        generation,
+        at: Date.now(),
+        surface: screen.effect.surface,
+        raw: screen.effect.raw,
+        predicted: screen.effect.belief,
+        decision: screen.proceed ? 'proceed' : 'skip',
+        reason: screen.reason,
+      })
+      base.twin = {
+        surface: screen.effect.surface,
+        decision: screen.proceed ? 'proceed' : 'skip',
+        reason: screen.reason,
+        predicted: screen.effect.belief,
+        winProbability: screen.winProbability,
+        ...(openReceipt ? { receipt: openReceipt.hash } : {}),
+      }
+      writeSubStep(`world model: ${surfaceLine(screen.effect, screen.winProbability)}`)
+      if (!screen.proceed) {
+        writeFail(`stopped before any benchmark task ran: ${screen.reason}`)
+        writeSubStep(`sandbox kept at ${sandbox.root} if you want to look`)
+        return { ...base, verdict: 'rejected', reason: screen.reason }
+      }
+    } catch (error) {
+      writeSubStep(`world model unavailable (${error instanceof Error ? error.message.split('\n')[0] : String(error)}) — measuring as before`)
+    }
+  }
+
+  const receiptsBefore = recentBoxReceipts().length
+  let typecheck: Awaited<ReturnType<typeof runGate>>
+  let unitTests: Awaited<ReturnType<typeof runGate>>
+  try {
+    ;[typecheck, unitTests] = await Promise.all([
+      runGate('bun run typecheck', GATE_TIMEOUT_MS, sandbox.root, ELIA_ROOT, options.signal),
+      runGate('bun test', GATE_TIMEOUT_MS, sandbox.root, ELIA_ROOT, options.signal),
+    ])
+  } catch (error) {
+    if (!(error instanceof ContainmentRequired)) throw error
+    // Infrastructure, not the candidate's fault: nothing was learned about the change.
+    writeFail(error.message)
+    return { ...base, verdict: 'error', reason: error.message }
+  }
+  if (evolveBoxMode() !== 'off') writeSubStep(describeAttestation(attest(receiptsBefore)))
   if (typecheck.exitCode !== 0) {
     if (looksUnavailable(typecheck.stderr)) {
       writeSubStep('typecheck unavailable in the sandbox — skipping that gate')
@@ -516,7 +661,9 @@ async function attemptGeneration(
     // the candidate really broke fails again; a list that cannot be read, or a
     // retry that fails, keeps the rejection.
     const files = failingTestFiles(`${unitTests.stdout}\n${unitTests.stderr}`)
-    const retry = files.length > 0 ? await runProcess({ executable: 'bun', args: ['test', ...files], timeoutMs: GATE_TIMEOUT_MS, cwd: sandbox.root }) : undefined
+    // Through the same gate as the first run: a retry that escaped the box would run the candidate uncontained.
+    const quoted = files.map((file) => `'${file.replace(/'/g, `'\\''`)}'`).join(' ')
+    const retry = files.length > 0 ? await runGate(`bun test ${quoted}`, GATE_TIMEOUT_MS, sandbox.root, ELIA_ROOT, options.signal) : undefined
     if (retry?.exitCode !== 0) {
       writeFail('unit tests failed')
       const output = retry ? `${retry.stderr || retry.stdout}` : `${unitTests.stderr || unitTests.stdout}`
@@ -547,6 +694,34 @@ async function attemptGeneration(
     return { ...base, verdict: 'rejected', reason }
   }
 
+  // A change to logic ships a test, and the test has to be one that could have
+  // failed; the files it touched must not have got worse under the linter. Both
+  // are cheap and both come before anything is spent on a model.
+  const proof: NonNullable<GenerationRecord['proof']> = { review: [], failToPass: 'not applicable: the change alters no logic', contained: '' }
+  if (review.needsTest) {
+    const outcome = await failToPass({
+      liveRoot: ELIA_ROOT,
+      candidateRoot: sandbox.root,
+      testFiles: review.newTests,
+      run: (command, cwd) => runGate(command, GATE_TIMEOUT_MS, cwd, ELIA_ROOT, options.signal),
+    })
+    proof.failToPass = outcome.detail
+    if (outcome.checked && !outcome.proves) {
+      const reason = `the new tests prove nothing: ${outcome.detail}`
+      writeFail(`rejected: ${reason}`)
+      writeSubStep(`sandbox kept at ${sandbox.root} if you want to look`)
+      return { ...base, verdict: 'rejected', reason }
+    }
+    writeSubStep(`new tests: ${outcome.detail}`)
+  }
+  const lint = lintFinding(ELIA_ROOT, sandbox.root, changed)
+  if (lint) {
+    const reason = `code review: ${lint.rule} — ${lint.detail}`
+    writeFail(`rejected: ${reason}`)
+    writeSubStep(`sandbox kept at ${sandbox.root} if you want to look`)
+    return { ...base, verdict: 'rejected', reason }
+  }
+
   // --- Measure the candidate, using the candidate ---------------------------
 
   // Race for the verdict rather than buying the whole scoreboard: the tasks this
@@ -558,6 +733,9 @@ async function attemptGeneration(
   let comparison: Comparison
   let evidenceCost: EvidenceCost | undefined
   let ranTaskIds: string[] = []
+  // A race that stopped early leaves tasks unrun, which have no tokens, so its
+  // total is not comparable with the baseline's and cannot score a prediction.
+  let raceComplete = true
   // The baseline as the race compared it: pooled, when a retest settled an
   // apparent regression (sieve.ts), so the recorded verdicts use the same numbers.
   let comparedBaseline = baseline
@@ -580,6 +758,7 @@ async function attemptGeneration(
       comparison = race.comparison
       if (race.baseline) comparedBaseline = race.baseline
       ranTaskIds = race.ran
+      raceComplete = race.skipped.length === 0
       evidenceCost = {
         tasksRun: race.ran.length,
         tasksCarried: race.carried.length,
@@ -613,6 +792,23 @@ async function attemptGeneration(
   base.candidate = candidate
   base.evidenceCost = evidenceCost
   base.funnel = 'measured'
+  base.costTokens = (base.costTokens ?? 0) + evidenceCost.tokens
+
+  // Score the world model's prediction with what was measured, where the
+  // measurement is comparable (a whole card on both sides).
+  const scoreTwin = (baselineTokens: number, candidateTokens: number): void => {
+    if (!openReceipt || baselineTokens <= 0 || candidateTokens <= 0) return
+    const actual = Math.log(candidateTokens / baselineTokens)
+    closeReceipt(openReceipt, actual)
+    if (base.twin) base.twin.actual = actual
+  }
+  if (raceComplete && candidateCard.unmeasured.length === 0) scoreTwin(comparedBaseline.totalTokens, candidate.totalTokens)
+
+  const ceiling = overran(policy, base.costTokens, baseline.totalTokens)
+  if (!ceiling.ok) {
+    writeFail(`stopped: ${ceiling.reason}`)
+    return { ...base, verdict: 'error', reason: `budget: ${ceiling.reason}` }
+  }
   // Recorded for every generation, not only the promoted ones: a rejected
   // candidate that gained on a held-out task is a near-miss worth knowing
   // about, and the ledger is where the next generation reads its history.
@@ -688,6 +884,12 @@ async function attemptGeneration(
   }
   const confirmationBaseline = toMetrics(confirmationBaselineCard)
   const confirmationCandidate = toMetrics(confirmationCandidateCard)
+  base.costTokens = (base.costTokens ?? 0) + confirmationBaselineCard.totalTokens + confirmationCandidateCard.totalTokens
+  // Two full sweeps of both trees: the best evidence of what the change did to
+  // tokens, so it supersedes the race's reading of the same prediction.
+  if (confirmationCandidateCard.unmeasured.length === 0 && confirmationBaselineCard.unmeasured.length === 0) {
+    scoreTwin(confirmationBaseline.totalTokens, confirmationCandidate.totalTokens)
+  }
   const confirmation = compareScorecards(confirmationBaseline, confirmationCandidate)
   // Same comparison, same spent level: requiring both measurements to clear it
   // can only lower the false-acceptance rate.
@@ -798,6 +1000,12 @@ async function attemptGeneration(
   base.funnel = 'guarded'
 
   const confirmedReason = `${decisionReason}; confirmed independently (${gate === 'sealed' ? sealedConfirmation.reason : confirmation.reason}); verifier, values and canaries held`
+  // What stood behind this promotion beyond the score, written into the ledger
+  // with it: the review it passed, the test that fails without it, and what
+  // contained the gate that ran it.
+  proof.review = review.findings.length === 0 ? ['clean'] : review.findings.map((finding) => `${finding.rule}: ${finding.detail}`)
+  proof.contained = describeAttestation(attest(receiptsBefore))
+  base.proof = proof
 
   if (options.dryRun) {
     writePass(`would promote: ${confirmedReason}`)
@@ -820,7 +1028,28 @@ Proposed and proven by \`elia evolve\`; nothing was changed in the working tree.
       )
       removeSandbox(sandbox)
       writePass(`promoted to branch ${branch}: ${confirmedReason}`)
-      return { ...base, funnel: 'promoted', verdict: 'promoted', reason: confirmedReason, branch, commit }
+
+      // With ELIA_COMPOUND_LAND=on, what was proven inside the box is kept: the
+      // branch is fast-forwarded into the checkout, so the next generation
+      // builds on it instead of on source that lacks it (landing.ts).
+      let landed: GenerationRecord['landed']
+      let landingNote = ''
+      if (landingEnabled()) {
+        const landing = await land({
+          liveRoot: ELIA_ROOT,
+          commit,
+          attestation: attest(receiptsBefore),
+          verify: async () => (await runShell('bun run typecheck', GATE_TIMEOUT_MS, ELIA_ROOT, options.signal)).exitCode === 0,
+        })
+        if (landing.landed) {
+          landed = { previousHead: landing.previousHead, at: Date.now() }
+          writePass(`landed: ${branch} was fast-forwarded into the checkout (previous head ${landing.previousHead.slice(0, 9)})`)
+        } else {
+          landingNote = `; not landed: ${landing.reason}${landing.reverted ? ' (reverted)' : ''}`
+          writeSubStep(`left on ${branch}, not landed: ${landing.reason}`)
+        }
+      }
+      return { ...base, funnel: 'promoted', verdict: 'promoted', reason: `${confirmedReason}${landingNote}`, branch, commit, ...(landed ? { landed } : {}) }
     } catch (error) {
       const reason = error instanceof LiveTreeConflict ? error.message : `could not commit the candidate: ${error instanceof Error ? error.message : String(error)}`
       writeFail(`rejected: ${reason}`)
@@ -908,6 +1137,7 @@ FAILING: ${failing}
 Observed model steps: ${baseline.steps ? Object.entries(baseline.steps).map(([id, steps]) => `${id}=${steps}`).join(', ') : '(not recorded)'}
 Cost of one full run: ${baseline.totalTokens} tokens, ${Math.round(baseline.totalElapsedMs / 1000)}s of agent time.${renderFailureEvidence(evidence)}${fieldEvidenceSection()}
 ${winningRuleSection(baseline)}
+${WORLD_MODEL_SECTION}
 ${tokenCostSection()}
 
 ## What you may not change
@@ -972,6 +1202,19 @@ Each task runs several times; its score is the fraction that passed, and it only
 - A provisional win is measured again, in full, on both trees; it must win again.
 ${headroom ? '' : '\nEvery task you are shown passes every attempt, so a tie is the best a correctness change can do here: efficiency is the way to win.\n'}`
 }
+
+/**
+ * What the world model does to a candidate before anything is paid for. Stated
+ * where the proposer reads it, for the reason \`winningRuleSection\` is: a rule
+ * the proposer cannot see is a rule it cannot aim at.
+ */
+export const WORLD_MODEL_SECTION = `
+## The world model reads your change first
+Before any benchmark task runs, a model of this harness prices your diff without calling a model (src/world/). Its core is exact: a task's tokens are steps times what every call sends first plus what the conversation has built up, and on the built-in tasks the fixed part alone is about 94% of the cost. So it knows what an edit to the system prompt or a tool definition does to the total. It stops a change, at no cost, in these cases:
+- Every file you touch is a test, a document, or code no benchmark task runs (src/autonomy/loop.ts; src/autonomy/roles.ts and src/subagent.ts, which a task reaches only by calling the \`task\` tool). Loaded is not executed: nothing there can move a score. Say so, or propose a task that exercises it.
+- You shorten the prompt or a tool definition but the saving is too small to clear 5% beyond about ±8% run-to-run noise. It tells you how many more tokens per call to cut.
+- You add more than a tenth of everything the suite spends to every call and name no failing task to earn it. Name the failing tasks you mean to fix in \`targetTasks\`; leave it empty for a change that is only about cost.
+A change to logic is priced as a gamble and measured, but it must ship a new test beside it that fails without it. Wording is priced exactly; logic is not.`
 
 /**
  * What every model call pays before the conversation starts, measured from this
@@ -1095,6 +1338,10 @@ ${hypothesis.targetFiles.map((file) => `- ${file}`).join('\n') || '(the plan doe
 - Work ONLY inside ${sandbox.root}. Never touch ${ELIA_ROOT} — that is the live installation.
 - Implement exactly this change. Nothing else. Unrelated edits will cause the whole generation to be rejected even if your change was good.
 - Do NOT modify any of these, at all: ${IMMUTABLE_FILES.join(', ')}. They define how the change is judged or enforce a deterministic safety boundary.
+- The one exception to the test rule: if you change logic (not wording), ADD a new test file beside the code, named after it — \`foo.ts\` gets \`foo.<change>.test.ts\` — with tests that fail without your change. Never edit an existing test. A new test may not skip, isolate or mock-replace anything.
+- Do not add \`@ts-ignore\`, \`oxlint-disable\` or a new \`any\`; satisfy the checks instead of silencing them.
+- Keep it to one change: at most 8 files and about 400 changed lines.
+- Call \`world_predict\` after your edits. It is free and answers in a second: it says what your change does to what every model call sends, whether a benchmark run would be paid for or the change stopped first, and what the code review would say. For a change meant to make elia cheaper, shorten again until it says the change would be measured.
 - Do not run git commands.
 - The change must typecheck (\`bun run typecheck\`) and keep the existing tests passing (\`bun test\`). Run both yourself before you finish, from inside ${sandbox.root}.
 
@@ -1141,6 +1388,11 @@ export function createHypothesisTool(ideas?: { records: readonly GenerationRecor
           type: 'string',
           description: 'Optional: the id of a stepping stone from the brief (e.g. "gen-12") to start from. Its files are laid into your copy first; the plan is the next step on top of it.',
         },
+        targetTasks: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'The FAILING benchmark tasks this change is meant to fix, by id. Leave empty for a change that only makes elia cheaper: the world model stops a change that merely adds text to every call unless it names a failing task to earn it.',
+        },
       },
       required: ['title', 'rationale', 'plan'],
     },
@@ -1174,7 +1426,8 @@ export function createHypothesisTool(ideas?: { records: readonly GenerationRecor
       }
 
       const buildOn = typeof input.buildOn === 'string' && input.buildOn.trim() ? input.buildOn.trim() : undefined
-      captured = { title, rationale, targetFiles, plan, ...(buildOn ? { buildOn } : {}) }
+      const targetTasks = Array.isArray(input.targetTasks) ? input.targetTasks.filter((id): id is string => typeof id === 'string' && id.trim().length > 0) : []
+      captured = { title, rationale, targetFiles, plan, ...(buildOn ? { buildOn } : {}), ...(targetTasks.length > 0 ? { targetTasks } : {}) }
       return 'Hypothesis recorded. Stop now — implementation happens in a separate step.'
     },
   }

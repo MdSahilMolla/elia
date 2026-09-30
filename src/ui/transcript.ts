@@ -78,6 +78,13 @@ export interface Transcript {
   snapshot(): TranscriptSnapshot
   restore(snapshot: TranscriptSnapshot): void
   toMarkdown(title?: string): string
+  /**
+   * Calls `listener` with every item the moment it is recorded — the tap a live
+   * recorder hangs off, so what it sees is exactly what the transcript holds. The
+   * item is the raw one (nothing redacted yet), and a listener that throws never
+   * disturbs the session. Returns the function that stops listening.
+   */
+  observe(listener: (item: TranscriptItem) => void): () => void
 }
 
 export interface TranscriptSnapshot {
@@ -129,12 +136,24 @@ export function createTranscript(): Transcript {
   const list: TranscriptItem[] = []
   let nextId = 1
   let turn = 0
+  const listeners = new Set<(item: TranscriptItem) => void>()
 
   const push = (item: TranscriptItem): void => {
     list.push(item)
+    for (const listener of listeners) {
+      try {
+        listener(item)
+      } catch {
+        // Recording is a side channel; it must never break the session it records.
+      }
+    }
   }
 
   return {
+    observe(listener) {
+      listeners.add(listener)
+      return () => listeners.delete(listener)
+    },
     items: () => list,
     turns: () => turn,
     appendUser(text) {

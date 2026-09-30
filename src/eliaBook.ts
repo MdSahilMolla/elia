@@ -3,9 +3,11 @@ import { join } from 'node:path'
 import type { ConversationMessage } from './agentLoop.ts'
 import { ensureSecureDirectory, hardenSecureFile, writeSecureFile } from './securePersistence.ts'
 import { redactArchiveValue, redactSecrets } from './ui/redact.ts'
-import { createTranscript, type TranscriptSnapshot } from './ui/transcript.ts'
+import { createTranscript, type TranscriptItem, type TranscriptSnapshot } from './ui/transcript.ts'
 import { resolveWorkspacePath } from './autonomy/context.ts'
 import { classifyRegime } from './autonomy/detectChecks.ts'
+import { closeOrphanedRecording, listRecordings, readRecording, recordingPath, recordingReference, type RecordedEvent } from './autonomy/sessionRecorder.ts'
+import { tokenize } from './bm25.ts'
 import type { SlashOutcome } from './ui/app/App.tsx'
 
 const BOOK_SCHEMA_VERSION = 1
@@ -563,6 +565,222 @@ export function rollbackEliaBook(id: string, cwd = process.cwd()): EliaBook {
   book.updatedAt = new Date().toISOString()
   saveBook(book, cwd)
   return book
+}
+
+// --- Recorded automatically: the live recording, folded into the playbooks -----
+
+const OPERATOR_CONTEXT = /<operator-context>[\s\S]*?<\/operator-context>\s*/g
+/** A recorded session joins an existing Book only when it is at least this much the same work. */
+const FOLD_THRESHOLD = 0.5
+const MAX_BOOK_VERSIONS = 8
+/** How many unclosed recordings one start will recover, newest first. */
+const MAX_RECOVERIES = 10
+/**
+ * A recording touched this recently may belong to a session that is running but
+ * has not yet announced itself, so it is left for the next start.
+ */
+const RECOVERY_GRACE_MS = 2 * 60_000
+
+/**
+ * A session's recording, rebuilt into the snapshot `sessionProcedure` reads. The
+ * recording is the one source, so a session that ended cleanly and one that was
+ * killed become Books by the same path.
+ */
+function snapshotFromRecording(sessionId: string, events: readonly RecordedEvent[]): EliaBookSessionSnapshot {
+  const items: TranscriptItem[] = []
+  const checkpoints: EliaBookSessionSnapshot['checkpoints'] = []
+  let start: Extract<RecordedEvent, { kind: 'session-start' }> | undefined
+  let usage: EliaBookSessionSnapshot['usage'] | undefined
+  for (const event of events) {
+    if (event.kind === 'session-start') start ??= event
+    else if (event.kind === 'user') items.push({ kind: 'user', id: event.seq, turn: event.turn, text: event.text.replace(OPERATOR_CONTEXT, '') })
+    else if (event.kind === 'assistant' || event.kind === 'notice' || event.kind === 'error' || event.kind === 'shell') items.push({ kind: event.kind, id: event.seq, turn: event.turn, text: event.text })
+    else if (event.kind === 'tool') {
+      items.push({ kind: 'tool', id: event.seq, turn: event.turn, name: event.name, input: event.input, status: event.status, result: event.result, durationMs: event.durationMs, ...(event.actor ? { actor: event.actor } : {}), ...(event.decision ? { decision: event.decision } : {}) })
+    } else if (event.kind === 'turn-end') {
+      usage = event.usage
+      if (event.touched.length > 0) checkpoints.push({ turn: event.turn, at: event.at, label: `Turn ${event.turn + 1}`, files: event.touched })
+    }
+  }
+  const turns = events.reduce((count, event) => Math.max(count, event.turn + 1), 0)
+  return {
+    sessionId,
+    messages: [],
+    transcriptMarkdown: '',
+    recording: { items, turns },
+    checkpoints,
+    usage: usage ?? { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, turns, elapsedMs: Math.max(0, (events.at(-1)?.at ?? 0) - (events[0]?.at ?? 0)) },
+    providerLabel: start?.model ?? 'unknown',
+    model: start?.model ?? 'unknown',
+    mode: start?.mode ?? 'dev',
+  }
+}
+
+const STOPWORDS = new Set(['the', 'and', 'for', 'with', 'this', 'that', 'from', 'into', 'then', 'please', 'can', 'you', 'how', 'what', 'why', 'are', 'was', 'has', 'have', 'not', 'but', 'all'])
+
+function contentWords(text: string): Set<string> {
+  return new Set(tokenize(text).filter((word) => word.length >= 3 && !STOPWORDS.has(word)))
+}
+
+function jaccard(a: ReadonlySet<string>, b: ReadonlySet<string>): number {
+  if (a.size === 0 || b.size === 0) return 0
+  let shared = 0
+  for (const word of a) if (b.has(word)) shared += 1
+  return shared / (a.size + b.size - shared)
+}
+
+/**
+ * How much a session's procedure is the same work as a Book's active one, 0–1:
+ * the overlap of what was asked, and — when both touched files — of where the
+ * work landed, weighted toward what was asked. "Fix the login bug" today and
+ * "the login bug is back" next week are one playbook getting better, not two.
+ */
+export function bookMatch(procedure: EliaBookProcedure, book: EliaBook): number {
+  const known = activeVersion(book).procedure
+  const asked = (value: EliaBookProcedure) => contentWords(`${value.goal} ${value.steps.map((step) => step.title).join(' ')}`)
+  const touched = (value: EliaBookProcedure) => new Set(value.steps.flatMap((step) => step.files))
+  const words = jaccard(asked(procedure), asked(known))
+  const here = touched(procedure)
+  const there = touched(known)
+  return here.size > 0 && there.size > 0 ? 0.65 * words + 0.35 * jaccard(here, there) : words
+}
+
+export interface AutoBookResult {
+  action: 'created' | 'folded' | 'refreshed' | 'skipped'
+  bookId?: string
+  /** For `folded`, how closely the session matched the Book it joined. */
+  match?: number
+  reason?: string
+}
+
+/**
+ * The Book for a recorded session, made without anyone asking: it joins the
+ * playbook it most resembles as a new version, or starts a draft of its own.
+ * A session that did nothing a playbook could repeat (no tool ran) makes none.
+ *
+ * Joining never promotes on its own say-so. A new version becomes the active one
+ * only when it did the same work measurably better *and* the active one was
+ * never verified; a verified version changes only through `improveEliaBook`,
+ * which demands a verified, mechanically checked run. That is what keeps a Book
+ * from drifting toward whatever a session happened to do.
+ */
+export function recordSessionAsBook(sessionId: string, cwd = process.cwd()): AutoBookResult {
+  const skipped = (reason: string): AutoBookResult => ({ action: 'skipped', reason })
+  const path = recordingPath(cwd, sessionId)
+  const events = path ? readRecording(path) : []
+  if (events.length === 0) return skipped('there is no recording')
+  if (!events.some((event) => event.kind === 'tool')) return skipped('no action ran, so there is nothing to repeat')
+
+  let captured: ReturnType<typeof sessionProcedure>
+  try {
+    captured = sessionProcedure(snapshotFromRecording(sessionId, events))
+  } catch (error) {
+    return skipped(error instanceof Error ? error.message : String(error))
+  }
+  const turnEnds = events.filter((event): event is Extract<RecordedEvent, { kind: 'turn-end' }> => event.kind === 'turn-end')
+  // A session that never got to write a turn's end (it was killed) has no usage
+  // record; unknown is not zero, and must not read as the cheapest run there was.
+  if (turnEnds.length === 0) {
+    captured.evidence.totalTokens = undefined
+    captured.evidence.elapsedMs = undefined
+  }
+  const passed = turnEnds.filter((event) => event.verify === 'pass').length
+  const failed = turnEnds.filter((event) => event.verify === 'fail').length
+  captured.evidence.recordingFiles = [recordingReference(sessionId)]
+  // "None" and "skipped" mean no check ran, which is different from a check that failed.
+  if (turnEnds.length > 0) captured.evidence.successes.push(`Of ${turnEnds.length} turn(s), the project's own checks passed on ${passed}, failed on ${failed}, and did not run on ${turnEnds.length - passed - failed}.`)
+
+  const books = listEliaBooks(cwd)
+  const now = new Date().toISOString()
+
+  // The same session again — resumed and carried on — updates its own version instead of adding a twin.
+  const existing = books.find((book) => book.versions.some((version) => version.evidence.sourceSessionId === sessionId))
+  if (existing) {
+    const version = existing.versions.find((item) => item.evidence.sourceSessionId === sessionId)!
+    if (version.evidence.actionCount === captured.evidence.actionCount && version.procedure.steps.length === captured.procedure.steps.length) return skipped('already recorded')
+    version.procedure = captured.procedure
+    version.evidence = captured.evidence
+    version.improvement = `Session ${sessionId} carried on.`
+    existing.updatedAt = now
+    saveBook(existing, cwd)
+    return { action: 'refreshed', bookId: existing.id }
+  }
+
+  const best = books
+    .map((book) => ({ book, score: bookMatch(captured.procedure, book) }))
+    .sort((a, b) => b.score - a.score)[0]
+  if (best && best.score >= FOLD_THRESHOLD) {
+    const { book, score } = best
+    const previous = activeVersion(book).evidence
+    const noWorse = captured.evidence.failedActions <= previous.failedActions && captured.evidence.blockedActions <= previous.blockedActions
+    // Speed and token counts move with the machine's mood, so they are neither
+    // called an improvement nor allowed to earn the active slot: only fewer
+    // failed or blocked actions do, and only against a version nobody verified.
+    const gains = noWorse ? measurableImprovements(previous, captured.evidence).filter((gain) => /^(?:failed|blocked) actions/.test(gain)) : []
+    const version = Math.max(...book.versions.map((item) => item.version)) + 1
+    book.versions.push({ version, createdAt: now, ...captured, improvement: `Re-recorded from session ${sessionId} (${Math.round(score * 100)}% the same work)${gains.length > 0 ? `; better: ${gains.join('; ')}` : ''}.` })
+    if (gains.length > 0 && !previous.verified) book.activeVersion = version
+    while (book.versions.length > MAX_BOOK_VERSIONS) {
+      const oldest = book.versions.find((item) => item.version !== book.activeVersion)
+      if (!oldest) break
+      book.versions.splice(book.versions.indexOf(oldest), 1)
+    }
+    book.updatedAt = now
+    saveBook(book, cwd)
+    return { action: 'folded', bookId: book.id, match: score }
+  }
+
+  const id = uniqueBookId(captured.procedure.goal, cwd)
+  saveBook(
+    {
+      schemaVersion: BOOK_SCHEMA_VERSION,
+      id,
+      title: captured.procedure.goal,
+      status: 'recorded',
+      createdAt: now,
+      updatedAt: now,
+      activeVersion: 1,
+      versions: [{ version: 1, createdAt: now, ...captured, improvement: `Recorded automatically from session ${sessionId}.` }],
+    },
+    cwd,
+  )
+  return { action: 'created', bookId: id }
+}
+
+/** Sessions whose recording a Book still points at; their recordings are never pruned. */
+export function bookedSessionIds(cwd = process.cwd()): Set<string> {
+  const ids = new Set<string>()
+  for (const book of listEliaBooks(cwd)) {
+    for (const version of book.versions) {
+      for (const file of version.evidence.recordingFiles) {
+        const id = /^\.elia\/recordings\/([^/]+)\.ndjson$/.exec(file)?.[1]
+        if (id) ids.add(id)
+      }
+    }
+  }
+  return ids
+}
+
+/**
+ * Finishes what a process that died could not: any recording left open by a
+ * session that is no longer running is closed and made into a Book. A session
+ * another elia still holds is left alone. Returns how many were recovered.
+ */
+export function recoverRecordings(cwd: string, options: { current?: string; isLive: (sessionId: string) => boolean; now?: number }): number {
+  const now = options.now ?? Date.now()
+  let recovered = 0
+  for (const file of listRecordings(cwd)) {
+    if (recovered >= MAX_RECOVERIES) break
+    if (file.sessionId === options.current || now - file.mtimeMs < RECOVERY_GRACE_MS || options.isLive(file.sessionId)) continue
+    try {
+      if (!closeOrphanedRecording(file.path)) continue
+      recordSessionAsBook(file.sessionId, cwd)
+      recovered += 1
+    } catch {
+      // One unreadable recording must not stop the rest from being recovered.
+    }
+  }
+  return recovered
 }
 
 export function renderEliaBook(book: EliaBook): string {

@@ -3,6 +3,7 @@
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { DaemonUnavailable, daemonMode, daemonShellExec } from './daemon/index.ts'
+import { BoxUnavailable, boxFallbackToHost, boxSandboxRequested, noteBoxFallback, runShellInBox } from './sandbox/box.ts'
 import { ContainerUnavailable, containerSandboxRequested, noteContainerFallback, runShellInContainer } from './sandbox/container.ts'
 
 /**
@@ -72,6 +73,28 @@ export async function runShell(
   // Operator cancellation must win even before the shell is spawned.
   if (signal?.aborted) {
     return { command, exitCode: 1, stdout: '', stderr: 'cancelled by operator', elapsedMs: 0, timedOut: false }
+  }
+
+  // elia-box (ELIA_SANDBOX=box) is elia's own sandbox and, unlike the container
+  // path, fails closed: when the box cannot run, the command is refused rather
+  // than quietly run outside it. Only an explicit ELIA_BOX_FALLBACK=host runs it
+  // unsandboxed, and that is recorded once.
+  if (boxSandboxRequested()) {
+    try {
+      return await runShellInBox(command, timeoutMs, cwd, signal, env)
+    } catch (err) {
+      if (signal?.aborted) {
+        return { command, exitCode: 1, stdout: '', stderr: 'cancelled by operator', elapsedMs: Date.now() - startedAt, timedOut: false }
+      }
+      const message = err instanceof Error ? err.message : String(err)
+      if (err instanceof BoxUnavailable && boxFallbackToHost()) {
+        noteBoxFallback(message)
+        // fall through to the daemon/in-process shell below.
+      } else {
+        const hint = err instanceof BoxUnavailable ? ' Set ELIA_BOX_FALLBACK=host to run unsandboxed instead.' : ''
+        return { command, exitCode: 1, stdout: '', stderr: `elia-box did not run this command: ${message}.${hint}`, elapsedMs: Date.now() - startedAt, timedOut: false }
+      }
+    }
   }
 
   // Container sandboxing (ELIA_SANDBOX=container) takes precedence over the
@@ -411,7 +434,7 @@ export function clampOutput(text: string, maxLength = 4000): string {
  * without — and `vite build` read as `vite`.
  */
 export function isLongRunningServerCommand(command: string): boolean {
-  return command.split(COMMAND_SEPARATOR).some((segment) => LONG_RUNNING_SERVER.test(invokedProgram(segment)))
+  return command.split(COMMAND_SEPARATOR).some((segment) => LONG_RUNNING_SERVER.test(invokedProgram(segment))) || isInteractiveSessionCommand(command)
 }
 
 /**
@@ -447,9 +470,58 @@ function invokedProgram(segment: string): string {
   }
 }
 
+/**
+ * Debuggers, REPLs and raw socket tools: programs that sit waiting on stdin
+ * for a human, which is the same shape of problem as a dev server and was
+ * missing from the list above.
+ *
+ * A debug session has no exit code to wait for. Treated as an ordinary
+ * command, the action contract demands exit-zero, the verification runner
+ * blocks out its full timeout and then reads the kill as a broken build, and
+ * the same repair loop that wasted run 2026-09-13-l0av-rnq0's budget on
+ * `bun run dev` reappears for `gdb ./app`. These belong with the servers, so
+ * `isLongRunningServerCommand` consults this too.
+ *
+ * A separate predicate rather than more branches in LONG_RUNNING_SERVER,
+ * because these carry a distinction the servers do not: `gdb -batch -x
+ * script ./app` and `lldb --batch` are bounded and *should* be held to
+ * exit-zero, while a bare `gdb ./app` should not. Matching the program name
+ * alone would refuse both.
+ *
+ * A *bounded* form of these is still just a command: `gdb -batch` (and
+ * `lldb -b`/`--batch`/`--one-line`) runs a script and exits, so it is not
+ * classified here. The dual-purpose socket tools likewise only count in their
+ * session form — `nc host 22` behind a pipe and `socat a b` are one-shot
+ * copies, and a port scan (`nc -z host port`) exits immediately.
+ */
+export function isInteractiveSessionCommand(command: string): boolean {
+  return command.split(COMMAND_SEPARATOR).some((segment) => {
+    const program = invokedProgram(segment)
+    if (BATCH_DEBUGGER.test(program)) return false
+    return INTERACTIVE_SESSION.test(program) || SOCAT_STDIO.test(program)
+  })
+}
+
+const BATCH_DEBUGGER =
+  /^(?:\S*[\\/])?(?:gdb|gdb-multiarch|rust-gdb|lldb)(?:\.exe)?\b[^\n]*(?:\s-{1,2}batch\b|\s-b\b|\s-{1,2}one-line\b)/i
+
 // Anchored: the program itself, optionally behind a path (`./node_modules/.bin/vite`, `bin/rails`).
 const LONG_RUNNING_SERVER =
   /^(?:\S*[\\/])?(?:(?:npm|pnpm|yarn|bun|deno)\s+(?:run\s+|task\s+)?(?:dev|start|serve|preview|watch)\b|vite(?:\s+(?:dev|serve|preview)\b|\s+-|\s*$)|next\s+(?:dev|start)\b|nuxt\s+(?:dev|start)\b|nuxi\s+dev\b|astro\s+dev\b|remix\s+dev\b|nodemon\b|ts-node-dev\b|concurrently\b|http-server\b|live-server\b|serve(?:\s|$)|http\.server\b|flask\s+run\b|uvicorn\b|gunicorn\b|daphne\b|hypercorn\b|waitress-serve\b|fastapi\s+(?:dev|run)\b|streamlit\s+run\b|gradio\s+\S+\.py\b|(?:panel|bokeh)\s+serve\b|(?:chainlit|solara|reflex|shiny)\s+run\b|(?:django-admin|django)\s+runserver\b|(?:python3?|py)(?:\.exe)?\s+(?:\S*[\\/])?manage\.py\s+runserver\b|rails\s+s(?:erver)?\b|php\s+artisan\s+serve\b|jekyll\s+serve\b|hugo\s+server\b|webpack(?:-dev)?-server\b|webpack\s+serve\b|ng\s+serve\b|expo\s+start\b|docker(?:-compose|\s+compose)\s+up\b(?!.*\s(?:-d|--detach)\b)|(?:bun|node|deno)\b.*\s--(?:watch|hot)\b|tail\s+-f\b|watchexec\b)/i
+
+// Anchored, like LONG_RUNNING_SERVER: the program that actually runs, not a
+// name that appears somewhere in the line. `python -m pdb` reaches here as
+// `pdb` (invokedProgram strips the module form).
+//
+// `nc` and `socat` are both dual-purpose — `nc host 22` behind a pipe and
+// `socat a b` are one-shot copies that exit — so each is matched only in its
+// session form: netcat with a listen flag, socat with a bare `-` (its stdio
+// address). Otherwise run_command would refuse a perfectly bounded transfer.
+const INTERACTIVE_SESSION =
+  /^(?:\S*[\\/])?(?:gdb-multiarch|gdbmultiarch|rust-gdb|ggdb|gdb|lldb(?:-server)?|gdbserver|rdb|pdb\d*|(?:ncat|netcat|nc)(?:\.exe)?(?=\s+-{1,2}(?:l|listen)\w*\b))(?:\.exe)?\b/i
+
+/** socat's stdio address, the operand that turns a transfer into a session. */
+const SOCAT_STDIO = /^(?:\S*[\\/])?socat(?:\.exe)?\b[^\n]*(?:\s-(?=\s|$)|^\S*[\\/]socat(?:\.exe)?\s+-)/i
 
 const APP_ENTRYPOINT =
   /^(?:\S*[\\/])?(?:python3?|py|node|bun|deno|tsx|ts-node)(?:\.exe)?\s+(?:run\s+)?(?:-\S+\s+)*(?:\S*[\\/])?(?:app|server|main|index|run|wsgi|asgi|api|web)\.(?:py|[cm]?[jt]sx?)(?:\s|$)/i

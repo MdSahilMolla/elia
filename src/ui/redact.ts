@@ -1,4 +1,67 @@
 const SECRET_KEY = /(api[_-]?key|token|secret|password|passwd|authorization|cookie|session|private[_-]?key|access[_-]?key|client[_-]?secret|webhook)/i
+
+/**
+ * Cookie and session-credential names, for keys and `name=value` pairs.
+ *
+ * `SECRET_KEY` above matches `session` anywhere in a key, so `JSESSIONID`
+ * trips it — but not `PHPSESSID`, `ASP.NET_SessionId`, or `_sessid`, which is
+ * exactly the naming a PHP or ASP.NET target gives the cookie that *is* the
+ * login. Those values are bearer credentials for as long as they live, and the
+ * one place they must never reach is a recon transcript.
+ *
+ * The rule is deliberately stricter than a keyword substring, because a
+ * substring rule on these words eats ordinary evidence: `author`, `monkey`,
+ * `tokenizer`, `residual`, and a browser action map keyed by `refresh` are all
+ * things a report has to be able to quote. So a name is sensitive when it is
+ * exactly one of these (after `_`, `-`, and `.` are stripped) or when it *ends*
+ * in one — which is how vendors attach a prefix (`PHPSESSID`,
+ * `github_token`, `oauth`). Ends-in only, and never on a bare three-letter tail,
+ * so nothing matches on its last few characters by accident.
+ */
+const COOKIE_NAMES = new Set([
+  'sid',
+  'sessid',
+  'sessionid',
+  'session',
+  'connectsid',
+  'phpsessid',
+  'jsessionid',
+  'aspsessionid',
+  'aspnetsessionid',
+  'cookie',
+  'cookies',
+  'authcookie',
+  'sessioncookie',
+  'csrf',
+  'csrftoken',
+  'xsrf',
+  'xsrftoken',
+  'auth',
+  'authtoken',
+  'token',
+  'accesstoken',
+  'refreshtoken',
+  'refresh',
+  'credential',
+  'credentials',
+])
+const COOKIE_NAME_SUFFIXES = ['sessid', 'sessionid', 'session', 'cookie', 'csrf', 'xsrf', 'token', 'auth', 'refresh', 'credential', 'sid']
+
+/**
+ * Whether a cookie or session-credential name — an object key, or the left half
+ * of a `name=value` pair — is one of the shapes above. Exported so the cookie
+ * jar and the probe tool ask the same question the redactor does.
+ */
+export function isCookieName(name: string): boolean {
+  const normalized = name.toLowerCase().replace(/[^a-z0-9]/g, '')
+  if (normalized.length === 0) return false
+  return COOKIE_NAMES.has(normalized) || COOKIE_NAME_SUFFIXES.some((suffix) => normalized.endsWith(suffix))
+}
+
+/** Whether an object key names a credential at all, under either rule. */
+export function isSensitiveKey(key: string): boolean {
+  return SECRET_KEY.test(key) || isCookieName(key)
+}
 // Value arms, most specific first:
 //  1. a real JWT — three dot-separated base64url segments, header starting
 //     `eyJ` (base64 of `{"`). Matched as ONE span so the whole token gets a
@@ -58,6 +121,22 @@ const SECRET_ASSIGNMENT = new RegExp(
 const PADDED_BASE64 = /^[A-Za-z0-9+/]{16,}={1,2}$/
 
 /**
+ * Every `name=value` assignment, with the name kept for `isCookieName` to judge.
+ *
+ * The pattern is deliberately wider than the rule it feeds: matching the shape
+ * and asking about the name in the replacement is what keeps `author=octocat`
+ * and `myVeryLongCamelCaseName=2` intact while `PHPSESSID=9F1A` is masked.
+ *
+ * The leading boundary is a lookbehind, not a consumed character. The earlier
+ * assignment arm consumed the delimiter before the identifier, and on a JSON
+ * string value that delimiter is the opening quote — which is how
+ * `recon/traffic.jsonl` ended up with an unparseable evidence line. A lookbehind
+ * cannot eat the quote, so this arm cannot corrupt a record even when it runs
+ * over serialized evidence.
+ */
+const ASSIGNED_TOKEN = /(?<![A-Za-z0-9_.-])([A-Za-z0-9_.-]{1,64})\s*=\s*[^\s;,}"']+/g
+
+/**
  * Whether a match the padding arm claimed cannot actually be base64.
  *
  * Two things have to hold for it to be an encoding rather than an identifier
@@ -85,7 +164,13 @@ export function redactSecrets(text: string): string {
   return text
     .replace(SECRET_VALUE, (match) => (isFalseBase64Padding(match) ? match : '[REDACTED]'))
     .replace(OPAQUE_RUN, (run) => (isDigestOrIdentifier(run) ? run : '[REDACTED]'))
-    .replace(SECRET_ASSIGNMENT, '[REDACTED]')
+    .replace(ASSIGNED_TOKEN, (match, name: string) => (isCookieName(name) ? `${name}=[REDACTED]` : match))
+    // An assignment the arm above already emptied is left alone, name included.
+    // `SECRET_ASSIGNMENT` replaces the whole `name: value` run, so letting it
+    // run second would strip the cookie name off a line whose value is already
+    // gone — and which cookie a server set, with which attributes, is the part
+    // of that line a finding has to quote.
+    .replace(SECRET_ASSIGNMENT, (match) => (match.endsWith('=[REDACTED]') || match.endsWith(':[REDACTED]') ? match : '[REDACTED]'))
 }
 
 /**
@@ -117,7 +202,7 @@ export function redactText(text: string, maxLength = 300): string {
 }
 
 export function redactValue(value: unknown, key?: string): unknown {
-  if (key && SECRET_KEY.test(key)) return '[REDACTED]'
+  if (key && isSensitiveKey(key)) return '[REDACTED]'
   if (typeof value === 'string') return redactText(value, 160)
   if (Array.isArray(value)) return value.map((item) => redactValue(item))
   if (value && typeof value === 'object') {
@@ -132,7 +217,7 @@ export function redactRecord(input: Record<string, unknown>): Record<string, unk
 
 /** Archive redaction preserves multiline evidence and full non-secret tool arguments. */
 export function redactArchiveValue(value: unknown, key?: string): unknown {
-  if (key && SECRET_KEY.test(key)) return '[REDACTED]'
+  if (key && isSensitiveKey(key)) return '[REDACTED]'
   if (typeof value === 'string') return redactSecrets(value)
   if (Array.isArray(value)) return value.map((item) => redactArchiveValue(item))
   if (value && typeof value === 'object') {

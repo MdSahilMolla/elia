@@ -3,7 +3,7 @@ import { join } from 'node:path'
 import { wilson } from '../compounding/stats.ts'
 import { withFileLock } from '../fileLock.ts'
 import { writeSecureFile } from '../securePersistence.ts'
-import { stateDir } from '../statePaths.ts'
+import { paths } from '../statePaths.ts'
 
 /**
  * Where the search's results are kept, so the next task of the same shape
@@ -42,6 +42,14 @@ export interface HarnessOutcome {
   elapsedMs: number
   /** Epoch millis, so a stale record can be aged out when a harness changes meaning. */
   at: number
+  /**
+   * The 1-based attempt that verified, when one did. Without it the library knows
+   * how many attempts a harness spent and not where they paid off, so no budget
+   * could ever be learned from the record (plan.ts `attemptCap`).
+   */
+  successAt?: number
+  /** What the world looked like when this ran — which of the planner's flags were true. */
+  context?: Record<string, boolean>
 }
 
 export interface HarnessRecord {
@@ -54,11 +62,25 @@ export interface HarnessRecord {
   totalCost: number
   totalElapsedMs: number
   lastAt: number
+  /** `successAt[k]` is the runs that verified on attempt k + 1: where this harness's successes come from. */
+  successAt?: number[]
+}
+
+/** Runs and how many verified: the smallest thing a rate is read from. */
+export interface Tally {
+  runs: number
+  verified: number
 }
 
 export interface Library {
   version: 1
   records: HarnessRecord[]
+  /**
+   * What each harness did while a world flag was true and while it was not,
+   * pooled across signatures (plan.ts). The only place a flag's effect can be
+   * read from, so it is recorded here rather than inferred.
+   */
+  flags?: Record<string, Record<string, { on: Tally; off: Tally }>>
 }
 
 /** Below this, a record has not earned the right to displace the default. */
@@ -73,7 +95,9 @@ export const EXPLORATION_CAP = 30
 
 const EMPTY: Library = { version: 1, records: [] }
 
-export function libraryPath(dir = join(stateDir, 'reason')): string {
+// `paths.state`, not the `stateDir` constant: the test preload redirects the
+// former, so a test that forgets `libraryFile` cannot write the real library.
+export function libraryPath(dir = join(paths.state, 'reason')): string {
   return join(dir, 'library.json')
 }
 
@@ -101,28 +125,51 @@ export function readLibrary(path = libraryPath()): Library {
  */
 export function recordOutcome(outcome: HarnessOutcome, path = libraryPath()): Library {
   return withFileLock(`${path}.lock`, () => {
-    const library = readLibrary(path)
-    const existing = library.records.find((record) => record.signature === outcome.signature && record.harnessId === outcome.harnessId)
-    const record: HarnessRecord = existing ?? {
-      signature: outcome.signature,
-      harnessId: outcome.harnessId,
-      runs: 0,
-      verifiedRuns: 0,
-      totalAttempts: 0,
-      totalCost: 0,
-      totalElapsedMs: 0,
-      lastAt: 0,
-    }
-    record.runs += 1
-    record.verifiedRuns += outcome.verified ? 1 : 0
-    record.totalAttempts += outcome.attemptsUsed
-    record.totalCost += outcome.cost
-    record.totalElapsedMs += outcome.elapsedMs
-    record.lastAt = outcome.at
-    if (!existing) library.records.push(record)
+    const library = applyOutcome(readLibrary(path), outcome)
     writeSecureFile(path, JSON.stringify(library, null, 2))
     return library
   })
+}
+
+/**
+ * Folds one outcome into a library in memory. What `recordOutcome` does under
+ * its lock, separated out so a search can be replayed against a library that
+ * lives nowhere but the replay (reason/metaSim.ts) with the same arithmetic.
+ */
+export function applyOutcome(library: Library, outcome: HarnessOutcome): Library {
+  const existing = library.records.find((record) => record.signature === outcome.signature && record.harnessId === outcome.harnessId)
+  const record: HarnessRecord = existing ?? {
+    signature: outcome.signature,
+    harnessId: outcome.harnessId,
+    runs: 0,
+    verifiedRuns: 0,
+    totalAttempts: 0,
+    totalCost: 0,
+    totalElapsedMs: 0,
+    lastAt: 0,
+  }
+  record.runs += 1
+  record.verifiedRuns += outcome.verified ? 1 : 0
+  record.totalAttempts += outcome.attemptsUsed
+  record.totalCost += outcome.cost
+  record.totalElapsedMs += outcome.elapsedMs
+  record.lastAt = outcome.at
+  if (outcome.verified && outcome.successAt !== undefined && Number.isInteger(outcome.successAt) && outcome.successAt >= 1) {
+    const histogram = (record.successAt ??= [])
+    while (histogram.length < outcome.successAt) histogram.push(0)
+    histogram[outcome.successAt - 1]! += 1
+  }
+  if (outcome.context) {
+    const table = ((library.flags ??= {})[outcome.harnessId] ??= {})
+    for (const [flag, on] of Object.entries(outcome.context)) {
+      const cell = (table[flag] ??= { on: { runs: 0, verified: 0 }, off: { runs: 0, verified: 0 } })
+      const side = on ? cell.on : cell.off
+      side.runs += 1
+      side.verified += outcome.verified ? 1 : 0
+    }
+  }
+  if (!existing) library.records.push(record)
+  return library
 }
 
 /**

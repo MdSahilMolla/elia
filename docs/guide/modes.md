@@ -191,14 +191,85 @@ elia ds python            # the Python interpreter and data packages available
 - **Not implemented:** streaming sources such as Kafka, geocoding of addresses, and deep-learning computer vision in the TypeScript engine. Text sentiment is a lexicon baseline and is labelled as one.
 - **Scale.** Data is held in memory, up to 2 million rows per dataset. For larger data, aggregate in the database first.
 
+## System Intelligence mode
+
+Start with `elia --sysintel` (or `--si`), switch with `/mode sysintel`, or run governed autonomy with `elia auto --sysintel "<goal>"`. System Intelligence mode is dev mode run as a whole technical organization: research, product, engineering, infrastructure, security, data, QA, and operations feeding work into each other. It keeps every dev-mode tool and adds an engine (`src/sysintel/`) that holds each piece of work to the lifecycle a mature organization would put it through.
+
+The model decides what the organization should do next. The engine decides what is true: which stage an initiative is in, whether its gates are met, and whether a review or a test still applies to the current code. The record lives under `.elia/sysintel/` (one JSON file per initiative, versioned artifacts, and an append-only `journal.jsonl`).
+
+### How work moves
+
+1. **Intake.** A request becomes an initiative with an origin (business, product, research, engineering, data, security, operations) and a lifecycle: `feature`, `change` (the git workflow), `research`, `incident`, `vulnerability`, `data-pipeline`, `analysis`, `ml`, `llm`, `ux`, `rfc`, or `planning`.
+2. **Triage.** Facts about the work (files, systems, severity, flags such as `security`, `data`, `deployed`, `irreversible`, `novel`) set a scale from `trivial` to `strategic`. The scale decides which stages and gates apply. A one-file fix gets code → tests → merge. An irreversible migration gets an RFC with a rollback plan and an architecture review. A strategic bet needs the person's direction sign-off. Wording that clearly implies a flag (for example "login", "migration", "drop table") adds the flag. Triage and re-triage can only raise rigor, never lower it.
+3. **Ownership.** Each stage has an owner hat, one of 25 roles from CTO and chief scientist to SRE, QA, TPM, and technical writer. Each hat owns one question: the research scientist asks "does this approach work?", the SRE asks "does it stay reliable?". `si_work brief` turns the current stage (or a work item) into a ready `task` call for the worker that wears that hat; `si_work brief review:<kind>` briefs an independent reviewer instead. Initiatives belong to a team: `si_org structure` prints the org chart. It has the CTO / Chief Scientist, Research, Product, Engineering, Data / ML / AI, Reliability / Security / QA, and Programs teams. It also has the specialised teams an autonomous-AI organization adds: agent research, evaluation, experiment infrastructure, model engineering, agent runtime, observability, safety and security, data infrastructure, automated experimentation, and research knowledge management.
+4. **Gates.** A stage passes only on evidence the engine produced or verified:
+   - an artifact that passes its template;
+   - a check the engine ran itself (`si_record check` runs the command through the governor as `run_command` and records the exit status against a fingerprint of the working tree);
+   - a commit or branch it found in git;
+   - a review from an independent worker;
+   - a sign-off the person gave.
+
+   The lead's own statements are notes. They can close discovery-style stages but never a test, review, or release gate.
+5. **Loops.** `si_work advance to:<earlier stage>` records an iteration: a refuted hypothesis, a failed review, a regression. Production problems and postmortem action items become linked follow-up initiatives (`si_work intake parent:SI-n`). A validated research result becomes an engineering initiative through `si_work handoff`. The handoff needs an independent research review and a feasibility assessment covering inference cost, latency, memory, reliability, scalability, security, maintainability, licensing, and data requirements.
+
+### Evidence rules
+
+- **Freshness.** Reviews and checks are tied to the git tree the working directory would commit, excluding `.elia`. That tree is the same before and after a commit and changes on any edit. An approval or a passing test on an earlier version of the code does not count for the current one, and release and production sign-offs are tied to the code they approved.
+- **Design reviews and code reviews.** A review names what it reviewed: the code, or a version of a design document. Security and infrastructure review a feature's design at the design stage, and security reviews the code again before release. A review of the design never satisfies a gate that asks for a review of the code. Architecture review follows the chain senior/staff review → principal architecture review → security review → approval, and each step needs a review from the reviewer wearing that hat.
+- **Independence.** A review counts only when it comes from a worker qualified for that review kind: `critic`/`bughunter` for code review, `security` for security review, `tester` for QA sign-off, `accessibility`, or `critic` wearing the staff, principal, SRE, or chief-scientist hat for architecture, reliability, and research reviews. A review from the operator at the terminal also counts. The lead's review and the author's review are recorded as self-review and never pass a gate.
+- **Artifacts.** 33 templates: PRD, roadmap, user stories, RFC, ADR, design doc, API spec, test plan, release plan, literature review, research proposal, experiment plan, experiment results, benchmark report, paper, feasibility, SLO, runbook, incident report, postmortem, threat model, security review, vulnerability report, data contract, lineage, analysis report, model card, eval report, UX spec, strategy, OKRs, program plan, and developer guide. Every required section must hold real content, and some sections have extra checks: an experiment's conclusion must say supported, refuted, or inconclusive; SLO targets must be percentages; key results must be measurable. Postmortems that assign blame get a warning. Each version is hashed. `elia si verify` finds files changed after they were recorded, and a changed artifact no longer passes a gate.
+
+### Tools
+
+| Tool | Actions |
+|---|---|
+| `si_org` | `roles`, `role`, `structure` (the org chart and its teams), `lifecycles`, `lifecycle`, `ownership`, `reviews`, `ladder`, `cadence` (daily engineering and research loops, weekly, quarterly, and where each forum lives in the record), `triage` (a preview that records nothing) |
+| `si_work` | `intake`, `show`, `list`, `gate`, `advance`, `plan`, `item`, `retriage`, `block`, `unblock`, `depend`, `assign` (the owning team), `link` (existing initiatives as follow-ups), `handoff`, `close`, `brief`, `report` (`board`, `priorities` for Monday planning, `week` for the Friday review, `quarter`, `flywheel`, `dependencies`, `risks`, `knowledge`, `digest`) |
+| `si_artifact` | `template`, `write`, `validate`, `show`, `list`, `export` |
+| `si_record` | `note`, `link`, `check`, `commit`, `branch`, `review`, `decide`, `risk`, `signoff` |
+
+Delegated workers get the org model, read access to the record, and their own evidence actions: reviewers record verdicts, and builders run checks and close work items. Moving an initiative between stages and asking for sign-offs stay with the lead.
+
+### What asks first
+
+Reading the model and appending to the record run without asking. A check's command is gated exactly like `run_command`. Exporting an artifact into the project asks under the review band. A sign-off (`direction`, `release`, `production`, `accept-risk`) is critical: the governor asks the person every time. An earlier "allow for this session", a rule in `allow.json`, or a remembered run decision never covers a sign-off, and an unattended run with nobody to ask cannot give one. The engine records a sign-off only when the rest of the stage is already met. Direct writes to `.elia/sysintel/` through file tools or shell commands are refused as `sysintel.record-edit`.
+
+### From the command line
+
+These commands do not use a model:
+
+```bash
+elia si                       # the board: every initiative, its stage, owner hat, and open gates
+elia si show SI-3             # one initiative in full, gates evaluated now
+elia si report priorities     # Monday: what matters this week, in order
+elia si report week           # Friday: shipped, learned, failed, next (also quarter, flywheel, dependencies, risks, knowledge, digest)
+elia si structure             # the org chart and its teams
+elia si journal               # every change to the record
+elia si verify                # recheck artifacts against their hashes
+elia si signoff SI-3 release  # sign off yourself (needs an interactive terminal and a typed confirmation)
+elia si review SI-3 code-review approve --note "read the diff, ran the tests"
+```
+
+`signoff` and `review` refuse to run without a real terminal, so a model driving a shell cannot perform them for you.
+
+### Limits
+
+- The organization is elia and its workers. Hats are prompts, tool sets, and ownership rules, not separate people, so independent review means a separate worker with its own context, not a second human. For decisions that need a person, the engine asks for one.
+- Evidence is local. Pull requests, CI runs, dashboards, and papers can be attached as links, but the engine cannot verify what is on the other end of a URL. Only checks it runs, git objects, and artifacts on disk are verified.
+- Freshness needs git. Outside a repository, check freshness is judged by time (after the stage began) and review staleness is not tracked.
+- Metrics (lead time, deployment frequency, time to recover, review send-back rate, hypothesis outcomes) are counted from this workspace's record only.
+
 ## Cybersecurity mode
 
 Start with `elia --cyber` or switch with `/mode cyber`. Cyber mode is for **authorized** security testing, CTF, vulnerability research, and defensive hardening — it acts only against systems the user owns or has written authorization to test, and refuses destructive techniques, denial-of-service, opportunistic scanning of third-party infrastructure, and detection-evasion tooling built for malicious use.
 
 Work is organised around an **engagement** — a `workspace/engagements/<slug>/` folder scaffolded by `new_engagement` with a `SCOPE.md` authorization record that every downstream action stays inside:
 
-- **`run_security_tool`** runs any installed scanner (nmap, nuclei, sqlmap, gobuster, …) for a scaffolded engagement and saves the raw output under `recon/`.
-- **`http_probe`** sends one HTTP request to an in-scope target and records the full request/response pair to `recon/traffic.jsonl`. The target host must appear in `SCOPE.md` — hostnames, IPs, and IPv4 CIDR ranges are matched, and an out-of-scope host is refused.
+- **`run_security_tool`** runs any installed scanner (nmap, nuclei, sqlmap, gobuster, …) for a scaffolded engagement and saves the raw output under `recon/`. It parses the command's network targets and refuses an out-of-scope one; a command whose targets it cannot read — a local binary, a wordlist path — still runs, and its log records that scope was not verified. A binary that is not installed is refused outright rather than saved as a "command not found" result, so a missing tool can never be cited as evidence. `timeoutMs` raises the 5-minute default for decompilation-length work.
+- **`http_probe`** sends one HTTP request to an in-scope target and records the full request/response pair to `recon/traffic.jsonl`. The target host must appear in `SCOPE.md` — hostnames, IPs, and IPv4 CIDR ranges are matched, and an out-of-scope host is refused, including when it appears as a redirect target. Cookies persist per engagement in `recon/session.json` (owner-readable, values masked everywhere they are reported), so a login made with one probe is sent on the next; `clearSession` drops it. This is what makes testing behind authentication possible.
+- **`security_triage`** reads a saved recon log and returns structured findings instead of raw text: nmap XML, nuclei JSONL, and nmap text output become ports, versions, and per-template matches, each carrying its evidence line and a checkable risk score. An unrecognised format says so rather than inventing findings.
+- **`ctf_toolchain`** reports which security tools are actually installed across the pwn, rev, crypto, stego, and misc categories, with a ready-to-run install plan for what is missing and each step's approval cost. It detects and reports; it never installs.
+- **`ctf_playbook`** returns the ordered triage procedure for one category — how to recognise it, what to run, what the output looks like, and the usual dead ends.
 - **`log_finding`** records a confirmed finding and *requires evidence*: one or more files under `recon/` that actually exist. A claim with no tool output behind it is rejected — a finding cites a file or it does not get logged. Findings land in `findings.jsonl` and `findings.md`.
 - **`engagement_report`** compiles `report.md` from the logged findings, ordered by severity, with an excerpt of each finding's evidence embedded for reproducibility. Any finding whose evidence file has since gone missing is flagged and the report is marked a **draft**.
 

@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 
@@ -29,4 +29,36 @@ function readMemoryFile(path: string): string | undefined {
   if (!existsSync(path)) return undefined
   const content = readFileSync(path, 'utf8').trim()
   return content.length > 0 ? content : undefined
+}
+
+export interface InstalledSkill { name: string; description: string; path: string; eliaVersion?: number }
+
+/** Where `npx skills` and other agents drop SKILL.md skills (project first, then home). */
+const SKILL_ROOTS = (dir: string): string[] => [
+  join(dir, 'agent', 'skills'), join(dir, '.agents', 'skills'), join(dir, '.claude', 'skills'),
+  join(homedir(), '.agents', 'skills'), join(homedir(), '.claude', 'skills'),
+]
+
+/** Lists instruction skills (`<root>/<name>/SKILL.md`) by frontmatter name + description. */
+export function loadInstalledSkills(dir: string): InstalledSkill[] {
+  const seen = new Map<string, InstalledSkill>()
+  for (const root of SKILL_ROOTS(dir)) {
+    let entries: string[] = []
+    try { entries = readdirSync(root) } catch { continue }
+    for (const entry of entries) {
+      const path = join(root, entry, 'SKILL.md')
+      const text = readMemoryFile(path)
+      const fm = text?.match(/^---\n([\s\S]*?)\n---/)?.[1]
+      if (!fm) continue
+      const name = fm.match(/^name:\s*(.+)$/m)?.[1]?.trim() ?? entry
+      const description = fm.match(/^description:\s*(?:>-?\s*\n((?:[ \t]+.*\n?)+)|(.+))/m)
+      const desc = (description?.[1] ?? description?.[2] ?? '').replace(/\s+/g, ' ').trim()
+      // A sibling `.meta.json` (written by src/skills/instructionSkills.ts) marks a
+      // skill elia wrote and revises itself, versus one a person installed.
+      const metaText = readMemoryFile(join(root, entry, '.meta.json'))
+      const eliaVersion = metaText ? (() => { try { return JSON.parse(metaText).version } catch { return undefined } })() : undefined
+      if (!seen.has(name)) seen.set(name, { name, description: desc.slice(0, 400), path, ...(typeof eliaVersion === 'number' ? { eliaVersion } : {}) })
+    }
+  }
+  return [...seen.values()]
 }

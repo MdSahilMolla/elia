@@ -4,8 +4,9 @@ import { relevanceBoost, type RelevanceCount } from './relevance.ts'
 import type { BrainItem } from './store.ts'
 
 /**
- * Ranks the merged brain against a query: BM25 for text relevance, then three
- * multiplicative boosts — proven usefulness (project-global recall signal), a
+ * Ranks the merged brain against a query: BM25 for text relevance, then
+ * multiplicative boosts — an item's own weight (a verified playbook, a fix that
+ * worked, a failure that keeps recurring), proven usefulness (project-global recall signal), a
  * hit on a file the turn is already working in, and gentle recency so a fresh
  * fact edges out a stale one of equal match.
  */
@@ -60,6 +61,7 @@ export function searchBrain(items: BrainItem[], query: string, options: SearchBr
         * (relevance ? relevanceBoost(relevance, item.key) : 1)
         * pathBoost(item, activePaths)
         * recencyBoost(item.at, now)
+        * (item.weight ?? 1)
       return { item, score: boosted }
     })
     .sort((a, b) => b.score - a.score)

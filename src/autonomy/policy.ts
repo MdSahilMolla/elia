@@ -157,9 +157,12 @@ export function applyPolicy(assessment: ActionAssessment, request: ActionRequest
   if (policy.denyIntents.includes(assessment.intent)) {
     return { assessment: { ...assessment, decision: 'block' }, blocked: true, message: `Blocked by .elia/policy.json: "${assessment.intent}" is on the deny list.` }
   }
-  // `process start` runs a shell command too; a forbidden command must not get
-  // through just because it was asked to keep running.
-  if (request.name === 'run_command' || request.name === 'run_program' || (request.name === 'process' && request.input.action === 'start')) {
+  // `process start` runs a shell command too, and `run_security_tool` is
+  // nothing but one: a forbidden command must not get through just because it
+  // was asked to keep running, or because it was routed through a tool whose
+  // name the policy has never heard of. A deny list that only covers the two
+  // shell tools is a hole the moment a third one exists.
+  if (request.name === 'run_command' || request.name === 'run_security_tool' || request.name === 'run_program' || (request.name === 'process' && request.input.action === 'start')) {
     const command = request.name === 'run_program'
       ? [typeof request.input.program === 'string' ? request.input.program : '', ...(Array.isArray(request.input.args) ? request.input.args.filter((arg): arg is string => typeof arg === 'string') : [])].join(' ')
       : (typeof request.input.command === 'string' ? request.input.command : '')

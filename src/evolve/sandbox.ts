@@ -109,6 +109,25 @@ export const IMMUTABLE_FILES = [
   // the baseline cache could poison the evidence those decisions are made from.
   'src/evolve/sieve.ts',
   'src/evolve/reach.ts',
+  // The world model that screens a candidate before it is paid for, the record
+  // it is scored on, and the review, budget and landing rules around it. A
+  // candidate that could edit the twin could tell it a bigger saving than it
+  // has, one that could edit the probe could report the live tree's prompt
+  // size, and one that could edit the review or the budget could approve itself
+  // (Phantom Guardrails: an agent that edits its own oracle fixes failures that
+  // never happened). The probe is run *from the candidate's tree*, exactly like
+  // toolSurface.ts, so its own file is the thing that must not move.
+  'src/world/**',
+  // The planner that chooses how elia reasons, and the simulator its claims are
+  // checked against. It scores its own plans, so a candidate that could edit it
+  // could grade itself.
+  'src/reason/plan.ts',
+  'src/reason/metaSim.ts',
+  'src/evolve/quality.ts',
+  'src/evolve/failToPass.ts',
+  'src/evolve/budget.ts',
+  'src/evolve/landing.ts',
+  'src/evolve/worldTool.ts',
   // Which half of the corpus the proposer is blind to. This is the one file
   // whose whole value is that the candidate cannot see past it: a candidate
   // able to edit split.ts could set the held-out fraction to nothing, or return
@@ -191,6 +210,10 @@ export const IMMUTABLE_FILES = [
   // works but never what it is for — a change here needs a human commit.
   'values/**',
   'src/values/**',
+  // elia's first principles and the suite that holds the code to them
+  // (principles/axioms.ts). A candidate may change how elia meets them, never
+  // what they are or how they are proved.
+  'src/principles/**',
   'src/gap/**',
   // The distillation gate is itself a measuring apparatus: it decides which
   // distilled fragments become standing instructions. `elia evolve` may rewrite

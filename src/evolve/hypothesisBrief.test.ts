@@ -146,3 +146,13 @@ test('the proposer is told what a benchmark task executes, not just what it load
   }
   expect(benchTask).not.toMatch(/autonomy\/loop|runAutonomous|planner/)
 })
+
+test('the brief tells the proposer what the world model will stop, and the section cannot drift from the code', async () => {
+  const { WORLD_MODEL_SECTION } = await import('./engine.ts')
+  const { DORMANT_FOR_BENCH } = await import('../world/twin.ts')
+  const brief = hypothesisBrief(SANDBOX, METRICS)
+  expect(brief).toContain('## The world model reads your change first')
+  expect(brief).toContain('targetTasks')
+  // Every module the twin treats as dormant is named to the proposer, so it cannot be surprised by the rule.
+  for (const path of DORMANT_FOR_BENCH) expect(WORLD_MODEL_SECTION).toContain(path.split('/').pop()!)
+})

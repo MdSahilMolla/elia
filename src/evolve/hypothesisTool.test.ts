@@ -44,3 +44,12 @@ test('a new idea goes straight through, and without a ledger nothing is checked'
   const unchecked = createHypothesisTool()
   await expect(unchecked.tool.execute(repeat)).resolves.toContain('Hypothesis recorded')
 })
+
+test('the failing tasks a change is meant to fix are kept, and blanks and non-strings are dropped', async () => {
+  const capture = createHypothesisTool()
+  await capture.tool.execute({ title: 't', rationale: 'r', plan: 'p', targetTasks: ['implement-to-spec', '  ', 7, 'hist-abc'] })
+  expect(capture.taken()?.targetTasks).toEqual(['implement-to-spec', 'hist-abc'])
+  // A cost-only change names none, and carries no field at all.
+  await capture.tool.execute({ title: 't2', rationale: 'r', plan: 'p' })
+  expect(capture.taken()).not.toHaveProperty('targetTasks')
+})

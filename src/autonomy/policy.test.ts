@@ -83,6 +83,17 @@ test('applyPolicy applies command patterns to `process start`, which runs a shel
   expect(applyPolicy(assessAction(logs, '/repo'), logs, '/repo', policy).blocked).toBe(false)
 })
 
+test('applyPolicy applies command patterns to run_security_tool, which executes a shell command for cyber mode', () => {
+  const policy: EliaPolicy = { ...base, denyCommandPatterns: ['nmap\\s+-sS'] }
+  const scan = { name: 'run_security_tool', input: { engagement: 'acme', label: 'sweep', command: 'nmap -sS 10.0.0.0/24' } }
+  const outcome = applyPolicy(assessAction(scan, '/repo'), scan, '/repo', policy)
+  expect(outcome.blocked).toBe(true)
+  expect(outcome.message).toContain('forbidden pattern')
+  // A permitted scanner command still runs — the pattern, not the tool, is the gate.
+  const allowed = { name: 'run_security_tool', input: { engagement: 'acme', label: 'sweep', command: 'nmap -sV -oX out.xml 10.0.0.1' } }
+  expect(applyPolicy(assessAction(allowed, '/repo'), allowed, '/repo', policy).blocked).toBe(false)
+})
+
 test('applyPolicy raises a safe allow to approve when the risk bar is lowered', () => {
   const safe = { name: 'web_search', input: { query: 'tls best practice' } }
   const assessment = assessAction(safe, process.cwd())

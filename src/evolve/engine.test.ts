@@ -6,11 +6,11 @@ import { join } from 'node:path'
 // engine.ts pulls in the agent loop, which resolves a provider at import time.
 process.env.ANTHROPIC_API_KEY ??= 'test-key-for-local-tests'
 
-const { eliaVersion, renderFailureEvidence } = await import('./engine.ts')
+const { eliaVersion, renderFailureEvidence, standsOnWinner } = await import('./engine.ts')
 const { gateDecision, meanGainOver, sealedCompare } = await import('./acceptance.ts')
 const { compareScorecards } = await import('./fitness.ts')
 const { archiveNearMiss, readArchive } = await import('./archive.ts')
-import type { Metrics } from './ledger.ts'
+import type { GenerationRecord, Metrics } from './ledger.ts'
 import type { SealedVerdict } from './acceptance.ts'
 import type { TaskOutcome } from './fitness.ts'
 import type { NearMiss } from './archive.ts'
@@ -162,6 +162,21 @@ test('keepSteppingStone’s gate is a positive gain on the shown half, computed 
 // the candidate's change with the working tree untouched, and a file with
 // uncommitted local edits is refused as a LiveTreeConflict — are already pinned
 // by sandbox.test.ts and deliberately not duplicated here.
+
+test('only a promotion that is in the live tree becomes the next generation’s baseline', () => {
+  // A branch promotion leaves the working tree alone, so the next candidate is cut
+  // from source without the win; measuring it against a baseline that has the win
+  // would hold it to a gain it was never given.
+  const record = (overrides: Partial<GenerationRecord>): GenerationRecord => ({
+    generation: 1, at: 1, hypothesis: '', rationale: '', targetFiles: [], changedFiles: [], verdict: 'rejected', reason: '', model: 'm', candidate: metrics(['a'], []), ...overrides,
+  })
+  expect(standsOnWinner(record({ verdict: 'promoted' }))).toBe(true)
+  expect(standsOnWinner(record({ verdict: 'promoted', branch: 'evolve/gen-1-2026-09-24', commit: 'abc' }))).toBe(false)
+  // Once landing fast-forwarded the branch into the checkout, the win is in the tree after all.
+  expect(standsOnWinner(record({ verdict: 'promoted', branch: 'evolve/gen-1-2026-09-24', commit: 'abc', landed: { previousHead: 'def', at: 1 } }))).toBe(true)
+  expect(standsOnWinner(record({ verdict: 'rejected' }))).toBe(false)
+  expect(standsOnWinner(record({ verdict: 'promoted', candidate: undefined }))).toBe(false)
+})
 
 test('eliaVersion reads the version elia is running', () => {
   // A leaf reporter (engine.ts:949); it has no dir parameter to redirect, so it

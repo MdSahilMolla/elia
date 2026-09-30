@@ -20,7 +20,7 @@ A checked-in `.elia/policy.json` tightens the autonomy governor before the model
 
 - `denyTools` — tool names blocked outright, e.g. `["codex_delegate", "communication"]`.
 - `denyIntents` — governor intents blocked outright, e.g. `["github.push", "browser.click"]` (a `tool.action` pair, so `github.push` is denied while `github.commit` is not).
-- `denyCommandPatterns` — case-insensitive regular expressions; a `run_command` is blocked when any matches.
+- `denyCommandPatterns` — case-insensitive regular expressions; blocked when any matches the command line of `run_command`, `run_program`, `process` with action `start`, or cyber mode's `run_security_tool`. Every tool that executes a shell string is covered, so routing a command through a different tool does not evade the list.
 - `requireApprovalAtOrAbove` — `"safe"`, `"review"`, or `"critical"` (default). Any action assessed at this risk or higher stops being auto-allowed in unattended mode and needs an explicit approval.
 
 A malformed policy file fails loudly rather than being ignored. A refused action reports `Blocked by .elia/policy.json`.

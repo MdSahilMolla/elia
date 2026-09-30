@@ -13,7 +13,8 @@ import { tryListSkillBundles } from './skills/bundles.ts'
 import { listSkillFiles, listLoadedSkills, loadSkills } from './skills/loader.ts'
 import { newSessionId, loadSession, saveSession } from './session.ts'
 import { withProvenance, eliaVersion } from './provenance.ts'
-import { recordUsage } from './usage.ts'
+import { addUsage, recordUsage } from './usage.ts'
+import { logSwallowedError } from './diagnostics.ts'
 import { config } from './config.ts'
 import { deploymentTool } from './tools/deployment.ts'
 import { runShell, clampOutput, terminateProcessGroup } from './shell.ts'
@@ -130,7 +131,7 @@ export function createBridgeSession(options: BridgeSessionOptions): BridgeSessio
     event('chat_started', { requestId: request.id, sessionId, mode })
     // One process serves many sessions here, so the fingerprint is scoped to
     // the request rather than set on the process (provenance.ts).
-    const result = await withProvenance(
+    const runOnce = () => withProvenance(
       { sessionId, surface: 'vscode', model: config.model, version: eliaVersion() },
       () =>
         runTurn(messages, {
@@ -161,6 +162,34 @@ export function createBridgeSession(options: BridgeSessionOptions): BridgeSessio
           onTool: (toolEvent) => event('tool_finished', { requestId: request.id, sessionId, ...safeToolEvent(toolEvent) }),
         }),
     )
+    const first = await runOnce()
+    // The reply is audited before it goes back to the editor, the way a REPL
+    // turn's is (reason/audit.ts): a citation that does not exist or a sum that
+    // does not hold gets one correction, streamed like the rest of the reply.
+    let result = first
+    if (first.stopReason !== 'aborted' && !currentAgent().signal?.aborted) {
+      try {
+        const { auditAndCorrect, describeAudit, pathsNamedByTools } = await import('./reason/audit.ts')
+        const audited = await auditAndCorrect({
+          reply: () => lastAssistantText(messages, ''),
+          cwd: currentAgent().cwd ?? process.cwd(),
+          touched: () => pathsNamedByTools(messages, turnStart),
+          signal: currentAgent().signal,
+          correct: async (briefing, before) => {
+            event('reply_audit', { requestId: request.id, sessionId, status: 'correcting', detail: redactText(describeAudit(before), 1_000) })
+            messages.push({ role: 'user', content: [{ type: 'text', text: briefing }] })
+            const correction = await runOnce()
+            result = { ...correction, usage: addUsage(first.usage, correction.usage), steps: first.steps + correction.steps }
+          },
+        })
+        if (audited.after) {
+          event('reply_audit', { requestId: request.id, sessionId, status: audited.after.problems === 0 ? 'corrected' : 'still-wrong', detail: redactText(describeAudit(audited.after), 1_000) })
+        }
+      } catch (error) {
+        // The editor still gets the reply it already streamed.
+        logSwallowedError('vscode-reply-audit', error)
+      }
+    }
     const text = streamedText || lastAssistantText(messages, streamedThinking || '[Elia stopped without a final answer.]')
     if (!messages.some((message) => message.role === 'assistant' && message.content.some((block) => block.type === 'text' && block.text === text))) {
       messages.push({ role: 'assistant', content: [{ type: 'text', text }] })
@@ -507,8 +536,8 @@ function renderEditorContext(value: unknown): string {
 
 function parseMode(value: unknown): AgentMode {
   if (value === undefined || value === 'dev') return 'dev'
-  if (value === 'cyber' || value === 'sports' || value === 'fitness' || value === 'battmann' || value === 'datascience') return value
-  throw new Error('mode must be dev, cyber, sports, fitness, battmann, or datascience')
+  if (value === 'cyber' || value === 'sports' || value === 'fitness' || value === 'battmann' || value === 'datascience' || value === 'sysintel') return value
+  throw new Error('mode must be dev, cyber, sports, fitness, battmann, datascience, or sysintel')
 }
 
 function parseGovernanceMode(value: unknown): GovernanceMode | undefined {

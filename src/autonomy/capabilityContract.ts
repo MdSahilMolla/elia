@@ -42,14 +42,20 @@ const CATALOG: CapabilityContract[] = [
   // a port, so it is reviewed like any other process capability.
   contract('process', 'review', ['process'], false, 'process id, live status, and captured output'),
   contract('provision_environment', 'review', ['process', 'workspace-write'], false, 'installed dependency or recorded blocker'),
-  // Per-call risk comes from the target's locality (devdb/policy.ts): local work
-  // is review, anything remote is critical. `review` is the ceiling it starts from.
-  contract('database', 'review', ['process', 'workspace-write', 'network-read'], false, 'query rows, schema readback, migration exit status, or pre-destructive backup path'),
+  // Per-call risk comes from the target's locality and what the call does
+  // (devdb/policy.ts): local work is safe or review, anything remote — and any
+  // SQL that reaches past the database — is critical. `review` is where it starts.
+  contract('database', 'review', ['process', 'workspace-write', 'network-read', 'external-write'], false, 'query rows, catalog readback, health findings, migration exit status, or the backup path taken before a destructive change'),
   contract('github', 'review', ['network-read', 'external-write'], false, 'provider response and readback'),
   contract('deployment', 'critical', ['process', 'network-read', 'external-write'], false, 'provider receipt and live postcondition'),
   contract('browser', 'critical', ['network-read', 'external-write'], false, 'fresh browser state or user takeover'),
   contract('communication', 'critical', ['external-write'], false, 'approved content and delivery readback'),
   ...['new_engagement', 'run_security_tool', 'http_probe', 'log_finding', 'engagement_report'].map((tool) => contract(tool, 'critical', ['security'], false, 'authorized scope and evidence artifact')),
+  // The CTF and triage tools only observe: a toolchain report, a stored
+  // procedure, and a parse of recon output elia already saved. None of them
+  // spawns a process or reaches a target, which is the line that separates them
+  // from run_security_tool on the same mode.
+  ...['ctf_toolchain', 'ctf_playbook', 'security_triage'].map((tool) => contract(tool, 'safe', ['workspace-read'], true, 'detected tool inventory, returned playbook, or parsed findings with per-finding evidence')),
   contract('read_spreadsheet', 'safe', ['workspace-read'], true, 'parsed workbook result'),
   ...['spreadsheet', 'presentation'].map((tool) => contract(tool, 'review', ['workspace-write'], false, 'saved artifact and schema/readback')),
   contract('battmann', 'critical', ['workspace-write', 'network-read', 'external-write'], false, 'dated evidence, audit entry, and governed action receipt'),
@@ -59,6 +65,11 @@ const CATALOG: CapabilityContract[] = [
   contract('ds_report', 'safe', ['workspace-read', 'workspace-write'], true, 'hashed artifact recorded against the execution records it reports'),
   contract('ds_data', 'review', ['workspace-read', 'workspace-write', 'network-read'], true, 'versioned dataset snapshot with source hash, lineage, and execution record'),
   contract('ds_python', 'critical', ['process', 'network-read', 'workspace-write'], false, 'recorded code, exit status, hashed outputs, and installed package list'),
+  // System Intelligence mode: per-action effects live in sysintel/effects.ts; these are the worst case per tool.
+  contract('si_org', 'safe', ['workspace-read'], true, 'organization model reference; nothing is recorded'),
+  contract('si_work', 'safe', ['workspace-read', 'workspace-write'], true, 'initiative record under .elia/sysintel with an append-only journal entry'),
+  contract('si_artifact', 'review', ['workspace-read', 'workspace-write'], true, 'artifact version validated against its template and hashed; exports name the project path'),
+  contract('si_record', 'critical', ['workspace-write', 'process'], false, 'engine-run check results, git-verified commits, attributed reviews, and person-approved sign-offs'),
 ]
 
 const BY_TOOL = new Map(CATALOG.map((entry) => [entry.tool, entry]))

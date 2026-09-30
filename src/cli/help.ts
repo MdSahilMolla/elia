@@ -50,6 +50,8 @@ Usage:
   elia "<task>"               Do one task and exit (a big build runs the full pipeline by itself)
   elia --continue, -c         Resume the most recent session in this directory
   elia --resume [id]          Reopen a past conversation — with no id, pick one from the list
+  elia --no-record            Do not record this session (also ELIA_RECORD=off). By default every session is
+                              recorded to .elia/recordings/ as it happens, redacted, and added to an Elia Book
   elia sessions [--all]       List the conversations saved here: id, when, and what each started with
   elia --self                 Started inside elia's own repository, change elia's source without asking
                               (by default elia asks first there, for anything outside workspace/ and .elia/)
@@ -148,10 +150,13 @@ Self-improvement:
   elia evolve --auto          One governed practice run, the same one elia starts when it is idle
   elia gap [history] [--check] Score the verification ladder on planted defects (free, no model);
                               --check fails when the gap regressed against the last recorded score
-  elia values [show|probe]    Show the Value Core, or probe that the role prompts still honour it
+  elia values [show|probe]    Show the Value Core and the first principles, or probe that the role prompts honour the core
   elia distill [run|traces|export]
                               Turn verified runs into prompt fragments (dry run; --promote keeps the
                               ones that pass every gate); traces lists what qualifies
+  elia world [predict|simulate] What elia has learned about how this project behaves and how well it
+                                predicts; 'predict' prices your uncommitted edits without a model,
+                                'simulate' checks the reasoning planner against the library it replaces
   elia jev [status|ping|bench]  How Jev, the optional independent judge, scores against elia's own
                               decisions (needs ELIA_JEV_API_KEY)
   elia compounding            Where each stage of the self-improvement loop stands
@@ -170,6 +175,9 @@ Learned tools:
   elia skills trust           Trust this project's .elia/skills so they load on startup
   elia skills untrust         Revoke a prior trust decision for this project
   elia skills status          Show whether this project's local skills are trusted
+  elia skills instructions    List SKILL.md instruction skills elia wrote for itself
+  elia skills instructions history <slug>    Why each version of a self-authored skill happened
+  elia skills instructions rollback <slug> <v>  Restore an archived version
 
 Time travel:
   elia runs                   List autonomous runs
@@ -191,7 +199,7 @@ Parallel sessions (a session belongs to the elia process that started it — ins
   elia sessions subscribe <name> --from <session>                    Inject a session's drops as context
 
 Background autonomy:
-  elia schedule add --every 1h [--mode battmann|datascience] [--max-actions N] "<goal>"  Persist a recurring goal for the local daemon
+  elia schedule add --every 1h [--mode battmann|datascience|sysintel] [--max-actions N] "<goal>"  Persist a recurring goal for the local daemon
   elia schedule list                       Show scheduled goals and last outcomes
   elia schedule pause|resume|remove <id>  Control a scheduled goal
   elia schedule run <id>                   Run one scheduled goal immediately
@@ -204,6 +212,16 @@ Data Science workspace (no model involved):
   elia ds verify                           Recheck recorded artifacts against their hashes
   elia ds python                           The Python interpreter and packages the engine can use
   elia datascience <command>               The same commands under their long name
+
+System Intelligence record (no model involved):
+  elia si [board]                          Every initiative, its lifecycle stage, owner hat, and open gates
+  elia si show <SI-n>                      One initiative in full, its gates evaluated now
+  elia si report priorities|week|quarter|flywheel|dependencies|risks|knowledge|digest
+                                           The organization's rhythms, computed from the record
+  elia si signoff <SI-n> <gate>            Sign off direction, release, production, or accept-risk yourself
+  elia si review <SI-n> <kind> <verdict> --note ".."   Record your own review
+  elia si journal | verify | org | structure | lifecycles | template <kind> | cadence
+  elia sysintel <command>                  The same commands under their long name
 
 Battmann intelligence (no model involved unless noted):
   elia battmann seed india-semiconductors  Subscribe real data feeds and open certified questions
@@ -257,7 +275,8 @@ Supervisor controls:
   elia control preauth list                Show live --authorize grants for this project + branch
   elia control preauth revoke <intent>     Revoke a live grant immediately, before it expires or is spent
   elia auto "<goal>" --authorize intent:1  Pre-authorize a run for exactly one use of <intent>
-  elia doctor                              Check native-stack health: eliad daemon, C++ validator, Java bridge
+  elia doctor                              Check native-stack health, and elia's own: crashes, bugs, unclean exits
+  elia doctor --repair [signature]         Fix a recorded bug in elia's source on its own branch (--brief prints the goal)
 
 Inside an interactive session:
   /                           Type "/" to see available commands — up/down to highlight,
@@ -282,11 +301,11 @@ Inside an interactive session:
   /capabilities               List specialist capabilities, risk classes, and output contracts
   /eliabook                   Open Save this session / Saved Elia Books
   /eliabook save [book-id]    Save the complete current session as a reusable Book
-  /eliabook saved             Browse saved session playbooks
+  /eliabook saved             Browse session playbooks — sessions are added automatically as they end
   /eliabook create <run-id>   Create a Book from a complete autonomous-run recording
   /eliabook run <book-id>     Run its active verified procedure in this session
   /eliabook improve <book-id> <run-id>  Promote a measurably better verified run
-  /mode                       Pick a core mode with arrow keys: dev, cyber, battmann, datascience
+  /mode                       Pick a core mode with arrow keys: dev, cyber, battmann, datascience, sysintel
   /mode <name>                Switch directly, e.g. /mode cyber, /mode dev ("tech" is an alias for dev)
   /betamode                   Pick an experimental mode or persona: sports, fitness, marketing,
                               finance, business, data, research, cybersecurity, automation,
@@ -317,6 +336,9 @@ Other flags:
   elia --datascience          Start (or run a one-shot prompt) in Data Science mode — runs and
                               validates the analysis itself, with an execution record per step
                               (--ds is the short form)
+  elia --sysintel             Start (or run a one-shot prompt) in System Intelligence mode — elia
+                              works as a whole technical organization: every hat, lifecycle, review,
+                              and sign-off, with gates only real evidence can pass (--si is the short form)
   elia --beta <mode>          Start in an experimental mode: sports, fitness
                               (the old --sports / --fitness flags still work, deprecated)
   elia --json                 Emit stable JSONL lifecycle events for automation

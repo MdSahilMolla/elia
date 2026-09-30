@@ -141,7 +141,59 @@ export async function runSkills(): Promise<void> {
     return
   }
 
-  writeError(`Unknown skills action "${action}". Use: list, bundles, path, candidates, synth, trust, untrust, or status.`)
+  if (action === 'instructions') {
+    const { elianAuthoredSlugs, readSkillMeta, rollbackInstructionSkill, INSTRUCTION_SKILLS_ROOT } = await import('../skills/instructionSkills.ts')
+    const sub = positionals()[1]
+
+    if (sub === 'history') {
+      const slug = positionals()[2]
+      const meta = slug ? readSkillMeta(slug) : undefined
+      if (!meta) {
+        writeError(slug ? `No elia-authored instruction skill named "${slug}".` : 'Usage: elia skills instructions history <slug>')
+        process.exitCode = 1
+        return
+      }
+      writeNotice(`${meta.name} (${meta.slug}) — v${meta.version}, ${meta.sourceLessonKeys.length} source lesson(s)`)
+      for (const entry of meta.history) writeUsageLine(`  v${entry.version}  ${new Date(entry.at).toISOString()}  ${entry.reason}`)
+      return
+    }
+
+    if (sub === 'rollback') {
+      const slug = positionals()[2]
+      const version = Number.parseInt(positionals()[3] ?? '', 10)
+      if (!slug || !Number.isFinite(version)) {
+        writeError('Usage: elia skills instructions rollback <slug> <version>')
+        process.exitCode = 1
+        return
+      }
+      const result = rollbackInstructionSkill(slug, version)
+      if (result.ok) writeNotice(`✓ ${result.detail}`)
+      else {
+        writeError(`✗ ${result.detail}`)
+        process.exitCode = 1
+      }
+      return
+    }
+
+    const slugs = elianAuthoredSlugs()
+    if (slugs.length === 0) {
+      writeNotice(`No self-authored instruction skills yet. Elia writes one under ${INSTRUCTION_SKILLS_ROOT} once enough certified lessons cluster on the same topic.`)
+      return
+    }
+    for (const line of table(
+      [{ header: 'skill' }, { header: 'v', align: 'right' }, { header: 'lessons', align: 'right' }, { header: 'updated' }],
+      slugs.map((slug) => {
+        const meta = readSkillMeta(slug)!
+        return [meta.name, `${meta.version}`, `${meta.sourceLessonKeys.length}`, new Date(meta.updatedAt).toISOString().slice(0, 10)]
+      }),
+    )) {
+      writeUsageLine(`  ${line}`)
+    }
+    writeNotice('elia keeps revising these on its own as certified lessons come and go. `elia skills instructions history <slug>` shows why each version happened; `rollback` restores an archived one.')
+    return
+  }
+
+  writeError(`Unknown skills action "${action}". Use: list, bundles, path, candidates, synth, trust, untrust, status, or instructions.`)
   process.exitCode = 1
 }
 

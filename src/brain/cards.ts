@@ -34,13 +34,16 @@ function concernsPath(item: BrainItem, path: string): boolean {
  * a hot file can't flood the prompt.
  */
 export function buildCard(items: BrainItem[], path: string): KnowledgeCard | undefined {
-  const relevant = items.filter((item) => concernsPath(item, path))
+  // Cards go into the system prompt on every turn that touches the file, so they
+  // stay to the four kinds they always held. Playbooks, recorded moments and
+  // recurring failures are found by searching the brain, not pushed at every turn.
+  const order: Partial<Record<BrainItem['kind'], number>> = { rationale: 0, note: 1, episode: 2, lesson: 3 }
+  const relevant = items.filter((item) => order[item.kind] !== undefined && concernsPath(item, path))
   if (relevant.length === 0) return undefined
 
-  const order: Record<BrainItem['kind'], number> = { rationale: 0, note: 1, episode: 2, lesson: 3 }
   const lines = relevant
     .slice()
-    .sort((a, b) => (order[a.kind] - order[b.kind]) || (b.at - a.at))
+    .sort((a, b) => (order[a.kind]! - order[b.kind]!) || (b.at - a.at))
     .slice(0, MAX_LINES_PER_CARD)
     .map((item) => `- ${truncate(item.render)}`)
 

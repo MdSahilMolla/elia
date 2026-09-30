@@ -4,7 +4,7 @@ import { runAgentLoop, type ConversationMessage, type RunAgentLoopResult, type T
 import { setParentSteering } from './autonomy/steering.ts'
 import { currentAgent, withAgentIdentity } from './autonomy/context.ts'
 import type { Provider, ProviderActivity } from './providers/types.ts'
-import { allWorkerTools, battmannTools, businessTools, cyberTools, datascienceTools, getSynthesizedTools } from './tools/registry.ts'
+import { allWorkerTools, battmannTools, businessTools, cyberTools, datascienceTools, getSynthesizedTools, sysintelTools } from './tools/registry.ts'
 import { taskTool } from './tools/task.ts'
 import { previewTool } from './tools/preview.ts'
 import { codexTool } from './tools/codex.ts'
@@ -30,6 +30,7 @@ import { regretNudge, weakDomainCaution } from './autonomy/outcomes.ts'
 import { disputeNudge } from './autonomy/disputeNudge.ts'
 import { renderSkillHint } from './skills/relevance.ts'
 import { draftUpfrontPlan, planActivity, planBriefing, planTodoItems, stripInjectedContext, upfrontPlanEnabled, wantsUpfrontPlan } from './autonomy/upfrontPlan.ts'
+import { checkPremises, describePremises, premiseBriefing } from './principles/premises.ts'
 import { beginPlanRequest, planChecklist, planProgressTitle, type PlanProgressUpdate } from './autonomy/planProgress.ts'
 import { memoryReceipt } from './autonomy/turnLearning.ts'
 
@@ -84,6 +85,9 @@ function topLevelTools(mode: AgentMode, selectedSkillNames?: string[]) {
     ...(mode === 'cyber' ? cyberTools : []),
     ...(mode === 'battmann' ? [...businessTools, ...battmannTools] : []),
     ...(mode === 'datascience' ? [...businessTools, ...datascienceTools] : []),
+    // System Intelligence is dev mode run as an organization: every engineering tool, plus
+    // the engine that holds initiatives to their lifecycle gates.
+    ...(mode === 'sysintel' ? sysintelTools : []),
     // A silent sub-agent handing work off to a whole separate external agent
     // would be even more surprising than task/preview — dev mode only.
     ...(mode === 'dev' ? [codexTool] : []),
@@ -254,11 +258,24 @@ async function runScopedTurn(
         activeTodoList().write(planTodoItems(plan.steps))
         surface(planActivity(plan.steps))
         activeSessionTranscript()?.notice(`${plan.thinking ? `Thinking: ${plan.thinking}\n` : ''}Plan:\n${plan.steps.map((step, index) => `${index + 1}. ${step}`).join('\n')}`)
+        // The plan was written without reading a file, so what it takes as given
+        // is checked against the workspace before anything is built on it — the
+        // `assumptions-are-debts` principle (principles/premises.ts). A false
+        // premise reaches the lead with the plan, and the person sees it too.
+        const premises = plan.premises ? checkPremises(plan.premises, process.cwd()) : []
+        const premiseNote = premiseBriefing(premises)
+        const premiseLine = describePremises(premises)
+        if (premiseLine) {
+          const falsified = premises.some((check) => check.verdict === 'false')
+          surface({ kind: 'status', status: falsified ? 'warning' : 'completed', title: premiseLine })
+          activeSessionTranscript()?.notice(premiseLine)
+        }
         // The lead starts from the plan: it is told the plan exists and is its
         // todo list, in the same user message it is answering.
         const last = messages[messages.length - 1]
         if (last?.role === 'user') {
-          messages[messages.length - 1] = { ...last, content: [...last.content, { type: 'text', text: planBriefing(plan.steps) }] }
+          const briefing = [planBriefing(plan.steps), premiseNote].filter(Boolean).join('\n')
+          messages[messages.length - 1] = { ...last, content: [...last.content, { type: 'text', text: briefing }] }
         }
         if (!options.skipStats) recordUsage(plan.usage, options.model ?? config.model)
       }

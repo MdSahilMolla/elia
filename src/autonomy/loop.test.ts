@@ -486,3 +486,131 @@ test('a note sent while the plan is approved changes the plan before building, a
     rmSync(workspace, { recursive: true, force: true })
   }
 }, 120_000)
+
+/**
+ * The reasoning layer (src/reason/) inside the pipeline — see repairSearch.ts.
+ *
+ * The check is a git lookup that cannot succeed, so the build is red on every
+ * pass, the scripted workers never change that, and the run stalls on the same
+ * failure: exactly the case the linear repair could only answer by asking again.
+ * The script runs out after the plan, so every worker and every repair pass
+ * answers "done." without touching anything.
+ */
+async function runRedBuild(searchOn: boolean) {
+  const { existsSync, mkdtempSync, rmSync } = await import('node:fs')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+  const { config } = await import('../config.ts')
+  const { createScriptedProvider } = await import('../bench/latency/scriptedProvider.ts')
+  const { setReportSink } = await import('../ui/report.ts')
+  const { runGit } = await import('./worktree.ts')
+  const { runAutonomousTask } = await import('./loop.ts')
+
+  const scripted = createScriptedProvider([
+    { text: 'A greeting file. The check is a git lookup, so nothing I write can satisfy it.' },
+    {
+      toolCalls: [
+        {
+          name: 'submit_proposal',
+          input: {
+            goal: 'write a greeting file',
+            understanding: 'Create greeting.txt containing a greeting.',
+            steps: [{ id: 's1', title: 'Write greeting.txt', instructions: 'Write greeting.txt', role: 'builder', files: ['greeting.txt'], dependsOn: [] }],
+            // Fails every time, names a test (so the regime is mechanical), and
+            // prints a word the stall classifier reads as a logic failure.
+            verification: ['git show assertion-x test'],
+            acceptanceCriteria: ['greeting.txt exists'],
+          },
+        },
+      ],
+    },
+  ])
+  const prompts: string[] = []
+  const provider = {
+    ...scripted,
+    streamTurn: (params: Parameters<typeof scripted.streamTurn>[0]) => {
+      prompts.push(params.messages.map((message) => message.content.map((block) => (block.type === 'text' ? block.text : '')).join('')).join('\n'))
+      return scripted.streamTurn(params)
+    },
+  }
+
+  const original = config.provider
+  const originalTiers = { fast: config.tiers.fast, deep: config.tiers.deep }
+  const originalFallbacks = config.fallbacks
+  const originalRouting = config.routingMode
+  const originalSearch = process.env.ELIA_REPAIR_SEARCH
+  const scriptedTier = (tier: typeof config.tiers.fast) => ({ ...tier, provider, providerName: 'scripted', model: 'scripted' })
+  const workspace = mkdtempSync(join(tmpdir(), 'elia-red-build-'))
+  const notes: string[] = []
+  try {
+    config.provider = provider
+    config.tiers.fast = scriptedTier(config.tiers.fast)
+    config.tiers.deep = scriptedTier(config.tiers.deep)
+    config.fallbacks = []
+    config.routingMode = 'selected'
+    if (searchOn) process.env.ELIA_REPAIR_SEARCH = 'on'
+    else delete process.env.ELIA_REPAIR_SEARCH
+    setReportSink((kind, text) => {
+      if (kind === 'substep') notes.push(text)
+    })
+    const result = await runAutonomousTask({
+      goal: 'write a greeting file',
+      workspaceRoot: workspace,
+      approve: async () => ({ action: 'approve' as const }),
+      profile: 'fast',
+      polish: false,
+      publish: false,
+      learn: false,
+      maxRepairAttempts: 2,
+      maxWallClockMs: 120_000,
+    } as Parameters<typeof runAutonomousTask>[0])
+    const worktrees = existsSync(join(workspace, '.git')) ? (await runGit(['worktree', 'list'], workspace)).stdout.trim().split('\n') : []
+    return { result, prompts, notes, worktrees }
+  } finally {
+    setReportSink(undefined)
+    if (originalSearch === undefined) delete process.env.ELIA_REPAIR_SEARCH
+    else process.env.ELIA_REPAIR_SEARCH = originalSearch
+    config.provider = original
+    config.tiers.fast = originalTiers.fast
+    config.tiers.deep = originalTiers.deep
+    config.fallbacks = originalFallbacks
+    config.routingMode = originalRouting
+    rmSync(workspace, { recursive: true, force: true })
+  }
+}
+
+test('each repair pass on a red build starts from a different approach, and nothing searches unless asked', async () => {
+  const { APPROACHES_BY_CLASS } = await import('../reason/harness.ts')
+  const run = await runRedBuild(false)
+
+  const repairs = run.prompts.filter((prompt) => prompt.includes('## What went wrong'))
+  expect(repairs.length).toBeGreaterThanOrEqual(2)
+  expect(repairs[0]).toContain(`## Approach for this attempt (${APPROACHES_BY_CLASS.repair[0]!.id})`)
+  expect(repairs[1]).toContain(`## Approach for this attempt (${APPROACHES_BY_CLASS.repair[1]!.id})`)
+  expect(run.notes.join('\n')).not.toContain('repair search')
+  expect(run.result.outcome).toBe('needs-attention')
+}, 120_000)
+
+test('with the search on, a wrong-approach stall on a red build is handed to it, and when it finds nothing the linear repair still runs', async () => {
+  const { join } = await import('node:path')
+  const { paths } = await import('../statePaths.ts')
+  const { readLibrary } = await import('../reason/library.ts')
+  const run = await runRedBuild(true)
+  const notes = run.notes.join('\n')
+
+  expect(notes).toContain('repair search (trio)')
+  expect(notes).toContain('none of 3 attempt(s) passed the checks — continuing with the linear repair')
+  // Three attempts were opened, the planner's opening shape (each is a worker whose task is the repair brief)…
+  expect(run.prompts.filter((prompt) => prompt.includes('## Your task\n## What went wrong')).length).toBe(3)
+  // …and the linear repair that follows a search that found nothing did run.
+  expect(run.prompts.filter((prompt) => prompt.includes('## Approach for this attempt')).length).toBeGreaterThanOrEqual(2)
+  // Every attempt's checkout was torn down: only the project's own remains.
+  expect(run.worktrees).toHaveLength(1)
+  expect(run.result.outcome).toBe('needs-attention')
+
+  // The outcome is filed under the stalled key, in the run's own state
+  // directory — not in a developer's real library.
+  const [record] = readLibrary(join(paths.state, 'reason', 'library.json')).records
+  expect(record).toMatchObject({ harnessId: 'trio', runs: 1, verifiedRuns: 0 })
+  expect(record?.signature.startsWith('stalled-repair/')).toBe(true)
+}, 120_000)

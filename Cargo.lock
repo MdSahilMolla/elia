@@ -52,6 +52,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "elia-box"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "cc",
+ "libc",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "elia-native"
 version = "0.1.0"
 dependencies = [

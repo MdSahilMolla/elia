@@ -42,6 +42,7 @@ export function stripInjectedContext(text: string): string {
     .replace(/<operator-context>[\s\S]*?<\/operator-context>/g, '')
     .replace(/<local-command>[\s\S]*?<\/output>/g, '')
     .replace(/<elia-plan>[\s\S]*?<\/elia-plan>/g, '')
+    .replace(/<elia-premises>[\s\S]*?<\/elia-premises>/g, '')
     .trim()
 }
 
@@ -117,6 +118,8 @@ export function plannerPrompt(request: string, digest: string): string {
     '1. <a concrete step — what you will do, naming the files, commands, or pages involved>',
     '2. ...',
     `(3 to ${MAX_STEPS - 1} steps. The last step checks the result for real: run the build or the tests, or open the page.)`,
+    'PREMISES:',
+    '- <each thing about this project as it is now that the plan depends on and you have not seen for yourself — a file or directory that must already exist, a script, a dependency, a program on PATH — named exactly, in backticks. elia checks these against the workspace before the work starts. Write "PREMISES: none" when the plan depends on nothing unseen.>',
     'If the request names something you cannot confirm exists here — a package, skill, plugin, file, or command — the first step finds out what it is. Never plan a step like "if it is new, create it": when the thing turns out not to exist, the plan stops and asks the user what they meant.',
   ]
     .filter((line, index) => index !== 0 || line)
@@ -129,6 +132,8 @@ const THINKING_LABEL = /^\s*(?:#{1,6}\s*)?\**\s*(?:thinking|approach|reasoning)\
 const LIST_ITEM = /^\s*(?:\d{1,2}[.)]|[-*•])\s+(.*\S)\s*$/
 const LIST_START = /^[ \t]*(?:\d{1,2}[.)]|[-*•])[ \t]+/m
 const NONE_REPLY = /^\W*none\b/i
+/** `PREMISES:` after the steps — what the plan takes as given (principles/premises.ts). */
+const PREMISES_MARKER = /^[ \t]*(?:#{1,6}[ \t]*)?\**[ \t]*premises[ \t]*\**[ \t]*:?[ \t]*\**[ \t]*(.*)$/im
 
 function cleanStep(step: string): string {
   return clip(step.replace(/^\*\*(.*)\*\*$/, '$1').replace(/\*\*/g, ''), MAX_STEP_CHARS)
@@ -145,6 +150,8 @@ function planStart(text: string): number {
 export interface ParsedPlan {
   thinking: string
   steps: string[]
+  /** What the plan takes as given about the workspace; present only when the reply named any. */
+  premises?: string[]
 }
 
 /** Reads the planner's reply. Undefined for NONE or anything with fewer than two steps. */
@@ -154,7 +161,11 @@ export function parsePlannerReply(reply: string): ParsedPlan | undefined {
   const start = planStart(text)
   if (start < 0) return undefined
   const marker = PLAN_MARKER.exec(text)
-  const body = marker && marker.index === start ? text.slice(start + marker[0].length) : text.slice(start)
+  const planned = marker && marker.index === start ? text.slice(start + marker[0].length) : text.slice(start)
+  // The premises follow the steps; read as steps they would become todo items.
+  const premisesAt = PREMISES_MARKER.exec(planned)
+  const body = premisesAt ? planned.slice(0, premisesAt.index) : planned
+  const premises = premisesAt ? parsePremises(premisesAt[1] ?? '', planned.slice(premisesAt.index + premisesAt[0].length)) : []
   const steps = body
     .split('\n')
     .flatMap((line) => {
@@ -164,7 +175,18 @@ export function parsePlannerReply(reply: string): ParsedPlan | undefined {
     .filter(Boolean)
     .slice(0, MAX_STEPS)
   if (steps.length < 2) return undefined
-  return { thinking: text.slice(0, start).replace(THINKING_LABEL, '').trim(), steps }
+  return { thinking: text.slice(0, start).replace(THINKING_LABEL, '').trim(), steps, ...(premises.length > 0 ? { premises } : {}) }
+}
+
+function parsePremises(inline: string, rest: string): string[] {
+  const listed = rest
+    .split('\n')
+    .flatMap((line) => {
+      const match = LIST_ITEM.exec(line)
+      return match ? [match[1]!.replace(/\*\*/g, '').trim()] : []
+    })
+  const all = [inline.trim(), ...listed].filter((premise) => premise && !NONE_REPLY.test(premise))
+  return all.slice(0, MAX_STEPS).map((premise) => clip(premise, MAX_STEP_CHARS))
 }
 
 /**
@@ -211,6 +233,8 @@ export function createThinkingStream(emit: (delta: string) => void): { push(delt
 export interface UpfrontPlan {
   thinking: string
   steps: string[]
+  /** What the plan takes as given — checked against the workspace before the lead starts (principles/premises.ts). */
+  premises?: string[]
   usage: Usage
   elapsedMs: number
 }

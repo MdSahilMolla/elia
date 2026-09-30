@@ -141,3 +141,38 @@ export function decideAnswerCheck(request: string): { check: boolean; why: strin
   }
   return { check: true, why: 'a question: if its answer is short, an independent attempt checks it' }
 }
+
+/**
+ * A request about the shape of a system rather than one change inside it —
+ * its architecture, its design, the trade-off between two structures.
+ * Deliberately about the subject, not the verb: "design the retry policy" and
+ * "how should we structure the queue?" qualify; "fix the design tokens in
+ * theme.ts" does not, because it names a file and a fix.
+ */
+const DESIGN_SUBJECT =
+  /\b(?:architect(?:ure|ural|ing)?|system\s+design|design\s+(?:a|an|the|our|this|my)\b|re-?design|how\s+should\s+(?:we|i|it|this|elia)\s+(?:be\s+)?(?:structure|structured|design|designed|architect|architected|model|modelled|modeled|organi[sz]e|organi[sz]ed|build|split|scale)|trade-?offs?\s+(?:between|of)|data\s+model|schema\s+design|first\s+principles?)\b/i
+const NAMES_A_FIX = /\b(?:fix|typo|rename|bump|lint|format)\b/i
+
+/**
+ * Whether the turn answering this request is asked to reason from first
+ * principles (FIRST_PRINCIPLES_GUIDANCE). No model call, like everything here.
+ */
+export function decideFirstPrinciples(request: string): { apply: boolean; why: string } {
+  const head = request.trim().slice(0, 800)
+  if (!DESIGN_SUBJECT.test(head)) return { apply: false, why: 'not a question of design or architecture' }
+  if (NAMES_A_FIX.test(head) && !/\b(?:architect|system\s+design|first\s+principles?)/i.test(head)) return { apply: false, why: 'a fix inside the design, not the design itself' }
+  return { apply: true, why: 'a design or architecture question: reasoned from first principles' }
+}
+
+/**
+ * Asked of the opening turn of a design or architecture request. The order is
+ * the point: constraints before patterns, so the familiar answer has to earn
+ * its place instead of being where the reasoning starts.
+ */
+export const FIRST_PRINCIPLES_GUIDANCE = [
+  'This request is about design or architecture. Reason from first principles before reaching for a familiar pattern:',
+  '1. State the goal as the outcome it must produce, and the hard constraints — what must be true (load, latency, data, failure modes, cost, who runs it). Say which you verified in this codebase and which you are assuming; check the doubtful ones rather than recalling them.',
+  '2. Derive the simplest design that satisfies exactly those constraints. Every component must be there because a constraint needs it.',
+  '3. Only then compare with how this codebase and the usual patterns do it, and say where you depart from them and why.',
+  '4. Name the one assumption that would change the answer most if it turned out wrong.',
+].join('\n')

@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { redactRecord, redactText, relativizeProjectPaths } from './redact.ts'
+import { isCookieName, redactRecord, redactSecrets, redactText, relativizeProjectPaths } from './redact.ts'
 
 test('redacts credential-shaped keys recursively', () => {
   expect(redactRecord({ apiKey: 'sk-test-secret', nested: { authorization: 'Bearer abcdefghijklmnop' } })).toEqual({
@@ -98,4 +98,49 @@ test('genuinely padded base64 and keyword assignments are still redacted', () =>
   expect(redactText('QWxhZGRpbjpvcGVuIHNlc2FtZQ==')).toBe('[REDACTED]')
   expect(redactText('export DATABASE_PASSWORD=hunter2')).toContain('[REDACTED]')
   expect(redactText('export DATABASE_PASSWORD=hunter2')).not.toContain('hunter2')
+})
+
+// `SECRET_KEY` matches `session` anywhere in a key, so `JSESSIONID` was already
+// covered — but a PHP or ASP.NET target names the cookie that *is* the login
+// `PHPSESSID` or `ASP.NET_SessionId`, and those sailed straight through into
+// recon transcripts and the evidence log. Those are bearer credentials.
+test('a PHP/ASP.NET session cookie name is treated as a credential', () => {
+  expect(redactRecord({ PHPSESSID: 'abc123', connect: { sid: 'x' } })).toEqual({ PHPSESSID: '[REDACTED]', connect: { sid: '[REDACTED]' } })
+  expect(redactRecord({ sid: 'abc123' })).toEqual({ sid: '[REDACTED]' })
+  expect(redactRecord({ 'ASP.NET_SessionId': 'abc123' })).toEqual({ 'ASP.NET_SessionId': '[REDACTED]' })
+  expect(redactRecord({ csrf_token: 'abc123', refresh_token: 'abc123' })).toEqual({ csrf_token: '[REDACTED]', refresh_token: '[REDACTED]' })
+  expect(redactRecord({ cookies: ['a=1'] })).toEqual({ cookies: '[REDACTED]' })
+  expect(redactSecrets('{"v":"PHPSESSID=kQw3r9ZpX2mB7vL1sT4yU6"}')).not.toContain('kQw3r9ZpX2mB7vL1sT4yU6')
+})
+
+// …and the name survives, because which cookie a server sets is the evidence.
+// A missing Secure/HttpOnly/SameSite on a named cookie *is* the finding.
+test('a masked cookie assignment keeps its name so the finding stays readable', () => {
+  expect(redactText('Set-Cookie → PHPSESSID (Path=/, HttpOnly)')).toBe('Set-Cookie → PHPSESSID (Path=/, HttpOnly)')
+  expect(redactText('PHPSESSID=kQw3r9ZpX2mB7vL1sT4yU6; Path=/')).toContain('PHPSESSID=[REDACTED]')
+  expect(redactText('PHPSESSID=kQw3r9ZpX2mB7vL1sT4yU6; Path=/')).not.toContain('kQw3r9ZpX2mB7vL1sT4yU6')
+  expect(redactText('csrftoken=abc123')).toContain('csrftoken=[REDACTED]')
+})
+
+// The rule is exact-or-suffix on the whole name, not a keyword substring, so a
+// report can still quote the words that only look like credentials.
+test('a name that merely contains a credential word is not redacted', () => {
+  expect(isCookieName('author')).toBe(false)
+  expect(isCookieName('monkey')).toBe(false)
+  expect(isCookieName('tokenizer')).toBe(false)
+  expect(isCookieName('residual')).toBe(false)
+  expect(isCookieName('refreshed')).toBe(false)
+  expect(isCookieName('phpsessid')).toBe(true)
+  expect(isCookieName('PHPSESSID')).toBe(true)
+  expect(redactText('commit by author=jane on 2026-01-01')).toBe('commit by author=jane on 2026-01-01')
+  expect(redactText('HEAD is now at refactor: 4a9c1f')).toBe('HEAD is now at refactor: 4a9c1f')
+})
+
+// A lookbehind, not a consumed boundary: the delimiter before the name in a
+// JSON string is the opening quote, and eating it is what once left
+// recon/traffic.jsonl unparseable.
+test('masking a cookie inside serialized evidence does not break the JSON', () => {
+  const record = JSON.stringify({ body: 'cookie debug: PHPSESSID=kQw3r9ZpX2mB7vL1sT4yU6 set', status: 200 })
+  const redacted = redactSecrets(record)
+  expect(JSON.parse(redacted)).toEqual({ body: 'cookie debug: PHPSESSID=[REDACTED] set', status: 200 })
 })
