@@ -1061,7 +1061,7 @@ async function runAutonomousTaskInternal(options: AutonomousRunOptions): Promise
   // see unwinnableVerificationCommands.
   if (planApproved && proposal.verification.length > 0) {
     const unattended = (options.governanceMode ?? 'unattended') === 'unattended'
-    const refused = unwinnableVerificationCommands(proposal.verification, { unattended })
+    const refused = unwinnableVerificationCommands(proposal.verification, { unattended, cwd: workspaceRoot })
     if (refused.length > 0) {
       const usable = proposal.verification.filter((command) => !refused.includes(command))
       const replacement = usable.length > 0 ? usable : detectChecks(workspaceRoot)

@@ -3,7 +3,7 @@ import { basename, relative, resolve, sep } from 'node:path'
 import type { Tool } from '../tools/types.ts'
 import { clampOutput, failureHint, isLongRunningServerCommand, mayStartServer, runShell, startsWithForeignShellCommand, type ShellResult } from '../shell.ts'
 import type { CriticIssue, CriticVerdict } from './types.ts'
-import { currentAgent } from './context.ts'
+import { currentAgent, withAgentIdentity } from './context.ts'
 import { activeActionGovernor, blockedInUnattendedMode, type ActionGovernor } from './governor.ts'
 import { changedStaticPages } from './detectChecks.ts'
 import { detectMissingPackage, installCommandFor, isInstallCommand } from './autoInstall.ts'
@@ -87,10 +87,10 @@ export function isNoTestsResult(result: ShellResult): boolean {
  */
 export function unwinnableVerificationCommands(
   commands: string[],
-  options: { unattended: boolean; platform?: NodeJS.Platform; which?: (name: string) => string | null },
+  options: { unattended: boolean; platform?: NodeJS.Platform; which?: (name: string) => string | null; cwd?: string },
 ): string[] {
   return commands.filter((command) =>
-    startsWithForeignShellCommand(command, options.platform, options.which) || (options.unattended && blockedInUnattendedMode(command)))
+    startsWithForeignShellCommand(command, options.platform, options.which) || (options.unattended && blockedInUnattendedMode(command, options.cwd)))
 }
 
 /**
@@ -184,7 +184,13 @@ export async function runVerification(
   for (const command of runnable) report(command, 'queued')
 
   for (const command of runnable) {
-    const gate = await (governor ?? activeActionGovernor()).check({ name: 'run_command', input: { command } })
+    // The check runs in `cwd`, often a sub-project; the governor resolves the
+    // program a command names (`node bin/cli.js`) from its agent's root, so
+    // it is asked from `cwd` too — the file it judges is the file that runs.
+    // Passing `cwd` as an input instead would put the path's words in front of
+    // every command pattern.
+    const check = () => (governor ?? activeActionGovernor()).check({ name: 'run_command', input: { command } })
+    const gate = await (cwd ? withAgentIdentity({ ...currentAgent(), cwd }, check) : check())
     if (!gate.allowed) {
       const reason = gate.message ?? 'verification command blocked by autonomy governor'
       const result: ShellResult = { command, exitCode: 126, stdout: '', stderr: reason, elapsedMs: 0, timedOut: false }

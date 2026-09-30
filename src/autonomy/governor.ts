@@ -6,6 +6,7 @@ import { skillCapability } from '../skills/capabilities.ts'
 import { currentAgent, isPathWithinWorkspace, resolveWorkspacePath } from './context.ts'
 import { assertWriteWithinSessionScope, currentSessionScope } from '../session/scope.ts'
 import { commandMayReadSensitiveData, isEliaTrustFile } from './sensitivePaths.ts'
+import { MAX_SCRIPT_DEPTH, argvInvocation, localProgram, shellInvocation, type ProgramInvocation } from './localProgram.ts'
 import { pauseToolSpinner, resumeToolSpinner } from '../ui/stream.ts'
 import { applyPolicy } from './policy.ts'
 import { assessDatabaseRequest } from '../devdb/policy.ts'
@@ -351,18 +352,21 @@ export function assessAction(request: ActionRequest, cwd = currentAgent().cwd ??
   const joined = values.join(' ')
   const resources = values.filter((value) => /[\\/]|https?:\/\//i.test(value)).slice(0, 4)
 
-  if (name === 'run_command') return assessCommand(joined, cwd)
+  if (name === 'run_command') return assessCommand(joined, cwd, { invocation: () => shellInvocation(input.command, input.cwd, cwd) })
   if (name === 'run_program') {
     const program = typeof input.program === 'string' ? input.program : ''
     const args = Array.isArray(input.args) ? input.args.filter((arg): arg is string => typeof arg === 'string') : []
-    return assessCommand([program, ...args].join(' '), cwd)
+    return assessCommand([program, ...args].join(' '), cwd, { invocation: () => argvInvocation([program, ...args], input.cwd, cwd) })
   }
   // `process start` launches a shell command exactly as run_command does — it
   // just doesn't wait for it — so it gets the same command assessment. The
   // other actions only read or stop processes this session itself started.
   if (name === 'process') {
     const action = typeof input.action === 'string' ? input.action : ''
-    if (action === 'start') return assessCommand(typeof input.command === 'string' ? input.command : '', cwd)
+    if (action === 'start') {
+      const command = typeof input.command === 'string' ? input.command : ''
+      return assessCommand(command, cwd, { invocation: () => shellInvocation(command, input.cwd, cwd) })
+    }
     // `send` joins them: it writes one line to a process this session itself
     // started, so it is bounded by the same argument as logs and list.
     if (action === 'logs' || action === 'list' || action === 'stop' || action === 'send') {
@@ -1220,22 +1224,38 @@ export function activeActionGovernor(): ActionGovernor {
  * to it, instead of discovering at verification time that the gate is unwinnable.
  */
 export function blockedInUnattendedMode(command: string, cwd = process.cwd()): boolean {
-  return assessCommand(command, cwd).risk === 'critical'
+  // A plan names the program it is about to write, so a script that does not
+  // exist yet counts as local when it would land inside the workspace. At run
+  // time the governor still requires the file itself.
+  return assessCommand(command, cwd, { invocation: () => shellInvocation(command, undefined, cwd), planning: true }).risk === 'critical'
+}
+
+interface CommandContext {
+  /**
+   * The program the command runs and the directory it runs in, when both are
+   * certain. A thunk: it reads the filesystem, and only a command that reaches
+   * the last check needs it.
+   */
+  invocation?: () => ProgramInvocation | undefined
+  /** Plan-time prediction (blockedInUnattendedMode): the script may not be written yet. */
+  planning?: boolean
+  /** package.json script nesting already followed. */
+  depth?: number
 }
 
 /**
- * Classify a shell command by what it *does*, not where it runs.
+ * Classify a shell command by what it *does*.
  *
- * `_cwd` is deliberately unread. Every branch below is a pattern match on the
- * command string — network egress, package installs, remote execution,
- * irreversible side effects — and none of those change meaning with the
- * working directory. Path scoping is a separate gate (workspace-path and
- * protected-file checks); folding it in here would give one classifier two
- * jobs and make each harder to reason about. The parameter stays so the
- * signature matches `blockedInUnattendedMode`, which is exported for
- * plan-time checking.
+ * Every branch but the last is a pattern match on the command string — network
+ * egress, package installs, remote execution, irreversible side effects — and
+ * none of those change meaning with the working directory. The one question
+ * that does is whether the command runs the project's own program
+ * (localProgram.ts): that needs the file on disk, resolved from the directory
+ * the command runs in, so `cwd` (the workspace root) and the invocation are
+ * read there and nowhere else. It is asked last, after every hazard has had
+ * its turn, so it can only lift what would otherwise be `shell.unknown`.
  */
-function assessCommand(command: string, _cwd: string): ActionAssessment {
+function assessCommand(command: string, cwd: string, context?: CommandContext): ActionAssessment {
   if (!command.trim()) return assessment('critical', 'approve', 'shell command is empty or invalid', 'shell', [], false)
   // CR/LF anywhere means a chain or a pasted script, not one verified
   // invocation, and is rejected before any other gate can run. A harmless
@@ -1294,7 +1314,37 @@ function assessCommand(command: string, _cwd: string): ActionAssessment {
   if (isWorkspaceMkdir(command)) {
     return assessment('review', 'approve', 'mkdir creates directories under the directory it runs in', 'shell', [], true)
   }
+  const invocation = context ? context.invocation?.() : shellInvocation(command, undefined, cwd)
+  const local = invocation && assessLocalProgram(invocation, cwd, context ?? {})
+  if (local) return local
   return assessment('critical', 'approve', 'shell command is not in the restricted read-only policy and may cause an unreviewed side effect', 'shell.unknown', [], false)
+}
+
+/**
+ * The project's own program, run inside the workspace, is local review work —
+ * the same band as a commit — so an autonomous session runs it unasked and an
+ * unattended run may too (localProgram.ts says what qualifies). A package.json
+ * script is only as local as what it runs: its body, and the `pre`/`post`
+ * hooks the manager runs with it, go back through this classifier, and one
+ * critical line keeps the whole script where it was (`shell.unknown`).
+ */
+function assessLocalProgram(invocation: ProgramInvocation, cwd: string, context: CommandContext): ActionAssessment | undefined {
+  const program = localProgram(invocation, cwd, { planning: context.planning })
+  if (!program) return undefined
+  if (program.kind === 'file') {
+    return assessment('review', 'approve', `runs ${program.path}, the project's own program inside the workspace`, 'shell.local-program', [program.path], true)
+  }
+  const depth = context.depth ?? 0
+  for (const body of program.bodies) {
+    const inner = depth < MAX_SCRIPT_DEPTH
+      ? assessCommand(body.command, cwd, { invocation: () => body.argv && { argv: body.argv, cwd: invocation.cwd }, planning: context.planning, depth: depth + 1 })
+      : undefined
+    if (!inner || inner.risk === 'critical') {
+      const why = inner ? inner.reason : `it nests scripts more than ${MAX_SCRIPT_DEPTH} deep`
+      return assessment('critical', 'approve', `the "${program.name}" script in ${program.manifest} runs \`${body.command}\`, and ${why}`, 'shell.unknown', [], false)
+    }
+  }
+  return assessment('review', 'approve', `runs the "${program.name}" script from ${program.manifest}, which only runs the project's own programs or allowed checks`, 'shell.local-program', [program.manifest], true)
 }
 
 /**
