@@ -5,6 +5,7 @@ import { parseScheduleInterval } from '../autonomy/scheduler.ts'
 import { withFileLock } from '../fileLock.ts'
 import { ensureSecureDirectory, writeSecureFile } from '../securePersistence.ts'
 import { autopilotDir } from './store.ts'
+import { isHashTrusted, sha256Hex, trustHash } from '../autonomy/projectTrust.ts'
 
 /**
  * What the autopilot watches while it runs with `--watch`, so it reacts when
@@ -217,11 +218,21 @@ function watchFile(root: string): string {
   return join(autopilotDir(root), 'watch.json')
 }
 
+/**
+ * The watch list, when this machine's own `elia autopilot watch` wrote it (or
+ * the person trusted it with `elia trust`). It sits inside the repository, so
+ * a repo could ship one: "github issues" on its author's tracker would turn
+ * text anyone can write into goals for an unattended pilot the person never
+ * pointed there. Like the pilot's state (store.ts), it is honoured only while
+ * the user-level trust record holds the hash of exactly these bytes.
+ */
 export function loadWatchers(root: string): Watcher[] {
   const file = watchFile(root)
   if (!existsSync(file)) return []
   try {
-    const parsed = JSON.parse(readFileSync(file, 'utf8')) as { watchers?: Watcher[] }
+    const text = readFileSync(file, 'utf8')
+    if (!isHashTrusted(file, sha256Hex(text))) return []
+    const parsed = JSON.parse(text) as { watchers?: Watcher[] }
     return Array.isArray(parsed.watchers) ? parsed.watchers.filter((watcher) => watcher && typeof watcher.id === 'string' && watcher.spec) : []
   } catch {
     return []
@@ -234,7 +245,9 @@ function changeWatchers<T>(root: string, change: (watchers: Watcher[]) => T): T 
   return withFileLock(`${file}.lock`, () => {
     const watchers = loadWatchers(root)
     const result = change(watchers)
-    writeSecureFile(file, `${JSON.stringify({ watchers }, null, 2)}\n`)
+    const text = `${JSON.stringify({ watchers }, null, 2)}\n`
+    writeSecureFile(file, text)
+    trustHash(file, sha256Hex(text))
     return result
   })
 }
@@ -288,6 +301,17 @@ export async function pollWatchers(root: string, deps: TriggerDeps): Promise<{ e
     })
   }
   return { events, notices, rescan }
+}
+
+/** True when a watch list is present that this machine did not write (or that changed since): it is ignored until trusted. */
+export function hasUntrustedWatchList(root: string): boolean {
+  const file = watchFile(root)
+  if (!existsSync(file)) return false
+  try {
+    return !isHashTrusted(file, sha256Hex(readFileSync(file, 'utf8')))
+  } catch {
+    return false
+  }
 }
 
 /** The real `gh` and page fetch the pilot uses; tests pass their own. */

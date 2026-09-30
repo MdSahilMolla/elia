@@ -233,10 +233,11 @@ export async function runAutopilotTurn(
 }
 
 async function runWatchCommand(root: string, args: string[]): Promise<void> {
-  const { addWatcher, describeTrigger, loadWatchers, parseTrigger, removeWatcher } = await import('../autopilot/watch.ts')
+  const { addWatcher, describeTrigger, hasUntrustedWatchList, loadWatchers, parseTrigger, removeWatcher } = await import('../autopilot/watch.ts')
   const [action = 'list', ...rest] = args
   try {
     if (action === 'list') {
+      if (hasUntrustedWatchList(root)) writeNotice('A watch list is here that was not written by elia on this machine (or was changed since), so it is ignored. Read .elia/autopilot/watch.json, then run `elia trust` to accept it — or add your own watchers.')
       const watchers = loadWatchers(root)
       if (watchers.length === 0) {
         writeNotice('The autopilot watches nothing yet. Add a watcher, for example:\n  elia autopilot watch add "github ci"\n  elia autopilot watch add "github issues label:bug"\n  elia autopilot watch add "file docs/feedback"\n  elia autopilot watch add "every 6h"\nthen run: elia autopilot --watch (or elia autopilot install)')

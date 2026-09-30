@@ -12,6 +12,7 @@ import { encodeNote } from '../autonomy/operatorNotes.ts'
 import { renderReport, statusText, pilotSnapshot } from './report.ts'
 import { loadPilotState } from './store.ts'
 import { isTestPath } from './git.ts'
+import { sha256Hex, trustHash } from '../autonomy/projectTrust.ts'
 import type { HealthReport, RepoSurvey } from './types.ts'
 
 function sh(root: string, ...args: string[]): string {
@@ -370,7 +371,10 @@ describe('pilot end to end (real git, fake model and worker)', () => {
         const file = join(autopilotDir(root), 'watch.json')
         const saved = JSON.parse(readFileSync(file, 'utf8')) as { watchers: Array<{ nextCheckAt: number }> }
         for (const watcher of saved.watchers) watcher.nextCheckAt = 0
-        writeFileSync(file, JSON.stringify(saved))
+        const text = JSON.stringify(saved)
+        writeFileSync(file, text)
+        // Edited by hand, so the person re-trusts it (as `elia trust` would); an untrusted list is ignored.
+        trustHash(file, sha256Hex(text))
       }
       const controller = new AbortController()
       const titles: string[] = []

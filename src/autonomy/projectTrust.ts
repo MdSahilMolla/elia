@@ -38,6 +38,7 @@ export const PROJECT_TRUST_TARGETS: readonly { path: string; suffix?: string; la
   { path: join('.elia', 'allow.json'), label: 'standing approvals (.elia/allow.json)' },
   { path: join('.elia', 'schedules.json'), label: 'schedules (.elia/schedules.json)' },
   { path: join('.elia', 'autopilot', 'state.json'), label: 'autopilot state (.elia/autopilot/state.json)' },
+  { path: join('.elia', 'autopilot', 'watch.json'), label: 'autopilot watchers (.elia/autopilot/watch.json)' },
 ]
 
 interface TrustEntry {

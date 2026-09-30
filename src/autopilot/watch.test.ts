@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { addEventGoal } from './backlog.ts'
 import { scopeHook, scopesNeeded, parseScopes } from './scopes.ts'
 import { pilotLaunchdPlist, pilotServicePlan, pilotSystemdUnit } from './service.ts'
-import { addWatcher, checkTrigger, describeTrigger, loadWatchers, parseTrigger, pollWatchers, removeWatcher, type TriggerDeps } from './watch.ts'
+import { addWatcher, checkTrigger, describeTrigger, hasUntrustedWatchList, loadWatchers, parseTrigger, pollWatchers, removeWatcher, type TriggerDeps } from './watch.ts'
 
 let dir: string
 
@@ -140,4 +140,16 @@ test('a schedule asks for a fresh look at the repository, not a vague goal', asy
   expect(await pollWatchers(dir, deps({ now: 30 * 60_000 }))).toEqual({ events: [], notices: [], rescan: false })
   expect(await pollWatchers(dir, deps({ now: 61 * 60_000 }))).toEqual({ events: [], notices: [], rescan: true })
   expect((await pollWatchers(dir, deps({ now: 62 * 60_000 }))).rescan).toBe(false)
+})
+
+test('a watch list the repository shipped is ignored until the person trusts it', () => {
+  // Written by hand (or committed by someone else), not by `elia autopilot watch add` here.
+  mkdirSync(join(dir, '.elia', 'autopilot'), { recursive: true })
+  writeFileSync(join(dir, '.elia', 'autopilot', 'watch.json'), JSON.stringify({ watchers: [{ id: 'w1', spec: { kind: 'github', what: 'issues', repo: 'attacker/tracker' }, nextCheckAt: 0 }] }))
+  expect(loadWatchers(dir)).toEqual([])
+  expect(hasUntrustedWatchList(dir)).toBe(true)
+  // The person's own watcher replaces it and is trusted, because elia wrote it here.
+  addWatcher(dir, parseTrigger('github ci'))
+  expect(loadWatchers(dir).map((watcher) => watcher.spec)).toEqual([{ kind: 'github', what: 'ci' }])
+  expect(hasUntrustedWatchList(dir)).toBe(false)
 })
