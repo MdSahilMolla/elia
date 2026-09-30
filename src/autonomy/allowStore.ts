@@ -223,10 +223,23 @@ const COMMAND_CHAIN_SYNTAX = /[;&|<>`$]|\$\(/i
  * after a human asked for the class) and by preauth, which is keyed by intent
  * and recorded before a run starts. What is refused here is the narrow,
  * easily-minted `commandPrefix` grant standing in for a category decision.
+ *
+ * The first two are argument-dependent: `curl https://example.com` and
+ * `npm test` stay covered, because there is a shape of the command that carries
+ * no risk. The rest are unconditional. Installing a package runs that package's
+ * lifecycle scripts, and reaching a container or host runs code somewhere the
+ * governor cannot see, so no argument shape makes `npm install left-pad` or
+ * `docker exec` a thing a leading token can be read as approving. The governor
+ * already says so: these carry a dedicated critical intent because "no settled
+ * sibling may ever cover commander", and a persisted prefix rule is such a
+ * sibling.
  */
 const PREFIX_NEVER_COVERS: ReadonlySet<string> = new Set([
   'shell.external-write',
   'shell.sensitive-read',
+  'shell.code-exec',
+  'shell.remote',
+  'shell.composed',
 ])
 
 /**
@@ -246,11 +259,13 @@ const TRANSPORT_BOUND_ARGUMENT =
   /(?:\s-X\s*(?:POST|PUT|PATCH|DELETE)|\s--(?:data|data-raw|data-binary|data-urlencode|form|form-string|upload-file|post-file|post-data|body-data|request|json)(?:=|\s)|-d\s|\s--?(?:[a-zA-Z]*[FT])\s|\s-[a-zA-Z]*[FT]\b)/i
 
 function prefixArgumentsAreSafe(command: string, intent: string): boolean {
-  // A sensitive read is never covered by a token, whatever the arguments. The
-  // governor has already decided this specific line reads something protected,
-  // and `cat`/`grep`/`tail` take a filename, so there is no "safe" argument
-  // shape to distinguish the way a fetch has.
-  if (intent === 'shell.sensitive-read') return false
+  // Only `shell.external-write` is decided by the shape of the arguments, since
+  // that is the one class where a harmless line exists ("fetch this page") and a
+  // harmful one does not ("upload this file"). Every other class here is refused
+  // outright: a secret read has already been identified as such, and installing
+  // code, entering a container or reaching a host has no harmless argument shape
+  // for a leading token to stand in for.
+  if (intent !== 'shell.external-write') return false
   return !TRANSPORT_BOUND_ARGUMENT.test(command)
 }
 

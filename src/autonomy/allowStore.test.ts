@@ -107,6 +107,24 @@ test('an explicit intent rule still covers the classes a prefix rule cannot', ()
   expect(isAllowlisted(request, assessAction(request, dir), dir)).toBe(true)
 })
 
+test('a package-manager prefix rule does not carry code execution', () => {
+  // Installing a package runs that package's lifecycle scripts, so there is no
+  // "safe" argument shape for a leading token to stand in for. `npm test` is
+  // fine and stays covered; anything that installs does not.
+  const dir = project()
+  addAllowRule({ tool: 'run_command', commandPrefix: 'npm', addedAt: '2026-01-01T00:00:00.000Z' }, 'project', dir)
+  clearAllowCache()
+
+  for (const command of ['npm install left-pad', 'npm ci', 'npm install --save-dev some-pkg', 'pip install requests']) {
+    const request = { name: 'run_command' as const, input: { command } }
+    expect(assessAction(request, dir).risk, command).toBe('critical')
+  }
+  // The refusal itself is asserted through the governor, since a code-exec
+  // install must prompt rather than inherit an earlier approval.
+  const install = { name: 'run_command' as const, input: { command: 'npm install left-pad' } }
+  expect(isAllowlisted(install, assessAction(install, dir), dir)).toBe(false)
+})
+
 test('a persisted project rule permits that command prefix and nothing else', () => {
   const dir = project()
   const push = { name: 'run_command', input: { command: 'git push origin main' } }
@@ -217,8 +235,11 @@ test('governor: a project "always allow" persists across governor instances', as
   const dir = project()
   const approve = async () => ({ approved: true, remember: 'project' as const })
 
+  // `git` rather than `npm`: persistence is what this test is about, and a
+  // `commandPrefix` rule deliberately cannot carry a code-exec class, so an
+  // `npm install` approval is no longer standing authority for `npm ci`.
   const g1 = createActionGovernor({ mode: 'supervised', cwd: dir, approve })
-  expect((await g1.check({ name: 'run_command', input: { command: 'npm install' } })).allowed).toBe(true)
+  expect((await g1.check({ name: 'run_command', input: { command: 'git status' } })).allowed).toBe(true)
 
   clearAllowCache()
   let asked = false
@@ -230,8 +251,31 @@ test('governor: a project "always allow" persists across governor instances', as
       return false
     },
   })
-  expect((await g2.check({ name: 'run_command', input: { command: 'npm ci' } })).allowed).toBe(true)
+  expect((await g2.check({ name: 'run_command', input: { command: 'git log --oneline' } })).allowed).toBe(true)
   expect(asked).toBe(false)
+})
+
+test('a persisted prefix rule does not carry a code-exec class across instances', async () => {
+  // Approving one install is not a decision about the next: each package runs its
+  // own lifecycle scripts, so `npm install` cannot be standing authority for
+  // `npm ci` (or `npm install <other-package>`) even though they share a token.
+  const dir = project()
+  const g1 = createActionGovernor({ mode: 'supervised', cwd: dir, approve: async () => ({ approved: true, remember: 'project' as const }) })
+  expect((await g1.check({ name: 'run_command', input: { command: 'npm install' } })).allowed).toBe(true)
+
+  clearAllowCache()
+  let asked = false
+  const g2 = createActionGovernor({
+    mode: 'supervised',
+    cwd: dir,
+    approve: async () => {
+      asked = true
+      return { approved: true, remember: 'session' as const }
+    },
+  })
+  expect((await g2.check({ name: 'run_command', input: { command: 'npm ci' } })).allowed).toBe(true)
+  // The project rule did not cover it; the fresh session decision did.
+  expect(asked).toBe(true)
 })
 
 test('governor: a denial with feedback surfaces the operator guidance', async () => {
