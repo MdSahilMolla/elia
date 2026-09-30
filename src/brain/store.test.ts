@@ -31,7 +31,13 @@ test('loadBrainItems merges episodes from every session, plus lessons, rationale
   const notesPath = join(dir, 'notes.jsonl')
   appendNote({ text: 'the staging API rate-limits at 20 rps', tags: ['api'] }, notesPath)
 
-  const items = await loadBrainItems({ sessionsDir, lessonsPath, rationalePath, notesPath, currentSessionId: 'sess-two' })
+  // `cwd` matters even though every explicit path above points into `dir`:
+  // the recording and book sources derive `.elia/recordings` and `.elia/books`
+  // from cwd rather than from those paths, so leaving it unset falls back to
+  // process.cwd() and indexes the developer's real session history into a test
+  // that asserts an exact set of kinds. Green on a fresh clone, red on any
+  // checkout that has actually been used.
+  const items = await loadBrainItems({ cwd: dir, sessionsDir, lessonsPath, rationalePath, notesPath, currentSessionId: 'sess-two' })
 
   const kinds = items.map((i) => i.kind).sort()
   expect(kinds).toEqual(['episode', 'episode', 'lesson', 'note', 'rationale'])
@@ -46,6 +52,7 @@ test('loadBrainItems merges episodes from every session, plus lessons, rationale
 test('loadBrainItems is empty and does not throw when nothing exists yet', async () => {
   const dir = scratch()
   const items = await loadBrainItems({
+    cwd: dir,
     sessionsDir: join(dir, 'sessions'),
     lessonsPath: join(dir, 'lessons.md'),
     rationalePath: join(dir, 'rationale.jsonl'),

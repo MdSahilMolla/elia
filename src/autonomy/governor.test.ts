@@ -17,9 +17,18 @@ import { clearAllowCache } from './allowStore.ts'
 // where "git" (say) was already always-allowed for real.
 let globalAllowDir: string
 let preauthDir: string
+// The project-scoped allow store is NOT env-overridable (allowStore.ts:82 reads
+// `<cwd>/.elia/allow.json` unconditionally), so a supervised governor left on
+// `process.cwd()` reads the real checkout's allow file. A developer who once
+// answered "always allow curl" then has `curl -X POST <url>` silently
+// auto-allowed, and a test asserting the governor asks every time goes red for a
+// reason that has nothing to do with the governor. This empty cwd is the
+// project-scope equivalent of the global isolation above.
+let hermeticCwd: string
 beforeEach(() => {
   globalAllowDir = mkdtempSync(join(tmpdir(), 'elia-governor-allow-'))
   process.env.ELIA_ALLOW_GLOBAL_PATH = join(globalAllowDir, 'allow.json')
+  hermeticCwd = mkdtempSync(join(tmpdir(), 'elia-governor-cwd-'))
   // Pre-authorization grants below are written through grantPreauth, so the
   // store needs the same isolation as the allow file. Without it the suite
   // wrote grants into the real per-user store — and, since the store's
@@ -36,6 +45,7 @@ afterEach(() => {
   clearAllowCache()
   rmSync(globalAllowDir, { recursive: true, force: true })
   rmSync(preauthDir, { recursive: true, force: true })
+  rmSync(hermeticCwd, { recursive: true, force: true })
 })
 
 describe('autonomy governor', () => {
@@ -887,7 +897,7 @@ test('autonomous sessions: local reversible work runs unasked; outside-world and
     asked.push(assessment.intent)
     return true
   }
-  const autonomous = createActionGovernor({ mode: 'supervised', approve, reviewRunsFreely: true })
+  const autonomous = createActionGovernor({ mode: 'supervised', cwd: hermeticCwd, approve, reviewRunsFreely: true })
   // Local and reversible: a commit on the current branch.
   expect((await autonomous.check({ name: 'run_command', input: { command: 'git commit -m "fix"' } })).allowed).toBe(true)
   expect(asked).toEqual([])
@@ -899,7 +909,7 @@ test('autonomous sessions: local reversible work runs unasked; outside-world and
 
   // Ask first (no flag): the same commit goes to the approval menu.
   const askFirstAsked: string[] = []
-  const askFirst = createActionGovernor({ mode: 'supervised', approve: async (assessment) => { askFirstAsked.push(assessment.intent); return true } })
+  const askFirst = createActionGovernor({ mode: 'supervised', cwd: hermeticCwd, approve: async (assessment) => { askFirstAsked.push(assessment.intent); return true } })
   await askFirst.check({ name: 'run_command', input: { command: 'git commit -m "fix"' } })
   expect(askFirstAsked.length).toBe(1)
 })
