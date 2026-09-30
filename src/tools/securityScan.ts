@@ -4,11 +4,13 @@ import { join, posix, win32 } from 'node:path'
 import type { Tool } from './types.ts'
 import { clampOutput, formatShellResult, runShell, type ShellResult } from '../shell.ts'
 import { captureBeforeWrite } from '../checkpoint.ts'
-import { engagementDir } from './engagement.ts'
+import { engagementDir, localEngagementRecord, writeEngagementScaffold } from './engagement.ts'
 import { currentAgent } from '../autonomy/context.ts'
 import { paths } from '../config.ts'
 import { redactSecrets } from '../ui/redact.ts'
 import { hostInScope, parseScopeHosts, stripZoneId } from './httpProbe.ts'
+import { installEntry, installKeyFor, type InstallReceipt } from './ctfToolchain.ts'
+import { SECURITY_TOOL_CATALOG, type CatalogEntry } from '../security/toolCatalog.ts'
 
 const SCAN_TIMEOUT_MS = 5 * 60_000
 /** A decompile or a full sweep legitimately runs past five minutes; half an hour is where it stops being a scan. */
@@ -182,6 +184,60 @@ function toolUnavailableReason(result: ShellResult): string | undefined {
   return result.stderr.split('\n').find((line) => TOOL_UNAVAILABLE.test(line))?.trim() || undefined
 }
 
+/**
+ * The catalog entry whose accepted binary names include `binary`, if any.
+ * Scoped to the catalog rather than the catalog's install hints so a name that
+ * is not catalogued — a locally built binary, a script — resolves to nothing and
+ * is reported as such instead of matching some unrelated entry.
+ */
+function entryForBinary(binary: string): CatalogEntry | undefined {
+  return SECURITY_TOOL_CATALOG.find((entry) => entry.binaries.includes(binary))
+}
+
+/**
+ * Try to install a missing binary, then confirm it with the caller's own `which`.
+ *
+ * Resolution is by catalog lookup, never by pattern-matching the command: the
+ * hint that ships with the entry is the only thing executed, and it has already
+ * been vetted by `executableInstallCommand`, which declines prose and chained
+ * procedures. Every failure mode returns a reason rather than throwing, because
+ * the caller's contract is a message explaining why no scan happened.
+ */
+async function installBinary(
+  binary: string,
+  which: (name: string) => string | null,
+  ctx: SecurityToolContext,
+): Promise<{ installed: boolean; reason: string; hint?: string }> {
+  const entry = entryForBinary(binary)
+  if (!entry) return { installed: false, reason: `${binary} is not a catalogued tool, so there is no vetted install command for it` }
+  const platform = ctx.platform ?? process.platform
+  const hint = entry.install?.[installKeyFor(platform)]
+  if (!hint) return { installed: false, reason: `no ${installKeyFor(platform)} install hint is recorded for ${entry.name}` }
+
+  let receipt: InstallReceipt
+  try {
+    receipt = await installEntry(entry, {
+      platform: ctx.platform,
+      signal: ctx.signal,
+      // The caller's resolved lookup, not ctx.which: ctx.which is often absent
+      // in production, and re-reading it here made the post-install re-probe ask
+      // a function that only ever returns null. The install would have succeeded
+      // and the binary would then have been reported as still missing.
+      which,
+      // The same seam the scan itself uses, so a test that injects a runner
+      // exercises the install and the scan through one fake shell.
+      ...(ctx.runCommand
+        ? { runInstall: (command, timeoutMs, signal) => ctx.runCommand!(command, timeoutMs, ctx.cwd, signal) }
+        : {}),
+    })
+  } catch (error) {
+    return { installed: false, reason: `the install attempt threw: ${error instanceof Error ? error.message : String(error)}`, hint }
+  }
+  if (receipt.outcome === 'installed') return { installed: true, reason: receipt.detail ?? `${entry.name} installed`, hint }
+  if (receipt.outcome === 'already-present') return { installed: which(binary) !== null, reason: receipt.detail ?? 'already present', hint }
+  return { installed: false, reason: receipt.detail ?? receipt.outcome, hint }
+}
+
 export type RunScanCommand = (
   command: string,
   timeoutMs: number,
@@ -200,6 +256,8 @@ export interface SecurityToolContext {
   writeLog?: (path: string, contents: string) => Promise<unknown>
   /** PATH lookup used for the pre-run binary check. */
   which?: (name: string) => string | null
+  /** Overrides the platform an install hint is resolved for, so a linux plan can be exercised from any host. */
+  platform?: NodeJS.Platform
 }
 
 function validateTimeoutMs(value: unknown): number | undefined {
@@ -223,16 +281,34 @@ export async function runSecurityTool(input: Record<string, unknown>, ctx: Secur
   const { engagement, label, command, timeoutMs: requestedTimeout } = validateScanInput(input)
   const dir = engagementDir(engagement, ctx.engagementRoot)
   const scopePath = join(dir, 'SCOPE.md')
+  const targets = extractCommandTargets(command)
 
   if (!existsSync(scopePath)) {
-    return `No engagement "${engagement}" found (missing ${scopePath}). Run new_engagement first — it records what you're authorized to test before any scan runs.`
+    // A command that names no host is analysis of something already on this
+    // machine — `file chall`, `strings chall`, `checksec --file=chall`. Making a
+    // person write an authorization record for reading their own challenge file
+    // was a precondition with nothing behind it, and it was the reason a
+    // one-command solve stopped before running anything. So the engagement is
+    // scaffolded on the spot, with a record that says plainly that no
+    // authorization is being claimed because no network target is involved.
+    //
+    // Any command that names a host still has to go through new_engagement: a
+    // live target is the one case where a person's answer is the only thing
+    // standing between the run and somebody else's machine.
+    if (targets.length > 0) {
+      return `No engagement "${engagement}" found (missing ${scopePath}), and this command names a network target (${targets.join(', ')}). Run new_engagement first with who authorized testing that target — nothing ran and no recon log was written.`
+    }
+    try {
+      await writeEngagementScaffold(localEngagementRecord(engagement, label), ctx.engagementRoot)
+    } catch (error) {
+      return `No engagement "${engagement}" found and it could not be scaffolded: ${error instanceof Error ? error.message : String(error)}. Run new_engagement first.`
+    }
   }
 
   // The contents decide what runs, not the file's existence. Checking only that
   // SCOPE.md was there let `nmap anything.example.com` run against an
   // engagement whose scope named a different host.
   const scopeHosts = parseScopeHosts(await Bun.file(scopePath).text())
-  const targets = extractCommandTargets(command)
   const outOfScope = targets.filter((host) => !hostInScope(host, scopeHosts))
   if (outOfScope.length > 0) {
     throw new Error(
@@ -243,8 +319,31 @@ export async function runSecurityTool(input: Record<string, unknown>, ctx: Secur
 
   const binary = leadingBinary(command)
   const which = ctx.which ?? ((name: string) => Bun.which(name))
+  let installNote = ''
   if (binary && !which(binary)) {
-    return `Tool unavailable: ${binary} is not installed or not on PATH, so nothing ran and no recon log was written. Install it (ctf_toolchain reports what the engagement toolchain provides) or fix PATH first — this is not a scan result and must not be cited as evidence.`
+    // A missing binary used to end the run here with a "not installed" message,
+    // which is right about the evidence (nothing was scanned) but wrong about
+    // the next step: the tool the caller needs is catalogued, so refusing to
+    // even try meant a challenge stalled on a solvable precondition. Install it,
+    // then ask `which` again — the re-check is what makes the scan below
+    // trustworthy, because an install that runs clean can still leave the binary
+    // off PATH. A second miss is reported as unavailable, and a tool that still
+    // fails to launch writes no log, so a failed run can never become evidence.
+    const attempt = await installBinary(binary, which, ctx)
+    if (!attempt.installed) {
+      return [
+        `Tool unavailable: ${binary} is not installed and could not be installed automatically, so nothing ran and no recon log was written.`,
+        `Reason: ${attempt.reason}`,
+        'Install it yourself or fix PATH, then retry — this is not a scan result and must not be cited as evidence.',
+        attempt.hint ? `The catalogued install for it is: ${attempt.hint}` : 'No install hint is recorded for this tool on this platform.',
+      ].join('\n')
+    }
+    // Then run the command the caller asked for. Stopping here to make the model
+    // re-issue the same call was a round trip with nothing behind it: the
+    // install exists precisely so this scan can happen, and returning "re-run
+    // this" made the tool description and the config text a lie the model would
+    // eventually learn to route around.
+    installNote = `${binary} was not installed, so it was installed first (${attempt.reason}) and the scan then ran as requested.`
   }
 
   const timeoutMs = requestedTimeout ?? ctx.timeoutMs ?? SCAN_TIMEOUT_MS
@@ -271,6 +370,7 @@ export async function runSecurityTool(input: Record<string, unknown>, ctx: Secur
   return [
     `Saved full output to ${logPath}`,
     scopeNote,
+    installNote,
     '',
     clampOutput(evidence, SCAN_RETURN_CHARS),
     evidence.length > SCAN_RETURN_CHARS ? `Output above is clamped to ${SCAN_RETURN_CHARS} characters — read_file ${logPath} for the rest.` : '',
@@ -282,7 +382,7 @@ export async function runSecurityTool(input: Record<string, unknown>, ctx: Secur
 export const runSecurityToolTool: Tool = {
   name: 'run_security_tool',
   description:
-    "Run a security tool (nmap, curl, openssl, nuclei, sqlmap, gobuster, whatever's installed) for an authorized engagement and save the raw output under that engagement's recon/ folder, so evidence stays organized instead of scrolling past in the terminal. Requires new_engagement to have been run first, and every network target named in the command must appear in that engagement's SCOPE.md — a target outside scope is refused and nothing runs. A command that names no network target still runs (local analysis such as file, strings, radare2, or checksec) and is logged as scope-unverified. The leading binary is checked before the run: a tool that is not installed returns a tool-unavailable message and writes no log, so a 'not recognized' error can never be cited as a finding. Times out after 5 minutes by default, or after timeoutMs (whole milliseconds, capped at 30 minutes) when you pass it — scope a long scan down (fewer ports, smaller wordlist) rather than relying on this to wait forever.",
+    "Run a security tool (nmap, curl, openssl, nuclei, sqlmap, gobuster, whatever's installed) for an authorized engagement and save the raw output under that engagement's recon/ folder, so evidence stays organized instead of scrolling past in the terminal. A command that names no network target (local analysis such as file, strings, radare2, or checksec) scaffolds its own engagement on first use and is logged as scope-unverified; a command that names a host still requires new_engagement first, and every network target in it must appear in that engagement's SCOPE.md — a target outside scope is refused and nothing runs. The leading binary is checked before the run: if it is a catalogued tool that is missing, Elia installs it, re-checks PATH, and then runs the command as asked; if it still cannot run, you get a tool-unavailable message and no log is written, so a 'not recognized' error can never be cited as a finding. Times out after 5 minutes by default, or after timeoutMs (whole milliseconds, capped at 30 minutes) when you pass it — scope a long scan down (fewer ports, smaller wordlist) rather than relying on this to wait forever.",
   input_schema: {
     type: 'object',
     properties: {
