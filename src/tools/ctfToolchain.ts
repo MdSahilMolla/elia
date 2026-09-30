@@ -1,6 +1,7 @@
 import type { Tool } from './types.ts'
 import { optionalString } from './args.ts'
 import { runShell } from '../shell.ts'
+import { activeMode } from '../autonomy/mode.ts'
 import {
   CATEGORY_DESCRIPTIONS,
   TOOL_CATEGORIES,
@@ -195,6 +196,37 @@ export function classifyInstall(hint: string): InstallMechanism {
   return 'manual'
 }
 
+/**
+ * Whether a catalog hint is one command this is willing to run unattended, and
+ * the exact text to run.
+ *
+ * The catalog deliberately mixes runnable commands with prose notes, because
+ * the file's own header rule is that a wrong install command is worse than no
+ * hint: `ghidra` is "Download … from the vendor" and `otool` has no Linux
+ * equivalent at all. Some entries also append a human note to a real command
+ * (`sudo apt install nmap — ncat ships inside the nmap package`). Executing a
+ * hint verbatim would therefore run English as a shell, or hand `apt` a
+ * trailing sentence to resolve as a package name, and the resulting failure
+ * would be recorded as if the install had been tried and failed. So a hint has
+ * to be exactly one recognised install command with nothing trailing it, and
+ * anything else is reported rather than attempted.
+ */
+export function executableInstallCommand(hint: string): string | undefined {
+  const trimmed = hint.trim()
+  if (!trimmed) return undefined
+  // An em dash or a spaced hyphen is the catalog's marker for "… and here is
+  // why", i.e. prose appended to a command. Stop at the dash rather than guess
+  // where the command ended.
+  if (/[\u2014\u2013]|\s-\s/.test(trimmed)) return undefined
+  // Chains, redirection, and substitution are an author's own multi-step
+  // procedure (pwndbg is clone-then-make), not a one-line install. Each of
+  // those needs its own approval and its own supervision.
+  if (/&&|\|\||[;|`]|\n|\r|\$\(|>|<|\$\{|\|\d/.test(trimmed)) return undefined
+  if (classifyInstall(trimmed) === 'manual') return undefined
+  return trimmed
+}
+
+
 function formatToolStatus(status: ToolStatus): string[] {
   const marker = status.present ? '[present]' : '[missing]'
   const via = status.via === 'probe' ? `probe: ${status.detectedAs}` : `binary: ${status.detectedAs}`
@@ -293,17 +325,243 @@ export async function reportToolchain(input: Record<string, unknown>, ctx: Toolc
   return formatToolchainReport(statuses, ctx.platform ?? process.platform, categories)
 }
 
+/** Installing a package is minutes of work, not a `--version`. */
+const INSTALL_TIMEOUT_MS = 600_000
+
+/**
+ * What happened to one entry's install. Every terminal state names the reason,
+ * including the two that are deliberate non-actions, so a caller can tell
+ * "installed", "I declined to guess", and "the machine said no" apart instead of
+ * reading them all as failure.
+ */
+export type InstallOutcome = 'installed' | 'already-present' | 'no-runnable-hint' | 'needs-sudo' | 'failed' | 'skipped'
+
+export interface InstallReceipt {
+  name: string
+  category: ToolCategory
+  outcome: InstallOutcome
+  mechanism?: InstallMechanism
+  command?: string
+  detail?: string
+}
+
+export interface InstallContext extends ToolchainContext {
+  /** Injection seam for the install runner, mirroring SecurityToolContext.runCommand. */
+  runInstall?: (command: string, timeoutMs: number, signal?: AbortSignal) => Promise<{ exitCode: number; stdout: string; stderr: string; timedOut: boolean }>
+}
+
+function defaultRunInstall(command: string, timeoutMs: number, signal?: AbortSignal) {
+  return runShell(command, timeoutMs, undefined, signal)
+}
+
+/**
+ * Whether sudo already holds a live credential, without ever prompting for one.
+ *
+ * `sudo -n true` fails immediately instead of hanging when nothing is cached,
+ * which is what makes this usable from an unattended run. The password itself is
+ * deliberately never read, requested, or passed through this process: it would
+ * land in a tool argument and could reach a log or a receipt. The supported way
+ * to unblock an install is for the user to run `sudo -v` in their own terminal,
+ * which caches the credential for the following ~15 minutes.
+ */
+async function sudoReady(run: InstallContext['runInstall'], signal?: AbortSignal): Promise<boolean> {
+  const executor = run ?? defaultRunInstall
+  try {
+    const result = await executor('sudo -n true', 10_000, signal)
+    return result.exitCode === 0 && !result.timedOut
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Install one catalogued entry, then re-detect it.
+ *
+ * The re-detection is the whole point: an install that ran without error but
+ * left the binary off PATH (a pip `--user` install, a `go install` whose
+ * GOPATH/bin is not exported) is reported as not-installed rather than assumed.
+ * The probe cache is cleared for that entry first, or the `false` cached by the
+ * pre-install report would be handed back and the tool would look permanently
+ * missing.
+ */
+export async function installEntry(entry: CatalogEntry, ctx: InstallContext = {}): Promise<InstallReceipt> {
+  const platform = ctx.platform ?? process.platform
+  const base: InstallReceipt = { name: entry.name, category: entry.category, outcome: 'failed' }
+  const hint = entry.install?.[installKeyFor(platform)]
+
+  if (!hint) {
+    return { ...base, outcome: 'no-runnable-hint', detail: `no ${installKeyFor(platform)} install hint recorded` }
+  }
+  const command = executableInstallCommand(hint)
+  if (!command) {
+    return {
+      ...base,
+      outcome: 'no-runnable-hint',
+      mechanism: classifyInstall(hint),
+      detail: `the recorded hint is a note or a multi-step procedure, not one command: "${hint}"`,
+    }
+  }
+
+  const mechanism = classifyInstall(command)
+  if (mechanism === 'winget' || mechanism === 'choco') {
+    // Both raise a Windows elevation dialog that nothing here can answer, so
+    // running them unattended would block on a prompt nobody sees.
+    return { ...base, outcome: 'skipped', mechanism, command, detail: 'Windows package managers prompt for elevation; install this one yourself' }
+  }
+
+  const before = await detectEntry(entry, ctx)
+  if (before.present) return { ...base, outcome: 'already-present', detail: `already on PATH as ${before.detectedAs}` }
+
+  const executor = ctx.runInstall ?? defaultRunInstall
+  if (mechanism === 'apt' && !(await sudoReady(executor, ctx.signal))) {
+    return {
+      ...base,
+      outcome: 'needs-sudo',
+      mechanism,
+      command,
+      detail: 'sudo has no cached credential for this process. Run `sudo -v` in your own terminal, then retry — elia never reads or forwards your password.',
+    }
+  }
+
+  let result: { exitCode: number; stdout: string; stderr: string; timedOut: boolean }
+  try {
+    result = await executor(command, INSTALL_TIMEOUT_MS, ctx.signal)
+  } catch (error) {
+    return { ...base, outcome: 'failed', mechanism, command, detail: `install threw: ${error instanceof Error ? error.message : String(error)}` }
+  }
+
+  if (result.timedOut) {
+    return { ...base, outcome: 'failed', mechanism, command, detail: `install exceeded ${INSTALL_TIMEOUT_MS}ms and was killed` }
+  }
+  if (result.exitCode !== 0) {
+    const firstError = result.stderr.split('\n').find((line) => line.trim().length > 0)?.trim()
+    return { ...base, outcome: 'failed', mechanism, command, detail: firstError || `exited ${result.exitCode} with no stderr` }
+  }
+
+  // The install command succeeded; whether the tool is now usable is a separate
+  // question, so it is answered by detection rather than by the exit code.
+  const cache = ctx.probeCache ?? defaultProbeCache
+  if (entry.probe) cache.delete(`${platform}|${entry.probe}`)
+  const after = await detectEntry({ ...entry, probe: entry.probe }, { ...ctx, probeCache: cache })
+  if (!after.present) {
+    return {
+      ...base,
+      outcome: 'failed',
+      mechanism,
+      command,
+      detail: `the install command succeeded but ${entry.name} still is not detectable as ${after.detectedAs} — it may need a PATH update or a new shell`,
+    }
+  }
+  return { ...base, outcome: 'installed', mechanism, command, detail: `detected as ${after.detectedAs}` }
+}
+
+export interface InstallSummary {
+  installed: string[]
+  alreadyPresent: string[]
+  notAttempted: { name: string; reason: string }[]
+  failed: { name: string; reason: string }[]
+  platform: NodeJS.Platform
+}
+
+export function formatInstallSummary(summary: InstallSummary): string {
+  const lines: string[] = []
+  lines.push('=== CTF toolchain install ===')
+  lines.push(`Platform: ${summary.platform}`)
+  lines.push('')
+  if (summary.installed.length > 0) {
+    lines.push(`Installed (${summary.installed.length}): ${summary.installed.join(', ')}`)
+  } else {
+    lines.push('Installed: nothing — every requested tool was already present or could not be installed.')
+  }
+  if (summary.alreadyPresent.length > 0) lines.push(`Already present (${summary.alreadyPresent.length}): ${summary.alreadyPresent.join(', ')}`)
+  if (summary.notAttempted.length > 0) {
+    lines.push('')
+    lines.push('Not attempted (deliberate, not a failure):')
+    for (const item of summary.notAttempted) lines.push(`    ${item.name} — ${item.reason}`)
+  }
+  if (summary.failed.length > 0) {
+    lines.push('')
+    lines.push('Failed:')
+    for (const item of summary.failed) lines.push(`    ${item.name} — ${item.reason}`)
+  }
+  lines.push('')
+  lines.push('Detection after install is authoritative: a tool listed under Installed answered a fresh probe.')
+  return lines.join('\n')
+}
+
+/**
+ * Install whatever is missing across the requested categories.
+ *
+ * Entries are handled one at a time on purpose. A batch `apt install a b c`
+ * would be faster, but it also means one bad package name takes the whole
+ * command down and reports nothing about which tool was actually responsible —
+ * and these entries are independent, so there is nothing to batch for.
+ */
+export async function installMissingTools(input: Record<string, unknown>, ctx: InstallContext = {}): Promise<string> {
+  const requested = optionalString(input.category, 'category')
+  if (requested !== undefined && !isCategory(requested)) {
+    throw new Error(`category must be one of: ${TOOL_CATEGORIES.join(', ')} — got "${requested}"`)
+  }
+  const categories: ToolCategory[] = requested === undefined ? [...TOOL_CATEGORIES] : [requested]
+  const platform = ctx.platform ?? process.platform
+  const entries = categories.flatMap((category) => entriesForCategory(category))
+
+  const statuses = await Promise.all(entries.map((entry) => detectEntry(entry, ctx)))
+  const missing = entries.filter((_, index) => !statuses[index]!.present)
+
+  const summary: InstallSummary = {
+    installed: [],
+    alreadyPresent: [],
+    notAttempted: [],
+    failed: [],
+    platform,
+  }
+  if (missing.length === 0) {
+    summary.alreadyPresent = statuses.map((status) => status.name)
+    return formatInstallSummary(summary)
+  }
+
+  for (const entry of missing) {
+    if (ctx.signal?.aborted) break
+    const receipt = await installEntry(entry, ctx)
+    if (receipt.outcome === 'installed') summary.installed.push(receipt.name)
+    else if (receipt.outcome === 'already-present') summary.alreadyPresent.push(receipt.name)
+    else if (receipt.outcome === 'no-runnable-hint' || receipt.outcome === 'needs-sudo' || receipt.outcome === 'skipped') {
+      summary.notAttempted.push({ name: receipt.name, reason: receipt.detail ?? receipt.outcome })
+    } else summary.failed.push({ name: receipt.name, reason: receipt.detail ?? 'unknown failure' })
+  }
+  return formatInstallSummary(summary)
+}
+
 export const ctfToolchainTool: Tool = {
   name: 'ctf_toolchain',
   description:
-    'Report which security/CTF tools are installed on this machine, grouped by category (pwn, rev, crypto, stego, misc), with a one-line blocking impact for every missing tool and an install plan grouped by mechanism with what each group would cost the user. READ-ONLY: it only runs PATH lookups and short import/`--version` probes, and it NEVER installs, downloads or runs an install command — the plan is text for the user to act on. Reach for it before starting a challenge so you pick a technique the machine can actually run, rather than discovering a missing tool halfway through an exploit.',
+    "Report which security/CTF tools are installed on this machine, grouped by category (pwn, rev, crypto, stego, misc), with a one-line blocking impact for every missing tool and an install plan grouped by mechanism with what each group would cost the user. Default is READ-ONLY: it only runs PATH lookups and short import/`--version` probes, and it NEVER installs, downloads or runs an install command. Pass `install: true` to execute the plan instead, which installs the missing catalogued tools one at a time, re-probes each one afterwards, and returns a receipt separating what installed from what was deliberately not attempted. It never improvises an install command: a hint that is prose or a multi-step procedure is reported, not guessed at, and a `sudo` install whose credential is not already cached is reported as needing `sudo -v` rather than prompting. Reach for it before starting a challenge so you pick a technique the machine can actually run, rather than discovering a missing tool halfway through an exploit.",
   input_schema: {
     type: 'object',
     properties: {
       category: { type: 'string', enum: ['pwn', 'rev', 'crypto', 'stego', 'misc'], description: 'Limit the report to one category (default: all)' },
+      install: {
+        type: 'boolean',
+        description: 'Actually install the missing catalogued tools and re-detect afterwards, instead of only printing a plan. Each install is one approval-class command; a `sudo` one needs `sudo -v` to have been run in your terminal first.',
+      },
     },
   },
-  async execute(input) {
-    return reportToolchain(input)
-  },
+    async execute(input) {
+      if (input.install === true) {
+        // Installing security tooling is a cyber capability, so the mode is
+        // checked here rather than left to the governor. An approval prompt
+        // would gate it in every mode, which is a weaker guarantee than the one
+        // this project wants: a `/scope all` grant for `ctf_toolchain.install`
+        // settles the action inside cyber mode, and this is what stops that
+        // grant from meaning anything anywhere else. The read-only path stays
+        // available everywhere — it is a PATH lookup, and denying it in dev
+        // would only make it harder to see what is installed.
+        if (activeMode() !== 'cyber') {
+          return `ctf_toolchain with install: true is a cyber capability and does not run in ${activeMode()} mode — it would install security tooling onto this machine outside a security engagement. Run it in cyber mode (--cyber, or /mode cyber), where /scope all can authorize it. The read-only report still works here; call it without install: true.`
+        }
+        return installMissingTools(input)
+      }
+      return reportToolchain(input)
+    },
 }

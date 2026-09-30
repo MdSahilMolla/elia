@@ -209,6 +209,7 @@ export const SECURITY_TOOL_CATALOG: CatalogEntry[] = [
     category: 'pwn',
     purpose: 'Copy an exact byte range out of a file: slice a header, or pull a trailing payload at a known offset.',
     binaries: ['dd'],
+    install: { linux: 'sudo apt install coreutils — dd ships inside the coreutils package' },
   },
 
   // ---------------------------------------------------------------- rev ----
@@ -522,6 +523,19 @@ export const SECURITY_TOOL_CATALOG: CatalogEntry[] = [
     category: 'misc',
     purpose: 'Fetch a challenge URL or post to it, and keep the raw response body for the next step.',
     binaries: ['curl'],
+    install: { linux: 'sudo apt install curl' },
+  },
+  {
+    // The one scanner the prompts, the mode docs, and the engagement tests all
+    // name first — and it was missing from this catalog entirely, which meant
+    // the missing-binary path in securityScan could never install it and a
+    // `nmap` run could only ever report "not installed". `ncat` below is a
+    // different binary from the same package, so both hints are `nmap`.
+    name: 'nmap',
+    category: 'misc',
+    purpose: 'Port and service scan an in-scope target; the first move against anything with a network surface, and the usual source of the version string that names the next CVE.',
+    binaries: ['nmap'],
+    install: { linux: 'sudo apt install nmap', macos: 'brew install nmap', windows: 'choco install nmap' },
   },
   {
     name: '7z',

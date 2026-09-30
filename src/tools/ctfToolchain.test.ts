@@ -1,13 +1,27 @@
 import { describe, expect, test } from 'bun:test'
-import { classifyInstall, ctfToolchainTool, reportToolchain, runProbeCommand, type ToolchainContext } from './ctfToolchain.ts'
+import {
+  classifyInstall,
+  ctfToolchainTool,
+  executableInstallCommand,
+  installEntry,
+  reportToolchain,
+  runProbeCommand,
+  type InstallContext,
+  type ToolchainContext,
+} from './ctfToolchain.ts'
 import { SECURITY_TOOL_CATALOG } from '../security/toolCatalog.ts'
+import { setActiveMode } from '../autonomy/mode.ts'
 
 /**
  * Detection is injected, so nothing here depends on a real toolchain: the
  * suite passes on a machine with none of these installed. The default `which`
  * would otherwise read the real PATH and make the assertions machine-specific.
+ *
+ * Typed as InstallContext rather than ToolchainContext so the install tests can
+ * inject `runInstall` through the same helper; InstallContext only adds that
+ * field, so every read-only caller is unaffected.
  */
-const noneInstalled = (overrides: Partial<ToolchainContext> = {}): ToolchainContext => ({
+const noneInstalled = (overrides: Partial<InstallContext> = {}): InstallContext => ({
   platform: 'linux',
   which: () => null,
   probe: async () => false,
@@ -183,5 +197,132 @@ describe('ctfToolchainTool', () => {
     expect(category.enum).toEqual(['pwn', 'rev', 'crypto', 'stego', 'misc'])
     expect(ctfToolchainTool.description).toContain('NEVER installs')
     expect(ctfToolchainTool.description).toContain('READ-ONLY')
+  })
+
+  test('refuses install:true outside cyber, so the tool cannot install on a dev turn', async () => {
+    // The schema still allows install:true in every mode, so the boundary cannot
+    // live in the schema. It lives here: read-only reporting is harmless
+    // anywhere, but installing packages runs build scripts and needs sudo, and
+    // that is a cyber permission, not a tool default.
+    setActiveMode('dev')
+    const result = await ctfToolchainTool.execute({ category: 'pwn', install: true })
+    expect(String(result)).toContain('cyber')
+    expect(String(result)).toContain('install')
+  })
+
+  test('keeps read-only reporting available in dev, which installs nothing', async () => {
+    setActiveMode('dev')
+    const result = await ctfToolchainTool.execute({ category: 'pwn' })
+    expect(String(result)).toContain('NEVER installs')
+  })
+})
+
+describe('install hint vetting', () => {
+  test('runs a single recognisable install command', () => {
+    expect(executableInstallCommand('sudo apt install nmap')).toBe('sudo apt install nmap')
+    expect(executableInstallCommand('pip install pwntools')).toBe('pip install pwntools')
+    expect(executableInstallCommand('brew install radare2')).toBe('brew install radare2')
+    expect(executableInstallCommand('go install example.com/tool@latest')).toBe('go install example.com/tool@latest')
+  })
+
+  test('refuses prose, because the catalog deliberately stores notes as hints', () => {
+    // ghidra and openstego are stored as download instructions. Executing one
+    // would run English as a shell and then record the failure as an install
+    // attempt, which is worse than reporting no hint at all.
+    expect(classifyInstall('Download Ghidra from the vendor site')).toBe('manual')
+    expect(executableInstallCommand('Download Ghidra from the vendor site')).toBeUndefined()
+    expect(executableInstallCommand('Build from source; see the project README')).toBeUndefined()
+  })
+
+  test('refuses a command with a trailing note, so apt is not handed a sentence', () => {
+    // This is a real catalog entry: the em dash is how the file annotates why
+    // one package serves several tools. Run verbatim, apt would try to resolve
+    // the note as package names.
+    const entry = SECURITY_TOOL_CATALOG.find((e) => e.name === 'ncat')
+    expect(entry?.install?.linux).toBeDefined()
+    expect(executableInstallCommand(entry!.install!.linux!)).toBeUndefined()
+  })
+
+  test('refuses chains and redirection, which are procedures rather than one install', () => {
+    expect(executableInstallCommand('git clone https://example.com/pwndbg && cd pwndbg && ./setup.sh')).toBeUndefined()
+    expect(executableInstallCommand('sudo apt install nmap > /tmp/out')).toBeUndefined()
+    expect(executableInstallCommand('sudo apt install nmap; reboot')).toBeUndefined()
+  })
+
+  test('every vetted linux hint in the real catalog is a single runnable command', () => {
+    // The catalog's own rule is that a wrong install command is worse than no
+    // hint, so this asserts the vetting holds across all of them rather than
+    // only on the entries picked out above.
+    for (const entry of SECURITY_TOOL_CATALOG) {
+      const hint = entry.install?.linux
+      if (hint === undefined) continue
+      const vetted = executableInstallCommand(hint)
+      if (vetted !== undefined) expect(vetted).toBe(hint.trim())
+    }
+  })
+})
+
+describe('installEntry', () => {
+  const gdb = SECURITY_TOOL_CATALOG.find((e) => e.name === 'gdb')!
+
+  test('reports an entry with no install hint instead of guessing one', async () => {
+    const otool = SECURITY_TOOL_CATALOG.find((e) => e.name === 'otool')!
+    const receipt = await installEntry(otool, noneInstalled())
+    expect(receipt.outcome).toBe('no-runnable-hint')
+  })
+
+  test('does not run an install when the tool is already present', async () => {
+    const receipt = await installEntry(gdb, noneInstalled({ which: (b) => (b === 'gdb' ? '/usr/bin/gdb' : null) }))
+    expect(receipt.outcome).toBe('already-present')
+  })
+
+  test('never runs an install when sudo has no cached credential', async () => {
+    const commands: string[] = []
+    const receipt = await installEntry(
+      gdb,
+      noneInstalled({
+        runInstall: async (command) => {
+          commands.push(command)
+          return { exitCode: 1, stdout: '', stderr: 'sudo: a password is required', timedOut: false }
+        },
+      }),
+    )
+    expect(commands).toEqual(['sudo -n true'])
+    expect(receipt.outcome).toBe('needs-sudo')
+  })
+
+  test('reports a clean install that did not put the tool on PATH as a failure', async () => {
+    // The exit code is not the postcondition: a pip --user or go install can
+    // succeed and still leave the binary unresolvable, and claiming otherwise
+    // would send the caller into a technique the machine cannot run.
+    const receipt = await installEntry(
+      gdb,
+      noneInstalled({
+        runInstall: async () => ({ exitCode: 0, stdout: 'ok', stderr: '', timedOut: false }),
+      }),
+    )
+    expect(receipt.outcome).toBe('failed')
+    expect(receipt.detail).toContain('still is not detectable')
+  })
+
+  test('a rootless install path needs no sudo preflight, and a probe-only tool is re-probed', async () => {
+    // pwntools has no binary of its own: it is detected by `python3 -c "import
+    // pwn"`, so the post-install check has to clear that probe's cached false
+    // and ask again, or the install is reported as a failure every time.
+    const commands: string[] = []
+    let present = false
+    const receipt = await installEntry(
+      SECURITY_TOOL_CATALOG.find((e) => e.name === 'pwntools')!,
+      noneInstalled({
+        probe: async () => present,
+        runInstall: async (command) => {
+          commands.push(command)
+          if (command.startsWith('pip')) present = true
+          return { exitCode: 0, stdout: 'ok', stderr: '', timedOut: false }
+        },
+      }),
+    )
+    expect(commands.some((c) => c.startsWith('sudo -n'))).toBe(false)
+    expect(receipt.outcome).toBe('installed')
   })
 })
