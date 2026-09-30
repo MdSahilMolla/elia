@@ -956,6 +956,18 @@ describe('trust-control writes (#1272)', () => {
     expect(assessAction({ name: 'edit_file', input: { path: join(homedir(), '.config', 'elia', 'allow.json') } }, repo).risk).toBe('critical')
   })
 
+  test("a model write to a durable run's own state is trust-control", () => {
+    // The loop writes these itself; a governed-tool write to them is an attempt
+    // to forge its own approvals or plan.
+    for (const target of ['.elia/runs/r1/goal-graph.json', '.elia/runs/r1/plan.md', '.elia/runs/r1/events.ndjson']) {
+      const result = assessAction({ name: 'write_file', input: { path: target, content: '{}' } }, repo)
+      expect(result.risk, target).toBe('critical')
+      expect(result.intent, target).toBe('trust-control')
+    }
+    const shell = assessAction({ name: 'run_command', input: { command: "sed -i 's/pending/approved/' .elia/runs/r1/goal-graph.json" } }, repo)
+    expect(shell.risk).toBe('critical')
+  })
+
   test('an ordinary project file that merely shares the name is still a workspace write', () => {
     // `policy.json`/`allow.json` are common application config names. Gating
     // them by bare file name would refuse a real project's work; only the
@@ -1242,5 +1254,70 @@ describe('the project’s own program', () => {
     for (const command of ['node ../outside/new.js', 'node dangling.js', 'node linked/new.js', 'node -e 1', 'npm run not-a-script', './node_modules/.bin/new']) {
       expect(blockedInUnattendedMode(command, root), command).toBe(true)
     }
+  })
+})
+
+describe('read-only shell allowance does not admit code-executing arguments', () => {
+  const runs = (command: string) => assessAction({ name: 'run_command', input: { command } }, '/repo')
+  test('awk system(), getline pipes and script files leave the read-only class', () => {
+    for (const command of [`awk 'BEGIN{system("id")}'`, `awk 'BEGIN { system ("id") }'`, `awk 'BEGIN{"id" | getline x}'`, `gawk -f prog.awk data`, `awk 'BEGIN{print 1}' | sh`]) {
+      const result = runs(command)
+      expect(result.intent, command).not.toBe('shell.read-only')
+      expect(result.risk, command).toBe('critical')
+    }
+  })
+  test('find -execdir/-ok/-delete/-fprint and quote-split spellings leave the read-only class', () => {
+    for (const command of ['find . -maxdepth 1 -execdir id {} +', 'find . -okdir id {} +', 'find . -delete', 'find . -fprint out.txt', 'find . -fls out.txt', "find . -ex''ecdir id {} +", 'find . -ex\\ecdir id {} +']) {
+      expect(runs(command).risk, command).toBe('critical')
+    }
+  })
+  test('rg --pre, go -exec/-toolexec, sed e/w and git --output leave the read-only class', () => {
+    for (const command of ['rg --pre id foo .', 'rg --pre=id foo .', 'rg --hostname-bin id foo', 'go test -exec id ./...', 'go build -toolexec id ./...', "sed 's/a/b/e' f", "sed -n '1e id' f", "sed 'w out.txt' f", "sed -n '/x/w out.txt' f", 'sed -f script.sed f', 'git diff --output=out.txt', 'git log --ext-diff']) {
+      expect(runs(command).risk, command).toBe('critical')
+    }
+  })
+  test('ordinary read-only forms still classify as safe', () => {
+    for (const command of ['find . -name "*.ts" -maxdepth 2', 'rg -n foo src', 'grep -rn foo src', "sed -n '1,5p' file.txt", "sed 's/a/b/g' file.txt", "sed -n '/west/p' file.txt", "sed -e 's/x/y/' file.txt", 'go test ./...', 'awk -F, 1 data.csv', 'git diff --stat']) {
+      expect(runs(command).intent, command).toBe('shell.read-only')
+    }
+  })
+})
+
+describe('deployment with the docker provider is assessed like docker build/push', () => {
+  test('docker build and push are critical, like the same commands through run_command', () => {
+    const build = assessAction({ name: 'deployment', input: { action: 'build', provider: 'docker' } }, '/repo')
+    expect(build.risk).toBe('critical')
+    expect(build.intent).toBe('shell.remote')
+    const push = assessAction({ name: 'deployment', input: { action: 'deploy', provider: 'docker', target: 'preview' } }, '/repo')
+    expect(push.risk).toBe('critical')
+    expect(assessAction({ name: 'run_command', input: { command: 'docker build .' } }, '/repo').risk).toBe('critical')
+  })
+  test('other providers keep their review band', () => {
+    expect(assessAction({ name: 'deployment', input: { action: 'build', provider: 'vercel' } }, '/repo').risk).toBe('review')
+    expect(assessAction({ name: 'deployment', input: { action: 'plan', provider: 'docker' } }, '/repo').risk).toBe('review')
+  })
+})
+
+describe('trust-control files and record paths', () => {
+  const root = mkdtempSync(join(tmpdir(), 'elia-governor-trust-'))
+  test('model writes to lifecycle hooks, schedules and autopilot state are critical trust-control edits', () => {
+    for (const path of ['.elia/lifecycle-hooks.json', '.elia/schedules.json', '.elia/autopilot/state.json']) {
+      const result = assessAction({ name: 'write_file', input: { path, content: '{}' } }, root)
+      expect(result.intent, path).toBe('trust-control')
+      expect(result.risk, path).toBe('critical')
+      expect(result.reversible, path).toBe(false)
+    }
+  })
+  test('the System Intelligence record guard folds case', () => {
+    for (const path of ['.elia/sysintel/initiatives/SI-1.json', '.ELIA/SYSINTEL/initiatives/SI-1.json', '.Elia/SysIntel/x.json']) {
+      expect(assessAction({ name: 'write_file', input: { path, content: '{}' } }, root).intent, path).toBe('sysintel.record-edit')
+    }
+  })
+  test('ds_python code naming the elia trust store needs approval', () => {
+    for (const code of ["open('/home/u/.config/elia/preauth.secret').read()", "Path.home() / '.config' / 'elia' / 'x'", "open('allow.json')", "open('.elia/policy.json')", "open('config.env')"]) {
+      const result = assessAction({ name: 'ds_python', input: { action: 'run', code } }, root)
+      expect(result.risk, code).toBe('critical')
+    }
+    expect(assessAction({ name: 'ds_python', input: { action: 'run', code: 'print(1 + 1)' } }, root).risk).toBe('review')
   })
 })

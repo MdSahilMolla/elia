@@ -6,6 +6,7 @@ import {
   BoxUnavailable,
   boxFallbackToHost,
   boxPolicyFor,
+  boxSafeEnv,
   boxSandboxRequested,
   findBoxBinary,
   recentBoxReceipts,
@@ -16,7 +17,7 @@ import {
   toolReadPaths,
   type BoxRun,
 } from './box.ts'
-import { runShell } from '../shell.ts'
+import { runProcess, runShell } from '../shell.ts'
 
 const saved = { ...process.env }
 afterEach(() => {
@@ -75,6 +76,24 @@ describe('policy construction', () => {
     expect(Object.keys(p.env ?? {}).sort()).toEqual(['FOO', 'PATH'])
     expect(JSON.stringify(p)).not.toContain('sk-secret')
     expect(p.envPassthrough).not.toContain('ANTHROPIC_API_KEY')
+  })
+
+  test('a copy of the host environment does not carry secrets into the box', () => {
+    process.env.ANTHROPIC_API_KEY = 'sk-secret'
+    process.env.ELIA_TEST_HOSTONLY = 'host-value'
+    // what workspaceScopedEnv hands in: the whole host env, PATH extended
+    const hostCopy: Record<string, string> = {}
+    for (const [k, v] of Object.entries(process.env)) if (v !== undefined) hostCopy[k] = v
+    hostCopy.PATH = `/work/node_modules/.bin:${hostCopy.PATH ?? ''}`
+    hostCopy.DEPLOY_TOKEN = 'explicit-secret'
+    hostCopy.EXTRA_FLAG = '1'
+    const p = boxPolicyFor('/work', 5000, hostCopy)
+    expect(Object.keys(p.env ?? {}).sort()).toEqual(['EXTRA_FLAG', 'PATH'])
+    expect(p.env?.PATH?.startsWith('/work/node_modules/.bin:')).toBe(true)
+    expect(JSON.stringify(p)).not.toContain('sk-secret')
+    expect(JSON.stringify(p)).not.toContain('explicit-secret')
+    expect(JSON.stringify(p)).not.toContain('host-value')
+    expect(boxSafeEnv({ MY_PASSWORD: 'x', COOKIE_JAR: 'x', Session_Id: 'x', OK_NAME: 'y' })).toEqual({ OK_NAME: 'y' })
   })
 
   test('network modes come from the environment; brokered carries its allowlist', () => {
@@ -208,6 +227,27 @@ live('live: elia-box on this machine (seatbelt)', () => {
 
       process.env.ELIA_BOX_FALLBACK = 'host'
       const open = await runShell('echo ran-on-host', 20_000, ws)
+      expect(open.stdout).toContain('ran-on-host')
+    } finally {
+      rmSync(ws, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('runProcess honours the box switch', () => {
+  test('run_program style argv fails closed when the box cannot run, and runs on the host only by name', async () => {
+    const ws = realpathSync(mkdtempSync(join(tmpdir(), 'eb-argv-')))
+    try {
+      process.env.ELIA_SANDBOX = 'box'
+      process.env.ELIA_BOX_BIN = '/nonexistent/elia-box'
+      delete process.env.ELIA_BOX_FALLBACK
+      const closed = await runProcess({ executable: 'echo', args: ['ran-on-host'], cwd: ws, timeoutMs: 20_000 })
+      expect(closed.exitCode).toBe(1)
+      expect(closed.stdout).not.toContain('ran-on-host')
+      expect(closed.stderr).toContain('elia-box did not run this command')
+
+      process.env.ELIA_BOX_FALLBACK = 'host'
+      const open = await runProcess({ executable: 'echo', args: ['ran-on-host'], cwd: ws, timeoutMs: 20_000 })
       expect(open.stdout).toContain('ran-on-host')
     } finally {
       rmSync(ws, { recursive: true, force: true })

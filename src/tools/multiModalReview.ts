@@ -1,5 +1,5 @@
 import type { Tool } from './types.ts'
-import { optionalString } from './args.ts'
+import { gitShowPatchArgs, optionalString, resolveCommitRef } from './args.ts'
 import { resolveWorkspacePath } from '../autonomy/context.ts'
 import { riskLevelFor, type RiskLevel } from './intel/risk.ts'
 import { readTextFile } from './specVerify.ts'
@@ -281,7 +281,7 @@ export const multiModalReviewTool: Tool = {
       code = codeInput
       source = 'provided code'
     } else if (commit) {
-      code = await runGit(cwd, ['show', commit, '--patch'])
+      code = await runGit(cwd, gitShowPatchArgs(await resolveCommitRef(cwd, commit)))
       source = `commit ${commit}`
     } else if (file) {
       code = readTextFile(cwd, file)

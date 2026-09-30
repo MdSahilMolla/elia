@@ -65,6 +65,14 @@ test('a change proven on the bare host is not landed', async () => {
   expect(git('rev-parse', 'HEAD')).toBe(before)
 })
 
+test('a boxed final gate does not land a change whose code also ran on the host', async () => {
+  const commit = candidate('a.ts', 'new\n')
+  const before = git('rev-parse', 'HEAD')
+  const result = await land({ liveRoot: root, commit, attestation: { boxed: 3, cutShort: 0, unboxed: 2 }, verify: async () => true })
+  expect(!result.landed && result.reason).toContain('outside elia-box')
+  expect(git('rev-parse', 'HEAD')).toBe(before)
+})
+
 test('it does not land onto a checkout that has moved on since the candidate was cut', async () => {
   const commit = candidate('a.ts', 'new\n')
   writeFileSync(join(root, 'b.ts'), 'someone else\n')

@@ -1578,3 +1578,53 @@ test('a route refused for a per-minute token cap is not sent requests over it ag
   // Once, straight to the fallback with no shrink-and-resend; then not at all.
   expect(asked).toEqual(['capped', 'works', 'works'])
 })
+
+test('a stored action approval answers the prompt but never skips the action budget', async () => {
+  // Security fix: the alreadyApproved path used to allow the action outright,
+  // so a durable "yes" rode past the governor's maxActions hard stop.
+  const { GoalGraphStore, withGoalGraph } = await import('./autonomy/goalGraph.ts')
+  const directory = mkdtempSync(join(tmpdir(), 'elia-approved-budget-'))
+  const originalProvider = config.provider
+  try {
+    const graph = GoalGraphStore.open({ runId: 'approved-budget-run', goal: 'exercise the approved path', dir: directory })
+    const request = { name: 'run_command', input: { command: 'npm publish' } }
+    const reserved = graph.reserveAction(request)
+    graph.blockAction(reserved.action.id, 'approval required', true)
+    const approval = graph.requestApproval('action', reserved.action.idempotencyKey, request, 'publishes', 'unattended')
+    graph.resolveApproval(approval.id, true)
+    expect(graph.isActionApproved(request, undefined, 'unattended')).toBe(true)
+
+    let executed = 0
+    const publishTool: Tool = {
+      name: 'run_command',
+      description: 'run a command',
+      input_schema: { type: 'object', properties: {} },
+      async execute() {
+        executed += 1
+        return 'published'
+      },
+    }
+    let turn = 0
+    config.provider = {
+      async streamTurn() {
+        turn += 1
+        if (turn === 1) {
+          return { content: [{ type: 'tool_use', id: 'pub', name: 'run_command', input: request.input }] as ContentBlock[], usage: { inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 } }
+        }
+        return { content: [{ type: 'text', text: 'stopping' }] as ContentBlock[], usage: { inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 } }
+      },
+    }
+
+    const governor = createActionGovernor({ mode: 'unattended', maxActions: 1, cwd: directory })
+    expect((await governor.check({ name: 'read_file', input: { path: 'README.md' } })).allowed).toBe(true)
+    const messages: ConversationMessage[] = [{ role: 'user', content: [{ type: 'text', text: 'publish it' }] }]
+    await withActionGovernor(governor, () => withGoalGraph(graph, () => runAgentLoop({ messages, systemPrompt: 'test', tools: [publishTool], useAnimation: false, verbose: false })))
+
+    expect(executed).toBe(0)
+    const toolResult = messages.flatMap((message) => message.content).find((block) => block.type === 'tool_result')
+    expect(JSON.stringify(toolResult)).toContain('Action budget exhausted')
+  } finally {
+    config.provider = originalProvider
+    rmSync(directory, { recursive: true, force: true })
+  }
+})

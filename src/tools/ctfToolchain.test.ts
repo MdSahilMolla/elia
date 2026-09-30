@@ -1,4 +1,7 @@
 import { describe, expect, test } from 'bun:test'
+import { readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { classifyInstall, ctfToolchainTool, reportToolchain, runProbeCommand, type ToolchainContext } from './ctfToolchain.ts'
 import { SECURITY_TOOL_CATALOG } from '../security/toolCatalog.ts'
 
@@ -73,12 +76,12 @@ describe('present and missing reporting', () => {
       noneInstalled({
         probe: async (command) => {
           probes.push(command)
-          return command === 'python3 -c "import pwn"'
+          return command === 'python3 -I -c "import pwn"'
         },
       }),
     )
-    expect(probes).toEqual(['python3 -c "import pwn"'])
-    expect(report).toContain('  [present] pwntools  (probe: python3 -c "import pwn")')
+    expect(probes).toEqual(['python3 -I -c "import pwn"'])
+    expect(report).toContain('  [present] pwntools  (probe: python3 -I -c "import pwn")')
     // A probe-based tool has no binary of its own, so the note says what the
     // probe actually depends on.
     expect(report).toContain('note: detected by probe, so it only answers once python3 is on PATH')
@@ -173,6 +176,32 @@ describe('runProbeCommand', () => {
     const started = Date.now()
     expect(await runProbeCommand('bun -e "setTimeout(() => {}, 60000)"', 300)).toBe(false)
     expect(Date.now() - started).toBeLessThan(15_000)
+  })
+})
+
+describe('probe isolation', () => {
+  test('a probe runs in an empty temp directory, not the workspace', async () => {
+    const marker = `probe-cwd-${process.pid}`
+    const out = join(tmpdir(), marker)
+    // The probe writes its own cwd listing; the workspace (this repo) has many entries.
+    const script = join(tmpdir(), `${marker}.js`)
+    writeFileSync(script, `const fs = require('fs'); fs.writeFileSync(process.argv[2], process.cwd() + '|' + fs.readdirSync('.').length)`)
+    const ok = await runProbeCommand(`bun ${script} ${out}`, 10_000)
+    rmSync(script, { force: true })
+    expect(ok).toBe(true)
+    const [cwd, count] = readFileSync(out, 'utf8').split('|')
+    rmSync(out, { force: true })
+    expect(cwd).not.toBe(process.cwd())
+    expect(count).toBe('0')
+  })
+
+  test('python probes are isolated and openstego is detected by PATH only', async () => {
+    const commands: string[] = []
+    await reportToolchain({}, { platform: 'linux', which: () => null, probe: async (c) => (commands.push(c), false) })
+    const python = commands.filter((c) => c.startsWith('python3'))
+    expect(python.length).toBeGreaterThan(0)
+    for (const c of python) expect(c.startsWith('python3 -I -c ')).toBe(true)
+    expect(commands.some((c) => c.includes('openstego.jar'))).toBe(false)
   })
 })
 

@@ -3067,7 +3067,7 @@ export async function runInteractive(): Promise<void> {
         const reply = await answerWhileWorking({ ...view, conversation: messages, pilot: pilot ? pilotSnapshot(pilot) : undefined, exchanges: liveExchanges, cwd: process.cwd() }, question, { signal, onThinking })
         liveExchanges.push({ question, answer: reply.answer })
         if (liveExchanges.length > 8) liveExchanges.splice(0, liveExchanges.length - 8)
-        carriedAsides.push(`<aside-while-you-worked>\nThe user asked: ${question}\nYou answered: ${reply.answer}${reply.steer ? `\n(Passed to the work: ${reply.steer})` : ''}\n</aside-while-you-worked>`)
+        carriedAsides.push(`<aside-while-you-worked>\nThe user asked: ${question}\nYou (the assistant, not the user) answered: ${reply.answer}${reply.steer ? `\n(Passed to the work: ${reply.steer})` : ''}\n</aside-while-you-worked>`)
         sessionTranscript.notice(`live reply — Q: ${question}\nA: ${reply.answer}${reply.dropped ? `\n(${reply.dropped} unbacked claim(s) removed)` : ''}`)
         await persistInteractiveSession()
         return reply

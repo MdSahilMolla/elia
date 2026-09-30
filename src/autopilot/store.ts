@@ -11,6 +11,7 @@ import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { CorruptStateError, noteCorruptState, parseLocalJson } from '../localJson.ts'
 import { appendSecureFile, writeSecureFile } from '../securePersistence.ts'
+import { isHashTrusted, sha256Hex, trustHash } from '../autonomy/projectTrust.ts'
 import type { PilotState } from './types.ts'
 
 export function autopilotDir(root: string): string {
@@ -35,11 +36,21 @@ export function newPilotState(root: string, now = new Date()): PilotState {
   return { version: 1, id: newPilotId(now), root, startedAt: stamp, updatedAt: stamp, phase: 'survey', backlog: [], goalsRun: 0, needsHuman: [] }
 }
 
+/**
+ * The saved pilot, or undefined. The file sits inside the repository, so a
+ * repo could ship one whose branch, backlog and verification commands become
+ * the pilot's own plan; it is honoured only when the user-level trust record
+ * holds the hash of exactly these bytes — which {@link savePilotState}
+ * records each time this machine's own pilot writes it. A state file that did
+ * not come from a pilot run here (or was edited since) is treated as absent.
+ */
 export function loadPilotState(root: string): PilotState | undefined {
   const path = statePath(root)
   if (!existsSync(path)) return undefined
   try {
-    const parsed = parseLocalJson(readFileSync(path, 'utf8'), path) as PilotState
+    const text = readFileSync(path, 'utf8')
+    if (!isHashTrusted(path, sha256Hex(text))) return undefined
+    const parsed = parseLocalJson(text, path) as PilotState
     if (parsed?.version !== 1 || !Array.isArray(parsed.backlog)) throw new CorruptStateError(path, 'not an autopilot state file (version 1)')
     return parsed
   } catch (error) {
@@ -50,7 +61,21 @@ export function loadPilotState(root: string): PilotState | undefined {
 
 export function savePilotState(state: PilotState, now = new Date()): void {
   state.updatedAt = now.toISOString()
-  writeSecureFile(statePath(state.root), `${JSON.stringify(state, null, 2)}\n`)
+  const path = statePath(state.root)
+  const text = `${JSON.stringify(state, null, 2)}\n`
+  writeSecureFile(path, text)
+  trustHash(path, sha256Hex(text))
+}
+
+/** True when a state file is present but not one this machine's pilot wrote (or it changed since) — it is ignored. */
+export function hasUntrustedPilotState(root: string): boolean {
+  const path = statePath(root)
+  if (!existsSync(path)) return false
+  try {
+    return !isHashTrusted(path, sha256Hex(readFileSync(path, 'utf8')))
+  } catch {
+    return false
+  }
 }
 
 export function appendJournal(root: string, event: string, data: Record<string, unknown> = {}, now = new Date()): void {

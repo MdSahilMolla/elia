@@ -162,3 +162,33 @@ test('a real prefixed key is still redacted wherever it starts a token', () => {
     expect(redactText(`("${value}")`)).toContain('[REDACTED]')
   }
 })
+
+test('redacts credentials embedded in a URL or connection string', () => {
+  for (const [input, kept] of [
+    ['clone https://alice:hunter2@example.com/repo.git now', '@example.com/repo.git'],
+    ['DATABASE at postgres://app:pa55@w0rd@db.internal:5432/app?sslmode=require', '@db.internal:5432/app'],
+    ['https://ghpat1234567890abcdefghij@github.com/o/r', '@github.com/o/r'],
+    ['redis://:onlypassword@cache:6379', '@cache:6379'],
+  ] as const) {
+    const out = redactSecrets(input)
+    expect(out, input).toContain('[REDACTED]@')
+    expect(out, input).toContain(kept)
+    expect(out, input).not.toMatch(/hunter2|pa55|ghpat1234|onlypassword/)
+  }
+})
+
+test('leaves URLs without credentials alone', () => {
+  for (const url of ['https://example.com/a?b=c', 'ssh://git@github.com/o/r.git', 'see http://localhost:3000/x@y']) {
+    expect(redactSecrets(url)).toBe(url)
+  }
+})
+
+test('connection-string style keys are sensitive', () => {
+  expect(redactRecord({ DATABASE_URL: 'x', sentryDsn: 'y', connectionString: 'z', redis_uri: 'w', url: 'https://example.com' })).toEqual({
+    DATABASE_URL: '[REDACTED]',
+    sentryDsn: '[REDACTED]',
+    connectionString: '[REDACTED]',
+    redis_uri: '[REDACTED]',
+    url: 'https://example.com',
+  })
+})

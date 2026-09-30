@@ -85,6 +85,22 @@ describe('sql classification', () => {
     test(`${JSON.stringify(sql)} → ${expected}`, () => expect(classifySql(sql)).toBe(expected))
   }
 
+  test('Postgres block comments nest, so a nested comment cannot hide a COPY ... PROGRAM', () => {
+    const payload = "SELECT 2 /* /* */ ' */ ; COPY t TO PROGRAM 'id'; --'"
+    expect(classifySql(payload)).toBe('host')
+    expect(classifySql(payload, 'postgres')).toBe('host')
+    // Nesting is Postgres-only: MySQL ends the comment at the first `*/`.
+    expect(classifySql('SELECT 1 /* a /* b */ , 2', 'mysql')).toBe('read')
+    expect(classifySql('SELECT 1 /* a /* b */ c */', 'postgres')).toBe('read')
+  })
+
+  test('text the classifier cannot read to the end fails closed', () => {
+    expect(classifySql('SELECT 1 /* never closed')).toBe('host')
+    expect(classifySql("SELECT 'never closed")).toBe('host')
+    expect(classifySql('SELECT $q$ never closed')).toBe('host')
+    expect(classifySql('SELECT 1 -- a trailing line comment is fine')).toBe('read')
+  })
+
   test('quoted text and dollar-quoted bodies never leak keywords into the verdict', () => {
     expect(stripSqlNoise("select 'a;b' , $f$ drop table x $f$")).not.toContain('drop')
     expect(splitSqlStatements("select 'a;b'; select 2")).toHaveLength(2)

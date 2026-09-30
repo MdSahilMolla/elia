@@ -13,7 +13,7 @@ import { runCodexLogin } from './cli/providerSetup.ts'
 import { runInteractive } from './cli/interactive.ts'
 import { runBench, runBenchLatency } from './cli/bench.ts'
 import { runCompounding, runDistill, runEvolve, runGap, runJev, runValues, runWorld } from './cli/selfImprove.ts'
-import { runConfig, runControl, runSkills } from './cli/settings.ts'
+import { runConfig, runControl, runSkills, runTrust } from './cli/settings.ts'
 import { runDaemon, runDoctor, runSchedule } from './cli/ops.ts'
 import { runFork, runResume, runRuns, runSessionsList } from './cli/sessions.ts'
 import { runAgentCommand, runAuto } from './cli/agent.ts'
@@ -116,6 +116,8 @@ async function main() {
       return runBenchLatency()
     case 'skills':
       return runSkills()
+    case 'trust':
+      return runTrust()
     case 'runs':
       return runRuns()
     case 'sessions':

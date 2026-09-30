@@ -1,6 +1,6 @@
 import { describe, expect, it, beforeAll, afterAll } from 'bun:test'
-import { analyzeSecurity, analyzePerformance, analyzeTesting, analyzeDocumentation, analyzeMaintainability, reviewCode, formatReport, runGit } from './multiModalReview.ts'
-import { mkdtempSync, writeFileSync, rmSync } from 'node:fs'
+import { analyzeSecurity, analyzePerformance, analyzeTesting, analyzeDocumentation, analyzeMaintainability, reviewCode, formatReport, runGit, multiModalReviewTool } from './multiModalReview.ts'
+import { mkdtempSync, existsSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { MAX_SHELL_OUTPUT_LENGTH } from '../shell.ts'
@@ -146,5 +146,12 @@ describe('runGit', () => {
     expect(patch.length).toBeLessThan(MAX_SHELL_OUTPUT_LENGTH + 200)
     expect(patch).toContain('characters omitted')
     expect(() => reviewCode(patch)).not.toThrow()
+  })
+})
+describe('multi_modal_review commit argument', () => {
+  it('refuses an option-shaped commit instead of letting git write a file', async () => {
+    const target = join(tmpdir(), `mmreview-inject-${process.pid}.txt`)
+    await expect(multiModalReviewTool.execute({ commit: `--output=${target}` })).rejects.toThrow('not a commit reference')
+    expect(existsSync(target)).toBe(false)
   })
 })

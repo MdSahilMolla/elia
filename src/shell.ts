@@ -3,8 +3,8 @@
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { DaemonUnavailable, daemonMode, daemonShellExec } from './daemon/index.ts'
-import { BoxUnavailable, boxFallbackToHost, boxSandboxRequested, noteBoxFallback, runShellInBox } from './sandbox/box.ts'
-import { ContainerUnavailable, containerSandboxRequested, noteContainerFallback, runShellInContainer } from './sandbox/container.ts'
+import { BoxUnavailable, boxFallbackToHost, boxSandboxRequested, noteBoxFallback, runProcessInBox, runShellInBox } from './sandbox/box.ts'
+import { ContainerUnavailable, containerSandboxRequested, noteContainerFallback, runProcessInContainer, runShellInContainer } from './sandbox/container.ts'
 
 /**
  * The Windows command interpreter, resolved to an absolute path.
@@ -45,6 +45,28 @@ export interface ProcessPlan {
 export const DEFAULT_SHELL_TIMEOUT_MS = 60_000
 export const MAX_SHELL_OUTPUT_LENGTH = 200_000
 
+/**
+ * Runs `run` in elia-box, failing closed. Returns undefined only when the box is
+ * unavailable and ELIA_BOX_FALLBACK=host asked for the unsandboxed path; the caller
+ * then falls through to host execution.
+ */
+async function runInBoxOrRefuse(command: string, startedAt: number, signal: AbortSignal | undefined, run: () => Promise<ShellResult>): Promise<ShellResult | undefined> {
+  try {
+    return await run()
+  } catch (err) {
+    if (signal?.aborted) {
+      return { command, exitCode: 1, stdout: '', stderr: 'cancelled by operator', elapsedMs: Date.now() - startedAt, timedOut: false }
+    }
+    const message = err instanceof Error ? err.message : String(err)
+    if (err instanceof BoxUnavailable && boxFallbackToHost()) {
+      noteBoxFallback(message)
+      return undefined
+    }
+    const hint = err instanceof BoxUnavailable ? ' Set ELIA_BOX_FALLBACK=host to run unsandboxed instead.' : ''
+    return { command, exitCode: 1, stdout: '', stderr: `elia-box did not run this command: ${message}.${hint}`, elapsedMs: Date.now() - startedAt, timedOut: false }
+  }
+}
+
 export async function runShell(
   command: string,
   timeoutMs = DEFAULT_SHELL_TIMEOUT_MS,
@@ -80,21 +102,8 @@ export async function runShell(
   // than quietly run outside it. Only an explicit ELIA_BOX_FALLBACK=host runs it
   // unsandboxed, and that is recorded once.
   if (boxSandboxRequested()) {
-    try {
-      return await runShellInBox(command, timeoutMs, cwd, signal, env)
-    } catch (err) {
-      if (signal?.aborted) {
-        return { command, exitCode: 1, stdout: '', stderr: 'cancelled by operator', elapsedMs: Date.now() - startedAt, timedOut: false }
-      }
-      const message = err instanceof Error ? err.message : String(err)
-      if (err instanceof BoxUnavailable && boxFallbackToHost()) {
-        noteBoxFallback(message)
-        // fall through to the daemon/in-process shell below.
-      } else {
-        const hint = err instanceof BoxUnavailable ? ' Set ELIA_BOX_FALLBACK=host to run unsandboxed instead.' : ''
-        return { command, exitCode: 1, stdout: '', stderr: `elia-box did not run this command: ${message}.${hint}`, elapsedMs: Date.now() - startedAt, timedOut: false }
-      }
-    }
+    const boxed = await runInBoxOrRefuse(command, startedAt, signal, () => runShellInBox(command, timeoutMs, cwd, signal, env))
+    if (boxed) return boxed
   }
 
   // Container sandboxing (ELIA_SANDBOX=container) takes precedence over the
@@ -222,6 +231,30 @@ export async function runProcess(plan: ProcessPlan): Promise<ShellResult> {
   const args = plan.args ?? []
   const command = [executable, ...args.map((arg) => JSON.stringify(arg))].join(' ')
   if (!executable) return { command, exitCode: 1, stdout: '', stderr: 'program executable is required', elapsedMs: 0, timedOut: false }
+  const timeoutMs = plan.timeoutMs ?? DEFAULT_SHELL_TIMEOUT_MS
+  const startedAt = Date.now()
+  if (plan.signal?.aborted) return { command, exitCode: 1, stdout: '', stderr: 'cancelled by operator', elapsedMs: 0, timedOut: false }
+  // Same sandbox switches as runShell: a direct argv is not a way around ELIA_SANDBOX.
+  if (boxSandboxRequested()) {
+    const boxed = await runInBoxOrRefuse(command, startedAt, plan.signal, () => runProcessInBox([executable, ...args], timeoutMs, plan.cwd, plan.signal, plan.env))
+    if (boxed) return { ...boxed, command }
+  } else if (containerSandboxRequested()) {
+    try {
+      return { ...(await runProcessInContainer(executable, args, timeoutMs, plan.cwd, plan.signal, plan.env)), command }
+    } catch (err) {
+      if (plan.signal?.aborted) return { command, exitCode: 1, stdout: '', stderr: 'cancelled by operator', elapsedMs: Date.now() - startedAt, timedOut: false }
+      if (!(err instanceof ContainerUnavailable)) throw err
+      noteContainerFallback(err.message)
+    }
+  }
+  return runHostProcess(plan)
+}
+
+/** Runs an executable on the host with no sandbox routing. For the sandbox backends themselves (docker), which must not recurse into runProcess. */
+export async function runHostProcess(plan: ProcessPlan): Promise<ShellResult> {
+  const executable = plan.executable.trim()
+  const args = plan.args ?? []
+  const command = [executable, ...args.map((arg) => JSON.stringify(arg))].join(' ')
   return runSpawned(command, [executable, ...args], plan.timeoutMs ?? DEFAULT_SHELL_TIMEOUT_MS, plan.cwd, plan.signal, plan.env)
 }
 

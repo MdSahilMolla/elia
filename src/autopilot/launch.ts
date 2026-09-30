@@ -14,12 +14,20 @@
  *     rollbacks can never touch yours) — said in one line, not silently
  *   - it is elia's own checkout, where the people building elia run it all
  *     day and autonomous self-edits need an explicit yes anyway
+ *   - it is the first time here: the autopilot's first act is to run the
+ *     project's own check commands (its package.json scripts, make, pytest…),
+ *     which is repository code. On a folder elia has not worked in on this
+ *     machine, that needs one explicit yes — `/autopilot`, or `elia trust` —
+ *     and after that (the pilot leaves a state file this machine vouches for)
+ *     a bare `elia` starts it again on its own. The yes is kept in the user's
+ *     config, never in the repo, so a cloned repository cannot grant it.
  */
 
 import { realpathSync } from 'node:fs'
 import { openGoals } from './backlog.ts'
 import { currentBranchName, dirtyPaths, headSha, isGitWorkTree } from './git.ts'
-import { loadPilotState } from './store.ts'
+import { isFolderTrusted } from '../autonomy/projectTrust.ts'
+import { hasUntrustedPilotState, loadPilotState } from './store.ts'
 
 export type LaunchDecision = { start: true; resume: boolean } | { start: false; notice?: string }
 
@@ -63,7 +71,16 @@ export function decideLaunch(input: LaunchInput): LaunchDecision {
       notice: `You have uncommitted changes (${dirty.length} file${dirty.length === 1 ? '' : 's'}), so the autopilot did not start — it works from a clean tree so its rollbacks can never touch your work. Commit or stash them and run /autopilot, or tell me what to do.`,
     }
   }
+  // Only a state this machine's own pilot wrote counts (store.ts), so "has a
+  // saved pilot" doubles as "elia has already worked in this folder".
   const saved = loadPilotState(input.root)
+  if (!saved && !isFolderTrusted(input.root)) {
+    const shipped = hasUntrustedPilotState(input.root) ? ' A saved autopilot state found here was not written by this machine and is ignored.' : ''
+    return {
+      start: false,
+      notice: `First time in this folder, so the autopilot did not start on its own: it begins by running this project's own check commands (its package.json scripts, make, pytest…), which is code from the repository.${shipped} Look them over, then run /autopilot (or elia trust) once to allow it here; after that a bare elia starts it by itself. Or just tell me what to do.`,
+    }
+  }
   const resume = Boolean(saved?.branch && currentBranchName(input.root) === saved.branch && openGoals(saved.backlog).length > 0)
   return { start: true, resume }
 }

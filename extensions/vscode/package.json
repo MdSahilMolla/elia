@@ -49,6 +49,17 @@
     "workspaceContains:.elia"
   ],
   "main": "./dist/extension.js",
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": "limited",
+      "description": "Elia starts a local CLI in the workspace, so it does not run until the workspace is trusted. Which executable it starts comes from settings, which an untrusted workspace can override.",
+      "restrictedConfigurations": [
+        "elia.cliPath",
+        "elia.runtime",
+        "elia.governanceMode"
+      ]
+    }
+  },
   "contributes": {
     "commands": [
       {

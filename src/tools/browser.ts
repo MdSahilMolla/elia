@@ -1,4 +1,7 @@
+import { lookup } from 'node:dns/promises'
+import { isIP } from 'node:net'
 import type { Tool } from './types.ts'
+import { isPrivateNetworkAddress, isPrivateNetworkHostname } from '../networkPolicy.ts'
 import { taskSessions } from '../taskSessions.ts'
 import { readBoundedOutput, shellInvocation, terminateProcessGroup } from '../shell.ts'
 import { browserMcpReadiness, findBrowserMcpTool } from '../mcp/browserRegistry.ts'
@@ -75,6 +78,7 @@ export const browserTool: Tool = {
   },
   async execute(input) {
     const request = validateRequest(input)
+    if (request.action === 'navigate' && request.url) await assertNavigableResolution(request.url)
     const session = taskSessions.create('browser', `Browser: ${request.action}`, 'Queued browser action')
     taskSessions.update(session.id, { status: 'running', action: request.action, detail: request.url ?? request.target ?? request.text?.slice(0, 120) ?? 'Working' })
     try {
@@ -91,6 +95,51 @@ export const browserTool: Tool = {
       return `Browser action failed: ${detail}\n\n${browserSetupHint()}\nTask session: ${session.id}`
     }
   },
+}
+
+/**
+ * Navigation is auto-allowed, so the destination is checked here. Loopback stays
+ * reachable (the browser verifies local dev servers); private ranges,
+ * link-local/cloud-metadata addresses and names that resolve to them do not.
+ * ELIA_BROWSER_ALLOW_PRIVATE=on is the explicit opt-out for an intranet target.
+ */
+function privateNavigationAllowed(): boolean {
+  return (process.env.ELIA_BROWSER_ALLOW_PRIVATE ?? '').toLowerCase() === 'on'
+}
+
+function isLoopbackHost(hostname: string): boolean {
+  const h = hostname.replace(/^\[|\]$/g, '').toLowerCase().replace(/\.+$/, '')
+  return h === 'localhost' || h.endsWith('.localhost') || h === '::1' || /^127\.\d+\.\d+\.\d+$/.test(h)
+}
+
+export const browserNavigationTestHooks: { resolve?: (hostname: string) => Promise<string[]> } = {}
+
+async function resolveHost(hostname: string): Promise<string[]> {
+  if (browserNavigationTestHooks.resolve) return browserNavigationTestHooks.resolve(hostname)
+  return (await lookup(hostname, { all: true, verbatim: true })).map((answer) => answer.address)
+}
+
+/** Refuses a literal private/metadata host (sync, no network). */
+function assertNavigableHost(parsed: URL): void {
+  if (privateNavigationAllowed() || isLoopbackHost(parsed.hostname)) return
+  if (isPrivateNetworkHostname(parsed.hostname) || (isIP(parsed.hostname.replace(/^\[|\]$/g, '')) !== 0 && isPrivateNetworkAddress(parsed.hostname))) {
+    throw new Error(`navigate refuses a private, link-local or metadata address (${parsed.hostname}); set ELIA_BROWSER_ALLOW_PRIVATE=on to allow it deliberately`)
+  }
+}
+
+/** Refuses a public-looking name that resolves to a private address. Fails closed when it cannot resolve. */
+async function assertNavigableResolution(url: string): Promise<void> {
+  const parsed = new URL(url)
+  if (privateNavigationAllowed() || isLoopbackHost(parsed.hostname) || isIP(parsed.hostname.replace(/^\[|\]$/g, '')) !== 0) return
+  let addresses: string[]
+  try {
+    addresses = await resolveHost(parsed.hostname)
+  } catch {
+    throw new Error(`navigate could not resolve ${parsed.hostname} safely`)
+  }
+  if (addresses.length === 0 || addresses.some((address) => isPrivateNetworkAddress(address) && !isLoopbackHost(address))) {
+    throw new Error(`navigate refuses ${parsed.hostname}: it resolves to a private, link-local or metadata address; set ELIA_BROWSER_ALLOW_PRIVATE=on to allow it deliberately`)
+  }
 }
 
 export function validateRequest(input: Record<string, unknown>): BrowserRequest {
@@ -110,6 +159,7 @@ export function validateRequest(input: Record<string, unknown>): BrowserRequest 
       throw new Error('navigate requires an absolute http(s) url')
     }
     if (parsed.username || parsed.password) throw new Error('navigate url must not contain embedded credentials')
+    assertNavigableHost(parsed)
     request.url = url
   }
   if (action === 'click') {

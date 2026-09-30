@@ -31,12 +31,35 @@ pub fn server_token() -> String {
     load_or_create(&crate::socket::token_path()).unwrap_or_else(|_| generate())
 }
 
+/// A persisted token is only trusted while the file is ours alone: a regular
+/// file (not a symlink), owned by this uid, with no group or other access. One
+/// that anybody else could have read or written is treated as absent.
+#[cfg(unix)]
+fn token_file_is_private(path: &str) -> bool {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    match fs::symlink_metadata(path) {
+        Ok(meta) => {
+            meta.file_type().is_file()
+                && meta.permissions().mode() & 0o077 == 0
+                && meta.uid() == unsafe { libc::geteuid() }
+        }
+        Err(_) => false,
+    }
+}
+
+#[cfg(not(unix))]
+fn token_file_is_private(_path: &str) -> bool {
+    true
+}
+
 /// Read the token at `path`, or generate and persist one.
 pub fn load_or_create(path: &str) -> io::Result<String> {
-    if let Ok(existing) = fs::read_to_string(path) {
-        let existing = existing.trim();
-        if !existing.is_empty() {
-            return Ok(existing.to_string());
+    if token_file_is_private(path) {
+        if let Ok(existing) = fs::read_to_string(path) {
+            let existing = existing.trim();
+            if !existing.is_empty() {
+                return Ok(existing.to_string());
+            }
         }
     }
     let token = generate();
@@ -48,17 +71,19 @@ fn persist(path: &str, token: &str) -> io::Result<()> {
     if let Some(parent) = std::path::Path::new(path).parent() {
         let _ = fs::create_dir_all(parent);
     }
-    let mut file = fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(true)
-        .open(path)?;
-    file.write_all(token.as_bytes())?;
+    // Replace, never reuse: whatever was at `path` (a symlink, a file another user
+    // could open) is removed, and the new file is created owner-only from the start,
+    // so there is no moment when the token sits in a file others can read.
+    let _ = fs::remove_file(path);
+    let mut options = fs::OpenOptions::new();
+    options.create_new(true).write(true);
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o600));
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
     }
+    let mut file = options.open(path)?;
+    file.write_all(token.as_bytes())?;
     Ok(())
 }
 
@@ -133,6 +158,26 @@ mod tests {
         assert!(!constant_time_eq("abcd1234", "abcd123"));
         assert!(!constant_time_eq("", "x"));
         assert!(constant_time_eq("", ""));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn token_file_is_created_private_and_a_lax_one_is_not_reused() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("eliad-auth-{}", generate()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("token");
+        let path = path.to_str().unwrap();
+
+        let first = load_or_create(path).unwrap();
+        assert_eq!(fs::metadata(path).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(load_or_create(path).unwrap(), first, "a private token is reused");
+
+        fs::set_permissions(path, fs::Permissions::from_mode(0o644)).unwrap();
+        let second = load_or_create(path).unwrap();
+        assert_ne!(second, first, "a readable token file is not trusted");
+        assert_eq!(fs::metadata(path).unwrap().permissions().mode() & 0o777, 0o600);
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

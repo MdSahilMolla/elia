@@ -26,6 +26,8 @@
 import { writeFileSync } from 'node:fs'
 import { formatCostUsd, sessionCost } from '../usage.ts'
 import { isSensitivePath } from '../autonomy/sensitivePaths.ts'
+import { decodeNote } from '../autonomy/operatorNotes.ts'
+import { ASSISTANT_READING, PERSON_NOTE } from '../live/liveReply.ts'
 import type { AutonomyProfile } from '../autonomy/loop.ts'
 import { addEventGoal, addUserGoal, MAX_ATTEMPTS, nextGoal, refreshBacklog } from './backlog.ts'
 import { isQuotaExhaustedError, isUnusableRouteError } from '../providerErrors.ts'
@@ -147,6 +149,19 @@ function today(now = new Date()): string {
 
 /** A direction that asks the pilot to stop rather than to do something. */
 const STOP_DIRECTION = /^\s*(?:please\s+)?(?:stop|pause|halt|wrap up|finish up|that'?s enough)\b/i
+
+/**
+ * The operator's own words in a queued direction. A live steer also carries the
+ * assistant's paraphrase and a machine-readable plan block; both are model text
+ * (the live lane reads repo files and tool output), so neither may become an
+ * operator goal, which outranks everything the pilot inferred.
+ */
+export function operatorWords(direction: string): string {
+  const lines = decodeNote(direction).text.split('\n')
+  const note = lines.find((line) => line.startsWith(PERSON_NOTE))
+  if (note !== undefined) return note.slice(PERSON_NOTE.length).trim().slice(0, 2_000)
+  return lines.filter((line) => !line.startsWith(ASSISTANT_READING) && !line.startsWith('Change the plan accordingly')).join('\n').trim().slice(0, 2_000)
+}
 
 /** Three rolled-back goals in a row means something systemic is wrong; stop and report. */
 const MAX_CONSECUTIVE_REJECTIONS = 3
@@ -516,7 +531,9 @@ export async function runPilot(options: PilotOptions): Promise<PilotResult> {
         break
       }
       let stopAsked: string | undefined
-      for (const direction of options.drainDirections?.() ?? []) {
+      for (const queued of options.drainDirections?.() ?? []) {
+        const direction = operatorWords(queued)
+        if (!direction) continue
         if (STOP_DIRECTION.test(direction)) {
           stopAsked = direction
           continue

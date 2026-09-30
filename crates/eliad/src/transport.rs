@@ -97,7 +97,16 @@ mod nix {
                     let _ = std::fs::set_permissions(parent, fs::Permissions::from_mode(0o700));
                 }
             }
-            let inner = UnixListener::bind(addr)?;
+            // Bind under a restrictive umask so the socket file never exists with wider
+            // access than the chmod below leaves it; the previous umask is put back at once.
+            #[cfg(unix)]
+            let previous_umask = unsafe { libc::umask(0o177) };
+            let bound = UnixListener::bind(addr);
+            #[cfg(unix)]
+            unsafe {
+                libc::umask(previous_umask);
+            }
+            let inner = bound?;
             // The listener creates its file with umask too; tighten it so a
             // same-user process on a shared machine is the only plausible peer.
             #[cfg(unix)]

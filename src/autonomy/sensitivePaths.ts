@@ -70,11 +70,16 @@ const SENSITIVE_FILE_PATTERNS = [
  * Elia's own trust surface: `policy.json` (governance policy), `allow.json`
  * (standing approvals), `preauth.json` + `preauth.secret` (pre-authorizations
  * and their HMAC key) under a `.elia/` directory, plus anything under the
- * per-user `~/.config/elia` home those stores relocated to. Matched by PATH
+ * per-user `~/.config/elia` home those stores relocated to. Also the files a
+ * later run EXECUTES or is steered by without asking again: lifecycle hooks,
+ * scheduled tasks, the autopilot's saved backlog, and a durable run's own state
+ * (`.elia/runs/<id>/goal-graph.json`, `events.ndjson`, `plan.md`, `checkpoints/`) —
+ * the loop writes those itself, in-process, never through a governed tool, so
+ * any model write to them is an attempt to edit its own run record. Matched by PATH
  * rather than bare file name, because `policy.json`/`allow.json` are ordinary
  * project config names elsewhere and must not be swept up.
  */
-const ELIA_TRUST_FILE = /(?:^|\/)\.elia\/(?:policy|allow)\.json$|(?:^|\/)\.elia\/preauth\.(?:json|secret)$/
+const ELIA_TRUST_FILE = /(?:^|\/)\.elia\/(?:policy|allow)\.json$|(?:^|\/)\.elia\/preauth\.(?:json|secret)$|(?:^|\/)\.elia\/(?:lifecycle-hooks|schedules)\.json$|(?:^|\/)\.elia\/autopilot\/state\.json$|(?:^|\/)\.elia\/runs\/[^/]+\/(?:goal-graph\.json[^/]*|events\.ndjson|plan\.md|checkpoints(?:\/.*)?)$/
 const ELIA_TRUST_HOME = /(?:^|\/)\.config\/elia(?:\/|$)/
 
 /** True when a path names one of elia's own trust-control files. */
@@ -123,6 +128,14 @@ export function assertSafeFileAccess(path: string): void {
   if (isSensitivePath(path)) throw new Error(`access to protected sensitive path is denied: ${path}`)
 }
 
+/** Elia's own trust surface as it is named in text (a shell line, model-written code). */
+export const ELIA_TRUST_MENTION: readonly string[] = [
+  String.raw`\.elia[\\/](?:policy|allow|preauth)\.(?:json|secret)\b`,
+  String.raw`\.config[\\/]elia(?:[\\/]|\b)`,
+  String.raw`preauth\.secret\b`,
+  String.raw`\.elia[\\/]runs[\\/][^\s'"]*?(?:goal-graph\.json|events\.ndjson|plan\.md|checkpoints)\b`,
+]
+
 /**
  * Text naming a file or directory that commonly stores secrets, matched
  * loosely against a whole command line rather than a single path argument.
@@ -144,12 +157,92 @@ const SENSITIVE_PATH_MENTION = new RegExp(
     // matched as text here: `cat ~/.config/elia/allow.json` would otherwise
     // ride the read-only shell policy and hand the model its own governor
     // inputs (and `preauth.secret`, the key that signs them).
-    String.raw`\.elia[\\/](?:policy|allow|preauth)\.(?:json|secret)\b`,
-    String.raw`\.config[\\/]elia(?:[\\/]|\b)`,
-    String.raw`preauth\.secret\b`,
+    ...ELIA_TRUST_MENTION,
   ].join('|'),
   'i',
 )
+
+/**
+ * The text a shell would act on once it has removed quotes and backslash
+ * escapes: `.e''nv`, `.e"n"v` and `.e\nv` all name `.env`. The guards below
+ * match text, so they must see this form as well as the raw one.
+ */
+export function unquoteShellText(command: string): string {
+  return command.replace(/['"\\]/g, '')
+}
+
+/**
+ * Concrete protected paths a shell glob could expand to. Each entry is a run
+ * of path segments; a command token is expanded segment by segment against
+ * them (`.e?v`, `.e[n]v`, `~/.config/eli?/preauth.secr?t`, `.c?nfig/elia`).
+ */
+const GLOB_TARGETS: readonly (readonly string[])[] = [
+  ...['.env', '.npmrc', '.pypirc', '.netrc', '.git-credentials', '.aws', '.azure', '.docker', '.kube', '.gnupg', '.ssh',
+    'preauth.secret', 'credentials', 'credentials.json', 'secret', 'secrets', 'password', 'passwords', 'shadow', 'passwd',
+    'cookies', 'environ', 'sudoers', 'sshd_config', 'id_rsa', 'id_dsa', 'id_ecdsa', 'id_ed25519', 'token', 'tokens'].map((name) => [name]),
+  ['.config', 'gcloud'],
+  ['.config', 'elia'],
+  ['.config', 'elia', 'allow.json'],
+  ['.config', 'elia', 'policy.json'],
+  ['.config', 'elia', 'preauth.secret'],
+  ['.elia', 'allow.json'],
+  ['.elia', 'policy.json'],
+  ['.elia', 'preauth.json'],
+  ['.elia', 'preauth.secret'],
+]
+
+const GLOB_CHARS = /[?*[]/
+
+/** One shell glob segment as a regex (`?`, `*`, `[...]`); other characters are literal. */
+function globSegmentRegex(segment: string): RegExp | undefined {
+  let source = ''
+  for (let index = 0; index < segment.length; index += 1) {
+    const char = segment[index]!
+    if (char === '?') source += '.'
+    else if (char === '*') source += '.*'
+    else if (char === '[') {
+      const close = segment.indexOf(']', index + 2)
+      if (close === -1) source += '\\['
+      else {
+        const body = segment.slice(index + 1, close).replace(/^!/, '^').replace(/\\/g, '\\\\')
+        source += `[${body}]`
+        index = close
+      }
+    } else source += char.replace(/[.+^${}()|\\\]]/g, '\\$&')
+  }
+  try {
+    return new RegExp(`^${source}$`, 'i')
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * True when a glob segment could stand for the concrete name. A glob that opens
+ * with a wildcard never matches a dotfile (the shell skips them), and a bare
+ * `*` or `*.ext` is an ordinary "all files" / "all of one type" word — not read
+ * as a probe for `credentials` or `allow.json` when it is the whole token.
+ */
+function globSegmentMatches(glob: string, name: string, whole: boolean): boolean {
+  if (!GLOB_CHARS.test(glob)) return glob.toLowerCase() === name.toLowerCase()
+  if (/^[?*[]/.test(glob) && name.startsWith('.')) return false
+  if (whole && /^\*(?:\.[A-Za-z0-9]+)?$/.test(glob)) return false
+  return globSegmentRegex(glob)?.test(name) ?? false
+}
+
+/** True when a token with glob characters can expand to a protected path. */
+function globMayNameSensitivePath(token: string): boolean {
+  const segments = token.split(/[\\/]+/).filter(Boolean)
+  return GLOB_TARGETS.some((target) => {
+    for (let start = 0; start + target.length <= segments.length; start += 1) {
+      const window = segments.slice(start, start + target.length)
+      if (!window.some((segment) => GLOB_CHARS.test(segment))) continue
+      const whole = segments.length === 1 && target.length === 1
+      if (window.every((segment, index) => globSegmentMatches(segment, target[index]!, whole))) return true
+    }
+    return false
+  })
+}
 
 /** Conservative shell check for common commands that would disclose protected local files. */
 export function commandMayReadSensitiveData(command: string): boolean {
@@ -163,8 +256,12 @@ export function commandMayReadSensitiveData(command: string): boolean {
   // `import-clixml`, `get-filehash`) are listed explicitly because none of
   // them contain a bare `cat`/`type`/`grep` token for the word-boundary test
   // below to trip over.
-  if (!/\b(?:cat|type|less|more|head|tail|sed|awk|grep|rg|cut|strings|xxd|od|base64|openssl|certutil|print|source|sqlite3|get-content|select-string|import-csv|import-clixml|get-filehash|gc\b|git\s+(?:show|log|diff)|\.\s*)\b/i.test(command)) return false
-  return SENSITIVE_PATH_MENTION.test(command)
+  // The shell removes quotes and escapes and expands globs before the reader
+  // runs, so the text is judged raw, unquoted, and glob-expanded.
+  const unquoted = unquoteShellText(command)
+  if (!/\b(?:cat|type|less|more|head|tail|sed|awk|grep|rg|cut|strings|xxd|od|base64|openssl|certutil|print|source|sqlite3|get-content|select-string|import-csv|import-clixml|get-filehash|gc\b|git\s+(?:show|log|diff)|\.\s*)\b/i.test(unquoted)) return false
+  if (SENSITIVE_PATH_MENTION.test(command) || SENSITIVE_PATH_MENTION.test(unquoted)) return true
+  return unquoted.split(/[\s;|&<>()=:,]+/).some((token) => GLOB_CHARS.test(token) && globMayNameSensitivePath(token))
 }
 
 /** Returns a stable path relative to a trusted root for safe display only. */

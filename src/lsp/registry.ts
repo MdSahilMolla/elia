@@ -1,4 +1,8 @@
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { LspClient } from './client.ts'
+import { isProtectedSecret } from '../datascience/secrets.ts'
 import { languageServerFor, type LanguageServerSpec } from './servers.ts'
 import { registerShutdownCleanup } from '../ui/shutdown.ts'
 import type { CodeAction, Command, Diagnostic, Range, WorkspaceEdit } from './protocol.ts'
@@ -10,6 +14,11 @@ import type { CodeAction, Command, Diagnostic, Range, WorkspaceEdit } from './pr
 // attempt (see getClient) so the two paths never share a cache entry.
 const clients = new Map<string, LspClient | null>()
 let shutdownRegistered = false
+const launchDirs: string[] = []
+
+function dropLaunchDirs(): void {
+  for (const dir of launchDirs.splice(0)) rmSync(dir, { recursive: true, force: true })
+}
 
 /**
  * The command+args this run should actually spawn: `spec.command` directly
@@ -31,17 +40,39 @@ export function resolveSpawnCommand(spec: LanguageServerSpec, allowNpxFallback: 
   return { command: spec.command, args: spec.args }
 }
 
+/**
+ * How the `npx` fallback is launched. npx resolves the package (and reads
+ * `.npmrc`, `package.json` scripts and workspace config) relative to its cwd,
+ * and the workspace is untrusted input, so it runs from a fresh empty directory
+ * with elia's own credentials removed from its environment. The server still
+ * learns the workspace from `rootUri` in the LSP `initialize` request.
+ */
+export function neutralNpxLaunch(env: NodeJS.ProcessEnv = process.env): { cwd: string; env: Record<string, string> } {
+  const cwd = mkdtempSync(join(tmpdir(), 'elia-lsp-npx-'))
+  const clean: Record<string, string> = {}
+  for (const [name, value] of Object.entries(env)) {
+    if (value !== undefined && !isProtectedSecret(name)) clean[name] = value
+  }
+  return { cwd, env: clean }
+}
+
 async function getClient(spec: LanguageServerSpec, root: string, allowNpxFallback: boolean): Promise<LspClient | undefined> {
   const cacheKey = `${spec.languageId}:${allowNpxFallback ? 'npx' : 'direct'}`
   if (clients.has(cacheKey)) return clients.get(cacheKey) ?? undefined
 
   const { command, args } = resolveSpawnCommand(spec, allowNpxFallback)
-  const client = new LspClient(command, args, spec.languageId, root)
+  const launch = command === 'npx' ? neutralNpxLaunch() : undefined
+  const client = new LspClient(command, args, spec.languageId, root, launch)
+  if (launch) launchDirs.push(launch.cwd)
   try {
     await client.connect()
   } catch {
     clients.set(cacheKey, null)
     client.close()
+    if (launch) {
+      launchDirs.splice(launchDirs.indexOf(launch.cwd), 1)
+      rmSync(launch.cwd, { recursive: true, force: true })
+    }
     return undefined
   }
   clients.set(cacheKey, client)
@@ -49,6 +80,7 @@ async function getClient(spec: LanguageServerSpec, root: string, allowNpxFallbac
     shutdownRegistered = true
     registerShutdownCleanup(() => {
       for (const c of clients.values()) c?.close()
+      dropLaunchDirs()
     })
   }
   return client
@@ -128,5 +160,6 @@ export function formatDiagnostics(diagnostics: Diagnostic[], path: string): stri
 export function resetLspStateForTests(): void {
   for (const client of clients.values()) client?.close()
   clients.clear()
+  dropLaunchDirs()
   shutdownRegistered = false
 }

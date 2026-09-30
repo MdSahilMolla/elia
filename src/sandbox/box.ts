@@ -101,6 +101,25 @@ export function toolReadPaths(pathEnv = process.env.PATH ?? '', home = homedir()
 
 const PASSTHROUGH = ['TERM', 'LANG', 'LC_ALL', 'CI', 'NO_COLOR', 'FORCE_COLOR', 'TZ']
 
+/** A name that reads as a credential (provider API keys included) is never carried into the box, whoever asked for it. */
+const SECRET_NAME = /KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|COOKIE|SESSION|AUTH/i
+
+/**
+ * The per-call environment a box run may add. Callers hand in a full copy of the
+ * host environment (workspaceScopedEnv), so anything that merely repeats the host's
+ * own value is dropped (the harmless names ride in via envPassthrough): the box gets PATH and what
+ * the call itself changed or added, minus anything named like a credential.
+ */
+export function boxSafeEnv(env: Record<string, string> | undefined, host: NodeJS.ProcessEnv = process.env): Record<string, string> {
+  const out: Record<string, string> = {}
+  for (const [name, value] of Object.entries(env ?? {})) {
+    if (SECRET_NAME.test(name)) continue
+    if (name !== 'PATH' && host[name] === value) continue
+    out[name] = value
+  }
+  return out
+}
+
 export function boxPolicyFor(cwd: string, timeoutMs: number, env?: Record<string, string>): BoxPolicy {
   const network = (process.env.ELIA_BOX_NETWORK ?? 'none').trim().toLowerCase()
   const allow = (process.env.ELIA_BOX_ALLOW ?? '').split(',').map((h) => h.trim()).filter(Boolean)
@@ -114,8 +133,9 @@ export function boxPolicyFor(cwd: string, timeoutMs: number, env?: Record<string
     network: network === 'open' ? { mode: 'open' } : network === 'brokered' ? { mode: 'brokered', allow } : { mode: 'none' },
     limits: { wallMs: Math.max(1, timeoutMs) },
     // PATH is the one host variable the command needs to find its tools; nothing else that
-    // could carry a credential is inherited. Per-call `env` overrides layer on top.
-    env: { PATH: process.env.PATH ?? '', ...(env ?? {}) },
+    // could carry a credential is inherited. Per-call `env` overrides layer on top, filtered
+    // by boxSafeEnv so a copy of the host environment cannot smuggle secrets in.
+    env: { PATH: process.env.PATH ?? '', ...boxSafeEnv(env) },
     envPassthrough: PASSTHROUGH,
   }
   if (process.env.ELIA_BOX_IMAGE?.trim()) policy.image = process.env.ELIA_BOX_IMAGE.trim()
@@ -205,6 +225,13 @@ export async function runShellInBox(command: string, timeoutMs: number, cwd?: st
   const workspace = cwd ?? process.cwd()
   const run = await runInBox(boxPolicyFor(workspace, timeoutMs, env), ['/bin/sh', '-c', command], { signal, timeoutMs })
   return shellResultFromBox(command, run)
+}
+
+/** Runs one executable with an explicit argv in the box, the way runShellInBox runs a shell line. */
+export async function runProcessInBox(argv: string[], timeoutMs: number, cwd?: string, signal?: AbortSignal, env?: Record<string, string>): Promise<ShellResult> {
+  const workspace = cwd ?? process.cwd()
+  const run = await runInBox(boxPolicyFor(workspace, timeoutMs, env), argv, { signal, timeoutMs })
+  return shellResultFromBox(argv.join(' '), run)
 }
 
 let warnedThisProcess = false

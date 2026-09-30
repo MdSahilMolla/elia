@@ -24,7 +24,7 @@ import { spendState, spendStopPrompt } from './spendLimit.ts'
 import { SPECULABLE_TOOLS, type CacheStats, type ToolResultCache } from './speculation/cache.ts'
 import { readMemo } from './speculation/deterministicCache.ts'
 import type { Prefetcher } from './speculation/prefetch.ts'
-import { activeActionGovernor, assessAction, redactActionInput, type ActionAssessment, type ActionGateResult } from './autonomy/governor.ts'
+import { activeActionGovernor, assessAction, redactActionInput, sessionScopeWriteBlock, SIGNOFF_INTENT_PREFIX, type ActionAssessment, type ActionGateResult } from './autonomy/governor.ts'
 import { applyPolicy } from './autonomy/policy.ts'
 import { activeGoalGraph, activeGoalNode, type ActionReservation, classifyFailure, isReportingTool } from './autonomy/goalGraph.ts'
 import { contractForAction, evaluatePostconditions, evaluatePreconditions, type ActionContract, type ContractEvaluation } from './autonomy/actionContract.ts'
@@ -756,9 +756,30 @@ async function runAgentLoopTracked(opts: RunAgentLoopOptions, inflight: Inflight
               let gate: ActionGateResult
               if (alreadyApproved) {
                 const policied = applyPolicy(assessAction(request), request, cwd)
-                gate = policied.blocked
-                  ? { allowed: false, assessment: policied.assessment, message: policied.message }
-                  : { allowed: true, assessment: { ...policied.assessment, decision: 'allow' as const } }
+                // A stored approval is a "yes" to the approval prompt only. The
+                // governor's hard stops are not prompts, so it never skips them:
+                // the session worktree scope, the action budget, and a person's
+                // sign-off (which no stored record can give) all still apply.
+                const scopeBlock = sessionScopeWriteBlock(request)
+                if (policied.blocked) {
+                  gate = { allowed: false, assessment: policied.assessment, message: policied.message }
+                } else if (scopeBlock !== undefined) {
+                  gate = {
+                    allowed: false,
+                    assessment: { ...policied.assessment, risk: 'critical', decision: 'block', intent: 'session-scope', reason: `file write is outside the session worktree: ${scopeBlock}` },
+                    message: `Path blocked by session worktree scope: ${scopeBlock}`,
+                  }
+                } else if (policied.assessment.intent.startsWith(SIGNOFF_INTENT_PREFIX)) {
+                  gate = await governor.check(request)
+                } else if (governor.chargeApprovedAction && !governor.chargeApprovedAction()) {
+                  gate = {
+                    allowed: false,
+                    assessment: { ...policied.assessment, decision: 'block' },
+                    message: `Action budget exhausted after ${governor.stats().maxActions} tool requests. Resume with a larger bounded budget or split the goal into smaller tasks.`,
+                  }
+                } else {
+                  gate = { allowed: true, assessment: { ...policied.assessment, decision: 'allow' as const } }
+                }
               } else {
                 gate = await governor.check(request)
               }

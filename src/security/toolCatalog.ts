@@ -62,8 +62,12 @@ const PIP = (packageName: string): Partial<Record<'linux' | 'macos' | 'windows',
   windows: `pip install ${packageName}`,
 })
 
-/** Probes are interpreter invocations: an import that fails is the missing signal. */
-const PYTHON_PROBE = (importLine: string): string => `python3 -c "${importLine}"`
+/**
+ * Probes are interpreter invocations: an import that fails is the missing signal.
+ * `-I` (isolated mode) keeps the workspace off `sys.path`, so a `pwn.py` or
+ * `sympy.py` planted in the project cannot be executed by detection.
+ */
+const PYTHON_PROBE = (importLine: string): string => `python3 -I -c "${importLine}"`
 
 export const SECURITY_TOOL_CATALOG: CatalogEntry[] = [
   // ---------------------------------------------------------------- pwn ----
@@ -450,12 +454,13 @@ export const SECURITY_TOOL_CATALOG: CatalogEntry[] = [
     name: 'openstego',
     category: 'stego',
     purpose: 'LSB steganography for PNG and BMP with a password, for the formats steghide does not cover.',
-    binaries: [],
-    probe: 'java -jar openstego.jar --help',
+    // Detected by PATH lookup only: a jar resolved relative to the working
+    // directory would run whatever the workspace put there.
+    binaries: ['openstego'],
     install: {
-      linux: 'Download the release jar from github.com/syvaidya/openstego/releases and run java -jar openstego.jar (needs a JDK on PATH) — the probe only finds it when the jar is reachable from the working directory',
-      macos: 'Download the release jar from github.com/syvaidya/openstego/releases and run java -jar openstego.jar (needs a JDK on PATH) — the probe only finds it when the jar is reachable from the working directory',
-      windows: 'Download the release jar from github.com/syvaidya/openstego/releases and run java -jar openstego.jar (needs a JDK on PATH) — the probe only finds it when the jar is reachable from the working directory',
+      linux: 'Download the release jar from github.com/syvaidya/openstego/releases and put an `openstego` launcher on PATH (needs a JDK) — detection only checks PATH, never the workspace',
+      macos: 'Download the release jar from github.com/syvaidya/openstego/releases and put an `openstego` launcher on PATH (needs a JDK) — detection only checks PATH, never the workspace',
+      windows: 'Download the release jar from github.com/syvaidya/openstego/releases and put an `openstego` launcher on PATH (needs a JDK) — detection only checks PATH, never the workspace',
     },
   },
   {

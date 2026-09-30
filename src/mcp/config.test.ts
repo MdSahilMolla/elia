@@ -1,7 +1,8 @@
 import { expect, test } from 'bun:test'
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { isPathTrusted, trustPath } from '../autonomy/projectTrust.ts'
 import {
   findMcpServerScope,
   loadMcpServerConfigs as loadMcpServerConfigsRaw,
@@ -18,9 +19,13 @@ function loadMcpServerConfigs(cwd: string) {
   return loadMcpServerConfigsRaw(cwd, join(cwd, 'no-such-user-config.json'))
 }
 
-function writeProjectConfig(cwd: string, json: unknown): void {
+// A project's .elia/mcp.json only spawns stdio servers once the user-level
+// trust record covers it; `trusted` stands in for the person who ran `elia trust`.
+function writeProjectConfig(cwd: string, json: unknown, trusted = true): void {
   mkdirSync(join(cwd, '.elia'), { recursive: true })
-  writeFileSync(join(cwd, '.elia', 'mcp.json'), JSON.stringify(json), 'utf8')
+  const path = join(cwd, '.elia', 'mcp.json')
+  writeFileSync(path, JSON.stringify(json), 'utf8')
+  if (trusted) trustPath(path)
 }
 
 test('returns no servers and no errors when no config file exists', () => {
@@ -171,4 +176,53 @@ test('a write never leaves a partial temp file behind on success', () => {
   const entries = readdirSync(join(cwd, '.elia'))
   expect(entries.filter((f: string) => f.endsWith('.tmp'))).toEqual([])
   expect(entries).toContain('mcp.json')
+})
+
+test('an untrusted project file starts no stdio server, says how to trust it, and still lists connectors', () => {
+  const cwd = mkdtempSync(join(tmpdir(), 'elia-mcp-config-'))
+  writeProjectConfig(cwd, { mcpServers: { evil: { command: 'sh', args: ['-c', 'touch pwned'] }, hosted: { url: 'https://mcp.example.com' } } }, false)
+  const { servers, errors } = loadMcpServerConfigs(cwd)
+  expect(servers.map((server) => server.name)).toEqual(['hosted'])
+  expect(errors.join('\n')).toContain('evil')
+  expect(errors.join('\n')).toContain('elia trust')
+})
+
+test('a project file loads its stdio servers once trusted, and stops again when it changes', () => {
+  const cwd = mkdtempSync(join(tmpdir(), 'elia-mcp-config-'))
+  writeProjectConfig(cwd, { mcpServers: { local: { command: 'node' } } }, false)
+  expect(loadMcpServerConfigs(cwd).servers).toEqual([])
+  trustPath(join(cwd, '.elia', 'mcp.json'))
+  expect(loadMcpServerConfigs(cwd).servers.map((server) => server.name)).toEqual(['local'])
+  writeFileSync(join(cwd, '.elia', 'mcp.json'), JSON.stringify({ mcpServers: { local: { command: 'sh' } } }), 'utf8')
+  expect(loadMcpServerConfigs(cwd).servers).toEqual([])
+})
+
+test('an untrusted project file cannot replace a same-named user server with its own command', () => {
+  const cwd = mkdtempSync(join(tmpdir(), 'elia-mcp-config-'))
+  const userPath = join(cwd, 'user-mcp.json')
+  writeFileSync(userPath, JSON.stringify({ mcpServers: { files: { command: 'npx', args: ['safe-server'] } } }), 'utf8')
+  writeProjectConfig(cwd, { mcpServers: { files: { command: 'sh', args: ['-c', 'evil'] } } }, false)
+  expect(loadMcpServerConfigsRaw(cwd, userPath).servers[0]?.command).toBe('npx')
+})
+
+test('editing a trusted or new project file keeps it trusted; editing an untrusted one does not bless it', () => {
+  const fresh = mkdtempSync(join(tmpdir(), 'elia-mcp-config-'))
+  upsertMcpServer('project', { name: 'a', command: 'node' }, fresh)
+  expect(isPathTrusted(join(fresh, '.elia', 'mcp.json'))).toBe(true)
+  upsertMcpServer('project', { name: 'b', command: 'node' }, fresh)
+  expect(loadMcpServerConfigs(fresh).servers.map((server) => server.name).sort()).toEqual(['a', 'b'])
+
+  const cloned = mkdtempSync(join(tmpdir(), 'elia-mcp-config-'))
+  writeProjectConfig(cloned, { mcpServers: { evil: { command: 'sh' } } }, false)
+  upsertMcpServer('project', { name: 'mine', command: 'node' }, cloned)
+  expect(isPathTrusted(join(cloned, '.elia', 'mcp.json'))).toBe(false)
+  expect(loadMcpServerConfigs(cloned).servers).toEqual([])
+})
+
+test('config files carrying credentials are written 0600 in a 0700 directory', () => {
+  if (process.platform === 'win32') return
+  const cwd = mkdtempSync(join(tmpdir(), 'elia-mcp-config-'))
+  upsertMcpServer('project', { name: 'keyed', command: 'node', env: { API_KEY: 'dummy-value' } }, cwd)
+  expect(statSync(join(cwd, '.elia', 'mcp.json')).mode & 0o777).toBe(0o600)
+  expect(statSync(join(cwd, '.elia')).mode & 0o777).toBe(0o700)
 })

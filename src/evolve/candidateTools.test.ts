@@ -1,9 +1,10 @@
 import { expect, test } from 'bun:test'
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import type { Tool } from '../tools/types.ts'
 import { candidateTools } from './candidateTools.ts'
+import { ContainmentRequired } from './containment.ts'
 
 const writeTool: Tool = {
   name: 'write_file',
@@ -43,6 +44,24 @@ test('candidate shell rejects commands outside its verification gate', async () 
     await expect(run.execute({ command: 'git status' })).rejects.toThrow('only allow')
     await expect(run.execute({ command: 'bun test && echo escaped' })).rejects.toThrow('only allow')
   } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('the builder\'s gate commands go through the evolve containment when a live root is given', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'elia-tools-'))
+  const saved = { mode: process.env.ELIA_EVOLVE_BOX, bin: process.env.ELIA_BOX_BIN }
+  try {
+    process.env.ELIA_EVOLVE_BOX = 'require'
+    process.env.ELIA_BOX_BIN = '/nonexistent/elia-box'
+    const run = candidateTools(root, [commandTool], resolve(import.meta.dir, '..', '..')).find((tool) => tool.name === 'run_command')!
+    // fails closed instead of running the builder-written tests on the host
+    await expect(run.execute({ command: 'bun test' })).rejects.toBeInstanceOf(ContainmentRequired)
+  } finally {
+    if (saved.mode === undefined) delete process.env.ELIA_EVOLVE_BOX
+    else process.env.ELIA_EVOLVE_BOX = saved.mode
+    if (saved.bin === undefined) delete process.env.ELIA_BOX_BIN
+    else process.env.ELIA_BOX_BIN = saved.bin
     rmSync(root, { recursive: true, force: true })
   }
 })

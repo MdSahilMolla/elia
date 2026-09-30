@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { hardenSecureFile, writeSecureFile, ensureSecureDirectory } from '../securePersistence.ts'
 import { join } from 'node:path'
@@ -36,6 +36,8 @@ interface CommunicationDraft {
   attachments: string[]
   replyTo?: string
   scheduledFor?: string
+  /** SHA-256 of what would be sent (see `contentDigest`), recorded when the draft was made. */
+  contentSha256?: string
   status: CommunicationStatus
   createdAt: string
   updatedAt: string
@@ -52,6 +54,15 @@ interface CommunicationResult {
   error?: string
   externalId?: string
   [key: string]: unknown
+}
+
+/** Digests recorded by this process, so a draft file rewritten together with its own hash is still caught. */
+const digestsThisProcess = new Map<string, string>()
+
+/** Everything the connector would deliver, and nothing that changes as the draft moves through its states. */
+function contentDigest(draft: CommunicationDraft): string {
+  const content = [draft.channel, draft.recipient, draft.cc, draft.bcc, draft.subject ?? null, draft.body, draft.attachments, draft.replyTo ?? null, draft.scheduledFor ?? null]
+  return createHash('sha256').update(JSON.stringify(content)).digest('hex')
 }
 
 const COMMUNICATION_DIR = join(paths.state, 'communications')
@@ -163,6 +174,8 @@ function createDraft(request: CommunicationRequest): string {
     createdAt: now,
     updatedAt: now,
   }
+  draft.contentSha256 = contentDigest(draft)
+  digestsThisProcess.set(draft.id, draft.contentSha256)
   saveDraft(draft)
   return `Draft ${draft.id} created for ${draft.channel} to ${draft.recipient}. It is not scheduled or sent. Use communication inspect with draftId=${draft.id} before requesting send approval.`
 }
@@ -192,6 +205,7 @@ function renderDraft(draft: CommunicationDraft): string {
     attachments: draft.attachments,
     replyTo: draft.replyTo,
     scheduledFor: draft.scheduledFor,
+    contentSha256: draft.contentSha256,
     status: draft.status,
     createdAt: draft.createdAt,
     updatedAt: draft.updatedAt,
@@ -205,6 +219,13 @@ function renderDraft(draft: CommunicationDraft): string {
 async function sendDraft(draft: CommunicationDraft): Promise<string> {
   if (draft.status === 'sent' || draft.status === 'verified') return `Draft ${draft.id} was already sent${draft.externalId ? ` with external id ${draft.externalId}` : ''}. Verify it again if delivery evidence is needed.`
   if (draft.status === 'cancelled') return `Draft ${draft.id} is cancelled and cannot be sent.`
+  // The approval the user gave was for the draft as it was inspected. A file that
+  // no longer hashes to what was recorded (or that has no recorded hash) has
+  // been changed outside this tool, so nothing is sent from it.
+  const expected = digestsThisProcess.get(draft.id) ?? draft.contentSha256
+  if (!expected || expected !== contentDigest(draft) || (draft.contentSha256 !== undefined && draft.contentSha256 !== expected)) {
+    return `Refusing to send draft ${draft.id}: its content on disk does not match the content recorded when it was created${expected ? '' : ' (no content hash was recorded)'}. Nothing was sent. Run communication inspect with draftId=${draft.id} to re-read it, or create a new draft with the intended content.`
+  }
   if (!hasCommunicationAdapter()) return `Cannot send draft ${draft.id}: no communication connector is configured. Configure ELIA_COMMUNICATION_BRIDGE_COMMAND or ELIA_COMMUNICATION_MCP_SERVER, then inspect the unchanged draft again.`
 
   draft.status = 'sending'

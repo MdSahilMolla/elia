@@ -18,7 +18,7 @@ import { writeNotice } from '../ui/stream.ts'
 import { paths } from '../statePaths.ts'
 import { ensureSecureDirectory, writeSecureFile } from '../securePersistence.ts'
 import { WorkspaceStore, DEFAULT_WORKSPACE_DB } from './store.ts'
-import { resolveCaller, type Caller } from './identity.ts'
+import { resolveCaller, revalidateCaller, type Caller } from './identity.ts'
 import { Orchestrator } from './orchestrator.ts'
 import { dispatchRpc, RpcError, type RpcContext } from './rpc.ts'
 import { isWorkspaceRpcRequest, WORKSPACE_PROTOCOL_VERSION, type WorkspaceServerMessage } from './protocol.ts'
@@ -77,6 +77,17 @@ export function runWorkspaceServer(options: WorkspaceServerOptions = {}): Runnin
         ws.send(frame)
       } catch {
         // Closing socket — the close handler will clean it up.
+      }
+    }
+    // A revocation or removal ends the connections it applies to now, not at their next call.
+    if (event.type === 'TokenRevoked' || event.type === 'MemberRemoved' || event.type === 'AgentIdentityRemoved') {
+      for (const ws of [...connections]) {
+        if (revalidateCaller(store, ws.data.caller)) continue
+        try {
+          ws.close(1008, 'credential revoked')
+        } catch {
+          /* already closing */
+        }
       }
     }
   })
@@ -163,9 +174,20 @@ export function runWorkspaceServer(options: WorkspaceServerOptions = {}): Runnin
           send(ws, { type: 'response', id: 'unknown', ok: false, error: 'invalid workspace RPC envelope' })
           return
         }
+        // Judged against the store on every call, so a revoked token or removed member stops working at once.
+        const caller = revalidateCaller(store, ws.data.caller)
+        if (!caller) {
+          send(ws, { type: 'response', id: parsed.id, ok: false, error: 'this credential was revoked; reconnect with a valid token' })
+          try {
+            ws.close(1008, 'credential revoked')
+          } catch {
+            /* already closing */
+          }
+          return
+        }
         const ctx: RpcContext = {
           store,
-          caller: ws.data.caller,
+          caller,
           connectionId: ws.data.connectionId,
           requestShutdown: () => queueMicrotask(() => stop()),
           planner: options.planner,

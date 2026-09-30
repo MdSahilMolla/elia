@@ -1,8 +1,14 @@
 import { afterEach, expect, test } from 'bun:test'
-import { browserTool, unwrapCdpEvaluateValue, validateRequest } from './browser.ts'
+import { browserNavigationTestHooks, browserTool, unwrapCdpEvaluateValue, validateRequest } from './browser.ts'
 import { clearBrowserMcpToolsForTests, registerBrowserMcpTool } from '../mcp/browserRegistry.ts'
 
-afterEach(() => clearBrowserMcpToolsForTests())
+afterEach(() => {
+  clearBrowserMcpToolsForTests()
+  browserNavigationTestHooks.resolve = undefined
+  delete process.env.ELIA_BROWSER_ALLOW_PRIVATE
+})
+// Tests never touch DNS: every name resolves to a public documentation address.
+browserNavigationTestHooks.resolve = async () => ['93.184.216.34']
 
 test('validateRequest accepts an absolute navigation URL', () => {
   expect(validateRequest({ action: 'navigate', url: 'https://example.com' })).toEqual({
@@ -156,4 +162,24 @@ test('the doubly-nested form is unwrapped too, whichever the transport hands bac
 test('a result that carries no RemoteObject is returned as it is', () => {
   // Page.navigate answers with frame ids, not a RemoteObject.
   expect(unwrapCdpEvaluateValue({ result: { frameId: 'F1', loaderId: 'L1' } })).toEqual({ frameId: 'F1', loaderId: 'L1' })
+})
+
+test('navigate refuses private, link-local and metadata literals but keeps loopback', () => {
+  for (const url of ['http://169.254.169.254/latest/meta-data/', 'http://10.0.0.5/', 'http://192.168.1.1/', 'http://172.16.0.1/', 'http://100.64.0.1/', 'http://[fd00::1]/', 'http://[fe80::1]/', 'http://metadata.google.internal/']) {
+    expect(() => validateRequest({ action: 'navigate', url })).toThrow('refuses a private')
+  }
+  for (const url of ['http://127.0.0.1:3000/', 'http://localhost:5173/', 'http://[::1]:8080/']) {
+    expect(validateRequest({ action: 'navigate', url }).url).toBe(url)
+  }
+  expect(() => validateRequest({ action: 'navigate', url: 'file:///etc/passwd' })).toThrow('absolute http(s) url')
+})
+
+test('navigate refuses a public-looking name that resolves to a private address', async () => {
+  browserNavigationTestHooks.resolve = async () => ['169.254.169.254']
+  await expect(browserTool.execute({ action: 'navigate', url: 'https://rebind.example.test/' })).rejects.toThrow('resolves to a private')
+})
+
+test('ELIA_BROWSER_ALLOW_PRIVATE=on is the explicit opt-out', () => {
+  process.env.ELIA_BROWSER_ALLOW_PRIVATE = 'on'
+  expect(validateRequest({ action: 'navigate', url: 'http://10.0.0.5/' }).url).toBe('http://10.0.0.5/')
 })

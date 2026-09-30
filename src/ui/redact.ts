@@ -58,10 +58,24 @@ export function isCookieName(name: string): boolean {
   return COOKIE_NAMES.has(normalized) || COOKIE_NAME_SUFFIXES.some((suffix) => normalized.endsWith(suffix))
 }
 
+/**
+ * Keys whose value is a connection string that usually embeds a password
+ * (`DATABASE_URL`, `redisUri`, `sentry_dsn`, `connectionString`). A bare `url`
+ * is not here: most URLs are evidence, and `redactSecrets` already strips the
+ * credentials out of the ones that carry any.
+ */
+const CONNECTION_KEY = /(?:dsn|connectionstring|connstr|(?:database|db|redis|mongo|mongodb|postgres|postgresql|mysql|amqp|broker)(?:url|uri))$/
+
 /** Whether an object key names a credential at all, under either rule. */
 export function isSensitiveKey(key: string): boolean {
-  return SECRET_KEY.test(key) || isCookieName(key)
+  return SECRET_KEY.test(key) || isCookieName(key) || CONNECTION_KEY.test(key.toLowerCase().replace(/[^a-z0-9]/g, ''))
 }
+
+// `scheme://user:password@host` — credentials embedded in a URL or connection string. Matched
+// on the authority part only (up to the first `/`, `?` or `#`), through the last `@` in it, so a
+// password containing `@` is covered. A bare `user@host` (`ssh://git@github.com`) names no secret
+// and is left alone, unless the user part is a long opaque token (`https://<token>@host`).
+const URL_CREDENTIALS = /\b([A-Za-z][A-Za-z0-9+.-]*:\/\/)(?:[^\s/?#@:]*:[^\s/?#]*|[A-Za-z0-9_-]{20,})@/g
 // Value arms, most specific first:
 //  1. a real JWT — three dot-separated base64url segments, header starting
 //     `eyJ` (base64 of `{"`). Matched as ONE span so the whole token gets a
@@ -164,6 +178,7 @@ function isFalseBase64Padding(match: string): boolean {
 /** Redacts credential-like values without flattening or truncating the surrounding evidence. */
 export function redactSecrets(text: string): string {
   return text
+    .replace(URL_CREDENTIALS, '$1[REDACTED]@')
     .replace(SECRET_VALUE, (match) => (isFalseBase64Padding(match) ? match : '[REDACTED]'))
     .replace(OPAQUE_RUN, (run) => (isDigestOrIdentifier(run) ? run : '[REDACTED]'))
     .replace(ASSIGNED_TOKEN, (match, name: string) => (isCookieName(name) ? `${name}=[REDACTED]` : match))

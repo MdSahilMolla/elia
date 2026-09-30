@@ -1017,6 +1017,8 @@ async function runAutonomousTaskInternal(options: AutonomousRunOptions): Promise
   }
 
   if (proposal && options.resumeGraph) {
+    // Say what the resume will honour before honouring it; never a prompt, so unattended runs are unaffected.
+    for (const line of graph.resumeNotice()) writeSubStep(line)
     const durableApproval = graph.state().approvals.find((approval) => approval.kind === 'plan')
     planApproved = durableApproval?.status === 'approved'
     if (durableApproval?.status !== 'approved') {

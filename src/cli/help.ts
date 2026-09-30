@@ -172,12 +172,17 @@ Self-improvement:
   elia compounding simulate   Reproduce the paper's simulations (zero spend)
   elia compounding predict    The paper's falsifiable predictions P1–P8 and elia's evidence on each
 
+Project trust:
+  elia trust                  Trust this project's own skills, MCP servers, standing approvals and schedules
+  elia trust status           Show which of them are trusted right now
+  elia trust revoke           Revoke that trust
+
 Learned tools:
   elia skills                 List the tools elia has written for itself
   elia skills bundles         List declarative groups of loaded skills
   elia skills candidates      Show repeated work that could become a new tool
   elia skills synth           Write a tool for the strongest candidate
-  elia skills trust           Trust this project's .elia/skills so they load on startup
+  elia skills trust           Trust this project's .elia/skills so they load on startup (hash-bound, kept in your user config)
   elia skills untrust         Revoke a prior trust decision for this project
   elia skills status          Show whether this project's local skills are trusted
   elia skills instructions    List SKILL.md instruction skills elia wrote for itself

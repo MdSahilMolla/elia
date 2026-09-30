@@ -172,7 +172,7 @@ export function addUserGoal(backlog: readonly Goal[], text: string, survey: Repo
   const repeat = backlog.find((goal) => goal.origin === 'user' && goal.status === 'open' && isSameGoal(title, goal.title))
   if (repeat) return [...backlog]
   const verification = survey ? verificationFor([], health, survey) : []
-  return [...backlog, make(backlog, { title, detail: `Asked for by the operator while the autopilot was running: ${text.trim()}`, kind: 'user', origin: 'user', value: 5, effort: 3, risk: 2, verification, evidence: ['operator'] }, now)]
+  return [...backlog, make(backlog, { title, detail: `Asked for by the operator while the autopilot was running: ${text.trim().slice(0, 2_000)}`, kind: 'user', origin: 'user', value: 5, effort: 3, risk: 2, verification, evidence: ['operator'] }, now)]
 }
 
 /**

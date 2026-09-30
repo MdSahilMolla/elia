@@ -44,21 +44,96 @@ export function stripZoneId(token: string): string {
   return token.replace(/%(?:25)?[0-9a-z._-]+$/i, '')
 }
 
-/** Pull every host/IP/CIDR token out of a SCOPE.md so a request target can be checked against it. */
-export function parseScopeHosts(scopeText: string): string[] {
-  const tokens = new Set<string>()
+const OUT_OF_SCOPE_LABEL = /^(?:out[\s-]*of[\s-]*scope|excluded?|exclusions?|off[\s-]*limits|not\s+(?:in\s+scope|authori[sz]ed)|do\s+not\s+test|forbidden)\b/i
+const IN_SCOPE_LABEL = /^(?:in[\s-]*scope|scope|targets?|authori[sz]ed\s+(?:targets?|hosts?|scope|assets?)|rules\s+of\s+engagement|allowed|assets?)\b/i
+
+export interface ScopeHosts {
+  include: string[]
+  exclude: string[]
+}
+
+type ScopeSection = 'in' | 'out' | 'skip'
+
+/** Host/IP/CIDR tokens in one stretch of text. An IPv6 token must really be one, so a word like "face" is not a host. */
+function scopeTokens(text: string): string[] {
+  const tokens: string[] = []
   const pattern = /\b((?:\*\.)?(?:[a-z0-9-]+\.)+[a-z]{2,}|(?:\d{1,3}\.){3}\d{1,3}(?:\/\d{1,2})?|localhost|\[?[0-9a-f:]+\]?(?:\/\d{1,3})?)\b/gi
-  for (const match of scopeText.matchAll(pattern)) {
+  for (const match of text.matchAll(pattern)) {
+    const before = text[match.index - 1]
+    const after = text[match.index + match[0].length]
+    // The domain half of an e-mail address is a contact, not a target.
+    if (before === '@' || after === '@') continue
     const token = stripZoneId(match[1]!.toLowerCase().replace(/^\[|\]$/g, ''))
-    // Skip bare version-like or date-like dotted numbers that are not addresses.
-    if (/^(?:\d{1,3}\.){3}\d{1,3}(?:\/\d{1,2})?$/.test(token)) {
-      const [ip, bits] = token.split('/')
-      if (isIP(ip!) === 4 && (bits === undefined || Number(bits) <= 32)) tokens.add(token)
+    const [addr, bits] = token.split('/')
+    if (/^(?:\d{1,3}\.){3}\d{1,3}$/.test(addr!)) {
+      // Skip bare version-like or date-like dotted numbers that are not addresses.
+      if (isIP(addr!) === 4 && (bits === undefined || Number(bits) <= 32)) tokens.push(token)
       continue
     }
-    tokens.add(token)
+    if (token.includes(':')) {
+      if (isIP(addr!) === 6 && (bits === undefined || Number(bits) <= 128)) tokens.push(token)
+      continue
+    }
+    if (/^[0-9a-f]+$/.test(token) && token !== 'localhost') continue
+    tokens.push(token)
   }
-  return [...tokens]
+  return tokens
+}
+
+function sectionOf(label: string): ScopeSection {
+  const text = label.trim().replace(/[*_`:]/g, '').trim()
+  if (OUT_OF_SCOPE_LABEL.test(text)) return 'out'
+  if (IN_SCOPE_LABEL.test(text)) return 'in'
+  return 'skip'
+}
+
+/**
+ * Read the authorization out of a SCOPE.md: hosts named in an explicit in-scope
+ * section (a heading or label such as "Scope", "Target", "Rules of engagement")
+ * and hosts named as out of scope. Hosts under any other heading ("Authorized
+ * by", contacts, notes) are not authorization. Text before the first heading or
+ * label is read as in scope, and "Out of scope: ..." inside a line is split off.
+ */
+export function parseScope(scopeText: string): ScopeHosts {
+  const include = new Set<string>()
+  const exclude = new Set<string>()
+  let section: ScopeSection = 'in'
+  const take = (kind: ScopeSection, text: string): void => {
+    if (kind === 'skip') return
+    for (const token of scopeTokens(text)) (kind === 'in' ? include : exclude).add(token)
+  }
+  for (const rawLine of scopeText.split(/\r?\n/)) {
+    let line = rawLine
+    const heading = line.match(/^\s{0,3}#{1,6}\s+(.*)$/)
+    const label = heading ? undefined : line.match(/^\s*(?:[-*+]\s+)?(?:\*\*([^*]+?)\*\*:?|([A-Za-z][A-Za-z -]{1,30}):)\s*(.*)$/)
+    if (heading) {
+      section = sectionOf(heading[1]!)
+      continue
+    }
+    if (label) {
+      const name = label[1] ?? label[2]!
+      const known = sectionOf(name)
+      if (known !== 'skip' || label[1] !== undefined) {
+        section = known
+        line = label[3] ?? ''
+      }
+    }
+    // "... Out of scope: a, b" inside one line: the split is the boundary.
+    const inline = line.match(/^(.*?)\bout[\s-]*of[\s-]*scope\b\s*[:-]?(.*)$/i)
+    if (inline) {
+      take(section, inline[1]!)
+      take('out', inline[2]!)
+      continue
+    }
+    take(section, line)
+  }
+  return { include: [...include], exclude: [...exclude] }
+}
+
+/** The authorized host tokens of a SCOPE.md, out-of-scope entries removed. */
+export function parseScopeHosts(scopeText: string): string[] {
+  const { include, exclude } = parseScope(scopeText)
+  return include.filter((token) => !exclude.includes(token))
 }
 
 function ipv4ToInt(ip: string): number | null {
@@ -78,18 +153,23 @@ function ipv4InCidr(ip: string, cidr: string): boolean {
   return (ipInt & mask) === (rangeInt & mask)
 }
 
-/** Whether a request hostname is covered by an engagement's authorized scope tokens. */
-export function hostInScope(hostname: string, scopeHosts: string[]): boolean {
+function tokenCovers(host: string, token: string, hostIsIpv4: boolean): boolean {
+  if (token === host) return true
+  if (token.startsWith('*.') && (host === token.slice(2) || host.endsWith(token.slice(1)))) return true
+  // A plain domain token also covers its subdomains.
+  if (!token.includes('/') && isIP(token) === 0 && token !== 'localhost' && (host === token || host.endsWith(`.${token}`))) return true
+  return hostIsIpv4 && token.includes('/') && ipv4InCidr(host, token)
+}
+
+/**
+ * Whether a request hostname is covered by an engagement's authorized scope
+ * tokens. `excluded` (SCOPE.md's out-of-scope entries) wins over `scopeHosts`.
+ */
+export function hostInScope(hostname: string, scopeHosts: string[], excluded: string[] = []): boolean {
   const host = stripZoneId(hostname.toLowerCase().replace(/^\[|\]$/g, '').replace(/\.$/, ''))
   const hostIsIpv4 = isIP(host) === 4
-  for (const token of scopeHosts) {
-    if (token === host) return true
-    if (token.startsWith('*.') && (host === token.slice(2) || host.endsWith(token.slice(1)))) return true
-    // A plain domain token also covers its subdomains.
-    if (!token.includes('/') && isIP(token) === 0 && token !== 'localhost' && (host === token || host.endsWith(`.${token}`))) return true
-    if (hostIsIpv4 && token.includes('/') && ipv4InCidr(host, token)) return true
-  }
-  return false
+  if (excluded.some((token) => tokenCovers(host, token, hostIsIpv4))) return false
+  return scopeHosts.some((token) => tokenCovers(host, token, hostIsIpv4))
 }
 
 /**
@@ -203,8 +283,8 @@ export const httpProbeTool: Tool = {
     if (url.username || url.password) throw new Error('URL must not contain embedded credentials')
 
     const scopeText = await Bun.file(scopePath).text()
-    const scopeHosts = parseScopeHosts(scopeText)
-    if (!hostInScope(url.hostname, scopeHosts)) {
+    const { include: scopeHosts, exclude: excludedHosts } = parseScope(scopeText)
+    if (!hostInScope(url.hostname, scopeHosts, excludedHosts)) {
       throw new Error(
         `${url.hostname} is not in scope for "${slug}". SCOPE.md authorizes: ${scopeHosts.join(', ') || '(no hosts parsed)'}. Update the engagement scope if this target is genuinely authorized.`,
       )

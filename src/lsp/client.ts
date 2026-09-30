@@ -47,6 +47,8 @@ export class LspClient {
     private readonly args: string[],
     languageId: string,
     private readonly rootPath: string,
+    /** Where the server process runs and with what environment. Defaults to the workspace and elia's own env. */
+    private readonly launch: { cwd?: string; env?: Record<string, string> } = {},
   ) {
     this.languageId = languageId
   }
@@ -56,7 +58,8 @@ export class LspClient {
         stdin: 'pipe',
         stdout: 'pipe',
         stderr: 'pipe',
-        cwd: this.rootPath,
+        cwd: this.launch.cwd ?? this.rootPath,
+        ...(this.launch.env ? { env: this.launch.env } : {}),
         // Its own process group on POSIX, so close() can take the whole tree.
         // A language server routinely re-execs itself or hands off to a helper
         // (tsserver forks its own workers, pyright spawns node), and killing the

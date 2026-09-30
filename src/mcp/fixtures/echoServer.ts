@@ -38,6 +38,13 @@ function handle(line: string): void {
     process.stderr.write('fixture crash: simulated fatal error\n')
     process.exit(1)
   }
+  // Used by client.test.ts to observe which environment variables the client
+  // handed this subprocess: answers with the value (or null) of `params.name`.
+  if (message.method === 'test/env') {
+    const name = String(message.params?.name ?? '')
+    send({ jsonrpc: '2.0', id: message.id, result: { value: process.env[name] ?? null } })
+    return
+  }
   if (message.method === 'tools/list') {
     send({
       jsonrpc: '2.0',
