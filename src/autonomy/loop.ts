@@ -69,6 +69,8 @@ import { reliabilitySignal } from './reliability.ts'
 import type { CriticVerdict, Proposal } from './types.ts'
 import type { SessionId } from '../session/types.ts'
 import { appendActionAudit, readActionLedger, writeRunReceipt } from './audit.ts'
+import { registerOutcomeContracts, type OutcomeRecord } from './outcomesClosure.ts'
+import { writeFailureArtifact } from './failureArtifacts.ts'
 import { buildReviewDiffSection } from './reviewContext.ts'
 import { createActionGovernor, withActionGovernor, type ActionApproval, type ActionGovernor, type ActionGovernorStats, type GovernanceMode } from './governor.ts'
 import { GoalGraphStore, outstandingActions, withGoalGraph, type GoalGraphStore as GoalGraphStoreType } from './goalGraph.ts'
@@ -585,6 +587,7 @@ async function runAutonomousTaskInternal(options: AutonomousRunOptions): Promise
   let planApproved = false
   let verificationPassed = false
   let reviewPassed = false
+  let registeredOutcomes: OutcomeRecord[] = []
   // How much this run's verification is worth (mechanical > empirical > judgment).
   // Defaults to the safe floor so an early abort never claims more; the verify
   // phase sets the real value once the changed files are known.
@@ -675,6 +678,18 @@ async function runAutonomousTaskInternal(options: AutonomousRunOptions): Promise
 
     let finalOutcome = outcome
     if (actionBudget.blockedByBudget > 0 && !['rejected', 'aborted'].includes(finalOutcome)) finalOutcome = 'needs-attention'
+    const outcomeRegistration = registerOutcomeContracts({ contracts: extra.proposal?.outcomes, workspaceRoot, runId })
+    registeredOutcomes = outcomeRegistration.records
+    if (outcomeRegistration.errors.length > 0) {
+      journal.append('phase', { phase: 'outcome-registration', errors: outcomeRegistration.errors })
+      writeSubStep(`⚠ ${outcomeRegistration.errors.length} delayed outcome contract(s) could not be registered`)
+      if (finalOutcome === 'completed') finalOutcome = 'needs-attention'
+    }
+    if (registeredOutcomes.length > 0 && finalOutcome === 'completed') {
+      finalOutcome = 'needs-attention'
+      journal.append('phase', { phase: 'outcome-observation', contracts: registeredOutcomes.map((record) => record.id) })
+      writeSubStep(`Run completed immediate checks; ${registeredOutcomes.length} delayed outcome contract(s) are now being observed`)
+    }
     if (outcome === 'completed') {
       try {
         graph.completeGoal()
@@ -712,7 +727,7 @@ async function runAutonomousTaskInternal(options: AutonomousRunOptions): Promise
     // crash path must not write a second one over it.
     claimInFlightRun()
     journal.append('run-end', { outcome: finalOutcome, completion, taskSessionId: parentTask.id, graph: graph.state().nodes.map((node) => ({ id: node.id, status: node.status })) })
-    writeRunReceipt({ runId, goal, outcome: finalOutcome, taskSessionId: parentTask.id, proposal: extra.proposal, verdict: extra.verdict, lessons: extra.lessons, completion, events: journal.events(), graph: graph.state(), usage, elapsedMs: Date.now() - startedAt, maxWallClockMs: maxWallClockMs || undefined, actionBudget })
+    writeRunReceipt({ runId, goal, outcome: finalOutcome, taskSessionId: parentTask.id, proposal: extra.proposal ?? proposal, verdict: extra.verdict, lessons: extra.lessons, outcomes: registeredOutcomes, completion, events: journal.events(), graph: graph.state(), usage, elapsedMs: Date.now() - startedAt, maxWallClockMs: maxWallClockMs || undefined, actionBudget })
     const completionFacts = {
       verificationPassed,
       reviewPassed,
@@ -2004,6 +2019,7 @@ Judge what is there, not what the code looks like it would probably do. A criter
         writeSubStep(`Stopping repair — ${stuck.category}: ${stuck.reason}`)
         if (stuck.question) writeBlock('Needs a decision from you', stuck.question)
         journal.append('phase', { phase: 'reflect', attempt, note: `stopped (${progress.trend} / ${stuck.category}): ${stuck.reason}${stuck.question ? ` Question: ${stuck.question}` : ''}` })
+        try { writeFailureArtifact({ runId, goal, gate, attempts: attempt, trend: progress.trend, fingerprints: progress.repeated, diagnosis: stuck.reason, workspaceRoot }) } catch { /* best effort */ }
         const auto = repeatedFailureLesson({ goal, gate, repeated: progress.repeated, attempts: attempt })
         const lessons = await captureLessons(goal, proposal, 'unresolved', journal, track, governor, graph, verificationRegime, runSignal, auto ? [auto] : [])
         return done('needs-attention', { proposal, verdict, lessons })
@@ -2039,6 +2055,9 @@ Judge what is there, not what the code looks like it would probably do. A criter
       // run that was still converging when the budget ran out has no dead
       // approach to warn a future run about.
       const recurred = progress.trend === 'stalled' || progress.trend === 'diverging' ? progress.repeated : []
+      if (recurred.length > 0) {
+        try { writeFailureArtifact({ runId, goal, gate, attempts: attempt, trend: progress.trend, fingerprints: recurred, diagnosis: why, workspaceRoot }) } catch { /* best effort */ }
+      }
       const auto = repeatedFailureLesson({ goal, gate, repeated: recurred, attempts: attempt })
       const lessons = await captureLessons(goal, proposal, 'unresolved', journal, track, governor, graph, verificationRegime, runSignal, auto ? [auto] : [])
       return done('needs-attention', { proposal, verdict, lessons })

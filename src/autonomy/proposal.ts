@@ -1,5 +1,5 @@
 import type { Tool } from '../tools/types.ts'
-import { isRoleName, ROLE_NAMES, type Proposal, type ProposalStep } from './types.ts'
+import { isRoleName, ROLE_NAMES, type OutcomeContract, type Proposal, type ProposalStep } from './types.ts'
 import { fileCollisions, planWaves } from './fleet.ts'
 import { bold, dim, cyan, red, gold } from '../ui/theme.ts'
 import { wrapText } from '../ui/layout.ts'
@@ -10,6 +10,7 @@ const LOCAL_SERVER_REQUEST = /(?:^|[\s;&|(])(?:curl|wget|http|Invoke-WebRequest|
 
 const MAX_PROPOSAL_STEPS = 32
 const MAX_VERIFICATION_COMMANDS = 16
+const MAX_OUTCOME_CONTRACTS = 16
 
 /**
  * Turns whatever the model produced into a validated proposal, or an explanation
@@ -81,6 +82,10 @@ export function parseProposal(raw: unknown): { proposal: Proposal } | { error: s
   // only that the workers stopped. Weaker models omit this field even though the
   // schema requires it, so it is enforced here rather than assumed.
   const verification = asStringArray(input.verification)
+  const parsedOutcomes = parseOutcomeContracts(input.outcomes)
+  if ('error' in parsedOutcomes) return parsedOutcomes
+  const acceptanceCriteria = asStringArray(input.acceptanceCriteria)
+  const outcomes = [...parsedOutcomes.contracts, ...extractOutcomeContracts(acceptanceCriteria)].slice(0, MAX_OUTCOME_CONTRACTS)
   // A type error reported as a content error is the expensive kind. Sent the
   // generic "needs a command that will actually fail" below, a model rewrites
   // its commands — cmd, PowerShell, `test -f`, a bun script — and every one is
@@ -175,11 +180,45 @@ export function parseProposal(raw: unknown): { proposal: Proposal } | { error: s
       risks: asStringArray(input.risks),
       verification,
       outOfScope: asStringArray(input.outOfScope),
-      acceptanceCriteria: asStringArray(input.acceptanceCriteria),
+      acceptanceCriteria,
+      outcomes,
       sideEffects: asStringArray(input.sideEffects),
       recovery: asStringArray(input.recovery),
     },
   }
+}
+
+function parseOutcomeContracts(raw: unknown): { contracts: OutcomeContract[] } | { error: string } {
+  if (raw === undefined) return { contracts: [] }
+  if (!Array.isArray(raw)) return { error: 'proposal.outcomes must be an array of typed contracts' }
+  if (raw.length > MAX_OUTCOME_CONTRACTS) return { error: `proposal.outcomes cannot contain more than ${MAX_OUTCOME_CONTRACTS} contracts` }
+  const contracts: OutcomeContract[] = []
+  for (const [index, item] of raw.entries()) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) return { error: `proposal.outcomes[${index}] must be an object` }
+    const value = item as Record<string, unknown>
+    const title = asString(value.title)
+    const after = asString(value.after)
+    const probe = value.probe
+    if (!title || !after || !probe || typeof probe !== 'object' || Array.isArray(probe)) return { error: `proposal.outcomes[${index}] requires title, after, and probe` }
+    const p = probe as Record<string, unknown>
+    const path = asString(p.path)
+    if (!path) return { error: `proposal.outcomes[${index}].probe.path is required` }
+    if (p.kind === 'file-exists') contracts.push({ title, after, probe: { kind: 'file-exists', path } })
+    else if (p.kind === 'file-contains' && asString(p.text)) contracts.push({ title, after, probe: { kind: 'file-contains', path, text: asString(p.text)! } })
+    else return { error: `proposal.outcomes[${index}].probe.kind must be file-exists or file-contains; file-contains also needs text` }
+  }
+  return { contracts }
+}
+
+function extractOutcomeContracts(criteria: string[]): OutcomeContract[] {
+  const extracted: OutcomeContract[] = []
+  for (const criterion of criteria) {
+    const exists = /^after\s+(\d+(?:\.\d+)?[smhd])\s*:\s*(?:file\s+)?exists\s+(.+)$/i.exec(criterion.trim())
+    if (exists) extracted.push({ title: criterion.trim(), after: exists[1]!, probe: { kind: 'file-exists', path: exists[2]!.trim() } })
+    const contains = /^after\s+(\d+(?:\.\d+)?[smhd])\s*:\s*(?:file\s+)?(.+?)\s+contains\s+["'](.+)["']$/i.exec(criterion.trim())
+    if (contains) extracted.push({ title: criterion.trim(), after: contains[1]!, probe: { kind: 'file-contains', path: contains[2]!.trim(), text: contains[3]! } })
+  }
+  return extracted
 }
 
 function isEnvironmentProbe(command: string): boolean {
@@ -285,6 +324,11 @@ Break the work into the smallest number of steps that are genuinely separable, a
           description: 'Related things you are deliberately not doing',
         },
         acceptanceCriteria: { type: 'array', items: { type: 'string' }, description: 'Observable conditions and evidence required for completion' },
+        outcomes: {
+          type: 'array',
+          description: 'Deterministic postconditions checked after the run settles; never use arbitrary shell or network commands',
+          items: { type: 'object', properties: { title: { type: 'string' }, after: { type: 'string' }, probe: { type: 'object', properties: { kind: { type: 'string', enum: ['file-exists', 'file-contains'] }, path: { type: 'string' }, text: { type: 'string' } }, required: ['kind', 'path'] } }, required: ['title', 'after', 'probe'] },
+        },
         sideEffects: { type: 'array', items: { type: 'string' }, description: 'External or irreversible effects identified in this plan' },
         recovery: { type: 'array', items: { type: 'string' }, description: 'What to do when a dependency, credential, environment, or approval blocks progress' },
       },
