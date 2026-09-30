@@ -50,7 +50,7 @@ const CATALOG: CapabilityContract[] = [
   contract('deployment', 'critical', ['process', 'network-read', 'external-write'], false, 'provider receipt and live postcondition'),
   contract('browser', 'critical', ['network-read', 'external-write'], false, 'fresh browser state or user takeover'),
   contract('communication', 'critical', ['external-write'], false, 'approved content and delivery readback'),
-  ...['new_engagement', 'run_security_tool', 'http_probe', 'log_finding', 'engagement_report'].map((tool) => contract(tool, 'critical', ['security'], false, 'authorized scope and evidence artifact')),
+  ...['new_engagement', 'run_security_tool', 'http_probe', 'log_finding', 'engagement_report', 'flag_verify'].map((tool) => contract(tool, 'critical', ['security'], false, 'authorized scope and evidence artifact')),
   // The CTF and triage tools only observe: a toolchain report, a stored
   // procedure, and a parse of recon output elia already saved. None of them
   // spawns a process or reaches a target, which is the line that separates them

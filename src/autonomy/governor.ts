@@ -798,6 +798,19 @@ export function assessAction(request: ActionRequest, cwd = currentAgent().cwd ??
     return assessment('review', 'approve', 'engagement_report compiles a workspace-local Markdown report from logged findings', 'engagement_report', resources, true)
   }
 
+  // flag_verify never touches a target: it hashes a candidate string and reads
+  // local challenge artifacts to see whether that string is actually in them.
+  // That read is bounded and content-blind — it returns whether a byte sequence
+  // was present, never the file's contents — so it cannot be used to exfiltrate
+  // a file. With an engagement slug it also appends a verdict line inside that
+  // engagement's own recon/ folder, which is the same workspace-local write
+  // log_finding does above. The capability contract still lists it critical on
+  // purpose: the contract records that a flag verdict is a security claim, while
+  // the runtime assessment reflects what this specific tool actually does.
+  if (name === 'flag_verify') {
+    return assessment('safe', 'allow', 'flag_verify hashes a candidate flag and searches local challenge artifacts for it without returning their contents; any engagement record is written inside that engagement recon/ folder', 'flag_verify', resources, true)
+  }
+
   // The CTF and triage tools are observation, not action, so they sit beside
   // project_profile and dependency_audit rather than the scanners above:
   // ctf_playbook and security_triage only read local files.
