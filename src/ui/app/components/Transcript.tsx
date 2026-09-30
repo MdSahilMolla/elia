@@ -3,6 +3,7 @@ import { Box, Static, Text } from 'ink'
 import type { Item } from '../store.ts'
 import { palette } from '../theme.ts'
 import { TranscriptItemView } from './TranscriptItem.tsx'
+import { useFrameWidth, wrapPlain } from '../wrap.ts'
 
 /**
  * Finished turns go through <Static> — Ink prints each once, above the live
@@ -33,6 +34,7 @@ export function Transcript({
   width?: number
 }) {
   const staticStyle = useMemo(() => (width ? { width } : undefined), [width])
+  const frameWidth = useFrameWidth()
   // A run of status notes reads as one block: only the first gets a gap above it.
   const leadsNotes = (item: Item, previous: Item | undefined): boolean =>
     item.kind === 'notice' && previous !== undefined && previous.kind !== 'notice'
@@ -46,7 +48,7 @@ export function Transcript({
       <Box flexDirection="column">
         {hiddenRows > 0 && (
           <Text color={palette.muted}>
-            {'  '}… {hiddenRows} line{hiddenRows === 1 ? '' : 's'} above, printed in full once finished
+            {wrapPlain(`  … ${hiddenRows} line${hiddenRows === 1 ? '' : 's'} above, printed in full once finished`, frameWidth)}
           </Text>
         )}
         {live.map((item, i) => (
