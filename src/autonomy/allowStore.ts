@@ -4,7 +4,11 @@ import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import type { ActionAssessment, ActionRequest } from './governor.ts'
 import { userPreauthSecret } from './preauth.ts'
+import { activeMode, AGENT_MODES, type AgentMode } from './mode.ts'
 import { noteCorruptState } from '../localJson.ts'
+
+/** The modes a stored `mode` tag may name. Anything else is a malformed rule. */
+const KNOWN_MODES = new Set<string>(AGENT_MODES)
 
 /**
  * A persistent "always allow" list — the counterpart to `.elia/policy.json`.
@@ -43,6 +47,20 @@ export interface AllowRule {
   commandPrefix?: string
   /** Governor intent (`edit_file.write`, `github.push`) — narrows non-command tools. */
   intent?: string
+  /**
+   * Restricts the rule to one mode, checked against the mode the turn is
+   * actually running as. Absent means every mode, which is the right default for
+   * a rule a person wrote by hand or the approval flow persisted — "always allow
+   * `git status`" is not a security-scoped statement.
+   *
+   * `/scope all` sets this to `cyber`. Its grants are standing permission to run
+   * installs, probes, and reads that only make sense inside a security run, and
+   * a permission scoped to that run has to stop when the run stops. Without the
+   * field, `/scope all` quietly widened dev too: the intents it grants are
+   * cyber-shaped, but the *store* was not, so the same command in a dev turn
+   * rode in on a grant given to a CTF.
+   */
+  mode?: AgentMode
   /** ISO timestamp the rule was added. */
   addedAt: string
   /** Free-text note (the assessment reason at the time), for humans reading the file. */
@@ -149,7 +167,14 @@ function load(path: string): AllowFile {
       } else {
         file = {
           rules: raw.rules
-            .filter((r): r is AllowRule => Boolean(r) && typeof r.tool === 'string')
+            .filter((r): r is AllowRule => {
+              if (!r || typeof r.tool !== 'string') return false
+              // A `mode` outside the known set is dropped rather than treated as
+              // absent. An unrecognized tag cannot be matched against a running
+              // mode, and quietly reading it as "no mode" would widen a
+              // cyber-scoped grant to every mode.
+              return r.mode === undefined || KNOWN_MODES.has(r.mode)
+            })
             .slice(0, MAX_RULES),
         }
       }
@@ -223,6 +248,10 @@ function directProgramPrefix(input: Record<string, unknown>): string {
 }
 
 function matches(rule: AllowRule, request: ActionRequest, assessment: ActionAssessment): boolean {
+  // A mode-scoped rule is authority given for one mode and no other. Checked
+  // first so a cyber-scoped grant can never be read as a general one, whatever
+  // the tool and intent below would have matched.
+  if (rule.mode !== undefined && rule.mode !== activeMode()) return false
   // "Always allow changes to elia's own source" means every file tool, not only
   // the one that happened to ask.
   if (rule.intent === 'self_edit') return assessment.intent === 'self_edit'
@@ -235,6 +264,18 @@ function matches(rule: AllowRule, request: ActionRequest, assessment: ActionAsse
     // @secrets.txt`, `git` must not cover `git reset --hard; git push --force`),
     // so it must never ride in on a prefix rule — prompt instead.
     if (COMMAND_CHAIN_SYNTAX.test(command)) return false
+    // An intent-only rule is a broader grant that the caller had to ask for
+    // explicitly: `/scope all` writes one for the shell families a security run
+    // needs, so a single approval covers `apt install gdb`, `apt install
+    // radare2` and `sudo apt install python3-pip` instead of demanding a
+    // separate "yes" per package.
+    //
+    // The chain guard above still runs first and is not bypassed by this: an
+    // intent rule widens *which commands of a class* are allowed, never what a
+    // command may chain onto. `shell.sensitive-read` rules are the sharp edge
+    // here, and they are written by `/scope all` for a run the user started,
+    // never inferred from a prefix somebody happened to approve earlier.
+    if (!rule.commandPrefix && rule.intent) return rule.intent === assessment.intent
     return Boolean(rule.commandPrefix) && commandPrefix(command) === rule.commandPrefix
   }
   if (request.name === 'run_program') {
@@ -267,17 +308,49 @@ export function ruleLabel(rule: AllowRule): string {
   return `\`${rule.tool}\``
 }
 
+/**
+ * Rule identity: what it covers, and which mode it was given for.
+ *
+ * `mode` belongs in here because a cyber-scoped grant and an unscoped one for
+ * the same intent are genuinely different permissions. Collapsing them would
+ * mean `/scope clear` deletes a hand-written rule the operator never asked it to
+ * touch, and `/scope all` could report a grant already present when the standing
+ * mode-agnostic one it found is not the one it wrote.
+ */
+function isSameRule(a: AllowRule, b: AllowRule): boolean {
+  return a.tool === b.tool && a.commandPrefix === b.commandPrefix && a.intent === b.intent && a.mode === b.mode
+}
+
 export function addAllowRule(rule: AllowRule, scope: AllowScope, cwd = process.cwd()): void {
   const path = allowPath(scope, cwd)
   const file = load(path)
-  const duplicate = file.rules.some(
-    (r) => r.tool === rule.tool && r.commandPrefix === rule.commandPrefix && r.intent === rule.intent,
-  )
+  const duplicate = file.rules.some((r) => isSameRule(r, rule))
   const rules: AllowRule[] = duplicate ? file.rules : [...file.rules, rule].slice(-MAX_RULES)
   const next: AllowFile = scope === 'global' ? { rules, mac: signRules(rules) } : { rules }
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 })
   writeFileSync(path, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 })
   cache.delete(path)
+}
+
+/**
+ * Drop every rule matching `rule`'s identity, returning how many were removed.
+ *
+ * A grant that cannot be taken back is a grant nobody can decline: `/scope all`
+ * is a standing yes, and the way a person revokes one has to be a command, not
+ * an editor and a signed file. Identity is the same triple `addAllowRule` uses
+ * to decide a rule is a duplicate, so re-adding after a removal is clean.
+ */
+export function removeAllowRule(rule: AllowRule, scope: AllowScope, cwd = process.cwd()): number {
+  const path = allowPath(scope, cwd)
+  const file = load(path)
+  const rules = file.rules.filter((r) => !isSameRule(r, rule))
+  const removed = file.rules.length - rules.length
+  if (removed === 0) return 0
+  const next: AllowFile = scope === 'global' ? { rules, mac: signRules(rules) } : { rules }
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 })
+  writeFileSync(path, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 })
+  cache.delete(path)
+  return removed
 }
 
 /** Test seam. */
