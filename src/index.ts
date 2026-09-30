@@ -15,6 +15,7 @@ import { runBench, runBenchLatency } from './cli/bench.ts'
 import { runCompounding, runDistill, runEvolve, runGap, runJev, runValues, runWorld } from './cli/selfImprove.ts'
 import { runConfig, runControl, runSkills } from './cli/settings.ts'
 import { runDaemon, runDoctor, runSchedule } from './cli/ops.ts'
+import { runOutcomes } from './cli/outcomes.ts'
 import { runFork, runResume, runRuns, runSessionsList } from './cli/sessions.ts'
 import { runAgentCommand, runAuto } from './cli/agent.ts'
 
@@ -126,6 +127,8 @@ async function main() {
       return runResume()
     case 'schedule':
       return runSchedule()
+    case 'outcomes':
+      return runOutcomes()
     case 'daemon':
       return runDaemon()
     case 'doctor':
