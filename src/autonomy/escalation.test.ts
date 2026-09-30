@@ -14,6 +14,10 @@ const escalates = [
   // "site" mentioned in passing does not make the project a website.
   'build a system to monitor site uptime and alert on-call',
   'create a site reliability dashboard for our kubernetes clusters',
+  // A program with scale behind it is still a project.
+  'build a multiplayer online chess game with accounts and a leaderboard',
+  'create a discord bot with a database of user scores and an admin dashboard',
+  'build a 3d game engine in rust',
 ]
 
 const stays = [
@@ -36,6 +40,11 @@ const stays = [
   'create a dynamic website for navigating kolkata',
   'create a website for nepal mountain treaking make sure the website describe the cost, the places and also a map of where they will travel',
   'make an interactive web page showing the kolkata metro lines',
+  // A small self-contained program: session muo052t5 spent 2m37s in the pipeline on the first.
+  'create a python game for tic tac toe',
+  'write a snake game in python using curses',
+  'make a cli calculator in go',
+  'create a script that renames my photos by date',
 ]
 
 test('large project builds escalate', () => {

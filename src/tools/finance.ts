@@ -111,8 +111,11 @@ function unitEconomics(input: Record<string, unknown>): string {
 }
 
 function runway(input: Record<string, unknown>): string {
+  // Seen live: "cash and monthly net burn" has no revenue in it, and a required
+  // monthlyRevenue cost the model three failed calls to discover. Missing revenue is zero.
+  if (typeof input.monthlyExpenses !== 'number') throw new Error('runway needs cashBalance and monthlyExpenses (monthly costs, or net burn); monthlyRevenue is optional and defaults to 0')
   const cashBalance = numberValue(input, 'cashBalance', { min: 0 })
-  const monthlyRevenue = numberValue(input, 'monthlyRevenue', { min: 0 })
+  const monthlyRevenue = optionalNumber(input, 'monthlyRevenue', { min: 0 }) ?? 0
   const monthlyExpenses = numberValue(input, 'monthlyExpenses', { min: 0 })
   const netBurn = Math.max(0, monthlyExpenses - monthlyRevenue)
   const runwayMonths = netBurn > 0 ? cashBalance / netBurn : null
@@ -129,6 +132,7 @@ function runway(input: Record<string, unknown>): string {
     interpretation: [
       'Runway is cash balance divided by positive net monthly burn; it excludes financing, taxes, seasonality, one-time costs, and working-capital timing unless included in the inputs.',
       runwayMonths === null ? 'No finite runway is calculated because the supplied monthly revenue covers monthly expenses.' : 'This is a static monthly estimate, not a forecast of survival under changing conditions.',
+      ...(input.monthlyRevenue === undefined ? ['No monthly revenue was supplied, so it was taken as 0 and monthlyExpenses as the whole net burn.'] : []),
     ],
     disclosure: disclosure(input),
   }, null, 2)

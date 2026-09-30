@@ -319,7 +319,25 @@ export interface SkillStorageOptions {
   quarantineDir?: string
   /** Replaces the builder subagent that writes the draft — tests only, so no test spends a model call. */
   draft?: (prompt: string, stagingFile: string) => Promise<void>
+  /** How soon after its last revision a skill may be rewritten again (default `MIN_REVISION_INTERVAL_MS`). */
+  minRevisionIntervalMs?: number
 }
+
+/**
+ * A skill is rewritten at most this often. Lessons cross the trust bar and
+ * back as their evidence moves, and each crossing was a full rewrite: the
+ * elia-development-workflow skill went v15, v16, v17 inside 50 seconds, "8
+ * source lessons retired" each time, with "2 new" in between. Waiting batches
+ * those swings into one rewrite of what has settled.
+ */
+export const MIN_REVISION_INTERVAL_MS = 30 * 60_000
+
+/**
+ * The pass in flight, if any. Every finished turn starts one in the background;
+ * two turns seconds apart both read v19 and both wrote "v20" (session
+ * muo052t5, 2026-09-30), two model calls for one revision.
+ */
+let evolutionInFlight: Promise<string[]> | undefined
 
 export async function createInstructionSkill(cluster: LessonEvidence[], options: SkillStorageOptions = {}): Promise<SkillEvolutionResult> {
   const root = options.root ?? INSTRUCTION_SKILLS_ROOT
@@ -463,6 +481,17 @@ export function relatesToSkill(candidate: LessonEvidence, meta: InstructionSkill
  * fail one.
  */
 export async function evolveInstructionSkills(lessonsPath = paths.lessons, options: SkillStorageOptions = {}): Promise<string[]> {
+  // A pass already running will see the same lessons; a second one only races it.
+  if (evolutionInFlight) return []
+  evolutionInFlight = evolveInstructionSkillsOnce(lessonsPath, options)
+  try {
+    return await evolutionInFlight
+  } finally {
+    evolutionInFlight = undefined
+  }
+}
+
+async function evolveInstructionSkillsOnce(lessonsPath: string, options: SkillStorageOptions): Promise<string[]> {
   const root = options.root ?? INSTRUCTION_SKILLS_ROOT
   const log: string[] = []
   try {
@@ -480,6 +509,7 @@ export async function evolveInstructionSkills(lessonsPath = paths.lessons, optio
       if (revisions >= MAX_REVISIONS_PER_PASS) break
       const meta = readSkillMeta(slug, root)
       if (!meta) continue
+      if (Date.now() - meta.updatedAt < (options.minRevisionIntervalMs ?? MIN_REVISION_INTERVAL_MS)) continue
       const known = new Set(meta.sourceLessonKeys)
       const currentKeys = new Set(evidence.map((item) => item.key))
       const added = evidence.filter((item) => !known.has(item.key) && relatesToSkill(item, meta, evidenceByKey))

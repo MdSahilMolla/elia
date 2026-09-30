@@ -71,8 +71,16 @@ export function formatAutonomousRunSummary(goal: string, result: AutonomousRunRe
     `\nFiles this run created or touched (${result.completion.completedSteps}/${result.completion.totalSteps} steps completed): ${touchedFiles.join(', ')}`
     + (result.outcome === 'completed' ? '' : '\nBefore doing anything else for this goal, check what is already there — do not start a fresh implementation from scratch.')
   )
+  // A run builds in its own folder; its file names are relative to it. Without
+  // the folder, the next turn ("go ahead, run it") looked for tic_tac_toe.py
+  // where elia was launched, said it "wasn't created", and wrote a second copy
+  // (session muo052t5).
+  const where = result.workspace && result.workspace.root !== result.workspace.launchedFrom
+    ? `\nThis run worked in ${result.workspace.root}: the file names above are relative to it, so pass it as cwd (or use the full path) to read, run or change them.`
+    : ''
   return `[autonomous run: ${result.outcome}] ${redactText(result.proposal?.goal ?? goal, 200)} · `
     + `${result.actionBudget?.consumed ?? 0} actions · ${formatElapsed(result.elapsedMs)}`
     + filesLine
+    + (filesLine ? where : '')
     + (result.lessons.length > 0 ? `\nLessons captured: ${result.lessons.join('; ')}` : '')
 }
