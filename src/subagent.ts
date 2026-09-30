@@ -19,6 +19,8 @@ import { createDelegationTool, MAX_DELEGATION_DEPTH } from './tools/delegate.ts'
 import { activeGoalGraph, withGoalGraph, withGoalNode, type GoalGraphStore } from './autonomy/goalGraph.ts'
 import type { Journal } from './autonomy/journal.ts'
 import { requiredToolReminders } from './requiredTool.ts'
+import { deferredToolsForMode, lazyToolsEnabled } from './tools/lazyTools.ts'
+import { providerCapabilities } from './providers/registry.ts'
 
 export interface SubAgentRequest {
   prompt: string
@@ -248,6 +250,10 @@ export async function runSubAgent(request: SubAgentRequest): Promise<SubAgentRes
         return deep.providerName === 'unconfigured' ? [] : [{ provider: deep.provider, providerName: deep.providerName, model: deep.model, label: deep.label }]
       },
       maxSteps: definition.maxSteps,
+      // A worker's specialists (a scout's browser, a builder's database) go out
+      // as a catalog too; what it loads is its own, not the lead's.
+      deferTools: lazyToolsEnabled(providerCapabilities(tier.providerName).kind) ? deferredToolsForMode(activeMode()) : undefined,
+      loadedTools: new Set(),
       useAnimation: false,
       verbose: false,
       onTool: (event) => {

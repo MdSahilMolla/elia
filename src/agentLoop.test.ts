@@ -1474,3 +1474,107 @@ test('a model that keeps writing its tool call as text is corrected twice, then 
   expect(warnings).toHaveLength(3)
   expect(warnings.at(-1)?.title).toMatch(/no tool ran/)
 })
+
+test('a deferred tool is sent as a catalog entry, and its definition follows once it is loaded or called', async () => {
+  const { resetLoadedToolsForTests } = await import('./tools/lazyTools.ts')
+  resetLoadedToolsForTests()
+  const seen: string[][] = []
+  const ran: string[] = []
+  const tool = (name: string): Tool => ({ name, description: `${name}.`, input_schema: { type: 'object', properties: {} }, async execute() { ran.push(name); return `${name} ok` } })
+  const replies: ContentBlock[][] = [
+    [{ type: 'tool_use', id: 'l1', name: 'load_tools', input: { names: ['finance'] } }],
+    [{ type: 'tool_use', id: 'g1', name: 'grep', input: {} }],
+    [{ type: 'text', text: 'done' }],
+  ]
+  try {
+    await runAgentLoop({
+      messages: [{ role: 'user', content: [{ type: 'text', text: 'go' }] }], systemPrompt: 'test', providerName: 'mercury', model: 'lazy-tools-test', useAnimation: false, verbose: false,
+      tools: [tool('read_file'), tool('grep'), tool('finance')],
+      deferTools: new Set(['grep', 'finance']),
+      provider: {
+        async streamTurn(params) {
+          seen.push(params.tools.map((definition) => definition.name))
+          return { content: replies.shift()!, usage: ZERO_USAGE }
+        },
+      },
+    })
+  } finally {
+    resetLoadedToolsForTests()
+  }
+  expect(seen[0]).toEqual(['read_file', 'load_tools'])
+  expect(seen[1]).toEqual(['read_file', 'load_tools', 'finance'])
+  // grep was never loaded, but a direct call still ran it, and attached it.
+  expect(ran).toEqual(['grep'])
+  expect(seen[2]).toEqual(['read_file', 'load_tools', 'finance', 'grep'])
+})
+
+test('a failed first direct call to a deferred tool gets its full parameters back', async () => {
+  const { resetLoadedToolsForTests } = await import('./tools/lazyTools.ts')
+  resetLoadedToolsForTests()
+  const messages: ConversationMessage[] = [{ role: 'user', content: [{ type: 'text', text: 'go' }] }]
+  const grep: Tool = { name: 'grep', description: 'Search.', input_schema: { type: 'object', properties: { pattern: { type: 'string' } }, required: ['pattern'] }, async execute(input) { if (!input.pattern) throw new Error('pattern is required'); return 'hit' } }
+  const replies: ContentBlock[][] = [
+    [{ type: 'tool_use', id: 'g1', name: 'grep', input: {} }],
+    [{ type: 'tool_use', id: 'g2', name: 'grep', input: {} }],
+    [{ type: 'text', text: 'done' }],
+  ]
+  try {
+    await runAgentLoop({
+      messages, systemPrompt: 'test', providerName: 'mercury', model: 'lazy-schema-test', useAnimation: false, verbose: false,
+      tools: [grep], deferTools: new Set(['grep']), loadedTools: new Set(),
+      provider: {
+        async streamTurn() {
+          return { content: replies.shift()!, usage: ZERO_USAGE }
+        },
+      },
+    })
+  } finally {
+    resetLoadedToolsForTests()
+  }
+  const results = messages.flatMap((message) => message.content.flatMap((block) => (block.type === 'tool_result' ? [block.content] : [])))
+  expect(results[0]).toContain('pattern is required')
+  expect(results[0]).toContain('the full parameters of grep')
+  // Once attached, a later failure is just the error.
+  expect(results[1]).not.toContain('the full parameters')
+})
+
+test('a request that never started is asked again on the same route, at once', async () => {
+  resetProviderHealthForTests()
+  let calls = 0
+  const stuckOnce = { async streamTurn(params: { onText: (delta: string) => void }) {
+    calls += 1
+    if (calls === 1) throw new Error('response stalled: no reply started within 20s (timed out)')
+    params.onText('ok')
+    return { content: [{ type: 'text', text: 'ok' }] as ContentBlock[], usage: ZERO_USAGE }
+  } }
+  const other = { async streamTurn(): Promise<never> { throw new Error('the fallback should not be asked') } }
+  const started = Date.now()
+  await runAgentLoop({
+    messages: [], systemPrompt: 'test', tools: [], provider: stuckOnce, providerName: 'mercury', model: 'stuck-test', useAnimation: false, verbose: false,
+    fallbacks: [{ provider: other, providerName: 'groq', model: 'other' }],
+  })
+  expect(calls).toBe(2)
+  expect(Date.now() - started).toBeLessThan(1_000)
+})
+
+test('a route refused for a per-minute token cap is not sent requests over it again', async () => {
+  resetProviderHealthForTests()
+  const asked: string[] = []
+  const capped = { async streamTurn(): Promise<never> {
+    asked.push('capped')
+    throw new Error('413 Request too large for model `m` on tokens per minute (TPM): Limit 10, Requested 5000')
+  } }
+  const works = { async streamTurn(params: { onText: (delta: string) => void }) {
+    asked.push('works')
+    params.onText('ok')
+    return { content: [{ type: 'text', text: 'ok' }] as ContentBlock[], usage: ZERO_USAGE }
+  } }
+  const run = () => runAgentLoop({
+    messages: [{ role: 'user', content: [{ type: 'text', text: 'hello there' }] }], systemPrompt: 'a system prompt long enough to be over ten tokens', tools: [], provider: capped, providerName: 'groq', model: 'tpm-cap-test', useAnimation: false, verbose: false,
+    fallbacks: [{ provider: works, providerName: 'mercury', model: 'tpm-fallback' }],
+  })
+  await run()
+  await run()
+  // Once, straight to the fallback with no shrink-and-resend; then not at all.
+  expect(asked).toEqual(['capped', 'works', 'works'])
+})

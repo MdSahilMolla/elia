@@ -51,6 +51,21 @@ export function streamIdleMs(env: NodeJS.ProcessEnv = process.env): number {
   return Number.isFinite(raw) && raw > 0 ? raw : 120_000
 }
 
+/**
+ * How long to wait for the *first* chunk. A response that has started may
+ * pause (a long tool call being written), but one that has not started within
+ * seconds is stuck: mercury answers in 1.5-3.5s, and every one of the 122s
+ * waits in the 29 recorded sessions (2026-09-30) was a request that never sent
+ * a byte, sitting out the whole idle budget before anything tried again.
+ * Prefill grows with the request, so the budget does too: 20s, plus a second
+ * per 16k characters sent, at most 90s. `ELIA_FIRST_BYTE_MS` overrides.
+ */
+export function firstByteMs(requestChars: number, env: NodeJS.ProcessEnv = process.env): number {
+  const raw = Number(env.ELIA_FIRST_BYTE_MS)
+  if (Number.isFinite(raw) && raw > 0) return raw
+  return Math.min(90_000, 20_000 + Math.round(requestChars / 16))
+}
+
 export function createOpenAICompatibleProvider(
   apiKey: string,
   model: string,
@@ -61,7 +76,10 @@ export function createOpenAICompatibleProvider(
   const validatedBaseURL = baseURL
     ? validateNetworkUrl(baseURL, { allowExplicitLocal, requireHttps: true }).toString()
     : baseURL
-  const client = new OpenAI({ apiKey, baseURL: validatedBaseURL, timeout: 180_000, maxRetries: 1, ...(options.gemini ? { fetch: geminiFetch() } : {}) })
+  // No SDK retries: it waited out a server's retry-after (up to a minute) with
+  // nothing on screen, then the agent loop's own retry policy ran on top of it.
+  // Every retry and fallback is decided, and said, in agentLoop.ts.
+  const client = new OpenAI({ apiKey, baseURL: validatedBaseURL, timeout: 180_000, maxRetries: 0, ...(options.gemini ? { fetch: geminiFetch() } : {}) })
   // Reasoning-capable OpenAI-compatible models (Groq's gpt-oss, DeepSeek's API,
   // others) emit reasoning as a non-standard `reasoning`/`reasoning_content`
   // field with no enable/disable request param — there is nothing to toggle in
@@ -99,19 +117,23 @@ export function createOpenAICompatibleProvider(
       let emittedContent = false
       const thoughts = geminiThoughts ? createThoughtSplitter() : undefined
       const idleMs = streamIdleMs()
+      const openAIMessages = toOpenAIMessages(fullSystem, messages, wire)
+      const startMs = firstByteMs(JSON.stringify(openAIMessages).length + JSON.stringify(openAITools).length)
       const stall = new AbortController()
       let idleTimer: ReturnType<typeof setTimeout> | undefined
+      let started = false
       const stillAlive = () => {
+        started = true
         if (idleTimer) clearTimeout(idleTimer)
         idleTimer = setTimeout(() => stall.abort(), idleMs)
       }
-      stillAlive()
+      idleTimer = setTimeout(() => stall.abort(), startMs)
       const streamSignal = signal ? AbortSignal.any([signal, stall.signal]) : stall.signal
       const runner = client.chat.completions
         .stream({
           model,
           max_tokens: maxTokens,
-          messages: toOpenAIMessages(fullSystem, messages, wire),
+          messages: openAIMessages,
           tools: openAITools,
           // Let the model emit several tool calls in one response so elia can run
           // them in parallel — the single biggest lever on agent wall-clock is
@@ -184,7 +206,11 @@ export function createOpenAICompatibleProvider(
       try {
         const completion = await runner.finalChatCompletion().catch((error: unknown) => {
           // Worded to read as a timeout, which is what routes to the next provider.
-          if (stall.signal.aborted && !signal?.aborted) throw new Error(`response stalled: nothing arrived for ${Math.round(idleMs / 1000)}s (timed out)`)
+          if (stall.signal.aborted && !signal?.aborted) {
+            throw new Error(started
+              ? `response stalled: nothing arrived for ${Math.round(idleMs / 1000)}s (timed out)`
+              : `response stalled: no reply started within ${Math.round(startMs / 1000)}s (timed out)`)
+          }
           throw error
         })
         const message = completion.choices[0]?.message

@@ -532,3 +532,11 @@ test('a 402 with no affordable length, or too little of one, stays a 402', async
   await expect(provider.streamTurn({ cwd: process.cwd(), system: 'sys', messages: USER_MESSAGES, tools: [], onText: () => {} })).rejects.toThrow('402')
   expect(calls).toBe(1)
 })
+
+test('the first-byte budget grows with the request and is capped', async () => {
+  const { firstByteMs } = await import('./openaiCompatible.ts')
+  expect(firstByteMs(0, {})).toBe(20_000)
+  expect(firstByteMs(64_000, {})).toBe(24_000)
+  expect(firstByteMs(10_000_000, {})).toBe(90_000)
+  expect(firstByteMs(64_000, { ELIA_FIRST_BYTE_MS: '5000' })).toBe(5_000)
+})
