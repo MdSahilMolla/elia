@@ -28,6 +28,7 @@ import { formatCostUsd, sessionCost } from '../usage.ts'
 import { isSensitivePath } from '../autonomy/sensitivePaths.ts'
 import type { AutonomyProfile } from '../autonomy/loop.ts'
 import { addEventGoal, addUserGoal, MAX_ATTEMPTS, nextGoal, refreshBacklog } from './backlog.ts'
+import { isQuotaExhaustedError, isUnusableRouteError } from '../providerErrors.ts'
 import type { CapabilityScope } from '../autonomy/capabilityContract.ts'
 import { scopeHook } from './scopes.ts'
 import { describeTrigger, fetchPage, loadWatchers, pollWatchers, runGh, type TriggerDeps } from './watch.ts'
@@ -55,6 +56,21 @@ import { formUnderstanding, type UnderstandingModel } from './understand.ts'
 import type { Goal, GoalOutcome, HealthReport, PilotState } from './types.ts'
 
 export class PilotError extends Error {}
+
+/**
+ * The model provider will not answer at all: out of quota, payment required,
+ * an invalid key. Nothing about the goal is wrong, so it must not count as an
+ * attempt: on elia's own pilot a spent free tier (402) failed two goals twice
+ * each, parked both, and then every restart of the service crashed replanning.
+ */
+export class ProviderRefusedError extends Error {}
+
+function providerRefused(message: string | undefined): boolean {
+  return Boolean(message) && (isUnusableRouteError(message!) || isQuotaExhaustedError(message!))
+}
+
+/** How long a watching pilot waits after the provider refuses before trying again. */
+const PROVIDER_RETRY_MS = 30 * 60_000
 
 export interface GoalRunResult {
   runId?: string
@@ -98,6 +114,8 @@ export interface PilotOptions {
   watchDeps?: Partial<Omit<TriggerDeps, 'now'>>
   /** A watching pilot's spending limit per UTC day, in USD (default `dailyBudgetUsd()`). */
   dailyBudgetUsd?: number
+  /** How long a watching pilot waits after the model provider refuses (default 30 minutes). */
+  providerRetryMs?: number
   sleep?: (ms: number, signal?: AbortSignal) => Promise<void>
   // Seams for tests.
   understandingModel?: UnderstandingModel
@@ -264,6 +282,16 @@ async function runOneGoal(state: PilotState, goal: Goal, options: PilotOptions, 
     run = { outcome: 'error', summary: error instanceof Error ? error.message : String(error), blockers: [] }
   }
 
+  if (run.outcome === 'error' && providerRefused(run.summary)) {
+    // Not the goal's failure: undo anything half-done, give the attempt back, and let the loop wait.
+    if (headSha(root) !== beforeSha || dirtyPaths(root).length > 0) rollbackTo(root, beforeSha, keep)
+    goal.attempts -= 1
+    state.currentGoalId = undefined
+    appendJournal(root, 'provider-refused', { goal: goal.id, reason: run.summary?.slice(0, 300) })
+    persist(state)
+    throw new ProviderRefusedError(run.summary)
+  }
+
   // The branch may have moved (the run commits per wave) or be dirty (leftovers).
   const changed = headSha(root) !== beforeSha || dirtyPaths(root).length > 0
   const checks = [...new Set([...before.checks.map((check) => check.command), ...goal.verification])]
@@ -415,9 +443,20 @@ export async function runPilot(options: PilotOptions): Promise<PilotResult> {
       state.latest = state.baseline
       persist(state)
     }
-    if (!state.understanding) {
+    while (!state.understanding && !options.signal?.aborted) {
       state.phase = 'understand'
-      await understand(state, options, log)
+      try {
+        await understand(state, options, log)
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        // A watching pilot waits for the provider (see `onRefused` below); anything else ends the pilot as before.
+        if (!options.watch || !providerRefused(message)) throw error
+        appendJournal(root, 'provider-refused', { reason: message.slice(0, 300) })
+        const retryMs = options.providerRetryMs ?? PROVIDER_RETRY_MS
+        log(`… the model provider refused (${message.slice(0, 120)}); trying again in ${Math.round(retryMs / 60_000)} min`)
+        await (options.sleep ?? waitUnlessAborted)(retryMs, options.signal)
+        continue
+      }
       persist(state)
     }
     state.phase = 'plan'
@@ -441,6 +480,31 @@ export async function runPilot(options: PilotOptions): Promise<PilotResult> {
       await sleep(idlePollMs, options.signal)
     }
     if (options.watch) log(`◆ watching: ${loadWatchers(root).map((watcher) => describeTrigger(watcher.spec)).join(' · ')}`)
+    // The model provider refusing is weather, not a verdict on the work: a
+    // watching pilot waits it out (a stopped one would only be restarted into
+    // the same refusal); a one-off pilot stops and says why.
+    const refusal = async (step: () => Promise<void>): Promise<string | undefined> => {
+      try {
+        await step()
+        return undefined
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        if (providerRefused(message)) return message
+        throw error
+      }
+    }
+    const onRefused = async (message: string): Promise<boolean> => {
+      appendJournal(root, 'provider-refused', { reason: message.slice(0, 300) })
+      if (!options.watch) {
+        state.stopReason = `the model provider refused: ${message.slice(0, 200)}`
+        return false
+      }
+      const retryMs = options.providerRetryMs ?? PROVIDER_RETRY_MS
+      log(`… the model provider refused (${message.slice(0, 120)}); trying again in ${Math.round(retryMs / 60_000)} min`)
+      waitingFor = undefined
+      await sleep(retryMs, options.signal)
+      return true
+    }
     const deadline = options.maxHours && options.maxHours > 0 ? Date.now() + options.maxHours * 3_600_000 : undefined
     const spendExceeded = options.spendExceeded ?? defaultSpendExceeded
     let rejectedInARow = 0
@@ -483,7 +547,11 @@ export async function runPilot(options: PilotOptions): Promise<PilotResult> {
           log('◆ scheduled look: re-surveying, re-measuring and re-reading the project…')
           state.survey = surveyRepository(root, { env: options.env, has: options.has })
           state.latest = await measureHealth(root, state.survey.checks, { signal: options.signal, runner: options.checkRunner })
-          await understand(state, options, log)
+          const refused = await refusal(() => understand(state, options, log))
+          if (refused) {
+            if (await onRefused(refused)) continue
+            break
+          }
           appendJournal(root, 'rescan', { health: summarizeHealth(state.latest) })
         }
         if (events.length > 0 || notices.length > 0 || rescan) {
@@ -529,7 +597,12 @@ export async function runPilot(options: PilotOptions): Promise<PilotResult> {
         replans += 1
         log('◆ backlog is empty — re-surveying and re-reading the project for what to do next…')
         state.survey = surveyRepository(root, { env: options.env, has: options.has })
-        await understand(state, options, log)
+        const refused = await refusal(() => understand(state, options, log))
+        if (refused) {
+          replans -= 1
+          if (await onRefused(refused)) continue
+          break
+        }
         persist(state)
         goal = nextGoal(state.backlog)
       }
@@ -542,7 +615,14 @@ export async function runPilot(options: PilotOptions): Promise<PilotResult> {
         break
       }
       waitingFor = undefined
-      const outcome = await runOneGoal(state, goal, options, log)
+      let outcome: GoalOutcome
+      try {
+        outcome = await runOneGoal(state, goal, options, log)
+      } catch (error) {
+        if (!(error instanceof ProviderRefusedError)) throw error
+        if (await onRefused(error.message)) continue
+        break
+      }
       goalsThisSession += 1
       rejectedInARow = outcome.accepted || outcome.reason.startsWith('the run completed without changing') ? 0 : rejectedInARow + 1
     }

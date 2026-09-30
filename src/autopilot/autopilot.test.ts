@@ -472,6 +472,46 @@ describe('pilot end to end (real git, fake model and worker)', () => {
     }
   })
 
+  test('a provider that refuses is waited out, and costs the goal nothing', async () => {
+    const refusal = '402 Free tier limit reached. Please upgrade to a paid plan to continue using the service.'
+    // A one-off pilot stops and says why; the goal keeps its attempts and stays open.
+    const once = await runPilot({ root, maxGoals: 2, maxReplans: 0, understandingModel: model, checkRunner: fileRunner, has: () => true, env: {}, spendExceeded: () => false, log: () => {},
+      runGoal: async () => { throw new Error(refusal) } })
+    expect(once.state.stopReason).toContain('the model provider refused: 402')
+    expect(once.state.backlog.every((goal) => goal.status === 'open' && goal.attempts === 0)).toBe(true)
+
+    // A watching pilot waits (30 min by default), and a restart that cannot even plan waits too instead of crashing.
+    const inbox = mkdtempSync(join(tmpdir(), 'autopilot-refused-'))
+    try {
+      const { addWatcher, parseTrigger } = await import('./watch.ts')
+      addWatcher(root, parseTrigger(`file ${inbox}`))
+      const waits: number[] = []
+      const controller = new AbortController()
+      let plans = 0
+      const lines: string[] = []
+      const watched = await runPilot({
+        root, watch: true, maxReplans: 0, checkRunner: fileRunner, has: () => true, env: {}, spendExceeded: () => false, signal: controller.signal, log: (line) => lines.push(line),
+        understandingModel: async () => {
+          plans += 1
+          if (plans === 1) throw new Error(refusal)
+          return model()
+        },
+        runGoal: async () => { throw new Error(refusal) },
+        sleep: async (ms) => {
+          waits.push(ms)
+          if (waits.length >= 2) controller.abort()
+        },
+      })
+      expect(waits).toEqual([30 * 60_000, 30 * 60_000])
+      expect(plans).toBe(2)
+      expect(watched.state.stopReason).toBe('stopped by the operator')
+      expect(watched.state.backlog.every((goal) => goal.status === 'open')).toBe(true)
+      expect(lines.filter((line) => line.includes('the model provider refused'))).toHaveLength(2)
+    } finally {
+      rmSync(inbox, { recursive: true, force: true })
+    }
+  })
+
   test('watching needs something to watch', async () => {
     await expect(runPilot({ root, watch: true, understandingModel: model, checkRunner: fileRunner, has: () => true, env: {}, log: () => {} })).rejects.toThrow('nothing to watch yet')
   })
