@@ -303,7 +303,7 @@ Actions:
       const contribution = contributionForDir(dir)
       const remote = contribution?.forkSlug ? 'upstream' : 'origin'
       const defaultBranch = contribution?.defaultBranch ?? (await git(['symbolic-ref', '--short', `refs/remotes/${remote}/HEAD`])).stdout.trim().split('/').pop() ?? 'main'
-      const fetched = await git(['fetch', remote, defaultBranch], dir, 120_000)
+      const fetched = await git(['fetch', '--', remote, defaultBranch], dir, 120_000)
       if (!fetched.ok) return fail(fetched)
       const target = `${remote}/${defaultBranch}`
       const behind = (await git(['rev-list', '--count', `HEAD..${target}`])).stdout.trim()
@@ -326,7 +326,7 @@ Actions:
       const contribution = contributionForDir(dir)
       const args = ['push']
       if (input.force === true) args.push('--force-with-lease')
-      args.push('-u', 'origin', branch)
+      args.push('-u', 'origin', '--', branch)
       const result = await git(args)
       if (!result.ok) return fail(result)
       // In a contribution clone `origin` is the fork by construction, so this
@@ -386,7 +386,7 @@ Actions:
       const upstream = await git(['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}'])
       if (!upstream.ok) {
         if (!branch || branch === 'HEAD') return 'Cannot create a PR: HEAD is detached. Create a branch first.'
-        const push = await git(['push', '-u', 'origin', branch])
+        const push = await git(['push', '-u', 'origin', '--', branch])
         if (!push.ok) return fail(push)
       }
 

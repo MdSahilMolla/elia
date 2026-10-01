@@ -1,4 +1,4 @@
-import { runProcess, type ShellResult } from '../shell.ts'
+import { runHostProcess, type ShellResult } from '../shell.ts'
 import { logSwallowedError } from '../diagnostics.ts'
 
 /**
@@ -58,6 +58,15 @@ const CONTAINER_WORKDIR = '/workspace'
  * asked for.
  */
 export async function runShellInContainer(command: string, timeoutMs: number, cwd?: string, signal?: AbortSignal, env?: Record<string, string>): Promise<ShellResult> {
+  return runInContainer(['sh', '-c', command], command, timeoutMs, cwd, signal, env)
+}
+
+/** The argv form of {@link runShellInContainer}: one executable and its arguments, never reparsed by a shell. */
+export async function runProcessInContainer(executable: string, args: string[], timeoutMs: number, cwd?: string, signal?: AbortSignal, env?: Record<string, string>): Promise<ShellResult> {
+  return runInContainer([executable, ...args], [executable, ...args].join(' '), timeoutMs, cwd, signal, env)
+}
+
+async function runInContainer(inner: string[], command: string, timeoutMs: number, cwd?: string, signal?: AbortSignal, env?: Record<string, string>): Promise<ShellResult> {
   const image = sandboxImage()
   if (!image) throw new ContainerUnavailable('ELIA_SANDBOX_IMAGE is not set — elia will not guess a sandbox image')
   if (!Bun.which('docker')) throw new ContainerUnavailable('docker is not installed or not on PATH')
@@ -73,9 +82,9 @@ export async function runShellInContainer(command: string, timeoutMs: number, cw
       envArgs.push('-e', `${key}=${value}`)
     }
   }
-  const args = ['run', '--rm', '-v', `${workspace}:${CONTAINER_WORKDIR}`, '-w', CONTAINER_WORKDIR, ...envArgs, ...networkArgs, image, 'sh', '-c', command]
+  const args = ['run', '--rm', '-v', `${workspace}:${CONTAINER_WORKDIR}`, '-w', CONTAINER_WORKDIR, ...envArgs, ...networkArgs, image, ...inner]
 
-  const result = await runProcess({ executable: 'docker', args, timeoutMs, cwd: workspace, signal })
+  const result = await runHostProcess({ executable: 'docker', args, timeoutMs, cwd: workspace, signal })
 
   if (isDockerTransportFailure(result)) {
     throw new ContainerUnavailable(result.stderr.trim() || `docker exited with code ${result.exitCode} before the command could run`)

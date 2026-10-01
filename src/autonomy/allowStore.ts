@@ -5,6 +5,7 @@ import { dirname, join } from 'node:path'
 import type { ActionAssessment, ActionRequest } from './governor.ts'
 import { userPreauthSecret } from './preauth.ts'
 import { activeMode, AGENT_MODES, type AgentMode } from './mode.ts'
+import { isHashTrusted, sha256Hex, trustHash, TRUST_HINT } from './projectTrust.ts'
 import { noteCorruptState } from '../localJson.ts'
 
 /** The modes a stored `mode` tag may name. Anything else is a malformed rule. */
@@ -35,10 +36,17 @@ const KNOWN_MODES = new Set<string>(AGENT_MODES)
  * (preauth.ts), which only this machine's own `--authorize`/approval flow can
  * produce. That is what makes the governor's "parent-signs-the-child" boundary
  * real for this store: a shell mishap, a dropped-in repo, or anyone else who
- * can write the file cannot grant themselves a permanent bypass. The
- * checked-in project file stays unsigned by design — it is a reviewed team
- * decision, and policy.json's invariant is that a repo may only ever tighten
- * governance, never hand out standing approvals.
+ * can write the file cannot grant themselves a permanent bypass.
+ *
+ * The project file is inside the repo, so it cannot vouch for itself: a cloned
+ * repository could otherwise ship `{"rules":[{"tool":"run_command","commandPrefix":"curl"}]}`
+ * and hand its author standing approvals in the victim's unattended runs. Its
+ * rules are honoured only while the user-level trust record
+ * (autonomy/projectTrust.ts — `elia trust`, or the "always allow" prompt
+ * writing the rule itself) covers the file's *current* SHA-256; any other
+ * content is ignored, like an unsigned per-user file. policy.json's invariant
+ * stays: a repo may only ever tighten governance, never hand out standing
+ * approvals.
  */
 export interface AllowRule {
   /** Tool name: `run_command`, `edit_file`, `github`, … */
@@ -123,6 +131,15 @@ interface Cached {
 }
 const cache = new Map<string, Cached>()
 const EMPTY: AllowFile = { rules: [] }
+const untrustedNoticed = new Set<string>()
+
+/** Says once per file content that a project allow file is being ignored, and how to trust it. */
+function noteUntrustedProjectAllow(path: string, sha: string): void {
+  const key = `${path}:${sha}`
+  if (untrustedNoticed.has(key)) return
+  untrustedNoticed.add(key)
+  process.stderr.write(`elia: ignoring the standing approvals in ${path} — it has not been trusted (or it changed since). ${TRUST_HINT}.\n`)
+}
 
 function load(path: string): AllowFile {
   // One-time migration: a pre-relocation ~/.elia/allow.json predates signing;
@@ -152,17 +169,25 @@ function load(path: string): AllowFile {
   } catch {
     return EMPTY
   }
-  const hit = cache.get(path)
+  const isGlobal = path === allowPath('global', process.cwd())
+  // A project file is re-read and re-hashed on every call: its trust is bound
+  // to the exact bytes, so an mtime cache would let a same-timestamp edit ride
+  // on an earlier verdict.
+  const hit = isGlobal ? cache.get(path) : undefined
   if (hit && hit.mtimeMs === mtimeMs) return hit.file
   let file: AllowFile = EMPTY
   try {
-    const parsed = JSON.parse(readFileSync(path, 'utf8')) as unknown
+    const text = readFileSync(path, 'utf8')
+    const parsed = JSON.parse(text) as unknown
     if (parsed && typeof parsed === 'object' && Array.isArray((parsed as AllowFile).rules)) {
       const raw = parsed as AllowFile
-      // The per-user global store must verify; the checked-in project store is
-      // a deliberate, reviewed team file and stays unsigned by design.
-      if (path === allowPath('global', process.cwd()) && !verifies(raw)) {
+      // The per-user global store must verify; the repo's project store must
+      // match a hash the user has trusted (see the header comment).
+      if (isGlobal && !verifies(raw)) {
         noteCorruptState('allowStore.verify', path, new Error('allow.json failed its HMAC verification — refusing the rules'), { keepCopy: true })
+        file = EMPTY
+      } else if (!isGlobal && !isHashTrusted(path, sha256Hex(text))) {
+        noteUntrustedProjectAllow(path, sha256Hex(text))
         file = EMPTY
       } else {
         file = {
@@ -185,7 +210,7 @@ function load(path: string): AllowFile {
     noteCorruptState('allowStore.read', path, error, { keepCopy: true })
     file = EMPTY
   }
-  cache.set(path, { mtimeMs, file })
+  if (isGlobal) cache.set(path, { mtimeMs, file })
   return file
 }
 
@@ -401,8 +426,14 @@ export function addAllowRule(rule: AllowRule, scope: AllowScope, cwd = process.c
   const duplicate = file.rules.some((r) => isSameRule(r, rule))
   const rules: AllowRule[] = duplicate ? file.rules : [...file.rules, rule].slice(-MAX_RULES)
   const next: AllowFile = scope === 'global' ? { rules, mac: signRules(rules) } : { rules }
+  const text = `${JSON.stringify(next, null, 2)}\n`
+  // The person just chose "always allow" (or this is their own `elia trust`
+  // flow): trust exactly what is about to be written, so their rule works
+  // without a second step. `file` came from load(), which already dropped any
+  // untrusted rules a repo shipped, so they are not blessed along with it.
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 })
-  writeFileSync(path, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 })
+  if (scope === 'project') trustHash(path, sha256Hex(text))
+  writeFileSync(path, text, { mode: 0o600 })
   cache.delete(path)
 }
 

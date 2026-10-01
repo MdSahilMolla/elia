@@ -8,7 +8,7 @@ import { engagementDir, localEngagementRecord, writeEngagementScaffold } from '.
 import { currentAgent } from '../autonomy/context.ts'
 import { paths } from '../config.ts'
 import { redactSecrets } from '../ui/redact.ts'
-import { hostInScope, parseScopeHosts, stripZoneId } from './httpProbe.ts'
+import { hostInScope, parseScope, stripZoneId } from './httpProbe.ts'
 import { installEntry, installKeyFor, type InstallReceipt } from './ctfToolchain.ts'
 import { SECURITY_TOOL_CATALOG, type CatalogEntry } from '../security/toolCatalog.ts'
 
@@ -308,8 +308,8 @@ export async function runSecurityTool(input: Record<string, unknown>, ctx: Secur
   // The contents decide what runs, not the file's existence. Checking only that
   // SCOPE.md was there let `nmap anything.example.com` run against an
   // engagement whose scope named a different host.
-  const scopeHosts = parseScopeHosts(await Bun.file(scopePath).text())
-  const outOfScope = targets.filter((host) => !hostInScope(host, scopeHosts))
+  const { include: scopeHosts, exclude: excludedHosts } = parseScope(await Bun.file(scopePath).text())
+  const outOfScope = targets.filter((host) => !hostInScope(host, scopeHosts, excludedHosts))
   if (outOfScope.length > 0) {
     throw new Error(
       `${outOfScope.join(', ')} is not in scope for "${engagement}", so nothing ran and no evidence was saved. SCOPE.md authorizes: ${scopeHosts.join(', ') || '(no hosts parsed)'}. Update the engagement scope if this target is genuinely authorized.`,

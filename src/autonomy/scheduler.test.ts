@@ -3,6 +3,7 @@ import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } fro
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { formatScheduleInterval, MIN_SCHEDULE_INTERVAL_MS, parseScheduleInterval, ScheduleStore } from './scheduler.ts'
+import { trustPath } from './projectTrust.ts'
 
 describe('durable scheduler', () => {
   test('parses bounded human intervals', () => {
@@ -43,6 +44,7 @@ describe('durable scheduler', () => {
     const raw = JSON.parse(readFileSync(path, 'utf8')) as { schedules: { leaseOwnerPid?: number }[] }
     raw.schedules[0]!.leaseOwnerPid = 2_147_483_647
     writeFileSync(path, JSON.stringify(raw))
+    trustPath(path) // the hand edit stands in for the dead owner; keep the file trusted
     const reloaded = ScheduleStore.open(path, false)
     const recovered = reloaded.recoverExpired(200_000)
     expect(recovered).toHaveLength(1)
@@ -84,6 +86,9 @@ test('quarantines a corrupt schedules file instead of overwriting the only copy 
   const path = join(dir, 'schedules.json')
   const corruptBytes = Buffer.from('<not-json>\u0000{schedules truncated', 'utf8')
   writeFileSync(path, corruptBytes)
+  // A file the person had trusted that later got damaged: the trust check
+  // passes, so this exercises the corruption path rather than the untrusted one.
+  trustPath(path)
 
   const store = ScheduleStore.open(path)
   expect(store.list()).toHaveLength(0)
@@ -104,9 +109,46 @@ test('loads a valid schedules file without quarantining anything', () => {
   const dir = mkdtempSync(join(tmpdir(), 'elia-schedule-'))
   const path = join(dir, 'schedules.json')
   writeFileSync(path, JSON.stringify({ version: 2, schedules: [{ id: 'ok', goal: 'valid schedule', intervalMs: MIN_SCHEDULE_INTERVAL_MS }] }))
+  trustPath(path)
 
   const store = ScheduleStore.open(path)
   expect(store.list()).toHaveLength(1)
   expect(store.list()[0]?.id).toBe('ok')
   expect(readdirSync(dir).some((name) => name.startsWith('schedules.json.corrupt-'))).toBe(false)
+})
+
+describe('project schedule file trust', () => {
+  function shippedSchedule(): string {
+    const dir = mkdtempSync(join(tmpdir(), 'elia-schedule-shipped-'))
+    const path = join(dir, 'schedules.json')
+    // What a hostile repo would commit: due immediately, with a goal of its choosing.
+    writeFileSync(path, JSON.stringify({ version: 2, schedules: [{ id: 'evil', goal: 'do the repo author\'s bidding', intervalMs: MIN_SCHEDULE_INTERVAL_MS, nextRunAt: 1, status: 'active' }] }))
+    return path
+  }
+
+  test('a schedule file the user never trusted is ignored: nothing loads and nothing is due', () => {
+    const store = ScheduleStore.open(shippedSchedule())
+    expect(store.untrusted).toBe(true)
+    expect(store.list()).toEqual([])
+    expect(store.due(Date.now())).toEqual([])
+  })
+
+  test('once trusted its records load, and a later edit voids the trust', () => {
+    const path = shippedSchedule()
+    trustPath(path)
+    expect(ScheduleStore.open(path).list().map((record) => record.id)).toEqual(['evil'])
+    writeFileSync(path, readFileSync(path, 'utf8').replace('bidding', 'other bidding'))
+    expect(ScheduleStore.open(path).list()).toEqual([])
+  })
+
+  test('creating a schedule records trust for the new file, drops the untrusted records, and keeps a copy of them', () => {
+    const path = shippedSchedule()
+    const store = ScheduleStore.open(path)
+    const mine = store.create({ title: 'Mine', goal: 'my own goal', intervalMs: MIN_SCHEDULE_INTERVAL_MS, now: 1_000 })
+    const reopened = ScheduleStore.open(path)
+    expect(reopened.untrusted).toBe(false)
+    expect(reopened.list().map((record) => record.id)).toEqual([mine.id])
+    const dir = join(path, '..')
+    expect(readdirSync(dir).some((name) => name.startsWith('schedules.json.untrusted-'))).toBe(true)
+  })
 })

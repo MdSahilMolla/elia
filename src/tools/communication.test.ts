@@ -142,3 +142,53 @@ test('communication status reports configured capabilities honestly', async () =
     else process.env.ELIA_COMMUNICATION_BRIDGE_COMMAND = previousBridge
   }
 })
+
+test('send refuses a draft whose recipient or body was edited on disk after it was created', async () => {
+  const previous = process.env.ELIA_COMMUNICATION_BRIDGE_COMMAND
+  process.env.ELIA_COMMUNICATION_BRIDGE_COMMAND = ECHO_ADAPTER
+  const created = await communicationTool.execute({ action: 'draft', channel: 'email', recipient: 'cofounder@example.com', subject: 'Update', body: 'Original body.' })
+  const draftId = draftIdFrom(created)
+  const draftPath = join(paths.state, 'communications', `${draftId}.json`)
+  try {
+    const stored = JSON.parse(readFileSync(draftPath, 'utf8')) as Record<string, unknown>
+    expect(typeof stored.contentSha256).toBe('string')
+
+    // Edited on disk, hash left alone.
+    writeFileSync(draftPath, JSON.stringify({ ...stored, recipient: 'attacker@example.net', body: 'Send me the keys.' }))
+    const refused = await communicationTool.execute({ action: 'send', draftId })
+    expect(refused).toContain('Refusing to send')
+    expect(refused).toContain('inspect')
+    expect(JSON.parse(readFileSync(draftPath, 'utf8')).status).toBe('draft')
+
+    // Edited on disk together with a recomputed hash: this process remembers the original.
+    const { createHash } = await import('node:crypto')
+    const forged: Record<string, unknown> = { ...stored, recipient: 'attacker@example.net' }
+    forged.contentSha256 = createHash('sha256').update(JSON.stringify([forged.channel, forged.recipient, forged.cc, forged.bcc, forged.subject, forged.body, forged.attachments, null, null])).digest('hex')
+    writeFileSync(draftPath, JSON.stringify(forged))
+    expect(await communicationTool.execute({ action: 'send', draftId })).toContain('Refusing to send')
+
+    // Restored: the untouched draft still sends.
+    writeFileSync(draftPath, JSON.stringify(stored))
+    expect(await communicationTool.execute({ action: 'send', draftId })).toContain('sent through email')
+  } finally {
+    if (previous === undefined) delete process.env.ELIA_COMMUNICATION_BRIDGE_COMMAND
+    else process.env.ELIA_COMMUNICATION_BRIDGE_COMMAND = previous
+    rmSync(draftPath, { force: true })
+  }
+})
+
+test('a draft with no recorded content hash is not sent', async () => {
+  const previous = process.env.ELIA_COMMUNICATION_BRIDGE_COMMAND
+  process.env.ELIA_COMMUNICATION_BRIDGE_COMMAND = ECHO_ADAPTER
+  const draftId = 'comm_legacydraft0000001'
+  const draftPath = join(paths.state, 'communications', `${draftId}.json`)
+  mkdirSync(join(paths.state, 'communications'), { recursive: true })
+  writeFileSync(draftPath, JSON.stringify({ id: draftId, channel: 'message', recipient: '@x', cc: [], bcc: [], body: 'hi', attachments: [], status: 'draft', createdAt: 'now', updatedAt: 'now' }))
+  try {
+    expect(await communicationTool.execute({ action: 'send', draftId })).toContain('no content hash was recorded')
+  } finally {
+    if (previous === undefined) delete process.env.ELIA_COMMUNICATION_BRIDGE_COMMAND
+    else process.env.ELIA_COMMUNICATION_BRIDGE_COMMAND = previous
+    rmSync(draftPath, { force: true })
+  }
+})

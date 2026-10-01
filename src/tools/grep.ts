@@ -1,6 +1,6 @@
 import type { Tool } from './types.ts'
-import { existsSync, statSync } from 'node:fs'
-import { basename, dirname } from 'node:path'
+import { existsSync, lstatSync, realpathSync, statSync } from 'node:fs'
+import { basename, dirname, isAbsolute, relative } from 'node:path'
 import { optionalString } from './args.ts'
 import { isIgnored, SKIP_DIRS } from './ignoreDirs.ts'
 import { resolveWorkspacePath } from '../autonomy/context.ts'
@@ -190,6 +190,25 @@ async function runRipgrep(rg: string, args: string[], dir: string): Promise<{ st
   }
 }
 
+/**
+ * ripgrep does not follow symlinks by default, so neither does the fallback: a
+ * link in the workspace must not be a way to read a file outside it. A link
+ * named explicitly (`onlyFile`) is read only when its target stays inside the
+ * directory and is not a sensitive path.
+ */
+function isSearchableEntry(dir: string, relPath: string, named: boolean): boolean {
+  const full = `${dir}/${relPath}`
+  try {
+    if (!lstatSync(full).isSymbolicLink()) return true
+    if (!named) return false
+    const real = realpathSync(full)
+    const rel = relative(realpathSync(dir), real)
+    return !isSensitivePath(real) && rel !== '' && !rel.startsWith('..') && !isAbsolute(rel)
+  } catch {
+    return false
+  }
+}
+
 /** Used when ripgrep is not installed. Slower, but the same contract. */
 /** Exported for tests: the pure-JS search path, used directly so a test doesn't depend on `rg` being absent from PATH. */
 export async function searchWithJs(pattern: string, dir: string, inputDir: string, globPattern: string | undefined, context: number | undefined, onlyFile?: string): Promise<string> {
@@ -212,6 +231,8 @@ export async function searchWithJs(pattern: string, dir: string, inputDir: strin
   for await (const relPath of onlyFile !== undefined ? [onlyFile] : scan.scan({ cwd: dir, dot: false })) {
     if ((onlyFile === undefined && isIgnored(relPath)) || isSensitivePath(relPath)) continue
     if (fileFilter && !fileFilter.match(relPath) && !fileFilter.match(relPath.split(/[\\/]/).at(-1) ?? relPath)) continue
+
+    if (!isSearchableEntry(dir, relPath, onlyFile !== undefined)) continue
 
     const fullPath = `${inputDir}/${relPath}`
     const file = Bun.file(`${dir}/${relPath}`)

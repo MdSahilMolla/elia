@@ -1,0 +1,70 @@
+{
+  "slug": "dev-workflow-and-site-conventions",
+  "name": "dev-workflow-and-site-conventions",
+  "version": 6,
+  "createdAt": 1790764772046,
+  "updatedAt": 1790767467354,
+  "sourceLessonKeys": [
+    "o0timodzixc1",
+    "ytf3l7fq9dzy",
+    "j3wd5mfswzxi",
+    "1ypus5zl39vt3",
+    "xbecucc9afoq",
+    "clvndpj39jrg",
+    "1rz415rb1qv0h",
+    "27w8518mck1fu",
+    "1w83zutrfownp",
+    "2fd487b2jvu5x",
+    "1tfvsi6150fx5",
+    "3g7qbekxld6y9",
+    "1nyq218xa6ksc",
+    "13lly97aag0pp",
+    "11eds8d4zf9pj",
+    "3e4egryd72pp4",
+    "3vj3czfy0xsv6",
+    "2wulci9epjgzs",
+    "1kwkv3vpsb31g",
+    "bayouhx41dcm",
+    "2x2m3iy3xmguz",
+    "162eyavb6z06i",
+    "8t3l4x6fp0c1",
+    "xwva55xl6fna",
+    "3mdawhx8s3k0b",
+    "314qrvtcc19zr",
+    "mja1m72pq6vi",
+    "2s0yycch3vyo9"
+  ],
+  "authoredBy": "elia",
+  "history": [
+    {
+      "version": 1,
+      "at": 1790764772046,
+      "reason": "created from 11 certified lessons"
+    },
+    {
+      "version": 2,
+      "at": 1790764783971,
+      "reason": "14 new certified lesson(s) about this topic"
+    },
+    {
+      "version": 3,
+      "at": 1790765941933,
+      "reason": "1 new certified lesson(s) about this topic"
+    },
+    {
+      "version": 4,
+      "at": 1790766778963,
+      "reason": "1 new certified lesson(s) about this topic"
+    },
+    {
+      "version": 5,
+      "at": 1790767413220,
+      "reason": "2 new certified lesson(s) about this topic"
+    },
+    {
+      "version": 6,
+      "at": 1790767467354,
+      "reason": "1 source lesson(s) were retired for not holding up — re-derived from what remains"
+    }
+  ]
+}

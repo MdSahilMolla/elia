@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from 'bun:test'
 import { mkdtempSync, realpathSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
-import { ContainmentRequired, attest, describeAttestation, evolveBoxMode, runGate } from './containment.ts'
+import { ContainmentRequired, attest, describeAttestation, evolveBoxMode, hostRunCount, noteHostRun, runGate } from './containment.ts'
 import { findBoxBinary, recentBoxReceipts, resetBoxReceiptsForTests, type BoxReceipt } from '../sandbox/box.ts'
 
 const saved = { ...process.env }
@@ -57,6 +57,26 @@ describe('attestation', () => {
   test('an unboxed gate is described as uncontained, never as attested', () => {
     expect(describeAttestation(attest(0, []))).toContain('uncontained')
     expect(describeAttestation(attest(0, [receipt()]))).toContain('1 sealed receipt')
+  })
+})
+
+describe('host runs of candidate code', () => {
+  test('a boxed receipt beside host runs is reported as partial containment, not as containment', () => {
+    const since = hostRunCount()
+    noteHostRun()
+    const a = attest(0, [receipt()], since)
+    expect(a.boxed).toBe(1)
+    expect(a.unboxed).toBe(1)
+    expect(describeAttestation(a)).toContain('only part')
+    expect(attest(0, [receipt()], hostRunCount()).unboxed).toBe(0)
+  })
+
+  test('a gate that falls back to the host is counted as a host run', async () => {
+    process.env.ELIA_EVOLVE_BOX = 'on'
+    process.env.ELIA_BOX_BIN = '/nonexistent/elia-box'
+    const since = hostRunCount()
+    await runGate('echo fallback', 10_000, tmpdir(), REPO)
+    expect(attest(0, [receipt()], since).unboxed).toBe(1)
   })
 })
 

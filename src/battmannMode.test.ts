@@ -112,3 +112,13 @@ test('every battmann store action has a governor contract and the write actions 
   expect(assessAction({ name: 'battmann', input: { action: 'stage_deployment', reportPath: '../../../../../loot.md' } }).risk).toBe('critical')
   expect(assessAction({ name: 'battmann', input: { action: 'define_action', storePath: '../../../../../secret.sqlite' } }).risk).toBe('critical')
 })
+
+test('the battmann prompt says what makes a brief finished, so the model saves its analysis instead of describing it', () => {
+  const prompt = BATTMANN_SYSTEM_PROMPT
+  // A live brief ran the calculators, saved one forecast, and produced a report with every other section empty.
+  expect(prompt).toContain('return numbers and save nothing')
+  expect(prompt).toContain('report_from_store prints only what is recorded')
+  for (const action of ['create_question', 'submit_forecast', 'register_claim', 'register_evidence', 'create_scenario', 'recordAs']) expect(prompt).toContain(action)
+  expect(prompt).toContain('integrityProblems')
+  expect(prompt).toContain('Do not tell the user a report is complete while it lists problems')
+})

@@ -471,3 +471,102 @@ test('persistent intelligence records reject impossible event ordering and dupli
   expect(detail.question.outcome).toBe(1)
   expect(detail.resolutions).toHaveLength(1)
 })
+
+// A brief recorded one question and one forecast, ran the calculators (which save nothing), and produced a report whose
+// judgments and scenarios were empty, whose summary quoted figures no evidence held, and whose ledger carried an old run's records.
+async function hollowStore(prefix: string) {
+  const cwd = mkdtempSync(join(tmpdir(), prefix))
+  const run = (input: Record<string, unknown>) => withAgentIdentity({ name: 'test', role: 'lead', cwd }, () => battmannTool.execute(input))
+  await run({ action: 'register_evidence', evidenceId: 'e-old', title: 'India GDP outlook', url: 'https://adb.example/gdp', sourceType: 'primary', publishedAt: '2020-08-01', retrievedAt: '2020-08-05', excerpt: 'GDP growth is projected to moderate to 6.9 percent.', independenceGroup: 'adb', reliability: 0.9 })
+  await run({ action: 'register_evidence', evidenceId: 'e-fx', title: 'USD against INR', url: 'https://fx.example/inr', sourceType: 'primary', publishedAt: '2020-09-01', retrievedAt: '2020-09-01', excerpt: 'USD/INR reference rate: 95.59 on 2020-09-22.', independenceGroup: 'ecb', reliability: 0.9 })
+  await run({ action: 'create_question', questionId: 'q1', question: 'Will landed cost rise 5% within 60 days?', openedAt: '2020-09-01', horizon: '2020-11-01', resolutionCriteria: 'Landed cost rises by at least 5% against the September average.' })
+  await run({ action: 'submit_forecast', questionId: 'q1', probability: 0.65, method: 'judgement', asOf: '2020-09-02', rationale: 'Freight is about $8,000/FEU and congestion is 4.3M TEUs; the rupee is at 95.59.', evidenceIds: ['e-fx'] })
+  return run
+}
+
+test('a hollow store report says so: what is missing, which figures are unsourced, and it leaves out uncited evidence', async () => {
+  const run = await hollowStore('elia-battmann-hollow-')
+  const result = JSON.parse(await run({ action: 'report_from_store', title: 'Supply brief', executiveSummary: 'Freight at $8,000/FEU and 4.3M TEUs of congestion give a 65% chance of a shock.', author: 'Battmann', asOf: '2020-09-05', outputPath: 'reports/hollow.md' }))
+  const problems: string[] = result.integrityProblems
+  expect(problems.join('\n')).toContain('Key judgments: none recorded')
+  expect(problems.join('\n')).toContain('Scenarios and signposts: none recorded')
+  expect(problems.join('\n')).toContain('1 forecast rationale(s)')
+  // The 65% is the report's own forecast, so it is not flagged; the freight figures are.
+  expect(result.summaryFiguresNotInEvidence).toEqual(['$8,000', '4.3M'])
+  expect(result.sources).toBe(1)
+
+  const markdown = readFileSync(result.reportPath, 'utf8')
+  expect(markdown).toContain('## Report integrity')
+  expect(markdown).toContain('⚠ Figures in this summary that appear in none of the evidence this report cites: $8,000, 4.3M')
+  expect(markdown).toContain('[e-fx]')
+  expect(markdown).not.toContain('India GDP outlook')
+  expect(markdown).toContain('1 other evidence record(s) in the store are cited by nothing in this report')
+
+  // The printable edition used to drop the forecast's ungrounded-figures column and the summary check.
+  const printable = readFileSync(result.htmlPath, 'utf8')
+  expect(printable).toContain('Rationale figures not in evidence')
+  expect(printable).toContain('Not in cited evidence: $8,000, 4.3M')
+  expect(printable).toContain('Figures in this summary that appear in none of the evidence')
+  expect(printable).toContain('<h2>Report integrity</h2>')
+  expect(printable).toContain('Verification: ')
+  expect(printable).not.toContain('India GDP outlook')
+  expect(JSON.parse(readFileSync(result.sidecarPath, 'utf8')).integrity.problems.length).toBeGreaterThan(0)
+})
+
+test('a report with no recorded judgment cannot be marked final, and says what to record', async () => {
+  const run = await hollowStore('elia-battmann-hollow-final-')
+  await expect(run({ action: 'report_from_store', reportStatus: 'final', title: 'Supply brief', executiveSummary: 'A summary.', author: 'Battmann', reviewer: 'rev', asOf: '2020-09-05', outputPath: 'reports/final.md' })).rejects.toThrow('register_claim')
+})
+
+test('a populated report with grounded figures has one problem left: its only source is unverified', async () => {
+  const run = await hollowStore('elia-battmann-grounded-')
+  await run({ action: 'register_claim', claimId: 'c1', statement: 'USD/INR was 95.59 on 2020-09-22.', classification: 'observed_fact', confidence: 'high', asOf: '2020-09-03', evidenceLinks: [{ evidenceId: 'e-fx', relation: 'supports', supportingExcerpt: 'USD/INR reference rate: 95.59 on 2020-09-22.' }] })
+  await run({ action: 'submit_forecast', questionId: 'q1', probability: 0.6, method: 'judgement', asOf: '2020-09-04', rationale: 'The rupee is at 95.59 and weakening.', evidenceIds: ['e-fx'] })
+  await run({ action: 'create_scenario', scenarioId: 's1', title: 'Rupee slide', baseAsOf: '2020-09-04', horizon: '2020-11-01', probability: 0.3, assumptions: ['Weakening continues'], questionIds: ['q1'], evidenceIds: ['e-fx'], indicators: ['USD/INR weekly close'], status: 'active' })
+  const result = JSON.parse(await run({ action: 'report_from_store', title: 'Supply brief', executiveSummary: 'USD/INR stands at 95.59, and we put a shock at 60%.', author: 'Battmann', asOf: '2020-09-05', outputPath: 'reports/grounded.md' }))
+  // Populated, and every figure is in the cited evidence; what remains is that register_evidence text was never checked against a page.
+  expect(result.integrityProblems).toHaveLength(1)
+  expect(result.integrityProblems[0]).toContain('rest only on unverified sources')
+  expect(result.summaryFiguresNotInEvidence).toBeUndefined()
+  expect(readFileSync(result.reportPath, 'utf8')).not.toContain('Key judgments: none recorded')
+})
+
+test('a consequence chain missing several fields is told about all of them at once, not one per call', () => {
+  // The reported session needed four calls: statement, then mechanism, then mechanism again, then basis.
+  let message = ''
+  try { buildConsequenceChain({ trigger: 'Freight spike', nodes: [{ id: 'n1', conditionalProbability: 0.6, lagDays: 5 }, { id: 'n2', parentId: 'n1', statement: 'Landed cost rises' }] }) } catch (error) { message = (error as Error).message }
+  for (const field of ['nodes[0].statement', 'nodes[0].mechanism', 'nodes[0].basis', 'nodes[1].mechanism', 'nodes[1].conditionalProbability', 'nodes[1].lagDays', 'nodes[1].basis']) expect(message).toContain(field)
+})
+
+test('a risk assessment missing several factor fields is told about all of them at once', () => {
+  let message = ''
+  try { calculateRiskAssessment({ subject: 'Imports', asOf: '2026-09-29', factors: [{ id: 'f1', summary: 'Freight up' }] }) } catch (error) { message = (error as Error).message }
+  for (const field of ['factors[0].sourceDate', 'factors[0].direction', 'factors[0].sourceUrl', 'factors[0].magnitude', 'factors[0].reliability', 'factors[0].independenceGroup']) expect(message).toContain(field)
+})
+
+test('a valid factor list still fails on a factor dated after asOf, alongside its other faults', () => {
+  expect(() => calculateRiskAssessment({ subject: 'Imports', asOf: '2026-09-01', factors: [{ id: 'f1', summary: 'Future', sourceUrl: 'https://x.example', sourceDate: '2026-09-20', direction: 'aggravating', magnitude: 0.5, reliability: 0.8, independenceGroup: 'g' }] })).toThrow('cannot be after asOf')
+})
+
+test('calculators say they save nothing, and a chain hands back a scenario the store accepts and the report then shows', async () => {
+  const risk = JSON.parse(calculateRiskAssessment({ subject: 'Imports', asOf: '2020-09-05', factors: [{ id: 'f1', summary: 'Freight up', sourceUrl: 'https://x.example', sourceDate: '2020-09-01', direction: 'aggravating', magnitude: 0.5, reliability: 0.8, independenceGroup: 'g' }] }))
+  expect(risk.saved).toBe(false)
+  expect(risk.toKeep).toContain('register_claim')
+
+  const chain = JSON.parse(buildConsequenceChain({ trigger: 'Freight corridor congestion', asOf: '2020-09-05', nodes: [
+    { id: 'n1', parentId: null, statement: 'Landed cost rises', mechanism: 'Freight passes through to price', conditionalProbability: 0.6, lagDays: 10, basis: 'Analyst estimate' },
+    { id: 'n2', parentId: 'n1', statement: 'Inventory cover falls', mechanism: 'Late arrivals draw stock down', conditionalProbability: 0.5, lagDays: 20, basis: 'Analyst estimate' },
+  ] }))
+  expect(chain.saved).toBe(false)
+  expect(chain.toKeep).toContain('create_scenario')
+  expect(chain.recordAs.action).toBe('create_scenario')
+  expect(chain.recordAs.probability).toBe(0.3)
+  expect(chain.recordAs.horizon.slice(0, 10)).toBe('2020-10-05')
+  expect(chain.stillNeeded.join(' ')).toContain('evidenceIds')
+
+  const run = await hollowStore('elia-battmann-chain-scenario-')
+  const { action: _ignored, ...scenario } = chain.recordAs
+  await run({ ...scenario, action: 'create_scenario', scenarioId: 's-chain', baseAsOf: '2020-09-05', questionIds: ['q1'], evidenceIds: ['e-fx'], indicators: ['Weekly freight index'] })
+  const report = JSON.parse(await run({ action: 'report_from_store', title: 'Supply brief', executiveSummary: 'A summary.', author: 'Battmann', asOf: '2020-09-06', outputPath: 'reports/chain.md' }))
+  expect(readFileSync(report.reportPath, 'utf8')).toContain('Freight corridor congestion — 30.0%')
+})

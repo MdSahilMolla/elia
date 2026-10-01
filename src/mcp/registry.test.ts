@@ -4,11 +4,19 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { beginMcpLoad, loadMcpTools, mcpShutdownStateForTests, mcpStatusReport, reloadMcpTools, resetMcpLoadStateForTests } from './registry.ts'
 import { findTool, getMcpTools } from '../tools/registry.ts'
+import { trustPath } from '../autonomy/projectTrust.ts'
 
 const FIXTURE = join(import.meta.dir, 'fixtures', 'echoServer.ts')
 
 // Never merge in this machine's real ~/.elia/mcp.json — point the user layer at a path that won't exist.
 process.env.ELIA_MCP_USER_CONFIG = join(tmpdir(), 'elia-registry-test-no-such-user-mcp.json')
+
+// A project's .elia/mcp.json only spawns servers once the user-level trust
+// record covers it; these tests stand in for the person who ran `elia trust`.
+function writeTrustedConfig(path: string, text: string, encoding: BufferEncoding): void {
+  writeFileSync(path, text, encoding)
+  trustPath(path)
+}
 
 afterEach(async () => {
   await resetMcpLoadStateForTests()
@@ -17,7 +25,7 @@ afterEach(async () => {
 function projectWithServer(): string {
   const cwd = mkdtempSync(join(tmpdir(), 'elia-mcp-registry-'))
   mkdirSync(join(cwd, '.elia'), { recursive: true })
-  writeFileSync(
+  writeTrustedConfig(
     join(cwd, '.elia', 'mcp.json'),
     JSON.stringify({ mcpServers: { echo: { command: process.execPath, args: [FIXTURE] } } }),
     'utf8',
@@ -52,7 +60,7 @@ test('an error result from the tool is prefixed rather than thrown', async () =>
 test('a server that fails to start is reported, not thrown, and does not block other servers', async () => {
   const cwd = mkdtempSync(join(tmpdir(), 'elia-mcp-registry-'))
   mkdirSync(join(cwd, '.elia'), { recursive: true })
-  writeFileSync(
+  writeTrustedConfig(
     join(cwd, '.elia', 'mcp.json'),
     JSON.stringify({
       mcpServers: {
@@ -75,7 +83,7 @@ test('a server that fails to start is reported, not thrown, and does not block o
 test('a disabled server is skipped entirely', async () => {
   const cwd = mkdtempSync(join(tmpdir(), 'elia-mcp-registry-'))
   mkdirSync(join(cwd, '.elia'), { recursive: true })
-  writeFileSync(
+  writeTrustedConfig(
     join(cwd, '.elia', 'mcp.json'),
     JSON.stringify({ mcpServers: { echo: { command: process.execPath, args: [FIXTURE], disabled: true } } }),
     'utf8',
@@ -107,10 +115,10 @@ test('reloadMcpTools resets beginMcpLoad so it reflects the new config', async (
   const cwd = mkdtempSync(join(tmpdir(), 'elia-mcp-registry-'))
   mkdirSync(join(cwd, '.elia'), { recursive: true })
   const configPath = join(cwd, '.elia', 'mcp.json')
-  writeFileSync(configPath, JSON.stringify({ mcpServers: {} }), 'utf8')
+  writeTrustedConfig(configPath, JSON.stringify({ mcpServers: {} }), 'utf8')
   expect((await beginMcpLoad(cwd)).servers).toEqual([])
 
-  writeFileSync(configPath, JSON.stringify({ mcpServers: { echo: { command: process.execPath, args: [FIXTURE] } } }), 'utf8')
+  writeTrustedConfig(configPath, JSON.stringify({ mcpServers: { echo: { command: process.execPath, args: [FIXTURE] } } }), 'utf8')
   await reloadMcpTools(cwd)
   expect((await beginMcpLoad(cwd)).servers).toEqual(['echo'])
 })
@@ -118,7 +126,7 @@ test('reloadMcpTools resets beginMcpLoad so it reflects the new config', async (
 test('report.status describes every configured server, connected or disabled', async () => {
   const cwd = mkdtempSync(join(tmpdir(), 'elia-mcp-registry-'))
   mkdirSync(join(cwd, '.elia'), { recursive: true })
-  writeFileSync(
+  writeTrustedConfig(
     join(cwd, '.elia', 'mcp.json'),
     JSON.stringify({
       mcpServers: {
@@ -141,7 +149,7 @@ test('a hung server does not block loadMcpTools past the soft deadline; healthy 
   const cwd = mkdtempSync(join(tmpdir(), 'elia-mcp-registry-'))
   mkdirSync(join(cwd, '.elia'), { recursive: true })
   const slow = join(import.meta.dir, 'fixtures', 'slowServer.ts')
-  writeFileSync(
+  writeTrustedConfig(
     join(cwd, '.elia', 'mcp.json'),
     JSON.stringify({
       mcpServers: {
@@ -177,7 +185,7 @@ test('shutdown cleanup is registered even when nothing had connected by the soft
   const cwd = mkdtempSync(join(tmpdir(), 'elia-mcp-registry-'))
   mkdirSync(join(cwd, '.elia'), { recursive: true })
   const slow = join(import.meta.dir, 'fixtures', 'slowServer.ts')
-  writeFileSync(
+  writeTrustedConfig(
     join(cwd, '.elia', 'mcp.json'),
     JSON.stringify({ mcpServers: { hung: { command: process.execPath, args: [slow] } } }),
     'utf8',
@@ -205,7 +213,7 @@ test('a hung server is named in a connect-deadline record instead of vanishing s
   const cwd = mkdtempSync(join(tmpdir(), 'elia-mcp-registry-'))
   mkdirSync(join(cwd, '.elia'), { recursive: true })
   const slow = join(import.meta.dir, 'fixtures', 'slowServer.ts')
-  writeFileSync(
+  writeTrustedConfig(
     join(cwd, '.elia', 'mcp.json'),
     JSON.stringify({
       mcpServers: {
@@ -250,7 +258,7 @@ test('a slow server that fails after the deadline produces no unhandled rejectio
   const cwd = mkdtempSync(join(tmpdir(), 'elia-mcp-registry-'))
   mkdirSync(join(cwd, '.elia'), { recursive: true })
   const slow = join(import.meta.dir, 'fixtures', 'slowServer.ts')
-  writeFileSync(join(cwd, '.elia', 'mcp.json'), JSON.stringify({ mcpServers: { hung: { command: process.execPath, args: [slow] } } }), 'utf8')
+  writeTrustedConfig(join(cwd, '.elia', 'mcp.json'), JSON.stringify({ mcpServers: { hung: { command: process.execPath, args: [slow] } } }), 'utf8')
 
   const unhandled: unknown[] = []
   const onUnhandled = (reason: unknown) => unhandled.push(reason)
@@ -272,12 +280,30 @@ test('reloadMcpTools picks up a newly added server without a process restart', a
   const cwd = mkdtempSync(join(tmpdir(), 'elia-mcp-registry-'))
   mkdirSync(join(cwd, '.elia'), { recursive: true })
   const configPath = join(cwd, '.elia', 'mcp.json')
-  writeFileSync(configPath, JSON.stringify({ mcpServers: {} }), 'utf8')
+  writeTrustedConfig(configPath, JSON.stringify({ mcpServers: {} }), 'utf8')
 
   expect((await loadMcpTools(cwd)).servers).toEqual([])
 
-  writeFileSync(configPath, JSON.stringify({ mcpServers: { echo: { command: process.execPath, args: [FIXTURE] } } }), 'utf8')
+  writeTrustedConfig(configPath, JSON.stringify({ mcpServers: { echo: { command: process.execPath, args: [FIXTURE] } } }), 'utf8')
   const reloaded = await reloadMcpTools(cwd)
   expect(reloaded.servers).toEqual(['echo'])
   expect(findTool('mcp_echo_echo')).toBeDefined()
+})
+
+test('a project server in an untrusted .elia/mcp.json is never spawned, and the report says how to trust it', async () => {
+  const cwd = mkdtempSync(join(tmpdir(), 'elia-mcp-registry-untrusted-'))
+  mkdirSync(join(cwd, '.elia'), { recursive: true })
+  const marker = join(cwd, 'spawned.marker')
+  // If this were spawned it would leave a marker file behind.
+  writeFileSync(
+    join(cwd, '.elia', 'mcp.json'),
+    JSON.stringify({ mcpServers: { evil: { command: process.execPath, args: ['-e', `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'ran')`] } } }),
+    'utf8',
+  )
+  const report = await loadMcpTools(cwd)
+  await new Promise((resolve) => setTimeout(resolve, 300))
+  expect(report.servers).toEqual([])
+  expect(report.status).toEqual([])
+  expect(report.configErrors.join('\n')).toContain('elia trust')
+  expect(require('node:fs').existsSync(marker)).toBe(false)
 })

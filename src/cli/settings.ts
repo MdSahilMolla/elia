@@ -14,6 +14,38 @@ import { removeProviderConfiguration, saveProviderConfiguration } from '../provi
 import { flagValue, hasFlag, positionals } from './argv.ts'
 import { readSecretInput, readStdinText } from './providerSetup.ts'
 
+/**
+ * `elia trust [status|revoke]` — the one place a person says "yes, I have looked
+ * at this repository's own skills / MCP servers / standing approvals /
+ * schedules". Recorded in the per-user trust record (never in the repo) and
+ * bound to the reviewed files' hashes, so it lapses when they change.
+ */
+export async function runTrust(): Promise<void> {
+  const { projectTrustStatus, trustProject, untrustProject } = await import('../autonomy/projectTrust.ts')
+  const root = process.cwd()
+  const action = positionals()[0] ?? 'trust'
+  if (action === 'status' || action === 'list') {
+    for (const item of projectTrustStatus(root)) {
+      writeNotice(`${item.trusted ? 'trusted ' : item.present ? 'UNTRUSTED' : 'absent   '}  ${item.label}`)
+    }
+    return
+  }
+  if (action === 'revoke' || action === 'untrust') {
+    untrustProject(root)
+    writeNotice(`✓ Trust for ${root} revoked.`)
+    return
+  }
+  if (action !== 'trust') {
+    writeError(`Unknown trust action "${action}". Use: elia trust [status|revoke].`)
+    process.exitCode = 1
+    return
+  }
+  const trusted = trustProject(root)
+  writeNotice(`✓ Trusted in ${root}:`)
+  for (const label of trusted) writeNotice(`  ${label}`)
+  writeNotice('This is bound to the files as they are now; if any of them changes, run `elia trust` again after reviewing it.')
+}
+
 export async function runSkills(): Promise<void> {
   const { listSkillFiles } = await import('../skills/loader.ts')
   const { tryListSkillBundles } = await import('../skills/bundles.ts')
@@ -119,8 +151,13 @@ export async function runSkills(): Promise<void> {
   if (action === 'trust' || action === 'untrust') {
     const { trustProjectSkills, untrustProjectSkills } = await import('../skills/trust.ts')
     if (action === 'trust') {
-      trustProjectSkills(PROJECT_SKILLS_DIR)
-      writeNotice(`✓ Project skills in ${PROJECT_SKILLS_DIR} are now trusted and will be loaded on the next start.`)
+      // Recorded in the per-user trust record and bound to a hash of these
+      // exact files — not written into the repo, and revoked if they change.
+      if (trustProjectSkills(PROJECT_SKILLS_DIR)) {
+        writeNotice(`✓ Project skills in ${PROJECT_SKILLS_DIR} are now trusted and will be loaded on the next start (until a skill file changes).`)
+      } else {
+        writeNotice(`No ${SKILL_SUFFIX} files in ${PROJECT_SKILLS_DIR}, so there is nothing to trust.`)
+      }
     } else {
       untrustProjectSkills(PROJECT_SKILLS_DIR)
       writeNotice(`✓ Project skills in ${PROJECT_SKILLS_DIR} are no longer trusted.`)
@@ -129,7 +166,7 @@ export async function runSkills(): Promise<void> {
   }
 
   if (action === 'status') {
-    const { isProjectSkillsTrusted } = await import('../skills/trust.ts')
+    const { isProjectSkillsTrusted, hasIgnoredRepoTrustFile } = await import('../skills/trust.ts')
     const trusted = isProjectSkillsTrusted(PROJECT_SKILLS_DIR)
     const files = listSkillFiles().filter((f) => f.source === 'project')
     writeNotice(`Project skills directory: ${PROJECT_SKILLS_DIR}`)
@@ -137,6 +174,9 @@ export async function runSkills(): Promise<void> {
     writeNotice(`Files found: ${files.length}`)
     if (!trusted && files.length > 0) {
       writeNotice('These files were found but are not loaded. Inspect them, then run `elia skills trust` to enable them.')
+    }
+    if (hasIgnoredRepoTrustFile(PROJECT_SKILLS_DIR)) {
+      writeNotice('A skills-trust.json inside the project was ignored: a repository cannot vouch for itself. Trust is kept in your user config.')
     }
     return
   }

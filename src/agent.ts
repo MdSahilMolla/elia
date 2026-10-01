@@ -34,6 +34,8 @@ import { draftUpfrontPlan, planActivity, planBriefing, planTodoItems, stripInjec
 import { checkPremises, describePremises, premiseBriefing } from './principles/premises.ts'
 import { beginPlanRequest, planChecklist, planProgressTitle, type PlanProgressUpdate } from './autonomy/planProgress.ts'
 import { memoryReceipt } from './autonomy/turnLearning.ts'
+import { providerCapabilities } from './providers/registry.ts'
+import { deferredToolsForMode, lazyToolsEnabled } from './tools/lazyTools.ts'
 
 /** The most recent user message text — the query project memory is ranked against. */
 function lastUserTextFor(messages: ConversationMessage[]): string {
@@ -319,6 +321,9 @@ async function runScopedTurn(
       systemPrompt,
       systemDynamicPrompt,
       tools,
+      // Specialist tools a mode does not rely on go out as a load-on-demand
+      // catalog. See tools/lazyTools.ts.
+      deferTools: lazyToolsEnabled(providerCapabilities(options.providerName ?? config.providerName).kind) ? deferredToolsForMode(mode) : undefined,
       provider: options.provider,
       providerName: options.providerName,
       model: options.model,

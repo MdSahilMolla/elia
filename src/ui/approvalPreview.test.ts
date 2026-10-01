@@ -45,3 +45,27 @@ test('tools without a meaningful preview return undefined', () => {
   expect(approvalPreviewLines('edit_file', {})).toBeUndefined()
   expect(approvalPreviewLines('run_command', {})).toBeUndefined()
 })
+
+test('communication send preview shows channel, recipients, subject, attachments and a redacted body excerpt', async () => {
+  const { mkdirSync, writeFileSync } = await import('node:fs')
+  const { join } = await import('node:path')
+  const { paths } = await import('../config.ts')
+  const dir = join(paths.state, 'communications')
+  mkdirSync(dir, { recursive: true })
+  const id = 'draft-preview-1'
+  writeFileSync(join(dir, `${id}.json`), JSON.stringify({
+    id, channel: 'email', recipient: 'a@example.com', cc: ['b@example.com'], bcc: ['c@example.com'],
+    subject: 'Quarterly numbers', attachments: ['report.pdf'], body: 'Hi\nuse https://u:pw123@host.example/x today',
+  }))
+  const lines = approvalPreviewLines('communication', { action: 'send', draftId: id })!
+  const text = lines.join('\n')
+  expect(text).toContain('to: a@example.com')
+  expect(text).toContain('cc: b@example.com')
+  expect(text).toContain('bcc: c@example.com')
+  expect(text).toContain('subject: Quarterly numbers')
+  expect(text).toContain('attachments: report.pdf')
+  expect(text).toContain('body: Hi use')
+  expect(text).not.toContain('pw123')
+  expect(approvalPreviewLines('communication', { action: 'send', draftId: '../../etc/passwd' })).toBeUndefined()
+  expect(approvalPreviewLines('communication', { action: 'send', draftId: 'missing-draft-id' })).toEqual(['  (draft not found — nothing to preview)'])
+})

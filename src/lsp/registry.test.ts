@@ -1,8 +1,8 @@
 import { expect, test } from 'bun:test'
-import { mkdtempSync } from 'node:fs'
+import { existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { formatDiagnostics, diagnosticsForFile, resetLspStateForTests, resolveSpawnCommand } from './registry.ts'
+import { formatDiagnostics, diagnosticsForFile, neutralNpxLaunch, resetLspStateForTests, resolveSpawnCommand } from './registry.ts'
 import type { Diagnostic } from './protocol.ts'
 
 test('formatDiagnostics returns an empty string for a clean file', () => {
@@ -91,5 +91,19 @@ test('ELIA_LSP=off disables diagnostics entirely, even for a recognized extensio
   } finally {
     if (previous === undefined) delete process.env.ELIA_LSP
     else process.env.ELIA_LSP = previous
+  }
+})
+
+test('the npx fallback launches from an empty temp directory with elia credentials removed', () => {
+  const launch = neutralNpxLaunch({ PATH: '/usr/bin', HOME: '/h', ANTHROPIC_API_KEY: 'dummy-a', OPENAI_API_KEY: 'dummy-o', ELIA_API_KEY: 'dummy-e', GITHUB_TOKEN: 'dummy-g' })
+  try {
+    expect(existsSync(launch.cwd)).toBe(true)
+    expect(readdirSync(launch.cwd)).toEqual([])
+    expect(launch.cwd).not.toBe(process.cwd())
+    expect(launch.env.PATH).toBe('/usr/bin')
+    expect(launch.env.HOME).toBe('/h')
+    for (const name of ['ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'ELIA_API_KEY', 'GITHUB_TOKEN']) expect(launch.env[name]).toBeUndefined()
+  } finally {
+    rmSync(launch.cwd, { recursive: true, force: true })
   }
 })

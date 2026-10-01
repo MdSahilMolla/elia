@@ -1,6 +1,7 @@
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { ELIA_ROOT } from '../config.ts'
 import { readBoundedOutput, terminateProcessGroup } from '../shell.ts'
+import { noteHostRun } from './containment.ts'
 import type { GapVector } from '../gap/types.ts'
 import type { ValueProbeRun } from '../values/probes.ts'
 import { isPrefixSizes, type PrefixSizes } from '../world/probe.ts'
@@ -30,7 +31,7 @@ const MEASURE_TIMEOUT_MS = 900_000
 
 /** The generator–verifier gap as `root`'s own verifier scores it, critic rung included. */
 export async function gapVectorIn(root: string, signal?: AbortSignal): Promise<GapVector | undefined> {
-  return spawnJson<GapVector>(join(root, 'src', 'gap', 'measure.ts'), ['--critic'], signal)
+  return spawnJson<GapVector>(join(root, 'src', 'gap', 'measure.ts'), ['--critic'], signal, root)
 }
 
 /**
@@ -45,22 +46,25 @@ export async function valueProbesIn(
   options: { subjectPrompt?: string; signal?: AbortSignal } = {},
 ): Promise<ValueProbeRun | undefined> {
   const args = options.subjectPrompt ? ['--subject-prompt', options.subjectPrompt] : []
-  return spawnJson<ValueProbeRun>(join(root, 'src', 'values', 'measure.ts'), args, options.signal)
+  return spawnJson<ValueProbeRun>(join(root, 'src', 'values', 'measure.ts'), args, options.signal, root)
 }
 
 /** The names of the tools `root`'s own registry gives its agent (toolSurface.ts). */
 export async function toolNamesIn(root: string, signal?: AbortSignal): Promise<string[] | undefined> {
-  const surface = await spawnJson<{ tools?: unknown }>(join(root, 'src', 'evolve', 'toolSurface.ts'), [], signal)
+  const surface = await spawnJson<{ tools?: unknown }>(join(root, 'src', 'evolve', 'toolSurface.ts'), [], signal, root)
   return Array.isArray(surface?.tools) && surface.tools.every((name) => typeof name === 'string') ? (surface.tools as string[]) : undefined
 }
 
 /** What `root`'s own prompt and tool definitions cost every call (world/probe.ts). */
 export async function prefixIn(root: string, signal?: AbortSignal): Promise<PrefixSizes | undefined> {
-  const sizes = await spawnJson<unknown>(join(root, 'src', 'world', 'probe.ts'), [], signal)
+  const sizes = await spawnJson<unknown>(join(root, 'src', 'world', 'probe.ts'), [], signal, root)
   return isPrefixSizes(sizes) ? sizes : undefined
 }
 
-async function spawnJson<T>(entry: string, args: string[], signal?: AbortSignal): Promise<T | undefined> {
+async function spawnJson<T>(entry: string, args: string[], signal?: AbortSignal, root?: string): Promise<T | undefined> {
+  // These probes run a tree's own entry files on the host (they call models, so they cannot be boxed);
+  // for a candidate tree that is recorded so landing does not read a boxed gate as covering it.
+  if (root !== undefined && resolve(root) !== resolve(ELIA_ROOT)) noteHostRun()
   const proc = Bun.spawn(['bun', 'run', entry, ...args], {
     cwd: ELIA_ROOT,
     stdout: 'pipe',

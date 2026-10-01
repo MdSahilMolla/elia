@@ -5,7 +5,7 @@
 //! supervisor watches the tree for that), or hide that a path exists (metadata
 //! reads stay allowed because path resolution needs them; contents do not).
 
-use crate::policy::{NetMode, Policy};
+use crate::policy::{protected_paths, NetMode, Policy};
 use anyhow::{bail, Result};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -86,6 +86,8 @@ pub fn profile(policy: &Policy, run_dir: &Path, scratch: &Path, proxy_port: Opti
     p.push_str("(allow file-read* (literal \"/\"))\n");
     p.push_str(&format!("(allow file-read*{})\n", subpath(reads)?));
     p.push_str(&format!("(allow file-write*{})\n", subpath(writes)?));
+    // Later rules win: control files inside the writable tree stay read-only.
+    p.push_str(&format!("(deny file-write*{})\n", subpath(protected_paths(run_dir))?));
     p.push_str("(allow file-write* (literal \"/dev/null\") (literal \"/dev/dtracehelper\"))\n");
     p.push_str("(allow mach-lookup");
     for s in MACH_SERVICES {
@@ -135,6 +137,18 @@ mod tests {
 
         let open = profile(&policy(r#"{"mode":"open"}"#), &ws, &ws, None).unwrap();
         assert!(open.contains("(allow network*)"));
+    }
+
+    #[test]
+    fn workspace_control_files_stay_read_only() {
+        let ws = std::env::temp_dir().canonicalize().unwrap();
+        let p = profile(&policy(r#"{"mode":"none"}"#), &ws, &ws, None).unwrap();
+        let allow = p.find(&format!("(allow file-write* (subpath {})", q(&ws).unwrap())).expect("workspace is writable");
+        let deny = p.find("(deny file-write*").expect("control files are denied");
+        assert!(deny > allow, "the deny must come after the allow so it wins");
+        for tail in [".git/hooks", ".git/config", ".elia"] {
+            assert!(p.contains(&q(&ws.join(tail)).unwrap()), "{tail} is protected");
+        }
     }
 
     #[test]

@@ -33,10 +33,29 @@ export class ContainmentRequired extends Error {
   }
 }
 
+let hostRuns = 0
+
+/**
+ * Records that candidate-authored code ran on the host, outside elia-box. Landing
+ * counts these: a boxed final gate is not proof of containment when the same code
+ * also ran unboxed earlier (the builder's own test runs, the benchmark, the probes).
+ */
+export function noteHostRun(): void {
+  hostRuns++
+}
+
+/** A value to hand back to {@link attest} as `hostSince` to count only host runs after this point. */
+export function hostRunCount(): number {
+  return hostRuns
+}
+
 /** A gate command, in the box when asked to be. */
 export async function runGate(command: string, timeoutMs: number, cwd: string, liveRoot: string, signal?: AbortSignal): Promise<ShellResult> {
   const mode = evolveBoxMode()
-  if (mode === 'off') return runShell(command, timeoutMs, cwd, signal)
+  if (mode === 'off') {
+    noteHostRun()
+    return runShell(command, timeoutMs, cwd, signal)
+  }
   const policy = boxPolicyFor(cwd, timeoutMs, { NO_COLOR: '1' })
   // The candidate tree has no node_modules of its own; resolution walks up to the live tree's.
   policy.readPaths = [...(policy.readPaths ?? []), realpathSync(join(liveRoot, 'node_modules'))]
@@ -45,7 +64,10 @@ export async function runGate(command: string, timeoutMs: number, cwd: string, l
   try {
     return shellResultFromBox(command, await runInBox(policy, ['/bin/sh', '-c', command], { signal, timeoutMs }))
   } catch (err) {
-    if (err instanceof BoxUnavailable && mode === 'on') return runShell(command, timeoutMs, cwd, signal)
+    if (err instanceof BoxUnavailable && mode === 'on') {
+      noteHostRun()
+      return runShell(command, timeoutMs, cwd, signal)
+    }
     if (err instanceof BoxUnavailable) throw new ContainmentRequired(`ELIA_EVOLVE_BOX=require but elia-box cannot run: ${err.message}`)
     throw err
   }
@@ -53,6 +75,8 @@ export async function runGate(command: string, timeoutMs: number, cwd: string, l
 
 export interface Attestation {
   boxed: number
+  /** Candidate-code runs on the host in the same window; landing needs this to be zero. */
+  unboxed: number
   backends: string[]
   networks: string[]
   /** Runs cut short by a limit, the wall clock, or an interrupt. */
@@ -60,11 +84,12 @@ export interface Attestation {
   receiptHashes: string[]
 }
 
-/** What the boxed runs since `sinceIndex` (a value of `recentBoxReceipts().length`) were held to. */
-export function attest(sinceIndex = 0, receipts: readonly BoxReceipt[] = recentBoxReceipts()): Attestation {
+/** What the boxed runs since `sinceIndex` (a value of `recentBoxReceipts().length`) were held to, and how many host runs of candidate code (since `hostSince`, a {@link hostRunCount}; none counted when omitted) sat beside them. */
+export function attest(sinceIndex = 0, receipts: readonly BoxReceipt[] = recentBoxReceipts(), hostSince = hostRuns): Attestation {
   const mine = receipts.slice(sinceIndex)
   return {
     boxed: mine.length,
+    unboxed: Math.max(0, hostRuns - hostSince),
     backends: [...new Set(mine.map((r) => r.backend))],
     networks: [...new Set(mine.map((r) => r.network.mode))],
     cutShort: mine.filter((r) => r.exit.timedOut || r.exit.limitHit !== null || r.exit.interrupted).length,
@@ -74,6 +99,7 @@ export function attest(sinceIndex = 0, receipts: readonly BoxReceipt[] = recentB
 
 export function describeAttestation(a: Attestation): string {
   if (a.boxed === 0) return 'the gate ran on the host, uncontained'
+  if (a.unboxed > 0) return `only part of the candidate's code was contained: ${a.boxed} run${a.boxed === 1 ? '' : 's'} in elia-box, ${a.unboxed} on the host`
   const cut = a.cutShort ? `, ${a.cutShort} cut short by a limit` : ''
   return `the gate ran in elia-box (${a.backends.join('+')}; network ${a.networks.join('+')}; ${a.boxed} sealed receipt${a.boxed === 1 ? '' : 's'}${cut})`
 }

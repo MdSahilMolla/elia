@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { chmodSync, existsSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { appendSecureFile, ensureSecureDirectory, hardenSecureFile, sweepStaleTemporaries, writeSecureBunFile, writeSecureFile } from './securePersistence.ts'
@@ -74,4 +74,27 @@ test('sweepStaleTemporaries removes only temps whose owner is gone', () => {
 
 test('sweepStaleTemporaries tolerates a missing directory', () => {
   expect(sweepStaleTemporaries(join(tmpdir(), 'elia-sweep-does-not-exist'), () => false)).toBe(0)
+})
+
+test.skipIf(!POSIX_PERMISSIONS)('appending and directory hardening refuse symlinks instead of following them', () => {
+  const root = mkdtempSync(join(tmpdir(), 'elia-secure-link-'))
+  try {
+    const victim = join(root, 'victim.txt')
+    writeFileSync(victim, 'keep\n', { mode: 0o644 })
+    chmodSync(victim, 0o644)
+    symlinkSync(victim, join(root, 'log.jsonl'))
+    expect(() => appendSecureFile(join(root, 'log.jsonl'), 'injected\n')).toThrow('symbolic link')
+    expect(readFileSync(victim, 'utf8')).toBe('keep\n')
+    expect(privateMode(victim)).toBe(0o644)
+
+    const realDir = join(root, 'real')
+    ensureSecureDirectory(realDir)
+    chmodSync(realDir, 0o755)
+    symlinkSync(realDir, join(root, 'state'))
+    expect(() => ensureSecureDirectory(join(root, 'state'))).toThrow('symbolic link')
+    expect(privateMode(realDir)).toBe(0o755)
+    expect(() => appendSecureFile(join(root, 'state', 'x.log'), 'a')).toThrow('symbolic link')
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
 })

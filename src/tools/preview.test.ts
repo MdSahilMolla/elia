@@ -127,3 +127,12 @@ test('a refused preview leaves no url behind to verify', async () => {
   await expect(preview({ path: 'does-not-exist.html' })).rejects.toThrow('Nothing to preview')
   expect(consumeLastPreviewedUrl()).toBeUndefined()
 })
+
+test('"." and anything that exists at the active root resolve there, not under the scratch workspace', () => {
+  const workspace = join(dir, 'workspace')
+  mkdirSync(workspace)
+  writeFileSync(join(workspace, 'game.py'), 'a different project')
+  writeFileSync(join(dir, 'game.py'), 'the file write_file just wrote')
+  expect(resolveProjectPath('.', dir, workspace)).toBe(dir)
+  expect(resolveProjectPath('game.py', dir, workspace)).toBe(join(dir, 'game.py'))
+})

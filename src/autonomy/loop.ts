@@ -25,7 +25,7 @@ import { createBlackboard, setActiveBlackboard } from './blackboard.ts'
 import { createTodoList, setActiveTodoList } from './todoList.ts'
 import { withAgentIdentity } from './context.ts'
 import { activeMode, withActiveMode, type AgentMode } from './mode.ts'
-import { loadDevelopmentToolHooks, withToolHooks } from './devHooks.ts'
+import { loadDevelopmentToolHooks, withToolHooks, type ToolHook } from './devHooks.ts'
 import { createJournal, newRunId, runDir, type Journal } from './journal.ts'
 import { registerShutdownCleanup } from '../ui/shutdown.ts'
 import { captureTreeSnapshot, discardTreeSnapshot, dirtyPaths, restoreTreeSnapshot, type TreeSnapshot } from './treeSnapshot.ts'
@@ -173,6 +173,12 @@ export interface AutonomousRunOptions {
    * the session id so the session's cost roll-ups include the run's spending.
    */
   sessionId?: SessionId
+  /**
+   * Tool hooks added to the run's own (see devHooks.ts). Hooks can only block,
+   * never grant: `elia autopilot --scopes` (autopilot/scopes.ts) uses them to
+   * keep its goal runs inside what they were given.
+   */
+  extraToolHooks?: readonly ToolHook[]
 }
 
 export type AutonomyProfile = 'fast' | 'balanced' | 'thorough'
@@ -391,7 +397,7 @@ function finalizeDeadRun(reason: string, error?: unknown): void {
 
 export function runAutonomousTask(options: AutonomousRunOptions): Promise<AutonomousRunResult> {
   const mode = options.mode ?? activeMode()
-  const hooks = mode === 'dev' ? loadDevelopmentToolHooks() : []
+  const hooks = [...(mode === 'dev' ? loadDevelopmentToolHooks() : []), ...(options.extraToolHooks ?? [])]
   const run = (): Promise<AutonomousRunResult> =>
     withActiveMode(mode, () =>
       withToolHooks(hooks, () =>
@@ -1011,6 +1017,8 @@ async function runAutonomousTaskInternal(options: AutonomousRunOptions): Promise
   }
 
   if (proposal && options.resumeGraph) {
+    // Say what the resume will honour before honouring it; never a prompt, so unattended runs are unaffected.
+    for (const line of graph.resumeNotice()) writeSubStep(line)
     const durableApproval = graph.state().approvals.find((approval) => approval.kind === 'plan')
     planApproved = durableApproval?.status === 'approved'
     if (durableApproval?.status !== 'approved') {
@@ -1055,7 +1063,7 @@ async function runAutonomousTaskInternal(options: AutonomousRunOptions): Promise
   // see unwinnableVerificationCommands.
   if (planApproved && proposal.verification.length > 0) {
     const unattended = (options.governanceMode ?? 'unattended') === 'unattended'
-    const refused = unwinnableVerificationCommands(proposal.verification, { unattended })
+    const refused = unwinnableVerificationCommands(proposal.verification, { unattended, cwd: workspaceRoot })
     if (refused.length > 0) {
       const usable = proposal.verification.filter((command) => !refused.includes(command))
       const replacement = usable.length > 0 ? usable : detectChecks(workspaceRoot)

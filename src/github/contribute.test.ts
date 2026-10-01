@@ -2,7 +2,7 @@ import { afterEach, expect, test } from 'bun:test'
 import { spawnSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import {
   contributionDirFor,
   contributionForDir,
@@ -88,9 +88,9 @@ test('an isolated task root never reaches up into the shared workspace', () => {
 test('the record round-trips and only open contributions are listed as open', () => {
   const state = join(scratch(), 'contributions.json')
   setContributionsPathForTests(state)
-  const base: Contribution = { slug: 'a/b', dir: join('x', 'b'), defaultBranch: 'main', status: 'branched', startedAt: 1, updatedAt: 1 }
+  const base: Contribution = { slug: 'a/b', dir: join(dirname(state), 'x', 'b'), defaultBranch: 'main', status: 'branched', startedAt: 1, updatedAt: 1 }
   saveContribution(base)
-  saveContribution({ ...base, slug: 'c/d', dir: join('x', 'd'), status: 'merged' })
+  saveContribution({ ...base, slug: 'c/d', dir: join(dirname(state), 'x', 'd'), status: 'merged' })
   expect(readContributions().map((row) => row.slug)).toEqual(['a/b', 'c/d'])
   expect(openContributions().map((row) => row.slug)).toEqual(['a/b'])
 
@@ -273,7 +273,7 @@ test('openContributionPr targets the upstream repo from the fork branch, and lin
   const contribution: Contribution = {
     slug: 'pallets/click',
     forkSlug: 'octocat/click',
-    dir: join('w', 'click'),
+    dir: join(dirname(state), 'w', 'click'),
     defaultBranch: 'main',
     branch: 'fix/issue-3652',
     issue: 3652,
@@ -290,7 +290,7 @@ test('openContributionPr targets the upstream repo from the fork branch, and lin
   expect(created).toContain('--head octocat:fix/issue-3652')
   expect(created).toContain('--base main')
   expect(created).toContain('Fixes #3652')
-  expect(git.calls).toContain('push -u origin fix/issue-3652')
+  expect(git.calls).toContain('push -u origin -- fix/issue-3652')
   expect(out).toContain('https://github.com/pallets/click/pull/9001')
 
   const saved = readContributions(state)[0]!
@@ -342,4 +342,23 @@ test('the compounding line separates what was merged upstream from what stopped 
   expect(rendered).toContain('pallets/click#9001 merged')
   expect(rendered).toContain('some/lib stopped at "committed" — no pull request, so nothing was contributed')
   expect(renderContributionEvidence([])).toBeUndefined()
+})
+
+test('a hand-edited record with a flag-shaped branch, a foreign dir or a bad PR number is dropped on read', () => {
+  const root = scratch()
+  const state = join(root, 'contributions.json')
+  setContributionsPathForTests(state)
+  const good: Contribution = { slug: 'a/b', dir: join(root, 'workspace', 'b'), defaultBranch: 'main', branch: 'fix/x', status: 'branched', prNumber: 4, startedAt: 1, updatedAt: 1 }
+  const rows: unknown[] = [
+    good,
+    { ...good, slug: 'c/d', branch: '--upload-pack=touch /tmp/pwned' },
+    { ...good, slug: 'e/f', defaultBranch: '-x' },
+    { ...good, slug: 'g/h', dir: '/etc' },
+    { ...good, slug: 'i/j', dir: 'relative/clone' },
+    { ...good, slug: '--flag/x' },
+    { ...good, slug: 'k/l', prNumber: '1; rm -rf' },
+    { ...good, slug: 'm/n', status: 'weird' },
+  ]
+  writeFileSync(state, JSON.stringify({ version: 1, contributions: rows }))
+  expect(readContributions().map((row) => row.slug)).toEqual(['a/b'])
 })

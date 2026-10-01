@@ -24,6 +24,16 @@ const SECRET_ENV_NAMES = [...new Set([
   'VERCEL_TOKEN', 'NETLIFY_AUTH_TOKEN', 'NETLIFY_SITE_ID',
 ])]
 
+/**
+ * `env` without elia's own credentials: provider keys, search keys and deploy
+ * tokens. For running code elia did not write (a project's own checks), which
+ * has no business with them.
+ */
+export function withoutEliaSecrets(env: NodeJS.ProcessEnv = process.env): Record<string, string> {
+  const secret = new Set(SECRET_ENV_NAMES)
+  return Object.fromEntries(Object.entries(env).filter((entry): entry is [string, string] => entry[1] !== undefined && !secret.has(entry[0])))
+}
+
 function envPresence(): Record<string, boolean> {
   return Object.fromEntries(SECRET_ENV_NAMES.map((name) => [name, Boolean(process.env[name])]))
 }

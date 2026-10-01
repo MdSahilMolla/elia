@@ -91,7 +91,7 @@ const MAX_ACCEPTED_TTL_MS = DEFAULT_PREAUTH_TTL_MS * 2
 // The per-user trust stores live under ~/.config/elia (not the project's
 // `.elia`) so no checked-out repo picks up or shadows them; a one-time
 // migration moves an existing ~/.elia store across on first read.
-function preauthDir(): string {
+export function preauthDir(): string {
   return process.env.ELIA_PREAUTH_DIR ?? join(homedir(), '.config', 'elia')
 }
 

@@ -196,3 +196,41 @@ test('a shell command that names a trust store is a sensitive read (#1272)', () 
     expect(commandMayReadSensitiveData(command), command).toBe(false)
   }
 })
+
+test('quote splitting, backslashes and globs cannot hide a protected path from the shell guard', () => {
+  for (const command of [
+    "cat .e''nv", 'cat .e"n"v', 'cat .e\\nv', 'ca""t .env',
+    'cat .en?', 'cat .e[n]v', 'cat .e*', 'cat .*', 'cat .[e]nv',
+    'cat ~/.config/eli?/preauth.secr?t', 'cat ~/.c*/elia/allow.json', 'cat ~/.config/eli?/*',
+    'cat .el?a/allow.json', 'cat ~/.s?h/id_rsa', 'head -n1 cred*', 'cat pass*',
+  ]) {
+    expect(commandMayReadSensitiveData(command), command).toBe(true)
+  }
+})
+
+test('ordinary quoting and globbing is not mistaken for a protected read', () => {
+  for (const command of [
+    'cat "my file.txt"', 'grep -r foo src/*.ts', 'cat *.md', 'cat *', 'head -n 5 src/?ain.ts', 'grep "a?b" README.md',
+    'cat .env.example', "grep -n 'foo' 'src/app.ts'", 'cat src/[ab].ts', 'cat .eslintrc*',
+  ]) {
+    expect(commandMayReadSensitiveData(command), command).toBe(false)
+  }
+})
+
+test('lifecycle hooks, schedules and autopilot state are trust-control files', () => {
+  for (const path of ['.elia/lifecycle-hooks.json', 'app/.elia/schedules.json', '.ELIA/Autopilot/state.json']) {
+    expect(isEliaTrustFile(path), path).toBe(true)
+  }
+  for (const path of ['lifecycle-hooks.json', 'src/schedules.json', 'autopilot/state.json']) {
+    expect(isEliaTrustFile(path), path).toBe(false)
+  }
+})
+
+test("a durable run's own state files are trust-control files", () => {
+  for (const path of ['.elia/runs/r1/goal-graph.json', 'app/.elia/runs/r1/goal-graph.json.tmp', '.elia/runs/r1/events.ndjson', '.elia/runs/r1/plan.md', '.elia/runs/r1/checkpoints/c1.json']) {
+    expect(isEliaTrustFile(path), path).toBe(true)
+  }
+  for (const path of ['runs/r1/goal-graph.json', '.elia/runs/r1/notes.md', 'docs/plan.md']) {
+    expect(isEliaTrustFile(path), path).toBe(false)
+  }
+})

@@ -88,3 +88,9 @@ test('environment discovery does not require a configured browser or provider', 
   // suite's load, not a hang in the tool. Given explicitly so a genuine
   // regression still fails instead of the clock deciding.
 }, 60_000)
+
+test('a project check runs without elia’s own credentials', async () => {
+  const { withoutEliaSecrets } = await import('./environment.ts')
+  const env = withoutEliaSecrets({ PATH: '/bin', INCEPTION_API_KEY: 'k', ANTHROPIC_API_KEY: 'k', VERCEL_TOKEN: 't', HOME: '/home/x' })
+  expect(env).toEqual({ PATH: '/bin', HOME: '/home/x' })
+})

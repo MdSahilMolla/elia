@@ -29,7 +29,7 @@ function contract(
 }
 
 const CATALOG: CapabilityContract[] = [
-  ...['read_file', 'list_files', 'grep', 'find_symbol', 'recall', 'brain', 'why', 'project_profile', 'production_readiness', 'environment', 'causal_debug', 'arch_drift', 'adversarial_verify', 'codebase_memory', 'predictive_impact', 'dependency_audit', 'multi_modal_review', 'spec_verify', 'temporal_analysis', 'board_read']
+  ...['read_file', 'list_files', 'grep', 'find_symbol', 'recall', 'brain', 'why', 'project_profile', 'production_readiness', 'environment', 'causal_debug', 'arch_drift', 'adversarial_verify', 'codebase_memory', 'predictive_impact', 'dependency_audit', 'multi_modal_review', 'spec_verify', 'temporal_analysis', 'board_read', 'load_tools']
     .map((tool) => contract(tool, 'safe', ['workspace-read'], true, 'bounded local observation')),
   ...['web_search', 'web_fetch', 'paper'].map((tool) => contract(tool, 'safe', ['network-read'], true, 'dated source or fetched response')),
   ...['visualize', 'finance', 'data_science', 'sports', 'fitness'].map((tool) => contract(tool, 'safe', ['workspace-read'], true, 'deterministic result or generated artifact')),

@@ -197,3 +197,24 @@ export function capacityRetryDelayMs(message: string): number {
 export function retryBackoffMs(failureText: string, attempt: number): number {
   return capacityRetryDelayMs(failureText) || 250 * 2 ** (attempt - 1)
 }
+
+/** A request the provider accepted and never started answering (see openaiCompatible.ts `firstByteMs`). */
+export function isStuckRequestError(message: string): boolean {
+  return /no reply started within/i.test(message)
+}
+
+/**
+ * The per-minute token cap a refusal names, when the request alone was over it:
+ * Groq's "Request too large for model ... on tokens per minute (TPM): Limit 8000,
+ * Requested 16230". A free Groq key refused every elia agent request this way,
+ * and each refusal was shrunk, re-sent and refused again before falling back.
+ */
+export function tokenRateCap(message: string): number | undefined {
+  if (!/tokens per minute|\bTPM\b/i.test(message) || !isRequestTooLargeError(message)) return undefined
+  const limit = /Limit:?\s*(\d+)/i.exec(message)?.[1]
+  const requested = /Requested:?\s*(\d+)/i.exec(message)?.[1]
+  if (!limit) return undefined
+  // Only a request over the cap on its own; hitting the cap with room to spare is a rate limit, which clears.
+  if (requested && Number(requested) <= Number(limit)) return undefined
+  return Number(limit)
+}

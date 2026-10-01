@@ -6,6 +6,8 @@ import { BATTMANN_STORE_ACTIONS, executeBattmannStoreAction, loadBattmannDashboa
 import { describeFeedResult, fetchFeed, leadingSeries, normalizeFeedRequest, type FeedResult } from '../battmann/feeds.ts'
 import { clampClearance, clearanceRank, modelBoundary } from '../battmann/modelBoundary.ts'
 import { DEFAULT_ARTIFACT_PATHS } from '../battmann/artifactPaths.ts'
+import { unverifiedFigures } from '../battmann/grounding.ts'
+import { assessReportIntegrity } from '../battmann/reportIntegrity.ts'
 import { excerptIsOnPage, lookupFetchedPage } from './fetchedPages.ts'
 import { openRuleQuestion, resolveDue } from '../battmann/monitor.ts'
 import { atomicWrite } from './atomicWrite.ts'
@@ -27,6 +29,21 @@ function date(input: unknown, name: string): string {
   const value = text(input, name, 100)
   if (!Number.isFinite(Date.parse(value))) throw new Error(`${name} must be an ISO date or timestamp`)
   return new Date(value).toISOString()
+}
+/**
+ * Runs each field's check and keeps every failure. A model that left out three fields of a consequence-chain node used to be
+ * told about one per call (statement, then mechanism, then basis), so a single chain cost four round-trips.
+ */
+function fieldCollector() {
+  const errors: string[] = []
+  return {
+    take<T>(parse: () => T): T {
+      try { return parse() } catch (error) { errors.push(error instanceof Error ? error.message : String(error)); return undefined as T }
+    },
+    done() {
+      if (errors.length) throw new Error(errors.length > 12 ? `${errors.slice(0, 12).join('; ')}; and ${errors.length - 12} more` : errors.join('; '))
+    },
+  }
 }
 function url(input: unknown, name: string): string {
   const value = text(input, name, 2_000)
@@ -139,19 +156,30 @@ export function calculateRiskAssessment(input: Record<string, unknown>): string 
   const asOf = date(input.asOf ?? new Date().toISOString(), 'asOf')
   const priorRisk = input.priorRisk === undefined ? 50 : number(input.priorRisk, 'priorRisk', 1, 99)
   // Common synonyms models send for a factor's fields.
+  const fields = fieldCollector()
   const factors: RiskFactor[] = list(input.factors, 'factors').map((raw): Record<string, unknown> => ({ ...raw, summary: raw.summary ?? raw.description, direction: raw.direction ?? raw.type })).map((item, index) => {
-    const sourceDate = date(item.sourceDate, `factors[${index}].sourceDate`)
-    if (sourceDate > asOf) throw new Error(`factors[${index}].sourceDate cannot be after asOf`)
-    const direction = text(item.direction, `factors[${index}].direction`, 20)
-    if (direction !== 'aggravating' && direction !== 'mitigating') throw new Error(`factors[${index}].direction must be aggravating or mitigating`)
-    const momentum = item.momentum === undefined ? 'stable' : text(item.momentum, `factors[${index}].momentum`, 20)
-    if (!['rising', 'stable', 'falling'].includes(momentum)) throw new Error(`factors[${index}].momentum must be rising, stable, or falling`)
+    const sourceDate = fields.take(() => {
+      const value = date(item.sourceDate, `factors[${index}].sourceDate`)
+      if (value > asOf) throw new Error(`factors[${index}].sourceDate cannot be after asOf`)
+      return value
+    })
+    const direction = fields.take(() => {
+      const value = text(item.direction, `factors[${index}].direction`, 20)
+      if (value !== 'aggravating' && value !== 'mitigating') throw new Error(`factors[${index}].direction must be aggravating or mitigating`)
+      return value as RiskDirection
+    })
+    const momentum = fields.take(() => {
+      const value = item.momentum === undefined ? 'stable' : text(item.momentum, `factors[${index}].momentum`, 20)
+      if (!['rising', 'stable', 'falling'].includes(value)) throw new Error(`factors[${index}].momentum must be rising, stable, or falling`)
+      return value as Momentum
+    })
     return {
-      id: text(item.id, `factors[${index}].id`, 100), summary: text(item.summary, `factors[${index}].summary`), sourceUrl: url(item.sourceUrl, `factors[${index}].sourceUrl`), sourceDate,
-      direction: direction as RiskDirection, magnitude: number(item.magnitude, `factors[${index}].magnitude`, 0.001, 1), reliability: number(item.reliability, `factors[${index}].reliability`, 0, 1),
-      independenceGroup: text(item.independenceGroup, `factors[${index}].independenceGroup`, 100), momentum: momentum as Momentum,
+      id: fields.take(() => text(item.id, `factors[${index}].id`, 100)), summary: fields.take(() => text(item.summary, `factors[${index}].summary`)), sourceUrl: fields.take(() => url(item.sourceUrl, `factors[${index}].sourceUrl`)), sourceDate,
+      direction, magnitude: fields.take(() => number(item.magnitude, `factors[${index}].magnitude`, 0.001, 1)), reliability: fields.take(() => number(item.reliability, `factors[${index}].reliability`, 0, 1)),
+      independenceGroup: fields.take(() => text(item.independenceGroup, `factors[${index}].independenceGroup`, 100)), momentum,
     }
   })
+  fields.done()
   if (!factors.length) throw new Error('factors must contain at least one sourced factor')
   if (new Set(factors.map((factor) => factor.id)).size !== factors.length) throw new Error('factor ids must be unique')
   const SCALE = 1.5
@@ -173,7 +201,9 @@ export function calculateRiskAssessment(input: Record<string, unknown>): string 
   const sensitivity = groupContributions.map((removed) => ({ removedGroup: removed.group, riskScore: round(100 * logistic(logit(priorRisk / 100) + groupContributions.filter((item) => item !== removed).reduce((sum, item) => sum + item.logOddsContribution, 0)), 1) }))
   const band = riskScore < 25 ? 'low' : riskScore < 50 ? 'moderate' : riskScore < 75 ? 'high' : 'severe'
   return JSON.stringify({
-    action: 'risk_assessment', subject, asOf, priorRisk, riskScore, band, confidence,
+    action: 'risk_assessment', saved: false,
+    toKeep: 'This score is not saved, and a report shows only what is saved. Record it with register_claim (classification model_estimate or reproducible_calculation, label the score as an estimate), citing evidence registered with register_evidence for its factors.',
+    subject, asOf, priorRisk, riskScore, band, confidence,
     directionOfTravel: { net: netTravel, magnitude: round(travel, 3), basis: 'supplied factor momentum weighted by each factor\u2019s contribution to the score', horizonNote: 'A 7- versus 30-day split requires dated factor histories; log them as forecast revisions on a resolvable question to obtain a measured trend.' },
     independentFactorGroups: groups.size, meanFactorReliability: round(meanReliability),
     factors: factors.map((factor) => ({ ...factor, contribution: round(signed(factor)) })),
@@ -191,16 +221,18 @@ export function buildConsequenceChain(input: Record<string, unknown>): string {
   const asOf = date(input.asOf ?? new Date().toISOString(), 'asOf')
   const raw = list(input.nodes, 'nodes')
   if (!raw.length) throw new Error('nodes must contain at least one consequence')
+  const fields = fieldCollector()
   const nodes: ConsequenceNode[] = raw.map((item, index) => ({
-    id: text(item.id, `nodes[${index}].id`, 100),
-    parentId: item.parentId === undefined || item.parentId === null || item.parentId === '' ? null : text(item.parentId, `nodes[${index}].parentId`, 100),
-    statement: text(item.statement, `nodes[${index}].statement`),
-    mechanism: text(item.mechanism, `nodes[${index}].mechanism`, 2_000),
-    conditionalProbability: number(item.conditionalProbability, `nodes[${index}].conditionalProbability`, 0.001, 0.999),
-    lagDays: number(item.lagDays, `nodes[${index}].lagDays`, 0, 3_650),
-    basis: text(item.basis, `nodes[${index}].basis`, 2_000),
-    sourceUrl: item.sourceUrl === undefined || item.sourceUrl === '' ? null : url(item.sourceUrl, `nodes[${index}].sourceUrl`),
+    id: fields.take(() => text(item.id, `nodes[${index}].id`, 100)),
+    parentId: fields.take(() => (item.parentId === undefined || item.parentId === null || item.parentId === '' ? null : text(item.parentId, `nodes[${index}].parentId`, 100))),
+    statement: fields.take(() => text(item.statement, `nodes[${index}].statement`)),
+    mechanism: fields.take(() => text(item.mechanism, `nodes[${index}].mechanism`, 2_000)),
+    conditionalProbability: fields.take(() => number(item.conditionalProbability, `nodes[${index}].conditionalProbability`, 0.001, 0.999)),
+    lagDays: fields.take(() => number(item.lagDays, `nodes[${index}].lagDays`, 0, 3_650)),
+    basis: fields.take(() => text(item.basis, `nodes[${index}].basis`, 2_000)),
+    sourceUrl: fields.take(() => (item.sourceUrl === undefined || item.sourceUrl === '' ? null : url(item.sourceUrl, `nodes[${index}].sourceUrl`))),
   }))
+  fields.done()
   if (new Set(nodes.map((node) => node.id)).size !== nodes.length) throw new Error('node ids must be unique')
   const byId = new Map(nodes.map((node) => [node.id, node]))
   // Every non-root parent must be defined earlier, which makes the graph an acyclic tree of consequences.
@@ -217,8 +249,14 @@ export function buildConsequenceChain(input: Record<string, unknown>): string {
   const leaves = annotated.filter((node) => !nodes.some((candidate) => candidate.parentId === node.id))
   const dominant = [...leaves].sort((a, b) => b.pathProbability - a.pathProbability)[0] ?? null
   const maxOrder = annotated.reduce((max, node) => Math.max(max, node.order), 0)
+  const weakest = [...annotated].sort((a, b) => a.conditionalProbability - b.conditionalProbability).slice(0, 3)
+  const horizonDays = Math.max(1, Math.ceil(dominant?.cumulativeLagDays ?? 1))
   return JSON.stringify({
-    action: 'consequence_chain', trigger, asOf, depth: maxOrder,
+    action: 'consequence_chain', saved: false,
+    toKeep: 'This chain is not saved, and a report shows only what is saved. Record it with create_scenario using recordAs, adding the stillNeeded fields; questionIds and evidenceIds must already exist in the store.',
+    recordAs: { action: 'create_scenario', title: trigger.slice(0, 500), baseAsOf: asOf, horizon: new Date(Date.parse(asOf) + horizonDays * 86_400_000).toISOString(), probability: Math.min(0.999, Math.max(0.001, dominant?.pathProbability ?? 0.5)), assumptions: weakest.map((node) => `${node.statement} (P = ${node.conditionalProbability} given its cause)`), indicators: [] as string[], status: 'draft' },
+    stillNeeded: ['scenarioId', 'questionIds', 'evidenceIds', 'indicators (the signposts that would confirm or refute the chain)'],
+    trigger, asOf, depth: maxOrder,
     countByOrder: Array.from({ length: maxOrder }, (_, index) => ({ order: index + 1, count: annotated.filter((node) => node.order === index + 1).length })),
     nodes: annotated,
     dominantPath: dominant ? { leafId: dominant.id, path: dominant.path, pathProbability: dominant.pathProbability, cumulativeLagDays: dominant.cumulativeLagDays } : null,
@@ -398,6 +436,8 @@ interface StoredReportData {
   asOf: string
   ontology: { activeObjects: number; activeLinks: number }
   scorecard: Record<string, unknown>
+  /** Evidence in the store that nothing in this report cites; the ledger leaves it out. */
+  uncitedEvidenceCount: number
   questions: Array<{ id: string; question: string; horizon: string; resolutionCriteria: string; status: string; outcome: number | null; latestForecast: null | { probability: number; asOf: string; method: string; evidenceIds: string[]; unverifiedFigures?: string[] } }>
   claims: Array<{ id: string; statement: string; classification: Classification; confidence: Confidence; evidence: Array<{ evidenceId: string; relation: string; supportingExcerpt: string }>; review: { verdict: string; reviewer?: string; reviewedAt?: string; notes?: string }; unverifiedFigures: string[]; sources: { verified: number; unverified: number } }>
   evidence: Array<{ id: string; title: string; url: string; publisher?: string; sourceType: string; publishedAt: string; retrievedAt: string; excerpt: string; contentHash: string; independenceGroup: string; reliability: number; provenance?: string }>
@@ -406,6 +446,10 @@ interface StoredReportData {
   outcomes: Array<{ id: string; decisionId: string; observedAt: string; summary: string; metrics: Record<string, unknown>; evidenceIds: string[] }>
   /** The true security classification ('public'|'internal'|'confidential'|'restricted') of the evidence/claims actually embedded in this report, computed by loadBattmannReportData — not the self-reported documentClassification below. */
   contentClassification: string
+}
+
+function evidenceVerification(provenance: string | undefined): string {
+  return provenance === 'feed' ? 'fetched by code from a data feed (raw response hashed)' : provenance === 'fetched' ? 'excerpt checked against the fetched page' : 'unverified (not checked against the source)'
 }
 
 async function createStoreReport(input: Record<string, unknown>): Promise<string> {
@@ -433,6 +477,24 @@ async function createStoreReport(input: Record<string, unknown>): Promise<string
   const htmlPath = path.slice(0, -3) + '.html'
   const forecastRows = data.questions.filter((question) => question.latestForecast)
   const score = data.scorecard as { sampleSize?: number; brierScore?: number | null; logLoss?: number | null; brierSkillScore?: number | null; expectedCalibrationError?: number | null; warning?: string }
+  // The summary is the part read first and, until now, the only part nothing checked. Its figures must appear in evidence this
+  // report cites, or in the questions, forecasts and scenarios the report itself states; anything else is flagged, not trusted.
+  const probabilityTexts = (probability: number | undefined) => (probability === undefined ? [] : [`${Math.round(probability * 100)}%`, `${probability}`])
+  const summaryContext = [
+    ...data.evidence.map((source) => `${source.title}\n${source.excerpt}`),
+    ...data.questions.flatMap((question) => [question.question, question.resolutionCriteria]),
+    ...forecastRows.flatMap((question) => probabilityTexts(question.latestForecast?.probability)),
+    ...data.scenarios.flatMap((scenario) => probabilityTexts(scenario.probability)),
+  ]
+  const summaryUnverified = unverifiedFigures(executiveSummary, summaryContext)
+  const flaggedForecasts = forecastRows.filter((question) => question.latestForecast?.unverifiedFigures?.length)
+  const integrity = assessReportIntegrity({
+    claims: data.claims.length, forecasts: forecastRows.length, scenarios: data.scenarios.length, decisions: data.decisions.length, outcomes: data.outcomes.length,
+    resolvedQuestions: score.sampleSize ?? 0, ontologyObjects: data.ontology.activeObjects, citedSources: data.evidence.length, uncitedSources: data.uncitedEvidenceCount,
+    summaryUnverifiedFigures: summaryUnverified, claimsWithUnverifiedFigures: flaggedClaims.length, forecastsWithUnverifiedFigures: flaggedForecasts.length,
+    claimsWithoutVerifiedSources: data.claims.filter((claim) => claim.sources.verified === 0).length,
+  })
+  if (reportStatus === 'final' && integrity.blocksFinal.length) throw new Error(`a final report cannot be produced yet: ${integrity.blocksFinal.join(' ')}`)
   const markdown = [
     `# ${title}`, '',
     '## Document control', '',
@@ -442,6 +504,12 @@ async function createStoreReport(input: Record<string, unknown>): Promise<string
     `| Distribution | ${md(distribution.join(', ') || 'Not specified')} |`, '',
     '> Classification and distribution labels are document metadata; they do not enforce access control.', '',
     '## Executive summary', '', executiveSummary, '',
+    ...(summaryUnverified.length ? [`> ⚠ Figures in this summary that appear in none of the evidence this report cites: ${md(summaryUnverified.join(', '))}. Treat them as unsourced.`, ''] : []),
+    '## Report integrity', '',
+    ...(integrity.problems.length
+      ? [`${integrity.problems.length} problem(s) to fix before this report is relied on:`, '', ...integrity.problems.map((problem) => `- ⚠ ${md(problem)}`)]
+      : ['No integrity problems found: the report is populated and its figures trace to the evidence it cites. That does not mean the analysis is right.']),
+    ...(integrity.notes.length ? ['', ...integrity.notes.map((note) => `- ${md(note)}`)] : []), '',
     '## Key judgments', '',
     '| ID | Judgment | Classification | Confidence | Review | Evidence | Verified sources | Figures not in cited evidence |', '|---|---|---|---|---|---|---|---|',
     ...data.claims.map((claim) => `| ${md(claim.id)} | ${md(claim.statement)} | ${claim.classification} | ${claim.confidence} | ${md(claim.review.verdict)} | ${claim.evidence.map((item) => `[${item.evidenceId}]`).join(', ')} | ${claim.sources.verified}/${claim.sources.verified + claim.sources.unverified}${claim.sources.verified === 0 ? ' ⚠' : ''} | ${claim.unverifiedFigures.length ? `⚠ ${md(claim.unverifiedFigures.join(', '))}` : '—'} |`),
@@ -468,7 +536,8 @@ async function createStoreReport(input: Record<string, unknown>): Promise<string
     ...(score.warning ? [`- Warning: ${score.warning}`] : []), '',
     '## Ontology coverage', '', `- Active objects: ${data.ontology.activeObjects}`, `- Active links: ${data.ontology.activeLinks}`, '',
     '## Evidence ledger', '',
-    ...data.evidence.flatMap((source) => [`### [${source.id}] ${source.title}`, '', `- URL: ${source.url}`, `- Verification: ${source.provenance === 'feed' ? 'fetched by code from a data feed (raw response hashed)' : source.provenance === 'fetched' ? 'excerpt checked against the fetched page' : 'unverified (not checked against the source)'}`, `- Publisher/type: ${source.publisher ?? 'Unspecified'} / ${source.sourceType}`, `- Published/retrieved: ${source.publishedAt} / ${source.retrievedAt}`, `- Independence group/reliability: ${source.independenceGroup} / ${source.reliability}`, `- SHA-256: ${source.contentHash}`, `- Preserved excerpt: ${md(source.excerpt)}`, '']),
+    ...(data.evidence.length ? [] : ['No evidence is cited by anything in this report.', '']),
+    ...data.evidence.flatMap((source) => [`### [${source.id}] ${source.title}`, '', `- URL: ${source.url}`, `- Verification: ${evidenceVerification(source.provenance)}`, `- Publisher/type: ${source.publisher ?? 'Unspecified'} / ${source.sourceType}`, `- Published/retrieved: ${source.publishedAt} / ${source.retrievedAt}`, `- Independence group/reliability: ${source.independenceGroup} / ${source.reliability}`, `- SHA-256: ${source.contentHash}`, `- Preserved excerpt: ${md(source.excerpt)}`, '']),
     '## Methodology, review and limitations', '',
     '- All data is cut off at the report as-of timestamp; later evidence, forecasts, reviews, resolutions, scenarios, and decisions are excluded.',
     '- Forecast revisions remain immutable and accepted resolutions are scored with proper scoring rules.',
@@ -477,16 +546,22 @@ async function createStoreReport(input: Record<string, unknown>): Promise<string
     `- ${unresolvedReviews.length} claim(s) remain unreviewed, contradicted, or unclear.`,
     '',
   ].join('\n')
-  const reportBundle = { reportSchemaVersion: 2, reportId, reportVersion, reportStatus, documentClassification, distribution, generatedAt, title, author, reviewer, executiveSummary, unresolvedReviewCount: unresolvedReviews.length, ...data }
+  const reportBundle = { reportSchemaVersion: 2, integrity, summaryUnverifiedFigures: summaryUnverified, reportId, reportVersion, reportStatus, documentClassification, distribution, generatedAt, title, author, reviewer, executiveSummary, unresolvedReviewCount: unresolvedReviews.length, ...data }
   const rowsHtml = data.claims.map((claim) => `<tr><td>${html(claim.id)}</td><td>${html(claim.statement)}${claim.unverifiedFigures.length ? `<p class="warning">Not in cited evidence: ${html(claim.unverifiedFigures.join(', '))}</p>` : ''}</td><td>${html(claim.confidence)}</td><td>${html(claim.review.verdict)}<br><small>${claim.sources.verified}/${claim.sources.verified + claim.sources.unverified} sources verified</small></td></tr>`).join('') || '<tr><td colspan="4">No stored judgments.</td></tr>'
-  const forecastsHtml = forecastRows.map((question) => `<tr><td>${html(question.question)}</td><td><span class="prob" style="--p:${Math.round((question.latestForecast?.probability ?? 0) * 100)}%">${((question.latestForecast?.probability ?? 0) * 100).toFixed(1)}%</span></td><td>${html(question.horizon)}</td><td>${html(question.status)}</td></tr>`).join('') || '<tr><td colspan="4">No eligible forecasts.</td></tr>'
+  const forecastsHtml = forecastRows.map((question) => {
+    const forecast = question.latestForecast
+    const flagged = forecast?.unverifiedFigures?.length ? `<p class="warning">Not in cited evidence: ${html(forecast.unverifiedFigures.join(', '))}</p>` : '—'
+    return `<tr><td>${html(question.question)}</td><td><span class="prob" style="--p:${Math.round((forecast?.probability ?? 0) * 100)}%">${((forecast?.probability ?? 0) * 100).toFixed(1)}%</span></td><td>${html(question.horizon)}</td><td>${html(question.status)}</td><td>${html(forecast?.method)}</td><td>${(forecast?.evidenceIds ?? []).map((id) => `[${html(id)}]`).join(', ') || 'none cited'}</td><td>${flagged}</td></tr>`
+  }).join('') || '<tr><td colspan="7">No eligible forecasts.</td></tr>'
+  const integrityHtml = `${integrity.problems.length ? `<p><b>${integrity.problems.length} problem(s) to fix before this report is relied on:</b></p>${integrity.problems.map((problem) => `<p class="warning">${html(problem)}</p>`).join('')}` : '<p>No integrity problems found: the report is populated and its figures trace to the evidence it cites. That does not mean the analysis is right.</p>'}${integrity.notes.length ? `<ul>${integrity.notes.map((note) => `<li>${html(note)}</li>`).join('')}</ul>` : ''}`
+  const summaryWarningHtml = summaryUnverified.length ? `<p class="warning">Figures in this summary that appear in none of the evidence this report cites: ${html(summaryUnverified.join(', '))}. Treat them as unsourced.</p>` : ''
   const scenariosHtml = data.scenarios.map((scenario) => `<article><h3>${html(scenario.title)} — ${(scenario.probability * 100).toFixed(1)}%</h3><p>Status: ${html(scenario.status)} · horizon: ${html(scenario.horizon)}</p><p><b>Assumptions:</b> ${html(scenario.assumptions.join('; ') || 'None supplied.')}<br><b>Indicators:</b> ${html(scenario.indicators.join('; ') || 'None supplied.')}</p></article>`).join('') || '<p>No scenarios recorded.</p>'
   const decisionsHtml = data.decisions.map((decision) => `<tr><td>${html(decision.title)}</td><td>${html(decision.chosenOption ?? 'Not chosen')}</td><td>${html(decision.status)}</td><td>${html(decision.approvedBy ?? 'Not approved')}</td><td>${html(decision.decidedAt)}</td></tr>`).join('') || '<tr><td colspan="5">No decisions recorded.</td></tr>'
   const outcomesHtml = data.outcomes.map((outcome) => `<tr><td>${html(outcome.summary)}</td><td>${html(outcome.decisionId)}</td><td>${html(outcome.observedAt)}</td><td>${html(JSON.stringify(outcome.metrics))}</td></tr>`).join('') || '<tr><td colspan="4">No outcomes recorded.</td></tr>'
-  const printable = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${html(title)}</title><style>@page{size:A4;margin:18mm}body{font:14px/1.5 system-ui,sans-serif;color:#172033;max-width:1100px;margin:32px auto;padding:0 24px}h1{font-size:32px}h2{margin-top:32px;border-bottom:2px solid #172033;padding-bottom:6px}table{width:100%;border-collapse:collapse;margin:12px 0}th,td{border:1px solid #cbd2df;padding:8px;text-align:left;vertical-align:top}th{background:#eef2f7}.control{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 24px;background:#f6f8fb;padding:16px}.prob{display:inline-block;min-width:72px;padding:3px 8px;background:linear-gradient(90deg,#8cb4ff var(--p),#e9edf4 var(--p));border-radius:4px}.warning{border-left:4px solid #c47b00;padding:8px 12px;background:#fff6df}@media print{body{margin:0;padding:0}.page-break{break-before:page}}</style></head><body><h1>${html(title)}</h1><section class="control"><div><b>Report ID</b><br>${html(reportId)}</div><div><b>Version/status</b><br>${html(reportVersion)} / ${html(reportStatus)}</div><div><b>As of</b><br>${html(data.asOf)}</div><div><b>Classification</b><br>${html(documentClassification)}</div><div><b>Author</b><br>${html(author)}</div><div><b>Reviewer</b><br>${html(reviewer ?? 'Not yet reviewed')}</div><div><b>Distribution</b><br>${html(distribution.join(', ') || 'Not specified')}</div></section><h2>Executive summary</h2><p>${html(executiveSummary)}</p><h2>Key judgments</h2><table><thead><tr><th>ID</th><th>Judgment</th><th>Confidence</th><th>Review</th></tr></thead><tbody>${rowsHtml}</tbody></table><h2>Forecast register</h2><table><thead><tr><th>Question</th><th>Probability</th><th>Horizon</th><th>Status</th></tr></thead><tbody>${forecastsHtml}</tbody></table><h2>Scenarios and signposts</h2>${scenariosHtml}<h2>Decisions</h2><table><thead><tr><th>Decision</th><th>Chosen option</th><th>Status</th><th>Approved by</th><th>Date</th></tr></thead><tbody>${decisionsHtml}</tbody></table><h2>Recorded outcomes</h2><table><thead><tr><th>Outcome</th><th>Decision ID</th><th>Observed</th><th>Metrics</th></tr></thead><tbody>${outcomesHtml}</tbody></table><h2>Track record</h2><p>Resolved sample: ${html(score.sampleSize ?? 0)} · Brier: ${html(score.brierScore ?? 'n/a')} · Log loss: ${html(score.logLoss ?? 'n/a')} · Skill: ${html(score.brierSkillScore ?? 'n/a')}</p>${score.warning ? `<p class="warning">${html(score.warning)}</p>` : ''}<h2>Ontology coverage</h2><p>${data.ontology.activeObjects} active objects and ${data.ontology.activeLinks} active links.</p><h2>Evidence ledger</h2>${data.evidence.map((source) => `<article><h3>[${html(source.id)}] ${html(source.title)}</h3><p><a href="${html(source.url)}">${html(source.url)}</a><br>Published ${html(source.publishedAt)} · retrieved ${html(source.retrievedAt)} · SHA-256 ${html(source.contentHash)}</p><p>${html(source.excerpt)}</p></article>`).join('')}<h2>Limitations</h2><p>As-of cutoff enforced. Hashes establish excerpt integrity, not truth. Review verdicts remain accountable judgments. Document labels do not enforce access.</p></body></html>`
+  const printable = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${html(title)}</title><style>@page{size:A4;margin:18mm}body{font:14px/1.5 system-ui,sans-serif;color:#172033;max-width:1100px;margin:32px auto;padding:0 24px}h1{font-size:32px}h2{margin-top:32px;border-bottom:2px solid #172033;padding-bottom:6px}table{width:100%;border-collapse:collapse;margin:12px 0}th,td{border:1px solid #cbd2df;padding:8px;text-align:left;vertical-align:top}th{background:#eef2f7}.control{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 24px;background:#f6f8fb;padding:16px}.prob{display:inline-block;min-width:72px;padding:3px 8px;background:linear-gradient(90deg,#8cb4ff var(--p),#e9edf4 var(--p));border-radius:4px}.warning{border-left:4px solid #c47b00;padding:8px 12px;background:#fff6df}@media print{body{margin:0;padding:0}.page-break{break-before:page}}</style></head><body><h1>${html(title)}</h1><section class="control"><div><b>Report ID</b><br>${html(reportId)}</div><div><b>Version/status</b><br>${html(reportVersion)} / ${html(reportStatus)}</div><div><b>As of</b><br>${html(data.asOf)}</div><div><b>Classification</b><br>${html(documentClassification)}</div><div><b>Author</b><br>${html(author)}</div><div><b>Reviewer</b><br>${html(reviewer ?? 'Not yet reviewed')}</div><div><b>Distribution</b><br>${html(distribution.join(', ') || 'Not specified')}</div></section><h2>Executive summary</h2><p>${html(executiveSummary)}</p>${summaryWarningHtml}<h2>Report integrity</h2>${integrityHtml}<h2>Key judgments</h2><table><thead><tr><th>ID</th><th>Judgment</th><th>Confidence</th><th>Review</th></tr></thead><tbody>${rowsHtml}</tbody></table><h2>Forecast register</h2><table><thead><tr><th>Question</th><th>Probability</th><th>Horizon</th><th>Status</th><th>Method</th><th>Evidence</th><th>Rationale figures not in evidence</th></tr></thead><tbody>${forecastsHtml}</tbody></table><h2>Scenarios and signposts</h2>${scenariosHtml}<h2>Decisions</h2><table><thead><tr><th>Decision</th><th>Chosen option</th><th>Status</th><th>Approved by</th><th>Date</th></tr></thead><tbody>${decisionsHtml}</tbody></table><h2>Recorded outcomes</h2><table><thead><tr><th>Outcome</th><th>Decision ID</th><th>Observed</th><th>Metrics</th></tr></thead><tbody>${outcomesHtml}</tbody></table><h2>Track record</h2><p>Resolved sample: ${html(score.sampleSize ?? 0)} · Brier: ${html(score.brierScore ?? 'n/a')} · Log loss: ${html(score.logLoss ?? 'n/a')} · Skill: ${html(score.brierSkillScore ?? 'n/a')}</p>${score.warning ? `<p class="warning">${html(score.warning)}</p>` : ''}<h2>Ontology coverage</h2><p>${data.ontology.activeObjects} active objects and ${data.ontology.activeLinks} active links.</p><h2>Evidence ledger</h2>${data.evidence.length ? '' : '<p>No evidence is cited by anything in this report.</p>'}${data.evidence.map((source) => `<article><h3>[${html(source.id)}] ${html(source.title)}</h3><p><a href="${html(source.url)}">${html(source.url)}</a><br>Verification: ${html(evidenceVerification(source.provenance))}<br>Published ${html(source.publishedAt)} · retrieved ${html(source.retrievedAt)} · SHA-256 ${html(source.contentHash)}</p><p>${html(source.excerpt)}</p></article>`).join('')}<h2>Limitations</h2><p>As-of cutoff enforced. Hashes establish excerpt integrity, not truth. Review verdicts remain accountable judgments. Document labels do not enforce access.</p></body></html>`
   await captureBeforeWrite(path); await captureBeforeWrite(sidecarPath); await captureBeforeWrite(htmlPath)
   await atomicWrite(path, markdown); await atomicWrite(sidecarPath, JSON.stringify(reportBundle, null, 2)); await atomicWrite(htmlPath, printable)
-  return JSON.stringify({ status: 'created', reportId, reportStatus, reportPath: path, sidecarPath, htmlPath, claims: data.claims.length, forecasts: forecastRows.length, sources: data.evidence.length, unresolvedReviewCount: unresolvedReviews.length, ...(flaggedClaims.length ? { claimsWithUnverifiedFigures: flaggedClaims.map((claim) => ({ id: claim.id, figures: claim.unverifiedFigures })) } : {}) }, null, 2)
+  return JSON.stringify({ status: 'created', reportId, reportStatus, reportPath: path, sidecarPath, htmlPath, claims: data.claims.length, forecasts: forecastRows.length, sources: data.evidence.length, unresolvedReviewCount: unresolvedReviews.length, ...(integrity.problems.length ? { integrityProblems: integrity.problems, fix: 'The report only shows what is recorded in the store. Fix these with the named actions, then run report_from_store again.' } : {}), ...(summaryUnverified.length ? { summaryFiguresNotInEvidence: summaryUnverified } : {}), ...(flaggedClaims.length ? { claimsWithUnverifiedFigures: flaggedClaims.map((claim) => ({ id: claim.id, figures: claim.unverifiedFigures })) } : {}) }, null, 2)
 }
 
 interface DashboardData {
