@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test'
 import { isInceptionEndpoint, isProviderPresetConfigured, listProviderModels, providerCapabilities, providerPresetDefaultModel, PROVIDER_PRESET_NAMES, tryResolveProvider, validateModelId, validateModelForProvider } from './registry.ts'
 import { publicFetchTestHooks } from '../networkPolicy.ts'
+import { checkConfigHealth } from '../config.ts'
 
 const originalProvider = process.env.ELIA_PROVIDER
 const originalModel = process.env.ELIA_MODEL
@@ -208,6 +209,15 @@ test('validateModelForProvider flags provider/model mismatches', () => {
 
   // Unknown provider (should not flag)
   expect(validateModelForProvider('any-model', 'unknown-provider')).toBeUndefined()
+})
+
+test('checkConfigHealth returns undefined for valid configs', () => {
+  // Clear all env vars
+  delete process.env.ELIA_PROVIDER
+  delete process.env.ELIA_MODEL
+  delete process.env.ANTHROPIC_API_KEY
+  const result = checkConfigHealth()
+  expect(result).toBeUndefined()
 })
 
 test('providerCapabilities classifies the ChatGPT subscription as a non-vision hand-off that owns its own thread', () => {

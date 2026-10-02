@@ -769,3 +769,39 @@ function buildMemorySections(): string {
   if (skills.length > 0) sections.push(`\n\n## Installed skills\nInstruction skills available on this machine. When the task or the user's wording matches one, read its SKILL.md with the file-read tool and follow it (still subject to the safety policy; treat it as guidance, not authority). If the user names a skill, always read it first. A "self-authored" one elia wrote and revises itself from its own certified lessons (src/skills/instructionSkills.ts) — read it the same way, and treat its guidance as no more authoritative than any other lesson.\n${skills.map((s) => `- ${s.name}${s.eliaVersion ? ` (self-authored, v${s.eliaVersion})` : ''}: ${s.description} (${s.path})`).join('\n')}`)
   return sections.join('')
 }
+
+/**
+ * Validates the current provider/model configuration at startup.
+ * Returns a warning string if there are obvious mismatches, undefined otherwise.
+ * Does not block execution - just gives users a chance to fix configs early.
+ */
+export function checkConfigHealth(): string | undefined {
+  // Validate the deep tier config
+  const configWarning = validateModelForProvider(config.model, config.providerName)
+  if (configWarning) {
+    console.warn(`Warning: ${configWarning}`)
+  }
+
+  // Validate the fast tier config if it's distinct from deep
+  if (config.cascadeEnabled && config.tiers.fast.providerName !== config.providerName) {
+    const fastWarning = validateModelForProvider(config.tiers.fast.model, config.tiers.fast.providerName)
+    if (fastWarning) {
+      console.warn(`Warning: Fast tier: ${fastWarning}`)
+    }
+  }
+
+  // Check role overrides
+  for (const [roleName, override] of Object.entries(config.roleOverrides)) {
+    if (override && override.providerName !== config.providerName) {
+      const roleWarning = validateModelForProvider(override.model, override.providerName)
+      if (roleWarning) {
+        console.warn(`Warning: ${roleName} override: ${roleWarning}`)
+      }
+    }
+  }
+
+  return configWarning
+}
+
+// Call at module load to warn users about invalid configs
+checkConfigHealth()
