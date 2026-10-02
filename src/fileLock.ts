@@ -16,7 +16,7 @@
  * this single-threaded runtime.
  */
 
-import { readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { lstatSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import { hostname as osHostname } from 'node:os'
 import { dirname } from 'node:path'
@@ -92,13 +92,8 @@ function readOwner(lockPath: string): LockOwner | undefined {
  */
 function unreadableLockIsStale(lockPath: string, ttlMs: number, now: number): boolean {
   try {
-    const stats = statSync(lockPath)
-    // An empty lock file indicates an incomplete lock acquisition attempt
-    // (the file was created but contents weren't written yet). Never reclaim
-    // empty files as stale; treat them as held by a live process.
-    if (stats.size === 0) return false
-    // 100ms grace period avoids issues when statSync returns a timestamp slightly
-    // in the future due to filesystem caching, or when the file was just created.
+    const stats = lstatSync(lockPath)
+    // Only reclaim if the file has been sitting untouched past the TTL + grace period.
     const graceMs = 100
     return now - stats.mtimeMs > ttlMs + graceMs
   } catch {
@@ -174,7 +169,12 @@ export function withFileLock<T>(lockPath: string, fn: () => T, options: FileLock
         // Two reclaimers can race here; `wx` on the next iteration ensures only
         // one wins the re-create and the other retries.
         try {
-          rmSync(lockPath, { force: true })
+          // Use lstatSync to avoid deleting symlink targets.
+          const stats = lstatSync(lockPath)
+          // Only delete regular files, not directories or special files.
+          if (stats.isFile()) {
+            rmSync(lockPath, { force: true })
+          }
         } catch {
           // Someone else already removed it.
         }
@@ -219,7 +219,12 @@ function releaseIfOwned(lockPath: string, token: string): void {
   const current = readOwner(lockPath)
   if (!current || current.token === token) {
     try {
-      rmSync(lockPath, { force: true })
+      // Use lstatSync to avoid deleting symlink targets.
+      const stats = lstatSync(lockPath)
+      // Only delete regular files, not directories or special files.
+      if (stats.isFile()) {
+        rmSync(lockPath, { force: true })
+      }
     } catch {
       // Already gone.
     }
@@ -253,7 +258,12 @@ export async function withFileLockAsync<T>(lockPath: string, fn: () => Promise<T
       const now = Date.now()
       if (isStale(readOwner(lockPath), ttlMs, now, lockPath)) {
         try {
-          rmSync(lockPath, { force: true })
+          // Use lstatSync to avoid deleting symlink targets.
+          const stats = lstatSync(lockPath)
+          // Only delete regular files, not directories or special files.
+          if (stats.isFile()) {
+            rmSync(lockPath, { force: true })
+          }
         } catch {
           // Someone else already removed it.
         }

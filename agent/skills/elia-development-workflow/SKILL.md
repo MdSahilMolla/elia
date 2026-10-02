@@ -23,7 +23,7 @@ NO_COLOR=1 ANTHROPIC_API_KEY=test-key-for-local-tests bun test
 
 ## Tool and Command Usage
 
-When invoking `run_command`, prefer non‑interactive commands. When running Python scripts that use `input()`, ensure the script handles `EOFError` gracefully or provides complete input sequences matching the expected logic. For piped input to Python scripts, use `printf` instead of `echo -e` to avoid exit code 1 failures. When invoking `risk_assessment`, include a non‑empty `sourceDate` string of at most 100 characters in the first factor. When invoking `create_question`, set the `horizon` field to a valid ISO date or timestamp.
+When invoking `run_command`, prefer non‑interactive commands. When running Python scripts that use `input()`, ensure the script handles `EOFError` gracefully or provides complete input sequences matching the expected logic. For piped input to Python scripts, use `printf` instead of `echo -e` to avoid exit code 1 failures.
 
 ## Development and Preview
 

@@ -1,39 +1,10 @@
 {
   "slug": "elia-development-workflow",
   "name": "elia-development-workflow",
-  "version": 22,
+  "version": 23,
   "createdAt": 1790690758697,
-  "updatedAt": 1790767598501,
-  "sourceLessonKeys": [
-    "3vj3czfy0xsv6",
-    "1rz415rb1qv0h",
-    "2fd487b2jvu5x",
-    "162eyavb6z06i",
-    "8t3l4x6fp0c1",
-    "o0timodzixc1",
-    "3g7qbekxld6y9",
-    "1nyq218xa6ksc",
-    "13lly97aag0pp",
-    "j3wd5mfswzxi",
-    "1ypus5zl39vt3",
-    "1w83zutrfownp",
-    "11eds8d4zf9pj",
-    "3e4egryd72pp4",
-    "ytf3l7fq9dzy",
-    "xbecucc9afoq",
-    "2wulci9epjgzs",
-    "27w8518mck1fu",
-    "1kwkv3vpsb31g",
-    "clvndpj39jrg",
-    "bayouhx41dcm",
-    "1tfvsi6150fx5",
-    "2x2m3iy3xmguz",
-    "xwva55xl6fna",
-    "3mdawhx8s3k0b",
-    "314qrvtcc19zr",
-    "mja1m72pq6vi",
-    "2s0yycch3vyo9"
-  ],
+  "updatedAt": 1790970382224,
+  "sourceLessonKeys": [],
   "authoredBy": "elia",
   "history": [
     {
@@ -145,6 +116,11 @@
       "version": 22,
       "at": 1790767598501,
       "reason": "24 source lesson(s) were retired for not holding up — re-derived from what remains"
+    },
+    {
+      "version": 23,
+      "at": 1790970382224,
+      "reason": "28 source lesson(s) were retired for not holding up — re-derived from what remains"
     }
   ]
 }
