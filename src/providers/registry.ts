@@ -232,6 +232,14 @@ export function validateModelForProvider(model: string, providerName: string): s
     return `model '${trimmed}' may not be valid for Anthropic (Anthropic models typically start with 'claude-')`
   }
 
+  // Validate that model prefix matches the provider
+  if (trimmed.toLowerCase().startsWith('claude-') && preset.kind !== 'anthropic') {
+    return `model '${trimmed}' appears to be an Anthropic model and should be used with Anthropic provider`
+  }
+  if (trimmed.toLowerCase().startsWith('openai/') && preset.kind !== 'openai-compatible') {
+    return `model '${trimmed}' appears to be an OpenAI model and should be used with an OpenAI-compatible provider`
+  }
+
   return undefined
 }
 

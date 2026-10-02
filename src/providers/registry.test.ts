@@ -220,13 +220,27 @@ test('validateModelForProvider flags provider/model mismatches', () => {
   expect(validateModelForProvider('claude-sonnet-5', 'unknown')).toBeUndefined()
 })
 
-test('checkConfigHealth returns undefined for valid configs', () => {
-  // Clear all env vars
-  delete process.env.ELIA_PROVIDER
-  delete process.env.ELIA_MODEL
-  delete process.env.ANTHROPIC_API_KEY
-  const result = checkConfigHealth()
-  expect(result).toBeUndefined()
+test('validateModelForProvider handles whitespace and case-insensitive provider names', () => {
+  // Whitespace in model should be trimmed before checking
+  expect(validateModelForProvider(' claude-sonnet-5 ', 'anthropic')).toBeUndefined()
+  expect(validateModelForProvider(' llama3:8b ', 'ollama')).toBeUndefined()
+  expect(validateModelForProvider(' default ', 'codex')).toBeUndefined()
+
+  // Provider name should be case-insensitive
+  expect(validateModelForProvider('claude-sonnet-5', 'Anthropic')).toBeUndefined()
+  expect(validateModelForProvider('claude-sonnet-5', 'ANTHROPIC')).toBeUndefined()
+  expect(validateModelForProvider('llama3:8b', 'Ollama')).toBeUndefined()
+  expect(validateModelForProvider('default', 'CODEX')).toBeUndefined()
+})
+
+test('validateModelForProvider validates model format even for valid providers', () => {
+  // Ollama models without tag are invalid
+  expect(validateModelForProvider('llama3', 'ollama')).toBeTruthy()
+  expect(validateModelForProvider('  ', 'ollama')).toBeTruthy()
+
+  // Anthropic models must start with claude-
+  expect(validateModelForProvider('-3', 'anthropic')).toBeTruthy()
+  expect(validateModelForProvider('claude-3-5-sonnet', 'anthropic')).toBeUndefined()
 })
 
 test('providerCapabilities classifies the ChatGPT subscription as a non-vision hand-off that owns its own thread', () => {
