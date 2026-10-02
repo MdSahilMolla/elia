@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test'
-import { isInceptionEndpoint, isProviderPresetConfigured, listProviderModels, providerCapabilities, providerPresetDefaultModel, PROVIDER_PRESET_NAMES, tryResolveProvider, validateModelId } from './registry.ts'
+import { isInceptionEndpoint, isProviderPresetConfigured, listProviderModels, providerCapabilities, providerPresetDefaultModel, PROVIDER_PRESET_NAMES, tryResolveProvider, validateModelId, validateModelForProvider } from './registry.ts'
 import { publicFetchTestHooks } from '../networkPolicy.ts'
 
 const originalProvider = process.env.ELIA_PROVIDER
@@ -190,6 +190,24 @@ test('validateModelId rejects empty, whitespace, sentinel, and overlong ids', ()
   expect(validateModelId('x'.repeat(300))).toBeTruthy()
   expect(validateModelId('claude-sonnet-5')).toBeUndefined()
   expect(validateModelId('openrouter/auto')).toBeUndefined()
+})
+
+test('validateModelForProvider flags provider/model mismatches', () => {
+  // Anthropic provider with non-Anthropic model
+  expect(validateModelForProvider('claude-sonnet-5', 'anthropic')).toBeUndefined()
+  expect(validateModelForProvider('gpt-4o', 'anthropic')).toBeTruthy()
+
+  // Ollama provider without : separator
+  expect(validateModelForProvider('llama3:8b', 'ollama')).toBeUndefined()
+  expect(validateModelForProvider('llama3', 'ollama')).toBeTruthy()
+
+  // Codex subscription only accepts 'default' as model
+  expect(validateModelForProvider('default', 'codex')).toBeUndefined()
+  expect(validateModelForProvider('openai/gpt-4o', 'codex')).toBeTruthy()
+  expect(validateModelForProvider('claude-3-5-sonnet', 'codex')).toBeTruthy()
+
+  // Unknown provider (should not flag)
+  expect(validateModelForProvider('any-model', 'unknown-provider')).toBeUndefined()
 })
 
 test('providerCapabilities classifies the ChatGPT subscription as a non-vision hand-off that owns its own thread', () => {

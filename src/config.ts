@@ -6,6 +6,7 @@ import {
   providerPresetDefaultModel,
   tryResolveProvider,
   validateModelId,
+  validateModelForProvider,
   type ResolvedProvider,
 } from './providers/registry.ts'
 import type { ThinkingOption } from './providers/types.ts'
@@ -196,6 +197,9 @@ export function switchModel(options: { providerName?: string; model?: string } =
   if (options.model !== undefined) {
     const invalidModel = validateModelId(options.model)
     if (invalidModel) return { ok: false, error: invalidModel }
+    const providerName = options.providerName ?? config.providerName
+    const providerWarning = validateModelForProvider(options.model, providerName)
+    if (providerWarning) console.warn(`Warning: ${providerWarning}`)
   }
 
   const providerName = options.providerName ?? config.providerName

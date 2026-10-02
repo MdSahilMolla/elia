@@ -206,6 +206,35 @@ export function validateModelId(model: string): string | undefined {
   return undefined
 }
 
+/**
+ * Checks whether a model id is compatible with the given provider. Returns
+ * an error string on obvious mismatches, or `undefined` if the model appears
+ * valid for the provider. Conservative: only flags clear errors, not every
+ * non-default model.
+ */
+export function validateModelForProvider(model: string, providerName: string): string | undefined {
+  const trimmed = model.trim()
+  const preset = PROVIDER_PRESETS[normalizeProviderName(providerName)]
+  if (!preset) return undefined
+
+  // Codex subscription only accepts 'default' as model
+  if (preset.kind === 'codex-subscription' && trimmed !== 'default') {
+    return `model '${trimmed}' may not be valid for Codex subscription (Codex only supports 'default')`
+  }
+
+  // Ollama models are local identifiers with colons (e.g., 'llama3:8b')
+  if (preset.kind === 'ollama' && !trimmed.includes(':')) {
+    return `model '${trimmed}' may not be valid for Ollama (Ollama models use 'model:tag' format)`
+  }
+
+  // Anthropic models start with 'claude-'
+  if (preset.kind === 'anthropic' && !trimmed.toLowerCase().startsWith('claude-')) {
+    return `model '${trimmed}' may not be valid for Anthropic (Anthropic models typically start with 'claude-')`
+  }
+
+  return undefined
+}
+
 /** Whether a preset's API key is actually set, so a "switch model" listing can show what's usable right now versus just known by name. */
 export function isProviderPresetConfigured(providerName: string): boolean {
   const preset = PROVIDER_PRESETS[normalizeProviderName(providerName)]
