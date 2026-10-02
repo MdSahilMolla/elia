@@ -65,6 +65,15 @@ export async function dispatchAgentRpc(
       const task = store.tasks({ status: ['assigned', 'in-review'] }).find((candidate) => candidate.assigneeId === id)
       if (!task) return { task: null }
 
+      // Walk the agent's own state up to the work. Normally it is already
+      // `assigned`, because this node's own orchestrator marked it before the
+      // agent saw the task. It is still `idle` when the assignment was granted
+      // by the *peer* node's orchestrator: `AgentStateChanged` is agent-scoped,
+      // so that node is not entitled to write this agent's state and correctly
+      // does not. The agent therefore owns both transitions, on its own node.
+      if (instance.status === 'idle') {
+        store.append({ type: 'AgentStateChanged', actorKind: 'agent', actorId: agent.id, payload: { id, status: 'assigned', currentTaskId: task.id } })
+      }
       store.append({ type: 'AgentStateChanged', actorKind: 'agent', actorId: agent.id, payload: { id, status: task.status === 'in-review' ? 'reviewing' : 'working', currentTaskId: task.id } })
       if (task.status === 'assigned') {
         store.append({

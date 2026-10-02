@@ -6,8 +6,9 @@
 
 import type {
   AgentIdentityRecord, AgentRecord, ApprovalRecord, DecisionRecord, MemberRecord,
-  ObjectiveRecord, PresenceRecord, ProjectRecord, ReservationRecord, TaskRecord,
-  TokenRecord, WorkspaceRecord, AgentMessageRecord,
+  NodePresenceRecord, NodeRecord, ObjectiveRecord, PresenceRecord, ProjectRecord,
+  ReservationRecord, TaskGrantRecord, TaskRecord, TokenRecord, WorkspaceRecord,
+  AgentMessageRecord,
 } from './types.ts'
 import type { RoleName } from '../autonomy/types.ts'
 import type { MemberRole } from './types.ts'
@@ -30,7 +31,7 @@ const arr = (value: unknown): string[] => {
 }
 
 export function toWorkspace(row: Row): WorkspaceRecord {
-  return { id: str(row.id), name: str(row.name), defaultProjectId: str(row.default_project_id), createdAt: str(row.created_at) }
+  return { id: str(row.id), name: str(row.name), defaultProjectId: str(row.default_project_id), createdAt: str(row.created_at), ownerNodeId: opt(row.owner_node_id) }
 }
 
 export function toProject(row: Row): ProjectRecord {
@@ -66,7 +67,7 @@ export function toAgent(row: Row): AgentRecord {
     id: str(row.id), identityId: str(row.identity_id), name: str(row.name), role: str(row.role) as RoleName,
     status: str(row.status) as AgentRecord['status'], currentTaskId: opt(row.current_task_id),
     connectionId: opt(row.connection_id), startedAt: str(row.started_at), lastHeartbeatAt: str(row.last_heartbeat_at),
-    stoppedAt: opt(row.stopped_at), lastError: opt(row.last_error),
+    stoppedAt: opt(row.stopped_at), lastError: opt(row.last_error), nodeId: opt(row.node_id),
   }
 }
 
@@ -75,6 +76,7 @@ export function toObjective(row: Row): ObjectiveRecord {
     id: str(row.id), workspaceId: str(row.workspace_id), projectId: str(row.project_id), goal: str(row.goal),
     status: str(row.status) as ObjectiveRecord['status'], runId: str(row.run_id), createdBy: str(row.created_by),
     createdAt: str(row.created_at), updatedAt: str(row.updated_at), approvedBy: opt(row.approved_by), approvedAt: opt(row.approved_at),
+    ownerNodeId: opt(row.owner_node_id),
   }
 }
 
@@ -89,7 +91,7 @@ export function toTask(row: Row): TaskRecord {
     worktreeRef: opt(row.worktree_ref), leaseOwner: opt(row.lease_owner), leaseExpiresAt: optNum(row.lease_expires_at),
     createdBy: str(row.created_by), createdAt: str(row.created_at), updatedAt: str(row.updated_at),
     startedAt: opt(row.started_at), finishedAt: opt(row.finished_at), lastError: opt(row.last_error), reviewNotes: opt(row.review_notes),
-    resultReport: opt(row.result_report),
+    resultReport: opt(row.result_report), executorNodeId: opt(row.executor_node_id),
   }
 }
 
@@ -136,4 +138,23 @@ export function toPresence(row: Row): PresenceRecord {
     subjectId: str(row.subject_id), name: str(row.name), focus: opt(row.focus),
     connectedAt: str(row.connected_at), lastSeenAt: str(row.last_seen_at),
   }
+}
+
+export function toNode(row: Row): NodeRecord {
+  return {
+    id: str(row.id), name: str(row.name), kind: str(row.kind) as NodeRecord['kind'],
+    fingerprint: opt(row.fingerprint), isLocal: bool(row.is_local),
+    firstSeenAt: str(row.first_seen_at), lastSeenAt: str(row.last_seen_at),
+  }
+}
+
+export function toNodePresence(row: Row): NodePresenceRecord {
+  return {
+    nodeId: str(row.node_id), name: str(row.name), focus: opt(row.focus),
+    connectedAt: str(row.connected_at), lastSeenAt: str(row.last_seen_at),
+  }
+}
+
+export function toTaskGrant(row: Row): TaskGrantRecord {
+  return { taskId: str(row.task_id), nodeId: str(row.node_id), grantedAt: str(row.granted_at), releasedAt: opt(row.released_at) }
 }
