@@ -196,19 +196,28 @@ test('validateModelId rejects empty, whitespace, sentinel, and overlong ids', ()
 test('validateModelForProvider flags provider/model mismatches', () => {
   // Anthropic provider with non-Anthropic model
   expect(validateModelForProvider('claude-sonnet-5', 'anthropic')).toBeUndefined()
+  expect(validateModelForProvider('claude-3-5-sonnet', 'anthropic')).toBeUndefined()
   expect(validateModelForProvider('gpt-4o', 'anthropic')).toBeTruthy()
 
   // Ollama provider without : separator
   expect(validateModelForProvider('llama3:8b', 'ollama')).toBeUndefined()
+  expect(validateModelForProvider('codellama:7b', 'ollama')).toBeUndefined()
   expect(validateModelForProvider('llama3', 'ollama')).toBeTruthy()
+  expect(validateModelForProvider('mistral', 'ollama')).toBeTruthy()
 
   // Codex subscription only accepts 'default' as model
   expect(validateModelForProvider('default', 'codex')).toBeUndefined()
   expect(validateModelForProvider('openai/gpt-4o', 'codex')).toBeTruthy()
   expect(validateModelForProvider('claude-3-5-sonnet', 'codex')).toBeTruthy()
 
+  // Cross-provider mismatches (model from one provider with different provider)
+  expect(validateModelForProvider('claude-sonnet-5', 'groq')).toBeTruthy()
+  expect(validateModelForProvider('claude-3-5-sonnet', 'openai')).toBeTruthy()
+  expect(validateModelForProvider('gpt-4o', 'anthropic')).toBeTruthy()
+
   // Unknown provider (should not flag)
   expect(validateModelForProvider('any-model', 'unknown-provider')).toBeUndefined()
+  expect(validateModelForProvider('claude-sonnet-5', 'unknown')).toBeUndefined()
 })
 
 test('checkConfigHealth returns undefined for valid configs', () => {
