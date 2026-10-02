@@ -92,10 +92,15 @@ function readOwner(lockPath: string): LockOwner | undefined {
  */
 function unreadableLockIsStale(lockPath: string, ttlMs: number, now: number): boolean {
   try {
+    const stats = statSync(lockPath)
+    // An empty lock file indicates an incomplete lock acquisition attempt
+    // (the file was created but contents weren't written yet). Never reclaim
+    // empty files as stale; treat them as held by a live process.
+    if (stats.size === 0) return false
     // 100ms grace period avoids issues when statSync returns a timestamp slightly
     // in the future due to filesystem caching, or when the file was just created.
     const graceMs = 100
-    return now - statSync(lockPath).mtimeMs > ttlMs + graceMs
+    return now - stats.mtimeMs > ttlMs + graceMs
   } catch {
     // Already gone — the next `wx` attempt settles who gets it.
     return false
