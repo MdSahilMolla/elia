@@ -87,10 +87,15 @@ function readOwner(lockPath: string): LockOwner | undefined {
  * a read can fail outright while the holder still has the file open. Treating
  * that window as stale deleted *live* locks and let two processes in at once.
  * Only an unreadable lock that has also sat untouched past the TTL is stale.
+ * We add a small grace period to avoid race conditions with filesystem timestamp
+ * precision and caching.
  */
 function unreadableLockIsStale(lockPath: string, ttlMs: number, now: number): boolean {
   try {
-    return now - statSync(lockPath).mtimeMs > ttlMs
+    // 100ms grace period avoids issues when statSync returns a timestamp slightly
+    // in the future due to filesystem caching, or when the file was just created.
+    const graceMs = 100
+    return now - statSync(lockPath).mtimeMs > ttlMs + graceMs
   } catch {
     // Already gone — the next `wx` attempt settles who gets it.
     return false
