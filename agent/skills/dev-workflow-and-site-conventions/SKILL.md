@@ -11,7 +11,7 @@ description: >
 
 ## Execution Context and Paths
 
-Always run `bun` commands (install, build, dev, test) from `workspace/flower-blooming`, where the package.json and sources live. Ensure all file and command paths are relative to the workspace root; never include absolute user paths. Before finalizing any change, run `bun run typecheck`; if absent, use `bun run build` for validation. When checking specific scripts like `node --check` on `script.js`, ensure compilation artifacts exist by building in the specific directory first (e.g., `workspace/portfolio-demo`) so relative imports resolve. Verify file existence before targeting nested paths; use `grep` on parent directories to list available files.
+Always run `bun` commands (install, build, dev, test) from the project root where the package.json and sources live. Ensure all file and command paths are relative to the workspace root; never include absolute user paths. Before finalizing any change, run `bun run typecheck`; if absent, use `bun run build` for validation. Verify file existence before targeting nested paths; use `grep` on parent directories to list available files.
 
 ## Preview and Cleanup
 
@@ -20,23 +20,21 @@ To view a site, run `bun run dev` followed by `preview http://localhost:3000`. N
 ## Research Paper Theme Constraints
 
 When building a research paper theme website, start with a static `index.html` and `styles.css` without build tools or dependencies. The site must remain pure HTML/CSS. Adhere to these strict styling rules:
-- **File Limits**: `index.html` must be <= 150 lines and include a meta description (target ~90 lines). `styles.css` must be concise and under 80 lines.
+- **File Limits**: `index.html` must be concise and include a meta description. `styles.css` must be concise.
 - **Selectors**: Use only class selectors prefixed with `rp-`, beginning with `rp-`.
 - **Visual Theme**: All CSS uses a black/white palette, system-ui font, fixed top navigation, marquee footer, and pill-shaped buttons.
 - **Navigation**: Implement a fixed top navigation with `position:fixed; top:0;` and a subtle backdrop-filter to match the humanastudio.com aesthetic.
 - **Interactions**: Apply subtle interactive states like hover lift and shadow for phases and buttons.
-- **Citation**: Reference the research paper in the footer with a citation: "Chen, Wang, Qu (2026), arXiv:2607.07663" so visitors know the source of the content.
-- **Utilities**: Ensure `grep` commands for CSS checks handle non-zero exit codes gracefully.
 
 ## TypeScript, Python, and Migration
 
 - **TypeScript**: In TypeScript files under `src/tools`, separate function parameters and object properties with commas to avoid TS1005 errors.
-- **Python**: Install Python dependencies (e.g., streamlit, pandas) using `pip3` before attempting to import them in the project. Precompile Python modules with `python3 -m py_compile` before executing imports to catch syntax errors and avoid runtime hangs. When interacting with Python scripts that require input, avoid using `echo -e` for piped input as it may cause exit code 1 failures; use `printf` instead. Ensure scripts requiring interactive input receive complete input sequences matching their expected logic to avoid runtime errors. Scripts using `input()` must catch `EOFError` to handle exhausted piped input gracefully. Where possible, use only non-interactive commands via `run_command`.
+- **Python**: Install Python dependencies using `pip3` before attempting to import them in the project. Precompile Python modules with `python3 -m py_compile` before executing imports to catch syntax errors and avoid runtime hangs. When interacting with Python scripts that require input, avoid using `echo -e` for piped input as it may cause exit code 1 failures; use `printf` instead. Ensure scripts requiring interactive input receive complete input sequences matching their expected logic to avoid runtime errors. Scripts using `input()` must catch `EOFError` to handle exhausted piped input gracefully. Where possible, use only non-interactive commands via `run_command`.
 - **Svelte**: Do not assume Svelte source files like `App.svelte` exist in `src/` during migration reviews, as the project may have already converted to vanilla JavaScript.
 
 ## File System and Safety
 
-- **Path Validation**: When invoking file-system commands such as `list_files`, ensure the target path is a valid existing directory under `workspace/flower-blooming`; a non-existent path will cause the command to fail.
+- **Path Validation**: When invoking file-system commands such as `list_files`, ensure the target path is a valid existing directory under the workspace root; a non-existent path will cause the command to fail.
 
 ## Utility Commands and Submission
 
