@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { formatDiagnostics, diagnosticsForFile, neutralNpxLaunch, resetLspStateForTests, resolveSpawnCommand } from './registry.ts'
 import type { Diagnostic } from './protocol.ts'
+import { languageServerFor } from './servers.ts'
 
 test('formatDiagnostics returns an empty string for a clean file', () => {
   expect(formatDiagnostics([], 'src/foo.ts')).toBe('')
@@ -34,13 +35,20 @@ test('a file extension with no configured language server returns undefined with
 })
 
 test('a recognized extension with no server binary installed fails soft instead of hanging or throwing', async () => {
-  // gopls is not installed in this environment (verified before writing this
-  // test) — a real "the user hasn't set this language server up" case.
+  // A real "the user hasn't set this language server up" case. The Go
+  // server is renamed to one no machine has, because gopls itself may well
+  // be installed (it is on the machine this test once assumed it was not).
   const root = mkdtempSync(join(tmpdir(), 'elia-lsp-registry-'))
+  const spec = languageServerFor('main.go')!
+  const command = spec.command
+  spec.command = 'elia-test-no-such-language-server'
+  // A Go server an earlier test started would otherwise answer from the cache.
+  resetLspStateForTests()
   try {
     const result = await diagnosticsForFile(join(root, 'main.go'), 'package main', root)
     expect(result).toBeUndefined()
   } finally {
+    spec.command = command
     resetLspStateForTests()
   }
 })

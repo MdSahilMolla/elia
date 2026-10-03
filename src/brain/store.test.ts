@@ -31,7 +31,8 @@ test('loadBrainItems merges episodes from every session, plus lessons, rationale
   const notesPath = join(dir, 'notes.jsonl')
   appendNote({ text: 'the staging API rate-limits at 20 rps', tags: ['api'] }, notesPath)
 
-  const items = await loadBrainItems({ sessionsDir, lessonsPath, rationalePath, notesPath, currentSessionId: 'sess-two' })
+  // cwd is the scratch dir: the loader also reads the project's session recordings, and this checkout's are not the fixture.
+  const items = await loadBrainItems({ sessionsDir, lessonsPath, rationalePath, notesPath, currentSessionId: 'sess-two', cwd: dir })
 
   const kinds = items.map((i) => i.kind).sort()
   expect(kinds).toEqual(['episode', 'episode', 'lesson', 'note', 'rationale'])
@@ -50,6 +51,7 @@ test('loadBrainItems is empty and does not throw when nothing exists yet', async
     lessonsPath: join(dir, 'lessons.md'),
     rationalePath: join(dir, 'rationale.jsonl'),
     notesPath: join(dir, 'notes.jsonl'),
+    cwd: dir,
   })
   expect(items).toEqual([])
 })
