@@ -1,6 +1,6 @@
 import { createAnthropicProvider } from './anthropic.ts'
 import { codexSubscriptionConfigured, createCodexSubscriptionProvider, listCodexSubscriptionModels } from './codexSubscription.ts'
-import { createOpenAICompatibleProvider } from './openaiCompatible.ts'
+import { createOpenAICompatibleProvider, dynamicTailEnabled } from './openaiCompatible.ts'
 import { assertOllamaHost, cachedOllamaDetection, createOllamaProvider, describeOllamaModel, detectOllama, ollamaHost, ollamaModelWarning, rankOllamaModels } from './ollama.ts'
 import { assertProviderEndpoint, publicFetch, validateNetworkUrl } from '../networkPolicy.ts'
 import type { Provider, ThinkingOption } from './types.ts'
@@ -446,6 +446,7 @@ export function tryResolveProvider(request: ProviderRequest = {}): ResolvedProvi
           reasoningSummary: isInceptionEndpoint(baseURL) && process.env.ELIA_REASONING_SUMMARY !== 'off',
           reasoningEffort: isInceptionEndpoint(baseURL),
           gemini: isGeminiEndpoint(baseURL),
+          dynamicTail: dynamicTailEnabled(isInceptionEndpoint(baseURL)),
         })
 
   return { provider, providerName, model }

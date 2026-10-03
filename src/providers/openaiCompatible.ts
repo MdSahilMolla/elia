@@ -24,6 +24,26 @@ export interface OpenAICompatibleProviderOptions {
    * returned when asked for — inline in `content`, wrapped in `<thought>` tags.
    */
   gemini?: boolean
+  /**
+   * Send the per-turn dynamic prompt as a system message after the history
+   * instead of appended to the leading one. An endpoint's prefix cache stops
+   * at the first changed token, so a dynamic block ahead of the history costs
+   * the whole conversation at full price on every new user turn; behind it,
+   * only the block itself. Measured on Inception (2026-10-03): a changed
+   * suffix in the leading system message dropped 13.5k cached tokens to 7.1k,
+   * the same change as a trailing message kept 13.5k, and the model read and
+   * followed the trailing message. Off elsewhere until verified — some chat
+   * templates refuse a system message that is not first.
+   */
+  dynamicTail?: boolean
+}
+
+/** Whether to send the dynamic prompt after the history (`dynamicTail`). `ELIA_DYNAMIC_TAIL=on|off` overrides the endpoint default. */
+export function dynamicTailEnabled(endpointDefault: boolean, env: Record<string, string | undefined> = process.env): boolean {
+  const setting = env.ELIA_DYNAMIC_TAIL?.trim().toLowerCase()
+  if (setting === 'off' || setting === '0' || setting === 'false') return false
+  if (setting === 'on' || setting === '1' || setting === 'true') return true
+  return endpointDefault
 }
 
 /**
@@ -101,8 +121,15 @@ export function createOpenAICompatibleProvider(
   async function streamOnce({ system, systemDynamic, messages, tools, onText, onThinking, onToolBlock, signal, reasoningEffort }: StreamTurnParams, maxTokens: number) {
       // The stable prompt stays first so an OpenAI-compatible endpoint's
       // automatic prefix caching still matches on it; the per-turn dynamic
-      // suffix follows it.
-      const fullSystem = systemDynamic && systemDynamic.trim() ? `${system}\n\n${systemDynamic}` : system
+      // part follows it, or follows the history too (`dynamicTail`).
+      const dynamic = systemDynamic?.trim() ? systemDynamic : undefined
+      const tail = dynamic && options.dynamicTail ? dynamic : undefined
+      const fullSystem = dynamic && !tail ? `${system}\n\n${dynamic}` : system
+      const toWire = () => {
+        const wireMessages = toOpenAIMessages(fullSystem, messages, wire)
+        if (tail) wireMessages.push({ role: 'system', content: tail })
+        return wireMessages
+      }
       const openAITools = toOpenAITools(tools)
       const requestParams: Record<string, unknown> = {
         ...summaryParams,
@@ -117,7 +144,7 @@ export function createOpenAICompatibleProvider(
       let emittedContent = false
       const thoughts = geminiThoughts ? createThoughtSplitter() : undefined
       const idleMs = streamIdleMs()
-      const openAIMessages = toOpenAIMessages(fullSystem, messages, wire)
+      const openAIMessages = toWire()
       const startMs = firstByteMs(JSON.stringify(openAIMessages).length + JSON.stringify(openAITools).length)
       const stall = new AbortController()
       let idleTimer: ReturnType<typeof setTimeout> | undefined
@@ -231,7 +258,7 @@ export function createOpenAICompatibleProvider(
         const completion = await client.chat.completions.create({
           model,
           max_tokens: maxTokens,
-          messages: toOpenAIMessages(fullSystem, messages, wire),
+          messages: toWire(),
           tools: openAITools,
           ...(openAITools.length > 0 ? { parallel_tool_calls: true } : {}),
           stream: false,
