@@ -1,6 +1,6 @@
 import { afterEach, expect, test } from 'bun:test'
 
-process.env.ANTHROPIC_API_KEY ??= 'test-key-for-improver-route-test'
+process.env.ANTHROPIC_API_KEY = 'test-key-for-improver-route-test'
 
 const { config } = await import('../config.ts')
 const { improverLoopRoute, improverRoute, withImproverBuilder } = await import('./improverRoute.ts')

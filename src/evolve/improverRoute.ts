@@ -34,7 +34,7 @@ export function improverRoute(): TierConfig | undefined {
     model,
     baseURL: process.env.ELIA_EVOLVE_BASE_URL,
     apiKeyEnv: process.env.ELIA_EVOLVE_API_KEY ? 'ELIA_EVOLVE_API_KEY' : undefined,
-    ignoreAmbient: true,
+    ignoreAmbient: false,
   })
   if ('error' in resolved) {
     throw new Error(`ELIA_EVOLVE_PROVIDER/ELIA_EVOLVE_MODEL could not be used: ${resolved.error}`)

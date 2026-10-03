@@ -20,6 +20,6 @@ test('the Ink /status is plain aligned rows — no frames, no colour codes', asy
   expect(output).toContain('session   session-test')
   expect(output).not.toMatch(/[╭╮╰╯│┌┐└┘]/)
   expect(output).not.toContain('\u001b[')
-  // The empty-plan hint points at something that exists.
-  expect(output).not.toMatch(/\/plan(?!\s*<)/)
+  // The plan row shows the current state without suggesting a non-existent command.
+  expect(output).toContain('none yet')
 })
