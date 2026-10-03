@@ -203,7 +203,9 @@ export const paperTool: Tool = {
 
 search finds papers by topic. get looks one up by DOI, arXiv id, or OpenAlex id. Sources: openalex (default, broadest coverage), arxiv (preprints, full abstracts, always a free PDF), crossref (published record and DOIs).
 
-Once you have a "free full text" link, web_fetch reads it — including PDFs. Prefer that over summarising from an abstract alone when the details matter.`,
+Once you have a "free full text" link, web_fetch reads it — including PDFs. Prefer that over summarising from an abstract alone when the details matter.
+
+For self-improving agents, coding agents, agent evaluation, reward hacking, agent memory, planning or tool use, search the knowledge tool's curated slice first: its entries are hand-verified, with the key idea and limitations written out. Use paper to go beyond it.`,
   input_schema: {
     type: 'object',
     properties: {

@@ -406,7 +406,7 @@ export function ollamaParallelSlots(env: Record<string, string | undefined> = pr
  * answered with the tools that exist. `ELIA_OLLAMA_TOOLS=full` offers them all.
  */
 export const LOCAL_MODEL_OMITTED_TOOLS: ReadonlySet<string> = new Set([
-  'github', 'task', 'preview', 'codex_delegate', 'communication', 'deployment', 'finance', 'paper', 'visualize',
+  'github', 'task', 'preview', 'codex_delegate', 'communication', 'deployment', 'finance', 'paper', 'knowledge', 'visualize',
   'data_science', 'fitness', 'sports', 'federated_collab', 'codebase_memory', 'arch_drift', 'cross_project_learn',
   'causal_debug', 'causal_fix', 'causal_verify', 'multi_modal_review', 'adversarial_verify', 'self_healing_monitor',
   'spec_verify', 'predictive_impact', 'temporal_analysis', 'dependency_audit', 'production_readiness', 'provision_environment',

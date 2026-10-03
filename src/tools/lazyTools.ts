@@ -27,7 +27,7 @@ import type { Tool } from './types.ts'
 // everyday tool only buys a retry. Everything here was used a handful of times.
 export const DEFERRED_DEV_TOOLS: ReadonlySet<string> = new Set([
   'github', 'database', 'lsp_refactor', 'environment', 'provision_environment', 'deployment',
-  'production_readiness', 'dependency_audit', 'codex_delegate', 'communication', 'paper', 'visualize',
+  'production_readiness', 'dependency_audit', 'codex_delegate', 'communication', 'paper', 'knowledge', 'visualize',
   'finance', 'data_science', 'sports', 'fitness', 'federated_collab', 'codebase_memory', 'cross_project_learn',
   'arch_drift', 'causal_debug', 'causal_fix', 'causal_verify', 'adversarial_verify', 'multi_modal_review',
   'self_healing_monitor', 'spec_verify', 'predictive_impact', 'temporal_analysis',
@@ -41,7 +41,7 @@ export const DEFERRED_DEV_TOOLS: ReadonlySet<string> = new Set([
  */
 const MODE_KEEPS: Record<string, readonly string[]> = {
   dev: [],
-  cyber: ['dependency_audit'],
+  cyber: ['dependency_audit', 'knowledge'],
   battmann: ['paper', 'visualize', 'finance', 'communication'],
   datascience: ['visualize', 'finance', 'paper', 'database'],
   sysintel: ['github', 'production_readiness'],
@@ -75,6 +75,7 @@ const TOOL_CUES: Record<string, RegExp> = {
   codex_delegate: /\bcodex\b/i,
   communication: /\b(e-?mail|slack|calendar|meeting invite|send (a|the) (note|message|update))\b/i,
   paper: /\b(papers?|arxiv|literature|citations?|doi|peer.reviewed|journal)\b/i,
+  knowledge: /\b(knowledge ?base|eliabase|kb|cves?|cve-\d{4}-\d+|exploit-?db|att&ck|mitre|ctf|wikipedia|wikidata|stack ?exchange|gutenberg|self-improv\w*|rsi)\b/i,
   visualize: /\b(charts?|diagram|plot|visuali[sz]\w*|flow ?chart)\b/i,
   finance: /\b(runway|burn rate|dcf|valuation|unit economics|ltv|cac|cash ?flow|financ\w*)\b/i,
   data_science: /\b(csv|tsv|jsonl|dataset|correlation|regression analysis|profile (the )?data)\b/i,
