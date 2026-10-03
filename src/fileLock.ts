@@ -93,7 +93,8 @@ function readOwner(lockPath: string): LockOwner | undefined {
 function unreadableLockIsStale(lockPath: string, ttlMs: number, now: number): boolean {
   try {
     const stats = lstatSync(lockPath)
-    // Only reclaim if the file has been sitting untouched past the TTL + grace period.
+    // Empty files from a wx race are in-progress acquisitions and not stale unless
+    // they've been sitting untouched past the TTL. Otherwise apply normal mtime check.
     const graceMs = 100
     return now - stats.mtimeMs > ttlMs + graceMs
   } catch {
