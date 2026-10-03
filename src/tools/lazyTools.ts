@@ -75,7 +75,10 @@ const TOOL_CUES: Record<string, RegExp> = {
   codex_delegate: /\bcodex\b/i,
   communication: /\b(e-?mail|slack|calendar|meeting invite|send (a|the) (note|message|update))\b/i,
   paper: /\b(papers?|arxiv|literature|citations?|doi|peer.reviewed|journal)\b/i,
-  knowledge: /\b(knowledge ?base|eliabase|kb|cves?|cve-\d{4}-\d+|exploit-?db|att&ck|mitre|ctf|wikipedia|wikidata|stack ?exchange|gutenberg|self-improv\w*|rsi)\b/i,
+  // Research and general-knowledge questions, security lookups, and the
+  // curated slice's own topics. "how does X work" counts only when X is not
+  // "this/the/our/my …": that is a question about the code in front of elia.
+  knowledge: /\b(knowledge ?base|eliabase|kb|cves?|cve-\d{4}-\d+|ghsa|exploit-?db|att&ck|mitre|ctf|wikipedia|wikidata|stack ?exchange|gutenberg|self-improv\w*|rsi|research (?:on|into|about|says|shows)|(?:the )?(?:research|scientific) literature|studies (?:on|show|about)|state of the art|sota|published (?:work|results|research)|reward hacking|world models?|agent memory|(?:llm|agent) (?:memory|planning|evaluation|benchmarks?)|tool use|chain[- ]of[- ]thought|in-context learning|rlhf|reinforcement learning|large language models?|how (?:does|do) (?!(?:this|the|that|our|my|your|it|these|those)\b)[\w -]{2,40} work)\b/i,
   visualize: /\b(charts?|diagram|plot|visuali[sz]\w*|flow ?chart)\b/i,
   finance: /\b(runway|burn rate|dcf|valuation|unit economics|ltv|cac|cash ?flow|financ\w*)\b/i,
   data_science: /\b(csv|tsv|jsonl|dataset|correlation|regression analysis|profile (the )?data)\b/i,

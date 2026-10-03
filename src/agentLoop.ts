@@ -250,6 +250,8 @@ export interface RunAgentLoopOptions {
    * approval, all while the run showed "Checking the 3 assumptions".
    */
   finishAfterTool?: string
+  /** Deferred tools to send in full from the first call, beyond what the request's words cue — a pre-turn check found work for them. */
+  preloadTools?: readonly string[]
   /**
    * Tools sent only by name until the model loads or calls them (see
    * tools/lazyTools.ts). They stay callable throughout; only their definitions
@@ -353,6 +355,7 @@ async function runAgentLoopTracked(opts: RunAgentLoopOptions, inflight: Inflight
     drainDirectives,
     onPlanProgress,
     finishAfterTool,
+    preloadTools,
     deferTools,
     loadedTools,
   } = opts
@@ -450,6 +453,7 @@ async function runAgentLoopTracked(opts: RunAgentLoopOptions, inflight: Inflight
   const lazyTools = createLazyToolSet(tools, deferTools ?? new Set(), loadedTools)
   // What this request says it needs goes out in full from the first call.
   lazyTools.preload(latestUserText(messages))
+  for (const name of preloadTools ?? []) lazyTools.markUsed(name)
   let toolDefinitions = lazyTools.definitions()
   const historyTrimmer = historyTrimmerFor(messages)
   const trimHistory = historyTrimEnabled(providerCapabilities(resolveRoute?.()?.providerName ?? providerName ?? config.providerName).kind)

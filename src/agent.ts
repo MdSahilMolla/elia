@@ -29,6 +29,7 @@ import { renderRationale } from './autonomy/rationale.ts'
 import { regretNudge, weakDomainCaution } from './autonomy/outcomes.ts'
 import { disputeNudge } from './autonomy/disputeNudge.ts'
 import { renderSkillHint } from './skills/relevance.ts'
+import { knowledgeProbe, knowledgeProbeEnabled } from './tools/knowledge.ts'
 import { draftUpfrontPlan, planActivity, planBriefing, planTodoItems, stripInjectedContext, upfrontPlanEnabled, wantsUpfrontPlan } from './autonomy/upfrontPlan.ts'
 import { checkPremises, describePremises, premiseBriefing } from './principles/premises.ts'
 import { beginPlanRequest, planChecklist, planProgressTitle, type PlanProgressUpdate } from './autonomy/planProgress.ts'
@@ -182,6 +183,10 @@ async function runScopedTurn(
   // compounding edge — the longer elia works a repo, the more it carries in.
   const turnQuery = lastUserTextFor(messages)
   const turnPaths = filePathsIn(turnQuery)
+  // Whether elia's knowledge base holds verified work on this request, asked
+  // while the rest of the brief is assembled. Evidence, not keywords: only
+  // entries that bear on the request count (tools/knowledge.ts, bearsOn).
+  const knowledgeLookup = !options.planMode && knowledgeProbeEnabled(mode) ? knowledgeProbe(stripInjectedContext(turnQuery)) : Promise.resolve(undefined)
   // Knowledge cards: what every past session accumulated about the specific
   // files this turn is about to touch. Derived on read from the second brain;
   // empty (and free) until the brain has something anchored to those paths.
@@ -209,7 +214,8 @@ async function runScopedTurn(
   // The wall-clock date leads the dynamic block in every mode: it must reflect
   // real time, and it must not bake into the cached stable prefix (a daemon can
   // stay up across midnight, or for days).
-  const systemDynamicPrompt = [turnContextPrompt(), projectMemory, options.turnGuidance ?? ''].map((part) => part.trim()).filter(Boolean).join('\n\n') || undefined
+  const knowledge = await knowledgeLookup
+  const systemDynamicPrompt = [turnContextPrompt(), projectMemory, knowledge?.hint ?? '', options.turnGuidance ?? ''].map((part) => part.trim()).filter(Boolean).join('\n\n') || undefined
 
   // A step elia ticked from evidence: the plan panel redraws from the checklist
   // (an "updated" activity, so scrollback is not filled with one per tick), and
@@ -232,6 +238,11 @@ async function runScopedTurn(
       else writeProviderActivity(activity.kind === 'plan' ? { ...activity, status: 'updated' } : activity)
     }
     options.onActivity?.(activity)
+  }
+
+  if (knowledge) {
+    const n = knowledge.entries.length
+    surface({ kind: 'status', status: 'completed', title: `Knowledge base: ${n} verified entr${n === 1 ? 'y' : 'ies'} on this request` })
   }
 
   if (options.upfrontPlan && mode === 'dev') {
@@ -316,6 +327,7 @@ async function runScopedTurn(
       // Specialist tools a mode does not rely on go out as a load-on-demand
       // catalog. See tools/lazyTools.ts.
       deferTools: lazyToolsEnabled(providerCapabilities(options.providerName ?? config.providerName).kind) ? deferredToolsForMode(mode) : undefined,
+      preloadTools: knowledge ? ['knowledge'] : undefined,
       provider: options.provider,
       providerName: options.providerName,
       model: options.model,

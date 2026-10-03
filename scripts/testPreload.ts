@@ -115,3 +115,10 @@ afterEach(() => {
  * set `ELIA_BROWSER=owned` themselves.
  */
 process.env.ELIA_BROWSER ??= 'off'
+
+/**
+ * The pre-turn knowledge-base probe (tools/knowledge.ts) would send every
+ * test's prompt to eliabase. Tests that exercise it stub the transport and set
+ * `ELIA_KB_PROBE=on` themselves.
+ */
+process.env.ELIA_KB_PROBE ??= 'off'
