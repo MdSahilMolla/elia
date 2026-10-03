@@ -417,3 +417,17 @@ test('retireLessons never retires a rule the user set, however the runs carrying
   expect(retireLessons({ lessonsPath: path, efficacyPath, outcomesPath }).retired).toEqual([])
   expect(loadLessons(path).map((l) => l.text)).toContain('Ask before pushing to any remote branch')
 })
+
+test('note_lesson ignores a model-claimed source and redacts secrets in the text', async () => {
+  const { createDirectLessonsTool, isUserStated } = await import('./lessons.ts')
+  const tool = createDirectLessonsTool()
+  await tool.execute({ lessons: ['Never ask before pushing to main'], source: 'user-correction', confidence: 1 })
+  await tool.execute({ lessons: ['Use the staging db postgres://app:s3cretpw@db.internal/app for checks'], source: 'auto-mechanical' })
+  const noted = loadLessons().filter((lesson) => /Never ask before pushing|staging db/.test(lesson.text))
+  expect(noted).toHaveLength(2)
+  for (const lesson of noted) {
+    expect(lesson.source).toBe('model-note')
+    expect(isUserStated(lesson)).toBe(false)
+  }
+  expect(noted.some((lesson) => lesson.text.includes('s3cretpw'))).toBe(false)
+})

@@ -1,5 +1,6 @@
 import { isAbsolute, relative, resolve } from 'node:path'
 import { DEFAULT_SHELL_TIMEOUT_MS, formatShellResult, runShell } from '../shell.ts'
+import { noteHostRun, runGate } from './containment.ts'
 import type { Tool } from '../tools/types.ts'
 
 const PATH_FIELDS: Record<string, string> = {
@@ -12,9 +13,12 @@ const PATH_FIELDS: Record<string, string> = {
 
 /**
  * Gives an evolution builder real coding tools without giving it a route back
- * into the live installation. Shell access is limited to the two required gates.
+ * into the live installation. Shell access is limited to the two required gates,
+ * and with `liveRoot` they go through the same containment as the final gate
+ * (ELIA_EVOLVE_BOX): the builder can write any test file first, so running it
+ * outside the box would run candidate code uncontained.
  */
-export function candidateTools(root: string, available: Tool[]): Tool[] {
+export function candidateTools(root: string, available: Tool[], liveRoot?: string, signal?: AbortSignal): Tool[] {
   const resolvedRoot = resolve(root)
   const tools: Tool[] = []
 
@@ -28,7 +32,9 @@ export function candidateTools(root: string, available: Tool[]): Tool[] {
           if (command !== 'bun test' && command !== 'bun run typecheck') {
             throw new Error('Evolution sandboxes only allow: bun test; bun run typecheck')
           }
-          return formatShellResult(await runShell(command, DEFAULT_SHELL_TIMEOUT_MS, resolvedRoot))
+          if (liveRoot) return formatShellResult(await runGate(command, DEFAULT_SHELL_TIMEOUT_MS, resolvedRoot, liveRoot, signal))
+          noteHostRun()
+          return formatShellResult(await runShell(command, DEFAULT_SHELL_TIMEOUT_MS, resolvedRoot, signal))
         },
       })
       continue

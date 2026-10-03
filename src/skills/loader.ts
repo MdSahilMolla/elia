@@ -22,8 +22,8 @@ import { isProjectSkillsTrusted } from './trust.ts'
  * top-level code immediately, before the validation below ever gets a look, so
  * "checked-in tool the user wrote" and "checked-in tool an attacker wrote" are
  * indistinguishable until it's too late. They are therefore only imported once
- * the project has been explicitly trusted (`elia skills trust`, persisted per
- * project — see `./trust.ts`); until then they are skipped with a warning, in
+ * the project's skill files have been explicitly trusted (`elia skills trust`,
+ * a hash-bound record in the user's own config, never in the repo — see `./trust.ts`); until then they are skipped with a warning, in
  * every context including non-interactive ones (bridge/VS Code/headless run),
  * which never auto-trust on their own.
  */
@@ -93,7 +93,7 @@ export async function loadSkills(
 /** Fail-closed, loud, and identical whether the caller is an interactive terminal or a headless bridge — no context gets to silently skip straight past this to auto-execute. */
 function warnUntrustedProjectSkills(projectSkillsDir: string, count: number): void {
   process.stderr.write(
-    `elia: ${count} project skill file(s) in ${projectSkillsDir} were not loaded — this project has not been trusted.\n` +
+    `elia: ${count} project skill file(s) in ${projectSkillsDir} were not loaded — this project has not been trusted (or they changed since you trusted them).\n` +
       `elia: inspect them, then run \`elia skills trust\` to enable them (or set ELIA_SKILLS=off to disable skills entirely).\n`,
   )
 }

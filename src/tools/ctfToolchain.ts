@@ -1,3 +1,6 @@
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import type { Tool } from './types.ts'
 import { optionalString } from './args.ts'
 import { runShell } from '../shell.ts'
@@ -108,11 +111,18 @@ const defaultProbeCache = new Map<string, Promise<boolean>>()
  * mechanism itself can be exercised, not just the injection seam.
  */
 export async function runProbeCommand(command: string, timeoutMs: number, signal?: AbortSignal): Promise<boolean> {
+  // Run from a fresh empty directory, never the workspace: a probe resolves
+  // modules and relative paths against its cwd, and detection must not execute
+  // code a project (or a cloned challenge) put there.
+  let neutral: string | undefined
   try {
-    const result = await runShell(command, timeoutMs, undefined, signal)
+    neutral = mkdtempSync(join(tmpdir(), 'elia-probe-'))
+    const result = await runShell(command, timeoutMs, neutral, signal)
     return result.exitCode === 0 && !result.timedOut
   } catch {
     return false
+  } finally {
+    if (neutral) rmSync(neutral, { recursive: true, force: true })
   }
 }
 

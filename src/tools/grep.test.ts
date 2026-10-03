@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -80,4 +80,25 @@ test('a plain scan with fewer than 200 matches reports no cap note', async () =>
   const result = await searchWithJs('needle', dir, 'dir', undefined, undefined)
   expect(result.split('\n').filter((line) => /:[0-9]+:needle/.test(line))).toHaveLength(5)
   expect(result).not.toContain('[stopped after 200 matches]')
+})
+test('the JS fallback does not follow a symlink out of the workspace', async () => {
+  const outside = mkdtempSync(join(tmpdir(), 'elia-grep-outside-'))
+  try {
+    writeFileSync(join(outside, 'secret.txt'), 'needle in the outside file\n')
+    mkdirSync(join(dir, 'src'))
+    writeFileSync(join(dir, 'src', 'real.txt'), 'needle in the workspace\n')
+    symlinkSync(join(outside, 'secret.txt'), join(dir, 'src', 'link.txt'))
+    symlinkSync(outside, join(dir, 'linked-dir'))
+
+    const result = await searchWithJs('needle', dir, 'dir', undefined, undefined)
+    expect(result).toContain('src/real.txt')
+    expect(result).not.toContain('outside file')
+    expect(result).not.toContain('link.txt')
+
+    // Naming the link directly is no different.
+    const direct = await searchWithJs('needle', join(dir, 'src'), 'dir/src', undefined, undefined, 'link.txt')
+    expect(direct).toBe('No matches found.')
+  } finally {
+    rmSync(outside, { recursive: true, force: true })
+  }
 })

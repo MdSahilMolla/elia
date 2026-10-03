@@ -2,8 +2,9 @@ import { autoFallbacksFor, config } from './config.ts'
 import { providerCapabilities } from './providers/registry.ts'
 import { beginCompaction, shrinkForOversizedRequest, type PendingCompaction } from './compaction.ts'
 import { compactionThresholdFor } from './contextWindow.ts'
-import { isConnectionError, isFallbackableProviderError, isMalformedToolCallError, isQuotaExhaustedError, isRequestTooLargeError, isTransientServerError, isUnusableRouteError, retryBackoffMs } from './providerErrors.ts'
+import { isConnectionError, isFallbackableProviderError, isMalformedToolCallError, isQuotaExhaustedError, isRequestTooLargeError, isStuckRequestError, isTransientServerError, isUnusableRouteError, retryBackoffMs, tokenRateCap } from './providerErrors.ts'
 import { createPlanlessWorkTracker, createRedundantReadTracker, isLoneBatchableRead, serialReadNudge } from './autonomy/toolBatchingNudge.ts'
+import { createLeakedToolCallGuard } from './autonomy/leakedToolCall.ts'
 import { createReadAhead } from './autonomy/readAhead.ts'
 import { createPlanProgressTracker, planBelongsToRequest, type PlanProgressUpdate, type ToolOutcome } from './autonomy/planProgress.ts'
 import { activeTodoList } from './autonomy/todoList.ts'
@@ -11,6 +12,8 @@ import { applyEditsToTodos, decodeNote } from './autonomy/operatorNotes.ts'
 import type { ChatMessage, ContentBlock, Provider, ProviderActivity, Usage } from './providers/types.ts'
 import type { Tool } from './tools/types.ts'
 import { unknownToolMessage } from './tools/toolNameSuggest.ts'
+import { createLazyToolSet } from './tools/lazyTools.ts'
+import { historyTrimEnabled, historyTrimmerFor, modelViewOfResult } from './contextDiet.ts'
 import { normalizeRunCommandInput } from './tools/runCommand.ts'
 import { redactText } from './ui/redact.ts'
 import { endTextTurn, writeNotice, writeToolCall, writeToolResult } from './ui/stream.ts'
@@ -21,7 +24,7 @@ import { spendState, spendStopPrompt } from './spendLimit.ts'
 import { SPECULABLE_TOOLS, type CacheStats, type ToolResultCache } from './speculation/cache.ts'
 import { readMemo } from './speculation/deterministicCache.ts'
 import type { Prefetcher } from './speculation/prefetch.ts'
-import { activeActionGovernor, assessAction, redactActionInput, type ActionAssessment, type ActionGateResult } from './autonomy/governor.ts'
+import { activeActionGovernor, assessAction, redactActionInput, sessionScopeWriteBlock, SIGNOFF_INTENT_PREFIX, type ActionAssessment, type ActionGateResult } from './autonomy/governor.ts'
 import { applyPolicy } from './autonomy/policy.ts'
 import { activeGoalGraph, activeGoalNode, type ActionReservation, classifyFailure, isReportingTool } from './autonomy/goalGraph.ts'
 import { contractForAction, evaluatePostconditions, evaluatePreconditions, type ActionContract, type ContractEvaluation } from './autonomy/actionContract.ts'
@@ -120,6 +123,8 @@ function sleepUnlessAborted(ms: number, signal?: AbortSignal): Promise<void> {
   })
 }
 const providerHealth = new Map<string, { failures: number; cooldownUntil: number; lastError?: string }>()
+/** Per-minute token caps routes have refused a request for, by route: a request over one is not sent there. */
+const routeTokenCaps = new Map<string, number>()
 
 /**
  * A hard ceiling on model round-trips in one loop. Without it a model that keeps
@@ -245,6 +250,14 @@ export interface RunAgentLoopOptions {
    * approval, all while the run showed "Checking the 3 assumptions".
    */
   finishAfterTool?: string
+  /**
+   * Tools sent only by name until the model loads or calls them (see
+   * tools/lazyTools.ts). They stay callable throughout; only their definitions
+   * are held back. Omit to send every definition.
+   */
+  deferTools?: ReadonlySet<string>
+  /** Where loaded deferred tools are remembered; defaults to the session's (shared by top-level turns). A worker passes its own. */
+  loadedTools?: Set<string>
 }
 
 export type StopReason = 'complete' | 'step-budget' | 'aborted' | 'no-progress' | 'spend-budget'
@@ -291,6 +304,17 @@ export function isObservation(request: { name: string; input: Record<string, unk
   return assessment.risk === 'safe' && assessment.intent === 'shell.read-only'
 }
 
+/** The text of the most recent user message: the request a loop is working on. */
+function latestUserText(messages: ConversationMessage[]): string {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index]!
+    if (message.role !== 'user') continue
+    const text = message.content.map((block) => (block.type === 'text' ? block.text : '')).join('\n')
+    if (text.trim()) return text
+  }
+  return ''
+}
+
 export async function runAgentLoop(opts: RunAgentLoopOptions): Promise<RunAgentLoopResult> {
   // Spend shows while the loop runs (usage.ts, "in flight"); the slot is
   // cleared before the caller records the loop's final total.
@@ -329,6 +353,8 @@ async function runAgentLoopTracked(opts: RunAgentLoopOptions, inflight: Inflight
     drainDirectives,
     onPlanProgress,
     finishAfterTool,
+    deferTools,
+    loadedTools,
   } = opts
 
   const transcript = activeSessionTranscript()
@@ -410,12 +436,24 @@ async function runAgentLoopTracked(opts: RunAgentLoopOptions, inflight: Inflight
     ? [requestedDynamicPrompt, `This model runs with a reduced tool set to keep its prompt short. Not available this session: ${withheld.join(', ')}. Do their work with the tools you have (e.g. \`gh\` through run_command).`].filter(Boolean).join('\n\n')
     : requestedDynamicPrompt
 
-  const toolDefinitions = tools.map((tool) => ({
-    name: tool.name,
-    description: tool.description,
-    input_schema: tool.input_schema,
-  }))
-  const toolsByName: Record<string, Tool> = Object.fromEntries(tools.map((tool) => [tool.name, tool]))
+  // A wait or a switch of provider is time the person sits through: say it
+  // wherever they are looking (plain terminal, the Ink UI via an activity) and
+  // in the session recording, not only on a verbose stdout.
+  const routeNotice = (text: string): void => {
+    transcript?.notice(`elia: ${text}`)
+    if (verbose) writeNotice(text)
+    else onActivity?.({ kind: 'status', status: 'warning', title: text })
+  }
+
+  // Deferred tools are held back as a catalog until used; toolDefinitions is
+  // re-read before every model call so a tool loaded in one step is there the next.
+  const lazyTools = createLazyToolSet(tools, deferTools ?? new Set(), loadedTools)
+  // What this request says it needs goes out in full from the first call.
+  lazyTools.preload(latestUserText(messages))
+  let toolDefinitions = lazyTools.definitions()
+  const historyTrimmer = historyTrimmerFor(messages)
+  const trimHistory = historyTrimEnabled(providerCapabilities(resolveRoute?.()?.providerName ?? providerName ?? config.providerName).kind)
+  const toolsByName: Record<string, Tool> = Object.fromEntries([...tools, ...(lazyTools.loader ? [lazyTools.loader] : [])].map((tool) => [tool.name, tool]))
 
   let totalUsage = ZERO_USAGE
   let steps = 0
@@ -435,6 +473,8 @@ async function runAgentLoopTracked(opts: RunAgentLoopOptions, inflight: Inflight
   // it has something true the model may not be holding. ELIA_WORLD=off removes it.
   const world = createWorld(currentAgent().cwd ?? process.cwd())
   const planlessWork = createPlanlessWorkTracker()
+  // A tool call the model wrote as text never ran; see autonomy/leakedToolCall.ts.
+  const leakedToolCalls = createLeakedToolCallGuard()
   // The list this loop runs under — the turn's, via withTodoList.
   const todoList = activeTodoList()
   const planProgress = onPlanProgress
@@ -507,6 +547,13 @@ async function runAgentLoopTracked(opts: RunAgentLoopOptions, inflight: Inflight
     }
     // Budget derived from the model actually in use, so a 200k-window model is
     // not compacted at the same point as an unknown 50k one.
+    // Old results the model can get again, re-reads that a later read replaced,
+    // and file contents already on disk stop riding along on every call
+    // (contextDiet.ts). Only what is sent changes; batched, so it changes rarely.
+    if (trimHistory) {
+      const saved = historyTrimmer.update(messages)
+      if (saved > 0) transcript?.notice(`elia: left ${saved} characters of stale tool output out of what the model is sent`)
+    }
     pendingCompaction ??= beginCompaction(messages, compactionThresholdFor(config.model))
 
     // One final call, with tool use waved off, so a forced stop still ends with a
@@ -562,6 +609,20 @@ async function runAgentLoopTracked(opts: RunAgentLoopOptions, inflight: Inflight
     for (const block of toolUseBlocks) if (block.name === 'run_command') block.input = normalizeRunCommandInput(block.input)
 
     if (toolUseBlocks.length === 0) {
+      // Not ready to stop if what it "called" was only written out as text:
+      // nothing ran, and ending here would report a finished turn with no work.
+      const leak = leakedToolCalls.observe(content)
+      if (leak.leaked) {
+        const title = leak.note
+          ? 'The model wrote a tool call as text, so it did not run — asking it to call the tool properly'
+          : 'The model wrote a tool call as text and no tool ran'
+        if (onActivity) onActivity({ kind: 'warning', status: 'warning', title })
+        else writeNotice(`elia: ${title}`)
+        if (leak.note) {
+          messages.push({ role: 'user', content: [{ type: 'text', text: leak.note }] })
+          continue
+        }
+      }
       // The model is ready to stop — but if the operator sent steering during
       // this last response, don't end the turn: fold it in and keep going.
       if (injectSteering() || injectDirectives()) continue
@@ -624,6 +685,9 @@ async function runAgentLoopTracked(opts: RunAgentLoopOptions, inflight: Inflight
         outcomes[blockIndex] = { name: block.name, input: block.input, result: resultText, isError: true }
         return { type: 'tool_result' as const, tool_use_id: block.id, content: resultText, is_error: true }
       }
+
+      // Calling a deferred tool by name runs it and attaches its definition from now on.
+      const firstDirectCall = lazyTools.markUsed(block.name)
 
       let resultText = ''
       let isError = false
@@ -692,9 +756,30 @@ async function runAgentLoopTracked(opts: RunAgentLoopOptions, inflight: Inflight
               let gate: ActionGateResult
               if (alreadyApproved) {
                 const policied = applyPolicy(assessAction(request), request, cwd)
-                gate = policied.blocked
-                  ? { allowed: false, assessment: policied.assessment, message: policied.message }
-                  : { allowed: true, assessment: { ...policied.assessment, decision: 'allow' as const } }
+                // A stored approval is a "yes" to the approval prompt only. The
+                // governor's hard stops are not prompts, so it never skips them:
+                // the session worktree scope, the action budget, and a person's
+                // sign-off (which no stored record can give) all still apply.
+                const scopeBlock = sessionScopeWriteBlock(request)
+                if (policied.blocked) {
+                  gate = { allowed: false, assessment: policied.assessment, message: policied.message }
+                } else if (scopeBlock !== undefined) {
+                  gate = {
+                    allowed: false,
+                    assessment: { ...policied.assessment, risk: 'critical', decision: 'block', intent: 'session-scope', reason: `file write is outside the session worktree: ${scopeBlock}` },
+                    message: `Path blocked by session worktree scope: ${scopeBlock}`,
+                  }
+                } else if (policied.assessment.intent.startsWith(SIGNOFF_INTENT_PREFIX)) {
+                  gate = await governor.check(request)
+                } else if (governor.chargeApprovedAction && !governor.chargeApprovedAction()) {
+                  gate = {
+                    allowed: false,
+                    assessment: { ...policied.assessment, decision: 'block' },
+                    message: `Action budget exhausted after ${governor.stats().maxActions} tool requests. Resume with a larger bounded budget or split the goal into smaller tasks.`,
+                  }
+                } else {
+                  gate = { allowed: true, assessment: { ...policied.assessment, decision: 'allow' as const } }
+                }
               } else {
                 gate = await governor.check(request)
               }
@@ -803,7 +888,9 @@ async function runAgentLoopTracked(opts: RunAgentLoopOptions, inflight: Inflight
         // The operator, the ledger, and the prefetcher above all saw the full
         // text; only the copy that re-enters the prompt on every later step is
         // bounded, so one noisy command cannot overflow the context window.
-        content: boundToolResult(resultText, block.name),
+        // A first direct call to a deferred tool was made without its schema; if
+        // it failed, the schema comes back with the error so the retry has it.
+        content: boundToolResult(modelViewOfResult(block.name, resultText, isError), block.name) + (firstDirectCall && isError ? lazyTools.schemaNote(block.name) : ''),
         is_error: isError,
       }
     })
@@ -930,7 +1017,14 @@ async function runAgentLoopTracked(opts: RunAgentLoopOptions, inflight: Inflight
       if (!routes.some((known) => known.providerName === route.providerName && known.model === route.model)) routes.push(route)
     }
     const now = Date.now()
-    const healthyRoutes = routes.filter((route) => (providerHealth.get(providerHealthKey(route))?.cooldownUntil ?? 0) <= now)
+    // A route whose per-minute token cap this request is known to exceed would
+    // only refuse it again; estimated at ~4 characters a token.
+    const requestTokens = routeTokenCaps.size > 0
+      ? Math.ceil((systemPrompt.length + (systemDynamicPrompt?.length ?? 0) + JSON.stringify(toolDefinitions).length + JSON.stringify(messages).length) / 4)
+      : 0
+    const healthyRoutes = routes.filter((route) =>
+      (providerHealth.get(providerHealthKey(route))?.cooldownUntil ?? 0) <= now
+      && (routeTokenCaps.get(providerHealthKey(route)) ?? Infinity) >= requestTokens)
     const activeRoutes = healthyRoutes.length > 0 ? healthyRoutes : routes
     let emittedOutput = false
     // The part of that output which *did* something — a Codex hand-off, or
@@ -1000,9 +1094,22 @@ async function runAgentLoopTracked(opts: RunAgentLoopOptions, inflight: Inflight
                 && !signal?.aborted
                 && attempt < MAX_PROVIDER_ATTEMPTS
               ) {
-                if (verbose) writeNotice('the model sent a tool call that was not valid JSON; asking it again')
+                routeNotice('the model sent a tool call that was not valid JSON; asking it again')
                 continue
               }
+              // A request that never started is stuck, not refused: the same
+              // route almost always answers a fresh one in seconds, faster and
+              // on the model the person chose, where a fallback may be slower,
+              // rate-limited or a different model. Once, then the usual policy.
+              if (isStuckRequestError(message) && attempt === 1 && !emittedOutput && !emittedActions && !signal?.aborted) {
+                routeNotice(`${route.label ?? route.providerName} did not start answering (${message.replace(/^response stalled: /, '').replace(/ \(timed out\)$/, '')}); asking it again`)
+                continue
+              }
+              // A per-minute token cap smaller than this request: no wait or retry
+              // on this route can answer it, and the next request is as large.
+              // Remember the cap and let this call and later ones go elsewhere.
+              const cap = tokenRateCap(message)
+              if (cap !== undefined) routeTokenCaps.set(providerHealthKey(route), cap)
               const unusable = isUnusableRouteError(message)
               if (unusable || isFallbackableProviderError(message)) {
                 const key = providerHealthKey(route)
@@ -1025,7 +1132,7 @@ async function runAgentLoopTracked(opts: RunAgentLoopOptions, inflight: Inflight
                 && (emittedOutput || !activeRoutes[routeIndex + 1])
               ) {
                 const delayMs = transientDelays[attempt - 1]!
-                if (verbose) writeNotice(`provider ${route.label ?? `${route.providerName} (${route.model})`} failed on its side (${message.slice(0, 80)}); asking again in ${Math.ceil(delayMs / 1000)}s`)
+                routeNotice(`provider ${route.label ?? `${route.providerName} (${route.model})`} failed on its side (${message.slice(0, 80)}); asking again in ${Math.ceil(delayMs / 1000)}s`)
                 await sleepUnlessAborted(delayMs, signal)
                 if (signal?.aborted) throw error
                 continue
@@ -1044,22 +1151,21 @@ async function runAgentLoopTracked(opts: RunAgentLoopOptions, inflight: Inflight
               if (
                 attempt < MAX_PROVIDER_ATTEMPTS
                 && isRequestTooLargeError(message)
+                && !(cap !== undefined && activeRoutes[routeIndex + 1])
                 && shrinkForOversizedRequest(messages)
               ) {
-                if (verbose) writeNotice('request was over the provider limit; trimmed oversized tool output and retrying smaller')
+                routeNotice('request was over the provider limit; trimmed oversized tool output and retrying smaller')
                 continue
               }
 
               const nextRoute = activeRoutes[routeIndex + 1]
               if (nextRoute) {
-                if (verbose) {
-                  // With the reason: five providers "unavailable" in a row is a
-                  // network blip, a spent key or a request too big for all of
-                  // them, and afterwards nothing else says which.
-                  writeNotice(
-                    `provider ${route.label ?? `${route.providerName} (${route.model})`} unavailable (${redactText(message.split('\n')[0] ?? '', 120)}); trying ${nextRoute.label ?? `${nextRoute.providerName} (${nextRoute.model})`}`,
-                  )
-                }
+                // With the reason: five providers "unavailable" in a row is a
+                // network blip, a spent key or a request too big for all of
+                // them, and afterwards nothing else says which.
+                routeNotice(
+                  `provider ${route.label ?? `${route.providerName} (${route.model})`} unavailable (${redactText(message.split('\n')[0] ?? '', 120)}); trying ${nextRoute.label ?? `${nextRoute.providerName} (${nextRoute.model})`}`,
+                )
                 break
               }
 
@@ -1126,12 +1232,13 @@ async function runAgentLoopTracked(opts: RunAgentLoopOptions, inflight: Inflight
         recordedText = ''
       }
       transcript?.notice(`Model: ${route.providerName}/${route.model} · agent: ${actor}`)
+      toolDefinitions = lazyTools.definitions()
       try {
           const result = await route.provider.streamTurn({
             cwd: workspaceRoot,
             system: systemPrompt,
             systemDynamic: systemDynamicPrompt,
-            messages,
+            messages: trimHistory ? historyTrimmer.view(messages) : messages,
             tools: toolDefinitions,
             onText: (delta) => {
               if (transcript) recordedText += delta
@@ -1238,4 +1345,5 @@ function providerHealthKey(route: ProviderRoute): string {
 
 export function resetProviderHealthForTests(): void {
   providerHealth.clear()
+  routeTokenCaps.clear()
 }

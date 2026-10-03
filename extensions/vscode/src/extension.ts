@@ -9,6 +9,13 @@ let refreshViews = (): void => undefined
 
 export function activate(context: vscode.ExtensionContext): void {
   extensionContext = context
+  // The bridge spawns `elia.cliPath` in the workspace, and a workspace can set that
+  // setting. Nothing starts, and no command is registered, until the workspace is trusted.
+  if (!vscode.workspace.isTrusted) {
+    vscode.window.showWarningMessage('Elia does not run in an untrusted workspace. Trust this workspace to use it.')
+    context.subscriptions.push(vscode.workspace.onDidGrantWorkspaceTrust(() => activate(context)))
+    return
+  }
   const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath
   if (!workspaceRoot) {
     vscode.window.showWarningMessage('Elia needs an open workspace to run its governed coding workflow.')

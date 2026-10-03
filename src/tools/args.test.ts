@@ -17,3 +17,13 @@ test('a real value is passed through untrimmed', () => {
 test('the wrong type is still a real mistake', () => {
   expect(() => optionalString(42, 'path')).toThrow('path must be a string when provided')
 })
+
+test('a commit reference that reads as a git option is refused before git runs', async () => {
+  const { validateCommitRef, resolveCommitRef } = await import('./args.ts')
+  expect(() => validateCommitRef('--output=/tmp/x')).toThrow('not a commit reference')
+  expect(() => validateCommitRef('-p')).toThrow('not a commit reference')
+  expect(() => validateCommitRef('a b')).toThrow('not a commit reference')
+  expect(validateCommitRef('HEAD~1')).toBe('HEAD~1')
+  await expect(resolveCommitRef(process.cwd(), '--output=/tmp/x')).rejects.toThrow('not a commit reference')
+  await expect(resolveCommitRef(process.cwd(), 'nosuchref0000')).rejects.toThrow('no commit')
+})

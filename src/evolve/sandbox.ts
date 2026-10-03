@@ -45,7 +45,9 @@ import { EVOLUTION_DIR } from './ledger.ts'
  * `src/evolve/benchTask.ts`, not the CLI.
  */
 const COPIED_ENTRIES = ['src', 'package.json', 'tsconfig.json', 'bunfig.toml', 'scripts', 'values', 'bin', 'extensions']
-const TRACKED_ROOT_FILES = ['package.json', 'tsconfig.json']
+const TRACKED_ROOT_FILES = ['package.json', 'tsconfig.json', 'bunfig.toml']
+/** Trees tracked whole, so an edit to any file in them (the test preload, the value core) is seen and can be refused as immutable. */
+const TRACKED_TREES = ['scripts', 'values']
 
 /**
  * Files a candidate is not allowed to change.
@@ -474,6 +476,18 @@ function trackedFilesIn(root: string): string[] {
     for (const path of glob.scanSync({ cwd: srcDir, dot: false })) {
       files.push(`src/${path.replace(/\\/g, '/')}`)
     }
+  }
+  // Non-TypeScript files under src that the candidate may not touch (history/tasks.json).
+  if (existsSync(srcDir)) {
+    for (const path of new Bun.Glob('**/*').scanSync({ cwd: srcDir, dot: false })) {
+      const file = `src/${path.replace(/\\/g, '/')}`
+      if (!file.endsWith('.ts') && isImmutablePath(file)) files.push(file)
+    }
+  }
+  for (const tree of TRACKED_TREES) {
+    const dir = join(root, tree)
+    if (!existsSync(dir)) continue
+    for (const path of new Bun.Glob('**/*').scanSync({ cwd: dir, dot: false })) files.push(`${tree}/${path.replace(/\\/g, '/')}`)
   }
   for (const file of TRACKED_ROOT_FILES) if (existsSync(join(root, file))) files.push(file)
   return files

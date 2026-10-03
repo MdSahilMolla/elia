@@ -2,7 +2,7 @@ import { afterEach, expect, test } from 'bun:test'
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { newEngagementTool, engagementDir } from './engagement.ts'
-import { httpProbeTool, parseScopeHosts, hostInScope, stripZoneId } from './httpProbe.ts'
+import { httpProbeTool, parseScope, parseScopeHosts, hostInScope, stripZoneId } from './httpProbe.ts'
 import { SESSION_JAR_FILE } from './httpSession.ts'
 
 const originalFetch = globalThis.fetch
@@ -71,6 +71,40 @@ test('parseScopeHosts extracts hostnames, IPs, and CIDR ranges', () => {
   expect(hosts).toContain('app.acme.com')
   expect(hosts).toContain('api.acme.com')
   expect(hosts).toContain('10.0.0.0/24')
+})
+
+test('parseScopeHosts reads only the in-scope section and subtracts out-of-scope entries', () => {
+  const text = [
+    '# Engagement scope: x',
+    '',
+    '**Target:** app.acme.com',
+    '**Authorized by:** alice@contact-person.org, legal.example.net',
+    '',
+    '## Rules of engagement',
+    'Test app.acme.com and 10.0.0.0/24. Out of scope: payments.acme.com',
+    '',
+    '## Out of scope',
+    '- admin.acme.com',
+    '- 10.0.0.0/24',
+    '',
+    '## Notes',
+    'Vendor status page: status.vendor.io',
+  ].join('\n')
+  const { include, exclude } = parseScope(text)
+  expect(include).toEqual(expect.arrayContaining(['app.acme.com', '10.0.0.0/24']))
+  expect(include).not.toContain('contact-person.org')
+  expect(include).not.toContain('legal.example.net')
+  expect(include).not.toContain('status.vendor.io')
+  expect(include).not.toContain('payments.acme.com')
+  expect(exclude).toEqual(expect.arrayContaining(['payments.acme.com', 'admin.acme.com', '10.0.0.0/24']))
+  expect(parseScopeHosts(text)).toEqual(['app.acme.com'])
+  expect(hostInScope('admin.acme.com', ['acme.com'], exclude)).toBe(false)
+  expect(hostInScope('www.acme.com', ['acme.com'], exclude)).toBe(true)
+})
+
+test('parseScopeHosts does not treat bare hex-letter words as IPv6 hosts', () => {
+  const hosts = parseScopeHosts('Scope: a dead face can add a bed at acme.com; the cafe is beef free')
+  expect(hosts).toEqual(['acme.com'])
 })
 
 test('hostInScope matches exact hosts, subdomains, and CIDR membership', () => {

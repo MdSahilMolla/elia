@@ -78,3 +78,15 @@ test('a non-Error thrown value still produces a usable record', () => {
   expect(crash).toContain('socket hang up')
   expect(crash).toContain('failed to run')
 })
+
+// Session muo052t5: the run built tic_tac_toe.py in its own folder, and "go
+// ahead" looked for it where elia was launched.
+test('a run that worked in its own folder says which, so the next turn can find its files', () => {
+  const proposal = {
+    goal: 'Create a CLI tic-tac-toe game', understanding: '', assumptions: [], risks: [], verification: [], outOfScope: [], acceptanceCriteria: [], sideEffects: [], recovery: [],
+    steps: [{ id: 's1', title: 'Build', role: 'builder' as const, instructions: '', files: ['tic_tac_toe.py'], dependsOn: [] }],
+  }
+  expect(formatAutonomousRunSummary('tic tac toe', result({ outcome: 'completed', proposal }))).toContain('This run worked in /workspace/r1')
+  const inPlace = result({ outcome: 'completed', proposal, workspace: { runId: 'r1', root: '/elia', kind: 'isolated', launchedFrom: '/elia', allowedRoots: ['/elia'] } })
+  expect(formatAutonomousRunSummary('tic tac toe', inPlace)).not.toContain('This run worked in')
+})

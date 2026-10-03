@@ -122,6 +122,25 @@ export function resolveCaller(store: WorkspaceStore, plaintext: string | undefin
   }
 }
 
+/**
+ * The caller as the store sees it now, or `undefined` once its token was revoked or
+ * its member or agent identity removed. A connection resolves its caller once at
+ * upgrade; without this, revoking access would not touch a socket already open.
+ * Role changes take effect too, since capabilities are rebuilt from the store.
+ */
+export function revalidateCaller(store: WorkspaceStore, caller: Caller): Caller | undefined {
+  const token = store.tokens(caller.id).find((item) => item.id === caller.tokenId)
+  if (!token || token.revokedAt || token.kind !== caller.kind) return undefined
+  if (caller.kind === 'member') {
+    const member = store.member(caller.id)
+    if (!member || member.removedAt || !isMemberRole(member.role)) return undefined
+    return { kind: 'member', id: member.id, name: member.name, role: member.role, tokenId: token.id, capabilities: CAPABILITIES_BY_ROLE[member.role] }
+  }
+  const identity = store.agentIdentity(caller.id)
+  if (!identity || identity.removedAt) return undefined
+  return { kind: 'agent', id: identity.id, name: identity.name, role: identity.role, tokenId: token.id, capabilities: AGENT_CAPABILITIES }
+}
+
 export class AuthorizationError extends Error {
   constructor(public readonly capability: Capability, callerName: string) {
     super(`${callerName} is not permitted to ${capability.replace(/_/g, ' ')}`)

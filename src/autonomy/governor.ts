@@ -5,7 +5,8 @@ import { SYSINTEL_RECORD_DIR, SYSINTEL_TOOLS, sysintelEffect } from '../sysintel
 import { skillCapability } from '../skills/capabilities.ts'
 import { currentAgent, isPathWithinWorkspace, resolveWorkspacePath } from './context.ts'
 import { assertWriteWithinSessionScope, currentSessionScope } from '../session/scope.ts'
-import { commandMayReadSensitiveData, isEliaTrustFile } from './sensitivePaths.ts'
+import { ELIA_TRUST_MENTION, commandMayReadSensitiveData, isEliaTrustFile, unquoteShellText } from './sensitivePaths.ts'
+import { MAX_SCRIPT_DEPTH, argvInvocation, localProgram, shellInvocation, type ProgramInvocation } from './localProgram.ts'
 import { pauseToolSpinner, resumeToolSpinner } from '../ui/stream.ts'
 import { applyPolicy } from './policy.ts'
 import { assessDatabaseRequest } from '../devdb/policy.ts'
@@ -77,6 +78,12 @@ export interface ActionGovernorStats {
 export interface ActionGovernor {
   check(request: ActionRequest): Promise<ActionGateResult>
   stats(): ActionGovernorStats
+  /**
+   * Charges one action against the budget for a call a durable, signed approval
+   * already cleared (agentLoop's alreadyApproved path skips `check`). False
+   * when the budget is spent, in which case the call must not run.
+   */
+  chargeApprovedAction?(): boolean
   /**
    * The governance mode this governor enforces. Exposed so durable-action
    * approvals (goalGraph.ts) can be scoped to the mode that granted them — an
@@ -161,6 +168,42 @@ const READ_ONLY_COMMAND = /^(?:command\s+)?(?:pwd|ls|find|grep|rg|git\s+(?:statu
 // Matched separately so assessCommand can exclude it from the read-only
 // allowance the same way it already excludes mv/cp/chmod etc. below.
 const SED_AWK_INPLACE_EDIT = /\b(?:sed|gsed|awk|gawk)\b[\s\S]*?(?:(?:^|\s)-i(?:[^\s]*)?(?:\s|$)|--in-place\b)/i
+// A read-only head word does not make every argument read-only. These forms run
+// a program, evaluate a script or write a file while still "just" being awk,
+// find, rg, sed, git or go: awk `system()`/`getline`/pipes, `find -exec`/
+// `-execdir`/`-ok`/`-delete`/`-fprint*`/`-fls`, `rg --pre`/`--hostname-bin`,
+// sed's `e`/`w` commands and script files, `git --output`/`--ext-diff`/
+// `--textconv`, and the `-exec`/`-toolexec`/`-vettool` hooks of `go`. Judged on
+// the unquoted text, since the shell removes quotes before the program sees
+// its arguments (`-ex''ecdir`). Such a command leaves the read-only allowance
+// and lands in shell.unknown (critical) with everything else unrecognised.
+const READ_ONLY_HEAD = /^(?:command\s+)?([A-Za-z][\w.-]*)/
+const AWK_CODE_EXEC = /\bsystem\s*\(|\bgetline\b|\||@load|@include|(?:^|\s)(?:-[A-Za-z]*f|--file|--exec|-E|--source)\b/
+const SED_CODE_EXEC = /(?:^|\s)(?:-[A-Za-z]*f[A-Za-z]*|--file(?:=\S*)?)(?:\s|$)|(?<![A-Za-z0-9_])s(.)(?:(?!\1).)*\1(?:(?!\1).)*\1[A-Za-z0-9]*[ewEW]|(?:^|[\s;{}\d$!])[eEwW](?:\s|;|}|$)|\/[eEwW](?:\s|;|}|$)/
+const CODE_EXEC_ARGUMENTS: Readonly<Record<string, RegExp>> = {
+  awk: AWK_CODE_EXEC,
+  gawk: AWK_CODE_EXEC,
+  mawk: AWK_CODE_EXEC,
+  nawk: AWK_CODE_EXEC,
+  sed: SED_CODE_EXEC,
+  gsed: SED_CODE_EXEC,
+  find: /(?:^|\s)-(?:exec|execdir|ok|okdir|delete|fprint0?|fprintf|fls)\b/i,
+  rg: /(?:^|\s)--(?:pre|hostname-bin)(?:-glob)?(?:=|\s|$)/i,
+  git: /(?:^|\s)--(?:output|ext-diff|textconv)\b/i,
+  go: /(?:^|\s)-{1,2}(?:exec|toolexec|vettool)(?:=|\s|$)/i,
+  cargo: /(?:^|\s)--config\b/i,
+}
+const BRACE_LIST = /\{[^{}]*,[^{}]*\}/
+function readOnlyCommandRunsCode(command: string): boolean {
+  const text = unquoteShellText(command).trim()
+  const match = READ_ONLY_HEAD.exec(text)
+  const head = match?.[1]?.toLowerCase() ?? ''
+  const pattern = CODE_EXEC_ARGUMENTS[head]
+  if (!pattern || !match) return false
+  const args = text.slice(match[0].length)
+  // Brace lists expand into separate words (`{-ex,ecdir}`), hiding a flag from the text test.
+  return pattern.test(args) || (pattern !== AWK_CODE_EXEC && pattern !== SED_CODE_EXEC && BRACE_LIST.test(args))
+}
 // `git branch` is read-only-by-default (no args, or a listing flag), but the
 // same subcommand also deletes (-d/-D/--delete), force-renames (-M), or
 // otherwise mutates a branch — none of which READ_ONLY_COMMAND's word-level
@@ -228,7 +271,14 @@ export const READ_ONLY_ROLES: ReadonlySet<string> = new Set(['scout', 'designer'
 const DATASCIENCE_TOOL_NAMES: ReadonlySet<string> = new Set(DATASCIENCE_TOOLS)
 
 /** Secret-bearing paths as analysis code names them (open('.env'), Path.home() / '.aws' / …). */
-const PYTHON_SECRET_PATH = /(?:^|[\s'"/\\(])\.env(?:\.[\w.-]+)?\b|\.(?:ssh|aws|azure|kube|gnupg|docker)\b|\.(?:netrc|npmrc|pypirc|git-credentials)\b|\bid_(?:rsa|dsa|ecdsa|ed25519)\b|\.config[\\/]gcloud|battmann[\w.-]*\.sqlite|\.(?:pem|p12|pfx)\b/i
+const PYTHON_SECRET_PATH_BASE = /(?:^|[\s'"/\\(])\.env(?:\.[\w.-]+)?\b|\.(?:ssh|aws|azure|kube|gnupg|docker)\b|\.(?:netrc|npmrc|pypirc|git-credentials)\b|\bid_(?:rsa|dsa|ecdsa|ed25519)\b|\.config[\\/]gcloud|battmann[\w.-]*\.sqlite|\.(?:pem|p12|pfx)\b/i
+// Elia's own trust store, from the same definitions the shell read guard uses, plus the
+// names it goes by in code: a path built in pieces (`'.config', 'elia'`), the pre-authorization
+// key, the standing-approval and policy files, and the per-user config.env.
+const PYTHON_SECRET_PATH = new RegExp(
+  [PYTHON_SECRET_PATH_BASE.source, ...ELIA_TRUST_MENTION, String.raw`\.config\W{1,8}elia\b`, String.raw`\bpreauth\b`, String.raw`\b(?:allow|policy)\.json\b`, String.raw`\bconfig\.env\b`].join('|'),
+  'i',
+)
 
 function hostOf(url: string): string {
   try {
@@ -299,8 +349,11 @@ const neverRemembered = (intent: string): boolean => intent.startsWith(SIGNOFF_I
 
 /** True when a path is inside the System Intelligence record (written only through si_* tools). */
 function isSysintelRecordPath(resolved: string, cwd: string): boolean {
-  const rel = relative(resolvePath(cwd), resolved).split('\\').join('/')
-  return rel === SYSINTEL_RECORD_DIR || rel.startsWith(`${SYSINTEL_RECORD_DIR}/`)
+  // Case-folded, like isEliaTrustFile and SYSINTEL_RECORD_MENTION: on a case-insensitive
+  // filesystem `.ELIA/SYSINTEL/...` names the same record.
+  const rel = relative(resolvePath(cwd), resolved).split('\\').join('/').toLocaleLowerCase()
+  const record = SYSINTEL_RECORD_DIR.toLocaleLowerCase()
+  return rel === record || rel.startsWith(`${record}/`)
 }
 
 const SYSINTEL_RECORD_MENTION = /\.elia[\\/]+sysintel\b/i
@@ -351,18 +404,21 @@ export function assessAction(request: ActionRequest, cwd = currentAgent().cwd ??
   const joined = values.join(' ')
   const resources = values.filter((value) => /[\\/]|https?:\/\//i.test(value)).slice(0, 4)
 
-  if (name === 'run_command') return assessCommand(joined, cwd)
+  if (name === 'run_command') return assessCommand(joined, cwd, { invocation: () => shellInvocation(input.command, input.cwd, cwd) })
   if (name === 'run_program') {
     const program = typeof input.program === 'string' ? input.program : ''
     const args = Array.isArray(input.args) ? input.args.filter((arg): arg is string => typeof arg === 'string') : []
-    return assessCommand([program, ...args].join(' '), cwd)
+    return assessCommand([program, ...args].join(' '), cwd, { invocation: () => argvInvocation([program, ...args], input.cwd, cwd) })
   }
   // `process start` launches a shell command exactly as run_command does — it
   // just doesn't wait for it — so it gets the same command assessment. The
   // other actions only read or stop processes this session itself started.
   if (name === 'process') {
     const action = typeof input.action === 'string' ? input.action : ''
-    if (action === 'start') return assessCommand(typeof input.command === 'string' ? input.command : '', cwd)
+    if (action === 'start') {
+      const command = typeof input.command === 'string' ? input.command : ''
+      return assessCommand(command, cwd, { invocation: () => shellInvocation(command, input.cwd, cwd) })
+    }
     // `send` joins them: it writes one line to a process this session itself
     // started, so it is bounded by the same argument as logs and list.
     if (action === 'logs' || action === 'list' || action === 'stop' || action === 'send') {
@@ -386,6 +442,13 @@ export function assessAction(request: ActionRequest, cwd = currentAgent().cwd ??
   if (name === 'deployment') {
     const action = typeof input.action === 'string' ? input.action : 'unknown'
     const target = typeof input.target === 'string' ? input.target : 'unknown'
+    // The docker provider resolves to a real `docker build` / `docker push`. Asked for directly through
+    // run_command, each is critical (shell.remote: Dockerfile RUN steps execute arbitrary code, a push
+    // leaves the machine); reaching the same command through this tool must not lower it to review.
+    if (input.provider === 'docker' && (action === 'build' || action === 'deploy')) {
+      const docker = assessCommand(action === 'build' ? 'docker build .' : 'docker push image', cwd)
+      return { ...docker, reason: `deployment ${action} with the docker provider runs \`docker ${action === 'build' ? 'build' : 'push'}\`: ${docker.reason}`, resources }
+    }
     if (action === 'plan' || action === 'build' || action === 'verify') {
       return assessment('review', 'approve', `deployment ${action} is a bounded release workflow step`, `deployment.${action}`, resources, true)
     }
@@ -556,7 +619,7 @@ export function assessAction(request: ActionRequest, cwd = currentAgent().cwd ??
     return assessment('safe', 'allow', `${name} is workspace-scoped and checkpointable`, name, path ? [path] : [], true)
   }
 
-  if (name === 'read_file' || name === 'list_files' || name === 'grep' || name === 'find_symbol' || name === 'recall' || name === 'brain' || name === 'board_read' || name === 'board_post' || name === 'todo_write' || name === 'why' || name === 'record_rationale' || name === 'note_lesson') {
+  if (name === 'read_file' || name === 'list_files' || name === 'grep' || name === 'find_symbol' || name === 'recall' || name === 'brain' || name === 'board_read' || name === 'board_post' || name === 'todo_write' || name === 'why' || name === 'record_rationale' || name === 'note_lesson' || name === 'load_tools') {
     const path = typeof input.path === 'string' ? input.path : ''
     return path && !isPathWithinWorkspace(path, cwd)
       ? assessment('critical', 'approve', `${name} may access data outside the active workspace or through an invalid path`, name, [path], false)
@@ -873,7 +936,7 @@ const OUTBOUND_REVIEW_INTENTS = new Set([
  * session scope is present and returns a block reason for anything that
  * resolves outside the scope's worktree.
  */
-function sessionScopeWriteBlock(request: ActionRequest): string | undefined {
+export function sessionScopeWriteBlock(request: ActionRequest): string | undefined {
   const scope = currentSessionScope()
   if (!scope) return undefined
   const path = request.input.path
@@ -1185,6 +1248,14 @@ export function createActionGovernor(options: ActionGovernorOptions = {}): Actio
 
   return {
     mode,
+    chargeApprovedAction() {
+      if (maxActions > 0 && actionCount >= maxActions) {
+        blockedByBudget += 1
+        return false
+      }
+      actionCount += 1
+      return true
+    },
     stats: () => ({ maxActions, consumed: actionCount, exhausted: maxActions > 0 && actionCount >= maxActions, blockedByBudget }),
     async check(request) {
       const result = await decide(request)
@@ -1218,22 +1289,38 @@ export function activeActionGovernor(): ActionGovernor {
  * to it, instead of discovering at verification time that the gate is unwinnable.
  */
 export function blockedInUnattendedMode(command: string, cwd = process.cwd()): boolean {
-  return assessCommand(command, cwd).risk === 'critical'
+  // A plan names the program it is about to write, so a script that does not
+  // exist yet counts as local when it would land inside the workspace. At run
+  // time the governor still requires the file itself.
+  return assessCommand(command, cwd, { invocation: () => shellInvocation(command, undefined, cwd), planning: true }).risk === 'critical'
+}
+
+interface CommandContext {
+  /**
+   * The program the command runs and the directory it runs in, when both are
+   * certain. A thunk: it reads the filesystem, and only a command that reaches
+   * the last check needs it.
+   */
+  invocation?: () => ProgramInvocation | undefined
+  /** Plan-time prediction (blockedInUnattendedMode): the script may not be written yet. */
+  planning?: boolean
+  /** package.json script nesting already followed. */
+  depth?: number
 }
 
 /**
- * Classify a shell command by what it *does*, not where it runs.
+ * Classify a shell command by what it *does*.
  *
- * `_cwd` is deliberately unread. Every branch below is a pattern match on the
- * command string — network egress, package installs, remote execution,
- * irreversible side effects — and none of those change meaning with the
- * working directory. Path scoping is a separate gate (workspace-path and
- * protected-file checks); folding it in here would give one classifier two
- * jobs and make each harder to reason about. The parameter stays so the
- * signature matches `blockedInUnattendedMode`, which is exported for
- * plan-time checking.
+ * Every branch but the last is a pattern match on the command string — network
+ * egress, package installs, remote execution, irreversible side effects — and
+ * none of those change meaning with the working directory. The one question
+ * that does is whether the command runs the project's own program
+ * (localProgram.ts): that needs the file on disk, resolved from the directory
+ * the command runs in, so `cwd` (the workspace root) and the invocation are
+ * read there and nowhere else. It is asked last, after every hazard has had
+ * its turn, so it can only lift what would otherwise be `shell.unknown`.
  */
-function assessCommand(command: string, _cwd: string): ActionAssessment {
+function assessCommand(command: string, cwd: string, context?: CommandContext): ActionAssessment {
   if (!command.trim()) return assessment('critical', 'approve', 'shell command is empty or invalid', 'shell', [], false)
   // CR/LF anywhere means a chain or a pasted script, not one verified
   // invocation, and is rejected before any other gate can run. A harmless
@@ -1245,7 +1332,7 @@ function assessCommand(command: string, _cwd: string): ActionAssessment {
   if (commandMayReadSensitiveData(command)) {
     return assessment('critical', 'approve', 'shell command may read credentials or protected system data', 'shell.sensitive-read', [], false)
   }
-  if (SYSINTEL_RECORD_MENTION.test(command) && !PLAIN_READ_COMMAND.test(command)) {
+  if ((SYSINTEL_RECORD_MENTION.test(command) || SYSINTEL_RECORD_MENTION.test(unquoteShellText(command))) && !PLAIN_READ_COMMAND.test(command)) {
     return assessment('critical', 'approve', `shell command may modify the System Intelligence record (${SYSINTEL_RECORD_DIR}), which is written only through the si_* tools`, 'sysintel.record-edit', [], false)
   }
   // The named hazard intents are checked BEFORE the generic CRITICAL_COMMAND
@@ -1286,13 +1373,43 @@ function assessCommand(command: string, _cwd: string): ActionAssessment {
   if (/^(?:command\s+)?git\s+branch\b/i.test(command) && !GIT_BRANCH_LIST_ONLY.test(command)) {
     return assessment('critical', 'approve', 'git branch command may create, delete, rename, or force-move a branch and is not a safe read-only operation', 'shell.unknown', [], false)
   }
-  if (READ_ONLY_COMMAND.test(command) && !SED_AWK_INPLACE_EDIT.test(command) && !DESTRUCTIVE_SHELL_VERBS.test(command)) {
+  if (READ_ONLY_COMMAND.test(command) && !SED_AWK_INPLACE_EDIT.test(command) && !DESTRUCTIVE_SHELL_VERBS.test(command) && !readOnlyCommandRunsCode(command)) {
     return assessment('safe', 'allow', 'shell command matches the restricted read-only command policy', 'shell.read-only', [], !SHELL_SIDE_EFFECT.test(command))
   }
   if (isWorkspaceMkdir(command)) {
     return assessment('review', 'approve', 'mkdir creates directories under the directory it runs in', 'shell', [], true)
   }
+  const invocation = context ? context.invocation?.() : shellInvocation(command, undefined, cwd)
+  const local = invocation && assessLocalProgram(invocation, cwd, context ?? {})
+  if (local) return local
   return assessment('critical', 'approve', 'shell command is not in the restricted read-only policy and may cause an unreviewed side effect', 'shell.unknown', [], false)
+}
+
+/**
+ * The project's own program, run inside the workspace, is local review work —
+ * the same band as a commit — so an autonomous session runs it unasked and an
+ * unattended run may too (localProgram.ts says what qualifies). A package.json
+ * script is only as local as what it runs: its body, and the `pre`/`post`
+ * hooks the manager runs with it, go back through this classifier, and one
+ * critical line keeps the whole script where it was (`shell.unknown`).
+ */
+function assessLocalProgram(invocation: ProgramInvocation, cwd: string, context: CommandContext): ActionAssessment | undefined {
+  const program = localProgram(invocation, cwd, { planning: context.planning })
+  if (!program) return undefined
+  if (program.kind === 'file') {
+    return assessment('review', 'approve', `runs ${program.path}, the project's own program inside the workspace`, 'shell.local-program', [program.path], true)
+  }
+  const depth = context.depth ?? 0
+  for (const body of program.bodies) {
+    const inner = depth < MAX_SCRIPT_DEPTH
+      ? assessCommand(body.command, cwd, { invocation: () => body.argv && { argv: body.argv, cwd: invocation.cwd }, planning: context.planning, depth: depth + 1 })
+      : undefined
+    if (!inner || inner.risk === 'critical') {
+      const why = inner ? inner.reason : `it nests scripts more than ${MAX_SCRIPT_DEPTH} deep`
+      return assessment('critical', 'approve', `the "${program.name}" script in ${program.manifest} runs \`${body.command}\`, and ${why}`, 'shell.unknown', [], false)
+    }
+  }
+  return assessment('review', 'approve', `runs the "${program.name}" script from ${program.manifest}, which only runs the project's own programs or allowed checks`, 'shell.local-program', [program.manifest], true)
 }
 
 /**

@@ -194,6 +194,20 @@ export async function createMcpServerRuntime(options: CreateMcpServerRuntimeOpti
     if (options.config.approvalMode === 'never' && policied.assessment.decision !== 'allow') {
       throw new Error(`Mutation ${request.name} requires approval, but approvalMode is never`)
     }
+    // Most contracts stand in a neutral reporting action for the governor, which assesses it
+    // as safe and never asks anyone. The approval the contract *declares* is decided here
+    // instead, against the declared assessment and the real mutation name: 'always' asks for
+    // every approve-gated mutation and refuses without a callback; 'auto' asks for a critical
+    // one only when a callback exists (there is no operator to ask otherwise).
+    const neutral = contract.action.name === 'submit_hypothesis' || contract.action.name === 'submit_fragment'
+    const declared = policied.assessment
+    const mustAsk = declared.decision === 'approve' && (options.config.approvalMode === 'always' || (declared.risk === 'critical' && options.approve !== undefined))
+    if (neutral && mustAsk) {
+      if (!options.approve) throw new Error(`Mutation ${request.name} requires an explicit approval callback`)
+      const outcome = await options.approve(declared, { name: request.name, input: request.input })
+      const approved = typeof outcome === 'boolean' ? outcome : outcome.approved
+      if (!approved) throw new Error(`Mutation ${request.name} was not approved`)
+    }
     const mode = options.config.approvalMode === 'auto' ? 'unattended' : 'supervised'
     const approve = options.config.approvalMode === 'always'
       ? async (assessmentResult: ActionAssessment, action: ActionRequest) => {

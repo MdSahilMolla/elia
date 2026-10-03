@@ -479,3 +479,23 @@ test('a page that does not render is still a red gate, not a free pass', async (
     rmSync(dir, { recursive: true, force: true })
   }
 }, 30_000)
+
+test('a verification gate that runs the project’s own program is judged where it runs', async () => {
+  // Seen live 2026-09-28: a notes CLI whose plan verified with its own
+  // `node bin/notes.js list` could never go green — the governor refused every
+  // program it did not recognise. It now runs, resolved from the check's cwd
+  // (here a sub-project), not from the governor's own root.
+  const dir = mkdtempSync(join(tmpdir(), 'elia-verify-local-'))
+  try {
+    mkdirSync(join(dir, 'bin'))
+    writeFileSync(join(dir, 'bin', 'cli.js'), 'console.log("ok")\n')
+    const { createActionGovernor } = await import('./governor.ts')
+    const outcome = await runVerification(['bun bin/cli.js'], dir, undefined, createActionGovernor({ mode: 'unattended' }))
+    expect(outcome.blocked).toBeFalsy()
+    expect(outcome.passed).toBe(true)
+    // At plan time the program may not be written yet; a path out of the workspace is still refused.
+    expect(unwinnableVerificationCommands(['node bin/new.js list', 'node ../elsewhere.js'], { unattended: true, platform: 'linux', cwd: dir })).toEqual(['node ../elsewhere.js'])
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})

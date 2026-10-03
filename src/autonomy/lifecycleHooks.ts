@@ -11,7 +11,9 @@ import { currentAgent } from './context.ts'
  * bypass the governor.
  *
  * Opt-in (`ELIA_UNSAFE_HOOKS=1`): `SessionEnd` / `PostToolUse` may run a single
- * allowlisted shell command pattern (notify-style). Still cannot grant approvals.
+ * shell command (split on whitespace, no shell; only ; & | ` $ < > and newlines are
+ * refused — there is no program allowlist). The hooks file is a governed trust-control
+ * file, so a model write to it needs approval. Still cannot grant approvals.
  */
 
 const MAX_HOOKS = 16

@@ -1,4 +1,4 @@
-import { setDefaultTimeout } from 'bun:test'
+import { afterEach, beforeEach, setDefaultTimeout } from 'bun:test'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, relative } from 'node:path'
@@ -88,6 +88,24 @@ for (const [key, value] of Object.entries(paths)) {
  * still bite. Keep this equal to the CI flag.
  */
 setDefaultTimeout(20_000)
+
+/**
+ * The project-trust record (autonomy/projectTrust.ts) lives beside the preauth
+ * grants in ~/.config/elia. Anything that records or checks trust — skills,
+ * project MCP servers, allow rules, schedules, autopilot state — would
+ * otherwise create the real per-user secret and trust file on whoever runs the
+ * suite. Tests that need their own directory still set ELIA_PREAUTH_DIR.
+ */
+const testPreauthDir = join(testState, 'preauth')
+process.env.ELIA_PREAUTH_DIR ??= testPreauthDir
+// A few suites `delete` the override in their own afterEach; put the throwaway
+// one back so the next suite in this process never falls through to the real home.
+beforeEach(() => {
+  process.env.ELIA_PREAUTH_DIR ??= testPreauthDir
+})
+afterEach(() => {
+  process.env.ELIA_PREAUTH_DIR ??= testPreauthDir
+})
 
 /**
  * `browser` falls back to launching elia's own headless Chrome when no bridge

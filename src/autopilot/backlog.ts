@@ -172,7 +172,20 @@ export function addUserGoal(backlog: readonly Goal[], text: string, survey: Repo
   const repeat = backlog.find((goal) => goal.origin === 'user' && goal.status === 'open' && isSameGoal(title, goal.title))
   if (repeat) return [...backlog]
   const verification = survey ? verificationFor([], health, survey) : []
-  return [...backlog, make(backlog, { title, detail: `Asked for by the operator while the autopilot was running: ${text.trim()}`, kind: 'user', origin: 'user', value: 5, effort: 3, risk: 2, verification, evidence: ['operator'] }, now)]
+  return [...backlog, make(backlog, { title, detail: `Asked for by the operator while the autopilot was running: ${text.trim().slice(0, 2_000)}`, kind: 'user', origin: 'user', value: 5, effort: 3, risk: 2, verification, evidence: ['operator'] }, now)]
+}
+
+/**
+ * Something a watcher saw (a failed CI run, a new issue, a changed file): the
+ * same standing as an operator's direction, one point less on value, so a
+ * person's words still go first. The same event twice is one goal.
+ */
+export function addEventGoal(backlog: readonly Goal[], event: string, survey: RepoSurvey | undefined, health: HealthReport | undefined, now = new Date()): Goal[] {
+  const title = event.trim().replace(/\s+/g, ' ').slice(0, 200)
+  if (!title) return [...backlog]
+  if (backlog.some((goal) => goal.origin === 'event' && goal.status === 'open' && isSameGoal(title, goal.title))) return [...backlog]
+  const verification = survey ? verificationFor([], health, survey) : []
+  return [...backlog, make(backlog, { title, detail: `Seen by the autopilot's watcher: ${event.trim()} Look into it, and act on it if it is this repository's to fix; if it is not, or it needs a person, say so and change nothing.`, kind: 'user', origin: 'event', value: 4, effort: 3, risk: 2, verification, evidence: ['watcher'] }, now)]
 }
 
 export function openGoals(backlog: readonly Goal[]): Goal[] {

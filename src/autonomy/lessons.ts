@@ -7,6 +7,7 @@ import { exposedCorrs, lessonTrials, loadEfficacy, MIN_EXPOSURES, type LessonTri
 import { certifyLessons, lessonArtifactId, lessonArtifacts, lessonLibraryPath, recordLessonReuse } from './lessonCertificates.ts'
 import { purgeArtifact, registerArtifact, retrievable } from './certifiedLibrary.ts'
 import { rankBm25 } from '../bm25.ts'
+import { redactSecrets } from '../ui/redact.ts'
 import { globalLessonsPath, partitionByScope } from './lessonScope.ts'
 import { competenceReport } from './outcomes.ts'
 
@@ -56,6 +57,9 @@ const MAX_INJECTED_LESSONS = 25
  * that cannot see it; and a model rewording it is how "never push without
  * asking" becomes a weaker sentence nobody agreed to.
  */
+/** The only provenance a model-written lesson can carry. It claims no check and no human origin. */
+export const MODEL_NOTE_SOURCE = 'model-note'
+
 const USER_STATED_SOURCES = new Set(['user', 'user-correction'])
 
 export function isUserStated(lesson: { source?: string }): boolean {
@@ -674,7 +678,7 @@ export function createDirectLessonsTool(): Tool {
         },
         source: {
           type: 'string',
-          description: 'Optional provenance label (e.g. interactive, repair, user)',
+          description: 'Ignored: lessons written through this tool are always labelled model-note. Provenance is set by elia, not claimed.',
         },
         confidence: {
           type: 'number',
@@ -687,9 +691,12 @@ export function createDirectLessonsTool(): Tool {
       const lessons = Array.isArray(input.lessons)
         ? input.lessons.filter((lesson): lesson is string => typeof lesson === 'string')
         : []
-      const source = typeof input.source === 'string' ? input.source : 'interactive'
+      // The label decides how much a lesson is trusted (user-stated ones are always injected and
+      // never retired; auto-* ones earn certificates), so a model cannot pick it. Internal callers
+      // with a real origin (turnLearning) go through appendLessons directly.
+      const source = MODEL_NOTE_SOURCE
       const confidence = typeof input.confidence === 'number' ? input.confidence : undefined
-      appendLessons(lessons.map((text) => ({ text, source, confidence })))
+      appendLessons(lessons.map((text) => ({ text: redactSecrets(text), source, confidence })))
       return `Recorded ${lessons.length} lesson(s) for future sessions in this project.`
     },
   }

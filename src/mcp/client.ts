@@ -30,6 +30,32 @@ function swallow(result: unknown, scope: string, context?: Record<string, unknow
 }
 
 /**
+ * What an MCP server process inherits from elia. A server is third-party code
+ * (often a repo-supplied `npx`/`uvx` package), so it does not get elia's whole
+ * environment — provider API keys, tokens and `ELIA_*` settings stay behind.
+ * It gets what a program needs to run at all (PATH, HOME, locale, temp dirs,
+ * terminal, proxies and CA bundles, the Windows system variables), plus
+ * whatever the server's own `env` block asks for explicitly.
+ */
+const MCP_ENV_ALLOWLIST = new Set([
+  'PATH', 'HOME', 'USER', 'LOGNAME', 'SHELL', 'LANG', 'LANGUAGE', 'TMPDIR', 'TMP', 'TEMP', 'TERM', 'COLORTERM', 'TZ',
+  'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'NO_PROXY', 'http_proxy', 'https_proxy', 'all_proxy', 'no_proxy',
+  'SSL_CERT_FILE', 'SSL_CERT_DIR', 'NODE_EXTRA_CA_CERTS', 'NODE_PATH', 'BUN_INSTALL', 'NVM_DIR', 'VOLTA_HOME', 'PNPM_HOME',
+  'NPM_CONFIG_REGISTRY', 'NPM_CONFIG_CACHE', 'NPM_CONFIG_PREFIX', 'UV_CACHE_DIR', 'PIPX_HOME',
+  'XDG_CONFIG_HOME', 'XDG_CACHE_HOME', 'XDG_DATA_HOME', 'XDG_RUNTIME_DIR',
+  'USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'SYSTEMROOT', 'SystemRoot', 'SYSTEMDRIVE', 'WINDIR', 'COMSPEC', 'PATHEXT', 'PROGRAMFILES', 'PROGRAMDATA', 'HOMEDRIVE', 'HOMEPATH',
+])
+
+export function mcpChildEnv(explicit: Record<string, string> | undefined, base: NodeJS.ProcessEnv = process.env): Record<string, string> {
+  const env: Record<string, string> = {}
+  for (const [key, value] of Object.entries(base)) {
+    if (value === undefined) continue
+    if (MCP_ENV_ALLOWLIST.has(key) || key.startsWith('LC_')) env[key] = value
+  }
+  return { ...env, ...explicit }
+}
+
+/**
  * One live connection to an MCP server over stdio. Line-delimited JSON-RPC 2.0,
  * per the MCP stdio transport spec — no Content-Length framing, one message per line.
  */
@@ -56,7 +82,7 @@ export class McpClient implements McpTransport {
         stdin: 'pipe',
         stdout: 'pipe',
         stderr: 'pipe',
-        env: { ...process.env, ...this.config.env } as Record<string, string>,
+        env: mcpChildEnv(this.config.env),
         // Its own process group on POSIX, so close() can take the whole tree.
         // `npx`-backed servers are exactly the case that leaks: npx is the
         // direct child, and the package it is about to exec is the grandchild.

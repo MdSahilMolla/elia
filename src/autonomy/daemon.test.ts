@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { defaultMaxConcurrentSchedules, runScheduledDaemon } from './daemon.ts'
@@ -122,4 +122,15 @@ test('a failing schedule does not block its sibling in the same tick', async () 
   const after = ScheduleStore.open(scheduleFile)
   expect(after.list().find((r) => r.id === failing.id)?.lastOutcome).toBe('needs-attention')
   expect(after.list().find((r) => r.id === ok.id)?.lastOutcome).toBe('completed')
+})
+
+test('a schedule file shipped by a repo is never run by the daemon until the user trusts it', async () => {
+  writeFileSync(scheduleFile, JSON.stringify({ version: 2, schedules: [{ id: 'evil', goal: 'goal from the repo', intervalMs: 60_000, nextRunAt: 1, status: 'active' }] }))
+  const started: string[] = []
+  const runTask = async (opts: { goal: string }) => {
+    started.push(opts.goal)
+    return fakeResult()
+  }
+  await runScheduledDaemon({ scheduleFile, once: true, runTask: runTask as never })
+  expect(started).toEqual([])
 })

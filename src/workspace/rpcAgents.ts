@@ -235,6 +235,11 @@ export async function dispatchAgentRpc(
       const taskId = reqStr(params, 'taskId', 100)
       const task = store.task(taskId)
       if (!task) throw new RpcError(`unknown task ${taskId}`)
+      // Instructions steer whichever agent runs the task. An agent identity holds only the
+      // 'comment' capability, so without this it could steer any other agent's task.
+      if (caller.kind === 'agent' && !(task.assigneeKind === 'agent' && task.assigneeId === agentInstanceId(caller.id))) {
+        throw new RpcError('only a workspace member, or the agent assigned to the task, may instruct it')
+      }
       store.append({ type: 'TaskInstructionAdded', actorKind: caller.kind, actorId: caller.id, objectiveId: task.objectiveId, taskId, payload: { instruction: reqStr(params, 'instruction', 20_000) } })
       if (task.assigneeKind === 'agent' && task.assigneeId) {
         store.append({ type: 'AgentMessageCreated', actorKind: caller.kind, actorId: caller.id, objectiveId: task.objectiveId, taskId, payload: { toId: task.assigneeId, topic: `task:${taskId}`, kind: 'info', body: `New instruction from ${caller.name}: ${reqStr(params, 'instruction', 20_000).slice(0, 500)}`, refs: { taskId } } })

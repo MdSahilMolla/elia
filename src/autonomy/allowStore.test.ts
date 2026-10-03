@@ -5,6 +5,7 @@ import { dirname, join } from 'node:path'
 import { addAllowRule, allowPath, canPersistPrefixRule, clearAllowCache, commandPrefix, isAllowlisted, ruleFor, ruleLabel } from './allowStore.ts'
 import { assessAction, createActionGovernor } from './governor.ts'
 import { clearPreauthCaches } from './preauth.ts'
+import { trustPath } from './projectTrust.ts'
 
 const dirs: string[] = []
 let globalAllowDir: string
@@ -248,14 +249,43 @@ test('an unsigned per-user allow file grants nothing (#1272)', () => {
   expect(isAllowlisted(push, assessAction(push, dir), dir)).toBe(false)
 })
 
-test('the checked-in project allow file stays unsigned — it is a reviewed team decision (#1272)', () => {
+function shipProjectAllow(dir: string, prefix: string): string {
+  const path = allowPath('project', dir)
+  mkdirSync(dirname(path), { recursive: true })
+  writeFileSync(path, `${JSON.stringify({ rules: [{ tool: 'run_command', commandPrefix: prefix, addedAt: '2026-01-01T00:00:00.000Z' }] }, null, 2)}\n`)
+  clearAllowCache()
+  return path
+}
+
+test('a project allow file shipped by a repo is ignored until the user trusts it, then honoured (#allow-project)', () => {
+  const dir = project()
+  const curl = { name: 'run_command', input: { command: 'curl https://example.com/x' } }
+  const path = shipProjectAllow(dir, 'curl')
+  // Unsigned, untrusted rules from the repo are not standing approvals.
+  expect(isAllowlisted(curl, assessAction(curl, dir), dir)).toBe(false)
+
+  trustPath(path)
+  expect(isAllowlisted(curl, assessAction(curl, dir), dir)).toBe(true)
+
+  // Any later change to the file — a pull, a hostile commit — voids the trust.
+  writeFileSync(path, readFileSync(path, 'utf8').replace('curl', 'rm'))
+  const rm = { name: 'run_command', input: { command: 'rm -rf build' } }
+  expect(isAllowlisted(rm, assessAction(rm, dir), dir)).toBe(false)
+  expect(isAllowlisted(curl, assessAction(curl, dir), dir)).toBe(false)
+})
+
+test('an "always allow" written by the user to the project store works at once, and drops untrusted shipped rules', () => {
   const dir = project()
   const push = { name: 'run_command', input: { command: 'git push origin main' } }
+  const curl = { name: 'run_command', input: { command: 'curl https://example.com/x' } }
+  shipProjectAllow(dir, 'curl')
   addAllowRule(ruleFor(push, assessAction(push, dir)), 'project', dir)
   const saved = JSON.parse(readFileSync(allowPath('project', dir), 'utf8'))
   expect(saved.mac).toBeUndefined()
   clearAllowCache()
   expect(isAllowlisted(push, assessAction(push, dir), dir)).toBe(true)
+  // The shipped rule was never trusted, so it is not blessed by the new write.
+  expect(isAllowlisted(curl, assessAction(curl, dir), dir)).toBe(false)
 })
 
 test('a legacy ~/.elia/allow.json is migrated once, as a signed store (#1272)', () => {

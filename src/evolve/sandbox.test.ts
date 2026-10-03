@@ -47,6 +47,35 @@ test('promotion and rollback restore edits, deletions, and newly introduced file
   }
 })
 
+test('a builder edit to the gate\'s own config, preload or task list is seen by changedFiles and refused as immutable', () => {
+  const temp = mkdtempSync(join(tmpdir(), 'elia-sandbox-'))
+  const live = join(temp, 'live')
+  const candidate = join(temp, 'candidate')
+  try {
+    for (const root of [live, candidate]) {
+      write(join(root, 'src/a.ts'), 'a')
+      write(join(root, 'package.json'), '{}')
+      write(join(root, 'tsconfig.json'), '{}')
+      write(join(root, 'bunfig.toml'), 'root = "src"')
+      write(join(root, 'scripts/testPreload.ts'), 'export {}')
+      write(join(root, 'values/value-core.md'), 'core')
+      write(join(root, 'src/evolve/history/tasks.json'), '[]')
+    }
+    const sandbox = { generation: 1, root: candidate, backupDir: join(temp, 'backup') }
+    expect(changedFiles(sandbox, live)).toEqual([])
+
+    write(join(candidate, 'bunfig.toml'), 'root = "empty"')
+    write(join(candidate, 'scripts/testPreload.ts'), 'process.exit(0)')
+    write(join(candidate, 'values/value-core.md'), 'changed')
+    write(join(candidate, 'src/evolve/history/tasks.json'), '[1]')
+    const changed = changedFiles(sandbox, live)
+    expect(changed).toEqual(['bunfig.toml', 'scripts/testPreload.ts', 'src/evolve/history/tasks.json', 'values/value-core.md'])
+    expect(violatedImmutables(changed)).toEqual(changed)
+  } finally {
+    rmSync(temp, { recursive: true, force: true })
+  }
+})
+
 test('gate configuration and tests are detected and immutable', () => {
   expect(violatedImmutables(['package.json', 'tsconfig.json', 'src/example.test.ts', 'src/agent.ts'])).toEqual([
     'package.json',

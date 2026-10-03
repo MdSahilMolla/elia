@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test'
 import { join } from 'node:path'
-import { McpClient } from './client.ts'
+import { McpClient, mcpChildEnv } from './client.ts'
 
 const FIXTURE = join(import.meta.dir, 'fixtures', 'echoServer.ts')
 
@@ -147,4 +147,31 @@ test('close() rejects any still-pending call instead of hanging', async () => {
   const error = await settled
   expect(error).toBeInstanceOf(Error)
   await client.closeAndWait()
+})
+
+test('a spawned server gets a minimal environment, not elia\'s provider keys or ELIA_* settings', async () => {
+  process.env.ANTHROPIC_API_KEY_TEST_SENTINEL = 'dummy-secret'
+  process.env.ELIA_TEST_SENTINEL = 'dummy-setting'
+  const client = new McpClient({ ...echoConfig(), env: { EXPLICIT_FROM_CONFIG: 'yes' } })
+  try {
+    await client.connect()
+    const internals = client as unknown as { request(method: string, params: unknown, timeoutMs: number, message: string): Promise<{ value: string | null }> }
+    const read = async (name: string) => (await internals.request('test/env', { name }, 5_000, 'no env answer')).value
+    expect(await read('ANTHROPIC_API_KEY_TEST_SENTINEL')).toBeNull()
+    expect(await read('ELIA_TEST_SENTINEL')).toBeNull()
+    expect(await read('EXPLICIT_FROM_CONFIG')).toBe('yes')
+    expect(await read('PATH')).toBe(process.env.PATH ?? null)
+  } finally {
+    delete process.env.ANTHROPIC_API_KEY_TEST_SENTINEL
+    delete process.env.ELIA_TEST_SENTINEL
+    await client.closeAndWait()
+  }
+})
+
+test('mcpChildEnv keeps runtime basics and proxies, drops everything else, and lets explicit env win', () => {
+  const env = mcpChildEnv(
+    { PATH: '/explicit/bin', TOKEN: 'from-config' },
+    { PATH: '/usr/bin', HOME: '/home/u', LC_ALL: 'C', HTTPS_PROXY: 'http://proxy', OPENAI_API_KEY: 'dummy', GITHUB_TOKEN: 'dummy', ELIA_SANDBOX: 'off' },
+  )
+  expect(env).toEqual({ PATH: '/explicit/bin', HOME: '/home/u', LC_ALL: 'C', HTTPS_PROXY: 'http://proxy', TOKEN: 'from-config' })
 })

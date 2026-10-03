@@ -15,6 +15,20 @@ export function isExplicitLocalHostname(hostname: string): boolean {
   return isExplicitLocalHost(hostname)
 }
 
+/**
+ * True for a hostname that is private, link-local or a cloud-metadata name but
+ * NOT plain loopback — the targets a browser pointed at a dev server must
+ * still not be steered to. IP literals are judged by address.
+ */
+export function isPrivateNetworkHostname(hostname: string): boolean {
+  return !isExplicitLocalHost(hostname) && isUnsafeHostname(hostname)
+}
+
+/** True when a resolved address is private, link-local, metadata or otherwise non-public (loopback included). */
+export function isPrivateNetworkAddress(address: string): boolean {
+  return isUnsafeAddress(address)
+}
+
 /** Parse and validate a network URL without performing any request. */
 export function validateNetworkUrl(raw: string, options: NetworkUrlOptions = {}): URL {
   let url: URL

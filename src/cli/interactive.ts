@@ -1523,51 +1523,62 @@ export async function runInteractive(): Promise<void> {
       // another way, checks that failed until a fix — becomes a lesson every
       // later session starts with, and the user sees it land. Interactive turns
       // used to forget these: note_lesson is voluntary and almost never called.
+      //
+      // In the background, like the skill work after it: when a turn qualified,
+      // this is a model call on the fast tier, and the person waited on it
+      // (45-52s in the recorded sessions, most of it a refused fast route) before
+      // the prompt came back. It reads a snapshot, so the next turn cannot move
+      // the conversation under it.
       if (!persona && !escalated && !uiHooks?.planMode && !controller.signal.aborted) {
-        const { learnFromTurn } = await import('../autonomy/turnLearning.ts')
-        const learned = await learnFromTurn({
-          provider: config.tiers.fast.provider,
-          messages,
-          fromIndex: messagesBefore.length,
-          request: requestText,
-          outcome: { verify: verifyResult, repairAttempts },
-          cwd: process.cwd(),
-          signal: controller.signal,
-          // Output of a `!cmd` run is carried into the request; it is not the user's words.
-          userWords: requestText.replace(/<local-command>[\s\S]*?<\/output>/g, ''),
-          onReflecting: () => uiHooks?.onActivity?.({ kind: 'status', status: 'updated', title: 'Learning from this turn' }),
-        })
-        if (learned.usage) {
-          const { recordUsage } = await import('../usage.ts')
-          recordUsage(learned.usage, config.tiers.fast.model)
-        }
-        for (const lesson of learned.lessons) {
-          // Recorded with the turn that taught it, so the lesson can point back at what produced it.
-          recorder.lesson(lesson)
-          const line = `✦ learned: ${lesson}`
-          sessionTranscript.notice(line)
-          if (uiHooks) uiHooks.onActivity?.({ kind: 'status', status: 'completed', title: line })
-          else writeNotice(line)
-        }
-
-        // Fire-and-forget: when enough certified lessons cluster on one topic,
-        // elia writes or revises its own instruction skill from them. Cheap
-        // clustering runs inline; the subagent draft (if any) runs in the
-        // background so it never delays the next prompt. See
-        // src/skills/instructionSkills.ts for the evidence and gating.
+        const turnMessages = messages.slice()
         void (async () => {
-          try {
-            const { evolveInstructionSkills } = await import('../skills/instructionSkills.ts')
-            for (const line of await evolveInstructionSkills()) {
-              const notice = `✦ skill: ${line}`
-              sessionTranscript.notice(notice)
-              if (uiHooks) uiHooks.onActivity?.({ kind: 'status', status: 'completed', title: notice })
-              else writeNotice(notice)
-            }
-          } catch {
-            // Best effort, same as learning itself — never surfaces as a turn failure.
+          const { learnFromTurn } = await import('../autonomy/turnLearning.ts')
+          const learned = await learnFromTurn({
+            provider: config.tiers.fast.provider,
+            messages: turnMessages,
+            fromIndex: messagesBefore.length,
+            request: requestText,
+            outcome: { verify: verifyResult, repairAttempts },
+            cwd: process.cwd(),
+            signal: controller.signal,
+            // Output of a `!cmd` run is carried into the request; it is not the user's words.
+            userWords: requestText.replace(/<local-command>[\s\S]*?<\/output>/g, ''),
+            onReflecting: () => uiHooks?.onActivity?.({ kind: 'status', status: 'updated', title: 'Learning from this turn' }),
+          })
+          if (learned.usage) {
+            const { recordUsage } = await import('../usage.ts')
+            recordUsage(learned.usage, config.tiers.fast.model)
           }
-        })()
+          for (const lesson of learned.lessons) {
+            // Recorded with the turn that taught it, so the lesson can point back at what produced it.
+            recorder.lesson(lesson)
+            const line = `✦ learned: ${lesson}`
+            sessionTranscript.notice(line)
+            if (uiHooks) uiHooks.onActivity?.({ kind: 'status', status: 'completed', title: line })
+            else writeNotice(line)
+          }
+
+          // Fire-and-forget: when enough certified lessons cluster on one topic,
+          // elia writes or revises its own instruction skill from them. Cheap
+          // clustering runs inline; the subagent draft (if any) runs in the
+          // background so it never delays the next prompt. See
+          // src/skills/instructionSkills.ts for the evidence and gating.
+          void (async () => {
+            try {
+              const { evolveInstructionSkills } = await import('../skills/instructionSkills.ts')
+              for (const line of await evolveInstructionSkills()) {
+                const notice = `✦ skill: ${line}`
+                sessionTranscript.notice(notice)
+                if (uiHooks) uiHooks.onActivity?.({ kind: 'status', status: 'completed', title: notice })
+                else writeNotice(notice)
+              }
+            } catch {
+              // Best effort, same as learning itself — never surfaces as a turn failure.
+            }
+          })()
+        })().catch(() => {
+          // Learning is best effort; a failure here never surfaces as a turn failure.
+        })
       }
 
       taskSessions.update(task.id, { status: 'done', action: 'Finished', detail: 'Request completed and session saved' })
@@ -3056,7 +3067,7 @@ export async function runInteractive(): Promise<void> {
         const reply = await answerWhileWorking({ ...view, conversation: messages, pilot: pilot ? pilotSnapshot(pilot) : undefined, exchanges: liveExchanges, cwd: process.cwd() }, question, { signal, onThinking })
         liveExchanges.push({ question, answer: reply.answer })
         if (liveExchanges.length > 8) liveExchanges.splice(0, liveExchanges.length - 8)
-        carriedAsides.push(`<aside-while-you-worked>\nThe user asked: ${question}\nYou answered: ${reply.answer}${reply.steer ? `\n(Passed to the work: ${reply.steer})` : ''}\n</aside-while-you-worked>`)
+        carriedAsides.push(`<aside-while-you-worked>\nThe user asked: ${question}\nYou (the assistant, not the user) answered: ${reply.answer}${reply.steer ? `\n(Passed to the work: ${reply.steer})` : ''}\n</aside-while-you-worked>`)
         sessionTranscript.notice(`live reply — Q: ${question}\nA: ${reply.answer}${reply.dropped ? `\n(${reply.dropped} unbacked claim(s) removed)` : ''}`)
         await persistInteractiveSession()
         return reply

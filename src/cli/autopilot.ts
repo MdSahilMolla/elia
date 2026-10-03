@@ -6,6 +6,10 @@
  *   elia autopilot --plan-only         survey, measure, understand and plan; change nothing
  *   elia autopilot --resume            continue the last pilot in this repository
  *   elia autopilot status | report     where the last pilot stands / its full report
+ *   elia autopilot watch add "<what>"  react to events: github ci|issues|prs, file <path>, url <https>, every <1h>
+ *   elia autopilot --watch             keep going: each event is a goal; idle waits instead of stopping
+ *   elia autopilot --scopes a,b        limit what goal runs may do (see autopilot/scopes.ts)
+ *   elia autopilot install|uninstall|service   run --watch in the background, from log-in on
  */
 
 import { existsSync, readFileSync } from 'node:fs'
@@ -28,8 +32,41 @@ function positiveNumber(flag: string, raw: string | undefined, integer: boolean)
 
 export async function runAutopilotCommand(): Promise<void> {
   const root = process.cwd()
-  const [sub] = positionals(['--max-goals', '--goal-minutes', '--hours', '--profile'])
+  const [sub, ...subArgs] = positionals(['--max-goals', '--goal-minutes', '--hours', '--profile', '--scopes', '--env-file'])
   const { loadPilotState, reportPath } = await import('../autopilot/store.ts')
+
+  if (sub === 'watch') return runWatchCommand(root, subArgs)
+  if (sub === 'install' || sub === 'uninstall' || sub === 'service') {
+    const { installPilotService, pilotLogTail, pilotServiceInstalled, pilotServicePlan, uninstallPilotService } = await import('../autopilot/service.ts')
+    const envFileRaw = flagValue('--env-file')
+    const envFile = envFileRaw ? (await import('node:path')).resolve(envFileRaw) : undefined
+    if (envFile && !existsSync(envFile)) {
+      writeError(`--env-file: ${envFile} does not exist`)
+      process.exitCode = 1
+      return
+    }
+    const plan = pilotServicePlan({ workspace: root, runtime: process.execPath, entry: process.argv[1] ?? '', envFile })
+    try {
+      if (sub === 'install') {
+        const { loadWatchers } = await import('../autopilot/watch.ts')
+        if (loadWatchers(root).length === 0) {
+          writeError('Nothing to watch yet, so a background autopilot would have nothing to react to. Add a watcher first: elia autopilot watch add "github ci"')
+          process.exitCode = 1
+          return
+        }
+        writeNotice(await installPilotService(plan))
+      } else if (sub === 'uninstall') writeNotice(await uninstallPilotService(plan))
+      else {
+        writeNotice(`${plan.label}: ${pilotServiceInstalled(plan) ? 'installed' : 'not installed'}`)
+        const tail = pilotLogTail(plan)
+        if (tail.length > 0) writeNotice(`log (${plan.logPath}):\n${tail.join('\n')}`)
+      }
+    } catch (error) {
+      writeError(error instanceof Error ? error.message : String(error))
+      process.exitCode = 1
+    }
+    return
+  }
 
   if (sub === 'status' || sub === 'report') {
     const state = loadPilotState(root)
@@ -52,7 +89,7 @@ export async function runAutopilotCommand(): Promise<void> {
     return
   }
   if (sub !== undefined) {
-    writeError(`Unknown autopilot subcommand "${sub}". Use: elia autopilot [--plan-only|--resume] | status | report`)
+    writeError(`Unknown autopilot subcommand "${sub}". Use: elia autopilot [--plan-only|--resume|--watch] | status | report | watch | install | uninstall | service`)
     process.exitCode = 1
     return
   }
@@ -68,6 +105,25 @@ export async function runAutopilotCommand(): Promise<void> {
     return
   }
 
+  const watch = hasFlag('--watch')
+  let scopes: import('../autonomy/capabilityContract.ts').CapabilityScope[] | undefined
+  const scopesRaw = flagValue('--scopes')
+  if (scopesRaw !== undefined) {
+    try {
+      scopes = (await import('../autopilot/scopes.ts')).parseScopes(scopesRaw)
+    } catch (error) {
+      writeError(error instanceof Error ? error.message : String(error))
+      process.exitCode = 1
+      return
+    }
+  }
+
+  if (watch && (await import('../autopilot/watch.ts')).loadWatchers(root).length === 0) {
+    writeError('autopilot: there is nothing to watch yet. Add a watcher first, e.g.: elia autopilot watch add "github ci"  (see: elia autopilot watch)')
+    process.exitCode = 1
+    return
+  }
+
   if (!(await ensureFirstRunProviderSetup())) return
   await loadRuntimeSkills()
   const { runPilot, PilotError } = await import('../autopilot/pilot.ts')
@@ -76,12 +132,15 @@ export async function runAutopilotCommand(): Promise<void> {
   const planOnly = hasFlag('--plan-only', '--plan')
   writeNotice(planOnly
     ? 'autopilot (plan only): surveying, measuring and planning — nothing will be changed.'
-    : `autopilot: unattended. Up to ${maxGoals ?? 5} goal(s)${maxHours ? `, ${maxHours}h at most` : ''}; each goal on elia's own branch, rolled back if it breaks a passing check. Irreversible or outside-world actions are refused and listed for you, never waited on.`)
+    : `autopilot: unattended${watch ? ', watching' : ''}. ${watch && !maxGoals ? 'Goals as events arrive' : `Up to ${maxGoals ?? 5} goal(s)`}${maxHours ? `, ${maxHours}h at most` : ''}; each goal on elia's own branch, rolled back if it breaks a passing check. Irreversible or outside-world actions are refused and listed for you, never waited on.${scopes ? ` Limited to: ${scopes.join(', ')}.` : ''}`)
   try {
     const result = await runPilot({
       root,
       planOnly,
-      resume: hasFlag('--resume'),
+      // A watcher picks up where the last pilot stood (it is what the background service restarts).
+      resume: hasFlag('--resume') || (watch && loadPilotState(root) !== undefined),
+      watch,
+      scopes,
       maxGoals: maxGoals ?? undefined,
       goalMinutes: goalMinutes ?? undefined,
       maxHours: maxHours ?? undefined,
@@ -170,5 +229,41 @@ export async function runAutopilotTurn(
   } catch (error) {
     if (error instanceof PilotError) summarize(`autopilot: ${error.message}`)
     else throw error
+  }
+}
+
+async function runWatchCommand(root: string, args: string[]): Promise<void> {
+  const { addWatcher, describeTrigger, hasUntrustedWatchList, loadWatchers, parseTrigger, removeWatcher } = await import('../autopilot/watch.ts')
+  const [action = 'list', ...rest] = args
+  try {
+    if (action === 'list') {
+      if (hasUntrustedWatchList(root)) writeNotice('A watch list is here that was not written by elia on this machine (or was changed since), so it is ignored. Read .elia/autopilot/watch.json, then run `elia trust` to accept it — or add your own watchers.')
+      const watchers = loadWatchers(root)
+      if (watchers.length === 0) {
+        writeNotice('The autopilot watches nothing yet. Add a watcher, for example:\n  elia autopilot watch add "github ci"\n  elia autopilot watch add "github issues label:bug"\n  elia autopilot watch add "file docs/feedback"\n  elia autopilot watch add "every 6h"\nthen run: elia autopilot --watch (or elia autopilot install)')
+        return
+      }
+      for (const watcher of watchers) writeNotice(`${watcher.id}  ${describeTrigger(watcher.spec)}${watcher.lastError ? `  — last check failed: ${watcher.lastError}` : ''}`)
+      return
+    }
+    if (action === 'add') {
+      const spec = parseTrigger(rest.join(' '))
+      const watcher = addWatcher(root, spec)
+      writeNotice(`Watching ${describeTrigger(spec)} (${watcher.id}). The first check records where things stand; only what happens after it becomes a goal. Start with: elia autopilot --watch`)
+      return
+    }
+    if (action === 'remove' && rest[0]) {
+      if (removeWatcher(root, rest[0])) writeNotice(`Stopped watching ${rest[0]}.`)
+      else {
+        writeError(`No watcher ${rest[0]}; see elia autopilot watch list`)
+        process.exitCode = 1
+      }
+      return
+    }
+    writeError('Usage: elia autopilot watch [list] | add "<github ci|github issues [owner/repo] [label:x]|github prs|file <path>|url <https://…>|every <1h>>" | remove <id>')
+    process.exitCode = 1
+  } catch (error) {
+    writeError(error instanceof Error ? error.message : String(error))
+    process.exitCode = 1
   }
 }

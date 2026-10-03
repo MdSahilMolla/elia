@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from 'node:crypto'
+import { createHash, createHmac, randomUUID, timingSafeEqual } from 'node:crypto'
 import { existsSync, readFileSync, renameSync } from 'node:fs'
 import { join } from 'node:path'
 import { AsyncLocalStorage } from 'node:async_hooks'
@@ -9,6 +9,7 @@ import { canonicalizeCommandForIdentity } from './commandIdentity.ts'
 import { ensureSecureDirectory, hardenSecureFile, writeSecureFile } from '../securePersistence.ts'
 import { isProcessAlive, withFileLock } from '../fileLock.ts'
 import { logSwallowedError } from '../diagnostics.ts'
+import { userPreauthSecret } from './preauth.ts'
 import { capacityRetryDelayMs, isCapacityError } from '../providerErrors.ts'
 
 export const GOAL_GRAPH_VERSION = 2
@@ -46,6 +47,49 @@ function isLeaseGenuinelyStale(leaseOwner: string | undefined, expiresAt: number
     return now - expiresAt > LEASE_LIVE_OWNER_GRACE_MS
   }
   return true
+}
+
+/** Domain-separated key: the preauth secret also signs grants and the allow store, and a MAC from one must never verify as another. */
+function approvalKey(): Buffer {
+  return createHmac('sha256', userPreauthSecret()).update('elia.goal-graph.approval.v1').digest()
+}
+
+function approvalMac(runId: string, approval: ApprovalRecord): string {
+  const data = JSON.stringify([runId, approval.kind, approval.subject, approval.mode ?? '', approval.status, approval.resolvedAt ?? '', approval.expiresAt ?? ''])
+  return createHmac('sha256', approvalKey()).update(data).digest('hex')
+}
+
+function approvalMacValid(runId: string, approval: ApprovalRecord): boolean {
+  if (typeof approval.mac !== 'string' || approval.mac.length === 0) return false
+  const expected = Buffer.from(approvalMac(runId, approval))
+  const actual = Buffer.from(approval.mac)
+  if (expected.length !== actual.length || !timingSafeEqual(expected, actual)) return false
+  // Belt and braces: even a validly signed record never outlives the TTL it was granted under.
+  if (approval.kind === 'action' && approval.status === 'approved') {
+    if (approval.resolvedAt === undefined || approval.expiresAt === undefined || approval.expiresAt > approval.resolvedAt + ACTION_APPROVAL_TTL_MS) return false
+  }
+  return true
+}
+
+/**
+ * Approvals read from disk are only honoured if this machine's secret signed
+ * them. An 'approved' record that fails the check is downgraded to pending (the
+ * person is asked again); the ids are returned so a resume can say so. Denials
+ * are only ever more restrictive, so they need no proof.
+ */
+function sanitizeApprovals(snapshot: GoalGraphSnapshot): string[] {
+  const untrusted: string[] = []
+  if (!Array.isArray(snapshot.approvals)) return untrusted
+  snapshot.approvals = snapshot.approvals.filter((item) => item !== null && typeof item === 'object')
+  for (const approval of snapshot.approvals) {
+    if (approval.status !== 'approved' || approvalMacValid(snapshot.runId, approval)) continue
+    approval.status = 'pending'
+    approval.resolvedAt = undefined
+    approval.expiresAt = undefined
+    approval.mac = undefined
+    untrusted.push(approval.id)
+  }
+  return untrusted
 }
 
 export type GoalNodeKind = 'goal' | 'step' | 'delegation'
@@ -124,6 +168,14 @@ export interface ApprovalRecord {
    * an approval written today must not cash out a resume three weeks later.
    */
   expiresAt?: number
+  /**
+   * HMAC over this record's run, kind, subject, mode, status, resolvedAt and
+   * expiresAt, keyed by the per-user secret outside the repo. Written only when
+   * a decision is resolved. The goal-graph file sits in the model's workspace,
+   * so an 'approved' record without a matching MAC is a forgery or a legacy
+   * record and loads as pending.
+   */
+  mac?: string
 }
 
 export interface FailureRecord {
@@ -181,7 +233,9 @@ export function readGoalGraphSnapshot(dir: string): GoalGraphSnapshot | undefine
   const path = join(dir, 'goal-graph.json')
   if (!existsSync(path)) return undefined
   try {
-    return JSON.parse(readFileSync(path, 'utf8')) as GoalGraphSnapshot
+    const parsed = JSON.parse(readFileSync(path, 'utf8')) as GoalGraphSnapshot
+    sanitizeApprovals(parsed)
+    return parsed
   } catch (error) {
     // A corrupt file reads identically to "no goal graph was ever recorded"
     // to every caller (`elia runs <id>` printed the same "No durable goal
@@ -200,6 +254,8 @@ export class GoalGraphStore {
   private mutating = 0
   /** Set when open quarantined a torn goal-graph.json instead of overwriting it. */
   openTornSnapshot?: { path: string }
+  /** Ids of approvals found on disk as 'approved' without a valid MAC (forged, hand-edited or from an older version); they load as pending. */
+  untrustedApprovals: string[] = []
 
   private constructor(private readonly options: GoalGraphOptions, snapshot: GoalGraphSnapshot) {
     this.path = join(options.dir, 'goal-graph.json')
@@ -232,10 +288,35 @@ export class GoalGraphStore {
     try {
       const parsed = JSON.parse(readFileSync(this.path, 'utf8')) as GoalGraphSnapshot
       if ((parsed.version === 1 || parsed.version === GOAL_GRAPH_VERSION) && parsed.runId === this.options.runId) {
-        this.snapshot = normalizeSnapshot(parsed, this.options)
+        const next = normalizeSnapshot(parsed, this.options)
+        const untrusted = sanitizeApprovals(next)
+        if (untrusted.length > 0) this.untrustedApprovals = [...new Set([...this.untrustedApprovals, ...untrusted])]
+        this.refuseStateRegressions(next)
+        this.snapshot = next
       }
     } catch {
       // A torn snapshot on disk: keep the in-memory one, which persist() will rewrite.
+    }
+  }
+
+  /**
+   * A file edit must not turn a refusal back into a runnable action. Only a
+   * signed, still-valid approval (resolveApproval) may move an action out of
+   * blocked/human-review; anything else the disk claims keeps the state this
+   * process already holds. (A cold open has no earlier state to compare with,
+   * but a 'planned' action alone confers nothing: it still meets the full
+   * governor gate unless a MAC-verified approval exists.)
+   */
+  private refuseStateRegressions(next: GoalGraphSnapshot): void {
+    const held = new Map(this.snapshot.actions.map((action) => [action.idempotencyKey, action]))
+    for (const action of next.actions) {
+      const before = held.get(action.idempotencyKey)
+      if (!before || (before.state !== 'blocked' && before.state !== 'human-review')) continue
+      if (action.state !== 'planned' && action.state !== 'retryable' && action.state !== 'completed') continue
+      const approved = next.approvals.some((approval) => approval.kind === 'action' && approval.subject === action.idempotencyKey && approval.status === 'approved')
+      if (approved) continue
+      action.state = before.state
+      action.error = before.error
     }
   }
 
@@ -248,7 +329,10 @@ export class GoalGraphStore {
       try {
         const parsed = JSON.parse(readFileSync(path, 'utf8')) as GoalGraphSnapshot
         if ((parsed.version === 1 || parsed.version === GOAL_GRAPH_VERSION) && parsed.runId === options.runId) {
-          const store = new GoalGraphStore(options, normalizeSnapshot(parsed, options))
+          const normalized = normalizeSnapshot(parsed, options)
+          const untrusted = sanitizeApprovals(normalized)
+          const store = new GoalGraphStore(options, normalized)
+          store.untrustedApprovals = untrusted
           const recovery = store.reconcileStaleLeases()
           store.lastLeaseRecovery = { nodes: recovery.nodes.length, actions: recovery.actions.length }
           return store
@@ -575,7 +659,7 @@ export class GoalGraphStore {
       // Time-bound the durable "yes" so a resumed run cannot cash out an
       // approval written long ago (or one written in a different mode — the
       // mode check in isActionApproved handles that half).
-      if (approved) record.expiresAt = Date.now() + ACTION_APPROVAL_TTL_MS
+      if (approved) record.expiresAt = record.resolvedAt + ACTION_APPROVAL_TTL_MS
       const action = this.snapshot.actions.find((item) => item.idempotencyKey === record.subject)
       if (action) {
         action.state = approved ? 'planned' : 'blocked'
@@ -583,6 +667,9 @@ export class GoalGraphStore {
         action.updatedAt = Date.now()
       }
     }
+    // The one place a real decision (a person, a preauth, autoApprove) is
+    // recorded, so the one place a record is signed.
+    record.mac = approvalMac(this.snapshot.runId, record)
     const root = this.requireNode(this.snapshot.rootId)
     root.status = approved ? 'running' : 'blocked'
     root.updatedAt = Date.now()
@@ -598,6 +685,25 @@ export class GoalGraphStore {
     this.persist()
     return structuredClone(record)
     })
+  }
+
+  /**
+   * What a resume is about to honour, as plain lines to print before it does:
+   * the proposal, each verified approval still in force, and any record found
+   * approved on disk without this machine's signature (which is asked again).
+   */
+  resumeNotice(): string[] {
+    const lines: string[] = []
+    const goal = this.snapshot.proposal?.goal
+    if (goal) lines.push(`Resuming run ${this.snapshot.runId}: ${goal.replace(/\s+/g, ' ').slice(0, 200)}`)
+    const now = Date.now()
+    for (const approval of this.snapshot.approvals) {
+      if (approval.status !== 'approved') continue
+      if (approval.kind === 'action' && (approval.expiresAt ?? 0) <= now) continue
+      lines.push(`Honouring ${approval.kind} approval (${approval.mode ?? 'any mode'}) for ${approval.subject.slice(0, 16)}${approval.expiresAt ? `, valid until ${new Date(approval.expiresAt).toISOString()}` : ''}`)
+    }
+    if (this.untrustedApprovals.length > 0) lines.push(`Ignoring ${this.untrustedApprovals.length} approval record(s) on disk that this machine did not sign; they will be asked for again.`)
+    return lines
   }
 
   needsResumption(nodeId: string): boolean {

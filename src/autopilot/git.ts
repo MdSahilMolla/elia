@@ -10,6 +10,7 @@
 import { spawnSync } from 'node:child_process'
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { signCommitMessage } from '../provenance.ts'
 
 export interface GitResult {
   ok: boolean
@@ -124,7 +125,7 @@ export function commitEverything(
   if (include.length === 0) return { committed: false, skipped }
   const add = git(['add', '-A', '--', ...include], root)
   if (!add.ok) throw new Error(`git add failed: ${add.stderr}`)
-  const commit = git([...identityArgs(root), 'commit', '-q', ...(options.hooks === false ? ['--no-verify'] : []), '-m', message], root, 300_000)
+  const commit = git([...identityArgs(root), 'commit', '-q', ...(options.hooks === false ? ['--no-verify'] : []), '-m', signCommitMessage(message)], root, 300_000)
   if (!commit.ok) {
     git(['reset', '-q'], root)
     throw new Error(`git commit failed: ${(commit.stderr || commit.stdout).slice(-600)}`)
@@ -148,4 +149,15 @@ export function rollbackTo(root: string, sha: string, keep: ReadonlySet<string>)
   if (!reset.ok) throw new Error(`git reset failed: ${reset.stderr}`)
   const created = untrackedPaths(root).filter((path) => !keep.has(path))
   if (created.length > 0) git(['clean', '-q', '-f', '--', ...created], root)
+}
+
+/** Files that changed between two commits. */
+export function changedFilesBetween(root: string, from: string, to: string): string[] {
+  const result = git(['diff', '--name-only', `${from}..${to}`], root)
+  return result.ok ? result.stdout.split('\n').map((line) => line.trim()).filter(Boolean) : []
+}
+
+/** A test file by the common conventions: `*.test.*`, `*.spec.*`, `*_test.*`, `test_*.py`, or anything under `test(s)/` or `__tests__/`. */
+export function isTestPath(path: string): boolean {
+  return /(?:^|\/)(?:tests?|__tests__)\/|\.(?:test|spec)\.[a-z0-9]+$|_test\.[a-z0-9]+$|(?:^|\/)test_[^/]+\.py$/i.test(path)
 }

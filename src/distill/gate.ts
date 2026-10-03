@@ -11,6 +11,7 @@ import { readLatestGapVector } from '../gap/report.ts'
 import { runValueProbes } from '../values/probes.ts'
 import { checkValueDrift, readLatestProbeRun, recordProbeRun } from '../values/drift.ts'
 import { promptForRole, promptForRoleIn } from '../autonomy/roles.ts'
+import { readTrajectories, type TrajectoryRow } from '../trajectory/record.ts'
 import { addFragment } from './fragments.ts'
 import type { DistillationCandidate } from './mine.ts'
 
@@ -40,6 +41,22 @@ export interface GateResult {
 
 const GATE_TIMEOUT_MS = 300_000
 
+/**
+ * The source runs of a candidate that this machine has no record of.
+ *
+ * Mining reads `.elia/runs/*\/receipt.json` from the working directory, and a
+ * repository can ship those files. The trajectory log lives in elia's own state
+ * directory, written only by runs that happened here, so a source run with no row
+ * in it is a receipt this machine never produced. A fragment drawn from one would
+ * become a standing instruction in a role's prompt in every project, on the
+ * strength of a file anyone could have committed; the benchmark, gap and value
+ * checks below do not read what the fragment says.
+ */
+export function foreignSourceRuns(candidate: Pick<DistillationCandidate, 'sourceRunIds'>, rows: Pick<TrajectoryRow, 'corr'>[] = readTrajectories('autonomous')): string[] {
+  const local = new Set(rows.map((row) => row.corr))
+  return candidate.sourceRunIds.filter((id) => !local.has(id))
+}
+
 export async function evaluateCandidate(candidate: DistillationCandidate, options: GateOptions = {}): Promise<GateResult> {
   const stage = options.onStage ?? (() => {})
   const sandbox = createSandbox(Date.now())
@@ -49,6 +66,12 @@ export async function evaluateCandidate(candidate: DistillationCandidate, option
   }
 
   try {
+    // 0. it must be drawn from this machine's own runs, not from receipts a repository shipped
+    const foreign = foreignSourceRuns(candidate)
+    if (candidate.sourceRunIds.length === 0 || foreign.length > 0) {
+      return record('rejected', `not derived from this machine's own runs: no local trajectory record for ${(foreign.length > 0 ? foreign : ['any source run']).join(', ')}`)
+    }
+
     // 1. apply the fragment into the sandbox copy
     addFragment(candidate.role, candidate.fragment, sandbox.root)
 
