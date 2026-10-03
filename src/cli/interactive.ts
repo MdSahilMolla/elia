@@ -108,7 +108,7 @@ export async function runInteractive(): Promise<void> {
   // can finish connecting in the background instead of gating the prompt.
   await loadRuntimeSkills({ deferMcp: interactiveTerminal })
   const { runTurn } = await import('../agent.ts')
-  const { config, describeThinking, describeReviewers, getThinking, switchModel } = await import('../config.ts')
+  const { config, describeThinking, describeReviewers, getThinking, providerModelNotice, switchModel } = await import('../config.ts')
   setCurrentUsageModel(config.model)
   const { PROVIDER_PRESET_NAMES, isProviderPresetConfigured, providerCapabilities, providerPresetDefaultModel, providerReadiness, listProviderModels } = await import('../providers/registry.ts')
   const { detectOllama } = await import('../providers/ollama.ts')
@@ -3041,7 +3041,7 @@ export async function runInteractive(): Promise<void> {
     await runInkRepl({
       sessionId,
       version: cliVersion,
-      startupNotice: [recoveryNotice, practiceReport, launchNotice].filter(Boolean).join('\n') || undefined,
+      startupNotice: [providerModelNotice(), recoveryNotice, practiceReport, launchNotice].filter(Boolean).join('\n') || undefined,
       initialTurn,
       getEnv: () => ({ model: config.model, providerLabel: config.providerLabel, providerName: config.providerName, routing: config.routingMode }),
       commands: allSlashCommands(),

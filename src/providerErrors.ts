@@ -170,7 +170,10 @@ export function isFallbackableProviderError(message: string): boolean {
   return isCapacityError(message) || isConnectionError(message) || isTransientServerError(message) || ROUTE_FALLBACK_MODEL_OR_TIMEOUT.test(message)
 }
 
-const ROUTE_FALLBACK_MODEL_OR_TIMEOUT = /timeout|timed out|model (?:not found|unavailable)|\b404\b|not found|connection|network/i
+// A model the endpoint does not serve is the route's problem, not the
+// request's: Inception answers another provider's model id with a 400 "Model
+// must be one of …" (issue #1294), and the next route may serve its own.
+const ROUTE_FALLBACK_MODEL_OR_TIMEOUT = /timeout|timed out|model (?:not found|unavailable)|model must be one of|invalid model|unknown model|model_not_found|\b404\b|not found|connection|network/i
 
 /**
  * How long to wait before re-attempting a capacity failure.

@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 
@@ -219,6 +219,26 @@ test('config set stores a provider key without printing it', async () => {
   const stored = readFileSync(configPath, 'utf8')
   expect(stored).toContain('NVIDIA_API_KEY=setup-test-key')
   expect(stored).toContain('ELIA_MODEL=nvidia/nemotron-3-super-120b-a12b')
+})
+
+test('config set refuses another provider\'s model for a single-family provider, and saves nothing (#1294)', async () => {
+  const configPath = join(mkdtempSync(join(tmpdir(), 'elia-cli-config-')), 'config.env')
+  const env = {
+    ELIA_CONFIG_PATH: configPath,
+    ELIA_PROVIDER: undefined,
+    ELIA_MODEL: undefined,
+    ELIA_API_KEY: undefined,
+    INCEPTION_API_KEY: undefined,
+    ELIA_TEST_SETUP_KEY: 'setup-test-key',
+  }
+  const refused = await runCli(['config', 'set', '--provider', 'mercury', '--model', 'gpt-5.5', '--api-key-env', 'ELIA_TEST_SETUP_KEY', '--plain'], env)
+  expect(refused.code).toBe(1)
+  expect(refused.stderr).toContain(`"gpt-5.5" is not one of mercury's models`)
+  expect(existsSync(configPath)).toBe(false)
+
+  const anyway = await runCli(['config', 'set', '--provider', 'mercury', '--model', 'gpt-5.5', '--anyway', '--api-key-env', 'ELIA_TEST_SETUP_KEY', '--plain'], env)
+  expect(anyway.code).toBe(0)
+  expect(readFileSync(configPath, 'utf8')).toContain('ELIA_MODEL=gpt-5.5')
 })
 
 test('the old supervision switches are gone: elia auto says so and stays autonomous', async () => {

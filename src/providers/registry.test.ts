@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test'
-import { isInceptionEndpoint, isProviderPresetConfigured, listProviderModels, providerCapabilities, providerPresetDefaultModel, PROVIDER_PRESET_NAMES, tryResolveProvider, validateModelId } from './registry.ts'
+import { foreignModelProblem, isInceptionEndpoint, isProviderPresetConfigured, listProviderModels, providerCapabilities, providerPresetDefaultModel, PROVIDER_PRESET_NAMES, tryResolveProvider, validateModelId } from './registry.ts'
 import { publicFetchTestHooks } from '../networkPolicy.ts'
 
 const originalProvider = process.env.ELIA_PROVIDER
@@ -221,4 +221,55 @@ test('providerCapabilities marks only the local provider local', () => {
 test('providerCapabilities favours a case-insensitive preset lookup and never throws for an unknown name', () => {
   expect(providerCapabilities('CODEX').handoff).toBe(true)
   expect(providerCapabilities('not-a-real-provider')).toMatchObject({ handoff: false, vision: true, threadModel: 'elia' })
+})
+
+test('a configured model from another provider runs the preset default, with a notice, instead of a 400 on every turn (#1294)', () => {
+  const originalInception = process.env.INCEPTION_API_KEY
+  process.env.INCEPTION_API_KEY = 'test-key'
+  try {
+    process.env.ELIA_PROVIDER = 'mercury'
+    process.env.ELIA_MODEL = 'gpt-5.5'
+    const resolved = tryResolveProvider()
+    if ('error' in resolved) throw new Error(resolved.error)
+    expect(resolved.model).toBe('mercury-2.5')
+    expect(resolved.modelNotice).toContain(`"gpt-5.5" is not one of mercury's models`)
+
+    // Its own model is left alone and says nothing.
+    process.env.ELIA_MODEL = 'mercury-coder'
+    const own = tryResolveProvider()
+    if ('error' in own) throw new Error(own.error)
+    expect(own.model).toBe('mercury-coder')
+    expect(own.modelNotice).toBeUndefined()
+
+    // A model asked for by name (`/model … --anyway`) is the caller's choice.
+    const asked = tryResolveProvider({ providerName: 'mercury', model: 'gpt-5.5' })
+    if ('error' in asked) throw new Error(asked.error)
+    expect(asked.model).toBe('gpt-5.5')
+
+    // Behind a proxy (ELIA_BASE_URL) elia cannot know what is served.
+    process.env.ELIA_MODEL = 'gpt-5.5'
+    process.env.ELIA_BASE_URL = 'https://proxy.example.com/v1'
+    const proxied = tryResolveProvider()
+    if ('error' in proxied) throw new Error(proxied.error)
+    expect(proxied.model).toBe('gpt-5.5')
+  } finally {
+    restore('INCEPTION_API_KEY', originalInception)
+  }
+})
+
+test('naming a different provider uses its default model, not the configured provider\'s ELIA_MODEL (#1294)', () => {
+  process.env.ELIA_PROVIDER = 'mercury'
+  process.env.ELIA_MODEL = 'mercury-2.5'
+  process.env.OPENROUTER_API_KEY = 'test-key'
+  const resolved = tryResolveProvider({ providerName: 'openrouter' })
+  if ('error' in resolved) throw new Error(resolved.error)
+  expect(resolved.model).toBe(providerPresetDefaultModel('openrouter')!)
+})
+
+test('an aggregator is never second-guessed: it serves every family', () => {
+  expect(foreignModelProblem('openrouter', 'anthropic/claude-sonnet-5')).toBeUndefined()
+  expect(foreignModelProblem('groq', 'gpt-5.5')).toBeUndefined()
+  expect(foreignModelProblem('anthropic', 'claude-opus-5')).toBeUndefined()
+  expect(foreignModelProblem('anthropic', 'gpt-5.5')).toContain("not one of anthropic's models")
+  expect(foreignModelProblem('google', 'models/gemini-3.7-flash')).toBeUndefined()
 })
