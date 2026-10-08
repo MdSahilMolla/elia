@@ -3,8 +3,14 @@
     "target": "ESNext",
     "module": "ESNext",
     "moduleResolution": "bundler",
-    "lib": ["ESNext", "DOM", "DOM.Iterable"],
-    "types": ["bun"],
+    "lib": [
+      "ESNext",
+      "DOM",
+      "DOM.Iterable"
+    ],
+    "types": [
+      "bun"
+    ],
     "strict": true,
     "noUncheckedIndexedAccess": true,
     "esModuleInterop": true,
@@ -15,6 +21,17 @@
     "jsx": "react-jsx",
     "jsxImportSource": "react"
   },
-  "include": ["src/**/*.ts", "src/**/*.tsx", "bin/**/*.ts", "scripts/**/*.ts"],
-  "exclude": ["node_modules", "workspace", "legacy", "dist"]
+  "include": [
+    "src/**/*.ts",
+    "src/**/*.tsx",
+    "bin/**/*.ts",
+    "scripts/**/*.ts",
+    "harness/**/*.ts"
+  ],
+  "exclude": [
+    "node_modules",
+    "workspace",
+    "legacy",
+    "dist"
+  ]
 }

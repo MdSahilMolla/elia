@@ -1098,7 +1098,6 @@ export const TRUST_CONTROL_INTENT = 'trust-control'
  */
 const isTrustControlFile = isEliaTrustFile
 
-
 /** A short, human-readable name for the trust store a write would touch. */
 export function trustControlLabel(absPath: string): string {
   const norm = absPath.replaceAll('\\', '/').toLocaleLowerCase()
@@ -1107,7 +1106,6 @@ export function trustControlLabel(absPath: string): string {
   if (basename(dirname(norm)) === '.elia') return `${file} in this project's .elia store`
   return file
 }
-
 
 export interface ActionGovernorOptions {
   mode?: GovernanceMode

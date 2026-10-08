@@ -51,7 +51,7 @@ async function fixture() {
   ] as const) {
     registerAgentIdentity(store, { name: spec.name, role: spec.role, pathScopes: [...spec.paths], actorId: created.ownerMemberId })
   }
-  const server: RunningWorkspaceServer = runWorkspaceServer({ port: 0, store, planner: authPlan, sweepMs: 300 })
+  const server: RunningWorkspaceServer = runWorkspaceServer({ port: 0, store, planner: authPlan, sweepMs: 300, mesh: false })
   cleanup.push(() => server.stop())
   cleanup.push(() => store.close())
   cleanup.push(() => {

@@ -12,7 +12,7 @@ import type { Database } from 'bun:sqlite'
  * Bump `PRAGMA user_version` and add an idempotent `ALTER`/`CREATE` below on any
  * change; never rewrite an existing statement.
  */
-export const SCHEMA_VERSION = 3
+export const SCHEMA_VERSION = 4
 
 export function migrate(db: Database): void {
   db.exec(`
@@ -24,18 +24,21 @@ export function migrate(db: Database): void {
       task_id      TEXT,
       actor_kind   TEXT NOT NULL,
       actor_id     TEXT NOT NULL,
+      actor_node   TEXT,
       payload_json TEXT NOT NULL,
       at           TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_events_type ON workspace_events(type);
     CREATE INDEX IF NOT EXISTS idx_events_objective ON workspace_events(objective_id);
     CREATE INDEX IF NOT EXISTS idx_events_task ON workspace_events(task_id);
+    CREATE INDEX IF NOT EXISTS idx_events_actor_node ON workspace_events(actor_node);
 
     CREATE TABLE IF NOT EXISTS workspaces (
       id                 TEXT PRIMARY KEY,
       name               TEXT NOT NULL,
       default_project_id TEXT NOT NULL,
-      created_at         TEXT NOT NULL
+      created_at         TEXT NOT NULL,
+      owner_node_id      TEXT
     );
 
     CREATE TABLE IF NOT EXISTS projects (
@@ -90,7 +93,8 @@ export function migrate(db: Database): void {
       started_at        TEXT NOT NULL,
       last_heartbeat_at TEXT NOT NULL,
       stopped_at        TEXT,
-      last_error        TEXT
+      last_error        TEXT,
+      node_id           TEXT
     );
 
     CREATE TABLE IF NOT EXISTS objectives (
@@ -102,9 +106,10 @@ export function migrate(db: Database): void {
       run_id       TEXT NOT NULL,
       created_by   TEXT NOT NULL,
       created_at   TEXT NOT NULL,
-      updated_at   TEXT NOT NULL,
+      updated_at  TEXT NOT NULL,
       approved_by  TEXT,
-      approved_at  TEXT
+      approved_at  TEXT,
+      owner_node_id TEXT
     );
 
     CREATE TABLE IF NOT EXISTS tasks (
@@ -135,13 +140,78 @@ export function migrate(db: Database): void {
       finished_at           TEXT,
       last_error            TEXT,
       review_notes          TEXT,
-      result_report         TEXT
+      result_report         TEXT,
+      executor_node_id      TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_tasks_objective ON tasks(objective_id);
     CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
     -- tasks({ objectiveId, status }) -- the board view and the orchestrator's
     -- "what's ready under this objective" query -- filters both columns together.
     CREATE INDEX IF NOT EXISTS idx_tasks_objective_status ON tasks(objective_id, status);
+
+    -- Partitioned ownership (§6.6). One writer per objective keeps the audit
+    -- chain serial; one grant per task attempt keeps execution single-writer.
+    CREATE INDEX IF NOT EXISTS idx_objectives_owner ON objectives(owner_node_id);
+    CREATE INDEX IF NOT EXISTS idx_tasks_executor ON tasks(executor_node_id);
+
+    -- A node is one machine running Elia. Identity is bound to the file plane's
+    -- pinned certificate fingerprint rather than a second keypair minted here
+    -- (design note §6.1): the transport already authenticates both machines, and
+    -- two identity systems for the same two machines would be a defect.
+    CREATE TABLE IF NOT EXISTS nodes (
+      id            TEXT PRIMARY KEY,
+      name          TEXT NOT NULL,
+      kind          TEXT NOT NULL,
+      fingerprint   TEXT,
+      is_local      INTEGER NOT NULL,
+      first_seen_at TEXT NOT NULL,
+      last_seen_at  TEXT NOT NULL
+    );
+
+    -- Node-level presence, keyed by node rather than by connection. A
+    -- connection is one WebSocket in one process, so it cannot say "the other
+    -- machine is online"; a node can (design note §6.3).
+    CREATE TABLE IF NOT EXISTS node_presence (
+      node_id      TEXT PRIMARY KEY,
+      name         TEXT NOT NULL,
+      focus        TEXT,
+      connected_at TEXT NOT NULL,
+      last_seen_at TEXT NOT NULL
+    );
+
+    -- A grant is the capability letting a node write execution events for one
+    -- task. Authored solely by the objective's owner, which is what prevents
+    -- double-dispatch.
+    CREATE TABLE IF NOT EXISTS task_grants (
+      task_id     TEXT NOT NULL REFERENCES tasks(id),
+      node_id     TEXT NOT NULL,
+      granted_at  TEXT NOT NULL,
+      released_at TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_task_grants_task ON task_grants(task_id, released_at);
+
+    -- How far this node has consumed each peer. Per peer rather than one global
+    -- cursor, because replication is per (objective, task) ownership: a
+    -- follower's log interleaves rows it owns with rows it only mirrors.
+    CREATE TABLE IF NOT EXISTS replication_state (
+      peer_node_id TEXT PRIMARY KEY,
+      last_seq     INTEGER NOT NULL,
+      updated_at   TEXT NOT NULL
+    );
+
+    -- Events that arrived from a peer, as distinct from events this node wrote.
+    --
+    -- Without this, two nodes replicating in both directions ping-pong: the
+    -- owner sends an event, the follower applies it, and the follower then
+    -- treats it as its own history and sends it straight back, forever. Marking
+    -- arrival is what lets the send filter say "I have already seen this one",
+    -- and it is recorded in the same transaction as the projection so a crash
+    -- cannot leave an applied event looking locally originated.
+    CREATE TABLE IF NOT EXISTS inbound_events (
+      id            TEXT PRIMARY KEY,
+      peer_node_id  TEXT,
+      received_at   TEXT NOT NULL
+    );
 
     CREATE TABLE IF NOT EXISTS reservations (
       id          TEXT PRIMARY KEY,
@@ -227,12 +297,22 @@ export function migrate(db: Database): void {
     );
   `)
 
-  // Idempotent forward migrations for databases created by an earlier version.
+// Idempotent forward migrations for databases created by an earlier version.
   const addColumn = (tableName: string, column: string, definition: string): void => {
     const columns = db.query(`PRAGMA table_info(${tableName})`).all() as Array<{ name: string }>
     if (!columns.some((row) => row.name === column)) db.exec(`ALTER TABLE ${tableName} ADD COLUMN ${column} ${definition}`)
   }
   addColumn('tasks', 'result_report', 'TEXT')
+  // v4 — partitioned ownership. Every one of these is nullable and therefore
+  // inert on a pre-v4 database until something sets it: `workspace authority`
+  // treats an absent owner or executor as "this row predates partitioning" and
+  // falls back to the single-writer rules, so an old workspace upgrades in place
+  // rather than needing a migration pass over its log.
+  addColumn('workspace_events', 'actor_node', 'TEXT')
+  addColumn('workspaces', 'owner_node_id', 'TEXT')
+  addColumn('objectives', 'owner_node_id', 'TEXT')
+  addColumn('tasks', 'executor_node_id', 'TEXT')
+  addColumn('agents', 'node_id', 'TEXT')
 
   db.exec(`PRAGMA user_version = ${SCHEMA_VERSION};`)
 }

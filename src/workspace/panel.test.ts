@@ -28,7 +28,7 @@ function fixture() {
   const dir = mkdtempSync(join(tmpdir(), 'elia-ws-panel-'))
   const store = WorkspaceStore.open(join(dir, 'workspace.sqlite'))
   const created = createWorkspace(store, { name: 'demo', ownerName: 'owner' })
-  const server: RunningWorkspaceServer = runWorkspaceServer({ port: 0, store })
+  const server: RunningWorkspaceServer = runWorkspaceServer({ port: 0, store, mesh: false })
   cleanup.push(() => server.stop())
   cleanup.push(() => store.close())
   cleanup.push(() => {
