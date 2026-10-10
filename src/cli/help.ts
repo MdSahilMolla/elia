@@ -235,6 +235,12 @@ System Intelligence record (no model involved):
   elia trials [analyze]                    What happened to each commit after it landed: is that signal usable, and how big a trial it needs
   elia trials basket                       The outcome basket and its digest (the outcomes, fixed before any analysis)
 
+CyberBrain (read-only retrieval corpus):
+  elia cyberbrain install <dir|zip|url>    Install the scraped CTF/VAPT corpus into ~/.elia/cyberbrain
+                                           (a directory, a .zip, or an https URL to a zip)
+  elia cyberbrain verify                   Re-run every validation gate and print the receipt
+  elia cyberbrain status                   Whether a corpus is installed, where, its counts, and generated_at
+
 Battmann intelligence (no model involved unless noted):
   elia battmann seed india-semiconductors  Subscribe real data feeds and open certified questions
   elia battmann brief india-semiconductors Seed if needed, then have the Battmann agent write the brief

@@ -55,7 +55,7 @@ const CATALOG: CapabilityContract[] = [
   // procedure, and a parse of recon output elia already saved. None of them
   // spawns a process or reaches a target, which is the line that separates them
   // from run_security_tool on the same mode.
-  ...['ctf_toolchain', 'ctf_playbook', 'security_triage'].map((tool) => contract(tool, 'safe', ['workspace-read'], true, 'detected tool inventory, returned playbook, or parsed findings with per-finding evidence')),
+  ...['ctf_toolchain', 'ctf_playbook', 'cyberbrain', 'security_triage'].map((tool) => contract(tool, 'safe', ['workspace-read'], true, 'detected tool inventory, returned playbook, or parsed findings with per-finding evidence')),
   // ask_user reaches no system: it puts one question to a person and reports
   // the answer. It is still critical, because what it returns decides whether a
   // run keeps spending money, and an answer nobody gave is a decision the model

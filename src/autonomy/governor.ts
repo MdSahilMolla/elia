@@ -895,6 +895,9 @@ export function assessAction(request: ActionRequest, cwd = currentAgent().cwd ??
   if (name === 'ctf_playbook') {
     return assessment('safe', 'allow', 'ctf_playbook returns a stored triage procedure and executes nothing', 'ctf_playbook', resources, true)
   }
+  if (name === 'cyberbrain') {
+    return assessment('safe', 'allow', 'cyberbrain loads the local CTF/VAPT retrieval corpus and ranks its chunks — it reads files and executes nothing', 'cyberbrain', resources, true)
+  }
   if (name === 'security_triage') {
     return assessment('safe', 'allow', 'security_triage parses recon output already saved under the engagement folder', 'security_triage', resources, true)
   }

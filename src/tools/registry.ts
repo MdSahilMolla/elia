@@ -17,6 +17,7 @@ import { httpProbeTool } from './httpProbe.ts'
 import { engagementReportTool, logFindingTool } from './findings.ts'
 import { ctfToolchainTool } from './ctfToolchain.ts'
 import { ctfPlaybookTool } from './ctfPlaybook.ts'
+import { cyberBrainTool } from './cyberbrain.ts'
 import { securityTriageTool } from './securityTriage.ts'
 import { flagVerifyTool } from './flagVerify.ts'
 import { askUserTool } from './askUser.ts'
@@ -122,7 +123,16 @@ export const browserTools: Tool[] = [browserTool]
 export const communicationTools: Tool[] = [communicationTool]
 
 /** Only granted to the lead agent's own turn, and only in cyber mode — see agent.ts. */
-export const cyberTools: Tool[] = [newEngagementTool, runSecurityToolTool, httpProbeTool, logFindingTool, engagementReportTool, ctfToolchainTool, ctfPlaybookTool, securityTriageTool, askUserTool, flagVerifyTool]
+export const cyberTools: Tool[] = [newEngagementTool, runSecurityToolTool, httpProbeTool, logFindingTool, engagementReportTool, ctfToolchainTool, ctfPlaybookTool, cyberBrainTool, securityTriageTool, askUserTool, flagVerifyTool]
+
+/**
+ * The one cyber tool that is also safe for worker roles. `cyberbrain` only reads
+ * the local corpus — unlike the action-oriented tools in {@link cyberTools} it
+ * spawns nothing and reaches no target — so a read-only scout fanned out during
+ * RECON can consult prior art too. Positive allowlists still decide which roles
+ * actually receive it (see src/autonomy/roles.ts).
+ */
+export const workerCyberTools: Tool[] = [cyberBrainTool]
 
 /** Real external data for the Marketing/Finance personas — see src/agents/personas.ts. Tech's toolset is unchanged. */
 export const businessTools: Tool[] = [readSpreadsheetTool, spreadsheetTool, presentationTool]
@@ -206,9 +216,9 @@ export function getMcpTools(): Tool[] {
   return [...mcpTools]
 }
 
-/** Every tool available to a worker: built-ins, collaboration, anything elia has synthesized, and connected MCP servers. */
+/** Every tool available to a worker: built-ins, collaboration, the read-only cyber corpus reader, anything elia has synthesized, and connected MCP servers. */
 export function allWorkerTools(): Tool[] {
-  return [...tools, ...collaborationTools, ...browserTools, ...communicationTools, ...synthesizedTools, ...mcpTools]
+  return [...tools, ...collaborationTools, ...browserTools, ...communicationTools, ...workerCyberTools, ...synthesizedTools, ...mcpTools]
 }
 
 export function findTool(name: string): Tool | undefined {

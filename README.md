@@ -44,6 +44,8 @@ The guards are enforced in code. The verifier must not get worse. The benchmark,
 
 It isn't only for code. Specialist modes cover research, data science (`elia --datascience`: elia runs and validates the analysis itself, with an execution record for every step), finance, spreadsheets and presentations, authorized security testing, strategic intelligence (Battmann), and System Intelligence (`elia --sysintel`: elia works as a whole technical organization, with lifecycle stages, owner roles, independent reviews, and gates that only engine-verified evidence can pass). Each mode has its own tools and safety rules.
 
+**CyberBrain** gives the security modes a local, offline body of knowledge. `elia cyberbrain install <dir|zip|url>` verifies a release corpus against its manifest (per-file sha256, record/chunk counts, taxonomies and vocabularies) and places it under `~/.elia/cyberbrain/`; `elia cyberbrain verify` re-checks what is installed and `elia cyberbrain status` reports it. Retrieval is a read-only BM25 search over the corpus, exposed as the `cyberbrain` tool (search, open a reference, browse a taxonomy, stats) and available to the read-only worker roles — no embeddings, no network. An install is reported OK only when the validation receipt proves it; a corpus that fails is kept on disk but never treated as installed.
+
 ## Install
 
 You need [Bun](https://bun.sh) 1.3 or newer.
@@ -102,6 +104,9 @@ elia auto "add rate limiting to the API client"      # plan → build → verify
 elia auto "fix the race in the queue" --variants 3   # three independent attempts; the verified one wins
 elia runs                                            # past autonomous runs
 elia fork <run-id> --at 1 --with "use a token bucket instead"   # re-plan from a checkpoint
+
+elia cyberbrain install kb_export.zip                 # verify + install a CyberBrain corpus (release asset)
+elia cyberbrain verify                                # re-check the installed corpus against its manifest
 ```
 
 Inside a session, type while elia works to ask or redirect it; `/autopilot` runs the pilot as a turn you can talk to. `/model` switches models, `/plan <goal>` researches and proposes a plan before changing anything, `/task` opens the task dashboard, `/mcp` manages MCP servers, and `!cmd` runs a shell command. Type `exit` or press Ctrl+C to quit. Use `--plain`, `--quiet` or `--json` for CI and scripts.

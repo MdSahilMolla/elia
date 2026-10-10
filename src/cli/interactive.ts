@@ -2915,6 +2915,12 @@ export async function runInteractive(): Promise<void> {
       const { runBrainCommand } = await import('../brain/command.ts')
       return done(await runBrainCommand(brainMatch[1] ?? ''))
     }
+    const cyberbrainMatch = /^\/cyberbrain(?:\s+(.+))?$/.exec(trimmed)
+    if (cyberbrainMatch) {
+      const { runCyberbrain } = await import('./cyberbrain.ts')
+      await runCyberbrain((cyberbrainMatch[1] ?? '').trim().split(/\s+/).filter(Boolean))
+      return done()
+    }
     if (trimmed === '/track') {
       const { renderCompetence } = await import('../autonomy/outcomes.ts')
       return done(renderCompetence())
@@ -3363,6 +3369,12 @@ export async function runInteractive(): Promise<void> {
     if (brainClassic) {
       const { runBrainCommand } = await import('../brain/command.ts')
       writeUsageLine(await runBrainCommand(brainClassic[1] ?? ''))
+      continue
+    }
+    const cyberbrainClassic = /^\/cyberbrain(?:\s+(.+))?$/.exec(trimmed)
+    if (cyberbrainClassic) {
+      const { runCyberbrain } = await import('./cyberbrain.ts')
+      await runCyberbrain((cyberbrainClassic[1] ?? '').trim().split(/\s+/).filter(Boolean))
       continue
     }
     if (trimmed === '/track') {

@@ -66,7 +66,7 @@ ${SHARED_CONTEXT}
 You own defensive assessment, threat modeling, secure configuration review, vulnerability triage, incident evidence analysis, security architecture, remediation planning, and security reports.
 Start by confirming scope and create or inspect an engagement before running security tools — an engagement whose target is a local file or a challenge artifact is scaffolded for you. Keep evidence, severity, affected assets, reproduction boundaries, remediation, and verification steps explicit.
 Default outputs: scoped findings with evidence, severity, impact, remediation, and retest criteria.
-Work the loop to completion: understand the target, scope the engagement, gather recon, analyse, verify the result actually works, report, and iterate past dead ends. Never end a turn by asking which tool or method to use — choose it yourself, install what is missing, and state the assumption you proceeded under instead of asking.${memorySections}`
+Work the loop to completion: understand the target, scope the engagement, gather recon, analyse, verify the result actually works, report, and iterate past dead ends. Before improvising a technique, consult \`cyberbrain\` — the local CTF/VAPT knowledge base — for prior art, and open the matching writeup rather than guessing. Never end a turn by asking which tool or method to use — choose it yourself, install what is missing, and state the assumption you proceeded under instead of asking.${memorySections}`
 
 const AUTOMATION_PROMPT = `You are elia, running as the Automation agent.
 ${SHARED_CONTEXT}
@@ -134,7 +134,7 @@ const PERSONA_TOOL_NAMES: Record<AgentPersona, string[]> = {
   business: ['read_file', 'list_files', 'grep', 'write_file', 'edit_file', 'web_search', 'web_fetch', 'read_spreadsheet', 'spreadsheet', 'presentation', 'visualize'],
   data: ['read_file', 'list_files', 'grep', 'write_file', 'edit_file', 'run_program', 'run_command', 'web_search', 'web_fetch', 'read_spreadsheet', 'spreadsheet', 'presentation', 'data_science', 'visualize'],
   research: ['read_file', 'list_files', 'grep', 'write_file', 'edit_file', 'web_search', 'web_fetch', 'browser', 'communication', 'spreadsheet', 'presentation'],
-  cyber: ['read_file', 'list_files', 'grep', 'run_program', 'run_command', 'write_file', 'edit_file', 'web_search', 'web_fetch', 'browser', 'process', 'new_engagement', 'run_security_tool', 'http_probe', 'log_finding', 'engagement_report', 'ctf_toolchain', 'ctf_playbook', 'security_triage'],
+  cyber: ['read_file', 'list_files', 'grep', 'run_program', 'run_command', 'write_file', 'edit_file', 'web_search', 'web_fetch', 'browser', 'process', 'new_engagement', 'run_security_tool', 'http_probe', 'log_finding', 'engagement_report', 'ctf_toolchain', 'ctf_playbook', 'cyberbrain', 'security_triage'],
   automation: ['read_file', 'list_files', 'grep', 'run_program', 'run_command', 'write_file', 'edit_file', 'web_search', 'web_fetch', 'browser', 'communication', 'spreadsheet', 'presentation', 'deployment'],
   communications: ['read_file', 'list_files', 'grep', 'write_file', 'edit_file', 'web_search', 'web_fetch', 'browser', 'communication'],
   ai: ['read_file', 'list_files', 'grep', 'run_program', 'run_command', 'write_file', 'edit_file', 'web_search', 'web_fetch', 'read_spreadsheet', 'browser'],
