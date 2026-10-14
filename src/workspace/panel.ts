@@ -13,6 +13,7 @@ import { bold, cyan, dim, gold } from '../ui/theme.ts'
 import { openWorkspaceClient, resolveServer, workspaceTokenFromEnv, type ResolvedServer } from './connection.ts'
 import type { WorkspaceStatusResult } from './protocol.ts'
 import type { PersistedEvent } from './events.ts'
+import { describeFileChange, fileChangeFromPayload } from './fileChange.ts'
 
 export interface EliaspaceSnapshot {
   /** A token is set — the minimum for the panel to try connecting. */
@@ -187,5 +188,10 @@ function counts(byStatus: Record<string, number>): string {
 function formatEvent(event: PersistedEvent): string {
   const time = event.at.slice(11, 19)
   const scope = event.taskId ? ` task=${event.taskId}` : event.objectiveId ? ` obj=${event.objectiveId}` : ''
-  return `${dim(time)}  #${String(event.seq).padStart(4)}  ${event.type.padEnd(22)} ${event.actorId}${dim(scope)}`
+  // A file change carries a path and a magnitude, which the generic line would
+  // hide behind the event type. Its body is never in the event log, so only the
+  // metadata is rendered here; the withheld notice rides along when it applies.
+  const change = event.type === 'FileChanged' ? fileChangeFromPayload(event.payload) : undefined
+  const detail = change === undefined ? '' : dim(` — ${describeFileChange(change)}`)
+  return `${dim(time)}  #${String(event.seq).padStart(4)}  ${event.type.padEnd(22)} ${event.actorId}${dim(scope)}${detail}`
 }

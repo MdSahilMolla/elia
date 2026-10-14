@@ -11,7 +11,7 @@ import {
   type ToolCategory,
 } from '../security/toolCatalog.ts'
 
-const CATEGORIES: ToolCategory[] = ['pwn', 'rev', 'crypto', 'stego', 'misc']
+const CATEGORIES: ToolCategory[] = ['pwn', 'rev', 'crypto', 'stego', 'web', 'misc']
 
 describe('SECURITY_TOOL_CATALOG invariants', () => {
   test('every entry names itself, picks a real category, and says what it is for', () => {

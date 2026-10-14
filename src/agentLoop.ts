@@ -24,7 +24,7 @@ import { endTextTurn, writeNotice, writeToolCall, writeToolResult } from './ui/s
 import { startThinkingAnimation } from './ui/animator.ts'
 import { createStreamCursor } from './ui/streamCursor.ts'
 import { ZERO_USAGE, addUsage, reportLiveOutput, trackInflightUsage, type InflightUsage } from './usage.ts'
-import { spendState, spendStopPrompt } from './spendLimit.ts'
+import { requestSpendIncrease, spendState, spendStopPrompt, type SpendState } from './spendLimit.ts'
 import { SPECULABLE_TOOLS, type CacheStats, type ToolResultCache } from './speculation/cache.ts'
 import { readMemo } from './speculation/deterministicCache.ts'
 import type { Prefetcher } from './speculation/prefetch.ts'
@@ -257,6 +257,15 @@ export interface RunAgentLoopOptions {
   /** Deferred tools to send in full from the first call, beyond what the request's words cue — a pre-turn check found work for them. */
   preloadTools?: readonly string[]
   /**
+   * Asked when a run hits its spending ceiling, so a person can raise it and the
+   * work continues in this same turn. Return a new total in USD to approve it, or
+   * undefined to decline and wrap up as before.
+   *
+   * Only wired up in cyber mode with a terminal attached, so the usual answer to
+   * "the budget ran out" stays "stop and summarise" everywhere else.
+   */
+  onSpendCeiling?: (state: SpendState, requestedUsd: number | undefined) => Promise<number | undefined>
+  /**
    * Tools sent only by name until the model loads or calls them (see
    * tools/lazyTools.ts). They stay callable throughout; only their definitions
    * are held back. Omit to send every definition.
@@ -369,6 +378,7 @@ async function runAgentLoopTracked(opts: RunAgentLoopOptions, inflight: Inflight
     onPlanProgress,
     finishAfterTool,
     preloadTools,
+    onSpendCeiling,
     deferTools,
     loadedTools,
   } = opts
@@ -616,7 +626,16 @@ async function runAgentLoopTracked(opts: RunAgentLoopOptions, inflight: Inflight
     // the session's deep model (#1244) — a cheap tier hit the ceiling early,
     // a dearer one blew straight past it.
     const spend = spendState(resolveRoute?.()?.model ?? model ?? config.model, totalUsage)
-    if (spend.exceeded) return wrapUpAndFinish(spendStopPrompt(spend), 'spend-budget')
+    if (spend.exceeded) {
+      // The one question an unfinished cyber run may put to a person. Only the
+      // interactive loop supplies `onSpendCeiling`, so a sub-agent, a headless
+      // run, and every other mode land on the wrap-up exactly as before.
+      const raised = onSpendCeiling ? await onSpendCeiling(spend, undefined) : undefined
+      if (raised === undefined) return wrapUpAndFinish(spendStopPrompt(spend), 'spend-budget')
+      const applied = requestSpendIncrease(spend, raised)
+      if (!applied.ok) return wrapUpAndFinish(`${spendStopPrompt(spend)}\n\n[elia] The raised ceiling was not applied: ${applied.reason}`, 'spend-budget')
+      continue
+    }
 
     steps += 1
     let content: ContentBlock[]

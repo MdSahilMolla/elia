@@ -21,8 +21,9 @@ import { miscPlaybook } from './misc.ts'
 import { pwnPlaybook } from './pwn.ts'
 import { revPlaybook } from './rev.ts'
 import { stegoPlaybook } from './stego.ts'
+import { webPlaybook } from './web.ts'
 
-export type PlaybookCategory = 'pwn' | 'rev' | 'crypto' | 'stego' | 'misc'
+export type PlaybookCategory = 'pwn' | 'rev' | 'crypto' | 'stego' | 'web' | 'misc'
 
 export interface PlaybookStep {
   title: string
@@ -47,13 +48,14 @@ export interface Playbook {
 }
 
 /** Fixed order. It is the triage order, the report order, and the render order. */
-export const PLAYBOOK_CATEGORIES: PlaybookCategory[] = ['pwn', 'rev', 'crypto', 'stego', 'misc']
+export const PLAYBOOK_CATEGORIES: PlaybookCategory[] = ['pwn', 'rev', 'crypto', 'stego', 'web', 'misc']
 
 export const PLAYBOOKS: Record<PlaybookCategory, Playbook> = {
   pwn: pwnPlaybook,
   rev: revPlaybook,
   crypto: cryptoPlaybook,
   stego: stegoPlaybook,
+  web: webPlaybook,
   misc: miscPlaybook,
 }
 
@@ -140,7 +142,7 @@ const CATEGORY_SIGNALS: Record<PlaybookCategory, CategorySignals> = {
       /carve|carving|polyglot/i,
     ],
   },
-  misc: {
+misc: {
     extensions: [/\.pcap(ng)?$/i, /\.cap$/i, /\.har$/i],
     keywords: [
       /pcap|packet capture|wireshark|\btshark\b|\btcpdump\b/i,
@@ -150,6 +152,24 @@ const CATEGORY_SIGNALS: Record<PlaybookCategory, CategorySignals> = {
       /\bqpdf\b|pdftotext|\bsoffice\b|libreoffice|\bpdf\b/i,
       /wordlist|rockyou|hashcat|john the ripper|\bjohn\b|hydra/i,
       /forensic|disk image|memory dump|volatility|\bscalpel\b|\bforemost\b/i,
+    ],
+  },
+  web: {
+    // `.har` and `.pcap` stay with `misc`: a capture is a forensic artifact first
+    // and a web artifact only second, so it must not outrank the forensic answer.
+    extensions: [
+      /\.(html?|php\d?|jsp|asp|aspx|cfm|war|htaccess)$/i,
+      /\.(js|mjs|cjs|ts|jsx|tsx)$/i,
+      /\.(css|map)$/i,
+    ],
+    keywords: [
+      /\bhttps?:\/\/|localhost|\b127\.0\.0\.1\b|\b0\.0\.0\.0\b|\bvhost\b|\bsubdomain\b|\bendpoint\b|\broute\b/i,
+      /\bweb(app|site|server)?\b|\bfront-?end\b|\bback-?end\b|\bnginx\b|\bapache\b|\biis\b|\bcaddy\b|\btomcat\b/i,
+      /\bsql ?injection\b|\bsqli\b|\bxss\b|\bcsrf\b|\bssrf\b|\bxxe\b|\brce\b|\bdeserializ/i,
+      /\bidor\b|\bbola\b|broken access control|\bprivilege escalation\b|\bauth ?bypass\b/i,
+      /\bhttp_?probe\b|\bcurl\b|\bwget\b|\bburp\b|\bnuclei\b|\bffuf\b|\bgobuster\b|\bsqlmap\b|\bnikto\b|\bjwt\b/i,
+      /\blfi\b|\brfi\b|path traversal|directory listing|\.htaccess|file (upload|inclusion)/i,
+      /\bcsp\b|\bset-cookie\b|\bsession\b|\bcookie\b|\bbearer\b|\bapi key\b/i,
     ],
   },
 }

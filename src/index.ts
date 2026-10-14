@@ -161,6 +161,10 @@ async function main() {
       const { runTrials } = await import('./trials/cli.ts')
       return runTrials()
     }
+    case 'cyberbrain': {
+      const { runCyberbrain } = await import('./cli/cyberbrain.ts')
+      return runCyberbrain()
+    }
     case 'bridge': {
       if (hasFlag('--http')) {
         const portRaw = flagValue('--port') ?? '4319'

@@ -242,7 +242,13 @@ test('config set refuses another provider\'s model for a single-family provider,
 })
 
 test('the old supervision switches are gone: elia auto says so and stays autonomous', async () => {
-  const result = await runCli(['auto', 'do work', '--supervised', '--plain'], {
+  // `--max-run-ms` bounds the run to a wall-clock budget, so this exercises flag
+  // handling and then stops. Without it the command starts a real autonomous run:
+  // with no provider key the CLI still reaches the model, streams its thinking,
+  // and never exits — which is what made this hang rather than merely run slow.
+  // The deprecation notice is printed during argument handling, before the run
+  // starts, so the bounded run still asserts exactly what this test is about.
+  const result = await runCli(['auto', 'do work', '--supervised', '--plain', '--max-run-ms', '2000'], {
     ELIA_PROVIDER: undefined,
     ELIA_MODEL: undefined,
     ELIA_API_KEY: undefined,
@@ -251,7 +257,7 @@ test('the old supervision switches are gone: elia auto says so and stays autonom
   })
   expect(`${result.stdout}${result.stderr}`).toContain('elia is always autonomous now')
   expect(`${result.stdout}${result.stderr}`).not.toContain('Supervision conflict')
-})
+}, 60_000)
 
 test('control status stays provider-independent', async () => {
   const result = await runCli(['control', 'status', '--plain'], {

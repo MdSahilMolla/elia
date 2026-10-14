@@ -14,6 +14,7 @@
 
 import net from 'node:net'
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
+import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { ELIA_ROOT } from '../statePaths.ts'
 import { logSwallowedError } from '../diagnostics.ts'
@@ -62,18 +63,38 @@ export function socketPath(): string {
     return explicit
   }
   if (process.platform === 'win32') return `\\\\.\\pipe\\elia-eliad-${userTag()}`
-  const dir = process.env.XDG_RUNTIME_DIR || join(process.env.HOME ?? '.', '.elia')
-  return join(dir, `eliad-${userTag()}.sock`)
+  return join(socketDir(), `eliad-${userTag()}.sock`)
+}
+
+/** The unix socket directory. Must match `crates/eliad/src/socket.rs`'s
+ * `socket_dir()`: `$XDG_RUNTIME_DIR` is used *verbatim* when set, else
+ * `~/.elia`. Note there is no extra path segment on the former — the socket
+ * file is joined onto it by the caller.
+ *
+ * Resolve the home directory with `os.homedir()`, not `process.env.HOME` — the
+ * daemon uses `dirs::home_dir()` (Rust), and on Windows `HOME` is often unset
+ * (it is a POSIX convention), which would silently point us at `./.elia` while
+ * the daemon wrote to the real profile. The two paths must stay identical or
+ * `readSocketToken` waits for a token the daemon never put there. See
+ * `src/commands/loader.test.ts` for the same `$HOME` trap. */
+function socketDir(): string {
+  return process.env.XDG_RUNTIME_DIR || join(homedir(), '.elia')
 }
 
 /** Where the daemon persists the connection token, 0600 in a 0700 directory —
- * must match `crates/eliad/src/socket.rs`'s `token_path()`. */
+ * must match `crates/eliad/src/socket.rs`'s `token_path()`.
+ *
+ * `homedir()`, not `$HOME`: the daemon resolves through `dirs::home_dir()`, and
+ * on Windows `HOME` is a POSIX convention that is frequently unset. When it
+ * was, the client looked for `./.elia/elia-eliad-<user>.token` while the daemon
+ * wrote `<real home>/.elia/...`, so the handshake timed out even though the
+ * daemon was healthy. The two implementations must agree byte-for-byte or the
+ * daemon is unreachable. */
 export function socketTokenPath(): string {
   if (process.platform === 'win32') {
-    return join(process.env.HOME ?? '.', '.elia', `elia-eliad-${userTag()}.token`)
+    return join(homedir(), '.elia', `elia-eliad-${userTag()}.token`)
   }
-  const dir = process.env.XDG_RUNTIME_DIR || join(process.env.HOME ?? '.', '.elia')
-  return join(dir, `eliad-${userTag()}.token`)
+  return join(process.env.XDG_RUNTIME_DIR || join(homedir(), '.elia'), `eliad-${userTag()}.token`)
 }
 
 /** Locate the `eliad` binary: an explicit override, then a published platform

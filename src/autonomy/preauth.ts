@@ -33,11 +33,12 @@
  * grant-authorized action is never invisible in the run's own audit trail.
  */
 
-import { createHmac, randomBytes } from 'node:crypto'
+import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { execCapture } from '../github/exec.ts'
+import { activeMode, AGENT_MODES, type AgentMode } from './mode.ts'
 
 export interface PreauthGrant {
   /** A governor `assessment.intent`, e.g. "deployment.production", "github.pr_merge". */
@@ -52,7 +53,18 @@ export interface PreauthGrant {
   lastUsedAt?: number
   /** Once `usedCount` reaches this, the grant is spent even if still inside its time window. `--authorize deployment.production:1` sets this to 1 for a true one-shot. Absent means uncapped (the original time-window-only behavior). */
   maxUses?: number
-  /** HMAC-SHA256 over intent/repo/branch/grantedAt/expiresAt/maxUses with the per-user secret. */
+  /**
+   * Restricts the grant to one mode, checked against the mode the turn is
+   * running as. Absent means every mode, which is what `--authorize` means and
+   * what every grant written before this field existed means.
+   *
+   * `/scope all` sets `cyber`. The grants it records authorize installs, probes
+   * and credential-adjacent reads, and a grant that outlived the security run
+   * that asked for it would be authority nobody re-approved. Signed below, so it
+   * cannot be removed from a stored grant to widen it back to every mode.
+   */
+  mode?: AgentMode
+  /** HMAC-SHA256 over intent/repo/branch/grantedAt/expiresAt/maxUses/mode with the per-user secret. */
   hmac?: string
 }
 
@@ -62,6 +74,8 @@ interface PreauthFile {
 
 const MAX_GRANTS = 50
 const INTENT_PATTERN = /^[a-z][a-z0-9_.-]{1,80}$/
+/** The modes a stored `mode` tag may name. Anything else is a malformed grant. */
+const KNOWN_MODES = new Set<string>(AGENT_MODES)
 /** Generous enough to cover a long unattended run; short enough that a forgotten grant doesn't linger across sessions. */
 export const DEFAULT_PREAUTH_TTL_MS = 4 * 60 * 60_000
 /**
@@ -149,8 +163,50 @@ export function userPreauthSecret(): string {
 }
 
 function hmacGrant(grant: PreauthGrant): string {
-  const data = [grant.intent, grant.repo, grant.branch, grant.grantedAt, grant.expiresAt, grant.maxUses ?? ''].join('\n')
-  return createHmac('sha256', getSecret()).update(data).digest('hex')
+  return createHmac('sha256', getSecret()).update(signedPayload(grant)).digest('hex')
+}
+
+/** The exact bytes covered by a grant's signature, `mode` included. */
+function signedPayload(grant: PreauthGrant): string {
+  return [grant.intent, grant.repo, grant.branch, grant.grantedAt, grant.expiresAt, grant.maxUses ?? '', grant.mode ?? ''].join('\n')
+}
+
+/**
+ * The payload format before `mode` was signed.
+ *
+ * A grant written by an earlier version carries a signature over six fields. If
+ * verification only understood the seven-field form, every live grant on the
+ * machine would fail closed and silently stop working on upgrade — the operator
+ * would find their `/scope all` had evaporated with nothing to explain it. So
+ * both forms verify, and a grant that only matches the older one keeps its
+ * original meaning: no `mode`, therefore every mode.
+ *
+ * Accepting both is safe in the direction that matters. Adding or removing
+ * `mode` in the file changes the seven-field payload, so it cannot match a
+ * signature that did not cover it. The only edit that still verifies is one that
+ * restores exactly the permission that was signed.
+ */
+function legacySignedPayload(grant: PreauthGrant): string {
+  return [grant.intent, grant.repo, grant.branch, grant.grantedAt, grant.expiresAt, grant.maxUses ?? ''].join('\n')
+}
+
+function grantSignatureVerifies(grant: PreauthGrant): boolean {
+  if (!grant.hmac) return false
+  const secret = getSecret()
+  const ok = (payload: string): boolean => {
+    const expected = createHmac('sha256', secret).update(payload).digest('hex')
+    try {
+      return timingSafeEqual(Buffer.from(grant.hmac!, 'hex'), Buffer.from(expected, 'hex'))
+    } catch {
+      return false
+    }
+  }
+  return ok(signedPayload(grant)) || (grant.mode === undefined && ok(legacySignedPayload(grant)))
+}
+
+/** Whether a grant's mode covers the mode this turn is actually running as. */
+function modeCovers(grant: PreauthGrant): boolean {
+  return grant.mode === undefined || grant.mode === activeMode()
 }
 
 interface Cached {
@@ -196,10 +252,14 @@ function load(path: string): PreauthFile {
           .filter((g): g is PreauthGrant => {
             if (!g || typeof g.intent !== 'string' || typeof g.repo !== 'string' || typeof g.branch !== 'string' || typeof g.grantedAt !== 'number' || typeof g.expiresAt !== 'number') return false
             if (g.maxUses !== undefined && (typeof g.maxUses !== 'number' || !Number.isInteger(g.maxUses) || g.maxUses < 1)) return false
+            // A `mode` outside the known set is refused rather than treated as
+            // absent: an unrecognized tag cannot be resolved against a running
+            // mode, and quietly reading it as "no mode" would widen it.
+            if (g.mode !== undefined && !KNOWN_MODES.has(g.mode)) return false
             // A grant with no signature is not one the CLI produced — and a
             // malformed one grants nothing. Signing requires the per-user
             // secret, so a hand-written or repo-committed grant fails here.
-            if (!g.hmac || g.hmac !== hmacGrant(g)) return false
+            if (!grantSignatureVerifies(g)) return false
             // Bounds the TTL to what grantPreauth can produce: a hand-edited
             // far-future expiresAt is rejected instead of honored as live.
             if (g.expiresAt - g.grantedAt > MAX_ACCEPTED_TTL_MS) return false
@@ -248,7 +308,7 @@ export function clearPreauthCaches(): void {
  * site — a human granting `--authorize` from a terminal at run start). Returns
  * the grants actually written (invalid intents are dropped, not thrown).
  */
-export function grantPreauth(intents: string[], cwd: string, branch: string, ttlMs = DEFAULT_PREAUTH_TTL_MS, maxUses?: number): PreauthGrant[] {
+export function grantPreauth(intents: string[], cwd: string, branch: string, ttlMs = DEFAULT_PREAUTH_TTL_MS, maxUses?: number, mode?: AgentMode): PreauthGrant[] {
   const path = preauthPath()
   const file = load(path)
   const now = Date.now()
@@ -259,7 +319,7 @@ export function grantPreauth(intents: string[], cwd: string, branch: string, ttl
   const granted: PreauthGrant[] = []
   for (const intent of intents) {
     if (!INTENT_PATTERN.test(intent)) continue
-    const grant: PreauthGrant = { intent, repo: cwd, branch, grantedAt: now, expiresAt: now + clampedTtlMs, usedCount: 0, maxUses: clampedMaxUses }
+    const grant: PreauthGrant = { intent, repo: cwd, branch, grantedAt: now, expiresAt: now + clampedTtlMs, usedCount: 0, maxUses: clampedMaxUses, ...(mode ? { mode } : {}) }
     grant.hmac = hmacGrant(grant)
     granted.push(grant)
   }
@@ -276,14 +336,17 @@ function isSpent(grant: PreauthGrant): boolean {
 function findLive(intent: string, cwd: string, branch: string, now: number): { file: PreauthFile; path: string; grant: PreauthGrant } | undefined {
   const path = preauthPath()
   const file = load(path)
-  const grant = file.grants.find((g) => g.intent === intent && g.repo === cwd && g.branch === branch && g.expiresAt > now && !isSpent(g))
+  const grant = file.grants.find((g) => g.intent === intent && g.repo === cwd && g.branch === branch && g.expiresAt > now && !isSpent(g) && modeCovers(g))
   return grant ? { file, path, grant } : undefined
 }
 
 /** Every live (unexpired, not yet spent) grant for this project + branch — for `elia control preauth list`. */
 export function listLivePreauth(cwd = process.cwd(), branch = 'unknown', now = Date.now()): PreauthGrant[] {
   const file = load(preauthPath())
-  return file.grants.filter((g) => g.repo === cwd && g.branch === branch && g.expiresAt > now && !isSpent(g))
+  // Mode-filtered for the same reason `isPreauthorized` is: "what is granted for
+  // this run" has to mean this run, or a cyber grant shows up as live authority
+  // in a dev listing and invites someone to rely on it there.
+  return file.grants.filter((g) => g.repo === cwd && g.branch === branch && g.expiresAt > now && !isSpent(g) && modeCovers(g))
 }
 
 /**
@@ -291,11 +354,19 @@ export function listLivePreauth(cwd = process.cwd(), branch = 'unknown', now = D
  * regardless of remaining time or uses. Returns how many were revoked. The
  * one way to take back a grant before it expires or is spent on its own.
  */
-export function revokePreauth(intent: string, cwd = process.cwd(), branch = 'unknown'): number {
-  const path = preauthPath()
-  const file = load(path)
-  const now = Date.now()
-  const remaining = file.grants.filter((g) => !(g.intent === intent && g.repo === cwd && g.branch === branch && g.expiresAt > now))
+export function revokePreauth(intent: string, cwd = process.cwd(), branch = 'unknown', mode?: AgentMode): number {
+    const path = preauthPath()
+    const file = load(path)
+    const now = Date.now()
+    // `mode` narrows the revocation to grants tagged for that mode, so
+    // `/scope clear` in cyber cannot take out a person's own unscoped grant for
+    // the same intent. Omitting it keeps the pre-existing "any grant for this
+    // intent + project + branch" behaviour, which is what `elia preauth remove`
+    // means: the person named the intent, not the tag.
+    const remaining = file.grants.filter((g) => {
+        if (!(g.intent === intent && g.repo === cwd && g.branch === branch && g.expiresAt > now)) return true
+        return mode !== undefined && g.mode !== mode
+    })
   const revokedCount = file.grants.length - remaining.length
   if (revokedCount > 0) save(path, { grants: remaining })
   return revokedCount

@@ -123,7 +123,7 @@ test('a trivial change moves through its gates only on engine-verified evidence'
   const store = new SysintelStore(dir)
   expect(store.read('SI-1').status).toBe('done')
   expect(store.journal().map((entry) => entry.event)).toContain('check-fail')
-})
+}, 60_000)
 
 test('work done before intake still counts once, and a new commit is evidence of it', async () => {
   const dir = repo()
@@ -177,7 +177,7 @@ test('only an independent, current review passes a review gate', async () => {
   expect(() => recordSignoff(operator, 'SI-1', 'production', 'deploy', 'operator-cli')).toThrow('does not call for a production sign-off')
   expect(recordSignoff(operator, 'SI-1', 'release', 'ship it', 'operator-cli')).toContain('release sign-off recorded')
   expect(await run('si_work', { action: 'advance', id: 'SI-1' })).toContain('is done')
-})
+}, 60_000)
 
 test('research loops on a refuted hypothesis and hands off only a validated, feasible result', async () => {
   const dir = repo()

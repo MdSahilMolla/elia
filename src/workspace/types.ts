@@ -73,6 +73,11 @@ export interface WorkspaceRecord {
   name: string
   defaultProjectId: string
   createdAt: string
+  /**
+   * The node that owns the workspace-level facts — members, tokens, agent
+   * identities — for objectives that do not name an owner of their own.
+   */
+  ownerNodeId?: string
 }
 
 export interface ProjectRecord {
@@ -185,6 +190,8 @@ export interface AgentRecord {
   lastHeartbeatAt: string
   stoppedAt?: string
   lastError?: string
+  /** The node whose process is hosting this runtime. Absent on a pre-v4 row. */
+  nodeId?: string
 }
 
 // --- Objectives and tasks ---
@@ -225,6 +232,12 @@ export interface ObjectiveRecord {
   updatedAt: string
   approvedBy?: string
   approvedAt?: string
+  /**
+   * The only node permitted to write owner-authoritative events for this
+   * objective. Exactly one writer per objective is what keeps the serial audit
+   * chain a valid total order (design note §6.6).
+   */
+  ownerNodeId?: string
 }
 
 export type TaskStatus =
@@ -309,6 +322,12 @@ export interface TaskRecord {
   reviewNotes?: string
   /** The completing agent's final report — fed to dependent tasks as scoped context. */
   resultReport?: string
+  /**
+   * The node granted execution of this task. Absent means the task has not been
+   * partitioned yet, in which case the legacy single-writer rules apply and no
+   * grant is required to write execution events.
+   */
+  executorNodeId?: string
 }
 
 // --- Coordination: reservations, messages, decisions, approvals, presence ---
@@ -383,6 +402,59 @@ export interface PresenceRecord {
   focus?: string
   connectedAt: string
   lastSeenAt: string
+}
+
+// --- Nodes (partitioned ownership) ---
+
+/**
+ * One machine running Elia. Deliberately *not* a member and *not* an agent: a
+ * node is where work happens, and the two-node design needs a name for "this
+ * process on this machine" to partition authorship by.
+ *
+ * The id is stable across restarts and is derived from the file plane's pinned
+ * certificate fingerprint when the mesh is active (design note §6.1), so the
+ * control plane has exactly one identity per machine rather than two.
+ */
+export interface NodeRecord {
+  id: string
+  name: string
+  /** `local` for this machine; `mesh` once its certificate fingerprint is known. */
+  kind: 'local' | 'mesh'
+  /** sha256 of the sidecar's pinned host certificate, when the mesh is active. */
+  fingerprint?: string
+  isLocal: boolean
+  firstSeenAt: string
+  lastSeenAt: string
+}
+
+/**
+ * A node's presence, keyed by node rather than by connection.
+ *
+ * `PresenceRecord` below is scoped to one process's WebSocket and therefore
+ * cannot express "the other machine is online" (design note §6.3); this can. It
+ * is derived from replicated `NodeHeartbeat` events, so it survives the peer
+ * disconnecting between beats and decays on a bounded lag rather than not at all.
+ */
+export interface NodePresenceRecord {
+  nodeId: string
+  name: string
+  focus?: string
+  connectedAt: string
+  lastSeenAt: string
+}
+
+/**
+ * The capability letting one node write execution events for one task.
+ *
+ * Authored solely by the objective's owner — one grant per attempt. Two grants
+ * on one task would permit two nodes to run it, which is exactly the
+ * double-dispatch the partitioning exists to prevent.
+ */
+export interface TaskGrantRecord {
+  taskId: string
+  nodeId: string
+  grantedAt: string
+  releasedAt?: string
 }
 
 // --- Shared limits ---

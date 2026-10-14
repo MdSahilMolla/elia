@@ -17,16 +17,22 @@
 
 import { Database } from 'bun:sqlite'
 import { createHash, randomUUID } from 'node:crypto'
+import { hostname } from 'node:os'
 import { dirname, join } from 'node:path'
 import { ensureSecureDirectory, hardenSecureFile } from '../securePersistence.ts'
 import { redactSecrets } from '../ui/redact.ts'
-import { applyProjection, derivedEvents, isWorkspaceEventType, type PersistedEvent, type WorkspaceEventInput } from './events.ts'
-import { migrate } from './schema.ts'
 import {
-  toAgent, toAgentIdentity, toAgentMessage, toApproval, toDecision, toMember, toObjective,
-  toPresence, toProject, toReservation, toTask, toToken, toWorkspace, type Row,
+  applyProjection, derivedEvents, isWorkspaceEventType, ownsObjective,
+  type PersistedEvent, type ReplicatedEvent, type WorkspaceEventInput,
+} from './events.ts'
+import { migrate } from './schema.ts'
+import { agentIdOf, classifyEvent, isAgentScoped, isTaskScoped } from './authority.ts'
+import {
+  toAgent, toAgentIdentity, toAgentMessage, toApproval, toDecision, toMember, toNode,
+  toNodePresence, toObjective, toPresence, toProject, toReservation, toTask, toTaskGrant,
+  toToken, toWorkspace, type Row,
 } from './rows.ts'
-import { LEASE_TTL_MS, type TaskStatus } from './types.ts'
+import { LEASE_TTL_MS, type NodePresenceRecord, type TaskGrantRecord, type TaskRecord, type TaskStatus } from './types.ts'
 
 export const DEFAULT_WORKSPACE_DB = join(process.cwd(), '.elia', 'workspace.sqlite')
 
@@ -53,11 +59,27 @@ export class WorkspaceStore {
   // commits (depth > 0) — see `append` and `transact` below.
   private transactDepth = 0
   private pendingNotifications: PersistedEvent[] = []
+  /** Set when an inbound event could not be projected. See `applyRemote`. */
+  private lastReplicationError: string | undefined
+  /**
+   * This process's node id, persisted on first use.
+   *
+   * It is generated rather than derived from the workspace or the machine,
+   * because it has to survive both a restart and a *second* workspace on the
+   * same machine without colliding — and because a node's identity in the mesh is
+   * its certificate fingerprint, which is learned later and then pinned onto this
+   * same row (see `bindNodeFingerprint`).
+   */
+  readonly localNodeId: string
 
   private constructor(
     readonly path: string,
     private readonly db: Database,
-  ) {}
+    /** False for a read-only handle, which must not mint or touch a node row. */
+    writable = true,
+  ) {
+    this.localNodeId = ensureLocalNode(db, writable)
+  }
 
   /**
    * Observe every committed event. The workspace server uses this to fan events
@@ -67,6 +89,21 @@ export class WorkspaceStore {
   subscribe(listener: EventListener): () => void {
     this.listeners.add(listener)
     return () => this.listeners.delete(listener)
+  }
+
+  /**
+   * Opens an existing workspace for reading only.
+   *
+   * A reader that can write is a hazard even when it only intends to read: a
+   * writable handle takes locks it has no reason to hold, and the node-id
+   * bootstrap below would make an inspection part of the state it is inspecting.
+   * The database file must already exist — this reports what is there, so an
+   * absent one is an error rather than something to create.
+   */
+  static openReadOnly(path: string = DEFAULT_WORKSPACE_DB): WorkspaceStore {
+    const db = new Database(path, { readonly: true, strict: true })
+    db.exec('PRAGMA busy_timeout = 5000;')
+    return new WorkspaceStore(path, db, false)
   }
 
   static open(path: string = DEFAULT_WORKSPACE_DB): WorkspaceStore {
@@ -102,13 +139,15 @@ export class WorkspaceStore {
   append(input: WorkspaceEventInput): PersistedEvent {
     if (!isWorkspaceEventType(input.type)) throw new Error(`unknown workspace event type: ${String(input.type)}`)
     const at = new Date().toISOString()
+    const actorNode = input.actorNode ?? this.localNodeId
+    this.assertMayAppend(input.type, input, actorNode)
 
     // The event plus anything it implies (see `derivedEvents`) commit together,
     // so a replica never sees the task finish without the objective finishing.
     const run = this.db.transaction(() => {
-      const event = this.insertEvent(input, at)
+      const event = this.insertEvent(input, at, actorNode)
       const committed = [event]
-      for (const derived of derivedEvents(this.db, event)) committed.push(this.insertEvent(derived, at))
+      for (const derived of derivedEvents(this.db, event, actorNode)) committed.push(this.insertEvent(derived, at, actorNode))
       return committed
     })
     const committed = run()
@@ -126,17 +165,191 @@ export class WorkspaceStore {
     return committed[0]!
   }
 
+  /**
+   * Refuse an event whose node is not entitled to write it.
+   *
+   * This is the single choke point for partitioned ownership, and it is here
+   * rather than in the RPC layer so that everything which mutates the workspace —
+   * the orchestrator, the agent RPC handlers, the reconcilers, a replication
+   * receive — inherits the check without knowing it exists.
+   *
+   * Two rules keep it inert for a single-node workspace, which is what stops this
+   * from being a change to existing behaviour:
+   *
+   * - An objective with no `owner_node_id`, and a task with no
+   *   `executor_node_id`, predate partitioning. They are unpartitioned, not
+   *   unowned-and-therefore-locked, so the legacy single-writer rules apply.
+   * - A node that owns nothing yet may register itself and create work; it is
+   *   refused only when it tries to write *someone else's* objective.
+   */
+  private assertMayAppend(type: WorkspaceEventInput['type'], input: WorkspaceEventInput, actorNode: string): void {
+    const authority = classifyEvent(type)
+
+    if (authority === 'coordination') return
+    if (authority === 'local') {
+      if (actorNode !== this.localNodeId) throw new Error(`${type} is process-local and cannot be written by node ${actorNode}`)
+      return
+    }
+
+    if (authority === 'executor') {
+      if (isTaskScoped(type)) {
+        if (!input.taskId) throw new Error(`${type} requires a taskId`)
+        const task = this.db.query('SELECT executor_node_id FROM tasks WHERE id = ?').get(input.taskId) as Row | null
+        const executor = task?.executor_node_id
+        // No executor recorded: the task has not been dispatched to a node, so
+        // there is no partition to respect yet.
+        if (executor == null || executor === '') return
+        if (String(executor) !== actorNode) {
+          throw new Error(`task ${input.taskId} is granted to node ${String(executor)}; node ${actorNode} may not write ${type} for it`)
+        }
+        return
+      }
+      if (isAgentScoped(type)) {
+        const agentId = agentIdOf(input.payload ?? {})
+        if (!agentId) return
+        const row = this.db.query('SELECT node_id FROM agents WHERE id = ?').get(agentId) as Row | null
+        const agentNode = row?.node_id
+        // An unknown or pre-v4 agent has no node to check against.
+        if (agentNode == null || agentNode === '') return
+        if (String(agentNode) !== actorNode) {
+          throw new Error(`agent ${agentId} runs on node ${String(agentNode)}; node ${actorNode} may not report its state`)
+        }
+        return
+      }
+      return
+    }
+
+    // Owner-authoritative. `ObjectiveCreated` establishes the partition rather
+    // than being bound by it, so it is checked against the workspace owner only.
+    const owner = this.ownerFor(type, input)
+    if (owner === undefined) return
+    if (owner !== actorNode) {
+      const scope = input.objectiveId ? `objective ${input.objectiveId}` : 'this workspace'
+      throw new Error(`${scope} is owned by node ${owner}; node ${actorNode} may not write ${type}`)
+    }
+  }
+
+  /**
+   * The node entitled to write an owner-authoritative event, or `undefined` when
+   * the row is not partitioned and therefore imposes no restriction.
+   */
+  private ownerFor(type: WorkspaceEventInput['type'], input: WorkspaceEventInput): string | undefined {
+    // Workspace-level facts — members, tokens, agent identities — have no
+    // objective to inherit an owner from.
+    const workspaceLevel = type === 'WorkspaceCreated' || type.startsWith('Member') || type.startsWith('Token') || type.startsWith('AgentIdentity')
+    if (type !== 'ObjectiveCreated' && !workspaceLevel && input.objectiveId) {
+      const row = this.db.query('SELECT owner_node_id FROM objectives WHERE id = ?').get(input.objectiveId) as Row | null
+      const owner = row?.owner_node_id
+      if (owner == null || owner === '') return undefined
+      return String(owner)
+    }
+    const row = this.db.query('SELECT owner_node_id FROM workspaces LIMIT 1').get() as Row | null
+    const owner = row?.owner_node_id
+    if (owner == null || owner === '') return undefined
+    return String(owner)
+  }
+
+  /**
+   * Apply an event that arrived from the peer.
+   *
+   * Three deliberate differences from `append`, each following from the replica
+   * not being the writer (design note §6.6):
+   *
+   * - The authority guard is *not* re-run. It already ran on the node that wrote
+   *   the event, against that node's ownership of that objective; re-running it
+   *   here would compare the origin node against *this* workspace's owner and
+   *   refuse every legitimate mirrored row.
+   * - `derivedEvents` is not run. The events it implies were already appended by
+   *   the originator, so deriving them again would duplicate them.
+   * - `appendAudit` is not run. The chain is this node's record of this node's
+   *   appends; adding a row the chain never hashed would break the verification
+   *   that the chain exists to provide.
+   *
+   * Idempotent on the event `id`, so a re-sent batch costs one ignored insert.
+   * Notifications still fire, so a replica's own orchestrator and clients see
+   * the change — but derived events are then appended through the normal path,
+   * which is what lets the owner complete an objective from a mirrored task.
+   */
+  applyRemote(event: ReplicatedEvent): boolean {
+    let inserted: PersistedEvent | undefined
+    let derived: PersistedEvent[] = []
+    const apply = this.db.transaction(() => {
+      inserted = this.insertRemote(event)
+      if (!inserted) return
+      const at = inserted.at
+      derived = derivedEvents(this.db, inserted, this.localNodeId)
+        .map((input) => this.insertEvent(input, at, this.localNodeId))
+    })
+    try {
+      apply()
+    } catch (err) {
+      // A peer can send something this database cannot project: an objective it
+      // has never seen, or a transition its state machine forbids. Two ways this
+      // could be handled, both bad — refusing the batch would let one bad event
+      // stall replication permanently, and letting the error escape would kill
+      // the transport from inside a network callback. So the event is skipped
+      // alone (its own transaction rolls it back completely) and the reason is
+      // kept for whoever is showing replication health.
+      this.lastReplicationError = `${event.type} ${event.id}: ${message(err)}`
+      return false
+    }
+    if (!inserted) return false
+    this.lastReplicationError = undefined
+    for (const committed of [inserted, ...derived]) {
+      if (this.transactDepth > 0) this.pendingNotifications.push(committed)
+      else this.notify(committed)
+    }
+    return true
+  }
+
+  /**
+   * Why the last inbound event was refused, if it was. Cleared by the next
+   * successful apply, so it always describes the most recent outcome.
+   */
+  replicationError(): string | undefined {
+    return this.lastReplicationError
+  }
+
+  /**
+   * Insert a mirrored event and project it, without the guard, derivation or
+   * audit chain. Caller owns the transaction.
+   */
+  private insertRemote(input: ReplicatedEvent): PersistedEvent | undefined {
+    const payload = redactPayload(input.payload ?? {})
+    // `INSERT OR IGNORE` on the event id is what makes replication idempotent: a
+    // batch re-sent after a reconnect applies once, and the projection is skipped
+    // for a row already present rather than applied twice.
+    const info = this.db.query(
+      `INSERT OR IGNORE INTO workspace_events (id, type, objective_id, task_id, actor_kind, actor_id, actor_node, payload_json, at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(input.id, input.type, input.objectiveId ?? null, input.taskId ?? null, input.actorKind, input.actorId,
+      input.actorNode ?? null, JSON.stringify(payload), input.at)
+    if (Number(info.changes) === 0) return undefined
+    // Marked in the same transaction as the projection below, so a crash cannot
+    // leave an applied event looking locally originated and eligible for sending
+    // back to the peer that sent it.
+    this.db.query('INSERT OR IGNORE INTO inbound_events (id, peer_node_id, received_at) VALUES (?, ?, ?)')
+      .run(input.id, input.actorNode ?? null, input.at)
+    const event: PersistedEvent = {
+      seq: Number(info.lastInsertRowid), id: input.id, type: input.type, actorKind: input.actorKind,
+      actorId: input.actorId, actorNode: input.actorNode, objectiveId: input.objectiveId,
+      taskId: input.taskId, payload, at: input.at,
+    }
+    applyProjection(this.db, event)
+    return event
+  }
+
   /** Insert one event row, project it, and chain it into the audit log. Caller owns the transaction. */
-  private insertEvent(input: WorkspaceEventInput, at: string): PersistedEvent {
+  private insertEvent(input: WorkspaceEventInput, at: string, actorNode: string): PersistedEvent {
     const id = `evt_${randomUUID().replaceAll('-', '')}`
     const payload = redactPayload(input.payload ?? {})
     const info = this.db.query(
-      `INSERT INTO workspace_events (id, type, objective_id, task_id, actor_kind, actor_id, payload_json, at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-    ).run(id, input.type, input.objectiveId ?? null, input.taskId ?? null, input.actorKind, input.actorId, JSON.stringify(payload), at)
+      `INSERT INTO workspace_events (id, type, objective_id, task_id, actor_kind, actor_id, actor_node, payload_json, at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(id, input.type, input.objectiveId ?? null, input.taskId ?? null, input.actorKind, input.actorId, actorNode, JSON.stringify(payload), at)
     const seq = Number(info.lastInsertRowid)
     const event: PersistedEvent = {
-      seq, id, type: input.type, actorKind: input.actorKind, actorId: input.actorId,
+      seq, id, type: input.type, actorKind: input.actorKind, actorId: input.actorId, actorNode,
       objectiveId: input.objectiveId, taskId: input.taskId, payload, at,
     }
     applyProjection(this.db, event)
@@ -160,12 +373,31 @@ export class WorkspaceStore {
     }
   }
 
+  /**
+   * Chain one append into the audit log.
+   *
+   * The chain is *per target* — per objective, or per task where the event names
+   * one, with workspace-level events forming their own chain under a null target.
+   * This is what makes the hash chain survive having two nodes: partitioned
+   * ownership gives exactly one writer per objective, so that writer's local
+   * order is a valid total order and its `prevHash` walk is sound. A single
+   * global chain across two writers would read as tampered (`auditChainIntact`
+   * would return false) the moment both appended at once, which is the failure
+   * the whole partitioning exists to prevent.
+   *
+   * The cost is that the guarantee is now scoped per objective rather than over
+   * the whole log, which is the honest trade: reordering events across two
+   * different objectives is not detectable, and never was.
+   */
   private appendAudit(event: PersistedEvent): void {
     const payloadHash = createHash('sha256').update(JSON.stringify(event.payload)).digest('hex')
-    const previous = this.db.query('SELECT entry_hash FROM audit_log ORDER BY seq DESC LIMIT 1').get() as Row | null
+    const target = event.taskId ?? event.objectiveId ?? null
+    // `IS` rather than `=`: SQLite's `=` is never true against NULL, so `=` would
+    // find no predecessor for workspace-level events and every one of them would
+    // chain from the empty string.
+    const previous = this.db.query('SELECT entry_hash FROM audit_log WHERE target IS ? ORDER BY seq DESC LIMIT 1').get(target) as Row | null
     const prevHash = previous ? String(previous.entry_hash) : ''
     const id = randomUUID()
-    const target = event.taskId ?? event.objectiveId ?? null
     const entryHash = createHash('sha256')
       .update([prevHash, id, event.type, event.actorKind, event.actorId, target ?? '', payloadHash, event.at].join('␟'))
       .digest('hex')
@@ -178,6 +410,12 @@ export class WorkspaceStore {
   /**
    * Verify the audit hash chain end to end.
    *
+   * Each target's chain is verified independently and in order, because the
+   * chains are independent: a per-objective chain is only required to be a valid
+   * sequence for its own objective. Verification walks targets in sorted order
+   * purely so the work is deterministic, not because there is an order between
+   * them.
+   *
    * Paginated by `seq` (keyset, not `OFFSET` — `OFFSET` would re-scan every
    * already-verified row on each batch) so a long-lived audit log is verified a
    * few thousand rows at a time instead of loading the whole table into one
@@ -186,21 +424,28 @@ export class WorkspaceStore {
    */
   auditChainIntact(): boolean {
     const BATCH = 5_000
-    let prevHash = ''
-    let afterSeq = 0
-    for (;;) {
-      const rows = this.db.query('SELECT * FROM audit_log WHERE seq > ? ORDER BY seq ASC LIMIT ?').all(afterSeq, BATCH) as Row[]
-      if (rows.length === 0) break
-      for (const row of rows) {
-        if (String(row.prev_hash) !== prevHash) return false
-        const recomputed = createHash('sha256')
-          .update([prevHash, row.id, row.action, row.actor_kind, row.actor_id, row.target ?? '', row.payload_hash, row.created_at].join('␟'))
-          .digest('hex')
-        if (recomputed !== String(row.entry_hash)) return false
-        prevHash = String(row.entry_hash)
-        afterSeq = Number(row.seq)
+    const targets = this.db.query('SELECT DISTINCT target FROM audit_log').all() as Row[]
+    for (const { target } of targets) {
+      // `IS ?` binds NULL correctly (SQLite's `=` never matches NULL), which is
+      // what puts workspace-level events in their own chain.
+      const key = target == null ? null : String(target)
+      let prevHash = ''
+      let afterSeq = 0
+      for (;;) {
+        const rows = this.db.query('SELECT * FROM audit_log WHERE target IS ? AND seq > ? ORDER BY seq ASC LIMIT ?')
+          .all(key, afterSeq, BATCH) as Row[]
+        if (rows.length === 0) break
+        for (const row of rows) {
+          if (String(row.prev_hash) !== prevHash) return false
+          const recomputed = createHash('sha256')
+            .update([prevHash, row.id, row.action, row.actor_kind, row.actor_id, row.target ?? '', row.payload_hash, row.created_at].join('␟'))
+            .digest('hex')
+          if (recomputed !== String(row.entry_hash)) return false
+          prevHash = String(row.entry_hash)
+          afterSeq = Number(row.seq)
+        }
+        if (rows.length < BATCH) break
       }
-      if (rows.length < BATCH) break
     }
     return true
   }
@@ -381,6 +626,91 @@ export class WorkspaceStore {
     return (this.db.query('SELECT * FROM presence ORDER BY connected_at').all() as Row[]).map(toPresence)
   }
 
+  nodes() {
+    return (this.db.query('SELECT * FROM nodes ORDER BY first_seen_at').all() as Row[]).map(toNode)
+  }
+
+  node(id: string) {
+    const row = this.db.query('SELECT * FROM nodes WHERE id = ?').get(id) as Row | null
+    return row ? toNode(row) : undefined
+  }
+
+  /**
+   * Node-level presence, newest beat first.
+   *
+   * Every node with a known presence row is returned, stale or not, flagged by
+   * `online`: a machine that dropped off the mesh must still be *reportable*
+   * ("last seen 4 minutes ago"), which it cannot be if the row is filtered out
+   * here. Callers that only want live nodes filter on the flag.
+   */
+  nodePresence(staleAfterMs = 90_000, now = Date.now()): Array<NodePresenceRecord & { online: boolean }> {
+    const cutoff = new Date(now - staleAfterMs).toISOString()
+    const rows = this.db.query('SELECT * FROM node_presence ORDER BY last_seen_at DESC').all() as Row[]
+    return rows.map((row) => {
+      const record = toNodePresence(row)
+      return { ...record, online: record.lastSeenAt >= cutoff }
+    })
+  }
+
+  /**
+   * Pin this node's certificate fingerprint, learned from the file plane.
+   *
+   * This is the whole of node identity as far as Elia is concerned: the
+   * sidecar's transport already authenticates both machines against a pinned
+   * certificate, so binding to that fingerprint gives the control plane exactly
+   * one identity per machine instead of a second keypair minted here
+   * (design note §6.1). Two independent identity systems for the same two
+   * machines would be a defect.
+   */
+  bindNodeFingerprint(fingerprint: string, name = hostname()): void {
+    const row = this.db.query('SELECT * FROM nodes WHERE id = ?').get(this.localNodeId) as Row | null
+    const firstSeenAt = row ? String(row.first_seen_at) : new Date().toISOString()
+    this.db.query(
+      `INSERT INTO nodes (id, name, kind, fingerprint, is_local, first_seen_at, last_seen_at)
+       VALUES (?, ?, 'mesh', ?, 1, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET fingerprint = excluded.fingerprint, kind = 'mesh', last_seen_at = excluded.last_seen_at`,
+    ).run(this.localNodeId, name, fingerprint, firstSeenAt, new Date().toISOString())
+  }
+
+  /** The node a task is granted to, and whether that grant is still open. */
+  taskGrants(taskId: string): TaskGrantRecord[] {
+    return (this.db.query('SELECT * FROM task_grants WHERE task_id = ? ORDER BY granted_at').all(taskId) as Row[]).map(toTaskGrant)
+  }
+
+  hasActiveGrant(taskId: string, nodeId: string): boolean {
+    const row = this.db.query(
+      'SELECT 1 AS ok FROM task_grants WHERE task_id = ? AND node_id = ? AND released_at IS NULL LIMIT 1',
+    ).get(taskId, nodeId) as Row | null
+    return row !== null
+  }
+
+  /** How far this node has consumed `peerNodeId`'s log. */
+  replicationCursor(peerNodeId: string): number {
+    const row = this.db.query('SELECT last_seq FROM replication_state WHERE peer_node_id = ?').get(peerNodeId) as Row | null
+    return row ? Number(row.last_seq) : 0
+  }
+
+  setReplicationCursor(peerNodeId: string, seq: number): void {
+    this.db.query(
+      `INSERT INTO replication_state (peer_node_id, last_seq, updated_at) VALUES (?, ?, ?)
+       ON CONFLICT(peer_node_id) DO UPDATE SET last_seq = excluded.last_seq, updated_at = excluded.updated_at`,
+    ).run(peerNodeId, seq, new Date().toISOString())
+  }
+
+  /**
+   * Which of these event ids arrived from a peer rather than being written here.
+   *
+   * One query for the whole batch: the send filter asks this for every event in
+   * each flush, and a per-event lookup would be a query per row on a table that
+   * grows without bound.
+   */
+  inboundEventIds(ids: string[]): Set<string> {
+    if (ids.length === 0) return new Set()
+    const placeholders = ids.map(() => '?').join(',')
+    const rows = this.db.query(`SELECT id FROM inbound_events WHERE id IN (${placeholders})`).all(...ids) as Row[]
+    return new Set(rows.map((row) => String(row.id)))
+  }
+
   events(query: EventQuery = {}): PersistedEvent[] {
     const clauses: string[] = []
     const values: unknown[] = []
@@ -413,6 +743,12 @@ export class WorkspaceStore {
    * counted; agents that missed their heartbeat window are marked `failed`;
    * expired reservations are released. Every recovery is itself an appended
    * event, so the history stays complete.
+   *
+   * Scoped to what *this* node may write. A follower that reclaimed a lease for
+   * an objective it does not own would both fail the authority guard and — worse,
+   * if that guard were ever relaxed — race the owner into two contradictory
+   * recoveries for one task. Ownership scoping fixes it by construction rather
+   * than by an idempotence key, which is the design note's stated preference.
    */
   reconcileLeases(now = Date.now()): { tasks: string[]; agents: string[]; reservations: string[] } {
     const tasks: string[] = []
@@ -420,6 +756,8 @@ export class WorkspaceStore {
     const reservations: string[] = []
 
     for (const task of this.tasks({ status: ['assigned', 'in-progress'] })) {
+      if (!ownsObjective(this.db, task.objectiveId, this.localNodeId)) continue
+      if (!this.mayExecute(task, this.localNodeId)) continue
       // A lease that can never expire must not hold a task forever (M-33).
       //
       // No lease at all reads back as `undefined` — SQL NULL through `optNum`.
@@ -450,6 +788,11 @@ export class WorkspaceStore {
 
     const staleCutoff = now - LEASE_TTL_MS
     for (const agent of this.agents()) {
+      // Only this machine's own agents. Faulting a mirrored agent would append an
+      // agent-scoped event about another node's process, which the guard refuses
+      // anyway — and the node that *can* fault it is the one whose heartbeat
+      // window actually elapsed.
+      if (agent.nodeId !== undefined && agent.nodeId !== this.localNodeId) continue
       const alive = agent.status !== 'cancelled' && agent.status !== 'completed' && agent.status !== 'failed'
       // `Date.parse` of a malformed/unset heartbeat yields `NaN`, and
       // `NaN <= cutoff` is false — the agent would never be faulted. A
@@ -466,6 +809,10 @@ export class WorkspaceStore {
     }
 
     for (const reservation of this.reservations(true)) {
+      const task = this.task(reservation.taskId)
+      // A reservation is executor-scoped, so expiring one that belongs to the
+      // peer is the peer's to release — mirror it, do not reclaim it.
+      if (task === undefined || !this.mayExecute(task, this.localNodeId)) continue
       // `reservations(true)` should only return rows with a real expiry, but a
       // malformed persisted value must fail closed: an unbounded/`null`/`NaN`
       // expiry must expire the reservation (freeing the file for others) rather
@@ -517,10 +864,51 @@ export class WorkspaceStore {
     for (const event of pending) this.notify(event)
   }
 
+  /**
+   * May `nodeId` run this task?
+   *
+   * A task with no `executor_node_id` is unpartitioned and answers to whoever
+   * the legacy rules allow. Once it *is* set, only that node may execute it —
+   * which is why a follower mirrors the row but never acquires it, and why the
+   * owner dispatches instead of running work on the other machine's behalf.
+   */
+  mayExecute(task: TaskRecord, nodeId: string): boolean {
+    return task.executorNodeId === undefined || task.executorNodeId === nodeId
+  }
+
+  /**
+   * Whether this node owns an objective — the single predicate the orchestrator
+   * uses to decide what it is entitled to decide.
+   *
+   * Null owner means unpartitioned (pre-v4, or created before node identity
+   * existed) and answers true, which is what keeps a single-node workspace
+   * behaving exactly as it did.
+   */
+  ownsObjective(objectiveId: string): boolean {
+    return ownsObjective(this.db, objectiveId, this.localNodeId)
+  }
+
+  /**
+   * Work this node may actually pick up: ready, dependencies satisfied, and not
+   * partitioned away to the peer.
+   *
+   * This is what the orchestrator should schedule from. Filtering by executor
+   * here rather than at each call site is deliberate — a missed filter becomes a
+   * cross-node write that the authority guard rejects, and that rejection lands
+   * as a thrown error inside a background timer where nobody will read it.
+   */
+  executableTasks(): TaskRecord[] {
+    return this.tasks({ status: ['ready'] }).filter((task) => this.mayExecute(task, this.localNodeId))
+  }
+
   /** Escape hatch for advanced queries and tests. Prefer the typed getters. */
   raw(): Database {
     return this.db
   }
+}
+
+function message(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
 }
 
 function hardenFiles(path: string): void {
@@ -539,10 +927,41 @@ function rowToEvent(row: Row): PersistedEvent {
   return {
     seq: Number(row.seq), id: String(row.id), type: String(row.type) as PersistedEvent['type'],
     actorKind: String(row.actor_kind) as PersistedEvent['actorKind'], actorId: String(row.actor_id),
+    actorNode: row.actor_node == null ? undefined : String(row.actor_node),
     objectiveId: row.objective_id == null ? undefined : String(row.objective_id),
     taskId: row.task_id == null ? undefined : String(row.task_id),
     payload, at: String(row.at),
   }
+}
+
+/**
+ * Read this workspace's node id, creating it on first use.
+ *
+ * The row is written outside a transaction wrapper because it happens in the
+ * constructor, before any caller has a handle: an id is minted, inserted, and
+ * read back in one statement so a crash mid-write cannot leave two ids behind
+ * (`INSERT OR IGNORE` + `SELECT` is atomic enough here — SQLite serialises
+ * writers, and the loser of a race simply reads the winner's id).
+ *
+ * `hostname()` is stored as a label only. It is never an identity: two
+ * machines on a LAN routinely share a name, and the whole point of the id is
+ * that it does not.
+ */
+function ensureLocalNode(db: Database, writable = true): string {
+  const existing = db.query('SELECT id FROM nodes WHERE is_local = 1 LIMIT 1').get() as Row | null
+  if (existing?.id) return String(existing.id)
+  // A read-only handle that found no local node has nothing to report rather
+  // than something to create. Returning empty makes the caller say so, instead of
+  // writing through a connection opened specifically not to.
+  if (!writable) return ''
+  const id = `nd_${randomUUID().replaceAll('-', '')}`
+  const at = new Date().toISOString()
+  db.query(
+    `INSERT OR IGNORE INTO nodes (id, name, kind, fingerprint, is_local, first_seen_at, last_seen_at)
+     VALUES (?, ?, 'local', NULL, 1, ?, ?)`,
+  ).run(id, hostname(), at, at)
+  const row = db.query('SELECT id FROM nodes WHERE is_local = 1 LIMIT 1').get() as Row | null
+  return row ? String(row.id) : id
 }
 
 /**

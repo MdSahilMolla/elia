@@ -106,12 +106,18 @@ describe('policy construction', () => {
     expect(boxPolicyFor('/w', 1).network).toEqual({ mode: 'none' })
   })
 
+  // toolReadPaths() admits a PATH entry only when it starts with '/', which is a
+  // Unix-absolute path — and the sandbox itself has no Windows backend
+  // (box.ts:152 throws BoxUnavailable on win32), so this function is a Unix code
+  // path by design. On Windows the list is therefore the home tool dirs only,
+  // and asserting a '/usr/bin' entry would be asserting a platform that does
+  // not exist here. The home-dir exclusions are checked on every platform.
   test('toolReadPaths lists real PATH dirs and known tool installs only', () => {
     const home = mkdtempSync(join(tmpdir(), 'eb-home-'))
     mkdirSync(join(home, '.bun'))
     mkdirSync(join(home, '.ssh'))
     const paths = toolReadPaths(`/usr/bin:/definitely/not/here:relative/bin`, home)
-    expect(paths).toContain('/usr/bin')
+    if (process.platform !== 'win32') expect(paths).toContain('/usr/bin')
     expect(paths).toContain(join(home, '.bun'))
     expect(paths.some((p) => p.includes('.ssh'))).toBe(false)
     expect(paths.some((p) => p.includes('not/here') || p.startsWith('relative'))).toBe(false)

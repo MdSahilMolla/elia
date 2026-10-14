@@ -195,7 +195,7 @@ export const ctfPlaybookTool: Tool = {
   input_schema: {
     type: 'object',
     properties: {
-      category: { type: 'string', enum: ['pwn', 'rev', 'crypto', 'stego', 'misc'], description: 'Which category (default: all summaries)' },
+      category: { type: 'string', enum: ['pwn', 'rev', 'crypto', 'stego', 'web', 'misc'], description: 'Which category (default: all summaries)' },
       hints: { type: 'array', description: 'Optional artifact filenames or keywords to suggest likely categories', items: { type: 'string' } },
     },
   },
