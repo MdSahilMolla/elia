@@ -1,45 +1,31 @@
 ---
-name: dev-workflow-and-site-conventions
+name: dev-workflow-and-site-conventions-revision
 description: >
   Use this when executing build or deployment tasks in the Elia workspace,
   especially for research paper style sites. It specifies directory context,
-  type checks, preview workflows, Python/TS validation, tool invocation constraints,
-  and strict CSS/HTML conventions.
+  type checks, preview workflows, and submission requirements.
 ---
 
 # Development Workflow and Site Conventions
 
 ## Execution Context and Paths
 
-Always run `bun` commands (install, build, dev, test) from `workspace/flower-blooming`, where the package.json and sources live. Ensure all file and command paths are relative to the workspace root; never include absolute user paths. Before finalizing any change, run `bun run typecheck`; if absent, use `bun run build` for validation. When checking specific scripts like `node --check` on `script.js`, ensure compilation artifacts exist by building in the specific directory first (e.g., `workspace/portfolio-demo`) so relative imports resolve. Verify file existence before targeting nested paths; use `grep` on parent directories to list available files.
+Always run `bun` commands from the workspace root where `package.json` and source files live. Keep all file and command paths relative to the workspace root to avoid absolute path issues. Before finalizing changes, run `bun run typecheck` or `bun run build` to validate the project. Verify file existence with tools like `list_files` before targeting nested paths.
 
 ## Preview and Cleanup
 
-To view a site, run `bun run dev` followed by `preview http://localhost:3000`. Note that `preview` auto-reloads and exits normally, while `bun run dev` runs persistently. If preview returns HTTP 500, delete stale Next.js artifacts with `rm -rf .next` before retrying. Verify the current working directory exists before executing git commands to avoid exit code 1 failures.
+To view a site, run the dev server followed by `preview http://localhost:3000`. If you encounter build errors or stale artifacts (like `HTTP 500`), clear the build cache (e.g., `rm -rf .next`) before retrying. Ensure your current working directory is valid before executing git or build commands.
 
-## Research Paper Theme Constraints
+## Site Templates
 
-When building a research paper theme website, start with a static `index.html` and `styles.css` without build tools or dependencies. The site must remain pure HTML/CSS. Adhere to these strict styling rules:
-- **File Limits**: `index.html` must be <= 150 lines and include a meta description (target ~90 lines). `styles.css` must be concise and under 80 lines.
-- **Selectors**: Use only class selectors prefixed with `rp-`, beginning with `rp-`.
-- **Visual Theme**: All CSS uses a black/white palette, system-ui font, fixed top navigation, marquee footer, and pill-shaped buttons.
-- **Navigation**: Implement a fixed top navigation with `position:fixed; top:0;` and a subtle backdrop-filter to match the humanastudio.com aesthetic.
-- **Interactions**: Apply subtle interactive states like hover lift and shadow for phases and buttons.
-- **Citation**: Reference the research paper in the footer with a citation: "Chen, Wang, Qu (2026), arXiv:2607.07663" so visitors know the source of the content.
-- **Utilities**: Ensure `grep` commands for CSS checks handle non-zero exit codes gracefully.
+For research paper summary sites, prioritize static HTML/CSS templates without build tools unless dependencies are required. Keep stylesheets concise and ensure navigation is accessible. Aim for clean, functional layouts that load quickly and adhere to the project's design guidelines.
 
-## TypeScript, Python, and Migration
+## Validation and Submission
 
-- **TypeScript**: In TypeScript files under `src/tools`, separate function parameters and object properties with commas to avoid TS1005 errors.
-- **Python**: Install Python dependencies (e.g., streamlit, pandas) using `pip3` before attempting to import them in the project. Precompile Python modules with `python3 -m py_compile` before executing imports to catch syntax errors and avoid runtime hangs. When interacting with Python scripts that require input, avoid using `echo -e` for piped input as it may cause exit code 1 failures; use `printf` instead. Ensure scripts requiring interactive input receive complete input sequences matching their expected logic to avoid runtime errors. Scripts using `input()` must catch `EOFError` to handle exhausted piped input gracefully. Where possible, use only non-interactive commands via `run_command`.
-- **Svelte**: Do not assume Svelte source files like `App.svelte` exist in `src/` during migration reviews, as the project may have already converted to vanilla JavaScript.
+- **TypeScript:** Follow language-specific conventions to avoid compiler errors.
+- **Python:** Install dependencies as needed and validate scripts with `py_compile` before execution. Handle interactive inputs carefully.
+- **Submission:** When invoking `submit_acceptance` or `submit_assumptions`, ensure every criterion has an associated verdict. When calling `risk_assessment`, include a non-empty sourceDate string.
 
-## File System and Safety
+## Safety and Conventions
 
-- **Path Validation**: When invoking file-system commands such as `list_files`, ensure the target path is a valid existing directory under `workspace/flower-blooming`; a non-existent path will cause the command to fail.
-
-## Utility Commands and Submission
-
-- **Skills**: When adding a skill with `npx skills add`, include the `-y` flag to auto-approve and `--agent '*'` to satisfy required options and avoid exit code 1.
-- **Submissions**: When invoking `submit_acceptance`, ensure every acceptance criterion has an associated verdict before calling; otherwise the submission will fail. When invoking `submit_assumptions`, ensure each assumption has an associated verdict before calling. When calling `risk_assessment`, include a non-empty sourceDate string of at most 100 characters in the first factor.
-- **Tool Invocation**: When invoking `create_question`, set the `horizon` field to a valid ISO date or timestamp.
+Validate all paths before invoking file-system commands. Ensure acceptance checks match expected patterns before claiming success. Always verify the existence of files before referencing them to avoid exit code failures.

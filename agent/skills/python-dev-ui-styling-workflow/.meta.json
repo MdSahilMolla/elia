@@ -1,0 +1,36 @@
+{
+  "slug": "python-dev-ui-styling-workflow",
+  "name": "python-dev-ui-styling-workflow",
+  "version": 5,
+  "createdAt": 1790863839255,
+  "updatedAt": 1791487442032,
+  "sourceLessonKeys": [],
+  "authoredBy": "elia",
+  "history": [
+    {
+      "version": 1,
+      "at": 1790863839255,
+      "reason": "created from 3 certified lessons"
+    },
+    {
+      "version": 2,
+      "at": 1790875153660,
+      "reason": "11 new certified lesson(s) about this topic"
+    },
+    {
+      "version": 3,
+      "at": 1790889335672,
+      "reason": "10 new certified lesson(s) about this topic"
+    },
+    {
+      "version": 4,
+      "at": 1790971954347,
+      "reason": "4 new certified lesson(s) about this topic"
+    },
+    {
+      "version": 5,
+      "at": 1791487442032,
+      "reason": "28 source lesson(s) were retired for not holding up — re-derived from what remains"
+    }
+  ]
+}

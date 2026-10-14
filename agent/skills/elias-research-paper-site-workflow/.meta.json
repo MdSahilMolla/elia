@@ -1,0 +1,43 @@
+{
+  "slug": "elias-research-paper-site-workflow",
+  "name": "elias-research-paper-site-workflow",
+  "version": 3,
+  "createdAt": 1791194290073,
+  "updatedAt": 1791487284624,
+  "sourceLessonKeys": [
+    "1cflg2xbfbopr",
+    "h17jo12xd0fe",
+    "2kalp2bxf7xx2",
+    "pzw3p2x75hnw",
+    "3s9w3yrqgvl5v",
+    "3kao4tuj84www",
+    "3gjnjimzdlu5c",
+    "1fuswprjzywe8",
+    "2sz1nxrf8bsqr",
+    "327psf817wyfx",
+    "2dora4bfb1usj",
+    "u68ltvdnwdq0",
+    "2ew3wzfs8sr8g",
+    "2kdgntj8wfdm",
+    "2a4hosi7p7x35",
+    "2tse7vn4plrow"
+  ],
+  "authoredBy": "elia",
+  "history": [
+    {
+      "version": 1,
+      "at": 1791194290073,
+      "reason": "created from 8 certified lessons"
+    },
+    {
+      "version": 2,
+      "at": 1791459041496,
+      "reason": "6 new certified lesson(s) about this topic"
+    },
+    {
+      "version": 3,
+      "at": 1791487284624,
+      "reason": "2 new certified lesson(s) about this topic"
+    }
+  ]
+}

@@ -1,0 +1,29 @@
+{
+  "slug": "elias-cli-and-ui-conventions",
+  "name": "elias-cli-and-ui-conventions",
+  "version": 2,
+  "createdAt": 1791459035874,
+  "updatedAt": 1791487260013,
+  "sourceLessonKeys": [
+    "327psf817wyfx",
+    "2a4hosi7p7x35",
+    "2kdgntj8wfdm",
+    "2kalp2bxf7xx2",
+    "2dora4bfb1usj",
+    "2ew3wzfs8sr8g",
+    "2tse7vn4plrow"
+  ],
+  "authoredBy": "elia",
+  "history": [
+    {
+      "version": 1,
+      "at": 1791459035874,
+      "reason": "created from 3 certified lessons"
+    },
+    {
+      "version": 2,
+      "at": 1791487260013,
+      "reason": "4 new certified lesson(s) about this topic"
+    }
+  ]
+}
