@@ -6,6 +6,9 @@ import { isConnectionError, isFallbackableProviderError, isMalformedToolCallErro
 import { createPlanlessWorkTracker, createRedundantReadTracker, isLoneBatchableRead, serialReadNudge } from './autonomy/toolBatchingNudge.ts'
 import { createLeakedToolCallGuard } from './autonomy/leakedToolCall.ts'
 import { createShallowResearchGuard } from './autonomy/shallowResearch.ts'
+import { createOutputLimitGuard } from './autonomy/outputLimit.ts'
+import { createCopyCheckGuard } from './autonomy/copyCheck.ts'
+import { detectInjection, injectionNotice, readsOutsideContent, sourceLabel } from './autonomy/injectionGuard.ts'
 import { createReadAhead } from './autonomy/readAhead.ts'
 import { createPlanProgressTracker, planBelongsToRequest, type PlanProgressUpdate, type ToolOutcome } from './autonomy/planProgress.ts'
 import { activeTodoList } from './autonomy/todoList.ts'
@@ -307,6 +310,15 @@ export function isObservation(request: { name: string; input: Record<string, unk
   return assessment.risk === 'safe' && assessment.intent === 'shell.read-only'
 }
 
+/** The conversation's recent user text, where an earlier turn may have named the page being worked on. */
+function conversationText(messages: ConversationMessage[]): string {
+  return messages
+    .slice(-60)
+    .filter((message) => message.role === 'user')
+    .map((message) => message.content.map((block) => (block.type === 'text' ? block.text : '')).join('\n'))
+    .join('\n')
+}
+
 /** The text of the most recent user message: the request a loop is working on. */
 function latestUserText(messages: ConversationMessage[]): string {
   for (let index = messages.length - 1; index >= 0; index -= 1) {
@@ -482,6 +494,14 @@ async function runAgentLoopTracked(opts: RunAgentLoopOptions, inflight: Inflight
   const leakedToolCalls = createLeakedToolCallGuard()
   // A research request answered from snippets alone; see autonomy/shallowResearch.ts.
   const shallowResearch = createShallowResearchGuard(latestUserText(messages), 'web_fetch' in toolsByName)
+  // A copy of a page reported done without being compared to it; see autonomy/copyCheck.ts.
+  const copyCheck = createCopyCheckGuard(latestUserText(messages), conversationText(messages), 'compare_page' in toolsByName)
+  // A response cut off at the provider's output limit; see autonomy/outputLimit.ts.
+  const outputLimit = createOutputLimitGuard()
+  // Set by streamOnce when the provider stopped at its output limit.
+  let lastResponseTruncated = false
+  // Told to the model after this step's tool results (or at once, when it made no call).
+  let outputLimitNote: string | undefined
   // The list this loop runs under — the turn's, via withTodoList.
   const todoList = activeTodoList()
   const planProgress = onPlanProgress
@@ -606,7 +626,18 @@ async function runAgentLoopTracked(opts: RunAgentLoopOptions, inflight: Inflight
       if (signal?.aborted) return finish('aborted')
       throw error
     }
-    messages.push({ role: 'assistant', content })
+    if (lastResponseTruncated) {
+      const cut = outputLimit.observe(content)
+      content = cut.content
+      outputLimitNote = cut.note
+      const title = cut.dropped
+        ? `The response hit the output limit mid-${cut.dropped} call — that call did not run${cut.note ? '; asking for it in parts' : ''}`
+        : `The response hit the output limit${cut.note ? ' — asking the model to continue' : ''}`
+      if (onActivity) onActivity({ kind: 'warning', status: 'warning', title })
+      else writeNotice(`elia: ${title}`)
+    }
+    // A response that was nothing but a cut-off call leaves nothing to keep, and an empty assistant message is refused by providers.
+    if (content.length > 0) messages.push({ role: 'assistant', content })
 
     const toolUseBlocks = content.filter(
       (block): block is Extract<ContentBlock, { type: 'tool_use' }> => block.type === 'tool_use',
@@ -614,6 +645,12 @@ async function runAgentLoopTracked(opts: RunAgentLoopOptions, inflight: Inflight
     // Before anything sees the call — concurrency, hooks, the governor, the
     // tool, the transcript — so all of them judge the same command.
     for (const block of toolUseBlocks) if (block.name === 'run_command') block.input = normalizeRunCommandInput(block.input)
+
+    if (toolUseBlocks.length === 0 && outputLimitNote) {
+      messages.push({ role: 'user', content: [{ type: 'text', text: outputLimitNote }] })
+      outputLimitNote = undefined
+      continue
+    }
 
     if (toolUseBlocks.length === 0) {
       // Not ready to stop if what it "called" was only written out as text:
@@ -633,6 +670,14 @@ async function runAgentLoopTracked(opts: RunAgentLoopOptions, inflight: Inflight
       // The model is ready to stop — but if the operator sent steering during
       // this last response, don't end the turn: fold it in and keep going.
       if (injectSteering() || injectDirectives()) continue
+      const finishNote = copyCheck.beforeFinish()
+      if (finishNote) {
+        messages.push({ role: 'user', content: [{ type: 'text', text: finishNote }] })
+        const title = 'The copy was not compared with the original — asking elia to measure it first'
+        if (onActivity) onActivity({ kind: 'status', status: 'updated', title })
+        else if (verbose) writeNotice(`elia: ${title}`)
+        continue
+      }
       const researchNote = shallowResearch.beforeFinish()
       if (researchNote) {
         messages.push({ role: 'user', content: [{ type: 'text', text: researchNote }] })
@@ -886,6 +931,21 @@ async function runAgentLoopTracked(opts: RunAgentLoopOptions, inflight: Inflight
         if (actionHeartbeat) clearInterval(actionHeartbeat)
       }
 
+      // Instructions planted in outside content are named as such before the
+      // model reads them, and the run's governor tightens from here on.
+      if (!isError && readsOutsideContent(block.name)) {
+        const hits = detectInjection(resultText)
+        if (hits.length > 0) {
+          const source = sourceLabel(block.name, block.input)
+          resultText = `${injectionNotice(source, hits)}\n${resultText}`
+          activeActionGovernor().noteUntrustedInstructions?.(source, hits)
+          const title = `${source} contains instructions aimed at an AI — flagged as untrusted; outward actions now need approval`
+          if (onActivity) onActivity({ kind: 'warning', status: 'warning', title })
+          else writeNotice(`elia: ${title}`)
+          transcript?.notice(`elia: ${title}`)
+        }
+      }
+
       const durationMs = Date.now() - startedAt
       durations[blockIndex] = cached ? 0 : durationMs
       if (verbose) writeToolResult(block.name, resultText, isError, cached)
@@ -981,6 +1041,11 @@ async function runAgentLoopTracked(opts: RunAgentLoopOptions, inflight: Inflight
     )
     const planlessNudge = planlessWork.observe(toolUseBlocks.map((block) => block.name))
     shallowResearch.observe(toolUseBlocks.map((block) => block.name))
+    copyCheck.observe(toolUseBlocks)
+    if (outputLimitNote) {
+      messages.push({ role: 'user', content: [{ type: 'text', text: outputLimitNote }] })
+      outputLimitNote = undefined
+    }
     // A read-ahead expansion already did the batching for the model this turn;
     // don't also scold it for not batching.
     const nudge = redundantReadNudge ?? (readAheadExpansion ? undefined : serialReadNudge(loneReadStreak)) ?? planlessNudge ?? progress?.nudge
@@ -1094,6 +1159,7 @@ async function runAgentLoopTracked(opts: RunAgentLoopOptions, inflight: Inflight
                   messageCount: messages.length,
                 })
               }
+              lastResponseTruncated = result.truncated === true
               return result.content
             } catch (error) {
               lastError = error

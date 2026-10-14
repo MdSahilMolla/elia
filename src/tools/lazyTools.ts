@@ -30,7 +30,7 @@ export const DEFERRED_DEV_TOOLS: ReadonlySet<string> = new Set([
   'production_readiness', 'dependency_audit', 'codex_delegate', 'communication', 'paper', 'knowledge', 'visualize',
   'finance', 'data_science', 'sports', 'fitness', 'federated_collab', 'codebase_memory', 'cross_project_learn',
   'arch_drift', 'causal_debug', 'causal_fix', 'causal_verify', 'adversarial_verify', 'multi_modal_review',
-  'self_healing_monitor', 'spec_verify', 'predictive_impact', 'temporal_analysis',
+  'self_healing_monitor', 'spec_verify', 'predictive_impact', 'temporal_analysis', 'compare_page', 'digest',
 ])
 
 /**
@@ -63,6 +63,9 @@ export const LOAD_TOOLS_NAME = 'load_tools'
  * one retry (the failed call is answered with the schema). A tool's own name,
  * with spaces or underscores, always counts.
  */
+/** A request to reproduce an existing page or site. Shared with the completion check in autonomy/copyCheck.ts. */
+export const COPY_REQUEST = /\b(?:copy|copies|copying|clone|cloning|recreate|recreating|replicate|replicating|duplicate|mirror|reproduce)\b[^.?!\n]{0,60}\b(?:site|website|page|landing|design|layout|ui|homepage|them|theirs?)\b|\bdesign\b[^.?!\n]{0,20}\bexact(?:ly)?\b|\b(?:exact|same|identical|matching)\s+(?:design|layout|look|copy|replica|ui|website|site|page)\b|\blooks?\s+(?:exactly\s+)?like\s+(?:their|the\s+original|https?:)/i
+
 const TOOL_CUES: Record<string, RegExp> = {
   github: /\b(git|github|commit|push|pull request|PRs?|merge|rebase|branch(es)?)\b/i,
   database: /\b(databases?|db|sql|postgres(ql)?|psql|mysql|mariadb|sqlite|migrations?)\b/i,
@@ -97,6 +100,8 @@ const TOOL_CUES: Record<string, RegExp> = {
   spec_verify: /\b(matches the spec|spec(ification)? (compliance|verif\w*)|acceptance criteria)\b/i,
   predictive_impact: /\b(blast radius|what (would|will) break)\b/i,
   temporal_analysis: /\b(over time|code growth|churn trends?)\b/i,
+  compare_page: COPY_REQUEST,
+  digest: /\b(?:(?:entire|whole|full|complete)\s+(?:book|log|logs|document|transcript|contract|report|dump|manual|spec|pdf|thesis)|(?:huge|massive|very (?:long|large)|long|large|big)\s+(?:file|log|logs|document|pdf|transcript|dump)|(?:too (?:long|big|large)) to read|\d+\s*(?:mb|gb|k lines|thousand lines|pages))\b/i,
 }
 
 /** The deferred tools a request's words say it will need. */

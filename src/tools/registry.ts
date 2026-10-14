@@ -21,6 +21,8 @@ import { ctfPlaybookTool } from './ctfPlaybook.ts'
 import { securityTriageTool } from './securityTriage.ts'
 import { webSearchTool } from './webSearch.ts'
 import { webFetchTool } from './webFetch.ts'
+import { comparePageTool } from './comparePage.ts'
+import { digestTool } from './digest.ts'
 import { readSpreadsheetTool } from './readSpreadsheet.ts'
 import { spreadsheetTool } from './spreadsheet.ts'
 import { presentationTool } from './presentation.ts'
@@ -76,6 +78,8 @@ export const tools: Tool[] = [
   processTool,
   webSearchTool,
   webFetchTool,
+  comparePageTool,
+  digestTool,
   paperTool,
   knowledgeTool,
   visualizeTool,

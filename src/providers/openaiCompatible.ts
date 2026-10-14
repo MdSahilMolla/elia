@@ -245,7 +245,11 @@ export function createOpenAICompatibleProvider(
           throw new Error('Provider returned no message in response')
         }
         const streamed: CompletionMessageLike = reasoningText ? { ...message, reasoning: reasoningText, reasoning_content: undefined } : message
-        return { content: withReasoningSummary(toContentBlocks(streamed, passthroughReasoning, wire), summary), usage: usageFrom(completion.usage) }
+        return {
+          content: withReasoningSummary(toContentBlocks(streamed, passthroughReasoning, wire), summary),
+          usage: usageFrom(completion.usage),
+          ...(completion.choices[0]?.finish_reason === 'length' ? { truncated: true } : {}),
+        }
       } catch (err) {
         // The non-streaming fallback below re-issues the whole request and
         // replays the full response through onText/onThinking — safe only when
@@ -274,7 +278,7 @@ export function createOpenAICompatibleProvider(
           if (block.type === 'thinking') onThinking?.(block.text)
           if (block.type === 'text') onText(block.text)
         }
-        return { content, usage: usageFrom(completion.usage) }
+        return { content, usage: usageFrom(completion.usage), ...(completion.choices[0]?.finish_reason === 'length' ? { truncated: true } : {}) }
       } finally {
         if (idleTimer) clearTimeout(idleTimer)
       }

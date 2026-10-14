@@ -31,7 +31,7 @@ function contract(
 const CATALOG: CapabilityContract[] = [
   ...['read_file', 'list_files', 'grep', 'find_symbol', 'recall', 'brain', 'why', 'project_profile', 'production_readiness', 'environment', 'causal_debug', 'arch_drift', 'adversarial_verify', 'codebase_memory', 'predictive_impact', 'dependency_audit', 'multi_modal_review', 'spec_verify', 'temporal_analysis', 'board_read', 'load_tools']
     .map((tool) => contract(tool, 'safe', ['workspace-read'], true, 'bounded local observation')),
-  ...['web_search', 'web_fetch', 'paper', 'knowledge'].map((tool) => contract(tool, 'safe', ['network-read'], true, 'dated source or fetched response')),
+  ...['web_search', 'web_fetch', 'compare_page', 'digest', 'paper', 'knowledge'].map((tool) => contract(tool, 'safe', ['network-read'], true, 'dated source or fetched response')),
   ...['visualize', 'finance', 'data_science', 'sports', 'fitness'].map((tool) => contract(tool, 'safe', ['workspace-read'], true, 'deterministic result or generated artifact')),
   ...['write_file', 'edit_file', 'delete_file', 'lsp_refactor', 'todo_write', 'note_lesson', 'record_rationale', 'causal_fix', 'causal_verify', 'cross_project_learn', 'self_healing_monitor', 'federated_collab', 'board_post']
     .map((tool) => contract(tool, 'review', ['workspace-write'], false, 'written artifact and postcondition')),

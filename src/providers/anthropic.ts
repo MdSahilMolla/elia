@@ -135,7 +135,7 @@ export function createAnthropicProvider(
         cacheWrite1hTokens: finalMessage.usage.cache_creation?.ephemeral_1h_input_tokens ?? 0,
       }
 
-      return { content, usage }
+      return { content, usage, ...(finalMessage.stop_reason === 'max_tokens' ? { truncated: true } : {}) }
     },
   }
 }

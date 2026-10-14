@@ -33,6 +33,31 @@ function redirectTarget(response: Response, from: URL): URL | undefined {
   }
 }
 
+/**
+ * A public GET with redirects followed, every hop back through the address
+ * policy (see redirectTarget). Throws `web_fetch failed: …` on a loop, too many
+ * hops, or a non-ok status; the caller owns the timeout via `signal`.
+ */
+export async function fetchFollowingRedirects(start: URL, signal: AbortSignal): Promise<{ response: Response; url: URL }> {
+  let url = start
+  let response = await publicFetch(url, { signal, headers: { 'User-Agent': 'elia-agent/0.1' } })
+  const seen = new Set<string>([url.toString()])
+  for (let hop = 0; hop < MAX_REDIRECTS; hop += 1) {
+    const next = redirectTarget(response, url)
+    if (!next) break
+    if (seen.has(next.toString())) throw new Error(`web_fetch failed: redirect loop at ${next.toString()}`)
+    seen.add(next.toString())
+    response.body?.cancel().catch(() => {})
+    url = next
+    response = await publicFetch(url, { signal, headers: { 'User-Agent': 'elia-agent/0.1' } })
+  }
+  if (response.status >= 300 && response.status < 400) {
+    throw new Error(`web_fetch failed: more than ${MAX_REDIRECTS} redirects, giving up at ${url.toString()}`)
+  }
+  if (!response.ok) throw new Error(`web_fetch failed: ${response.status} ${response.statusText}`)
+  return { response, url }
+}
+
 /** Reads one specific page a web_search turned up — a competitor site, a pricing page, a public data source. */
 export const webFetchTool: Tool = {
   name: 'web_fetch',
@@ -75,21 +100,9 @@ export const webFetchTool: Tool = {
       // connection's own DNS lookup, so the address that passed the policy is
       // the one the socket connects to — a rebinding DNS server gets no second
       // resolution to answer differently.
-      let response = await publicFetch(url, { signal: controller.signal, headers: { 'User-Agent': 'elia-agent/0.1' } })
-      const seen = new Set<string>([url.toString()])
-      for (let hop = 0; hop < MAX_REDIRECTS; hop += 1) {
-        const next = redirectTarget(response, url)
-        if (!next) break
-        if (seen.has(next.toString())) throw new Error(`web_fetch failed: redirect loop at ${next.toString()}`)
-        seen.add(next.toString())
-        response.body?.cancel().catch(() => {})
-        url = next
-        response = await publicFetch(url, { signal: controller.signal, headers: { 'User-Agent': 'elia-agent/0.1' } })
-      }
-      if (response.status >= 300 && response.status < 400) {
-        throw new Error(`web_fetch failed: more than ${MAX_REDIRECTS} redirects, giving up at ${url.toString()}`)
-      }
-      if (!response.ok) throw new Error(`web_fetch failed: ${response.status} ${response.statusText}`)
+      const fetched = await fetchFollowingRedirects(url, controller.signal)
+      const response = fetched.response
+      url = fetched.url
 
       const contentType = response.headers.get('content-type') ?? ''
       let text: string
@@ -142,7 +155,7 @@ export const webFetchTool: Tool = {
       const window = text.slice(offset, offset + MAX_CHARS)
       const end = offset + window.length
       const header = offset > 0 ? `[resuming at character ${offset} of ${text.length}]\n\n` : ''
-      const footer = end < text.length ? `\n\n[truncated at ${end} of ${text.length} characters — call web_fetch again with offset: ${end}${wantsHtml ? ' and format: "html"' : ''} to read on]` : ''
+      const footer = end < text.length ? `\n\n[truncated at ${end} of ${text.length} characters — call web_fetch again with offset: ${end}${wantsHtml ? ' and format: "html"' : ''} to read on${text.length - end > 4 * MAX_CHARS ? ', or ask digest a question over the whole document' : ''}]` : ''
       return `${header}${window}${footer}${end >= text.length ? designNote : ''}`
     } catch (err) {
       if (err instanceof Error && err.message.startsWith('web_fetch failed:')) throw err

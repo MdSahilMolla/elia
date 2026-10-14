@@ -19,12 +19,14 @@ export const MAX_WRITE_BYTES = 5_000_000
 export const writeFileTool: Tool = {
   name: 'write_file',
   description:
-    'Create a file, or overwrite one entirely with new content. Creates parent directories as needed. To overwrite an existing non-empty file you must read_file it first (or use edit_file for a targeted change).',
+    'Create a file, or overwrite one entirely with new content. Creates parent directories as needed. To overwrite an existing non-empty file you must read_file it first (or use edit_file for a targeted change). A file too long for one response is written in parts: the first with partial: true, each later one with append: true (and partial: true until the last), so every call stays well under your output limit.',
   input_schema: {
     type: 'object',
     properties: {
       path: { type: 'string', description: 'Path to the file to write' },
       content: { type: 'string', description: 'Full content to write to the file' },
+      append: { type: 'boolean', description: 'Add content to the end of the file instead of replacing it (created if missing).' },
+      partial: { type: 'boolean', description: 'More parts follow, so the file is unfinished: skip the syntax check until the last part.' },
     },
     required: ['path', 'content'],
   },
@@ -39,11 +41,18 @@ export const writeFileTool: Tool = {
     if (contentBytes > MAX_WRITE_BYTES) {
       throw new Error(`write_file content is ${contentBytes} bytes, over the ${MAX_WRITE_BYTES}-byte limit. Generate a file this large with a script (run_command), or split it into smaller files.`)
     }
+    if (input.append !== undefined && typeof input.append !== 'boolean') throw new Error('append must be true or false')
+    if (input.partial !== undefined && typeof input.partial !== 'boolean') throw new Error('partial must be true or false')
+    const append = input.append === true
+    const partial = input.partial === true
     const path = resolveWorkspacePath(input.path)
-    const content = input.content
 
     const existing = Bun.file(path)
     const priorText = (await existing.exists()) ? await existing.text() : undefined
+    const content = append ? (priorText ?? '') + input.content : input.content
+    if (append && Buffer.byteLength(content, 'utf8') > MAX_WRITE_BYTES) {
+      throw new Error(`Appending would make ${input.path} larger than the ${MAX_WRITE_BYTES}-byte limit. Generate a file this large with a script (run_command), or split it into smaller files.`)
+    }
 
     // A protected file that already has content is never overwritten, and the
     // refusal has to say so plainly.
@@ -62,8 +71,9 @@ export const writeFileTool: Tool = {
     }
 
     // Guard against clobbering a file the agent never looked at. An empty file
-    // has nothing to lose; a file it has already read (or written) is fair game.
-    if (priorText !== undefined && priorText.trim().length > 0 && !hasReadFile(path)) {
+    // has nothing to lose; a file it has already read (or written) is fair game,
+    // and an append clobbers nothing.
+    if (!append && priorText !== undefined && priorText.trim().length > 0 && !hasReadFile(path)) {
       throw new Error(
         `${input.path} already exists (${priorText.split('\n').length} lines) and has not been read this session. read_file it first so you overwrite it deliberately, or use edit_file for a targeted change.`,
       )
@@ -89,26 +99,31 @@ export const writeFileTool: Tool = {
     // Reject content that is structurally broken (unbalanced brackets, an
     // unterminated string/comment) when the file it replaces was fine — a
     // sub-ms native check in place of a failed build. No-ops without the daemon.
-    const structural = await preflightStructuralCheck(path, priorText, content)
-    if (structural) throw new Error(structural)
+    //
+    // A file written in parts is unbalanced until its last part lands, so the
+    // check waits for that part, and then judges the whole file as if new: the
+    // half-written file before it is not "already broken" code to be repaired.
+    const structural = partial ? undefined : await preflightStructuralCheck(path, append ? undefined : priorText, content)
+    if (structural) throw new Error(append ? `${structural}\nThis part was not appended; the file still holds the earlier parts.` : structural)
 
     await captureBeforeWrite(path)
     await atomicWrite(path, content)
     noteFileRead(path)
 
     const root = currentAgent().cwd ?? process.cwd()
-    const diagnostics = await diagnosticsForFile(path, content, root)
+    const diagnostics = partial ? undefined : await diagnosticsForFile(path, content, root)
     // Overwrites get a real before/after patch; new files get a capped add-only
     // hunk so the model (and the terminal) can see what landed without a full dump.
     const diff = priorText === undefined
       ? addOnlyDiff(content, input.path)
       : unifiedDiff(priorText.replace(/\r\n/g, '\n'), content.replace(/\r\n/g, '\n'), input.path)
-    const verb = priorText === undefined ? 'Created' : 'Overwrote'
+    const verb = append && priorText !== undefined ? 'Appended to' : priorText === undefined ? 'Created' : 'Overwrote'
     const body = diff.hunks.length > 0 ? `\n${fencedDiff(diff)}` : ''
     // State the absolute path so "where did the file go?" is never ambiguous —
     // relative paths resolve against the run's cwd, which is not always what the
     // model (or the user) assumes, especially for scratch projects.
     const at = path !== input.path ? `\n  at ${path}` : ''
-    return `${verb} ${input.path} (${diffStat(diff)})${at}${body}${diagnostics ? formatDiagnostics(diagnostics, input.path) : ''}`
+    const unfinished = partial ? `\n  (partial: continue with write_file append: true; the last part leaves partial off so the whole file is checked)` : ''
+    return `${verb} ${input.path} (${diffStat(diff)})${at}${unfinished}${body}${diagnostics ? formatDiagnostics(diagnostics, input.path) : ''}`
   },
 }

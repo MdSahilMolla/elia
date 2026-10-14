@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
+import { addToTaint, createTaint, escalateForTaint, type InjectionHit } from './injectionGuard.ts'
 import { DEFAULT_ARTIFACT_PATHS } from '../battmann/artifactPaths.ts'
 import { DATASCIENCE_TOOLS, datascienceEffect } from '../datascience/effects.ts'
 import { SYSINTEL_RECORD_DIR, SYSINTEL_TOOLS, sysintelEffect } from '../sysintel/effects.ts'
@@ -84,6 +85,12 @@ export interface ActionGovernor {
    * when the budget is spent, in which case the call must not run.
    */
   chargeApprovedAction?(): boolean
+  /**
+   * Text addressed to an AI as instructions was found in `source`'s output
+   * (autonomy/injectionGuard.ts). From then on, actions aimed at what it named,
+   * and actions that cannot be undone, need approval.
+   */
+  noteUntrustedInstructions?(source: string, hits: InjectionHit[]): void
   /**
    * The governance mode this governor enforces. Exposed so durable-action
    * approvals (goalGraph.ts) can be scoped to the mode that granted them — an
@@ -646,6 +653,12 @@ export function assessAction(request: ActionRequest, cwd = currentAgent().cwd ??
     // made this safe still holds per hop rather than by refusing to move.
     return assessment('safe', 'allow', 'web fetch is a bounded read-only GET restricted to public http(s) addresses, with every redirect hop re-validated', 'web_fetch', resources, true)
   }
+  if (name === 'digest') {
+    return assessment('safe', 'allow', 'digest reads a workspace file through the guarded path check, or a public URL through the same GET as web_fetch, and only sends its text to the configured model; it writes nothing', 'digest', resources, true)
+  }
+  if (name === 'compare_page') {
+    return assessment('safe', 'allow', 'page comparison reads the original through the same public-address GET as web_fetch and the copy as a guarded workspace read; it writes nothing', 'compare_page', resources, true)
+  }
 
   if (name === 'visualize') {
     const slug = typeof input.slug === 'string' ? input.slug : ''
@@ -1018,6 +1031,8 @@ export function createActionGovernor(options: ActionGovernorOptions = {}): Actio
   const classDecisions = new Map<string, boolean>()
   /** "Allow for this session" choices from the supervised approval menu. */
   const sessionAllow = new Set<string>()
+  /** Instructions planted in content this governor's run has read. */
+  const taint = createTaint()
   const sessionKey = (request: ActionRequest, assessment: ActionAssessment): string =>
     request.name === 'run_command' || (request.name === 'process' && request.input.action === 'start')
       ? `${request.name}:${String(request.input.command ?? '').trim().split(/[\s;|&]+/, 1)[0] ?? ''}`
@@ -1046,10 +1061,13 @@ export function createActionGovernor(options: ActionGovernorOptions = {}): Actio
       // outright, or raise its decision from allow to approve. Applied before
       // the budget check so a policy-blocked action never consumes budget.
       const policied = applyPolicy(baseAssessment, request, options.cwd)
-      const assessment = policied.assessment
       if (policied.blocked) {
-        return { allowed: false, assessment, message: policied.message }
+        return { allowed: false, assessment: policied.assessment, message: policied.message }
       }
+      // After planted instructions were read, some allowed actions need a
+      // person — and no standing allow rule may wave them through.
+      const escalated = escalateForTaint(taint, request.name, request.input, policied.assessment)
+      const assessment = escalated ?? policied.assessment
       if (maxActions > 0 && actionCount >= maxActions) {
         blockedByBudget += 1
         return {
@@ -1074,6 +1092,7 @@ export function createActionGovernor(options: ActionGovernorOptions = {}): Actio
       // interactive session.
       if (
         mode === 'supervised' &&
+        !escalated &&
         !neverRemembered(assessment.intent) &&
         (sessionAllow.has(sessionKey(request, assessment)) || isAllowlisted(request, assessment, options.cwd))
       ) {
@@ -1262,6 +1281,9 @@ export function createActionGovernor(options: ActionGovernorOptions = {}): Actio
       return true
     },
     stats: () => ({ maxActions, consumed: actionCount, exhausted: maxActions > 0 && actionCount >= maxActions, blockedByBudget }),
+    noteUntrustedInstructions(source, hits) {
+      addToTaint(taint, source, hits)
+    },
     async check(request) {
       const result = await decide(request)
       // Every way a self_edit gets through — a yes at the prompt, a remembered

@@ -573,3 +573,21 @@ test('the first-byte budget grows with the request and is capped', async () => {
   expect(firstByteMs(10_000_000, {})).toBe(90_000)
   expect(firstByteMs(64_000, { ELIA_FIRST_BYTE_MS: '5000' })).toBe(5_000)
 })
+
+test('a stream that stops for length is reported as truncated; one that stops normally is not', async () => {
+  process.env.ELIA_ALLOW_INSECURE_LOCAL_ENDPOINT = '1'
+  const base = { id: '1', object: 'chat.completion.chunk', created: 1, model: 'm' }
+  let finish = 'length'
+  server = Bun.serve({
+    port: 0,
+    fetch: () => new Response(sse(
+      { ...base, choices: [{ index: 0, delta: { role: 'assistant', content: 'half an ans' }, finish_reason: null }] },
+      { ...base, choices: [{ index: 0, delta: {}, finish_reason: finish }] },
+    ) + 'data: [DONE]\n\n', { headers: { 'content-type': 'text/event-stream' } }),
+  })
+  const provider = createOpenAICompatibleProvider('key', 'm', `http://127.0.0.1:${server.port}`)
+  const turn = () => provider.streamTurn({ cwd: process.cwd(), system: 'sys', messages: USER_MESSAGES, tools: [], onText: () => {} })
+  expect((await turn()).truncated).toBe(true)
+  finish = 'stop'
+  expect((await turn()).truncated).toBeUndefined()
+})
