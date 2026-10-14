@@ -30,6 +30,7 @@ export const WORKSPACE_EVENT_TYPES = [
   'FileChanged', 'ReservationAcquired', 'ReservationReleased', 'ReservationExpired', 'ReservationRenewed', 'ConflictDetected',
   'AgentMessageCreated', 'DecisionRecorded', 'CommentPosted',
   'ApprovalRequired', 'ApprovalGranted', 'ApprovalRejected',
+  'NodeRegistered', 'NodeHeartbeat',
   'PresenceJoined', 'PresenceUpdated', 'PresenceLeft',
 ] as const
 
@@ -53,6 +54,12 @@ export interface WorkspaceEventInput {
   type: WorkspaceEventType
   actorKind: AssigneeKind | 'system'
   actorId: string
+  /**
+   * The node that authored this event. Omitted means "this process's node", which
+   * is correct for every local append; replication sets it to the originating
+   * node so the guard sees who actually wrote the row (design note §6.2, §6.6).
+   */
+  actorNode?: string
   objectiveId?: string
   taskId?: string
   payload?: Record<string, unknown>
@@ -65,11 +72,21 @@ export interface PersistedEvent {
   type: WorkspaceEventType
   actorKind: AssigneeKind | 'system'
   actorId: string
+  actorNode?: string
   objectiveId?: string
   taskId?: string
   payload: Record<string, unknown>
   at: string
 }
+
+/**
+ * The wire form of an event crossing to the peer.
+ *
+ * `seq` is dropped on purpose: it is local to the storing database and means
+ * nothing on the other machine, where the same event gets its own rowid. The
+ * event `id` is the stable identity replication deduplicates on.
+ */
+export type ReplicatedEvent = Omit<PersistedEvent, 'seq'>
 
 export function newEventId(): string {
   return `evt_${randomUUID().replaceAll('-', '')}`
@@ -135,10 +152,39 @@ function requireTaskRow(db: Database, taskId: string): Row {
   return row
 }
 
+/**
+ * The node that owns a newly created objective.
+ *
+ * `ObjectiveCreated` names an owner explicitly when the plan wants the work run
+ * on a machine other than the one that proposed it; otherwise the workspace's
+ * owner node inherits it. `null` on a workspace with no owner recorded — a
+ * pre-v4 database, or one created before node identity existed — which the guard
+ * reads as "not partitioned", so old behaviour is preserved rather than locked
+ * out.
+ */
+function objectiveOwner(db: Database, event: PersistedEvent): string | null {
+  const explicit = event.payload.ownerNodeId
+  if (typeof explicit === 'string' && explicit !== '') return explicit
+  if (event.actorNode) return event.actorNode
+  const row = db.query('SELECT owner_node_id FROM workspaces LIMIT 1').get() as Row | null
+  return row?.owner_node_id == null ? null : String(row.owner_node_id)
+}
+
 function requireAgentRow(db: Database, agentId: string): Row {
   const row = db.query('SELECT * FROM agents WHERE id = ?').get(agentId) as Row | null
   if (!row) throw new Error(`unknown agent ${agentId}`)
   return row
+}
+
+/**
+ * Close every unreleased grant on a task.
+ *
+ * A grant outliving its task is a real hazard rather than a tidy-up: it leaves
+ * the executor node authorised to write `TaskProgress` for work it no longer
+ * holds, and the authority guard would accept those events.
+ */
+function releaseGrants(db: Database, taskId: string, at: string): void {
+  db.query('UPDATE task_grants SET released_at = ? WHERE task_id = ? AND released_at IS NULL').run(at, taskId)
 }
 
 function setObjectiveStatus(db: Database, objectiveId: string, next: ObjectiveStatus, at: string, extra: Row = {}): void {
@@ -221,8 +267,8 @@ export function applyProjection(db: Database, event: PersistedEvent): void {
   const p = event.payload
   switch (event.type) {
     case 'WorkspaceCreated': {
-      db.query('INSERT INTO workspaces (id, name, default_project_id, created_at) VALUES (?, ?, ?, ?)')
-        .run(String(p.id), String(p.name), String(p.defaultProjectId), event.at)
+      db.query('INSERT INTO workspaces (id, name, default_project_id, created_at, owner_node_id) VALUES (?, ?, ?, ?, ?)')
+        .run(String(p.id), String(p.name), String(p.defaultProjectId), event.at, event.actorNode ?? null)
       db.query('INSERT INTO projects (id, workspace_id, name, repo_root, branch, created_at) VALUES (?, ?, ?, ?, ?, ?)')
         .run(String(p.defaultProjectId), String(p.id), String(p.projectName ?? 'default'), String(p.repoRoot), String(p.branch ?? 'main'), event.at)
       return
@@ -261,11 +307,13 @@ export function applyProjection(db: Database, event: PersistedEvent): void {
       return
     }
     case 'AgentStarted': {
-      db.query(`INSERT INTO agents (id, identity_id, name, role, status, started_at, last_heartbeat_at, connection_id)
-        VALUES (?, ?, ?, ?, 'idle', ?, ?, ?)
+      db.query(`INSERT INTO agents (id, identity_id, name, role, status, started_at, last_heartbeat_at, connection_id, node_id)
+        VALUES (?, ?, ?, ?, 'idle', ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET status = 'idle', connection_id = excluded.connection_id,
-          last_heartbeat_at = excluded.last_heartbeat_at, stopped_at = NULL, last_error = NULL`)
-        .run(String(p.id), String(p.identityId), String(p.name), String(p.role), event.at, event.at, p.connectionId == null ? null : String(p.connectionId))
+          last_heartbeat_at = excluded.last_heartbeat_at, stopped_at = NULL, last_error = NULL,
+          node_id = COALESCE(excluded.node_id, agents.node_id)`)
+        .run(String(p.id), String(p.identityId), String(p.name), String(p.role), event.at, event.at,
+          p.connectionId == null ? null : String(p.connectionId), event.actorNode ?? null)
       return
     }
     case 'AgentStateChanged': {
@@ -286,10 +334,10 @@ export function applyProjection(db: Database, event: PersistedEvent): void {
       return
     }
     case 'ObjectiveCreated': {
-      db.query(`INSERT INTO objectives (id, workspace_id, project_id, goal, status, run_id, created_by, created_at, updated_at)
-        VALUES (?, ?, ?, ?, 'planning', ?, ?, ?, ?)`)
+      db.query(`INSERT INTO objectives (id, workspace_id, project_id, goal, status, run_id, created_by, created_at, updated_at, owner_node_id)
+        VALUES (?, ?, ?, ?, 'planning', ?, ?, ?, ?, ?)`)
         .run(String(p.id), String(p.workspaceId), String(p.projectId), String(p.goal), String(p.runId),
-          String(event.actorId), event.at, event.at)
+          String(event.actorId), event.at, event.at, objectiveOwner(db, event))
       return
     }
     case 'ObjectivePlanned': {
@@ -331,19 +379,38 @@ export function applyProjection(db: Database, event: PersistedEvent): void {
       return
     }
     case 'TaskAssigned': {
+      const executorNodeId = p.executorNodeId == null || p.executorNodeId === '' ? null : String(p.executorNodeId)
       setTaskStatus(db, String(event.taskId), 'assigned', event.at, {
         // '' is the pool-reassign sentinel — store it as unassigned (NULL), never a real id.
         assignee_kind: String(p.assigneeKind), assignee_id: p.assigneeId == null || p.assigneeId === '' ? null : String(p.assigneeId),
         wave: p.wave == null ? null : Number(p.wave),
         worktree_ref: p.worktreeRef == null ? null : String(p.worktreeRef),
+        executor_node_id: executorNodeId,
       })
+      // The grant is the capability itself, not a side effect of it: the executor
+      // node's authority check reads this row, so it has to be written by the same
+      // transaction that dispatches the task or the node could receive the
+      // assignment and be refused its own work.
+      if (executorNodeId) {
+        db.query('UPDATE task_grants SET released_at = ? WHERE task_id = ? AND released_at IS NULL')
+          .run(event.at, String(event.taskId))
+        db.query('INSERT INTO task_grants (task_id, node_id, granted_at) VALUES (?, ?, ?)')
+          .run(String(event.taskId), executorNodeId, event.at)
+      }
       return
     }
     case 'TaskReassigned': {
       const row = requireTaskRow(db, String(event.taskId))
       const status = toTask(row).status
-      db.query('UPDATE tasks SET assignee_kind = ?, assignee_id = ?, lease_owner = NULL, lease_expires_at = NULL, updated_at = ? WHERE id = ?')
-        .run(String(p.assigneeKind), p.assigneeId == null || p.assigneeId === '' ? null : String(p.assigneeId), event.at, String(event.taskId))
+      const executorNodeId = p.executorNodeId == null || p.executorNodeId === '' ? null : String(p.executorNodeId)
+      db.query('UPDATE tasks SET assignee_kind = ?, assignee_id = ?, executor_node_id = ?, lease_owner = NULL, lease_expires_at = NULL, updated_at = ? WHERE id = ?')
+        .run(String(p.assigneeKind), p.assigneeId == null || p.assigneeId === '' ? null : String(p.assigneeId),
+          executorNodeId, event.at, String(event.taskId))
+      releaseGrants(db, String(event.taskId), event.at)
+      if (executorNodeId) {
+        db.query('INSERT INTO task_grants (task_id, node_id, granted_at) VALUES (?, ?, ?)')
+          .run(String(event.taskId), executorNodeId, event.at)
+      }
       if (status === 'assigned' || status === 'in-progress') setTaskStatus(db, String(event.taskId), 'ready', event.at)
       return
     }
@@ -367,6 +434,7 @@ export function applyProjection(db: Database, event: PersistedEvent): void {
         ...(p.report !== undefined ? { result_report: String(p.report) } : {}),
       })
       const task = toTask(requireTaskRow(db, String(event.taskId)))
+      releaseGrants(db, String(event.taskId), event.at)
       refreshTaskReadiness(db, task.objectiveId, event.at)
       // Objective completion, if this was the last open task, is a separate
       // ObjectiveStatusChanged event — see `derivedEvents`.
@@ -375,6 +443,7 @@ export function applyProjection(db: Database, event: PersistedEvent): void {
     case 'TaskFailed': {
       setTaskStatus(db, String(event.taskId), 'failed', event.at, { lease_owner: null, lease_expires_at: null, last_error: String(p.error ?? 'task failed') })
       const task = toTask(requireTaskRow(db, String(event.taskId)))
+      releaseGrants(db, String(event.taskId), event.at)
       refreshTaskReadiness(db, task.objectiveId, event.at)
       return
     }
@@ -397,6 +466,7 @@ export function applyProjection(db: Database, event: PersistedEvent): void {
       // 'cancelled' is a TERMINAL_DEP_STATUS (a cancelled prerequisite shouldn't
       // strand its dependents forever) — without this, nothing ever re-derives them.
       const task = toTask(requireTaskRow(db, String(event.taskId)))
+      releaseGrants(db, String(event.taskId), event.at)
       refreshTaskReadiness(db, task.objectiveId, event.at)
       return
     }
@@ -507,6 +577,36 @@ export function applyProjection(db: Database, event: PersistedEvent): void {
       db.query('DELETE FROM presence WHERE connection_id = ?').run(String(p.connectionId))
       return
     }
+    case 'NodeRegistered': {
+      // Upsert, never replace: the local row already exists (it is how this node
+      // knows its own id), and the first time the mesh reports a fingerprint is
+      // exactly when it should be pinned onto it.
+      db.query(`INSERT INTO nodes (id, name, kind, fingerprint, is_local, first_seen_at, last_seen_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET name = excluded.name, kind = excluded.kind,
+          fingerprint = COALESCE(excluded.fingerprint, nodes.fingerprint), last_seen_at = excluded.last_seen_at`)
+        .run(String(p.id), String(p.name ?? String(p.id)), String(p.kind ?? 'mesh'),
+          p.fingerprint == null || p.fingerprint === '' ? null : String(p.fingerprint),
+          p.isLocal === true ? 1 : 0, event.at, event.at)
+      return
+    }
+    case 'NodeHeartbeat': {
+      const nodeId = String(p.id)
+      db.query(`INSERT INTO nodes (id, name, kind, fingerprint, is_local, first_seen_at, last_seen_at)
+        VALUES (?, ?, ?, NULL, 0, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET last_seen_at = excluded.last_seen_at,
+          name = COALESCE(NULLIF(excluded.name, ''), nodes.name)`)
+        .run(nodeId, String(p.name ?? nodeId), String(p.kind ?? 'mesh'), event.at, event.at)
+      // Presence is keyed by node, so a beat from the other machine is what makes
+      // "they are online" true here. `connected_at` is left alone by the upsert so
+      // a flapping link reads as continuously present rather than as a new arrival.
+      db.query(`INSERT INTO node_presence (node_id, name, focus, connected_at, last_seen_at)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(node_id) DO UPDATE SET last_seen_at = excluded.last_seen_at,
+          name = excluded.name, focus = COALESCE(excluded.focus, node_presence.focus)`)
+        .run(nodeId, String(p.name ?? nodeId), p.focus == null ? null : String(p.focus), event.at, event.at)
+      return
+    }
     default: {
       const exhaustive: never = event.type
       throw new Error(`unhandled workspace event ${String(exhaustive)}`)
@@ -539,14 +639,47 @@ function objectiveReadyToComplete(db: Database, objectiveId: string): boolean {
  * orchestrator's listeners, a replica) never saw the objective finish. Emitting
  * it as a real `ObjectiveStatusChanged` keeps "every mutation is an event" true.
  */
-export function derivedEvents(db: Database, event: PersistedEvent): WorkspaceEventInput[] {
+/**
+ * Whether `nodeId` owns an objective.
+ *
+ * An objective with no recorded owner predates partitioned ownership (or was
+ * created before node identity existed) and is treated as unowned rather than as
+ * owned by nobody-and-therefore-locked: the guard falls back to the legacy
+ * single-writer rules for it, and the owner's derivations still run.
+ */
+export function ownsObjective(db: Database, objectiveId: string, nodeId: string): boolean {
+  const row = db.query('SELECT owner_node_id FROM objectives WHERE id = ?').get(objectiveId) as Row | null
+  const owner = row?.owner_node_id
+  return owner == null || owner === '' || String(owner) === nodeId
+}
+
+/**
+ * Events that a just-projected event implies, for `WorkspaceStore.append` to
+ * add to the spine inside the same transaction.
+ *
+ * Objective completion used to be a raw `UPDATE objectives` buried in the
+ * TaskCompleted / ReviewCompleted projection — a status change with no event.
+ * Anything that learns state from the stream (WebSocket clients, the
+ * orchestrator's listeners, a replica) never saw the objective finish. Emitting
+ * it as a real `ObjectiveStatusChanged` keeps "every mutation is an event" true.
+ *
+ * Only the owner derives it. `ObjectiveStatusChanged` is owner-authoritative, so
+ * a follower completing the last task would have its whole `TaskCompleted`
+ * transaction — including the completion the agent actually performed — roll back
+ * on the authority guard. The owner's node derives it instead, from the mirrored
+ * row, so the objective still finishes exactly once and on the node entitled to
+ * say so.
+ */
+export function derivedEvents(db: Database, event: PersistedEvent, actorNode?: string): WorkspaceEventInput[] {
   const completesTask = event.type === 'TaskCompleted' || (event.type === 'ReviewCompleted' && Boolean(event.payload.passed))
   if (!completesTask || !event.taskId) return []
   const task = db.query('SELECT objective_id FROM tasks WHERE id = ?').get(event.taskId) as Row | null
   const objectiveId = task ? String(task.objective_id) : undefined
   if (!objectiveId || !objectiveReadyToComplete(db, objectiveId)) return []
+  if (actorNode !== undefined && !ownsObjective(db, objectiveId, actorNode)) return []
   return [{
     type: 'ObjectiveStatusChanged', actorKind: 'system', actorId: 'workspace', objectiveId,
+    ...(actorNode !== undefined ? { actorNode } : {}),
     payload: { status: 'completed', reason: 'every task is done or cancelled', causedBy: event.id },
   }]
 }

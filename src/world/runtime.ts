@@ -392,7 +392,11 @@ export class World {
   }
 
   private relative(path: string): string {
-    const root = this.cwd.replace(/\\/g, '/').replace(/\/$/, '')
+    // Resolve the root the same way `absolute` resolves a path. On Windows a cwd
+    // of `/repo` comes back from `absolute` as `H:/repo/src/a.ts` while the raw
+    // cwd still reads `/repo`, so the prefix never matches and every file in the
+    // snapshot is reported as an absolute path.
+    const root = resolve(this.cwd, '.').replace(/\\/g, '/').replace(/\/$/, '')
     return path.startsWith(`${root}/`) ? path.slice(root.length + 1) : path
   }
 

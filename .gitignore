@@ -76,6 +76,10 @@ lacking/
 docs/*
 !docs/guide/
 research/
+error.md
+
+# --- Generated architecture-diagram artifacts (hand-drawn, not source) ---
+elia-backend-workflow.*
 
 # --- Scratch workspace: elia builds throwaway projects here ---
 /workspace/

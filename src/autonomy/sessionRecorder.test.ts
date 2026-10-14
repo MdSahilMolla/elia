@@ -10,6 +10,15 @@ afterEach(() => {
   for (const dir of roots.splice(0)) rmSync(dir, { recursive: true, force: true })
 })
 
+// The recorder creates its files 0o600, and that is a real guarantee on a
+// filesystem with POSIX bits. Windows has no permission bits at all — `chmod`
+// is a no-op there and the file inherits its directory ACLs — so the mode
+// check below is the one assertion in this file that cannot hold on NTFS.
+// Everything it actually protects (ordering, redaction, thinking stripped) is
+// asserted unconditionally on every platform. Same guard as
+// securePersistence.test.ts:11 and providerSettings.test.ts:42.
+const POSIX_PERMISSIONS = process.platform !== 'win32'
+
 function project(): string {
   const dir = mkdtempSync(join(tmpdir(), 'elia-recorder-'))
   roots.push(dir)
@@ -51,7 +60,7 @@ test('every event lands on disk as it happens, in order, without private reasoni
   expect(lesson).toMatchObject({ kind: 'lesson', from: 1 })
   const failed = events.find((event) => event.kind === 'tool' && event.status === 'error')
   expect(failed).toMatchObject({ kind: 'tool', name: 'run_command', result: 'error: boom' })
-  expect(statSync(path).mode & 0o077).toBe(0)
+  if (POSIX_PERMISSIONS) expect(statSync(path).mode & 0o077).toBe(0)
 })
 
 test('an oversized result is clipped and says so; a recording at its limit stops with a row that says why, and still closes', () => {

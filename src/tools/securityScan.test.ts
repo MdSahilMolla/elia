@@ -99,10 +99,11 @@ describe('runSecurityTool (injected command and log)', () => {
     rmSync(cwd, { recursive: true, force: true })
   })
 
-  it('refuses to run before an engagement is scaffolded', async () => {
-    const out = await runSecurityTool({ engagement: 'unknown-eng', label: 'probe', command: 'x' }, ctx())
+  it('refuses to run before an engagement is scaffolded, for a network target', async () => {
+    const out = await runSecurityTool({ engagement: 'unknown-eng', label: 'probe', command: 'nmap -sV acme.test' }, ctx())
     expect(out).toContain('No engagement "unknown-eng" found')
     expect(out).toContain('SCOPE.md')
+    expect(out).toContain('acme.test')
     expect(written.length).toBe(0)
   })
 
@@ -152,30 +153,89 @@ describe('runSecurityTool (injected command and log)', () => {
     expect(written.length).toBe(1)
   })
 
-  it('refuses a missing binary before running it and writes no log', async () => {
-    let ran = false
+  it('tries to install a missing catalogued binary, then reports why it could not, and writes no log', async () => {
+    const commands: string[] = []
     const out = await runSecurityTool(
       { engagement: 'acme-webapp', label: 'nmap', command: 'nmap -sV acme.test' },
       ctx({
+        platform: 'linux',
         which: (name) => (name === 'nmap' ? null : 'C:\\fake\\tool.exe'),
         runCommand: async (command) => {
-          ran = true
+          commands.push(command)
           return { command, exitCode: 0, stdout: '', stderr: '', elapsedMs: 1, timedOut: false }
         },
       }),
     )
-    expect(ran).toBe(false)
-    expect(out).toContain('nmap is not installed or not on PATH')
+    // The install seam is the same runner, so `ran` would be true for the
+    // preflight. What must not have happened is the scan itself: an
+    // unlaunchable tool never reaches recon/ and cannot be cited as evidence.
+    expect(commands.some((c) => c.startsWith('nmap -sV'))).toBe(false)
+    expect(out).toContain('nmap is not installed and could not be installed automatically')
     expect(out).toContain('no recon log was written')
+    expect(out).toContain('sudo apt install nmap')
     expect(written.length).toBe(0)
+  })
+
+  it('installs a missing binary, re-checks PATH, and then runs the scan as asked', async () => {
+    const commands: string[] = []
+    let installed = false
+    const out = await runSecurityTool(
+      { engagement: 'acme-webapp', label: 'nmap', command: 'nmap -sV acme.test' },
+      ctx({
+        platform: 'linux',
+        // Absent until the install runs, present after - this is the re-check
+        // that makes the scan below honest rather than assumed.
+        which: (name) => (name === 'nmap' ? (installed ? '/usr/bin/nmap' : null) : '/usr/bin/other'),
+        runCommand: async (command) => {
+          commands.push(command)
+          if (command.includes('apt install')) {
+            installed = true
+            return { command, exitCode: 0, stdout: 'done', stderr: '', elapsedMs: 1, timedOut: false }
+          }
+          return { command, exitCode: 0, stdout: 'port 443 is open', stderr: '', elapsedMs: 1, timedOut: false }
+        },
+      }),
+    )
+    // The sudo preflight has to come first, and it must not prompt.
+    expect(commands[0]).toBe('sudo -n true')
+    expect(commands).toContain('sudo apt install nmap')
+    // The install exists so the requested scan can happen: the same command
+    // runs afterwards, and a model told to "re-run this" would only be adding a
+    // round trip between the install and the work it was asked to do.
+    expect(commands).toContain('nmap -sV acme.test')
+    expect(out).toContain('port 443 is open')
+    expect(out).toContain('nmap was not installed, so it was installed first')
+    expect(written.length).toBe(1)
+  })
+
+  it('never asks sudo for a password: a cold credential is reported, not prompted', async () => {
+    const commands: string[] = []
+    const out = await runSecurityTool(
+      { engagement: 'acme-webapp', label: 'gdb', command: 'gdb --version' },
+      ctx({
+        platform: 'linux',
+        which: () => null,
+        runCommand: async (command) => {
+          commands.push(command)
+          // sudo -n fails immediately when nothing is cached, which is what
+          // keeps an unattended run from hanging on an invisible password prompt.
+          return { command, exitCode: 1, stdout: '', stderr: 'sudo: a password is required', elapsedMs: 1, timedOut: false }
+        },
+      }),
+    )
+    expect(commands).toEqual(['sudo -n true'])
+    expect(out).toContain('sudo -v')
+    // It still names the command so the user can run it — naming it is not
+    // running it. The executed set above is the actual invariant.
+    expect(out).toContain('sudo apt install gdb')
   })
 
   it('checks the binary behind a wrapper', async () => {
     const out = await runSecurityTool(
       { engagement: 'acme-webapp', label: 'sudo-nmap', command: 'sudo nmap -sV acme.test' },
-      ctx({ which: () => null }),
+      ctx({ platform: 'linux', which: () => null }),
     )
-    expect(out).toContain('nmap is not installed or not on PATH')
+    expect(out).toContain('nmap is not installed')
   })
 
   it('writes no log when the shell reports the tool could not be started', async () => {

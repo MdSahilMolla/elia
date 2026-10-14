@@ -13,6 +13,9 @@ import { AsyncLocalStorage } from 'node:async_hooks'
  */
 export type AgentMode = 'dev' | 'cyber' | 'sports' | 'fitness' | 'battmann' | 'datascience' | 'sysintel'
 
+/** Every mode, as a runtime set — for validating a mode read back from stored state rather than a type assertion. */
+export const AGENT_MODES: readonly AgentMode[] = ['dev', 'cyber', 'sports', 'fitness', 'battmann', 'datascience', 'sysintel']
+
 let current: AgentMode = 'dev'
 const storage = new AsyncLocalStorage<AgentMode>()
 

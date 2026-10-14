@@ -1,6 +1,6 @@
 import { afterAll, afterEach, beforeEach, expect, test } from 'bun:test'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { homedir, tmpdir } from 'node:os'
+import { basename, dirname, isAbsolute, join } from 'node:path'
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import {
   DaemonUnavailable,
@@ -11,6 +11,7 @@ import {
   resolveJvmBridgeJar,
   resetDaemonClientForTests,
   socketPath,
+  socketTokenPath,
 } from './client.ts'
 import { PROTOCOL_VERSION } from './types.ts'
 import { runShell } from '../shell.ts'
@@ -246,3 +247,83 @@ withJvm('jvm.check type-checks a Java edit via elia-jvm-bridge', async () => {
   expect(broken.ok).toBe(false)
   expect(broken.errors[0]?.severity).toBe('error')
 }, 40_000)
+
+// The daemon (Rust) resolves its home with `dirs::home_dir()`; the client used
+// to read `process.env.HOME`, which is a POSIX convention and is typically unset
+// on Windows. When it was unset the client looked for a token under `./.elia`
+// while the daemon wrote it into the real profile, so every daemon test failed
+// with "token file never appeared" even though the daemon was healthy. These
+// assert the client never depends on `$HOME`, so the drift cannot come back.
+test('socketTokenPath does not depend on the HOME env var', () => {
+  const saved = process.env.HOME
+  try {
+    delete process.env.HOME
+    const withoutHome = socketTokenPath()
+    process.env.HOME = join(tmpdir(), 'some-other-home')
+    const withBogusHome = socketTokenPath()
+    // A different (or absent) $HOME must not move the token: the daemon would
+    // never write there, so the client would wait forever for a token.
+    expect(withBogusHome).toBe(withoutHome)
+    // Nor may it collapse to a path relative to the cwd, which is the exact
+    // failure mode `.\.elia` produced on a real Windows box.
+    expect(isAbsolute(withoutHome)).toBe(true)
+    expect(withoutHome.endsWith(join('.elia', `elia-eliad-${userTag()}.token`))).toBe(true)
+  } finally {
+    if (saved === undefined) delete process.env.HOME
+    else process.env.HOME = saved
+  }
+})
+
+test('socketTokenPath is unique per user and mirrors the Rust token_path rules', () => {
+  const path = socketTokenPath()
+  // `socket.rs`'s `token_path()` names the file `elia-eliad-<user>.token` on
+  // Windows and `eliad-<user>.token` elsewhere; the two differ on purpose.
+  const expectedName = process.platform === 'win32' ? `elia-eliad-${userTag()}.token` : `eliad-${userTag()}.token`
+  expect(basename(path)).toBe(expectedName)
+  // It must live in a real home directory, never the repo cwd. `$XDG_RUNTIME_DIR`
+  // supersedes `~/.elia` on unix (that is `token_path()`'s own precedence).
+  if (process.platform !== 'win32' && process.env.XDG_RUNTIME_DIR) {
+    expect(dirname(path)).toBe(process.env.XDG_RUNTIME_DIR)
+  } else {
+    expect(basename(dirname(path))).toBe('.elia')
+  }
+  expect(isAbsolute(path)).toBe(true)
+})
+
+test('the socket and token share one directory, and XDG_RUNTIME_DIR is used verbatim', () => {
+  // `socket_dir()` in socket.rs returns `$XDG_RUNTIME_DIR` with no extra segment
+  // and falls back to `~/.elia`. A stray `elia/` segment here silently sends the
+  // client to a directory the daemon never binds, so the dir is pinned exactly.
+  // Asserted through the token path on every platform: on Windows the socket is
+  // a named pipe, but the token is still a file under the same rules, and
+  // socketPath() is checked too where it is file-based.
+  const saved = process.env.XDG_RUNTIME_DIR
+  try {
+    if (process.platform === 'win32') {
+      // Windows uses a named pipe; only the token path is file-based there.
+      expect(basename(dirname(socketTokenPath()))).toBe('.elia')
+    } else {
+      const runtime = join(tmpdir(), 'xdg-pin')
+      process.env.XDG_RUNTIME_DIR = runtime
+      expect(dirname(socketPath())).toBe(runtime)
+      expect(dirname(socketTokenPath())).toBe(runtime)
+    }
+
+    delete process.env.XDG_RUNTIME_DIR
+    expect(dirname(socketTokenPath())).toBe(join(homedir(), '.elia'))
+    if (process.platform !== 'win32') {
+      expect(dirname(socketPath())).toBe(join(homedir(), '.elia'))
+    }
+  } finally {
+    if (saved === undefined) delete process.env.XDG_RUNTIME_DIR
+    else process.env.XDG_RUNTIME_DIR = saved
+  }
+})
+
+// Mirrors how the rest of the codebase resolves a home directory: via
+// `os.homedir()`. Duplicated here rather than exported so the test pins the
+// same derivation the production code uses.
+function userTag(): string {
+  const raw = process.env.USER || process.env.USERNAME || 'default'
+  return (raw.match(/[A-Za-z0-9_-]/g) ?? []).join('').slice(0, 32) || 'default'
+}

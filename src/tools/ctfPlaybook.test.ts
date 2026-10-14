@@ -9,7 +9,7 @@ import { PLAYBOOKS, PLAYBOOK_CATEGORIES, type PlaybookCategory } from '../securi
  * read, and (b) no category renders an empty or stubbed page.
  */
 
-const CATEGORIES: PlaybookCategory[] = ['pwn', 'rev', 'crypto', 'stego', 'misc']
+const CATEGORIES: PlaybookCategory[] = ['pwn', 'rev', 'crypto', 'stego', 'web', 'misc']
 
 /** Below this a rendered playbook is a stub rather than a procedure. */
 const MIN_PLAYBOOK_CHARS = 2_500
@@ -167,7 +167,7 @@ describe('the hints path', () => {
 describe('bad input fails loudly', () => {
   test('an unknown category throws and names the valid ones', async () => {
     await expect(ctfPlaybookTool.execute({ category: 'forensics' })).rejects.toThrow(
-      /category must be one of: pwn, rev, crypto, stego, misc — got "forensics"/,
+      /category must be one of: pwn, rev, crypto, stego, web, misc — got "forensics"/,
     )
   })
 

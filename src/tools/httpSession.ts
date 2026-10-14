@@ -3,6 +3,7 @@ import { isIP } from 'node:net'
 import { join } from 'node:path'
 import { writeSecureFile } from '../securePersistence.ts'
 import { noteCorruptState, parseLocalJson } from '../localJson.ts'
+import { isSealedJar, openSealedJar, sealJar, SEALED_JAR_VERSION } from './httpSessionSeal.ts'
 
 /**
  * A persistent cookie jar for `http_probe`, one per engagement.
@@ -11,9 +12,10 @@ import { noteCorruptState, parseLocalJson } from '../localJson.ts'
  * access control, and anything behind a login all need the same authenticated
  * request replayed across pages. The jar holds *live bearer credentials* — a
  * `Set-Cookie` value is as good as the password that produced it until it
- * expires — so the rules here are conservative by construction: values live in
- * an owner-only (`0600`) file, are never rendered into any string the model
- * reads, and are pruned the moment they expire.
+ * expires — so the rules here are conservative by construction: values are
+ * **sealed at rest** (see `httpSessionSeal.ts`) inside an owner-only (`0600`)
+ * file, are never rendered into any string the model reads, and are pruned the
+ * moment they expire.
  *
  * The file is `recon/session.json` and the location is forced, not chosen:
  * `resolveEvidencePath` in `findings.ts` confines a finding's evidence to the
@@ -22,7 +24,7 @@ import { noteCorruptState, parseLocalJson } from '../localJson.ts'
  * that is *not* kept.
  */
 
-const JAR_VERSION = 1
+const JAR_VERSION = SEALED_JAR_VERSION
 const MAX_COOKIE_NAME = 256
 const MAX_COOKIE_VALUE = 8_192
 const MAX_SESSION_NAME = 64
@@ -143,6 +145,28 @@ export function readSessionJar(path: string): { jar: SessionJar; corrupt?: strin
     const reason = error instanceof Error ? error.message : String(error)
     return { jar: emptyJar(), corrupt: `${path} is not readable JSON (${reason}); this probe starts from an empty session` }
   }
+  // Version 2: the values are sealed, so the bytes on disk are ciphertext and
+  // `parseJar` would reject them as not-a-jar. Open the seal first, then parse
+  // the plaintext jar out of it. A jar that fails its auth tag is reported the
+  // same way a corrupt one is: empty, and saying so, because a session that
+  // silently resets looks exactly like a login that did not work.
+  if (isSealedJar(parsed)) {
+    const plaintext = openSealedJar(parsed, path)
+    if (plaintext === undefined) {
+      return { jar: emptyJar(), corrupt: `${path} is sealed but did not authenticate — the jar was moved, copied to another project, or edited; this probe starts from an empty session` }
+    }
+    let inner: unknown
+    try {
+      inner = parseLocalJson(plaintext, path)
+    } catch (error) {
+      noteCorruptState('httpProbe.sessionJar', path, error)
+      return { jar: emptyJar(), corrupt: `${path} decrypted to something that is not JSON; this probe starts from an empty session` }
+    }
+    const jar = parseJar(inner)
+    if (!jar) return { jar: emptyJar(), corrupt: `${path} decrypted to something that is not a session jar; this probe starts from an empty session` }
+    return { jar }
+  }
+
   const jar = parseJar(parsed)
   if (!jar) return { jar: emptyJar(), corrupt: `${path} is not a session jar; this probe starts from an empty session` }
   return { jar }
@@ -156,7 +180,7 @@ export function readSessionJar(path: string): { jar: SessionJar; corrupt?: strin
  * umask the way a plain `Bun.write` would.
  */
 export function writeSessionJar(path: string, jar: SessionJar): void {
-  writeSecureFile(path, `${JSON.stringify(jar, null, 2)}\n`)
+  writeSecureFile(path, sealJar(JSON.stringify(jar, null, 2), path))
 }
 
 /** RFC 6265 §5.1.3 — a Domain attribute only covers the setting host and its subdomains, never an IP literal. */

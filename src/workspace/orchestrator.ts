@@ -23,7 +23,7 @@ import { acquireForTask, reconcileReservations, releaseForTask } from './reserva
 import { REVIEWER_ROLES } from './rpcAgents.ts'
 import type { WorkspaceStore } from './store.ts'
 import type { PersistedEvent } from './events.ts'
-import type { AgentRecord, TaskRecord } from './types.ts'
+import type { AgentRecord, AgentStatus, TaskRecord } from './types.ts'
 import type { RoleName } from '../autonomy/types.ts'
 
 const BUILDER_COVERS: RoleName[] = ['builder', 'frontend', 'backend', 'polisher', 'scribe', 'tester']
@@ -105,7 +105,14 @@ export class Orchestrator {
     this.handleFailures(now)
     this.requeueRevisions()
 
-    const objectives = this.store.objectives().filter((objective) => objective.status === 'active')
+    // Only objectives this node owns. A follower mirrors the owner's objective
+    // rows so it can execute the tasks granted to it, but it must never decide
+    // anything about the plan: dispatching, requeueing or escalating an objective
+    // it does not own would either be refused by the authority guard or — worse,
+    // if the guard were ever relaxed — race the owner into two contradictory
+    // schedules for one objective.
+    const objectives = this.store.objectives()
+      .filter((objective) => objective.status === 'active' && this.store.ownsObjective(objective.id))
     if (objectives.length === 0) return
 
     const idleAgents = this.store.agents().filter((agent) => agent.status === 'idle' && agent.connectionId)
@@ -118,6 +125,7 @@ export class Orchestrator {
       for (const task of this.store.tasks({ objectiveId: objective.id, status: 'in-review' })) {
         if (task.assigneeId && this.store.agent(task.assigneeId)?.status === 'reviewing') continue
         const reviewer = idleAgents.find((agent) => {
+          if (!this.isLocal(agent)) return false
           const identity = this.store.agentIdentity(agent.identityId)
           return identity && REVIEWER_ROLES.has(identity.role)
         })
@@ -128,7 +136,7 @@ export class Orchestrator {
           objectiveId: objective.id, taskId: task.id,
           payload: { assigneeKind: 'agent', assigneeId: reviewer.id },
         })
-        this.store.append({ type: 'AgentStateChanged', actorKind: 'system', actorId: 'orchestrator', payload: { id: reviewer.id, status: 'assigned', currentTaskId: task.id } })
+        this.setAgentState(reviewer.id, 'assigned', task.id)
         idleAgents.splice(idleAgents.indexOf(reviewer), 1)
       }
     }
@@ -142,6 +150,10 @@ export class Orchestrator {
       if (inFlight >= this.maxConcurrent) break
 
       const ready = this.store.tasks({ objectiveId: objective.id, status: 'ready' })
+        // A task already granted away is the other node's to run. It is excluded
+        // here rather than left to fail the guard, so it does not silently consume
+        // dispatch slots this node could use for its own work.
+        .filter((task) => this.store.mayExecute(task, this.store.localNodeId))
         .sort((a, b) => (a.wave ?? 99) - (b.wave ?? 99) || a.createdAt.localeCompare(b.createdAt))
 
       for (const task of ready) {
@@ -158,19 +170,52 @@ export class Orchestrator {
           continue
         }
 
+        // Dispatch to an agent on another node by granting the task to that node.
+        // The grant *is* the dispatch: it replicates, and the peer's agent finds
+        // the assignment by polling its own server in `agent.claim`, so no
+        // cross-node RPC and no second dispatch mechanism are needed.
+        const executorNodeId = this.nodeOf(agent)
         this.store.append({
           type: 'TaskAssigned', actorKind: 'system', actorId: 'orchestrator',
           objectiveId: objective.id, taskId: task.id,
-          payload: { assigneeKind: 'agent', assigneeId: agent.id, wave: task.wave },
+          payload: { assigneeKind: 'agent', assigneeId: agent.id, wave: task.wave, ...(executorNodeId ? { executorNodeId } : {}) },
         })
-        this.store.append({
-          type: 'AgentStateChanged', actorKind: 'system', actorId: 'orchestrator',
-          payload: { id: agent.id, status: 'assigned', currentTaskId: task.id },
-        })
+        this.setAgentState(agent.id, 'assigned', task.id)
         idleAgents.splice(idleAgents.indexOf(agent), 1)
         inFlight += 1
       }
     }
+  }
+
+  /** Whether this agent's process runs on this machine. */
+  private isLocal(agent: AgentRecord): boolean {
+    return this.nodeOf(agent) === undefined || this.nodeOf(agent) === this.store.localNodeId
+  }
+
+  /**
+   * The node an agent runs on, or undefined when it is unknown — an agent row
+   * from before node tracking, or one connected to this node's own server.
+   *
+   * Returning undefined for a local agent is deliberate: it leaves
+   * `executor_node_id` unset, which the authority guard reads as "unpartitioned"
+   * and so preserves the single-node behaviour exactly.
+   */
+  private nodeOf(agent: AgentRecord): string | undefined {
+    return agent.nodeId === this.store.localNodeId ? undefined : agent.nodeId
+  }
+
+  /**
+   * Set an agent's state, but only for agents on this machine.
+   *
+   * `AgentStateChanged` is agent-scoped, so appending one for a mirrored peer
+   * agent would be refused — and the refusal would abort the rest of the tick,
+   * since this runs mid-pass. The peer node's own orchestrator reconciles its
+   * agents; this node only mirrors the result.
+   */
+  private setAgentState(agentId: string, status: AgentStatus, currentTaskId: string | null): void {
+    const agent = this.store.agent(agentId)
+    if (agent && !this.isLocal(agent)) return
+    this.store.append({ type: 'AgentStateChanged', actorKind: 'system', actorId: 'orchestrator', payload: { id: agentId, status, currentTaskId } })
   }
 
   private pickAgent(task: TaskRecord, idleAgents: AgentRecord[]): AgentRecord | undefined {
@@ -205,13 +250,14 @@ export class Orchestrator {
     const busy = new Set(['assigned', 'planning', 'working', 'waiting', 'reviewing'])
     for (const agent of this.store.agents()) {
       if (!busy.has(agent.status) || !agent.currentTaskId) continue
+      // Only this machine's agents. A mirrored peer agent is reconciled by the
+      // node it actually runs on; freeing it from here would be refused by the
+      // authority guard mid-tick.
+      if (!this.isLocal(agent)) continue
       const task = this.store.task(agent.currentTaskId)
       const stillOurs = task && task.assigneeId === agent.id && (task.status === 'assigned' || task.status === 'in-progress' || task.status === 'in-review')
       if (!stillOurs) {
-        this.store.append({
-          type: 'AgentStateChanged', actorKind: 'system', actorId: 'orchestrator',
-          payload: { id: agent.id, status: 'idle', currentTaskId: null },
-        })
+        this.setAgentState(agent.id, 'idle', null)
       }
     }
   }
@@ -219,6 +265,8 @@ export class Orchestrator {
   /** A task a reviewer sent back re-enters the queue with the review notes attached. */
   private requeueRevisions(): void {
     for (const task of this.store.tasks({ status: 'changes-requested' })) {
+      // Owner-scoped work: the peer may execute the revision but not requeue it.
+      if (!this.store.ownsObjective(task.objectiveId)) continue
       this.store.append({
         type: 'TaskStatusChanged', actorKind: 'system', actorId: 'orchestrator',
         objectiveId: task.objectiveId, taskId: task.id, payload: { status: 'ready' },
@@ -232,13 +280,16 @@ export class Orchestrator {
 
   private handleFailures(now = Date.now()): void {
     for (const task of this.store.tasks({ status: 'failed' })) {
+      // Owner-scoped recovery. A task the peer was executing replicates here as
+      // failed, and the owner is the node entitled to retry or escalate it.
+      if (!this.store.ownsObjective(task.objectiveId)) continue
       releaseForTask(this.store, task.id, 'orchestrator')
       const failure = classifyFailure(task.lastError ?? 'task failed', { source: 'report' })
       const canRetry = failure.class === 'retryable' && task.attemptCount < task.maxAttempts
       // Free the agent that was on it.
       const agent = this.store.agents().find((candidate) => candidate.currentTaskId === task.id)
-      if (agent && agent.status !== 'idle') {
-        this.store.append({ type: 'AgentStateChanged', actorKind: 'system', actorId: 'orchestrator', payload: { id: agent.id, status: 'idle', currentTaskId: null } })
+      if (agent && agent.status !== 'idle' && this.isLocal(agent)) {
+        this.setAgentState(agent.id, 'idle', null)
       }
       if (canRetry) {
         // Some failures — a rate limit above all — describe the next few seconds,

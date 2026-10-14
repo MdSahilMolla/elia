@@ -21,7 +21,7 @@ import type { SlashOutcome as InkSlashOutcome } from '../ui/app/index.tsx'
 import type { PackageKind } from '../marketplace/registry.ts'
 import { playIntro } from '../ui/character.ts'
 import { ZERO_USAGE, addUsage, getSessionSummaryLine, sessionUsageSnapshot, setCurrentUsageModel, type SessionUsageSnapshot } from '../usage.ts'
-import { createSlashPrompt } from '../ui/slashPrompt.ts'
+import { createSlashPrompt, type SlashPromptHandle } from '../ui/slashPrompt.ts'
 import { resolveCustomCommand } from '../commands/loader.ts'
 import { collectPromptInjects, fireLifecycleEvent } from '../autonomy/lifecycleHooks.ts'
 import { confirmOnce } from '../ui/confirm.ts'
@@ -30,6 +30,13 @@ import { box, table } from '../ui/layout.ts'
 import { pick } from '../ui/picker.ts'
 import { openTaskDashboard, renderTaskSummary } from '../ui/taskDashboard.ts'
 import { inferTaskKind, taskSessions } from '../taskSessions.ts'
+
+/**
+ * The line-mode REPL's prompt, published so a mid-turn question can be asked
+ * through the editor the session already owns. Creating a second one would put
+ * stdin into raw mode twice, and the two would race for keystrokes.
+ */
+let ambientPrompt: SlashPromptHandle | null = null
 import { isAgentPersona, type AgentPersona } from '../agents/types.ts'
 import { CAPABILITIES } from '../capabilities.ts'
 import { type ActionApproval } from '../autonomy/governor.ts'
@@ -48,6 +55,8 @@ import { logSwallowedError } from '../diagnostics.ts'
 import { ensureFirstRunProviderSetup, interactiveProviderSetup, prewarmActiveProvider, runCodexLogin } from './providerSetup.ts'
 import { actionApprovalPrompt, allSlashCommands, approvalTitle, loadRuntimeSkills, printTurnProfileReport, requestedAgentMode, userMessage, warnIfAtFilesystemRoot } from './runtime.ts'
 import type { ProviderActivity } from '../providers/types.ts'
+import type { SpendState } from '../spendLimit.ts'
+import { setOperatorPrompt } from '../tools/askUser.ts'
 import { type ToolEvent } from '../agentLoop.ts'
 
 /** There is one way elia works — autonomously — so the switches that chose between ways are gone. */
@@ -912,6 +921,56 @@ export async function runInteractive(): Promise<void> {
       .map((session) => ({ label: describeSession(session, 64), detail: sessionDetail(session), value: session.id }))
   }
 
+  /**
+   * A one-line question on the operator's terminal, or undefined when there is
+   * no terminal to ask on.
+   *
+   * Every question path in a session has to come from here, because the code
+   * that wants to ask (the `ask_user` tool) has no business knowing whether a
+   * person is present. Undefined when stdin is not a TTY is the load-bearing
+   * part: a headless run must never block on a read that will never be answered.
+   *
+   * The line-mode REPL already holds an open prompt, and a second one would put
+   * stdin into raw mode twice and fight it for keystrokes, so the ask goes
+   * through whichever prompt the session already owns.
+   */
+  async function askOperator(question: string): Promise<string | undefined> {
+    if (!process.stdin.isTTY) return undefined
+    const owner = ambientPrompt
+    const answer = owner ? await owner.question(`${question}\n${gold('?')} `) : await withFreshPrompt(question)
+    return answer === null ? undefined : answer
+  }
+
+  async function withFreshPrompt(question: string): Promise<string | null> {
+    const askPrompt = createSlashPrompt([])
+    try {
+      return await askPrompt.question(`${question}\n${gold('?')} `)
+    } finally {
+      askPrompt.close()
+    }
+  }
+
+  /**
+   * The spending-ceiling escape hatch, wired only in cyber mode.
+   *
+   * A run that stops one step short of the flag makes the person retype the
+   * whole request, which throws away the context that made the extra spend
+   * worth asking for. This is the single place a cyber run may interrupt, and it
+   * is deliberately narrow: it raises a dollar ceiling and nothing else.
+   */
+  const cyberSpendCeiling =
+    process.stdin.isTTY && mode === 'cyber'
+      ? async (state: SpendState, requestedUsd: number | undefined) => {
+          const { spendIncreaseQuestion, parseSpendIncreaseAnswer } = await import('../spendLimit.ts')
+          const answer = await askOperator(spendIncreaseQuestion(state, requestedUsd))
+          return answer === undefined ? undefined : parseSpendIncreaseAnswer(answer, state, requestedUsd)
+        }
+      : undefined
+
+  // The `ask_user` tool reads the operator through this, so a model can raise the
+  // ceiling itself rather than waiting for the loop to notice.
+  setOperatorPrompt(process.stdin.isTTY ? askOperator : null)
+
   async function runCheckpointedTurn(userText: string, approveAction?: ActionApproval, skillNames = selectedSkillNames, uiHooks?: TurnUiHooks): Promise<void> {
     try {
       await withSessionTranscript(sessionTranscript, () => runRecordedTurn(userText, approveAction, skillNames, uiHooks))
@@ -1059,6 +1118,7 @@ export async function runInteractive(): Promise<void> {
         upfrontPlan: opening,
         ...(opening && openingGuidance ? { turnGuidance: openingGuidance } : {}),
         drainSteering: uiHooks?.drainSteering,
+        onSpendCeiling: cyberSpendCeiling,
         onText: uiHooks?.onText,
         onThinking: uiHooks?.onThinking,
         onToolStart: uiHooks?.onToolStart,
@@ -1982,6 +2042,7 @@ export async function runInteractive(): Promise<void> {
   }
 
   const prompt = createSlashPrompt(allSlashCommands())
+  ambientPrompt = prompt
 
   async function handleSkillsPicker(): Promise<void> {
     const { listLoadedSkills } = await import('../skills/loader.ts')
@@ -2689,6 +2750,10 @@ export async function runInteractive(): Promise<void> {
       const { limitCommand } = await import('../spendLimit.ts')
       return { handled: true, text: limitCommand(trimmed.slice('/limit'.length), config.model) }
     }
+    if (trimmed === '/scope' || trimmed.startsWith('/scope ')) {
+      const { scopeCommand } = await import('./scope.ts')
+      return { handled: true, text: await scopeCommand(trimmed.slice('/scope'.length)) }
+    }
     if (trimmed === '/cost') {
       const { sessionUsageSnapshot, estimateCostUsd, formatCostUsd, formatTokenCount, formatElapsed } = await import('../usage.ts')
       const s = sessionUsageSnapshot()
@@ -2849,6 +2914,12 @@ export async function runInteractive(): Promise<void> {
     if (brainMatch) {
       const { runBrainCommand } = await import('../brain/command.ts')
       return done(await runBrainCommand(brainMatch[1] ?? ''))
+    }
+    const cyberbrainMatch = /^\/cyberbrain(?:\s+(.+))?$/.exec(trimmed)
+    if (cyberbrainMatch) {
+      const { runCyberbrain } = await import('./cyberbrain.ts')
+      await runCyberbrain((cyberbrainMatch[1] ?? '').trim().split(/\s+/).filter(Boolean))
+      return done()
     }
     if (trimmed === '/track') {
       const { renderCompetence } = await import('../autonomy/outcomes.ts')
@@ -3112,7 +3183,8 @@ export async function runInteractive(): Promise<void> {
     })
     holdPractice()
     if (practiceHere) await practice.maybeStartPractice().catch(() => false)
-    prompt.close()
+  prompt.close()
+  ambientPrompt = null
     return
   }
 
@@ -3181,6 +3253,13 @@ export async function runInteractive(): Promise<void> {
     if (trimmed === '/limit' || trimmed.startsWith('/limit ')) {
       const { limitCommand } = await import('../spendLimit.ts')
       writeNotice(limitCommand(trimmed.slice('/limit'.length), config.model))
+      continue
+    }
+
+    // /scope — standing grants so a cyber run stops asking per command.
+    if (trimmed === '/scope' || trimmed.startsWith('/scope ')) {
+      const { scopeCommand } = await import('./scope.ts')
+      writeNotice(await scopeCommand(trimmed.slice('/scope'.length)))
       continue
     }
 
@@ -3290,6 +3369,12 @@ export async function runInteractive(): Promise<void> {
     if (brainClassic) {
       const { runBrainCommand } = await import('../brain/command.ts')
       writeUsageLine(await runBrainCommand(brainClassic[1] ?? ''))
+      continue
+    }
+    const cyberbrainClassic = /^\/cyberbrain(?:\s+(.+))?$/.exec(trimmed)
+    if (cyberbrainClassic) {
+      const { runCyberbrain } = await import('./cyberbrain.ts')
+      await runCyberbrain((cyberbrainClassic[1] ?? '').trim().split(/\s+/).filter(Boolean))
       continue
     }
     if (trimmed === '/track') {

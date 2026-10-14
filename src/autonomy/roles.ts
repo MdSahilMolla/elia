@@ -35,7 +35,7 @@ export interface Role {
   maxChildren?: number
 }
 
-const READ_TOOLS = ['read_file', 'list_files', 'grep', 'find_symbol', 'web_search', 'web_fetch', 'knowledge', 'board_post', 'board_read', 'browser', 'todo_write', 'why']
+const READ_TOOLS = ['read_file', 'list_files', 'grep', 'cyberbrain', 'find_symbol', 'web_search', 'web_fetch', 'knowledge', 'board_post', 'board_read', 'browser', 'todo_write', 'why']
 const WRITE_TOOLS = [...READ_TOOLS, 'write_file', 'edit_file', 'delete_file', 'lsp_refactor', 'record_rationale', 'note_lesson']
 // Direct argv execution is the normal worker path. Shell strings remain for
 // genuine shell syntax only and are governed more conservatively at runtime.

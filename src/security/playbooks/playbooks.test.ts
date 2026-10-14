@@ -16,7 +16,7 @@ import {
  * assert substance, not just presence.
  */
 
-const CATEGORIES: PlaybookCategory[] = ['pwn', 'rev', 'crypto', 'stego', 'misc']
+const CATEGORIES: PlaybookCategory[] = ['pwn', 'rev', 'crypto', 'stego', 'web', 'misc']
 
 /** Below this a playbook is a stub, not a procedure. */
 const MIN_STEPS = 5

@@ -539,3 +539,30 @@ test('projections survive a reopen — SQLite is the source of truth', () => {
   expect(second.member(created.ownerMemberId)?.role).toBe('owner')
   second.close()
 })
+
+test('a store opened read-only reports the truth and refuses to write', () => {
+  // The harness reads a live node's state to decide whether the run passed, and
+  // Elia is single-writer per node. A second writer on the same SQLite file
+  // works right up until it does not, so the read path is explicit rather than a
+  // store that happens to be quiet.
+  const dir = mkdtempSync(join(tmpdir(), 'elia-store-ro-'))
+  const path = join(dir, 'workspace.sqlite')
+  const writable = WorkspaceStore.open(path)
+  createWorkspace(writable, { name: 'demo', ownerName: 'owner' })
+  const before = writable.events().length
+  writable.close()
+
+  const reader = WorkspaceStore.openReadOnly(path)
+  try {
+    expect(reader.workspace()?.name).toBe('demo')
+    expect(reader.events().length).toBe(before)
+    // Opening read-only still records this node's own presence, so a node can
+    // report itself while being read.
+    expect(reader.localNodeId).toBeTruthy()
+    expect(reader.replicationError()).toBeUndefined()
+  } finally {
+    reader.close()
+  }
+
+  rmSync(dir, { recursive: true, force: true })
+})
