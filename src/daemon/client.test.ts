@@ -256,7 +256,12 @@ withJvm('jvm.check type-checks a Java edit via elia-jvm-bridge', async () => {
 // assert the client never depends on `$HOME`, so the drift cannot come back.
 test('socketTokenPath does not depend on the HOME env var', () => {
   const saved = process.env.HOME
+  const savedXdg = process.env.XDG_RUNTIME_DIR
   try {
+    // Pin $XDG_RUNTIME_DIR off so the token resolves under ~/.elia; this test is
+    // about the HOME behaviour, and a runtime dir in the ambient env would send
+    // the path down the XDG branch and mask it.
+    delete process.env.XDG_RUNTIME_DIR
     delete process.env.HOME
     const withoutHome = socketTokenPath()
     process.env.HOME = join(tmpdir(), 'some-other-home')
@@ -267,10 +272,15 @@ test('socketTokenPath does not depend on the HOME env var', () => {
     // Nor may it collapse to a path relative to the cwd, which is the exact
     // failure mode `.\.elia` produced on a real Windows box.
     expect(isAbsolute(withoutHome)).toBe(true)
-    expect(withoutHome.endsWith(join('.elia', `elia-eliad-${userTag()}.token`))).toBe(true)
+    // `token_path()` names the file `elia-eliad-<user>.token` on Windows and
+    // `eliad-<user>.token` elsewhere (see the sibling test); match the platform.
+    const tokenName = process.platform === 'win32' ? `elia-eliad-${userTag()}.token` : `eliad-${userTag()}.token`
+    expect(withoutHome.endsWith(join('.elia', tokenName))).toBe(true)
   } finally {
     if (saved === undefined) delete process.env.HOME
     else process.env.HOME = saved
+    if (savedXdg === undefined) delete process.env.XDG_RUNTIME_DIR
+    else process.env.XDG_RUNTIME_DIR = savedXdg
   }
 })
 
@@ -298,7 +308,11 @@ test('the socket and token share one directory, and XDG_RUNTIME_DIR is used verb
   // a named pipe, but the token is still a file under the same rules, and
   // socketPath() is checked too where it is file-based.
   const saved = process.env.XDG_RUNTIME_DIR
+  const savedSocket = process.env.ELIA_ELIAD_SOCKET
   try {
+    // `beforeEach` sets ELIA_ELIAD_SOCKET, which socketPath() honours before any
+    // directory rule. Clear it so socketPath() actually exercises socket_dir().
+    delete process.env.ELIA_ELIAD_SOCKET
     if (process.platform === 'win32') {
       // Windows uses a named pipe; only the token path is file-based there.
       expect(basename(dirname(socketTokenPath()))).toBe('.elia')
@@ -317,6 +331,8 @@ test('the socket and token share one directory, and XDG_RUNTIME_DIR is used verb
   } finally {
     if (saved === undefined) delete process.env.XDG_RUNTIME_DIR
     else process.env.XDG_RUNTIME_DIR = saved
+    if (savedSocket === undefined) delete process.env.ELIA_ELIAD_SOCKET
+    else process.env.ELIA_ELIAD_SOCKET = savedSocket
   }
 })
 
