@@ -101,6 +101,9 @@ export async function loadCorpus(opts: { dir?: string; force?: boolean } = {}): 
   }
 
   cache = { fingerprint: fp, corpus }
+  // Registration is idempotent by name; repeating it here keeps the cache
+  // visible even after the registry was emptied (resetCacheRegistryForTests).
+  registerCorpusCache()
   return corpus
 }
 
@@ -109,4 +112,8 @@ export function resetCorpusCache(): void {
   cache = undefined
 }
 
-registerCache('cyberbrain', resetCorpusCache, () => (cache ? cache.corpus.records.length : 0))
+function registerCorpusCache(): void {
+  registerCache('cyberbrain', resetCorpusCache, () => (cache ? cache.corpus.records.length : 0))
+}
+
+registerCorpusCache()
