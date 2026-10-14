@@ -37,12 +37,13 @@ function redirectTarget(response: Response, from: URL): URL | undefined {
 export const webFetchTool: Tool = {
   name: 'web_fetch',
   description:
-    'Fetch a single web page or PDF and return its readable text (HTML tags stripped, PDF text extracted). Use this to read a specific document a search turned up. Redirects are followed, so DOI links and other resolvers work. Long documents are truncated; pass offset to read on from where a previous call stopped. A scanned, image-only PDF says so rather than coming back empty.',
+    'Fetch a single web page or PDF and return its readable text (HTML tags stripped, PDF text extracted). Use this to read a specific document a search turned up. Redirects are followed, so DOI links and other resolvers work. Long documents are truncated; pass offset to read on from where a previous call stopped. A scanned, image-only PDF says so rather than coming back empty. To copy or match a page\'s design, pass format: "html" for its markup and inline styles, then fetch the stylesheet URLs it lists.',
   input_schema: {
     type: 'object',
     properties: {
       url: { type: 'string', description: 'The URL to fetch (must start with http:// or https://)' },
       offset: { type: 'number', description: 'Character offset to start from, for reading on past a truncated page. Default 0.' },
+      format: { type: 'string', enum: ['text', 'html'], description: 'text (default): readable text. html: the page source as served, for its structure, classes and styles.' },
     },
     required: ['url'],
   },
@@ -51,7 +52,9 @@ export const webFetchTool: Tool = {
     if (input.offset !== undefined && (typeof input.offset !== 'number' || !Number.isInteger(input.offset) || input.offset < 0)) {
       throw new Error('offset must be a non-negative integer')
     }
+    if (input.format !== undefined && input.format !== 'text' && input.format !== 'html') throw new Error('format must be "text" or "html"')
     const offset = typeof input.offset === 'number' ? input.offset : 0
+    const wantsHtml = input.format === 'html'
     const raw = input.url.trim()
     let url: URL
     try {
@@ -63,6 +66,8 @@ export const webFetchTool: Tool = {
       throw new Error(`Refusing to fetch non-http(s) URL: ${raw}`)
     }
 
+    let designNote = ''
+    let evidence: string | undefined
     const controller = new AbortController()
     const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS)
     try {
@@ -109,22 +114,36 @@ export const webFetchTool: Tool = {
         const body = response.body ? await readBoundedOutput(response.body, MAX_RESPONSE_CHARS) : ''
         // A server that mislabels a PDF as octet-stream or text/plain is common;
         // sniff the header rather than trust the label.
-        text = contentType.includes('html')
+        const isHtml = contentType.includes('html')
+        text = isHtml
           ? htmlToText(body)
           : looksLikePdf(new TextEncoder().encode(body.slice(0, 1024)))
             ? pdfToText(new Uint8Array(Buffer.from(body, 'latin1'))).text
             : body
+        if (isHtml) {
+          // The text form drops every tag and style, so "recreate this site
+          // exactly" used to be attempted from the words alone: the model never
+          // saw a colour, a font or a class. Say where the design lives.
+          const sheets = stylesheetUrls(body, url)
+          if (wantsHtml) {
+            // Evidence checks quote the readable text, whichever form was asked for.
+            evidence = text
+            text = body
+          } else if (sheets.length > 0 || /<style\b/i.test(body)) {
+            designNote = `\n\n[design: this page's look is not in this text. format: "html" returns its markup and inline styles${sheets.length > 0 ? `; its stylesheets: ${sheets.join(', ')}` : ''}]`
+          }
+        }
       }
 
-      rememberFetchedPage([raw, url.toString()], text)
+      rememberFetchedPage([raw, url.toString()], evidence ?? text)
       if (offset >= text.length && text.length > 0) {
         return `[offset ${offset} is past the end of this page — it is ${text.length} characters]`
       }
       const window = text.slice(offset, offset + MAX_CHARS)
       const end = offset + window.length
       const header = offset > 0 ? `[resuming at character ${offset} of ${text.length}]\n\n` : ''
-      const footer = end < text.length ? `\n\n[truncated at ${end} of ${text.length} characters — call web_fetch again with offset: ${end} to read on]` : ''
-      return `${header}${window}${footer}`
+      const footer = end < text.length ? `\n\n[truncated at ${end} of ${text.length} characters — call web_fetch again with offset: ${end}${wantsHtml ? ' and format: "html"' : ''} to read on]` : ''
+      return `${header}${window}${footer}${end >= text.length ? designNote : ''}`
     } catch (err) {
       if (err instanceof Error && err.message.startsWith('web_fetch failed:')) throw err
       throw new Error(`web_fetch request failed: ${err instanceof Error ? err.message : String(err)}`)
@@ -132,6 +151,25 @@ export const webFetchTool: Tool = {
       clearTimeout(timeout)
     }
   },
+}
+
+const MAX_STYLESHEETS = 6
+
+/** Absolute URLs of the stylesheets a page links, first few only. */
+export function stylesheetUrls(html: string, base: URL): string[] {
+  const urls: string[] = []
+  for (const tag of html.match(/<link\b[^>]*>/gi) ?? []) {
+    if (!/\brel\s*=\s*["']?[^"'>]*\bstylesheet\b/i.test(tag)) continue
+    const href = /\bhref\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/i.exec(tag)
+    const value = href?.[1] ?? href?.[2] ?? href?.[3]
+    if (!value) continue
+    try {
+      const absolute = new URL(decodeEntities(value), base)
+      if ((absolute.protocol === 'http:' || absolute.protocol === 'https:') && !urls.includes(absolute.toString())) urls.push(absolute.toString())
+    } catch {}
+    if (urls.length >= MAX_STYLESHEETS) break
+  }
+  return urls
 }
 
 const NAMED_ENTITIES: Record<string, string> = {

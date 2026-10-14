@@ -5,6 +5,7 @@ import { compactionThresholdFor } from './contextWindow.ts'
 import { isConnectionError, isFallbackableProviderError, isMalformedToolCallError, isQuotaExhaustedError, isRequestTooLargeError, isStuckRequestError, isTransientServerError, isUnusableRouteError, retryBackoffMs, tokenRateCap } from './providerErrors.ts'
 import { createPlanlessWorkTracker, createRedundantReadTracker, isLoneBatchableRead, serialReadNudge } from './autonomy/toolBatchingNudge.ts'
 import { createLeakedToolCallGuard } from './autonomy/leakedToolCall.ts'
+import { createShallowResearchGuard } from './autonomy/shallowResearch.ts'
 import { createReadAhead } from './autonomy/readAhead.ts'
 import { createPlanProgressTracker, planBelongsToRequest, type PlanProgressUpdate, type ToolOutcome } from './autonomy/planProgress.ts'
 import { activeTodoList } from './autonomy/todoList.ts'
@@ -479,6 +480,8 @@ async function runAgentLoopTracked(opts: RunAgentLoopOptions, inflight: Inflight
   const planlessWork = createPlanlessWorkTracker()
   // A tool call the model wrote as text never ran; see autonomy/leakedToolCall.ts.
   const leakedToolCalls = createLeakedToolCallGuard()
+  // A research request answered from snippets alone; see autonomy/shallowResearch.ts.
+  const shallowResearch = createShallowResearchGuard(latestUserText(messages), 'web_fetch' in toolsByName)
   // The list this loop runs under — the turn's, via withTodoList.
   const todoList = activeTodoList()
   const planProgress = onPlanProgress
@@ -630,6 +633,14 @@ async function runAgentLoopTracked(opts: RunAgentLoopOptions, inflight: Inflight
       // The model is ready to stop — but if the operator sent steering during
       // this last response, don't end the turn: fold it in and keep going.
       if (injectSteering() || injectDirectives()) continue
+      const researchNote = shallowResearch.beforeFinish()
+      if (researchNote) {
+        messages.push({ role: 'user', content: [{ type: 'text', text: researchNote }] })
+        const title = 'Research answered from search snippets — asking elia to open its sources first'
+        if (onActivity) onActivity({ kind: 'status', status: 'updated', title })
+        else if (verbose) writeNotice(`elia: ${title}`)
+        continue
+      }
       return finishAndFlush('complete')
     }
 
@@ -969,6 +980,7 @@ async function runAgentLoopTracked(opts: RunAgentLoopOptions, inflight: Inflight
       toolUseBlocks.map((block) => ({ name: block.name, path: typeof block.input.path === 'string' ? block.input.path : undefined })),
     )
     const planlessNudge = planlessWork.observe(toolUseBlocks.map((block) => block.name))
+    shallowResearch.observe(toolUseBlocks.map((block) => block.name))
     // A read-ahead expansion already did the batching for the model this turn;
     // don't also scold it for not batching.
     const nudge = redundantReadNudge ?? (readAheadExpansion ? undefined : serialReadNudge(loneReadStreak)) ?? planlessNudge ?? progress?.nudge
