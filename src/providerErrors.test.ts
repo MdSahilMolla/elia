@@ -134,6 +134,7 @@ test('isFallbackableProviderError is the union of the fallbackable families', ()
     'model not found for the given provider',
     '404 model unavailable',
     'Our server could not handle the request (timed out)',
+    '400 Model must be one of the following: mercury, mercury-2, mercury-2.5',
   ]) {
     expect(isFallbackableProviderError(message), message).toBe(true)
   }

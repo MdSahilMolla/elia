@@ -5,6 +5,20 @@ import { pathToFileURL } from 'node:url'
 import type { BenchTask } from './task.ts'
 
 /**
+ * Where to write a copy of a candidate's source to import it. Bun caches a
+ * module by path and ignores a query string, so each check needs a new path;
+ * and under `bun test` it also caches a directory's listing once it has
+ * resolved from it, so a second new file in the same directory is "not found"
+ * (the second attempt of a task was always scored a failure). A new directory
+ * per probe avoids both. The caller removes `dirname(probe)`.
+ */
+function probePath(parent: string, name: string): string {
+  const folder = join(parent, `.check-${crypto.randomUUID()}`)
+  mkdirSync(folder)
+  return join(folder, name)
+}
+
+/**
  * Tasks shaped from what actually goes wrong in real use.
  *
  * The rest of the suite was written from a list of competencies, and elia
@@ -128,10 +142,9 @@ export const FIELD_BENCH_TASKS: BenchTask[] = [
       }
       const source = read(dir, 'packages/core/src/range.ts')
       if (!source) return { passed: false, detail: 'packages/core/src/range.ts is gone' }
-      // A uniquely named copy: Bun caches a module by path and ignores a query
-      // string, so importing the file itself would score the first attempt's
-      // version on every later one.
-      const probe = join(dir, 'packages/core/src', `.check-${crypto.randomUUID()}.ts`)
+      // A copy in a new directory (see `probePath`): importing the file itself
+      // would score the first attempt's version on every later one.
+      const probe = probePath(join(dir, 'packages/core/src'), 'range.ts')
       try {
         writeFileSync(probe, source)
         const { range } = (await import(pathToFileURL(probe).href)) as { range: (a: number, b: number) => number[] }
@@ -148,7 +161,7 @@ export const FIELD_BENCH_TASKS: BenchTask[] = [
       } catch (error) {
         return { passed: false, detail: `range.ts no longer loads: ${error instanceof Error ? error.message : String(error)}` }
       } finally {
-        rmSync(probe, { force: true })
+        rmSync(dirname(probe), { recursive: true, force: true })
       }
     },
   },
@@ -238,9 +251,8 @@ export const FIELD_BENCH_TASKS: BenchTask[] = [
         }
         const source = git(['show', `${branch}:src/sum.ts`], fork)
         if (!source.ok || !source.out) return { passed: false, detail: `${branch} has no src/sum.ts` }
-        // Imported from a uniquely named copy: Bun caches a module by path, so
-        // reusing one filename would score the first attempt on every later run.
-        const probe = join(dir, `.check-${crypto.randomUUID()}.ts`)
+        // Imported from a copy in a new directory (see `probePath`).
+        const probe = probePath(dir, 'sum.ts')
         try {
           writeFileSync(probe, source.out)
           const { sum } = (await import(pathToFileURL(probe).href)) as { sum: (values: number[]) => number }
@@ -253,7 +265,7 @@ export const FIELD_BENCH_TASKS: BenchTask[] = [
         } catch (error) {
           return { passed: false, detail: `src/sum.ts on ${branch} does not load: ${error instanceof Error ? error.message : String(error)}` }
         } finally {
-          rmSync(probe, { force: true })
+          rmSync(dirname(probe), { recursive: true, force: true })
         }
       }
       return { passed: false, detail: `the fork's branches (${proposed.join(', ')}) have no commits beyond main` }

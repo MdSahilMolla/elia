@@ -52,6 +52,7 @@ export const DEFAULT_THINKING_BUDGET = 4096
  * `resolveDeepTier`, to stay out of its temporal dead zone.
  */
 let deepTierResolutionError: string | undefined
+let deepTierModelNotice: string | undefined
 
 function unconfiguredTier(error: string): TierConfig {
   return {
@@ -619,8 +620,14 @@ export function providerConfigError(): string | undefined {
   return deepTierResolutionError
 }
 
+/** Why the deep tier is not running the configured ELIA_MODEL (another provider's model), if it isn't. */
+export function providerModelNotice(): string | undefined {
+  return deepTierModelNotice
+}
+
 function resolveDeepTier(thinking: ThinkingOption): TierConfig {
   const resolved = tryResolveProvider({ thinking })
+  deepTierModelNotice = 'error' in resolved ? undefined : resolved.modelNotice
   if ('error' in resolved) {
     deepTierResolutionError = resolved.error
     return unconfiguredTier(resolved.error)

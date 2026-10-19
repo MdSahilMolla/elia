@@ -683,6 +683,9 @@ export function assessAction(request: ActionRequest, cwd = currentAgent().cwd ??
   if (name === 'paper') {
     return assessment('safe', 'allow', 'paper lookup is read-only retrieval from public scholarly indexes; no external state changes', 'paper', resources, true)
   }
+  if (name === 'knowledge') {
+    return assessment('safe', 'allow', 'knowledge-base lookup is read-only retrieval from elia\'s own search API; no external state changes', 'knowledge', resources, true)
+  }
   if (name === 'web_fetch') {
     // Redirects are followed now, but each hop is re-validated against the
     // public-address policy before the socket opens, so the constraint that

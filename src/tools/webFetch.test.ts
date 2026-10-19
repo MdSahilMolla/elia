@@ -223,3 +223,35 @@ test('readBoundedBytes returns the whole body when it fits and a null stream as 
   expect(bounded.truncated).toBe(false)
   expect((await readBoundedBytes(null, 100)).bytes.length).toBe(0)
 })
+
+// "Recreate this site exactly" was attempted from the stripped text alone: the
+// model never saw a colour, a font or a class, and nothing told it where they were.
+
+const STYLED_PAGE =
+  '<html><head><link rel="stylesheet" href="/assets/site.css"><link rel="icon" href="/f.ico"><style>.hero{color:#b22}</style></head>' +
+  '<body><section class="hero"><h1>Fresh meat</h1></section></body></html>'
+
+test('web_fetch text names where a styled page keeps its design', async () => {
+  respond(STYLED_PAGE, { status: 200, headers: { 'content-type': 'text/html' } })
+  const result = await webFetchTool.execute({ url: 'https://example.com/' })
+  expect(result).toContain('Fresh meat')
+  expect(result).toContain('format: "html"')
+  expect(result).toContain('https://example.com/assets/site.css')
+  expect(result).not.toContain('f.ico')
+  expect(result).not.toContain('.hero{')
+})
+
+test('web_fetch format html returns the page source, styles included', async () => {
+  respond(STYLED_PAGE, { status: 200, headers: { 'content-type': 'text/html' } })
+  const result = await webFetchTool.execute({ url: 'https://example.com/', format: 'html' })
+  expect(result).toBe(STYLED_PAGE)
+})
+
+test('web_fetch adds no design note to an unstyled page', async () => {
+  respond('<p>plain</p>', { status: 200, headers: { 'content-type': 'text/html' } })
+  expect(await webFetchTool.execute({ url: 'https://example.com/' })).toBe('plain')
+})
+
+test('web_fetch rejects an unknown format', async () => {
+  await expect(webFetchTool.execute({ url: 'https://example.com/', format: 'markdown' })).rejects.toThrow('format must be')
+})

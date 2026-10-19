@@ -1508,6 +1508,24 @@ test('a deferred tool is sent as a catalog entry, and its definition follows onc
   expect(seen[2]).toEqual(['read_file', 'load_tools', 'finance', 'grep'])
 })
 
+test('a tool a pre-turn check asked for goes out in full from the first call, with no cue word in the request', async () => {
+  const { resetLoadedToolsForTests } = await import('./tools/lazyTools.ts')
+  resetLoadedToolsForTests()
+  const seen: string[][] = []
+  const tool = (name: string): Tool => ({ name, description: `${name}.`, input_schema: { type: 'object', properties: {} }, async execute() { return 'ok' } })
+  try {
+    await runAgentLoop({
+      messages: [{ role: 'user', content: [{ type: 'text', text: 'go' }] }], systemPrompt: 'test', providerName: 'mercury', model: 'preload-test', useAnimation: false, verbose: false,
+      tools: [tool('read_file'), tool('knowledge'), tool('finance')],
+      deferTools: new Set(['knowledge', 'finance']), loadedTools: new Set(), preloadTools: ['knowledge'],
+      provider: { async streamTurn(params) { seen.push(params.tools.map((definition) => definition.name)); return { content: [{ type: 'text', text: 'done' }], usage: ZERO_USAGE } } },
+    })
+  } finally {
+    resetLoadedToolsForTests()
+  }
+  expect(seen[0]).toEqual(['read_file', 'load_tools', 'knowledge'])
+})
+
 test('a failed first direct call to a deferred tool gets its full parameters back', async () => {
   const { resetLoadedToolsForTests } = await import('./tools/lazyTools.ts')
   resetLoadedToolsForTests()

@@ -300,10 +300,16 @@ Hard requirements:
 Write the file with your file tools, then stop. Do not write anything else.`
 }
 
-/** `stagingFile` is already named in the prompt; the builder writes it with its file tools. */
-async function draftToStagingFile(prompt: string, _stagingFile: string): Promise<void> {
-  const { runSubAgent } = await import('../subagent.ts')
-  await runSubAgent({ role: 'builder', name: 'builder#instruction-skill', prompt })
+/**
+ * The draft is one file whose whole content is in the prompt's evidence, so
+ * the builder gets only write_file and stops once it lands. With the full
+ * builder tool set every step re-sent ~9k tokens of tool definitions, and it
+ * took about five steps per draft: on 2026-10-01 these drafts were 49 of the
+ * day's 127 model calls.
+ */
+async function draftToStagingFile(prompt: string, stagingFile: string): Promise<void> {
+  const [{ runSubAgent }, { writeFileTool }] = await Promise.all([import('../subagent.ts'), import('../tools/writeFile.ts')])
+  await runSubAgent({ role: 'builder', name: 'builder#instruction-skill', prompt, tools: [writeFileTool], finishAfterTool: writeFileTool.name })
 }
 
 // --- Create / revise ---------------------------------------------------------

@@ -322,7 +322,7 @@ export async function runControl(): Promise<void> {
 }
 
 export async function runConfig(): Promise<void> {
-  const { PROVIDER_PRESET_NAMES, isProviderPresetConfigured, providerPresetApiKeyEnv, providerPresetBaseURL, providerPresetDefaultModel, providerPresetKeyOptional, providerReadiness } =
+  const { PROVIDER_PRESET_NAMES, foreignModelProblem, isProviderPresetConfigured, providerPresetApiKeyEnv, providerPresetBaseURL, providerPresetDefaultModel, providerPresetKeyOptional, providerReadiness } =
     await import('../providers/registry.ts')
   const action = positionals()[0] ?? 'status'
   const configPath = userConfigPath()
@@ -382,6 +382,15 @@ export async function runConfig(): Promise<void> {
   const baseURLFlag = flagValue('--base-url')
   if (baseURLFlag === '') {
     writeError('--base-url requires a non-empty URL')
+    process.exitCode = 1
+    return
+  }
+  // Another provider's model would be saved and then refused on every
+  // request (issue #1294). A --base-url proxy may serve anything, and
+  // --anyway keeps the escape hatch `/model` has.
+  const foreignModel = modelFlag && !baseURLFlag && !hasFlag('--anyway') ? foreignModelProblem(provider, modelFlag) : undefined
+  if (foreignModel) {
+    writeError(`${foreignModel}. Nothing was saved. Leave out --model for the default, or pass --anyway to save it as given.`)
     process.exitCode = 1
     return
   }

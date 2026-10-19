@@ -36,7 +36,7 @@ export function modelViewOfResult(name: string, result: string, isError: boolean
  */
 const REPRODUCIBLE_TOOLS = new Set([
   'read_file', 'grep', 'list_files', 'find_symbol', 'run_command', 'run_program', 'process', 'web_search', 'web_fetch',
-  'paper', 'browser', 'write_file', 'edit_file', 'project_profile', 'environment', 'lsp_refactor', 'github', 'database',
+  'paper', 'knowledge', 'browser', 'write_file', 'edit_file', 'project_profile', 'environment', 'lsp_refactor', 'github', 'database',
 ])
 
 export interface HistoryTrimOptions {

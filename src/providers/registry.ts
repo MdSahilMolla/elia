@@ -1,6 +1,6 @@
 import { createAnthropicProvider } from './anthropic.ts'
 import { codexSubscriptionConfigured, createCodexSubscriptionProvider, listCodexSubscriptionModels } from './codexSubscription.ts'
-import { createOpenAICompatibleProvider } from './openaiCompatible.ts'
+import { createOpenAICompatibleProvider, dynamicTailEnabled } from './openaiCompatible.ts'
 import { assertOllamaHost, cachedOllamaDetection, createOllamaProvider, describeOllamaModel, detectOllama, ollamaHost, ollamaModelWarning, rankOllamaModels } from './ollama.ts'
 import { assertProviderEndpoint, publicFetch, validateNetworkUrl } from '../networkPolicy.ts'
 import type { Provider, ThinkingOption } from './types.ts'
@@ -12,6 +12,14 @@ interface ProviderPreset {
   keyOptional?: boolean
   baseURL?: string
   defaultModel?: string
+  /**
+   * The ids this preset's own endpoint can serve, for a provider whose
+   * catalogue is one vendor's family. A model outside it is another
+   * provider's, carried over in config, and every request with it is a 400
+   * (issue #1294). Aggregators (OpenRouter, Groq, NVIDIA, custom) serve many
+   * families and get none.
+   */
+  modelFamily?: RegExp
 }
 
 const PROVIDER_PRESETS: Record<string, ProviderPreset> = {
@@ -19,6 +27,7 @@ const PROVIDER_PRESETS: Record<string, ProviderPreset> = {
     kind: 'anthropic',
     apiKeyEnv: 'ANTHROPIC_API_KEY',
     defaultModel: 'claude-sonnet-5',
+    modelFamily: /^claude-/i,
   },
   groq: {
     kind: 'openai-compatible',
@@ -53,6 +62,7 @@ const PROVIDER_PRESETS: Record<string, ProviderPreset> = {
     apiKeyEnv: 'GEMINI_API_KEY',
     baseURL: 'https://generativelanguage.googleapis.com/v1beta/openai/',
     defaultModel: 'gemini-3.7-flash',
+    modelFamily: /^(?:models\/)?(?:gemini|gemma)/i,
   },
   nvidia: {
     kind: 'openai-compatible',
@@ -72,6 +82,7 @@ const PROVIDER_PRESETS: Record<string, ProviderPreset> = {
     apiKeyEnv: 'INCEPTION_API_KEY',
     baseURL: 'https://api.inceptionlabs.ai/v1',
     defaultModel: 'mercury-2.5',
+    modelFamily: /^mercury/i,
   },
   // Local models. No default model — only the person knows which of their
   // pulled models to run — and no key unless the server asks for one. The
@@ -91,6 +102,19 @@ export interface ResolvedProvider {
   provider: Provider
   providerName: string
   model: string
+  /** Set when a configured model was not this provider's and its default ran instead; say it to the person. */
+  modelNotice?: string
+}
+
+/**
+ * Why `model` cannot run on preset `providerName`'s own endpoint, or
+ * undefined when it can or elia cannot tell (an aggregator, an unknown
+ * preset). See `ProviderPreset.modelFamily`.
+ */
+export function foreignModelProblem(providerName: string, model: string): string | undefined {
+  const preset = PROVIDER_PRESETS[normalizeProviderName(providerName)]
+  if (!preset?.modelFamily || preset.modelFamily.test(model.trim())) return undefined
+  return `"${model}" is not one of ${normalizeProviderName(providerName)}'s models${preset.defaultModel ? ` (its default is ${preset.defaultModel})` : ''}`
 }
 
 /** Preset provider names elia knows about out of the box — `custom` covers anything else via `ELIA_BASE_URL`. */
@@ -429,7 +453,22 @@ export function tryResolveProvider(request: ProviderRequest = {}): ResolvedProvi
     }
   }
 
-  const model = request.model ?? ambient.ELIA_MODEL ?? preset.defaultModel
+  // A provider named over a different configured one gets its own default
+  // model, exactly as it gets its own endpoint above: ELIA_MODEL belongs to
+  // the configured provider (issue #1294).
+  const configuredModel = explicitDifferentProvider && providerName !== 'custom' ? undefined : ambient.ELIA_MODEL
+  let model = request.model ?? configuredModel ?? preset.defaultModel
+  let modelNotice: string | undefined
+  // A configured model that cannot be this provider's fails every request
+  // with a 400; run the preset default and say why. Only on the preset's own
+  // endpoint (a proxy behind ELIA_BASE_URL may serve anything), and never over
+  // a model the caller asked for by name (`/model … --anyway`).
+  const ownEndpoint = preset.kind === 'anthropic' || baseURL === preset.baseURL
+  const problem = !request.model && model && ownEndpoint ? foreignModelProblem(providerName, model) : undefined
+  if (problem && preset.defaultModel) {
+    modelNotice = `ELIA_MODEL ${problem}; using ${preset.defaultModel}. Run \`/model\` or \`elia config set\` to choose one.`
+    model = preset.defaultModel
+  }
   if (!model) {
     return {
       error:
@@ -446,9 +485,10 @@ export function tryResolveProvider(request: ProviderRequest = {}): ResolvedProvi
           reasoningSummary: isInceptionEndpoint(baseURL) && process.env.ELIA_REASONING_SUMMARY !== 'off',
           reasoningEffort: isInceptionEndpoint(baseURL),
           gemini: isGeminiEndpoint(baseURL),
+          dynamicTail: dynamicTailEnabled(isInceptionEndpoint(baseURL)),
         })
 
-  return { provider, providerName, model }
+  return { provider, providerName, model, ...(modelNotice ? { modelNotice } : {}) }
 }
 
 /**
