@@ -1,10 +1,12 @@
 import { emitEvent } from '../ui/runtime.ts'
 import { writeNotice } from '../ui/stream.ts'
 import { ScheduleStore, type ScheduleRecord } from './scheduler.ts'
+import { OutcomeStore } from './outcomesClosure.ts'
 import type { runAutonomousTask as RunAutonomousTask } from './loop.ts'
 
 export interface ScheduledDaemonOptions {
   scheduleFile?: string
+  outcomeFile?: string
   pollMs?: number
   once?: boolean
   signal?: AbortSignal
@@ -34,10 +36,16 @@ export function defaultMaxConcurrentSchedules(env: NodeJS.ProcessEnv = process.e
 
 export async function runScheduledDaemon(options: ScheduledDaemonOptions = {}): Promise<void> {
   const store = ScheduleStore.open(options.scheduleFile)
+  const outcomes = OutcomeStore.open(options.outcomeFile)
   const pollMs = Math.max(MIN_POLL_MS, options.pollMs ?? DEFAULT_POLL_MS)
   const maxConcurrent = Math.max(1, Math.min(options.maxConcurrent ?? defaultMaxConcurrentSchedules(), MAX_MAX_CONCURRENT_SCHEDULES))
 
   const tick = async (): Promise<void> => {
+    const checkedOutcomes = outcomes.checkDue()
+    for (const outcome of checkedOutcomes) {
+      writeNotice(`Outcome ${outcome.status}: ${outcome.title}${outcome.failure ? ` — ${outcome.failure}` : ''}`)
+      emitEvent('outcome_checked', { outcomeId: outcome.id, status: outcome.status, runId: outcome.runId })
+    }
     const recovered = store.recoverExpired()
     for (const schedule of recovered) {
       writeNotice(`Recovered expired schedule lease: ${schedule.title} (${schedule.id})`)

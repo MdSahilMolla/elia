@@ -117,6 +117,7 @@ Inside a session, type while elia works to ask or redirect it; `/autopilot` runs
 |---|---|
 | **[Serve elia over MCP](MCP.md)** | Claude Desktop, Cursor, Zed, Continue: the 39 tools, 6 resources and 5 prompts, client configs, protocol negotiation, and the governance boundaries a client cannot cross |
 | **[Recursive intelligence compounding](docs/guide/compounding.md)** | The six stages, the commands, the guards, and where each stage stands today |
+| **[Autonomous-AI frontier](docs/guide/autonomous-frontier.md)** | Outcome closure, Battmann limitations, autonomy gaps, and the uniqueness roadmap |
 | [Amplification without distillation](docs/guide/discovery.md) | `elia compounding frontier`: the verification frontier, the certified library, the sealed gate, isolation and the resource governor |
 | [Using the terminal](docs/guide/terminal.md) | All commands and flags, the terminal UI, images, LSP diagnostics, cost display |
 | [Autonomous work](docs/guide/autonomy.md) | How `elia auto` works, roles, delegation, best-of-N, forking, durable runs, schedules and the daemon |

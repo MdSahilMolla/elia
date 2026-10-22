@@ -12,6 +12,7 @@ import type { CompletionAssessment } from './outcome.ts'
 import { appendSecureFile, ensureSecureDirectory, writeSecureFile } from '../securePersistence.ts'
 import { withFileLock } from '../fileLock.ts'
 import { paths } from '../statePaths.ts'
+import type { OutcomeRecord } from './outcomesClosure.ts'
 
 export interface ActionLedgerRecord {
   at: number
@@ -59,6 +60,7 @@ export interface RunReceiptInput {
    * `elia distill` could say nothing about it but "run never finished".
    */
   interruption?: { reason: string; error?: string; stack?: string; lastPhase?: string }
+  outcomes?: OutcomeRecord[]
 }
 
 export function appendActionAudit(event: ToolEvent, runIdOverride?: string): void {
@@ -145,6 +147,7 @@ export function writeRunReceipt(input: RunReceiptInput): void {
     maxWallClockMs: input.maxWallClockMs,
     actionBudget: input.actionBudget,
     interruption: input.interruption,
+    outcomes: input.outcomes,
     usage: input.usage,
     proposal: input.proposal
       ? {
@@ -234,6 +237,7 @@ function renderReceipt(receipt: {
   interruption?: { reason: string; error?: string; stack?: string; lastPhase?: string }
   actions: { total: number; failed: number; blocked: number; irreversible: number; replayed?: number; humanReview?: number; retryable?: number }
   graph?: { nodes: { id: string; status: string; attempts: number }[]; pendingApprovals: number; recoveredNodes?: number; activeLeases?: number; retryableActions?: number; humanReviewActions?: number; contractedActions?: number; preconditionFailures?: { id: string; tool: string; failures: string[]; nextAction?: string }[]; postconditionFailures?: { id: string; tool: string; failures: string[]; nextAction?: string }[]; takeoverActions?: { id: string; tool: string; state: string; error?: string }[] }
+  outcomes?: OutcomeRecord[]
   completion?: CompletionAssessment
 }): string {
   const verificationLines =
@@ -267,6 +271,7 @@ function renderReceipt(receipt: {
     `- **Human-review actions:** ${receipt.actions.humanReview ?? 0}`,
     `- **Retryable actions:** ${receipt.actions.retryable ?? 0}`,
     ...(receipt.graph ? [`- **Pending approvals:** ${receipt.graph.pendingApprovals}`, `- **Graph nodes:** ${receipt.graph.nodes.filter((node) => node.status === 'completed').length}/${receipt.graph.nodes.length} completed`, `- **Recovered stale nodes:** ${receipt.graph.recoveredNodes ?? 0}`, `- **Active leases at receipt:** ${receipt.graph.activeLeases ?? 0}`, `- **Contracted actions:** ${receipt.graph.contractedActions ?? 0}`, `- **Contract precondition failures:** ${receipt.graph.preconditionFailures?.length ?? 0}`, `- **Contract postcondition failures:** ${receipt.graph.postconditionFailures?.length ?? 0}`, `- **User-takeover actions:** ${receipt.graph.takeoverActions?.length ?? 0}`] : []),
+    ...(receipt.outcomes && receipt.outcomes.length > 0 ? [`- **Delayed outcomes:** ${receipt.outcomes.map((outcome) => `${outcome.status} (${outcome.id})`).join(', ')}`] : []),
     '',
     '## What proves completion',
     '',

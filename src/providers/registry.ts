@@ -399,7 +399,6 @@ export function tryResolveProvider(request: ProviderRequest = {}): ResolvedProvi
   // An unknown name is a mistake to report, not something to silently run as
   // `custom` (which then fails with a misleading "no API key" message).
   if (!preset) return { error: unknownProviderError(requestedName) }
-
   if (preset.kind === 'codex-subscription') {
     if (!codexSubscriptionConfigured()) return { error: 'Codex is not signed in. Select Settings > Provider connections > ChatGPT subscription (Codex) and complete sign-in first.' }
     const model = request.model ?? ambient.ELIA_MODEL ?? preset.defaultModel ?? 'default'

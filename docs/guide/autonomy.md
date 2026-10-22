@@ -127,3 +127,19 @@ This is **Gemini Spark-inspired**, not a claim that Elia is Gemini Spark. Google
 [gemini-interactions]: https://ai.google.dev/api/interactions-api "Gemini Interactions API reference"
 
 The Gemini Spark discussion above is based on Google’s [Spark overview][gemini-spark], [support documentation][gemini-spark-support], [Gemini API documentation][gemini-api], and [Interactions API reference][gemini-interactions].
+
+
+### Delayed outcome closure
+
+Immediate tests are not enough for autonomous work: a generated artifact can disappear, a status marker can remain stale, or a postcondition can be contradicted after the run has ended. Elia can keep a bounded, durable outcome contract and check it after a delay:
+
+```bash
+elia outcomes add --after 5m --file .elia/artifacts/release-marker.txt \
+  --contains "healthy" --title "Release remains healthy" --run <run-id>
+elia outcomes list
+elia outcomes check
+```
+
+Outcome contracts are stored in `.elia/outcomes.json` with owner-only permissions. The first implementation supports only deterministic, workspace-local probes (`file-exists` and `file-contains`); it does not add arbitrary background shell or network access. A due probe becomes `verified`, `failed`, or `inconclusive`, and records evidence or a bounded failure explanation. `elia daemon --once` resolves due contracts before scheduled goals, so the same local daemon can provide recurring closure without silently widening the action governor.
+
+This is the foundation for longer-lived autonomy. Future probe adapters should add governed service health, deployment, and external outcome checks only with explicit readiness, provenance, retry, and escalation rules; a model's statement that an outcome happened must never close a contract by itself.

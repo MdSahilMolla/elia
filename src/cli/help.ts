@@ -216,6 +216,12 @@ Background autonomy:
   elia daemon --once                       Run due schedules once and exit
   elia daemon --poll-ms 30000             Keep checking due schedules in the foreground
 
+Delayed outcome closure:
+  elia outcomes add --after 5m --file path [--contains "text"]  Check a postcondition after the run settles
+  elia outcomes list                                             Show pending and resolved outcome contracts
+  elia outcomes show <id>                                        Show evidence and failure details
+  elia outcomes check                                            Resolve due local deterministic checks
+
 Data Science workspace (no model involved):
   elia ds capabilities                     Every ds_* action and how it touches the world
   elia ds datasets | runs | record <id>    Datasets, execution records, and one record in full

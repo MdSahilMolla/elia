@@ -32,6 +32,22 @@ test('a minimal proposal parses and gets generated step ids', () => {
   expect(proposal.steps[0]!.files).toEqual([])
 })
 
+test('typed outcome contracts parse and acceptance criteria can declare a safe file outcome', () => {
+  const proposal = expectOk({
+    ...minimal,
+    acceptanceCriteria: ['after 5m: file health.txt contains "healthy"'],
+    outcomes: [{ title: 'marker remains', after: '10m', probe: { kind: 'file-exists', path: 'release.txt' } }],
+  })
+  expect(proposal.outcomes).toEqual([
+    { title: 'marker remains', after: '10m', probe: { kind: 'file-exists', path: 'release.txt' } },
+    { title: 'after 5m: file health.txt contains "healthy"', after: '5m', probe: { kind: 'file-contains', path: 'health.txt', text: 'healthy' } },
+  ])
+})
+
+test('outcome contracts reject arbitrary probe kinds', () => {
+  expect(expectError({ ...minimal, outcomes: [{ title: 'network', after: '5m', probe: { kind: 'http', path: 'https://example.com' } }] })).toContain('file-exists or file-contains')
+})
+
 test('an unrecognised role falls back to builder rather than failing the plan', () => {
   const proposal = expectOk({ ...minimal, steps: [{ ...minimal.steps[0], role: 'wizard' }] })
 
