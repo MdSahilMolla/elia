@@ -116,9 +116,9 @@ export interface PublicFetchInit {
 const NULL_BODY_STATUSES = new Set([101, 103, 204, 205, 304])
 
 /**
- * Test seam: when set, `publicFetch` hands the (already policy-checked) request
- * here instead of opening a socket, so tool tests can stub responses the way
- * they used to stub `globalThis.fetch`. Never set outside tests.
+ * Test seam: when set, `publicFetch` hands the syntactically policy-checked
+ * request here instead of resolving or opening a socket, so tool tests stay
+ * hermetic. Never set outside tests.
  */
 export const publicFetchTestHooks: { transport?: (url: URL, init: PublicFetchInit) => Promise<Response> } = {}
 
@@ -132,8 +132,14 @@ export const publicFetchTestHooks: { transport?: (url: URL, init: PublicFetchIni
  * back as-is for the caller to refuse or re-validate.
  */
 export async function publicFetch(raw: string | URL, init: PublicFetchInit = {}): Promise<Response> {
+  // Test transports do not make a network connection, so DNS resolution is
+  // neither useful nor reliably available. Keep the URL-level SSRF checks so
+  // a test cannot accidentally hide an unsafe target.
+  if (publicFetchTestHooks.transport) {
+    const url = validateNetworkUrl(String(raw), init.policy)
+    return publicFetchTestHooks.transport(url, init)
+  }
   const url = await assertPublicNetworkUrl(raw, init.policy)
-  if (publicFetchTestHooks.transport) return publicFetchTestHooks.transport(url, init)
   const transport = url.protocol === 'https:' ? https : http
   return new Promise<Response>((resolve, reject) => {
     const req = transport.request(url, {

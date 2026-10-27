@@ -353,6 +353,7 @@ test('renderLessonsWithKeys withholds project lessons by coin flip and returns t
   const [first, second, third] = loadLessons(path).map((l) => l.key!)
   expect(rendered.keys).toEqual([first!, third!])
   expect(rendered.heldOut).toEqual([second!])
+  expect(rendered.trialKeys).toEqual([first!, second!, third!])
   expect(rendered.text).not.toContain('- second')
 })
 

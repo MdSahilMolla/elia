@@ -387,7 +387,7 @@ export function renderLessonsWithKeys(
   path = paths.lessons,
   globalPath = path === paths.lessons ? globalLessonsPath() : undefined,
   holdout: { rate: number; random?: () => number } = { rate: path === paths.lessons ? lessonHoldoutRate() : 0 },
-): { text: string; keys: string[]; heldOut: string[] | undefined } {
+): { text: string; keys: string[]; heldOut: string[] | undefined; trialKeys: string[] } {
   // Quarantined and purged lessons never reach a model; lessons that predate
   // the certified library have no record and stay usable.
   const certificates = lessonArtifacts(path)
@@ -399,6 +399,7 @@ export function renderLessonsWithKeys(
   const stated = usable.filter(isUserStated).slice(-MAX_INJECTED_USER_STATED)
   const learned = usable.filter((lesson) => !isUserStated(lesson))
   const selected = selectLessons(learned, query, certified, MAX_INJECTED_LESSONS - stated.length)
+  const trialKeys = selected.map((lesson) => lesson.key ?? lessonKey(lesson.text))
   const random = holdout.random ?? Math.random
   const project: Lesson[] = []
   const heldOut: string[] = []
@@ -412,7 +413,7 @@ export function renderLessonsWithKeys(
   const lessons = [...global, ...project]
   const injected = [...stated, ...lessons].map((lesson) => lesson.key ?? lessonKey(lesson.text))
   const withheld = holdout.rate > 0 ? heldOut : undefined
-  if (injected.length === 0) return { text: '', keys: [], heldOut: withheld }
+  if (injected.length === 0) return { text: '', keys: [], heldOut: withheld, trialKeys }
   recordLessonReuse(injected, path)
   const listing = (items: Lesson[]) =>
     items
@@ -427,7 +428,7 @@ export function renderLessonsWithKeys(
     stated.length > 0 ? `\n\n## Rules the user has set for this project\nThe user asked for these directly. Follow them over any learned lesson below.\n${stated.map((lesson) => `- ${lesson.text}`).join('\n')}` : '',
     lessons.length > 0 ? `\n\n## What earlier runs learned about this project\n${listing(lessons)}` : '',
   ].join('')
-  return { text, keys: injected, heldOut: withheld }
+  return { text, keys: injected, heldOut: withheld, trialKeys }
 }
 
 /** The lessons most worth this turn, formatted for injection into a planner's briefing. */

@@ -103,6 +103,30 @@ function generalizationNote(ledger: GenerationRecord[]): string {
   return `; of ${scored.length} scored generation(s), ${generalized} gained on tasks it was never shown, ${shownOnly} only where it was`
 }
 
+export interface PromotionEvidence {
+  promotions: number
+  confirmed: number
+  generalized: number
+  demonstrated: number
+}
+
+/**
+ * A promotion alone is a guarded benchmark win, not demonstrated improvement.
+ * The stronger claim needs the engine's independent confirmation pair (`proof`)
+ * and a gain on a task whose failure was not shown to the proposer.
+ */
+export function promotionEvidence(records: readonly GenerationRecord[]): PromotionEvidence {
+  const promotions = records.filter((record) => record.verdict === 'promoted')
+  const confirmed = promotions.filter((record) => record.proof !== undefined)
+  const generalized = promotions.filter((record) => record.generalization?.verdict === 'generalized')
+  return {
+    promotions: promotions.length,
+    confirmed: confirmed.length,
+    generalized: generalized.length,
+    demonstrated: promotions.filter((record) => record.proof !== undefined && record.generalization?.verdict === 'generalized').length,
+  }
+}
+
 /** A benchmark this close to perfect can only reward cheaper, not better. */
 const SATURATED = 0.95
 
@@ -225,7 +249,7 @@ export function compoundingStatus(): StageReport[] {
   const checked = rows.filter((row) => row.verify === 'pass' && row.regime !== 'judgment').length
 
   const ledger = readLedger()
-  const promoted = ledger.filter((record) => record.verdict === 'promoted').length
+  const promotion = promotionEvidence(ledger)
   const lastGen = ledger.at(-1)
 
   const trials = [...lessonTrials().values()]
@@ -261,11 +285,11 @@ export function compoundingStatus(): StageReport[] {
     {
       stage: 3,
       name: 'Turn checked work into a change',
-      state: promoted > 0 ? 'working' : ledger.length > 0 ? 'partial' : 'no evidence',
+      state: promotion.demonstrated > 0 ? 'working' : ledger.length > 0 ? 'partial' : 'no evidence',
       evidence: ledger.length === 0
         ? 'evolve has never run'
-        : `${ledger.length} evolve generation(s), ${promoted} promoted; last ${new Date(lastGen!.at).toISOString().slice(0, 10)} (${lastGen!.verdict})${generalizationNote(ledger)}`,
-      next: promoted === 0 ? 'once stage 4 is measured cleanly: `elia evolve --generations 3`' : undefined,
+        : `${ledger.length} evolve generation(s), ${promotion.promotions} promoted; ${promotion.confirmed} independently confirmed, ${promotion.generalized} gained on unseen tasks, ${promotion.demonstrated} demonstrated; last ${new Date(lastGen!.at).toISOString().slice(0, 10)} (${lastGen!.verdict})${generalizationNote(ledger)}`,
+      next: promotion.demonstrated === 0 ? 'run `elia evolve --generations 3` after stage 4 is measured cleanly; a demonstrated gain needs both confirmation and an unseen-task improvement' : undefined,
     },
     benchStage(benchRuns, readLiftRuns()),
     {

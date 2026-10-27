@@ -1,7 +1,11 @@
-import { expect, test } from 'bun:test'
+import { afterEach, expect, test } from 'bun:test'
 import http from 'node:http'
 import type { AddressInfo } from 'node:net'
-import { assertProviderEndpoint, assertPublicNetworkUrl, publicAddressLookup, publicFetch, validateNetworkUrl } from './networkPolicy.ts'
+import { assertProviderEndpoint, assertPublicNetworkUrl, publicAddressLookup, publicFetch, publicFetchTestHooks, validateNetworkUrl } from './networkPolicy.ts'
+
+afterEach(() => {
+  publicFetchTestHooks.transport = undefined
+})
 
 async function withLocalServer<T>(run: (port: number, hits: () => number) => Promise<T>): Promise<T> {
   let hits = 0
@@ -64,6 +68,17 @@ test('publicFetch refuses a local target without the explicit opt-in', async () 
     await expect(publicFetch(`http://localhost:${port}/`)).rejects.toThrow('private or local')
     expect(hits()).toBe(0)
   })
+})
+
+test('the test transport is hermetic but still receives URL policy validation', async () => {
+  let called = false
+  publicFetchTestHooks.transport = async () => {
+    called = true
+    return new Response('test response')
+  }
+  expect(await publicFetch('https://example.invalid/').then((response) => response.text())).toBe('test response')
+  await expect(publicFetch('http://127.0.0.1:3000/')).rejects.toThrow('private or local')
+  expect(called).toBe(true)
 })
 
 test('network URL validation rejects unsafe schemes, credentials, and literal internal targets', () => {

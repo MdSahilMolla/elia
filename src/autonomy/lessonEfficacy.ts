@@ -35,6 +35,12 @@ export interface LessonExposureOutcome {
    * and the coin kept everything. Only the second kind belongs in a trial.
    */
   heldOut?: string[]
+  /**
+   * The selected project lessons that entered the holdout coin. Unlike
+   * `lessonKeys`, this excludes user rules and machine lessons that were never
+   * randomized, so aggregate lift can use a real treatment size.
+   */
+  trialKeys?: string[]
 }
 
 interface ExposureRecord {
@@ -42,9 +48,15 @@ interface ExposureRecord {
   corr: string
   lessonKeys: string[]
   heldOutKeys?: string[]
+  trialKeys?: string[]
   verify: VerifyResult
   regime?: LessonExposureOutcome['regime']
   clean: boolean
+}
+
+/** Only a completed check can measure a lesson; no-check and judgment-only runs are not trial evidence. */
+function independentlyMeasured(record: Pick<ExposureRecord, 'verify' | 'regime'>): boolean {
+  return (record.verify === 'pass' || record.verify === 'fail') && record.regime !== 'judgment'
 }
 
 export interface EfficacyCounts {
@@ -82,6 +94,7 @@ export function recordLessonExposure(
       corr,
       lessonKeys,
       ...(heldOut ? { heldOutKeys: heldOut } : {}),
+      ...(outcome.trialKeys ? { trialKeys: outcome.trialKeys } : {}),
       verify: outcome.verify,
       regime: outcome.regime,
       clean: outcome.clean,
@@ -199,8 +212,14 @@ export function lessonTrials(path = EFFICACY_PATH): Map<string, LessonTrial> {
     // Only runs that went through the coin flip. A run from before holdout
     // existed (or with it switched off) saw its lessons by selection alone, and
     // mixing it in would bring back exactly the confound this exists to remove.
-    if (!Array.isArray(record.heldOutKeys)) continue
-    for (const key of record.lessonKeys) {
+    if (!Array.isArray(record.heldOutKeys) || !independentlyMeasured(record)) continue
+    // New records name the lessons eligible for the coin explicitly. Older
+    // records had only project lessons in a trial arm, so preserve them as a
+    // compatibility fallback rather than discarding their evidence.
+    const shownKeys = Array.isArray(record.trialKeys)
+      ? record.lessonKeys.filter((key) => record.trialKeys!.includes(key))
+      : record.lessonKeys
+    for (const key of shownKeys) {
       const entry = arm(key).shown
       entry.runs += 1
       if (record.clean) entry.clean += 1

@@ -25,6 +25,10 @@ import { olsSlope, summarize } from './stats.ts'
 interface ExposureLine {
   lessonKeys?: string[]
   heldOutKeys?: string[]
+  /** Selected project lessons that were eligible for the randomized holdout. */
+  trialKeys?: string[]
+  verify?: 'pass' | 'fail' | 'skipped' | 'none'
+  regime?: 'mechanical' | 'empirical' | 'judgment'
   clean?: boolean
 }
 
@@ -64,16 +68,23 @@ export const MIN_RUNS = 30
 /**
  * Text-lesson elasticity from the holdout coin. Only runs that went through the
  * coin (`heldOutKeys` present) count; the regressor is log(shown / selected),
- * which the coin alone sets.
+ * which the coin alone sets. Records from before `trialKeys` was added are
+ * omitted: their `lessonKeys` include non-randomized rules and machine facts.
  */
 export function lessonElasticity(lines: readonly ExposureLine[]): ElasticityEstimate {
-  const trials = lines.filter((line) => Array.isArray(line.heldOutKeys) && Array.isArray(line.lessonKeys) && typeof line.clean === 'boolean')
+  const trials = lines.filter((line) =>
+    Array.isArray(line.heldOutKeys) &&
+    Array.isArray(line.trialKeys) &&
+    typeof line.clean === 'boolean' &&
+    (line.verify === 'pass' || line.verify === 'fail') &&
+    line.regime !== 'judgment',
+  )
   const xs: number[] = []
   const ys: number[] = []
   let varied = 0
   for (const line of trials) {
-    const shown = line.lessonKeys!.length
-    const selected = shown + line.heldOutKeys!.length
+    const selected = line.trialKeys!.length
+    const shown = selected - line.heldOutKeys!.length
     if (selected === 0 || shown === 0) continue
     if (line.heldOutKeys!.length > 0) varied += 1
     xs.push(Math.log(shown / selected))

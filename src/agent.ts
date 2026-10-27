@@ -159,7 +159,7 @@ function notedLessons(input: Record<string, unknown>): string[] {
   return Array.isArray(input.lessons) ? input.lessons.filter((lesson): lesson is string => typeof lesson === 'string' && lesson.trim().length > 0) : []
 }
 
-export type TurnLessonMemory = { lessonKeys: string[]; lessonHeldOut: string[] | undefined }
+export type TurnLessonMemory = { lessonKeys: string[]; lessonHeldOut: string[] | undefined; lessonTrialKeys: string[] }
 
 export async function runTurn(
   messages: ConversationMessage[],
@@ -199,7 +199,7 @@ async function runScopedTurn(
   // files this turn is about to touch. Derived on read from the second brain;
   // empty (and free) until the brain has something anchored to those paths.
   const brainCards = mode === 'dev' && turnPaths.length > 0 ? await renderBrainCards(turnPaths) : ''
-  const lessonMemory = mode === 'dev' ? renderLessonsWithKeys(turnQuery) : { text: '', keys: [], heldOut: undefined }
+  const lessonMemory = mode === 'dev' ? renderLessonsWithKeys(turnQuery) : { text: '', keys: [], heldOut: undefined, trialKeys: [] }
   const rationale = mode === 'dev' ? renderRationale(turnQuery, turnPaths) : ''
   const weakCaution = mode === 'dev' ? weakDomainCaution(turnQuery, turnPaths) : ''
   const lastTurnFriction = mode === 'dev' ? regretNudge() : ''
@@ -392,5 +392,5 @@ async function runScopedTurn(
   const prefetchNote = hits > 0 ? ` · ${hits} read${hits === 1 ? '' : 's'} prefetched` : ''
   if (!options.silent && !options.skipStats) writeUsageLine(`${config.providerLabel} · ${formatUsageLine(result.usage, elapsedMs, config.model)}${prefetchNote}`)
 
-  return { ...result, lessonKeys: lessonMemory.keys, lessonHeldOut: lessonMemory.heldOut }
+  return { ...result, lessonKeys: lessonMemory.keys, lessonHeldOut: lessonMemory.heldOut, lessonTrialKeys: lessonMemory.trialKeys }
 }

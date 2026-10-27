@@ -1149,7 +1149,7 @@ export async function runInteractive(): Promise<void> {
           pushHeartbeat(true, action)
         },
       })
-      lastTurnLessonMemory = { lessonKeys: turn.lessonKeys, lessonHeldOut: turn.lessonHeldOut }
+      lastTurnLessonMemory = { lessonKeys: turn.lessonKeys, lessonHeldOut: turn.lessonHeldOut, lessonTrialKeys: turn.lessonTrialKeys }
       // The model was told to wrap up; the person is told why, and how to go on.
       if (turn.stopReason === 'spend-budget') {
         const { spendState, spendStopNotice } = await import('../spendLimit.ts')
@@ -1733,7 +1733,7 @@ export async function runInteractive(): Promise<void> {
         if (lastTurnLessonMemory) {
           try {
             const { recordLessonExposure } = await import('../autonomy/lessonEfficacy.ts')
-            recordLessonExposure(task.id, lastTurnLessonMemory.lessonKeys, { verify: verifyResult, clean: cleanTurn, heldOut: lastTurnLessonMemory.lessonHeldOut })
+            recordLessonExposure(task.id, lastTurnLessonMemory.lessonKeys, { verify: verifyResult, clean: cleanTurn, heldOut: lastTurnLessonMemory.lessonHeldOut, trialKeys: lastTurnLessonMemory.lessonTrialKeys })
           } catch {
             // best-effort
           }

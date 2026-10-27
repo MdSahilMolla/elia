@@ -1,4 +1,5 @@
 import { expect, test } from 'bun:test'
+import type { GenerationRecord } from '../evolve/ledger.ts'
 
 process.env.ANTHROPIC_API_KEY ??= 'test-key-for-compounding-test'
 
@@ -60,6 +61,17 @@ test('before a full sweep finishes, focus comes from the history tasks it has me
 })
 
 const { lessonStoreEffect } = await import('./status.ts')
+
+const { promotionEvidence } = await import('./status.ts')
+
+test('only a confirmed promotion that gains on unseen tasks counts as demonstrated', () => {
+  const generation = (overrides: Partial<GenerationRecord>): GenerationRecord => ({ generation: 1, at: 0, hypothesis: '', rationale: '', targetFiles: [], changedFiles: [], verdict: 'promoted', reason: '', model: 'm', ...overrides })
+  const proof = { review: ['clean'], failToPass: 'test', contained: 'box' }
+  const demonstrated = generation({ proof, generalization: { verdict: 'generalized', trainPassRate: 0.7, heldOutPassRate: 0.8, heldOutMeasured: 2, heldOutTotal: 3, gainedUnseen: ['u'], gainedShown: [], detail: 'gain' } })
+  const shownOnly = generation({ proof, generalization: { verdict: 'shown-only', trainPassRate: 0.8, heldOutPassRate: 0.5, heldOutMeasured: 2, heldOutTotal: 3, gainedUnseen: [], gainedShown: ['s'], detail: 'shown' } })
+  const legacy = generation({})
+  expect(promotionEvidence([demonstrated, shownOnly, legacy])).toEqual({ promotions: 3, confirmed: 2, generalized: 1, demonstrated: 1 })
+})
 
 test('the lesson store effect pairs the latest complete runs of the same set', () => {
   const runs = [

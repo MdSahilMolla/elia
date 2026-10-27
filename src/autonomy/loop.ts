@@ -756,6 +756,7 @@ async function runAutonomousTaskInternal(options: AutonomousRunOptions): Promise
       regime: verificationRegime,
       clean: verificationPassed && contradictions.length === 0,
       heldOut: lessonMemory?.heldOut,
+      trialKeys: lessonMemory?.trialKeys,
     })
     // This run just added a data point to the trial ledger, so re-judge it here.
     //

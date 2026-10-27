@@ -123,6 +123,25 @@ test('lessonTrials ignores shown runs from before holdout existed', () => {
   expect(trial?.verdict).toBe('unclear')
 })
 
+test('lessonTrials excludes unverified and judgment-only runs', () => {
+  for (let i = 0; i < MIN_HELD_OUT; i += 1) {
+    recordLessonExposure(`none-${i}`, ['k'], { verify: 'none', clean: true, heldOut: [] }, path)
+    recordLessonExposure(`skipped-${i}`, [], { verify: 'skipped', clean: false, heldOut: ['k'] }, path)
+    recordLessonExposure(`judgment-${i}`, ['k'], { verify: 'pass', regime: 'judgment', clean: true, heldOut: [] }, path)
+  }
+  expect(lessonTrials(path).has('k')).toBe(false)
+})
+
+test('lessonTrials excludes non-randomized injected rules from a new-format trial', () => {
+  for (let i = 0; i < MIN_HELD_OUT; i += 1) {
+    recordLessonExposure(`shown-${i}`, ['user-rule', 'project'], { verify: 'pass', clean: true, heldOut: [], trialKeys: ['project'] }, path)
+    recordLessonExposure(`held-${i}`, ['user-rule'], { verify: 'fail', clean: false, heldOut: ['project'], trialKeys: ['project'] }, path)
+  }
+  const trials = lessonTrials(path)
+  expect(trials.has('user-rule')).toBe(false)
+  expect(trials.get('project')).toMatchObject({ shown: { runs: MIN_HELD_OUT, clean: MIN_HELD_OUT }, heldOut: { runs: MIN_HELD_OUT, clean: 0 } })
+})
+
 test('renderEfficacyLine reports randomized verdicts', () => {
   for (let i = 0; i < 30; i += 1) trialRun(`s-${i}`, 'good', true, true)
   for (let i = 0; i < 12; i += 1) trialRun(`h-${i}`, 'good', false, false)

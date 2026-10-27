@@ -92,7 +92,7 @@ test('γ from the holdout coin: recovers a real effect, and reports none when th
     const heldOut = random() < 0.5 ? 10 : 0
     const shown = 20 - heldOut
     const clean = random() < 0.4 + 0.3 * (shown / 20)
-    return { lessonKeys: Array(shown).fill('k'), heldOutKeys: Array(heldOut).fill('h'), clean }
+    return { trialKeys: Array(shown + heldOut).fill('k'), heldOutKeys: Array(heldOut).fill('h'), verify: clean ? 'pass' as const : 'fail' as const, clean }
   })
   const estimate = lessonElasticity(withEffect)
   expect(estimate.gamma!).toBeGreaterThan(0)
@@ -101,4 +101,18 @@ test('γ from the holdout coin: recovers a real effect, and reports none when th
   const none = withEffect.map((line) => ({ ...line, clean: random() < 0.6 }))
   expect(lessonElasticity(none).detail).toContain('indistinguishable from zero')
   expect(lessonElasticity([]).detail).toContain('needs')
+})
+
+test('γ ignores injected lessons that were not randomized', () => {
+  const random = seededRandom(9)
+  const rows = Array.from({ length: 400 }, () => {
+    const heldOut = random() < 0.5 ? 1 : 0
+    const trialKeys = ['selected-a', 'selected-b']
+    const clean = random() < (heldOut ? 0.35 : 0.7)
+    return { trialKeys, heldOutKeys: heldOut ? ['selected-a'] : [], lessonKeys: ['user-rule', 'machine-fact', ...trialKeys.slice(heldOut)], verify: clean ? 'pass' as const : 'fail' as const, clean }
+  })
+  const baseline = lessonElasticity(rows)
+  const withExtraInjected = lessonElasticity(rows.map((row) => ({ ...row, lessonKeys: [...row.lessonKeys, ...Array(100).fill('unrandomized') ] })))
+  expect(withExtraInjected.gamma).toBeCloseTo(baseline.gamma!)
+  expect(withExtraInjected.se).toBeCloseTo(baseline.se!)
 })
