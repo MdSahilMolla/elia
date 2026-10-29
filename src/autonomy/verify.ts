@@ -9,7 +9,8 @@ import { changedStaticPages } from './detectChecks.ts'
 import { detectMissingPackage, installCommandFor, isInstallCommand } from './autoInstall.ts'
 import { scanProjectFiles } from './hygiene.ts'
 import { ensurePreviewServer } from '../preview/server.ts'
-import { checkRendered, waitForHttp } from '../preview/readiness.ts'
+import { waitForHttp } from '../preview/readiness.ts'
+import { renderDepthNote, verifyPageRender } from '../preview/browserRender.ts'
 
 /** Verification commands are usually a test suite, which needs far longer than an ordinary tool call. */
 const VERIFY_TIMEOUT_MS = 300_000
@@ -406,13 +407,13 @@ export async function fallbackStaticPageVerification(
       results: [{ command, exitCode: 1, stdout: '', stderr: ready.reason ?? 'server did not respond', elapsedMs: 0, timedOut: false }],
     }
   }
-  const rendered = await checkRendered(url, signal)
+  const rendered = await verifyPageRender(url, signal)
   return {
     passed: rendered.ok,
     results: [{
       command,
       exitCode: rendered.ok ? 0 : 1,
-      stdout: '',
+      stdout: rendered.ok ? `rendered${renderDepthNote(rendered)}` : (rendered.warnings ?? []).join('\n'),
       stderr: rendered.ok ? '' : (rendered.reason ?? 'page did not render'),
       elapsedMs: 0,
       timedOut: false,

@@ -4,6 +4,7 @@ import { resolveWorkspacePath } from './context.ts'
 import { ensureSecureDirectory, hardenSecureFile, writeSecureFile } from '../securePersistence.ts'
 import { withFileLock } from '../fileLock.ts'
 import { redactText } from '../ui/redact.ts'
+import { resolveOutcomeProbes } from './groundTruth.ts'
 import type { OutcomeContract } from './types.ts'
 
 export const OUTCOME_SCHEMA_VERSION = 1
@@ -144,6 +145,14 @@ export class OutcomeStore {
   }
 
   checkDue(now = Date.now()): OutcomeRecord[] {
+    const checked = this.checkDueLocked(now)
+    // A decided probe is ground truth for the run that registered it: score the
+    // confidence that run claimed against what the world now shows.
+    resolveOutcomeProbes(checked)
+    return checked
+  }
+
+  private checkDueLocked(now: number): OutcomeRecord[] {
     return this.withExclusiveLock(() => {
       this.reload()
       const checked: OutcomeRecord[] = []

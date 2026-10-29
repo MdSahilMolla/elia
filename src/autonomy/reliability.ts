@@ -15,6 +15,7 @@
  */
 
 import { readCalibrationLog, type CalibrationEntry } from './calibration.ts'
+import { readGroundTruth, scoreGroundTruth, type GroundTruthEntry } from './groundTruth.ts'
 
 /** How many of the most recent runs to weigh, and the floor below which there
  * is not enough history to say anything. */
@@ -44,6 +45,12 @@ export interface ReliabilitySignal {
   strictCompletion: boolean
   /** One line for the orient agent / run log. */
   note: string
+  /**
+   * Stated-minus-observed success on the most overconfident claim level, from
+   * outcome probes that checked the world after the run. 0 when there is not
+   * enough ground truth to say.
+   */
+  overconfidence: number
 }
 
 const CLEAN: ReliabilitySignal = {
@@ -54,7 +61,11 @@ const CLEAN: ReliabilitySignal = {
   extraReviewers: 0,
   strictCompletion: false,
   note: 'No completion-calibration history for this project yet.',
+  overconfidence: 0,
 }
+
+/** A claim level whose stated success beats what probes later found by this much is not trusted. */
+const OVERCONFIDENCE_THRESHOLD = 0.2
 
 /** Below this fraction of recent runs actually reaching `verified`, completion
  * itself is rare enough here to warrant the same scrutiny as over-claiming —
@@ -62,11 +73,36 @@ const CLEAN: ReliabilitySignal = {
 const LOW_SUCCESS_THRESHOLD = 0.34
 
 export function reliabilitySignal(cwd = process.cwd()): ReliabilitySignal {
-  return signalFromEntries(readCalibrationLog(cwd))
+  return signalFromEntries(readCalibrationLog(cwd), readGroundTruth(cwd))
 }
 
 /** Split out for testing. */
-export function signalFromEntries(all: CalibrationEntry[]): ReliabilitySignal {
+export function signalFromEntries(all: CalibrationEntry[], truth: GroundTruthEntry[] = []): ReliabilitySignal {
+  return applyGroundTruth(signalFromVerdicts(all), truth)
+}
+
+/**
+ * Self-consistency (`calibration.ts`) cannot see a run that was consistent and
+ * wrong. When delayed outcome probes show a claim level over-promising, that
+ * outranks a clean verdict record: the next run gets strict completion and an
+ * extra reviewer, and is told by how much its confidence has been off.
+ * User-reaction evidence is too weak to escalate on and is not used here.
+ */
+function applyGroundTruth(signal: ReliabilitySignal, truth: GroundTruthEntry[]): ReliabilitySignal {
+  const score = scoreGroundTruth(truth, 'outcome-probe')
+  if (!score.worstClaim || score.worstGap < OVERCONFIDENCE_THRESHOLD) return signal
+  const bucket = score.buckets.find((item) => item.claim === score.worstClaim)!
+  const note = `Ground truth: runs that reported "${bucket.claim}" stated ~${pct(bucket.stated)} success but later outcome checks held for ${pct(bucket.observed)} (n=${bucket.count}). Treat this run's confidence as inflated: prove completion with checks that touch the real result, not the plan.`
+  const escalated = signal.tier === 'unreliable' ? signal : { ...signal, tier: 'watch' as const, extraReviewers: Math.max(signal.extraReviewers, 1) }
+  return {
+    ...escalated,
+    strictCompletion: true,
+    overconfidence: score.worstGap,
+    note: signal.tier === 'insufficient-history' ? note : `${signal.note} ${note}`,
+  }
+}
+
+function signalFromVerdicts(all: CalibrationEntry[]): ReliabilitySignal {
   const recent = all.slice(-WINDOW)
   if (recent.length < MIN_RUNS) return { ...CLEAN, sampled: recent.length }
 
@@ -85,6 +121,7 @@ export function signalFromEntries(all: CalibrationEntry[]): ReliabilitySignal {
       tier: 'unreliable',
       extraReviewers: 2,
       strictCompletion: true,
+      overconfidence: 0,
       note: `Reliability: ${contradicting}/${recent.length} recent runs claimed more than the facts supported (${pct(rate)}). Treat every "done" here as unproven — widen the acceptance contract, require concrete evidence, and expect extra review.`,
     }
   }
@@ -96,6 +133,7 @@ export function signalFromEntries(all: CalibrationEntry[]): ReliabilitySignal {
       tier: 'watch',
       extraReviewers: 1,
       strictCompletion: true,
+      overconfidence: 0,
       note: rate >= 0.15
         ? `Reliability: ${contradicting}/${recent.length} recent runs over-claimed completion (${pct(rate)}). Be precise about what "done" means for this run and back it with evidence.`
         : `Reliability: verdicts have been honest (${pct(rate)} contradiction rate), but ${successNote} Do not assume this kind of task usually finishes — treat "should be straightforward" as a hypothesis, not a plan.`,
@@ -108,6 +146,7 @@ export function signalFromEntries(all: CalibrationEntry[]): ReliabilitySignal {
     tier: 'clean',
     extraReviewers: 0,
     strictCompletion: false,
+    overconfidence: 0,
     note: `Reliability: ${recent.length} recent runs, ${contradicting} verdict/facts contradiction(s) (${pct(rate)}), ${successNote} Track record is sound.`,
   }
 }

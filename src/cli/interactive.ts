@@ -1003,6 +1003,11 @@ export async function runInteractive(): Promise<void> {
     // Classify on the request (title) and what was actually typed (prompt).
     // Passing the inject-prefixed userText as both let operator-context text
     // (a "deploy" note, say) decide the task kind — and titled the task with it.
+    // The previous turn said it was done; this message is how the user took it.
+    if (!persona) {
+      const { resolveTurnClaim } = await import('../autonomy/groundTruth.ts')
+      resolveTurnClaim(requestText)
+    }
     const task = taskSessions.create(inferTaskKind(requestText, submittedText), redactText(requestText, 160), 'Starting request')
     taskSessions.update(task.id, { status: 'running', action: 'Thinking', detail: 'Planning the next action' })
     pushHeartbeat(true, redactText(userText, 160))
@@ -1474,7 +1479,11 @@ export async function runInteractive(): Promise<void> {
           renderTarget = target
           if (target) {
             const { prepareAutoPreview } = await import('../preview/prepare.ts')
-            const { waitForHttp, checkRendered } = await import('../preview/readiness.ts')
+            const { waitForHttp } = await import('../preview/readiness.ts')
+            // Runs the page in a headless browser when one is available, so a
+            // script that throws on boot or a missing stylesheet fails the turn
+            // instead of passing an HTTP fetch that never executed the page.
+            const { verifyPageRender, renderDepthNote } = await import('../preview/browserRender.ts')
             const prep = prepareAutoPreview(target)
             if (prep.kind === 'skip') {
               const line = `Preview skipped — ${prep.reason}`
@@ -1487,7 +1496,7 @@ export async function runInteractive(): Promise<void> {
               // Don't announce "ready" until the server actually answers and the
               // root paints something — a blank page is worse than no preview.
               const up = await waitForHttp(url, 8_000, controller.signal)
-              let rendered = up.ok ? await checkRendered(url, controller.signal) : up
+              let rendered = up.ok ? await verifyPageRender(url, controller.signal) : up
               // For a static page, *this* is the verification: it serves and it
               // paints. `detectChecks` only ever looked for typecheck/test
               // commands, and its CODE_EXT filter excludes .html/.css entirely,
@@ -1516,7 +1525,7 @@ export async function runInteractive(): Promise<void> {
                   )
                   await runModelTurn()
                   const retry = await waitForHttp(url, 8_000, controller.signal)
-                  rendered = retry.ok ? await checkRendered(url, controller.signal) : retry
+                  rendered = retry.ok ? await verifyPageRender(url, controller.signal) : retry
                 }
                 const verdict = rendered.ok
                   ? '✓ page renders after repair'
@@ -1527,7 +1536,7 @@ export async function runInteractive(): Promise<void> {
 
               if (ownsVerification) {
                 verifyResult = rendered.ok ? 'pass' : 'fail'
-                sessionTranscript.notice(rendered.ok ? `Render check passed — ${url}` : `Render check failed — ${rendered.reason ?? 'it painted nothing'} (${url})`)
+                sessionTranscript.notice(rendered.ok ? `Render check passed — ${url}${renderDepthNote(rendered)}` : `Render check failed — ${rendered.reason ?? 'it painted nothing'} (${url})`)
               }
               if (rendered.ok) {
                 const detail = url
@@ -1560,15 +1569,16 @@ export async function runInteractive(): Promise<void> {
         // "verification: none". Check the page as the turn left it: preview
         // checked it when it opened it, and a later edit can still break it.
         try {
-          const { checkRendered } = await import('../preview/readiness.ts')
+          const { verifyPageRender, renderDepthNote } = await import('../preview/browserRender.ts')
           // The model chose this URL, so it may well be a dev server rather than
           // elia's static server — don't fail it on the unbuilt-bundler
           // heuristic, which is only ever a real failure for a static server.
-          const rendered = await checkRendered(previewedUrl, AbortSignal.any([controller.signal, AbortSignal.timeout(5_000)]), { staticServer: false })
+          // 20s, not 5s: the browser pass loads and settles the page after the HTTP fetch.
+          const rendered = await verifyPageRender(previewedUrl, AbortSignal.any([controller.signal, AbortSignal.timeout(20_000)]), { staticServer: false })
           verifyResult = rendered.ok ? 'pass' : 'fail'
           // Status lines reach only the live UI. Without this, a turn recorded
           // "verification: fail" and nothing anywhere said what had failed.
-          sessionTranscript.notice(rendered.ok ? `Render check passed — ${previewedUrl}` : `Render check failed — ${rendered.reason ?? 'it painted nothing'} (${previewedUrl})`)
+          sessionTranscript.notice(rendered.ok ? `Render check passed — ${previewedUrl}${renderDepthNote(rendered)}` : `Render check failed — ${rendered.reason ?? 'it painted nothing'} (${previewedUrl})`)
           if (!rendered.ok && !machineReadable) {
             const line = `Page no longer renders — ${rendered.reason ?? 'it painted nothing'}`
             if (uiHooks) uiHooks.onActivity?.({ kind: 'status', status: 'warning', title: line })
@@ -1725,6 +1735,8 @@ export async function runInteractive(): Promise<void> {
           aborted: stopRequested || controller.signal.aborted || escalatedAborted,
           ...(turnFailed ? { failed: true } : {}),
         })
+        const { noteTurnClaim } = await import('../autonomy/groundTruth.ts')
+        noteTurnClaim(task.id, verifyResult, changedPaths.length, !turnFailed && !(stopRequested || controller.signal.aborted || escalatedAborted))
         const cleanTurn = !turnFailed && toolErrorCount === 0 && editRetryCount === 0 && (verifyResult === 'pass' || verifyResult === 'none' || verifyResult === 'skipped') && !(stopRequested || controller.signal.aborted || escalatedAborted)
         // The interactive exposure record exists only when this turn actually
         // ran an interactive model turn (escalated turns record inside the
