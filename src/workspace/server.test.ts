@@ -7,6 +7,7 @@ import { addMember, createWorkspace, registerAgentIdentity } from './admin.ts'
 import { runWorkspaceServer, type RunningWorkspaceServer } from './server.ts'
 import { WorkspaceClient } from './client.ts'
 import type { PersistedEvent } from './events.ts'
+import type { MeshSupervisorOptions } from '../mesh/index.ts'
 
 const cleanup: Array<() => void> = []
 afterEach(() => {
@@ -33,7 +34,10 @@ async function fixture() {
   const created = createWorkspace(store, { name: 'demo', ownerName: 'owner' })
   const contributor = addMember(store, { name: 'dev', role: 'contributor', actorId: created.ownerMemberId })
   const agent = registerAgentIdentity(store, { name: 'fe', role: 'frontend', actorId: created.ownerMemberId })
-  const server: RunningWorkspaceServer = runWorkspaceServer({ port: 0, store, planner: stubPlanner })
+  // mesh: false — these tests exercise the coordination server alone. The file
+  // plane is gated by ELIA_WORKSPACE_MESH, but pinning it off keeps a developer
+  // who has that variable set from spawning a real sidecar mid-test.
+  const server: RunningWorkspaceServer = runWorkspaceServer({ port: 0, store, planner: stubPlanner, mesh: false })
   cleanup.push(() => server.stop())
   cleanup.push(() => store.close())
   cleanup.push(() => {
@@ -100,7 +104,7 @@ test('a browser Origin is refused unless explicitly allowed', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'elia-ws-origin-'))
   const store = WorkspaceStore.open(join(dir, 'workspace.sqlite'))
   createWorkspace(store, { name: 'origin', ownerName: 'owner' })
-  const allowed = runWorkspaceServer({ port: 0, store, planner: stubPlanner, allowedOrigins: ['https://good.example'] })
+  const allowed = runWorkspaceServer({ port: 0, store, planner: stubPlanner, allowedOrigins: ['https://good.example'], mesh: false })
   cleanup.push(() => allowed.stop())
   cleanup.push(() => store.close())
   const allowedHttp = allowed.url.replace(/^ws/, 'http')
@@ -201,4 +205,81 @@ test('objective.add plans a task graph; approval activates it and makes wave-1 t
   const tasks = await owns.call<Array<{ title: string; status: string }>>('task.list', { objectiveId: planned.objectiveId })
   expect(tasks.find((t) => t.title === 'API')!.status).toBe('ready')
   expect(tasks.find((t) => t.title === 'Tests')!.status).toBe('pending')
+})
+
+test('a refused token says so, rather than claiming nothing is listening', async () => {
+  // The two failures look identical from the client: a WebSocket that is
+  // rejected with 401 and one that never connected. Reporting "cannot reach" for
+  // a bad token sends the reader to look at the network, which is working.
+  const { server } = await fixture()
+  const message = await rejection(WorkspaceClient.connect({ url: server.url, token: 'wst_bogus' }, 2_000))
+  expect(message).toMatch(/401|token/i)
+})
+
+test('the server applies an inbound control frame from a peer that named none', async () => {
+  // A sidecar tells a host its peers' ids, and tells a member only the host's
+  // certificate fingerprint — so a member's `ready` frame carries no peers at
+  // all. Replication used to be started only once a peer id was known, which
+  // meant a member had no handle to apply anything with: the mesh looked
+  // connected and every relayed event was dropped.
+  const dir = mkdtempSync(join(tmpdir(), 'elia-ws-inbound-'))
+  const store = WorkspaceStore.open(join(dir, 'workspace.sqlite'))
+  const created = createWorkspace(store, { name: 'demo', ownerName: 'owner' })
+  cleanup.push(() => store.close())
+  cleanup.push(() => {
+    try {
+      rmSync(dir, { recursive: true, force: true })
+    } catch {
+      /* windows lock */
+    }
+  })
+
+  let meshOptions: MeshSupervisorOptions | undefined
+  const server: RunningWorkspaceServer = runWorkspaceServer({
+    port: 0,
+    store,
+    planner: stubPlanner,
+    mesh: true,
+    startMesh: (supervisorOptions) => {
+      meshOptions = supervisorOptions
+      return { decision: { start: true, reason: 'required' }, done: Promise.resolve(), stop: () => {}, sendControl: () => true }
+    },
+  })
+  cleanup.push(() => server.stop())
+  const ready = meshOptions!.onReady!
+  const control = meshOptions!.onControl!
+
+  // A member-style ready frame: role member, host fingerprint, and — the point of
+  // the test — no peers, which is exactly what a member's sidecar sends.
+  ready({
+    protocol: 1,
+    workspaceId: created.workspaceId,
+    peerId: 'p1',
+    role: 'member',
+    root: dir,
+    listenAddr: '',
+    fingerprint: 'fp-local',
+    hostFingerprint: 'fp-host',
+    // Empty on purpose: a member's sidecar has nobody joined into it, so it has
+    // no peers to list. That empty list is what used to disable replication.
+    peers: [],
+  })
+
+  const before = store.events().length
+  control({
+    node: 'nd_peer',
+    events: [{
+      id: 'evt_inbound_1',
+      type: 'NodeHeartbeat',
+      actorKind: 'system',
+      actorId: 'workspace-server',
+      actorNode: 'nd_peer',
+      payload: { id: 'nd_peer', name: 'peer', kind: 'mesh' },
+      at: '2026-01-01T00:00:00.000Z',
+    }],
+  })
+
+  expect(store.events().length).toBe(before + 1)
+  expect(store.events().at(-1)!.id).toBe('evt_inbound_1')
+  expect(store.replicationError()).toBeUndefined()
 })

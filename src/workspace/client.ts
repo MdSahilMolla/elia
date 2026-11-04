@@ -80,20 +80,74 @@ export class WorkspaceClient {
       ws.addEventListener('message', (event) => {
         this.onMessage(typeof event.data === 'string' ? event.data : '')
       })
+      // A WebSocket failure carries no usable status. Bun reports a refused
+      // upgrade as a close with the reason "Expected 101 status code", which says
+      // only that *something* answered; a rejected token and a dead port are
+      // indistinguishable from it. So on any failure before `hello`, ask the
+      // server what it said. One request, on the failure path only, and the
+      // difference between "your token was refused" and "nothing is listening"
+      // is the difference between a one-line fix and an afternoon spent looking
+      // at the wrong half of the system.
+      const refuseWith = (summary: (reason: string) => string) => {
+        void this.describeRefusal().then((reason) => {
+          const error = new WorkspaceClientError(summary(reason))
+          this.failAll(error)
+          this.helloReject?.(error)
+        })
+      }
+
       ws.addEventListener('error', () => {
         clearTimeout(this.helloTimer)
-        const error = new WorkspaceClientError(`cannot reach workspace server at ${this.options.url}`)
-        this.failAll(error)
-        this.helloReject?.(error)
+        refuseWith((reason) => `cannot reach workspace server at ${this.options.url}${reason}`)
       })
       ws.addEventListener('close', (event) => {
         clearTimeout(this.helloTimer)
-        const error = new WorkspaceClientError(`workspace connection closed (${event.code})`)
-        this.failAll(error)
-        this.helloReject?.(error)
-        this.options.onClose?.(event.code, String(event.reason ?? ''))
+        const reason = String(event.reason ?? '')
+        const settled = (detail: string) => {
+          this.failAll(new WorkspaceClientError(detail))
+          this.options.onClose?.(event.code, reason)
+        }
+        if (this.helloReject !== undefined) {
+          // Closed before `hello`, so this is a failed open rather than a
+          // connection that worked and then ended.
+          refuseWith((server) =>
+            `workspace connection closed (${event.code}${reason === '' ? '' : `: ${reason}`})${server}`,
+          )
+          return
+        }
+        // The reason is carried by the closing side and costs nothing to include.
+        // A bare code leaves the reader to look up what 1006 means, which is not
+        // a thing anyone should have to do while a system is failing.
+        settled(`workspace connection closed (${event.code}${reason === '' ? '' : `: ${reason}`})`)
       })
     })
+  }
+
+  /**
+   * Asks the server why it would not upgrade, for the error message.
+   *
+   * Best effort throughout: a server that is simply not there fails this too,
+   * and then the original message stands, which is the right thing to say in
+   * that case.
+   */
+  private async describeRefusal(): Promise<string> {
+    // The URL is a WebSocket one, and `fetch` refuses `ws:` outright — with an
+    // error that says nothing about the server and reads like the server being
+    // down. Swapping the scheme is what turns "cannot reach" into the actual
+    // status the server returned.
+    const url = this.options.url.replace(/^ws:/, 'http:').replace(/^wss:/, 'https:')
+    try {
+      const response = await fetch(url, {
+        headers: { Authorization: `Bearer ${this.options.token}` },
+        signal: AbortSignal.timeout(3_000),
+      })
+      if (response.status === 401) return ': the server refused this token (401)'
+      if (response.status === 403) return ': the server refused this origin (403)'
+      if (response.status === 400) return `: ${await response.text()}`
+      return `: the server answered ${response.status}`
+    } catch {
+      return ' (nothing is listening)'
+    }
   }
 
   private onMessage(raw: string): void {

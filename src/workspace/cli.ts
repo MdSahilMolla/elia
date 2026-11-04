@@ -369,7 +369,7 @@ async function runFeed(flags: Map<string, string>, bools: Set<string>): Promise<
   })
 }
 
-async function runWatch(): Promise<void> {
+export async function runWatch(): Promise<void> {
   const { renderWorkspaceBoard } = await import('../ui/workspaceBoard.ts')
   const feed: PersistedEvent[] = []
   await withClient(async (client) => {

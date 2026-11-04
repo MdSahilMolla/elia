@@ -39,7 +39,7 @@ async function fixture(opts: { withReviewer?: boolean } = {}) {
   const created = createWorkspace(store, { name: 'demo', ownerName: 'owner' })
   registerAgentIdentity(store, { name: 'be', role: 'backend', pathScopes: ['api/**'], actorId: created.ownerMemberId })
   if (opts.withReviewer) registerAgentIdentity(store, { name: 'sec', role: 'security', actorId: created.ownerMemberId })
-  const server: RunningWorkspaceServer = runWorkspaceServer({ port: 0, store, planner: onePlan, sweepMs: 300 })
+  const server: RunningWorkspaceServer = runWorkspaceServer({ port: 0, store, planner: onePlan, sweepMs: 300, mesh: false })
   cleanup.push(() => server.stop())
   cleanup.push(() => store.close())
   cleanup.push(() => {
