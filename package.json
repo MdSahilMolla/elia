@@ -46,6 +46,7 @@
     "mcp:smoke": "bun run scripts/mcp-run-task-smoke.ts",
     "react": "bun run src/react_server.ts",
     "test": "bun test --timeout=20000",
+    "test:parallel": "bun test --timeout=20000 --parallel",
     "test:fast": "bun test --timeout=20000 --path-ignore-patterns 'src/battmann/**' --path-ignore-patterns 'src/ui/app/fastRender.test.ts' --path-ignore-patterns 'src/ui/cliSmoke.test.ts' --path-ignore-patterns 'src/sourceHygiene.test.ts' --path-ignore-patterns 'src/bridgeHttp.test.ts' --path-ignore-patterns 'src/vscodeBridge.test.ts' --path-ignore-patterns 'src/vscodeBridgeProtocol.test.ts' --path-ignore-patterns 'src/evolve/hypothesisBrief.test.ts' --path-ignore-patterns 'src/tools/causalDebug.test.ts' --path-ignore-patterns 'src/tools/communication.test.ts' --path-ignore-patterns 'src/tools/environment.test.ts'",
     "test:slow": "bun test --timeout=120000 src/battmann/ src/ui/app/fastRender.test.ts src/ui/cliSmoke.test.ts src/sourceHygiene.test.ts src/bridgeHttp.test.ts src/vscodeBridge.test.ts src/vscodeBridgeProtocol.test.ts src/evolve/hypothesisBrief.test.ts src/tools/causalDebug.test.ts src/tools/communication.test.ts src/tools/environment.test.ts",
     "typecheck": "tsc --noEmit",
@@ -64,7 +65,7 @@
     "nvidia-nim"
   ],
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.125.0",
+    "@anthropic-ai/sdk": "^0.126.0",
     "diff": "^9.0.0",
     "exceljs": "^4.4.0",
     "ink": "^7.1.1",

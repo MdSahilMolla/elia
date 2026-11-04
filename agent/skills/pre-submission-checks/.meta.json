@@ -1,0 +1,51 @@
+{
+  "slug": "pre-submission-checks",
+  "name": "pre-submission-checks",
+  "version": 8,
+  "createdAt": 1790690905847,
+  "updatedAt": 1791459103586,
+  "sourceLessonKeys": [],
+  "authoredBy": "elia",
+  "history": [
+    {
+      "version": 1,
+      "at": 1790690905847,
+      "reason": "created from 5 certified lessons"
+    },
+    {
+      "version": 2,
+      "at": 1790691045853,
+      "reason": "10 new certified lesson(s) about this topic"
+    },
+    {
+      "version": 3,
+      "at": 1790691224188,
+      "reason": "9 new certified lesson(s) about this topic"
+    },
+    {
+      "version": 4,
+      "at": 1790764094414,
+      "reason": "13 new certified lesson(s) about this topic"
+    },
+    {
+      "version": 5,
+      "at": 1790771144321,
+      "reason": "21 new certified lesson(s) about this topic"
+    },
+    {
+      "version": 6,
+      "at": 1790804677846,
+      "reason": "2 new certified lesson(s) about this topic"
+    },
+    {
+      "version": 7,
+      "at": 1790863850342,
+      "reason": "59 source lesson(s) were retired for not holding up — re-derived from what remains"
+    },
+    {
+      "version": 8,
+      "at": 1791459103586,
+      "reason": "1 source lesson(s) were retired for not holding up — re-derived from what remains"
+    }
+  ]
+}

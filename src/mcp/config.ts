@@ -1,10 +1,11 @@
 import { randomBytes } from 'node:crypto'
-import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, lstatSync, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { dirname, isAbsolute, join, resolve } from 'node:path'
+import { isAbsolute, join, resolve } from 'node:path'
 import { projectMcpConfigPath, userMcpConfigPath } from './paths.ts'
 import { withFileLock } from '../fileLock.ts'
 import { hardenSecureFile, writeSecureFile } from '../securePersistence.ts'
+import { isPathTrusted, sha256Hex, trustHash, TRUST_HINT } from '../autonomy/projectTrust.ts'
 
 /**
  * One configured MCP server. Two shapes:
@@ -63,7 +64,17 @@ export function loadMcpServerConfigs(cwd = process.cwd(), userPath = userMcpConf
 
   for (const [path, layer] of [[userPath, 'user'], [projectMcpConfigPath(cwd), 'project']] as const) {
     if (!existsSync(path)) continue
-    const parsed = parseConfigFile(path, layer, errors)
+    let parsed = parseConfigFile(path, layer, errors)
+    // A stdio server is a command line the repo wants run as the user. The
+    // project file lives inside whatever repo was just cloned, so its stdio
+    // entries are spawned only while the user-level trust record covers the
+    // file's current hash (`elia trust`); connectors (`url`) never spawn
+    // anything and are unaffected.
+    if (layer === 'project' && parsed.some((server) => !isConnector(server)) && !isPathTrusted(path)) {
+      const skipped = parsed.filter((server) => !isConnector(server)).map((server) => server.name)
+      errors.push(`project MCP config ${path}: not starting stdio server(s) ${skipped.join(', ')} — this file has not been trusted (or it changed since); ${TRUST_HINT}`)
+      parsed = parsed.filter(isConnector)
+    }
     for (const server of parsed) byName.set(server.name, server)
   }
 
@@ -166,20 +177,27 @@ function readConfigObject(path: string): { mcpServers: Record<string, Record<str
   return { mcpServers: {} }
 }
 
-// Sibling temp file + rename, same integrity guarantee as tools/atomicWrite.ts:
-// a reader (or a crash) only ever sees the complete old file or the complete
-// new one, never a truncated one. Kept synchronous (a plain rename) since
-// this module's public API is sync and its config files are tiny.
-function writeConfigObject(path: string, data: unknown): void {
-  mkdirSync(dirname(path), { recursive: true })
-  const tmp = join(dirname(path), `.mcp-${process.pid}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}.json.tmp`)
-  writeFileSync(tmp, `${JSON.stringify(data, null, 2)}\n`, 'utf8')
-  try {
-    renameSync(tmp, path)
-  } catch (err) {
-    rmSync(tmp, { force: true })
-    throw err
-  }
+// Atomic (sibling temp file + rename, so a reader or a crash only ever sees the
+// complete old or new file) and private: this file carries server `env` and
+// connector `headers`, i.e. credentials, so it is written 0600 in a 0700
+// directory instead of the umask default. Returns the text written, for hashing.
+function writeConfigObject(path: string, data: unknown): string {
+  const text = `${JSON.stringify(data, null, 2)}\n`
+  writeSecureFile(path, text)
+  return text
+}
+
+/**
+ * Runs one read-modify-write of a config layer. A project file that was
+ * trusted (or did not exist) before the edit stays trusted afterwards — the
+ * person's own `/mcp` action changed it — but one that was not trusted is left
+ * that way, so editing a cloned repo's file never blesses what else it holds.
+ */
+function editConfig<T>(scope: McpConfigScope, path: string, edit: () => { result: T; written?: string }): T {
+  const trustedBefore = scope !== 'project' || !existsSync(path) || isPathTrusted(path)
+  const { result, written } = edit()
+  if (scope === 'project' && trustedBefore && written !== undefined) trustHash(path, sha256Hex(written))
+  return result
 }
 
 /** Cross-process lock guarding a single config file's read-modify-write cycle. */
@@ -207,39 +225,36 @@ export function serverConfigToEntry(server: Omit<McpServerConfig, 'name'>): Reco
 export function upsertMcpServer(scope: McpConfigScope, server: McpServerConfig, cwd = process.cwd()): string {
   if (!isValidMcpServerName(server.name)) throw new Error(`invalid server name "${server.name}" — use letters, digits, "_" or "-"`)
   const path = scopePath(scope, cwd)
-  return withConfigLock(path, () => {
+  return withConfigLock(path, () => editConfig(scope, path, () => {
     const data = readConfigObject(path)
     const { name, ...rest } = server
     data.mcpServers[name] = serverConfigToEntry(rest)
-    writeConfigObject(path, data)
-    return path
-  })
+    return { result: path, written: writeConfigObject(path, data) }
+  }))
 }
 
 /** Removes one server from the given layer. Returns whether it was there. */
 export function removeMcpServer(scope: McpConfigScope, name: string, cwd = process.cwd()): { path: string; removed: boolean } {
   const path = scopePath(scope, cwd)
-  return withConfigLock(path, () => {
+  return withConfigLock(path, () => editConfig(scope, path, () => {
     const data = readConfigObject(path)
     const removed = name in data.mcpServers
     delete data.mcpServers[name]
-    if (removed) writeConfigObject(path, data)
-    return { path, removed }
-  })
+    return { result: { path, removed }, written: removed ? writeConfigObject(path, data) : undefined }
+  }))
 }
 
 /** Flips `disabled` on one server in the given layer. Returns the new state, or null if the server isn't in that layer. */
 export function setMcpServerDisabled(scope: McpConfigScope, name: string, disabled: boolean, cwd = process.cwd()): { path: string; disabled: boolean } | null {
   const path = scopePath(scope, cwd)
-  return withConfigLock(path, () => {
+  return withConfigLock(path, () => editConfig(scope, path, () => {
     const data = readConfigObject(path)
     const entry = data.mcpServers[name]
-    if (!entry) return null
+    if (!entry) return { result: null }
     if (disabled) entry.disabled = true
     else delete entry.disabled
-    writeConfigObject(path, data)
-    return { path, disabled }
-  })
+    return { result: { path, disabled }, written: writeConfigObject(path, data) }
+  }))
 }
 
 export interface EliaMcpServerConfig {

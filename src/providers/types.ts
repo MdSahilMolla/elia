@@ -128,7 +128,8 @@ export interface ProviderActivity {
 }
 
 export interface Provider {
-  streamTurn(params: StreamTurnParams): Promise<{ content: ContentBlock[]; usage: Usage }>
+  /** `truncated`: the provider stopped at its output limit, so the response (and any tool call it ends in) is incomplete. */
+  streamTurn(params: StreamTurnParams): Promise<{ content: ContentBlock[]; usage: Usage; truncated?: boolean }>
   /**
    * Optional, fire-and-forget: open a connection to the provider's host before
    * the first real request needs it, so that request doesn't pay DNS + TLS +

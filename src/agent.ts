@@ -21,6 +21,7 @@ import { renderCards } from './brain/cards.ts'
 import { noteBrainToolUse } from './brain/relevance.ts'
 import { appendActionAudit } from './autonomy/audit.ts'
 import { createActionGovernor, withActionGovernor, type ActionApproval, type GovernanceMode } from './autonomy/governor.ts'
+import type { SpendState } from './spendLimit.ts'
 import { loadDevelopmentToolHooks, withToolHooks } from './autonomy/devHooks.ts'
 import { expandSkillSelection } from './skills/bundles.ts'
 import { activeTodoList, type TodoList, withTodoList } from './autonomy/todoList.ts'
@@ -29,10 +30,13 @@ import { renderRationale } from './autonomy/rationale.ts'
 import { regretNudge, weakDomainCaution } from './autonomy/outcomes.ts'
 import { disputeNudge } from './autonomy/disputeNudge.ts'
 import { renderSkillHint } from './skills/relevance.ts'
+import { knowledgeProbe, knowledgeProbeEnabled } from './tools/knowledge.ts'
 import { draftUpfrontPlan, planActivity, planBriefing, planTodoItems, stripInjectedContext, upfrontPlanEnabled, wantsUpfrontPlan } from './autonomy/upfrontPlan.ts'
 import { checkPremises, describePremises, premiseBriefing } from './principles/premises.ts'
 import { beginPlanRequest, planChecklist, planProgressTitle, type PlanProgressUpdate } from './autonomy/planProgress.ts'
 import { memoryReceipt } from './autonomy/turnLearning.ts'
+import { providerCapabilities } from './providers/registry.ts'
+import { deferredToolsForMode, lazyToolsEnabled } from './tools/lazyTools.ts'
 
 /** The most recent user message text — the query project memory is ranked against. */
 function lastUserTextFor(messages: ConversationMessage[]): string {
@@ -128,6 +132,13 @@ export interface RunTurnOptions {
   /** Mid-run steering: pending operator messages to splice in at the next step boundary (see runAgentLoop). */
   drainSteering?: () => string[]
   /**
+   * Asked when the turn hits its spending ceiling, so a cyber run can ask for
+   * more and finish the task it is in the middle of. Undefined everywhere
+   * except the interactive cyber REPL, which means every other caller keeps
+   * wrapping up on the ceiling exactly as before.
+   */
+  onSpendCeiling?: (state: SpendState, requestedUsd: number | undefined) => Promise<number | undefined>
+  /**
    * This call opens a fresh user request (not a verification-repair or
    * self-review continuation): say what memory the turn is drawing on, and for
    * multi-step work think it through out loud and draft the plan before any
@@ -180,6 +191,10 @@ async function runScopedTurn(
   // compounding edge — the longer elia works a repo, the more it carries in.
   const turnQuery = lastUserTextFor(messages)
   const turnPaths = filePathsIn(turnQuery)
+  // Whether elia's knowledge base holds verified work on this request, asked
+  // while the rest of the brief is assembled. Evidence, not keywords: only
+  // entries that bear on the request count (tools/knowledge.ts, bearsOn).
+  const knowledgeLookup = !options.planMode && knowledgeProbeEnabled(mode) ? knowledgeProbe(stripInjectedContext(turnQuery)) : Promise.resolve(undefined)
   // Knowledge cards: what every past session accumulated about the specific
   // files this turn is about to touch. Derived on read from the second brain;
   // empty (and free) until the brain has something anchored to those paths.
@@ -207,7 +222,8 @@ async function runScopedTurn(
   // The wall-clock date leads the dynamic block in every mode: it must reflect
   // real time, and it must not bake into the cached stable prefix (a daemon can
   // stay up across midnight, or for days).
-  const systemDynamicPrompt = [turnContextPrompt(), projectMemory, options.turnGuidance ?? ''].map((part) => part.trim()).filter(Boolean).join('\n\n') || undefined
+  const knowledge = await knowledgeLookup
+  const systemDynamicPrompt = [turnContextPrompt(), projectMemory, knowledge?.hint ?? '', options.turnGuidance ?? ''].map((part) => part.trim()).filter(Boolean).join('\n\n') || undefined
 
   // A step elia ticked from evidence: the plan panel redraws from the checklist
   // (an "updated" activity, so scrollback is not filled with one per tick), and
@@ -230,6 +246,11 @@ async function runScopedTurn(
       else writeProviderActivity(activity.kind === 'plan' ? { ...activity, status: 'updated' } : activity)
     }
     options.onActivity?.(activity)
+  }
+
+  if (knowledge) {
+    const n = knowledge.entries.length
+    surface({ kind: 'status', status: 'completed', title: `Knowledge base: ${n} verified entr${n === 1 ? 'y' : 'ies'} on this request` })
   }
 
   if (options.upfrontPlan && mode === 'dev') {
@@ -311,6 +332,10 @@ async function runScopedTurn(
       systemPrompt,
       systemDynamicPrompt,
       tools,
+      // Specialist tools a mode does not rely on go out as a load-on-demand
+      // catalog. See tools/lazyTools.ts.
+      deferTools: lazyToolsEnabled(providerCapabilities(options.providerName ?? config.providerName).kind) ? deferredToolsForMode(mode) : undefined,
+      preloadTools: knowledge ? ['knowledge'] : undefined,
       provider: options.provider,
       providerName: options.providerName,
       model: options.model,
@@ -327,7 +352,8 @@ async function runScopedTurn(
       cache,
       prefetcher,
       signal: options.signal,
-      drainSteering: options.drainSteering,
+        drainSteering: options.drainSteering,
+        onSpendCeiling: options.onSpendCeiling,
       // Plan mode proposes a plan; there is nothing yet to tick.
       onPlanProgress: mode === 'dev' && !options.planMode ? planProgressed : undefined,
       // A ChatGPT-subscription turn is one internal `codex_delegate` action for

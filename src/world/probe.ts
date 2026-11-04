@@ -40,7 +40,13 @@ if (import.meta.main) {
     const { DEV_SYSTEM_PROMPT } = await import('../config.ts')
     const { allWorkerTools } = await import('../tools/registry.ts')
     const { taskTool } = await import('../tools/task.ts')
-    const tools = [...allWorkerTools(), taskTool].map((tool) => ({
+    const all = [...allWorkerTools(), taskTool]
+    // What a call actually sends: with load-on-demand tools (tools/lazyTools.ts),
+    // the core definitions plus the catalog, not every definition. A tree from
+    // before that module existed sends them all.
+    const lazy = await import('../tools/lazyTools.ts').catch(() => undefined)
+    const sent = lazy ? lazy.createLazyToolSet(all, lazy.deferredToolsForMode('dev'), new Set()).definitions() : all
+    const tools = sent.map((tool) => ({
       name: tool.name,
       chars: JSON.stringify({ name: tool.name, description: tool.description, input_schema: tool.input_schema }).length,
     }))

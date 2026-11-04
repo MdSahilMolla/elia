@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test'
+import { createHmac } from 'node:crypto'
 import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -185,6 +186,43 @@ test('a hand-edited maxUses (loosening a cap after the fact) invalidates the sig
   onDisk.grants[0].maxUses = 1000 // forged: raise the cap without the secret
   writeFileSync(path, JSON.stringify(onDisk, null, 2) + '\n')
   clearPreauthCaches()
+  expect(isPreauthorized('deployment.production', repoDir, 'main')).toBe(false)
+})
+
+test('a grant signed before `mode` was signed still verifies, and keeps its old meaning', () => {
+  // The upgrade hazard: `mode` joined the signed payload, so a grant written by
+  // an earlier version carries a signature over six fields, not seven. If only
+  // the new form verified, every live grant on the machine would fail closed on
+  // upgrade and an operator's `/scope all` would vanish with nothing to explain
+  // it. Re-sign it the old way to stand in for that file.
+  grantPreauth(['deployment.production'], repoDir, 'main')
+  const path = preauthPath()
+  const onDisk = JSON.parse(readFileSync(path, 'utf8'))
+  const grant = onDisk.grants[0]
+  const legacy = [grant.intent, grant.repo, grant.branch, grant.grantedAt, grant.expiresAt, grant.maxUses ?? ''].join('\n')
+  grant.hmac = createHmac('sha256', userPreauthSecret()).update(legacy).digest('hex')
+  writeFileSync(path, JSON.stringify(onDisk, null, 2) + '\n')
+  clearPreauthCaches()
+
+  // No `mode` field, so it means what it always meant: every mode.
+  expect(isPreauthorized('deployment.production', repoDir, 'main')).toBe(true)
+})
+
+test('adding a mode to a six-field-signed grant does not verify', () => {
+  // The direction that matters for safety. The six-field signature never covered
+  // `mode`, so someone who can write the file must not be able to attach one and
+  // keep a valid signature — otherwise hand-editing a grant into `mode: "cyber"`
+  // would be a privilege edit the secret was never asked about.
+  grantPreauth(['deployment.production'], repoDir, 'main')
+  const path = preauthPath()
+  const onDisk = JSON.parse(readFileSync(path, 'utf8'))
+  const grant = onDisk.grants[0]
+  const legacy = [grant.intent, grant.repo, grant.branch, grant.grantedAt, grant.expiresAt, grant.maxUses ?? ''].join('\n')
+  grant.hmac = createHmac('sha256', userPreauthSecret()).update(legacy).digest('hex')
+  grant.mode = 'cyber'
+  writeFileSync(path, JSON.stringify(onDisk, null, 2) + '\n')
+  clearPreauthCaches()
+
   expect(isPreauthorized('deployment.production', repoDir, 'main')).toBe(false)
 })
 

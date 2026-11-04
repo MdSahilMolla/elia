@@ -1,0 +1,31 @@
+{
+  "slug": "elia-dev-workflow-guide",
+  "name": "elia-dev-workflow-guide",
+  "version": 2,
+  "createdAt": 1791458973082,
+  "updatedAt": 1791487237392,
+  "sourceLessonKeys": [
+    "2sz1nxrf8bsqr",
+    "u68ltvdnwdq0",
+    "2kalp2bxf7xx2",
+    "2dora4bfb1usj",
+    "2ew3wzfs8sr8g",
+    "2a4hosi7p7x35",
+    "327psf817wyfx",
+    "2kdgntj8wfdm",
+    "2tse7vn4plrow"
+  ],
+  "authoredBy": "elia",
+  "history": [
+    {
+      "version": 1,
+      "at": 1791458973082,
+      "reason": "created from 5 certified lessons"
+    },
+    {
+      "version": 2,
+      "at": 1791487237392,
+      "reason": "4 new certified lesson(s) about this topic"
+    }
+  ]
+}

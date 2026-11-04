@@ -18,6 +18,96 @@ export function engagementRootDir(): string {
   return join(paths.workspace, 'engagements')
 }
 
+export interface EngagementRecord {
+  slug: string
+  target: string
+  authorizedBy: string
+  scope: string
+}
+
+/**
+ * Write the four scaffold files for an engagement and return its directory.
+ *
+ * Extracted from the tool body so `run_security_tool` can scaffold a local-file
+ * engagement on the caller's behalf. The scope text it records in that case is
+ * deliberately machine-checkable rather than a real authorization claim, and
+ * says so on its face — see `localEngagementRecord`.
+ */
+export async function writeEngagementScaffold(values: EngagementRecord, root = paths.workspace): Promise<string> {
+  const slug = slugify(values.slug)
+  const dir = engagementDir(slug, root)
+  const { target, authorizedBy, scope } = values
+  const recordedAt = new Date().toISOString()
+
+  const scopePath = join(dir, 'SCOPE.md')
+  const findingsPath = join(dir, 'findings.md')
+  const reportPath = join(dir, 'report.md')
+  const reconKeep = join(dir, 'recon', '.gitkeep')
+  if (existsSync(scopePath)) throw new Error(`engagement "${slug}" already exists; refusing to overwrite its authorization record`)
+
+  const scopeContent = `# Engagement scope: ${slug}
+
+**Target:** ${target}
+**Authorized by:** ${authorizedBy}
+**Recorded:** ${recordedAt}
+
+## Rules of engagement
+${scope}
+
+---
+Every action in this engagement must stay inside this scope. If a target, host, or
+technique isn't covered above, stop and ask before touching it.
+`
+  const findingsContent = `# Findings: ${slug}
+
+<!-- Append one entry per finding as you go: title, severity, description, evidence, remediation. -->
+`
+  const reportContent = `# Security assessment report: ${slug}
+
+**Target:** ${target}
+**Date:** ${recordedAt.slice(0, 10)}
+
+## Scope
+${scope}
+
+## Executive summary
+_TODO_
+
+## Findings
+_Summarize and prioritize findings.md by severity here once testing is complete._
+
+## Recommendations
+_TODO_
+`
+
+  for (const path of [scopePath, findingsPath, reportPath, reconKeep]) await captureBeforeWrite(path)
+  await Bun.write(scopePath, scopeContent)
+  await Bun.write(findingsPath, findingsContent)
+  await Bun.write(reportPath, reportContent)
+  await Bun.write(reconKeep, '')
+
+  return dir
+}
+
+/**
+ * The record written when a run names a local artifact and no engagement exists.
+ *
+ * The authorization line is the honest part: an auto-scaffolded engagement is
+ * NOT a claim that a person granted anything, and it does not pretend otherwise.
+ * It records that the only thing in scope is a file on this machine, which is
+ * the one case where no network target is touched and therefore nothing outside
+ * the workspace is at stake. A command that names any host still has to go
+ * through new_engagement, where a person states who authorized it.
+ */
+export function localEngagementRecord(slug: string, artifact: string): EngagementRecord {
+  return {
+    slug,
+    target: `local artifact ${artifact}`,
+    authorizedBy: 'not applicable — no network target; analysis is confined to a file on this machine',
+    scope: `Only the local artifact \`${artifact}\` is in scope. No host, network, or third-party system is authorized by this record. If the work needs to reach a live target, stop and run new_engagement with a real authorization.`,
+  }
+}
+
 export const newEngagementTool: Tool = {
   name: 'new_engagement',
   description:
@@ -52,58 +142,8 @@ export const newEngagementTool: Tool = {
       values[key] = value.trim()
     }
     const slug = slugify(values.slug)
-    const dir = engagementDir(slug)
-    const target = values.target
-    const authorizedBy = values.authorizedBy
-    const scope = values.scope
     const recordedAt = new Date().toISOString()
-
-    const scopePath = join(dir, 'SCOPE.md')
-    const findingsPath = join(dir, 'findings.md')
-    const reportPath = join(dir, 'report.md')
-    const reconKeep = join(dir, 'recon', '.gitkeep')
-    if (existsSync(scopePath)) throw new Error(`engagement "${slug}" already exists; refusing to overwrite its authorization record`)
-
-    const scopeContent = `# Engagement scope: ${slug}
-
-**Target:** ${target}
-**Authorized by:** ${authorizedBy}
-**Recorded:** ${recordedAt}
-
-## Rules of engagement
-${scope}
-
----
-Every action in this engagement must stay inside this scope. If a target, host, or
-technique isn't covered above, stop and ask before touching it.
-`
-    const findingsContent = `# Findings: ${slug}
-
-<!-- Append one entry per finding as you go: title, severity, description, evidence, remediation. -->
-`
-    const reportContent = `# Security assessment report: ${slug}
-
-**Target:** ${target}
-**Date:** ${recordedAt.slice(0, 10)}
-
-## Scope
-${scope}
-
-## Executive summary
-_TODO_
-
-## Findings
-_Summarize and prioritize findings.md by severity here once testing is complete._
-
-## Recommendations
-_TODO_
-`
-
-    for (const path of [scopePath, findingsPath, reportPath, reconKeep]) await captureBeforeWrite(path)
-    await Bun.write(scopePath, scopeContent)
-    await Bun.write(findingsPath, findingsContent)
-    await Bun.write(reportPath, reportContent)
-    await Bun.write(reconKeep, '')
+    const dir = await writeEngagementScaffold({ ...values, slug }, paths.workspace)
 
     return `Scaffolded engagement "${slug}" at ${dir}
 - SCOPE.md — authorization record; stay inside it

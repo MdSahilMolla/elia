@@ -29,9 +29,9 @@ function contract(
 }
 
 const CATALOG: CapabilityContract[] = [
-  ...['read_file', 'list_files', 'grep', 'find_symbol', 'recall', 'brain', 'why', 'project_profile', 'production_readiness', 'environment', 'causal_debug', 'arch_drift', 'adversarial_verify', 'codebase_memory', 'predictive_impact', 'dependency_audit', 'multi_modal_review', 'spec_verify', 'temporal_analysis', 'board_read']
+  ...['read_file', 'list_files', 'grep', 'find_symbol', 'recall', 'brain', 'why', 'project_profile', 'production_readiness', 'environment', 'causal_debug', 'arch_drift', 'adversarial_verify', 'codebase_memory', 'predictive_impact', 'dependency_audit', 'multi_modal_review', 'spec_verify', 'temporal_analysis', 'board_read', 'load_tools']
     .map((tool) => contract(tool, 'safe', ['workspace-read'], true, 'bounded local observation')),
-  ...['web_search', 'web_fetch', 'paper'].map((tool) => contract(tool, 'safe', ['network-read'], true, 'dated source or fetched response')),
+  ...['web_search', 'web_fetch', 'compare_page', 'digest', 'paper', 'knowledge'].map((tool) => contract(tool, 'safe', ['network-read'], true, 'dated source or fetched response')),
   ...['visualize', 'finance', 'data_science', 'sports', 'fitness'].map((tool) => contract(tool, 'safe', ['workspace-read'], true, 'deterministic result or generated artifact')),
   ...['write_file', 'edit_file', 'delete_file', 'lsp_refactor', 'todo_write', 'note_lesson', 'record_rationale', 'causal_fix', 'causal_verify', 'cross_project_learn', 'self_healing_monitor', 'federated_collab', 'board_post']
     .map((tool) => contract(tool, 'review', ['workspace-write'], false, 'written artifact and postcondition')),
@@ -50,12 +50,18 @@ const CATALOG: CapabilityContract[] = [
   contract('deployment', 'critical', ['process', 'network-read', 'external-write'], false, 'provider receipt and live postcondition'),
   contract('browser', 'critical', ['network-read', 'external-write'], false, 'fresh browser state or user takeover'),
   contract('communication', 'critical', ['external-write'], false, 'approved content and delivery readback'),
-  ...['new_engagement', 'run_security_tool', 'http_probe', 'log_finding', 'engagement_report'].map((tool) => contract(tool, 'critical', ['security'], false, 'authorized scope and evidence artifact')),
+  ...['new_engagement', 'run_security_tool', 'http_probe', 'log_finding', 'engagement_report', 'flag_verify'].map((tool) => contract(tool, 'critical', ['security'], false, 'authorized scope and evidence artifact')),
   // The CTF and triage tools only observe: a toolchain report, a stored
   // procedure, and a parse of recon output elia already saved. None of them
   // spawns a process or reaches a target, which is the line that separates them
   // from run_security_tool on the same mode.
-  ...['ctf_toolchain', 'ctf_playbook', 'security_triage'].map((tool) => contract(tool, 'safe', ['workspace-read'], true, 'detected tool inventory, returned playbook, or parsed findings with per-finding evidence')),
+  ...['ctf_toolchain', 'ctf_playbook', 'cyberbrain', 'security_triage'].map((tool) => contract(tool, 'safe', ['workspace-read'], true, 'detected tool inventory, returned playbook, or parsed findings with per-finding evidence')),
+  // ask_user reaches no system: it puts one question to a person and reports
+  // the answer. It is still critical, because what it returns decides whether a
+  // run keeps spending money, and an answer nobody gave is a decision the model
+  // would otherwise be inventing. `workspace-read` covers the one thing it
+  // actually observes, the session's spend so far.
+  contract('ask_user', 'critical', ['workspace-read'], false, "the operator's answer, or a recorded decline when there is nobody to ask"),
   contract('read_spreadsheet', 'safe', ['workspace-read'], true, 'parsed workbook result'),
   ...['spreadsheet', 'presentation'].map((tool) => contract(tool, 'review', ['workspace-write'], false, 'saved artifact and schema/readback')),
   contract('battmann', 'critical', ['workspace-write', 'network-read', 'external-write'], false, 'dated evidence, audit entry, and governed action receipt'),

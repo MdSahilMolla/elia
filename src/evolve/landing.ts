@@ -14,7 +14,8 @@ import type { Attestation } from './containment.ts'
  * "Earns it" is a short list, all of which has to hold:
  *
  *   - the gate ran *contained*: every command that ran the candidate's code
- *     went through elia-box and none was cut short (`Attestation`). A change
+ *     went through elia-box, none ran it on the host, and none was cut short
+ *     (`Attestation`). A change
  *     proven on the bare host has not been proven safe to run;
  *   - the checkout is exactly where the candidate was cut from (its parent is
  *     HEAD), so what lands is what was measured, byte for byte;
@@ -37,7 +38,7 @@ export function landingEnabled(env: Record<string, string | undefined> = process
 export interface LandingOptions {
   liveRoot: string
   commit: string
-  attestation: Pick<Attestation, 'boxed' | 'cutShort'> | undefined
+  attestation: (Pick<Attestation, 'boxed' | 'cutShort'> & Partial<Pick<Attestation, 'unboxed'>>) | undefined
   /** Type-checks the live tree after the landing. */
   verify: () => Promise<boolean>
   /** Injection seam for tests. */
@@ -57,6 +58,7 @@ export async function land(options: LandingOptions): Promise<Landing> {
 
   const attested = options.attestation
   if (!attested || attested.boxed === 0) return refuse('the gate ran on the bare host, not in elia-box, so the change has not been proven safe to run (ELIA_EVOLVE_BOX=on)')
+  if ((attested.unboxed ?? 0) > 0) return refuse(`${attested.unboxed} run(s) of the candidate's code happened outside elia-box (builder tests, benchmark or probes), so a boxed final gate does not prove it contained`)
   if (attested.cutShort > 0) return refuse(`${attested.cutShort} of the boxed runs were cut short by a limit, so the evidence is incomplete`)
 
   const head = run(['rev-parse', 'HEAD'])

@@ -81,6 +81,11 @@ Autonomous runs from the command line — autopilot picks the goals, auto takes 
   elia autopilot --resume            Continue the last pilot in this repository
   elia autopilot status | report     Where the last pilot stands / its full report
                                      (.elia/autopilot/REPORT.md). Inside a session: /autopilot
+  elia autopilot watch add "github ci"  React to events too: github ci|issues|prs, file <path>, url <https>, every 6h
+  elia autopilot --watch             Keep going: every event becomes a goal; waits when there is nothing to do
+  elia autopilot --scopes a,b        Limit what its goal runs may do (e.g. workspace-read,workspace-write,process)
+  elia autopilot install [--env-file F]  Run --watch in the background from log-in on (uninstall | service for status);
+                                     a watching pilot spends at most ELIA_AUTOPILOT_DAILY_USD a day (default $2)
 
   elia auto "<goal>"                 Your goal, through the full pipeline: plan it, execute it with a
                                      fleet of sub-agents, verify, repair, and record what it learned
@@ -167,12 +172,17 @@ Self-improvement:
   elia compounding simulate   Reproduce the paper's simulations (zero spend)
   elia compounding predict    The paper's falsifiable predictions P1–P8 and elia's evidence on each
 
+Project trust:
+  elia trust                  Trust this project's own skills, MCP servers, standing approvals and schedules
+  elia trust status           Show which of them are trusted right now
+  elia trust revoke           Revoke that trust
+
 Learned tools:
   elia skills                 List the tools elia has written for itself
   elia skills bundles         List declarative groups of loaded skills
   elia skills candidates      Show repeated work that could become a new tool
   elia skills synth           Write a tool for the strongest candidate
-  elia skills trust           Trust this project's .elia/skills so they load on startup
+  elia skills trust           Trust this project's .elia/skills so they load on startup (hash-bound, kept in your user config)
   elia skills untrust         Revoke a prior trust decision for this project
   elia skills status          Show whether this project's local skills are trusted
   elia skills instructions    List SKILL.md instruction skills elia wrote for itself
@@ -206,6 +216,12 @@ Background autonomy:
   elia daemon --once                       Run due schedules once and exit
   elia daemon --poll-ms 30000             Keep checking due schedules in the foreground
 
+Delayed outcome closure:
+  elia outcomes add --after 5m --file path [--contains "text"]  Check a postcondition after the run settles
+  elia outcomes list                                             Show pending and resolved outcome contracts
+  elia outcomes show <id>                                        Show evidence and failure details
+  elia outcomes check                                            Resolve due local deterministic checks
+
 Data Science workspace (no model involved):
   elia ds capabilities                     Every ds_* action and how it touches the world
   elia ds datasets | runs | record <id>    Datasets, execution records, and one record in full
@@ -222,6 +238,14 @@ System Intelligence record (no model involved):
   elia si review <SI-n> <kind> <verdict> --note ".."   Record your own review
   elia si journal | verify | org | structure | lifecycles | template <kind> | cadence
   elia sysintel <command>                  The same commands under their long name
+  elia trials [analyze]                    What happened to each commit after it landed: is that signal usable, and how big a trial it needs
+  elia trials basket                       The outcome basket and its digest (the outcomes, fixed before any analysis)
+
+CyberBrain (read-only retrieval corpus):
+  elia cyberbrain install <dir|zip|url>    Install the scraped CTF/VAPT corpus into ~/.elia/cyberbrain
+                                           (a directory, a .zip, or an https URL to a zip)
+  elia cyberbrain verify                   Re-run every validation gate and print the receipt
+  elia cyberbrain status                   Whether a corpus is installed, where, its counts, and generated_at
 
 Battmann intelligence (no model involved unless noted):
   elia battmann seed india-semiconductors  Subscribe real data feeds and open certified questions

@@ -6,7 +6,7 @@ import { runSubAgent } from '../subagent.ts'
 import { allWorkerTools } from '../tools/registry.ts'
 import type { Tool } from '../tools/types.ts'
 import { clampOutput, runShell } from '../shell.ts'
-import { ContainmentRequired, attest, describeAttestation, evolveBoxMode, runGate } from './containment.ts'
+import { ContainmentRequired, attest, describeAttestation, evolveBoxMode, hostRunCount, runGate } from './containment.ts'
 import { recentBoxReceipts } from '../sandbox/box.ts'
 import { writeText } from '../ui/stream.ts'
 import { writeBlock, writeFail, writePass, writePhase, writeSubStep, writeSummary } from '../ui/report.ts'
@@ -512,6 +512,9 @@ async function attemptGeneration(
 
   // --- Implement it inside the sandbox --------------------------------------
 
+  // The attestation window opens before the builder runs: its test runs execute candidate code too.
+  const receiptsBefore = recentBoxReceipts().length
+  const hostRunsBefore = hostRunCount()
   writePhase('execute', `applying it in ${sandbox.root}`)
   const failedIds = new Set(baseline.failed)
   const targetsFailing = (hypothesis.targetTasks ?? []).some((id) => failedIds.has(id))
@@ -529,7 +532,7 @@ async function attemptGeneration(
       name: `builder#gen${generation}`,
       prompt: implementationBrief(sandbox, hypothesis),
       signal: options.signal,
-      tools: [...candidateTools(sandbox.root, allWorkerTools()), ...(twinEnabled() ? [worldTool] : [])],
+      tools: [...candidateTools(sandbox.root, allWorkerTools(), ELIA_ROOT, options.signal), ...(twinEnabled() ? [worldTool] : [])],
     }),
   )
   // What the proposer and the builder spent, in this process: the race and the
@@ -622,7 +625,6 @@ async function attemptGeneration(
     }
   }
 
-  const receiptsBefore = recentBoxReceipts().length
   let typecheck: Awaited<ReturnType<typeof runGate>>
   let unitTests: Awaited<ReturnType<typeof runGate>>
   try {
@@ -636,7 +638,7 @@ async function attemptGeneration(
     writeFail(error.message)
     return { ...base, verdict: 'error', reason: error.message }
   }
-  if (evolveBoxMode() !== 'off') writeSubStep(describeAttestation(attest(receiptsBefore)))
+  if (evolveBoxMode() !== 'off') writeSubStep(describeAttestation(attest(receiptsBefore, undefined, hostRunsBefore)))
   if (typecheck.exitCode !== 0) {
     if (looksUnavailable(typecheck.stderr)) {
       writeSubStep('typecheck unavailable in the sandbox — skipping that gate')
@@ -1004,7 +1006,7 @@ async function attemptGeneration(
   // with it: the review it passed, the test that fails without it, and what
   // contained the gate that ran it.
   proof.review = review.findings.length === 0 ? ['clean'] : review.findings.map((finding) => `${finding.rule}: ${finding.detail}`)
-  proof.contained = describeAttestation(attest(receiptsBefore))
+  proof.contained = describeAttestation(attest(receiptsBefore, undefined, hostRunsBefore))
   base.proof = proof
 
   if (options.dryRun) {
@@ -1038,7 +1040,7 @@ Proposed and proven by \`elia evolve\`; nothing was changed in the working tree.
         const landing = await land({
           liveRoot: ELIA_ROOT,
           commit,
-          attestation: attest(receiptsBefore),
+          attestation: attest(receiptsBefore, undefined, hostRunsBefore),
           verify: async () => (await runShell('bun run typecheck', GATE_TIMEOUT_MS, ELIA_ROOT, options.signal)).exitCode === 0,
         })
         if (landing.landed) {

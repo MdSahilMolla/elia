@@ -156,6 +156,8 @@ export async function runRuns(): Promise<void> {
   const { renderCalibrationLine } = await import('../autonomy/calibration.ts')
   const calibration = renderCalibrationLine()
   if (calibration && !machineReadable) writeNotice(calibration)
+  const { renderGroundTruthLines } = await import('../autonomy/groundTruth.ts')
+  if (!machineReadable) for (const line of renderGroundTruthLines()) writeNotice(line)
   writeNotice('Inspect one with: elia runs <id>')
 }
 

@@ -1,11 +1,25 @@
-import { appendFileSync, chmodSync, lstatSync, mkdirSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { chmodSync, closeSync, constants, fchmodSync, lstatSync, mkdirSync, openSync, readdirSync, renameSync, rmSync, statSync, writeFileSync, writeSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 
 const PRIVATE_DIRECTORY_MODE = 0o700
 const PRIVATE_FILE_MODE = 0o600
 
+/** Throws when `path` is itself a symbolic link. A missing path is fine. */
+function refuseSymlink(path: string): void {
+  let isLink = false
+  try {
+    isLink = lstatSync(path).isSymbolicLink()
+  } catch {
+    return
+  }
+  if (isLink) throw new Error(`refusing to use ${path}: it is a symbolic link`)
+}
+
 /** Ensure a state directory exists and is not group/world accessible. */
 export function ensureSecureDirectory(path: string): void {
+  // A symlinked state directory would have `chmod` applied to (and files written
+  // into) whatever it points at, which a cloned repository can choose.
+  refuseSymlink(path)
   mkdirSync(path, { recursive: true, mode: PRIVATE_DIRECTORY_MODE })
   chmodSync(path, PRIVATE_DIRECTORY_MODE)
 }
@@ -67,8 +81,17 @@ export function writeSecureFile(path: string, content: string): void {
 /** Append an owner-readable record, using a restrictive creation mode. */
 export function appendSecureFile(path: string, content: string): void {
   ensureSecureDirectory(dirname(path))
-  appendFileSync(path, content, { mode: PRIVATE_FILE_MODE })
-  chmodSync(path, PRIVATE_FILE_MODE)
+  refuseSymlink(path)
+  // O_NOFOLLOW makes the open itself fail on a link (where the platform has it),
+  // and the mode is set on the descriptor, so a swap after the check above
+  // cannot redirect the append or the chmod.
+  const fd = openSync(path, constants.O_WRONLY | constants.O_APPEND | constants.O_CREAT | (constants.O_NOFOLLOW ?? 0), PRIVATE_FILE_MODE)
+  try {
+    writeSync(fd, content)
+    fchmodSync(fd, PRIVATE_FILE_MODE)
+  } finally {
+    closeSync(fd)
+  }
 }
 
 /**

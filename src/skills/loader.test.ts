@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from 'bun:test'
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { listLoadedSkills, loadSkills } from './loader.ts'
@@ -84,6 +84,23 @@ test('ELIA_SKILLS=off still skips project skills entirely, trusted or not', asyn
     if (original === undefined) delete process.env.ELIA_SKILLS
     else process.env.ELIA_SKILLS = original
   }
+})
+
+test('a repo-shipped skills-trust.json does not trust the project (the record is per-user, not in the repo)', async () => {
+  const { skillsDir, markerPath } = setupProject()
+  writeFileSync(join(skillsDir, '..', 'skills-trust.json'), JSON.stringify({ trusted: true, trustedAt: new Date().toISOString() }))
+  const report = await loadSkills({}, skillsDir)
+  expect(existsSync(markerPath)).toBe(false)
+  expect(report.untrustedProject).toEqual([join(skillsDir, 'evil.skill.ts')])
+})
+
+test('editing a trusted skill file revokes trust until it is reviewed again', async () => {
+  const { skillsDir, markerPath } = setupProject()
+  trustProjectSkills(skillsDir)
+  writeFileSync(join(skillsDir, 'evil.skill.ts'), readFileSync(join(skillsDir, 'evil.skill.ts'), 'utf8') + '// changed after review\n')
+  const report = await loadSkills({}, skillsDir)
+  expect(existsSync(markerPath)).toBe(false)
+  expect(report.untrustedProject).toEqual([join(skillsDir, 'evil.skill.ts')])
 })
 
 // --- registry isolation ---
@@ -176,6 +193,11 @@ test('a skill written after the first load is callable after a reload', async ()
   expect(first.loaded.some((s) => s.name === 'late_skill_tool')).toBe(false)
 
   writeSkill(skillsDir, 'late.skill.ts', 'late_skill_tool')
+  // Trust is bound to the files that were reviewed: a new file voids it.
+  const beforeReview = await loadSkills({}, skillsDir)
+  expect(beforeReview.loaded.some((s) => s.name === 'late_skill_tool')).toBe(false)
+  expect(beforeReview.untrustedProject).toContain(join(skillsDir, 'late.skill.ts'))
+  trustProjectSkills(skillsDir)
   const second = await loadSkills({}, skillsDir)
   expect(second.loaded.some((s) => s.name === 'late_skill_tool')).toBe(true)
   expect(listLoadedSkills().map((skill) => skill.name)).toContain('late_skill_tool')
@@ -214,11 +236,11 @@ test('a quarantined skill is not re-quarantined by the next reload', async () =>
   dirs.push(projectDir)
   const skillsDir = join(projectDir, '.elia', 'skills')
   mkdirSync(skillsDir, { recursive: true })
-  trustProjectSkills(skillsDir)
   // Imports cleanly but exports nothing the loader will accept, so it is moved
   // into `<skillsDir>/quarantine` with a timestamp prefix.
   const file = join(skillsDir, 'broken.skill.ts')
   writeFileSync(file, "export const notATool = { name: 'not_a_tool' }\n")
+  trustProjectSkills(skillsDir)
 
   const first = await loadSkills({}, skillsDir)
   const second = await loadSkills({}, skillsDir)

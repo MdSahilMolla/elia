@@ -1,10 +1,11 @@
-import { existsSync, readFileSync, renameSync } from 'node:fs'
+import { copyFileSync, existsSync, readFileSync, renameSync } from 'node:fs'
 import { basename, dirname, join } from 'node:path'
 import { logSwallowedError } from '../diagnostics.ts'
 import { redactText } from '../ui/redact.ts'
 import type { AutonomyProfile, AutonomousRunResult } from './loop.ts'
 import { ensureSecureDirectory, hardenSecureFile, writeSecureFile } from '../securePersistence.ts'
 import { withFileLock } from '../fileLock.ts'
+import { isHashTrusted, sha256Hex, trustHash, TRUST_HINT } from './projectTrust.ts'
 import type { AgentMode } from './mode.ts'
 
 export const SCHEDULE_SCHEMA_VERSION = 2
@@ -65,8 +66,26 @@ export function formatScheduleInterval(intervalMs: number): string {
   return `${intervalMs / 1000}s`
 }
 
+const untrustedNoticed = new Set<string>()
+
+/**
+ * The schedule file is inside the project, so a repository can ship one whose
+ * goals `elia daemon` would then run unattended. Its records are honoured only
+ * while the user-level trust record (autonomy/projectTrust.ts) covers the file's
+ * current hash; the store's own writes record the hash they produce, so
+ * schedules the person created through `elia schedule` keep working.
+ */
+function noteUntrustedSchedules(path: string, sha: string): void {
+  const key = `${path}:${sha}`
+  if (untrustedNoticed.has(key)) return
+  untrustedNoticed.add(key)
+  process.stderr.write(`elia: ignoring the schedules in ${path} — the file has not been trusted (or it changed since). ${TRUST_HINT}.\n`)
+}
+
 export class ScheduleStore {
   private readonly records = new Map<string, ScheduleRecord>()
+  /** True when a schedule file exists but is not covered by the user-level trust record, so none of it was loaded. */
+  untrusted = false
 
   private constructor(private readonly path: string) {}
 
@@ -75,7 +94,13 @@ export class ScheduleStore {
     if (!existsSync(path)) return store
     hardenSecureFile(path)
     try {
-      const parsed = JSON.parse(readFileSync(path, 'utf8')) as Partial<ScheduleSnapshot>
+      const text = readFileSync(path, 'utf8')
+      if (!isHashTrusted(path, sha256Hex(text))) {
+        store.untrusted = true
+        noteUntrustedSchedules(path, sha256Hex(text))
+        return store
+      }
+      const parsed = JSON.parse(text) as Partial<ScheduleSnapshot>
       for (const raw of Array.isArray(parsed.schedules) ? parsed.schedules : []) {
         if (!raw || typeof raw.id !== 'string' || typeof raw.goal !== 'string') continue
         const persistedIntervalMs = typeof raw.intervalMs === 'number' && Number.isFinite(raw.intervalMs) ? raw.intervalMs : 0
@@ -276,6 +301,7 @@ export class ScheduleStore {
 
   private reloadFromDisk(): void {
     const fresh = ScheduleStore.open(this.path, false)
+    this.untrusted = fresh.untrusted
     this.records.clear()
     for (const record of fresh.list()) this.records.set(record.id, record)
   }
@@ -298,6 +324,22 @@ export class ScheduleStore {
 
   private persist(): void {
     ensureSecureDirectory(join(this.path, '..'))
-    writeSecureFile(this.path, JSON.stringify({ version: SCHEDULE_SCHEMA_VERSION, schedules: this.list() }, null, 2))
+    const text = JSON.stringify({ version: SCHEDULE_SCHEMA_VERSION, schedules: this.list() }, null, 2)
+    if (this.untrusted && existsSync(this.path)) {
+      // The untrusted file was never loaded; keep its bytes for inspection
+      // rather than overwriting the only copy (it may be the person's own).
+      try {
+        copyFileSync(this.path, `${this.path}.untrusted-${new Date().toISOString().replace(/[:.]/g, '-')}`)
+      } catch (error) {
+        logSwallowedError('scheduler.untrusted.keepCopy', error, { path: this.path })
+      }
+    }
+    writeSecureFile(this.path, text)
+    // What this process just wrote is the person's own schedule (or a lease
+    // update on one), not something a repo shipped: record its hash so the next
+    // open() honours it. A previously untrusted file was never loaded, so its
+    // records are not carried into this write.
+    this.untrusted = false
+    trustHash(this.path, sha256Hex(text))
   }
 }

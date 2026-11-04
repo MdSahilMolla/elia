@@ -100,6 +100,21 @@ const SMALL_SITE = /\b(?:web[-\s]?site|web[-\s]?page|html\s+page|site)\b/i
 const APP_SIGNAL =
   /\b(?:marketplace|e-?commerce|saas|platform|portal|back[-\s]?end|server[-\s]?side|database|db|api|cms|auth|authentication|log[-\s]?in|sign[-\s]?up|accounts?|payments?|checkout)\b/i
 
+/**
+ * A small self-contained program: a game, a command-line tool, a script, a bot.
+ * "create a python game for tic tac toe" matched BUILD_VERB + PROJECT_NOUN and
+ * went through the whole pipeline (session muo052t5, 2026-09-30): the file was
+ * written 41s in, and the next two minutes were an assumption check, a builder
+ * and a polisher each running the interactive game until it timed out waiting
+ * for input, and four reviewers. 2m37s for one file the fast path writes and
+ * checks in one turn.
+ */
+const SMALL_PROGRAM = /\b(?:game|cli|command[-\s]?line\s+(?:tool|program|app)|script|bot|calculator|quiz|puzzle|simulator|solver|converter|generator)\b/i
+
+/** What makes a program more than one file's work. */
+const PROGRAM_SCALE =
+  /\b(?:multi[-\s]?player|online|networked|real[-\s]?time|server|3d|engine|mmo|leaderboards?|mobile|ios|android|microservices?|distributed|plugin\s+system)\b/i
+
 export function classifyEscalation(rawText: string): EscalationDecision {
   const raw = rawText.trim()
   const no = (reason: string): EscalationDecision => ({ escalate: false, reason })
@@ -131,6 +146,12 @@ export function classifyEscalation(rawText: string): EscalationDecision {
   const namesAnotherProject = PROJECT_NOUN.test(text.replace(new RegExp(SMALL_SITE.source, 'gi'), ' '))
   if (SMALL_SITE.test(text) && !namesAnotherProject && !APP_SIGNAL.test(text) && !FEATURE_LIST.test(text) && !WHOLE_PROJECT.test(text)) {
     return no('a website with no server, data, or feature set — the fast path builds and previews it in one turn')
+  }
+  // A small program, unless something about it says scale or another project
+  // noun ("a game engine", "a bot platform", "a cli app for a SaaS") is named too.
+  const namesBiggerProject = PROJECT_NOUN.test(text.replace(new RegExp(SMALL_PROGRAM.source, 'gi'), ' '))
+  if (SMALL_PROGRAM.test(text) && !namesBiggerProject && !PROGRAM_SCALE.test(text) && !APP_SIGNAL.test(text) && !FEATURE_LIST.test(text) && !WHOLE_PROJECT.test(text)) {
+    return no('a small self-contained program — the fast path writes and checks it in one turn')
   }
   // A concrete file target usually means "change this file", unless the request
   // is unmistakably a whole project that happens to mention a config file.

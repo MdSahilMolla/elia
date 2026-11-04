@@ -1,9 +1,10 @@
 import { afterEach, expect, test } from 'bun:test'
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { newEngagementTool, engagementDir } from './engagement.ts'
-import { httpProbeTool, parseScopeHosts, hostInScope, stripZoneId } from './httpProbe.ts'
-import { SESSION_JAR_FILE } from './httpSession.ts'
+import { httpProbeTool, parseScope, parseScopeHosts, hostInScope, stripZoneId } from './httpProbe.ts'
+import { readSessionJar, SESSION_JAR_FILE, writeSessionJar } from './httpSession.ts'
+import { SEALED_JAR_VERSION } from './httpSessionSeal.ts'
 
 const originalFetch = globalThis.fetch
 const slug = 'elia-test-httpprobe-2026'
@@ -58,7 +59,10 @@ function jarPath(name = slug): string {
 }
 
 function readJar(name = slug): { version: number; sessions: Record<string, Array<{ name: string; value: string; path: string }>> } {
-  return JSON.parse(readFileSync(jarPath(name), 'utf8'))
+  // The jar is sealed at rest, so assertions go through the production reader
+  // rather than parsing the file — a test that read ciphertext would pass even
+  // if the jar stopped round-tripping.
+  return readSessionJar(jarPath(name)).jar as unknown as { version: number; sessions: Record<string, Array<{ name: string; value: string; path: string }>> }
 }
 
 function writeJar(content: string, name = slug): void {
@@ -66,11 +70,50 @@ function writeJar(content: string, name = slug): void {
   writeFileSync(jarPath(name), content)
 }
 
+/** Seed the jar through the production writer so it is sealed exactly as a real probe would seal it. */
+function seedJar(jar: unknown, name = slug): void {
+  writeSessionJar(jarPath(name), jar as Parameters<typeof writeSessionJar>[1])
+}
+
 test('parseScopeHosts extracts hostnames, IPs, and CIDR ranges', () => {
   const hosts = parseScopeHosts('Target: app.acme.com and 10.0.0.0/24; also api.acme.com. Out of scope: everything else. Version 1.2.3 is fine.')
   expect(hosts).toContain('app.acme.com')
   expect(hosts).toContain('api.acme.com')
   expect(hosts).toContain('10.0.0.0/24')
+})
+
+test('parseScopeHosts reads only the in-scope section and subtracts out-of-scope entries', () => {
+  const text = [
+    '# Engagement scope: x',
+    '',
+    '**Target:** app.acme.com',
+    '**Authorized by:** alice@contact-person.org, legal.example.net',
+    '',
+    '## Rules of engagement',
+    'Test app.acme.com and 10.0.0.0/24. Out of scope: payments.acme.com',
+    '',
+    '## Out of scope',
+    '- admin.acme.com',
+    '- 10.0.0.0/24',
+    '',
+    '## Notes',
+    'Vendor status page: status.vendor.io',
+  ].join('\n')
+  const { include, exclude } = parseScope(text)
+  expect(include).toEqual(expect.arrayContaining(['app.acme.com', '10.0.0.0/24']))
+  expect(include).not.toContain('contact-person.org')
+  expect(include).not.toContain('legal.example.net')
+  expect(include).not.toContain('status.vendor.io')
+  expect(include).not.toContain('payments.acme.com')
+  expect(exclude).toEqual(expect.arrayContaining(['payments.acme.com', 'admin.acme.com', '10.0.0.0/24']))
+  expect(parseScopeHosts(text)).toEqual(['app.acme.com'])
+  expect(hostInScope('admin.acme.com', ['acme.com'], exclude)).toBe(false)
+  expect(hostInScope('www.acme.com', ['acme.com'], exclude)).toBe(true)
+})
+
+test('parseScopeHosts does not treat bare hex-letter words as IPv6 hosts', () => {
+  const hosts = parseScopeHosts('Scope: a dead face can add a bed at acme.com; the cafe is beef free')
+  expect(hosts).toEqual(['acme.com'])
 })
 
 test('hostInScope matches exact hosts, subdomains, and CIDR membership', () => {
@@ -134,7 +177,7 @@ test('useSession: null means "not set" rather than a call error', async () => {
 
 test('a jar cookie missing a field is dropped instead of sent as a malformed header', async () => {
   await scaffold()
-  writeJar(JSON.stringify({ version: 1, sessions: { default: [{ name: 'sid', value: 'abc123', domain: 'app.example.com' }] } }))
+  seedJar({ version: SEALED_JAR_VERSION, sessions: { default: [{ name: 'sid', value: 'abc123', domain: 'app.example.com' }] } })
   stub(() => new Response('ok', { status: 200 }))
   const result = await httpProbeTool.execute({ engagement: slug, url: 'https://app.example.com/' })
   expect(requests[0]?.cookie).toBeNull()
@@ -470,7 +513,9 @@ test('a login round-trip and its redirect chain work over a loopback server', as
     const me = await httpProbeTool.execute({ engagement: loopbackSlug, url: `${base}/api/me` })
     expect(me).toContain('account alice')
     expect(me).not.toContain(cookieValue)
-    expect(await Bun.file(jarPath(loopbackSlug)).text()).toContain(cookieValue)
+    // The value must be on disk to be replayable, but never in the clear.
+    expect(await Bun.file(jarPath(loopbackSlug)).text()).not.toContain(cookieValue)
+    expect(readSessionJar(jarPath(loopbackSlug)).jar.sessions.default?.[0]?.value).toBe(cookieValue)
 
     const anonymous = await httpProbeTool.execute({ engagement: loopbackSlug, url: `${base}/api/me`, useSession: false })
     expect(anonymous).toContain('account anonymous')

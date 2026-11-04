@@ -161,10 +161,45 @@ function lockPath(path: string): string {
   return `${path}.lock`
 }
 
+const SLUG = /^[A-Za-z0-9][A-Za-z0-9._-]*\/[A-Za-z0-9][A-Za-z0-9._-]*$/
+/** The same charset github.ts applies to a branch the model names; a stored branch gets no more latitude. */
+const REF = /^[A-Za-z0-9][A-Za-z0-9._/-]*$/
+const STATUSES = new Set<string>(['cloned', 'branched', 'committed', 'pushed', 'pr_open', 'merged', 'abandoned'])
+
+function insideDir(root: string, target: string): boolean {
+  const rel = relative(resolve(root), resolve(target))
+  return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel))
+}
+
+/**
+ * `.elia/contributions.json` sits in the project, so a cloned repository can
+ * carry one. Its rows become `cwd` and argv for git and gh, so a row is only
+ * trusted when every field has the shape this module itself writes: an
+ * absolute clone directory under the project (or its workspace), branch names
+ * that cannot be read as flags, owner/repo slugs and integer PR numbers.
+ */
+function isTrustedContribution(row: unknown, statePathInUse: string): row is Contribution {
+  if (typeof row !== 'object' || row === null) return false
+  const c = row as Record<string, unknown>
+  if (typeof c.slug !== 'string' || !SLUG.test(c.slug)) return false
+  if (c.forkSlug !== undefined && (typeof c.forkSlug !== 'string' || !SLUG.test(c.forkSlug))) return false
+  if (typeof c.defaultBranch !== 'string' || !REF.test(c.defaultBranch) || c.defaultBranch.includes('..')) return false
+  if (c.branch !== undefined && (typeof c.branch !== 'string' || !REF.test(c.branch) || c.branch.includes('..'))) return false
+  if (typeof c.status !== 'string' || !STATUSES.has(c.status)) return false
+  if (c.prNumber !== undefined && (typeof c.prNumber !== 'number' || !Number.isSafeInteger(c.prNumber) || c.prNumber <= 0)) return false
+  if (c.issue !== undefined && (typeof c.issue !== 'number' || !Number.isSafeInteger(c.issue) || c.issue <= 0)) return false
+  if (typeof c.dir !== 'string' || !isAbsolute(c.dir)) return false
+  // Clones land under the project, its workspace, or (isolated task) the task root
+  // — and the record's own directory, which is where a relocated record lives.
+  const roots = [process.cwd(), paths.workspace, dirname(dirname(statePathInUse))]
+  return roots.some((root) => insideDir(root, c.dir as string))
+}
+
 export function readContributions(path?: string): Contribution[] {
+  const file = statePath(path)
   try {
-    const parsed = JSON.parse(readFileSync(statePath(path), 'utf8')) as ContributionFile
-    return Array.isArray(parsed?.contributions) ? parsed.contributions : []
+    const parsed = JSON.parse(readFileSync(file, 'utf8')) as ContributionFile
+    return Array.isArray(parsed?.contributions) ? parsed.contributions.filter((row) => isTrustedContribution(row, file)) : []
   } catch {
     return []
   }
@@ -460,7 +495,7 @@ export async function openContributionPr(options: PrOptions): Promise<string> {
     return `The branch ${contribution.branch} has no commits that ${contribution.defaultBranch} does not. There is nothing to propose — commit the fix first.`
   }
 
-  const push = await git(['push', '-u', 'origin', contribution.branch], contribution.dir, 120_000)
+  const push = await git(['push', '-u', 'origin', '--', contribution.branch], contribution.dir, 120_000)
   if (!push.ok) return `Could not push ${contribution.branch} to origin (${contribution.forkSlug ?? 'origin'}): ${push.stderr || push.stdout}`
   saveContribution({ ...contribution, status: 'pushed' }, state)
 

@@ -24,6 +24,26 @@ export interface OpenAICompatibleProviderOptions {
    * returned when asked for — inline in `content`, wrapped in `<thought>` tags.
    */
   gemini?: boolean
+  /**
+   * Send the per-turn dynamic prompt as a system message after the history
+   * instead of appended to the leading one. An endpoint's prefix cache stops
+   * at the first changed token, so a dynamic block ahead of the history costs
+   * the whole conversation at full price on every new user turn; behind it,
+   * only the block itself. Measured on Inception (2026-10-03): a changed
+   * suffix in the leading system message dropped 13.5k cached tokens to 7.1k,
+   * the same change as a trailing message kept 13.5k, and the model read and
+   * followed the trailing message. Off elsewhere until verified — some chat
+   * templates refuse a system message that is not first.
+   */
+  dynamicTail?: boolean
+}
+
+/** Whether to send the dynamic prompt after the history (`dynamicTail`). `ELIA_DYNAMIC_TAIL=on|off` overrides the endpoint default. */
+export function dynamicTailEnabled(endpointDefault: boolean, env: Record<string, string | undefined> = process.env): boolean {
+  const setting = env.ELIA_DYNAMIC_TAIL?.trim().toLowerCase()
+  if (setting === 'off' || setting === '0' || setting === 'false') return false
+  if (setting === 'on' || setting === '1' || setting === 'true') return true
+  return endpointDefault
 }
 
 /**
@@ -51,6 +71,21 @@ export function streamIdleMs(env: NodeJS.ProcessEnv = process.env): number {
   return Number.isFinite(raw) && raw > 0 ? raw : 120_000
 }
 
+/**
+ * How long to wait for the *first* chunk. A response that has started may
+ * pause (a long tool call being written), but one that has not started within
+ * seconds is stuck: mercury answers in 1.5-3.5s, and every one of the 122s
+ * waits in the 29 recorded sessions (2026-09-30) was a request that never sent
+ * a byte, sitting out the whole idle budget before anything tried again.
+ * Prefill grows with the request, so the budget does too: 20s, plus a second
+ * per 16k characters sent, at most 90s. `ELIA_FIRST_BYTE_MS` overrides.
+ */
+export function firstByteMs(requestChars: number, env: NodeJS.ProcessEnv = process.env): number {
+  const raw = Number(env.ELIA_FIRST_BYTE_MS)
+  if (Number.isFinite(raw) && raw > 0) return raw
+  return Math.min(90_000, 20_000 + Math.round(requestChars / 16))
+}
+
 export function createOpenAICompatibleProvider(
   apiKey: string,
   model: string,
@@ -61,7 +96,10 @@ export function createOpenAICompatibleProvider(
   const validatedBaseURL = baseURL
     ? validateNetworkUrl(baseURL, { allowExplicitLocal, requireHttps: true }).toString()
     : baseURL
-  const client = new OpenAI({ apiKey, baseURL: validatedBaseURL, timeout: 180_000, maxRetries: 1, ...(options.gemini ? { fetch: geminiFetch() } : {}) })
+  // No SDK retries: it waited out a server's retry-after (up to a minute) with
+  // nothing on screen, then the agent loop's own retry policy ran on top of it.
+  // Every retry and fallback is decided, and said, in agentLoop.ts.
+  const client = new OpenAI({ apiKey, baseURL: validatedBaseURL, timeout: 180_000, maxRetries: 0, ...(options.gemini ? { fetch: geminiFetch() } : {}) })
   // Reasoning-capable OpenAI-compatible models (Groq's gpt-oss, DeepSeek's API,
   // others) emit reasoning as a non-standard `reasoning`/`reasoning_content`
   // field with no enable/disable request param — there is nothing to toggle in
@@ -83,8 +121,15 @@ export function createOpenAICompatibleProvider(
   async function streamOnce({ system, systemDynamic, messages, tools, onText, onThinking, onToolBlock, signal, reasoningEffort }: StreamTurnParams, maxTokens: number) {
       // The stable prompt stays first so an OpenAI-compatible endpoint's
       // automatic prefix caching still matches on it; the per-turn dynamic
-      // suffix follows it.
-      const fullSystem = systemDynamic && systemDynamic.trim() ? `${system}\n\n${systemDynamic}` : system
+      // part follows it, or follows the history too (`dynamicTail`).
+      const dynamic = systemDynamic?.trim() ? systemDynamic : undefined
+      const tail = dynamic && options.dynamicTail ? dynamic : undefined
+      const fullSystem = dynamic && !tail ? `${system}\n\n${dynamic}` : system
+      const toWire = () => {
+        const wireMessages = toOpenAIMessages(fullSystem, messages, wire)
+        if (tail) wireMessages.push({ role: 'system', content: tail })
+        return wireMessages
+      }
       const openAITools = toOpenAITools(tools)
       const requestParams: Record<string, unknown> = {
         ...summaryParams,
@@ -99,19 +144,23 @@ export function createOpenAICompatibleProvider(
       let emittedContent = false
       const thoughts = geminiThoughts ? createThoughtSplitter() : undefined
       const idleMs = streamIdleMs()
+      const openAIMessages = toWire()
+      const startMs = firstByteMs(JSON.stringify(openAIMessages).length + JSON.stringify(openAITools).length)
       const stall = new AbortController()
       let idleTimer: ReturnType<typeof setTimeout> | undefined
+      let started = false
       const stillAlive = () => {
+        started = true
         if (idleTimer) clearTimeout(idleTimer)
         idleTimer = setTimeout(() => stall.abort(), idleMs)
       }
-      stillAlive()
+      idleTimer = setTimeout(() => stall.abort(), startMs)
       const streamSignal = signal ? AbortSignal.any([signal, stall.signal]) : stall.signal
       const runner = client.chat.completions
         .stream({
           model,
           max_tokens: maxTokens,
-          messages: toOpenAIMessages(fullSystem, messages, wire),
+          messages: openAIMessages,
           tools: openAITools,
           // Let the model emit several tool calls in one response so elia can run
           // them in parallel — the single biggest lever on agent wall-clock is
@@ -184,7 +233,11 @@ export function createOpenAICompatibleProvider(
       try {
         const completion = await runner.finalChatCompletion().catch((error: unknown) => {
           // Worded to read as a timeout, which is what routes to the next provider.
-          if (stall.signal.aborted && !signal?.aborted) throw new Error(`response stalled: nothing arrived for ${Math.round(idleMs / 1000)}s (timed out)`)
+          if (stall.signal.aborted && !signal?.aborted) {
+            throw new Error(started
+              ? `response stalled: nothing arrived for ${Math.round(idleMs / 1000)}s (timed out)`
+              : `response stalled: no reply started within ${Math.round(startMs / 1000)}s (timed out)`)
+          }
           throw error
         })
         const message = completion.choices[0]?.message
@@ -192,7 +245,11 @@ export function createOpenAICompatibleProvider(
           throw new Error('Provider returned no message in response')
         }
         const streamed: CompletionMessageLike = reasoningText ? { ...message, reasoning: reasoningText, reasoning_content: undefined } : message
-        return { content: withReasoningSummary(toContentBlocks(streamed, passthroughReasoning, wire), summary), usage: usageFrom(completion.usage) }
+        return {
+          content: withReasoningSummary(toContentBlocks(streamed, passthroughReasoning, wire), summary),
+          usage: usageFrom(completion.usage),
+          ...(completion.choices[0]?.finish_reason === 'length' ? { truncated: true } : {}),
+        }
       } catch (err) {
         // The non-streaming fallback below re-issues the whole request and
         // replays the full response through onText/onThinking — safe only when
@@ -205,7 +262,7 @@ export function createOpenAICompatibleProvider(
         const completion = await client.chat.completions.create({
           model,
           max_tokens: maxTokens,
-          messages: toOpenAIMessages(fullSystem, messages, wire),
+          messages: toWire(),
           tools: openAITools,
           ...(openAITools.length > 0 ? { parallel_tool_calls: true } : {}),
           stream: false,
@@ -221,7 +278,7 @@ export function createOpenAICompatibleProvider(
           if (block.type === 'thinking') onThinking?.(block.text)
           if (block.type === 'text') onText(block.text)
         }
-        return { content, usage: usageFrom(completion.usage) }
+        return { content, usage: usageFrom(completion.usage), ...(completion.choices[0]?.finish_reason === 'length' ? { truncated: true } : {}) }
       } finally {
         if (idleTimer) clearTimeout(idleTimer)
       }

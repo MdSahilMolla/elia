@@ -124,3 +124,27 @@ test('refuses to overwrite a non-empty protected file', async () => {
   await expect(write({ path, content: 'SECRET=2\n' })).rejects.toThrow(/protected path/)
   expect(readFileSync(path, 'utf8')).toBe('SECRET=1\n')
 })
+
+// A file too long for one response is written in parts.
+
+test('a file written in parts: partial skips the syntax check, append adds to the end, the last part checks the whole file', async () => {
+  const path = join(dir, 'big.ts')
+  expect(await write({ path, content: 'export function f() {\n', partial: true })).toContain('partial')
+  expect(await write({ path, content: '  return 1\n', append: true, partial: true })).toContain('Appended to')
+  await write({ path, content: '}\n', append: true })
+  expect(readFileSync(path, 'utf8')).toBe('export function f() {\n  return 1\n}\n')
+})
+
+test('append adds to an unread file without the overwrite guard, and creates a missing one', async () => {
+  const path = join(dir, 'log.txt')
+  writeFileSync(path, 'one\n')
+  await write({ path, content: 'two\n', append: true })
+  expect(readFileSync(path, 'utf8')).toBe('one\ntwo\n')
+  const fresh = join(dir, 'fresh.txt')
+  expect(await write({ path: fresh, content: 'x', append: true })).toContain('Created')
+})
+
+test('append and partial must be booleans', async () => {
+  await expect(write({ path: join(dir, 'a.txt'), content: 'x', append: 'yes' })).rejects.toThrow('append must be')
+  await expect(write({ path: join(dir, 'a.txt'), content: 'x', partial: 1 })).rejects.toThrow('partial must be')
+})

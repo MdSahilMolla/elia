@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from 'bun:test'
-import { existsSync, rmSync } from 'node:fs'
+import { existsSync, readFileSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { newEngagementTool, engagementDir } from './engagement.ts'
 import { runSecurityToolTool } from './securityScan.ts'
@@ -7,7 +7,7 @@ import { runSecurityToolTool } from './securityScan.ts'
 // paths.workspace is fixed at process start from the real cwd (see config.ts), so
 // these write into the real workspace/engagements/ tree under distinctly-named,
 // test-only slugs — cleaned up below rather than run against a faked cwd.
-const testSlugs = ['elia-test-acme-webapp-2026', 'elia-test-never-scaffolded', 'elia-test-lab']
+const testSlugs = ['elia-test-acme-webapp-2026', 'elia-test-never-scaffolded', 'elia-test-lab', 'elia-test-autoscaffold']
 
 afterEach(() => {
   for (const slug of testSlugs) rmSync(engagementDir(slug), { recursive: true, force: true })
@@ -31,13 +31,32 @@ test('new_engagement scaffolds SCOPE.md, findings.md, report.md, and recon/', as
   expect(existsSync(join(dir, 'recon'))).toBe(true)
 })
 
-test('run_security_tool refuses to run for an engagement that was never scaffolded', async () => {
+test('run_security_tool refuses a network target for an engagement that was never scaffolded', async () => {
   const result = await runSecurityToolTool.execute({
     engagement: 'elia-test-never-scaffolded',
     label: 'nmap',
-    command: 'echo hi',
+    // A named host is the case that still needs a person: an auto-scaffolded
+    // record is not an authorization, so the refusal has to stand here.
+    command: 'nmap -sV acme.test',
   })
   expect(result).toContain('Run new_engagement first')
+  expect(result).toContain('acme.test')
+})
+
+test('run_security_tool scaffolds its own engagement for a local command that names no host', async () => {
+  const slug = 'elia-test-autoscaffold'
+  const result = await runSecurityToolTool.execute({
+    engagement: slug,
+    label: 'file',
+    command: 'echo local-analysis-456',
+  })
+  expect(result).toContain('Saved full output to')
+  const scopePath = join(engagementDir(slug), 'SCOPE.md')
+  expect(existsSync(scopePath)).toBe(true)
+  // The record must not read as a claim that anybody authorized anything.
+  const scope = readFileSync(scopePath, 'utf-8')
+  expect(scope).toContain('not applicable')
+  expect(scope).toContain('no network target')
 })
 
 test('run_security_tool runs the command and saves output under the engagement recon/ folder', async () => {

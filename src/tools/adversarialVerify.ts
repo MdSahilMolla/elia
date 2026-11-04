@@ -1,5 +1,5 @@
 import type { Tool } from './types.ts'
-import { optionalString } from './args.ts'
+import { gitShowPatchArgs, optionalString, resolveCommitRef } from './args.ts'
 import { resolveWorkspacePath } from '../autonomy/context.ts'
 
 const MAX_DIFF_LINES = 500
@@ -276,7 +276,7 @@ export const adversarialVerifyTool: Tool = {
     if (diffInput) {
       diffText = diffInput
     } else if (commit) {
-      diffText = await runGit(cwd, ['show', commit, '--patch'])
+      diffText = await runGit(cwd, gitShowPatchArgs(await resolveCommitRef(cwd, commit)))
     } else if (file) {
       diffText = await gitDiffForFile(cwd, file)
     } else {

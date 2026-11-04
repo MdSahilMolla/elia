@@ -3,13 +3,14 @@ import { basename, relative, resolve, sep } from 'node:path'
 import type { Tool } from '../tools/types.ts'
 import { clampOutput, failureHint, isLongRunningServerCommand, mayStartServer, runShell, startsWithForeignShellCommand, type ShellResult } from '../shell.ts'
 import type { CriticIssue, CriticVerdict } from './types.ts'
-import { currentAgent } from './context.ts'
+import { currentAgent, withAgentIdentity } from './context.ts'
 import { activeActionGovernor, blockedInUnattendedMode, type ActionGovernor } from './governor.ts'
 import { changedStaticPages } from './detectChecks.ts'
 import { detectMissingPackage, installCommandFor, isInstallCommand } from './autoInstall.ts'
 import { scanProjectFiles } from './hygiene.ts'
 import { ensurePreviewServer } from '../preview/server.ts'
-import { checkRendered, waitForHttp } from '../preview/readiness.ts'
+import { waitForHttp } from '../preview/readiness.ts'
+import { renderDepthNote, verifyPageRender } from '../preview/browserRender.ts'
 
 /** Verification commands are usually a test suite, which needs far longer than an ordinary tool call. */
 const VERIFY_TIMEOUT_MS = 300_000
@@ -87,10 +88,10 @@ export function isNoTestsResult(result: ShellResult): boolean {
  */
 export function unwinnableVerificationCommands(
   commands: string[],
-  options: { unattended: boolean; platform?: NodeJS.Platform; which?: (name: string) => string | null },
+  options: { unattended: boolean; platform?: NodeJS.Platform; which?: (name: string) => string | null; cwd?: string },
 ): string[] {
   return commands.filter((command) =>
-    startsWithForeignShellCommand(command, options.platform, options.which) || (options.unattended && blockedInUnattendedMode(command)))
+    startsWithForeignShellCommand(command, options.platform, options.which) || (options.unattended && blockedInUnattendedMode(command, options.cwd)))
 }
 
 /**
@@ -184,7 +185,13 @@ export async function runVerification(
   for (const command of runnable) report(command, 'queued')
 
   for (const command of runnable) {
-    const gate = await (governor ?? activeActionGovernor()).check({ name: 'run_command', input: { command } })
+    // The check runs in `cwd`, often a sub-project; the governor resolves the
+    // program a command names (`node bin/cli.js`) from its agent's root, so
+    // it is asked from `cwd` too — the file it judges is the file that runs.
+    // Passing `cwd` as an input instead would put the path's words in front of
+    // every command pattern.
+    const check = () => (governor ?? activeActionGovernor()).check({ name: 'run_command', input: { command } })
+    const gate = await (cwd ? withAgentIdentity({ ...currentAgent(), cwd }, check) : check())
     if (!gate.allowed) {
       const reason = gate.message ?? 'verification command blocked by autonomy governor'
       const result: ShellResult = { command, exitCode: 126, stdout: '', stderr: reason, elapsedMs: 0, timedOut: false }
@@ -400,13 +407,13 @@ export async function fallbackStaticPageVerification(
       results: [{ command, exitCode: 1, stdout: '', stderr: ready.reason ?? 'server did not respond', elapsedMs: 0, timedOut: false }],
     }
   }
-  const rendered = await checkRendered(url, signal)
+  const rendered = await verifyPageRender(url, signal)
   return {
     passed: rendered.ok,
     results: [{
       command,
       exitCode: rendered.ok ? 0 : 1,
-      stdout: '',
+      stdout: rendered.ok ? `rendered${renderDepthNote(rendered)}` : (rendered.warnings ?? []).join('\n'),
       stderr: rendered.ok ? '' : (rendered.reason ?? 'page did not render'),
       elapsedMs: 0,
       timedOut: false,

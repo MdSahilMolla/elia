@@ -141,6 +141,6 @@ export const readFileTool: Tool = {
     const output = endsWithNewline && reachesEnd ? `${rendered}\n` : rendered
     const remaining = allLines.length - (start + window.length)
     // Tell the model how to continue rather than letting it assume it saw everything.
-    return remaining > 0 ? `${output}\n\n[${remaining} more line(s); pass offset ${start + window.length + 1} to continue]` : output
+    return remaining > 0 ? `${output}\n\n[${remaining} more line(s); pass offset ${start + window.length + 1} to continue${remaining > 4 * DEFAULT_LIMIT ? ', or ask digest a question over the whole file' : ''}]` : output
   },
 }

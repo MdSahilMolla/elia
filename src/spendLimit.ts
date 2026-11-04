@@ -118,6 +118,67 @@ export function spendStopNotice(state: SpendState): string {
   return `Stopped on the spending limit — about ${formatCostUsd(state.spentUsd)} spent of ${formatCostUsd(state.limitUsd)}. Type /limit 5 to allow more (or /limit off), then send the request again.`
 }
 
+/**
+ * What a model says when it needs more money to finish.
+ *
+ * The run is mid-task: it has a flag to capture, a payload to try, a wordlist
+ * left to run. Stopping there to make a person retype the request throws away
+ * the context that made the ask sensible, which is why an ask is possible at all.
+ */
+export function spendIncreasePrompt(state: SpendState, requestedUsd?: number): string {
+  const ask = requestedUsd === undefined ? 'more budget' : `a budget of ${formatCostUsd(requestedUsd)}`
+  return `[elia] Spending ceiling reached: about ${formatCostUsd(state.spentUsd)} of ${formatCostUsd(state.limitUsd)} is spent. You may call ask_user once to request ${ask} to finish this task. If the operator declines or is not present, stop calling tools and summarise what you completed, what is left, and what you would do next.`
+}
+
+/** The question put to the operator. Kept here so the loop and the prompt cannot drift apart. */
+export function spendIncreaseQuestion(state: SpendState, requestedUsd?: number): string {
+  const spent = state.spentUsd === undefined ? 'an unknown amount' : formatCostUsd(state.spentUsd)
+  const suggested = requestedUsd ?? (state.spentUsd === undefined ? 5 : Math.max(5, Math.ceil(state.spentUsd * 4)))
+  return `This run hit its spending ceiling (${spent} of ${formatCostUsd(state.limitUsd)}). Raise the ceiling so it can keep going? Enter a new total in dollars, or press enter to allow ${formatCostUsd(suggested)}. Anything else declines.`
+}
+
+/**
+ * Apply an operator-approved ceiling, refusing the amounts that would not help.
+ *
+ * Two failures are worth naming rather than setting anyway. A ceiling at or
+ * below what is already spent leaves the next `spendState` call reporting
+ * `exceeded` again, so the loop would ask the operator the same question and
+ * stop again on the very next step — an approval that silently does nothing is
+ * worse than a refusal the operator can see. And a non-positive or unparseable
+ * amount is not a budget, whatever the operator typed.
+ */
+export function requestSpendIncrease(
+  state: SpendState,
+  requestedUsd: number | undefined,
+  env: NodeJS.ProcessEnv = process.env,
+): { ok: true; limitUsd: number } | { ok: false; reason: string } {
+  if (requestedUsd === undefined) {
+    return { ok: false, reason: 'no new amount was given' }
+  }
+  if (!Number.isFinite(requestedUsd) || requestedUsd <= 0) {
+    return { ok: false, reason: `"${requestedUsd}" is not an amount` }
+  }
+  const spent = state.spentUsd ?? 0
+  if (requestedUsd <= spent) {
+    return {
+      ok: false,
+      reason: `${formatCostUsd(requestedUsd)} is not more than the ${formatCostUsd(spent)} already spent, so the run would stop on the very next step. Ask for a total above what has been spent.`,
+    }
+  }
+  env.ELIA_MAX_SPEND_USD = String(requestedUsd)
+  return { ok: true, limitUsd: requestedUsd }
+}
+
+/** Read an operator's answer to `spendIncreaseQuestion` into an amount, or undefined to decline. */
+export function parseSpendIncreaseAnswer(raw: string, state: SpendState, requestedUsd?: number): number | undefined {
+  const value = raw.trim().replace(/^\$/, '')
+  if (value === '') return requestedUsd ?? (state.spentUsd === undefined ? 5 : Math.max(5, Math.ceil(state.spentUsd * 4)))
+  const usd = Number.parseFloat(value)
+  if (!/^\d+(?:\.\d+)?$/.test(value) || !Number.isFinite(usd)) return undefined
+  return usd
+}
+
+
 /** `/limit [amount|off]`: shows the session's limit, or changes it, and says where spend stands. */
 export function limitCommand(arg: string, model: string, env: NodeJS.ProcessEnv = process.env): string {
   const spent = sessionCost({ model, usage: ZERO_USAGE }).usd

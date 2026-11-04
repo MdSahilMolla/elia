@@ -105,7 +105,13 @@ export function resolveWorkspacePath(inputPath: string, cwd = currentAgent().cwd
  */
 export function resolveProjectPath(inputPath: string, base = currentAgent().cwd ?? process.cwd(), workspace = paths.workspace): string {
   const raw = toolPathInput(inputPath, base)
-  if (!isAbsolute(raw)) {
+  // What already exists at the root the tools run from is what the path names
+  // there, "." above all: tried under the scratch workspace first, "." named
+  // workspace/ itself. In session muo052t5 write_file put tic_tac_toe.py at the
+  // root while `process start cwd:"."` ran python in workspace/ and exited
+  // "can't open file". write_file resolves against the root, so this keeps the
+  // two agreeing about anything it wrote.
+  if (!isAbsolute(raw) && !existsSync(resolve(base, raw))) {
     const underWorkspace = resolve(workspace, raw)
     if (isWithin(resolve(base), underWorkspace) && existsSync(underWorkspace)) return resolveWorkspacePath(underWorkspace, base)
   }

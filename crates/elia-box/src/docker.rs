@@ -2,7 +2,7 @@
 //! backend with kernel-enforced memory, process and CPU budgets, a read-only root
 //! filesystem, no capabilities, and a private network namespace.
 
-use crate::policy::{NetMode, Policy};
+use crate::policy::{protected_paths, NetMode, Policy};
 use anyhow::{bail, Result};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -105,6 +105,15 @@ pub fn command(
     }
     c.arg("--env-file").arg(env_file);
     c.arg("-v").arg(format!("{}:{WORKDIR}:rw", run_dir.display()));
+    // Control files inside the writable tree are re-mounted read-only over it. Only paths
+    // that exist are mounted, since docker would otherwise create them on the host.
+    for p in protected_paths(run_dir) {
+        if let Ok(rel) = p.strip_prefix(run_dir) {
+            if p.exists() {
+                c.arg("-v").arg(format!("{}:{WORKDIR}/{}:ro", p.display(), rel.display()));
+            }
+        }
+    }
     for p in &policy.read_paths {
         c.arg("-v").arg(format!("{0}:{0}:ro", p.display()));
     }

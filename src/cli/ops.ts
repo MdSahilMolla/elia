@@ -18,6 +18,15 @@ export async function runSchedule(): Promise<void> {
   const action = positionals(['--every', '--title', '--profile', '--mode', '--max-run-ms', '--max-actions'])[0] ?? 'list'
   const store = ScheduleStore.open()
 
+  // A schedules.json shipped inside the project is not something the user
+  // approved: nothing in it is listed or run until `elia trust` covers it.
+  // `add` is the exception — it writes the person's own file (keeping a copy of the old one).
+  if (store.untrusted && action !== 'add') {
+    writeError('The schedules in .elia/schedules.json have not been trusted (or the file changed since), so none are loaded. Inspect the file, then run `elia trust` — or `elia schedule add` to start a fresh schedule of your own.')
+    process.exitCode = 1
+    return
+  }
+
   if (action === 'list') {
     const records = store.list()
     if (records.length === 0) {

@@ -63,10 +63,21 @@ export interface Proposal {
   outOfScope: string[]
   /** Observable conditions and evidence required for the goal to count as complete. */
   acceptanceCriteria?: string[]
+  /** Deterministic postconditions checked after the run settles. */
+  outcomes?: OutcomeContract[]
   /** External or irreversible actions explicitly identified in the plan. */
   sideEffects?: string[]
   /** Recovery instructions for retries, missing credentials, or human handoff. */
   recovery?: string[]
+}
+
+export interface OutcomeContract {
+  title: string
+  /** Delay such as `5m`, `2h`, or `1d`; bounded by the outcome store. */
+  after: string
+  probe:
+    | { kind: 'file-exists'; path: string }
+    | { kind: 'file-contains'; path: string; text: string }
 }
 
 export interface CriticIssue {

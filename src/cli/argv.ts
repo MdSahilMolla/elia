@@ -14,8 +14,8 @@
 
 export const SUBCOMMANDS = [
   'auto', 'agent', 'evolve', 'gap', 'values', 'distill', 'compounding', 'jev',
-  'bench', 'bench-latency', 'skills', 'runs', 'sessions', 'fork', 'resume', 'schedule',
-  'world', 'daemon', 'doctor', 'config', 'codex-login', 'control', 'bridge', 'workspace', 'battmann', 'autopilot', 'ds', 'datascience', 'si', 'sysintel',
+  'bench', 'bench-latency', 'skills', 'runs', 'sessions', 'fork', 'resume', 'schedule', 'outcomes',
+  'world', 'daemon', 'doctor', 'config', 'codex-login', 'control', 'bridge', 'workspace', 'battmann', 'autopilot', 'ds', 'datascience', 'si', 'sysintel', 'trials', 'trust', 'cyberbrain',
 ] as const
 
 export type Subcommand = (typeof SUBCOMMANDS)[number]

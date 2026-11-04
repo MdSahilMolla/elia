@@ -1,6 +1,6 @@
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { runWithConcurrencyLimit } from '../agentLoop.ts'
 import { estimateCostUsd, formatCostUsd, formatElapsed, formatTokenCount } from '../usage.ts'
 import { BENCH_TASKS, TOTAL_WEIGHT, type BenchTask } from './suite.ts'
@@ -11,6 +11,7 @@ import { MAX_SHELL_OUTPUT_LENGTH, readBoundedOutput, terminateProcessGroup } fro
 import { registerShutdownCleanup } from '../ui/shutdown.ts'
 import { writeSubStep } from '../ui/report.ts'
 import { ELIA_ROOT } from '../statePaths.ts'
+import { noteHostRun } from './containment.ts'
 import { REACH_OUT_ENV, absorbReachFile } from './reach.ts'
 import { MODEL_SILENCE_MS, TRACE_OUT_ENV, readTrace, renderTrace, waitingOnModel } from './trace.ts'
 
@@ -515,6 +516,9 @@ async function runOneTask(task: BenchTask, sourceRoot: string, arm: BenchArm): P
     // which of elia's files a task can reach — and recording it would shrink the
     // task's footprint, the one direction reach.ts cannot afford.
     const recordReach = arm === 'elia'
+    // The benchmark needs provider keys and the network, so it cannot sit in the box; when it
+    // runs a candidate's code that is recorded, so landing does not read the boxed gate as covering it.
+    if (resolve(sourceRoot) !== resolve(ELIA_ROOT)) noteHostRun()
     const proc = Bun.spawn(['bun', 'run', ...(recordReach ? ['--preload', join(ELIA_ROOT, 'src', 'evolve', 'reachRecorder.ts')] : []), entry, task.id], {
       cwd: dir,
       stdout: 'pipe',

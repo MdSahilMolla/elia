@@ -19,7 +19,7 @@
  * "no install hint" rather than guessed at.
  */
 
-export type ToolCategory = 'pwn' | 'rev' | 'crypto' | 'stego' | 'misc'
+export type ToolCategory = 'pwn' | 'rev' | 'crypto' | 'stego' | 'web' | 'misc'
 
 export interface CatalogEntry {
   /** Display name, e.g. `nmap`. Unique across the catalog. */
@@ -37,18 +37,28 @@ export interface CatalogEntry {
   scopeNote?: string
 }
 
-export const TOOL_CATEGORIES: ToolCategory[] = ['pwn', 'rev', 'crypto', 'stego', 'misc']
+export const TOOL_CATEGORIES: ToolCategory[] = ['pwn', 'rev', 'crypto', 'stego', 'web', 'misc']
 
 export const CATEGORY_DESCRIPTIONS: Record<ToolCategory, string> = {
   pwn: 'Binary exploitation: read the mitigations, find the bug, build the chain.',
   rev: 'Reverse engineering: recover what a stripped or compiled artifact was doing.',
   crypto: 'Cryptanalysis: solve the maths instead of guessing the plaintext.',
   stego: 'Steganography: find what was hidden inside an image, audio file or archive.',
+  web: 'Web exploitation: read what the app trusts, change one value at a time, and diff the response.',
   misc: 'Forensics and general-purpose: the capture, document, media and encoding tools everything else leans on.',
 }
 
 /** The two password-cracking entries are the same boundary, so it is written once. */
 const CRACK_SCOPE_NOTE = 'Only run this against a CTF challenge\'s own artifacts — the hashes and files the challenge ships with, or a target inside a recorded, authorized engagement. Never against third-party accounts, a hash you scraped from somewhere else, or a machine you were not engaged to test.'
+
+/**
+ * Every entry that talks to a host shares one boundary. These scanners will send
+ * real requests and will happily enumerate a target they were pointed at, so the
+ * engagement record is the only thing standing between a breadth tool and a
+ * stranger's server. Each one also sprays findings — a tool whose output needs no
+ * confirmation is a tool that manufactures false positives.
+ */
+const TARGET_SCOPE_NOTE = 'Only run this against a target inside a recorded, authorized engagement whose SCOPE.md covers that host. Never point it at a third-party or public site. Its output is a list of hypotheses: confirm each one with a single controlled request before reporting it.'
 
 /** `binutils` ships the three of them, so the same hint serves objdump/readelf/nm/strings. */
 const BINUTILS = {
@@ -62,8 +72,12 @@ const PIP = (packageName: string): Partial<Record<'linux' | 'macos' | 'windows',
   windows: `pip install ${packageName}`,
 })
 
-/** Probes are interpreter invocations: an import that fails is the missing signal. */
-const PYTHON_PROBE = (importLine: string): string => `python3 -c "${importLine}"`
+/**
+ * Probes are interpreter invocations: an import that fails is the missing signal.
+ * `-I` (isolated mode) keeps the workspace off `sys.path`, so a `pwn.py` or
+ * `sympy.py` planted in the project cannot be executed by detection.
+ */
+const PYTHON_PROBE = (importLine: string): string => `python3 -I -c "${importLine}"`
 
 export const SECURITY_TOOL_CATALOG: CatalogEntry[] = [
   // ---------------------------------------------------------------- pwn ----
@@ -209,6 +223,7 @@ export const SECURITY_TOOL_CATALOG: CatalogEntry[] = [
     category: 'pwn',
     purpose: 'Copy an exact byte range out of a file: slice a header, or pull a trailing payload at a known offset.',
     binaries: ['dd'],
+    install: { linux: 'sudo apt install coreutils — dd ships inside the coreutils package' },
   },
 
   // ---------------------------------------------------------------- rev ----
@@ -450,12 +465,13 @@ export const SECURITY_TOOL_CATALOG: CatalogEntry[] = [
     name: 'openstego',
     category: 'stego',
     purpose: 'LSB steganography for PNG and BMP with a password, for the formats steghide does not cover.',
-    binaries: [],
-    probe: 'java -jar openstego.jar --help',
+    // Detected by PATH lookup only: a jar resolved relative to the working
+    // directory would run whatever the workspace put there.
+    binaries: ['openstego'],
     install: {
-      linux: 'Download the release jar from github.com/syvaidya/openstego/releases and run java -jar openstego.jar (needs a JDK on PATH) — the probe only finds it when the jar is reachable from the working directory',
-      macos: 'Download the release jar from github.com/syvaidya/openstego/releases and run java -jar openstego.jar (needs a JDK on PATH) — the probe only finds it when the jar is reachable from the working directory',
-      windows: 'Download the release jar from github.com/syvaidya/openstego/releases and run java -jar openstego.jar (needs a JDK on PATH) — the probe only finds it when the jar is reachable from the working directory',
+      linux: 'Download the release jar from github.com/syvaidya/openstego/releases and put an `openstego` launcher on PATH (needs a JDK) — detection only checks PATH, never the workspace',
+      macos: 'Download the release jar from github.com/syvaidya/openstego/releases and put an `openstego` launcher on PATH (needs a JDK) — detection only checks PATH, never the workspace',
+      windows: 'Download the release jar from github.com/syvaidya/openstego/releases and put an `openstego` launcher on PATH (needs a JDK) — detection only checks PATH, never the workspace',
     },
   },
   {
@@ -472,6 +488,63 @@ export const SECURITY_TOOL_CATALOG: CatalogEntry[] = [
     purpose: 'Carve a raw byte stream or an image back into its original files by signature.',
     binaries: ['foremost'],
     install: { linux: 'sudo apt install foremost', macos: 'brew install foremost', windows: 'choco install foremost' },
+  },
+
+  // ---------------------------------------------------------------- web ----
+  {
+    name: 'nuclei',
+    category: 'web',
+    purpose: 'Run a library of known-issue templates against a target for breadth; confirm every hit before believing it.',
+    binaries: ['nuclei'],
+    scopeNote: TARGET_SCOPE_NOTE,
+    install: {
+      linux: 'go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest (needs go on PATH), or download the release binary from github.com/projectdiscovery/nuclei/releases',
+      macos: 'brew install nuclei',
+      windows: 'winget install ProjectDiscovery.nuclei',
+    },
+  },
+  {
+    name: 'ffuf',
+    category: 'web',
+    purpose: 'Fuzz one request position — paths, query keys, headers, values — and sort by response size so soft-404s drop out.',
+    binaries: ['ffuf'],
+    scopeNote: TARGET_SCOPE_NOTE,
+    install: {
+      linux: 'go install -v github.com/ffuf/ffuf/v2@latest (needs go on PATH), or download the release binary from github.com/ffuf/ffuf/releases',
+      macos: 'brew install ffuf',
+      windows: 'choco install ffuf',
+    },
+  },
+  {
+    name: 'gobuster',
+    category: 'web',
+    purpose: 'Enumerate directories and files against a vhost, with an extension list to catch .bak and .php leftovers.',
+    binaries: ['gobuster'],
+    scopeNote: TARGET_SCOPE_NOTE,
+    install: { linux: 'sudo apt install gobuster', macos: 'brew install gobuster', windows: 'choco install gobuster' },
+  },
+  {
+    name: 'sqlmap',
+    category: 'web',
+    purpose: 'Confirm and exploit a SQL injection you have already found; treat its output as a hypothesis until a request proves it.',
+    binaries: ['sqlmap'],
+    scopeNote: TARGET_SCOPE_NOTE,
+    install: PIP('sqlmap'),
+  },
+  {
+    name: 'nikto',
+    category: 'web',
+    purpose: 'Run a broad server misconfiguration and known-file scan for a quick inventory of what is exposed.',
+    binaries: ['nikto'],
+    scopeNote: TARGET_SCOPE_NOTE,
+    install: { linux: 'sudo apt install nikto', macos: 'brew install nikto', windows: 'choco install nikto' },
+  },
+  {
+    name: 'jwt_tool',
+    category: 'web',
+    purpose: 'Decode, tamper with and re-sign a JWT to test alg:none, weak secrets and unsigned claims.',
+    binaries: ['jwt_tool'],
+    install: { linux: 'pip install jwt-tool' },
   },
 
   // --------------------------------------------------------------- misc ----
@@ -522,6 +595,19 @@ export const SECURITY_TOOL_CATALOG: CatalogEntry[] = [
     category: 'misc',
     purpose: 'Fetch a challenge URL or post to it, and keep the raw response body for the next step.',
     binaries: ['curl'],
+    install: { linux: 'sudo apt install curl' },
+  },
+  {
+    // The one scanner the prompts, the mode docs, and the engagement tests all
+    // name first — and it was missing from this catalog entirely, which meant
+    // the missing-binary path in securityScan could never install it and a
+    // `nmap` run could only ever report "not installed". `ncat` below is a
+    // different binary from the same package, so both hints are `nmap`.
+    name: 'nmap',
+    category: 'misc',
+    purpose: 'Port and service scan an in-scope target; the first move against anything with a network surface, and the usual source of the version string that names the next CVE.',
+    binaries: ['nmap'],
+    install: { linux: 'sudo apt install nmap', macos: 'brew install nmap', windows: 'choco install nmap' },
   },
   {
     name: '7z',

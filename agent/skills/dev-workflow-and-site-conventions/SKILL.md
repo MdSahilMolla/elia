@@ -1,0 +1,31 @@
+---
+name: dev-workflow-and-site-conventions-revision
+description: >
+  Use this when executing build or deployment tasks in the Elia workspace,
+  especially for research paper style sites. It specifies directory context,
+  type checks, preview workflows, and submission requirements.
+---
+
+# Development Workflow and Site Conventions
+
+## Execution Context and Paths
+
+Always run `bun` commands from the workspace root where `package.json` and source files live. Keep all file and command paths relative to the workspace root to avoid absolute path issues. Before finalizing changes, run `bun run typecheck` or `bun run build` to validate the project. Verify file existence with tools like `list_files` before targeting nested paths.
+
+## Preview and Cleanup
+
+To view a site, run the dev server followed by `preview http://localhost:3000`. If you encounter build errors or stale artifacts (like `HTTP 500`), clear the build cache (e.g., `rm -rf .next`) before retrying. Ensure your current working directory is valid before executing git or build commands.
+
+## Site Templates
+
+For research paper summary sites, prioritize static HTML/CSS templates without build tools unless dependencies are required. Keep stylesheets concise and ensure navigation is accessible. Aim for clean, functional layouts that load quickly and adhere to the project's design guidelines.
+
+## Validation and Submission
+
+- **TypeScript:** Follow language-specific conventions to avoid compiler errors.
+- **Python:** Install dependencies as needed and validate scripts with `py_compile` before execution. Handle interactive inputs carefully.
+- **Submission:** When invoking `submit_acceptance` or `submit_assumptions`, ensure every criterion has an associated verdict. When calling `risk_assessment`, include a non-empty sourceDate string.
+
+## Safety and Conventions
+
+Validate all paths before invoking file-system commands. Ensure acceptance checks match expected patterns before claiming success. Always verify the existence of files before referencing them to avoid exit code failures.

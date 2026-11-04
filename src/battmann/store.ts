@@ -1767,10 +1767,19 @@ export function loadBattmannReportData(input: Row): Row {
       const sources = evidenceGrades(db, links.map((link) => String(link.evidence_id)))
       return { sources, id: claim.id, statement: claim.statement, classification: claim.classification, confidence: claim.confidence, asOf: claim.as_of, evidence: links.map((link) => ({ evidenceId: link.evidence_id, relation: link.relation, supportingExcerpt: link.supporting_excerpt })), review: review ? { verdict: review.verdict, reviewer: review.reviewer, reviewedAt: review.reviewed_at, notes: review.notes } : { verdict: 'unreviewed' }, unverifiedFigures: unverified }
     })
-    const evidence = (db.query('SELECT * FROM evidence WHERE published_at <= ? AND retrieved_at <= ? ORDER BY published_at, id').all(asOf, asOf) as Row[]).filter((row) => withinClearance(row, rank))
+    // The ledger lists what this report stands on. Every evidence row in a long-lived store used to be printed, so a
+    // supply-chain brief carried a GDP forecast and border talks from an earlier run while its own freight figures had no source.
+    const availableEvidence = (db.query('SELECT * FROM evidence WHERE published_at <= ? AND retrieved_at <= ? ORDER BY published_at, id').all(asOf, asOf) as Row[]).filter((row) => withinClearance(row, rank))
     const scenarios = (db.query('SELECT * FROM scenarios WHERE base_as_of <= ? ORDER BY horizon').all(asOf) as Row[]).map((row) => ({ id: row.id, title: row.title, baseAsOf: row.base_as_of, horizon: row.horizon, probability: row.probability, assumptions: parseJson(row.assumptions_json, []), questionIds: parseJson(row.question_ids_json, []), evidenceIds: parseJson(row.evidence_ids_json, []), indicators: parseJson(row.indicators_json, []), status: row.status }))
     const decisions = (db.query('SELECT * FROM decisions WHERE decided_at <= ? ORDER BY decided_at').all(asOf) as Row[]).map((row) => ({ id: row.id, scenarioId: row.scenario_id, title: row.title, options: parseJson(row.options_json, []), chosenOption: row.chosen_option, rationale: row.rationale, status: row.status, approvedBy: row.approved_by, decidedAt: row.decided_at }))
     const outcomes = (db.query('SELECT * FROM outcomes WHERE observed_at <= ? ORDER BY observed_at').all(asOf) as Row[]).map((row) => ({ id: row.id, decisionId: row.decision_id, observedAt: row.observed_at, summary: row.summary, metrics: parseJson(row.metrics_json, {}), evidenceIds: parseJson(row.evidence_ids_json, []) }))
+    const citedEvidenceIds = new Set<string>([
+      ...claims.flatMap((claim) => claim.evidence.map((link) => String(link.evidenceId))),
+      ...questions.flatMap((question) => ((question.latestForecast as { evidenceIds?: string[] } | null)?.evidenceIds ?? [])),
+      ...scenarios.flatMap((scenario) => scenario.evidenceIds as string[]),
+      ...outcomes.flatMap((outcome) => outcome.evidenceIds as string[]),
+    ])
+    const evidence = availableEvidence.filter((row) => citedEvidenceIds.has(String(row.id)))
     const objectCount = Number((db.query('SELECT COUNT(DISTINCT id) AS count FROM ontology_objects WHERE valid_from <= ? AND (valid_to IS NULL OR valid_to > ?)').get(asOf, asOf) as Row).count)
     const linkCount = Number((db.query('SELECT COUNT(*) AS count FROM ontology_links WHERE valid_from <= ? AND (valid_to IS NULL OR valid_to > ?)').get(asOf, asOf) as Row).count)
     const score = scoreRows(resolvedLatestForecasts(db).filter((row) => row.resolvedAt <= asOf))
@@ -1783,6 +1792,7 @@ export function loadBattmannReportData(input: Row): Row {
       asOf,
       questions,
       claims,
+      uncitedEvidenceCount: availableEvidence.length - evidence.length,
       evidence: evidence.map((row) => ({ id: row.id, title: row.title, url: row.url, publisher: row.publisher, sourceType: row.source_type, publishedAt: row.published_at, retrievedAt: row.retrieved_at, excerpt: row.excerpt, contentHash: row.content_hash, independenceGroup: row.independence_group, reliability: row.reliability, provenance: row.provenance ?? 'agent', responseHash: row.response_hash ?? null })),
       scenarios,
       decisions,

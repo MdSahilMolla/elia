@@ -1,9 +1,10 @@
 import { expect, test } from 'bun:test'
-import { mkdtempSync } from 'node:fs'
+import { existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { formatDiagnostics, diagnosticsForFile, resetLspStateForTests, resolveSpawnCommand } from './registry.ts'
+import { formatDiagnostics, diagnosticsForFile, neutralNpxLaunch, resetLspStateForTests, resolveSpawnCommand } from './registry.ts'
 import type { Diagnostic } from './protocol.ts'
+import { languageServerFor } from './servers.ts'
 
 test('formatDiagnostics returns an empty string for a clean file', () => {
   expect(formatDiagnostics([], 'src/foo.ts')).toBe('')
@@ -34,13 +35,20 @@ test('a file extension with no configured language server returns undefined with
 })
 
 test('a recognized extension with no server binary installed fails soft instead of hanging or throwing', async () => {
-  // gopls is not installed in this environment (verified before writing this
-  // test) — a real "the user hasn't set this language server up" case.
+  // A real "the user hasn't set this language server up" case. The Go
+  // server is renamed to one no machine has, because gopls itself may well
+  // be installed (it is on the machine this test once assumed it was not).
   const root = mkdtempSync(join(tmpdir(), 'elia-lsp-registry-'))
+  const spec = languageServerFor('main.go')!
+  const command = spec.command
+  spec.command = 'elia-test-no-such-language-server'
+  // A Go server an earlier test started would otherwise answer from the cache.
+  resetLspStateForTests()
   try {
     const result = await diagnosticsForFile(join(root, 'main.go'), 'package main', root)
     expect(result).toBeUndefined()
   } finally {
+    spec.command = command
     resetLspStateForTests()
   }
 })
@@ -91,5 +99,19 @@ test('ELIA_LSP=off disables diagnostics entirely, even for a recognized extensio
   } finally {
     if (previous === undefined) delete process.env.ELIA_LSP
     else process.env.ELIA_LSP = previous
+  }
+})
+
+test('the npx fallback launches from an empty temp directory with elia credentials removed', () => {
+  const launch = neutralNpxLaunch({ PATH: '/usr/bin', HOME: '/h', ANTHROPIC_API_KEY: 'dummy-a', OPENAI_API_KEY: 'dummy-o', ELIA_API_KEY: 'dummy-e', GITHUB_TOKEN: 'dummy-g' })
+  try {
+    expect(existsSync(launch.cwd)).toBe(true)
+    expect(readdirSync(launch.cwd)).toEqual([])
+    expect(launch.cwd).not.toBe(process.cwd())
+    expect(launch.env.PATH).toBe('/usr/bin')
+    expect(launch.env.HOME).toBe('/h')
+    for (const name of ['ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'ELIA_API_KEY', 'GITHUB_TOKEN']) expect(launch.env[name]).toBeUndefined()
+  } finally {
+    rmSync(launch.cwd, { recursive: true, force: true })
   }
 })

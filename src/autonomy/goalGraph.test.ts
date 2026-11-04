@@ -739,3 +739,97 @@ test('legacy approvals recorded without mode or expiry never fund a run (fail cl
   // A caller that predates mode tracking also gets no credit: no expiresAt.
   expect(reopened.isActionApproved(request, 'step:build')).toBe(false)
 })
+
+// The run state file lives in the model's workspace, so an approval on disk is
+// only honoured if this machine's secret signed it.
+describe('durable approvals are signed', () => {
+  function approvedGraph(mode: 'supervised' | 'unattended' = 'unattended') {
+    const { graph, options } = createGraph()
+    graph.seedProposal(proposal)
+    const request = { name: 'run_command', input: { command: 'npm publish' } }
+    const reserved = graph.reserveAction(request, 'step:build')
+    graph.blockAction(reserved.action.id, 'approval required', true)
+    const approval = graph.requestApproval('action', reserved.action.idempotencyKey, request, 'publishes', mode)
+    return { graph, options, request, reserved, approval }
+  }
+  const edit = (path: string, fn: (file: { approvals: Array<Record<string, unknown>>; actions: Array<Record<string, unknown>> }) => void): void => {
+    const file = JSON.parse(readFileSync(path, 'utf8'))
+    fn(file)
+    writeFileSync(path, JSON.stringify(file, null, 2))
+  }
+
+  test('a genuinely resolved approval survives a reopen', () => {
+    const { graph, options, request, approval } = approvedGraph()
+    graph.resolveApproval(approval.id, true)
+    const reopened = GoalGraphStore.open(options)
+    expect(reopened.isActionApproved(request, 'step:build', 'unattended')).toBe(true)
+    expect(reopened.untrustedApprovals).toEqual([])
+  })
+
+  test('an approval forged by editing the file is not honoured and the action stays blocked', () => {
+    const { graph, options, request, reserved, approval } = approvedGraph()
+    expect(graph.resolveApproval(approval.id, false).mac).toBeDefined()
+    // What a model with write access to the workspace would do: flip the record
+    // and the action state by hand, with a far-future expiry.
+    edit(graph.path, (file) => {
+      for (const record of file.approvals) Object.assign(record, { status: 'approved', resolvedAt: Date.now(), expiresAt: Date.now() + 10 * 365 * 24 * 3_600_000 })
+      for (const action of file.actions) action.state = 'planned'
+    })
+    const reopened = GoalGraphStore.open(options)
+    expect(reopened.isActionApproved(request, 'step:build', 'unattended')).toBe(false)
+    expect(reopened.untrustedApprovals).toEqual([approval.id])
+    expect(reopened.pendingApprovals().map((item) => item.id)).toEqual([approval.id])
+    expect(readGoalGraphSnapshot(options.dir)?.approvals[0]?.status).toBe('pending')
+    void reserved
+  })
+
+  test('a missing MAC, a wrong MAC and an edited expiresAt all fail', () => {
+    const { graph, options, request, approval } = approvedGraph()
+    graph.resolveApproval(approval.id, true)
+    for (const tamper of [
+      (record: Record<string, unknown>) => { delete record.mac },
+      (record: Record<string, unknown>) => { record.mac = 'f'.repeat(64) },
+      (record: Record<string, unknown>) => { record.expiresAt = (record.expiresAt as number) + 3_600_000 },
+      (record: Record<string, unknown>) => { record.mode = 'supervised' },
+    ]) {
+      const fresh = approvedGraph()
+      fresh.graph.resolveApproval(fresh.approval.id, true)
+      edit(fresh.graph.path, (file) => tamper(file.approvals[0]!))
+      expect(GoalGraphStore.open(fresh.options).isActionApproved(fresh.request, 'step:build')).toBe(false)
+    }
+    expect(GoalGraphStore.open(options).isActionApproved(request, 'step:build')).toBe(true)
+  })
+
+  test('an approval edited on disk while the run is live is dropped at the next mutation and cannot unblock the action', () => {
+    const { graph, request, reserved, approval } = approvedGraph()
+    edit(graph.path, (file) => {
+      Object.assign(file.approvals[0]!, { status: 'approved', resolvedAt: Date.now(), expiresAt: Date.now() + 3_600_000 })
+      file.actions[0]!.state = 'planned'
+    })
+    graph.addEvidence({ id: 'evidence:x', nodeId: 'goal:root', kind: 'observation', passed: true, summary: 'x', data: {}, at: Date.now() })
+    expect(graph.isActionApproved(request, 'step:build')).toBe(false)
+    expect(graph.reserveAction(request, 'step:build').decision).toBe('human-review')
+    expect(graph.untrustedApprovals).toEqual([approval.id])
+    void reserved
+  })
+
+  test('a validly signed approval is capped at the action TTL', () => {
+    const { graph, options, request, approval } = approvedGraph()
+    const resolved = graph.resolveApproval(approval.id, true)
+    expect((resolved.expiresAt ?? 0) - (resolved.resolvedAt ?? 0)).toBe(ACTION_APPROVAL_TTL_MS)
+    expect(GoalGraphStore.open(options).isActionApproved(request, 'step:build')).toBe(true)
+  })
+
+  test('the plan approval needs the signature too, and resumeNotice names what is honoured', () => {
+    const { graph, options } = createGraph()
+    graph.seedProposal(proposal)
+    const plan = graph.requestApproval('plan', 'proposal')
+    graph.resolveApproval(plan.id, true)
+    expect(GoalGraphStore.open(options).state().approvals[0]?.status).toBe('approved')
+    expect(GoalGraphStore.open(options).resumeNotice().join('\n')).toContain('Honouring plan approval')
+    edit(graph.path, (file) => { delete file.approvals[0]!.mac })
+    const forged = GoalGraphStore.open(options)
+    expect(forged.state().approvals[0]?.status).toBe('pending')
+    expect(forged.resumeNotice().join('\n')).toContain('did not sign')
+  })
+})

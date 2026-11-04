@@ -9,6 +9,14 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+/// Files inside a writable workspace that later steer the host rather than the
+/// run itself: git hooks and config execute or redirect on the user's next `git`
+/// call, and `.elia` holds elia's own trust state. A run may read them but never
+/// change them, so a writable tree is not a way to plant code outside the box.
+pub fn protected_paths(run_dir: &Path) -> Vec<PathBuf> {
+    vec![run_dir.join(".git").join("hooks"), run_dir.join(".git").join("config"), run_dir.join(".elia")]
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum Backend {

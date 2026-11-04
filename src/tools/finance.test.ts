@@ -80,3 +80,10 @@ test('finance rejects invalid percentage and non-finite inputs', async () => {
   await expect(financeTool.execute({ action: 'runway', cashBalance: Number.NaN, monthlyRevenue: 10, monthlyExpenses: 20 })).rejects.toThrow('cashBalance must be a finite number')
   await expect(financeTool.execute({ action: 'dcf', baseFreeCashFlow: 100, revenueGrowthRate: 0.05, discountRate: 0.02, terminalGrowthRate: 0.03, forecastYears: 5 })).rejects.toThrow('discountRate must be greater than terminalGrowthRate')
 })
+
+test('runway without revenue treats it as zero, and names the fields it needs when burn is missing', async () => {
+  const result = JSON.parse(await financeTool.execute({ action: 'runway', cashBalance: 120_000, monthlyExpenses: 15_000 })) as { outputs: { runwayMonths: number }; interpretation: string[] }
+  expect(result.outputs.runwayMonths).toBe(8)
+  expect(result.interpretation.join(' ')).toContain('taken as 0')
+  await expect(financeTool.execute({ action: 'runway', cashBalance: 120_000, monthlyOperatingExpenses: 15_000 })).rejects.toThrow('runway needs cashBalance and monthlyExpenses')
+})

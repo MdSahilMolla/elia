@@ -88,7 +88,7 @@ test('push targets the current branch and sets upstream', async () => {
   setExecForTests(fn)
   const out = await githubTool.execute({ action: 'push' })
   expect(out).toContain('Pushed "feature/z"')
-  expect(calls.some((c) => c === 'git push -u origin feature/z')).toBe(true)
+  expect(calls.some((c) => c === 'git push -u origin -- feature/z')).toBe(true)
 })
 
 test('pr_create passes title and body through argv (not a shell)', async () => {

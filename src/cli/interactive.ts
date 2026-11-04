@@ -21,7 +21,7 @@ import type { SlashOutcome as InkSlashOutcome } from '../ui/app/index.tsx'
 import type { PackageKind } from '../marketplace/registry.ts'
 import { playIntro } from '../ui/character.ts'
 import { ZERO_USAGE, addUsage, getSessionSummaryLine, sessionUsageSnapshot, setCurrentUsageModel, type SessionUsageSnapshot } from '../usage.ts'
-import { createSlashPrompt } from '../ui/slashPrompt.ts'
+import { createSlashPrompt, type SlashPromptHandle } from '../ui/slashPrompt.ts'
 import { resolveCustomCommand } from '../commands/loader.ts'
 import { collectPromptInjects, fireLifecycleEvent } from '../autonomy/lifecycleHooks.ts'
 import { confirmOnce } from '../ui/confirm.ts'
@@ -30,6 +30,13 @@ import { box, table } from '../ui/layout.ts'
 import { pick } from '../ui/picker.ts'
 import { openTaskDashboard, renderTaskSummary } from '../ui/taskDashboard.ts'
 import { inferTaskKind, taskSessions } from '../taskSessions.ts'
+
+/**
+ * The line-mode REPL's prompt, published so a mid-turn question can be asked
+ * through the editor the session already owns. Creating a second one would put
+ * stdin into raw mode twice, and the two would race for keystrokes.
+ */
+let ambientPrompt: SlashPromptHandle | null = null
 import { isAgentPersona, type AgentPersona } from '../agents/types.ts'
 import { CAPABILITIES } from '../capabilities.ts'
 import { type ActionApproval } from '../autonomy/governor.ts'
@@ -48,6 +55,8 @@ import { logSwallowedError } from '../diagnostics.ts'
 import { ensureFirstRunProviderSetup, interactiveProviderSetup, prewarmActiveProvider, runCodexLogin } from './providerSetup.ts'
 import { actionApprovalPrompt, allSlashCommands, approvalTitle, loadRuntimeSkills, printTurnProfileReport, requestedAgentMode, userMessage, warnIfAtFilesystemRoot } from './runtime.ts'
 import type { ProviderActivity } from '../providers/types.ts'
+import type { SpendState } from '../spendLimit.ts'
+import { setOperatorPrompt } from '../tools/askUser.ts'
 import { type ToolEvent } from '../agentLoop.ts'
 
 /** There is one way elia works — autonomously — so the switches that chose between ways are gone. */
@@ -108,7 +117,7 @@ export async function runInteractive(): Promise<void> {
   // can finish connecting in the background instead of gating the prompt.
   await loadRuntimeSkills({ deferMcp: interactiveTerminal })
   const { runTurn } = await import('../agent.ts')
-  const { config, describeThinking, describeReviewers, getThinking, switchModel } = await import('../config.ts')
+  const { config, describeThinking, describeReviewers, getThinking, providerModelNotice, switchModel } = await import('../config.ts')
   setCurrentUsageModel(config.model)
   const { PROVIDER_PRESET_NAMES, isProviderPresetConfigured, providerCapabilities, providerPresetDefaultModel, providerReadiness, listProviderModels } = await import('../providers/registry.ts')
   const { detectOllama } = await import('../providers/ollama.ts')
@@ -912,6 +921,56 @@ export async function runInteractive(): Promise<void> {
       .map((session) => ({ label: describeSession(session, 64), detail: sessionDetail(session), value: session.id }))
   }
 
+  /**
+   * A one-line question on the operator's terminal, or undefined when there is
+   * no terminal to ask on.
+   *
+   * Every question path in a session has to come from here, because the code
+   * that wants to ask (the `ask_user` tool) has no business knowing whether a
+   * person is present. Undefined when stdin is not a TTY is the load-bearing
+   * part: a headless run must never block on a read that will never be answered.
+   *
+   * The line-mode REPL already holds an open prompt, and a second one would put
+   * stdin into raw mode twice and fight it for keystrokes, so the ask goes
+   * through whichever prompt the session already owns.
+   */
+  async function askOperator(question: string): Promise<string | undefined> {
+    if (!process.stdin.isTTY) return undefined
+    const owner = ambientPrompt
+    const answer = owner ? await owner.question(`${question}\n${gold('?')} `) : await withFreshPrompt(question)
+    return answer === null ? undefined : answer
+  }
+
+  async function withFreshPrompt(question: string): Promise<string | null> {
+    const askPrompt = createSlashPrompt([])
+    try {
+      return await askPrompt.question(`${question}\n${gold('?')} `)
+    } finally {
+      askPrompt.close()
+    }
+  }
+
+  /**
+   * The spending-ceiling escape hatch, wired only in cyber mode.
+   *
+   * A run that stops one step short of the flag makes the person retype the
+   * whole request, which throws away the context that made the extra spend
+   * worth asking for. This is the single place a cyber run may interrupt, and it
+   * is deliberately narrow: it raises a dollar ceiling and nothing else.
+   */
+  const cyberSpendCeiling =
+    process.stdin.isTTY && mode === 'cyber'
+      ? async (state: SpendState, requestedUsd: number | undefined) => {
+          const { spendIncreaseQuestion, parseSpendIncreaseAnswer } = await import('../spendLimit.ts')
+          const answer = await askOperator(spendIncreaseQuestion(state, requestedUsd))
+          return answer === undefined ? undefined : parseSpendIncreaseAnswer(answer, state, requestedUsd)
+        }
+      : undefined
+
+  // The `ask_user` tool reads the operator through this, so a model can raise the
+  // ceiling itself rather than waiting for the loop to notice.
+  setOperatorPrompt(process.stdin.isTTY ? askOperator : null)
+
   async function runCheckpointedTurn(userText: string, approveAction?: ActionApproval, skillNames = selectedSkillNames, uiHooks?: TurnUiHooks): Promise<void> {
     try {
       await withSessionTranscript(sessionTranscript, () => runRecordedTurn(userText, approveAction, skillNames, uiHooks))
@@ -944,6 +1003,11 @@ export async function runInteractive(): Promise<void> {
     // Classify on the request (title) and what was actually typed (prompt).
     // Passing the inject-prefixed userText as both let operator-context text
     // (a "deploy" note, say) decide the task kind — and titled the task with it.
+    // The previous turn said it was done; this message is how the user took it.
+    if (!persona) {
+      const { resolveTurnClaim } = await import('../autonomy/groundTruth.ts')
+      resolveTurnClaim(requestText)
+    }
     const task = taskSessions.create(inferTaskKind(requestText, submittedText), redactText(requestText, 160), 'Starting request')
     taskSessions.update(task.id, { status: 'running', action: 'Thinking', detail: 'Planning the next action' })
     pushHeartbeat(true, redactText(userText, 160))
@@ -1059,6 +1123,7 @@ export async function runInteractive(): Promise<void> {
         upfrontPlan: opening,
         ...(opening && openingGuidance ? { turnGuidance: openingGuidance } : {}),
         drainSteering: uiHooks?.drainSteering,
+        onSpendCeiling: cyberSpendCeiling,
         onText: uiHooks?.onText,
         onThinking: uiHooks?.onThinking,
         onToolStart: uiHooks?.onToolStart,
@@ -1414,7 +1479,11 @@ export async function runInteractive(): Promise<void> {
           renderTarget = target
           if (target) {
             const { prepareAutoPreview } = await import('../preview/prepare.ts')
-            const { waitForHttp, checkRendered } = await import('../preview/readiness.ts')
+            const { waitForHttp } = await import('../preview/readiness.ts')
+            // Runs the page in a headless browser when one is available, so a
+            // script that throws on boot or a missing stylesheet fails the turn
+            // instead of passing an HTTP fetch that never executed the page.
+            const { verifyPageRender, renderDepthNote } = await import('../preview/browserRender.ts')
             const prep = prepareAutoPreview(target)
             if (prep.kind === 'skip') {
               const line = `Preview skipped — ${prep.reason}`
@@ -1427,7 +1496,7 @@ export async function runInteractive(): Promise<void> {
               // Don't announce "ready" until the server actually answers and the
               // root paints something — a blank page is worse than no preview.
               const up = await waitForHttp(url, 8_000, controller.signal)
-              let rendered = up.ok ? await checkRendered(url, controller.signal) : up
+              let rendered = up.ok ? await verifyPageRender(url, controller.signal) : up
               // For a static page, *this* is the verification: it serves and it
               // paints. `detectChecks` only ever looked for typecheck/test
               // commands, and its CODE_EXT filter excludes .html/.css entirely,
@@ -1456,7 +1525,7 @@ export async function runInteractive(): Promise<void> {
                   )
                   await runModelTurn()
                   const retry = await waitForHttp(url, 8_000, controller.signal)
-                  rendered = retry.ok ? await checkRendered(url, controller.signal) : retry
+                  rendered = retry.ok ? await verifyPageRender(url, controller.signal) : retry
                 }
                 const verdict = rendered.ok
                   ? '✓ page renders after repair'
@@ -1467,7 +1536,7 @@ export async function runInteractive(): Promise<void> {
 
               if (ownsVerification) {
                 verifyResult = rendered.ok ? 'pass' : 'fail'
-                sessionTranscript.notice(rendered.ok ? `Render check passed — ${url}` : `Render check failed — ${rendered.reason ?? 'it painted nothing'} (${url})`)
+                sessionTranscript.notice(rendered.ok ? `Render check passed — ${url}${renderDepthNote(rendered)}` : `Render check failed — ${rendered.reason ?? 'it painted nothing'} (${url})`)
               }
               if (rendered.ok) {
                 const detail = url
@@ -1500,15 +1569,16 @@ export async function runInteractive(): Promise<void> {
         // "verification: none". Check the page as the turn left it: preview
         // checked it when it opened it, and a later edit can still break it.
         try {
-          const { checkRendered } = await import('../preview/readiness.ts')
+          const { verifyPageRender, renderDepthNote } = await import('../preview/browserRender.ts')
           // The model chose this URL, so it may well be a dev server rather than
           // elia's static server — don't fail it on the unbuilt-bundler
           // heuristic, which is only ever a real failure for a static server.
-          const rendered = await checkRendered(previewedUrl, AbortSignal.any([controller.signal, AbortSignal.timeout(5_000)]), { staticServer: false })
+          // 20s, not 5s: the browser pass loads and settles the page after the HTTP fetch.
+          const rendered = await verifyPageRender(previewedUrl, AbortSignal.any([controller.signal, AbortSignal.timeout(20_000)]), { staticServer: false })
           verifyResult = rendered.ok ? 'pass' : 'fail'
           // Status lines reach only the live UI. Without this, a turn recorded
           // "verification: fail" and nothing anywhere said what had failed.
-          sessionTranscript.notice(rendered.ok ? `Render check passed — ${previewedUrl}` : `Render check failed — ${rendered.reason ?? 'it painted nothing'} (${previewedUrl})`)
+          sessionTranscript.notice(rendered.ok ? `Render check passed — ${previewedUrl}${renderDepthNote(rendered)}` : `Render check failed — ${rendered.reason ?? 'it painted nothing'} (${previewedUrl})`)
           if (!rendered.ok && !machineReadable) {
             const line = `Page no longer renders — ${rendered.reason ?? 'it painted nothing'}`
             if (uiHooks) uiHooks.onActivity?.({ kind: 'status', status: 'warning', title: line })
@@ -1523,51 +1593,62 @@ export async function runInteractive(): Promise<void> {
       // another way, checks that failed until a fix — becomes a lesson every
       // later session starts with, and the user sees it land. Interactive turns
       // used to forget these: note_lesson is voluntary and almost never called.
+      //
+      // In the background, like the skill work after it: when a turn qualified,
+      // this is a model call on the fast tier, and the person waited on it
+      // (45-52s in the recorded sessions, most of it a refused fast route) before
+      // the prompt came back. It reads a snapshot, so the next turn cannot move
+      // the conversation under it.
       if (!persona && !escalated && !uiHooks?.planMode && !controller.signal.aborted) {
-        const { learnFromTurn } = await import('../autonomy/turnLearning.ts')
-        const learned = await learnFromTurn({
-          provider: config.tiers.fast.provider,
-          messages,
-          fromIndex: messagesBefore.length,
-          request: requestText,
-          outcome: { verify: verifyResult, repairAttempts },
-          cwd: process.cwd(),
-          signal: controller.signal,
-          // Output of a `!cmd` run is carried into the request; it is not the user's words.
-          userWords: requestText.replace(/<local-command>[\s\S]*?<\/output>/g, ''),
-          onReflecting: () => uiHooks?.onActivity?.({ kind: 'status', status: 'updated', title: 'Learning from this turn' }),
-        })
-        if (learned.usage) {
-          const { recordUsage } = await import('../usage.ts')
-          recordUsage(learned.usage, config.tiers.fast.model)
-        }
-        for (const lesson of learned.lessons) {
-          // Recorded with the turn that taught it, so the lesson can point back at what produced it.
-          recorder.lesson(lesson)
-          const line = `✦ learned: ${lesson}`
-          sessionTranscript.notice(line)
-          if (uiHooks) uiHooks.onActivity?.({ kind: 'status', status: 'completed', title: line })
-          else writeNotice(line)
-        }
-
-        // Fire-and-forget: when enough certified lessons cluster on one topic,
-        // elia writes or revises its own instruction skill from them. Cheap
-        // clustering runs inline; the subagent draft (if any) runs in the
-        // background so it never delays the next prompt. See
-        // src/skills/instructionSkills.ts for the evidence and gating.
+        const turnMessages = messages.slice()
         void (async () => {
-          try {
-            const { evolveInstructionSkills } = await import('../skills/instructionSkills.ts')
-            for (const line of await evolveInstructionSkills()) {
-              const notice = `✦ skill: ${line}`
-              sessionTranscript.notice(notice)
-              if (uiHooks) uiHooks.onActivity?.({ kind: 'status', status: 'completed', title: notice })
-              else writeNotice(notice)
-            }
-          } catch {
-            // Best effort, same as learning itself — never surfaces as a turn failure.
+          const { learnFromTurn } = await import('../autonomy/turnLearning.ts')
+          const learned = await learnFromTurn({
+            provider: config.tiers.fast.provider,
+            messages: turnMessages,
+            fromIndex: messagesBefore.length,
+            request: requestText,
+            outcome: { verify: verifyResult, repairAttempts },
+            cwd: process.cwd(),
+            signal: controller.signal,
+            // Output of a `!cmd` run is carried into the request; it is not the user's words.
+            userWords: requestText.replace(/<local-command>[\s\S]*?<\/output>/g, ''),
+            onReflecting: () => uiHooks?.onActivity?.({ kind: 'status', status: 'updated', title: 'Learning from this turn' }),
+          })
+          if (learned.usage) {
+            const { recordUsage } = await import('../usage.ts')
+            recordUsage(learned.usage, config.tiers.fast.model)
           }
-        })()
+          for (const lesson of learned.lessons) {
+            // Recorded with the turn that taught it, so the lesson can point back at what produced it.
+            recorder.lesson(lesson)
+            const line = `✦ learned: ${lesson}`
+            sessionTranscript.notice(line)
+            if (uiHooks) uiHooks.onActivity?.({ kind: 'status', status: 'completed', title: line })
+            else writeNotice(line)
+          }
+
+          // Fire-and-forget: when enough certified lessons cluster on one topic,
+          // elia writes or revises its own instruction skill from them. Cheap
+          // clustering runs inline; the subagent draft (if any) runs in the
+          // background so it never delays the next prompt. See
+          // src/skills/instructionSkills.ts for the evidence and gating.
+          void (async () => {
+            try {
+              const { evolveInstructionSkills } = await import('../skills/instructionSkills.ts')
+              for (const line of await evolveInstructionSkills()) {
+                const notice = `✦ skill: ${line}`
+                sessionTranscript.notice(notice)
+                if (uiHooks) uiHooks.onActivity?.({ kind: 'status', status: 'completed', title: notice })
+                else writeNotice(notice)
+              }
+            } catch {
+              // Best effort, same as learning itself — never surfaces as a turn failure.
+            }
+          })()
+        })().catch(() => {
+          // Learning is best effort; a failure here never surfaces as a turn failure.
+        })
       }
 
       taskSessions.update(task.id, { status: 'done', action: 'Finished', detail: 'Request completed and session saved' })
@@ -1654,6 +1735,8 @@ export async function runInteractive(): Promise<void> {
           aborted: stopRequested || controller.signal.aborted || escalatedAborted,
           ...(turnFailed ? { failed: true } : {}),
         })
+        const { noteTurnClaim } = await import('../autonomy/groundTruth.ts')
+        noteTurnClaim(task.id, verifyResult, changedPaths.length, !turnFailed && !(stopRequested || controller.signal.aborted || escalatedAborted))
         const cleanTurn = !turnFailed && toolErrorCount === 0 && editRetryCount === 0 && (verifyResult === 'pass' || verifyResult === 'none' || verifyResult === 'skipped') && !(stopRequested || controller.signal.aborted || escalatedAborted)
         // The interactive exposure record exists only when this turn actually
         // ran an interactive model turn (escalated turns record inside the
@@ -1971,6 +2054,7 @@ export async function runInteractive(): Promise<void> {
   }
 
   const prompt = createSlashPrompt(allSlashCommands())
+  ambientPrompt = prompt
 
   async function handleSkillsPicker(): Promise<void> {
     const { listLoadedSkills } = await import('../skills/loader.ts')
@@ -2678,6 +2762,10 @@ export async function runInteractive(): Promise<void> {
       const { limitCommand } = await import('../spendLimit.ts')
       return { handled: true, text: limitCommand(trimmed.slice('/limit'.length), config.model) }
     }
+    if (trimmed === '/scope' || trimmed.startsWith('/scope ')) {
+      const { scopeCommand } = await import('./scope.ts')
+      return { handled: true, text: await scopeCommand(trimmed.slice('/scope'.length)) }
+    }
     if (trimmed === '/cost') {
       const { sessionUsageSnapshot, estimateCostUsd, formatCostUsd, formatTokenCount, formatElapsed } = await import('../usage.ts')
       const s = sessionUsageSnapshot()
@@ -2838,6 +2926,12 @@ export async function runInteractive(): Promise<void> {
     if (brainMatch) {
       const { runBrainCommand } = await import('../brain/command.ts')
       return done(await runBrainCommand(brainMatch[1] ?? ''))
+    }
+    const cyberbrainMatch = /^\/cyberbrain(?:\s+(.+))?$/.exec(trimmed)
+    if (cyberbrainMatch) {
+      const { runCyberbrain } = await import('./cyberbrain.ts')
+      await runCyberbrain((cyberbrainMatch[1] ?? '').trim().split(/\s+/).filter(Boolean))
+      return done()
     }
     if (trimmed === '/track') {
       const { renderCompetence } = await import('../autonomy/outcomes.ts')
@@ -3030,7 +3124,7 @@ export async function runInteractive(): Promise<void> {
     await runInkRepl({
       sessionId,
       version: cliVersion,
-      startupNotice: [recoveryNotice, practiceReport, launchNotice].filter(Boolean).join('\n') || undefined,
+      startupNotice: [providerModelNotice(), recoveryNotice, practiceReport, launchNotice].filter(Boolean).join('\n') || undefined,
       initialTurn,
       getEnv: () => ({ model: config.model, providerLabel: config.providerLabel, providerName: config.providerName, routing: config.routingMode }),
       commands: allSlashCommands(),
@@ -3056,7 +3150,7 @@ export async function runInteractive(): Promise<void> {
         const reply = await answerWhileWorking({ ...view, conversation: messages, pilot: pilot ? pilotSnapshot(pilot) : undefined, exchanges: liveExchanges, cwd: process.cwd() }, question, { signal, onThinking })
         liveExchanges.push({ question, answer: reply.answer })
         if (liveExchanges.length > 8) liveExchanges.splice(0, liveExchanges.length - 8)
-        carriedAsides.push(`<aside-while-you-worked>\nThe user asked: ${question}\nYou answered: ${reply.answer}${reply.steer ? `\n(Passed to the work: ${reply.steer})` : ''}\n</aside-while-you-worked>`)
+        carriedAsides.push(`<aside-while-you-worked>\nThe user asked: ${question}\nYou (the assistant, not the user) answered: ${reply.answer}${reply.steer ? `\n(Passed to the work: ${reply.steer})` : ''}\n</aside-while-you-worked>`)
         sessionTranscript.notice(`live reply — Q: ${question}\nA: ${reply.answer}${reply.dropped ? `\n(${reply.dropped} unbacked claim(s) removed)` : ''}`)
         await persistInteractiveSession()
         return reply
@@ -3101,7 +3195,8 @@ export async function runInteractive(): Promise<void> {
     })
     holdPractice()
     if (practiceHere) await practice.maybeStartPractice().catch(() => false)
-    prompt.close()
+  prompt.close()
+  ambientPrompt = null
     return
   }
 
@@ -3170,6 +3265,13 @@ export async function runInteractive(): Promise<void> {
     if (trimmed === '/limit' || trimmed.startsWith('/limit ')) {
       const { limitCommand } = await import('../spendLimit.ts')
       writeNotice(limitCommand(trimmed.slice('/limit'.length), config.model))
+      continue
+    }
+
+    // /scope — standing grants so a cyber run stops asking per command.
+    if (trimmed === '/scope' || trimmed.startsWith('/scope ')) {
+      const { scopeCommand } = await import('./scope.ts')
+      writeNotice(await scopeCommand(trimmed.slice('/scope'.length)))
       continue
     }
 
@@ -3279,6 +3381,12 @@ export async function runInteractive(): Promise<void> {
     if (brainClassic) {
       const { runBrainCommand } = await import('../brain/command.ts')
       writeUsageLine(await runBrainCommand(brainClassic[1] ?? ''))
+      continue
+    }
+    const cyberbrainClassic = /^\/cyberbrain(?:\s+(.+))?$/.exec(trimmed)
+    if (cyberbrainClassic) {
+      const { runCyberbrain } = await import('./cyberbrain.ts')
+      await runCyberbrain((cyberbrainClassic[1] ?? '').trim().split(/\s+/).filter(Boolean))
       continue
     }
     if (trimmed === '/track') {

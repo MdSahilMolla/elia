@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from 'bun:test'
-import { GEMINI_SKIP_SIGNATURE, affordableTokens, createOpenAICompatibleProvider, createThoughtSplitter, toContentBlocks, toOpenAIMessages } from './openaiCompatible.ts'
+import { GEMINI_SKIP_SIGNATURE, affordableTokens, createOpenAICompatibleProvider, createThoughtSplitter, dynamicTailEnabled, toContentBlocks, toOpenAIMessages } from './openaiCompatible.ts'
 import type { ChatMessage } from './types.ts'
 
 // The fake server below is plain http://127.0.0.1 — allow that explicitly for
@@ -254,6 +254,39 @@ test('a per-request reasoning effort is sent only to an endpoint that takes one'
   await createOpenAICompatibleProvider('key', 'mercury-2.5', url, { reasoningEffort: true }).streamTurn({ ...turn, reasoningEffort: undefined })
 
   expect(bodies.map((body) => body.reasoning_effort)).toEqual(['low', undefined, undefined])
+})
+
+test('the dynamic prompt follows the history only where dynamicTail is on, so a new turn keeps the cached history', async () => {
+  process.env.ELIA_ALLOW_INSECURE_LOCAL_ENDPOINT = '1'
+  const bodies: { messages: { role: string; content: unknown }[] }[] = []
+  server = Bun.serve({
+    port: 0,
+    async fetch(request) {
+      bodies.push((await request.json()) as (typeof bodies)[number])
+      return new Response(mercuryStream(null), { headers: { 'content-type': 'text/event-stream' } })
+    },
+  })
+  const url = `http://127.0.0.1:${server.port}`
+  const turn = { cwd: process.cwd(), system: 'sys', messages: USER_MESSAGES, tools: [], onText: () => {} }
+  const tail = createOpenAICompatibleProvider('key', 'm', url, { dynamicTail: true })
+  await tail.streamTurn({ ...turn, systemDynamic: 'lessons A' })
+  await tail.streamTurn({ ...turn, systemDynamic: 'lessons B' })
+  await tail.streamTurn({ ...turn, systemDynamic: '  ' })
+  await createOpenAICompatibleProvider('key', 'm', url).streamTurn({ ...turn, systemDynamic: 'lessons A' })
+
+  const roles = (index: number) => bodies[index]!.messages.map((message) => `${message.role}:${String(message.content)}`)
+  expect(roles(0)).toEqual(['system:sys', 'user:hi', 'system:lessons A'])
+  // Everything ahead of the dynamic block is byte-identical across turns.
+  expect(roles(1)).toEqual(['system:sys', 'user:hi', 'system:lessons B'])
+  expect(roles(2)).toEqual(['system:sys', 'user:hi'])
+  expect(roles(3)).toEqual(['system:sys\n\nlessons A', 'user:hi'])
+})
+
+test('ELIA_DYNAMIC_TAIL overrides the endpoint default either way', () => {
+  expect(dynamicTailEnabled(true, {})).toBe(true)
+  expect(dynamicTailEnabled(false, {})).toBe(false)
+  expect(dynamicTailEnabled(true, { ELIA_DYNAMIC_TAIL: 'off' })).toBe(false)
+  expect(dynamicTailEnabled(false, { ELIA_DYNAMIC_TAIL: 'on' })).toBe(true)
 })
 
 test('a streaming failure after partial content propagates instead of silently replaying the whole response', async () => {
@@ -531,4 +564,30 @@ test('a 402 with no affordable length, or too little of one, stays a 402', async
   const provider = createOpenAICompatibleProvider('key', 'm', `http://127.0.0.1:${server.port}`)
   await expect(provider.streamTurn({ cwd: process.cwd(), system: 'sys', messages: USER_MESSAGES, tools: [], onText: () => {} })).rejects.toThrow('402')
   expect(calls).toBe(1)
+})
+
+test('the first-byte budget grows with the request and is capped', async () => {
+  const { firstByteMs } = await import('./openaiCompatible.ts')
+  expect(firstByteMs(0, {})).toBe(20_000)
+  expect(firstByteMs(64_000, {})).toBe(24_000)
+  expect(firstByteMs(10_000_000, {})).toBe(90_000)
+  expect(firstByteMs(64_000, { ELIA_FIRST_BYTE_MS: '5000' })).toBe(5_000)
+})
+
+test('a stream that stops for length is reported as truncated; one that stops normally is not', async () => {
+  process.env.ELIA_ALLOW_INSECURE_LOCAL_ENDPOINT = '1'
+  const base = { id: '1', object: 'chat.completion.chunk', created: 1, model: 'm' }
+  let finish = 'length'
+  server = Bun.serve({
+    port: 0,
+    fetch: () => new Response(sse(
+      { ...base, choices: [{ index: 0, delta: { role: 'assistant', content: 'half an ans' }, finish_reason: null }] },
+      { ...base, choices: [{ index: 0, delta: {}, finish_reason: finish }] },
+    ) + 'data: [DONE]\n\n', { headers: { 'content-type': 'text/event-stream' } }),
+  })
+  const provider = createOpenAICompatibleProvider('key', 'm', `http://127.0.0.1:${server.port}`)
+  const turn = () => provider.streamTurn({ cwd: process.cwd(), system: 'sys', messages: USER_MESSAGES, tools: [], onText: () => {} })
+  expect((await turn()).truncated).toBe(true)
+  finish = 'stop'
+  expect((await turn()).truncated).toBeUndefined()
 })

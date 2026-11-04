@@ -57,6 +57,7 @@ interface Segment {
 /** `$$` or `$tag$` — but not `$1` (a parameter) and not the `$` inside an identifier like `a$b`. */
 const DOLLAR_TAG = /^\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$/
 
+/** Index of the closing quote, or -1 when the quote is never closed. */
 function quotedEnd(sql: string, start: number, closer: string, backslashEscapes: boolean): number {
   let j = start + 1
   while (j < sql.length) {
@@ -74,12 +75,45 @@ function quotedEnd(sql: string, start: number, closer: string, backslashEscapes:
     }
     j += 1
   }
-  return sql.length - 1
+  return -1
+}
+
+/** End (exclusive) of a Postgres block comment starting at `start`, which nests; -1 when it is never closed. */
+function nestedCommentEnd(sql: string, start: number): number {
+  let depth = 0
+  let j = start
+  while (j < sql.length - 1) {
+    if (sql[j] === '/' && sql[j + 1] === '*') {
+      depth += 1
+      j += 2
+    } else if (sql[j] === '*' && sql[j + 1] === '/') {
+      depth -= 1
+      j += 2
+      if (depth === 0) return j
+    } else {
+      j += 1
+    }
+  }
+  return -1
+}
+
+/**
+ * True when a comment, quote or dollar-quoted body is never closed. The
+ * classifier and the server can disagree about where such text ends, so a
+ * statement like that is not trusted to be read correctly.
+ */
+export function hasUnterminatedSql(sql: string, engine: DatabaseEngine = 'postgres'): boolean {
+  return segmentSqlChecked(sql, engine).unterminated
 }
 
 /** Cuts SQL into code, comments, string literals, quoted identifiers and dollar-quoted bodies. */
 function segmentSql(sql: string, engine: DatabaseEngine): Segment[] {
+  return segmentSqlChecked(sql, engine).segments
+}
+
+function segmentSqlChecked(sql: string, engine: DatabaseEngine): { segments: Segment[]; unterminated: boolean } {
   const out: Segment[] = []
+  let unterminated = false
   let codeStart = 0
   let i = 0
   while (i < sql.length) {
@@ -92,19 +126,30 @@ function segmentSql(sql: string, engine: DatabaseEngine): Segment[] {
       end = newline === -1 ? sql.length : newline
       kind = 'comment'
     } else if (ch === '/' && next === '*') {
-      const close = sql.indexOf('*/', i + 2)
-      end = close === -1 ? sql.length : close + 2
+      // Postgres block comments nest; the other engines end at the first `*/`.
+      if (engine === 'postgres') {
+        const close = nestedCommentEnd(sql, i)
+        if (close === -1) unterminated = true
+        end = close === -1 ? sql.length : close
+      } else {
+        const close = sql.indexOf('*/', i + 2)
+        if (close === -1) unterminated = true
+        end = close === -1 ? sql.length : close + 2
+      }
       kind = 'comment'
     } else if (ch === "'" || ch === '"' || ch === '`' || (ch === '[' && engine === 'sqlite')) {
       // MySQL strings honour backslash escapes; so do Postgres E'…' strings.
       const escapeString = ch === "'" && /[Ee]/.test(sql[i - 1] ?? '') && !/[\w$]/.test(sql[i - 2] ?? '')
       const backslash = (engine === 'mysql' && ch !== '`') || escapeString
-      end = quotedEnd(sql, i, ch === '[' ? ']' : ch, backslash) + 1
+      const closed = quotedEnd(sql, i, ch === '[' ? ']' : ch, backslash)
+      if (closed === -1) unterminated = true
+      end = closed === -1 ? sql.length : closed + 1
       kind = ch === "'" || (ch === '"' && engine === 'mysql') ? 'string' : 'identifier'
     } else if (ch === '$' && engine === 'postgres' && !/[\w$]/.test(sql[i - 1] ?? '')) {
       const tag = DOLLAR_TAG.exec(sql.slice(i, i + 66))?.[0]
       if (tag) {
         const close = sql.indexOf(tag, i + tag.length)
+        if (close === -1) unterminated = true
         end = close === -1 ? sql.length : close + tag.length
         kind = 'dollar'
       }
@@ -120,7 +165,7 @@ function segmentSql(sql: string, engine: DatabaseEngine): Segment[] {
     codeStart = i
   }
   if (sql.length > codeStart) out.push({ kind: 'code', start: codeStart, end: sql.length })
-  return out
+  return { segments: out, unterminated }
 }
 
 function unquoteIdentifier(text: string): string {
@@ -379,12 +424,14 @@ export function reachesHost(statement: string, engine: DatabaseEngine = 'postgre
 
 /** The band of one statement, in its original text. */
 export function classifyRawStatement(statement: string, engine: DatabaseEngine = 'postgres'): SqlClass {
-  if (reachesHost(statement, engine)) return 'host'
+  // Fail closed: text this classifier cannot read to the end is treated like host access.
+  if (hasUnterminatedSql(statement, engine) || reachesHost(statement, engine)) return 'host'
   const masked = normalized(statement, engine)
   return worstClass([classifyStatement(masked), callEffect(masked)])
 }
 
 export function classifySql(sql: string, engine: DatabaseEngine = 'postgres'): SqlClass {
+  if (hasUnterminatedSql(sql, engine)) return 'host'
   const statements = splitSqlText(sql, engine)
   if (statements.length === 0) return 'read'
   return worstClass(statements.map((statement) => classifyRawStatement(statement, engine)))

@@ -300,9 +300,16 @@ Hard requirements:
 Write the file with your file tools, then stop. Do not write anything else.`
 }
 
+/**
+ * The draft is one file whose whole content is in the prompt's evidence, so
+ * the builder gets only write_file and stops once it lands. With the full
+ * builder tool set every step re-sent ~9k tokens of tool definitions, and it
+ * took about five steps per draft: on 2026-10-01 these drafts were 49 of the
+ * day's 127 model calls.
+ */
 async function draftToStagingFile(prompt: string, stagingFile: string): Promise<void> {
-  const { runSubAgent } = await import('../subagent.ts')
-  await runSubAgent({ role: 'builder', name: 'builder#instruction-skill', prompt })
+  const [{ runSubAgent }, { writeFileTool }] = await Promise.all([import('../subagent.ts'), import('../tools/writeFile.ts')])
+  await runSubAgent({ role: 'builder', name: 'builder#instruction-skill', prompt, tools: [writeFileTool], finishAfterTool: writeFileTool.name })
 }
 
 // --- Create / revise ---------------------------------------------------------
@@ -317,7 +324,27 @@ export interface SkillStorageOptions {
   root?: string
   stagingDir?: string
   quarantineDir?: string
+  /** Replaces the builder subagent that writes the draft — tests only, so no test spends a model call. */
+  draft?: (prompt: string, stagingFile: string) => Promise<void>
+  /** How soon after its last revision a skill may be rewritten again (default `MIN_REVISION_INTERVAL_MS`). */
+  minRevisionIntervalMs?: number
 }
+
+/**
+ * A skill is rewritten at most this often. Lessons cross the trust bar and
+ * back as their evidence moves, and each crossing was a full rewrite: the
+ * elia-development-workflow skill went v15, v16, v17 inside 50 seconds, "8
+ * source lessons retired" each time, with "2 new" in between. Waiting batches
+ * those swings into one rewrite of what has settled.
+ */
+export const MIN_REVISION_INTERVAL_MS = 30 * 60_000
+
+/**
+ * The pass in flight, if any. Every finished turn starts one in the background;
+ * two turns seconds apart both read v19 and both wrote "v20" (session
+ * muo052t5, 2026-09-30), two model calls for one revision.
+ */
+let evolutionInFlight: Promise<string[]> | undefined
 
 export async function createInstructionSkill(cluster: LessonEvidence[], options: SkillStorageOptions = {}): Promise<SkillEvolutionResult> {
   const root = options.root ?? INSTRUCTION_SKILLS_ROOT
@@ -326,7 +353,7 @@ export async function createInstructionSkill(cluster: LessonEvidence[], options:
   mkdirSync(stagingDir, { recursive: true })
   const stagingFile = join(stagingDir, `${Date.now()}-new.md`)
   try {
-    await draftToStagingFile(createPrompt(cluster, stagingFile), stagingFile)
+    await (options.draft ?? draftToStagingFile)(createPrompt(cluster, stagingFile), stagingFile)
   } catch (err) {
     return { ok: false, detail: `drafting a new skill failed: ${err instanceof Error ? err.message : String(err)}` }
   }
@@ -362,11 +389,19 @@ export async function createInstructionSkill(cluster: LessonEvidence[], options:
   return { ok: true, detail: `created skill "${slug}" from ${cluster.length} certified lessons`, slug }
 }
 
+/**
+ * `retiredKeys` are source lessons the revision has just re-derived the skill
+ * without. They must leave `sourceLessonKeys` once the rewrite lands, or the
+ * next pass still finds them "lost" and rewrites the same skill again — a paid
+ * subagent call on every turn (`elia-development-workflow` went v14→v17 in
+ * four turns, each time retiring the same 8 lessons).
+ */
 export async function reviseInstructionSkill(
   slug: string,
   newEvidence: LessonEvidence[],
   reason: string,
   options: SkillStorageOptions = {},
+  retiredKeys: readonly string[] = [],
 ): Promise<SkillEvolutionResult> {
   const root = options.root ?? INSTRUCTION_SKILLS_ROOT
   const stagingDir = options.stagingDir ?? INSTRUCTION_SKILL_STAGING_DIR
@@ -377,7 +412,7 @@ export async function reviseInstructionSkill(
   mkdirSync(stagingDir, { recursive: true })
   const stagingFile = join(stagingDir, `${Date.now()}-${slug}-revision.md`)
   try {
-    await draftToStagingFile(revisePrompt(currentContent, newEvidence, reason, stagingFile), stagingFile)
+    await (options.draft ?? draftToStagingFile)(revisePrompt(currentContent, newEvidence, reason, stagingFile), stagingFile)
   } catch (err) {
     return { ok: false, detail: `revising "${slug}" failed: ${err instanceof Error ? err.message : String(err)}` }
   }
@@ -401,7 +436,7 @@ export async function reviseInstructionSkill(
       name: validation.name ?? meta.name,
       version: nextVersion,
       updatedAt: Date.now(),
-      sourceLessonKeys: [...new Set([...meta.sourceLessonKeys, ...newEvidence.map((item) => item.key)])],
+      sourceLessonKeys: [...new Set([...meta.sourceLessonKeys.filter((key) => !retiredKeys.includes(key)), ...newEvidence.map((item) => item.key)])],
       history: [...meta.history, { version: nextVersion, at: Date.now(), reason }],
     },
     root,
@@ -453,6 +488,17 @@ export function relatesToSkill(candidate: LessonEvidence, meta: InstructionSkill
  * fail one.
  */
 export async function evolveInstructionSkills(lessonsPath = paths.lessons, options: SkillStorageOptions = {}): Promise<string[]> {
+  // A pass already running will see the same lessons; a second one only races it.
+  if (evolutionInFlight) return []
+  evolutionInFlight = evolveInstructionSkillsOnce(lessonsPath, options)
+  try {
+    return await evolutionInFlight
+  } finally {
+    evolutionInFlight = undefined
+  }
+}
+
+async function evolveInstructionSkillsOnce(lessonsPath: string, options: SkillStorageOptions): Promise<string[]> {
   const root = options.root ?? INSTRUCTION_SKILLS_ROOT
   const log: string[] = []
   try {
@@ -470,6 +516,7 @@ export async function evolveInstructionSkills(lessonsPath = paths.lessons, optio
       if (revisions >= MAX_REVISIONS_PER_PASS) break
       const meta = readSkillMeta(slug, root)
       if (!meta) continue
+      if (Date.now() - meta.updatedAt < (options.minRevisionIntervalMs ?? MIN_REVISION_INTERVAL_MS)) continue
       const known = new Set(meta.sourceLessonKeys)
       const currentKeys = new Set(evidence.map((item) => item.key))
       const added = evidence.filter((item) => !known.has(item.key) && relatesToSkill(item, meta, evidenceByKey))
@@ -479,8 +526,9 @@ export async function evolveInstructionSkills(lessonsPath = paths.lessons, optio
         revisions++
       } else if (lost.length > 0) {
         log.push(
-          (await reviseInstructionSkill(slug, [], `${lost.length} source lesson(s) were retired for not holding up — re-derived from what remains`, options))
-            .detail,
+          (
+            await reviseInstructionSkill(slug, [], `${lost.length} source lesson(s) were retired for not holding up — re-derived from what remains`, options, lost)
+          ).detail,
         )
         revisions++
       }
