@@ -39,9 +39,20 @@ pub struct Probe {
 /// Whether a docker daemon answers, and what it is.
 pub fn probe() -> Probe {
     let Some(docker) = find_docker() else {
-        return Probe { available: false, reason: Some("docker is not installed".into()), server: None };
+        return Probe {
+            available: false,
+            reason: Some("docker is not installed".into()),
+            server: None,
+        };
     };
-    match Command::new(&docker).args(["version", "--format", "{{.Server.Os}}/{{.Server.Arch}} {{.Server.Version}}"]).output() {
+    match Command::new(&docker)
+        .args([
+            "version",
+            "--format",
+            "{{.Server.Os}}/{{.Server.Arch}} {{.Server.Version}}",
+        ])
+        .output()
+    {
         Ok(o) if o.status.success() => Probe {
             available: true,
             reason: None,
@@ -49,10 +60,20 @@ pub fn probe() -> Probe {
         },
         Ok(o) => Probe {
             available: false,
-            reason: Some(String::from_utf8_lossy(&o.stderr).lines().next().unwrap_or("docker daemon not reachable").to_string()),
+            reason: Some(
+                String::from_utf8_lossy(&o.stderr)
+                    .lines()
+                    .next()
+                    .unwrap_or("docker daemon not reachable")
+                    .to_string(),
+            ),
             server: None,
         },
-        Err(e) => Probe { available: false, reason: Some(e.to_string()), server: None },
+        Err(e) => Probe {
+            available: false,
+            reason: Some(e.to_string()),
+            server: None,
+        },
     }
 }
 
@@ -80,13 +101,23 @@ pub fn command(
     let l = &policy.limits;
     let mut c = Command::new(docker);
     c.args(["run", "--name", name, "--pull", "never", "--init"]);
-    c.args(["--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--read-only"]);
+    c.args([
+        "--cap-drop",
+        "ALL",
+        "--security-opt",
+        "no-new-privileges",
+        "--read-only",
+    ]);
     c.arg("--tmpfs").arg("/tmp:rw,nosuid,nodev,size=512m");
     c.arg("--memory").arg(format!("{}m", l.memory_mb));
     c.arg("--memory-swap").arg(format!("{}m", l.memory_mb));
     c.arg("--pids-limit").arg(l.pids.to_string());
-    c.arg("--ulimit").arg(format!("fsize={0}:{0}", l.file_size_mb.saturating_mul(1024 * 1024)));
-    c.arg("--ulimit").arg(format!("nofile={0}:{0}", l.open_files));
+    c.arg("--ulimit").arg(format!(
+        "fsize={0}:{0}",
+        l.file_size_mb.saturating_mul(1024 * 1024)
+    ));
+    c.arg("--ulimit")
+        .arg(format!("nofile={0}:{0}", l.open_files));
     c.arg("--ulimit").arg("core=0:0");
     if let Some(cpu) = l.cpu_seconds {
         c.arg("--ulimit").arg(format!("cpu={cpu}:{cpu}"));
@@ -104,13 +135,15 @@ pub fn command(
         c.arg("--user").arg(format!("{uid}:{gid}"));
     }
     c.arg("--env-file").arg(env_file);
-    c.arg("-v").arg(format!("{}:{WORKDIR}:rw", run_dir.display()));
+    c.arg("-v")
+        .arg(format!("{}:{WORKDIR}:rw", run_dir.display()));
     // Control files inside the writable tree are re-mounted read-only over it. Only paths
     // that exist are mounted, since docker would otherwise create them on the host.
     for p in protected_paths(run_dir) {
         if let Ok(rel) = p.strip_prefix(run_dir) {
             if p.exists() {
-                c.arg("-v").arg(format!("{}:{WORKDIR}/{}:ro", p.display(), rel.display()));
+                c.arg("-v")
+                    .arg(format!("{}:{WORKDIR}/{}:ro", p.display(), rel.display()));
             }
         }
     }
@@ -138,7 +171,10 @@ pub fn inspect(docker: &Path, name: &str) -> Option<Inspect> {
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
     let st = v.get(0)?.get("State")?;
     Some(Inspect {
-        oom_killed: st.get("OOMKilled").and_then(|b| b.as_bool()).unwrap_or(false),
+        oom_killed: st
+            .get("OOMKilled")
+            .and_then(|b| b.as_bool())
+            .unwrap_or(false),
     })
 }
 

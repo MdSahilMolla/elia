@@ -160,7 +160,8 @@ test('a spawned server gets a minimal environment, not elia\'s provider keys or 
     expect(await read('ANTHROPIC_API_KEY_TEST_SENTINEL')).toBeNull()
     expect(await read('ELIA_TEST_SENTINEL')).toBeNull()
     expect(await read('EXPLICIT_FROM_CONFIG')).toBe('yes')
-    expect(await read('PATH')).toBe(process.env.PATH ?? null)
+    // Windows stores the variable as `Path`, so accept either spelling.
+    expect(await read('PATH')).toBe(process.env.PATH ?? process.env.Path ?? null)
   } finally {
     delete process.env.ANTHROPIC_API_KEY_TEST_SENTINEL
     delete process.env.ELIA_TEST_SENTINEL

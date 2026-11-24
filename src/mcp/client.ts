@@ -38,7 +38,9 @@ function swallow(result: unknown, scope: string, context?: Record<string, unknow
  * whatever the server's own `env` block asks for explicitly.
  */
 const MCP_ENV_ALLOWLIST = new Set([
-  'PATH', 'HOME', 'USER', 'LOGNAME', 'SHELL', 'LANG', 'LANGUAGE', 'TMPDIR', 'TMP', 'TEMP', 'TERM', 'COLORTERM', 'TZ',
+  // Windows stores this one as `Path`, so match both spellings or the child is
+  // spawned without a usable PATH and cannot resolve any executable.
+  'PATH', 'Path', 'HOME', 'USER', 'LOGNAME', 'SHELL', 'LANG', 'LANGUAGE', 'TMPDIR', 'TMP', 'TEMP', 'TERM', 'COLORTERM', 'TZ',
   'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'NO_PROXY', 'http_proxy', 'https_proxy', 'all_proxy', 'no_proxy',
   'SSL_CERT_FILE', 'SSL_CERT_DIR', 'NODE_EXTRA_CA_CERTS', 'NODE_PATH', 'BUN_INSTALL', 'NVM_DIR', 'VOLTA_HOME', 'PNPM_HOME',
   'NPM_CONFIG_REGISTRY', 'NPM_CONFIG_CACHE', 'NPM_CONFIG_PREFIX', 'UV_CACHE_DIR', 'PIPX_HOME',

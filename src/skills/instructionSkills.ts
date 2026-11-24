@@ -307,7 +307,7 @@ Write the file with your file tools, then stop. Do not write anything else.`
  * took about five steps per draft: on 2026-10-01 these drafts were 49 of the
  * day's 127 model calls.
  */
-async function draftToStagingFile(prompt: string, stagingFile: string): Promise<void> {
+async function draftToStagingFile(prompt: string, _stagingFile: string): Promise<void> {
   const [{ runSubAgent }, { writeFileTool }] = await Promise.all([import('../subagent.ts'), import('../tools/writeFile.ts')])
   await runSubAgent({ role: 'builder', name: 'builder#instruction-skill', prompt, tools: [writeFileTool], finishAfterTool: writeFileTool.name })
 }

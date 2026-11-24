@@ -14,7 +14,11 @@ use std::path::{Path, PathBuf};
 /// call, and `.elia` holds elia's own trust state. A run may read them but never
 /// change them, so a writable tree is not a way to plant code outside the box.
 pub fn protected_paths(run_dir: &Path) -> Vec<PathBuf> {
-    vec![run_dir.join(".git").join("hooks"), run_dir.join(".git").join("config"), run_dir.join(".elia")]
+    vec![
+        run_dir.join(".git").join("hooks"),
+        run_dir.join(".git").join("config"),
+        run_dir.join(".elia"),
+    ]
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -181,7 +185,11 @@ impl Policy {
             }
         }
         for host in &self.network.allow {
-            if host.is_empty() || host.contains('/') || host.contains(':') || host.contains(char::is_whitespace) {
+            if host.is_empty()
+                || host.contains('/')
+                || host.contains(':')
+                || host.contains(char::is_whitespace)
+            {
                 bail!("network.allow entries are host patterns like example.com or *.example.com, got {host:?}");
             }
         }
@@ -192,7 +200,12 @@ impl Policy {
             bail!("network.mode \"brokered\" needs at least one network.allow host; use \"none\" to deny everything");
         }
         let l = &self.limits;
-        if l.wall_ms == 0 || l.memory_mb == 0 || l.pids == 0 || l.open_files == 0 || l.file_size_mb == 0 {
+        if l.wall_ms == 0
+            || l.memory_mb == 0
+            || l.pids == 0
+            || l.open_files == 0
+            || l.file_size_mb == 0
+        {
             bail!("limits must be positive");
         }
         Ok(self)
@@ -216,7 +229,9 @@ fn canonical_dir(p: &Path, what: &str) -> Result<PathBuf> {
 }
 
 fn reject_control_chars(p: &Path, what: &str) -> Result<()> {
-    let s = p.to_str().ok_or_else(|| anyhow!("{what} path is not valid UTF-8"))?;
+    let s = p
+        .to_str()
+        .ok_or_else(|| anyhow!("{what} path is not valid UTF-8"))?;
     if s.chars().any(|c| c.is_control()) {
         bail!("{what} path contains a control character");
     }
@@ -231,7 +246,10 @@ fn refuse_too_broad(p: &Path, what: &str) -> Result<()> {
     }
     if let Some(home) = std::env::var_os("HOME").and_then(|h| std::fs::canonicalize(h).ok()) {
         if home.starts_with(p) {
-            bail!("{what} {} contains the home directory; choose a project directory", p.display());
+            bail!(
+                "{what} {} contains the home directory; choose a project directory",
+                p.display()
+            );
         }
     }
     Ok(())
@@ -258,7 +276,10 @@ mod tests {
     #[test]
     fn partial_limits_keep_the_other_defaults() {
         let dir = std::env::temp_dir();
-        let json = format!(r#"{{"workspace":"{}","limits":{{"wallMs":5}}}}"#, dir.display());
+        let json = format!(
+            r#"{{"workspace":"{}","limits":{{"wallMs":5}}}}"#,
+            dir.display()
+        );
         let p = Policy::parse(&json).unwrap();
         assert_eq!(p.limits.wall_ms, 5);
         assert_eq!(p.limits.memory_mb, Limits::default().memory_mb);
@@ -268,37 +289,82 @@ mod tests {
     fn unknown_fields_are_rejected() {
         let dir = std::env::temp_dir();
         let json = format!(r#"{{"workspace":"{}","netwrok":{{}}}}"#, dir.display());
-        assert!(Policy::parse(&json).is_err(), "a typo must not silently mean 'no restriction'");
+        assert!(
+            Policy::parse(&json).is_err(),
+            "a typo must not silently mean 'no restriction'"
+        );
     }
 
     #[test]
     fn broad_roots_are_refused() {
-        assert!(Policy::parse(r#"{"workspace":"/"}"#).unwrap().resolve().is_err());
+        assert!(Policy::parse(r#"{"workspace":"/"}"#)
+            .unwrap()
+            .resolve()
+            .is_err());
         if let Some(home) = std::env::var_os("HOME") {
-            let json = format!(r#"{{"workspace":{}}}"#, serde_json::to_string(&home.to_string_lossy()).unwrap());
-            assert!(Policy::parse(&json).unwrap().resolve().is_err(), "HOME is too broad");
+            let json = format!(
+                r#"{{"workspace":{}}}"#,
+                serde_json::to_string(&home.to_string_lossy()).unwrap()
+            );
+            assert!(
+                Policy::parse(&json).unwrap().resolve().is_err(),
+                "HOME is too broad"
+            );
             let parent = Path::new(&home).parent().unwrap();
-            let json = format!(r#"{{"workspace":{}}}"#, serde_json::to_string(&parent.to_string_lossy()).unwrap());
-            assert!(Policy::parse(&json).unwrap().resolve().is_err(), "an ancestor of HOME is too broad");
+            let json = format!(
+                r#"{{"workspace":{}}}"#,
+                serde_json::to_string(&parent.to_string_lossy()).unwrap()
+            );
+            assert!(
+                Policy::parse(&json).unwrap().resolve().is_err(),
+                "an ancestor of HOME is too broad"
+            );
         }
     }
 
     #[test]
     fn network_rules_are_consistent() {
         let ws = std::env::temp_dir().canonicalize().unwrap();
-        let mk = |net: &str| Policy::parse(&format!(r#"{{"workspace":"{}","network":{}}}"#, ws.display(), net));
-        assert!(mk(r#"{"mode":"brokered"}"#).unwrap().resolve().is_err(), "brokered with no hosts");
-        assert!(mk(r#"{"mode":"none","allow":["a.com"]}"#).unwrap().resolve().is_err(), "allow without brokered");
-        assert!(mk(r#"{"mode":"brokered","allow":["https://a.com"]}"#).unwrap().resolve().is_err());
-        assert!(mk(r#"{"mode":"brokered","allow":["*.pypi.org"]}"#).unwrap().resolve().is_ok());
+        let mk = |net: &str| {
+            Policy::parse(&format!(
+                r#"{{"workspace":"{}","network":{}}}"#,
+                ws.display(),
+                net
+            ))
+        };
+        assert!(
+            mk(r#"{"mode":"brokered"}"#).unwrap().resolve().is_err(),
+            "brokered with no hosts"
+        );
+        assert!(
+            mk(r#"{"mode":"none","allow":["a.com"]}"#)
+                .unwrap()
+                .resolve()
+                .is_err(),
+            "allow without brokered"
+        );
+        assert!(mk(r#"{"mode":"brokered","allow":["https://a.com"]}"#)
+            .unwrap()
+            .resolve()
+            .is_err());
+        assert!(mk(r#"{"mode":"brokered","allow":["*.pypi.org"]}"#)
+            .unwrap()
+            .resolve()
+            .is_ok());
     }
 
     #[test]
     fn relative_and_missing_paths_are_refused() {
         let ws = std::env::temp_dir().canonicalize().unwrap();
-        let json = format!(r#"{{"workspace":"{}","readPaths":["relative/dir"]}}"#, ws.display());
+        let json = format!(
+            r#"{{"workspace":"{}","readPaths":["relative/dir"]}}"#,
+            ws.display()
+        );
         assert!(Policy::parse(&json).unwrap().resolve().is_err());
-        let json = format!(r#"{{"workspace":"{}","readPaths":["/definitely/not/here"]}}"#, ws.display());
+        let json = format!(
+            r#"{{"workspace":"{}","readPaths":["/definitely/not/here"]}}"#,
+            ws.display()
+        );
         assert!(Policy::parse(&json).unwrap().resolve().is_err());
     }
 }

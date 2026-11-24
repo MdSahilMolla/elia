@@ -1439,8 +1439,9 @@ describe('the project’s own program', () => {
       'python3 tools/report.py --out report.md',
       'python tools/report.py',
       'bash scripts/check.sh',
-      './scripts/check.sh',
-      'scripts/check.sh',
+      // cmd.exe does not run a `.sh` file directly, and the governor refuses
+      // the bare-path form on Windows for exactly that reason.
+      ...(process.platform === 'win32' ? [] : ['./scripts/check.sh', 'scripts/check.sh']),
       'npm run notes',
       'npm run notes -- add "Test note"',
       'bun run notes',
@@ -1536,7 +1537,10 @@ describe('the project’s own program', () => {
     expect(run('node bin/notes.js list | cat').intent).toBe('shell.composed')
     expect(run('node bin/notes.js $(whoami)').intent).toBe('shell.composed')
     expect(run('sudo node bin/notes.js').risk).toBe('critical')
-    for (const command of ['node bin/notes.js *', 'node bin/notes.js {a,b}', 'FOO=1 node bin/notes.js', 'node bin/notes.js \\x', 'node bin/notes.js "unterminated']) {
+    // Globs and braces are refused because a POSIX shell expands them; cmd.exe
+    // passes them through literally, so they are ordinary local arguments there.
+    const shellExpansion = process.platform === 'win32' ? [] : ['node bin/notes.js *', 'node bin/notes.js {a,b}']
+    for (const command of [...shellExpansion, 'FOO=1 node bin/notes.js', 'node bin/notes.js \\x', 'node bin/notes.js "unterminated']) {
       expect(run(command).risk, command).toBe('critical')
     }
   })

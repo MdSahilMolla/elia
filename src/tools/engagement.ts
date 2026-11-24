@@ -142,7 +142,6 @@ export const newEngagementTool: Tool = {
       values[key] = value.trim()
     }
     const slug = slugify(values.slug)
-    const recordedAt = new Date().toISOString()
     const dir = await writeEngagementScaffold({ ...values, slug }, paths.workspace)
 
     return `Scaffolded engagement "${slug}" at ${dir}

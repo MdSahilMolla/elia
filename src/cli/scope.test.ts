@@ -6,7 +6,7 @@ import { scopeCommand } from './scope.ts'
 import { isAllowlisted, clearAllowCache } from '../autonomy/allowStore.ts'
 import { assessAction, createActionGovernor } from '../autonomy/governor.ts'
 import { clearPreauthCaches, grantPreauth, isPreauthorized } from '../autonomy/preauth.ts'
-import { activeMode, setActiveMode } from '../autonomy/mode.ts'
+import { setActiveMode } from '../autonomy/mode.ts'
 
 /**
  * `/scope all` writes to the real global allow path and the real preauth store

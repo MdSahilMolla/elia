@@ -126,7 +126,7 @@ describe('flag_verify: malformed and format handling', () => {
 
 describe('flag_verify: optional engagement recording', () => {
   test('a scaffolded engagement records the verdict to recon/flag-verification.jsonl', async () => {
-    const dir = sandbox('flagverify-engagement')
+    sandbox('flagverify-engagement')
     const slug = 'flagverify-lab'
     mkdirSync(join(engagementDir(slug), 'recon'), { recursive: true })
     writeFileSync(join(engagementDir(slug), 'SCOPE.md'), '# scope\n')
@@ -142,7 +142,7 @@ describe('flag_verify: optional engagement recording', () => {
   })
 
   test('recording appends rather than overwriting a previous verdict', async () => {
-    const dir = sandbox('flagverify-append')
+    sandbox('flagverify-append')
     const slug = 'flagverify-append-lab'
     mkdirSync(join(engagementDir(slug), 'recon'), { recursive: true })
     writeFileSync(join(engagementDir(slug), 'SCOPE.md'), '# scope\n')

@@ -16,7 +16,7 @@
  * this single-threaded runtime.
  */
 
-import { lstatSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { lstatSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import { hostname as osHostname } from 'node:os'
 import { dirname } from 'node:path'

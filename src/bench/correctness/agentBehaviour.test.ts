@@ -561,6 +561,10 @@ function repoWithNestedClone(at: string, nested: string): void {
   git(['add', '-A'])
   git(['commit', '-q', '-m', 'host'])
   git(['clone', '-q', source, join(at, nested)])
+  // A fresh clone has no identity; the github tool commits with the clone's own
+  // config, so give it one the way a real contributor's checkout would have.
+  git(['config', 'user.email', 't@t.local'], join(at, nested))
+  git(['config', 'user.name', 't'], join(at, nested))
 }
 
 function gitIn(cwd: string, args: string[]): string {

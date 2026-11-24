@@ -17,11 +17,17 @@ pub fn canonical(v: &Value) -> String {
 }
 
 fn hex_to_bytes(h: &str) -> Vec<u8> {
-    (0..h.len() / 2).filter_map(|i| u8::from_str_radix(&h[2 * i..2 * i + 2], 16).ok()).collect()
+    (0..h.len() / 2)
+        .filter_map(|i| u8::from_str_radix(&h[2 * i..2 * i + 2], 16).ok())
+        .collect()
 }
 
 pub fn hmac_sha256_hex(key: &[u8], msg: &[u8]) -> String {
-    let mut k = if key.len() > 64 { hex_to_bytes(&sha256_hex(key)) } else { key.to_vec() };
+    let mut k = if key.len() > 64 {
+        hex_to_bytes(&sha256_hex(key))
+    } else {
+        key.to_vec()
+    };
     k.resize(64, 0);
     let mut inner: Vec<u8> = k.iter().map(|b| b ^ 0x36).collect();
     inner.extend_from_slice(msg);
@@ -36,7 +42,10 @@ pub fn seal(mut body: Value, key: Option<&[u8]>) -> Value {
     let obj = body.as_object_mut().expect("receipt is an object");
     obj.insert("receiptHash".into(), json!(sha256_hex(text.as_bytes())));
     if let Some(k) = key {
-        obj.insert("receiptMac".into(), json!(hmac_sha256_hex(k, text.as_bytes())));
+        obj.insert(
+            "receiptMac".into(),
+            json!(hmac_sha256_hex(k, text.as_bytes())),
+        );
     }
     body
 }
@@ -51,12 +60,19 @@ pub enum Verdict {
 }
 
 pub fn verify(receipt: &Value, key: Option<&[u8]>) -> Verdict {
-    let Some(obj) = receipt.as_object() else { return Verdict::Bad("not an object".into()) };
+    let Some(obj) = receipt.as_object() else {
+        return Verdict::Bad("not an object".into());
+    };
     let mut body = obj.clone();
-    let Some(hash) = body.remove("receiptHash").and_then(|h| h.as_str().map(String::from)) else {
+    let Some(hash) = body
+        .remove("receiptHash")
+        .and_then(|h| h.as_str().map(String::from))
+    else {
         return Verdict::Bad("no receiptHash".into());
     };
-    let mac = body.remove("receiptMac").and_then(|h| h.as_str().map(String::from));
+    let mac = body
+        .remove("receiptMac")
+        .and_then(|h| h.as_str().map(String::from));
     let text = canonical(&Value::Object(body));
     if sha256_hex(text.as_bytes()) != hash {
         return Verdict::Bad("receiptHash does not match the contents".into());
@@ -65,7 +81,9 @@ pub fn verify(receipt: &Value, key: Option<&[u8]>) -> Verdict {
         (Some(m), Some(k)) if hmac_sha256_hex(k, text.as_bytes()) == m => Verdict::MacOk,
         (Some(_), Some(_)) => Verdict::Bad("receiptMac does not verify under this key".into()),
         (Some(_), None) => Verdict::HashOk,
-        (None, Some(_)) => Verdict::Bad("a key was supplied but the receipt carries no receiptMac".into()),
+        (None, Some(_)) => {
+            Verdict::Bad("a key was supplied but the receipt carries no receiptMac".into())
+        }
         (None, None) => Verdict::HashOk,
     }
 }
@@ -85,7 +103,12 @@ pub fn rfc3339(t: SystemTime) -> String {
     let day = doy - (153 * mp + 2) / 5 + 1;
     let month = if mp < 10 { mp + 3 } else { mp - 9 };
     let year = yoe + era * 400 + i64::from(month <= 2);
-    format!("{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}.{ms:03}Z", rem / 3600, rem % 3600 / 60, rem % 60)
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}.{ms:03}Z",
+        rem / 3600,
+        rem % 3600 / 60,
+        rem % 60
+    )
 }
 
 #[cfg(test)]
@@ -101,7 +124,10 @@ mod tests {
         );
         // RFC 4231 test case 6: a key longer than the block size
         assert_eq!(
-            hmac_sha256_hex(&[0xaa; 131], b"Test Using Larger Than Block-Size Key - Hash Key First"),
+            hmac_sha256_hex(
+                &[0xaa; 131],
+                b"Test Using Larger Than Block-Size Key - Hash Key First"
+            ),
             "60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54"
         );
     }
@@ -131,6 +157,9 @@ mod tests {
     #[test]
     fn timestamps_format() {
         assert_eq!(rfc3339(UNIX_EPOCH), "1970-01-01T00:00:00.000Z");
-        assert_eq!(rfc3339(UNIX_EPOCH + std::time::Duration::from_millis(1_709_210_096_789)), "2024-02-29T12:34:56.789Z");
+        assert_eq!(
+            rfc3339(UNIX_EPOCH + std::time::Duration::from_millis(1_709_210_096_789)),
+            "2024-02-29T12:34:56.789Z"
+        );
     }
 }

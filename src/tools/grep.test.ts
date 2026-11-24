@@ -91,7 +91,10 @@ test('the JS fallback does not follow a symlink out of the workspace', async () 
     symlinkSync(outside, join(dir, 'linked-dir'))
 
     const result = await searchWithJs('needle', dir, 'dir', undefined, undefined)
-    expect(result).toContain('src/real.txt')
+    // Bun.Glob yields OS-native separators (backslashes on Windows) while the
+    // other grep backends normalise to slashes; compare on a normalised copy.
+    const normalized = result.replaceAll('\\', '/')
+    expect(normalized).toContain('src/real.txt')
     expect(result).not.toContain('outside file')
     expect(result).not.toContain('link.txt')
 
