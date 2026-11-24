@@ -170,13 +170,23 @@ mod tests {
         let path = path.to_str().unwrap();
 
         let first = load_or_create(path).unwrap();
-        assert_eq!(fs::metadata(path).unwrap().permissions().mode() & 0o777, 0o600);
-        assert_eq!(load_or_create(path).unwrap(), first, "a private token is reused");
+        assert_eq!(
+            fs::metadata(path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(
+            load_or_create(path).unwrap(),
+            first,
+            "a private token is reused"
+        );
 
         fs::set_permissions(path, fs::Permissions::from_mode(0o644)).unwrap();
         let second = load_or_create(path).unwrap();
         assert_ne!(second, first, "a readable token file is not trusted");
-        assert_eq!(fs::metadata(path).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(
+            fs::metadata(path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 

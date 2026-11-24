@@ -1,6 +1,6 @@
 import { afterEach, expect, test } from 'bun:test'
 import { askUserTool, setOperatorPrompt } from './askUser.ts'
-import { activeMode, setActiveMode } from '../autonomy/mode.ts'
+import { setActiveMode } from '../autonomy/mode.ts'
 import { spendCeilingUsd } from '../spendLimit.ts'
 
 /**

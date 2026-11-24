@@ -95,11 +95,13 @@ describe('git-backed trends (real git, argv runner)', () => {
     mkdirSync(join(root, 'src'))
     writeFileSync(join(root, 'src', 'grow.ts'), 'export const a = 1\n')
     await runner(['add', '.'])
-    expect(await commitAt('2026-09-01T12:00:00', 'initial')).toBe(0)
+    // The frequency trend looks back over the last `days` days, so the commits
+    // have to sit inside that window however long after this test was written.
+    expect(await commitAt(new Date(Date.now() - 20 * 86_400_000).toISOString(), 'initial')).toBe(0)
     writeFileSync(join(root, 'src', 'grow.ts'), Array.from({ length: 100 }, (_, i) => `export const v${i} = ${i}\n`).join(''))
     writeFileSync(join(root, 'src', 'other.ts'), 'export const b = 2\n')
     await runner(['add', '.'])
-    expect(await commitAt('2026-09-05T12:00:00', 'grow')).toBe(0)
+    expect(await commitAt(new Date(Date.now() - 10 * 86_400_000).toISOString(), 'grow')).toBe(0)
   })
 
   afterAll(() => {

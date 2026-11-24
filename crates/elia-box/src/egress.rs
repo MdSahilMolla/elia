@@ -60,7 +60,11 @@ impl Broker {
         let addr = v["listening"].as_str().unwrap_or_default();
         let port = addr.rsplit(':').next().and_then(|p| p.parse::<u16>().ok());
         match port {
-            Some(port) => Ok(Broker { child, port, log: log.to_path_buf() }),
+            Some(port) => Ok(Broker {
+                child,
+                port,
+                log: log.to_path_buf(),
+            }),
             None => {
                 let _ = child.kill();
                 bail!("the egress broker reported an unusable address: {addr}")
@@ -85,7 +89,9 @@ fn summarize(log: &Path) -> Value {
     let (mut allowed, mut denied) = (0u64, 0u64);
     let mut events: Vec<Value> = Vec::new();
     for line in text.lines() {
-        let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
+        let Ok(v) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
         if v["allowed"].as_bool().unwrap_or(false) {
             allowed += 1;
         } else {

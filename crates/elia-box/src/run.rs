@@ -106,7 +106,10 @@ struct Proc {
 }
 
 fn ps_table() -> Option<HashMap<i32, Proc>> {
-    let out = Command::new("/bin/ps").args(["-axo", "pid=,ppid=,pgid=,rss="]).output().ok()?;
+    let out = Command::new("/bin/ps")
+        .args(["-axo", "pid=,ppid=,pgid=,rss="])
+        .output()
+        .ok()?;
     if !out.status.success() {
         return None;
     }
@@ -116,8 +119,17 @@ fn ps_table() -> Option<HashMap<i32, Proc>> {
         if f.len() < 4 {
             continue;
         }
-        if let (Ok(pid), Ok(ppid), Ok(pgid), Ok(rss)) = (f[0].parse(), f[1].parse(), f[2].parse(), f[3].parse()) {
-            table.insert(pid, Proc { ppid, pgid, rss_kb: rss });
+        if let (Ok(pid), Ok(ppid), Ok(pgid), Ok(rss)) =
+            (f[0].parse(), f[1].parse(), f[2].parse(), f[3].parse())
+        {
+            table.insert(
+                pid,
+                Proc {
+                    ppid,
+                    pgid,
+                    rss_kb: rss,
+                },
+            );
         }
     }
     Some(table)
@@ -161,20 +173,42 @@ pub struct SandboxProbe {
 fn sandboxed_members(probe: &SandboxProbe) -> Vec<i32> {
     use std::ffi::CString;
     extern "C" {
-        fn sandbox_check(pid: libc::c_int, operation: *const libc::c_char, filter_type: libc::c_int, ...) -> libc::c_int;
+        fn sandbox_check(
+            pid: libc::c_int,
+            operation: *const libc::c_char,
+            filter_type: libc::c_int,
+            ...
+        ) -> libc::c_int;
     }
     const FILTER_PATH: libc::c_int = 1;
     const NO_REPORT: libc::c_int = 0x4000_0000;
-    let (Ok(w), Ok(r)) = (CString::new(probe.allowed_write.as_str()), CString::new(probe.denied_read.as_str())) else { return vec![] };
-    let Some(table) = ps_table() else { return vec![] };
+    let (Ok(w), Ok(r)) = (
+        CString::new(probe.allowed_write.as_str()),
+        CString::new(probe.denied_read.as_str()),
+    ) else {
+        return vec![];
+    };
+    let Some(table) = ps_table() else {
+        return vec![];
+    };
     let me = std::process::id() as i32;
     table
         .keys()
         .copied()
         .filter(|pid| *pid != me && *pid > 1)
         .filter(|pid| unsafe {
-            sandbox_check(*pid, c"file-write-data".as_ptr(), FILTER_PATH | NO_REPORT, w.as_ptr()) == 0
-                && sandbox_check(*pid, c"file-read-data".as_ptr(), FILTER_PATH | NO_REPORT, r.as_ptr()) == 1
+            sandbox_check(
+                *pid,
+                c"file-write-data".as_ptr(),
+                FILTER_PATH | NO_REPORT,
+                w.as_ptr(),
+            ) == 0
+                && sandbox_check(
+                    *pid,
+                    c"file-read-data".as_ptr(),
+                    FILTER_PATH | NO_REPORT,
+                    r.as_ptr(),
+                ) == 1
         })
         .collect()
 }
@@ -210,8 +244,13 @@ fn kill_tree(root: i32, probe: Option<&SandboxProbe>) {
 
 fn user_process_count() -> Option<u64> {
     let uid = unsafe { libc::getuid() };
-    let out = Command::new("/bin/ps").args(["-U", &uid.to_string(), "-o", "pid="]).output().ok()?;
-    out.status.success().then(|| String::from_utf8_lossy(&out.stdout).lines().count() as u64)
+    let out = Command::new("/bin/ps")
+        .args(["-U", &uid.to_string(), "-o", "pid="])
+        .output()
+        .ok()?;
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).lines().count() as u64)
 }
 
 fn set_rlimit(resource: libc::c_int, want: u64) -> std::io::Result<()> {
@@ -221,7 +260,10 @@ fn set_rlimit(resource: libc::c_int, want: u64) -> std::io::Result<()> {
             return Err(std::io::Error::last_os_error());
         }
         let v = (want as libc::rlim_t).min(cur.rlim_max);
-        let lim = libc::rlimit { rlim_cur: v, rlim_max: v };
+        let lim = libc::rlimit {
+            rlim_cur: v,
+            rlim_max: v,
+        };
         if libc::setrlimit(resource, &lim) != 0 {
             return Err(std::io::Error::last_os_error());
         }
@@ -239,11 +281,28 @@ enum Why {
 
 pub fn run(spec: RunSpec) -> Result<Outcome> {
     install_signal_handlers();
-    let RunSpec { mut cmd, limits, watch_tree, apply_rlimits, on_kill, probe } = spec;
-    cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let RunSpec {
+        mut cmd,
+        limits,
+        watch_tree,
+        apply_rlimits,
+        on_kill,
+        probe,
+    } = spec;
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
 
-    let nproc_cap = if apply_rlimits { user_process_count().map(|n| n + limits.pids) } else { None };
-    let (cpu, fsize, nofile) = (limits.cpu_seconds, limits.file_size_mb.saturating_mul(1024 * 1024), limits.open_files);
+    let nproc_cap = if apply_rlimits {
+        user_process_count().map(|n| n + limits.pids)
+    } else {
+        None
+    };
+    let (cpu, fsize, nofile) = (
+        limits.cpu_seconds,
+        limits.file_size_mb.saturating_mul(1024 * 1024),
+        limits.open_files,
+    );
     unsafe {
         cmd.pre_exec(move || {
             if libc::setsid() < 0 {
@@ -265,7 +324,9 @@ pub fn run(spec: RunSpec) -> Result<Outcome> {
     }
 
     let started = Instant::now();
-    let mut child = cmd.spawn().map_err(|e| anyhow!("could not start the sandboxed command: {e}"))?;
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| anyhow!("could not start the sandboxed command: {e}"))?;
     let pid = child.id() as i32;
     let out = capture(child.stdout.take().expect("piped"), limits.output_bytes);
     let err = capture(child.stderr.take().expect("piped"), limits.output_bytes);
@@ -288,7 +349,11 @@ pub fn run(spec: RunSpec) -> Result<Outcome> {
                 } else if watch_tree {
                     if let Some(table) = ps_table() {
                         let members = tree_members(&table, pid);
-                        let rss: u64 = members.iter().filter_map(|p| table.get(p)).map(|p| p.rss_kb).sum();
+                        let rss: u64 = members
+                            .iter()
+                            .filter_map(|p| table.get(p))
+                            .map(|p| p.rss_kb)
+                            .sum();
                         let procs = members.len() as u64;
                         let mut pk = peaks.lock().unwrap();
                         pk.0 = pk.0.max(rss);
@@ -327,7 +392,10 @@ pub fn run(spec: RunSpec) -> Result<Outcome> {
     let _ = monitor.join();
 
     // Anything the command left running dies with it.
-    let stragglers = unsafe { libc::killpg(pid, 0) } == 0 || probe.as_ref().is_some_and(|p| !sandboxed_members(p).is_empty());
+    let stragglers = unsafe { libc::killpg(pid, 0) } == 0
+        || probe
+            .as_ref()
+            .is_some_and(|p| !sandboxed_members(p).is_empty());
     if stragglers {
         kill_tree(pid, probe.as_ref());
     }
@@ -376,11 +444,21 @@ mod tests {
     fn spec(script: &str, limits: Limits) -> RunSpec {
         let mut cmd = Command::new("/bin/sh");
         cmd.arg("-c").arg(script);
-        RunSpec { cmd, limits, watch_tree: true, apply_rlimits: true, on_kill: None, probe: None }
+        RunSpec {
+            cmd,
+            limits,
+            watch_tree: true,
+            apply_rlimits: true,
+            on_kill: None,
+            probe: None,
+        }
     }
 
     fn quick() -> Limits {
-        Limits { wall_ms: 10_000, ..Limits::default() }
+        Limits {
+            wall_ms: 10_000,
+            ..Limits::default()
+        }
     }
 
     #[test]
@@ -394,29 +472,49 @@ mod tests {
 
     #[test]
     fn wall_clock_kills_the_whole_tree() {
-        let l = Limits { wall_ms: 400, ..Limits::default() };
+        let l = Limits {
+            wall_ms: 400,
+            ..Limits::default()
+        };
         let marker = format!("30.{}", 100 + std::process::id() % 800);
-        let o = run(spec(&format!("sleep {marker} & sleep {marker} & sleep {marker}"), l)).unwrap();
+        let o = run(spec(
+            &format!("sleep {marker} & sleep {marker} & sleep {marker}"),
+            l,
+        ))
+        .unwrap();
         assert!(o.timed_out);
         assert_eq!(o.signal, Some(libc::SIGKILL));
         assert!(o.wall_ms < 5_000, "took {}ms", o.wall_ms);
         // nothing from the run may survive
         std::thread::sleep(Duration::from_millis(200));
-        let left = Command::new("/usr/bin/pgrep").args(["-f", &format!("sleep {marker}")]).output().unwrap();
-        assert!(left.stdout.is_empty(), "survivors: {}", String::from_utf8_lossy(&left.stdout));
+        let left = Command::new("/usr/bin/pgrep")
+            .args(["-f", &format!("sleep {marker}")])
+            .output()
+            .unwrap();
+        assert!(
+            left.stdout.is_empty(),
+            "survivors: {}",
+            String::from_utf8_lossy(&left.stdout)
+        );
     }
 
     #[test]
     fn stragglers_left_behind_are_killed() {
         let o = run(spec("sleep 30 >/dev/null 2>&1 & echo started", quick())).unwrap();
         assert_eq!(o.exit_code, Some(0));
-        assert!(o.stragglers_killed, "a background process outliving the command must be reaped");
+        assert!(
+            o.stragglers_killed,
+            "a background process outliving the command must be reaped"
+        );
         assert!(o.wall_ms < 5_000);
     }
 
     #[test]
     fn output_is_capped_but_counted() {
-        let l = Limits { output_bytes: 1000, ..quick() };
+        let l = Limits {
+            output_bytes: 1000,
+            ..quick()
+        };
         let o = run(spec("head -c 100000 /dev/zero | tr '\\0' x", l)).unwrap();
         assert_eq!(o.stdout.len(), 1000);
         assert_eq!(o.stdout_bytes, 100_000);
@@ -424,9 +522,16 @@ mod tests {
 
     #[test]
     fn rlimit_file_size_stops_a_disk_filler() {
-        let l = Limits { file_size_mb: 1, ..quick() };
+        let l = Limits {
+            file_size_mb: 1,
+            ..quick()
+        };
         let path = std::env::temp_dir().join(format!("eb-fsize-{}", std::process::id()));
-        let o = run(spec(&format!("head -c 5000000 /dev/zero > {}; echo after", path.display()), l)).unwrap();
+        let o = run(spec(
+            &format!("head -c 5000000 /dev/zero > {}; echo after", path.display()),
+            l,
+        ))
+        .unwrap();
         let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
         let _ = std::fs::remove_file(&path);
         assert!(size <= 1024 * 1024, "wrote {size} bytes past a 1MB limit");
@@ -435,7 +540,10 @@ mod tests {
 
     #[test]
     fn memory_budget_is_enforced() {
-        let l = Limits { memory_mb: 64, ..quick() };
+        let l = Limits {
+            memory_mb: 64,
+            ..quick()
+        };
         let o = run(spec(
             "python3 -c \"b=bytearray(400*1024*1024); import time; time.sleep(20)\"",
             l,

@@ -21,6 +21,9 @@ fn main() {
         .compile("elia_box_fs");
 
     println!("cargo:rerun-if-changed={}", src.display());
-    println!("cargo:rerun-if-changed={}", include.join("elia_box_fs.h").display());
+    println!(
+        "cargo:rerun-if-changed={}",
+        include.join("elia_box_fs.h").display()
+    );
     println!("cargo:rerun-if-changed=build.rs");
 }

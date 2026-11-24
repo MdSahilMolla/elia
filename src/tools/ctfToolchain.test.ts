@@ -10,7 +10,6 @@ import {
   reportToolchain,
   runProbeCommand,
   type InstallContext,
-  type ToolchainContext,
 } from './ctfToolchain.ts'
 import { SECURITY_TOOL_CATALOG } from '../security/toolCatalog.ts'
 import { setActiveMode } from '../autonomy/mode.ts'

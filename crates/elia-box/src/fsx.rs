@@ -20,11 +20,18 @@ fn cstr(s: &str) -> Result<CString> {
 }
 
 fn path_cstr(p: &Path) -> Result<CString> {
-    cstr(p.to_str().ok_or_else(|| anyhow!("path is not valid UTF-8: {}", p.display()))?)
+    cstr(
+        p.to_str()
+            .ok_or_else(|| anyhow!("path is not valid UTF-8: {}", p.display()))?,
+    )
 }
 
 fn last_error() -> String {
-    unsafe { CStr::from_ptr(ebfs_last_error()).to_string_lossy().into_owned() }
+    unsafe {
+        CStr::from_ptr(ebfs_last_error())
+            .to_string_lossy()
+            .into_owned()
+    }
 }
 
 fn take(p: *mut c_char) -> Result<String> {
@@ -43,7 +50,12 @@ pub fn fork(src: &Path, dst: &Path) -> Result<bool> {
     let mut cloned: c_int = 0;
     let rc = unsafe { ebfs_fork(s.as_ptr(), d.as_ptr(), &mut cloned) };
     if rc != 0 {
-        return Err(anyhow!("fork {} -> {}: {}", src.display(), dst.display(), last_error()));
+        return Err(anyhow!(
+            "fork {} -> {}: {}",
+            src.display(),
+            dst.display(),
+            last_error()
+        ));
     }
     Ok(cloned == 1)
 }
@@ -93,8 +105,14 @@ mod tests {
 
     #[test]
     fn sha256_known_vectors() {
-        assert_eq!(sha256_hex(b"abc"), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
-        assert_eq!(sha256_hex(b""), "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+        assert_eq!(
+            sha256_hex(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        assert_eq!(
+            sha256_hex(b""),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
         // a message longer than one block, crossing the padding boundary
         assert_eq!(
             sha256_hex(&[b'a'; 1000]),
@@ -119,7 +137,11 @@ mod tests {
         let ex = vec!["node_modules".to_string()];
         let before = snapshot(&dst, &ex).unwrap();
         assert!(!before.contains("node_modules"));
-        assert_eq!(before, snapshot(&src, &ex).unwrap(), "a fresh fork has an identical manifest");
+        assert_eq!(
+            before,
+            snapshot(&src, &ex).unwrap(),
+            "a fresh fork has an identical manifest"
+        );
 
         fs::write(dst.join("edit.txt"), "after!").unwrap();
         fs::write(dst.join("new.txt"), "new").unwrap();
@@ -130,9 +152,16 @@ mod tests {
         assert_eq!(ch.modified, vec!["edit.txt"]);
         assert_eq!(ch.deleted, vec!["sub/gone.txt"]);
 
-        assert_eq!(fs::read_to_string(src.join("edit.txt")).unwrap(), "before", "the original is untouched");
+        assert_eq!(
+            fs::read_to_string(src.join("edit.txt")).unwrap(),
+            "before",
+            "the original is untouched"
+        );
         assert!(src.join("sub/gone.txt").exists());
-        assert!(fork(&src, &dst).is_err(), "an existing destination is refused");
+        assert!(
+            fork(&src, &dst).is_err(),
+            "an existing destination is refused"
+        );
         remove_tree(&root).unwrap();
     }
 
@@ -146,7 +175,10 @@ mod tests {
         fs::create_dir_all(&victim).unwrap();
         std::os::unix::fs::symlink(&outside, victim.join("escape")).unwrap();
         remove_tree(&victim).unwrap();
-        assert!(outside.join("precious").exists(), "a symlink is unlinked, never followed");
+        assert!(
+            outside.join("precious").exists(),
+            "a symlink is unlinked, never followed"
+        );
         assert!(remove_tree(Path::new("/")).is_err());
         assert!(remove_tree(Path::new("")).is_err());
         remove_tree(&root).unwrap();

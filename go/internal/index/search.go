@@ -280,6 +280,11 @@ func Query(pattern, root, globPattern string, context int) (QueryResult, error) 
 // match the ripgrep tier (the pure-JS tier keeps it — see go/README.md).
 func splitLines(data []byte) []string {
 	raw := strings.Split(string(data), "\n")
+	// A final newline ends the last line; it does not start an empty one that
+	// context would then print (ripgrep doesn't, and searchWithJs drops it).
+	if len(raw) > 1 && raw[len(raw)-1] == "" {
+		raw = raw[:len(raw)-1]
+	}
 	for i, line := range raw {
 		raw[i] = strings.TrimSuffix(line, "\r")
 	}
